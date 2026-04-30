@@ -27,7 +27,7 @@ import { downloadBlob, uploadBlob } from '../services/storage';
 import { buildSubmitEvidence } from '../services/submissions';
 import { useTxSend } from '../hooks/useTxSend';
 import { useWallet } from '../context/WalletContext';
-import { useAuth } from '../context/AuthContext';
+import { useAccount } from 'wagmi';
 
 export default function WorkerView() {
   const [rootHash, setRootHash] = useState('');
@@ -48,7 +48,7 @@ export default function WorkerView() {
 
   const txSend = useTxSend();
   const { isCorrectChain } = useWallet();
-  const { isAuthenticated } = useAuth();
+  const { isConnected } = useAccount();
 
   const handleDecrypt = async () => {
     setDecryptError(null);
@@ -105,7 +105,7 @@ export default function WorkerView() {
 
   const canDecrypt = rootHash && wrappedKey && privateKey && !decrypting;
   const canSubmit =
-    taskId && evidence.trim() && isAuthenticated && isCorrectChain && !submitting && !txSend.isPending;
+    taskId && evidence.trim() && isConnected && isCorrectChain && !submitting && !txSend.isPending;
 
   return (
     <div>
@@ -221,10 +221,10 @@ export default function WorkerView() {
               disabled={!canSubmit}
               onClick={handleSubmitEvidence}
             />
-            {!isAuthenticated && (
+            {!isConnected && (
               <span className="text-[11px] font-mono text-ink-3">connect wallet to submit</span>
             )}
-            {isAuthenticated && !isCorrectChain && (
+            {isConnected && !isCorrectChain && (
               <span className="text-[11px] font-mono text-err">switch to 0G Galileo</span>
             )}
             {submitError && (
