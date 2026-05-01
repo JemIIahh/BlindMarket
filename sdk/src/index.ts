@@ -158,6 +158,23 @@ export class BlindBounty {
   }
 
   /**
+   * Submit evidence for an assigned task.
+   */
+  async submitEvidence(params: { taskId: number; evidence: string }): Promise<{ unsignedTx: object }> {
+    const key = randomBytes(32);
+    const iv = randomBytes(12);
+    const cipher = createCipheriv('aes-256-gcm', key, iv);
+    const encrypted = Buffer.concat([cipher.update(params.evidence, 'utf8'), cipher.final()]);
+    const tag = (cipher as any).getAuthTag() as Buffer;
+    const blob = Buffer.concat([iv, tag, encrypted]).toString('base64');
+
+    await this.req('POST', '/api/v1/storage/upload', { data: blob });
+    const evidenceHash = '0x' + createHash('sha256').update(Buffer.concat([iv, tag, encrypted])).digest('hex');
+
+    return this.req('POST', '/api/v1/submissions/submit', { taskId: params.taskId, evidenceHash });
+  }
+
+  /**
    * Get task status.
    */
   async getTask(taskId: string): Promise<{ status: number; agent: string; worker: string; amount: string }> {
