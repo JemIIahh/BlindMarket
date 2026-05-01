@@ -35,7 +35,7 @@ contract INFT is ERC721, Ownable, ReentrancyGuard {
 
     // ── Constructor ──────────────────────────────────────────────────────────
 
-    constructor(address _oracle) ERC721("BlindBounty Agent NFT", "BBNFT") Ownable(msg.sender) {
+    constructor(address _oracle) ERC721("BlindMarket Agent NFT", "BBNFT") Ownable(msg.sender) {
         require(_oracle != address(0), "Oracle required");
         oracle = _oracle;
     }

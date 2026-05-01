@@ -1,5 +1,5 @@
 /**
- * Deploy all BlindBounty contracts to 0G Testnet (Galileo).
+ * Deploy all BlindMarket contracts to 0G Testnet (Galileo).
  *
  * Deploys via UUPS proxies:
  *   1. MockERC20 (test USDC, 6 decimals)

@@ -7,7 +7,7 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 
 /**
  * @title BlindReputation
- * @author BlindBounty Team
+ * @author BlindMarket Team
  * @notice Anonymous reputation system. Scores are linked to wallet addresses
  *         but no name, location, or PII is stored on-chain.
  *         Only authorized raters (escrow contracts) can rate.

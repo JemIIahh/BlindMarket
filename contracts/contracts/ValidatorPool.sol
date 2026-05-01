@@ -7,7 +7,7 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /**
  * @title ValidatorPool
- * @notice Hybrid dispute resolution for BlindBounty.
+ * @notice Hybrid dispute resolution for BlindMarket.
  *         TEE handles routine verifications. Validators vote on disputes.
  *
  * Flow:

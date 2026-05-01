@@ -7,7 +7,7 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 
 /**
  * @title TaskRegistry
- * @author BlindBounty Team
+ * @author BlindMarket Team
  * @notice On-chain index for task discovery. Stores only metadata — never content.
  *         Workers browse by category, location zone, and reward.
  *         Task instructions remain encrypted on 0G Storage.

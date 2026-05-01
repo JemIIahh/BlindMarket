@@ -13,7 +13,7 @@ import "./interfaces/ITaskRegistry.sol";
 
 /**
  * @title BlindEscrow
- * @author BlindBounty Team
+ * @author BlindMarket Team
  * @notice Privacy-first escrow for encrypted task bounties.
  *         Task content is never stored on-chain — only encrypted blob hashes.
  *         Payment releases on TEE-verified evidence (0G Sealed Inference).
