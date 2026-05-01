@@ -295,113 +295,108 @@ validator
 validator
   .command('run')
   .description('Run validator daemon — watches for disputes and auto-votes')
-  .option('--api-base <url>', 'API base URL', 'http://localhost:3001')
-  .action(async (opts: { apiBase: string }) => {
+  .option('--rpc <url>', 'RPC URL', 'https://evmrpc-testnet.0g.ai')
+  .option('--pool <address>', 'ValidatorPool contract address')
+  .action(async (opts: { rpc: string; pool?: string }) => {
     const cfg = loadConfig();
     if (!cfg.apiKey || !cfg.agentWallet) {
       console.error('Not registered. Run: blind register --name <name>');
       process.exit(1);
     }
-    cfg.apiBase = opts.apiBase;
-    saveConfig(cfg);
 
-    console.log(`\n  blind validator daemon starting`);
-    console.log(`  wallet: ${cfg.agentWallet}`);
-    console.log(`  api:    ${cfg.apiBase}`);
-    console.log(`  watching for disputes...\n`);
+    const poolAddress = opts.pool || process.env.VALIDATOR_POOL_ADDRESS;
+    if (!poolAddress) {
+      console.error('ValidatorPool address required: --pool <address> or VALIDATOR_POOL_ADDRESS env var');
+      process.exit(1);
+    }
 
-    // Track disputes we've already voted on
-    const voted = new Set<string>();
-    const pendingFinalize = new Map<string, number>(); // disputeId → finalizeAt timestamp
+    const { ethers } = await import('ethers');
+    const provider = new ethers.JsonRpcProvider(opts.rpc);
+    const POOL_ABI = [
+      'event DisputeOpened(uint256 indexed disputeId, uint256 indexed taskId, address escrow)',
+      'function vote(uint256 disputeId, uint8 vote) external',
+      'function finalizeDispute(uint256 disputeId) external',
+      'function getDispute(uint256 disputeId) external view returns (uint256 taskId, address escrow, uint256 amount, uint256 openedAt, bool finalized, bool workerFavored, uint256 workerVotes, uint256 agentVotes)',
+      'function getVote(uint256 disputeId, address validator) external view returns (uint8)',
+    ];
+    const pool = new ethers.Contract(poolAddress, POOL_ABI, provider);
 
     const VOTE_WINDOW_MS = 48 * 60 * 60 * 1000;
-    const POLL_INTERVAL_MS = 30_000;
+    const pendingFinalize = new Map<string, number>(); // disputeId → finalizeAt
 
-    const poll = async () => {
-      try {
-        // Check for any open disputes we haven't voted on
-        // We poll by checking our own validator status and known dispute IDs
-        // In production this would use ethers event subscription
-        const disputeId = await findNextOpenDispute(cfg);
-        if (disputeId && !voted.has(disputeId)) {
-          console.log(`  [${new Date().toISOString()}] dispute #${disputeId} detected — fetching evidence...`);
+    console.log(`\n  blind validator daemon`);
+    console.log(`  wallet:  ${cfg.agentWallet}`);
+    console.log(`  pool:    ${poolAddress}`);
+    console.log(`  rpc:     ${opts.rpc}`);
+    console.log(`  listening for DisputeOpened events...\n`);
 
-          const dispute = await api.get<{
-            taskId: string; openedAt: number; finalized: boolean;
-            workerVotes: number; agentVotes: number;
-          }>(`/api/v1/validators/disputes/${disputeId}`, cfg.apiKey);
+    const handleDispute = async (disputeId: bigint, taskId: bigint) => {
+      const dId = disputeId.toString();
+      console.log(`  [${new Date().toISOString()}] DisputeOpened #${dId} (task #${taskId})`);
 
-          if (dispute.finalized) return;
-
-          // Ask TEE to evaluate
-          const result = await api.post<{ passed: boolean; confidence: number }>(
-            '/api/v1/verification/trigger',
-            {
-              taskId: parseInt(dispute.taskId),
-              taskCategory: 'general',
-              taskRequirements: 'Evidence must demonstrate task completion',
-              evidenceSummary: `Dispute #${disputeId} on task #${dispute.taskId}`,
-            },
-            cfg.apiKey,
-          ).catch(() => null);
-
-          const vote = result?.passed ? 1 : 2; // 1=worker, 2=agent
-          console.log(`  [${new Date().toISOString()}] voting ${vote === 1 ? 'worker' : 'agent'} (TEE confidence: ${result ? (result.confidence * 100).toFixed(0) : '?'}%)`);
-
-          const { unsignedTx } = await api.post<{ unsignedTx: object }>(
-            '/api/v1/validators/vote',
-            { disputeId, vote },
-            cfg.apiKey,
-          );
-          console.log(`  vote tx ready — broadcast: ${JSON.stringify(unsignedTx)}`);
-          voted.add(disputeId);
-
-          // Schedule finalize after vote window
-          const finalizeAt = dispute.openedAt * 1000 + VOTE_WINDOW_MS + 60_000; // +1min buffer
-          pendingFinalize.set(disputeId, finalizeAt);
-        }
-
-        // Check if any disputes are ready to finalize
-        const now = Date.now();
-        for (const [dId, finalizeAt] of pendingFinalize) {
-          if (now >= finalizeAt) {
-            console.log(`  [${new Date().toISOString()}] finalizing dispute #${dId}...`);
-            const { unsignedTx } = await api.post<{ unsignedTx: object }>(
-              '/api/v1/validators/finalize',
-              { disputeId: dId },
-              cfg.apiKey,
-            );
-            console.log(`  finalize tx ready — broadcast: ${JSON.stringify(unsignedTx)}`);
-            pendingFinalize.delete(dId);
-          }
-        }
-      } catch (e) {
-        console.error(`  [daemon error] ${(e as Error).message}`);
+      // Check if already voted
+      const existingVote = await pool.getVote(dId, cfg.agentWallet).catch(() => 0);
+      if (Number(existingVote) !== 0) {
+        console.log(`  already voted on #${dId}, skipping`);
+        return;
       }
-    };
 
-    // Run immediately then on interval
-    await poll();
-    setInterval(poll, POLL_INTERVAL_MS);
-    console.log(`  polling every ${POLL_INTERVAL_MS / 1000}s. press ctrl+c to stop.\n`);
-  });
+      // Ask TEE to evaluate
+      const result = await api.post<{ passed: boolean; confidence: number }>(
+        '/api/v1/verification/trigger',
+        {
+          taskId: Number(taskId),
+          taskCategory: 'general',
+          taskRequirements: 'Evidence must demonstrate task completion',
+          evidenceSummary: `Dispute #${dId} on task #${taskId}`,
+        },
+        cfg.apiKey,
+      ).catch(() => null);
 
-async function findNextOpenDispute(cfg: ReturnType<typeof loadConfig>): Promise<string | null> {
-  // Poll disputes starting from 1 upward until we find an open one
-  // In production: use ethers.Contract.on('DisputeOpened', ...) for real-time
-  for (let i = 1; i <= 100; i++) {
-    try {
-      const d = await api.get<{ finalized: boolean; openedAt: number }>(
-        `/api/v1/validators/disputes/${i}`,
+      const vote = result?.passed !== false ? 1 : 2; // default worker-favored if TEE unavailable
+      console.log(`  voting ${vote === 1 ? 'worker' : 'agent'} (confidence: ${result ? (result.confidence * 100).toFixed(0) : '?'}%)`);
+
+      const { unsignedTx } = await api.post<{ unsignedTx: object }>(
+        '/api/v1/validators/vote',
+        { disputeId: dId, vote },
         cfg.apiKey,
       );
-      const windowOpen = Date.now() < d.openedAt * 1000 + 48 * 60 * 60 * 1000;
-      if (!d.finalized && windowOpen) return String(i);
-    } catch { break; }
-  }
-  return null;
-}
+      console.log(`  vote tx (sign + broadcast): ${JSON.stringify(unsignedTx)}\n`);
 
+      // Schedule finalize
+      const dispute = await pool.getDispute(dId);
+      const finalizeAt = Number(dispute.openedAt) * 1000 + VOTE_WINDOW_MS + 60_000;
+      pendingFinalize.set(dId, finalizeAt);
+    };
+
+    // Subscribe to on-chain events
+    pool.on('DisputeOpened', (disputeId: bigint, taskId: bigint) => {
+      handleDispute(disputeId, taskId).catch(e =>
+        console.error(`  [error] ${(e as Error).message}`)
+      );
+    });
+
+    // Check finalize queue every minute
+    setInterval(async () => {
+      const now = Date.now();
+      for (const [dId, finalizeAt] of pendingFinalize) {
+        if (now >= finalizeAt) {
+          console.log(`  [${new Date().toISOString()}] finalizing dispute #${dId}`);
+          const { unsignedTx } = await api.post<{ unsignedTx: object }>(
+            '/api/v1/validators/finalize',
+            { disputeId: dId },
+            cfg.apiKey,
+          ).catch(e => { console.error(`  finalize error: ${(e as Error).message}`); return { unsignedTx: null }; });
+          if (unsignedTx) console.log(`  finalize tx: ${JSON.stringify(unsignedTx)}\n`);
+          pendingFinalize.delete(dId);
+        }
+      }
+    }, 60_000);
+
+    console.log('  daemon running. press ctrl+c to stop.\n');
+    // Keep process alive
+    await new Promise(() => {});
+  });
 
 validator
   .command('info')
