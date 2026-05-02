@@ -7,14 +7,13 @@
       "config": { "distDir": "dist" }
     },
     {
-      "src": "backend/src/index.ts",
+      "src": "backend/src/vercel.ts",
       "use": "@vercel/node"
     }
   ],
   "routes": [
-    { "src": "/api/(.*)", "dest": "backend/src/index.ts" },
-    { "src": "/health", "dest": "backend/src/index.ts" },
-    { "src": "/socket.io/(.*)", "dest": "backend/src/index.ts" },
+    { "src": "/api/(.*)", "dest": "backend/src/vercel.ts" },
+    { "src": "/health", "dest": "backend/src/vercel.ts" },
     { "src": "/(.*)", "dest": "frontend/dist/index.html" }
   ]
 }
