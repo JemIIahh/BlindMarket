@@ -67,9 +67,17 @@ export default function TaskFeed() {
         title="Task feed"
         description="Open encrypted tasks available for workers."
         right={
-          <span className="text-[11px] font-mono text-ink-3 uppercase tracking-widest">
-            {tasks?.length ?? 0} open · live from chain
-          </span>
+          <div className="flex items-center gap-4">
+            <span className="text-[11px] font-mono text-ink-3 uppercase tracking-widest">
+              {tasks?.length ?? 0} open · live from chain
+            </span>
+            <Link
+              to="/tasks/new"
+              className="px-4 py-2 border border-cream text-[11px] font-mono text-cream hover:bg-cream hover:text-bg transition-colors uppercase tracking-widest"
+            >
+              + post task
+            </Link>
+          </div>
         }
       />
 
