@@ -61,8 +61,8 @@ export default function AgentDetail() {
     <div className="max-w-5xl mx-auto px-4 py-10">
       {/* Header */}
       <div className="flex items-center gap-4 mb-8">
-        <button onClick={() => navigate('/agents')} className="text-gray-500 hover:text-white text-sm transition-colors">
-          ← Back
+        <button onClick={() => navigate('/agents/mine')} className="text-gray-500 hover:text-white text-sm transition-colors">
+          ← Back to my agents
         </button>
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl bg-blue-900/40 border border-blue-800/50 flex items-center justify-center text-blue-400 font-bold text-sm">
