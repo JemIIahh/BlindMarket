@@ -80,7 +80,7 @@ export default function Earnings() {
       )}
 
       {/* Stat cards — live from accounting API */}
-      <div className="grid grid-cols-4 gap-0 border border-line mb-8">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-0 border border-line mb-8">
         <StatCard
           label="total earned"
           value={summaryLoading ? '…' : formatUsd(summary?.totalEarned)}

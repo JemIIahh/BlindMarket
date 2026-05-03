@@ -54,7 +54,7 @@ export default function VerificationStatus() {
       />
 
       {/* Stat cards */}
-      <div className="grid grid-cols-4 gap-0 border border-line mb-8">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-0 border border-line mb-8">
         <StatCard
           label="sealed inference"
           value={teeStatus?.configured ? 'ONLINE' : 'OFFLINE'}
