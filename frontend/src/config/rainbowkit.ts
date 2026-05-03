@@ -27,7 +27,7 @@ const ogGalileoTestnet = defineChain({
 
 export const config = getDefaultConfig({
   appName: 'BlindMarket',
-  projectId: 'YOUR_PROJECT_ID', // Get from https://cloud.walletconnect.com
+  projectId: import.meta.env.VITE_WALLETCONNECT_PROJECT_ID ?? '21fef48091f12692cad574a6f7753643',
   chains: [ogGalileoTestnet],
   ssr: false,
 });
