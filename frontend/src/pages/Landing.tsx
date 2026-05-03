@@ -74,7 +74,7 @@ export default function Landing() {
         <div className="grid grid-cols-[auto_1fr_auto] items-center h-16 px-6 sm:px-10 gap-6">
           {/* Far left — brand */}
           <Link to="/" className="flex items-center gap-3">
-            <LogoMark size={22} blade="#f5efe0" />
+            <LogoMark size={22} blade="var(--bb-ink)" />
             <span className="text-base font-semibold text-ink tracking-tight">BlindMarket</span>
           </Link>
 
@@ -497,7 +497,7 @@ export default function Landing() {
       <footer className="border-t border-line">
         <div className="max-w-6xl mx-auto px-6 py-6 flex flex-col sm:flex-row items-center justify-between gap-3">
           <div className="flex items-center gap-3">
-            <LogoMark size={16} blade="#f5efe0" />
+            <LogoMark size={16} blade="var(--bb-ink)" />
             <span className="text-sm font-semibold text-ink">BlindMarket</span>
             <span className="text-xs text-ink-3">· built on 0G</span>
           </div>

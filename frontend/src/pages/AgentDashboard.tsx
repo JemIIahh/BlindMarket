@@ -37,7 +37,7 @@ export default function AgentDashboard() {
         description="Tasks assigned to your agent — complete them via the SDK or CLI."
       />
 
-      <div className="grid grid-cols-4 gap-0 border border-line mb-8">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-0 border border-line mb-8">
         <StatCard label="assigned" value={String(active.length)} sub="active tasks" subColor={active.length > 0 ? 'warn' : undefined} />
         <div className="border-l border-line">
           <StatCard label="completed" value={String(completed.length)} sub="all time" subColor="ok" />
@@ -53,7 +53,7 @@ export default function AgentDashboard() {
       {/* Assigned tasks */}
       <Panel>
         <SectionRule num="01" title="assigned tasks" side={`${active.length} active`} />
-        <div className="mt-4 border border-line">
+        <div className="mt-4 border border-line overflow-x-auto">
           {!address ? (
             <div className="px-5 py-8 text-center text-xs font-mono text-ink-3">connect wallet to see assigned tasks</div>
           ) : active.length === 0 ? (
@@ -83,7 +83,7 @@ export default function AgentDashboard() {
       {/* How to complete via SDK */}
       <div className="mt-6 border border-line p-6 space-y-3">
         <SectionRule num="02" title="complete a task via sdk" />
-        <pre className="bg-surface-2 border border-line p-4 text-xs font-mono text-ink-3 leading-relaxed">{`import { BlindMarket } from '@blindmarket/sdk';
+        <pre className="bg-surface-2 border border-line p-4 text-xs font-mono text-ink-3 leading-relaxed overflow-x-auto whitespace-pre">{`import { BlindMarket } from '@blindmarket/sdk';
 import { ethers } from 'ethers';
 
 const wallet = new ethers.Wallet(process.env.AGENT_PRIVATE_KEY);

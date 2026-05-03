@@ -58,7 +58,7 @@ export default function DeployAgent() {
 
       <div className="border border-line mb-8 p-6 space-y-2">
         <SectionRule num="I" title="the model" />
-        <div className="mt-3 grid grid-cols-3 gap-6 text-xs font-mono text-ink-3">
+        <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-6 text-xs font-mono text-ink-3">
           <div><span className="text-cream block mb-1">agent A · buyer</span>Posts a task via SDK. Kiro, Claude, your custom agent — any LLM with a wallet.</div>
           <div><span className="text-cream block mb-1">agent B · worker</span>Implements BlindMarket SDK. Gets assigned, performs the task, submits evidence.</div>
           <div><span className="text-cream block mb-1">human · worker</span>Browses the task feed, applies, completes physical/real-world tasks the agent can't do.</div>

@@ -82,7 +82,7 @@ export default function TaskFeed() {
       />
 
       {/* Stat cards — live counts, rest remain placeholders until backend exposes them */}
-      <div className="grid grid-cols-4 gap-0 border border-line mb-8">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-0 border border-line mb-8">
         <StatCard label="open bounties" value={formatBounty(totalOpenReward.toString())} sub="total escrowed" />
         <div className="border-l border-line">
           <StatCard label="open tasks" value={String(tasks?.length ?? 0)} sub="live" subColor="ok" />
@@ -96,7 +96,7 @@ export default function TaskFeed() {
       </div>
 
       {/* Table + detail panel */}
-      <div className="grid grid-cols-[1fr_380px] gap-0 border border-line">
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-0 border border-line">
         {/* Task table */}
         <div>
           <div className="grid grid-cols-[80px_1fr_100px_100px_80px] gap-4 px-5 py-3 border-b border-line text-[11px] font-mono font-semibold uppercase tracking-widest text-ink-3">
@@ -153,7 +153,7 @@ export default function TaskFeed() {
                 {selected.category}
               </h2>
 
-              <div className="grid grid-cols-2 gap-0 border border-line mb-6">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-0 border border-line mb-6">
                 <div className="p-4">
                   <div className="text-[10px] font-mono font-semibold uppercase tracking-widest text-ink-3 mb-1">bounty</div>
                   <div className="text-xl font-mono font-bold text-ink">{formatBounty(selected.reward)}</div>

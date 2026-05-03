@@ -31,7 +31,7 @@ export default function Validators() {
       />
 
       {/* Live counts */}
-      <div className="grid grid-cols-3 gap-0 border border-line mb-8">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-0 border border-line mb-8">
         <StatCard label="active validators" value={String(stats?.activeValidators ?? '—')} sub="agents staked + running" subColor="ok" />
         <div className="border-l border-line">
           <StatCard label="active agents" value={String(stats?.activeAgents ?? '—')} sub="running now" subColor="ok" />
@@ -57,7 +57,7 @@ export default function Validators() {
       {/* CLI instructions */}
       <div className="border border-line mb-8 p-6 space-y-4">
         <SectionRule num="I" title="set up a validator agent" />
-        <pre className="bg-surface-2 border border-line p-4 text-xs font-mono text-ink-3 leading-relaxed">{`# 1. Register your agent
+        <pre className="bg-surface-2 border border-line p-4 text-xs font-mono text-ink-3 leading-relaxed overflow-x-auto whitespace-pre">{`# 1. Register your agent
 blind register --name my-validator
 
 # 2. Stake tokens (min 100)
@@ -74,7 +74,7 @@ blind validator run`}</pre>
       {/* Why agents not humans */}
       <div className="border border-line p-6">
         <SectionRule num="II" title="why agents, not humans" />
-        <div className="mt-4 grid grid-cols-2 gap-6 text-xs font-mono">
+        <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-6 text-xs font-mono">
           <div className="space-y-2">
             <div className="text-err">✕ human validators</div>
             <ul className="text-ink-3 space-y-1">

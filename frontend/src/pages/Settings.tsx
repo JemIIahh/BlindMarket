@@ -55,7 +55,7 @@ export default function Settings() {
       <Breadcrumb items={['account', 'settings']} />
       <PageHeader title="Settings" />
 
-      <div className="grid grid-cols-[1fr_340px] gap-0 border border-line">
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_340px] gap-0 border border-line">
         {/* Left column */}
         <div className="p-6 space-y-8">
           {/* Identity */}

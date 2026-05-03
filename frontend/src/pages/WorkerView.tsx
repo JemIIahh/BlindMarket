@@ -117,7 +117,7 @@ export default function WorkerView() {
       <TxPendingModal open={txSend.isPending} />
 
       {/* Stat cards — real data deferred to Phase post-hackathon */}
-      <div className="grid grid-cols-4 gap-0 border border-line mb-8">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-0 border border-line mb-8">
         <StatCard label="total staked" value="—" sub="preview" />
         <div className="border-l border-line">
           <StatCard label="active" value="—" sub="preview" />
@@ -131,7 +131,7 @@ export default function WorkerView() {
       </div>
 
       {/* Two columns */}
-      <div className="grid grid-cols-2 gap-0 border border-line mb-8">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-0 border border-line mb-8">
         {/* Decrypt instructions */}
         <div className="p-6 space-y-5">
           <SectionRule num="01" title="decrypt task instructions" />

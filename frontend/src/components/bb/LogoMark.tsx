@@ -5,13 +5,13 @@ interface LogoMarkProps {
   className?: string;
 }
 
-export function LogoMark({ size = 24, blade = 'currentColor', slit = 'var(--bb-bg)', className = '' }: LogoMarkProps) {
+export function LogoMark({ size = 24, blade = 'var(--bb-ink)', slit = 'var(--bb-bg)', className = '' }: LogoMarkProps) {
   return (
     <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 44 44" className={className}>
-      <circle cx="22" cy="22" r="21" fill="none" stroke="rgba(255,255,255,.12)" strokeWidth="1" />
+      <circle cx="22" cy="22" r="21" fill="none" stroke="var(--bb-line-2)" strokeOpacity="0.5" strokeWidth="1" />
       <g transform="translate(22 22)">
         <g id="bb-blade">
-          <path d="M 0 -18 L 15 -9 L 0 -2 Z" fill={blade} opacity="0.8" />
+          <path d="M 0 -18 L 15 -9 L 0 -2 Z" fill={blade} />
         </g>
         <use href="#bb-blade" transform="rotate(60)" />
         <use href="#bb-blade" transform="rotate(120)" />
