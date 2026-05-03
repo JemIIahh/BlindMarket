@@ -14,6 +14,9 @@ interface Tool {
   url: string;
   method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
   toolName?: string; // for mcp
+  authType?: 'none' | 'bearer' | 'api-key' | 'basic';
+  authValue?: string;
+  authHeader?: string; // custom header name for api-key auth
 }
 
 export default function DeployAgentForm() {
@@ -37,7 +40,7 @@ export default function DeployAgentForm() {
   });
 
   const [tools, setTools] = useState<Tool[]>([]);
-  const [newTool, setNewTool] = useState<Tool>({ type: 'http', name: '', description: '', url: '', method: 'POST' });
+  const [newTool, setNewTool] = useState<Tool>({ type: 'http', name: '', description: '', url: '', method: 'POST', authType: 'none', authValue: '', authHeader: 'X-API-Key' });
   const [showToolForm, setShowToolForm] = useState(false);
 
   const [status, setStatus] = useState<'idle' | 'deploying' | 'done' | 'error'>('idle');
@@ -87,10 +90,15 @@ export default function DeployAgentForm() {
           ownerAddress: address,
           ownerPublicKey,
           capabilities: [],
-          tools: tools.map(t => t.type === 'mcp'
-            ? { type: 'mcp', name: t.name, description: t.description, endpointUrl: t.url, toolName: t.toolName ?? t.name }
-            : { type: 'http', name: t.name, description: t.description, url: t.url, method: t.method ?? 'POST' }
-          ),
+          tools: tools.map(t => {
+            const headers: Record<string, string> = {};
+            if (t.authType === 'bearer') headers['Authorization'] = `Bearer ${t.authValue}`;
+            else if (t.authType === 'api-key') headers[t.authHeader ?? 'X-API-Key'] = t.authValue ?? '';
+            else if (t.authType === 'basic') headers['Authorization'] = `Basic ${btoa(t.authValue ?? '')}`;
+            return t.type === 'mcp'
+              ? { type: 'mcp', name: t.name, description: t.description, endpointUrl: t.url, toolName: t.toolName ?? t.name }
+              : { type: 'http', name: t.name, description: t.description, url: t.url, method: t.method ?? 'POST', headers };
+          }),
         }),
       });
       const json = await res.json();
@@ -209,16 +217,51 @@ export default function DeployAgentForm() {
                       placeholder="web-search" className="w-full bg-surface-2 border border-line px-3 py-2 text-xs font-mono text-ink placeholder-ink-3 focus:outline-none focus:border-cream" />
                   </div>
                 </div>
-                <div>
-                  <label className="block text-[11px] font-mono uppercase tracking-widest text-ink-3 mb-1">url / endpoint</label>
-                  <input value={newTool.url} onChange={e => setNewTool(t => ({ ...t, url: e.target.value }))}
-                    placeholder="https://..." className="w-full bg-surface-2 border border-line px-3 py-2 text-xs font-mono text-ink placeholder-ink-3 focus:outline-none focus:border-cream" />
+                <div className="grid grid-cols-[1fr_120px] gap-3">
+                  <div>
+                    <label className="block text-[11px] font-mono uppercase tracking-widest text-ink-3 mb-1">url / endpoint</label>
+                    <input value={newTool.url} onChange={e => setNewTool(t => ({ ...t, url: e.target.value }))}
+                      placeholder="https://..." className="w-full bg-surface-2 border border-line px-3 py-2 text-xs font-mono text-ink placeholder-ink-3 focus:outline-none focus:border-cream" />
+                  </div>
+                  {newTool.type === 'http' && (
+                    <div>
+                      <label className="block text-[11px] font-mono uppercase tracking-widest text-ink-3 mb-1">method</label>
+                      <select value={newTool.method ?? 'POST'} onChange={e => setNewTool(t => ({ ...t, method: e.target.value as Tool['method'] }))}
+                        className="w-full bg-surface-2 border border-line px-3 py-2 text-xs font-mono text-ink focus:outline-none focus:border-cream">
+                        {['GET','POST','PUT','DELETE'].map(m => <option key={m} value={m}>{m}</option>)}
+                      </select>
+                    </div>
+                  )}
                 </div>
                 <div>
                   <label className="block text-[11px] font-mono uppercase tracking-widest text-ink-3 mb-1">description</label>
                   <input value={newTool.description} onChange={e => setNewTool(t => ({ ...t, description: e.target.value }))}
                     placeholder="What this tool does" className="w-full bg-surface-2 border border-line px-3 py-2 text-xs font-mono text-ink placeholder-ink-3 focus:outline-none focus:border-cream" />
                 </div>
+                {newTool.type === 'http' && (
+                  <div className="space-y-2">
+                    <label className="block text-[11px] font-mono uppercase tracking-widest text-ink-3">auth</label>
+                    <div className="grid grid-cols-2 gap-3">
+                      <select value={newTool.authType ?? 'none'} onChange={e => setNewTool(t => ({ ...t, authType: e.target.value as Tool['authType'] }))}
+                        className="w-full bg-surface-2 border border-line px-3 py-2 text-xs font-mono text-ink focus:outline-none focus:border-cream">
+                        <option value="none">none</option>
+                        <option value="bearer">bearer token</option>
+                        <option value="api-key">api key header</option>
+                        <option value="basic">basic auth</option>
+                      </select>
+                      {newTool.authType !== 'none' && (
+                        <input type="password" value={newTool.authValue ?? ''} onChange={e => setNewTool(t => ({ ...t, authValue: e.target.value }))}
+                          placeholder={newTool.authType === 'basic' ? 'user:password' : 'token / key'}
+                          className="w-full bg-surface-2 border border-line px-3 py-2 text-xs font-mono text-ink placeholder-ink-3 focus:outline-none focus:border-cream" />
+                      )}
+                    </div>
+                    {newTool.authType === 'api-key' && (
+                      <input value={newTool.authHeader ?? 'X-API-Key'} onChange={e => setNewTool(t => ({ ...t, authHeader: e.target.value }))}
+                        placeholder="header name e.g. X-API-Key"
+                        className="w-full bg-surface-2 border border-line px-3 py-2 text-xs font-mono text-ink placeholder-ink-3 focus:outline-none focus:border-cream" />
+                    )}
+                  </div>
+                )}
                 <div className="flex gap-2">
                   <button type="button" onClick={addTool} className="px-4 py-2 border border-cream text-xs font-mono text-cream hover:bg-cream hover:text-bg transition-colors">add tool</button>
                   <button type="button" onClick={() => setShowToolForm(false)} className="px-4 py-2 border border-line text-xs font-mono text-ink-3 hover:bg-surface-2">cancel</button>
