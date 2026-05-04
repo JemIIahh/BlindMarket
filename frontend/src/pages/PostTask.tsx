@@ -88,8 +88,6 @@ export default function PostTask() {
 
       // 4. Sign and send via MetaMask
       setStatus('signing');
-      const provider = new BrowserProvider(walletClient.transport);
-      const signer = await provider.getSigner();
       await signAndSendTx(signer, taskJson.unsignedTx);
 
       setTaskId(taskJson.taskId ?? null);
