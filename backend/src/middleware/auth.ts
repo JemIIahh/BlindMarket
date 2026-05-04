@@ -1,6 +1,7 @@
 import type { Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import jwksRsa from 'jwks-rsa';
+import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { timingSafeEqual } from 'crypto';
 import { config } from '../config.js';
 import { AppError } from './errorHandler.js';
@@ -17,47 +18,31 @@ function isAgentApiKey(candidate: string): boolean {
   return !!(config.agentApiKey && safeCompare(candidate, config.agentApiKey));
 }
 
-// Privy JWKS client (lazily initialized)
-let jwksClient: jwksRsa.JwksClient | null = null;
+// Jose-based JWKS set
+let remoteJWKSet: ReturnType<typeof createRemoteJWKSet> | null = null;
 
-function getJwksClient(): jwksRsa.JwksClient | null {
+function getJWKS() {
   if (!config.privyAppId) return null;
-  if (!jwksClient) {
-    jwksClient = jwksRsa({
-      // Privy's documented JWKS endpoint for verifying access tokens
-      jwksUri: `https://auth.privy.io/api/v1/apps/${config.privyAppId}/jwks`,
-      cache: true,
-      cacheMaxAge: 3600000, // 1 hour
-      rateLimit: true,
-    });
+  if (!remoteJWKSet) {
+    remoteJWKSet = createRemoteJWKSet(
+      new URL(`https://auth.privy.io/api/v1/apps/${config.privyAppId}/jwks`)
+    );
   }
-  return jwksClient;
+  return remoteJWKSet;
 }
 
-/** Verify a Privy JWT using JWKS */
+/** Verify a Privy JWT using jose */
 async function verifyPrivyToken(token: string): Promise<{ address: string }> {
-  const client = getJwksClient();
-  if (!client) throw new Error('Privy not configured');
+  const JWKS = getJWKS();
+  if (!JWKS) throw new Error('Privy not configured (missing PRIVY_APP_ID)');
 
-  // Decode header to get kid
-  const decoded = jwt.decode(token, { complete: true });
-  if (!decoded || typeof decoded === 'string' || !decoded.header.kid) {
-    throw new Error('Invalid token header');
-  }
-
-  const key = await client.getSigningKey(decoded.header.kid);
-  const signingKey = key.getPublicKey();
-
-  const payload = jwt.verify(token, signingKey, {
-    // Privy signs access tokens with ES256 (ECDSA P-256), not RS256.
-    algorithms: ['ES256'],
+  const { payload } = await jwtVerify(token, JWKS, {
     issuer: 'privy.io',
     audience: config.privyAppId,
-  }) as jwt.JwtPayload;
+  });
 
   // Extract wallet address from Privy token claims
-  // Privy stores linked accounts in the token
-  const walletAddress = extractWalletAddress(payload);
+  const walletAddress = extractWalletAddress(payload as any);
   if (!walletAddress) {
     throw new Error('No wallet address in Privy token');
   }
@@ -151,8 +136,10 @@ export function requireAuth(req: AuthRequest, _res: Response, next: NextFunction
       req.user = user;
       next();
     })
-    .catch(() => {
-      next(new AppError(401, 'INVALID_TOKEN', 'Invalid or expired token'));
+    .catch((err) => {
+      console.error('[Auth] Privy verification failed:', err.message);
+      // Pass original error message for easier debugging
+      next(new AppError(401, 'INVALID_TOKEN', `Invalid or expired token: ${err.message}`));
     });
 }
 
