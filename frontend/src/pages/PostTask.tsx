@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAccount, useWalletClient } from 'wagmi';
-import { usePrivy, getIdentityToken, getAccessToken } from '@privy-io/react-auth';
+import { getIdentityToken, getAccessToken } from '@privy-io/react-auth';
 import { BrowserProvider, Contract, parseUnits } from 'ethers';
 import { Breadcrumb, PageHeader, SectionRule } from '../components/bb';
 import { aesEncrypt, generateAesKey, sha256, toBase64, toBytes } from '../lib/crypto';
@@ -22,7 +22,6 @@ const ERC20_ABI = [
 export default function PostTask() {
   const { address } = useAccount();
   const { data: walletClient } = useWalletClient();
-  const { login } = usePrivy();
   const navigate = useNavigate();
 
   const [form, setForm] = useState({
@@ -91,7 +90,7 @@ export default function PostTask() {
       const taskHash = '0x' + await sha256(ciphertext);
 
       // 2. Upload encrypted blob to storage
-      const uploadJson = await authedPost<any>('/api/v1/storage/upload', { data: blob }, token);
+      await authedPost<any>('/api/v1/storage/upload', { data: blob }, token);
 
       // 3. Get unsigned tx from backend
       const taskJson = await authedPost<any>('/api/v1/tasks', {
@@ -106,11 +105,10 @@ export default function PostTask() {
       // 4. Sign and send via MetaMask
       setStatus('signing');
       console.log(`[PostTask] Signing registration TX...`);
-      const tx = await signAndSendTx(signer, taskJson.unsignedTx);
-      const taskExplorerLink = `https://chainscan-galileo.0g.ai/tx/${tx.hash}`;
-      console.log(`[PostTask] Task TX sent: ${tx.hash}`);
+      const receipt = await signAndSendTx(signer, taskJson.unsignedTx);
+      const taskExplorerLink = `https://chainscan-galileo.0g.ai/tx/${receipt.hash}`;
+      console.log(`[PostTask] Task TX confirmed: ${receipt.hash}`);
       console.log(`[PostTask] Track it here: ${taskExplorerLink}`);
-      await tx.wait();
       console.log('[PostTask] Task creation confirmed.');
 
       setTaskId(taskJson.taskId ?? null);
