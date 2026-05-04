@@ -71,8 +71,10 @@ async function verifyPrivyToken(token: string): Promise<{ address: string }> {
 
     // Extract wallet address from Privy token claims
     const walletAddress = extractWalletAddress(payload as any);
-    if (!walletAddress) {
-      throw new Error('No wallet address in Privy token');
+    if (!walletAddress || !walletAddress.startsWith('0x')) {
+      // Debug log the claims if we can't find a wallet
+      console.warn(`[Auth] No wallet found in token. Claims:`, JSON.stringify(payload));
+      throw new Error(`No wallet address in Privy token (found: ${walletAddress})`);
     }
 
     return { address: walletAddress };
@@ -82,24 +84,20 @@ async function verifyPrivyToken(token: string): Promise<{ address: string }> {
 }
 
 /** Extract wallet address from Privy JWT claims */
-function extractWalletAddress(payload: jwt.JwtPayload): string | null {
-  // Privy stores linked accounts in custom claims
-  // The wallet address may be in linked_accounts or directly in the sub
-  const linkedAccounts = (payload as Record<string, unknown>).linked_accounts;
-  if (Array.isArray(linkedAccounts)) {
-    const walletAccount = linkedAccounts.find(
-      (a: Record<string, unknown>) => a.type === 'wallet' && typeof a.address === 'string'
-    );
-    if (walletAccount) return (walletAccount as Record<string, string>).address;
+function extractWalletAddress(payload: any): string | null {
+  // 1. Check for the preferred 'wallet_address' claim (often present in v2 or specific configs)
+  if (typeof payload.wallet_address === 'string') return payload.wallet_address;
+
+  // 2. Check linked_accounts array
+  const accounts = payload.linked_accounts;
+  if (Array.isArray(accounts)) {
+    // Prioritize embedded wallets or external wallets
+    const wallet = accounts.find((a: any) => a.type === 'wallet' && a.address?.startsWith('0x'));
+    if (wallet) return wallet.address;
   }
 
-  // Fallback: check if wallet_address is directly in claims
-  if (typeof (payload as Record<string, unknown>).wallet_address === 'string') {
-    return (payload as Record<string, string>).wallet_address;
-  }
-
-  // Last resort: use sub (Privy user ID) as identifier
-  if (payload.sub) return payload.sub;
+  // 3. Last resort: check sub if it's an address (unlikely but possible)
+  if (typeof payload.sub === 'string' && payload.sub.startsWith('0x')) return payload.sub;
 
   return null;
 }
