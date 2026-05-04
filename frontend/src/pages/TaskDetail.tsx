@@ -48,7 +48,8 @@ export default function TaskDetail() {
   const { onChain, meta } = data;
   const isAgent = address?.toLowerCase() === onChain.agent?.toLowerCase();
   const isWorker = address?.toLowerCase() === onChain.worker?.toLowerCase();
-  const reward = Number(meta.reward) / 1e18;
+  const decimals = (meta as any).decimals ?? 18;
+  const reward = Number(meta.reward) / (10 ** decimals);
   const stakeAmount = Math.round(reward * 0.10 * 100) / 100;
 
   const handleApply = () => {

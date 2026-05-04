@@ -4,6 +4,7 @@ import { requireAuth } from '../middleware/auth.js';
 import { AppError } from '../middleware/errorHandler.js';
 import * as escrowService from '../services/escrow.js';
 import * as registryService from '../services/registry.js';
+import { getTokenDecimals } from '../services/chain.js';
 import type { AuthRequest, ApiResponse, AgentCapability } from '../types.js';
 import { AGENT_CAPABILITIES } from '../types.js';
 import * as a2aStore from '../services/a2aStore.js';
@@ -65,7 +66,22 @@ tasksRouter.get('/', async (req, res, next) => {
     try {
       const rawTasks = await registryService.getOpenTasks(offset, limit);
       total = await registryService.openTaskCount();
-      tasks = rawTasks.map((t) => serializeBigInts(t as unknown as Record<string, unknown>));
+      
+      // Enrich with token info from escrow
+      tasks = await Promise.all(rawTasks.map(async (t) => {
+        const taskId = Number(t.taskId);
+        try {
+          const escrowTask = await escrowService.getTask(taskId);
+          const decimals = await getTokenDecimals(escrowTask.token);
+          return {
+            ...serializeBigInts(t as unknown as Record<string, unknown>),
+            token: escrowTask.token,
+            decimals,
+          };
+        } catch (err) {
+          return serializeBigInts(t as unknown as Record<string, unknown>);
+        }
+      }));
     } catch (chainErr) {
       // Surface chain failures so the UI can show a real error instead of
       // pretending the list is empty. Frontends can still render a graceful
@@ -107,11 +123,17 @@ tasksRouter.get('/:id', async (req, res, next) => {
       registryService.getTaskMeta(taskId).catch(() => null),
     ]);
 
+    const decimals = await getTokenDecimals(task.token);
+
     const body: ApiResponse = {
       success: true,
       data: {
         ...serializeBigInts(task as unknown as Record<string, unknown>),
-        meta: meta ? serializeBigInts(meta as unknown as Record<string, unknown>) : null,
+        meta: meta ? {
+          ...serializeBigInts(meta as unknown as Record<string, unknown>),
+          decimals,
+        } : null,
+        decimals,
       },
     };
     res.json(body);
@@ -153,12 +175,13 @@ tasksRouter.post('/', requireAuth, async (req: AuthRequest, res, next) => {
 
     // Record escrow_lock accounting event
     try {
+      const decimals = await getTokenDecimals(data.token);
       accountingService.recordTransaction({
         address: from,
         role: 'agent',
         taskId: data.taskHash,
         type: 'escrow_lock',
-        amount: Number(data.amount) / 1e18,
+        amount: Number(data.amount) / (10 ** decimals),
       });
     } catch (accErr) {
       console.warn('[tasks] Accounting record failed (non-blocking):', accErr);
@@ -271,7 +294,8 @@ tasksRouter.post('/:id/cancel', requireAuth, async (req: AuthRequest, res, next)
 
     // Record refund accounting event
     try {
-      const amount = Number(task.amount) / 1e18;
+      const decimals = await getTokenDecimals(task.token);
+      const amount = Number(task.amount) / (10 ** decimals);
       accountingService.recordTransaction({
         address: from,
         role: 'agent',

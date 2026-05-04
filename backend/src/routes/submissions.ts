@@ -6,6 +6,7 @@ import * as escrowService from '../services/escrow.js';
 import type { AuthRequest, ApiResponse } from '../types.js';
 import * as accountingService from '../services/accountingService.js';
 import * as reputationDecay from '../services/reputationDecay.js';
+import { getTokenDecimals } from '../services/chain.js';
 
 export const submissionsRouter = Router();
 
@@ -55,7 +56,8 @@ submissionsRouter.post('/verify', requireAuth, async (req: AuthRequest, res, nex
     // Record accounting + reputation events
     try {
       const task = await escrowService.getTask(taskId);
-      const amount = Number(task.amount) / 1e18;
+      const decimals = await getTokenDecimals(task.token);
+      const amount = Number(task.amount) / (10 ** decimals);
       const workerAddr = task.worker;
 
       if (passed) {

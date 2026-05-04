@@ -40,3 +40,13 @@ export async function buildUnsignedTx(
   const to = await contract.getAddress();
   return { to, data, from: ethers.getAddress(from) };
 }
+/** Get decimals for an ERC-20 token */
+export async function getTokenDecimals(tokenAddress: string): Promise<number> {
+  try {
+    const token = new ethers.Contract(tokenAddress, ['function decimals() view returns (uint8)'], provider);
+    return Number(await token.decimals());
+  } catch (err) {
+    console.warn(`[chain] Failed to fetch decimals for ${tokenAddress}, defaulting to 18:`, err);
+    return 18;
+  }
+}

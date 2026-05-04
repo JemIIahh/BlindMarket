@@ -17,6 +17,7 @@ const ERC20_ABI = [
   'function approve(address spender, uint256 amount) public returns (bool)',
   'function allowance(address owner, address spender) public view returns (uint256)',
   'function balanceOf(address account) public view returns (uint256)',
+  'function decimals() public view returns (uint8)',
 ];
 
 export default function PostTask() {
@@ -56,12 +57,22 @@ export default function PostTask() {
       const provider = new BrowserProvider(walletClient.transport);
       const signer = await provider.getSigner();
       const tokenContract = new Contract(TOKEN, ERC20_ABI, signer);
-      const amountWei = parseUnits(form.amount, 18);
+      
+      const decimals = await tokenContract.decimals().catch(() => 18);
+      const amountWei = parseUnits(form.amount, decimals);
 
       try {
-        console.log(`[PostTask] Checking allowance for ${address} on token ${TOKEN}...`);
-        const allowance = await tokenContract.allowance(address, BLIND_ESCROW_ADDRESS);
-        console.log(`[PostTask] Current allowance: ${allowance.toString()}`);
+        console.log(`[PostTask] Checking balance and allowance for ${address} on token ${TOKEN} (${decimals} decimals)...`);
+        const [balance, allowance] = await Promise.all([
+          tokenContract.balanceOf(address),
+          tokenContract.allowance(address, BLIND_ESCROW_ADDRESS)
+        ]);
+        
+        console.log(`[PostTask] Balance: ${balance.toString()}, Allowance: ${allowance.toString()}, Required: ${amountWei.toString()}`);
+        
+        if (balance < amountWei) {
+          throw new Error(`Insufficient balance. You need ${form.amount} tokens, but only have ${Number(balance) / (10 ** decimals)}.`);
+        }
         
         if (allowance < amountWei) {
           setStatus('approving');

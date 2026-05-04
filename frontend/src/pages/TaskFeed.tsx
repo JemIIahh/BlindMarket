@@ -9,12 +9,12 @@ import { useSocket } from '../hooks/useSocket';
 import { truncateAddress } from '../lib/utils';
 import type { TaskMeta } from '../types/api';
 
-function formatBounty(amountWei: string): string {
+function formatBounty(amountWei: string, decimals: number = 18): string {
   try {
     const n = BigInt(amountWei);
-    // Assume 18 decimals; show with up to 2 decimals for readability.
-    const whole = n / 10n ** 18n;
-    const frac = Number(n % 10n ** 18n) / 1e18;
+    const divisor = 10n ** BigInt(decimals);
+    const whole = n / divisor;
+    const frac = Number(n % divisor) / (10 ** decimals);
     const total = Number(whole) + frac;
     return total >= 1
       ? `$${total.toLocaleString(undefined, { maximumFractionDigits: 2 })} USDC`
@@ -57,7 +57,11 @@ export default function TaskFeed() {
 
   const totalOpenReward =
     tasks?.reduce((acc, t) => {
-      try { return acc + BigInt(t.reward); } catch { return acc; }
+      try { 
+        const decimals = (t as any).decimals ?? 18;
+        const normalized = BigInt(t.reward) * (10n ** BigInt(18 - decimals));
+        return acc + normalized; 
+      } catch { return acc; }
     }, 0n) ?? 0n;
 
   return (
@@ -83,7 +87,7 @@ export default function TaskFeed() {
 
       {/* Stat cards — live counts, rest remain placeholders until backend exposes them */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-0 border border-line mb-8">
-        <StatCard label="open bounties" value={formatBounty(totalOpenReward.toString())} sub="total escrowed" />
+        <StatCard label="open bounties" value={formatBounty(totalOpenReward.toString(), 18)} sub="total escrowed" />
         <div className="border-l border-line">
           <StatCard label="open tasks" value={String(tasks?.length ?? 0)} sub="live" subColor="ok" />
         </div>
@@ -135,7 +139,7 @@ export default function TaskFeed() {
               <span className="text-ink truncate">
                 {task.category} · <span className="text-ink-3">{task.locationZone || 'global'}</span>
               </span>
-              <span className="text-ink font-semibold">{formatBounty(task.reward)}</span>
+              <span className="text-ink font-semibold">{formatBounty(task.reward, (task as any).decimals)}</span>
               <span className="text-ink-3 truncate">{truncateAddress(task.agent)}</span>
               <span className="text-ink-3">{formatAge(task.createdAt)}</span>
             </button>
@@ -156,7 +160,7 @@ export default function TaskFeed() {
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-0 border border-line mb-6">
                 <div className="p-4">
                   <div className="text-[10px] font-mono font-semibold uppercase tracking-widest text-ink-3 mb-1">bounty</div>
-                  <div className="text-xl font-mono font-bold text-ink">{formatBounty(selected.reward)}</div>
+                  <div className="text-xl font-mono font-bold text-ink">{formatBounty(selected.reward, (selected as any).decimals)}</div>
                 </div>
                 <div className="p-4 border-l border-line">
                   <div className="text-[10px] font-mono font-semibold uppercase tracking-widest text-ink-3 mb-1">zone</div>
