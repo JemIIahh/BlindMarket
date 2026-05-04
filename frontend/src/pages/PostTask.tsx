@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAccount, useWalletClient } from 'wagmi';
+import { usePrivy } from '@privy-io/react-auth';
 import { BrowserProvider } from 'ethers';
 import { Breadcrumb, PageHeader, SectionRule } from '../components/bb';
 import { aesEncrypt, generateAesKey, sha256, toBase64, toBytes } from '../lib/crypto';
@@ -14,6 +15,7 @@ const TOKEN = import.meta.env.VITE_MOCK_ERC20_ADDRESS ?? '0x3af9232009C5da30AdA3
 export default function PostTask() {
   const { address } = useAccount();
   const { data: walletClient } = useWalletClient();
+  const { getIdentityToken, getAccessToken } = usePrivy();
   const navigate = useNavigate();
 
   const [form, setForm] = useState({
@@ -39,6 +41,10 @@ export default function PostTask() {
       setStatus('encrypting');
       setError('');
 
+      // Manual token fetch to ensure we have it even if module-level getter is out of sync
+      const token = (await getIdentityToken()) || (await getAccessToken());
+      if (!token) throw new Error('No authentication token available. Please try logging out and back in.');
+
       // 1. Encrypt instructions browser-side
       const key = generateAesKey();
       const plaintext = toBytes(form.instructions);
@@ -47,7 +53,7 @@ export default function PostTask() {
       const taskHash = '0x' + await sha256(ciphertext);
 
       // 2. Upload encrypted blob to storage
-      const uploadJson = await authedPost<any>('/api/v1/storage/upload', { data: blob });
+      const uploadJson = await authedPost<any>('/api/v1/storage/upload', { data: blob }, token);
 
       // 3. Get unsigned tx from backend
       const amountWei = (BigInt(Math.round(parseFloat(form.amount) * 1e18))).toString();
@@ -58,7 +64,7 @@ export default function PostTask() {
         category: form.category,
         locationZone: form.locationZone,
         duration: form.duration,
-      });
+      }, token);
 
       // 4. Sign and send via MetaMask
       setStatus('signing');

@@ -30,7 +30,8 @@ export function setAccessTokenGetter(getter: (() => Promise<string | null>) | nu
   _getAccessToken = getter;
 }
 
-async function getAuthHeaders(): Promise<Record<string, string>> {
+async function getAuthHeaders(overrideToken?: string): Promise<Record<string, string>> {
+  if (overrideToken) return { Authorization: `Bearer ${overrideToken}` };
   if (!_getAccessToken) return {};
   const token = await _getAccessToken();
   return token ? { Authorization: `Bearer ${token}` } : {};
@@ -52,17 +53,17 @@ export async function post<T>(path: string, body?: unknown): Promise<T> {
   return handleResponse<T>(res);
 }
 
-export async function authedGet<T>(path: string): Promise<T> {
+export async function authedGet<T>(path: string, overrideToken?: string): Promise<T> {
   const res = await fetch(`${API_BASE_URL}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...(await getAuthHeaders()) },
+    headers: { 'Content-Type': 'application/json', ...(await getAuthHeaders(overrideToken)) },
   });
   return handleResponse<T>(res);
 }
 
-export async function authedPost<T>(path: string, body?: unknown): Promise<T> {
+export async function authedPost<T>(path: string, body?: unknown, overrideToken?: string): Promise<T> {
   const res = await fetch(`${API_BASE_URL}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...(await getAuthHeaders()) },
+    headers: { 'Content-Type': 'application/json', ...(await getAuthHeaders(overrideToken)) },
     body: body ? JSON.stringify(body) : undefined,
   });
   return handleResponse<T>(res);
