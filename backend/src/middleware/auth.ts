@@ -1,6 +1,5 @@
 import type { Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
-import jwksRsa from 'jwks-rsa';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { timingSafeEqual } from 'crypto';
 import { config } from '../config.js';
@@ -27,10 +26,9 @@ async function getJWKS() {
 
   const app_id = config.privyAppId;
   const urls = [
+    `https://auth.privy.io/api/v1/apps/${app_id}/jwks.json`,
     `https://auth.privy.io/api/v1/apps/${app_id}/jwks`,
     `https://auth.privy.io/api/v1/apps/${app_id}/.well-known/jwks.json`,
-    `https://auth.privy.io/api/v1/apps/${app_id}/keys`,
-    `https://auth.privy.io/apps/${app_id}/jwks`,
   ];
 
   for (const url of urls) {
