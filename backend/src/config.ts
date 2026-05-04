@@ -18,7 +18,7 @@ export const config = {
 
   // 0G Chain
   ogRpcUrl: optional('OG_RPC_URL', 'https://evmrpc-testnet.0g.ai'),
-  ogChainId: parseInt(optional('OG_CHAIN_ID', '16602'), 10),
+  ogChainId: parseInt(optional('OG_CHAIN_ID', '16601'), 10),
 
   // Contracts
   blindEscrowAddress: required('BLIND_ESCROW_ADDRESS'),
@@ -28,7 +28,7 @@ export const config = {
 
   // Auth — Privy is the sole identity provider; agent API key for service callers
   agentApiKey: process.env.AGENT_API_KEY || '',
-  privyAppId: required('PRIVY_APP_ID'),
+  privyAppId: required('PRIVY_APP_ID').trim(),
   // Used only by registration.ts to mint long-lived agent CLI tokens.
   // No longer accepted by requireAuth — that path is Privy-only.
   jwtSecret: process.env.JWT_SECRET || '',
