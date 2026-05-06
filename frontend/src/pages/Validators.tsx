@@ -91,7 +91,7 @@ export default function Validators() {
 
   async function stakeWithApproval() {
     if (!address || !walletClient) return;
-    const amountWei = BigInt(Math.round(parseFloat(stakeAmount))) * 10n ** 18n;
+    const amountWei = BigInt(Math.round(parseFloat(stakeAmount))) * 10n ** 6n;
     const USDC = import.meta.env.VITE_MOCK_ERC20_ADDRESS ?? '0x3af9232009C5da30AdA366B6E09849A040162A1a';
     const POOL = '0xBBE1b3736147C849455467E558245b04f01790E6';
     const approveData = '0x095ea7b3' +
@@ -151,7 +151,7 @@ export default function Validators() {
           <div className="p-8 text-center text-xs font-mono text-ink-3">connect wallet to continue</div>
         ) : isValidator ? (
           <div className="p-6 grid grid-cols-4 gap-6 text-xs font-mono">
-            <div><div className="text-ink-3 mb-1">staked</div><div className="text-cream">{(BigInt(validatorInfo!.stake) / 10n ** 18n).toString()} USDC</div></div>
+            <div><div className="text-ink-3 mb-1">staked</div><div className="text-cream">{(BigInt(validatorInfo!.stake) / 10n ** 6n).toString()} USDC</div></div>
             <div><div className="text-ink-3 mb-1">total votes</div><div className="text-ink">{validatorInfo!.totalVotes}</div></div>
             <div><div className="text-ink-3 mb-1">correct votes</div><div className="text-ink">{validatorInfo!.correctVotes}</div></div>
             <div>
@@ -201,7 +201,7 @@ export default function Validators() {
               <div key={d.disputeId} className="grid grid-cols-[80px_1fr_120px_100px_100px_160px] gap-4 px-5 py-4 border-b border-line last:border-b-0 text-xs font-mono items-center">
                 <span className="text-ink-3">#{d.disputeId}</span>
                 <span className="text-ink">task #{d.taskId}</span>
-                <span className="text-cream">${(BigInt(d.amount) / 10n ** 18n).toString()} USDC</span>
+                <span className="text-cream">${(BigInt(d.amount) / 10n ** 6n).toString()} USDC</span>
                 <span className="text-ink">{d.workerVotes}</span>
                 <span className="text-ink">{d.agentVotes}</span>
                 <div className="flex gap-2">
