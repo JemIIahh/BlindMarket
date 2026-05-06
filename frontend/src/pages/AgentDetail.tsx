@@ -106,7 +106,7 @@ export default function AgentDetail() {
         <div className="border-l border-line"><StatCard label="wallet balance" value={balance ? parseFloat(balance.formatted).toFixed(4) : '—'} sub={balance?.symbol ?? '0G'} /></div>
       </div>
 
-      <div className="grid grid-cols-[300px_1fr] gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-[300px_1fr] gap-6">
         {/* Identity */}
         <div className="border border-line p-5">
           <SectionRule num="01" title="identity" />
@@ -122,10 +122,10 @@ export default function AgentDetail() {
         {/* Tabbed right panel */}
         <div className="border border-line flex flex-col">
           {/* Tabs */}
-          <div className="flex border-b border-line">
+          <div className="flex flex-wrap border-b border-line">
             {(['logs', 'tools', 'tasks', ...(isOwner ? ['edit'] : [])] as const).map(t => (
               <button key={t} onClick={() => setTab(t as typeof tab)}
-                className={`px-5 py-3 text-[11px] font-mono uppercase tracking-widest border-r border-line transition-colors ${tab === t ? 'text-cream bg-surface-2' : 'text-ink-3 hover:text-ink hover:bg-surface-2'}`}>
+                className={`flex-1 min-w-[80px] px-3 sm:px-5 py-3 text-[11px] font-mono uppercase tracking-widest border-r border-line transition-colors ${tab === t ? 'text-cream bg-surface-2' : 'text-ink-3 hover:text-ink hover:bg-surface-2'}`}>
                 {t}
               </button>
             ))}
