@@ -119,9 +119,8 @@ export default function PostTask() {
       setStatus('signing');
       console.log(`[PostTask] Signing registration TX...`);
       const receipt = await signAndSendTx(signer, taskJson.unsignedTx);
-      const taskExplorerLink = `https://chainscan-galileo.0g.ai/tx/${receipt.hash}`;
-      console.log(`[PostTask] Task TX confirmed: ${receipt.hash}`);
-      console.log(`[PostTask] Track it here: ${taskExplorerLink}`);
+      const txHash = receipt?.hash ?? taskJson.unsignedTx?.hash ?? '';
+      console.log(`[PostTask] Task TX submitted: ${txHash}`);
       console.log('[PostTask] Task creation confirmed.');
 
       setTaskId(taskJson.taskId ?? null);

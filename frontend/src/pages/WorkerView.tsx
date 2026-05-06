@@ -95,7 +95,7 @@ export default function WorkerView() {
       const unsignedTx = await buildSubmitEvidence({ taskId, evidenceHash });
       const receipt = await txSend.mutateAsync(unsignedTx);
 
-      setLastSubmit({ rootHash: uploaded.rootHash, evidenceHash, txHash: receipt.hash });
+      setLastSubmit({ rootHash: uploaded.rootHash, evidenceHash, txHash: receipt?.hash ?? '' });
     } catch (err) {
       setSubmitError((err as Error).message || 'failed to submit evidence');
     } finally {
