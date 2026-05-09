@@ -19,8 +19,10 @@
 import { ethers } from "hardhat";
 import * as fs from "fs";
 import * as path from "path";
+import { assertSafeNetwork } from "./_guard";
 
 async function main() {
+  await assertSafeNetwork();
   const newAddr = process.env.MARKETPLACE_SIGNER_ADDRESS ?? process.argv[2];
   if (!newAddr || !/^0x[0-9a-fA-F]{40}$/.test(newAddr)) {
     throw new Error(

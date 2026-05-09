@@ -24,6 +24,7 @@
 import { ethers, upgrades } from "hardhat";
 import * as fs from "fs";
 import * as path from "path";
+import { assertSafeNetwork } from "./_guard";
 
 const EIP1967_IMPL_SLOT =
   "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
@@ -42,6 +43,7 @@ async function readImplFromChain(proxy: string): Promise<string> {
 }
 
 async function main() {
+  await assertSafeNetwork();
   const deploymentsPath = path.resolve(__dirname, "../deployments/0g-testnet.json");
   if (!fs.existsSync(deploymentsPath)) {
     throw new Error(`deployments file not found: ${deploymentsPath}`);

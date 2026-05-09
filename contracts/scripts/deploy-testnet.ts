@@ -23,8 +23,10 @@
 import { ethers, upgrades } from "hardhat";
 import * as fs from "fs";
 import * as path from "path";
+import { assertSafeNetwork } from "./_guard";
 
 async function main() {
+  await assertSafeNetwork();
   const [deployer] = await ethers.getSigners();
   console.log("Deployer:", deployer.address);
 
