@@ -22,6 +22,9 @@ const KEY = {
   state: (taskId: string) => `a2a:state:${taskId}`,
   open: 'a2a:open',
   executor: (addr: string) => `a2a:executor:${addr.toLowerCase()}`,
+  // Tasks posted by a given address — populated when meta.posterAddress is set.
+  // Used by the manual-verify inbox query.
+  poster: (addr: string) => `a2a:poster:${addr.toLowerCase()}`,
 };
 
 export async function setMeta(meta: A2ATaskMeta): Promise<void> {
@@ -35,6 +38,9 @@ export async function setMeta(meta: A2ATaskMeta): Promise<void> {
   );
   if (meta.targetExecutorType === 'agent') {
     pipe.sadd(KEY.open, meta.taskId);
+  }
+  if (meta.posterAddress) {
+    pipe.sadd(KEY.poster(meta.posterAddress), meta.taskId);
   }
   await pipe.exec();
 }
@@ -119,7 +125,22 @@ export async function browseAgentTasks(
 export async function getExecutorTasks(
   address: string,
 ): Promise<Array<{ meta: A2ATaskMeta; state: A2ATaskState }>> {
-  const ids = await redis.smembers(KEY.executor(address));
+  return loadTasksByIndex(KEY.executor(address));
+}
+
+/** Get all tasks posted by a specific address. Drives the poster's inbox. */
+export async function getPosterTasks(
+  address: string,
+): Promise<Array<{ meta: A2ATaskMeta; state: A2ATaskState }>> {
+  return loadTasksByIndex(KEY.poster(address));
+}
+
+/** Helper used by getExecutorTasks and getPosterTasks — same shape, different
+ *  index. Returns meta+state pairs for every taskId in the named set. */
+async function loadTasksByIndex(
+  setKey: string,
+): Promise<Array<{ meta: A2ATaskMeta; state: A2ATaskState }>> {
+  const ids = await redis.smembers(setKey);
   if (ids.length === 0) return [];
 
   const pipe = redis.pipeline();

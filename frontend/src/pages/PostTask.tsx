@@ -33,6 +33,10 @@ export default function PostTask() {
     amount: '10',
     duration: '86400',
     executor: 'human' as 'human' | 'agent',
+    // Verification mode — only meaningful when executor === 'agent'.
+    //   manual: poster reviews the submission and clicks approve/reject (H2A)
+    //   auto:   backend runs autoVerify against criteria (A2A — no human needed)
+    verificationMode: 'manual' as 'manual' | 'auto',
   });
   const [status, setStatus] = useState<'idle' | 'encrypting' | 'approving' | 'signing' | 'done' | 'error'>('idle');
   const [error, setError] = useState('');
@@ -51,7 +55,27 @@ export default function PostTask() {
       setError('');
 
       // Manual token fetch to ensure we have it even if module-level getter is out of sync
-      const token = (await getIdentityToken()) || (await getAccessToken());
+      const idTok = await getIdentityToken();
+      const accTok = await getAccessToken();
+      const token = idTok || accTok;
+      // Diagnostic: surface which token type resolved, and decode its payload
+      // so we can see whether linked_accounts is present. This is intentionally
+      // verbose for debugging the 401-on-storage-upload issue. Strip when fixed.
+      try {
+        const usedKind = idTok ? 'identity' : accTok ? 'access' : 'none';
+        const decode = (t: string | null) => {
+          if (!t) return null;
+          const b64 = t.split('.')[1];
+          if (!b64) return 'malformed';
+          const json = atob(b64.replace(/-/g, '+').replace(/_/g, '/'));
+          return JSON.parse(json);
+        };
+        console.log('[PostTask][auth] using:', usedKind);
+        console.log('[PostTask][auth] identity payload:', decode(idTok ?? null));
+        console.log('[PostTask][auth] access payload:', decode(accTok ?? null));
+      } catch (e) {
+        console.warn('[PostTask][auth] decode failed', e);
+      }
       if (!token) throw new Error('No authentication token available. Please try logging out and back in.');
 
       // 0. Handle Token Approval if needed
@@ -119,7 +143,16 @@ export default function PostTask() {
         // it shows up in /a2a's browse_tasks panel. Verification defaults to
         // manual; the A2A submit endpoint also supports auto/oracle modes.
         ...(form.executor === 'agent'
-          ? { targetExecutorType: 'agent' as const, verificationMode: 'manual' as const }
+          ? {
+              targetExecutorType: 'agent' as const,
+              verificationMode: form.verificationMode,
+              // Defaults for auto-verify — sensible criteria so the bridge has
+              // something to evaluate against. Posters with stricter needs can
+              // post via the API directly until we expose criteria editing.
+              ...(form.verificationMode === 'auto'
+                ? { verificationCriteria: { min_length: 10 } }
+                : {}),
+            }
           : {}),
       }, token);
 
@@ -235,6 +268,37 @@ export default function PostTask() {
                     : 'visible in the human task feed at /tasks · humans apply and the poster assigns'}
                 </div>
               </div>
+
+              {form.executor === 'agent' && (
+                <div>
+                  <label className="block text-[11px] font-mono uppercase tracking-widest text-ink-3 mb-2">verification</label>
+                  <div className="grid grid-cols-2 border border-line">
+                    {([
+                      { value: 'manual', label: 'manual', hint: 'you review and approve submissions (H2A)' },
+                      { value: 'auto',   label: 'auto',   hint: 'backend verifies by criteria (A2A — no review)' },
+                    ] as const).map((opt, idx) => {
+                      const active = form.verificationMode === opt.value;
+                      return (
+                        <button
+                          key={opt.value}
+                          type="button"
+                          onClick={() => setForm(f => ({ ...f, verificationMode: opt.value }))}
+                          className={`px-4 py-3 text-[11px] font-mono uppercase tracking-widest transition-colors ${idx === 1 ? 'border-l border-line' : ''} ${
+                            active ? 'bg-cream text-bg' : 'text-ink-3 hover:text-ink hover:bg-surface-2'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="mt-1 text-[11px] font-mono text-ink-3">
+                    {form.verificationMode === 'manual'
+                      ? 'submissions land in your /a2a → to_review tab · you approve or reject before escrow releases'
+                      : 'submissions auto-verify against built-in criteria · escrow releases without your involvement'}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 

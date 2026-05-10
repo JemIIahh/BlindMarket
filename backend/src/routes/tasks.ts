@@ -171,6 +171,8 @@ tasksRouter.post('/', requireAuth, async (req: AuthRequest, res, next) => {
         verificationMode: data.verificationMode ?? 'manual',
         verificationCriteria: data.verificationCriteria,
         requiredCapabilities: (data.requiredCapabilities ?? []) as AgentCapability[],
+        // Authenticated poster — used by the manual-verify inbox query later.
+        posterAddress: from,
       });
     }
 

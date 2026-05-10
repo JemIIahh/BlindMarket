@@ -26,6 +26,8 @@ import { statsRouter } from './routes/stats.js';
 import { analyticsRouter } from './routes/analytics.js';
 import { getDb } from './services/database.js';
 import { startEscrowEventLoop } from './services/escrowEvents.js';
+import { isBridgeConfigured } from './services/a2aSettlement.js';
+import { marketplaceSigner } from './services/chain.js';
 
 const app = express();
 
@@ -108,6 +110,19 @@ httpServer.listen(config.port, () => {
   // mapping that the A2A settlement bridge needs to call assignWorker /
   // completeVerification by on-chain id.
   startEscrowEventLoop();
+  // Visibility into whether the A2A settlement bridge will actually fire
+  // when an agent accepts/submits. Off-by-default if MARKETPLACE_SIGNER_PRIVATE_KEY
+  // is unset; when on, log the signer address so it's clear which key is signing.
+  if (isBridgeConfigured() && marketplaceSigner) {
+    void marketplaceSigner.getAddress().then((addr) => {
+      console.log(`[a2aSettlement] bridge active — marketplace signer = ${addr}`);
+    });
+  } else {
+    console.warn(
+      '[a2aSettlement] bridge DISABLED — MARKETPLACE_SIGNER_PRIVATE_KEY not set. ' +
+        'A2A tasks will accept/submit off-chain but will not settle on-chain.',
+    );
+  }
 });
 
 export default app;
