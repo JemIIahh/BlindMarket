@@ -11,7 +11,21 @@ import { authedPost } from '../lib/api';
 import { trackEvent } from '../hooks/useAnalytics';
 import { BLIND_ESCROW_ADDRESS } from '../config/constants';
 
-const CATEGORIES = ['photography', 'research', 'verification', 'data-collection', 'transcription', 'other'];
+// Suggested categories surfaced via <datalist> on the category input — these
+// are popular hints, not the full set. The category field is free-text
+// (backend accepts any string 1..64 chars) so the poster can describe whatever
+// their task actually is rather than being forced into "other".
+const CATEGORY_SUGGESTIONS = [
+  'photography',
+  'research',
+  'verification',
+  'data-collection',
+  'transcription',
+  'writing',
+  'translation',
+  'code-review',
+  'analysis',
+];
 const TOKEN = import.meta.env.VITE_MOCK_ERC20_ADDRESS ?? '0x3af9232009C5da30AdA366B6E09849A040162A1a';
 
 const ERC20_ABI = [
@@ -28,7 +42,7 @@ export default function PostTask() {
 
   const [form, setForm] = useState({
     instructions: '',
-    category: 'photography',
+    category: '',
     locationZone: 'global',
     amount: '10',
     duration: '86400',
@@ -225,13 +239,37 @@ export default function PostTask() {
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-[11px] font-mono uppercase tracking-widest text-ink-3 mb-2">category</label>
-                  <select
+                  <input
+                    type="text"
+                    required
+                    maxLength={64}
                     value={form.category}
                     onChange={e => setForm(f => ({ ...f, category: e.target.value }))}
-                    className="w-full bg-surface-2 border border-line px-4 py-3 text-xs font-mono text-ink focus:outline-none focus:border-cream"
-                  >
-                    {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
-                  </select>
+                    placeholder="describe it — or pick a suggestion below"
+                    className="w-full bg-surface-2 border border-line px-4 py-3 text-xs font-mono text-ink placeholder-ink-3 focus:outline-none focus:border-cream"
+                  />
+                  {/* Suggestion chips — single wrapped row, click to fill the
+                      input. Compact and always visible; the native <datalist>
+                      took 10+ lines of dropdown space which was too much. */}
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {CATEGORY_SUGGESTIONS.map(c => {
+                      const active = form.category === c;
+                      return (
+                        <button
+                          key={c}
+                          type="button"
+                          onClick={() => setForm(f => ({ ...f, category: c }))}
+                          className={`px-2 py-0.5 text-[10px] font-mono border transition-colors ${
+                            active
+                              ? 'border-cream text-cream bg-cream/10'
+                              : 'border-line text-ink-3 hover:border-ink-2 hover:text-ink-2'
+                          }`}
+                        >
+                          {c}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
                 <div>
                   <label className="block text-[11px] font-mono uppercase tracking-widest text-ink-3 mb-2">location zone</label>

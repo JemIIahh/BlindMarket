@@ -39,8 +39,21 @@ const AGENT_PRIVATE_KEY = process.env.AGENT_PRIVATE_KEY ?? '';
 const OG_RPC_URL = process.env.OG_RPC_URL ?? 'https://evmrpc-testnet.0g.ai';
 const OG_CHAIN_ID = Number(process.env.OG_CHAIN_ID ?? 16602);
 const AGENT_TOOLS_RAW = process.env.AGENT_TOOLS ?? '[]';
+const AGENT_CAPABILITIES_RAW = process.env.AGENT_CAPABILITIES ?? '[]';
 const BACKEND_URL = process.env.BACKEND_URL ?? 'http://localhost:3001';
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? 30_000);
+
+// Capabilities the parent agentRunner declares for us at deploy time. Used to
+// auto-register as an A2A executor on startup (without registration the
+// /a2a/tasks/:hash/accept handler refuses our calls with 403 NOT_REGISTERED).
+// Default to a single generic capability if none configured, so an agent
+// deployed without explicit caps can still pick up the simplest tasks.
+let agentCapabilities = [];
+try {
+  const parsed = JSON.parse(AGENT_CAPABILITIES_RAW);
+  if (Array.isArray(parsed) && parsed.length > 0) agentCapabilities = parsed;
+} catch {}
+if (agentCapabilities.length === 0) agentCapabilities = ['data_processing'];
 
 // Ethers wallet — used to sign + broadcast the unsigned txs the backend builds
 let signerWallet = null;
@@ -383,5 +396,41 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-setInterval(pollAndWork, POLL_INTERVAL_MS);
-pollAndWork();
+/**
+ * Register this agent as an A2A executor so the /accept handler will let it
+ * claim tasks. Without this we get 403 NOT_REGISTERED on every /a2a/accept.
+ * Idempotent on the backend (registerAgent overwrites existing rows), so
+ * safe to call on every worker start.
+ */
+async function ensureRegisteredAsA2AExecutor() {
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/v1/a2a/register`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${AGENT_PLATFORM_TOKEN}`,
+      },
+      body: JSON.stringify({
+        displayName: AGENT_NAME,
+        capabilities: agentCapabilities,
+      }),
+    });
+    if (res.ok) {
+      log(`registered as A2A executor (caps=${agentCapabilities.join(',')})`);
+    } else {
+      const errText = await res.text();
+      log(`a2a register failed: ${res.status} ${errText.slice(0, 120)}`);
+    }
+  } catch (e) {
+    log(`a2a register error: ${e.message}`);
+  }
+}
+
+// Bootstrap: register first (so the very first poll cycle can accept), then
+// start the loop. Both calls are non-blocking — register failure just means
+// the first /accept will 403 and we'll retry on the next tick.
+(async () => {
+  await ensureRegisteredAsA2AExecutor();
+  setInterval(pollAndWork, POLL_INTERVAL_MS);
+  pollAndWork();
+})();
