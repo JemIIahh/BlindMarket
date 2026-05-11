@@ -15,7 +15,13 @@ describe("ValidatorPool", function () {
   let escrow: HardhatEthersSigner; // signer used for openDispute in basic tests
   let stranger: HardhatEthersSigner;
 
-  const MIN_STAKE = ethers.parseEther("100");
+  // Contract uses 6-decimal USDC (MIN_STAKE = 100e6). Master commit 393ebb0
+  // changed the contract constant from 100e18 → 100e6 without updating this
+  // test, so the "reverts if stake below minimum" assertion was broken on
+  // master. Fixed as part of the merge resolution. AMOUNT (only used as a
+  // dispute payout sentinel) is left at parseEther since the contract doesn't
+  // compare it against a USDC-denominated bound.
+  const MIN_STAKE = ethers.parseUnits("100", 6);
   const VOTE_WINDOW = 48 * 3600;
   const TASK_ID = 1;
   const AMOUNT = ethers.parseEther("500");

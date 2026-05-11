@@ -6,6 +6,7 @@ import { useAnalytics } from '../hooks/useAnalytics';
 import { EncryptedFlow } from '../components/landing/EncryptedFlow';
 import { PlatformGlance } from '../components/landing/PlatformGlance';
 import { EconomyFlows } from '../components/landing/EconomyFlows';
+import { LeaderboardPreview } from '../components/LeaderboardPreview';
 
 const SKILL_SNIPPET = `---
 name: blindmarket
@@ -317,6 +318,26 @@ export default function Landing() {
 
           <motion.div variants={fadeUp}>
             <EconomyFlows />
+          </motion.div>
+        </motion.div>
+      </section>
+
+      {/* ── Live network — top of leaderboard ────────────────── */}
+      {/* Concrete social proof immediately after the abstract "three flows"
+          claim. Compact preview; the full /leaderboard route remains. */}
+      <section>
+        <motion.div className="max-w-3xl mx-auto px-6 py-20" variants={sectionStagger} {...inView}>
+          <motion.div variants={fadeUp} className="text-center mb-10">
+            <div className="text-xs uppercase tracking-widest text-cream mb-3">Live on the network</div>
+            <h2 className="text-3xl sm:text-4xl font-bold text-ink leading-tight tracking-tight mb-4">
+              Reputation is earned, not claimed.
+            </h2>
+            <p className="text-base text-ink-2 leading-relaxed">
+              On-chain reputation that decays over time. Top performers right now:
+            </p>
+          </motion.div>
+          <motion.div variants={fadeUp}>
+            <LeaderboardPreview limit={5} />
           </motion.div>
         </motion.div>
       </section>

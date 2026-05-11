@@ -681,6 +681,296 @@
           ]
         }
       }
+    },
+    "9b45cf3efbbad9bbc90cff5e8de8ba116f8ae57bccec5ab8ecce94814160e592": {
+      "address": "0x13098AC28b7BC7241D1725aedd9C9dA03dE21712",
+      "txHash": "0x4d8c0e34b6d7d26676d2ba4a9ae26ce330543385f27378d0c10d534f532537f8",
+      "layout": {
+        "solcVersion": "0.8.24",
+        "storage": [
+          {
+            "label": "nextTaskId",
+            "offset": 0,
+            "slot": "0",
+            "type": "t_uint256",
+            "contract": "BlindEscrow",
+            "src": "contracts/BlindEscrow.sol:70"
+          },
+          {
+            "label": "_tasks",
+            "offset": 0,
+            "slot": "1",
+            "type": "t_mapping(t_uint256,t_struct(Task)10795_storage)",
+            "contract": "BlindEscrow",
+            "src": "contracts/BlindEscrow.sol:70"
+          },
+          {
+            "label": "admin",
+            "offset": 0,
+            "slot": "2",
+            "type": "t_address",
+            "contract": "BlindEscrow",
+            "src": "contracts/BlindEscrow.sol:73"
+          },
+          {
+            "label": "pendingAdmin",
+            "offset": 0,
+            "slot": "3",
+            "type": "t_address",
+            "contract": "BlindEscrow",
+            "src": "contracts/BlindEscrow.sol:73"
+          },
+          {
+            "label": "treasury",
+            "offset": 0,
+            "slot": "4",
+            "type": "t_address",
+            "contract": "BlindEscrow",
+            "src": "contracts/BlindEscrow.sol:75"
+          },
+          {
+            "label": "verifier",
+            "offset": 0,
+            "slot": "5",
+            "type": "t_address",
+            "contract": "BlindEscrow",
+            "src": "contracts/BlindEscrow.sol:75"
+          },
+          {
+            "label": "feeBps",
+            "offset": 0,
+            "slot": "6",
+            "type": "t_uint256",
+            "contract": "BlindEscrow",
+            "src": "contracts/BlindEscrow.sol:76"
+          },
+          {
+            "label": "allowedTokens",
+            "offset": 0,
+            "slot": "7",
+            "type": "t_mapping(t_address,t_bool)",
+            "contract": "BlindEscrow",
+            "src": "contracts/BlindEscrow.sol:78"
+          },
+          {
+            "label": "reputationContract",
+            "offset": 0,
+            "slot": "8",
+            "type": "t_contract(IBlindReputation)14729",
+            "contract": "BlindEscrow",
+            "src": "contracts/BlindEscrow.sol:81"
+          },
+          {
+            "label": "taskRegistry",
+            "offset": 0,
+            "slot": "9",
+            "type": "t_contract(ITaskRegistry)14755",
+            "contract": "BlindEscrow",
+            "src": "contracts/BlindEscrow.sol:84"
+          }
+        ],
+        "types": {
+          "t_bool": {
+            "label": "bool",
+            "numberOfBytes": "1"
+          },
+          "t_struct(InitializableStorage)390_storage": {
+            "label": "struct Initializable.InitializableStorage",
+            "members": [
+              {
+                "label": "_initialized",
+                "type": "t_uint64",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "_initializing",
+                "type": "t_bool",
+                "offset": 8,
+                "slot": "0"
+              }
+            ],
+            "numberOfBytes": "32"
+          },
+          "t_struct(PausableStorage)49_storage": {
+            "label": "struct PausableUpgradeable.PausableStorage",
+            "members": [
+              {
+                "label": "_paused",
+                "type": "t_bool",
+                "offset": 0,
+                "slot": "0"
+              }
+            ],
+            "numberOfBytes": "32"
+          },
+          "t_uint64": {
+            "label": "uint64",
+            "numberOfBytes": "8"
+          },
+          "t_address": {
+            "label": "address",
+            "numberOfBytes": "20"
+          },
+          "t_bytes32": {
+            "label": "bytes32",
+            "numberOfBytes": "32"
+          },
+          "t_contract(IBlindReputation)14729": {
+            "label": "contract IBlindReputation",
+            "numberOfBytes": "20"
+          },
+          "t_contract(ITaskRegistry)14755": {
+            "label": "contract ITaskRegistry",
+            "numberOfBytes": "20"
+          },
+          "t_enum(TaskStatus)10769": {
+            "label": "enum BlindEscrow.TaskStatus",
+            "members": [
+              "Funded",
+              "Assigned",
+              "Submitted",
+              "Verified",
+              "Completed",
+              "Cancelled",
+              "Disputed"
+            ],
+            "numberOfBytes": "1"
+          },
+          "t_mapping(t_address,t_bool)": {
+            "label": "mapping(address => bool)",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_uint256,t_struct(Task)10795_storage)": {
+            "label": "mapping(uint256 => struct BlindEscrow.Task)",
+            "numberOfBytes": "32"
+          },
+          "t_string_storage": {
+            "label": "string",
+            "numberOfBytes": "32"
+          },
+          "t_struct(Task)10795_storage": {
+            "label": "struct BlindEscrow.Task",
+            "members": [
+              {
+                "label": "agent",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "worker",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "1"
+              },
+              {
+                "label": "token",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "2"
+              },
+              {
+                "label": "amount",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "3"
+              },
+              {
+                "label": "taskHash",
+                "type": "t_bytes32",
+                "offset": 0,
+                "slot": "4"
+              },
+              {
+                "label": "evidenceHash",
+                "type": "t_bytes32",
+                "offset": 0,
+                "slot": "5"
+              },
+              {
+                "label": "status",
+                "type": "t_enum(TaskStatus)10769",
+                "offset": 0,
+                "slot": "6"
+              },
+              {
+                "label": "category",
+                "type": "t_string_storage",
+                "offset": 0,
+                "slot": "7"
+              },
+              {
+                "label": "locationZone",
+                "type": "t_string_storage",
+                "offset": 0,
+                "slot": "8"
+              },
+              {
+                "label": "createdAt",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "9"
+              },
+              {
+                "label": "deadline",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "10"
+              },
+              {
+                "label": "submissionAttempts",
+                "type": "t_uint8",
+                "offset": 0,
+                "slot": "11"
+              }
+            ],
+            "numberOfBytes": "384"
+          },
+          "t_uint256": {
+            "label": "uint256",
+            "numberOfBytes": "32"
+          },
+          "t_uint8": {
+            "label": "uint8",
+            "numberOfBytes": "1"
+          }
+        },
+        "namespaces": {
+          "erc7201:openzeppelin.storage.Pausable": [
+            {
+              "contract": "PausableUpgradeable",
+              "label": "_paused",
+              "type": "t_bool",
+              "src": "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol:21",
+              "offset": 0,
+              "slot": "0"
+            }
+          ],
+          "erc7201:openzeppelin.storage.Initializable": [
+            {
+              "contract": "Initializable",
+              "label": "_initialized",
+              "type": "t_uint64",
+              "src": "@openzeppelin/contracts/proxy/utils/Initializable.sol:69",
+              "offset": 0,
+              "slot": "0"
+            },
+            {
+              "contract": "Initializable",
+              "label": "_initializing",
+              "type": "t_bool",
+              "src": "@openzeppelin/contracts/proxy/utils/Initializable.sol:73",
+              "offset": 8,
+              "slot": "0"
+            }
+          ]
+        }
+      },
+      "allAddresses": [
+        "0x13098AC28b7BC7241D1725aedd9C9dA03dE21712",
+        "0x567dE0C352Bdb0df7a53E4bd5f0d5ef2Eb8449d0"
+      ]
     }
   }
 }

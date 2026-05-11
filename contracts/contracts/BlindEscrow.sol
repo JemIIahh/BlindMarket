@@ -242,6 +242,33 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
     }
 
     /**
+     * @notice Marketplace verifier assigns a worker on the task agent's behalf.
+     * @dev Enables autonomous A2A settlement: when an off-chain A2A executor accepts a
+     *      task, the marketplace backend (set via setVerifier) calls this so the poster
+     *      doesn't need to sign assignWorker themselves. Self-deal protection is enforced
+     *      against the task's actual agent (t.agent), not msg.sender (the verifier, who
+     *      should never be assignable as the worker either, but that's an off-chain
+     *      concern).
+     */
+    function marketplaceAssign(uint256 taskId, address worker) external onlyVerifier whenNotPaused {
+        Task storage t = _tasks[taskId];
+        if (t.status != TaskStatus.Funded) revert InvalidStatus(t.status, TaskStatus.Funded);
+        if (worker == address(0)) revert ZeroAddress();
+        if (worker == t.agent) revert SelfAssignment();
+        if (block.timestamp >= t.deadline) revert DeadlineReached();
+
+        t.worker = worker;
+        t.status = TaskStatus.Assigned;
+
+        // Close listing on TaskRegistry — same downstream effect as assignWorker
+        if (address(taskRegistry) != address(0)) {
+            taskRegistry.closeTask(taskId);
+        }
+
+        emit WorkerAssigned(taskId, worker);
+    }
+
+    /**
      * @notice Worker submits encrypted evidence hash. Allowed while Assigned or after failed Verification (retry).
      */
     function submitEvidence(uint256 taskId, bytes32 evidenceHash) external onlyWorker(taskId) whenNotPaused {

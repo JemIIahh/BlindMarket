@@ -11,7 +11,21 @@ import { authedPost } from '../lib/api';
 import { trackEvent } from '../hooks/useAnalytics';
 import { BLIND_ESCROW_ADDRESS } from '../config/constants';
 
-const CATEGORIES = ['photography', 'research', 'verification', 'data-collection', 'transcription', 'other'];
+// Suggested categories surfaced via <datalist> on the category input — these
+// are popular hints, not the full set. The category field is free-text
+// (backend accepts any string 1..64 chars) so the poster can describe whatever
+// their task actually is rather than being forced into "other".
+const CATEGORY_SUGGESTIONS = [
+  'photography',
+  'research',
+  'verification',
+  'data-collection',
+  'transcription',
+  'writing',
+  'translation',
+  'code-review',
+  'analysis',
+];
 const TOKEN = import.meta.env.VITE_MOCK_ERC20_ADDRESS ?? '0x3af9232009C5da30AdA366B6E09849A040162A1a';
 
 const ERC20_ABI = [
@@ -28,10 +42,15 @@ export default function PostTask() {
 
   const [form, setForm] = useState({
     instructions: '',
-    category: 'photography',
+    category: '',
     locationZone: 'global',
     amount: '10',
     duration: '86400',
+    executor: 'human' as 'human' | 'agent',
+    // Verification mode — only meaningful when executor === 'agent'.
+    //   manual: poster reviews the submission and clicks approve/reject (H2A)
+    //   auto:   backend runs autoVerify against criteria (A2A — no human needed)
+    verificationMode: 'manual' as 'manual' | 'auto',
   });
   const [status, setStatus] = useState<'idle' | 'encrypting' | 'approving' | 'signing' | 'done' | 'error'>('idle');
   const [error, setError] = useState('');
@@ -50,7 +69,27 @@ export default function PostTask() {
       setError('');
 
       // Manual token fetch to ensure we have it even if module-level getter is out of sync
-      const token = (await getIdentityToken()) || (await getAccessToken());
+      const idTok = await getIdentityToken();
+      const accTok = await getAccessToken();
+      const token = idTok || accTok;
+      // Diagnostic: surface which token type resolved, and decode its payload
+      // so we can see whether linked_accounts is present. This is intentionally
+      // verbose for debugging the 401-on-storage-upload issue. Strip when fixed.
+      try {
+        const usedKind = idTok ? 'identity' : accTok ? 'access' : 'none';
+        const decode = (t: string | null) => {
+          if (!t) return null;
+          const b64 = t.split('.')[1];
+          if (!b64) return 'malformed';
+          const json = atob(b64.replace(/-/g, '+').replace(/_/g, '/'));
+          return JSON.parse(json);
+        };
+        console.log('[PostTask][auth] using:', usedKind);
+        console.log('[PostTask][auth] identity payload:', decode(idTok ?? null));
+        console.log('[PostTask][auth] access payload:', decode(accTok ?? null));
+      } catch (e) {
+        console.warn('[PostTask][auth] decode failed', e);
+      }
       if (!token) throw new Error('No authentication token available. Please try logging out and back in.');
 
       // 0. Handle Token Approval if needed
@@ -113,6 +152,22 @@ export default function PostTask() {
         category: form.category,
         locationZone: form.locationZone,
         duration: form.duration,
+        // When the poster targets agents, pass targetExecutorType so the
+        // backend mirrors the task into the A2A store (a2aStore.setMeta) and
+        // it shows up in /a2a's browse_tasks panel. Verification defaults to
+        // manual; the A2A submit endpoint also supports auto/oracle modes.
+        ...(form.executor === 'agent'
+          ? {
+              targetExecutorType: 'agent' as const,
+              verificationMode: form.verificationMode,
+              // Defaults for auto-verify — sensible criteria so the bridge has
+              // something to evaluate against. Posters with stricter needs can
+              // post via the API directly until we expose criteria editing.
+              ...(form.verificationMode === 'auto'
+                ? { verificationCriteria: { min_length: 10 } }
+                : {}),
+            }
+          : {}),
       }, token);
 
       // 4. Sign and send via MetaMask
@@ -129,6 +184,7 @@ export default function PostTask() {
         taskId: taskJson.taskId ?? null,
         category: form.category,
         amount: Number(form.amount),
+        executor: form.executor,
       });
     } catch (err) {
       setError((err as Error).message);
@@ -183,13 +239,37 @@ export default function PostTask() {
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-[11px] font-mono uppercase tracking-widest text-ink-3 mb-2">category</label>
-                  <select
+                  <input
+                    type="text"
+                    required
+                    maxLength={64}
                     value={form.category}
                     onChange={e => setForm(f => ({ ...f, category: e.target.value }))}
-                    className="w-full bg-surface-2 border border-line px-4 py-3 text-xs font-mono text-ink focus:outline-none focus:border-cream"
-                  >
-                    {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
-                  </select>
+                    placeholder="describe it — or pick a suggestion below"
+                    className="w-full bg-surface-2 border border-line px-4 py-3 text-xs font-mono text-ink placeholder-ink-3 focus:outline-none focus:border-cream"
+                  />
+                  {/* Suggestion chips — single wrapped row, click to fill the
+                      input. Compact and always visible; the native <datalist>
+                      took 10+ lines of dropdown space which was too much. */}
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {CATEGORY_SUGGESTIONS.map(c => {
+                      const active = form.category === c;
+                      return (
+                        <button
+                          key={c}
+                          type="button"
+                          onClick={() => setForm(f => ({ ...f, category: c }))}
+                          className={`px-2 py-0.5 text-[10px] font-mono border transition-colors ${
+                            active
+                              ? 'border-cream text-cream bg-cream/10'
+                              : 'border-line text-ink-3 hover:border-ink-2 hover:text-ink-2'
+                          }`}
+                        >
+                          {c}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
                 <div>
                   <label className="block text-[11px] font-mono uppercase tracking-widest text-ink-3 mb-2">location zone</label>
@@ -202,6 +282,60 @@ export default function PostTask() {
                   />
                 </div>
               </div>
+
+              <div>
+                <label className="block text-[11px] font-mono uppercase tracking-widest text-ink-3 mb-2">execute by</label>
+                <div className="grid grid-cols-2 border border-line">
+                  {(['human', 'agent'] as const).map(opt => (
+                    <button
+                      key={opt}
+                      type="button"
+                      onClick={() => setForm(f => ({ ...f, executor: opt }))}
+                      className={`px-4 py-3 text-[11px] font-mono uppercase tracking-widest transition-colors border-line ${opt === 'agent' ? 'border-l' : ''} ${
+                        form.executor === opt ? 'bg-cream text-bg' : 'text-ink-3 hover:text-ink hover:bg-surface-2'
+                      }`}
+                    >
+                      {opt}
+                    </button>
+                  ))}
+                </div>
+                <div className="mt-1 text-[11px] font-mono text-ink-3">
+                  {form.executor === 'agent'
+                    ? 'visible to A2A executors at /a2a · agents can browse, accept, and submit work'
+                    : 'visible in the human task feed at /tasks · humans apply and the poster assigns'}
+                </div>
+              </div>
+
+              {form.executor === 'agent' && (
+                <div>
+                  <label className="block text-[11px] font-mono uppercase tracking-widest text-ink-3 mb-2">verification</label>
+                  <div className="grid grid-cols-2 border border-line">
+                    {([
+                      { value: 'manual', label: 'manual', hint: 'you review and approve submissions (H2A)' },
+                      { value: 'auto',   label: 'auto',   hint: 'backend verifies by criteria (A2A — no review)' },
+                    ] as const).map((opt, idx) => {
+                      const active = form.verificationMode === opt.value;
+                      return (
+                        <button
+                          key={opt.value}
+                          type="button"
+                          onClick={() => setForm(f => ({ ...f, verificationMode: opt.value }))}
+                          className={`px-4 py-3 text-[11px] font-mono uppercase tracking-widest transition-colors ${idx === 1 ? 'border-l border-line' : ''} ${
+                            active ? 'bg-cream text-bg' : 'text-ink-3 hover:text-ink hover:bg-surface-2'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="mt-1 text-[11px] font-mono text-ink-3">
+                    {form.verificationMode === 'manual'
+                      ? 'submissions land in your /a2a → to_review tab · you approve or reject before escrow releases'
+                      : 'submissions auto-verify against built-in criteria · escrow releases without your involvement'}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 

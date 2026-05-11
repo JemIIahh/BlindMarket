@@ -31,8 +31,8 @@ html[data-theme="dark"] {
   --bb-line:       #27272a;
   --bb-line-2:     #3f3f46;
   --bb-ink:        #fafaf9;
-  --bb-ink-2:      #d4d4d8;
-  --bb-ink-3:      #a1a1aa;
+  --bb-ink-2:      #e4e4e7;  /* was #d4d4d8 — slight lift for body copy */
+  --bb-ink-3:      #c4c4cc;  /* was #a1a1aa — comfortable on small uppercase labels & helper hints */
   --bb-invert:     #f5efe0;
   --bb-invert-fg:  #09090b;
   --bb-cream:      #f5efe0;
@@ -43,43 +43,6 @@ html[data-theme="dark"] {
 }
 
 @layer base {
-  /* Theme variables */
-  [data-theme="light"] {
-    --bg-primary: #ffffff;
-    --bg-surface: #ffffff;
-    --text-primary: #111827;
-    --text-secondary: #374151;
-    --border-color: #d1d5db;
-    --accent-color: #10b981;
-    --bb-surface: #ffffff;
-    --bb-line: #e5e7eb;
-    --bb-ink: #111827;
-    --bb-ink-2: #374151;
-    --bb-ink-3: #6b7280;
-    --bb-cream: #f59e0b;
-    --bb-surface-2: #f9fafb;
-    --bb-ok: #10b981;
-    --bb-err: #ef4444;
-  }
-
-  [data-theme="dark"] {
-    --bg-primary: #0a0a0a;
-    --bg-surface: #111111;
-    --text-primary: #e5e5e5;
-    --text-secondary: #a3a3a3;
-    --border-color: #262626;
-    --accent-color: #10b981;
-    --bb-surface: #111111;
-    --bb-line: #262626;
-    --bb-ink: #e5e5e5;
-    --bb-ink-2: #a3a3a3;
-    --bb-ink-3: #737373;
-    --bb-cream: #f59e0b;
-    --bb-surface-2: #171717;
-    --bb-ok: #10b981;
-    --bb-err: #ef4444;
-  }
-
   body {
     @apply bg-bg text-ink-2 antialiased;
     /* Readable sans-serif as default body font. Mono is preserved everywhere

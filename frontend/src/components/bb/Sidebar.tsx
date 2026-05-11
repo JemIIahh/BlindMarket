@@ -5,6 +5,12 @@ import { LogoMark } from './LogoMark';
 import { get } from '../../lib/api';
 import { useSocket } from '../../hooks/useSocket';
 
+// Sidebar IA — organised around the three primary user intents:
+//   1. POST WORK     → post a task (the toggle inside PostTask handles
+//                       human-targeted vs agent-targeted)
+//   2. YOUR AGENTS   → deploy / manage your own agents
+//   3. FIND WORK     → where work comes from for an agent or human
+// Plus EXPLORE (ambient discovery) and ACCOUNT (settings/earnings).
 const navGroups = [
   {
     label: 'docs',
@@ -13,24 +19,39 @@ const navGroups = [
     ],
   },
   {
-    label: 'tasks',
+    label: 'post',
     items: [
-      { to: '/tasks', label: 'browse', exact: true },
       { to: '/tasks/new', label: 'post_task', exact: true },
+      // /tasks/mine landed on master while this branch was in review — kept
+      // under POST so the poster's own task list sits next to where they
+      // create them.
       { to: '/tasks/mine', label: 'my_tasks', exact: true },
     ],
   },
   {
-    label: 'agents',
+    label: 'your agents',
     items: [
+      // /agents/deploy is a chooser page; /agents/deploy/ui and /sdk are the
+      // actual flows. No `exact` so deploy_agent stays highlighted on all three.
       { to: '/agents/deploy', label: 'deploy_agent' },
       { to: '/agents/mine', label: 'my_agents', exact: true },
+    ],
+  },
+  {
+    label: 'find work',
+    items: [
+      { to: '/a2a', label: 'a2a', exact: true },
+      { to: '/tasks', label: 'task_feed', exact: true },
       { to: '/agent', label: 'worker_view' },
     ],
   },
   {
-    label: 'network',
+    label: 'explore',
     items: [
+      { to: '/agents', label: 'agent_market', exact: true },
+      // /leaderboard route still exists — it's surfaced on the landing page
+      // (LeaderboardPreview) with a "view full leaderboard →" link, keeping
+      // it out of the in-app navigation where it's lower-frequency content.
       { to: '/validators', label: 'validators' },
     ],
   },
@@ -96,9 +117,14 @@ export function Sidebar({ open, onClose }: SidebarProps) {
         {/* Nav groups */}
         <nav className="flex-1 overflow-y-auto py-4">
           {navGroups.map((group) => (
-            <div key={group.label} className="mb-4">
-              <div className="px-6 mb-2 text-[10px] font-mono font-semibold uppercase tracking-widest text-ink-3">
-                {group.label}
+            <div key={group.label} className="mb-6">
+              {/* Section header — explicitly non-interactive. Slightly dimmer
+                  weight, with a short underline rule + select-none so it
+                  reads as a divider rather than a nav row. */}
+              <div className="px-6 mb-3 select-none cursor-default">
+                <span className="inline-block pb-1 border-b border-line text-[10px] font-mono font-semibold uppercase tracking-[0.2em] text-ink-3/80">
+                  {group.label}
+                </span>
               </div>
               {group.items.map((item) => {
                 const active = item.exact

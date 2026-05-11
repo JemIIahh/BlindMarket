@@ -59,12 +59,42 @@ export default function TaskDetail() {
     TaskStatus.Verified
   ].includes(onChain.status);
 
+  // Source of truth for "have I already applied" — driven by the applications
+  // list itself, which the apply mutation invalidates on success. Avoids any
+  // local boolean drifting out of sync with backend state.
+  const hasApplied = !!address && (applications ?? []).some(
+    (a) => a.applicant?.toLowerCase() === address.toLowerCase(),
+  );
+
   const handleApply = () => {
-    if (!id) return;
-    applyMutation.mutate({ taskId: id, message: applyMessage || undefined });
-    setShowApplyForm(false);
-    setApplyMessage('');
+    if (!id || hasApplied) return;
+    // Don't close synchronously — keep the form mounted so the button can
+    // render loading state and any error surfaces inline. Once the mutation
+    // succeeds, the applications query refetches, hasApplied flips true, and
+    // the form is replaced by the "already applied" panel.
+    applyMutation.mutate(
+      { taskId: id, message: applyMessage || undefined },
+      {
+        onSuccess: () => {
+          setShowApplyForm(false);
+          setApplyMessage('');
+        },
+      },
+    );
   };
+
+  // Friendly error rendering — the backend's 409 maps to ALREADY_APPLIED, but
+  // raw fetch errors arrive as JSON-stringified payloads. Pull the most useful
+  // piece out without showing the user a wall of JSON.
+  const applyErrorMessage = applyMutation.error
+    ? (() => {
+        const msg = (applyMutation.error as Error).message ?? String(applyMutation.error);
+        if (msg.includes('ALREADY_APPLIED')) return 'You\'ve already applied to this task.';
+        if (msg.includes('UNAUTHORIZED') || msg.includes('401')) return 'Sign in to apply.';
+        // Strip leading "HTTP 4xx: " noise if present
+        return msg.replace(/^HTTP \d+:\s*/, '').slice(0, 200);
+      })()
+    : null;
 
   const handleAssign = async (worker: string) => {
     if (!id) return;
@@ -226,7 +256,20 @@ export default function TaskDetail() {
             <Card className="mb-6">
               <CardHeader title="Apply for this Task" bordered />
               <CardBody>
-                {showApplyForm ? (
+                {hasApplied ? (
+                  // Already in the applications list — block re-apply and tell
+                  // the user where they stand. The card stays visible (not
+                  // hidden) so it's clear the apply action did register.
+                  <div className="flex items-center gap-3 text-xs font-mono">
+                    <span className="text-ok">✓</span>
+                    <div>
+                      <div className="text-ink">Application submitted</div>
+                      <div className="text-ink-3 mt-0.5">
+                        Waiting for the poster to assign a worker. You'll be notified if they pick you.
+                      </div>
+                    </div>
+                  </div>
+                ) : showApplyForm ? (
                   <div className="space-y-4">
                     <Textarea
                       label="Application Message (optional)"
@@ -234,17 +277,32 @@ export default function TaskDetail() {
                       value={applyMessage}
                       onChange={(e) => setApplyMessage(e.target.value)}
                       rows={3}
+                      disabled={applyMutation.isPending}
                     />
+                    {applyErrorMessage && (
+                      <div className="text-xs font-mono text-err border border-err/40 bg-err/5 px-3 py-2">
+                        {applyErrorMessage}
+                      </div>
+                    )}
                     <div className="flex gap-2">
                       <Button
                         variant="primary"
                         size="sm"
                         loading={applyMutation.isPending}
+                        disabled={applyMutation.isPending}
                         onClick={handleApply}
                       >
-                        Submit Application
+                        {applyMutation.isPending ? 'Submitting…' : 'Submit Application'}
                       </Button>
-                      <Button variant="ghost" size="sm" onClick={() => setShowApplyForm(false)}>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={applyMutation.isPending}
+                        onClick={() => {
+                          setShowApplyForm(false);
+                          applyMutation.reset();
+                        }}
+                      >
                         Cancel
                       </Button>
                     </div>

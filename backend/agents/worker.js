@@ -43,8 +43,17 @@ const AGENT_CAPABILITIES_RAW = process.env.AGENT_CAPABILITIES ?? '[]';
 const BACKEND_URL = process.env.BACKEND_URL ?? 'http://localhost:3001';
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? 30_000);
 
+// Capabilities the parent agentRunner declares for us at deploy time. Used to
+// auto-register as an A2A executor on startup (without registration the
+// /a2a/tasks/:hash/accept handler refuses our calls with 403 NOT_REGISTERED).
+// Default to a single generic capability if none configured, so an agent
+// deployed without explicit caps can still pick up the simplest tasks.
 let agentCapabilities = [];
-try { agentCapabilities = JSON.parse(AGENT_CAPABILITIES_RAW); } catch {}
+try {
+  const parsed = JSON.parse(AGENT_CAPABILITIES_RAW);
+  if (Array.isArray(parsed) && parsed.length > 0) agentCapabilities = parsed;
+} catch {}
+if (agentCapabilities.length === 0) agentCapabilities = ['data_processing'];
 
 // Ethers wallet — used to sign + broadcast the unsigned txs the backend builds
 let signerWallet = null;
@@ -195,174 +204,178 @@ function buildTools() {
 }
 
 // ── Main loop ────────────────────────────────────────────────────────────────
+//
+// Flow (against the /a2a endpoints — drives the settlement bridge end-to-end):
+//   1. GET  /a2a/tasks                       → browse open agent-targeted tasks
+//   2. POST /a2a/tasks/:hash/accept          → bridge fires marketplaceAssign
+//   3. Wait briefly for the on-chain assign to confirm (so submit doesn't revert)
+//   4. Run the LLM with the task instructions, produce a result object
+//   5. POST /a2a/tasks/:hash/submit          → backend returns unsignedSubmitEvidence
+//   6. Sign + broadcast submitEvidence with the agent's own wallet
+//   7. POST /a2a/tasks/:hash/finalize        → backend auto-verifies (if mode=auto)
+//                                              and fires settleVerification, OR returns
+//                                              awaitingPosterApproval (mode=manual)
+//
+// `appliedTasks` (kept from before, just relabeled) is an in-process dedup so
+// we don't try the same task twice in a single worker run.
 
 async function pollAndWork() {
   try {
     sendHeartbeat();
 
-    // 1. Find open tasks
-    const url = `${BACKEND_URL}/api/v1/tasks?status=open&limit=5`;
+    // 1. Browse open A2A-targeted tasks
+    const url = `${BACKEND_URL}/api/v1/a2a/tasks`;
     log(`polling ${url}...`);
     const res = await fetch(url, {
-      headers: { 'Authorization': `Bearer ${AGENT_PLATFORM_TOKEN}` }
+      headers: { 'Authorization': `Bearer ${AGENT_PLATFORM_TOKEN}` },
     });
-    if (!res.ok) { 
+    if (!res.ok) {
       const errText = await res.text();
-      log(`poll failed: ${res.status} ${errText.slice(0, 50)}`); 
-      return; 
+      log(`poll failed: ${res.status} ${errText.slice(0, 80)}`);
+      return;
     }
-    
+
     const json = await res.json();
-    const tasks = json.data?.tasks;
-    
-    if (!tasks || !Array.isArray(tasks)) {
-      log(`invalid tasks response structure: ${Object.keys(json.data || {}).join(', ')}`);
+    const entries = json.data?.tasks;
+    if (!Array.isArray(entries)) {
+      log(`unexpected /a2a/tasks shape: ${Object.keys(json.data || {}).join(', ')}`);
       return;
     }
-    
-    if (tasks.length === 0) {
-      log(`no open tasks found (total reported: ${json.data?.total})`);
-      return;
-    }
-
-    // Filter out tasks we've already applied to
-    const availableTasks = tasks.filter(t => {
-      if (appliedTasks.has(String(t.taskId))) return false;
-      // If agent has declared capabilities, only apply to matching tasks
-      if (agentCapabilities.length > 0 && t.category) {
-        const cat = t.category.toLowerCase().replace(/-/g, '_');
-        return agentCapabilities.some(c => c === cat || cat.includes(c) || c.includes(cat));
-      }
-      return true;
-    });
-
-    if (availableTasks.length === 0) {
-      log(`found ${tasks.length} open tasks, but already applied to all of them`);
+    if (entries.length === 0) {
+      log('no open A2A tasks');
       return;
     }
 
-    log(`found ${availableTasks.length} new open tasks (total open: ${json.data?.total})`);
+    // Each entry is { meta, state }. meta.taskId is the taskHash we use to
+    // address subsequent /accept, /submit, /finalize calls. Capability matching
+    // against the task's `requiredCapabilities` happens server-side in the
+    // /accept handler (a2a.ts:105-110) using the agent's registered capability
+    // list — so we don't filter here. Master's client-side capability filter
+    // was for the old /tasks-based flow where the agent applied unilaterally.
+    const available = entries.filter(e => !appliedTasks.has(e.meta.taskId));
+    if (available.length === 0) {
+      log(`found ${entries.length} open tasks, but already touched all of them`);
+      return;
+    }
 
-    // 2. Apply to available tasks until one succeeds (or we've tried them all)
-    let selectedTaskId = null;
-    let selectedTask = null;
-
-    for (const task of availableTasks) {
-      const taskId = String(task.taskId);
-      log(`applying to task ${taskId}`);
-      const applyRes = await fetch(`${BACKEND_URL}/api/v1/tasks/${taskId}/apply`, {
+    // 2. Accept the first one we can. /accept fails with 403/409 if caps don't
+    //    match or state changed under us — try the next.
+    let acceptedTaskHash = null;
+    let acceptedEntry = null;
+    for (const entry of available) {
+      const taskHash = entry.meta.taskId;
+      log(`accepting task ${taskHash.slice(0, 10)}…`);
+      const acceptRes = await fetch(`${BACKEND_URL}/api/v1/a2a/tasks/${taskHash}/accept`, {
         method: 'POST',
-        headers: { 
+        headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${AGENT_PLATFORM_TOKEN}`
+          'Authorization': `Bearer ${AGENT_PLATFORM_TOKEN}`,
         },
-        body: JSON.stringify({ message: `I am ${AGENT_NAME}, an autonomous agent ready to help.` }),
       });
-
-      if (applyRes.ok) {
-        appliedTasks.add(taskId);
-        selectedTaskId = taskId;
-        selectedTask = task;
-        break; 
-      }
-
-      const err = await applyRes.json();
-      log(`apply failed for task ${taskId}: ${applyRes.status} ${err.error?.code || ''}`); 
-      
-      // If already applied, record it and try the NEXT task in this same poll
-      if (applyRes.status === 409 || err.error?.code === 'ALREADY_APPLIED') {
-        appliedTasks.add(taskId);
-        continue;
-      } else {
-        // For other errors (e.g. 500, network), stop this cycle
-        return;
-      }
-    }
-
-    if (!selectedTaskId) {
-      log(`could not apply to any of the ${availableTasks.length} tasks`);
-      return;
-    }
-
-    const taskId = selectedTaskId;
-    const task = selectedTask;
-
-    // 3. Wait for assignment (poll task status for 30s)
-    let assigned = false;
-    for (let i = 0; i < 6; i++) {
-      await sleep(5000);
-      const statusRes = await fetch(`${BACKEND_URL}/api/v1/tasks/${taskId}`, {
-        headers: { 'Authorization': `Bearer ${AGENT_PLATFORM_TOKEN}` }
-      });
-      if (!statusRes.ok) break;
-      const { data: updated } = await statusRes.json();
-      if (updated.status === 1 && updated.worker?.toLowerCase() === process.env.AGENT_WALLET?.toLowerCase()) {
-        assigned = true;
+      if (acceptRes.ok) {
+        appliedTasks.add(taskHash);
+        acceptedTaskHash = taskHash;
+        acceptedEntry = entry;
         break;
       }
+      const err = await acceptRes.json().catch(() => ({}));
+      log(`accept failed for ${taskHash.slice(0, 10)}…: ${acceptRes.status} ${err.error?.code || ''}`);
+      // Skip-and-continue on common terminal errors; bail on others.
+      if (acceptRes.status === 403 || acceptRes.status === 409) {
+        appliedTasks.add(taskHash);
+        continue;
+      }
+      return;
     }
-    if (!assigned) { log(`not assigned to task ${taskId}`); return; }
 
-    // 4. Decrypt instructions from 0G Storage (TODO: implement decryption flow)
-    // For now, use task.category as instructions placeholder
-    const instructions = task.category;
+    if (!acceptedTaskHash) {
+      log(`could not accept any of the ${available.length} available tasks`);
+      return;
+    }
 
-    // 5. Call LLM with tools
-    log(`working on task ${taskId}`);
+    // 3. Wait briefly for the bridge's marketplaceAssign to confirm on chain.
+    //    Without this, submitEvidence broadcasts before the contract status is
+    //    Assigned and would revert. 0G blocks are ~6s; 12s gives a comfortable
+    //    margin without making the loop too slow.
+    log(`waiting for on-chain assignment to confirm for ${acceptedTaskHash.slice(0, 10)}…`);
+    await sleep(12_000);
+
+    // 4. Run the LLM. The result is an object so it shapes cleanly to the
+    //    submit endpoint's `resultData: Record<string, unknown>` schema and
+    //    plays well with autoVerify criteria like `min_length` (which operates
+    //    on JSON.stringify of the object).
+    const category = acceptedEntry.meta.targetExecutorType === 'agent'
+      ? (acceptedEntry.meta.requiredCapabilities?.join(', ') || 'general')
+      : 'general';
+    log(`working on task ${acceptedTaskHash.slice(0, 10)}…`);
     const { text } = await generateText({
       model: getModel(),
       system: AGENT_INSTRUCTIONS,
-      prompt: `Task ID: ${taskId}\nCategory: ${task.category}\n\nInstructions: ${instructions}`,
+      prompt: `Task: ${acceptedTaskHash}\nCapabilities required: ${category}\n\nProduce a result.`,
       tools: buildTools(),
       maxSteps: 5,
     });
+    const resultData = { output: text, agent: AGENT_ID };
 
-    // 6. Encrypt evidence and upload to 0G Storage (TODO: implement encryption + upload)
-    // For now, just hash the result
-    const evidenceHash = createHash('sha256').update(text).digest('hex');
-
-    // 7. Submit evidence — backend builds the unsigned submitEvidence tx, the
-    // agent signs with its own wallet and broadcasts to 0G. Without this step
-    // the on-chain task stays in Assigned forever and escrow never releases.
-    log(`submitting task ${taskId}`);
-    const submitRes = await fetch(`${BACKEND_URL}/api/v1/submissions/submit`, {
+    // 5. POST /submit — backend persists resultData and returns the unsigned
+    //    submitEvidence tx for us to sign.
+    log(`submitting task ${acceptedTaskHash.slice(0, 10)}…`);
+    const submitRes = await fetch(`${BACKEND_URL}/api/v1/a2a/tasks/${acceptedTaskHash}/submit`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${AGENT_PLATFORM_TOKEN}`
+        'Authorization': `Bearer ${AGENT_PLATFORM_TOKEN}`,
       },
-      body: JSON.stringify({
-        taskId: Number(taskId),
-        evidenceHash: `0x${evidenceHash}`,
-      }),
+      body: JSON.stringify({ resultData }),
     });
-
     if (!submitRes.ok) {
       const errText = await submitRes.text();
-      log(`submit endpoint failed for task ${taskId}: ${submitRes.status} ${errText.slice(0, 120)}`);
+      log(`submit failed for ${acceptedTaskHash.slice(0, 10)}…: ${submitRes.status} ${errText.slice(0, 160)}`);
       return;
     }
-
     const submitJson = await submitRes.json();
-    const unsignedTx = submitJson.data?.unsignedTx;
-    if (!unsignedTx) {
-      log(`submit endpoint returned no unsignedTx for task ${taskId}`);
+    const unsignedSubmitEvidence = submitJson.data?.unsignedSubmitEvidence;
+    if (!unsignedSubmitEvidence) {
+      log(`submit response missing unsignedSubmitEvidence for ${acceptedTaskHash.slice(0, 10)}…`);
       return;
     }
 
+    // 6. Sign + broadcast submitEvidence with the agent's own wallet (the
+    //    contract requires onlyWorker for this call — the marketplace signer
+    //    can't do it). Wait for the receipt so finalize has a real Submitted
+    //    state to verify against.
     if (!signerWallet) {
-      log(`cannot broadcast task ${taskId}: signer not initialised (missing AGENT_PRIVATE_KEY)`);
+      log(`cannot broadcast submitEvidence: signer not initialised (missing AGENT_PRIVATE_KEY)`);
+      return;
+    }
+    try {
+      const sent = await signerWallet.sendTransaction(unsignedSubmitEvidence);
+      log(`submitEvidence broadcast for ${acceptedTaskHash.slice(0, 10)}…: ${sent.hash}`);
+      const receipt = await sent.wait();
+      log(`submitEvidence confirmed for ${acceptedTaskHash.slice(0, 10)}…: block=${receipt?.blockNumber} status=${receipt?.status}`);
+    } catch (e) {
+      log(`submitEvidence broadcast failed for ${acceptedTaskHash.slice(0, 10)}…: ${e.shortMessage ?? e.message}`);
       return;
     }
 
-    try {
-      const sent = await signerWallet.sendTransaction(unsignedTx);
-      log(`submitEvidence broadcast for task ${taskId}: ${sent.hash}`);
-      const receipt = await sent.wait();
-      log(`submitEvidence confirmed for task ${taskId}: block=${receipt?.blockNumber} status=${receipt?.status}`);
-    } catch (e) {
-      log(`submitEvidence broadcast failed for task ${taskId}: ${e.shortMessage ?? e.message}`);
+    // 7. Finalize — tells the backend to run autoVerify (auto mode) or hand
+    //    off to manual approval (manual mode). For auto, the bridge then fires
+    //    completeVerification and the escrow releases automatically.
+    log(`finalizing task ${acceptedTaskHash.slice(0, 10)}…`);
+    const finalizeRes = await fetch(`${BACKEND_URL}/api/v1/a2a/tasks/${acceptedTaskHash}/finalize`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${AGENT_PLATFORM_TOKEN}`,
+      },
+    });
+    if (!finalizeRes.ok) {
+      const errText = await finalizeRes.text();
+      log(`finalize failed: ${finalizeRes.status} ${errText.slice(0, 160)}`);
+      return;
     }
+    const finalizeJson = await finalizeRes.json();
+    log(`finalize result for ${acceptedTaskHash.slice(0, 10)}…: ${JSON.stringify(finalizeJson.data)}`);
   } catch (err) {
     log(`error: ${err.message}`);
   }
@@ -383,5 +396,41 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-setInterval(pollAndWork, POLL_INTERVAL_MS);
-pollAndWork();
+/**
+ * Register this agent as an A2A executor so the /accept handler will let it
+ * claim tasks. Without this we get 403 NOT_REGISTERED on every /a2a/accept.
+ * Idempotent on the backend (registerAgent overwrites existing rows), so
+ * safe to call on every worker start.
+ */
+async function ensureRegisteredAsA2AExecutor() {
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/v1/a2a/register`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${AGENT_PLATFORM_TOKEN}`,
+      },
+      body: JSON.stringify({
+        displayName: AGENT_NAME,
+        capabilities: agentCapabilities,
+      }),
+    });
+    if (res.ok) {
+      log(`registered as A2A executor (caps=${agentCapabilities.join(',')})`);
+    } else {
+      const errText = await res.text();
+      log(`a2a register failed: ${res.status} ${errText.slice(0, 120)}`);
+    }
+  } catch (e) {
+    log(`a2a register error: ${e.message}`);
+  }
+}
+
+// Bootstrap: register first (so the very first poll cycle can accept), then
+// start the loop. Both calls are non-blocking — register failure just means
+// the first /accept will 403 and we'll retry on the next tick.
+(async () => {
+  await ensureRegisteredAsA2AExecutor();
+  setInterval(pollAndWork, POLL_INTERVAL_MS);
+  pollAndWork();
+})();

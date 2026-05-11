@@ -194,6 +194,65 @@ describe("BlindEscrow", function () {
     });
   });
 
+  // ── marketplaceAssign ──
+  // Verifier-gated assignment used for autonomous A2A settlement: marketplace
+  // backend assigns the worker without poster involvement.
+
+  describe("marketplaceAssign", function () {
+    beforeEach(async function () {
+      await escrow.connect(agent).createTask(TASK_HASH, await token.getAddress(), AMOUNT, "photo", "Lagos", ONE_WEEK);
+    });
+
+    it("should assign a worker via verifier and close registry listing", async function () {
+      const tx = await escrow.connect(verifier).marketplaceAssign(1, worker.address);
+
+      const task = await escrow.getTask(1);
+      expect(task.worker).to.equal(worker.address);
+      expect(task.status).to.equal(1); // Assigned
+
+      // Registry listing closed (same downstream effect as assignWorker)
+      expect(await registry.openTaskCount()).to.equal(0);
+
+      // Reuses the existing WorkerAssigned event so off-chain listeners need no change
+      await expect(tx).to.emit(escrow, "WorkerAssigned").withArgs(1, worker.address);
+    });
+
+    it("should reject non-verifier callers (including the task agent)", async function () {
+      await expect(
+        escrow.connect(agent).marketplaceAssign(1, worker.address)
+      ).to.be.revertedWithCustomError(escrow, "NotVerifier");
+      await expect(
+        escrow.connect(stranger).marketplaceAssign(1, worker.address)
+      ).to.be.revertedWithCustomError(escrow, "NotVerifier");
+    });
+
+    it("should reject zero address worker", async function () {
+      await expect(
+        escrow.connect(verifier).marketplaceAssign(1, ethers.ZeroAddress)
+      ).to.be.revertedWithCustomError(escrow, "ZeroAddress");
+    });
+
+    it("should reject assigning the task agent as the worker (self-deal)", async function () {
+      await expect(
+        escrow.connect(verifier).marketplaceAssign(1, agent.address)
+      ).to.be.revertedWithCustomError(escrow, "SelfAssignment");
+    });
+
+    it("should reject assignment after deadline", async function () {
+      await time.increase(ONE_WEEK + 1);
+      await expect(
+        escrow.connect(verifier).marketplaceAssign(1, worker.address)
+      ).to.be.revertedWithCustomError(escrow, "DeadlineReached");
+    });
+
+    it("should reject if task already assigned (status != Funded)", async function () {
+      await escrow.connect(agent).assignWorker(1, worker.address);
+      await expect(
+        escrow.connect(verifier).marketplaceAssign(1, worker.address)
+      ).to.be.revertedWithCustomError(escrow, "InvalidStatus");
+    });
+  });
+
   // ── submitEvidence ──
 
   describe("submitEvidence", function () {

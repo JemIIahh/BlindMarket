@@ -30,7 +30,7 @@ function rpcError(id: string | number, code: number, message: string): JsonRpcRe
  * POST /a2a/v1
  * JSON-RPC 2.0 endpoint for A2A protocol.
  */
-a2aProtocolRouter.post('/', (req, res) => {
+a2aProtocolRouter.post('/', async (req, res) => {
   const body = req.body as JsonRpcRequest;
 
   if (!body || body.jsonrpc !== '2.0' || !body.method || !body.id) {
@@ -48,7 +48,7 @@ a2aProtocolRouter.post('/', (req, res) => {
         res.json(rpcError(id, -32602, 'Missing taskId param'));
         return;
       }
-      const state = a2aStore.getState(taskId);
+      const state = await a2aStore.getState(taskId);
       res.json(rpcSuccess(id, {
         taskId,
         status: state?.status ?? 'unknown',
@@ -63,8 +63,8 @@ a2aProtocolRouter.post('/', (req, res) => {
         res.json(rpcError(id, -32602, 'Missing taskId param'));
         return;
       }
-      const meta = a2aStore.getMeta(taskId);
-      const state = a2aStore.getState(taskId);
+      const meta = await a2aStore.getMeta(taskId);
+      const state = await a2aStore.getState(taskId);
       if (!meta) {
         res.json(rpcError(id, -32001, 'Task not found'));
         return;
@@ -74,7 +74,7 @@ a2aProtocolRouter.post('/', (req, res) => {
     }
 
     case 'tasks/list': {
-      const tasks = a2aStore.browseAgentTasks();
+      const tasks = await a2aStore.browseAgentTasks();
       res.json(rpcSuccess(id, { tasks, total: tasks.length }));
       break;
     }
@@ -85,7 +85,7 @@ a2aProtocolRouter.post('/', (req, res) => {
         res.json(rpcError(id, -32602, 'Missing taskId param'));
         return;
       }
-      const state = a2aStore.getState(taskId);
+      const state = await a2aStore.getState(taskId);
       if (!state) {
         res.json(rpcError(id, -32001, 'Task not found'));
         return;
@@ -94,7 +94,7 @@ a2aProtocolRouter.post('/', (req, res) => {
         res.json(rpcError(id, -32003, 'Cannot cancel completed task'));
         return;
       }
-      a2aStore.updateState(taskId, { status: 'failed' });
+      await a2aStore.updateState(taskId, { status: 'failed' });
       res.json(rpcSuccess(id, { taskId, status: 'failed' }));
       break;
     }

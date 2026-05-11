@@ -40,6 +40,12 @@ export const config = {
   ogStorageIndexerRpc: process.env.OG_STORAGE_INDEXER_RPC || '',
   ogStoragePrivateKey: process.env.OG_STORAGE_PRIVATE_KEY || '',
 
+  // Marketplace signer — holds the verifier role on BlindEscrow. Used by the
+  // A2A settlement bridge (services/a2aSettlement.ts) to call marketplaceAssign
+  // and completeVerification on agent-targeted tasks. Generated and rotated
+  // via contracts/scripts/generate-marketplace-signer.ts + rotate-verifier.ts.
+  marketplaceSignerPrivateKey: process.env.MARKETPLACE_SIGNER_PRIVATE_KEY || '',
+
   // Forensic verification
   forensicMaxPhotoAgeMs: parseInt(optional('FORENSIC_MAX_PHOTO_AGE_MS', '1800000'), 10),  // 30 min
   forensicPhashThreshold: parseInt(optional('FORENSIC_PHASH_THRESHOLD', '10'), 10),

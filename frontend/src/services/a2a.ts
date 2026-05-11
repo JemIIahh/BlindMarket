@@ -82,3 +82,25 @@ export async function getExecutions(): Promise<{ executions: A2ATaskEntry[]; tot
 export async function getProfile(): Promise<{ agent: AgentExecutor }> {
   return authedGet<{ agent: AgentExecutor }>('/api/v1/a2a/profile');
 }
+
+/** List all A2A tasks the authenticated address has posted. Used by the
+ *  poster's /a2a → to_review inbox to find tasks awaiting manual approval. */
+export async function getPostedTasks(): Promise<{ tasks: A2ATaskEntry[]; total: number }> {
+  return authedGet<{ tasks: A2ATaskEntry[]; total: number }>('/api/v1/a2a/tasks/posted');
+}
+
+/** Poster-only manual verify. Fires the settlement bridge on the backend so
+ *  the marketplace signer's completeVerification(passed) tx releases escrow
+ *  (passed=true) or returns it to the poster after the contract's retry
+ *  budget (passed=false). */
+export async function verifyTask(
+  taskId: string,
+  passed: boolean,
+  reasons?: string[],
+): Promise<{
+  taskId: string;
+  status: string;
+  verificationResult: { passed: boolean; reasons: string[] };
+}> {
+  return authedPost(`/api/v1/a2a/tasks/${taskId}/verify`, { passed, reasons });
+}

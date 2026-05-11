@@ -15,6 +15,8 @@ import {
   useBrowseAgentTasks,
   useMyExecutions,
   useRegisterAgent,
+  usePostedTasks,
+  useVerifyTask,
 } from '../hooks/useA2A';
 import { useAuth } from '../context/AuthContext';
 
@@ -34,8 +36,10 @@ const statusTone: Record<string, 'neutral' | 'info' | 'ok' | 'err' | 'warn'> = {
   cancelled: 'warn',
 };
 
+type Tab = 'register' | 'browse_tasks' | 'my_executions' | 'to_review';
+
 export default function A2ADashboard() {
-  const [activeTab, setActiveTab] = useState<'register' | 'browse_tasks' | 'my_executions'>('register');
+  const [activeTab, setActiveTab] = useState<Tab>('register');
   const [displayName, setDisplayName] = useState('');
   const [selectedCaps, setSelectedCaps] = useState<string[]>([]);
   const [agentCardUrl, setAgentCardUrl] = useState('');
@@ -49,9 +53,17 @@ export default function A2ADashboard() {
   const execsEnabled = activeTab === 'my_executions';
   const { data: browse, isLoading: browseLoading } = useBrowseAgentTasks();
   const { data: execs, isLoading: execsLoading } = useMyExecutions();
+  const { data: posted, isLoading: postedLoading } = usePostedTasks();
+  const verifyMutation = useVerifyTask();
   const registerMutation = useRegisterAgent();
   void browseEnabled;
   void execsEnabled;
+
+  // Subset that the poster actually needs to act on — manual-mode tasks that
+  // have been submitted but not yet verified.
+  const toReview = (posted?.tasks ?? []).filter(
+    (t) => t.meta.verificationMode === 'manual' && t.state.status === 'submitted',
+  );
 
   const toggleCap = (cap: string) => {
     setSelectedCaps((prev) =>
@@ -75,21 +87,29 @@ export default function A2ADashboard() {
         description="Register an executor · browse sealed tasks · manage your executions."
       />
 
-      {/* Tabs */}
+      {/* Tabs — to_review is appended dynamically so the badge can reflect count */}
       <div className="flex gap-6 border-b border-line mb-8">
-        {(['register', 'browse_tasks', 'my_executions'] as const).map((tab) => (
-          <button
-            key={tab}
-            onClick={() => setActiveTab(tab)}
-            className={`pb-2.5 text-xs font-mono font-semibold tracking-widest transition-colors border-b -mb-px ${
-              activeTab === tab
-                ? 'text-cream border-cream'
-                : 'text-ink-3 border-transparent hover:text-ink-2'
-            }`}
-          >
-            {activeTab === tab ? '▸ ' : ''}{tab}
-          </button>
-        ))}
+        {(['register', 'browse_tasks', 'my_executions', 'to_review'] as const).map((tab) => {
+          const badgeCount = tab === 'to_review' ? toReview.length : 0;
+          return (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              className={`pb-2.5 text-xs font-mono font-semibold tracking-widest transition-colors border-b -mb-px flex items-center gap-1.5 ${
+                activeTab === tab
+                  ? 'text-cream border-cream'
+                  : 'text-ink-3 border-transparent hover:text-ink-2'
+              }`}
+            >
+              {activeTab === tab ? '▸ ' : ''}{tab}
+              {badgeCount > 0 && (
+                <span className="text-[10px] font-mono text-bg bg-cream px-1.5 py-0.5 rounded-sm">
+                  {badgeCount}
+                </span>
+              )}
+            </button>
+          );
+        })}
       </div>
 
       {/* Register tab */}
@@ -275,6 +295,101 @@ export default function A2ADashboard() {
                   <span className="text-ink-3">{e.state.verificationResult?.passed ? '✓' : '—'}</span>
                 </div>
               ))}
+            </div>
+          )}
+        </Panel>
+      )}
+
+      {/* To-review tab — poster's manual-approval inbox */}
+      {activeTab === 'to_review' && (
+        <Panel>
+          {postedLoading ? (
+            <div className="py-12 flex flex-col items-center justify-center gap-4">
+              <Prompt command="tail -f inbox.log" blink />
+              <p className="text-ink-3 text-xs font-mono">loading…</p>
+            </div>
+          ) : toReview.length === 0 ? (
+            <div className="py-12 flex flex-col items-center justify-center gap-4">
+              <Prompt command="$ inbox --status=awaiting" blink />
+              <p className="text-ink-3 text-xs font-mono text-center max-w-md">
+                {isAuthenticated
+                  ? 'no submissions awaiting your review. when an agent submits work on one of your manual-mode tasks, it will appear here.'
+                  : 'connect wallet to see submissions awaiting your review.'}
+              </p>
+              <Tag tone="neutral">empty inbox</Tag>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {toReview.map((entry) => {
+                const submittedAt = entry.state.submittedAt
+                  ? new Date(entry.state.submittedAt).toLocaleString()
+                  : '—';
+                const output = (entry.state.resultData as Record<string, unknown> | undefined)?.output;
+                const preview = typeof output === 'string'
+                  ? output
+                  : JSON.stringify(entry.state.resultData, null, 2);
+                return (
+                  <div key={entry.meta.taskId} className="border border-line p-5 space-y-4">
+                    <div className="flex items-start justify-between gap-3 flex-wrap">
+                      <div className="space-y-1 min-w-0">
+                        <div className="text-[11px] font-mono uppercase tracking-widest text-ink-3">task</div>
+                        <div className="text-sm font-mono text-ink truncate">{entry.meta.taskId.slice(0, 24)}…</div>
+                      </div>
+                      <div className="space-y-1">
+                        <div className="text-[11px] font-mono uppercase tracking-widest text-ink-3">submitted</div>
+                        <div className="text-xs font-mono text-ink-2">{submittedAt}</div>
+                      </div>
+                      <div className="space-y-1">
+                        <div className="text-[11px] font-mono uppercase tracking-widest text-ink-3">executor</div>
+                        <div className="text-xs font-mono text-ink-2 truncate max-w-[200px]">
+                          {entry.state.executorAddress
+                            ? `${entry.state.executorAddress.slice(0, 8)}…${entry.state.executorAddress.slice(-6)}`
+                            : '—'}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="text-[11px] font-mono uppercase tracking-widest text-ink-3 mb-1.5">submission</div>
+                      <pre className="text-xs font-mono text-ink bg-surface-2 border border-line p-3 max-h-64 overflow-auto whitespace-pre-wrap break-words">
+                        {preview}
+                      </pre>
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                      <button
+                        type="button"
+                        disabled={verifyMutation.isPending}
+                        onClick={() =>
+                          verifyMutation.mutate({ taskId: entry.meta.taskId, passed: true })
+                        }
+                        className="px-4 py-2 border border-ok text-[11px] font-mono uppercase tracking-widest text-ok hover:bg-ok hover:text-bg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        {verifyMutation.isPending ? 'submitting…' : 'approve'}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={verifyMutation.isPending}
+                        onClick={() =>
+                          verifyMutation.mutate({ taskId: entry.meta.taskId, passed: false })
+                        }
+                        className="px-4 py-2 border border-err text-[11px] font-mono uppercase tracking-widest text-err hover:bg-err hover:text-bg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        reject
+                      </button>
+                      <span className="text-[11px] font-mono text-ink-3 ml-2">
+                        approving releases escrow to the executor · rejecting refunds you
+                      </span>
+                    </div>
+
+                    {verifyMutation.isError && (
+                      <div className="text-[11px] font-mono text-err">
+                        {(verifyMutation.error as Error).message.slice(0, 200)}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
         </Panel>

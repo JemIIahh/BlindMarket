@@ -55,3 +55,24 @@ export function useSubmitWork() {
     },
   });
 }
+
+export function usePostedTasks() {
+  return useQuery({
+    queryKey: ['a2a', 'posted'],
+    queryFn: () => a2aService.getPostedTasks(),
+    refetchInterval: 10_000,
+  });
+}
+
+export function useVerifyTask() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ taskId, passed, reasons }: { taskId: string; passed: boolean; reasons?: string[] }) =>
+      a2aService.verifyTask(taskId, passed, reasons),
+    onSuccess: () => {
+      // Refresh the posted list so the verified task drops out of the inbox
+      qc.invalidateQueries({ queryKey: ['a2a', 'posted'] });
+      qc.invalidateQueries({ queryKey: ['a2a'] });
+    },
+  });
+}

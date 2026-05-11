@@ -109,6 +109,10 @@ export interface A2ATaskMeta {
   verificationMode: VerificationMode;
   verificationCriteria?: VerificationCriteria;
   requiredCapabilities: AgentCapability[];
+  // Address of the EOA that posted the task (authenticated at POST /api/v1/tasks
+  // time). Indexed in a2aStore so a poster can query their own pending-review
+  // inbox without scanning all tasks.
+  posterAddress?: string;
 }
 
 export type A2ATaskStateStatus =
@@ -128,6 +132,11 @@ export interface A2ATaskState {
   submittedAt?: string;
   resultData?: Record<string, unknown>;
   verificationResult?: { passed: boolean; reasons: string[] };
+  // Settlement-bridge bookkeeping. Existence of these hashes means the
+  // corresponding on-chain call has at least been broadcast; absence means
+  // the bridge hasn't run yet (or the broadcast failed and was logged).
+  assignTxHash?: string;
+  verifyTxHash?: string;
 }
 
 export interface VerificationCriteria {

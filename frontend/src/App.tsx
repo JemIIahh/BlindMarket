@@ -13,6 +13,7 @@ import TaskDetail from './pages/TaskDetail';
 import AgentDashboard from './pages/AgentDashboard';
 import WorkerView from './pages/WorkerView';
 import VerificationStatus from './pages/VerificationStatus';
+import A2ADashboard from './pages/A2ADashboard';
 import HowItWorks from './pages/HowItWorks';
 import Earnings from './pages/Earnings';
 import Settings from './pages/Settings';
@@ -80,6 +81,7 @@ export default function App() {
                   <Route path="/worker" element={<WorkerView />} />
                   <Route path="/validators" element={<Validators />} />
                   <Route path="/verification" element={<VerificationStatus />} />
+                  <Route path="/a2a" element={<A2ADashboard />} />
                   <Route path="/earnings" element={<Earnings />} />
                   <Route path="/settings" element={<Settings />} />
                   <Route path="/agents" element={<AgentMarketplace />} />
