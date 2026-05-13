@@ -88,17 +88,22 @@ export default function AgentDetail() {
         description={`${agent.provider} · ${agent.model}`}
         right={
           <div className="flex items-center gap-3">
-            <Tag tone={STATUS_TONE[agent.status] ?? 'neutral'}>{agent.status}</Tag>
+            <Tag tone={STATUS_TONE[agent.status] ?? 'neutral'}>{action.isPending ? `${action.variables}…` : agent.status}</Tag>
             {isOwner && (
               <div className="flex gap-2 text-[11px] font-mono">
-                {agent.status !== 'running' && <button onClick={() => action.mutate('start')} className="px-3 py-1 border border-green-400 text-green-400 hover:bg-green-400 hover:text-bg transition-colors">start</button>}
-                {agent.status === 'running' && <button onClick={() => action.mutate('pause')} className="px-3 py-1 border border-yellow-400 text-yellow-400 hover:bg-yellow-400 hover:text-bg transition-colors">pause</button>}
-                <button onClick={() => action.mutate('stop')} className="px-3 py-1 border border-line text-ink-3 hover:border-red-400 hover:text-red-400 transition-colors">stop</button>
+                {agent.status !== 'running' && <button disabled={action.isPending} onClick={() => action.mutate('start')} className="px-3 py-1 border border-green-400 text-green-400 hover:bg-green-400 hover:text-bg transition-colors disabled:opacity-40">start</button>}
+                {agent.status === 'running' && <button disabled={action.isPending} onClick={() => action.mutate('pause')} className="px-3 py-1 border border-yellow-400 text-yellow-400 hover:bg-yellow-400 hover:text-bg transition-colors disabled:opacity-40">pause</button>}
+                <button disabled={action.isPending} onClick={() => action.mutate('stop')} className="px-3 py-1 border border-line text-ink-3 hover:border-red-400 hover:text-red-400 transition-colors disabled:opacity-40">stop</button>
               </div>
             )}
           </div>
         }
       />
+      {action.isError && (
+        <div className="mb-4 px-3 py-2 border border-red-900/40 bg-red-900/10 text-[11px] font-mono text-red-400">
+          {action.variables} failed: {(action.error as Error).message}
+        </div>
+      )}
 
       <div className="grid grid-cols-3 gap-0 border border-line mb-8">
         <StatCard label="tasks completed" value={String(agent.tasksCompleted ?? 0)} sub="all time" />

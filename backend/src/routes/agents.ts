@@ -155,7 +155,10 @@ agentsRouter.post('/:id/start', async (req, res) => {
     await startAgent(req.params.id);
     res.json({ success: true, data: strip(await getAgent(req.params.id)) });
   } catch (e: unknown) {
-    res.status(400).json({ success: false, error: (e as Error).message });
+    res.status(400).json({
+      success: false,
+      error: { code: 'AGENT_ACTION_FAILED', message: (e as Error).message },
+    });
   }
 });
 
@@ -165,7 +168,10 @@ agentsRouter.post('/:id/pause', async (req, res) => {
     await pauseAgent(req.params.id);
     res.json({ success: true, data: strip(await getAgent(req.params.id)) });
   } catch (e: unknown) {
-    res.status(400).json({ success: false, error: (e as Error).message });
+    res.status(400).json({
+      success: false,
+      error: { code: 'AGENT_ACTION_FAILED', message: (e as Error).message },
+    });
   }
 });
 
@@ -175,6 +181,9 @@ agentsRouter.post('/:id/stop', async (req, res) => {
     await stopAgent(req.params.id);
     res.json({ success: true, data: strip(await getAgent(req.params.id)) });
   } catch (e: unknown) {
-    res.status(400).json({ success: false, error: (e as Error).message });
+    res.status(400).json({
+      success: false,
+      error: { code: 'AGENT_ACTION_FAILED', message: (e as Error).message },
+    });
   }
 });

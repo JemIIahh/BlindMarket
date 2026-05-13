@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTask } from '../hooks/useTasks';
-import { useTxSend } from '../hooks/useTxSend';
 import { useWallet } from '../context/WalletContext';
 import { useAuth } from '../context/AuthContext';
 import { StatusBadge } from '../components/ui/StatusBadge';
@@ -12,6 +12,7 @@ import { TxPendingModal } from '../components/TxPendingModal';
 import { CustodyChain } from '../components/CustodyChain';
 import { truncateAddress, formatCurrency, formatDate } from '../lib/utils';
 import { buildCancelTask, buildClaimTimeout } from '../services/tasks';
+import { signAndSendTx } from '../lib/txSigner';
 import { TaskStatus } from '../types/api';
 
 const fadeUp = {
@@ -22,11 +23,37 @@ const fadeUp = {
 export default function TaskDetail() {
   const { id } = useParams<{ id: string }>();
   const { data, isLoading } = useTask(id);
-  const { address } = useWallet();
+  const { address, signer } = useWallet();
   // Auth context kept for any future reads; not used in the A2A view path.
   void useAuth();
-  const txSend = useTxSend();
+  const qc = useQueryClient();
   const [activeTab, setActiveTab] = useState<'details' | 'custody'>('details');
+
+  // Build + sign + send the cancel / timeout tx as one mutation so React Query
+  // surfaces the error (auth failure, server error, user-rejected sig) instead
+  // of swallowing it in an unhandled promise.
+  const cancelMutation = useMutation({
+    mutationFn: async () => {
+      if (!id) throw new Error('Missing task id');
+      if (!signer) throw new Error('Wallet not connected');
+      const tx = await buildCancelTask(id);
+      return signAndSendTx(signer, tx);
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['tasks', id] }),
+  });
+
+  const timeoutMutation = useMutation({
+    mutationFn: async () => {
+      if (!id) throw new Error('Missing task id');
+      if (!signer) throw new Error('Wallet not connected');
+      const tx = await buildClaimTimeout(id);
+      return signAndSendTx(signer, tx);
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['tasks', id] }),
+  });
+
+  const txPending = cancelMutation.isPending || timeoutMutation.isPending;
+  const txError = cancelMutation.error ?? timeoutMutation.error;
 
   if (isLoading || !data) {
     return (
@@ -52,21 +79,9 @@ export default function TaskDetail() {
     TaskStatus.Verified
   ].includes(onChain.status);
 
-  const handleCancel = async () => {
-    if (!id) return;
-    const unsignedTx = await buildCancelTask(id);
-    txSend.mutate(unsignedTx);
-  };
-
-  const handleTimeout = async () => {
-    if (!id) return;
-    const unsignedTx = await buildClaimTimeout(id);
-    txSend.mutate(unsignedTx);
-  };
-
   return (
     <motion.div initial="hidden" animate="visible" variants={fadeUp} className="max-w-3xl mx-auto">
-      <TxPendingModal open={txSend.isPending} />
+      <TxPendingModal open={txPending} />
 
       {/* Breadcrumb — context-aware:
           • posters land back on their my_tasks list
@@ -244,22 +259,27 @@ export default function TaskDetail() {
                 </div>
                 {onChain.status === TaskStatus.Funded ? (
                   <button
-                    className="px-4 py-2 rounded-lg border border-red-900/50 text-red-400 text-sm font-medium hover:bg-red-900/20 transition-colors"
-                    onClick={handleCancel}
-                    disabled={txSend.isPending}
+                    className="px-4 py-2 rounded-lg border border-red-900/50 text-red-400 text-sm font-medium hover:bg-red-900/20 transition-colors disabled:opacity-40"
+                    onClick={() => cancelMutation.mutate()}
+                    disabled={txPending}
                   >
-                    Cancel & Refund
+                    {cancelMutation.isPending ? 'Cancelling…' : 'Cancel & Refund'}
                   </button>
                 ) : (
                   <button
-                    className="px-4 py-2 rounded-lg border border-red-900/50 text-red-400 text-sm font-medium hover:bg-red-900/20 transition-colors"
-                    onClick={handleTimeout}
-                    disabled={txSend.isPending}
+                    className="px-4 py-2 rounded-lg border border-red-900/50 text-red-400 text-sm font-medium hover:bg-red-900/20 transition-colors disabled:opacity-40"
+                    onClick={() => timeoutMutation.mutate()}
+                    disabled={txPending}
                   >
-                    Claim Timeout
+                    {timeoutMutation.isPending ? 'Claiming…' : 'Claim Timeout'}
                   </button>
                 )}
               </div>
+              {txError && (
+                <div className="mt-3 text-xs font-mono text-red-400 break-words">
+                  {(txError as Error).message}
+                </div>
+              )}
             </div>
           )}
         </>
