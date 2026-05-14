@@ -252,10 +252,7 @@ function buildTools() {
           if (!statusRes.ok) break;
           const { data: state } = await statusRes.json();
           if (state.status === 'verified') {
-            return { 
-              summary: 'Sub-agent task completed successfully', 
-              result: state.resultData 
-            };
+            return state.resultData;
           }
           if (state.status === 'failed') {
             return { error: 'Agent failed to complete task', reasons: state.verificationResult?.reasons };
@@ -473,7 +470,7 @@ async function pollAndWork() {
     try {
       const result = await generateText({
         model: getModel(),
-        system: `${AGENT_INSTRUCTIONS}\n\nCRITICAL: If you use tools, you MUST provide the final summary output in the requested format AFTER tool calls are finished. Do not stop until you have provided the final summary.`,
+        system: `${AGENT_INSTRUCTIONS}\n\nCRITICAL: You must act as the primary summarization agent. If you use tools (like delegate_to_agent), you MUST incorporate the tool result into your final answer. After all tool interactions are complete, you are required to generate a final, structured summary in the requested format. Do not return empty text or end prematurely.`,
         prompt: briefPlaintext,
         tools: buildTools(),
         maxSteps: 10,
