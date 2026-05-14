@@ -8,10 +8,10 @@ import { get, post } from '../lib/api';
 import { AGENT_CAPABILITIES } from '../config/capabilities';
 
 // How much native 0G to send to a freshly-deployed agent wallet so it can pay
-// gas for its on-chain actions (submitEvidence, USDC sweep, etc). 0.05 0G
+// gas for its on-chain actions (submitEvidence, USDC sweep, etc). 0.005 0G
 // covers ~125 submitEvidence txs at current gas prices — enough for a
 // reasonable demo session without burning a full faucet drip.
-const DEPLOY_FUND_AMOUNT = '0.05';
+const DEPLOY_FUND_AMOUNT = '0.005';
 
 // Minimum owner balance to even attempt deploy: fund amount + buffer for the
 // transfer's own gas cost. If the owner's wallet is below this we disable the
@@ -77,7 +77,7 @@ export default function DeployAgentForm() {
   useEffect(() => {
     get<ProviderModels>('/api/v1/agents/providers')
       .then(setProviders)
-      .catch(() => {});
+      .catch(() => { });
   }, []);
 
   function set(k: keyof typeof form, v: string) {
@@ -268,11 +268,10 @@ export default function DeployAgentForm() {
             {AGENT_CAPABILITIES.map(cap => (
               <button key={cap} type="button"
                 onClick={() => setCapabilities(cs => cs.includes(cap) ? cs.filter(c => c !== cap) : [...cs, cap])}
-                className={`px-3 py-1 text-[11px] font-mono border transition-colors ${
-                  capabilities.includes(cap)
-                    ? 'border-cream text-cream bg-cream/10'
-                    : 'border-line text-ink-3 hover:border-ink hover:text-ink'
-                }`}>
+                className={`px-3 py-1 text-[11px] font-mono border transition-colors ${capabilities.includes(cap)
+                  ? 'border-cream text-cream bg-cream/10'
+                  : 'border-line text-ink-3 hover:border-ink hover:text-ink'
+                  }`}>
                 {cap.replace(/_/g, ' ')}
               </button>
             ))}
@@ -329,7 +328,7 @@ export default function DeployAgentForm() {
                       <label className="block text-[11px] font-mono uppercase tracking-widest text-ink-3 mb-1">method</label>
                       <select value={newTool.method ?? 'POST'} onChange={e => setNewTool(t => ({ ...t, method: e.target.value as Tool['method'] }))}
                         className="w-full bg-surface-2 border border-line px-3 py-2 text-xs font-mono text-ink focus:outline-none focus:border-cream">
-                        {['GET','POST','PUT','DELETE'].map(m => <option key={m} value={m}>{m}</option>)}
+                        {['GET', 'POST', 'PUT', 'DELETE'].map(m => <option key={m} value={m}>{m}</option>)}
                       </select>
                     </div>
                   )}

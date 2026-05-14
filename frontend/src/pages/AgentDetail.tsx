@@ -10,8 +10,8 @@ import { API_BASE_URL, MARKETPLACE_TOKEN_ADDRESS } from '../config/constants';
 
 // Top-up amount when the agent runs low on gas. Same default as the deploy
 // funding step — round trip + LLM call + submitEvidence costs ~0.0004 0G, so
-// 0.05 0G covers ~125 tasks before the next top-up.
-const TOP_UP_AMOUNT = '0.05';
+// 0.005 0G covers ~125 tasks before the next top-up.
+const TOP_UP_AMOUNT = '0.005';
 
 // Below this the agent can't reliably pay for a submitEvidence + a USDC sweep
 // tx. UI surfaces a "Top Up Gas" call to action when balance is under this.
@@ -80,7 +80,7 @@ export default function AgentDetail() {
     if (!id) return;
     const es = new EventSource(`${API_BASE_URL}/api/v1/agents/${id}/logs`);
     es.onmessage = e => {
-      try { setLogs(prev => [...prev.slice(-199), JSON.parse(e.data)]); } catch {}
+      try { setLogs(prev => [...prev.slice(-199), JSON.parse(e.data)]); } catch { }
     };
     return () => es.close();
   }, [id]);
@@ -228,11 +228,10 @@ export default function AgentDetail() {
           <button
             onClick={handleTopUp}
             disabled={topUpStatus === 'sending'}
-            className={`px-3 py-1.5 border transition-colors disabled:opacity-40 ${
-              isLowGas
-                ? 'border-yellow-400 text-yellow-400 hover:bg-yellow-400 hover:text-bg'
-                : 'border-line text-ink-3 hover:border-cream hover:text-cream'
-            }`}>
+            className={`px-3 py-1.5 border transition-colors disabled:opacity-40 ${isLowGas
+              ? 'border-yellow-400 text-yellow-400 hover:bg-yellow-400 hover:text-bg'
+              : 'border-line text-ink-3 hover:border-cream hover:text-cream'
+              }`}>
             {topUpStatus === 'sending' ? `sending ${TOP_UP_AMOUNT} 0G…` : `top up gas (+${TOP_UP_AMOUNT} 0G)`}
           </button>
           {topUpStatus === 'error' && <span className="text-red-400">{topUpError}</span>}

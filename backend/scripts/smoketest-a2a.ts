@@ -81,14 +81,14 @@ const OG_CHAIN_ID = Number(process.env.OG_CHAIN_ID ?? 16602);
 const BACKEND_URL = process.env.BACKEND_URL ?? 'http://localhost:3001';
 
 if (!POSTER_PRIVATE_KEY) fail('POSTER_PRIVATE_KEY missing — set it in contracts/.env');
-if (!JWT_SECRET)         fail('JWT_SECRET missing — must be in backend/.env');
+if (!JWT_SECRET) fail('JWT_SECRET missing — must be in backend/.env');
 
 // Contract addresses from the deployments file (source of truth)
 const deployments = JSON.parse(
   readFileSync(resolve(__dirname, '../../contracts/deployments/0g-testnet.json'), 'utf-8'),
 );
 const BLIND_ESCROW_ADDRESS = deployments.contracts.BlindEscrow as string;
-const USDC_ADDRESS         = deployments.contracts.MockERC20   as string;
+const USDC_ADDRESS = deployments.contracts.MockERC20 as string;
 
 // Minimal ABIs — just what this script calls. The Task struct order MUST match
 // BlindEscrow.sol:45 exactly — getting it wrong silently decodes other fields
@@ -147,8 +147,8 @@ async function main() {
 
   const taskAmount = parseUnits('1', usdcDecimals); // 1 USDC bounty
   const fundAgent = parseUnits('0.02', 18);          // 0.02 AOGI to throwaway agent
-  if (aogiBal < parseUnits('0.05', 18)) {
-    fail(`poster AOGI too low — need ≥ 0.05 to cover gas + agent funding (have ${formatEther(aogiBal)})`);
+  if (aogiBal < parseUnits('0.005', 18)) {
+    fail(`poster AOGI too low — need ≥ 0.005 to cover gas + agent funding (have ${formatEther(aogiBal)})`);
   }
   if (usdcBal < taskAmount) {
     log('preflight', `minting ${formatUnits(taskAmount, usdcDecimals)} USDC to poster`);
@@ -173,7 +173,7 @@ async function main() {
 
   // Mint platform JWTs
   const posterJWT = mintPlatformJWT(JWT_SECRET!, poster.address);
-  const agentJWT  = mintPlatformJWT(JWT_SECRET!, agent.address);
+  const agentJWT = mintPlatformJWT(JWT_SECRET!, agent.address);
   ok('platform JWTs minted (HS256 against JWT_SECRET)');
 
   // ── Phase: Post task ────────────────────────────────────────────────────

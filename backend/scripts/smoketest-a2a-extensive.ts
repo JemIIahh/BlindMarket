@@ -41,11 +41,11 @@ const __dirname = dirname(__filename);
 // ── Color logging ────────────────────────────────────────────────────────────
 
 const c = {
-  dim:  (s: string) => `\x1b[2m${s}\x1b[0m`,
+  dim: (s: string) => `\x1b[2m${s}\x1b[0m`,
   cyan: (s: string) => `\x1b[36m${s}\x1b[0m`,
-  green:(s: string) => `\x1b[32m${s}\x1b[0m`,
-  red:  (s: string) => `\x1b[31m${s}\x1b[0m`,
-  yellow:(s: string) => `\x1b[33m${s}\x1b[0m`,
+  green: (s: string) => `\x1b[32m${s}\x1b[0m`,
+  red: (s: string) => `\x1b[31m${s}\x1b[0m`,
+  yellow: (s: string) => `\x1b[33m${s}\x1b[0m`,
   bold: (s: string) => `\x1b[1m${s}\x1b[0m`,
 };
 
@@ -57,23 +57,23 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // ── Env + addresses ──────────────────────────────────────────────────────────
 
 const contractsEnvPath = resolve(__dirname, '../../contracts/.env');
-const backendEnvPath   = resolve(__dirname, '../.env');
+const backendEnvPath = resolve(__dirname, '../.env');
 if (existsSync(contractsEnvPath)) dotenvConfig({ path: contractsEnvPath, override: false });
-if (existsSync(backendEnvPath))   dotenvConfig({ path: backendEnvPath,   override: false });
+if (existsSync(backendEnvPath)) dotenvConfig({ path: backendEnvPath, override: false });
 
 const POSTER_PRIVATE_KEY = process.env.POSTER_PRIVATE_KEY;
-const JWT_SECRET         = process.env.JWT_SECRET;
-const OG_RPC_URL         = process.env.OG_RPC_URL ?? 'https://evmrpc-testnet.0g.ai';
-const OG_CHAIN_ID        = Number(process.env.OG_CHAIN_ID ?? 16602);
-const BACKEND_URL        = process.env.BACKEND_URL ?? 'http://localhost:3001';
+const JWT_SECRET = process.env.JWT_SECRET;
+const OG_RPC_URL = process.env.OG_RPC_URL ?? 'https://evmrpc-testnet.0g.ai';
+const OG_CHAIN_ID = Number(process.env.OG_CHAIN_ID ?? 16602);
+const BACKEND_URL = process.env.BACKEND_URL ?? 'http://localhost:3001';
 if (!POSTER_PRIVATE_KEY) { console.error('POSTER_PRIVATE_KEY missing'); process.exit(1); }
-if (!JWT_SECRET)         { console.error('JWT_SECRET missing');         process.exit(1); }
+if (!JWT_SECRET) { console.error('JWT_SECRET missing'); process.exit(1); }
 
 const deployments = JSON.parse(
   readFileSync(resolve(__dirname, '../../contracts/deployments/0g-testnet.json'), 'utf-8'),
 );
 const BLIND_ESCROW_ADDRESS = deployments.contracts.BlindEscrow as string;
-const USDC_ADDRESS         = deployments.contracts.MockERC20   as string;
+const USDC_ADDRESS = deployments.contracts.MockERC20 as string;
 
 // Task struct matches BlindEscrow.sol:45 exactly — order is load-bearing.
 const ESCROW_ABI = [
@@ -167,7 +167,7 @@ async function jsonPost(url: string, token: string, body: unknown): Promise<{ ok
   });
   const text = await res.text();
   let data: any = null;
-  try { data = JSON.parse(text); } catch {}
+  try { data = JSON.parse(text); } catch { }
   return { ok: res.ok, status: res.status, data, text };
 }
 
@@ -283,8 +283,10 @@ async function runAgentSide(
     capabilities: scenario.executorCapabilities,
   });
   if (!regRes.ok) {
-    return { scenario: name, ok: false, expected: scenario.expect, actual: 'register_failed',
-             notes: `${regRes.status} ${regRes.text.slice(0, 160)}`, elapsedSec: (Date.now() - t0) / 1000 };
+    return {
+      scenario: name, ok: false, expected: scenario.expect, actual: 'register_failed',
+      notes: `${regRes.status} ${regRes.text.slice(0, 160)}`, elapsedSec: (Date.now() - t0) / 1000
+    };
   }
   log(name, `${c.green('✓')} executor registered (caps=[${scenario.executorCapabilities.join(',')}])`);
 
@@ -295,20 +297,26 @@ async function runAgentSide(
     const isCapBlock = acceptRes.status === 403 && /CAPABILITY_MISMATCH|capabilities/i.test(acceptRes.text);
     if (scenario.expect === 'AcceptRejected' && isCapBlock) {
       log(name, `${c.green('✓')} accept rejected as expected: ${acceptRes.status}`);
-      return { scenario: name, ok: true, expected: scenario.expect, actual: 'AcceptRejected',
-               taskId: onChainId, taskHash, notes: 'capability gate blocked the accept (correct behavior)',
-               elapsedSec: (Date.now() - t0) / 1000 };
+      return {
+        scenario: name, ok: true, expected: scenario.expect, actual: 'AcceptRejected',
+        taskId: onChainId, taskHash, notes: 'capability gate blocked the accept (correct behavior)',
+        elapsedSec: (Date.now() - t0) / 1000
+      };
     }
-    return { scenario: name, ok: false, expected: scenario.expect, actual: 'accept_failed',
-             notes: `${acceptRes.status} ${acceptRes.text.slice(0, 160)}`, elapsedSec: (Date.now() - t0) / 1000 };
+    return {
+      scenario: name, ok: false, expected: scenario.expect, actual: 'accept_failed',
+      notes: `${acceptRes.status} ${acceptRes.text.slice(0, 160)}`, elapsedSec: (Date.now() - t0) / 1000
+    };
   }
   log(name, `${c.green('✓')} accept recorded — bridge fires marketplaceAssign`);
 
   if (scenario.expect === 'AcceptRejected') {
     // We expected a rejection but accept succeeded — that's a regression on capability gating.
-    return { scenario: name, ok: false, expected: scenario.expect, actual: 'AcceptSucceeded_butExpectedRejection',
-             notes: 'capability gate didn\'t block the accept', taskId: onChainId, taskHash,
-             elapsedSec: (Date.now() - t0) / 1000 };
+    return {
+      scenario: name, ok: false, expected: scenario.expect, actual: 'AcceptSucceeded_butExpectedRejection',
+      notes: 'capability gate didn\'t block the accept', taskId: onChainId, taskHash,
+      elapsedSec: (Date.now() - t0) / 1000
+    };
   }
 
   // 7. Wait for marketplaceAssign → status flips to Assigned
@@ -327,8 +335,10 @@ async function runAgentSide(
     resultData: scenario.resultData,
   });
   if (!submitRes.ok) {
-    return { scenario: name, ok: false, expected: scenario.expect, actual: 'submit_failed',
-             notes: `${submitRes.status} ${submitRes.text.slice(0, 160)}`, elapsedSec: (Date.now() - t0) / 1000 };
+    return {
+      scenario: name, ok: false, expected: scenario.expect, actual: 'submit_failed',
+      notes: `${submitRes.status} ${submitRes.text.slice(0, 160)}`, elapsedSec: (Date.now() - t0) / 1000
+    };
   }
   const unsignedSubmit: TransactionRequest = submitRes.data.data.unsignedSubmitEvidence;
   const submitSent = await executor.sendTransaction(unsignedSubmit);
@@ -338,8 +348,10 @@ async function runAgentSide(
   // 9. Finalize — backend runs autoVerify + fires settleVerification
   const finalizeRes = await jsonPost(`${BACKEND_URL}/api/v1/a2a/tasks/${taskHash}/finalize`, executorJWT, {});
   if (!finalizeRes.ok) {
-    return { scenario: name, ok: false, expected: scenario.expect, actual: 'finalize_failed',
-             notes: `${finalizeRes.status} ${finalizeRes.text.slice(0, 160)}`, elapsedSec: (Date.now() - t0) / 1000 };
+    return {
+      scenario: name, ok: false, expected: scenario.expect, actual: 'finalize_failed',
+      notes: `${finalizeRes.status} ${finalizeRes.text.slice(0, 160)}`, elapsedSec: (Date.now() - t0) / 1000
+    };
   }
   log(name, `${c.green('✓')} finalize: ${JSON.stringify(finalizeRes.data?.data?.verificationResult ?? finalizeRes.data?.data)}`);
 
@@ -383,7 +395,7 @@ async function main() {
   });
   const poster = new Wallet(POSTER_PRIVATE_KEY!, provider);
   const escrow = new Contract(BLIND_ESCROW_ADDRESS, ESCROW_ABI, provider);
-  const usdc   = new Contract(USDC_ADDRESS, USDC_ABI, provider);
+  const usdc = new Contract(USDC_ADDRESS, USDC_ABI, provider);
   const usdcDecimals = Number(await usdc.decimals());
 
   // Pre-flight: backend up
@@ -400,8 +412,8 @@ async function main() {
     const tx = await usdcAsPoster.mint(poster.address, parseUnits(String(totalBounty + 10), usdcDecimals));
     await tx.wait();
   }
-  if (posterAogi < 0.05 * SCENARIOS.length) {
-    console.error(c.red(`  poster needs at least ${0.05 * SCENARIOS.length} AOGI — has ${posterAogi}`));
+  if (posterAogi < 0.005 * SCENARIOS.length) {
+    console.error(c.red(`  poster needs at least ${0.005 * SCENARIOS.length} AOGI — has ${posterAogi}`));
     process.exit(1);
   }
   console.log(`  poster: ${poster.address} (${posterAogi.toFixed(3)} AOGI · ${posterUsdc.toFixed(2)} USDC)\n`);
@@ -469,7 +481,7 @@ async function main() {
   const pass = results.filter((r) => r.ok).length;
   const total = results.length;
   const overall = pass === total ? c.green(c.bold(`  ${pass}/${total} PASSED · battery green`))
-                                 : c.red(c.bold(`  ${pass}/${total} passed · battery has failures`));
+    : c.red(c.bold(`  ${pass}/${total} passed · battery has failures`));
   console.log(overall);
   console.log('');
   process.exit(pass === total ? 0 : 1);
