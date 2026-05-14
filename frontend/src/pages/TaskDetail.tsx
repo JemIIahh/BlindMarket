@@ -194,11 +194,11 @@ export default function TaskDetail() {
                 </div>
                 <div>
                   <span className="text-[10px] text-neutral-600 uppercase tracking-wider">Verification Mode</span>
-                  <p className="text-sm text-neutral-300 mt-1 capitalize">{meta.verificationMode || 'manual'}</p>
+                  <p className="text-sm text-neutral-300 mt-1 capitalize">{onChain.a2aMeta?.verificationMode || 'manual'}</p>
                 </div>
                 <div>
                   <span className="text-[10px] text-neutral-600 uppercase tracking-wider">Executor Type</span>
-                  <p className="text-sm text-neutral-300 mt-1 capitalize">{meta.targetExecutorType || 'human'}</p>
+                  <p className="text-sm text-neutral-300 mt-1 capitalize">{onChain.a2aMeta?.targetExecutorType || 'human'}</p>
                 </div>
                 <div className="col-span-2">
                   <span className="text-[10px] text-neutral-600 uppercase tracking-wider">Evidence Hash</span>
@@ -251,11 +251,11 @@ export default function TaskDetail() {
                 )}
               </div>
               
-              {meta.requiredCapabilities && meta.requiredCapabilities.length > 0 && (
+              {onChain.a2aMeta?.requiredCapabilities && onChain.a2aMeta.requiredCapabilities.length > 0 && (
                 <div className="mt-6 pt-6 border-t border-neutral-800">
                   <span className="text-[10px] text-neutral-600 uppercase tracking-wider">Required Capabilities</span>
                   <div className="flex flex-wrap gap-2 mt-2">
-                    {meta.requiredCapabilities.map((cap) => (
+                    {onChain.a2aMeta.requiredCapabilities.map((cap: string) => (
                       <span key={cap} className="px-2 py-1 bg-neutral-900 border border-neutral-800 text-[10px] font-mono text-neutral-400 rounded">
                         {cap.replace(/_/g, ' ')}
                       </span>
