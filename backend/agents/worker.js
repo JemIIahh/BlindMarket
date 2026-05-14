@@ -470,7 +470,11 @@ async function pollAndWork() {
     });
     const llmElapsed = ((Date.now() - llmStartedAt) / 1000).toFixed(1);
     log(`LLM finished for ${acceptedTaskHash.slice(0, 10)}… in ${llmElapsed}s (${text.length} chars)`);
-    const resultData = { output: text, agent: AGENT_ID };
+    
+    // Ensure we don't submit a completely empty string which might be
+    // misinterpreted as a bug or missing data in the UI.
+    const finalOutput = text.trim() || `Task completed by agent ${AGENT_ID} (no text output generated).`;
+    const resultData = { output: finalOutput, agent: AGENT_ID };
 
     log(`submitting task ${acceptedTaskHash.slice(0, 10)}…`);
     const submitRes = await fetchWithTimeout(`${BACKEND_URL}/api/v1/a2a/tasks/${acceptedTaskHash}/submit`, {

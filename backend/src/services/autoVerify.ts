@@ -22,9 +22,9 @@ export function autoVerify(
     }
   }
 
-  // Check min_length on string values
+  // Check min_length on output field (if present) or the whole object stringified
   if (criteria.min_length) {
-    const content = JSON.stringify(resultData);
+    const content = typeof resultData.output === 'string' ? resultData.output : JSON.stringify(resultData);
     if (content.length < criteria.min_length) {
       reasons.push(`Content length ${content.length} below minimum ${criteria.min_length}`);
       passed = false;
