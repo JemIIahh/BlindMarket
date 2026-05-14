@@ -154,7 +154,7 @@ export default function Landing() {
 
           <motion.div
             variants={fadeUp}
-            className="flex flex-col sm:flex-row items-center justify-center gap-3 mb-16"
+            className="flex flex-col sm:flex-row items-center justify-center gap-3"
           >
             <Link
               to="/tasks/new"
@@ -169,13 +169,6 @@ export default function Landing() {
               <Button variant="outline" label="Deploy an agent" size="md" />
             </Link>
           </motion.div>
-
-          <motion.p
-            variants={fadeUp}
-            className="text-sm text-ink-3 max-w-xl mx-auto leading-relaxed"
-          >
-            <strong className="text-ink-2">Privacy isn't a promise — it's the architecture.</strong>
-          </motion.p>
         </motion.div>
       </section>
 
@@ -334,15 +327,11 @@ export default function Landing() {
       {/* Concrete social proof after the abstract "three flows" claim.
           Compact preview links to /a2a so visitors can see live work. */}
       <section>
-        <motion.div className="max-w-3xl mx-auto px-6 py-20" variants={sectionStagger} {...inView}>
-          <motion.div variants={fadeUp} className="text-center mb-10">
-            <div className="text-xs uppercase tracking-widest text-cream mb-3">Live on the network</div>
-            <h2 className="text-3xl sm:text-4xl font-bold text-ink leading-tight tracking-tight mb-4">
-              Reputation is earned, not claimed.
+        <motion.div className="max-w-3xl mx-auto px-6 py-14" variants={sectionStagger} {...inView}>
+          <motion.div variants={fadeUp} className="text-center mb-6">
+            <h2 className="text-xl sm:text-2xl font-semibold text-ink tracking-tight">
+              Top performers right now
             </h2>
-            <p className="text-base text-ink-2 leading-relaxed">
-              On-chain reputation that decays over time. Top performers right now:
-            </p>
           </motion.div>
           <motion.div variants={fadeUp}>
             <LeaderboardPreview limit={5} />
@@ -455,34 +444,21 @@ export default function Landing() {
           />
         )}
 
-        <motion.div className="relative max-w-5xl mx-auto px-6 py-24 text-center" variants={sectionStagger} {...inView}>
-          <motion.div
-            variants={fadeUp}
-            className="inline-flex items-center gap-2 px-3 py-1 border border-line text-[10px] font-mono uppercase tracking-widest text-ink-3 mb-8"
-          >
-            <span className="w-1 h-1 bg-cream inline-block" />
-            The bottom line
-          </motion.div>
-
-          {/* Headline — strikethrough contrast */}
+        <motion.div className="relative max-w-5xl mx-auto px-6 py-20 text-center" variants={sectionStagger} {...inView}>
           <motion.h2
             variants={fadeUp}
-            className="text-3xl sm:text-5xl font-bold text-ink leading-[1.1] tracking-tight mb-10 max-w-4xl mx-auto"
+            className="text-2xl sm:text-3xl font-semibold text-ink tracking-tight mb-8"
           >
-            Every other marketplace asks you to{' '}
-            <span className="relative inline-block text-ink-3">
-              <span className="relative">trust them not to look</span>
-              <span aria-hidden className="absolute left-0 right-0 top-1/2 h-[3px] bg-err -rotate-1" />
-            </span>
-            .
-            <br className="hidden sm:block" />
-            <span className="text-cream"> We make looking impossible.</span>
+            Ship privately.
           </motion.h2>
 
-          {/* Guarantee chips — like contract clauses */}
+          {/* Guarantee chips — the unique value of this section. The big
+              "we make looking impossible" headline that used to live here
+              was a verbatim duplicate of the section 5 heading; cut to
+              avoid hammering the same message three times. */}
           <motion.div
             variants={fadeUp}
-            className="flex flex-wrap items-center justify-center gap-x-3 gap-y-2 mb-12 font-mono text-[11px]"
+            className="flex flex-wrap items-center justify-center gap-x-3 gap-y-2 mb-10 font-mono text-[11px]"
           >
             {[
               'no plaintext logs',
