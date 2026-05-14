@@ -85,28 +85,11 @@ const BACKEND_URL = process.env.BACKEND_URL ?? 'http://localhost:3001';
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? 30_000);
 
 // ── Logging helpers ──────────────────────────────────────────────────────
-//
-// These MUST be declared above any module-level code that calls log(). `const`
-// declarations are not hoisted — referencing ANSI_DIM from inside log() before
-// its declaration line ran would throw `Cannot access 'ANSI_DIM' before
-// initialization` (temporal dead zone). The previous tries (helpers at the
-// bottom of the file, then helpers above the startup log) both missed the
-// AGENT_TOOLS-parse catch at line ~205 which also calls log(). Anchoring the
-// block right after the env-var reads is the only safe spot — every later
-// module-level statement is below.
 
-// Pretty timestamp for log lines. ISO-ish, trimmed to the second so the UI's
-// monospace column stays narrow. Always UTC so logs from different timezones
-// line up.
 function nowStamp() {
   return new Date().toISOString().slice(0, 19) + 'Z';
 }
 
-// ANSI colors are useful when a developer tails the worker locally, but the
-// agent runs as a forked child piping stdout to the parent process, which
-// streams it to the browser. Browsers don't interpret terminal escape codes —
-// they render `\x1b[2m` as literal `[2m`. Detect "am I attached to a TTY?" and
-// skip colors when we're not.
 const COLORED = !!process.stdout.isTTY;
 const ANSI_DIM   = COLORED ? '\x1b[2m'  : '';
 const ANSI_CYAN  = COLORED ? '\x1b[36m' : '';
@@ -118,11 +101,6 @@ function log(msg) {
   );
 }
 
-// Capabilities the parent agentRunner declares for us at deploy time. Used to
-// auto-register as an A2A executor on startup (without registration the
-// /a2a/tasks/:hash/accept handler refuses our calls with 403 NOT_REGISTERED).
-// Default to a single generic capability if none configured, so an agent
-// deployed without explicit caps can still pick up the simplest tasks.
 let agentCapabilities = [];
 try {
   const parsed = JSON.parse(AGENT_CAPABILITIES_RAW);
@@ -130,7 +108,6 @@ try {
 } catch {}
 if (agentCapabilities.length === 0) agentCapabilities = ['data_processing'];
 
-// Ethers wallet — used to sign + broadcast the unsigned txs the backend builds
 let signerWallet = null;
 if (AGENT_PRIVATE_KEY) {
   try {
@@ -144,11 +121,6 @@ if (AGENT_PRIVATE_KEY) {
   }
 }
 
-// BlindEscrow Interface — used to decode custom-error reverts returned by
-// signerWallet.sendTransaction. Without it, ethers prints "unknown custom
-// error" because we send raw unsignedSubmitEvidence txs that have no local
-// contract instance / ABI attached. Loaded best-effort: if the file moves or
-// JSON parse fails, we just fall back to the raw shortMessage in catch blocks.
 let escrowIface = null;
 try {
   const abiPath = pathJoin(
@@ -163,17 +135,8 @@ try {
   console.warn(`[agent] could not load BlindEscrow ABI for revert decoding: ${e.message}`);
 }
 
-// TaskStatus enum mirror from BlindEscrow.sol. Used to render InvalidStatus
-// args as human-readable names instead of raw uint8s. Order must match the
-// Solidity enum — if you reorder the contract enum, update this too.
 const TASK_STATUS = ['Funded', 'Assigned', 'Submitted', 'Verified', 'Completed', 'Cancelled', 'Disputed'];
 
-/**
- * Try to decode a CALL_EXCEPTION-style error's revert data against the
- * BlindEscrow ABI. Returns { name, args } or null if no match. ethers v6 puts
- * the data on `err.data`, but some provider chains nest it under
- * `err.info.error.data` or `err.error.data`, so we probe all three.
- */
 function decodeEscrowRevert(err) {
   if (!escrowIface) return null;
   const data = err?.data ?? err?.info?.error?.data ?? err?.error?.data;
@@ -187,11 +150,6 @@ function decodeEscrowRevert(err) {
   }
 }
 
-/**
- * Render a decoded error as a one-line label for the log. For InvalidStatus
- * we expand both enum args (current, required) so the message is actionable
- * without needing to cross-reference the contract.
- */
 function formatRevert(err) {
   const decoded = decodeEscrowRevert(err);
   if (!decoded) return err.shortMessage ?? err.message ?? String(err);
@@ -203,13 +161,6 @@ function formatRevert(err) {
   return `${decoded.name}()`;
 }
 
-/**
- * NotWorker and InvalidStatus(Funded, Assigned) both indicate the bridge's
- * marketplaceAssign tx hasn't confirmed yet — the contract still has
- * t.worker == address(0) and t.status == Funded. Both clear once the
- * assignment mines, so it's worth a couple of retries before giving up.
- * Everything else (DeadlineReached, EmptyHash, paused, …) is permanent.
- */
 function isTransientAssignmentRevert(err) {
   const decoded = decodeEscrowRevert(err);
   if (!decoded) return false;
@@ -221,16 +172,9 @@ function isTransientAssignmentRevert(err) {
   return false;
 }
 
-// Track tasks we've already applied to or are currently working on
 const appliedTasks = new Set();
-
-// Track tasks where we've already POSTed /bid after a NEEDS_WRAP. Re-bidding
-// is server-side idempotent but pointless — once the poster's frontend sees
-// our bid it'll wrap to us, and the next /accept will pass. Cleared only
-// when the worker process restarts (rare in normal operation).
 const bidPlacedTasks = new Set();
 
-// Exit if parent process disconnects (prevents orphans)
 process.on('disconnect', () => {
   log('parent disconnected, exiting');
   process.exit();
@@ -254,12 +198,31 @@ function getModel() {
 
 log(`started | provider=${AGENT_PROVIDER} model=${AGENT_MODEL} tools=${agentTools.length}`);
 
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function fetchWithTimeout(url, options = {}, timeout = 30000) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeout);
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    return response;
+  } finally {
+    clearTimeout(id);
+  }
+}
+
 // ── Tool builders ────────────────────────────────────────────────────────────
 
 function buildTools() {
   const tools = {};
 
-  // Built-in: A2A delegation
   tools.delegate_to_agent = tool({
     description: 'Delegate a sub-task to another agent on the marketplace. Returns the result when the agent completes it.',
     inputSchema: z.object({
@@ -268,8 +231,7 @@ function buildTools() {
     }),
     execute: async ({ taskDescription, requiredCapabilities }) => {
       try {
-        // Create A2A task
-        const createRes = await fetch(`${BACKEND_URL}/api/v1/a2a/tasks`, {
+        const createRes = await fetchWithTimeout(`${BACKEND_URL}/api/v1/a2a/tasks`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -282,12 +244,11 @@ function buildTools() {
         if (!createRes.ok) return { error: `Failed to create A2A task: ${createRes.status}` };
         const { data: task } = await createRes.json();
 
-        // Poll until verified or failed (max 2 minutes)
         const maxWait = 120_000;
         const start = Date.now();
         while (Date.now() - start < maxWait) {
           await sleep(5000);
-          const statusRes = await fetch(`${BACKEND_URL}/api/v1/a2a/tasks/${task.taskId}`);
+          const statusRes = await fetchWithTimeout(`${BACKEND_URL}/api/v1/a2a/tasks/${task.taskId}`);
           if (!statusRes.ok) break;
           const { data: state } = await statusRes.json();
           if (state.status === 'verified') {
@@ -304,7 +265,6 @@ function buildTools() {
     },
   });
 
-  // Custom tools from AGENT_TOOLS
   for (const t of agentTools) {
     if (t.type === 'http') {
       tools[t.name] = tool({
@@ -314,7 +274,7 @@ function buildTools() {
           try {
             const url = t.url.replace(/\{(\w+)\}/g, () => encodeURIComponent(input));
             const body = t.bodyTemplate ? t.bodyTemplate.replace(/\{\{(\w+)\}\}/g, () => input) : undefined;
-            const res = await fetch(url, {
+            const res = await fetchWithTimeout(url, {
               method: t.method,
               headers: { 'Content-Type': 'application/json', ...t.headers },
               body: body ? JSON.stringify(JSON.parse(body)) : undefined,
@@ -331,7 +291,7 @@ function buildTools() {
         inputSchema: z.object({ input: z.string() }),
         execute: async ({ input }) => {
           try {
-            const res = await fetch(t.endpointUrl, {
+            const res = await fetchWithTimeout(t.endpointUrl, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ tool: t.toolName, input }),
@@ -362,29 +322,14 @@ function buildTools() {
 }
 
 // ── Main loop ────────────────────────────────────────────────────────────────
-//
-// Flow (against the /a2a endpoints — drives the settlement bridge end-to-end):
-//   1. GET  /a2a/tasks                       → browse open agent-targeted tasks
-//   2. POST /a2a/tasks/:hash/accept          → bridge fires marketplaceAssign
-//   3. Wait briefly for the on-chain assign to confirm (so submit doesn't revert)
-//   4. Run the LLM with the task instructions, produce a result object
-//   5. POST /a2a/tasks/:hash/submit          → backend returns unsignedSubmitEvidence
-//   6. Sign + broadcast submitEvidence with the agent's own wallet
-//   7. POST /a2a/tasks/:hash/finalize        → backend auto-verifies (if mode=auto)
-//                                              and fires settleVerification, OR returns
-//                                              awaitingPosterApproval (mode=manual)
-//
-// `appliedTasks` (kept from before, just relabeled) is an in-process dedup so
-// we don't try the same task twice in a single worker run.
 
 async function pollAndWork() {
   try {
     sendHeartbeat();
 
-    // 1. Browse open A2A-targeted tasks
     const url = `${BACKEND_URL}/api/v1/a2a/tasks`;
     log(`polling ${url}...`);
-    const res = await fetch(url, {
+    const res = await fetchWithTimeout(url, {
       headers: { 'Authorization': `Bearer ${AGENT_PLATFORM_TOKEN}` },
     });
     if (!res.ok) {
@@ -404,31 +349,21 @@ async function pollAndWork() {
       return;
     }
 
-    // Each entry is { meta, state }. meta.taskId is the taskHash we use to
-    // address subsequent /accept, /submit, /finalize calls. Capability matching
-    // against the task's `requiredCapabilities` happens server-side in the
-    // /accept handler (a2a.ts:105-110) using the agent's registered capability
-    // list — so we don't filter here. Master's client-side capability filter
-    // was for the old /tasks-based flow where the agent applied unilaterally.
     const available = entries.filter(e => !appliedTasks.has(e.meta.taskId));
     if (available.length === 0) {
       log(`found ${entries.length} open tasks, but already touched all of them`);
       return;
     }
 
-    // 2. Accept the first one we can. /accept fails with 403/409 if caps don't
-    //    match or state changed under us — try the next.
     let acceptedTaskHash = null;
     let acceptedEntry = null;
-    // Captured from the accept response. Both may be absent for legacy/test
-    // tasks posted before the encrypted-brief pipeline existed — handled
-    // below by falling back to a non-decrypted prompt.
     let acceptedRootHash = null;
     let acceptedWrappedKey = null;
+
     for (const entry of available) {
       const taskHash = entry.meta.taskId;
       log(`accepting task ${taskHash.slice(0, 10)}…`);
-      const acceptRes = await fetch(`${BACKEND_URL}/api/v1/a2a/tasks/${taskHash}/accept`, {
+      const acceptRes = await fetchWithTimeout(`${BACKEND_URL}/api/v1/a2a/tasks/${taskHash}/accept`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -448,23 +383,13 @@ async function pollAndWork() {
         }
         break;
       }
-      // Note: we record the per-task start clock AFTER the accept-success break
-      // below, not here — we don't want failed accept attempts on tasks we
-      // can't actually claim (CAPABILITY_MISMATCH, NEEDS_WRAP) to skew the
-      // "task done in Xs" line. Only the successfully-accepted task gets a
-      // start time.
       const err = await acceptRes.json().catch(() => ({}));
       log(`accept failed for ${taskHash.slice(0, 10)}…: ${acceptRes.status} ${err.error?.code || ''}`);
 
-      // NEEDS_WRAP — the task was posted before this agent registered (or
-      // posted with no executors). Register intent via /bid; the poster's
-      // frontend will ECIES-wrap the AES key to us on its next polling
-      // cycle, and a later /accept attempt will succeed. Don't add to
-      // appliedTasks so we retry — but track the bid so we don't spam.
       if (acceptRes.status === 403 && err.error?.code === 'NEEDS_WRAP') {
         if (!bidPlacedTasks.has(taskHash)) {
           try {
-            const bidRes = await fetch(`${BACKEND_URL}/api/v1/a2a/tasks/${taskHash}/bid`, {
+            const bidRes = await fetchWithTimeout(`${BACKEND_URL}/api/v1/a2a/tasks/${taskHash}/bid`, {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
@@ -477,8 +402,6 @@ async function pollAndWork() {
             } else {
               const bidErr = await bidRes.json().catch(() => ({}));
               log(`bid failed for ${taskHash.slice(0, 10)}…: ${bidRes.status} ${bidErr.error?.code || ''}`);
-              // CAPABILITY_MISMATCH / NOT_REGISTERED / NO_PUBKEY from /bid
-              // are terminal for us — stop retrying.
               if (bidRes.status === 403 || bidRes.status === 400) {
                 appliedTasks.add(taskHash);
               }
@@ -490,7 +413,6 @@ async function pollAndWork() {
         continue;
       }
 
-      // Skip-and-continue on other 403/409s; bail on transient (5xx) errors.
       if (acceptRes.status === 403 || acceptRes.status === 409) {
         appliedTasks.add(taskHash);
         continue;
@@ -503,24 +425,11 @@ async function pollAndWork() {
       return;
     }
 
-    // Capture the per-task start clock now that we've actually claimed a
-    // task. Used at the end of the run to emit a "task done in Xs" summary
-    // alongside the per-stage timestamps each log line already carries.
     const taskStartedAt = Date.now();
 
-    // 3. Wait briefly for the bridge's marketplaceAssign to confirm on chain.
-    //    Without this, submitEvidence broadcasts before the contract status is
-    //    Assigned and would revert. 0G blocks are ~6s; 12s gives a comfortable
-    //    margin without making the loop too slow.
     log(`waiting for on-chain assignment to confirm for ${acceptedTaskHash.slice(0, 10)}…`);
     await sleep(12_000);
 
-    // 4. Decrypt the brief. The poster ECIES-wrapped the AES key to our
-    //    pubkey at task-creation time; the backend stored the encrypted blob
-    //    on 0G Storage and just handed us the rootHash + our wrappedKey slice
-    //    in the /accept response. We unwrap the AES key with our private
-    //    key, fetch the blob, AES-decrypt it, and the plaintext brief is
-    //    what we feed to the LLM as the user message.
     let briefPlaintext = null;
     if (acceptedRootHash && acceptedWrappedKey && AGENT_PRIVATE_KEY) {
       try {
@@ -528,7 +437,7 @@ async function pollAndWork() {
         const aesKey = eciesDecryptK1(wrappedBytes, AGENT_PRIVATE_KEY);
         log(`unwrapped AES key for ${acceptedTaskHash.slice(0, 10)}… (${aesKey.length} bytes)`);
 
-        const dlRes = await fetch(`${BACKEND_URL}/api/v1/storage/${acceptedRootHash}`, {
+        const dlRes = await fetchWithTimeout(`${BACKEND_URL}/api/v1/storage/${acceptedRootHash}`, {
           headers: { 'Authorization': `Bearer ${AGENT_PLATFORM_TOKEN}` },
         });
         if (!dlRes.ok) {
@@ -542,9 +451,6 @@ async function pollAndWork() {
         briefPlaintext = plaintext.toString('utf8');
         log(`decrypted brief for ${acceptedTaskHash.slice(0, 10)}… (${briefPlaintext.length} chars)`);
       } catch (e) {
-        // Decryption failure means we can't honestly complete the task. Skip
-        // rather than fabricate — the contract's claim-timeout path will
-        // reclaim the poster's escrow when the deadline passes.
         log(`brief decrypt failed for ${acceptedTaskHash.slice(0, 10)}…: ${e.message}`);
         return;
       }
@@ -553,10 +459,6 @@ async function pollAndWork() {
       return;
     }
 
-    // 5. Run the LLM with the decrypted brief as the user prompt. The agent's
-    //    AGENT_INSTRUCTIONS stays as the system prompt so role + output-shape
-    //    constraints carry across every task. resultData is an object so it
-    //    plays well with autoVerify's required_fields / min_length checks.
     log(`working on task ${acceptedTaskHash.slice(0, 10)}…`);
     const llmStartedAt = Date.now();
     const { text } = await generateText({
@@ -570,10 +472,8 @@ async function pollAndWork() {
     log(`LLM finished for ${acceptedTaskHash.slice(0, 10)}… in ${llmElapsed}s (${text.length} chars)`);
     const resultData = { output: text, agent: AGENT_ID };
 
-    // 5. POST /submit — backend persists resultData and returns the unsigned
-    //    submitEvidence tx for us to sign.
     log(`submitting task ${acceptedTaskHash.slice(0, 10)}…`);
-    const submitRes = await fetch(`${BACKEND_URL}/api/v1/a2a/tasks/${acceptedTaskHash}/submit`, {
+    const submitRes = await fetchWithTimeout(`${BACKEND_URL}/api/v1/a2a/tasks/${acceptedTaskHash}/submit`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -593,20 +493,10 @@ async function pollAndWork() {
       return;
     }
 
-    // 6. Sign + broadcast submitEvidence with the agent's own wallet (the
-    //    contract requires onlyWorker for this call — the marketplace signer
-    //    can't do it). Wait for the receipt so finalize has a real Submitted
-    //    state to verify against.
     if (!signerWallet) {
       log(`cannot broadcast submitEvidence: signer not initialised (missing AGENT_PRIVATE_KEY)`);
       return;
     }
-    // Retry on transient assignment reverts. ethers' sendTransaction does a
-    // pre-broadcast eth_call, so a revert surfaces immediately without
-    // burning gas — we just sleep one 0G block (~6s) and try again. Cap is
-    // small because if marketplaceAssign is genuinely broken (signer out of
-    // funds, waitForTaskId timed out), no amount of polling will fix it; the
-    // decoded error in the final log line will tell us which.
     const MAX_SUBMIT_ATTEMPTS = 3;
     const RETRY_DELAY_MS = 6_000;
     let broadcastOk = false;
@@ -631,11 +521,8 @@ async function pollAndWork() {
     }
     if (!broadcastOk) return;
 
-    // 7. Finalize — tells the backend to run autoVerify (auto mode) or hand
-    //    off to manual approval (manual mode). For auto, the bridge then fires
-    //    completeVerification and the escrow releases automatically.
     log(`finalizing task ${acceptedTaskHash.slice(0, 10)}…`);
-    const finalizeRes = await fetch(`${BACKEND_URL}/api/v1/a2a/tasks/${acceptedTaskHash}/finalize`, {
+    const finalizeRes = await fetchWithTimeout(`${BACKEND_URL}/api/v1/a2a/tasks/${acceptedTaskHash}/finalize`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -650,11 +537,6 @@ async function pollAndWork() {
     const finalizeJson = await finalizeRes.json();
     log(`finalize result for ${acceptedTaskHash.slice(0, 10)}…: ${JSON.stringify(finalizeJson.data)}`);
 
-    // ── Per-task elapsed summary ──────────────────────────────────────────
-    // Single-line wrap-up so operators can see at a glance how long the full
-    // accept→submit→finalize cycle took. Per-stage timing is already
-    // recoverable from the timestamps on individual log lines; this line is
-    // the quick-look version most users actually want.
     const totalElapsed = ((Date.now() - taskStartedAt) / 1000).toFixed(1);
     log(`task ${acceptedTaskHash.slice(0, 10)}… done in ${totalElapsed}s (LLM ${llmElapsed}s)`);
   } catch (err) {
@@ -668,19 +550,9 @@ function sendHeartbeat() {
   }
 }
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-/**
- * Register this agent as an A2A executor so the /accept handler will let it
- * claim tasks. Without this we get 403 NOT_REGISTERED on every /a2a/accept.
- * Idempotent on the backend (registerAgent overwrites existing rows), so
- * safe to call on every worker start.
- */
 async function ensureRegisteredAsA2AExecutor() {
   try {
-    const res = await fetch(`${BACKEND_URL}/api/v1/a2a/register`, {
+    const res = await fetchWithTimeout(`${BACKEND_URL}/api/v1/a2a/register`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -689,9 +561,6 @@ async function ensureRegisteredAsA2AExecutor() {
       body: JSON.stringify({
         displayName: AGENT_NAME,
         capabilities: agentCapabilities,
-        // Only include publicKey if we actually have one — empty strings would
-        // fail the strict regex on the backend (and break older worker images
-        // that haven't been redeployed yet).
         ...(AGENT_PUBLIC_KEY ? { publicKey: AGENT_PUBLIC_KEY } : {}),
       }),
     });
@@ -706,9 +575,6 @@ async function ensureRegisteredAsA2AExecutor() {
   }
 }
 
-// Bootstrap: register first (so the very first poll cycle can accept), then
-// start the loop. Both calls are non-blocking — register failure just means
-// the first /accept will 403 and we'll retry on the next tick.
 (async () => {
   await ensureRegisteredAsA2AExecutor();
   setInterval(pollAndWork, POLL_INTERVAL_MS);
