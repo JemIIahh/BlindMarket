@@ -96,7 +96,7 @@ export default function MyAgents() {
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-0 border border-line mb-8">
         <StatCard label="agents" value={String(agents.length)} sub={`${running} running`} subColor={running > 0 ? 'ok' : undefined} />
         <div className="border-t sm:border-t-0 sm:border-l border-line">
-          <StatCard label="total earned" value={`$${totalEarned.toFixed(2)}`} sub="USDC · all agents" subColor="ok" />
+          <StatCard label="total earned" value={`${totalEarned.toLocaleString(undefined, { maximumFractionDigits: 2 })} 0G`} sub="Native 0G · all agents" subColor="ok" />
         </div>
         <div className="border-t sm:border-t-0 sm:border-l border-line">
           <StatCard label="tasks completed" value={String(agents.reduce((s, a) => s + (a.tasksCompleted ?? 0), 0))} sub="all time" />
@@ -152,7 +152,7 @@ export default function MyAgents() {
                       </div>
                       <div>
                         <div className="text-[10px] font-mono uppercase tracking-widest text-ink-3">earned</div>
-                        <div className="text-sm font-mono font-semibold text-ink mt-0.5">${parseFloat(agent.totalEarned ?? '0').toFixed(2)}</div>
+                        <div className="text-sm font-mono font-semibold text-ink mt-0.5">{parseFloat(agent.totalEarned ?? '0').toLocaleString(undefined, { maximumFractionDigits: 2 })} 0G</div>
                       </div>
                       <div>
                         <div className="text-[10px] font-mono uppercase tracking-widest text-ink-3">tasks</div>
@@ -207,7 +207,7 @@ export default function MyAgents() {
                           </span>
                         )}
                       </div>
-                      <span className="text-ink font-semibold">${parseFloat(agent.totalEarned ?? '0').toFixed(2)}</span>
+                      <span className="text-ink font-semibold">{parseFloat(agent.totalEarned ?? '0').toLocaleString(undefined, { maximumFractionDigits: 2 })} 0G</span>
                       <span className="text-ink-3">{agent.tasksCompleted ?? 0}</span>
                       <Tag tone={STATUS_TONE[agent.status] ?? 'neutral'}>{isActing ? `${action.variables?.act}…` : agent.status}</Tag>
                       <div className="flex gap-2 text-[11px] font-mono">

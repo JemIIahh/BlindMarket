@@ -49,13 +49,12 @@ const STATUS_TONE: Record<number, 'ok' | 'warn' | 'err' | 'neutral'> = {
   0: 'neutral', 1: 'warn', 2: 'warn', 3: 'ok', 4: 'ok', 5: 'err', 6: 'err',
 };
 
-// Marketplace token is the canonical USDC — six decimals. The original wei
-// formatter assumed 18 decimals which displayed e.g. $0.000010 for a $10 task.
+// Marketplace token is Native 0G — 18 decimals.
 function formatReward(raw: string | undefined) {
   if (!raw) return '—';
   try {
-    const n = Number(BigInt(raw)) / 1e6;
-    return `$${n.toFixed(2)}`;
+    const n = Number(BigInt(raw)) / 1e18;
+    return `${n.toLocaleString(undefined, { maximumFractionDigits: 4 })} 0G`;
   } catch {
     return raw;
   }
@@ -152,7 +151,7 @@ export default function MyTasks() {
   const completedCount = tasks.filter(t => effectiveStatus(t) === 4).length;
   const totalSpent = tasks
     .filter(t => effectiveStatus(t) === 4)
-    .reduce((s, t) => s + (t.onChain ? Number(BigInt(t.onChain.reward)) / 1e6 : 0), 0);
+    .reduce((s, t) => s + (t.onChain ? Number(BigInt(t.onChain.reward)) / 1e18 : 0), 0);
 
   return (
     <div>
@@ -171,7 +170,7 @@ export default function MyTasks() {
         <StatCard label="open" value={String(openCount)} sub="awaiting worker" />
         <div className="border-l border-line"><StatCard label="active" value={String(activeCount)} sub="in progress" subColor="warn" /></div>
         <div className="border-t border-l-0 sm:border-t-0 sm:border-l border-line"><StatCard label="completed" value={String(completedCount)} sub="all time" subColor="ok" /></div>
-        <div className="border-t border-l border-line sm:border-t-0"><StatCard label="total spent" value={`$${totalSpent.toFixed(2)}`} sub="USDC paid out" /></div>
+        <div className="border-t border-l border-line sm:border-t-0"><StatCard label="total spent" value={`${totalSpent.toLocaleString(undefined, { maximumFractionDigits: 2 })} 0G`} sub="Native 0G paid out" /></div>
       </div>
 
       <div className="border border-line">

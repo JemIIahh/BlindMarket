@@ -42,3 +42,6 @@ BlindBounty Design System.zip
 .kiro.json
 dump.rdb
 scratch/
+
+backend/.env.testnet
+frontend/.env.testnet

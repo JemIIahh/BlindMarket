@@ -23,6 +23,7 @@ import DeployAgentForm from './pages/DeployAgentForm';
 import DeployAgentSdk from './pages/DeployAgentSdk';
 import MyAgents from './pages/MyAgents';
 import Metrics from './pages/Metrics';
+import { ThemeSync } from './components/ThemeSync';
 
 const privyAppId = import.meta.env.VITE_PRIVY_APP_ID;
 if (!privyAppId) {
@@ -61,6 +62,7 @@ export default function App() {
         <WagmiProvider config={wagmiConfig}>
           <WalletProvider>
             <AuthProvider>
+              <ThemeSync />
               <Routes>
                 <Route path="/" element={<Landing />} />
                 <Route path="/register/:token" element={<RegisterAgent />} />

@@ -70,24 +70,19 @@ const ERC20_TRANSFER_ABI = [
 export const agentsRouter = Router();
 
 /**
- * USDC raw micro-units → decimal string. Six decimals because USDC. Kept tight
- * because the frontend reads this as `parseFloat(totalEarned).toFixed(2)` and
- * passing raw micro-units (e.g. "8500000") would render as "$8500000.00".
+ * 0G raw units (18 decimals) → decimal string.
  */
-function formatUsdcDecimal(raw: string): string {
+function formatNativeDecimal(raw: string): string {
   const n = BigInt(raw);
-  const whole = (n / 1_000_000n).toString();
-  const frac = (n % 1_000_000n).toString().padStart(6, '0');
+  const whole = (n / 1_000_000_000_000_000_000n).toString();
+  const frac = (n % 1_000_000_000_000_000_000n).toString().padStart(18, '0').slice(0, 6);
   return `${whole}.${frac}`;
 }
 
 /**
  * Merge the on-chain-executor stats (kept in agentStore keyed by walletAddress)
  * onto a stripped DeployedAgent record. tasksCompleted + totalEarned only live
- * in the executor record — without this enrichment the dashboard UI reads
- * `undefined` for both and shows 0 / $0.00 even after the agent has been paid
- * (the on-chain payout is real but the off-chain index is in a sibling Redis
- * key the /agents route never touched until now).
+ * in the executor record.
  */
 async function withExecutorStats<T extends { walletAddress?: string }>(stripped: T) {
   if (!stripped.walletAddress) return { ...stripped, tasksCompleted: 0, totalEarned: '0' };
@@ -95,7 +90,7 @@ async function withExecutorStats<T extends { walletAddress?: string }>(stripped:
   return {
     ...stripped,
     tasksCompleted: exec?.tasksCompleted ?? 0,
-    totalEarned: formatUsdcDecimal(exec?.totalEarnedRaw ?? '0'),
+    totalEarned: formatNativeDecimal(exec?.totalEarnedRaw ?? '0'),
   };
 }
 

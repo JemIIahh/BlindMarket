@@ -14,10 +14,10 @@ import { useAuth } from '../context/AuthContext';
 import type { Transaction } from '../services/accounting';
 import { API_BASE_URL } from '../config/constants';
 
-function formatUsd(n: number | null | undefined): string {
+function format0G(n: number | null | undefined): string {
   if (n == null || !Number.isFinite(n)) return '—';
   const sign = n < 0 ? '-' : n > 0 ? '+' : '';
-  return `${sign}$${Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return `${sign}${Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 4, maximumFractionDigits: 4 })} 0G`;
 }
 
 function formatTime(iso: string): string {
@@ -84,13 +84,13 @@ export default function Earnings() {
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-0 border border-line mb-8">
         <StatCard
           label="total earned"
-          value={summaryLoading ? '…' : formatUsd(summary?.totalEarned)}
+          value={summaryLoading ? '…' : format0G(summary?.totalEarned)}
           sub={summary && summary.taskCount > 0 ? `${summary.taskCount} tasks` : 'across all time'}
         />
         <div className="border-l border-line">
           <StatCard
             label="net revenue"
-            value={summaryLoading ? '…' : formatUsd(summary?.netRevenue)}
+            value={summaryLoading ? '…' : format0G(summary?.netRevenue)}
             sub="after fees"
             subColor="ok"
           />
@@ -98,7 +98,7 @@ export default function Earnings() {
         <div className="border-l border-line">
           <StatCard
             label="total fees"
-            value={summaryLoading ? '…' : formatUsd(summary?.totalFees)}
+            value={summaryLoading ? '…' : format0G(summary?.totalFees)}
             sub="15% platform"
             subColor="warn"
           />
@@ -189,8 +189,8 @@ export default function Earnings() {
                 <div key={p.id} className="border-b border-line last:border-b-0 px-5 py-4 space-y-2">
                   <div className="flex items-start justify-between gap-3">
                     <div>
-                      <div className="text-sm font-mono font-semibold text-ink">{formatUsd(p.amount)}</div>
-                      <div className="text-[10px] font-mono text-ink-3 mt-0.5">{p.task_id ? `task #${p.task_id}` : 'no task'} · fee {formatUsd(p.fee)}</div>
+                      <div className="text-sm font-mono font-semibold text-ink">{format0G(p.amount)}</div>
+                      <div className="text-[10px] font-mono text-ink-3 mt-0.5">{p.task_id ? `task #${p.task_id}` : 'no task'} · fee {format0G(p.fee)}</div>
                     </div>
                     <Tag tone={typeTone(p.type)}>{p.type}</Tag>
                   </div>
@@ -210,8 +210,8 @@ export default function Earnings() {
                 <div key={p.id} className="grid grid-cols-[80px_100px_100px_100px_1fr_100px] gap-4 px-5 py-4 border-b border-line last:border-b-0 text-[13px] font-mono">
                   <span className="text-ink-3">{p.task_id ? `#${p.task_id}` : '—'}</span>
                   <Tag tone={typeTone(p.type)}>{p.type}</Tag>
-                  <span className="text-ink font-semibold">{formatUsd(p.amount)}</span>
-                  <span className="text-ink-3">{formatUsd(p.fee)}</span>
+                  <span className="text-ink font-semibold">{format0G(p.amount)}</span>
+                  <span className="text-ink-3">{format0G(p.fee)}</span>
                   <span className="text-ink-3 truncate">{shortHash(p.tx_hash)}</span>
                   <span className="text-ink-3">{formatTime(p.created_at)}</span>
                 </div>
@@ -244,9 +244,9 @@ export default function Earnings() {
                     <div className="flex items-start justify-between gap-3">
                       <div>
                         <div className={`text-sm font-mono font-semibold ${tx.amount > 0 ? 'text-ok' : tx.amount < 0 ? 'text-err' : 'text-ink'}`}>
-                          {formatUsd(tx.amount)}
+                          {format0G(tx.amount)}
                         </div>
-                        <div className="text-[10px] font-mono text-ink-3 mt-0.5">net {formatUsd(tx.net)}</div>
+                        <div className="text-[10px] font-mono text-ink-3 mt-0.5">net {format0G(tx.net)}</div>
                       </div>
                       <div className="flex flex-col items-end gap-1">
                         <Tag tone={typeTone(tx.type)}>{tx.type}</Tag>
@@ -274,9 +274,9 @@ export default function Earnings() {
                     <Tag tone={typeTone(tx.type)}>{tx.type}</Tag>
                     <span className="text-ink-3 truncate">{tx.task_id ? `#${tx.task_id}` : '—'}</span>
                     <span className={tx.amount > 0 ? 'text-ok' : tx.amount < 0 ? 'text-err' : 'text-ink-3'}>
-                      {formatUsd(tx.amount)}
+                      {format0G(tx.amount)}
                     </span>
-                    <span className="text-ink-3">{formatUsd(tx.net)}</span>
+                    <span className="text-ink-3">{format0G(tx.net)}</span>
                     <span className="text-ink-3 truncate">{shortHash(tx.tx_hash)}</span>
                     <Tag tone={tx.status === 'ok' ? 'ok' : tx.status === 'pending' ? 'warn' : 'err'}>
                       ● {tx.status}

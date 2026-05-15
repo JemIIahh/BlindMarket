@@ -4,7 +4,6 @@ import { useAccount, useWalletClient } from 'wagmi';
 import { getIdentityToken, getAccessToken } from '@privy-io/react-auth';
 import { BrowserProvider, Contract, parseUnits, formatUnits } from 'ethers';
 import { Breadcrumb, PageHeader, SectionRule } from '../components/bb';
-import { MintTestTokensCard } from '../components/MintTestTokensCard';
 import { aesEncrypt, eciesEncrypt, generateAesKey, sha256, toBase64, toBytes } from '../lib/crypto';
 import { stashAesKey } from '../lib/keyStash';
 import { signAndSendTx } from '../lib/txSigner';
@@ -128,8 +127,8 @@ export default function PostTask() {
       const provider = new BrowserProvider(walletClient.transport);
       const signer = await provider.getSigner();
 
-      const decimals = 18;
-      const amountWei = parseUnits(form.amount, decimals);
+      // Treat input as 0G units (18 decimals)
+      const amountWei = parseUnits(form.amount, 18);
 
       // 1. Discover eligible executors
       console.log('[PostTask] Looking up matching executors...');
@@ -227,8 +226,8 @@ export default function PostTask() {
 
       // 7. Sign and send via MetaMask
       setStatus('signing');
-      console.log(`[PostTask] Signing registration TX with value ${amountWei.toString()}...`);
-      const receipt = await signAndSendTx(signer, taskJson.unsignedTx, amountWei);
+      console.log(`[PostTask] Signing registration TX with value ${amountWei}...`);
+      const receipt = await signAndSendTx(signer, taskJson.unsignedTx, BigInt(amountWei));
       const txHash = receipt?.hash ?? taskJson.unsignedTx?.hash ?? '';
       console.log(`[PostTask] Task TX submitted: ${txHash}`);
       console.log('[PostTask] Task creation confirmed.');
@@ -257,8 +256,6 @@ export default function PostTask() {
         title="Post a task for agent execution"
         description="Encrypt your instructions, lock payment in escrow. An autonomous agent accepts, completes, and auto-verifies — settlement happens on chain without you signing again."
       />
-
-      <MintTestTokensCard />
 
       {status === 'done' ? (
         <div className="border border-line p-6 sm:p-8 space-y-5">
@@ -387,11 +384,10 @@ export default function PostTask() {
                           key={c}
                           type="button"
                           onClick={() => setForm(f => ({ ...f, category: c }))}
-                          className={`px-2 py-1 text-[10px] font-mono border transition-colors text-center ${
-                            active
-                              ? 'border-cream text-cream bg-cream/10'
-                              : 'border-line text-ink-3 hover:border-ink-2 hover:text-ink-2'
-                          }`}
+                          className={`px-2 py-1 text-[10px] font-mono border transition-colors text-center ${active
+                            ? 'border-cream text-cream bg-cream/10'
+                            : 'border-line text-ink-3 hover:border-ink-2 hover:text-ink-2'
+                            }`}
                         >
                           {c}
                         </button>
@@ -426,11 +422,10 @@ export default function PostTask() {
                         key={cap}
                         type="button"
                         onClick={() => toggleCap(cap)}
-                        className={`px-2.5 py-1 text-[11px] font-mono border transition-colors ${
-                          active
-                            ? 'bg-cream/10 border-cream/40 text-cream'
-                            : 'bg-surface-2 border-line text-ink-3 hover:text-ink-2'
-                        }`}
+                        className={`px-2.5 py-1 text-[11px] font-mono border transition-colors ${active
+                          ? 'bg-cream/10 border-cream/40 text-cream'
+                          : 'bg-surface-2 border-line text-ink-3 hover:text-ink-2'
+                          }`}
                       >
                         {cap}
                       </button>
@@ -468,13 +463,18 @@ export default function PostTask() {
                   required
                   value={form.amount}
                   onChange={e => setForm(f => ({ ...f, amount: e.target.value }))}
-                  className="w-full bg-surface-2 border border-line px-4 py-3 text-xs font-mono text-ink focus:outline-none focus:border-cream"
-                />
+                  className="w-full bg-surface-2 border border-line px-4 py-3 text-xs font-mono text-ink focus:outline-none focus:border-cream" />
                 <div className="mt-1 text-[11px] font-mono text-ink-3">
                   85% to worker · 15% protocol fee
-                  {form.amount && (
-                    <span className="block text-cream mt-0.5">≈ ${(parseFloat(form.amount) * 0.5).toFixed(2)} USD</span>
-                  )}
+                  {form.amount && !isNaN(parseFloat(form.amount)) && (() => {
+                    const amountinWei = parseUnits(form.amount, 18);
+                    const tokenSymbol = '0G';
+                    return (
+                      <span className="block text-cream mt-0.5">
+                        {formatUnits(amountinWei, 18)} {tokenSymbol}
+                      </span>
+                    );
+                  })()}
                 </div>
               </div>
               <div>

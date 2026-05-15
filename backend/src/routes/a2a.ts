@@ -87,18 +87,15 @@ async function recordWorkerPayout(taskHash: string, executorAddr: string): Promi
       agent.totalEarnedRaw = (prev + workerShare).toString();
 
       // Mirror the payout into the accounting ledger so the Earnings page can
-      // surface it. USDC has 6 decimals, so micro-units → float USD = /1e6.
-      // Safe up to ~9e15 micro-units (Number.MAX_SAFE_INTEGER), i.e. ~$9B —
-      // more than fine for testnet payouts.
+      // surface it. Native 0G has 18 decimals.
       try {
         accountingService.recordTransaction({
           address: executorAddr.toLowerCase(),
           role: 'worker',
           taskId: onChainId,
           type: 'payment',
-          amount: Number(workerShare) / 1_000_000,
-          fee: Number(platformFee) / 1_000_000,
-          net: Number(workerShare) / 1_000_000,
+          amount: Number(workerShare) / 1e18,
+          fee: Number(platformFee) / 1e18,
           status: 'confirmed',
         });
       } catch (acctErr) {

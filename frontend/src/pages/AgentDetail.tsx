@@ -215,7 +215,7 @@ export default function AgentDetail() {
 
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-0 border border-line mb-2">
         <StatCard label="tasks completed" value={String(agent.tasksCompleted ?? 0)} sub="all time" />
-        <div className="border-t sm:border-t-0 sm:border-l border-line"><StatCard label="earned" value={`$${parseFloat(agent.totalEarned ?? '0').toFixed(2)}`} sub="USDC" subColor="ok" /></div>
+        <div className="border-t sm:border-t-0 sm:border-l border-line"><StatCard label="earned" value={`${parseFloat(agent.totalEarned ?? '0').toLocaleString(undefined, { maximumFractionDigits: 4 })} 0G`} sub="Native 0G" subColor="ok" /></div>
         <div className="border-t sm:border-t-0 sm:border-l border-line"><StatCard label="wallet balance" value={balance ? parseFloat(balance.formatted).toFixed(4) : '—'} sub={isLowGas ? 'low gas — top up' : (balance?.symbol ?? '0G')} subColor={isLowGas ? 'warn' : undefined} /></div>
       </div>
 
@@ -257,21 +257,21 @@ export default function AgentDetail() {
           )}
           {recoverStatus === 'error' && <span className="text-red-400">{recoverError}</span>}
 
-          {/* USDC withdrawal — same `!= running` rule, with the additional
+          {/* 0G withdrawal — same `!= running` rule, with the additional
               guard that the agent must have actually earned something. The
               backend separately rejects the sweep with NO_GAS if the wallet
-              can't afford the ERC20 transfer's own gas (~50k). */}
+              can't afford the 0G transfer's own gas. */}
           {agent.status !== 'running' && parseFloat(agent.totalEarned ?? '0') > 0 && (
             <button
               onClick={handleSweepToken}
               disabled={sweepStatus === 'sending' || balanceEther < 0.0002}
               className="px-3 py-1.5 border border-cream text-cream hover:bg-cream hover:text-bg transition-colors disabled:opacity-40">
-              {sweepStatus === 'sending' ? 'withdrawing…' : `withdraw USDC → owner`}
+              {sweepStatus === 'sending' ? 'withdrawing…' : `withdraw 0G → owner`}
             </button>
           )}
           {sweepStatus === 'done' && sweepInfo && (
             <span className="text-green-400">
-              withdrew ${parseFloat(sweepInfo.amount).toFixed(2)} USDC · tx {sweepInfo.txHash.slice(0, 10)}…
+              withdrew {parseFloat(sweepInfo.amount).toLocaleString(undefined, { maximumFractionDigits: 4 })} 0G · tx {sweepInfo.txHash.slice(0, 10)}…
             </span>
           )}
           {sweepStatus === 'error' && <span className="text-red-400">{sweepError}</span>}

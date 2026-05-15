@@ -116,9 +116,9 @@ export function getSummary(address: string, from?: string, to?: string): Transac
   }
 
   return {
-    totalEarned: Math.round(totalEarned * 100) / 100,
-    totalFees: Math.round(totalFees * 100) / 100,
-    netRevenue: Math.round(netRevenue * 100) / 100,
+    totalEarned: Math.round(totalEarned * 1_000_000) / 1_000_000,
+    totalFees: Math.round(totalFees * 1_000_000) / 1_000_000,
+    netRevenue: Math.round(netRevenue * 1_000_000) / 1_000_000,
     taskCount,
   };
 }

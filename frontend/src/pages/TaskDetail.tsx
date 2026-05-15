@@ -120,7 +120,9 @@ export default function TaskDetail() {
           </div>
         </div>
         <div className="text-right">
-          <div className="text-3xl font-bold text-amber-400">{formatCurrency(reward)}</div>
+          <div className="text-3xl font-bold text-amber-400">
+            {reward.toLocaleString(undefined, { maximumFractionDigits: 4 })} 0G
+          </div>
           <div className="text-[10px] uppercase tracking-wider text-neutral-600 mt-1">Escrow Locked</div>
         </div>
       </div>

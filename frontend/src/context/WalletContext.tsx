@@ -140,6 +140,8 @@ function DirectWalletProvider({ children }: { children: ReactNode }) {
     if (!eth) return;
     try {
       await eth.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: OG_CHAIN_CONFIG.chainId }] });
+      const cid = await eth.request({ method: 'eth_chainId' });
+      setChainId(Number(cid));
     } catch (err: unknown) {
       const code = (err as { code?: number }).code;
       if (code === 4902) {
