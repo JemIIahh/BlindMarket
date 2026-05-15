@@ -39,8 +39,9 @@ export async function buildCreateTask(
   category: string,
   locationZone: string,
   duration: bigint,
+  value?: bigint,
 ): Promise<ethers.TransactionRequest> {
-  return buildUnsignedTx(escrow, 'createTask', [taskHash, token, amount, category, locationZone, duration], from);
+  return buildUnsignedTx(escrow, 'createTask', [taskHash, token, amount, category, locationZone, duration], from, value);
 }
 
 /** Build unsigned assignWorker transaction */

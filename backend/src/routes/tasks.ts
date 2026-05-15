@@ -203,14 +203,18 @@ tasksRouter.post('/', requireAuth, async (req: AuthRequest, res, next) => {
     const data = createTaskSchema.parse(req.body);
     const from = req.user!.address;
 
+    const amountBigInt = BigInt(data.amount);
+    const isNative = data.token === '0x0000000000000000000000000000000000000000';
+
     const tx = await escrowService.buildCreateTask(
       from,
       data.taskHash,
       data.token,
-      BigInt(data.amount),
+      amountBigInt,
       data.category,
       data.locationZone,
       BigInt(data.duration),
+      isNative ? amountBigInt : undefined,
     );
 
     // Store A2A metadata if this is an agent-targeted task

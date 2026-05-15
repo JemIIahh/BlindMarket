@@ -12,19 +12,21 @@ function optional(key: string, fallback: string): string {
   return process.env[key] || fallback;
 }
 
+const IS_PROD = process.env.NODE_ENV === 'production';
+
 export const config = {
   port: parseInt(optional('PORT', '3001'), 10),
   nodeEnv: optional('NODE_ENV', 'development'),
 
   // 0G Chain
-  ogRpcUrl: optional('OG_RPC_URL', 'https://evmrpc-testnet.0g.ai'),
-  ogChainId: parseInt(optional('OG_CHAIN_ID', '16602'), 10),
+  ogRpcUrl: optional('OG_RPC_URL', IS_PROD ? 'https://evmrpc.0g.ai' : 'https://evmrpc-testnet.0g.ai'),
+  ogChainId: parseInt(optional('OG_CHAIN_ID', IS_PROD ? '16661' : '16602'), 10),
 
   // Contracts
-  blindEscrowAddress: required('BLIND_ESCROW_ADDRESS'),
-  taskRegistryAddress: required('TASK_REGISTRY_ADDRESS'),
-  blindReputationAddress: required('BLIND_REPUTATION_ADDRESS'),
-  inftAddress: process.env.INFT_ADDRESS || '',
+  blindEscrowAddress: optional('BLIND_ESCROW_ADDRESS', IS_PROD ? '0x3d0374963DaaD43e31d42373eb11156A8e8ce2Ff' : '0x037529B296a89E6Dd1abAF84D413cb2dD70C5be5'),
+  taskRegistryAddress: optional('TASK_REGISTRY_ADDRESS', IS_PROD ? '0x9CCF9c196006B573FaA9C9c9CebDd1296dbd5cE0' : '0x25Bc5be1F8Ab44ADfb7a6Ce1362d37408E74DA95'),
+  blindReputationAddress: optional('BLIND_REPUTATION_ADDRESS', IS_PROD ? '0x3af9232009C5da30AdA366B6E09849A040162A1a' : '0x3d0374963DaaD43e31d42373eb11156A8e8ce2Ff'),
+  inftAddress: optional('INFT_ADDRESS', IS_PROD ? '0xfE70a007AFD022A4824d1975A1facFA266F66E28' : ''),
 
   // Auth — Privy is the sole identity provider; agent API key for service callers
   agentApiKey: process.env.AGENT_API_KEY || '',
