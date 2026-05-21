@@ -222,8 +222,7 @@ export default function PostTask() {
       console.log(`[PostTask] Signing registration TX with value ${amountWei}...`);
       const receipt = await signAndSendTx(signer, taskJson.unsignedTx, BigInt(amountWei));
       const txHash = receipt?.hash ?? taskJson.unsignedTx?.hash ?? '';
-      console.log(`[PostTask] Task TX submitted: ${txHash}`);
-      console.log('[PostTask] Task creation confirmed.');
+      console.log(`[PostTask] Task TX confirmed: hash=${txHash} block=${receipt?.blockNumber}`);
 
       setTaskId(taskJson.taskId ?? null);
       setInitialWrapCount(Object.keys(wrappedKeys).length);
