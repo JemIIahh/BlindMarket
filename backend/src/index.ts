@@ -141,8 +141,12 @@ httpServer.listen(config.port, () => {
           console.log(`[a2aSettlement] ✓ verifier role confirmed (escrow.verifier() == signer)`);
         }
       } catch (e) {
+        const err = e as Error & { errors?: Error[] };
+        const msg = err.errors?.length
+          ? err.errors.map((ee: Error) => ee.message || String(ee)).join('; ')
+          : err.message || String(e);
         console.error(
-          `[a2aSettlement] ⛔ could not read escrow.verifier() — escrow contract at ${appConfig.blindEscrowAddress} may be wrong or unreachable: ${(e as Error).message}`,
+          `[a2aSettlement] ⛔ could not read escrow.verifier() — escrow contract at ${appConfig.blindEscrowAddress} may be wrong or unreachable: ${msg}`,
         );
       }
     })();

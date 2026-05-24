@@ -135,8 +135,10 @@ async function tick(): Promise<void> {
       // network-fault windows we collapse repeated identical errors into a
       // single line, with a count emitted on the first occurrence and on
       // each transition to a new failure mode.
-      const err = e as Error;
-      const msg = err.message || `${err.name || typeof e}: ${String(e)}`;
+      const err = e as Error & { errors?: Error[] };
+      const msg = err.errors?.length
+        ? `AggregateError: ${err.errors.map((ee: Error) => ee.message || String(ee)).join('; ')}`
+        : (err.message || `${err.name || typeof e}: ${String(e)}`);
       // Bucket by first few words / error code so transient timeouts don't
       // each look unique to the dedup logic.
       const sig = msg.match(/^[A-Za-z _-]+ (?:error )?: ?[A-Z_]+/)?.[0]
