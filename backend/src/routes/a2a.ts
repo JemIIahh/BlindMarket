@@ -10,6 +10,7 @@ import { settleAssignment, settleVerification } from '../services/a2aSettlement.
 import { getTaskIdByHash } from '../services/escrowEvents.js';
 import * as escrowService from '../services/escrow.js';
 import * as accountingService from '../services/accountingService.js';
+import * as reputationDecay from '../services/reputationDecay.js';
 import { provider, escrow } from '../services/chain.js';
 import { redis } from '../services/redis.js';
 import { ethers } from 'ethers';
@@ -136,6 +137,17 @@ async function recordWorkerPayout(taskHash: string, executorAddr: string): Promi
       console.warn(`[a2a] recordWorkerPayout: hash ${taskHash.slice(0, 10)}… not indexed yet; tasksCompleted bumped but totalEarnedRaw untouched`);
     }
     await agentStore.registerAgent(agent);
+
+    // Update the off-chain decay-based reputation (SQLite) — mirrors the
+    // reputationDecay.recordTaskCompletion call in the traditional
+    // submissions.ts /verify route. Without this, the A2A path never
+    // populates the /reputation/ leaderboard or the decayed score that
+    // /agents and /agents/:id return.
+    try {
+      reputationDecay.recordTaskCompletion(executorAddr, taskHash, 10);
+    } catch (decayErr) {
+      console.warn(`[a2a] recordWorkerPayout: reputationDecay.recordTaskCompletion failed for ${taskHash.slice(0, 10)}…:`, (decayErr as Error).message);
+    }
   } catch (err) {
     console.error(`[a2a] recordWorkerPayout failed for ${taskHash.slice(0, 10)}… executor=${executorAddr}:`, (err as Error).message);
   }
@@ -1089,7 +1101,7 @@ a2aRouter.get('/executions', requireAuth, async (req: AuthRequest, res, next) =>
 
 /**
  * GET /api/v1/a2a/profile
- * Get my agent profile.
+ * Get my agent profile with decayed reputation.
  */
 a2aRouter.get('/profile', requireAuth, async (req: AuthRequest, res, next) => {
   try {
@@ -1102,7 +1114,7 @@ a2aRouter.get('/profile', requireAuth, async (req: AuthRequest, res, next) => {
 
     const body: ApiResponse = {
       success: true,
-      data: { agent },
+      data: { agent, reputation: reputationDecay.getDecayedReputation(address) },
     };
     res.json(body);
   } catch (err) {
