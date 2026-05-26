@@ -25,6 +25,8 @@ interface AgentDetails {
   walletAddress?: string; publicKey?: string; inftTokenId?: number;
   tasksCompleted?: number; totalEarned?: string; tools?: AgentTool[];
   capabilities?: string[];
+  reputation?: { score: number; avgScore: number; tasksCompleted: number; disputes: number };
+  decayedReputation?: { rawScore: number; decayedScore: number; tasksCompleted: number; disputes: number };
 }
 
 const STATUS_TONE: Record<string, 'ok' | 'warn' | 'err' | 'neutral'> = {
@@ -187,9 +189,10 @@ export default function AgentDetail() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-0 border border-line mb-2">
+      <div className="grid grid-cols-1 sm:grid-cols-4 gap-0 border border-line mb-2">
         <StatCard label="tasks completed" value={String(agent.tasksCompleted ?? 0)} sub="all time" />
         <div className="border-t sm:border-t-0 sm:border-l border-line"><StatCard label="earned" value={`${parseFloat(agent.totalEarned ?? '0').toLocaleString(undefined, { maximumFractionDigits: 4 })} 0G`} sub="Native 0G" subColor="ok" /></div>
+        <div className="border-t sm:border-t-0 sm:border-l border-line"><StatCard label="reputation" value={String(agent.decayedReputation?.decayedScore ?? agent.reputation?.score ?? 0)} sub={`${agent.reputation?.tasksCompleted ?? 0} tasks · ${agent.reputation?.disputes ?? 0} disputes`} subColor={agent.reputation?.disputes && agent.reputation.disputes > 0 ? 'warn' : undefined} /></div>
         <div className="border-t sm:border-t-0 sm:border-l border-line"><StatCard label="wallet balance" value={balance ? parseFloat(balance.formatted).toFixed(4) : '—'} sub={isLowGas ? 'low gas — top up' : (balance?.symbol ?? '0G')} subColor={isLowGas ? 'warn' : undefined} /></div>
       </div>
 

@@ -381,8 +381,10 @@ async function buildActionResponse(id: string) {
 }
 
 // POST /api/v1/agents/:id/start
-agentsRouter.post('/:id/start', async (req, res) => {
+agentsRouter.post('/:id/start', requireAuth, async (req: AuthRequest, res) => {
   try {
+    const agent = await authorizeOwner(req, res, req.params.id);
+    if (!agent) return;
     await startAgent(req.params.id);
     res.json({ success: true, data: await buildActionResponse(req.params.id) });
   } catch (e: unknown) {
@@ -394,8 +396,10 @@ agentsRouter.post('/:id/start', async (req, res) => {
 });
 
 // POST /api/v1/agents/:id/pause
-agentsRouter.post('/:id/pause', async (req, res) => {
+agentsRouter.post('/:id/pause', requireAuth, async (req: AuthRequest, res) => {
   try {
+    const agent = await authorizeOwner(req, res, req.params.id);
+    if (!agent) return;
     await pauseAgent(req.params.id);
     res.json({ success: true, data: await buildActionResponse(req.params.id) });
   } catch (e: unknown) {
@@ -407,8 +411,10 @@ agentsRouter.post('/:id/pause', async (req, res) => {
 });
 
 // POST /api/v1/agents/:id/stop
-agentsRouter.post('/:id/stop', async (req, res) => {
+agentsRouter.post('/:id/stop', requireAuth, async (req: AuthRequest, res) => {
   try {
+    const agent = await authorizeOwner(req, res, req.params.id);
+    if (!agent) return;
     await stopAgent(req.params.id);
     res.json({ success: true, data: await buildActionResponse(req.params.id) });
   } catch (e: unknown) {
