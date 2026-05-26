@@ -51,14 +51,9 @@ export default function AgentDetail() {
   // actions so the buttons can show their own progress without interfering.
   const [topUpStatus, setTopUpStatus] = useState<'idle' | 'sending' | 'error'>('idle');
   const [topUpError, setTopUpError] = useState('');
-  const [recoverStatus, setRecoverStatus] = useState<'idle' | 'sending' | 'done' | 'error'>('idle');
-  const [recoverInfo, setRecoverInfo] = useState<{ txHash: string; amount: string } | null>(null);
-  const [recoverError, setRecoverError] = useState('');
-  // USDC sweep state — same shape as the 0G recovery flow, separate so the
-  // two operations can run independently and show their own status.
-  const [sweepStatus, setSweepStatus] = useState<'idle' | 'sending' | 'done' | 'error'>('idle');
-  const [sweepInfo, setSweepInfo] = useState<{ txHash: string; amount: string } | null>(null);
-  const [sweepError, setSweepError] = useState('');
+  const [withdrawStatus, setWithdrawStatus] = useState<'idle' | 'sending' | 'done' | 'error'>('idle');
+  const [withdrawInfo, setWithdrawInfo] = useState<{ txHash: string; amount: string } | null>(null);
+  const [withdrawError, setWithdrawError] = useState('');
 
   const { data: balance, refetch: refetchBalance } = useBalance({
     address: agent?.walletAddress as `0x${string}` | undefined,
@@ -130,61 +125,35 @@ export default function AgentDetail() {
     }
   }
 
-  // Backend signs the sweep tx using the agent's stored rawPrivateKey and
-  // sends the wallet's balance (minus a small gas reserve) back to the owner.
-  // Only valid when the agent is stopped — sweeping a running agent would
-  // race with its in-flight submitEvidence txs.
+  // Backend signs the withdrawal tx using the agent's stored rawPrivateKey and
+  // sends funds back to the owner. Handles both native 0G and ERC20 tokens
+  // via the single /withdraw endpoint — omit tokenAddress for native 0G sweep,
+  // or pass a specific ERC20 address to withdraw that token.
   //
   // Uses authedPost so the JWT (Privy identity) flows to the backend, where
-  // requireAuth + authorizeOwner verify the caller is the agent's owner. The
-  // previous "ownerAddress in body" claim is no longer trusted server-side.
-  async function handleRecoverFunds() {
+  // requireAuth + authorizeOwner verify the caller is the agent's owner.
+  // Refuses while the agent is running to avoid racing with in-flight txs.
+  async function handleWithdraw() {
     if (!address || !id) return;
-    if (!confirm(`Recover remaining 0G from this agent's wallet back to ${address.slice(0, 8)}…? This cannot be undone.`)) return;
-    setRecoverStatus('sending');
-    setRecoverError('');
+    if (!confirm(`Withdraw funds from this agent's wallet back to ${address.slice(0, 8)}…? This cannot be undone.`)) return;
+    setWithdrawStatus('sending');
+    setWithdrawError('');
     try {
-      const data = await authedPost<{ txHash: string; amountSent: string; recipient: string }>(`/api/v1/agents/${id}/recover-funds`, {});
-      setRecoverInfo({ txHash: data.txHash, amount: data.amountSent });
-      setRecoverStatus('done');
+      const data = await authedPost<{ txHash: string; amountSent: string; amountFormatted?: string; recipient: string }>(
+        `/api/v1/agents/${id}/withdraw`,
+        {},
+      );
+      const amount = data.amountFormatted ?? data.amountSent;
+      setWithdrawInfo({ txHash: data.txHash, amount });
+      setWithdrawStatus('done');
       await refetchBalance();
-    } catch (err) {
-      setRecoverError((err as Error).message || 'recover failed');
-      setRecoverStatus('error');
-    }
-  }
-
-  // Sweep accumulated marketplace-token (USDC) earnings from the agent wallet
-  // back to the owner. Same auth model as handleRecoverFunds — backend gates
-  // on the authenticated wallet matching agent.ownerAddress, and refuses while
-  // the agent is running (could race with an in-flight payout from escrow).
-  async function handleSweepToken() {
-    if (!address || !id) return;
-    if (!confirm(`Withdraw all USDC earnings from this agent's wallet back to ${address.slice(0, 8)}…? This cannot be undone.`)) return;
-    setSweepStatus('sending');
-    setSweepError('');
-    try {
-      // Pass tokenAddress explicitly so the endpoint works regardless of
-      // whether the backend's MOCK_ERC20_ADDRESS env var is set. The
-      // canonical address lives in constants.ts; same value the post-task
-      // approve flow uses.
-      const data = await authedPost<{
-        txHash: string;
-        amountFormatted: string;
-        amountRaw: string;
-        recipient: string;
-      }>(`/api/v1/agents/${id}/sweep-token`, { tokenAddress: MARKETPLACE_TOKEN_ADDRESS });
-      setSweepInfo({ txHash: data.txHash, amount: data.amountFormatted });
-      setSweepStatus('done');
-      // Refresh agent record so the earned/totalEarned display picks up the
-      // post-sweep balance on next render.
       try {
         const fresh = await get<AgentDetails>(`/api/v1/agents/${id}`);
         setAgent(fresh);
       } catch { /* non-blocking */ }
     } catch (err) {
-      setSweepError((err as Error).message || 'sweep failed');
-      setSweepStatus('error');
+      setWithdrawError((err as Error).message || 'withdraw failed');
+      setWithdrawStatus('error');
     }
   }
 
@@ -224,9 +193,8 @@ export default function AgentDetail() {
         <div className="border-t sm:border-t-0 sm:border-l border-line"><StatCard label="wallet balance" value={balance ? parseFloat(balance.formatted).toFixed(4) : '—'} sub={isLowGas ? 'low gas — top up' : (balance?.symbol ?? '0G')} subColor={isLowGas ? 'warn' : undefined} /></div>
       </div>
 
-      {/* Gas management — only relevant to the agent owner. Top Up nudges any
-          agent whose wallet is below threshold; Recover Funds sweeps remaining
-          balance back to the owner once the agent is stopped. */}
+      {/* Gas management — only relevant to the agent owner. Top Up sends native
+          0G to the agent wallet; Withdraw sweeps balance back to the owner. */}
       {isOwner && agent.walletAddress && (
         <div className="border border-line border-t-0 mb-8 px-4 py-3 flex flex-wrap items-center gap-3 text-[11px] font-mono">
           <span className="text-ink-3">gas:</span>
@@ -241,45 +209,23 @@ export default function AgentDetail() {
           </button>
           {topUpStatus === 'error' && <span className="text-red-400">{topUpError}</span>}
 
-          {/* 0G recovery — show whenever the agent isn't actively running.
-              Paused agents have their child process killed and aren't polling
-              for new tasks, so they're safe to sweep too. The backend's
-              /recover-funds endpoint enforces the same `!= running` rule, so
-              this gate just matches it instead of being stricter for no
-              reason. */}
+          {/* Withdraw — single button for both native 0G and ERC20 tokens.
+              The backend's /withdraw endpoint auto-detects; empty body sweeps
+              native 0G (gas reserve kept). */}
           {agent.status !== 'running' && (
             <button
-              onClick={handleRecoverFunds}
-              disabled={recoverStatus === 'sending' || balanceEther < 0.0015}
+              onClick={handleWithdraw}
+              disabled={withdrawStatus === 'sending' || balanceEther < 0.0015}
               className="px-3 py-1.5 border border-line text-ink-3 hover:border-red-400 hover:text-red-400 transition-colors disabled:opacity-40">
-              {recoverStatus === 'sending' ? 'sweeping…' : 'recover 0G → owner'}
+              {withdrawStatus === 'sending' ? 'withdrawing…' : 'withdraw → owner'}
             </button>
           )}
-          {recoverStatus === 'done' && recoverInfo && (
+          {withdrawStatus === 'done' && withdrawInfo && (
             <span className="text-green-400">
-              swept {parseFloat(recoverInfo.amount).toFixed(4)} 0G · tx {recoverInfo.txHash.slice(0, 10)}…
+              withdrew {parseFloat(withdrawInfo.amount).toFixed(4)} 0G · tx {withdrawInfo.txHash.slice(0, 10)}…
             </span>
           )}
-          {recoverStatus === 'error' && <span className="text-red-400">{recoverError}</span>}
-
-          {/* 0G withdrawal — same `!= running` rule, with the additional
-              guard that the agent must have actually earned something. The
-              backend separately rejects the sweep with NO_GAS if the wallet
-              can't afford the 0G transfer's own gas. */}
-          {agent.status !== 'running' && parseFloat(agent.totalEarned ?? '0') > 0 && (
-            <button
-              onClick={handleSweepToken}
-              disabled={sweepStatus === 'sending' || balanceEther < 0.0002}
-              className="px-3 py-1.5 border border-cream text-cream hover:bg-cream hover:text-bg transition-colors disabled:opacity-40">
-              {sweepStatus === 'sending' ? 'withdrawing…' : `withdraw 0G → owner`}
-            </button>
-          )}
-          {sweepStatus === 'done' && sweepInfo && (
-            <span className="text-green-400">
-              withdrew {parseFloat(sweepInfo.amount).toLocaleString(undefined, { maximumFractionDigits: 4 })} 0G · tx {sweepInfo.txHash.slice(0, 10)}…
-            </span>
-          )}
-          {sweepStatus === 'error' && <span className="text-red-400">{sweepError}</span>}
+          {withdrawStatus === 'error' && <span className="text-red-400">{withdrawError}</span>}
 
           {isLowGas && agent.status !== 'stopped' && (
             <span className="text-yellow-400">⚠ agent will fail to submit evidence below {LOW_GAS_THRESHOLD} 0G</span>

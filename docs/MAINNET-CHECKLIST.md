@@ -263,10 +263,9 @@ should walk this back to a non-custodial model.
 
 ### 5b.1 Endpoint authorization (DONE for the funds endpoints, NOT for the rest)
 
-- [x] `POST /agents/:id/recover-funds` — JWT-gated, verifies `req.user.address`
-      matches `agent.ownerAddress`. Refuses while agent is running.
-- [x] `POST /agents/:id/sweep-token` — same gate as above. Withdraws ERC20
-      earnings (USDC) back to the owner.
+- [x] `POST /agents/:id/withdraw` — JWT-gated, verifies `req.user.address`
+      matches `agent.ownerAddress`. Refuses while agent is running. Handles
+      both native 0G (empty body) and ERC20 tokens (pass tokenAddress).
 - [x] `POST /agents/:id/export-key` — JWT-gated.
 - [ ] `POST /agents/:id/start | pause | stop` — still trust `req.body.ownerAddress`
       as a plaintext claim. Not fund-moving but trivially griefable. Apply the

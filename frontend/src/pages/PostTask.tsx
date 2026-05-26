@@ -54,9 +54,10 @@ const CATEGORY_SUGGESTIONS = [
 
 import { AGENT_CAPABILITIES } from '../config/capabilities';
 
-// Pulled from the shared constants module so the address lives in exactly
-// one place. AgentDetail's sweep-token call uses the same value.
-const TOKEN = MARKETPLACE_TOKEN_ADDRESS;
+  // Pulled from the shared constants module so the address lives in exactly
+  // one place. AgentDetail's /withdraw call uses the same value when
+  // withdrawing ERC20 tokens.
+  const TOKEN = MARKETPLACE_TOKEN_ADDRESS;
 
 export default function PostTask() {
   const { address } = useAccount();
