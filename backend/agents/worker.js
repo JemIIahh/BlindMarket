@@ -409,6 +409,39 @@ function buildTools() {
         const start = Date.now();
         while (Date.now() - start < maxWait) {
           await sleep(5000);
+
+          // Late-bidder wrap loop — the agent-runtime equivalent of the
+          // frontend's useBidWatcher. An agent that registered AFTER we posted
+          // can't decrypt the brief (it wasn't in the post-time wrap), so it
+          // hits NEEDS_WRAP and bids. We still hold the AES key, so we wrap it
+          // to each new bidder ourselves — no platform custody, no human
+          // browser. Best-effort: a failure here must not abort the wait.
+          try {
+            const bRes = await fetchWithTimeout(`${BACKEND_URL}/api/v1/a2a/tasks/${taskHash}/bids`, { headers: auth });
+            if (bRes.ok) {
+              const bd = (await bRes.json()).data ?? {};
+              const alreadyWrapped = new Set((bd.wrapped ?? []).map((a) => a.toLowerCase()));
+              const additions = {};
+              for (const bid of (bd.bids ?? [])) {
+                const addr = (bid.address ?? '').toLowerCase();
+                if (!addr || !bid.publicKey || alreadyWrapped.has(addr)) continue;
+                try {
+                  additions[addr] = eciesEncryptK1(aesKey, bid.publicKey).toString('hex');
+                } catch (e) {
+                  log(`delegate: skip late-wrap for ${addr} (${e.message})`);
+                }
+              }
+              if (Object.keys(additions).length > 0) {
+                const wRes = await fetchWithTimeout(`${BACKEND_URL}/api/v1/a2a/tasks/${taskHash}/wrap-to`, {
+                  method: 'POST', headers: jsonAuth, body: JSON.stringify({ wrappedKeys: additions }),
+                });
+                log(`delegate: wrapped ${Object.keys(additions).length} late bidder(s) on ${taskHash.slice(0, 10)}… (${wRes.ok ? 'ok' : wRes.status})`);
+              }
+            }
+          } catch (e) {
+            log(`delegate: late-bidder wrap poll error on ${taskHash.slice(0, 10)}…: ${e.message}`);
+          }
+
           const pRes = await fetchWithTimeout(`${BACKEND_URL}/api/v1/a2a/tasks/posted`, { headers: auth });
           if (!pRes.ok) continue;
           const posted = (await pRes.json()).data?.tasks ?? [];
