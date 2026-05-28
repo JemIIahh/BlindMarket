@@ -84,7 +84,12 @@ export default function DeployAgentForm() {
   function addTool() {
     if (!newTool.name || !newTool.url) return;
     if (newTool.body.contentType === 'application/json') {
-      try { JSON.parse(newTool.body.payload || '{}'); } catch { alert('Invalid JSON payload'); return; }
+      const payload = newTool.body.payload.trim();
+      if (!payload.startsWith('{') || !payload.endsWith('}')) {
+        alert('JSON payload must be enclosed in {}');
+        return;
+      }
+      try { JSON.parse(payload); } catch { alert('Invalid JSON payload'); return; }
     }
     setTools(t => [...t, newTool]);
     setNewTool({ type: 'http', name: '', description: '', url: '', method: 'POST', headers: [], queryParams: [], body: { contentType: 'application/json', payload: '{}' } });
