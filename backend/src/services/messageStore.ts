@@ -22,7 +22,7 @@ export async function sendMessage(opts: {
   subject?: string;
   body: string;
 }): Promise<AgentMessage> {
-  const db = getPool();
+  const db = await getPool();
   const { rows } = await db.query<AgentMessage>(
     'INSERT INTO agent_messages (task_id, from_address, to_address, subject, body) VALUES ($1, $2, $3, $4, $5) RETURNING *',
     [opts.taskId ?? null, opts.from.toLowerCase(), opts.to.toLowerCase(), opts.subject ?? null, opts.body],
@@ -37,7 +37,7 @@ export async function getInbox(
   address: string,
   opts?: { taskId?: string; unreadOnly?: boolean; limit?: number; offset?: number },
 ): Promise<{ messages: AgentMessage[]; total: number }> {
-  const db = getPool();
+  const db = await getPool();
   const addr = address.toLowerCase();
   let where = 'WHERE to_address = $1';
   const params: (string | number)[] = [addr];
@@ -73,7 +73,7 @@ export async function getSent(
   address: string,
   opts?: { taskId?: string; limit?: number; offset?: number },
 ): Promise<{ messages: AgentMessage[]; total: number }> {
-  const db = getPool();
+  const db = await getPool();
   const addr = address.toLowerCase();
   let where = 'WHERE from_address = $1';
   const params: (string | number)[] = [addr];
@@ -107,7 +107,7 @@ export async function getThread(
   addressB: string,
   taskId: string,
 ): Promise<AgentMessage[]> {
-  const db = getPool();
+  const db = await getPool();
   const a = addressA.toLowerCase();
   const b = addressB.toLowerCase();
   const { rows } = await db.query<AgentMessage>(
@@ -124,7 +124,7 @@ export async function getThread(
  * Mark messages as read.
  */
 export async function markRead(address: string, messageIds?: number[]): Promise<void> {
-  const db = getPool();
+  const db = await getPool();
   const addr = address.toLowerCase();
 
   if (messageIds?.length) {
@@ -142,7 +142,7 @@ export async function markRead(address: string, messageIds?: number[]): Promise<
  * Count unread messages for an address.
  */
 export async function unreadCount(address: string): Promise<number> {
-  const db = getPool();
+  const db = await getPool();
   const { rows } = await db.query<{ cnt: number }>(
     'SELECT COUNT(*) as cnt FROM agent_messages WHERE to_address = $1 AND read_at IS NULL',
     [address.toLowerCase()],

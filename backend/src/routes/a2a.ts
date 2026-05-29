@@ -478,6 +478,12 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
       },
     };
     res.json(body);
+
+    // Fire webhook for task assignment (non-blocking)
+    try {
+      const { fireWebhooks } = await import('../services/webhookStore.js');
+      fireWebhooks(address, 'task_assigned', { taskId, rootHash: meta.rootHash }).catch(() => {});
+    } catch { /* webhook module optional */ }
   } catch (err) {
     console.error(`[a2a] accept failed for ${req.params.id}:`, (err as Error).message);
     next(err);
