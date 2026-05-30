@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useAccount } from 'wagmi';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
+import { formatUnits } from 'ethers';
 import {
   Breadcrumb,
   PageHeader,
@@ -70,12 +71,31 @@ const STATUS_LABELS: Record<number, string> = {
   0: 'open', 1: 'assigned', 2: 'submitted', 3: 'verified', 4: 'completed', 5: 'cancelled', 6: 'disputed',
 };
 
-// Marketplace token is Native 0G — 18 decimals.
+// The marketplace settles every task in native 0G (18 decimals) on both
+// mainnet and testnet — see MARKETPLACE_TOKEN_ADDRESS in config/constants.ts.
+// If a whitelisted ERC-20 is ever added, this (and `sumRewards` below) must
+// switch on `onChain.token` for the right decimals/symbol.
+const NATIVE_DECIMALS = 18;
+const NATIVE_SYMBOL = '0G';
+
+// Convert a raw uint256 reward (wei, as string) to a 0G number. Uses
+// `formatUnits` rather than `Number(BigInt(raw)) / 1e18` because a single 0G is
+// 1e18 wei, which exceeds Number.MAX_SAFE_INTEGER (~9.007e15) — the old path
+// silently lost low-order digits for any amount ≳ 0.009 0G.
+function rewardToNumber(raw: string | undefined): number {
+  if (!raw) return 0;
+  try {
+    return Number(formatUnits(BigInt(raw), NATIVE_DECIMALS));
+  } catch {
+    return 0;
+  }
+}
+
 function formatReward(raw: string | undefined) {
   if (!raw) return '—';
   try {
-    const n = Number(BigInt(raw)) / 1e18;
-    return `${n.toLocaleString(undefined, { maximumFractionDigits: 4 })} 0G`;
+    const n = rewardToNumber(raw);
+    return `${n.toLocaleString(undefined, { maximumFractionDigits: 4 })} ${NATIVE_SYMBOL}`;
   } catch {
     return raw;
   }
@@ -157,14 +177,17 @@ export default function MyTasks() {
       return true;
     })
     .sort((a, b) => {
-      const getReward = (t: PostedTask) => (t.onChain ? Number(BigInt(t.onChain.reward)) : 0);
+      // Compare rewards as BigInt — they're uint256 wei, well past the safe
+      // integer range, so Number() coercion could mis-order near-equal amounts.
+      const rewardWei = (t: PostedTask) => (t.onChain ? BigInt(t.onChain.reward) : 0n);
+      const cmpWei = (x: bigint, y: bigint) => (x < y ? -1 : x > y ? 1 : 0);
       const getCreatedAt = (t: PostedTask) => Number(t.onChain?.createdAt || t.state.acceptedAt || 0);
-      
+
       switch (sort) {
         case 'newest': return getCreatedAt(b) - getCreatedAt(a);
         case 'oldest': return getCreatedAt(a) - getCreatedAt(b);
-        case 'highest-reward': return getReward(b) - getReward(a);
-        case 'lowest-reward': return getReward(a) - getReward(b);
+        case 'highest-reward': return cmpWei(rewardWei(b), rewardWei(a));
+        case 'lowest-reward': return cmpWei(rewardWei(a), rewardWei(b));
         default: return 0;
       }
     });
@@ -172,9 +195,18 @@ export default function MyTasks() {
   const openCount = tasks.filter(t => effectiveStatus(t) === 0).length;
   const activeCount = tasks.filter(t => [1, 2].includes(effectiveStatus(t))).length;
   const completedCount = tasks.filter(t => effectiveStatus(t) === 4).length;
-  const totalSpent = tasks
-    .filter(t => effectiveStatus(t) === 4)
-    .reduce((s, t) => s + (t.onChain ? Number(BigInt(t.onChain.reward)) / 1e18 : 0), 0);
+  // "Total spent" = gross 0G that has irreversibly left the poster — i.e. the
+  // full escrowed amount (worker share + 15% platform fee) of tasks that
+  // reached on-chain status Completed (4). Active/open tasks are deliberately
+  // excluded: their escrow is still refundable on cancel/timeout/dispute, so it
+  // isn't "spent" yet. Summed as BigInt wei, then formatted once, to avoid the
+  // per-task Number() precision loss above 0.009 0G.
+  const completedTasks = tasks.filter(t => effectiveStatus(t) === 4);
+  const totalSpentWei = completedTasks.reduce(
+    (s, t) => s + (t.onChain ? BigInt(t.onChain.reward) : 0n),
+    0n,
+  );
+  const totalSpent = Number(formatUnits(totalSpentWei, NATIVE_DECIMALS));
 
   const FILTERS: { id: 'all' | 'open' | 'active' | 'completed'; label: string }[] = [
     { id: 'all', label: 'All' },
@@ -206,7 +238,7 @@ export default function MyTasks() {
         <StatCard label="Open" value={String(openCount)} sub="Awaiting worker" />
         <div className="border-l border-line"><StatCard label="Active" value={String(activeCount)} sub="In progress" subColor="warn" /></div>
         <div className="border-t border-l-0 sm:border-t-0 sm:border-l border-line"><StatCard label="Completed" value={String(completedCount)} sub="All time" subColor="ok" /></div>
-        <div className="border-t border-l border-line sm:border-t-0"><StatCard label="Total spent" value={`${totalSpent.toLocaleString(undefined, { maximumFractionDigits: 2 })} 0G`} sub="Native 0G paid out" /></div>
+        <div className="border-t border-l border-line sm:border-t-0"><StatCard label="Total spent" value={`${totalSpent.toLocaleString(undefined, { maximumFractionDigits: 4 })} ${NATIVE_SYMBOL}`} sub="Paid out on completed tasks" /></div>
       </div>
 
       <div className="border border-line">
