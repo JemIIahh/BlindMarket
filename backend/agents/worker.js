@@ -112,13 +112,6 @@ const DELEGATE_REWARD_OG = process.env.DELEGATE_REWARD_OG ?? '0.0001';
 // it can still pay gas for its own submitEvidence on the task it's working.
 const DELEGATE_GAS_RESERVE_OG = process.env.DELEGATE_GAS_RESERVE_OG ?? '0.005';
 
-// 0G Compute Router — when set, inference routes through 0G instead of direct API.
-// The Router is OpenAI-compatible: same SDK, different base URL + API key.
-// Every response is TEE-signed for on-chain verifiability.
-const OG_COMPUTE_ROUTER_API_KEY = process.env.OG_COMPUTE_ROUTER_API_KEY ?? '';
-const OG_COMPUTE_ROUTER_BASE_URL = process.env.OG_COMPUTE_ROUTER_BASE_URL ?? 'https://router-api.0g.ai/v1';
-const OG_COMPUTE_ENABLED = !!OG_COMPUTE_ROUTER_API_KEY;
-
 // ── Logging helpers ──────────────────────────────────────────────────────
 
 function nowStamp() {
@@ -244,15 +237,6 @@ try {
 }
 
 function getModel() {
-  // 0G Compute Router mode: route through 0G instead of direct API.
-  // The Router is OpenAI-compatible — just swap base URL + API key.
-  // All inference responses are TEE-signed (ZG-Res-Key header).
-  if (OG_COMPUTE_ENABLED) {
-    return createOpenAI({
-      apiKey: OG_COMPUTE_ROUTER_API_KEY,
-      baseURL: OG_COMPUTE_ROUTER_BASE_URL,
-    })(AGENT_MODEL);
-  }
   switch (AGENT_PROVIDER) {
     case 'anthropic': return createAnthropic({ apiKey: AGENT_API_KEY })(AGENT_MODEL);
     case 'groq': return createGroq({ apiKey: AGENT_API_KEY })(AGENT_MODEL);
@@ -261,7 +245,7 @@ function getModel() {
   }
 }
 
-log(`started | provider=${AGENT_PROVIDER} model=${AGENT_MODEL} tools=${agentTools.length}${OG_COMPUTE_ENABLED ? ' | 0G Compute Router ENABLED' : ''}`);
+log(`started | provider=${AGENT_PROVIDER} model=${AGENT_MODEL} tools=${agentTools.length}`);
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -845,26 +829,8 @@ async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrapp
     let text = '';
     let llmElapsed = '0.0';
     let toolCalls = [];
-    let teeAttestation = null; // { chatId, verified, timestamp }
-    const origFetch = globalThis.fetch;
 
     try {
-      // When running on 0G Compute Router, intercept fetch to capture the
-      // TEE signature (ZG-Res-Key header) from the inference response.
-      // The AI SDK doesn't expose raw HTTP headers, so we hook fetch.
-      let capturedTeeKey = null;
-      if (OG_COMPUTE_ENABLED) {
-        globalThis.fetch = async (...args) => {
-          const res = await origFetch(...args);
-          const clone = res.clone();
-          try {
-            const zgKey = res.headers.get('zg-res-key') || res.headers.get('ZG-Res-Key');
-            if (zgKey) capturedTeeKey = zgKey;
-          } catch { /* header access may fail on some environments */ }
-          return clone;
-        };
-      }
-
       const result = await generateText({
         model: getModel(),
         system: `[IDENTITY]\n${AGENT_INSTRUCTIONS}\n\n[CAPABILITIES]\nYou have access to tools. If you use a tool, you must synthesize the results into a final text summary for the user. Do not simply output the raw tool result.`,
@@ -872,9 +838,6 @@ async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrapp
         tools: buildTools(acceptedTaskHash),
         maxSteps: 10,
       });
-
-      // Restore original fetch
-      if (OG_COMPUTE_ENABLED) globalThis.fetch = origFetch;
 
       text = result.text;
       llmElapsed = ((Date.now() - llmStartedAt) / 1000).toFixed(1);
@@ -902,38 +865,6 @@ async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrapp
         }
       }
 
-      // Capture TEE attestation from 0G Compute Router response.
-      // The ZG-Res-Key header contains a chatID that can be verified
-      // against the provider's TEE signature via the broker SDK.
-      if (OG_COMPUTE_ENABLED && capturedTeeKey) {
-        teeAttestation = { chatId: capturedTeeKey, verified: false, timestamp: Date.now() };
-        log(`0G Compute TEE: captured ZG-Res-Key=${capturedTeeKey.slice(0, 16)}…`);
-
-        // Verify TEE signature via broker SDK if available
-        try {
-          const { createRequire } = await import('module');
-          const req = createRequire(import.meta.url);
-          const mod = req('@0gfoundation/0g-compute-ts-sdk');
-          const createBroker = mod.createZGComputeNetworkBroker;
-          const { ethers } = await import('ethers');
-          const provider = new ethers.JsonRpcProvider(process.env.OG_COMPUTE_RPC_URL ?? 'https://evmrpc-testnet.0g.ai');
-          const wallet = new ethers.Wallet(process.env.OG_COMPUTE_PRIVATE_KEY ?? '', provider);
-          const broker = await createBroker(wallet);
-          // List services to find the provider address
-          const services = await broker.inference.listService();
-          if (services?.length > 0) {
-            const svc = services[0];
-            const providerAddr = svc.provider || svc.providerAddress;
-            if (providerAddr) {
-              teeAttestation.verified = await broker.inference.processResponse(providerAddr, capturedTeeKey);
-              log(`0G Compute TEE: verification ${teeAttestation.verified ? 'PASSED' : 'FAILED'}`);
-            }
-          }
-        } catch (teeErr) {
-          log(`0G Compute TEE: verification error — ${teeErr.message}`);
-        }
-      }
-
       if (text.length === 0 && toolCalls.length === 0) {
         log(`WARNING: LLM returned an empty string with no tool calls. Final result object: ${JSON.stringify({
           finishReason: result.finishReason,
@@ -947,8 +878,6 @@ async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrapp
         log(`LLM response: "${text.slice(0, 200)}${text.length > 200 ? '…' : ''}"`);
       }
     } catch (llmErr) {
-      // Restore fetch if we intercepted it
-      if (OG_COMPUTE_ENABLED && globalThis.fetch !== origFetch) globalThis.fetch = origFetch;
       log(`LLM ERROR for ${acceptedTaskHash.slice(0, 10)}…: ${llmErr.message}`);
       if (llmErr.stack) log(`LLM Stack: ${llmErr.stack.split('\n').slice(0, 3).join(' | ')}`);
       text = `Error during LLM execution: ${llmErr.message}`;
@@ -957,7 +886,7 @@ async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrapp
     // Ensure we don't submit a completely empty string which might be
     // misinterpreted as a bug or missing data in the UI.
     const finalOutput = text.trim() || `Task completed by agent ${AGENT_ID} (no text output generated by model).`;
-    const resultData = { output: finalOutput, agent: AGENT_ID, ...(teeAttestation ? { teeAttestation } : {}) };
+    const resultData = { output: finalOutput, agent: AGENT_ID };
 
     log(`submitting task ${acceptedTaskHash.slice(0, 10)}…`);
     // Retry the /submit call on transient backend-side gates:

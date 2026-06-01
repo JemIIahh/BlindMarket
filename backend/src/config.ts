@@ -63,12 +63,6 @@ export const config = {
   // RPC for compute network (defaults to testnet)
   ogComputeRpcUrl: optional('OG_COMPUTE_RPC_URL', 'https://evmrpc-testnet.0g.ai'),
 
-  // 0G Compute Router — routes agent inference through 0G instead of direct API.
-  // When OG_COMPUTE_ROUTER_API_KEY is set, workers use the 0G Router (OpenAI-compatible)
-  // for LLM inference. Every response is TEE-signed for on-chain verifiability.
-  ogComputeRouterApiKey: process.env.OG_COMPUTE_ROUTER_API_KEY || '',
-  ogComputeRouterBaseUrl: optional('OG_COMPUTE_ROUTER_BASE_URL', 'https://router-api.0g.ai/v1'),
-
   // Key custody / late-joiner re-wrap (docs/TEE-REWRAP-SPEC.md). DEFAULT OFF.
   // When enabled, posters seal the brief AES key to a platform-held custody key
   // so an agent that registers AFTER a task was posted can be served a

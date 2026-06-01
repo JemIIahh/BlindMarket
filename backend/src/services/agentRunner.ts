@@ -155,11 +155,6 @@ export async function startAgent(id: string): Promise<void> {
       BACKEND_URL: `http://localhost:${config.port}`,
       AGENT_TOOLS: JSON.stringify(agent.tools ?? []),
       AGENT_CAPABILITIES: JSON.stringify(agent.capabilities ?? []),
-      // 0G Compute Router — routes inference through 0G for TEE-signed responses
-      OG_COMPUTE_ROUTER_API_KEY: config.ogComputeRouterApiKey,
-      OG_COMPUTE_ROUTER_BASE_URL: config.ogComputeRouterBaseUrl,
-      OG_COMPUTE_PRIVATE_KEY: config.ogComputePrivateKey,
-      OG_COMPUTE_RPC_URL: config.ogComputeRpcUrl,
     },
     silent: true,
   });
