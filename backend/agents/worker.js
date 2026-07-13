@@ -1219,12 +1219,16 @@ async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrapp
             log(`[thought ${si + 1}/${result.steps.length}] ${stepText.slice(0, 500)}${stepText.length > 500 ? '…' : ''}`);
           }
           for (const tc of step.toolCalls || []) {
-            const args = tc.args ? JSON.stringify(tc.args) : (tc.input ? JSON.stringify(tc.input) : '');
+            // AI SDK v5 tool-call args live on .input (v4's .args no longer exists
+            // on TypedToolCall — accessing it failed typecheck:agents).
+            const args = tc.input ? JSON.stringify(tc.input) : '';
             log(`[tool ${si + 1}] ${tc.toolName}(${args.length > 100 ? args.slice(0, 100) + '…' : args})`);
           }
           for (const tr of step.toolResults || []) {
-            let resultStr = typeof tr.result === 'string' ? tr.result : JSON.stringify(tr.result);
-            if (!resultStr) resultStr = String(tr.result);
+            // AI SDK v5 tool-result payload is .output (v4's .result no longer
+            // exists — the old code both failed typecheck AND logged "undefined").
+            let resultStr = typeof tr.output === 'string' ? tr.output : JSON.stringify(tr.output);
+            if (!resultStr) resultStr = String(tr.output);
             log(`[result ${si + 1}] ${resultStr.slice(0, 200)}${resultStr.length > 200 ? '…' : ''}`);
           }
         }
