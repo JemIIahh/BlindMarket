@@ -262,9 +262,10 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
             IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
         }
 
-        // Publish to TaskRegistry if connected
+        // Publish to TaskRegistry if connected. Optional bookkeeping — a paused or
+        // reverting registry must not block task creation (funds are escrowed above).
         if (address(taskRegistry) != address(0)) {
-            taskRegistry.publishTask(taskId, msg.sender, category, locationZone, amount);
+            try taskRegistry.publishTask(taskId, msg.sender, category, locationZone, amount) {} catch {}
         }
 
         emit TaskCreated(taskId, msg.sender, token, amount, taskHash, category, locationZone, deadline);
@@ -294,9 +295,9 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         t.worker = worker;
         t.status = TaskStatus.Assigned;
 
-        // Close listing on TaskRegistry
+        // Close listing on TaskRegistry (optional — must not block assignment)
         if (address(taskRegistry) != address(0)) {
-            taskRegistry.closeTask(taskId);
+            try taskRegistry.closeTask(taskId) {} catch {}
         }
 
         emit WorkerAssigned(taskId, worker);
@@ -322,8 +323,9 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         t.status = TaskStatus.Assigned;
 
         // Close listing on TaskRegistry — same downstream effect as assignWorker
+        // (optional — must not block a marketplace assignment)
         if (address(taskRegistry) != address(0)) {
-            taskRegistry.closeTask(taskId);
+            try taskRegistry.closeTask(taskId) {} catch {}
         }
 
         emit WorkerAssigned(taskId, worker);
@@ -387,9 +389,10 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
             _transferPayout(t.token, t.worker, payout);
             _transferPayout(t.token, treasury, fee);
 
-            // Record reputation if connected
+            // Record reputation if connected (optional — the worker is already
+            // paid above; a reverting/paused reputation contract must not undo it).
             if (address(reputationContract) != address(0)) {
-                reputationContract.rate(t.worker, 5, taskId);
+                try reputationContract.rate(t.worker, 5, taskId) {} catch {}
             }
 
             emit TaskCompleted(taskId, payout, fee);
@@ -397,9 +400,9 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
             // Failed verification — worker can retry if attempts remain
             t.status = TaskStatus.Verified;
 
-            // Record dispute if max attempts reached
+            // Record dispute if max attempts reached (optional bookkeeping)
             if (t.submissionAttempts >= MAX_SUBMISSION_ATTEMPTS && address(reputationContract) != address(0)) {
-                reputationContract.recordDispute(t.worker, taskId);
+                try reputationContract.recordDispute(t.worker, taskId) {} catch {}
             }
         }
     }
@@ -417,9 +420,9 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         // Interactions
         _transferPayout(t.token, t.agent, t.amount);
 
-        // Close listing if connected
+        // Close listing if connected (optional — must not block the refund)
         if (address(taskRegistry) != address(0)) {
-            taskRegistry.closeTask(taskId);
+            try taskRegistry.closeTask(taskId) {} catch {}
         }
 
         emit TaskCancelled(taskId, t.amount);
@@ -463,6 +466,12 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         bool canDispute = t.status == TaskStatus.Submitted || t.status == TaskStatus.Verified;
         if (!canDispute) revert InvalidStatus(t.status, TaskStatus.Submitted);
 
+        // After the deadline the agent's claimTimeout refund is the guaranteed
+        // exit. A party must not be able to raise a NEW dispute post-deadline to
+        // move the task to Disputed (which claimTimeout cannot recover) purely to
+        // freeze the escrow and block that refund — a griefing / fund-lock vector.
+        if (block.timestamp >= t.deadline) revert DeadlineReached();
+
         t.status = TaskStatus.Disputed;
         emit TaskDisputed(taskId, msg.sender);
     }
@@ -483,7 +492,8 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
             _transferPayout(t.token, treasury, fee);
 
             if (address(reputationContract) != address(0)) {
-                reputationContract.rate(t.worker, 3, taskId); // neutral score for disputed completion
+                // neutral score for disputed completion (optional — worker already paid)
+                try reputationContract.rate(t.worker, 3, taskId) {} catch {}
             }
 
             emit DisputeResolved(taskId, true);
@@ -494,7 +504,8 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
             _transferPayout(t.token, t.agent, t.amount);
 
             if (address(reputationContract) != address(0)) {
-                reputationContract.recordDispute(t.worker, taskId);
+                // optional bookkeeping — the agent is already refunded above
+                try reputationContract.recordDispute(t.worker, taskId) {} catch {}
             }
 
             emit DisputeResolved(taskId, false);
