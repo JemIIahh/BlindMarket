@@ -101,10 +101,9 @@ contract INFT is ERC721, Ownable, ReentrancyGuard {
         _metadataHashes[tokenId] = newHash;
         _encryptedURIs[tokenId] = newURI;
 
-        // Invalidate every usage authorization granted by the previous owner —
-        // a stale grant must not survive a change of ownership.
-        _tokenAuthNonce[tokenId]++;
-
+        // Authorization invalidation is handled centrally in _update() below, which
+        // fires for THIS transfer and for the inherited ERC721 transferFrom /
+        // safeTransferFrom paths too — so no stale grant can survive any transfer.
         _transfer(from, to, tokenId);
         emit MetadataUpdated(tokenId, newHash, newURI);
     }
@@ -153,6 +152,27 @@ contract INFT is ERC721, Ownable, ReentrancyGuard {
         require(ownerOf(tokenId) == msg.sender, "Not owner");
         delete _authorizations[tokenId][executor];
         emit UsageRevoked(tokenId, executor);
+    }
+
+    // ── Transfer hook (invalidate usage authorizations on EVERY transfer) ──────
+
+    /**
+     * @dev OZ v5 routes all mints/transfers/burns through _update. Bumping the
+     *      token's auth nonce here invalidates every prior usage authorization on
+     *      any real ownership change — including the inherited public
+     *      transferFrom / safeTransferFrom, which would otherwise bypass the
+     *      per-function bump. Skipped on mint (previous owner == address(0)).
+     */
+    function _update(address to, uint256 tokenId, address auth)
+        internal
+        override
+        returns (address)
+    {
+        address from = super._update(to, tokenId, auth);
+        if (from != address(0)) {
+            _tokenAuthNonce[tokenId]++;
+        }
+        return from;
     }
 
     // ── Views ─────────────────────────────────────────────────────────────────
