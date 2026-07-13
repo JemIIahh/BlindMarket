@@ -41,6 +41,11 @@ describe("ValidatorPool", function () {
 
     const MockEscrow = await ethers.getContractFactory("MockEscrow");
     mockEscrow = await MockEscrow.deploy();
+
+    // #24: openDispute is now allow-listed to specific escrows. Authorize the
+    // escrow signer and the beforeEach MockEscrow so the dispute tests can open.
+    await pool.connect(admin).setAuthorizedEscrow(escrow.address, true);
+    await pool.connect(admin).setAuthorizedEscrow(await mockEscrow.getAddress(), true);
   });
 
   // ── Registration ──────────────────────────────────────────────────────────
@@ -118,6 +123,32 @@ describe("ValidatorPool", function () {
       expect(d.taskId).to.equal(TASK_ID);
       expect(d.finalized).to.be.false;
     });
+
+    it("reverts openDispute from an unauthorized caller (#24)", async () => {
+      await expect(pool.connect(stranger).openDispute(TASK_ID, await token.getAddress(), AMOUNT))
+        .to.be.revertedWithCustomError(pool, "OnlyEscrow");
+    });
+  });
+
+  describe("stake lock — anti-slash-dodge (#10)", () => {
+    it("blocks unstake while a voted dispute is open, releases it after finalize", async () => {
+      await registerAll();
+      const dId = await openDispute();
+      await pool.connect(v1).vote(dId, 1);
+
+      // v1 has skin in an unresolved dispute — must not be able to withdraw its
+      // stake to escape a potential slash.
+      await expect(pool.connect(v1).unstake())
+        .to.be.revertedWithCustomError(pool, "StakeLocked");
+      // A validator who did not vote is unaffected.
+      await expect(pool.connect(v2).unstake()).to.not.be.reverted;
+
+      await time.increase(VOTE_WINDOW + 1);
+      await pool.finalizeDispute(dId);
+
+      // Lock released on finalize — v1 can now unstake its remaining stake.
+      await expect(pool.connect(v1).unstake()).to.not.be.reverted;
+    });
   });
 
   describe("vote", () => {
@@ -184,6 +215,7 @@ describe("ValidatorPool", function () {
     const meAddr = await me.getAddress();
     await ethers.provider.send("hardhat_impersonateAccount", [meAddr]);
     await ethers.provider.send("hardhat_setBalance", [meAddr, "0x1000000000000000000"]);
+    await pool.connect(admin).setAuthorizedEscrow(meAddr, true); // #24
     const meSigner = await ethers.getSigner(meAddr);
     const tx = await pool.connect(meSigner).openDispute(TASK_ID, await token.getAddress(), AMOUNT);
     const receipt = await tx.wait();

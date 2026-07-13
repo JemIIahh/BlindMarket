@@ -67,6 +67,15 @@ contract ValidatorPool is ReentrancyGuard {
     // taskId → disputeId
     mapping(uint256 => uint256) public taskDispute;
 
+    // Escrows the admin has allow-listed to open disputes. Without this,
+    // openDispute() is permissionless and anyone can spam bogus disputes.
+    mapping(address => bool) public authorizedEscrows;
+
+    // Count of not-yet-finalized disputes a validator has voted in. A validator
+    // cannot unstake while this is nonzero, so they can't withdraw their stake to
+    // dodge slashing after seeing which way a vote is going.
+    mapping(address => uint256) public lockedInDisputes;
+
     // ── Events ──
 
     event ValidatorRegistered(address indexed validator, uint256 stake);
@@ -76,6 +85,7 @@ contract ValidatorPool is ReentrancyGuard {
     event DisputeFinalized(uint256 indexed disputeId, bool workerFavored, uint256 workerVotes, uint256 agentVotes);
     event RewardPaid(address indexed validator, uint256 amount);
     event Slashed(address indexed validator, uint256 amount);
+    event EscrowAuthorized(address indexed escrow, bool allowed);
 
     // ── Errors ──
 
@@ -90,6 +100,7 @@ contract ValidatorPool is ReentrancyGuard {
     error AlreadyFinalized();
     error NotEnoughVotes();
     error OnlyEscrow();
+    error StakeLocked();
 
     // ── Constructor ──
 
@@ -115,6 +126,10 @@ contract ValidatorPool is ReentrancyGuard {
     function unstake() external nonReentrant {
         Validator storage v = validators[msg.sender];
         if (!v.active) revert NotValidator();
+        // Can't withdraw while a dispute you voted in is still open — otherwise a
+        // validator watches the tally and unstakes before finalizeDispute() to
+        // escape slashing (finalize slashes against current stake, which is 0).
+        if (lockedInDisputes[msg.sender] != 0) revert StakeLocked();
 
         uint256 amount = v.stake;
         v.stake = 0;
@@ -126,13 +141,23 @@ contract ValidatorPool is ReentrancyGuard {
 
     // ── Dispute Lifecycle ──
 
+    /// @notice Admin allow-lists (or removes) an escrow permitted to open disputes.
+    function setAuthorizedEscrow(address escrow, bool allowed) external {
+        if (msg.sender != admin) revert NotAdmin();
+        authorizedEscrows[escrow] = allowed;
+        emit EscrowAuthorized(escrow, allowed);
+    }
+
     /**
-     * @notice Called by BlindEscrow when a dispute is raised.
+     * @notice Called by an allow-listed BlindEscrow when a dispute is raised.
      * @param taskId  The disputed task ID.
      * @param token   The payment token (used for reward distribution).
      * @param amount  The escrowed amount.
      */
     function openDispute(uint256 taskId, address token, uint256 amount) external returns (uint256 disputeId) {
+        // Only an allow-listed BlindEscrow may open disputes. The declared
+        // OnlyEscrow error was previously unused, leaving this permissionless.
+        if (!authorizedEscrows[msg.sender]) revert OnlyEscrow();
         disputeId = nextDisputeId++;
         Dispute storage d = disputes[disputeId];
         d.taskId    = taskId;
@@ -160,6 +185,8 @@ contract ValidatorPool is ReentrancyGuard {
 
         d.votes[msg.sender] = voteFor;
         d.voters.push(msg.sender);
+        // Lock this validator's stake until the dispute is finalized.
+        lockedInDisputes[msg.sender]++;
 
         if (voteFor == Vote.Worker) d.workerVotes++;
         else d.agentVotes++;
@@ -178,21 +205,27 @@ contract ValidatorPool is ReentrancyGuard {
         if (d.finalized) revert AlreadyFinalized();
         if (block.timestamp <= d.openedAt + VOTE_WINDOW) revert VoteWindowOpen();
 
+        // Mark finalized up front (CEI: no external call happens before this).
+        d.finalized = true;
+
         uint256 totalVotes = d.workerVotes + d.agentVotes;
         if (totalVotes < MIN_VOTES) {
-            // Not enough participation — admin resolves manually
-            d.finalized = true;
+            // Not enough participation — admin resolves manually. Release every
+            // voter's stake lock; no slashing occurs.
+            for (uint256 i = 0; i < d.voters.length; i++) {
+                lockedInDisputes[d.voters[i]]--;
+            }
             emit DisputeFinalized(disputeId, false, d.workerVotes, d.agentVotes);
             return;
         }
 
         bool workerFavored = d.workerVotes >= d.agentVotes;
-        d.finalized = true;
         d.workerFavored = workerFavored;
-
         Vote winningVote = workerFavored ? Vote.Worker : Vote.Agent;
 
-        // Collect slash amounts from wrong voters
+        // Collect slash amounts from wrong voters. Their stake is guaranteed
+        // intact: unstake() is blocked while lockedInDisputes > 0, so a voter can
+        // never withdraw between voting and finalization to dodge the slash.
         uint256 slashPool = 0;
         for (uint256 i = 0; i < d.voters.length; i++) {
             address v = d.voters[i];
@@ -204,25 +237,26 @@ contract ValidatorPool is ReentrancyGuard {
             }
         }
 
-        // Count correct voters for reward split
         uint256 correctCount = workerFavored ? d.workerVotes : d.agentVotes;
+        uint256 rewardEach = (correctCount > 0 && slashPool > 0) ? slashPool / correctCount : 0;
 
-        // Reward = slash pool + REWARD_BPS of task amount (pulled from escrow fee)
-        // For simplicity: split slash pool equally among correct voters
-        if (correctCount > 0 && slashPool > 0) {
-            uint256 rewardEach = slashPool / correctCount;
-            for (uint256 i = 0; i < d.voters.length; i++) {
-                address v = d.voters[i];
-                if (d.votes[v] == winningVote && rewardEach > 0) {
+        // Reward correct voters, tally participation, and release EVERY voter's
+        // stake lock. This loop must run for all voters regardless of the reward
+        // split — otherwise locks would leak and those stakes freeze forever.
+        for (uint256 i = 0; i < d.voters.length; i++) {
+            address v = d.voters[i];
+            if (d.votes[v] == winningVote) {
+                if (rewardEach > 0) {
                     validators[v].stake += rewardEach;
-                    validators[v].correctVotes++;
                     emit RewardPaid(v, rewardEach);
                 }
-                validators[v].totalVotes++;
+                validators[v].correctVotes++;
             }
+            validators[v].totalVotes++;
+            lockedInDisputes[v]--;
         }
 
-        // Callback to BlindEscrow
+        // Callback to BlindEscrow (d.finalized already set; nonReentrant guards reentry)
         IBlindEscrowDispute(d.escrow).resolveDispute(d.taskId, workerFavored);
 
         emit DisputeFinalized(disputeId, workerFavored, d.workerVotes, d.agentVotes);
