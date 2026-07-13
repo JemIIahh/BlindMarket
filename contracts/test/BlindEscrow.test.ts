@@ -557,6 +557,17 @@ describe("BlindEscrow", function () {
       await expect(tx).to.emit(escrow, "TaskDisputed").withArgs(1, agent.address);
     });
 
+    it("should reject raiseDispute after the deadline and not block claimTimeout (#14)", async function () {
+      await time.increase(ONE_WEEK + 1);
+      // Neither party can raise a NEW dispute post-deadline to freeze the escrow.
+      await expect(escrow.connect(worker).raiseDispute(1))
+        .to.be.revertedWithCustomError(escrow, "DeadlineReached");
+      await expect(escrow.connect(agent).raiseDispute(1))
+        .to.be.revertedWithCustomError(escrow, "DeadlineReached");
+      // The agent's guaranteed timeout refund still works.
+      await expect(escrow.connect(agent).claimTimeout(1)).to.not.be.reverted;
+    });
+
     it("should allow worker to raise dispute after failed verification", async function () {
       await escrow.connect(verifier).completeVerification(1, false);
       await escrow.connect(worker).raiseDispute(1);
