@@ -86,6 +86,7 @@ contract ValidatorPool is ReentrancyGuard {
     event RewardPaid(address indexed validator, uint256 amount);
     event Slashed(address indexed validator, uint256 amount);
     event EscrowAuthorized(address indexed escrow, bool allowed);
+    event EscrowCallbackFailed(uint256 indexed disputeId, address escrow);
 
     // ── Errors ──
 
@@ -142,6 +143,11 @@ contract ValidatorPool is ReentrancyGuard {
     // ── Dispute Lifecycle ──
 
     /// @notice Admin allow-lists (or removes) an escrow permitted to open disputes.
+    /// @dev Admin MUST allow-list only a real BlindEscrow *contract*. Authorizing
+    ///      an EOA would make finalizeDispute's callback revert outside the
+    ///      try/catch (the extcodesize existence check runs in the caller frame)
+    ///      and re-freeze voter stakes — an operator-error residual, not guarded
+    ///      on-chain to keep the setter minimal.
     function setAuthorizedEscrow(address escrow, bool allowed) external {
         if (msg.sender != admin) revert NotAdmin();
         authorizedEscrows[escrow] = allowed;
@@ -256,8 +262,14 @@ contract ValidatorPool is ReentrancyGuard {
             lockedInDisputes[v]--;
         }
 
-        // Callback to BlindEscrow (d.finalized already set; nonReentrant guards reentry)
-        IBlindEscrowDispute(d.escrow).resolveDispute(d.taskId, workerFavored);
+        // Callback to BlindEscrow. WRAPPED: every pool-side effect above (slashing,
+        // rewards, lock release, d.finalized) is already committed under CEI, so a
+        // reverting escrow must NOT revert finalize — otherwise the lock releases
+        // roll back and all voters' stakes freeze forever. (Notably resolveDispute
+        // is onlyAdmin: the pool cannot call it until an admin/role wiring exists,
+        // so it WOULD revert today.) Surface the failure for manual resolution.
+        try IBlindEscrowDispute(d.escrow).resolveDispute(d.taskId, workerFavored) {}
+        catch { emit EscrowCallbackFailed(disputeId, d.escrow); }
 
         emit DisputeFinalized(disputeId, workerFavored, d.workerVotes, d.agentVotes);
     }
