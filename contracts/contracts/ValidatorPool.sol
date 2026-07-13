@@ -28,6 +28,9 @@ contract ValidatorPool is ReentrancyGuard {
     uint256 public constant SLASH_BPS        = 1000;    // 10% slashed from wrong voters
     uint256 public constant REWARD_BPS       = 500;     // 5% of dispute amount to correct voters
     uint256 public constant MIN_VOTES        = 3;       // minimum votes to be valid
+    uint256 public constant MAX_VOTERS       = 64;      // cap per dispute so finalizeDispute's
+                                                        // voter loops can never exceed block gas
+                                                        // (a stuck finalize would freeze stakes)
 
     // ── Types ──
 
@@ -102,6 +105,7 @@ contract ValidatorPool is ReentrancyGuard {
     error NotEnoughVotes();
     error OnlyEscrow();
     error StakeLocked();
+    error TooManyVoters();
 
     // ── Constructor ──
 
@@ -188,6 +192,10 @@ contract ValidatorPool is ReentrancyGuard {
         if (block.timestamp > d.openedAt + VOTE_WINDOW) revert VoteWindowClosed();
         if (!validators[msg.sender].active) revert NotValidator();
         if (d.votes[msg.sender] != Vote.None) revert AlreadyVoted();
+        // Bound the panel so finalizeDispute's O(voters) loops always fit in a
+        // block — otherwise a flood of sybil voters could make finalize
+        // permanently un-callable and freeze every voter's locked stake.
+        if (d.voters.length >= MAX_VOTERS) revert TooManyVoters();
 
         d.votes[msg.sender] = voteFor;
         d.voters.push(msg.sender);
