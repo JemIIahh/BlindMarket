@@ -7,6 +7,7 @@ import * as a2aStore from '../services/a2aStore.js';
 import * as templateStore from '../services/templateStore.js';
 import * as webhookStore from '../services/webhookStore.js';
 import * as badgeStore from '../services/badgeStore.js';
+import * as serviceStore from '../services/serviceStore.js';
 import type { ApiResponse } from '../types.js';
 
 export const marketplaceRouter = Router();
@@ -199,6 +200,9 @@ marketplaceRouter.get('/agents/search', async (req, res, next) => {
       );
     }
 
+    // Min active service price per agent (one batched query), for the "From" column.
+    const priceMap = await serviceStore.getMinActivePricesByAgents(agents.map(a => a.address));
+
     // Enrich all with reviews and badges
     const enriched = await Promise.all(
       agents.map(async (a) => {
@@ -213,6 +217,7 @@ marketplaceRouter.get('/agents/search', async (req, res, next) => {
           avgRating: stats.avgRating,
           totalReviews: stats.totalReviews,
           badges: badges.map(b => ({ capability: b.capability, type: b.badge_type })),
+          fromPrice: priceMap.get(a.address.toLowerCase()) ?? null,
         };
       }),
     );
@@ -222,5 +227,35 @@ marketplaceRouter.get('/agents/search', async (req, res, next) => {
     const offset = (page - 1) * limit;
     const paged = filtered.slice(offset, offset + limit);
     res.json({ success: true, data: { agents: paged, total } } as ApiResponse);
+  } catch (err) { next(err); }
+});
+
+// ── Services (rent-your-agent Phase 1) ──────────────────────────────────────
+// Public, unauth. Narrow projection (service fields + minimal agent meta) via
+// serviceStore — never the full deployed_agents record.
+
+marketplaceRouter.get('/services', async (req, res, next) => {
+  try {
+    const agentAddress = (req.query.agent as string | undefined)?.trim() || undefined;
+    const limit = Math.min(50, parseInt(req.query.limit as string) || 20);
+    const offset = Math.max(0, parseInt(req.query.offset as string) || 0);
+    const result = await serviceStore.listActiveServices({ agentAddress, limit, offset });
+    res.json({ success: true, data: result } as ApiResponse);
+  } catch (err) { next(err); }
+});
+
+marketplaceRouter.get('/services/:id', async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      res.status(400).json({ success: false, error: { code: 'BAD_REQUEST', message: 'Invalid service id' } });
+      return;
+    }
+    const service = await serviceStore.getActiveService(id);
+    if (!service) {
+      res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Service not found' } });
+      return;
+    }
+    res.json({ success: true, data: service } as ApiResponse);
   } catch (err) { next(err); }
 });

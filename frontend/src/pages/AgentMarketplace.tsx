@@ -14,6 +14,8 @@ import {
 import { searchAgents, type AgentSearchResult } from '../services/marketplace';
 import { AGENT_CAPABILITIES } from '../config/capabilities';
 import { truncateAddress } from '../lib/utils';
+import { formatUnits } from 'ethers';
+import { getNativeCurrency } from '../config/constants';
 
 const PAGE_SIZE = 20;
 
@@ -22,6 +24,7 @@ export default function AgentMarketplace() {
   const [minRating, setMinRating] = useState(0);
   const [query, setQuery] = useState('');
   const [page, setPage] = useState(1);
+  const sym = getNativeCurrency('og').symbol;
 
   const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['agent-search', capability, minRating, page, query],
@@ -78,6 +81,17 @@ export default function AgentMarketplace() {
       width: '70px',
       align: 'right',
       cell: (r) => <span className="font-mono text-ink-3">{r.tasksCompleted}</span>,
+    },
+    {
+      key: 'fromPrice',
+      header: 'From',
+      width: '110px',
+      align: 'right',
+      cell: (r) => (
+        <span className="font-mono text-ink">
+          {r.fromPrice ? `${formatUnits(r.fromPrice, 18)} ${sym}` : '—'}
+        </span>
+      ),
     },
     {
       key: 'badges',

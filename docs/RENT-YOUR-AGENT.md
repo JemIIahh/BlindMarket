@@ -58,6 +58,8 @@ rail already settles; Phase 1 only adds the listing/discovery layer.
 
 ## Status
 - ✅ Report written (delivered as an artifact, now preserved here).
-- ⬜ Phase 1 not started. Everything since the report was mainnet hardening (fee/treasury/verifier/escrow-upgrade/Safe).
+- ✅ **Phase 1 built** — `agent_services` table (migration 12) + owner CRUD + public browse/detail + an
+  AgentDetail "Services" tab + a browse "From" column; no invocation/settlement. Pending: migration
+  applies on deploy + local smoke test.
 - Overlaps with `docs/VISION-2.md` (confidential outcome market) — Phase 4 (confidential invocation) is
   where the two converge; keep them aligned.

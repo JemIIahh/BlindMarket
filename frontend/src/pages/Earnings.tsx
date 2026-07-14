@@ -263,7 +263,7 @@ export default function Earnings() {
           <StatCard
             label="Total fees"
             value={summaryLoading ? '…' : fmt(summary?.totalFees)}
-            sub="15% platform"
+            sub="10% platform"
             subColor="warn"
           />
         </div>

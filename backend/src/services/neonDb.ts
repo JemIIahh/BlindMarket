@@ -272,6 +272,30 @@ const migrations: Array<{ id: number; name: string; sql: string }> = [
       ALTER TABLE deployed_agents ADD COLUMN IF NOT EXISTS chain_type TEXT;
     `,
   },
+  {
+    id: 12,
+    name: 'agent_services',
+    sql: `
+      CREATE TABLE IF NOT EXISTS agent_services (
+        id SERIAL PRIMARY KEY,
+        agent_address TEXT NOT NULL,
+        owner_address TEXT NOT NULL,
+        name TEXT NOT NULL CHECK (char_length(name) BETWEEN 5 AND 60),
+        description TEXT NOT NULL DEFAULT '',
+        price_raw TEXT NOT NULL,
+        service_type TEXT NOT NULL DEFAULT 'api' CHECK (service_type IN ('api','a2a')),
+        active BOOLEAN NOT NULL DEFAULT true,
+        sold_count INTEGER NOT NULL DEFAULT 0,
+        avg_rating DOUBLE PRECISION NOT NULL DEFAULT 0,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_services_agent ON agent_services(agent_address);
+      CREATE INDEX IF NOT EXISTS idx_services_owner ON agent_services(owner_address);
+      CREATE INDEX IF NOT EXISTS idx_services_active ON agent_services(active) WHERE active = true;
+    `,
+  },
 ];
 
 async function runMigrations(p: pg.Pool): Promise<void> {

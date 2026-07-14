@@ -1,4 +1,4 @@
-import { get, authedGet, authedPost, authedDelete } from '../lib/api';
+import { get, authedGet, authedPost, authedPatch, authedDelete } from '../lib/api';
 
 export interface AgentSearchResult {
   address: string;
@@ -9,6 +9,27 @@ export interface AgentSearchResult {
   avgRating: number;
   totalReviews: number;
   badges: { capability: string; type: string }[];
+  fromPrice: string | null; // min active service price (wei) for the "From" column
+}
+
+/** A rentable service listing (rent-your-agent Phase 1). `agent_*` fields are
+ *  present only on the public projection. `price_raw` is per-call rent in wei. */
+export interface AgentService {
+  id: number;
+  agent_address: string;
+  owner_address: string;
+  name: string;
+  description: string;
+  price_raw: string;
+  service_type: 'api' | 'a2a';
+  active: boolean;
+  sold_count: number;
+  avg_rating: number;
+  created_at: string;
+  updated_at: string;
+  agent_name?: string | null;
+  agent_capabilities?: string[] | null;
+  agent_reputation?: number | null;
 }
 
 export interface AgentReview {
@@ -136,6 +157,45 @@ export async function deleteWebhook(id: number): Promise<void> {
 
 export async function getAgentBadges(agentAddress: string): Promise<AgentBadge[]> {
   return get<AgentBadge[]>(`/api/v1/marketplace/badges/${agentAddress}`);
+}
+
+// ── Agent services (rent-your-agent Phase 1) ────────────────────────────────
+
+/** Public: active services (all, or filtered to one agent's wallet address). */
+export async function listServices(
+  agentAddress?: string,
+): Promise<{ services: AgentService[]; total: number }> {
+  const qs = agentAddress ? `?agent=${encodeURIComponent(agentAddress)}` : '';
+  return get<{ services: AgentService[]; total: number }>(`/api/v1/marketplace/services${qs}`);
+}
+
+/** Public: a single active service. */
+export async function getService(id: number): Promise<AgentService> {
+  return get<AgentService>(`/api/v1/marketplace/services/${id}`);
+}
+
+/** Owner: all services for an agent (including inactive). */
+export async function getAgentServices(agentId: string): Promise<AgentService[]> {
+  return authedGet<AgentService[]>(`/api/v1/agents/${agentId}/services`);
+}
+
+export async function createService(
+  agentId: string,
+  data: { name: string; description?: string; priceRaw: string; serviceType: 'api' | 'a2a'; active?: boolean },
+): Promise<AgentService> {
+  return authedPost<AgentService>(`/api/v1/agents/${agentId}/services`, data);
+}
+
+export async function updateService(
+  agentId: string,
+  serviceId: number,
+  data: Partial<{ name: string; description: string; priceRaw: string; serviceType: 'api' | 'a2a'; active: boolean }>,
+): Promise<AgentService> {
+  return authedPatch<AgentService>(`/api/v1/agents/${agentId}/services/${serviceId}`, data);
+}
+
+export async function deleteService(agentId: string, serviceId: number): Promise<void> {
+  await authedDelete(`/api/v1/agents/${agentId}/services/${serviceId}`);
 }
 
 

@@ -12,6 +12,7 @@ import {
 import * as reputationService from '../services/reputation.js';
 import * as reputationDecay from '../services/reputationDecay.js';
 import * as agentStore from '../services/agentStore.js';
+import * as serviceStore from '../services/serviceStore.js';
 import { redis } from '../services/redis.js';
 import { ethers } from 'ethers';
 import { provider } from '../services/chain.js';
@@ -507,6 +508,105 @@ agentsRouter.patch('/:id', requireAuth, async (req: AuthRequest, res) => {
   };
   const updated = await updateAgent(req.params.id, { instructions, model, tools: tools as any, capabilities: capabilities as any, minReward });
   res.json({ success: true, data: strip(updated) });
+});
+
+// ── Agent Services (rent-your-agent Phase 1) ────────────────────────────────
+// Owner-managed CRUD for an agent's priced service listings. Public browse/detail
+// live on the marketplace router. Every route is owner-gated via authorizeOwner;
+// mutations are additionally guarded by agent_address in the store so the owner of
+// one agent can't touch another agent's services (cross-agent tamper → 404).
+
+const serviceSchema = z.object({
+  name: z.string().min(5).max(60),
+  description: z.string().max(2000).optional().default(''),
+  priceRaw: z.string().regex(/^\d+$/, 'priceRaw must be a wei integer string'),
+  serviceType: z.enum(['api', 'a2a']),
+  active: z.boolean().optional().default(true),
+});
+// No defaults here — an absent field in a PATCH must stay undefined (skipped),
+// not get reset to a default.
+const serviceUpdateSchema = z.object({
+  name: z.string().min(5).max(60).optional(),
+  description: z.string().max(2000).optional(),
+  priceRaw: z.string().regex(/^\d+$/, 'priceRaw must be a wei integer string').optional(),
+  serviceType: z.enum(['api', 'a2a']).optional(),
+  active: z.boolean().optional(),
+});
+
+function parseServiceId(req: AuthRequest, res: import('express').Response): number | null {
+  const id = Number(req.params.serviceId);
+  if (!Number.isInteger(id) || id <= 0) {
+    res.status(400).json({ success: false, error: { code: 'BAD_REQUEST', message: 'Invalid service id' } });
+    return null;
+  }
+  return id;
+}
+
+// GET /api/v1/agents/:id/services — owner view (all, including inactive)
+agentsRouter.get('/:id/services', requireAuth, async (req: AuthRequest, res, next) => {
+  try {
+    const agent = await authorizeOwner(req, res, req.params.id);
+    if (!agent) return;
+    res.json({ success: true, data: await serviceStore.listOwnerServices(agent.walletAddress) });
+  } catch (err) { next(err); }
+});
+
+// POST /api/v1/agents/:id/services
+agentsRouter.post('/:id/services', requireAuth, async (req: AuthRequest, res, next) => {
+  try {
+    const agent = await authorizeOwner(req, res, req.params.id);
+    if (!agent) return;
+    const data = serviceSchema.parse(req.body);
+    const service = await serviceStore.createService({
+      agentAddress: agent.walletAddress,
+      ownerAddress: agent.ownerAddress, // canonical owner, never from the body
+      name: data.name,
+      description: data.description,
+      priceRaw: data.priceRaw,
+      serviceType: data.serviceType,
+      active: data.active,
+    });
+    res.status(201).json({ success: true, data: service });
+  } catch (err) { next(err); }
+});
+
+// PATCH /api/v1/agents/:id/services/:serviceId
+agentsRouter.patch('/:id/services/:serviceId', requireAuth, async (req: AuthRequest, res, next) => {
+  try {
+    const agent = await authorizeOwner(req, res, req.params.id);
+    if (!agent) return;
+    const serviceId = parseServiceId(req, res);
+    if (serviceId === null) return;
+    const patch = serviceUpdateSchema.parse(req.body);
+    const updated = await serviceStore.updateService(serviceId, agent.walletAddress, {
+      name: patch.name,
+      description: patch.description,
+      price_raw: patch.priceRaw,
+      service_type: patch.serviceType,
+      active: patch.active,
+    });
+    if (!updated) {
+      res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Service not found for this agent' } });
+      return;
+    }
+    res.json({ success: true, data: updated });
+  } catch (err) { next(err); }
+});
+
+// DELETE /api/v1/agents/:id/services/:serviceId
+agentsRouter.delete('/:id/services/:serviceId', requireAuth, async (req: AuthRequest, res, next) => {
+  try {
+    const agent = await authorizeOwner(req, res, req.params.id);
+    if (!agent) return;
+    const serviceId = parseServiceId(req, res);
+    if (serviceId === null) return;
+    const ok = await serviceStore.deleteService(serviceId, agent.walletAddress);
+    if (!ok) {
+      res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Service not found for this agent' } });
+      return;
+    }
+    res.json({ success: true, data: { deleted: true } });
+  } catch (err) { next(err); }
 });
 
 // GET /api/v1/agents/:id

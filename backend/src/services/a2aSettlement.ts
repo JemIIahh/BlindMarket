@@ -284,7 +284,7 @@ function truncate(s: string): string {
 /**
  * Translate an A2A `verified` or `failed` transition into an on-chain
  * completeVerification(taskId, passed). On the contract, passed=true releases
- * escrow to the worker (85/15 split); passed=false only moves the task to
+ * escrow to the worker (90/10 split); passed=false only moves the task to
  * Verified — it does NOT refund the poster, and there is NO auto-cancel after
  * MAX_SUBMISSION_ATTEMPTS (the contract just blocks further submitEvidence and
  * records a dispute). After a terminal failure the only exits are the poster's

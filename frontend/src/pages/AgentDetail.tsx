@@ -32,8 +32,13 @@ import {
   getWebhooks,
   registerWebhook as apiRegisterWebhook,
   deleteWebhook,
+  listServices,
+  getAgentServices,
+  createService,
+  updateService,
+  deleteService,
 } from '../services/marketplace';
-import type { AgentReview, AgentReviewStats, AgentBadge, AgentWebhook } from '../services/marketplace';
+import type { AgentReview, AgentReviewStats, AgentBadge, AgentWebhook, AgentService } from '../services/marketplace';
 
 import AgentMetricsPanel from '../components/AgentMetricsPanel';
 
@@ -61,12 +66,13 @@ interface AgentDetails {
   decayedReputation?: { rawScore: number; decayedScore: number; tasksCompleted: number; disputes: number };
 }
 
-type Tab = 'logs' | 'tools' | 'tasks' | 'reviews' | 'webhooks' | 'edit' | 'metrics';
+type Tab = 'logs' | 'tools' | 'tasks' | 'services' | 'reviews' | 'webhooks' | 'edit' | 'metrics';
 
 const TAB_LABELS: Record<Tab, string> = {
   logs: 'Logs',
   tools: 'Tools',
   tasks: 'Tasks',
+  services: 'Services',
   reviews: 'Reviews',
   webhooks: 'Webhooks',
   edit: 'Edit',
@@ -334,7 +340,7 @@ export default function AgentDetail() {
   }
 
   const isOwner = address?.toLowerCase() === agent.ownerAddress?.toLowerCase();
-  const tabs: Tab[] = ['logs', 'tools', 'tasks', 'reviews', 'metrics', ...(isOwner ? (['webhooks', 'edit'] as Tab[]) : [])];
+  const tabs: Tab[] = ['logs', 'tools', 'tasks', 'services', 'reviews', 'metrics', ...(isOwner ? (['webhooks', 'edit'] as Tab[]) : [])];
 
   return (
     <div>
@@ -725,6 +731,15 @@ export default function AgentDetail() {
               </div>
             )}
 
+            {tab === 'services' && (
+              <ServicesTab
+                agentId={id!}
+                walletAddress={agent.walletAddress || ''}
+                isOwner={isOwner}
+                symbol={balanceSymbol}
+              />
+            )}
+
             {tab === 'webhooks' && isOwner && (
               <WebhookTab agentId={id!} />
             )}
@@ -836,6 +851,163 @@ function AgentTasks({ agentWallet }: { agentWallet?: string }) {
           <span className="shrink-0"><StatusTag status={e.state.status} /></span>
         </div>
       ))}
+    </div>
+  );
+}
+
+function ServicesTab({
+  agentId,
+  walletAddress,
+  isOwner,
+  symbol,
+}: {
+  agentId: string;
+  walletAddress: string;
+  isOwner: boolean;
+  symbol: string;
+}) {
+  const [publicServices, setPublicServices] = useState<AgentService[] | null>(null);
+  const [ownerServices, setOwnerServices] = useState<AgentService[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
+  const [price, setPrice] = useState('');
+  const [serviceType, setServiceType] = useState<'api' | 'a2a'>('api');
+  const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState('');
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setLoadError(false);
+    try {
+      const pub = walletAddress ? await listServices(walletAddress) : { services: [], total: 0 };
+      setPublicServices(pub.services);
+      if (isOwner) setOwnerServices(await getAgentServices(agentId));
+    } catch {
+      setLoadError(true);
+    } finally {
+      setLoading(false);
+    }
+  }, [walletAddress, agentId, isOwner]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const fmt = (wei: string) => {
+    try { return `${formatUnits(wei, 18)} ${symbol}`; } catch { return `${wei} wei`; }
+  };
+
+  async function handleCreate() {
+    setFormError('');
+    if (name.trim().length < 5) { setFormError('Name must be at least 5 characters.'); return; }
+    let priceRaw: string;
+    try { priceRaw = parseEther(price || '0').toString(); } catch { setFormError('Enter a valid price.'); return; }
+    if (priceRaw === '0') { setFormError('Price must be greater than 0.'); return; }
+    setSaving(true);
+    try {
+      await createService(agentId, { name: name.trim(), description: description.trim(), priceRaw, serviceType });
+      setName(''); setDescription(''); setPrice(''); setServiceType('api');
+      await load();
+    } catch (err) {
+      setFormError((err as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function toggleActive(s: AgentService) {
+    try { await updateService(agentId, s.id, { active: !s.active }); await load(); } catch { /* surfaced on next load */ }
+  }
+  async function remove(s: AgentService) {
+    try { await deleteService(agentId, s.id); await load(); } catch { /* surfaced on next load */ }
+  }
+
+  if (loading) return <LoadingState label="Loading services…" />;
+  if (loadError) return <ErrorState title="Couldn't load services" onRetry={() => load()} />;
+
+  return (
+    <div className="space-y-8">
+      <div>
+        <SectionRule num="01" title="Services" side={publicServices?.length ? `${publicServices.length} listed` : undefined} />
+        {publicServices && publicServices.length > 0 ? (
+          <div className="grid gap-3 sm:grid-cols-2">
+            {publicServices.map(s => (
+              <div key={s.id} className="border border-line bg-surface-2 p-4">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="text-ink font-medium">{s.name}</div>
+                  <Tag tone="info">{s.service_type}</Tag>
+                </div>
+                {s.description && <div className="text-xs text-ink-3 mt-1.5">{s.description}</div>}
+                <div className="flex items-center justify-between mt-3">
+                  <span className="font-mono text-ink text-sm">{fmt(s.price_raw)}<span className="text-ink-3"> / call</span></span>
+                  <Button variant="outline" size="sm" label="Use — coming soon" disabled />
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <EmptyState
+            icon="briefcase"
+            title="No services listed"
+            description={isOwner ? 'Publish a service below to let others rent this agent per call.' : 'This agent has no rentable services yet.'}
+          />
+        )}
+      </div>
+
+      {isOwner && (
+        <div>
+          <SectionRule num="02" title="Manage services" />
+          <div className="border border-line bg-surface-2 p-4 space-y-4">
+            <FormField label="Service name" required>
+              <FormInput placeholder="e.g. Market sentiment analysis" value={name} onChange={e => setName(e.target.value)} />
+            </FormField>
+            <FormField label="Description">
+              <FormTextarea rows={2} placeholder="What the buyer gets per call" value={description} onChange={e => setDescription(e.target.value)} />
+            </FormField>
+            <div className="grid grid-cols-2 gap-4">
+              <FormField label={`Price per call (${symbol})`} required>
+                <FormInput className="font-mono" placeholder="0.5" value={price} onChange={e => setPrice(e.target.value)} />
+              </FormField>
+              <FormField label="Type">
+                <div className="flex gap-2">
+                  {(['api', 'a2a'] as const).map(t => (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => setServiceType(t)}
+                      className={`px-2.5 py-1 text-xs border transition-colors ${serviceType === t ? 'bg-cream/10 border-cream/40 text-cream' : 'bg-surface-2 border-line text-ink-3 hover:text-ink-2'}`}
+                    >
+                      {t}
+                    </button>
+                  ))}
+                </div>
+              </FormField>
+            </div>
+            {formError && <div className="text-xs text-err">{formError}</div>}
+            <Button variant="primary" size="sm" label={saving ? 'Publishing…' : 'Publish service'} disabled={saving} onClick={handleCreate} />
+          </div>
+
+          {ownerServices && ownerServices.length > 0 && (
+            <div className="mt-4 space-y-2">
+              {ownerServices.map(s => (
+                <div key={s.id} className="flex items-center justify-between gap-3 border border-line bg-surface-2 px-4 py-2.5">
+                  <div className="min-w-0">
+                    <div className="text-ink text-sm truncate">
+                      {s.name}{!s.active && <span className="text-ink-3 text-xs"> · inactive</span>}
+                    </div>
+                    <div className="font-mono text-xs text-ink-3">{fmt(s.price_raw)} / call · {s.service_type}</div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <Button variant="ghost" size="sm" label={s.active ? 'Deactivate' : 'Activate'} onClick={() => toggleActive(s)} />
+                    <Button variant="ghost" size="sm" label="Delete" onClick={() => remove(s)} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
