@@ -461,3 +461,33 @@ describe('POST /accept — capability gate (superset match)', () => {
     expect(settleAssignment).toHaveBeenCalledWith(TASK, AGENT);
   });
 });
+
+// ── Pinned target executor (rent-your-agent Phase 2 "Use now") ──────────────
+//
+// A per-call "Use now" invocation pins the task to one agent (meta.targetExecutor)
+// so only that agent can execute it. The gate runs after the registration check
+// and before the CAS. No rootHash → skips the wrap gate so the pin alone decides.
+describe('POST /accept — pinned target executor', () => {
+  it('non-target caller is REJECTED: 403 NOT_TARGET_EXECUTOR before the CAS', async () => {
+    const OTHER = '0xother00000000000000000000000000000000ff';
+    vi.mocked(a2aStore.getMeta).mockResolvedValue(meta({ targetExecutor: OTHER }) as any);
+
+    const res = await accept();
+
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe('NOT_TARGET_EXECUTOR');
+    expect(a2aStore.tryAccept).not.toHaveBeenCalled(); // gated before the CAS
+    expect(settleAssignment).not.toHaveBeenCalled();
+  });
+
+  it('the pinned target is ACCEPTED: 200', async () => {
+    vi.mocked(a2aStore.getMeta).mockResolvedValue(meta({ targetExecutor: AGENT }) as any);
+    vi.mocked(a2aStore.tryAccept).mockResolvedValue({ ok: true, state: {} } as any);
+
+    const res = await accept();
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe('accepted');
+    expect(settleAssignment).toHaveBeenCalledWith(TASK, AGENT);
+  });
+});

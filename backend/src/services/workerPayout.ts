@@ -10,6 +10,7 @@ import * as agentStore from './agentStore.js';
 import * as accountingService from './accountingService.js';
 import * as reputationDecay from './reputationDecay.js';
 import * as escrowService from './escrow.js';
+import * as serviceStore from './serviceStore.js';
 import { redis } from './redis.js';
 
 // Cache the on-chain feeBps for the duration of the process. Fee changes are
@@ -55,7 +56,7 @@ export async function recordWorkerPayout(
   executorAddr: string,
   onChainId: string,
   grossAmount: bigint,
-  opts: { rethrow?: boolean } = {},
+  opts: { rethrow?: boolean; serviceId?: number } = {},
 ): Promise<void> {
   const creditedKey = `a2a:credited:${taskHash.toLowerCase()}`;
   try {
@@ -89,6 +90,17 @@ export async function recordWorkerPayout(
     const prev = BigInt(agent.totalEarnedRaw ?? '0');
     agent.totalEarnedRaw = (prev + workerShare).toString();
     await agentStore.registerAgent(agent);
+
+    // rent-your-agent: bump the rented service's sold_count in the SAME
+    // at-most-once block so a finalize retry can't double-count. Own try/catch —
+    // a bump failure must never release the credit marker (which would re-credit).
+    if (opts.serviceId !== undefined) {
+      try {
+        await serviceStore.incrementSoldCount(opts.serviceId);
+      } catch (scErr) {
+        console.warn(`[a2a] incrementSoldCount ${opts.serviceId} failed:`, (scErr as Error).message);
+      }
+    }
 
     // Mirror the payout into the accounting ledger so the Earnings page can
     // surface it. Native 0G has 18 decimals.

@@ -22,6 +22,7 @@ import { rankAgents } from '../services/agentScorer.js';
 import { emitTaskOffer, emitTaskAvailable } from '../services/socket.js';
 import { EXPIRY_GRACE_SEC } from '../services/a2aExpirySweep.js';
 import { config } from '../config.js';
+import * as serviceStore from '../services/serviceStore.js';
 
 export const a2aRouter = Router();
 
@@ -127,6 +128,12 @@ const indexTaskSchema = z.object({
         .max(8192),
     })
     .optional(),
+  // rent-your-agent Phase 2: pin this task to one executor + link the service row.
+  targetExecutor: z
+    .string()
+    .regex(/^0x[0-9a-fA-F]{40}$/, 'targetExecutor must be a 0x EOA address')
+    .optional(),
+  serviceId: z.number().int().positive().optional(),
 });
 
 const verifySchema = z.object({
@@ -310,6 +317,12 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
     if (!agent) {
       console.warn(`[a2a] accept: agent not registered: ${address}`);
       throw new AppError(403, 'NOT_REGISTERED', 'Register as an agent executor first');
+    }
+    // rent-your-agent: a per-call "Use now" invocation is PINNED to one agent.
+    // Reject any other executor before the CAS, so they don't burn the
+    // open→accepted transition on a task only the target can decrypt anyway.
+    if (meta.targetExecutor && meta.targetExecutor.toLowerCase() !== address.toLowerCase()) {
+      throw new AppError(403, 'NOT_TARGET_EXECUTOR', 'This task is reserved for a specific agent');
     }
     if (meta.requiredCapabilities.length > 0) {
       // Match the PostTask UI copy: "an executor agent matches only if it has ALL
@@ -1020,6 +1033,27 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       ? { ...(wrappedKeysNormalized ?? {}), ...(existingMeta?.wrappedKeys ?? {}) }
       : undefined;
 
+    // rent-your-agent Phase 2: a per-call "Use now" pins the task to one agent and
+    // links the agent_services row it rents. Validate the link so a later
+    // sold_count bump is trustworthy — the service must be active, its agent must
+    // be the pinned executor, and the escrow must cover the listed price.
+    const targetExecutor = data.targetExecutor?.toLowerCase();
+    if (data.serviceId !== undefined) {
+      if (!targetExecutor) {
+        throw new AppError(400, 'SERVICE_NO_TARGET', 'serviceId requires targetExecutor (the service agent)');
+      }
+      const svc = await serviceStore.getActiveService(data.serviceId);
+      if (!svc) {
+        throw new AppError(409, 'SERVICE_NOT_ACTIVE', 'No active service with that id');
+      }
+      if (svc.agent_address.toLowerCase() !== targetExecutor) {
+        throw new AppError(409, 'SERVICE_AGENT_MISMATCH', "targetExecutor does not match the service's agent");
+      }
+      if (BigInt(onChainAmount) < BigInt(svc.price_raw)) {
+        throw new AppError(409, 'UNDERPAID', 'Escrow amount is below the service price');
+      }
+    }
+
     await a2aStore.setMeta({
       taskId: taskHash,
       targetExecutorType: 'agent',
@@ -1035,6 +1069,9 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       // TaskCreated event — lets browse hide expired tasks, /accept refuse
       // them pre-CAS, and the expiry sweep close them with no chain read.
       deadline: onChainDeadline,
+      // rent-your-agent Phase 2: pin + service link (validated above).
+      targetExecutor,
+      serviceId: data.serviceId,
     });
 
     console.log(
@@ -1485,7 +1522,7 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
       const reconciledStatus: 'verified' | 'failed' = settledPass ? 'verified' : 'failed';
       await a2aStore.updateState(taskHash, { status: reconciledStatus, verificationResult: reconciled });
       if (settledPass) {
-        await recordWorkerPayout(taskHash, address, ocId, onChainTask.amount);
+        await recordWorkerPayout(taskHash, address, ocId, onChainTask.amount, { serviceId: meta.serviceId });
       } else {
         await recordWorkerDispute(taskHash, address);
       }
@@ -1527,7 +1564,7 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
     });
 
     if (verificationResult.passed) {
-      await recordWorkerPayout(taskHash, address, ocId, onChainTask.amount);
+      await recordWorkerPayout(taskHash, address, ocId, onChainTask.amount, { serviceId: meta.serviceId });
     } else {
       await recordWorkerDispute(taskHash, address);
     }

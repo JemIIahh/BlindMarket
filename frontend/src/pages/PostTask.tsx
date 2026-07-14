@@ -594,7 +594,7 @@ export default function PostTask() {
               <FormField
                 label={`Bounty (${native.symbol})`}
                 required
-                hint="85% to worker, 15% protocol fee."
+                hint="90% to worker, 10% protocol fee."
               >
                 <FormInput
                   className="font-mono"

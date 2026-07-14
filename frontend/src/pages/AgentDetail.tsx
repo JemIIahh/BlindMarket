@@ -41,6 +41,7 @@ import {
 import type { AgentReview, AgentReviewStats, AgentBadge, AgentWebhook, AgentService } from '../services/marketplace';
 
 import AgentMetricsPanel from '../components/AgentMetricsPanel';
+import UseServiceModal from '../components/UseServiceModal';
 
 // Top-up amount when the agent runs low on gas. Same default as the deploy
 // funding step — round trip + LLM call + submitEvidence costs ~0.0004 0G, so
@@ -244,20 +245,24 @@ export default function AgentDetail() {
   // user proves control of the owner wallet (their active wagmi wallet) by
   // signing a server nonce. That adds their Privy identity to authorizedOwners,
   // after which authorizeOwner stops rejecting them. We then retry the action.
+  // Reusable owner-link: prove control of the owner wallet (sign a server nonce)
+  // so the backend adds this Privy identity to authorizedOwners. Throws on
+  // failure. Shared by the Start/Stop recovery banner AND the Services form 403.
+  async function linkOwner(): Promise<void> {
+    const challenge = await authedPost<{ nonce: string; message: string; ownerAddress: string }>(
+      `/api/v1/agents/${id}/link-owner/challenge`,
+      {},
+    );
+    if (!walletClient) throw new Error('Wallet not connected');
+    const signature = await walletClient.signMessage({ message: challenge.message });
+    await authedPost(`/api/v1/agents/${id}/link-owner`, { nonce: challenge.nonce, signature });
+  }
+
   async function handleLinkOwner() {
     setLinkStatus('signing');
     setLinkError('');
     try {
-      const challenge = await authedPost<{ nonce: string; message: string; ownerAddress: string }>(
-        `/api/v1/agents/${id}/link-owner/challenge`,
-        {},
-      );
-
-      if (!walletClient) throw new Error('Wallet not connected');
-      const signature = await walletClient.signMessage({ message: challenge.message });
-
-      setLinkStatus('linking');
-      await authedPost(`/api/v1/agents/${id}/link-owner`, { nonce: challenge.nonce, signature });
+      await linkOwner();
       setLinkStatus('idle');
       // Refresh the record (now carries authorizedOwners) and retry whatever
       // action triggered the lock-out (defaults to start).
@@ -737,6 +742,8 @@ export default function AgentDetail() {
                 walletAddress={agent.walletAddress || ''}
                 isOwner={isOwner}
                 symbol={balanceSymbol}
+                agentStatus={agent.status}
+                onLinkOwner={linkOwner}
               />
             )}
 
@@ -860,13 +867,21 @@ function ServicesTab({
   walletAddress,
   isOwner,
   symbol,
+  agentStatus,
+  onLinkOwner,
 }: {
   agentId: string;
   walletAddress: string;
   isOwner: boolean;
   symbol: string;
+  agentStatus: string;
+  onLinkOwner: () => Promise<void>;
 }) {
   const [publicServices, setPublicServices] = useState<AgentService[] | null>(null);
+  const [useService, setUseService] = useState<AgentService | null>(null);
+  const [needsLink, setNeedsLink] = useState(false);
+  const [linking, setLinking] = useState(false);
+  const retryRef = useRef<null | (() => Promise<void>)>(null);
   const [ownerServices, setOwnerServices] = useState<AgentService[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -898,6 +913,34 @@ function ServicesTab({
     try { return `${formatUnits(wei, 18)} ${symbol}`; } catch { return `${wei} wei`; }
   };
 
+  // On an owner-mismatch 403, stash the failed mutation so a one-click
+  // "Link this wallet & retry" can re-run it after linking (mirrors Start/Stop).
+  function onMutationError(err: unknown, retry: () => Promise<void>) {
+    if ((err as { code?: string }).code === 'FORBIDDEN') {
+      setNeedsLink(true);
+      retryRef.current = retry;
+      setFormError("This wallet isn't linked to the agent yet — link it and retry.");
+    } else {
+      setFormError((err as Error).message);
+    }
+  }
+
+  async function linkAndRetry() {
+    setLinking(true);
+    setFormError('');
+    try {
+      await onLinkOwner();
+      setNeedsLink(false);
+      const retry = retryRef.current;
+      retryRef.current = null;
+      if (retry) await retry();
+    } catch (err) {
+      setFormError((err as Error).message || 'Could not link this wallet');
+    } finally {
+      setLinking(false);
+    }
+  }
+
   async function handleCreate() {
     setFormError('');
     if (name.trim().length < 5) { setFormError('Name must be at least 5 characters.'); return; }
@@ -908,19 +951,22 @@ function ServicesTab({
     try {
       await createService(agentId, { name: name.trim(), description: description.trim(), priceRaw, serviceType });
       setName(''); setDescription(''); setPrice(''); setServiceType('api');
+      setNeedsLink(false);
       await load();
     } catch (err) {
-      setFormError((err as Error).message);
+      onMutationError(err, handleCreate);
     } finally {
       setSaving(false);
     }
   }
 
   async function toggleActive(s: AgentService) {
-    try { await updateService(agentId, s.id, { active: !s.active }); await load(); } catch { /* surfaced on next load */ }
+    try { await updateService(agentId, s.id, { active: !s.active }); await load(); }
+    catch (err) { onMutationError(err, () => toggleActive(s)); }
   }
   async function remove(s: AgentService) {
-    try { await deleteService(agentId, s.id); await load(); } catch { /* surfaced on next load */ }
+    try { await deleteService(agentId, s.id); await load(); }
+    catch (err) { onMutationError(err, () => remove(s)); }
   }
 
   if (loading) return <LoadingState label="Loading services…" />;
@@ -930,6 +976,11 @@ function ServicesTab({
     <div className="space-y-8">
       <div>
         <SectionRule num="01" title="Services" side={publicServices?.length ? `${publicServices.length} listed` : undefined} />
+        {agentStatus !== 'running' && publicServices && publicServices.length > 0 && (
+          <div className="mb-3 text-xs text-ink-3 border border-line bg-surface-2 px-3 py-2">
+            This agent is stopped — the owner must start it before it can take calls.
+          </div>
+        )}
         {publicServices && publicServices.length > 0 ? (
           <div className="grid gap-3 sm:grid-cols-2">
             {publicServices.map(s => (
@@ -941,7 +992,13 @@ function ServicesTab({
                 {s.description && <div className="text-xs text-ink-3 mt-1.5">{s.description}</div>}
                 <div className="flex items-center justify-between mt-3">
                   <span className="font-mono text-ink text-sm">{fmt(s.price_raw)}<span className="text-ink-3"> / call</span></span>
-                  <Button variant="outline" size="sm" label="Use — coming soon" disabled />
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    label="Use now"
+                    disabled={agentStatus !== 'running' || !s.agent_public_key}
+                    onClick={() => setUseService(s)}
+                  />
                 </div>
               </div>
             ))}
@@ -985,6 +1042,9 @@ function ServicesTab({
               </FormField>
             </div>
             {formError && <div className="text-xs text-err">{formError}</div>}
+            {needsLink && (
+              <Button variant="outline" size="sm" label={linking ? 'Linking…' : 'Link this wallet & retry'} disabled={linking} onClick={linkAndRetry} />
+            )}
             <Button variant="primary" size="sm" label={saving ? 'Publishing…' : 'Publish service'} disabled={saving} onClick={handleCreate} />
           </div>
 
@@ -1007,6 +1067,14 @@ function ServicesTab({
             </div>
           )}
         </div>
+      )}
+      {useService && (
+        <UseServiceModal
+          service={useService}
+          symbol={symbol}
+          onClose={() => setUseService(null)}
+          onSettled={load}
+        />
       )}
     </div>
   );

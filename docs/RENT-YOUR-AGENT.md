@@ -58,16 +58,16 @@ rail already settles; Phase 1 only adds the listing/discovery layer.
 
 ## Status
 - ✅ Report written (delivered as an artifact, now preserved here).
-- ✅ **Phase 1 built** — `agent_services` table (migration 12) + owner CRUD + public browse/detail + an
-  AgentDetail "Services" tab + a browse "From" column; no invocation/settlement. Pending: migration
-  applies on deploy + local smoke test.
+- ✅ **Phase 1 shipped** — `agent_services` table (migration 12) + owner CRUD + public browse/detail + an
+  AgentDetail "Services" tab + a browse "From" column. Live on mainnet.
+- ✅ **Phase 2 built** — "Use now" per-call invocation reusing the escrow rail: a `targetExecutor` pin +
+  `NOT_TARGET_EXECUTOR` accept gate, instant auto-verify, atomic `sold_count`, a `UseServiceModal`, and the
+  Services-form link-owner recovery. No new migration. Pending: live e2e after deploy.
 - Overlaps with `docs/VISION-2.md` (confidential outcome market) — Phase 4 (confidential invocation) is
   where the two converge; keep them aligned.
 
-## Follow-ups (next batch)
-- **Services-form link-owner recovery** — the owner Services form shows a raw error on a 403, while
-  Start/Stop offer a one-click "Link this wallet to the agent" button (AgentDetail `handleLinkOwner`,
-  ~`:247`/`:387`). A first-time publisher whose Privy identity ≠ the deploy wallet gets stranded until
-  they trigger the link via Start/Stop. Add the same recovery affordance to the Services form's 403.
-  Quick, non-urgent — folded into the next batch.
-- **Phases 2–4** remain: per-use invocation → payment channels → confidential invocation (see phases above).
+## Follow-ups
+- ✅ **Services-form link-owner recovery** — shipped in Phase 2 (one-click "Link this wallet & retry" on a 403).
+- **Phases 3–4** remain: payment channels (kill per-call gas) → confidential invocation (seal input+output).
+- Optional hardening: worker-side "treat NOT_TARGET as touched" to cut poll churn; a dedicated authed
+  single-task result read (Use-now polls `/tasks/posted` today).

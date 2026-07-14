@@ -29,12 +29,14 @@ export interface AgentServicePublic extends AgentService {
   agent_name: string | null;
   agent_capabilities: string[] | null;
   agent_reputation: number | null;
+  agent_public_key: string | null; // executor secp256k1 pubkey — lets a buyer ECIES-wrap a Use-now brief
 }
 
 const PUBLIC_COLS = `
   s.id, s.agent_address, s.owner_address, s.name, s.description, s.price_raw,
   s.service_type, s.active, s.sold_count, s.avg_rating, s.created_at, s.updated_at,
-  ae.display_name AS agent_name, ae.capabilities AS agent_capabilities, ae.reputation AS agent_reputation
+  ae.display_name AS agent_name, ae.capabilities AS agent_capabilities, ae.reputation AS agent_reputation,
+  ae.public_key AS agent_public_key
 `;
 
 export async function createService(opts: {
@@ -185,4 +187,15 @@ export async function getMinActivePricesByAgents(addresses: string[]): Promise<M
   );
   for (const r of rows) out.set(r.agent_address, r.min_price);
   return out;
+}
+
+/** Atomic per-call sale counter bump (statement-atomic UPDATE). Called at-most-once
+ *  per invocation from INSIDE recordWorkerPayout's Redis-NX-gated block, so a
+ *  finalize retry can't double-count. */
+export async function incrementSoldCount(serviceId: number): Promise<void> {
+  const db = await getPool();
+  await db.query(
+    'UPDATE agent_services SET sold_count = sold_count + 1, updated_at = NOW() WHERE id = $1',
+    [serviceId],
+  );
 }

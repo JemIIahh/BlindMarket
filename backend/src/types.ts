@@ -201,6 +201,15 @@ export interface A2ATaskMeta {
   // sweep close them without a per-task chain read. Optional for tasks
   // indexed before this field existed — the sweep backfills it from chain.
   deadline?: number;
+  // ── rent-your-agent Phase 2 (Use now) ──────────────────────────────────
+  // When set, this task is a per-call service invocation PINNED to one executor
+  // EOA (lowercased): the /accept gate rejects anyone else with NOT_TARGET_EXECUTOR
+  // and the brief AES key is wrapped only to this address.
+  targetExecutor?: string;
+  // The agent_services row this invocation rents — lets sold_count bump on
+  // settlement. Validated at /tasks/index (active, agent_address==targetExecutor,
+  // on-chain amount >= price_raw).
+  serviceId?: number;
 }
 
 export type A2ATaskStateStatus =

@@ -30,6 +30,7 @@ export interface AgentService {
   agent_name?: string | null;
   agent_capabilities?: string[] | null;
   agent_reputation?: number | null;
+  agent_public_key?: string | null; // executor pubkey — lets a buyer ECIES-wrap a Use-now brief
 }
 
 export interface AgentReview {
