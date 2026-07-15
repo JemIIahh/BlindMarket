@@ -165,36 +165,86 @@ async function ensureOgComputeBroker() {
     const wallet = new ethers.Wallet(AGENT_PRIVATE_KEY, rpcProvider);
     _ogComputeBroker = await createBroker(wallet);
     const services = await _ogComputeBroker.inference.listService();
-    if (services?.length > 0) {
-      _ogComputeProvider = services[0].provider || services[0].providerAddress;
-      try { await _ogComputeBroker.inference.acknowledgeProviderSigner(_ogComputeProvider); } catch {}
-      // Ensure the wallet has a ledger account on the compute network. The
-      // first deposit creates the account automatically. If the account already
-      // exists the contract rejects with LedgerExists — that's fine, skip it.
-      try {
-        const bal = await rpcProvider.getBalance(wallet.address);
-        const depositAmount = '1.0';
-        const depositWei = ethers.parseEther(depositAmount);
-        const minBalance = ethers.parseEther('0.5');
-        if (bal >= depositWei + minBalance) {
-          log(`0G Compute: depositing ${depositAmount} 0G to create ledger account...`);
-          await _ogComputeBroker.ledger.depositFund(depositAmount);
-          log(`0G Compute: ledger account created, starting auto-funding...`);
-          await _ogComputeBroker.inference.startAutoFunding(_ogComputeProvider);
-        } else {
-          log(`0G Compute: wallet balance ${formatEther(bal)} 0G too low to deposit ${depositAmount} 0G — inference may fail`);
-        }
-      } catch (ledgerErr) {
-        const m = (ledgerErr?.message || '').toLowerCase();
-        if (m.includes('ledgerexists')) {
-          // Account already exists — just start auto-funding
-          try { await _ogComputeBroker.inference.startAutoFunding(_ogComputeProvider); } catch {}
-        } else {
-          log(`0G Compute: ledger setup failed — ${ledgerErr.message}`);
+    if (!services?.length) {
+      log('0G Compute: no inference providers available right now — inference will fail until one appears');
+      return _ogComputeBroker;
+    }
+    _ogComputeProvider = services[0].provider || services[0].providerAddress;
+
+    // 1) Ledger — the wallet's prepaid inference balance. Must exist before any
+    //    provider sub-account can be funded. Create it (first depositFund) or
+    //    confirm it already exists. If the wallet is below the create threshold
+    //    we still PROBE for an existing ledger, so a previously-funded agent
+    //    isn't stranded just because its balance dipped (the old code skipped
+    //    provider setup entirely in that case).
+    let ledgerReady = false;
+    try {
+      const bal = await rpcProvider.getBalance(wallet.address);
+      const depositAmount = '1.0';
+      const depositWei = ethers.parseEther(depositAmount);
+      const minBalance = ethers.parseEther('0.5');
+      if (bal >= depositWei + minBalance) {
+        log(`0G Compute: creating ledger with a ${depositAmount} 0G deposit...`);
+        await _ogComputeBroker.ledger.depositFund(depositAmount);
+        ledgerReady = true;
+        log('0G Compute: ledger account created');
+      } else {
+        try {
+          await _ogComputeBroker.ledger.getLedger();
+          ledgerReady = true;
+          log(`0G Compute: ledger exists (wallet ${formatEther(bal)} 0G is below the ${formatEther(depositWei + minBalance)} 0G to create a new one, but one is already funded)`);
+        } catch {
+          log(`0G Compute: NO ledger, and wallet balance ${formatEther(bal)} 0G is below the ${formatEther(depositWei + minBalance)} 0G needed to create one — top up the agent wallet and Restart. Inference will fail until then.`);
         }
       }
+    } catch (ledgerErr) {
+      const m = (ledgerErr?.message || '').toLowerCase();
+      if (m.includes('ledgerexists') || m.includes('already')) {
+        ledgerReady = true;
+        log('0G Compute: ledger account exists');
+      } else {
+        log(`0G Compute: ledger setup failed — ${ledgerErr.message}. Inference will fail until this succeeds.`);
+      }
     }
-    log(`0G Compute: broker ready, provider=${_ogComputeProvider?.slice(0, 10)}…`);
+
+    // 2) Provider sub-account — acknowledgeProviderSigner CREATES the per-provider
+    //    sub-account that getRequestHeaders needs; startAutoFunding keeps it
+    //    funded. Runs whenever a ledger is ready (NOT only right after a fresh
+    //    deposit, which stranded existing-ledger agents). The acknowledge was
+    //    previously swallowed by a bare `catch {}` — the #1 reason a failure
+    //    surfaced later as an undiagnosable "Sub-account not found".
+    if (ledgerReady && _ogComputeProvider) {
+      const p = _ogComputeProvider.slice(0, 10);
+      try {
+        const acked = await _ogComputeBroker.inference.userAcknowledged(_ogComputeProvider).catch(() => false);
+        if (!acked) {
+          log(`0G Compute: acknowledging provider ${p}…`);
+          await _ogComputeBroker.inference.acknowledgeProviderSigner(_ogComputeProvider);
+        }
+        log(`0G Compute: provider ${p}… acknowledged`);
+      } catch (ackErr) {
+        const m = (ackErr?.message || '').toLowerCase();
+        if (m.includes('already') || m.includes('acknowledged')) {
+          log(`0G Compute: provider ${p}… already acknowledged`);
+        } else {
+          log(`0G Compute: provider acknowledge FAILED — ${ackErr.message}  (this is what surfaces as "Sub-account not found" at inference; top up the agent wallet and Restart)`);
+        }
+      }
+      try {
+        await _ogComputeBroker.inference.startAutoFunding(_ogComputeProvider);
+      } catch (fundErr) {
+        log(`0G Compute: startAutoFunding failed — ${fundErr.message}`);
+      }
+      // 3) Verify the sub-account is actually usable, so a broken setup is
+      //    visible HERE (at boot) instead of on the first paid job.
+      try {
+        await _ogComputeBroker.inference.getAccount(_ogComputeProvider);
+        log(`0G Compute: provider sub-account ready ✓ (provider=${p}…)`);
+      } catch (acctErr) {
+        log(`0G Compute: provider sub-account NOT ready — ${acctErr.message}. Inference will fail until the ledger + acknowledge succeed.`);
+      }
+    }
+    log(`0G Compute: broker init done, provider=${_ogComputeProvider?.slice(0, 10)}…`);
   } catch (e) {
     log(`0G Compute: broker init failed — ${e.message}`);
   }
@@ -1984,6 +2034,11 @@ if (process.env.NODE_ENV !== 'test') {
     if (SKIP_RESUME) log('auto-restarted after a crash — skipping in-flight task resume for this run');
 
     await ensureRegisteredAsA2AExecutor();
+    // Warm up 0G Compute (ledger + provider sub-account) at BOOT, before we
+    // accept any work, so the first job doesn't race the lazy setup — and any
+    // failure is logged HERE instead of surfacing as an undiagnosable inference
+    // error on a paid job. No-op for API-key agents (OG_COMPUTE_ENABLED=false).
+    await ensureOgComputeBroker();
     // Connect WebSocket for push-based assignment (instant task offers)
     connectWebSocket();
     // Keep poll as safety net for missed WS events
