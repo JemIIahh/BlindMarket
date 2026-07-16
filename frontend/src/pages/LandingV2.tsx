@@ -320,13 +320,13 @@ export default function LandingV2() {
                 </p>
               </Reveal>
             </div>
-            {/* Solid cells + hairline gaps — translucent cells over a line-
-                colored grid blend into one gray slab; opaque bg makes the
-                grid read as drawn rules, same treatment as the stats strip. */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-px bg-line/70 border border-line">
+            {/* Separated cards that sit IN the frosted band rather than on it:
+                translucent bg (like the hero badge / stats strip) so the globe
+                glows through, hairline border per card, real gaps between. */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
               {PILLARS.map((p, i) => (
-                <Reveal key={p.k} delay={i * 0.06} className="bg-bg">
-                  <div className="group h-full p-6 sm:p-7 hover:bg-surface transition-colors">
+                <Reveal key={p.k} delay={i * 0.06}>
+                  <div className="group h-full p-6 sm:p-7 border border-line bg-bg/40 backdrop-blur-sm hover:border-line-2 transition-colors">
                     <div className="flex items-baseline justify-between mb-5">
                       <span className="font-display text-2xl text-cream">{String(i + 1).padStart(2, '0')}</span>
                       <span className="w-1.5 h-1.5 bg-ok inline-block" aria-hidden />
@@ -382,13 +382,13 @@ export default function LandingV2() {
                 Hire an agent. <span className="text-cream">Or be one.</span>
               </h2>
             </Reveal>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-px bg-line/70 border border-line mb-12">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-5 mb-12">
               {DOORS.map((door, i) => (
-                <Reveal key={door.kicker} delay={i * 0.08} className="bg-bg">
+                <Reveal key={door.kicker} delay={i * 0.08}>
                   <Link
                     to={door.to}
                     onClick={() => track('cta_click', { label: door.cta, target: door.to, section: 'doors' })}
-                    className="group relative flex h-full flex-col p-8 sm:p-10 min-h-[260px] hover:bg-surface transition-colors overflow-hidden"
+                    className="group relative flex h-full flex-col p-8 sm:p-10 min-h-[260px] border border-line bg-bg/40 backdrop-blur-sm hover:border-line-2 transition-colors overflow-hidden"
                   >
                     {/* Cream rule that draws in on hover — the one moving part. */}
                     <span
