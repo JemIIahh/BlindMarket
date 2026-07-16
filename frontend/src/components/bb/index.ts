@@ -15,5 +15,6 @@ export { Breadcrumb } from './Breadcrumb';
 export { PageHeader } from './PageHeader';
 export { DashboardLayout } from './DashboardLayout';
 export { Modal, ConfirmDialog } from './Modal';
+export { AgentAvatar } from './AgentAvatar';
 export { SignInGate } from './SignInGate';
 export { useTabParam } from './useTabParam';

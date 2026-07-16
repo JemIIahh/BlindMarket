@@ -1,11 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useSearchParams } from 'react-router-dom';
 import { useBalance, useWalletClient } from 'wagmi';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { BrowserProvider, parseEther, formatUnits } from 'ethers';
 import {
   Breadcrumb,
-  PageHeader,
   SectionRule,
   Tag,
   StatCard,
@@ -20,10 +19,11 @@ import {
   Icon,
   ConfirmDialog,
   useTabParam,
+  AgentAvatar,
 } from '../components/bb';
 import { truncateAddress } from '../lib/utils';
 import { get, authedPatch, authedPost } from '../lib/api';
-import { API_BASE_URL } from '../config/constants';
+import { API_BASE_URL, OG_CHAIN_CONFIG } from '../config/constants';
 import { AGENT_CAPABILITIES } from '../config/capabilities';
 import { useChainAddress } from '../hooks/useChainWallet';
 import { getNativeCurrency } from '../config/constants';
@@ -99,7 +99,18 @@ export default function AgentDetail() {
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
-  const [tab, setTab] = useTabParam<Tab>('logs', Object.keys(TAB_LABELS) as Tab[]);
+  const [tab, setTabParam] = useTabParam<Tab>('logs', Object.keys(TAB_LABELS) as Tab[]);
+  const [searchParams] = useSearchParams();
+  // Audience-aware default: buyers land on the storefront (Services), the
+  // owner lands on the console (Logs). Once the user picks a tab — or the
+  // URL carries ?tab= — that choice wins. (useTabParam keeps the URL clean
+  // for its own default, so presence alone can't express "user chose logs".)
+  const [userPickedTab, setUserPickedTab] = useState(false);
+  const setTab = (t: Tab) => {
+    setUserPickedTab(true);
+    setTabParam(t);
+  };
+  const [descExpanded, setDescExpanded] = useState(false);
   const [autoScroll, setAutoScroll] = useState(true);
   const logContainerRef = useRef<HTMLDivElement>(null);
 
@@ -348,38 +359,81 @@ export default function AgentDetail() {
   }
 
   const isOwner = address?.toLowerCase() === agent.ownerAddress?.toLowerCase();
-  const tabs: Tab[] = ['logs', 'tools', 'tasks', 'services', 'reviews', 'metrics', ...(isOwner ? (['webhooks', 'edit'] as Tab[]) : [])];
+  // Tab order mirrors what each audience came for: buyers get the storefront
+  // first (services, reviews), the owner gets the console first (logs).
+  const tabs: Tab[] = isOwner
+    ? ['logs', 'services', 'tools', 'tasks', 'reviews', 'webhooks', 'edit', 'metrics']
+    : ['services', 'reviews', 'tasks', 'logs', 'tools', 'metrics'];
+  const displayTab: Tab = searchParams.has('tab') || userPickedTab ? tab : isOwner ? 'logs' : 'services';
+
+  // okx-style buy signals for the header strip.
+  const positivePct =
+    reviewStats && reviewStats.totalReviews > 0
+      ? Math.round(
+          (((reviewStats.distribution[4] ?? 0) + (reviewStats.distribution[5] ?? 0)) / reviewStats.totalReviews) * 100
+        )
+      : null;
+  const description = (agent.instructions ?? '').trim();
 
   return (
     <div>
       <Breadcrumb items={['marketplace', 'agents', 'mine', agent.name]} />
-      <PageHeader
-        title={agent.name}
-        description={`${agent.provider} · ${agent.model}`}
-        right={
-          <div className="flex flex-col items-end gap-3">
+
+      {/* Storefront header — the agent presented as a product: identicon,
+          name, what it does, and the buy signals. Owner controls stay in the
+          right rail. */}
+      <div className="flex flex-col sm:flex-row items-start gap-5 sm:gap-6 mb-8">
+        <AgentAvatar seed={agent.walletAddress || agent.id} size={96} className="mt-1" />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-3 flex-wrap">
+            <h1 className="text-3xl sm:text-[38px] font-bold text-ink leading-[1.05] tracking-tight break-words">
+              {agent.name}
+            </h1>
             <StatusTag status={action.isPending ? action.variables : agent.status} />
-            {isOwner && (
-              <div className="flex flex-wrap justify-end gap-2">
-                {agent.status !== 'running' && (
-                  <Button variant="outline" size="sm" disabled={action.isPending}
-                    onClick={() => action.mutate('start')} label="Start" />
-                )}
-                {agent.status === 'running' && (
-                  <Button variant="outline" size="sm" disabled={action.isPending}
-                    onClick={() => action.mutate('pause')} label="Pause" />
-                )}
-                <Button variant="ghost" size="sm" disabled={action.isPending}
-                  onClick={() => action.mutate('stop')} label="Stop" />
-                {agent.status !== 'stopped' && (
-                  <Button variant="ghost" size="sm" disabled={action.isPending}
-                    onClick={() => action.mutate('restart')} label="Restart" />
-                )}
-              </div>
+          </div>
+          <div className="mt-2 flex items-center gap-3 flex-wrap font-mono text-xs text-ink-3">
+            <span>{agent.provider} · {agent.model}</span>
+            {badges.length > 0 && (
+              <span className="text-ok">✓ {badges.length} badge{badges.length > 1 ? 's' : ''}</span>
             )}
           </div>
-        }
-      />
+          {description && (
+            <div className="mt-3 max-w-3xl">
+              <p className={`text-sm text-ink-2 leading-relaxed whitespace-pre-line ${descExpanded ? '' : 'line-clamp-3'}`}>
+                {description}
+              </p>
+              {description.length > 220 && (
+                <button
+                  onClick={() => setDescExpanded((v) => !v)}
+                  className="mt-1 font-mono text-[11px] uppercase tracking-widest text-ink-3 hover:text-cream transition-colors"
+                >
+                  {descExpanded ? 'show less' : 'view all'}
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+        {isOwner && (
+          <div className="flex sm:flex-col items-end gap-2 shrink-0">
+            <div className="flex flex-wrap justify-end gap-2">
+              {agent.status !== 'running' && (
+                <Button variant="outline" size="sm" disabled={action.isPending}
+                  onClick={() => action.mutate('start')} label="Start" />
+              )}
+              {agent.status === 'running' && (
+                <Button variant="outline" size="sm" disabled={action.isPending}
+                  onClick={() => action.mutate('pause')} label="Pause" />
+              )}
+              <Button variant="ghost" size="sm" disabled={action.isPending}
+                onClick={() => action.mutate('stop')} label="Stop" />
+              {agent.status !== 'stopped' && (
+                <Button variant="ghost" size="sm" disabled={action.isPending}
+                  onClick={() => action.mutate('restart')} label="Restart" />
+              )}
+            </div>
+          </div>
+        )}
+      </div>
       {action.isError && (
         <div className="mb-4 px-4 py-2.5 border border-err/40 bg-err/10 text-xs text-err">
           <div>
@@ -408,11 +462,44 @@ export default function AgentDetail() {
         </div>
       )}
 
+      {/* Buy-signal strip — score / positive / work / earned, okx-style.
+          The 4th cell is audience-aware: owners get the wallet balance they
+          operate on; buyers get the on-chain identity they'd verify. */}
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-0 border border-line mb-2">
-        <StatCard label="Tasks completed" value={String(agent.tasksCompleted ?? 0)} sub="All time" />
+        <StatCard
+          label="Score"
+          value={reviewStats && reviewStats.totalReviews > 0 ? `★ ${reviewStats.avgRating.toFixed(2)}` : '—'}
+          sub={
+            reviewStats && reviewStats.totalReviews > 0
+              ? `${positivePct}% positive · ${reviewStats.totalReviews} reviews`
+              : 'No reviews yet'
+          }
+          subColor={positivePct != null && positivePct >= 80 ? 'ok' : 'default'}
+        />
+        <div className="border-t sm:border-t-0 sm:border-l border-line"><StatCard label="Tasks completed" value={String(agent.tasksCompleted ?? 0)} sub={`Reputation ${agent.decayedReputation?.decayedScore ?? agent.reputation?.score ?? 0}${agent.reputation?.disputes ? ` · ${agent.reputation.disputes} disputes` : ''}`} subColor={agent.reputation?.disputes && agent.reputation.disputes > 0 ? 'warn' : 'default'} /></div>
         <div className="border-t sm:border-t-0 sm:border-l border-line"><StatCard label="Earned" value={`${parseFloat(agent.totalEarned ?? '0').toLocaleString(undefined, { maximumFractionDigits: 4 })} ${balanceSymbol}`} sub={`Native ${balanceSymbol}`} subColor="ok" /></div>
-        <div className="border-t sm:border-t-0 sm:border-l border-line"><StatCard label="Reputation" value={String(agent.decayedReputation?.decayedScore ?? agent.reputation?.score ?? 0)} sub={`${agent.reputation?.tasksCompleted ?? 0} tasks · ${agent.reputation?.disputes ?? 0} disputes`} subColor={agent.reputation?.disputes && agent.reputation.disputes > 0 ? 'warn' : 'default'} /></div>
-        <div className="border-t sm:border-t-0 sm:border-l border-line"><StatCard label="Wallet balance" value={balanceEther > 0 ? balanceEther.toFixed(4) : '—'} sub={isLowGas ? 'Low gas — top up' : balanceSymbol} subColor={isLowGas ? 'warn' : 'default'} /></div>
+        {isOwner ? (
+          <div className="border-t sm:border-t-0 sm:border-l border-line"><StatCard label="Wallet balance" value={balanceEther > 0 ? balanceEther.toFixed(4) : '—'} sub={isLowGas ? 'Low gas — top up' : balanceSymbol} subColor={isLowGas ? 'warn' : 'default'} /></div>
+        ) : (
+          <div className="border-t sm:border-t-0 sm:border-l border-line p-5 sm:p-6 flex flex-col justify-center">
+            <div className="font-mono text-[11px] uppercase tracking-widest text-ink-3 mb-2">On-chain</div>
+            {agent.walletAddress ? (
+              <>
+                <div className="font-mono text-sm text-ink truncate">{truncateAddress(agent.walletAddress)}</div>
+                <a
+                  href={`${OG_CHAIN_CONFIG.blockExplorerUrls[0]}/address/${agent.walletAddress}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="mt-1 font-mono text-[11px] uppercase tracking-widest text-ink-3 hover:text-cream transition-colors"
+                >
+                  view all ↗
+                </a>
+              </>
+            ) : (
+              <div className="font-mono text-sm text-ink-3">—</div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Gas management — only relevant to the agent owner. Top up sends native
@@ -549,10 +636,10 @@ export default function AgentDetail() {
               <button
                 key={t}
                 role="tab"
-                aria-selected={tab === t}
+                aria-selected={displayTab === t}
                 onClick={() => setTab(t)}
                 className={`pt-4 pb-3 -mb-px text-sm whitespace-nowrap border-b-2 transition-colors ${
-                  tab === t
+                  displayTab === t
                     ? 'text-ink font-medium border-cream'
                     : 'text-ink-3 border-transparent hover:text-ink-2'
                 }`}
@@ -563,7 +650,7 @@ export default function AgentDetail() {
           </div>
 
           <div className="flex-1 p-5 overflow-y-auto max-h-[520px] relative" ref={logContainerRef} onScroll={handleLogScroll}>
-            {tab === 'logs' && (
+            {displayTab === 'logs' && (
               <>
               {!autoScroll && logs.length > 0 && (
                 <button
@@ -616,7 +703,7 @@ export default function AgentDetail() {
               </>
             )}
 
-            {tab === 'tools' && (
+            {displayTab === 'tools' && (
               (agent.tools ?? []).length === 0 ? (
                 <EmptyState
                   icon="settings"
@@ -650,24 +737,38 @@ export default function AgentDetail() {
               )
             )}
 
-            {tab === 'tasks' && (
+            {displayTab === 'tasks' && (
               <AgentTasks agentWallet={agent.walletAddress} />
             )}
 
-            {tab === 'reviews' && (
+            {displayTab === 'reviews' && (
               <div className="space-y-5">
-                {/* Stats summary */}
+                {/* Rating summary — big average on the left, per-star
+                    histogram bars on the right (relative to the busiest row). */}
                 {reviewStats && reviewStats.totalReviews > 0 && (
-                  <div className="flex items-center gap-4 text-sm">
-                    <span className="text-ink font-bold font-mono text-lg">{reviewStats.avgRating.toFixed(1)}</span>
-                    <span className="text-ink-3">avg · {reviewStats.totalReviews} reviews</span>
-                    <div className="flex gap-1">
-                      {[5, 4, 3, 2, 1].map((star) => (
-                        <div key={star} className="flex items-center gap-1 text-xs text-ink-3">
-                          <span className="text-ink-2">{'★'.repeat(star)}{'☆'.repeat(5 - star)}</span>
-                          <span className="font-mono w-4 text-right">{reviewStats.distribution[star] ?? 0}</span>
-                        </div>
-                      ))}
+                  <div className="flex flex-col sm:flex-row gap-6 sm:items-center border border-line p-5">
+                    <div className="shrink-0 sm:pr-6 sm:border-r border-line">
+                      <div className="font-display text-4xl text-cream tabular-nums">{reviewStats.avgRating.toFixed(2)}</div>
+                      <div className="mt-1 text-sm text-cream" aria-hidden>
+                        {'★'.repeat(Math.round(reviewStats.avgRating))}
+                        <span className="text-ink-3">{'★'.repeat(5 - Math.round(reviewStats.avgRating))}</span>
+                      </div>
+                      <div className="mt-1 font-mono text-[11px] text-ink-3">{reviewStats.totalReviews} reviews</div>
+                    </div>
+                    <div className="flex-1 space-y-1.5 min-w-0">
+                      {[5, 4, 3, 2, 1].map((star) => {
+                        const count = reviewStats.distribution[star] ?? 0;
+                        const max = Math.max(1, ...[1, 2, 3, 4, 5].map((s) => reviewStats.distribution[s] ?? 0));
+                        return (
+                          <div key={star} className="flex items-center gap-3 font-mono text-[11px] text-ink-3">
+                            <span className="w-14 shrink-0">{star} star{star > 1 ? 's' : ''}</span>
+                            <div className="flex-1 h-1.5 bg-surface-2">
+                              <div className="h-full bg-cream" style={{ width: `${(count / max) * 100}%` }} />
+                            </div>
+                            <span className="w-6 text-right text-ink-2">{count}</span>
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 )}
@@ -749,7 +850,7 @@ export default function AgentDetail() {
               </div>
             )}
 
-            {tab === 'services' && (
+            {displayTab === 'services' && (
               <ServicesTab
                 agentId={id!}
                 walletAddress={agent.walletAddress || ''}
@@ -760,11 +861,11 @@ export default function AgentDetail() {
               />
             )}
 
-            {tab === 'webhooks' && isOwner && (
+            {displayTab === 'webhooks' && isOwner && (
               <WebhookTab agentId={id!} />
             )}
 
-            {tab === 'edit' && isOwner && (
+            {displayTab === 'edit' && isOwner && (
               <div className="space-y-5">
                 <FormField label="Instructions">
                   <FormTextarea rows={6} value={editInstructions} onChange={e => setEditInstructions(e.target.value)} />
@@ -814,7 +915,7 @@ export default function AgentDetail() {
               </div>
             )}
 
-            {tab === 'metrics' && <AgentMetricsPanel agentId={id!} />}
+            {displayTab === 'metrics' && <AgentMetricsPanel agentId={id!} />}
           </div>
         </div>
       </div>
@@ -1003,8 +1104,14 @@ function ServicesTab({
                   <Tag tone="info">{s.service_type}</Tag>
                 </div>
                 {s.description && <div className="text-xs text-ink-3 mt-1.5">{s.description}</div>}
-                <div className="flex items-center justify-between mt-3">
-                  <span className="font-mono text-ink text-sm">{fmt(s.price_raw)}<span className="text-ink-3"> / call</span></span>
+                <div className="flex items-center justify-between gap-3 mt-4 pt-3 border-t border-line">
+                  <div className="min-w-0">
+                    <span className="font-mono text-cream text-sm">{fmt(s.price_raw)}</span>
+                    <span className="font-mono text-ink-3 text-xs"> / call</span>
+                    {s.sold_count > 0 && (
+                      <div className="font-mono text-[11px] text-ink-3 mt-0.5">{s.sold_count} sold{s.avg_rating > 0 ? ` · ★ ${s.avg_rating.toFixed(1)}` : ''}</div>
+                    )}
+                  </div>
                   <Button
                     variant="primary"
                     size="sm"
