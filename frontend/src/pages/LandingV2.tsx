@@ -320,15 +320,19 @@ export default function LandingV2() {
                 </p>
               </Reveal>
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-px bg-line border border-line">
+            {/* Solid cells + hairline gaps — translucent cells over a line-
+                colored grid blend into one gray slab; opaque bg makes the
+                grid read as drawn rules, same treatment as the stats strip. */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-px bg-line/70 border border-line">
               {PILLARS.map((p, i) => (
-                <Reveal key={p.k} delay={i * 0.06} className="bg-bg/70">
-                  <div className="h-full p-6">
-                    <div className="flex items-center gap-2 font-mono text-[11px] uppercase tracking-widest text-ink mb-3">
-                      <span className="text-ok">●</span>
-                      {p.k}
+                <Reveal key={p.k} delay={i * 0.06} className="bg-bg">
+                  <div className="group h-full p-6 sm:p-7 hover:bg-surface transition-colors">
+                    <div className="flex items-baseline justify-between mb-5">
+                      <span className="font-display text-2xl text-cream">{String(i + 1).padStart(2, '0')}</span>
+                      <span className="w-1.5 h-1.5 bg-ok inline-block" aria-hidden />
                     </div>
-                    <p className="text-sm text-ink-2 leading-relaxed">{p.d}</p>
+                    <div className="font-mono text-[11px] uppercase tracking-widest text-ink mb-2.5">{p.k}</div>
+                    <p className="text-sm text-ink-3 group-hover:text-ink-2 leading-relaxed transition-colors">{p.d}</p>
                   </div>
                 </Reveal>
               ))}
@@ -378,20 +382,30 @@ export default function LandingV2() {
                 Hire an agent. <span className="text-cream">Or be one.</span>
               </h2>
             </Reveal>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-px bg-line border border-line mb-12">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-px bg-line/70 border border-line mb-12">
               {DOORS.map((door, i) => (
-                <Reveal key={door.kicker} delay={i * 0.08} className="bg-bg/70">
+                <Reveal key={door.kicker} delay={i * 0.08} className="bg-bg">
                   <Link
                     to={door.to}
                     onClick={() => track('cta_click', { label: door.cta, target: door.to, section: 'doors' })}
-                    className="group flex h-full flex-col p-7 sm:p-9 hover:bg-surface-2/60 transition-colors"
+                    className="group relative flex h-full flex-col p-8 sm:p-10 min-h-[260px] hover:bg-surface transition-colors overflow-hidden"
                   >
-                    <div className="font-mono text-[11px] uppercase tracking-widest text-ink-3 mb-4">{door.kicker}</div>
-                    <h3 className="text-xl sm:text-2xl font-semibold text-ink mb-3">{door.title}</h3>
-                    <p className="text-sm text-ink-2 leading-relaxed mb-8">{door.d}</p>
-                    <div className="mt-auto flex items-center justify-between font-mono text-[11px] uppercase tracking-widest">
-                      <span className="text-ink-3">{door.verbs}</span>
-                      <span className="text-ink-3 group-hover:text-cream transition-colors">↗</span>
+                    {/* Cream rule that draws in on hover — the one moving part. */}
+                    <span
+                      aria-hidden
+                      className="absolute top-0 left-0 h-0.5 w-full bg-cream origin-left scale-x-0 group-hover:scale-x-100 transition-transform duration-300"
+                    />
+                    <div className="flex items-center justify-between mb-6">
+                      <span className="font-mono text-[11px] uppercase tracking-widest text-ink-3">{door.kicker}</span>
+                      <span className="font-display text-xl text-line-2 group-hover:text-cream transition-colors" aria-hidden>
+                        {String(i + 1).padStart(2, '0')}
+                      </span>
+                    </div>
+                    <h3 className="text-2xl sm:text-3xl font-bold tracking-tight text-ink mb-3">{door.title}</h3>
+                    <p className="text-sm text-ink-3 group-hover:text-ink-2 leading-relaxed mb-10 max-w-sm transition-colors">{door.d}</p>
+                    <div className="mt-auto flex items-center justify-between border-t border-line pt-4 font-mono text-[11px] uppercase tracking-widest">
+                      <span className="text-ink-2">{door.verbs}</span>
+                      <span className="text-ink-3 group-hover:text-cream group-hover:translate-x-0.5 transition-all">→</span>
                     </div>
                   </Link>
                 </Reveal>
