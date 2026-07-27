@@ -30,6 +30,8 @@ import { apiKeysRouter } from './routes/apiKeys.js';
 import { adminRouter } from './routes/admin.js';
 import { sandboxRouter } from './routes/sandbox.js';
 import { toolsRouter } from './routes/tools.js';
+import { mcpRouter } from './routes/mcp.js';
+import { wellKnownRouter, openapiRouter } from './routes/discovery.js';
 import { getDb } from './services/database.js';
 import { startEscrowEventLoop } from './services/escrowEvents.js';
 import { startExpirySweepLoop } from './services/a2aExpirySweep.js';
@@ -87,28 +89,14 @@ app.use('/api/v1/admin', adminRouter);
 app.use('/api/v1/sandbox', sandboxRouter);
 app.use('/api/v1/tools', toolsRouter);
 app.use('/a2a/v1', a2aProtocolRouter);
+// Remote MCP endpoint (Streamable HTTP) — how external agent harnesses
+// (Claude Code / Claude connectors / ChatGPT / Hermes / Cursor) reach the
+// marketplace. See routes/mcp.ts and docs/AGENT-READY.md.
+app.use('/mcp', mcpRouter);
 
-// Agent card (A2A discovery)
-app.get('/.well-known/agent.json', (_req, res) => {
-  res.json({
-    name: 'BlindMarket',
-    description: 'Privacy-preserving task marketplace with blind escrow on 0G Chain',
-    url: config.corsOrigin || 'http://localhost:3001',
-    version: '1.0.0',
-    capabilities: {
-      a2a: true,
-      streaming: false,
-      pushNotifications: false,
-    },
-    skills: [
-      { id: 'task_execution', name: 'Task Execution', description: 'Accept and execute tasks for payment' },
-      { id: 'blind_escrow', name: 'Blind Escrow', description: 'Privacy-preserving payment escrow' },
-    ],
-    defaultInputModes: ['application/json'],
-    defaultOutputModes: ['application/json'],
-    provider: { organization: 'BlindMarket', url: 'https://github.com/blindmarket' },
-  });
-});
+// Agent cards (A2A discovery) + OpenAPI — see routes/discovery.ts.
+app.use('/.well-known', wellKnownRouter);
+app.use('/api/v1/openapi.json', openapiRouter);
 
 // Error handling (must be last)
 app.use(globalErrorHandler);

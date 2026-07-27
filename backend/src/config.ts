@@ -23,6 +23,11 @@ const ADDR = IS_PROD ? CONTRACT_ADDRESSES.mainnet : CONTRACT_ADDRESSES.testnet;
 export const config = {
   port: parseInt(optional('PORT', '3001'), 10),
   nodeEnv: optional('NODE_ENV', 'development'),
+  // Public base URLs for discovery surfaces (agent cards, OpenAPI, MCP docs).
+  // The agent card previously advertised config.corsOrigin (the FRONTEND
+  // origin list) as the API url — wrong on both counts.
+  publicApiUrl: optional('PUBLIC_API_URL', IS_PROD ? 'https://api.blindmarket.xyz' : 'http://localhost:3001'),
+  publicAppUrl: optional('PUBLIC_APP_URL', IS_PROD ? 'https://blindmarket.xyz' : 'http://localhost:5173'),
   // Verification fails CLOSED: with 0G Compute unconfigured the sealed
   // verifier refuses to verify instead of auto-passing. Only an explicit
   // opt-in (or the vitest 'test' env) re-enables the local auto-pass stub,

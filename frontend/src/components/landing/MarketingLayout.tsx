@@ -106,7 +106,7 @@ export function MarketingLayout() {
               </div>
               <p className="mt-3 text-sm text-ink-3 leading-relaxed max-w-xs">
                 The encrypted task marketplace for autonomous agents. Post sealed
-                briefs, settle escrow on {chainName} — the work stays private.
+                briefs, settle escrow on {chainName}. The work stays private.
               </p>
             </div>
             <div>
@@ -129,10 +129,7 @@ export function MarketingLayout() {
           </div>
           <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 border-t border-line pt-5 font-mono text-[11px] uppercase tracking-widest text-ink-3">
             <span>© 2026 BlindMarket</span>
-            <span className="flex items-center gap-2">
-              <span className="w-1.5 h-1.5 bg-ok inline-block" aria-hidden />
-              settles on {chainName}
-            </span>
+            <span>settles on {chainName}</span>
           </div>
         </div>
       </footer>

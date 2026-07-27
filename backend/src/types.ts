@@ -210,6 +210,20 @@ export interface A2ATaskMeta {
   // settlement. Validated at /tasks/index (active, agent_address==targetExecutor,
   // on-chain amount >= price_raw).
   serviceId?: number;
+  // ── Per-task privacy (agent-ready, Jul 2026) ────────────────────────────
+  // 'public': the poster explicitly opted OUT of blindness for this task.
+  // The storage blob at rootHash is PLAINTEXT utf-8 (no AES/ECIES), key
+  // material must be absent (wrappedKeys/keyCustodyBlob rejected at
+  // /tasks/index), any registered executor can accept without a wrapped
+  // slice (the NEEDS_WRAP gate is skipped), and the brief + resultData are
+  // visible on public surfaces. Absent = 'private' = the original encrypted
+  // flow; the value is immutable across re-indexes.
+  privacy?: 'public';
+  // Bounded plaintext display copy of a PUBLIC task's brief, so browse and
+  // detail surfaces can show it without a storage fetch. The blob at
+  // rootHash stays the canonical brief for execution. Never present on
+  // private tasks.
+  publicBrief?: string;
 }
 
 export type A2ATaskStateStatus =

@@ -1228,6 +1228,7 @@ async function pollAndWork() {
     let acceptedTaskHash = null;
     let acceptedRootHash = null;
     let acceptedWrappedKey = null;
+    let acceptedPrivacy = null;
 
     for (const entry of available) {
       const taskHash = entry.meta.taskId;
@@ -1246,6 +1247,7 @@ async function pollAndWork() {
           const acceptJson = await acceptRes.json();
           acceptedRootHash = acceptJson.data?.rootHash ?? null;
           acceptedWrappedKey = acceptJson.data?.wrappedKey ?? null;
+          acceptedPrivacy = acceptJson.data?.privacy ?? null;
         } catch {
           // Non-JSON response body; treat as no brief available.
         }
@@ -1327,6 +1329,7 @@ async function pollAndWork() {
             const acceptJson = await retryRes.json();
             acceptedRootHash = acceptJson.data?.rootHash ?? null;
             acceptedWrappedKey = acceptJson.data?.wrappedKey ?? null;
+            acceptedPrivacy = acceptJson.data?.privacy ?? null;
           } catch { /* non-JSON body */ }
           break;
         }
@@ -1357,7 +1360,7 @@ async function pollAndWork() {
     // before the HTTP response returns. No sleep needed.
     log(`assignment confirmed for ${acceptedTaskHash.slice(0, 10)}…, starting work`);
 
-    await runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrappedKey);
+    await runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrappedKey, acceptedPrivacy);
   } catch (err) {
     log(`error: ${err.message}`);
   } finally {
@@ -1372,11 +1375,9 @@ async function pollAndWork() {
 // guards (worker == caller, task status, deadline) are enforced downstream by
 // /submit and the submitEvidence revert handling, so no separate chain check is
 // needed here.
-// Download an AES-encrypted brief blob from 0G Storage (via the backend) and
-// decrypt it with our ECIES-wrapped slice. Shared by the executor path
-// (runAcceptedTask) and the verifier path (pollAndVerify). Throws on failure.
-async function downloadAndDecryptBrief(rootHash, wrappedKeyHex) {
-  const aesKey = eciesDecryptK1(Buffer.from(wrappedKeyHex, 'hex'), AGENT_PRIVATE_KEY);
+// Download a brief blob from 0G Storage (via the backend). Returns the raw
+// bytes — the caller decides whether they are ciphertext or plaintext.
+async function downloadBriefBlob(rootHash) {
   // Generous timeout: 0G storage indexer reads routinely exceed the 30s
   // fetchWithTimeout default under load, and an abort here burns one of only
   // MAX_RESUME_ATTEMPTS self-recovery tries on a brief that was fetchable.
@@ -1387,18 +1388,37 @@ async function downloadAndDecryptBrief(rootHash, wrappedKeyHex) {
   const dlJson = await dlRes.json();
   const b64 = dlJson.data?.blob;
   if (!b64) throw new Error('storage response missing blob');
-  return aesDecrypt(Buffer.from(b64, 'base64'), aesKey).toString('utf8');
+  return Buffer.from(b64, 'base64');
 }
 
-async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrappedKey) {
+// Download an AES-encrypted brief blob from 0G Storage (via the backend) and
+// decrypt it with our ECIES-wrapped slice. Shared by the executor path
+// (runAcceptedTask) and the verifier path (pollAndVerify). Throws on failure.
+async function downloadAndDecryptBrief(rootHash, wrappedKeyHex) {
+  const aesKey = eciesDecryptK1(Buffer.from(wrappedKeyHex, 'hex'), AGENT_PRIVATE_KEY);
+  const blob = await downloadBriefBlob(rootHash);
+  return aesDecrypt(blob, aesKey).toString('utf8');
+}
+
+// Fetch a PUBLIC task's brief: the blob at rootHash is plaintext utf-8 by
+// definition (privacy='public' rows can carry no key material — enforced at
+// /tasks/index), so no key and no decryption are involved.
+async function downloadPublicBrief(rootHash) {
+  return (await downloadBriefBlob(rootHash)).toString('utf8');
+}
+
+async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrappedKey, acceptedPrivacy) {
   try {
     const taskStartedAt = Date.now();
 
+    const isPublicTask = acceptedPrivacy === 'public';
     let briefPlaintext = null;
-    if (acceptedRootHash && acceptedWrappedKey && AGENT_PRIVATE_KEY) {
+    if (acceptedRootHash && (isPublicTask || (acceptedWrappedKey && AGENT_PRIVATE_KEY))) {
       try {
-        briefPlaintext = await downloadAndDecryptBrief(acceptedRootHash, acceptedWrappedKey);
-        log(`decrypted brief for ${acceptedTaskHash.slice(0, 10)}… (${briefPlaintext.length} chars)`);
+        briefPlaintext = isPublicTask
+          ? await downloadPublicBrief(acceptedRootHash)
+          : await downloadAndDecryptBrief(acceptedRootHash, acceptedWrappedKey);
+        log(`${isPublicTask ? 'fetched public' : 'decrypted'} brief for ${acceptedTaskHash.slice(0, 10)}… (${briefPlaintext.length} chars)`);
         // Fetch any existing message thread so the agent can continue where
         // it left off (e.g. after restart during wait_for_reply).
         try {
@@ -1766,8 +1786,9 @@ async function resumeAssignedTasks() {
     if (!taskHash || resumingTasks.has(taskHash)) continue;
 
     const wrappedKey = meta.wrappedKeys?.[myAddr];
-    // finalize-only needs no brief; a full re-run needs a decryptable slice.
-    if (!finalizeOnly && (!meta.rootHash || !wrappedKey)) continue;
+    // finalize-only needs no brief; a full re-run needs a decryptable slice —
+    // or a PUBLIC task, whose brief is plaintext and needs no slice at all.
+    if (!finalizeOnly && (!meta.rootHash || (!wrappedKey && meta.privacy !== 'public'))) continue;
 
     const attempts = resumeFailures.get(taskHash) ?? 0;
     if (attempts >= MAX_RESUME_ATTEMPTS) {
@@ -1914,10 +1935,11 @@ async function pollAndVerify() {
     if (state.executorAddress && state.executorAddress.toLowerCase() === myAddr) continue;
 
     const wrappedKey = meta.wrappedKeys?.[myAddr];
+    const isPublicTask = meta.privacy === 'public';
     const output = typeof state.resultData?.output === 'string'
       ? state.resultData.output
       : (state.resultData ? JSON.stringify(state.resultData) : '');
-    if (!meta.rootHash || !wrappedKey || !output) continue;
+    if (!meta.rootHash || !output || (!wrappedKey && !isPublicTask)) continue;
 
     // Cap GENUINE failed attempts only (decrypt failure, model error, terminal
     // POST error) — NOT transient on-chain races, which the POST loop retries
@@ -1931,9 +1953,11 @@ async function pollAndVerify() {
 
       let brief;
       try {
-        brief = await downloadAndDecryptBrief(meta.rootHash, wrappedKey);
+        brief = isPublicTask
+          ? await downloadPublicBrief(meta.rootHash)
+          : await downloadAndDecryptBrief(meta.rootHash, wrappedKey);
       } catch (e) {
-        log(`verify: brief decrypt failed for ${taskHash.slice(0, 10)}…: ${e.message}`);
+        log(`verify: brief ${isPublicTask ? 'fetch' : 'decrypt'} failed for ${taskHash.slice(0, 10)}…: ${e.message}`);
         bumpVerifyFailure(taskHash);
         continue;
       }
@@ -2167,14 +2191,16 @@ async function tryAcceptTask(taskHash) {
     appliedTasks.set(taskHash, Date.now());
     let rootHash = null;
     let wrappedKey = null;
+    let privacy = null;
     try {
       const acceptJson = await acceptRes.json();
       rootHash = acceptJson.data?.rootHash ?? null;
       wrappedKey = acceptJson.data?.wrappedKey ?? null;
+      privacy = acceptJson.data?.privacy ?? null;
     } catch { /* non-JSON body */ }
     log(`assignment confirmed for ${taskHash.slice(0, 10)}…, starting work`);
     // Run the task in the foreground (blocks this handler until done)
-    await runAcceptedTask(taskHash, rootHash, wrappedKey);
+    await runAcceptedTask(taskHash, rootHash, wrappedKey, privacy);
     return true;
   }
 

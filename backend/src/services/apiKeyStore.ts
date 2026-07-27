@@ -1,5 +1,6 @@
 import { randomBytes, createHash } from 'crypto';
 import { getPool } from './neonDb.js';
+import { config } from '../config.js';
 
 const KEY_PREFIX = 'sk_';
 
@@ -96,6 +97,9 @@ export async function lookupApiKey(rawKey: string): Promise<{
   ownerAddress: string;
   capabilities: string[];
 } | null> {
+  // No Neon configured (local dev): treat as "no such key" so requireAuth
+  // falls through to legacy-key/JWT auth instead of 500ing every request.
+  if (!config.databaseUrl) return null;
   const db = await getPool();
   const hash = hashKey(rawKey);
   const { rows } = await db.query<Record<string, unknown>>(

@@ -71,6 +71,13 @@ export default function PostTask() {
     instructions: '',
     locationZone: 'global',
     amount: '10',
+    // Per-task privacy. 'private' (default) = the encrypted flow: brief is
+    // AES-encrypted browser-side, key ECIES-wrapped per executor, platform
+    // stays blind. 'public' = poster opts out of blindness: plaintext brief,
+    // no key wrapping (never key-stranded), brief + result visible to
+    // everyone — any agent anywhere (incl. external harnesses via MCP) can
+    // read and work it with zero crypto.
+    privacy: 'private' as 'private' | 'public',
     // Stored as a datetime-local string (YYYY-MM-DDTHH:mm). Converted to a
     // seconds-from-now duration at submit time — the contract takes duration,
     // not an absolute date, so this is a UX layer over the on-chain primitive.
@@ -106,6 +113,9 @@ export default function PostTask() {
   // can /accept immediately; zero means the task is awaiting bids. The
   // server-side key custody will re-wrap to late joiners on /accept.
   const [initialWrapCount, setInitialWrapCount] = useState<number>(0);
+  // Whether the just-posted task was public — drives the success copy (the
+  // wrap-count cases only make sense for encrypted posts).
+  const [postedPublic, setPostedPublic] = useState(false);
   // Re-entry guard. `status` is async React state, so a fast double-click can
   // fire handleSubmit twice before the button disables — each run burns a fresh
   // 0G storage upload and opens a second wallet prompt. A ref flips
@@ -166,25 +176,41 @@ export default function PostTask() {
       const amountBase = parseUnits(form.amount, native.decimals);
       console.log(`[PostTask] Amount: ${form.amount} ${native.symbol} (${amountBase} base units)`);
 
-      // 1. Discover eligible executors
-      console.log('[PostTask] Looking up matching executors...');
-      const capsQS = encodeURIComponent(requiredCaps.join(','));
-      // authedGet unwraps to `body.data` (see api.ts:23), so T is the inner
-      // payload — not the {success, data} envelope.
-      const execResp = await authedGet<{
-        executors: Array<{ address: string; publicKey: string; capabilities: string[]; reputation: number }>;
-      }>(`/api/v1/a2a/executors?capabilities=${capsQS}`, token);
-      const executors = execResp.executors ?? [];
-      console.log(`[PostTask] ${executors.length} matching executor(s) found at post time`);
+      const isPublicTask = form.privacy === 'public';
 
-      // 2. Encrypt instructions browser-side
+      // 1. Discover eligible executors (private only — a public task needs no
+      //    wrap targets; every agent can read it).
+      let executors: Array<{ address: string; publicKey: string; capabilities: string[]; reputation: number }> = [];
+      if (!isPublicTask) {
+        console.log('[PostTask] Looking up matching executors...');
+        const capsQS = encodeURIComponent(requiredCaps.join(','));
+        // authedGet unwraps to `body.data` (see api.ts:23), so T is the inner
+        // payload — not the {success, data} envelope.
+        const execResp = await authedGet<{
+          executors: Array<{ address: string; publicKey: string; capabilities: string[]; reputation: number }>;
+        }>(`/api/v1/a2a/executors?capabilities=${capsQS}`, token);
+        executors = execResp.executors ?? [];
+        console.log(`[PostTask] ${executors.length} matching executor(s) found at post time`);
+      }
+
+      // 2. Prepare the brief blob. Private: AES-encrypt browser-side, hash the
+      //    ciphertext. Public: the poster opted out of blindness — the blob is
+      //    the plaintext itself, hashed as-is (same commitment scheme, no key).
       setStatus('encrypting');
-      console.log('[PostTask] Encrypting instructions...');
-      const key = generateAesKey();
       const plaintext = toBytes(form.instructions);
-      const ciphertext = await aesEncrypt(plaintext, key);
-      const blob = toBase64(ciphertext);
-      const taskHash = '0x' + await sha256(ciphertext);
+      let blob: string;
+      let taskHash: string;
+      const key = generateAesKey(); // unused for public tasks
+      if (isPublicTask) {
+        console.log('[PostTask] Public task — posting plaintext brief (no encryption)...');
+        blob = toBase64(plaintext);
+        taskHash = '0x' + await sha256(plaintext);
+      } else {
+        console.log('[PostTask] Encrypting instructions...');
+        const ciphertext = await aesEncrypt(plaintext, key);
+        blob = toBase64(ciphertext);
+        taskHash = '0x' + await sha256(ciphertext);
+      }
 
       // 3. Upload encrypted blob to storage and capture the rootHash so the
       //    backend can persist it in A2A meta. Without rootHash the executor
@@ -208,29 +234,32 @@ export default function PostTask() {
       //    Server-side key custody handles the late-joiner re-wrap on /accept,
       //    so no browser-side wrap loop is needed. We stash the AES key locally
       //    as a client-side fallback in case custody is unavailable.
-      stashAesKey(taskHash, key);
       const wrappedKeys: Record<string, string> = {};
-      for (const exec of executors) {
-        try {
-          const wrappedBytes = await eciesEncrypt(key, exec.publicKey);
-          const wrappedHex = Array.from(wrappedBytes, (b) => b.toString(16).padStart(2, '0')).join('');
-          wrappedKeys[exec.address.toLowerCase()] = wrappedHex;
-        } catch (e) {
-          // Skip an executor with a malformed pubkey rather than fail the
-          // entire post — log so we can flag the bad registration later.
-          console.warn(`[PostTask] Skipped ${exec.address} (wrap failed):`, (e as Error).message);
+      if (!isPublicTask) {
+        stashAesKey(taskHash, key);
+        for (const exec of executors) {
+          try {
+            const wrappedBytes = await eciesEncrypt(key, exec.publicKey);
+            const wrappedHex = Array.from(wrappedBytes, (b) => b.toString(16).padStart(2, '0')).join('');
+            wrappedKeys[exec.address.toLowerCase()] = wrappedHex;
+          } catch (e) {
+            // Skip an executor with a malformed pubkey rather than fail the
+            // entire post — log so we can flag the bad registration later.
+            console.warn(`[PostTask] Skipped ${exec.address} (wrap failed):`, (e as Error).message);
+          }
         }
+        console.log(
+          `[PostTask] AES key wrapped to ${Object.keys(wrappedKeys).length}/${executors.length} executor(s); ` +
+          `stashed locally for post-hoc bidders`,
+        );
       }
-      console.log(
-        `[PostTask] AES key wrapped to ${Object.keys(wrappedKeys).length}/${executors.length} executor(s); ` +
-        `stashed locally for post-hoc bidders`,
-      );
 
       // 4a. Agent-verify: also wrap the AES key to the designated verifier so it
       //     can decrypt the real brief and judge the work. The verifier usually
       //     isn't in the capability-matched executor set, so wrap it separately.
       //     The backend rejects the index unless this slice is present.
-      if (form.verificationMode === 'agent' && form.verifierPublicKey && form.verifierAddress) {
+      //     Public tasks skip this — the verifier reads the plaintext brief.
+      if (!isPublicTask && form.verificationMode === 'agent' && form.verifierPublicKey && form.verifierAddress) {
         try {
           const wrappedBytes = await eciesEncrypt(key, form.verifierPublicKey);
           wrappedKeys[form.verifierAddress.toLowerCase()] =
@@ -251,13 +280,15 @@ export default function PostTask() {
       //     skip sealing entirely.
       let keyCustodyBlob: { keyId: string; blob: string } | undefined;
       try {
-        const custodyKey = await authedGet<{
-          enabled: boolean;
-          keyId: string | null;
-          publicKey: string | null;
-          attestation: string | null;
-        }>('/api/v1/a2a/key-custody/pubkey', token);
-        if (custodyKey.enabled && custodyKey.keyId && custodyKey.publicKey) {
+        const custodyKey = isPublicTask
+          ? null // public task — there is no AES key to seal
+          : await authedGet<{
+              enabled: boolean;
+              keyId: string | null;
+              publicKey: string | null;
+              attestation: string | null;
+            }>('/api/v1/a2a/key-custody/pubkey', token);
+        if (custodyKey && custodyKey.enabled && custodyKey.keyId && custodyKey.publicKey) {
           // The local (operator-trusted) backend returns attestation:null. When
           // an attested backend (TDX / 0G oracle) ships, VERIFY
           // custodyKey.attestation here before sealing — sealing to an
@@ -315,7 +346,7 @@ export default function PostTask() {
         verifierAddress,
         requiredCapabilities: requiredCaps,
         rootHash,
-        wrappedKeys,
+        wrappedKeys: isPublicTask ? undefined : wrappedKeys,
       }, token);
 
       // 7. Sign and send — EVM via ethers/MetaMask
@@ -340,15 +371,20 @@ export default function PostTask() {
         verifierAddress,
         requiredCapabilities: requiredCaps,
         rootHash,
-        wrappedKeys,
+        wrappedKeys: isPublicTask ? undefined : wrappedKeys,
         // Only sent when key-custody is enabled (else undefined → omitted by
         // JSON.stringify). Lets the backend self-heal late joiners on /accept.
         keyCustodyBlob,
+        // Public task: plaintext brief, no key material (backend enforces),
+        // plus a bounded display copy for browse/detail surfaces.
+        privacy: isPublicTask ? ('public' as const) : undefined,
+        publicBrief: isPublicTask ? form.instructions.slice(0, 4000) : undefined,
       }, token);
 
       const finalTaskId = indexResp.onChainTaskId ?? taskJson?.taskId ?? null;
       setTaskId(finalTaskId);
       setInitialWrapCount(Object.keys(wrappedKeys).length);
+      setPostedPublic(isPublicTask);
       setStatus('done');
       trackEvent('task_posted', {
         taskId: finalTaskId,
@@ -366,10 +402,11 @@ export default function PostTask() {
   const busy = status === 'encrypting' || status === 'approving' || status === 'signing';
 
   const submitLabel =
-    status === 'encrypting' ? 'Encrypting…'
+    status === 'encrypting' ? (form.privacy === 'public' ? 'Preparing…' : 'Encrypting…')
       : status === 'approving' ? 'Approving…'
         : status === 'signing' ? 'Sign in wallet…'
-          : 'Encrypt and post task';
+          : form.privacy === 'public' ? 'Post public task'
+            : 'Encrypt and post task';
 
   return (
     <div>
@@ -395,12 +432,33 @@ export default function PostTask() {
                   Task ID <span className="font-mono text-ink-2">#{taskId}</span>
                 </div>
               )}
-              <div className="text-sm text-ink-3">Instructions encrypted, payment locked in escrow.</div>
+              <div className="text-sm text-ink-3">
+                {postedPublic
+                  ? 'Brief posted publicly, payment locked in escrow.'
+                  : 'Instructions encrypted, payment locked in escrow.'}
+              </div>
             </div>
           </div>
 
           <div className="p-6 sm:p-8 space-y-6">
-            {initialWrapCount > 0 ? (
+            {postedPublic ? (
+              // Public task — no key handling at all: every agent (including
+              // external ones reaching the marketplace over MCP) can read the
+              // brief. Nothing can be key-stranded.
+              <div className="border border-ok/40 bg-ok/5 p-4 sm:p-5 space-y-3">
+                <div className="flex items-center gap-2 text-ok">
+                  <Icon name="check" size={16} />
+                  <span className="text-sm font-semibold">Open to all agents</span>
+                </div>
+                <p className="text-sm text-ink-2 leading-relaxed">
+                  Your brief was posted publicly — any agent can read and accept it,
+                  no key wrapping involved. The result will also be public.
+                </p>
+                <p className="text-sm text-ink-3 leading-relaxed">
+                  You can close this tab — the task will be picked up whether you're here or not.
+                </p>
+              </div>
+            ) : initialWrapCount > 0 ? (
               // Case A — at least one matching agent was wrapped at post-time, so
               // the brief can be decrypted without any further action from the
               // poster. No need to keep a tab alive.
@@ -463,9 +521,43 @@ export default function PostTask() {
             <SectionRule num="01" title="Task details" />
             <div className="space-y-5">
               <FormField
+                label="Privacy"
+                hint="Private briefs are encrypted end-to-end. Public briefs are readable by every agent — and by anyone."
+              >
+                <div className="flex flex-wrap gap-1.5 mb-1">
+                  {([
+                    ['private', 'Private (encrypted)'],
+                    ['public', 'Public (open to all agents)'],
+                  ] as const).map(([mode, label]) => {
+                    const active = form.privacy === mode;
+                    return (
+                      <button
+                        key={mode}
+                        type="button"
+                        onClick={() => setForm(f => ({ ...f, privacy: mode }))}
+                        className={`px-2.5 py-1 text-xs border transition-colors ${active
+                          ? 'bg-cream/10 border-cream/40 text-cream'
+                          : 'bg-surface-2 border-line text-ink-3 hover:text-ink-2'
+                          }`}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="text-xs text-ink-3">
+                  {form.privacy === 'private'
+                    ? 'Only agents you wrap the key to can read the brief; the platform never sees it.'
+                    : 'Brief and result are public record — no encryption, no key handling, reachable by any agent on any platform. Don’t include secrets.'}
+                </div>
+              </FormField>
+
+              <FormField
                 label="Instructions"
                 required
-                hint="This will be encrypted — only the assigned agent can read it."
+                hint={form.privacy === 'private'
+                  ? 'This will be encrypted — only the assigned agent can read it.'
+                  : 'This will be posted in plaintext — visible to everyone.'}
               >
                 <FormTextarea
                   required

@@ -135,6 +135,12 @@ const indexTaskSchema = z.object({
     .regex(/^0x[0-9a-fA-F]{40}$/, 'targetExecutor must be a 0x EOA address')
     .optional(),
   serviceId: z.number().int().positive().optional(),
+  // Per-task privacy. 'public' = plaintext brief at rootHash, no key wrapping,
+  // brief + result visible to everyone. Absent/'private' = encrypted flow.
+  privacy: z.enum(['private', 'public']).optional(),
+  // Bounded display copy of a PUBLIC brief (browse/detail render it without a
+  // storage fetch). Only allowed when privacy='public'.
+  publicBrief: z.string().min(1).max(4000).optional(),
 });
 
 const verifySchema = z.object({
@@ -390,8 +396,9 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
     // with no slice for this caller is only acceptable if we can self-heal from
     // the key-custody blob (below). Otherwise the caller must /bid and wait for
     // the poster's browser (or the posting agent's wrap loop) to ship a slice.
-    // Tasks with no rootHash (legacy / unencrypted) skip this entirely.
-    if (meta.rootHash && !hasOwnSlice && !canSelfHeal && !meta.skipKeyWrap) {
+    // Tasks with no rootHash (legacy / unencrypted) and PUBLIC tasks (their
+    // blob is plaintext — there is no key to wrap) skip this entirely.
+    if (meta.privacy !== 'public' && meta.rootHash && !hasOwnSlice && !canSelfHeal && !meta.skipKeyWrap) {
       const custodyRotated =
         !!meta.keyCustodyBlob &&
         activeCustodyKeyId !== null &&
@@ -471,6 +478,9 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
           status: 'accepted',
           rootHash: currentMeta?.rootHash,
           wrappedKey,
+          // 'public' tells the worker the blob at rootHash is plaintext —
+          // skip ECIES/AES entirely (there is no wrappedKey by design).
+          privacy: currentMeta?.privacy,
           alreadySettled: reSettleResult.alreadySettled ?? true,
           assignTxHash: reSettleResult.txHash,
         },
@@ -610,6 +620,9 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
         status: 'accepted',
         rootHash: meta.rootHash,
         wrappedKey,
+        // 'public' tells the worker the blob at rootHash is plaintext —
+        // skip ECIES/AES entirely (there is no wrappedKey by design).
+        privacy: meta.privacy,
         alreadySettled: settleResult.alreadySettled,
         assignTxHash: settleResult.txHash,
       },
@@ -998,7 +1011,9 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       if (data.verifierAddress.toLowerCase() === address.toLowerCase()) {
         throw new AppError(400, 'INVALID_VERIFIER', 'The poster cannot be their own verifier');
       }
-      if (!wrappedKeysNormalized?.[data.verifierAddress.toLowerCase()]) {
+      // Public tasks skip this: the brief is plaintext, the verifier reads it
+      // like anyone else — there is no AES key to wrap.
+      if (data.privacy !== 'public' && !wrappedKeysNormalized?.[data.verifierAddress.toLowerCase()]) {
         throw new AppError(
           400,
           'VERIFIER_NOT_WRAPPED',
@@ -1030,6 +1045,29 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
     // only the original post-time set — otherwise a re-index strands late joiners
     // back on NEEDS_WRAP. Existing meta (a superset) wins on key collisions.
     const existingMeta = await a2aStore.getMeta(taskHash);
+
+    // ── Per-task privacy ────────────────────────────────────────────────────
+    // A PUBLIC task must carry ZERO key material: its blob is plaintext, so a
+    // wrapped key or custody blob on the row would be incoherent (and would
+    // make the accept-gate/worker branch on inconsistent state). A PRIVATE
+    // task must never carry a plaintext display brief. Privacy is immutable
+    // across re-indexes — flipping private→public would publish the pointer
+    // to a brief the poster encrypted expecting blindness (and vice versa
+    // would strand executors mid-flight).
+    const isPublic = data.privacy === 'public';
+    if (isPublic) {
+      if (data.wrappedKeys && Object.keys(data.wrappedKeys).length > 0) {
+        throw new AppError(400, 'PUBLIC_TASK_HAS_KEYS', 'A public task must not carry wrappedKeys — post it unencrypted, or omit privacy for the encrypted flow');
+      }
+      if (data.keyCustodyBlob) {
+        throw new AppError(400, 'PUBLIC_TASK_HAS_CUSTODY', 'A public task must not carry a keyCustodyBlob');
+      }
+    } else if (data.publicBrief) {
+      throw new AppError(400, 'BRIEF_ON_PRIVATE_TASK', "publicBrief is only allowed when privacy='public' — a private brief must stay encrypted");
+    }
+    if (existingMeta && (existingMeta.privacy === 'public') !== isPublic) {
+      throw new AppError(409, 'PRIVACY_IMMUTABLE', 'A task\'s privacy mode cannot be changed after it is first indexed');
+    }
     const mergedWrappedKeys = (existingMeta?.wrappedKeys || wrappedKeysNormalized)
       ? { ...(wrappedKeysNormalized ?? {}), ...(existingMeta?.wrappedKeys ?? {}) }
       : undefined;
@@ -1073,6 +1111,10 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       // rent-your-agent Phase 2: pin + service link (validated above).
       targetExecutor,
       serviceId: data.serviceId,
+      // Stored only when public — absent means private (back-compat with
+      // every pre-existing row).
+      privacy: isPublic ? 'public' : undefined,
+      publicBrief: isPublic ? data.publicBrief : undefined,
     });
 
     console.log(

@@ -37,6 +37,10 @@ interface PostedTask {
     posterAddress?: string;
     verifierAddress?: string;
     rootHash?: string;
+    // 'public' = plaintext brief, no key material at all (so never "key at
+    // risk"), brief + result public. Absent = private/encrypted.
+    privacy?: 'public';
+    publicBrief?: string;
   };
   state: {
     taskId: string;
@@ -331,8 +335,11 @@ export default function MyTasks() {
               // recoverable server-side via re-wrap, so it's NOT at risk even at
               // wrapCount 0. keyHere tells us whether THIS browser still holds
               // the key (recoverable but fragile) or not.
+              // Public tasks carry NO key at all — rootHash points at a
+              // plaintext blob, so the zero-wraps state is normal, not a risk.
               const keyAtRisk =
-                status === 0 && !!t.meta.rootHash && (t.wrapCount ?? 0) === 0 && !t.hasCustody;
+                status === 0 && t.meta.privacy !== 'public' &&
+                !!t.meta.rootHash && (t.wrapCount ?? 0) === 0 && !t.hasCustody;
               const keyHere = keyAtRisk && !!getAesKey(t.meta.taskId);
               const taskId = t.onChain?.taskId || t.meta.taskId;
               const taskUrl = `/tasks/${taskId}`;
@@ -342,7 +349,10 @@ export default function MyTasks() {
                 <>
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-[11px] font-mono text-ink-3">{shortId(t)}</span>
-                    <StatusTag status={statusLabel} />
+                    <div className="flex items-center gap-1.5">
+                      {t.meta.privacy === 'public' && <Tag tone="neutral">public</Tag>}
+                      <StatusTag status={statusLabel} />
+                    </div>
                   </div>
                   <div className="flex-1">
                     <div className="text-sm font-mono text-ink break-all">{t.meta.taskId.slice(0, 18)}…</div>

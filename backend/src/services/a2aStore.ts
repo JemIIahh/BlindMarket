@@ -516,10 +516,19 @@ export async function browseAgentTasks(
  *  one signal discovery actually used (does this task carry a brief at all). */
 export type PublicTaskMeta = Omit<A2ATaskMeta, 'wrappedKeys' | 'keyCustodyBlob' | 'rootHash'> & {
   hasEncryptedBrief: boolean;
+  rootHash?: string;
 };
 
 export function projectPublicMeta(meta: A2ATaskMeta): PublicTaskMeta {
   const { wrappedKeys: _wrappedKeys, keyCustodyBlob: _keyCustodyBlob, rootHash, ...pub } = meta;
+  // A PUBLIC task's brief is meant to be read: keep the storage pointer (the
+  // blob is plaintext by definition — key material can't exist on these
+  // rows, enforced at /tasks/index). Private tasks keep rootHash stripped:
+  // it's the ciphertext pointer and a correlation surface. publicBrief rides
+  // along in ...pub — it only ever exists on public tasks.
+  if (meta.privacy === 'public') {
+    return { ...pub, hasEncryptedBrief: false, rootHash };
+  }
   return { ...pub, hasEncryptedBrief: !!rootHash };
 }
 

@@ -294,6 +294,21 @@ export default function TaskDetail() {
                 </div>
               </div>
             )}
+
+            {/* Public task: the poster opted out of blindness — the brief is
+                part of the public record, so show it. Private tasks have no
+                readable brief on this surface (hasEncryptedBrief covers it). */}
+            {onChain.a2aMeta?.privacy === 'public' && onChain.a2aMeta?.publicBrief && (
+              <div className="mt-6 pt-6 border-t border-line">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-[11px] text-ink-3 tracking-wide">Brief</span>
+                  <Tag tone="neutral">public</Tag>
+                </div>
+                <p className="text-sm text-ink-2 leading-relaxed whitespace-pre-wrap">
+                  {onChain.a2aMeta.publicBrief}
+                </p>
+              </div>
+            )}
           </Panel>
 
           {/* A2A status — describes the current lifecycle stage in A2A

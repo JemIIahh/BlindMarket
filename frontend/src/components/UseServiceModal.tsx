@@ -43,6 +43,9 @@ export default function UseServiceModal({
   const { data: walletClient } = useWalletClient();
 
   const [prompt, setPrompt] = useState('');
+  // Per-call privacy: private (default) encrypts the prompt to the agent;
+  // public posts it in plaintext (prompt + result become public record).
+  const [privacy, setPrivacy] = useState<'private' | 'public'>('private');
   const [phase, setPhase] = useState<Phase>('input');
   const [error, setError] = useState('');
   const [output, setOutput] = useState<string | null>(null);
@@ -104,7 +107,8 @@ export default function UseServiceModal({
   async function handleUse() {
     if (submittingRef.current) return;
     if (!address || !walletClient) { setError('Connect your wallet first.'); setPhase('error'); return; }
-    if (!service.agent_public_key) { setError('This agent has no encryption key available.'); setPhase('error'); return; }
+    const isPublic = privacy === 'public';
+    if (!isPublic && !service.agent_public_key) { setError('This agent has no encryption key available.'); setPhase('error'); return; }
     if (prompt.trim().length < 1) { setError('Enter a prompt for the agent.'); return; }
     submittingRef.current = true;
     setError('');
@@ -113,25 +117,29 @@ export default function UseServiceModal({
       const token = (await getIdentityToken()) || (await getAccessToken());
       if (!token) throw new Error('No auth token — try logging out and back in.');
 
-      // 1. Encrypt the buyer's prompt (the brief) browser-side.
-      const key = generateAesKey();
-      const ciphertext = await aesEncrypt(toBytes(prompt), key);
-      const taskHash = '0x' + (await sha256(ciphertext));
+      // 1. Prepare the brief blob. Private: encrypt browser-side. Public: the
+      //    plaintext itself is the blob (no key, no wrapping).
+      const agentAddr = service.agent_address.toLowerCase();
+      const plainBytes = toBytes(prompt);
+      let blobBytes: Uint8Array;
+      let wrappedKeys: Record<string, string> | undefined;
+      if (isPublic) {
+        blobBytes = plainBytes;
+      } else {
+        const key = generateAesKey();
+        blobBytes = await aesEncrypt(plainBytes, key);
+        wrappedKeys = { [agentAddr]: toHex(await eciesEncrypt(key, service.agent_public_key!)) };
+        stashAesKey('0x' + (await sha256(blobBytes)), key);
+      }
+      const taskHash = '0x' + (await sha256(blobBytes));
 
-      // 2. Upload the encrypted blob → rootHash.
+      // 2. Upload the blob → rootHash.
       const { rootHash } = await authedPost<{ rootHash: string }>(
         '/api/v1/storage/upload',
-        { data: toBase64(ciphertext), chainType: activeChain },
+        { data: toBase64(blobBytes), chainType: activeChain },
         token,
       );
       if (!rootHash) throw new Error('Storage upload returned no rootHash');
-
-      // 3. Wrap the AES key to ONLY the pinned service agent.
-      stashAesKey(taskHash, key);
-      const agentAddr = service.agent_address.toLowerCase();
-      const wrappedKeys: Record<string, string> = {
-        [agentAddr]: toHex(await eciesEncrypt(key, service.agent_public_key)),
-      };
 
       // 4. Build the funding tx — priced at the service, instant auto-verify.
       const taskJson = await authedPost<{ unsignedTx: Parameters<typeof signAndSendTx>[1] }>('/api/v1/tasks', {
@@ -149,12 +157,12 @@ export default function UseServiceModal({
         wrappedKeys,
       }, token);
 
-      // 5. Sign + fund from the buyer's wallet.
+      // 4. Sign + fund from the buyer's wallet.
       setPhase('signing');
       const signer = await new BrowserProvider(walletClient.transport).getSigner();
       const sent = await signAndSendTx(signer, taskJson.unsignedTx, BigInt(service.price_raw));
 
-      // 6. Index the meta — pinned to the agent + linked to the service.
+      // 5. Index the meta — pinned to the agent + linked to the service.
       await authedPost('/api/v1/a2a/tasks/index', {
         txHash: sent.hash,
         taskHash,
@@ -165,9 +173,11 @@ export default function UseServiceModal({
         wrappedKeys,
         targetExecutor: agentAddr,
         serviceId: service.id,
+        privacy: isPublic ? 'public' : undefined,
+        publicBrief: isPublic ? prompt.slice(0, 4000) : undefined,
       }, token);
 
-      // 7. Wait for the agent to run + settle, then show the result.
+      // 6. Wait for the agent to run + settle, then show the result.
       setPhase('running');
       await pollForResult(taskHash, token);
     } catch (err) {
@@ -196,9 +206,29 @@ export default function UseServiceModal({
       <>
         {(phase === 'input' || phase === 'error') && (
           <div className="space-y-4">
-            <FormField label="Your input" hint="This prompt is encrypted to the agent — the platform never sees it.">
+            <FormField
+              label="Your input"
+              hint={privacy === 'private'
+                ? 'This prompt is encrypted to the agent — the platform never sees it.'
+                : 'This prompt is posted in plaintext — it and the result will be publicly visible.'}
+            >
               <FormTextarea rows={4} placeholder="What do you want this agent to do?" value={prompt} onChange={(e) => setPrompt(e.target.value)} />
             </FormField>
+            <div className="flex flex-wrap gap-1.5">
+              {([['private', 'Private (encrypted)'], ['public', 'Public']] as const).map(([mode, label]) => (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => setPrivacy(mode)}
+                  className={`px-2.5 py-1 text-xs border transition-colors ${privacy === mode
+                    ? 'bg-cream/10 border-cream/40 text-cream'
+                    : 'bg-surface-2 border-line text-ink-3 hover:text-ink-2'
+                    }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
             <div className="text-xs text-ink-3 border border-line bg-surface-2 p-3">
               You pay <span className="font-mono text-ink">{priceLabel}</span> per call. Payment is released to the
               agent on completion (90% agent / 10% platform) regardless of the output — you're paying for the

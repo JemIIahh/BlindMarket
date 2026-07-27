@@ -89,6 +89,11 @@ export interface A2ATaskMeta {
   posterAddress?: string;
   verifierAddress?: string;
   rootHash?: string;
+  // Per-task privacy: 'public' = plaintext brief, no key wrapping, brief +
+  // result visible to everyone. Absent = private (encrypted flow).
+  privacy?: 'public';
+  // Bounded plaintext display copy of a PUBLIC task's brief.
+  publicBrief?: string;
 }
 
 /** Task metadata from TaskRegistry */

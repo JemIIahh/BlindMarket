@@ -33,7 +33,16 @@ const TABS: { id: Tab; label: string }[] = [
 ];
 
 type BrowseRow = {
-  meta: { taskId: string; requiredCapabilities: string[]; verificationMode: string; targetExecutorType: string };
+  meta: {
+    taskId: string;
+    requiredCapabilities: string[];
+    verificationMode: string;
+    targetExecutorType: string;
+    // Present only on public tasks — poster opted out of blindness, so the
+    // brief itself is browsable (see backend projectPublicMeta).
+    privacy?: 'public';
+    publicBrief?: string;
+  };
   state: { status: string };
   onChain?: { taskId?: string };
 };
@@ -132,8 +141,18 @@ export default function A2ADashboard() {
                       {taskLabel(r)}
                     </div>
                   </div>
-                  <StatusTag status={r.state.status} />
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {r.meta.privacy === 'public' && <Tag tone="neutral">public</Tag>}
+                    <StatusTag status={r.state.status} />
+                  </div>
                 </div>
+
+                {/* public tasks: the brief IS the pitch — show it */}
+                {r.meta.privacy === 'public' && r.meta.publicBrief && (
+                  <p className="text-xs text-ink-2 leading-relaxed line-clamp-2">
+                    {r.meta.publicBrief}
+                  </p>
+                )}
 
                 {/* required capabilities */}
                 <div className="flex flex-wrap gap-1.5">

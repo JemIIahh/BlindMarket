@@ -34,14 +34,15 @@ import type { AgentService } from '../services/marketplace';
 
 type CopyTab = 'prompt' | 'script';
 
-function buildScript(service: AgentService, symbol: string, apiBase: string): string {
+function buildScript(service: AgentService, symbol: string, apiBase: string, privacy: 'private' | 'public'): string {
   const price = formatUnits(service.price_raw, 18);
   const chainName = isMainnet ? '0G Mainnet' : '0G Testnet';
+  const isPublic = privacy === 'public';
   // NB: the script must stay free of backticks/template-interpolation so this
   // generator (and the prompt tab that embeds it) never fights escaping.
   return `#!/usr/bin/env node
 // BlindMarket — rent "${service.name}" (service #${service.id}) from agent ${service.agent_address}
-// One call: encrypt your brief -> escrow ${price} ${symbol} -> the agent executes -> you get the result.
+// One call: ${isPublic ? 'post your brief (PUBLIC — plaintext, result is public too)' : 'encrypt your brief'} -> escrow ${price} ${symbol} -> the agent executes -> you get the result.
 //
 // Setup (once):
 //   npm i ethers                          # v6, Node 18+
@@ -50,12 +51,11 @@ function buildScript(service: AgentService, symbol: string, apiBase: string): st
 //                         the backend resolves the key to its owner wallet, and the funding tx
 //                         must come from that wallet or indexing is rejected (NOT_TASK_AGENT).
 //   PRIVATE_KEY           wallet that pays ${price} ${symbol} + gas on ${chainName} (chain ${OG_CHAIN_ID})
-//   PROMPT                what you want the agent to do (encrypted end-to-end; the
-//                         platform only ever sees a hash)
+//   PROMPT                what you want the agent to do${isPublic ? ' (PUBLIC: posted in plaintext,\n//                         visible to everyone — do not include secrets)' : ' (encrypted end-to-end; the\n//                         platform only ever sees a hash)'}
 //
 // Run:  PROMPT="..." node use-service.mjs
 
-import { Wallet, JsonRpcProvider, SigningKey } from 'ethers';
+import { Wallet, JsonRpcProvider${isPublic ? '' : ', SigningKey'} } from 'ethers';
 import crypto from 'node:crypto';
 
 const API = '${apiBase}';
@@ -89,7 +89,16 @@ async function api(method, path, body) {
   return json.data;
 }
 
-// AES-256-GCM. Wire format: [12-byte IV][16-byte auth tag][ciphertext]
+${isPublic ? `// 1. The brief is PUBLIC — the plaintext itself is the blob (no key, no wrap).
+const blob = Buffer.from(PROMPT, 'utf8');
+const taskHash = '0x' + crypto.createHash('sha256').update(blob).digest('hex');
+
+const wallet = new Wallet(PRIVATE_KEY, new JsonRpcProvider(RPC));
+console.log('paying from', wallet.address);
+
+// 2. Upload the plaintext blob to 0G Storage.
+const { rootHash } = await api('POST', '/api/v1/storage/upload', { data: blob.toString('base64') });
+` : `// AES-256-GCM. Wire format: [12-byte IV][16-byte auth tag][ciphertext]
 function aesEncrypt(plain, key) {
   const iv = crypto.randomBytes(12);
   const c = crypto.createCipheriv('aes-256-gcm', key, iv);
@@ -121,8 +130,8 @@ const { rootHash } = await api('POST', '/api/v1/storage/upload', { data: ciphert
 
 // 3. Wrap the AES key to the provider agent only.
 const wrappedKeys = { [SERVICE.agent]: eciesEncrypt(aesKey, SERVICE.publicKey).toString('hex') };
-
-// 4. Build the escrow funding tx, sign + send it from YOUR wallet.
+`}
+// ${isPublic ? '3' : '4'}. Build the escrow funding tx, sign + send it from YOUR wallet.
 const { unsignedTx } = await api('POST', '/api/v1/tasks', {
   taskHash,
   token: SERVICE.token,
@@ -133,8 +142,7 @@ const { unsignedTx } = await api('POST', '/api/v1/tasks', {
   verificationMode: 'auto',
   verificationCriteria: { min_length: 1 },
   requiredCapabilities: [],
-  rootHash,
-  wrappedKeys,
+  rootHash,${isPublic ? '' : '\n  wrappedKeys,'}
 });
 const isNative = /^0x0+$/.test(SERVICE.token);
 const tx = await wallet.sendTransaction({
@@ -146,21 +154,20 @@ const tx = await wallet.sendTransaction({
 console.log('funding tx', tx.hash);
 await tx.wait();
 
-// 5. Index the task, pinned to the provider agent + this service.
+// ${isPublic ? '4' : '5'}. Index the task, pinned to the provider agent + this service.
 await api('POST', '/api/v1/a2a/tasks/index', {
   txHash: tx.hash,
   taskHash,
   verificationMode: 'auto',
   verificationCriteria: { min_length: 1 },
   requiredCapabilities: [],
-  rootHash,
-  wrappedKeys,
+  rootHash,${isPublic ? "\n  privacy: 'public',\n  publicBrief: PROMPT.slice(0, 4000)," : '\n  wrappedKeys,'}
   targetExecutor: SERVICE.agent,
   serviceId: SERVICE.id,
 });
 console.log('task indexed', taskHash);
 
-// 6. Poll until the agent delivers (auto-verified; escrow settles ${WORKER_SHARE_PCT}/${PLATFORM_FEE_PCT} on pass).
+// ${isPublic ? '5' : '6'}. Poll until the agent delivers (auto-verified; escrow settles ${WORKER_SHARE_PCT}/${PLATFORM_FEE_PCT} on pass).
 for (let i = 0; i < 75; i++) {
   await new Promise((r) => setTimeout(r, 4000));
   const { tasks } = await api('GET', '/api/v1/a2a/tasks/posted');
@@ -181,14 +188,19 @@ process.exit(1);
 `;
 }
 
-function buildPrompt(service: AgentService, symbol: string, apiBase: string, script: string): string {
+function buildPrompt(service: AgentService, symbol: string, apiBase: string, script: string, privacy: 'private' | 'public'): string {
   const price = formatUnits(service.price_raw, 18);
   const chainName = isMainnet ? '0G Mainnet' : '0G Testnet';
+  const privacyLine = privacy === 'public'
+    ? `BlindMarket is a task marketplace with on-chain escrow. This call is PUBLIC:
+my brief and the result will be visible to everyone (no encryption involved) —
+do not include secrets in the prompt.`
+    : `BlindMarket is an encrypted task marketplace: my brief is encrypted so only the
+provider agent can read it (the platform only sees a hash), payment is escrowed
+on-chain, and the result comes back after automatic verification.`;
   return `I'd like to use a BlindMarket agent service from here.
 
-BlindMarket is an encrypted task marketplace: my brief is encrypted so only the
-provider agent can read it (the platform only sees a hash), payment is escrowed
-on-chain, and the result comes back after automatic verification.
+${privacyLine}
 
 Service:   ${service.name} (service #${service.id})
 ${service.description ? `About:     ${service.description}\n` : ''}Provider:  agent ${service.agent_address}
@@ -229,12 +241,15 @@ export default function UseFromAgentModal({
 }) {
   const [tab, setTab] = useState<CopyTab>('prompt');
   const [copied, setCopied] = useState(false);
+  // The generated code/prompt differs per privacy mode: private = the full
+  // encrypt→wrap flow; public = plaintext brief, no key handling, public result.
+  const [privacy, setPrivacy] = useState<'private' | 'public'>('private');
 
   // API_BASE_URL is '' behind the nginx same-origin proxy — the copy block
   // leaves the app, so it needs an absolute URL either way.
   const apiBase = API_BASE_URL || window.location.origin;
-  const script = buildScript(service, symbol, apiBase);
-  const prompt = buildPrompt(service, symbol, apiBase, script);
+  const script = buildScript(service, symbol, apiBase, privacy);
+  const prompt = buildPrompt(service, symbol, apiBase, script, privacy);
   const active = tab === 'prompt' ? prompt : script;
 
   const copy = async () => {
@@ -261,6 +276,25 @@ export default function UseFromAgentModal({
           <a href="/settings" className="text-cream hover:underline">Settings</a>, created
           with the same wallet your agent pays from.
         </p>
+
+        <div className="flex flex-wrap items-center gap-1.5">
+          {([['private', 'Private (encrypted)'], ['public', 'Public']] as const).map(([mode, label]) => (
+            <button
+              key={mode}
+              type="button"
+              onClick={() => setPrivacy(mode)}
+              className={`px-2.5 py-1 text-xs border transition-colors ${privacy === mode
+                ? 'bg-cream/10 border-cream/40 text-cream'
+                : 'bg-surface-2 border-line text-ink-3 hover:text-ink-2'
+                }`}
+            >
+              {label}
+            </button>
+          ))}
+          <span className="text-[11px] text-ink-3 ml-1">
+            {privacy === 'private' ? 'Brief encrypted end-to-end.' : 'Brief + result become public record.'}
+          </span>
+        </div>
 
         <div role="tablist" className="flex gap-6 border-b border-line">
           {([

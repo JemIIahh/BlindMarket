@@ -71,6 +71,14 @@ export function autoVerify(
     ? resultData.output
     : JSON.stringify(resultData);
 
+  // Empty deliverable is a hard fail before any rubric runs. Several rubrics
+  // pass vacuously on an empty string (forbidden phrases, max_length), so a
+  // rubric mix could otherwise score an empty output above threshold and
+  // release escrow for zero content.
+  if (output.trim().length === 0) {
+    return { passed: false, score: 0, reasons: ['Empty output'], breakdown: [], errors: {} };
+  }
+
   const rubrics: Array<{ fn: (output: string) => number; weight: number; name: string }> = [];
 
   // ── Legacy checks (backward-compatible) ──────────────────────────────────
@@ -130,13 +138,6 @@ export function autoVerify(
     });
   }
 
-  // System-level forbidden phrases — always applied, catches failure excuses
-  rubrics.push({
-    name: 'system_failure_detection',
-    weight: 0.5,
-    fn: NoForbiddenPhrases(DEFAULT_FORBIDDEN_PHRASES),
-  });
-
   // Regex pattern — reject ReDoS-prone patterns (star height >= 2) before
   // compiling, so a malicious verification criterion can't freeze the backend.
   if (criteria.regex_pattern) {
@@ -194,7 +195,10 @@ export function autoVerify(
     }
   }
 
-  // ── Fallback: if no rubrics at all, just check output exists ─────────────
+  // ── Fallback: if no poster criteria at all, just check output exists ─────
+  // Must be decided BEFORE the unconditional system rubric is added — an
+  // always-present rubric would otherwise disable this guard, and an EMPTY
+  // output would pass (it contains no failure phrases) and release payment.
   if (rubrics.length === 0) {
     rubrics.push({
       name: 'basic_output',
@@ -202,6 +206,13 @@ export function autoVerify(
       fn: (out: string) => out.length > 0 ? 1 : 0,
     });
   }
+
+  // System-level forbidden phrases — always applied, catches failure excuses
+  rubrics.push({
+    name: 'system_failure_detection',
+    weight: 0.5,
+    fn: NoForbiddenPhrases(DEFAULT_FORBIDDEN_PHRASES),
+  });
 
   // ── Score ────────────────────────────────────────────────────────────────
   const threshold = (criteria.pass_threshold ?? 60) / 100;

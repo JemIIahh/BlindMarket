@@ -42,6 +42,21 @@ apiKeysRouter.get('/', async (req: AuthRequest, res) => {
 });
 
 /**
+ * GET /api/v1/api-keys/whoami
+ * The wallet identity this credential resolves to. Lets MCP servers / SDK
+ * clients sanity-check at boot that their API key's owner wallet matches
+ * their local signing wallet — mismatches surface later as the confusing
+ * NOT_TASK_AGENT rejection at /a2a/tasks/index. Returns only the caller's
+ * own identity, nothing else.
+ */
+apiKeysRouter.get('/whoami', async (req: AuthRequest, res) => {
+  res.json({
+    success: true,
+    data: { address: req.user!.address, addresses: req.user!.addresses ?? [req.user!.address] },
+  });
+});
+
+/**
  * DELETE /api/v1/api-keys/:id
  * Revoke an API key.
  */

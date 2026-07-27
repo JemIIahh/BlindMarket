@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { requireAuth, optionalAuth } from '../middleware/auth.js';
-import { loadAgentByWallet } from '../services/deployedAgentStore.js';
+import { canViewerSeeResult } from '../services/resultVisibility.js';
 import { AppError } from '../middleware/errorHandler.js';
 import * as escrowService from '../services/escrow.js';
 import * as registryService from '../services/registry.js';
@@ -16,8 +16,6 @@ import { getDb } from '../services/database.js';
 import { rooms } from '../services/socket.js';
 
 export const tasksRouter = Router();
-
-const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 
 // --- Schemas ---
 const createTaskSchema = z.object({
@@ -215,26 +213,15 @@ tasksRouter.get('/:id', optionalAuth, async (req: AuthRequest, res, next) => {
       a2aStore.getState(taskHash),
     ]);
 
-    // The deliverable (resultData) is poster/worker-only. Viewer addresses come
-    // from optionalAuth (Privy JWT wallets, agent platform JWT, or API key).
-    // When the poster is a deployed agent, its human owner(s) qualify too.
-    let canSeeResult = false;
-    if (a2aState?.resultData != null && req.user) {
-      const viewer = new Set(
-        [req.user.address, req.user.ownerAddress, ...(req.user.addresses ?? [])]
-          .filter((a): a is string => typeof a === 'string' && a.startsWith('0x'))
-          .map((a) => a.toLowerCase()),
-      );
-      const poster = String(task.agent).toLowerCase();
-      const worker = String(task.worker).toLowerCase();
-      canSeeResult = viewer.has(poster) || (worker !== ZERO_ADDRESS && viewer.has(worker));
-      if (!canSeeResult && viewer.size > 0) {
-        const posterAgent = await loadAgentByWallet(poster).catch(() => null);
-        if (posterAgent) {
-          canSeeResult = [posterAgent.ownerAddress, ...(posterAgent.authorizedOwners ?? [])]
-            .some((o) => viewer.has(o.toLowerCase()));
-        }
-      }
+    // The deliverable (resultData) is poster/worker-only — except on PUBLIC
+    // tasks, where the poster opted out of blindness and the result is part
+    // of the public record. Viewer addresses come from optionalAuth (Privy
+    // JWT wallets, agent platform JWT, or API key). When the poster is a
+    // deployed agent, its human owner(s) qualify too. Gate shared with the
+    // MCP get_task_status tool — see resultVisibility.ts.
+    let canSeeResult = a2aMeta?.privacy === 'public';
+    if (!canSeeResult && a2aState?.resultData != null && req.user) {
+      canSeeResult = await canViewerSeeResult(req.user, String(task.agent), String(task.worker));
     }
 
     const body: ApiResponse = {

@@ -13,6 +13,7 @@ import * as reputationService from '../services/reputation.js';
 import * as reputationDecay from '../services/reputationDecay.js';
 import * as agentStore from '../services/agentStore.js';
 import * as serviceStore from '../services/serviceStore.js';
+import { isAgentOwner, stripAgentSecrets } from '../services/agentOwnership.js';
 import { redis } from '../services/redis.js';
 import { ethers } from 'ethers';
 import { provider } from '../services/chain.js';
@@ -40,16 +41,12 @@ async function authorizeOwner(req: AuthRequest, res: import('express').Response,
 
   // Check ALL linked wallets, not just the primary one — users often have
   // multiple wallets in the same Privy account (e.g. embedded + external).
-  const allAddresses = [authed, ...(req.user?.addresses ?? [])];
   // Owner set = the original wagmi deploy wallet plus any signature-linked
   // wallets (authorizedOwners). The latter unlocks the common case where the
   // wallet captured at deploy isn't the Privy identity the JWT surfaces — the
   // user proves control of the owner wallet once via POST /:id/link-owner and
   // their Privy identity is added here.
-  const ownerSet = new Set(
-    [agent.ownerAddress, ...(agent.authorizedOwners ?? [])].map(a => a.toLowerCase()),
-  );
-  const isOwner = allAddresses.some(a => ownerSet.has(a.toLowerCase()));
+  const isOwner = isAgentOwner(agent, [authed, ...(req.user?.addresses ?? [])]);
 
   if (!isOwner) {
     // JWT's first wallet entry isn't guaranteed to be the one used at deploy.
@@ -212,9 +209,7 @@ const DeploySchema = z.object({
 });
 
 function strip(agent: Awaited<ReturnType<typeof getAgent>>) {
-  if (!agent) return null;
-  const { encryptedPrivateKey: _a, encryptedApiKey: _b, apiKey: _c, rawPrivateKey: _d, platformToken: _e, ...safe } = agent;
-  return safe;
+  return stripAgentSecrets(agent);
 }
 
 // GET /api/v1/agents/providers

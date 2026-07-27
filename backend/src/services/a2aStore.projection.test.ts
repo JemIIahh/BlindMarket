@@ -69,6 +69,36 @@ describe('projectPublicMeta', () => {
     expect(src.wrappedKeys).toEqual({ '0xagent': 'deadbeefslice' });
     expect(src.rootHash).toBe('0xroot');
   });
+
+  it('keeps rootHash + publicBrief on PUBLIC tasks (poster opted out of blindness)', () => {
+    // A privacy='public' row can carry no key material by construction
+    // (enforced at /tasks/index), so the only fields present are safe ones.
+    const publicMeta = {
+      taskId: '0xtask',
+      targetExecutorType: 'agent' as const,
+      verificationMode: 'auto' as const,
+      requiredCapabilities: [],
+      posterAddress: '0xposter',
+      rootHash: '0xplaintext-root',
+      privacy: 'public' as const,
+      publicBrief: 'Summarize this article about MCP servers',
+      deadline: 123,
+    };
+    const pub = projectPublicMeta(publicMeta as any);
+    expect(pub.rootHash).toBe('0xplaintext-root');
+    expect((pub as any).publicBrief).toBe('Summarize this article about MCP servers');
+    expect(pub.hasEncryptedBrief).toBe(false);
+    expect((pub as any).privacy).toBe('public');
+  });
+
+  it('still strips everything on a malformed row that claims public AND carries keys', () => {
+    // Defense in depth: /tasks/index refuses this combination, but if a row
+    // were hand-written into Redis, the key material must still be stripped.
+    const malformed = { ...fullMeta, privacy: 'public' as const };
+    const pub = projectPublicMeta(malformed as any);
+    expect('wrappedKeys' in pub).toBe(false);
+    expect('keyCustodyBlob' in pub).toBe(false);
+  });
 });
 
 describe('projectPublicState', () => {
