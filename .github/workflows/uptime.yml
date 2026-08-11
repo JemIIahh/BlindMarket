@@ -1,0 +1,150 @@
+name: uptime
+
+# Why this exists
+# ---------------
+# api.blindmarket.xyz runs on a Render **Free** web service. Render spins a Free
+# web service down after 15 minutes without inbound traffic, and spinning back up
+# "takes about one minute" (https://render.com/docs/free#spinning-down-on-idle).
+#
+# Measured 2026-08-11 against production:
+#   - first request after idle: no first byte within 90s (connect succeeded at 8.3s)
+#   - once warm: 8/8 requests returned 200 in 0.73-1.16s
+#   - backend boot, locally: 1.54s to listening, /health answers in 5ms
+# The application is not the problem — index.ts binds the port before running any
+# init work (escrow poller, expiry sweep, agent reconcile all run inside the
+# listen callback). The latency is entirely Render instance spin-up.
+#
+# This workflow does two things at once:
+#   1. KEEP WARM   — a request every ~10 minutes means the 15-minute idle timer
+#                    never fires, so a visitor never pays the cold start.
+#   2. EXTERNAL MONITOR — closes item 7 of docs/CLOSEOUT-FOUNDER-OPS.md. A failed
+#                    run emails the repo owner. External matters: a platform
+#                    watching itself misses the hibernate-wake failure class.
+#
+# This is a MITIGATION, not the fix. The fix is a paid always-on instance type
+# (runbook in docs/CLOSEOUT-FOUNDER-OPS.md item 7). Known limits of this approach:
+#   - GitHub disables scheduled workflows in repos with 60 days of no activity.
+#   - Actions cron is best-effort and can be delayed several minutes under load,
+#     so an occasional cold start can still slip through.
+#   - Staying warm 24/7 burns ~720 of the workspace's 750 monthly Free instance
+#     hours; spun-down time is what's normally free. If any other Free service
+#     shares the workspace, exhausting the pool suspends ALL of them.
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: uptime
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      HEALTH_URL: https://api.blindmarket.xyz/health
+    steps:
+      - name: Wake, then verify the service is actually serving
+        run: |
+          # Each probe writes to its own body/stderr files. Sharing one file is a
+          # trap: curl only creates or truncates the -o target when body bytes
+          # actually arrive, so a bodyless failure leaves the PREVIOUS probe's
+          # body in place and the next assertion silently validates stale data.
+          probe() {
+            local label="$1" budget="$2" out rc
+            rm -f "/tmp/body.$label.txt" "/tmp/err.$label.txt"
+            out=$(curl -sSL -o "/tmp/body.$label.txt" -w '%{http_code} %{time_total}' \
+                  --max-time "$budget" "$HEALTH_URL" 2>"/tmp/err.$label.txt")
+            rc=$?
+            # curl prints its write-out even when it fails, so keep the real
+            # measurement. Only synthesise a value when curl produced nothing —
+            # and use -1, never the budget, so a 50ms connection-refused can't be
+            # reported as a 120s "cold start".
+            if [ -z "$out" ]; then out="000 -1"; fi
+            echo "$out"
+            return $rc
+          }
+
+          # Phase 1 — wake. Generous budget: a spun-down Free instance needs ~1 min.
+          read -r WAKE_CODE WAKE_TIME <<<"$(probe wake 120)"
+          echo "wake: code=$WAKE_CODE time=${WAKE_TIME}s"
+
+          # Phase 2 — a warm instance must answer fast. This is the real assertion:
+          # phase 1 alone can't distinguish "healthy" from "woke up after a minute".
+          # Retried, because a single miss is usually a redeploy restart, a
+          # transient Cloudflare 52x, or a spin-up that overran phase 1's budget —
+          # none of which is an outage. Paging on those trains you to ignore the
+          # alert, which is worse than having no alert.
+          WARM_CODE=000
+          WARM_TIME=-1
+          for attempt in 1 2 3; do
+            read -r WARM_CODE WARM_TIME <<<"$(probe "warm$attempt" 20)"
+            echo "warm attempt $attempt: code=$WARM_CODE time=${WARM_TIME}s"
+            BODY=$(head -c 200 "/tmp/body.warm$attempt.txt" 2>/dev/null || true)
+            case "$WARM_CODE:$BODY" in
+              200:*'"status":"ok"'*) break ;;
+            esac
+            [ "$attempt" -lt 3 ] && sleep 20
+          done
+          echo "body: $BODY"
+
+          # -1 means curl itself failed, so elapsed time is unknown rather than
+          # slow. A real Render spin-up is ~60s and a warm probe from a cold
+          # runner measured ~3.8s end to end (DNS + TLS + Cloudflare + app), so
+          # 10s separates the two cleanly without false alarms.
+          if [ "$WAKE_TIME" = "-1" ]; then
+            COLD=unknown
+          else
+            COLD=$(awk -v t="$WAKE_TIME" 'BEGIN { print (t+0 > 10) ? "yes" : "no" }')
+          fi
+
+          {
+            echo "### API uptime probe"
+            echo ""
+            echo "| phase | code | time |"
+            echo "|---|---|---|"
+            echo "| wake | \`$WAKE_CODE\` | ${WAKE_TIME}s |"
+            echo "| warm | \`$WARM_CODE\` | ${WARM_TIME}s |"
+            echo ""
+            echo "Cold start observed: **$COLD**"
+            if [ "$COLD" = "yes" ]; then
+              echo ""
+              echo "> A cold start means the instance had already spun down, i.e. it is"
+              echo "> still on a spin-down (Free) instance type, or the schedule was"
+              echo "> delayed past the 15-minute idle window. See"
+              echo "> docs/CLOSEOUT-FOUNDER-OPS.md item 7."
+            elif [ "$COLD" = "unknown" ]; then
+              echo ""
+              echo "> The wake probe failed outright (curl error, not a slow response), so"
+              echo "> spin-down cannot be inferred from this run. See \`/tmp/err.wake.txt\` in"
+              echo "> the step log above."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$WARM_CODE" != "200" ]; then
+            echo "::error::API unhealthy — warm probe returned $WARM_CODE after 3 attempts (wake probe: $WAKE_CODE after ${WAKE_TIME}s)"
+            echo "curl stderr: $(cat /tmp/err.warm3.txt 2>/dev/null || true)"
+            exit 1
+          fi
+
+          # Assert a real payload, and assert it is non-empty first: a bodyless
+          # 200 from an edge interstitial must not be able to pass the shape check.
+          if [ ! -s "/tmp/body.warm$attempt.txt" ]; then
+            echo "::error::API returned 200 with an empty body"
+            exit 1
+          fi
+
+          case "$BODY" in
+            *'"status":"ok"'*) : ;;
+            *)
+              echo "::error::API returned 200 but the body is not the expected health payload: $BODY"
+              exit 1
+              ;;
+          esac
+
+          echo "API healthy."
