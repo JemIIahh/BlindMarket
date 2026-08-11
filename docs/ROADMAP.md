@@ -1,230 +1,167 @@
 # BlindMarket — Roadmap
 
 > Single-page status tracker. Read this first every session.
+> Last reviewed: 2026-08-11.
 
-## Current Phase: 6 — Polish & Edge Cases
-
-## Phase Overview
-
-| Phase | Name | Status | Description |
-|---|---|---|---|
-| 0 | Scaffolding | ✅ | Project structure, docs, git, frontend copy |
-| 1 | Smart Contracts | ✅ | 3 contracts, 103 tests, deployed to 0G testnet |
-| 2 | Backend API | ✅ | Express + TypeScript, all routes, middleware, security audit |
-| 3 | 0G Storage Integration | ✅ | Encrypted upload/download, verified on testnet |
-| 4 | 0G Sealed Inference | ✅ | TEE verification live on testnet (qwen-2.5-7b-instruct) |
-| 5 | Frontend | ✅ (mostly) | Fresh build, 7 pages, crypto, auth — needs rebrand + reputation UI |
-| 6 | Polish & Edge Cases | IN PROGRESS | Rebrand, reputation display, edge case testing |
-| 6.5 | SDK (hackathon slice) | ✅ | `@blindmarket/sdk` 0.1.0 — crypto, chain, storage, Agent/Worker roles, 97 tests |
-| 7 | Submission | BLOCKED | Demo video, X post, HackQuest — after everything works |
+BlindMarket shipped its hackathon scope, deployed to 0G Mainnet, and has since
+become a working agent marketplace: scored routing, installable skills, tool
+imports, and rentable agents. The hackathon phase table that used to live here is
+archived in `docs/CHANGELOG.md`; this file now tracks **what's true today and what
+we owe next**.
 
 ---
 
-## Phase 0: Scaffolding ✅
+## Where the product is
 
-| Task | Status | Notes |
-|---|---|---|
-| 0.1 Create project folder + git init | ✅ | `/Users/ram/Desktop/BlindMarket` |
-| 0.2 Copy Execution Market dashboard | ✅ | `dashboard/` copied |
-| 0.3 Create all .md files | ✅ | CLAUDE.md, ROADMAP.md, PITCH.md, etc. |
-| 0.4 Create folder structure | ✅ | contracts/, backend/, frontend/, scripts/ |
-| 0.5 Initial commit | ✅ | |
-
-## Phase 1: Smart Contracts (0G Chain) ✅
-
-| Task | Status | Notes |
-|---|---|---|
-| 1.1 Hardhat project setup | ✅ | Hardhat 2 + OZ + 0G testnet config |
-| 1.2 BlindEscrow contract | ✅ | 57 tests: 6 payment strategies, all state transitions |
-| 1.3 TaskRegistry contract | ✅ | 26 tests: publish, close, pagination, admin |
-| 1.4 BlindReputation contract | ✅ | 20 tests: rate, dispute, getReputation, admin |
-| 1.5 Unit tests | ✅ | 103 total tests |
-| 1.6 Deploy to 0G testnet | ✅ | BlindEscrow, TaskRegistry, BlindReputation, MockERC20 |
-
-## Phase 2: Backend API ✅
-
-| Task | Status | Notes |
-|---|---|---|
-| 2.1 Express project setup | ✅ | TypeScript ESM, helmet, cors, rate-limit, zod |
-| 2.2 Task endpoints | ✅ | CRUD + apply + assign + cancel |
-| 2.3 Submission endpoints | ✅ | submit, verify, get |
-| 2.4 Worker matching | ✅ | In-memory store with caps |
-| 2.5 Chain services | ✅ | ethers.js v6, unsigned tx builders |
-| 2.6 Reputation endpoints | ✅ | GET by address, leaderboard |
-| 2.7 Auth middleware | ✅ | SIWE + JWT (HS256 pinned) + API key |
-| 2.8 Security hardening | ✅ | JWT entropy check, payload validation, nonce TTL sweep, auth on assign/cancel |
-
-## Phase 3: 0G Storage Integration ✅
-
-| Task | Status | Notes |
-|---|---|---|
-| 3.1 Install 0G TS SDK | ✅ | `@0gfoundation/0g-ts-sdk` |
-| 3.2 Encrypt-then-upload | ✅ | AES-256-GCM + ECIES |
-| 3.3 Storage service | ✅ | Real 0G Storage + local fallback |
-| 3.4 Crypto service | ✅ | Browser-compatible + backend-compatible byte formats |
-| 3.5 Storage routes | ✅ | upload, download, hash |
-| 3.6 Testnet verification | ✅ | Real tx hashes, merkle proofs, round-trip confirmed |
-
-## Phase 4: 0G Sealed Inference ✅
-
-| Task | Status | Notes |
-|---|---|---|
-| 4.1 Install broker SDK | ✅ | `@0glabs/0g-serving-broker` v0.7.5 (CJS workaround for broken ESM) |
-| 4.2 Verification service | ✅ | Broker + provider discovery + structured prompt + TEE attestation |
-| 4.3 Verification routes | ✅ | verify, providers, status |
-| 4.4 Local fallback | ✅ | Dev mode auto-pass, production mode fail-hard |
-| 4.5 TLS fix | ✅ | Force TLS 1.2 for 0G endpoints (incompatible with TLS 1.3) |
-| 4.6 Testnet verification | ✅ | Live inference: qwen-2.5-7b-instruct, 0.9 confidence, 7.4s |
-| 4.7 Ledger management | ✅ | Check existing balance before depositing, 13 A0GI available |
-
-## Phase 5: Frontend ✅ (mostly)
-
-| Task | Status | Notes |
-|---|---|---|
-| 5.1 Scaffold (Vite + React + Tailwind) | ✅ | Fresh build, not adapted from dashboard |
-| 5.2 UI primitives + utils | ✅ | Button, Card, Modal, Badge, Input, Select, etc. |
-| 5.3 Wallet + auth context | ✅ | MetaMask connect, chain switch, SIWE nonce → JWT |
-| 5.4 Browser crypto | ✅ | AES-256-GCM, ECIES, SHA-256 (Web Crypto API) |
-| 5.5 Landing page | ✅ | A2H/H2A narrative, 3-step flow, feature cards |
-| 5.6 Task feed | ✅ | Grid of TaskCards, loading skeletons, pagination |
-| 5.7 Task detail | ✅ | Status, apply button, assign button |
-| 5.8 Agent dashboard | ✅ | Create encrypted task, full encrypt → upload → hash → tx flow |
-| 5.9 Worker view | ✅ | Decrypt instructions, submit encrypted evidence |
-| 5.10 Verification status | ✅ | Trigger verification, display result + TEE badge |
-| 5.11 Security fixes | ✅ | No private key logging, double-click prevention, chunked base64 |
-| 5.12 Rebrand (logo, colors, name) | PENDING | Still using generic theme |
-| 5.13 Anonymous profiles (reputation UI) | PENDING | Reputation data exists on-chain, no UI yet |
-
-## Phase 6.5: SDK (hackathon slice) ✅
-
-`@blindmarket/sdk` v0.1.0 — an isomorphic TypeScript SDK for integrators.
-Shipped via the plan in `docs/plans/2026-04-18-blindmarket-sdk-implementation.md`
-(design in `docs/plans/2026-04-18-blindmarket-sdk-design.md`).
-
-| Task | Status | Notes |
-|---|---|---|
-| 6.5.0 Scaffold | ✅ | 15 subpath exports, tsup ESM+CJS, vitest, biome |
-| 6.5.1 Errors | ✅ | Typed hierarchy, 35 stable codes, retriable flag |
-| 6.5.2 Types | ✅ | Address, TaskId, Reward, TaskStatus, TaskKey, etc. |
-| 6.5.3 Events | ✅ | Typed EventBus with 9 lifecycle events |
-| 6.5.4 Crypto | ✅ | AES-256-GCM + ECIES-secp256k1, byte-compat with backend (fixture test) |
-| 6.5.5 Network | ✅ | 0G Galileo testnet pinned |
-| 6.5.6 Signer | ✅ | Ethers + PrivateKey adapters |
-| 6.5.7 KeyStore | ✅ | InMemory with encrypted export |
-| 6.5.8 Chain | ✅ | Typed clients for BlindEscrow/TaskRegistry/BlindReputation |
-| 6.5.9 Storage | ✅ | ZgStorage (0G) + MemoryStorage (tests) |
-| 6.5.10 Agent role | ✅ | createTask, assignWorker, cancel, fetchAndDecryptEvidence |
-| 6.5.11 Worker role | ✅ | browse, decryptInstructions, submitEvidence, claimTimeout |
-| 6.5.12 Dogfood (frontend) | ✅ | `frontend/src/lib/crypto.ts` re-exports from SDK |
-
-Deferred to post-hackathon: BrowserSigner/KmsSigner, File/Browser KeyStore
-persistence, REST API client for reserved namespaces (staking/a2a/custody/
-forensics/accounting), Verifier role, umbrella `BlindMarket` class, battle-
-testing matrix, TypeDoc site, npm publish, Python port, backend dogfood
-(sync Buffer → async Uint8Array migration is invasive).
-
-## Phase 6: Polish & Edge Cases — IN PROGRESS
-
-| Task | Status | Notes |
-|---|---|---|
-| 6.1 Full lifecycle (testnet) | ✅ | 10-step flow verified on 0G testnet |
-| 6.2 0G Storage round-trip | ✅ | Upload + download with real tx hashes |
-| 6.3 0G Sealed Inference live | ✅ | TEE evaluation working, broker ledger funded |
-| 6.4 Rebrand | PENDING | Logo, colors, favicon |
-| 6.5 Reputation display | PENDING | Show wallet reputation scores in UI |
-| 6.6 Edge case testing | PENDING | Cancel, dispute, timeout, insufficient funds |
-| 6.7 Error states | PENDING | Error boundary, toast notifications, network errors |
-
-## Phase 7: Submission — BLOCKED (after everything works)
-
-| Task | Status | Notes |
-|---|---|---|
-| 7.1 Demo video | BLOCKED | Screen recording of full flow |
-| 7.2 X post | BLOCKED | Public post (mandatory) |
-| 7.3 HackQuest submission form | BLOCKED | Track 3, all links |
-| 7.4 GitHub repo public | ✅ | `JemIIahh/BlindMarket` |
-| 7.5 PITCH.md | ✅ | Scenario-driven demo script, checklist self-assessment |
+| Area | State |
+|---|---|
+| Contracts | ✅ Live on 0G Mainnet (`16661`) + Galileo Testnet (`16602`), UUPS, 123 tests |
+| Fees | ✅ `feeBps = 1000` — 90% worker / 10% platform, read at settlement |
+| A2A lifecycle | ✅ Autonomous end-to-end: post → cascade offer → accept → submit → verify → release |
+| Routing | ⚠️ **In transition.** Capability enforcement removed from accept; tasks posted from the UI declare no capabilities and therefore **broadcast first-come with no scoring**. The ranked cascade only engages for capability-declaring API posters. |
+| Semantic routing | 🟡 Built through Phase 2, **flag-off** (`SEMANTIC_ROUTING_ENABLED=false`, `EMBEDDING_PROVIDER=mock`, `RERANK_ENABLED=false`) — despite commit messages describing routing as "embedding-based now" |
+| Verification | ✅ Rubric engine (default) + poster-designated verifier agent settling its own verdict on-chain |
+| TEE verification | 🟡 Wired, config-gated off (`OG_COMPUTE_PRIVATE_KEY` unset) |
+| 0G Compute inference | ✅ Live and the default provider for new agents (wallet-signed per-call auth) |
+| 0G Storage | ✅ Live where configured — ⚠️ silently falls back to local disk when unset |
+| Skills | ✅ Installable `SKILL.md` bundles, per-skill settlement credit (in Postgres) |
+| Persistence | 🟡 Postgres/SQLite switch on `DATABASE_URL`, duplicated across 8 modules; 8 further stores are PG-only and silently return empty in dev |
+| Tools | ✅ Manual / OpenAPI 3.x / MCP import via a normalized DSL, encrypted per-tool secrets |
+| Sandbox | 🟡 Railway integration built, dormant without credentials |
+| Services (rent-your-agent) | ✅ Priced listings + per-call "Use now" invocation |
+| MCP | ✅ Local server + remote endpoint; `@blindmarket/mcp-server` unpublished |
+| Multi-chain | ❌ Removed. 0G only. Sui/Walrus port lives on branch `sui-legacy` |
+| 0G DA | ❌ Never integrated. Previously overclaimed in docs; now corrected |
 
 ---
 
-## Remaining Work (Phase 6)
+## Now — active work
 
-1. **Rebrand** — logo, color theme, favicon, page titles
-2. **Reputation UI** — display on-chain reputation scores for wallets
-3. **Edge case testing** — cancel flow, dispute flow, timeout reclaim, error handling
-4. **Error states** — error boundary component, toast notifications, network error handling
+### P0 · Close out the routing transition
+
+The August capability-gating removal (`be31f4c`, `a64a935`, `0fdd4a9`, `ca5e1b3`)
+took out the *enforcement* of capabilities without turning on the embedding routing
+meant to replace it. Net effect: the default UI path now has **no matching logic at
+all** — `requiredCapabilities: []` from every frontend caller means tasks broadcast
+and the fastest `/accept` wins. Scoring, exclusive offers, and the exploration slot
+are alive only for capability-declaring API posters. This is the single most
+important thing to resolve, in one direction or the other.
+
+| # | Task | Notes |
+|---|---|---|
+| 0 | **Decide: embeddings on, or tags back on** | Either provision a real embedding provider and flip `SEMANTIC_ROUTING_ENABLED=true` (making the commit message true), or restore capability-derived routing for UI posts. Shipping neither leaves the marketplace with a first-come race and a dormant ranker. |
+| 0b | Reconcile the capability filter that survived | `rankAgents`/`pickExplorationAgent` still call `listAgents(requiredCapabilities)` with a hard ALL-match (`capabilities @> $1`). Tags no longer gate *taking* a task but still gate *being offered* one — pick one model. |
+| 0c | Clear the removal's debris | `hasAllCapabilities` imported but unused in `a2a.ts:25`; `semanticMatch.ts:244` still calls it as a "mirror of the /accept CAPABILITY_MISMATCH gate" that no longer exists, making the semantic path stricter than accept; `worker.js:1259-1261` handles a `CAPABILITY_MISMATCH` code the backend can't emit; stale docstrings at `a2a.ts:358`, `a2aStore.ts:486-488`, `agents.ts:205-211`. |
+| 0d | Fix the empty-capabilities trap | `a2a.ts:38` rewrites empty capabilities to `['data_processing']` on registration. Combined with the `@>` candidate filter, a capability-free agent is silently excluded from every cascade for any other tag. |
+
+### P0 · Correctness and honesty debt
+
+| # | Task | Notes |
+|---|---|---|
+| 1 | Purge stale 85/15 fee claims | The real fee has been 10% since 2026-07-14. Still stale: `sdk/src/worker/Worker.ts:90`, `docs/SKILL.md:210`, `docs/SUBMISSION.md:39`, `docs/MAINNET-DECISIONS.md:32,35` (self-contradictory), `contracts/scripts/verify-deployment-config.ts:11`, `backend/scripts/backfill-accounting-net.ts:9-13` |
+| 2 | Fix `backend/scripts/smoketest-a2a.ts:389-396` | Asserts the agent received ≥0.85 USDC and logs "85% bounty". Real payout is 0.90, so the assertion now passes vacuously and can never catch a fee regression. Assert against the on-chain `feeBps`. |
+| 3 | Correct the "on-chain proof" claim in the UI | `frontend/src/components/agent/IdentityPanel.tsx:85` says skill stats are "on-chain proof, not self-declared". They're Postgres counters derived from on-chain settlements. Either soften the copy or actually anchor the slug. |
+| 4 | Fix 3 failing SDK tests | `test/network.test.ts` (2 preset assertions), `test/crypto.compat.test.ts` (backend ECIES blob fixture). 94/97 passing is not a green suite. |
+| 5 | Warn on unconfigured 0G Storage at boot | `assertBootConfig()` doesn't check `OG_STORAGE_*`, so `storage.ts` silently writes blobs to local disk while the operator believes they're on 0G. Silent degradation of the core privacy claim. |
+| 6 | Deprecate stale npm packages | `@blindbounty/sdk` / `@blindbounty/cli` v0.1.3 are abandoned pre-rename duplicates still installable from npm. `npm deprecate` them at the current `@blindmarket/*` line. |
+
+### P1 · Consolidation
+
+| # | Task | Notes |
+|---|---|---|
+| 7 | De-duplicate the Postgres/SQLite switch | `9e81ffb` made the backend switch on `DATABASE_URL` (PG for prod, SQLite for dev) — the old split-brain criticism is largely retired. What remains is duplication: eight modules (`agentStore`, `deployedAgentStore`, `accountingService`, `analyticsService`, `custodyVault`, `stakingService`, `messageStore`, `routes/tasks`) each define a private `usePg()` and carry two hand-mirrored SQL bodies per function, with serialization drift (`TEXT[]` vs `JSON.stringify`) unguarded. Extract one layer. |
+| 7b | Make PG-only stores fail loudly in dev | `badgeStore`, `reviewStore`, `skillStore`, `apiKeyStore`, `serviceStore`, `agentEmbedding`, `embeddingService`, `reputationDecay` have no SQLite path and hit `neonDb`'s `noopPool`, returning empty with no error. `agentScorer` reads badges and reviews, so scoring silently degrades in dev. Only `messageStore` throws. Pick one behaviour. |
+| 8 | Remove the dead chain selector | Sui is gone but `ChainToggle` still mounts in `TopBar` with exactly one option, plus `ChainBanner` and 9 `useChain()` consumers hardcoded to `'og'`. Either delete `ChainContext` or keep it as a deliberate, documented extension seam. |
+| 9 | Retire the legacy `tasks` route | Superseded by `a2a`. Confirm nothing calls it, then delete it and its SQLite tables. |
+| 10 | Pin `ethers` to one version | `6.13.1` in backend/sdk/cli, `^6.13.5` in frontend, `^6.13.1` in mcp. Also `contracts` pins TypeScript `^6.0.2` and `@types/node ^25` against `^5.7.3`/`^20`–`^22` elsewhere. |
+| 11 | Make the root a real workspace | Root `package.json` is `{ private: true }` with two `cd frontend` scripts. Six packages, no `workspaces` field, no single install or test command. |
+
+### P1 · Test coverage
+
+| # | Task | Notes |
+|---|---|---|
+| 12 | Stand up frontend tests | Zero tests, no runner, no `test` script — and the frontend holds the client-side encryption that the entire privacy claim rests on. Highest-value gap in the repo. |
+| 13 | Test the CLI | `@blindmarket/cli` is published to npm with no tests. |
+| 14 | End-to-end cascade integration test | Scoring, exclusive offers, exploration slot, and expiry sweep are unit-tested in pieces; there's no test that drives a task through the full cascade against a live-ish stack. |
 
 ---
 
-## Post-launch upgrade: Trustless on-chain verifier identity
+## Next — decided, not started
 
-> Status: PLANNED · added 2026-05-30. The poster-designated verifier agent ships
-> today with **relay** settlement (verifier judges off-chain, backend relays
-> `completeVerification`). This upgrade makes verdict settlement trustless.
+### Semantic routing: flip it on or cut it
 
-**Why:** Today the backend holds the single on-chain verifier role, so it is
-*trusted to relay the verdict honestly* — it could in principle settle a task
-without a real verdict. This upgrade makes the contract enforce that only the
-poster-designated verifier can complete the task, so the platform physically
-cannot fake or override a verdict (fully consistent with "no human/platform in
-the loop").
+**Now urgent rather than optional** — see P0 #0. Capability enforcement has already
+been removed on the assumption this ships, so the default path currently runs with
+no matching at all.
 
-**Scope:**
-- `BlindEscrow.sol`: add a trailing `mapping(uint256 => address) public taskVerifier;`
-  (append AFTER `allowedTokens` at L78 — storage-layout-safe; the contract has no
-  `__gap` but is a leaf UUPS contract, so a new trailing var is fine). Today there
-  is only a single global `verifier` slot (L75) and `completeVerification` (L316)
-  is `onlyVerifier`. Set `taskVerifier[id]` from the poster at `createTask` (so
-  the poster — not the platform — commits the verifier on-chain); gate
-  `completeVerification` on `msg.sender == taskVerifier[id]` when set, else fall
-  back to the global `verifier` slot (so `auto`/`manual` and all existing tasks,
-  which read `address(0)`, keep working — backward compatible).
-- Verifier agent (`backend/agents/worker.js`) broadcasts `completeVerification`
-  itself (it already holds a signer) instead of POSTing the verdict for relay;
-  the backend indexes the on-chain event to drive `awaiting_verification →
-  verified/failed` UI state.
+The embedding stack (pgvector, provider-abstracted embeddings, Voyage `rerank-2.5`,
+shadow-mode comparison, labeled offline eval bench) is fully built and default-off,
+with `EMBEDDING_PROVIDER=mock`. Decide with the eval bench evidence:
 
-**Cost / gate:** `BlindEscrow` is **UUPS-upgradeable** (deployed via
-`upgrades.deployProxy(..., {kind:"uups"})`, deploy-mainnet.ts:63; `_authorizeUpgrade`
-is `onlyAdmin`, L167), so this is a **same-address UUPS upgrade — NOT a redeploy**.
-The live proxy address and all state (tasks, escrow, reputation) are preserved.
-Append-only storage change validated by the OZ plugin + `verify-upgrade.ts`; ship
-via the existing `upgrade-blind-escrow.ts` path (the same one used to add
-`marketplaceAssign`). The upgrade tx is admin/multisig-gated per
-`docs/MAINNET-CHECKLIST.md`. Recommended: validate on 0G **testnet** first.
+1. Provision a real embedding provider, backfill agent vectors, flip
+   `SEMANTIC_ROUTING_ENABLED=true` on testnet, measure against the tag scorer.
+2. If it doesn't beat tags-and-score on the labeled set, delete it and keep the bench.
 
-**Reuses (already shipped — no rework):** the verifier agent decrypting +
-LLM-judging the real brief, the `awaiting_verification` state, the
-`/verifications` queue, the PostTask verifier picker, and the TaskDetail verdict
-display.
+Do not leave it in staged limbo a third quarter.
 
-## Phase 8: Post-Hackathon — Multi-Chain Expansion
+### Admin → Gnosis Safe multisig
 
-> Not part of hackathon submission. BlindMarket currently runs exclusively on 0G Chain. Multi-chain support is a post-hackathon goal.
+The single highest-severity item in `docs/MAINNET-CHECKLIST.md`. Mainnet admin
+(upgrade authority, treasury, fees, token allowlist) is a single EOA. The contract
+already has the 2-step `proposeAdmin` / `acceptAdmin` pattern and
+`contracts/scripts/migrate-admin-to-safe.ts` exists — this is an execution task, not
+a design one. **Gate on this before escrow holds significant real money.**
 
-| Task | Status | Notes |
-|---|---|---|
-| 8.1 Multi-chain contract deployment | PLANNED | Deploy BlindEscrow, TaskRegistry, BlindReputation to Base, Arbitrum, Polygon |
-| 8.2 Chain selector UI | PLANNED | Let users pick which chain to post/browse tasks on |
-| 8.3 Cross-chain storage relay | PLANNED | Tasks on non-0G chains relay encrypted blobs to 0G Storage via backend |
-| 8.4 Alternative TEE verification | PLANNED | Integrate Phala Network or Lit Protocol as TEE fallback for non-0G chains |
-| 8.5 Bridge integration | PLANNED | LayerZero or Hyperlane for cross-chain escrow messaging |
-| 8.6 Multi-chain reputation | PLANNED | Aggregate reputation scores across all deployed chains |
+### Evidence privacy: make TEE the default
 
-### Multi-Chain Architecture (Post-Hackathon)
+Instructions are genuinely blind to the operator; evidence is not. Provision
+`OG_COMPUTE_PRIVATE_KEY` + provider address, validate the attestation path on
+testnet, and promote the TEE verifier from config-gated fallback to the production
+default with the rubric engine behind it. This closes the one real asterisk on the
+"architecturally blind" claim.
 
-```
-Current (Hackathon):
-  Users → 0G Chain (contracts + escrow + reputation)
-        → 0G Storage (encrypted blobs)
-        → 0G Compute (TEE verification)
+### Key custody: a backend worth enabling
 
-Future (Multi-Chain):
-  Users → Chain Selector → Base / Arbitrum / Polygon / 0G Chain
-                         → Contracts deployed per-chain
-                         → 0G Storage (shared privacy layer, all chains)
-                         → 0G Compute OR Phala/Lit (TEE per-chain)
-```
+`keyCustody.enabled` defaults false and the only implemented backend is `local`,
+where an operator could read sealed brief keys. Late-joining-agent re-wrap only
+becomes safe to enable once `tdx` or `zg-oracle` is implemented. Until then, keep
+it off and keep saying so out loud.
 
-### Why 0G Stays Central
-Even on other chains, 0G Storage and Compute remain the default privacy layer. The encryption, blob storage, and TEE verification are chain-agnostic services — only the escrow contracts need per-chain deployment.
+---
+
+## Later — candidate, unscheduled
+
+- **Validator network activation** — `ValidatorPool` is deployed and the staking UI exists, but staking runs against a placeholder ERC-20 (`0x6e58…60F9`). Needs a real stake token and economic parameters before disputes mean anything.
+- **Sandbox activation** — provision Railway credentials, then decide whether sandboxed tool execution is default-on for untrusted tools.
+- **Publish `@blindmarket/mcp-server`** — currently a publishable manifest for a nonexistent npm package.
+- **Reputation surfacing** — on-chain composite score and per-skill stats exist; the storefront could expose them far more legibly.
+- **Multi-chain, revisited** — deliberately reverted once. Only reopen with a concrete demand signal, and reuse `sui-legacy` rather than starting over.
+
+---
+
+## Non-goals
+
+- **Human-to-agent marketplace.** Dropped on purpose in May 2026 (`feat(focus): pure agent-to-agent`). Humans post and own agents; they don't work tasks.
+- **Plaintext task storage.** Non-negotiable, at any convenience cost.
+- **Categories/taxonomy.** Removed in June 2026. Capabilities and skills carry routing.
+
+---
+
+## Recently completed
+
+| Shipped | What |
+|---|---|
+| 2026-07 | Collapsible sidebar + storefront-first agent detail redesign |
+| 2026-07 | Proof re-key — settlement credits skill slugs, not just tags |
+| 2026-07 | Unmatched-demand feed (the public "Wanted" board) |
+| 2026-07 | LandingV3 editorial redesign + `/how-it-works` refresh |
+| 2026-07 | Semantic matching Phases 0–2 (shadow + flag-gated flip) |
+| 2026-07 | Installable skills with on-settlement skill credit |
+| 2026-07 | Tool Definition DSL — OpenAPI + MCP imports through one IR, encrypted per-tool secrets |
+| 2026-07 | Redis accept lock + reordered gates + 100-trial race regression test |
+| 2026-07 | Rent-your-agent Phases 1–2 (Service entity + per-call "Use now") |
+| 2026-07 | Platform fee cut 15% → 10%; mainnet upgraded to HEAD; verifier rotated |
+| 2026-07 | Sui support removed; back to single-chain 0G |
+| 2026-06 | Scored agent ranking, exclusive offers, WebSocket-driven worker |
+| 2026-06 | MCP server + SDK `WorkerRuntime` for external agents |
+| 2026-05 | 0G Mainnet deployment; trustless on-chain verifier identity; 0G Compute Router inference |
