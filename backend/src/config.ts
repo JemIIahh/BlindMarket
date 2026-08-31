@@ -19,6 +19,7 @@ const IS_PROD = process.env.NODE_ENV === 'production';
 // via contracts/scripts/sync-addresses.ts (do not hand-edit contractAddresses.ts).
 // Env vars still win at runtime; these are the no-env defaults.
 const ADDR = IS_PROD ? CONTRACT_ADDRESSES.mainnet : CONTRACT_ADDRESSES.testnet;
+const BASE_ADDR = IS_PROD ? CONTRACT_ADDRESSES.base : CONTRACT_ADDRESSES.baseTestnet;
 
 export const config = {
   port: parseInt(optional('PORT', '3001'), 10),
@@ -34,15 +35,23 @@ export const config = {
   // and production ignores the flag entirely. See services/verification.ts.
   allowInsecureLocalVerify: optional('ALLOW_INSECURE_LOCAL_VERIFY', 'false').toLowerCase() === 'true',
 
-  // 0G Chain
+  // 0G Chain (agent infra — TaskRegistry, Reputation, INFT)
   ogRpcUrl: optional('OG_RPC_URL', IS_PROD ? 'https://evmrpc.0g.ai' : 'https://evmrpc-testnet.0g.ai'),
   ogChainId: parseInt(optional('OG_CHAIN_ID', IS_PROD ? '16661' : '16602'), 10),
 
-  // Contracts
+  // Base Chain (settlement — BlindEscrow, USDC payouts)
+  baseRpcUrl: optional('BASE_RPC_URL', IS_PROD ? 'https://mainnet.base.org' : 'https://sepolia.base.org'),
+  baseChainId: parseInt(optional('BASE_CHAIN_ID', IS_PROD ? '8453' : '84532'), 10),
+
+  // Contracts — 0G (agent infra)
   blindEscrowAddress: optional('BLIND_ESCROW_ADDRESS', ADDR.blindEscrow),
   taskRegistryAddress: optional('TASK_REGISTRY_ADDRESS', ADDR.taskRegistry),
   blindReputationAddress: optional('BLIND_REPUTATION_ADDRESS', ADDR.blindReputation),
   inftAddress: optional('INFT_ADDRESS', ADDR.inft),
+
+  // Contracts — Base (settlement)
+  baseEscrowAddress: optional('BASE_ESCROW_ADDRESS', BASE_ADDR.blindEscrow),
+  baseUsdcAddress: optional('BASE_USDC_ADDRESS', IS_PROD ? '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' : '0x036CbD53842c5426634c4923a64805772f97d1b6'),
 
   // Auth — Privy is the sole identity provider; agent API key for service callers
   agentApiKey: process.env.AGENT_API_KEY || '',
@@ -63,9 +72,14 @@ export const config = {
 
   // Marketplace signer — holds the verifier role on BlindEscrow. Used by the
   // A2A settlement bridge (services/a2aSettlement.ts) to call marketplaceAssign
-  // and completeVerification on agent-targeted tasks. Generated and rotated
-  // via contracts/scripts/generate-marketplace-signer.ts + rotate-verifier.ts.
+  // (0G) and completeVerification (Base). Generated and rotated via
+  // contracts/scripts/generate-marketplace-signer.ts + rotate-verifier.ts.
   marketplaceSignerPrivateKey: process.env.MARKETPLACE_SIGNER_PRIVATE_KEY || '',
+
+  // Base marketplace signer — separate key for Base escrow interactions
+  // (completeVerification on Base releases USDC). Same pattern as above but
+  // targets the Base BlindEscrow.
+  baseMarketplaceSignerPrivateKey: process.env.BASE_MARKETPLACE_SIGNER_PRIVATE_KEY || '',
 
   // Forensic verification
   forensicMaxPhotoAgeMs: parseInt(optional('FORENSIC_MAX_PHOTO_AGE_MS', '1800000'), 10),  // 30 min
