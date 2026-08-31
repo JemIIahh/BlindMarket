@@ -1,4 +1,4 @@
-import { escrow, buildUnsignedTx } from './chain.js';
+import { escrow, baseEscrow, buildUnsignedTx } from './chain.js';
 import type { OnChainTask } from '../types.js';
 import { ethers } from 'ethers';
 
@@ -38,6 +38,12 @@ export async function feeBps(): Promise<number> {
  */
 export async function getTaskVerifier(taskId: number): Promise<string> {
   return await escrow.taskVerifier(taskId);
+}
+
+/** Read per-task verifier from Base escrow */
+export async function getTaskVerifierBase(taskId: number): Promise<string> {
+  if (!baseEscrow) throw new Error('Base escrow not configured');
+  return await baseEscrow.taskVerifier(taskId);
 }
 
 /** Build unsigned createTask transaction */
@@ -109,4 +115,31 @@ export async function buildCompleteVerification(
   passed: boolean,
 ): Promise<ethers.TransactionRequest> {
   return buildUnsignedTx(escrow, 'completeVerification', [taskId, passed], from);
+}
+
+// ── Base escrow (settlement — USDC payouts) ────────────────────────────────
+
+/** Build unsigned createTask transaction against Base escrow */
+export async function buildCreateTaskBase(
+  from: string,
+  taskHash: string,
+  token: string,
+  amount: bigint,
+  category: string,
+  locationZone: string,
+  duration: bigint,
+  value?: bigint,
+  verifierAgent?: string,
+): Promise<ethers.TransactionRequest> {
+  if (!baseEscrow) throw new Error('Base escrow not configured (BASE_ESCROW_ADDRESS)');
+  if (verifierAgent && verifierAgent !== ethers.ZeroAddress) {
+    return buildUnsignedTx(
+      baseEscrow,
+      'createTaskWithVerifier',
+      [taskHash, token, amount, category, locationZone, duration, verifierAgent],
+      from,
+      value,
+    );
+  }
+  return buildUnsignedTx(baseEscrow, 'createTask', [taskHash, token, amount, category, locationZone, duration], from, value);
 }

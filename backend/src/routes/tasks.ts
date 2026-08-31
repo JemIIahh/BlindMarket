@@ -273,7 +273,11 @@ tasksRouter.post('/', requireAuth, async (req: AuthRequest, res, next) => {
     const amountBigInt = BigInt(data.amount);
     const isNative = data.token === '0x0000000000000000000000000000000000000000';
 
-    const tx = await escrowService.buildCreateTask(
+    // Base escrow for settlement (USDC) when configured, else 0G escrow (legacy)
+    const useBase = !!config.baseEscrowAddress;
+    const buildTask = useBase ? escrowService.buildCreateTaskBase : escrowService.buildCreateTask;
+
+    const tx = await buildTask(
       from,
       data.taskHash,
       data.token,

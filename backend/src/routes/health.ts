@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { formatEther } from 'ethers';
 import type { ApiResponse } from '../types.js';
-import { escrow, marketplaceSigner, provider } from '../services/chain.js';
+import { escrow, marketplaceSigner, provider, baseEscrow, baseMarketplaceSigner, baseProvider } from '../services/chain.js';
 import { isBridgeConfigured } from '../services/a2aSettlement.js';
 import { config } from '../config.js';
 
@@ -52,10 +52,6 @@ healthRouter.get('/bridge', async (_req, res, next) => {
       onChainVerifier !== null &&
       onChainVerifier.toLowerCase() === signerAddr.toLowerCase();
 
-    // Signer gas balance — disambiguates BRIDGE_FAILED. A signer that holds the
-    // verifier role but is out of gas can't broadcast marketplaceAssign /
-    // completeVerification, so tasks stick exactly like a role mismatch would.
-    // Best-effort: if the RPC read fails, still return the verifier info above.
     let signerBalanceOg: string | null = null;
     let signerGasLow: boolean | null = null;
     let signerBalanceError: string | null = null;
@@ -69,6 +65,58 @@ healthRouter.get('/bridge', async (_req, res, next) => {
     }
 
     const network = config.ogChainId === 16661 ? 'mainnet' : 'testnet';
+
+    // Base bridge status (USDC settlement)
+    let baseBridge: Record<string, unknown> | null = null;
+    if (config.baseEscrowAddress && baseEscrow && baseMarketplaceSigner && baseProvider) {
+      const baseSignerAddr = await baseMarketplaceSigner.getAddress();
+      let baseVerifier: string | null = null;
+      let baseEscrowError: string | null = null;
+      try {
+        baseVerifier = (await baseEscrow.verifier()) as string;
+      } catch (e) {
+        baseEscrowError = (e as Error).message;
+      }
+      const baseVerifierMatches =
+        baseVerifier !== null &&
+        baseVerifier.toLowerCase() === baseSignerAddr.toLowerCase();
+      let baseSignerBalanceUsdc: string | null = null;
+      let baseSignerBalanceError: string | null = null;
+      try {
+        // USDC balance (6 decimals)
+        const USDC_ABI = ['function balanceOf(address) view returns (uint256)'];
+        const usdc = new (await import('ethers')).ethers.Contract(config.baseUsdcAddress!, USDC_ABI, baseProvider);
+        baseSignerBalanceUsdc = (await usdc.balanceOf(baseSignerAddr)).toString();
+      } catch (e) {
+        baseSignerBalanceError = (e as Error).message;
+      }
+      let baseSignerEthBalance: string | null = null;
+      let baseSignerEthLow: boolean | null = null;
+      try {
+        const ethBal = await baseProvider.getBalance(baseSignerAddr);
+        baseSignerEthBalance = formatEther(ethBal);
+        baseSignerEthLow = Number(baseSignerEthBalance) < 0.001;
+      } catch {
+        // non-critical
+      }
+      baseBridge = {
+        configured: true,
+        signerAddress: baseSignerAddr,
+        escrowAddress: config.baseEscrowAddress,
+        chainId: config.baseChainId,
+        onChainVerifier: baseVerifier,
+        verifierMatches: baseVerifierMatches,
+        escrowReadError: baseEscrowError,
+        signerUsdcBalance: baseSignerBalanceUsdc,
+        signerEthBalance: baseSignerEthBalance,
+        signerEthLow: baseSignerEthLow,
+        signerBalanceError: baseSignerBalanceError,
+        rotateCommand: baseVerifierMatches
+          ? null
+          : `cd contracts && MARKETPLACE_SIGNER_ADDRESS=${baseSignerAddr} npx hardhat run scripts/rotate-verifier.ts --network base${network === 'mainnet' ? '' : '-sepolia'}`,
+      };
+    }
+
     const body: ApiResponse = {
       success: true,
       data: {
@@ -85,6 +133,7 @@ healthRouter.get('/bridge', async (_req, res, next) => {
         rotateCommand: verifierMatches
           ? null
           : `cd contracts && MARKETPLACE_SIGNER_ADDRESS=${signerAddr} npx hardhat run scripts/rotate-verifier.ts --network 0g-${network}`,
+        base: baseBridge,
       },
     };
     res.json(body);

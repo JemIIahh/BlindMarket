@@ -17,7 +17,7 @@ import * as reputationDecay from '../services/reputationDecay.js';
 import * as agentEmbedding from '../services/agentEmbedding.js';
 import * as semanticMatch from '../services/semanticMatch.js';
 import { demandFeed, MAX_DEMAND_LIMIT } from '../services/demandFeed.js';
-import { provider, escrow } from '../services/chain.js';
+import { provider, escrow, baseProvider, baseEscrow } from '../services/chain.js';
 import { redis } from '../services/redis.js';
 import { ethers } from 'ethers';
 import type { AuthRequest, ApiResponse, AgentCapability } from '../types.js';
@@ -1041,10 +1041,29 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
     // then 404 a tx that is genuinely on-chain — funding the escrow but leaving
     // the task un-indexed (no rootHash/wrappedKeys meta → invisible to
     // executors). Retry across ~24s to ride out that replica lag.
-    let receipt = await provider.getTransactionReceipt(data.txHash);
-    for (let i = 0; i < 8 && !receipt; i++) {
-      await new Promise((r) => setTimeout(r, 3000));
-      receipt = await provider.getTransactionReceipt(data.txHash);
+    // Poll for the receipt from both chains — the tx may target 0G or Base escrow.
+    // Try Base first (if configured) since new tasks are funded on Base, then 0G.
+    let receipt = null;
+    let activeProvider = provider;
+    let activeEscrow = escrow;
+    const providers = baseProvider && baseEscrow
+      ? [
+          { prov: baseProvider, esc: baseEscrow, label: 'Base' },
+          { prov: provider, esc: escrow, label: '0G' },
+        ]
+      : [{ prov: provider, esc: escrow, label: '0G' }];
+
+    for (const { prov, esc, label } of providers) {
+      receipt = await prov.getTransactionReceipt(data.txHash);
+      for (let i = 0; i < 8 && !receipt; i++) {
+        await new Promise((r) => setTimeout(r, 3000));
+        receipt = await prov.getTransactionReceipt(data.txHash);
+      }
+      if (receipt) {
+        activeProvider = prov;
+        activeEscrow = esc;
+        break;
+      }
     }
     if (!receipt) {
       throw new AppError(
@@ -1061,11 +1080,11 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       );
     }
 
-    // Parse logs from the configured escrow address only. We don't trust a
+    // Parse logs from the active escrow address only. We don't trust a
     // receipt that originated from some other contract — a malicious poster
     // could otherwise pass a tx hash from a different escrow with a colliding
     // taskHash.
-    const escrowAddress = (await escrow.getAddress()).toLowerCase();
+    const escrowAddress = (await activeEscrow.getAddress()).toLowerCase();
     const taskCreatedTopic = ethers.id(
       'TaskCreated(uint256,address,address,uint256,bytes32,string,string,uint256)',
     );
@@ -1086,7 +1105,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
         'Receipt contains multiple TaskCreated events — ambiguous index target',
       );
     }
-    const parsed = escrow.interface.parseLog({
+    const parsed = activeEscrow.interface.parseLog({
       topics: matching[0].topics as string[],
       data: matching[0].data,
     });
@@ -1156,7 +1175,9 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       // different verifier, the designated agent's settlement tx reverts
       // NotVerifier and the task sticks in awaiting_verification until
       // claimTimeout. Refuse the index up front instead.
-      const onChainVerifier = await escrowService.getTaskVerifier(Number(onChainTaskId));
+      const onChainVerifier = activeEscrow === baseEscrow
+        ? await escrowService.getTaskVerifierBase(Number(onChainTaskId))
+        : await escrowService.getTaskVerifier(Number(onChainTaskId));
       if (onChainVerifier.toLowerCase() !== data.verifierAddress.toLowerCase()) {
         throw new AppError(
           409,

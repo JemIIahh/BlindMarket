@@ -36,6 +36,7 @@ import { mcpRouter } from './routes/mcp.js';
 import { wellKnownRouter, openapiRouter } from './routes/discovery.js';
 import { getDb } from './services/database.js';
 import { startEscrowEventLoop } from './services/escrowEvents.js';
+import { startBaseEscrowEventLoop } from './services/baseEscrowEvents.js';
 import { startExpirySweepLoop } from './services/a2aExpirySweep.js';
 import { auditCustodySealedTasks } from './services/keyCustodyService.js';
 import { isBridgeConfigured } from './services/a2aSettlement.js';
@@ -139,6 +140,9 @@ httpServer.listen(config.port, () => {
   // mapping that the A2A settlement bridge needs to call assignWorker /
   // completeVerification by on-chain id.
   startEscrowEventLoop();
+  // Base escrow event loop — populates base: prefixed taskHash↔taskId
+  // mapping needed for USDC settlement on Base chain.
+  startBaseEscrowEventLoop();
 
   // Proactively close open tasks whose on-chain deadline has passed, instead
   // of leaving them listed until some agent burns an /accept on them.
