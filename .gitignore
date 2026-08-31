@@ -43,6 +43,11 @@ BlindBounty Design System.zip
 dump.rdb
 scratch/
 
+# One-off debug/query scripts (not part of the app)
+backend/scripts/*.mjs
+scripts/query-*.mjs
+scripts/fetch-*.mjs
+
 backend/.env.testnet
 frontend/.env.testnet
 
