@@ -25,9 +25,9 @@ import { redis } from './redis.js';
 const EARNED_BADGE_MIN_COMPLETED = 5;
 const EARNED_BADGE_MAX_FAILURE_RATIO = 0.2;
 
-// Cache the on-chain feeBps for the duration of the process. Fee changes are
-// admin-gated and rare; one stale read per restart is fine. Falls back to 1000
-// (10%) — the documented default in CLAUDE.md — if the RPC is unreachable.
+// Cached fee basis points. Read from 0G escrow at startup; Base escrow
+// should mirror the same value (admin sets both via set-fee.ts). Falls back
+// to 1000 (10%) if the RPC is unreachable.
 let cachedFeeBps: number | null = null;
 export async function getFeeBps(): Promise<number> {
   if (cachedFeeBps !== null) return cachedFeeBps;
@@ -72,11 +72,8 @@ export async function recordWorkerPayout(
     rethrow?: boolean;
     serviceId?: number;
     computeCostMicroUnits?: number;
-    /** The task's meta — feeds the per-skill proof layer (tags + routing
-     *  text for slug resolution). The a2a routes pass the meta they already
-     *  fetched in the same handler; the DisputeResolved listener omits it and
-     *  this function falls back to a2aStore.getMeta (safe import direction —
-     *  a2aStore only imports redis). */
+    /** Token decimals: 6 for USDC (Base), 18 for native 0G. */
+    decimals?: number;
     meta?: import('../types.js').A2ATaskMeta;
   } = {},
 ): Promise<void> {
@@ -102,10 +99,15 @@ export async function recordWorkerPayout(
     }
 
     const feeBps = await getFeeBps();
+    const decimals = opts.decimals ?? 18;
+    const decimalsDivisor = 10 ** decimals;
 
-    // Convert micro-units (1e-6 USDC) to 0G chain units (18 decimals).
-    // 1 USDC = 1e6 micro-units = 1e18 chain units, so multiply by 1e12.
-    const computeCostChain = BigInt(Math.floor((opts.computeCostMicroUnits ?? 0) * 1e12));
+    // Convert micro-units (1e-6 USDC) to chain units.
+    // USDC (6 decimals): 1 micro-unit = 1e-6, so no conversion needed.
+    // Native 0G (18 decimals): 1 micro-unit = 1e-12 chain units.
+    const computeCostChain = decimals === 6
+      ? BigInt(Math.floor(opts.computeCostMicroUnits ?? 0))
+      : BigInt(Math.floor((opts.computeCostMicroUnits ?? 0) * 1e12));
     const afterComputeCost = grossAmount > computeCostChain ? grossAmount - computeCostChain : 0n;
 
     const workerShare = (afterComputeCost * (10_000n - BigInt(feeBps))) / 10_000n;
@@ -145,9 +147,9 @@ export async function recordWorkerPayout(
         role: 'worker',
         taskId: onChainId,
         type: 'payment',
-        amount: Number(grossAmount) / 1e18,
-        fee: Number(platformFee) / 1e18,
-        net: Number(workerShare) / 1e18,
+        amount: Number(grossAmount) / decimalsDivisor,
+        fee: Number(platformFee) / decimalsDivisor,
+        net: Number(workerShare) / decimalsDivisor,
         status: 'confirmed',
       });
     } catch (acctErr) {
