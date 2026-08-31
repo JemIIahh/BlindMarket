@@ -27,8 +27,9 @@
 
 import type { ContractTransactionResponse } from 'ethers';
 import { isAddress } from 'ethers';
-import { escrowAsMarketplace, marketplaceSigner } from './chain.js';
+import { escrowAsMarketplace, marketplaceSigner, baseEscrowAsMarketplace, baseMarketplaceSigner } from './chain.js';
 import { getTaskIdByHash } from './escrowEvents.js';
+import { getBaseTaskIdByHash } from './baseEscrowEvents.js';
 import * as a2aStore from './a2aStore.js';
 import { rooms } from './socket.js';
 
@@ -39,33 +40,41 @@ const HASH_LOOKUP_TIMEOUT_MS = 30_000;
 const HASH_LOOKUP_POLL_INTERVAL_MS = 2_000;
 
 /**
- * Serial tx queue for the marketplace signer.
+ * Serial tx queues — one per signer (0G and Base use different wallets).
  *
- * All marketplaceAssign / completeVerification calls go through the same
- * signer wallet, which means they share a nonce sequence. Without
- * serialisation, two concurrent /accept requests fire two settleAssignment()
- * calls in parallel; both grab the same nonce and one gets dropped with
- * REPLACEMENT_UNDERPRICED. Surfaced as a real bug by the extensive smoke
- * battery — tasks 19 and 21 stuck at Funded because their bridge txs
- * collided with task 20's.
- *
- * Pattern: chain new operations onto a tail promise. Each operation awaits
- * the previous one (success or failure) before running. Errors don't break
- * the chain — they're swallowed for the queue but still returned to the
- * caller so individual callers see what happened.
+ * All marketplaceAssign calls go through the 0G signer; all
+ * completeVerification calls go through the Base signer. Each queue
+ * serialises nonces within its own chain.
  */
-let signerTxQueue: Promise<unknown> = Promise.resolve();
-function enqueueSignerTx<T>(fn: () => Promise<T>): Promise<T> {
-  const next = signerTxQueue.then(fn, fn);
-  signerTxQueue = next.catch(() => {}); // don't propagate errors to the next queued tx
+let ogSignerTxQueue: Promise<unknown> = Promise.resolve();
+let baseSignerTxQueue: Promise<unknown> = Promise.resolve();
+
+function enqueueOgSignerTx<T>(fn: () => Promise<T>): Promise<T> {
+  const next = ogSignerTxQueue.then(fn, fn);
+  ogSignerTxQueue = next.catch(() => {});
   return next;
 }
 
-function bridgeReady(): boolean {
+function enqueueBaseSignerTx<T>(fn: () => Promise<T>): Promise<T> {
+  const next = baseSignerTxQueue.then(fn, fn);
+  baseSignerTxQueue = next.catch(() => {});
+  return next;
+}
+
+function assignmentBridgeReady(): boolean {
   if (!escrowAsMarketplace || !marketplaceSigner) {
     console.error(
-      '[a2aSettlement] bridge disabled — MARKETPLACE_SIGNER_PRIVATE_KEY is not set in backend env. ' +
-        'Run contracts/scripts/generate-marketplace-signer.ts and rotate-verifier.ts to provision it.',
+      '[a2aSettlement] assignment bridge disabled — MARKETPLACE_SIGNER_PRIVATE_KEY not set.',
+    );
+    return false;
+  }
+  return true;
+}
+
+function verificationBridgeReady(): boolean {
+  if (!baseEscrowAsMarketplace || !baseMarketplaceSigner) {
+    console.error(
+      '[a2aSettlement] verification bridge disabled — BASE_MARKETPLACE_SIGNER_PRIVATE_KEY not set.',
     );
     return false;
   }
@@ -74,10 +83,18 @@ function bridgeReady(): boolean {
 
 async function waitForTaskId(taskHash: string): Promise<string | null> {
   const deadline = Date.now() + HASH_LOOKUP_TIMEOUT_MS;
-  // First lookup runs immediately (no upfront delay) — covers the common case
-  // where the event listener has already captured the mapping.
   while (true) {
     const id = await getTaskIdByHash(taskHash);
+    if (id) return id;
+    if (Date.now() >= deadline) return null;
+    await new Promise((r) => setTimeout(r, HASH_LOOKUP_POLL_INTERVAL_MS));
+  }
+}
+
+async function waitForBaseTaskId(taskHash: string): Promise<string | null> {
+  const deadline = Date.now() + HASH_LOOKUP_TIMEOUT_MS;
+  while (true) {
+    const id = await getBaseTaskIdByHash(taskHash);
     if (id) return id;
     if (Date.now() >= deadline) return null;
     await new Promise((r) => setTimeout(r, HASH_LOOKUP_POLL_INTERVAL_MS));
@@ -179,7 +196,7 @@ async function confirmAssignedWorker(
  * Unexpected errors (not bridge-not-ready, not already-settled) propagate.
  */
 export async function settleAssignment(taskHash: string, executor: string): Promise<SettleResult> {
-  if (!bridgeReady()) {
+  if (!assignmentBridgeReady()) {
     const msg = 'Bridge disabled: MARKETPLACE_SIGNER_PRIVATE_KEY not set';
     await safePersistAssignError(taskHash, msg);
     return { success: false, error: msg };
@@ -215,7 +232,7 @@ export async function settleAssignment(taskHash: string, executor: string): Prom
       throw staticErr;
     }
 
-    tx = await enqueueSignerTx(() =>
+    tx = await enqueueOgSignerTx(() =>
       escrowAsMarketplace!.marketplaceAssign(BigInt(taskId), executor) as Promise<ContractTransactionResponse>,
     );
   } catch (err) {
@@ -283,16 +300,14 @@ function truncate(s: string): string {
 
 /**
  * Translate an A2A `verified` or `failed` transition into an on-chain
- * completeVerification(taskId, passed). On the contract, passed=true releases
- * escrow to the worker (90/10 split); passed=false only moves the task to
- * Verified — it does NOT refund the poster, and there is NO auto-cancel after
- * MAX_SUBMISSION_ATTEMPTS (the contract just blocks further submitEvidence and
- * records a dispute). After a terminal failure the only exits are the poster's
+ * completeVerification(taskId, passed) on the BASE escrow. On Base, passed=true
+ * releases USDC to the worker (90/10 split); passed=false only moves the task
+ * to Verified. After a terminal failure the only exits are the poster's
  * claimTimeout (post-deadline refund) or an admin resolveDispute.
  */
 export async function settleVerification(taskHash: string, passed: boolean): Promise<SettleResult> {
-  if (!bridgeReady()) {
-    const msg = 'Bridge disabled: MARKETPLACE_SIGNER_PRIVATE_KEY not set';
+  if (!verificationBridgeReady()) {
+    const msg = 'Verification bridge disabled: BASE_MARKETPLACE_SIGNER_PRIVATE_KEY not set';
     await safePersistVerifyError(taskHash, msg);
     return { success: false, error: msg };
   }
@@ -306,9 +321,9 @@ export async function settleVerification(taskHash: string, passed: boolean): Pro
   }
 
   try {
-    const taskId = await waitForTaskId(taskHash);
+    const taskId = await waitForBaseTaskId(taskHash);
     if (taskId === null) {
-      const msg = `hash2id lookup timed out — createTask event never seen by indexer (taskHash=${taskHash.slice(0, 10)}…)`;
+      const msg = `hash2id lookup timed out — Base createTask event never seen by indexer (taskHash=${taskHash.slice(0, 10)}…)`;
       console.error(`[a2aSettlement] ${msg}`);
       await safePersistVerifyError(taskHash, msg);
       return { success: false, error: msg };
@@ -316,21 +331,13 @@ export async function settleVerification(taskHash: string, passed: boolean): Pro
 
     let tx: ContractTransactionResponse;
     try {
-      // Serialise via the shared signer tx queue (see enqueueSignerTx above)
-      tx = await enqueueSignerTx(() =>
-        escrowAsMarketplace!.completeVerification(BigInt(taskId), passed) as Promise<ContractTransactionResponse>,
+      tx = await enqueueBaseSignerTx(() =>
+        baseEscrowAsMarketplace!.completeVerification(BigInt(taskId), passed) as Promise<ContractTransactionResponse>,
       );
     } catch (err) {
       if (isAlreadySettled(err)) {
-        // InvalidStatus means the task is no longer Submitted — but that
-        // covers MORE than "this verdict already settled": Disputed,
-        // Cancelled, and a racing settlement with the OPPOSITE verdict all
-        // revert the same way. Only report success when the on-chain outcome
-        // actually matches `passed`; otherwise crediting would mirror a
-        // settlement that never happened. (The caller's retry converges via
-        // the routes' reconcile-from-chain branch.)
         try {
-          const t = await escrowAsMarketplace!.getTask(BigInt(taskId));
+          const t = await baseEscrowAsMarketplace!.getTask(BigInt(taskId));
           const status = Number(t.status);
           if (status === (passed ? 4 : 3)) {
             console.log(
@@ -353,21 +360,15 @@ export async function settleVerification(taskHash: string, passed: boolean): Pro
 
     await a2aStore.updateState(taskHash, { verifyTxHash: tx.hash, verifyError: undefined });
     console.log(
-      `[a2aSettlement] completeVerification broadcast taskId=${taskId} passed=${passed} tx=${tx.hash}`,
+      `[a2aSettlement] completeVerification (Base) broadcast taskId=${taskId} passed=${passed} tx=${tx.hash}`,
     );
 
-    // Bounded wait: routes now AWAIT this inside the HTTP handler, so a tx
-    // stuck in the mempool must surface as a retryable failure, not hold the
-    // request open indefinitely. ethers v6 wait(confirms, timeoutMs) throws
-    // a timeout error → caught below → success:false → the route 503s and
-    // the retry converges (settle re-runs or the reconcile branch adopts the
-    // landed tx).
     const receipt = await tx.wait(1, 60_000);
     console.log(
-      `[a2aSettlement] completeVerification confirmed taskId=${taskId} passed=${passed} block=${receipt?.blockNumber} status=${receipt?.status}`,
+      `[a2aSettlement] completeVerification (Base) confirmed taskId=${taskId} passed=${passed} block=${receipt?.blockNumber} status=${receipt?.status}`,
     );
     if (receipt?.status !== 1) {
-      const msg = `completeVerification tx ${tx.hash} reverted on chain`;
+      const msg = `completeVerification tx ${tx.hash} reverted on Base chain`;
       await safePersistVerifyError(taskHash, msg);
       return { success: false, error: msg, txHash: tx.hash };
     }
@@ -388,7 +389,7 @@ export async function settleVerification(taskHash: string, passed: boolean): Pro
   }
 }
 
-/** True if the bridge has all its prerequisites configured. */
+/** True if both assignment (0G) and verification (Base) bridges are configured. */
 export function isBridgeConfigured(): boolean {
-  return !!(escrowAsMarketplace && marketplaceSigner);
+  return !!(escrowAsMarketplace && marketplaceSigner && baseEscrowAsMarketplace && baseMarketplaceSigner);
 }
