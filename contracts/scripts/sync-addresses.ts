@@ -35,7 +35,12 @@ function load(file: string): Record<string, string> {
 }
 
 function render(): string {
-  const body = JSON.stringify({ mainnet: load("0g-mainnet.json"), testnet: load("0g-testnet.json") }, null, 2);
+  const body = JSON.stringify({
+    mainnet: load("0g-mainnet.json"),
+    testnet: load("0g-testnet.json"),
+    base: load("base-mainnet.json"),
+    baseTestnet: load("base-sepolia.json"),
+  }, null, 2);
   return (
     "// GENERATED FILE — do not edit by hand.\n" +
     "// Source of truth: contracts/deployments/*.json\n" +

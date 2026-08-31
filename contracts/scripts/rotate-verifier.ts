@@ -31,8 +31,18 @@ async function main() {
   }
 
   const { chainId } = await ethers.provider.getNetwork();
-  const isMainnet = Number(chainId) === 16661;
-  const deployFile = isMainnet ? "0g-mainnet.json" : "0g-testnet.json";
+  const cid = Number(chainId);
+  // Map chainId → deployment file
+  const DEPLOY_FILES: Record<number, string> = {
+    16661: "0g-mainnet.json",
+    16602: "0g-testnet.json",
+    8453:  "base-mainnet.json",
+    84532: "base-sepolia.json",
+  };
+  const deployFile = DEPLOY_FILES[cid];
+  if (!deployFile) {
+    throw new Error(`Unknown chainId ${cid} — no deployment file mapping. Add it to rotate-verifier.ts.`);
+  }
   
   const deploymentsPath = path.resolve(__dirname, `../deployments/${deployFile}`);
   if (!fs.existsSync(deploymentsPath)) {
