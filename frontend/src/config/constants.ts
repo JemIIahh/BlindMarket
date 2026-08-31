@@ -126,3 +126,16 @@ export function getChainConfig(chain: SupportedChain) {
 export function getNativeCurrency(chain: SupportedChain) {
   return getChainConfig(chain).nativeCurrency;
 }
+
+/**
+ * Payment decimals and symbol for the settlement chain. Task rewards are
+ * denominated in the settlement chain's payment token (USDC on Base = 6
+ * decimals; native 0G when Base is not configured = 18 decimals).
+ */
+export function getPaymentDecimals(): number {
+  return BASE_ESCROW_ADDRESS ? 6 : 18;
+}
+
+export function getPaymentSymbol(): string {
+  return BASE_ESCROW_ADDRESS ? 'USDC' : getNativeCurrency('og').symbol;
+}
