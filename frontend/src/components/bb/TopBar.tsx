@@ -42,11 +42,6 @@ export function TopBar({ onMenuClick }: TopBarProps = {}) {
         <Button variant="outline" label="Post task" size="sm" />
       </Link>
 
-      {/* Chain toggle — hidden on small screens */}
-      <div className="hidden sm:block">
-        <ChainToggle />
-      </div>
-
       {/* Theme toggle — hidden on small screens */}
       <button
         onClick={toggleTheme}
