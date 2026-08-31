@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { usePrivy } from '@privy-io/react-auth';
 import { useAccount, useChainId, useSwitchChain } from 'wagmi';
-import { ogTestnet } from '../../config/chains';
+import { baseChain, ogTestnet } from '../../config/chains';
 import { isMainnet } from '../../config/constants';
 import { copyToClipboard } from '../../lib/utils';
 
@@ -20,7 +20,11 @@ function EvmWalletButton({ variant }: Props) {
   const { switchChain } = useSwitchChain();
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
-  const currentChain = ogTestnet;
+  const supportedChainIds = [baseChain.id, ogTestnet.id];
+  const activeChain = supportedChainIds.includes(chainId) ? null : baseChain;
+  const networkName = chainId === baseChain.id
+    ? (isMainnet ? 'Base' : 'Base Sepolia')
+    : (isMainnet ? '0G Mainnet' : ogTestnet.name);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -55,9 +59,9 @@ function EvmWalletButton({ variant }: Props) {
     );
   }
 
-  if (chainId && chainId !== currentChain.id) {
+  if (chainId && activeChain) {
     return (
-      <button onClick={() => switchChain({ chainId: currentChain.id })} className="px-3 py-1.5 border border-err text-[11px] font-mono text-err hover:bg-surface-2 transition-colors">
+      <button onClick={() => switchChain({ chainId: activeChain.id })} className="px-3 py-1.5 border border-err text-[11px] font-mono text-err hover:bg-surface-2 transition-colors">
         wrong_network
       </button>
     );
@@ -68,7 +72,7 @@ function EvmWalletButton({ variant }: Props) {
       <div className="flex items-center border border-line text-[11px] font-mono">
         <span className="hidden sm:flex px-3 py-1.5 text-ink-2 items-center gap-1.5">
           <span className="w-1.5 h-1.5 bg-ok inline-block" />
-          {isMainnet ? '0G Mainnet' : ogTestnet.name}
+          {networkName}
         </span>
         <button onClick={() => setMenuOpen(o => !o)} className="px-3 py-1.5 sm:border-l border-line text-ink hover:bg-surface-2 transition-colors flex items-center gap-1.5">
           <span className="sm:hidden w-1.5 h-1.5 bg-ok inline-block" />
