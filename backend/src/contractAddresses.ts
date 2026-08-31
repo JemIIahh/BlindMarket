@@ -21,7 +21,7 @@ export const CONTRACT_ADDRESSES = {
     "USDC": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
   },
   "baseTestnet": {
-    "blindEscrow": "0x0000000000000000000000000000000000000000",
+    "blindEscrow": "0xCca5ab873158b888158AD9Dc36fb4Ee683eFbEBf",
     "USDC": "0x036CbD53842c5426634c4923a64805772f97d1b6"
   }
 } as const;

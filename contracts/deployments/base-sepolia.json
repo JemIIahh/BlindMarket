@@ -1,11 +1,11 @@
 {
   "network": "base-sepolia",
   "chainId": 84532,
-  "deployer": "0x0000000000000000000000000000000000000000",
-  "timestamp": null,
-  "note": "Placeholder — run deploy-base.ts to populate. BlindEscrow only; agent infra stays on 0G.",
+  "deployer": "0x2f8b1177c83623a560B26B38dE984e154b123D75",
+  "timestamp": "2026-08-31T15:38:07.787Z",
+  "note": "BlindEscrow only — agent infra stays on 0G. Verifier must be rotated to marketplace signer.",
   "contracts": {
-    "BlindEscrow": "0x0000000000000000000000000000000000000000",
-    "USDC": "0x036CbD53842c5426634c4923a64805772f97d1b6"
+    "BlindEscrow": "0xCca5ab873158b888158AD9Dc36fb4Ee683eFbEBf",
+    "USDC": "0x036cbd53842c5426634c4923a64805772f97d1b6"
   }
 }
