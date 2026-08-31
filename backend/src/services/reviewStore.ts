@@ -63,8 +63,8 @@ export async function getAgentReviews(
   return {
     reviews,
     stats: {
-      avgRating: Math.round(Number(statsRows[0].avg) * 10) / 10,
-      totalReviews: Number(statsRows[0].cnt),
+      avgRating: statsRows[0] ? Math.round(Number(statsRows[0].avg) * 10) / 10 : 0,
+      totalReviews: Number(statsRows[0]?.cnt ?? 0),
       distribution,
     },
   };
