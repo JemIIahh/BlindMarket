@@ -18,6 +18,9 @@ const IS_PROD = import.meta.env.PROD;
 // via contracts/scripts/sync-addresses.ts (do not hand-edit contractAddresses.ts).
 // VITE_* env vars still win at build time; these are the no-env defaults.
 const ADDR = IS_PROD ? CONTRACT_ADDRESSES.mainnet : CONTRACT_ADDRESSES.testnet;
+const BASE_ADDR = IS_PROD ? (CONTRACT_ADDRESSES as any).base : (CONTRACT_ADDRESSES as any).baseTestnet;
+
+// ── 0G Chain (agent infra) ─────────────────────────────────────────────────
 
 export const OG_CHAIN_ID = Number(
   import.meta.env.VITE_OG_CHAIN_ID || (IS_PROD ? '16661' : '16602')
@@ -38,12 +41,31 @@ export const TASK_REGISTRY_ADDRESS =
 export const BLIND_REPUTATION_ADDRESS =
   import.meta.env.VITE_BLIND_REPUTATION_ADDRESS || ADDR.blindReputation;
 
-// Marketplace payment token.
-// Mainnet: Native 0G (address(0))
-// Testnet: Native 0G (address(0)) - Mock USDC is no longer used for bounties.
+// ── Base Chain (settlement — USDC payouts) ──────────────────────────────────
+
+export const BASE_CHAIN_ID = Number(
+  import.meta.env.VITE_BASE_CHAIN_ID || (IS_PROD ? '8453' : '84532')
+);
+
+export const BASE_RPC_URL =
+  import.meta.env.VITE_BASE_RPC_URL ||
+  (IS_PROD ? 'https://mainnet.base.org' : 'https://sepolia.base.org');
+
+export const BASE_ESCROW_ADDRESS =
+  import.meta.env.VITE_BASE_ESCROW_ADDRESS || BASE_ADDR?.blindEscrow || '';
+
+export const BASE_USDC_ADDRESS =
+  import.meta.env.VITE_BASE_USDC_ADDRESS ||
+  (IS_PROD ? '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' : '0x036CbD53842c5426634c4923a64805772f97d1b6');
+
+// ── Payment token ───────────────────────────────────────────────────────────
+
+// Marketplace payment token — Base USDC when Base is configured, else native 0G.
 export const MARKETPLACE_TOKEN_ADDRESS =
-  (import.meta.env.VITE_MOCK_ERC20_ADDRESS as string | undefined) ||
-  '0x0000000000000000000000000000000000000000';
+  BASE_ESCROW_ADDRESS
+    ? BASE_USDC_ADDRESS
+    : (import.meta.env.VITE_MOCK_ERC20_ADDRESS as string | undefined) ||
+      '0x0000000000000000000000000000000000000000';
 
 // Founder addresses (comma-separated, lowercase). Used to gate the /metrics page.
 export const FOUNDER_ADDRESSES: string[] = (import.meta.env.VITE_FOUNDER_ADDRESSES || '')
@@ -59,8 +81,16 @@ export const OG_CHAIN_CONFIG = {
   blockExplorerUrls: [OG_CHAIN_ID === 16661 ? 'https://chainscan.0g.ai' : 'https://chainscan-newton.0g.ai'],
 } as const;
 
-// Only 0G (EVM) chain is supported
-export const SUPPORTED_CHAINS = ['og'] as const;
+export const BASE_CHAIN_CONFIG = {
+  chainId: `0x${BASE_CHAIN_ID.toString(16)}`,
+  chainName: BASE_CHAIN_ID === 8453 ? 'Base' : 'Base Sepolia',
+  nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 },
+  rpcUrls: [BASE_RPC_URL],
+  blockExplorerUrls: [BASE_CHAIN_ID === 8453 ? 'https://basescan.org' : 'https://sepolia.basescan.org'],
+} as const;
+
+// Supported chains: 'base' for settlement, 'og' for agent infra
+export const SUPPORTED_CHAINS = ['base', 'og'] as const;
 export type SupportedChain = typeof SUPPORTED_CHAINS[number];
 
 /**
@@ -80,10 +110,12 @@ export function getActiveChain(): SupportedChain {
       return saved as SupportedChain;
     }
   } catch {}
-  return (import.meta.env.VITE_ACTIVE_CHAIN as SupportedChain | undefined) ?? 'og';
+  // Default to 'base' for settlement — users interact with Base
+  return (import.meta.env.VITE_ACTIVE_CHAIN as SupportedChain | undefined) ?? 'base';
 }
 
 export const CHAIN_CONFIGS = {
+  base: BASE_CHAIN_CONFIG,
   og: OG_CHAIN_CONFIG,
 } as const;
 

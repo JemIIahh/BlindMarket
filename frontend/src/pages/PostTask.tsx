@@ -22,7 +22,7 @@ import { stashAesKey } from '../lib/keyStash';
 import { signAndSendTx } from '../lib/txSigner';
 import { authedGet, authedPost } from '../lib/api';
 import { trackEvent } from '../hooks/useAnalytics';
-import { MARKETPLACE_TOKEN_ADDRESS, getNativeCurrency, WORKER_SHARE_PCT, PLATFORM_FEE_PCT } from '../config/constants';
+import { MARKETPLACE_TOKEN_ADDRESS, BASE_ESCROW_ADDRESS, getNativeCurrency, WORKER_SHARE_PCT, PLATFORM_FEE_PCT } from '../config/constants';
 import { useChain } from '../context/ChainContext';
 import { useChainAddress } from '../hooks/useChainWallet';
 import { useAuth } from '../context/AuthContext';
@@ -56,6 +56,9 @@ function durationHint(secs: number): string {
   // one place. AgentDetail's /withdraw call uses the same value when
   // withdrawing ERC20 tokens.
   const TOKEN = MARKETPLACE_TOKEN_ADDRESS;
+  // USDC on Base has 6 decimals; native 0G has 18. Use the token's decimals
+  // for amount parsing when Base escrow is configured.
+  const PAYMENT_DECIMALS = BASE_ESCROW_ADDRESS ? 6 : 18;
 
 export default function PostTask() {
   const { activeChain } = useChain();
@@ -171,8 +174,8 @@ export default function PostTask() {
       if (!token) throw new Error('No authentication token available. Please try logging out and back in.');
 
       // 0. Handle Payment (Native token)
-      const amountBase = parseUnits(form.amount, native.decimals);
-      console.log(`[PostTask] Amount: ${form.amount} ${native.symbol} (${amountBase} base units)`);
+      const amountBase = parseUnits(form.amount, PAYMENT_DECIMALS);
+      console.log(`[PostTask] Amount: ${form.amount} (${amountBase} base units, ${PAYMENT_DECIMALS} decimals)`);
 
       const isPublicTask = form.privacy === 'public';
 
@@ -718,11 +721,11 @@ export default function PostTask() {
                   onChange={e => setForm(f => ({ ...f, amount: e.target.value }))}
                 />
                 {form.amount && !isNaN(parseFloat(form.amount)) && (() => {
-                  const amt = parseUnits(form.amount, native.decimals);
+                        const amt = parseUnits(form.amount, PAYMENT_DECIMALS);
                   return (
                     <div className="mt-1.5">
                       <Tag tone="neutral" className="font-mono">
-                        {formatUnits(amt, native.decimals)} {native.symbol}
+                        {formatUnits(amt, PAYMENT_DECIMALS)} USDC
                       </Tag>
                     </div>
                   );
