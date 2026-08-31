@@ -22,6 +22,7 @@ export const CONTRACT_ADDRESSES = {
   },
   "baseTestnet": {
     "blindEscrow": "0xCca5ab873158b888158AD9Dc36fb4Ee683eFbEBf",
-    "USDC": "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+    "USDC": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+    "agentFactory": "0x4AFf5FE7f19779EEfBA8515fB1BaE84A8F3a20B6"
   }
 } as const;

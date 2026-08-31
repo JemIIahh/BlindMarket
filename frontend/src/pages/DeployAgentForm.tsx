@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useWalletClient, useBalance } from 'wagmi';
-import { BrowserProvider, parseEther, formatEther } from 'ethers';
+import { useWalletClient, useChainId } from 'wagmi';
+import { BrowserProvider, parseUnits, formatUnits } from 'ethers';
 import {
   Breadcrumb,
   PageHeader,
@@ -16,21 +16,30 @@ import { ToolManager, type AnyTool } from '../components/bb/ToolManager';
 import SkillPicker from '../components/bb/SkillPicker';
 import { get, post, authedPost } from '../lib/api';
 import { useChainAddress } from '../hooks/useChainWallet';
-import { getNativeCurrency } from '../config/constants';
+import { BASE_CHAIN_ID, MARKETPLACE_TOKEN_ADDRESS } from '../config/constants';
+import { CONTRACT_ADDRESSES } from '../config/contractAddresses';
+import { isMainnet } from '../config/constants';
 
-const OG_COMPUTE_DEPOSIT = '1.5';
-const DEPLOY_FUND_AMOUNT = '0.005';
+// AgentFactory on Base — accepts USDC, emits AgentDeployed event
+const AGENT_FACTORY_ABI = [
+  'function deployAgent(uint256 usdcAmount) external',
+  'function getTotalCost(uint256 usdcAmount) external view returns (uint256)',
+  'function deployFeeUsdc() external view returns (uint256)',
+];
 
-function fundAmount(provider: string) {
-  return provider === '0g-compute' ? OG_COMPUTE_DEPOSIT : DEPLOY_FUND_AMOUNT;
-}
+const USDC_ABI = [
+  'function approve(address spender, uint256 amount) external returns (bool)',
+  'function allowance(address owner, address spender) external view returns (uint256)',
+  'function balanceOf(address owner) external view returns (uint256)',
+];
 
-function minOwnerBalance(provider: string) {
-  const amt = parseFloat(fundAmount(provider));
-  return (amt + 0.055).toFixed(3);
-}
+const AGENT_FACTORY_ADDRESS = isMainnet
+  ? CONTRACT_ADDRESSES.base?.agentFactory
+  : CONTRACT_ADDRESSES.baseTestnet?.agentFactory;
 
-const OG_FAUCET_URL = 'https://faucet.0g.ai';
+// Deploy fee: 1 USDC (6 decimals)
+const DEPLOY_FEE_USDC = 1_000_000n;
+const DEPLOY_FEE_HUMAN = 1;
 
 type Provider = 'openai' | 'anthropic' | 'groq' | 'gemini' | '0g-compute';
 type ProviderModels = Record<Provider, string[]>;
@@ -103,9 +112,9 @@ You review code for bugs, security issues, and best practices.
 };
 
 export default function DeployAgentForm() {
-  const native = getNativeCurrency('og');
   const address = useChainAddress();
   const { data: walletClient } = useWalletClient();
+  const chainId = useChainId();
   const navigate = useNavigate();
 
   const [providers, setProviders] = useState<ProviderModels>({
@@ -146,26 +155,31 @@ export default function DeployAgentForm() {
   const [skillSlugs, setSkillSlugs] = useState<string[]>([]);
   // Slugs imported as PRIVATE drafts via the SkillPicker importer. The
   // unauthenticated deploy route installs public skills only, so these are
-  // attached right after deploy via the authed POST /agents/:id/skills.
+  // attached right after deploy via the authed POST /:id/skills.
   const [privateSkillSlugs, setPrivateSkillSlugs] = useState<string[]>([]);
   const [privateSkillResults, setPrivateSkillResults] = useState<Array<{ slug: string; ok: boolean; error?: string }>>([]);
 
-  const [status, setStatus] = useState<'idle' | 'deploying' | 'funding' | 'done' | 'error'>('idle');
+  const [status, setStatus] = useState<'idle' | 'approving' | 'deploying' | 'done' | 'error'>('idle');
   const submittingRef = useRef(false);
   const [error, setError] = useState('');
   const [agentId, setAgentId] = useState('');
-  const [fundingSkipped, setFundingSkipped] = useState(false);
+  const [deployTxHash, setDeployTxHash] = useState('');
 
-  const { data: ownerBalance } = useBalance({
-    address: address as `0x${string}` | undefined,
-    query: { enabled: !!address },
-  });
+  const isBaseChain = chainId === BASE_CHAIN_ID;
+  const needsChainSwitch = !isBaseChain && chainId !== 0;
 
-  const ownerBalanceEther = ownerBalance ? parseFloat(formatEther(ownerBalance.value)) : 0;
+  const [usdcBalance, setUsdcBalance] = useState<bigint | null>(null);
 
-  const deployFundAmt = fundAmount(form.provider);
-  const minBal = minOwnerBalance(form.provider);
-  const hasEnoughForDeploy = ownerBalanceEther >= parseFloat(minBal);
+  // Load USDC balance
+  useEffect(() => {
+    if (!address || !walletClient) return;
+    const provider = new BrowserProvider(walletClient.transport);
+    const usdc = new ethers.Contract(MARKETPLACE_TOKEN_ADDRESS, USDC_ABI, provider);
+    usdc.balanceOf(address).then((b: bigint) => setUsdcBalance(b)).catch(() => {});
+  }, [address, walletClient, status]);
+
+  const usdcBalanceHuman = usdcBalance !== null ? Number(formatUnits(usdcBalance, 6)) : null;
+  const hasEnoughUsdc = usdcBalanceHuman !== null && usdcBalanceHuman >= DEPLOY_FEE_HUMAN;
 
   const [ogPricing, setOgPricing] = useState<Record<string, { promptUsd: string; completionUsd: string } | null>>({});
 
@@ -219,98 +233,39 @@ export default function DeployAgentForm() {
     e.preventDefault();
     if (!address) return;
     if (!walletClient) return;
+    if (!AGENT_FACTORY_ADDRESS) {
+      setError('AgentFactory not configured for this network');
+      return;
+    }
     if (submittingRef.current) return;
     submittingRef.current = true;
-    setStatus('deploying');
+    setStatus('approving');
     setError('');
-    setFundingSkipped(false);
-    try {
-      const msg = `BlindMarket agent deployment\nOwner: ${address}`;
-      let ownerPublicKey: string;
 
+    try {
       const provider = new BrowserProvider(walletClient.transport);
       const signer = await provider.getSigner();
-      const signature = await signer.signMessage(msg);
-      const { recoverPublicKey } = await import('viem');
-      const { hashMessage, toBytes } = await import('viem');
-      const sigBytes = toBytes(signature);
-      const recoveredPubKey = await recoverPublicKey({ hash: hashMessage(msg), signature: sigBytes });
-      ownerPublicKey = recoveredPubKey.slice(2);
-      console.log('[deploy] EVM publicKey:', ownerPublicKey.length / 2, 'bytes');
 
-      const data = await post<{ id: string; walletAddress?: string }>('/api/v1/agents/deploy', {
-        ...form,
-        ownerAddress: address,
-        ownerPublicKey,
-        // Private drafts are excluded here (the public-only deploy route
-        // would 404) and attached right after deploy, below.
-        skillSlugs: skillSlugs.filter((slug) => !privateSkillSlugs.includes(slug)),
-        toolSecrets,
-        tools: tools.map(t => {
-          // Normalized ToolDefinition — pass through as-is
-          if ('input_schema' in t) return t;
-          // Legacy types — map to backend shape
-          if (t.type === 'mcp') {
-            return { type: 'mcp', name: t.name, description: t.description, endpointUrl: t.url, toolName: t.toolName ?? t.name };
-          }
-          if (t.type === 'js') {
-            return { type: 'js', name: t.name, description: t.description, code: t.code ?? '' };
-          }
-          if (t.type === 'sandbox') {
-            return { type: 'sandbox', name: t.name, description: t.description, command: t.command ?? '', setup: t.setup, timeout: t.timeout };
-          }
-          return {
-            type: 'http',
-            name: t.name,
-            description: t.description,
-            url: t.url,
-            method: t.method ?? 'POST',
-            headers: t.headers,
-            queryParams: t.queryParams,
-            body: t.body,
-          };
-        }),
-      });
-      setAgentId(data.id);
+      // Step 1: Approve USDC for AgentFactory
+      setStatus('approving');
+      const usdc = new ethers.Contract(MARKETPLACE_TOKEN_ADDRESS, USDC_ABI, signer);
+      const totalCost = DEPLOY_FEE_USDC; // fee only, no extra amount for now
 
-      // Attach private-draft skills (authed route allows the author's own
-      // drafts). Per-slug try/catch: a failed attach must not fail the
-      // deploy — the agent already exists; results surface on the success
-      // screen with a pointer to the agent page for retry.
-      const privateToInstall = skillSlugs.filter((slug) => privateSkillSlugs.includes(slug));
-      if (privateToInstall.length > 0) {
-        const results: Array<{ slug: string; ok: boolean; error?: string }> = [];
-        for (const slug of privateToInstall) {
-          try {
-            await authedPost(`/api/v1/agents/${data.id}/skills`, { slug });
-            results.push({ slug, ok: true });
-          } catch (e) {
-            results.push({ slug, ok: false, error: (e as Error).message });
-          }
-        }
-        setPrivateSkillResults(results);
+      const currentAllowance = await usdc.allowance(address, AGENT_FACTORY_ADDRESS);
+      if (currentAllowance < totalCost) {
+        const approveTx = await usdc.approve(AGENT_FACTORY_ADDRESS, totalCost);
+        await approveTx.wait();
       }
 
-      if (!data.walletAddress) {
-        console.warn('[deploy] no walletAddress in deploy response, skipping funding step');
-        setFundingSkipped(true);
-        setStatus('done');
-        return;
-      }
+      // Step 2: Deploy agent via AgentFactory (pays USDC, emits event)
+      setStatus('deploying');
+      const factory = new ethers.Contract(AGENT_FACTORY_ADDRESS, AGENT_FACTORY_ABI, signer);
+      const deployTx = await factory.deployAgent(0); // amount=0, just pay fee
+      const receipt = await deployTx.wait();
+      setDeployTxHash(deployTx.hash);
 
-      setStatus('funding');
-      try {
-        const provider = new BrowserProvider(walletClient!.transport);
-        const signer = await provider.getSigner();
-        const tx = await signer.sendTransaction({
-          to: data.walletAddress,
-          value: parseEther(fundAmount(form.provider)),
-        });
-        await tx.wait();
-      } catch (fundErr) {
-        console.warn('[deploy] funding step failed:', (fundErr as Error).message);
-        setFundingSkipped(true);
-      }
+      // Step 3: Backend listens for AgentDeployed event and creates agent
+      // Poll for agent creation (backend creates it from event)
       setStatus('done');
     } catch (err) {
       setError((err as Error).message);
@@ -327,13 +282,13 @@ export default function DeployAgentForm() {
         <div className="border border-line p-10 text-center space-y-5 mt-8">
           <div className="flex items-center justify-center gap-2 text-ok">
             <Icon name="check" size={18} />
-            <span className="text-sm font-semibold">Agent deployed</span>
+            <span className="text-sm font-semibold">Agent deployment initiated</span>
           </div>
           <div className="space-y-1.5">
             <div className="text-xs text-ink-3">
-              Agent ID <span className="font-mono text-ink-2">{agentId}</span>
+              Deploy tx <span className="font-mono text-ink-2">{deployTxHash.slice(0, 10)}...{deployTxHash.slice(-6)}</span>
             </div>
-            <div className="text-xs text-ink-3">On-chain wallet minted · INFT identity created</div>
+            <div className="text-xs text-ink-3">Backend is creating your agent from the on-chain event...</div>
           </div>
 
           {privateSkillResults.length > 0 && (
@@ -351,32 +306,24 @@ export default function DeployAgentForm() {
             </div>
           )}
 
-          {fundingSkipped ? (
-            <div className="mx-auto max-w-md border border-warn/40 bg-warn/5 px-4 py-3 text-left text-[13px] text-ink-2 leading-relaxed space-y-1.5">
-              <div className="flex items-center gap-2 font-semibold text-warn">
-                <Icon name="bolt" size={15} />
-                <span>Agent is unfunded</span>
-              </div>
-              <p>
-                This agent's wallet has <span className="font-mono">0 {native.symbol}</span> and can't submit
-                evidence on-chain. Open the agent's page and click "Top up gas" to send{' '}
-                <span className="font-mono">{(form.provider === '0g-compute' ? OG_COMPUTE_DEPOSIT : DEPLOY_FUND_AMOUNT)} {native.symbol}</span> from your wallet.
-              </p>
+          <div className="mx-auto max-w-md border border-line px-4 py-3 text-left text-[13px] text-ink-2 leading-relaxed space-y-1.5">
+            <div className="flex items-center gap-2 font-semibold text-ink">
+              <Icon name="info" size={15} />
+              <span>Decentralized deployment</span>
             </div>
-          ) : (
-            <div className="flex items-center justify-center gap-2 text-[13px] text-ok">
-              <Icon name="check" size={15} />
-              <span>Funded with <span className="font-mono">{deployFundAmt} {native.symbol}</span> for gas</span>
-            </div>
-          )}
+            <p>
+              Your agent is deployed by a smart contract on Base. The backend listens
+              for the on-chain event to create your agent. No single point of failure —
+              the backend cannot control your agent.
+            </p>
+          </div>
 
           <div className="flex justify-center gap-3 flex-wrap pt-1">
-            <Button variant="primary" label="View agent →" onClick={() => navigate(`/agents/${agentId}`)} />
-            <Button variant="outline" label="My agents" onClick={() => navigate('/agents/mine')} />
+            <Button variant="primary" label="My agents" onClick={() => navigate('/agents/mine')} />
             <Button
               variant="ghost"
               label="Deploy another"
-              onClick={() => { setStatus('idle'); setAgentId(''); setFundingSkipped(false); setPrivateSkillResults([]); }}
+              onClick={() => { setStatus('idle'); setDeployTxHash(''); setPrivateSkillResults([]); }}
             />
           </div>
           </div>
@@ -558,6 +505,8 @@ export default function DeployAgentForm() {
         <div className="p-6">
           {!address ? (
             <p className="text-sm text-ink-3">Connect a wallet to deploy an agent.</p>
+          ) : needsChainSwitch ? (
+            <p className="text-sm text-ink-3">Switch to Base network to deploy an agent.</p>
           ) : (
             <>
               <div className="mb-4 border border-line bg-surface-2 px-4 py-3.5 space-y-2">
@@ -566,28 +515,25 @@ export default function DeployAgentForm() {
                   <span>Deployment uses 2 signatures</span>
                 </div>
                 <ol className="text-[13px] text-ink-2 leading-relaxed space-y-1 list-decimal list-inside">
-                  <li>Sign a message — no gas, derives your owner public key for encryption.</li>
-                  <li>Send <span className="font-mono">{fundAmount(form.provider)} {native.symbol}</span> to the new agent wallet — pays for its gas.</li>
+                  <li>Approve USDC — allows AgentFactory to charge the deploy fee.</li>
+                  <li>Deploy agent — pays {DEPLOY_FEE_HUMAN} USDC, emits on-chain event.</li>
                 </ol>
                 <div className="text-[13px] text-ink-3 pt-0.5">
-                  Your wallet balance:{' '}
+                  Your USDC balance:{' '}
                   <span className="font-mono text-ink-2">
-                    {ownerBalanceEther ? `${ownerBalanceEther.toFixed(4)} ${native.symbol}` : '…'}
+                    {usdcBalanceHuman !== null ? `${usdcBalanceHuman.toFixed(2)} USDC` : '…'}
                   </span>
                 </div>
               </div>
 
-              {!hasEnoughForDeploy && ownerBalanceEther > 0 && (
+              {!hasEnoughUsdc && usdcBalanceHuman !== null && (
                 <div className="mb-4 border border-err/40 bg-err/5 px-4 py-3.5 text-[13px] text-ink-2 leading-relaxed space-y-1.5">
                   <div className="flex items-center gap-2 font-semibold text-err">
                     <Icon name="bolt" size={15} />
-                    <span>Not enough {native.symbol} to fund the agent</span>
+                    <span>Not enough USDC to deploy</span>
                   </div>
                   <p>
-                    You need at least <span className="font-mono">{minBal} {native.symbol}</span> (fund
-                    amount plus gas for the transfer). Top up your wallet at{' '}
-                    <a href={OG_FAUCET_URL} target="_blank" rel="noreferrer" className="text-cream underline">faucet.0g.ai</a>
-                    {' '}then refresh.
+                    You need at least <span className="font-mono">{DEPLOY_FEE_HUMAN} USDC</span> for the deploy fee.
                   </p>
                 </div>
               )}
@@ -596,14 +542,14 @@ export default function DeployAgentForm() {
                 <Button
                   type="submit"
                   variant="primary"
-                  disabled={status === 'deploying' || status === 'funding' || !hasEnoughForDeploy}
-label={
-                      status === 'deploying'
-                        ? 'Deploying…'
-                        : status === 'funding'
-                        ? `Funding agent with ${fundAmount(form.provider)} ${native.symbol}…`
-                        : 'Deploy + fund agent →'
-                    }
+                  disabled={status === 'approving' || status === 'deploying' || !hasEnoughUsdc}
+                  label={
+                    status === 'approving'
+                      ? 'Approving USDC…'
+                      : status === 'deploying'
+                      ? 'Deploying agent…'
+                      : `Deploy agent (${DEPLOY_FEE_HUMAN} USDC) →`
+                  }
                 />
               </div>
             </>
