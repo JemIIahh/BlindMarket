@@ -17,7 +17,7 @@ import { searchAgents, type AgentSearchResult } from '../services/marketplace';
 import { truncateAddress } from '../lib/utils';
 import { get } from '../lib/api';
 import { formatUnits } from 'ethers';
-import { getNativeCurrency } from '../config/constants';
+import { getPaymentDecimals, getPaymentSymbol } from '../config/constants';
 
 const PAGE_SIZE = 20;
 
@@ -47,7 +47,7 @@ function agoLabel(ms: number): string {
 function rewardLabel(rewardRaw: string | null | undefined, sym: string): string | null {
   if (!rewardRaw) return null;
   try {
-    return `${formatUnits(rewardRaw, 18)} ${sym}`;
+    return `${formatUnits(rewardRaw, getPaymentDecimals())} ${sym}`;
   } catch {
     return null;
   }
@@ -102,7 +102,7 @@ export default function AgentMarketplace() {
   const [minRating, setMinRating] = useState(0);
   const [query, setQuery] = useState('');
   const [page, setPage] = useState(1);
-  const sym = getNativeCurrency('og').symbol;
+  const sym = getPaymentSymbol();
 
   const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['agent-search', minRating, page, query],

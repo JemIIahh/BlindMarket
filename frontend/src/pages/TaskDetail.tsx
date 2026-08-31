@@ -12,7 +12,7 @@ import { CustodyChain } from '../components/CustodyChain';
 import { truncateAddress, formatDate } from '../lib/utils';
 import { buildCancelTask, buildClaimTimeout } from '../services/tasks';
 import { signAndSendTx } from '../lib/txSigner';
-import { getNativeCurrency, WORKER_SHARE_PCT, PLATFORM_FEE_PCT, API_BASE_URL } from '../config/constants';
+import { getNativeCurrency, getPaymentDecimals, WORKER_SHARE_PCT, PLATFORM_FEE_PCT, API_BASE_URL } from '../config/constants';
 import { useChainExplorerUrl } from '../hooks/useChainWallet';
 import { TaskStatus, TaskStatusLabels } from '../types/api';
 
@@ -106,7 +106,7 @@ export default function TaskDetail() {
   // `onChain.agent` is the contract's name for the task poster — keep the
   // boolean named isPoster to make the intent clear in UI conditions.
   const isPoster = address?.toLowerCase() === onChain.agent?.toLowerCase();
-  const decimals = meta.decimals ?? 18;
+  const decimals = meta.decimals ?? getPaymentDecimals();
   // meta.reward can be absent on partial/undecryptable metas — render 0
   // rather than "NaN 0G" in the page's hero number.
   const rewardRaw = Number(meta.reward);

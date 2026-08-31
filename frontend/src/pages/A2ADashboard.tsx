@@ -22,6 +22,7 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { useChainAddress } from '../hooks/useChainWallet';
 import { getOrCreateExecutorIdentity } from '../lib/executorIdentity';
+import { getPaymentSymbol } from '../config/constants';
 
 type Tab = 'browse' | 'executions' | 'register';
 
@@ -71,7 +72,7 @@ export default function A2ADashboard() {
   "name": "${displayName || '<agent_name>'}",
   "agent_card_url": "${agentCardUrl || '<url>'}",
   "mcp_endpoint": "${mcpEndpoint || '<url>'}",
-  "rate": "${rate || '0'} 0G/task"
+  "rate": "${rate || '0'} ${getPaymentSymbol()}/task"
 }`;
 
   return (
@@ -254,7 +255,7 @@ export default function A2ADashboard() {
               <FormInput className="font-mono" placeholder="https://…" value={mcpEndpoint} onChange={(e) => setMcpEndpoint(e.target.value)} />
             </FormField>
 
-            <FormField label="Rate" hint="0G per task">
+            <FormField label="Rate" hint={`${getPaymentSymbol()} per task`}>
               <FormInput className="font-mono" placeholder="50" value={rate} onChange={(e) => setRate(e.target.value)} />
             </FormField>
 

@@ -22,7 +22,7 @@ import { stashAesKey } from '../lib/keyStash';
 import { signAndSendTx } from '../lib/txSigner';
 import { authedGet, authedPost } from '../lib/api';
 import { trackEvent } from '../hooks/useAnalytics';
-import { MARKETPLACE_TOKEN_ADDRESS, BASE_ESCROW_ADDRESS, getNativeCurrency, WORKER_SHARE_PCT, PLATFORM_FEE_PCT } from '../config/constants';
+import { MARKETPLACE_TOKEN_ADDRESS, getNativeCurrency, getPaymentDecimals, getPaymentSymbol, WORKER_SHARE_PCT, PLATFORM_FEE_PCT } from '../config/constants';
 import { useChain } from '../context/ChainContext';
 import { useChainAddress } from '../hooks/useChainWallet';
 import { useAuth } from '../context/AuthContext';
@@ -58,7 +58,8 @@ function durationHint(secs: number): string {
   const TOKEN = MARKETPLACE_TOKEN_ADDRESS;
   // USDC on Base has 6 decimals; native 0G has 18. Use the token's decimals
   // for amount parsing when Base escrow is configured.
-  const PAYMENT_DECIMALS = BASE_ESCROW_ADDRESS ? 6 : 18;
+  const PAYMENT_DECIMALS = getPaymentDecimals();
+  const PAYMENT_SYMBOL = getPaymentSymbol();
 
 export default function PostTask() {
   const { activeChain } = useChain();
@@ -725,7 +726,7 @@ export default function PostTask() {
                   return (
                     <div className="mt-1.5">
                       <Tag tone="neutral" className="font-mono">
-                        {formatUnits(amt, PAYMENT_DECIMALS)} USDC
+                        {formatUnits(amt, PAYMENT_DECIMALS)} {PAYMENT_SYMBOL}
                       </Tag>
                     </div>
                   );

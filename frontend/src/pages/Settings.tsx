@@ -14,7 +14,7 @@ import {
 } from '../components/bb';
 import { useReputation } from '../hooks/useReputation';
 import {
-  isMainnet, OG_CHAIN_ID, OG_RPC_URL,
+  isMainnet, OG_CHAIN_ID, OG_RPC_URL, BASE_CHAIN_ID, BASE_RPC_URL,
 } from '../config/constants';
 import { authedGet, authedPost, authedDelete } from '../lib/api';
 import { copyToClipboard } from '../lib/utils';
@@ -53,8 +53,9 @@ export default function Settings() {
   const { user, linkWallet } = usePrivy();
   const { unlink } = useUnlinkWallet();
   const chainLabel = `0G ${isMainnet ? 'Mainnet' : 'Galileo'}`;
-  const chainIdLabel = String(OG_CHAIN_ID);
-  const rpcDisplay = OG_RPC_URL.replace(/^https?:\/\//, '');
+  const baseChainLabel = `Base ${isMainnet ? 'Mainnet' : 'Sepolia'}`;
+  const ogRpcDisplay = OG_RPC_URL.replace(/^https?:\/\//, '');
+  const baseRpcDisplay = BASE_RPC_URL.replace(/^https?:\/\//, '');
 
   const [notifyPayouts, setNotifyPayouts] = useState(() => loadBool(NOTIF_KEYS.payout, true));
   const [notifyAssignments, setNotifyAssignments] = useState(() => loadBool(NOTIF_KEYS.assignment, true));
@@ -235,14 +236,26 @@ export default function Settings() {
             <SectionRule num="03" title="Network" />
 
             <FormField
-              label="Active chain"
-              hint={`Currently set to 0G. Change via the header dropdown.`}
+              label="Settlement chain (Base)"
+              hint="Tasks are settled in USDC on Base."
             >
               <div className="px-3 py-2.5 bg-surface-2 border border-line text-sm flex items-center gap-2 flex-wrap">
                 <Tag tone="ok">
-                  0G · <span className="font-mono">{chainIdLabel}</span>
+                  Base · <span className="font-mono">{BASE_CHAIN_ID}</span>
                 </Tag>
-                <span className="ml-auto text-xs text-ok">{chainLabel}</span>
+                <span className="ml-auto text-xs text-ok">{baseChainLabel}</span>
+              </div>
+            </FormField>
+
+            <FormField
+              label="Agent infra chain (0G)"
+              hint="Agents run on 0G. Change via the header dropdown."
+            >
+              <div className="px-3 py-2.5 bg-surface-2 border border-line text-sm flex items-center gap-2 flex-wrap">
+                <Tag tone="neutral">
+                  0G · <span className="font-mono">{OG_CHAIN_ID}</span>
+                </Tag>
+                <span className="ml-auto text-xs text-ink-2">{chainLabel}</span>
               </div>
             </FormField>
           </div>
@@ -335,14 +348,26 @@ export default function Settings() {
                   color: isConnected ? 'text-ok' : 'text-ink-3',
                 },
                 {
-                  label: 'Chain ID',
-                  value: String(OG_CHAIN_ID),
+                  label: 'Base Chain ID',
+                  value: String(BASE_CHAIN_ID),
                   mono: true,
                   color: 'text-ok',
                 },
                 {
-                  label: 'RPC',
-                  value: rpcDisplay,
+                  label: 'Base RPC',
+                  value: baseRpcDisplay,
+                  mono: true,
+                  color: 'text-ink-3',
+                },
+                {
+                  label: '0G Chain ID',
+                  value: String(OG_CHAIN_ID),
+                  mono: true,
+                  color: 'text-ink-2',
+                },
+                {
+                  label: '0G RPC',
+                  value: ogRpcDisplay,
                   mono: true,
                   color: 'text-ink-3',
                 },
