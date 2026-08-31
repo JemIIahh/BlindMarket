@@ -56,7 +56,7 @@ export const BASE_ESCROW_ADDRESS =
 
 export const BASE_USDC_ADDRESS =
   import.meta.env.VITE_BASE_USDC_ADDRESS ||
-  (IS_PROD ? '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' : '0x036CbD53842c5426634c4923a64805772f97d1b6');
+  (IS_PROD ? '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' : '0x036CbD53842c5426634e7929541eC2318f3dCF7e');
 
 // ── Payment token ───────────────────────────────────────────────────────────
 

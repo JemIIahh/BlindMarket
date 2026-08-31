@@ -16,7 +16,7 @@ import { assertSafeNetwork } from "./_guard";
 // Base USDC addresses
 const BASE_USDC: Record<number, string> = {
   8453:  "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", // Base mainnet
-  84532: "0x036CbD53842c5426634c4923a64805772f97d1b6".toLowerCase(), // Base Sepolia
+  84532: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", // Base Sepolia
 };
 
 async function main() {

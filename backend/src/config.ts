@@ -51,7 +51,7 @@ export const config = {
 
   // Contracts — Base (settlement)
   baseEscrowAddress: optional('BASE_ESCROW_ADDRESS', BASE_ADDR.blindEscrow),
-  baseUsdcAddress: optional('BASE_USDC_ADDRESS', IS_PROD ? '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' : '0x036CbD53842c5426634c4923a64805772f97d1b6'),
+  baseUsdcAddress: optional('BASE_USDC_ADDRESS', IS_PROD ? '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' : '0x036CbD53842c5426634e7929541eC2318f3dCF7e'),
 
   // Auth — Privy is the sole identity provider; agent API key for service callers
   agentApiKey: process.env.AGENT_API_KEY || '',
