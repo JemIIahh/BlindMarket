@@ -304,8 +304,22 @@ function truncate(s: string): string {
  * releases USDC to the worker (90/10 split); passed=false only moves the task
  * to Verified. After a terminal failure the only exits are the poster's
  * claimTimeout (post-deadline refund) or an admin resolveDispute.
+ *
+ * When a valid 0G TEE attestation is provided, uses completeVerificationWithTEE
+ * for trustless settlement — the on-chain ecrecover verifies the TEE signature
+ * against the registered teeSigner, removing the backend as trusted party.
  */
-export async function settleVerification(taskHash: string, passed: boolean): Promise<SettleResult> {
+export async function settleVerification(
+  taskHash: string,
+  passed: boolean,
+  teeAttestation?: {
+    signature: string;
+    signer?: string;
+    signedText: string;
+    chatID?: string;
+    verified?: boolean;
+  } | null,
+): Promise<SettleResult> {
   if (!verificationBridgeReady()) {
     const msg = 'Verification bridge disabled: BASE_MARKETPLACE_SIGNER_PRIVATE_KEY not set';
     await safePersistVerifyError(taskHash, msg);
@@ -320,6 +334,12 @@ export async function settleVerification(taskHash: string, passed: boolean): Pro
     return { success: false, error: msg };
   }
 
+  // Determine whether to use TEE settlement
+  const useTEE = teeAttestation
+    && teeAttestation.signature
+    && teeAttestation.signedText
+    && teeAttestation.verified === true;
+
   try {
     const taskId = await waitForBaseTaskId(taskHash);
     if (taskId === null) {
@@ -331,9 +351,21 @@ export async function settleVerification(taskHash: string, passed: boolean): Pro
 
     let tx: ContractTransactionResponse;
     try {
-      tx = await enqueueBaseSignerTx(() =>
-        baseEscrowAsMarketplace!.completeVerification(BigInt(taskId), passed) as Promise<ContractTransactionResponse>,
-      );
+      if (useTEE) {
+        console.log(`[a2aSettlement] using TEE settlement for taskId=${taskId}`);
+        tx = await enqueueBaseSignerTx(() =>
+          baseEscrowAsMarketplace!.completeVerificationWithTEE(
+            BigInt(taskId),
+            passed,
+            teeAttestation.signature,
+            teeAttestation.signedText,
+          ) as Promise<ContractTransactionResponse>,
+        );
+      } else {
+        tx = await enqueueBaseSignerTx(() =>
+          baseEscrowAsMarketplace!.completeVerification(BigInt(taskId), passed) as Promise<ContractTransactionResponse>,
+        );
+      }
     } catch (err) {
       if (isAlreadySettled(err)) {
         try {
@@ -359,13 +391,14 @@ export async function settleVerification(taskHash: string, passed: boolean): Pro
     }
 
     await a2aStore.updateState(taskHash, { verifyTxHash: tx.hash, verifyError: undefined });
+    const mode = useTEE ? 'TEE' : 'legacy';
     console.log(
-      `[a2aSettlement] completeVerification (Base) broadcast taskId=${taskId} passed=${passed} tx=${tx.hash}`,
+      `[a2aSettlement] completeVerification (${mode}, Base) broadcast taskId=${taskId} passed=${passed} tx=${tx.hash}`,
     );
 
     const receipt = await tx.wait(1, 60_000);
     console.log(
-      `[a2aSettlement] completeVerification (Base) confirmed taskId=${taskId} passed=${passed} block=${receipt?.blockNumber} status=${receipt?.status}`,
+      `[a2aSettlement] completeVerification (${mode}, Base) confirmed taskId=${taskId} passed=${passed} block=${receipt?.blockNumber} status=${receipt?.status}`,
     );
     if (receipt?.status !== 1) {
       const msg = `completeVerification tx ${tx.hash} reverted on Base chain`;

@@ -62,6 +62,14 @@ const registerSchema = z.object({
 
 const submitSchema = z.object({
   resultData: z.record(z.unknown()),
+  teeAttestation: z.object({
+    signature: z.string(),
+    signer: z.string().optional(),
+    signedText: z.string(),
+    chatID: z.string().optional(),
+    verified: z.boolean().optional(),
+  }).nullable().optional(),
+  rootHash: z.string().nullable().optional(),
 });
 
 // POST /tasks/index — verified A2A meta write. The poster's frontend calls
@@ -1401,7 +1409,7 @@ a2aRouter.post('/tasks/:id/submit', requireAuth, async (req: AuthRequest, res, n
   try {
     const taskHash = req.params.id as string;
     const address = req.user!.address;
-    const { resultData } = submitSchema.parse(req.body);
+    const { resultData, teeAttestation, rootHash } = submitSchema.parse(req.body);
     console.log(`[a2a] POST /submit: taskHash=${taskHash}, executor=${address}`);
 
     const meta = await a2aStore.getMeta(taskHash);
@@ -1540,6 +1548,10 @@ a2aRouter.post('/tasks/:id/submit', requireAuth, async (req: AuthRequest, res, n
       // increments submissionAttempts in submitEvidence). /verdict uses it to
       // reject verdicts that target a previous round.
       submissionRound: chainAttempts + 1,
+      // 0G TEE attestation for trustless settlement on Base
+      ...(teeAttestation ? { teeAttestation } : {}),
+      // 0G Storage rootHash of the task output
+      ...(rootHash ? { outputRootHash: rootHash } : {}),
     });
     console.log(`[a2a] submit: resultData stored and unsignedSubmitEvidence built for ${taskHash}`);
 
@@ -1803,7 +1815,7 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
     // reverted. On settle failure state stays 'submitted' and we 503; the
     // executor's retry either re-runs the settle or — if the tx actually
     // landed — takes the reconcile branch above. Both converge.
-    const settle = await settleVerification(taskHash, verificationResult.passed);
+    const settle = await settleVerification(taskHash, verificationResult.passed, state.teeAttestation);
     if (!settle.success) {
       throw new AppError(
         503,

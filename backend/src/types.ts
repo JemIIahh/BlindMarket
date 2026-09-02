@@ -278,6 +278,16 @@ export interface A2ATaskState {
   // BRIDGE_FAILED code instead of looping on NOT_ASSIGNED_YET forever.
   assignError?: string;
   verifyError?: string;
+  // 0G TEE attestation captured by the worker for trustless settlement
+  teeAttestation?: {
+    signature: string;
+    signer?: string;
+    signedText: string;
+    chatID?: string;
+    verified?: boolean;
+  };
+  // 0G Storage rootHash of the task output
+  outputRootHash?: string;
 }
 
 export interface VerificationCriteria {
