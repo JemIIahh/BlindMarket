@@ -87,6 +87,11 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
     // trailing state variable for UUPS storage-layout safety.
     mapping(uint256 => address) public taskVerifier;
 
+    // 0G TEE signer address — registered on-chain so completeVerificationWithTEE
+    // can verify TEE attestation signatures via ecrecover. Set by admin.
+    // address(0) = TEE path disabled (legacy address-gated flow only).
+    address public teeSigner;
+
     // ── Events ──
 
     event TaskCreated(uint256 indexed taskId, address indexed agent, address token, uint256 amount, bytes32 taskHash, string category, string locationZone, uint256 deadline);
@@ -109,6 +114,8 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
     event AdminTransferCompleted(address indexed oldAdmin, address indexed newAdmin);
     event ReputationContractUpdated(address indexed oldContract, address indexed newContract);
     event TaskRegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
+    event TeeSignerUpdated(address indexed oldSigner, address indexed newSigner);
+    event TEESettled(uint256 indexed taskId, bool passed, address indexed teeSigner);
 
     // ── Errors (custom errors are cheaper than string reverts) ──
 
@@ -128,6 +135,8 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
     error DeadlineReached();
     error MaxSubmissionAttemptsReached();
     error FeeExceedsMax();
+    error InvalidTEESignature();
+    error TEESignerNotSet();
 
     // ── Modifiers ──
 
@@ -282,6 +291,37 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
     }
 
     /**
+     * @dev Compute EIP-191 personal_sign hash: keccak256("\x19Ethereum Signed Message:\n" + len(message) + message)
+     */
+    function _eip191Hash(bytes calldata message) internal pure returns (bytes32) {
+        // Convert message length to decimal string
+        uint256 len = message.length;
+        bytes memory lenStr;
+        if (len == 0) {
+            lenStr = "0";
+        } else {
+            uint256 temp = len;
+            uint256 digits;
+            while (temp > 0) {
+                digits++;
+                temp /= 10;
+            }
+            lenStr = new bytes(digits);
+            temp = len;
+            for (uint256 i = digits; i > 0; i--) {
+                lenStr[i - 1] = bytes1(uint8(48 + (temp % 10)));
+                temp /= 10;
+            }
+        }
+
+        return keccak256(abi.encodePacked(
+            "\x19Ethereum Signed Message:\n",
+            lenStr,
+            message
+        ));
+    }
+
+    /**
      * @notice Agent assigns a worker to the task. Only possible while Funded and before deadline.
      * @dev Agent cannot assign themselves to prevent self-dealing.
      */
@@ -401,6 +441,74 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
             t.status = TaskStatus.Verified;
 
             // Record dispute if max attempts reached (optional bookkeeping)
+            if (t.submissionAttempts >= MAX_SUBMISSION_ATTEMPTS && address(reputationContract) != address(0)) {
+                try reputationContract.recordDispute(t.worker, taskId) {} catch {}
+            }
+        }
+    }
+
+    /**
+     * @notice Settlement via 0G TEE attestation signature.
+     *         Anyone can call this (no address gate) — the TEE signature is
+     *         verified on-chain via ecrecover against the registered teeSigner.
+     * @param taskId On-chain task ID
+     * @param passed Whether verification passed
+     * @param signature ECDSA signature from the 0G TEE (65 bytes: r + s + v)
+     * @param signedText The exact text the TEE signed via personal_sign (commitment over request+response hashes)
+     */
+    function completeVerificationWithTEE(
+        uint256 taskId,
+        bool passed,
+        bytes calldata signature,
+        bytes calldata signedText
+    ) external nonReentrant whenNotPaused {
+        if (teeSigner == address(0)) revert TEESignerNotSet();
+        if (signature.length != 65) revert InvalidTEESignature();
+
+        Task storage t = _tasks[taskId];
+        if (t.status != TaskStatus.Submitted) revert InvalidStatus(t.status, TaskStatus.Submitted);
+
+        // Compute EIP-191 personal_sign hash on-chain
+        bytes32 msgHash = _eip191Hash(signedText);
+
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+
+        assembly {
+            r := calldataload(add(signature.offset, 0))
+            s := calldataload(add(signature.offset, 32))
+            v := byte(0, calldataload(add(signature.offset, 64)))
+        }
+
+        if (v < 27) v += 27;
+
+        address recoveredSigner = ecrecover(msgHash, v, r, s);
+        if (recoveredSigner == address(0) || recoveredSigner != teeSigner) {
+            revert InvalidTEESignature();
+        }
+
+        emit VerificationCompleted(taskId, passed);
+        emit TEESettled(taskId, passed, teeSigner);
+
+        if (passed) {
+            // ── Effects (all state changes first) ──
+            uint256 fee = (t.amount * feeBps) / 10_000;
+            uint256 payout = t.amount - fee;
+            t.status = TaskStatus.Completed;
+
+            // ── Interactions (external calls last) ──
+            _transferPayout(t.token, t.worker, payout);
+            _transferPayout(t.token, treasury, fee);
+
+            if (address(reputationContract) != address(0)) {
+                try reputationContract.rate(t.worker, 5, taskId) {} catch {}
+            }
+
+            emit TaskCompleted(taskId, payout, fee);
+        } else {
+            t.status = TaskStatus.Verified;
+
             if (t.submissionAttempts >= MAX_SUBMISSION_ATTEMPTS && address(reputationContract) != address(0)) {
                 try reputationContract.recordDispute(t.worker, taskId) {} catch {}
             }
@@ -538,6 +646,11 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         if (_verifier == address(0)) revert ZeroAddress();
         emit VerifierUpdated(verifier, _verifier);
         verifier = _verifier;
+    }
+
+    function setTeeSigner(address _teeSigner) external onlyAdmin {
+        emit TeeSignerUpdated(teeSigner, _teeSigner);
+        teeSigner = _teeSigner;
     }
 
     function setFeeBps(uint256 _feeBps) external onlyAdmin {
