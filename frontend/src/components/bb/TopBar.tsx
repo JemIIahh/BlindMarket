@@ -2,23 +2,23 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Button } from './Button';
 import { ConnectWalletButton } from './ConnectWalletButton';
-import { ChainToggle } from './ChainToggle';
 import { getStoredTheme } from '../ThemeSync';
+import { useUsdcBalance } from '../../hooks/useChainWallet';
 
 interface TopBarProps {
   onMenuClick?: () => void;
 }
 
 export function TopBar({ onMenuClick }: TopBarProps = {}) {
-  // ThemeSync applies the saved theme on boot; the TopBar only toggles it.
   const [currentTheme, setCurrentTheme] = useState<'dark' | 'light'>(getStoredTheme);
+  const usdc = useUsdcBalance();
 
   const toggleTheme = () => {
     const next = currentTheme === 'light' ? 'dark' : 'light';
     document.documentElement.setAttribute('data-theme', next);
     try {
       localStorage.setItem('bb.theme', next);
-    } catch {}
+    } catch { }
     setCurrentTheme(next);
   };
 
@@ -58,6 +58,12 @@ export function TopBar({ onMenuClick }: TopBarProps = {}) {
 
       {/* Wallet — Privy-driven connect/disconnect pill */}
       <ConnectWalletButton />
+      {/* USDC balance */}
+      <div className="flex items-center gap-2 px-3 py-1.5 border border-line text-[11px] font-mono text-ink hover:bg-surface-2 transition-colors">
+        <span className="w-1.5 h-1.5 bg-blue-500 inline-block" />
+        <span className="text-[10px] text-blue-600">USDC</span>
+        <span className="text-[10px] text-ink-2">${usdc.formatted}</span>
+      </div>
     </header>
   );
 }

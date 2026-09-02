@@ -1,7 +1,7 @@
 import { useCallback } from 'react';
-import { useAccount, useBalance as useWagmiBalance } from 'wagmi';
+import { useAccount, useBalance as useWagmiBalance, useReadContract } from 'wagmi';
 import { usePrivy } from '@privy-io/react-auth';
-import { OG_CHAIN_ID, BASE_CHAIN_ID, getNativeCurrency, getChainConfig } from '../config/constants';
+import { OG_CHAIN_ID, BASE_CHAIN_ID, BASE_USDC_ADDRESS, getNativeCurrency, getChainConfig } from '../config/constants';
 import { useWallet } from '../context/WalletContext';
 
 export function useChainAddress(): string | undefined {
@@ -50,4 +50,35 @@ export function useChainIsCorrectChain(): boolean {
 export function useChainExplorerUrl(chain: 'og' | 'base' = 'og'): string {
   const config = getChainConfig(chain);
   return config.blockExplorerUrls[0];
+}
+
+const ERC20_ABI = [
+  {
+    name: 'balanceOf',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [{ name: 'account', type: 'address' }],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+] as const;
+
+export function useUsdcBalance() {
+  const { address } = useAccount();
+  const { data: rawBalance } = useReadContract({
+    address: BASE_USDC_ADDRESS as `0x${string}`,
+    abi: ERC20_ABI,
+    functionName: 'balanceOf',
+    args: address ? [address] : undefined,
+    chainId: BASE_CHAIN_ID,
+    query: { enabled: !!address, refetchInterval: 10_000 },
+  });
+
+  const balance = rawBalance != null ? Number(rawBalance) / 1e6 : 0;
+
+  return {
+    raw: rawBalance,
+    formatted: balance > 0 ? balance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : '0.00',
+    symbol: 'USDC',
+    decimals: 6,
+  };
 }
