@@ -192,11 +192,10 @@ Chain id `16602` · RPC `https://evmrpc-testnet.0g.ai` · Explorer `https://chai
 | Contract | Proxy address |
 |---|---|
 | `BlindEscrow` | `0x037529B296a89E6Dd1abAF84D413cb2dD70C5be5` |
-| `TaskRegistry` | `0x25Bc5be1F8Ab44ADfb7a6Ce1362d37408E74DA95` |
-| `BlindReputation` | `0x3d0374963DaaD43e31d42373eb11156A8e8ce2Ff` |
-| `ValidatorPool` | `0xBBE1b3736147C849455467E558245b04f01790E6` |
-| `INFT` | `0xf771677276c900800d27e3cA4f9389FccFB34906` |
-| `MockERC20` (6-dec test USDC) | `0x3af9232009C5da30AdA366B6E09849A040162A1a` |
+| `TaskRegistry` | `0xF6AaCce326fD7f25860f383f18A771E5d089ea8c` |
+| `BlindReputation` | `0xFEAFe4ab073FfB47aBb5AD458622b3F9B10C81dD` |
+| `ValidatorPool` | `0x1D5867cE8072d8ccD3f2C78717D48036173aa9ab` |
+| `INFT` | `0xc4498099413f8a7D709175eC252aFa7543c6d39a` |
 
 `BlindEscrow` has been upgraded in place on both networks (proxy addresses unchanged, state preserved) — first to add `marketplaceAssign`, later to bring mainnet up to `HEAD` alongside a verifier rotation. See `docs/MAINNET-CHECKLIST.md` for remaining hardening items (multisig admin migration in particular) before the contracts hold significant real-money escrow.
 
