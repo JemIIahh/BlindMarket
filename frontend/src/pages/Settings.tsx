@@ -52,8 +52,8 @@ export default function Settings() {
   const { data: reputation } = useReputation(address ?? null);
   const { user, linkWallet } = usePrivy();
   const { unlink } = useUnlinkWallet();
-  const chainLabel = `0G ${isMainnet ? 'Mainnet' : 'Galileo'}`;
-  const baseChainLabel = `Base ${isMainnet ? 'Mainnet' : 'Sepolia'}`;
+  const chainLabel = `0G ${isMainnet ? 'Mainnet' : 'Testnet'}`;
+  const baseChainLabel = `Base ${BASE_CHAIN_ID === 8453 ? 'Mainnet' : 'Sepolia'}`;
   const ogRpcDisplay = OG_RPC_URL.replace(/^https?:\/\//, '');
   const baseRpcDisplay = BASE_RPC_URL.replace(/^https?:\/\//, '');
 
