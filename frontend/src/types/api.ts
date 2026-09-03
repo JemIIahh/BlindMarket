@@ -77,6 +77,7 @@ export interface A2ATaskState {
   };
   assignTxHash?: string;
   verifyTxHash?: string;
+  outputRootHash?: string;
 }
 
 /** A2A Metadata tracked in Redis */

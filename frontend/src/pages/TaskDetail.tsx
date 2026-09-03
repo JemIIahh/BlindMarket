@@ -256,6 +256,20 @@ export default function TaskDetail() {
                   </p>
                 </Field>
               )}
+              {a2aState?.outputRootHash && (
+                <Field label="0G storage root (output)" span2>
+                  <p className="text-sm font-mono break-all">
+                    <a
+                      href={`${storageBase}/api/v1/storage/${a2aState.outputRootHash}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-cream hover:underline decoration-cream/30"
+                    >
+                      {a2aState.outputRootHash}
+                    </a>
+                  </p>
+                </Field>
+              )}
               {a2aState?.assignTxHash && (
                 <Field label="Assignment TX" span2>
                   <p className="text-sm font-mono break-all">
