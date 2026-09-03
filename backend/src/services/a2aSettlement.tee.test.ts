@@ -92,3 +92,60 @@ describe('isTeeAttestationValid', () => {
     expect(isTeeAttestationValid({ signature: goodSig, signedText: '' })).toBe(false);
   });
 });
+
+/**
+ * A valid attestation only earns the TEE path on a contract that can honour it.
+ * `completeVerificationWithTEE` landed in BlindEscrow long after the 0G mainnet
+ * proxy was deployed, and that proxy was never upgraded — the selector is
+ * absent, so the call reverts with no data, escapes the InvalidStatus catch,
+ * and leaves the worker unpaid. `teeSigner` is per-deployment besides.
+ */
+describe('teeSettlementReady', () => {
+  const escrowWith = (teeSigner: () => Promise<string>) => ({ teeSigner }) as never;
+
+  // The readiness answer is cached per chain, so each case needs a fresh module.
+  async function freshReady() {
+    vi.resetModules();
+    return (await import('./a2aSettlement.js')).teeSettlementReady;
+  }
+
+  it('is not ready when the escrow has no teeSigner selector (un-upgraded proxy)', async () => {
+    const ready = await freshReady();
+    const escrow = escrowWith(() => Promise.reject(new Error('execution reverted (no data present)')));
+
+    expect(await ready('0g', escrow)).toBe(false);
+  });
+
+  it('is not ready when the signer is unset on that deployment', async () => {
+    const ready = await freshReady();
+    const escrow = escrowWith(async () => '0x0000000000000000000000000000000000000000');
+
+    expect(await ready('0g', escrow)).toBe(false);
+  });
+
+  it('is not ready when the contract trusts a different enclave key', async () => {
+    const ready = await freshReady();
+    const escrow = escrowWith(async () => rogueWallet.address);
+
+    // The contract's own ecrecover would reject the attestation we validated.
+    expect(await ready('base', escrow)).toBe(false);
+  });
+
+  it('is ready when the contract trusts the configured enclave key', async () => {
+    const ready = await freshReady();
+    const escrow = escrowWith(async () => teeWallet.address);
+
+    expect(await ready('base', escrow)).toBe(true);
+  });
+
+  it('reads the contract once per chain rather than per settlement', async () => {
+    const ready = await freshReady();
+    const teeSigner = vi.fn(async () => teeWallet.address);
+    const escrow = escrowWith(teeSigner);
+
+    await ready('base', escrow);
+    await ready('base', escrow);
+
+    expect(teeSigner).toHaveBeenCalledTimes(1);
+  });
+});

@@ -181,6 +181,16 @@ export async function buildClaimTimeoutBase(
   return buildUnsignedTx(baseEscrow, 'claimTimeout', [taskId], from);
 }
 
+/** Build unsigned submitEvidence transaction against the Base escrow. */
+export async function buildSubmitEvidenceBase(
+  from: string,
+  taskId: number,
+  evidenceHash: string,
+): Promise<ethers.TransactionRequest> {
+  if (!baseEscrow) throw new Error('Base escrow not configured (BASE_ESCROW_ADDRESS)');
+  return buildUnsignedTx(baseEscrow, 'submitEvidence', [taskId, evidenceHash], from);
+}
+
 // ── Chain-aware wrappers ───────────────────────────────────────────────────
 //
 // A taskHash resolves to a chain via taskChain.resolveTaskByHash; these pick
@@ -212,6 +222,26 @@ export async function buildClaimTimeoutOn(
   taskId: number,
 ): Promise<ethers.TransactionRequest> {
   return chain === 'base' ? buildClaimTimeoutBase(from, taskId) : buildClaimTimeout(from, taskId);
+}
+
+/**
+ * Worker evidence submission, on whichever chain holds the task.
+ *
+ * The worker signs and broadcasts this, so aiming it at the wrong escrow is
+ * unrecoverable from the backend: the tx reverts (or silently no-ops if the
+ * wallet is on the other network, since the address has no code there), the
+ * task never reaches Submitted, and settleVerification then fails InvalidStatus
+ * forever with the escrow still funded.
+ */
+export async function buildSubmitEvidenceOn(
+  chain: 'base' | '0g',
+  from: string,
+  taskId: number,
+  evidenceHash: string,
+): Promise<ethers.TransactionRequest> {
+  return chain === 'base'
+    ? buildSubmitEvidenceBase(from, taskId, evidenceHash)
+    : buildSubmitEvidence(from, taskId, evidenceHash);
 }
 
 /** Read the per-task verifier from whichever chain holds the task. */

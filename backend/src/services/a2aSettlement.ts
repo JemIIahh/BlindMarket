@@ -361,6 +361,48 @@ export function isTeeAttestationValid(att?: TeeAttestation | null): boolean {
   }
 }
 
+const TEE_READY_TTL_MS = 5 * 60_000;
+const teeReadyCache = new Map<TaskChain, { signer: string | null; at: number }>();
+
+/**
+ * Whether the escrow on `chain` can actually settle via TEE right now.
+ *
+ * A valid attestation is not enough: `completeVerificationWithTEE` and
+ * `teeSigner` were added to BlindEscrow in 69d1335, long after the 0G mainnet
+ * escrow was deployed, and that proxy has never been upgraded — calling the
+ * selector there reverts with no data, which escapes the InvalidStatus catch
+ * below and leaves the worker unpaid. Even on an upgraded contract the signer
+ * is per-deployment, so `teeSigner` unset (or set to a different key than the
+ * one we just recovered against) reverts too.
+ *
+ * Reading `teeSigner()` answers all three cases at once, and lets a later 0G
+ * upgrade start using the TEE path without a code change. Anything unexpected
+ * resolves to "not ready", which only costs us the legacy path — that still
+ * settles correctly.
+ */
+export async function teeSettlementReady(
+  chain: TaskChain,
+  escrow: NonNullable<typeof escrowAsMarketplace>,
+): Promise<boolean> {
+  const expected = config.teeSignerAddress?.toLowerCase();
+  if (!expected) return false;
+
+  const cached = teeReadyCache.get(chain);
+  let signer = cached && Date.now() - cached.at < TEE_READY_TTL_MS ? cached.signer : undefined;
+
+  if (signer === undefined) {
+    try {
+      signer = ((await escrow.teeSigner()) as string).toLowerCase();
+    } catch {
+      // Selector missing (un-upgraded proxy) or the read failed.
+      signer = null;
+    }
+    teeReadyCache.set(chain, { signer, at: Date.now() });
+  }
+
+  return signer !== null && signer !== ZERO_ADDRESS && signer === expected;
+}
+
 export async function settleVerification(
   taskHash: string,
   passed: boolean,
@@ -381,7 +423,7 @@ export async function settleVerification(
   // the party being paid, not evidence. Recover the signer here instead: an
   // attestation that doesn't check out falls back to the legacy path rather
   // than sending a transaction the contract would revert.
-  const useTEE = isTeeAttestationValid(teeAttestation);
+  const attestationValid = isTeeAttestationValid(teeAttestation);
 
   try {
     const resolved = await waitForResolvedTask(taskHash);
@@ -399,6 +441,15 @@ export async function settleVerification(
       console.error(`[a2aSettlement] ${msg}`);
       await safePersistVerifyError(taskHash, msg);
       return { success: false, error: msg };
+    }
+
+    // TEE settlement is a property of the contract we are about to call, not
+    // of the attestation alone — the two can disagree per chain.
+    const useTEE = attestationValid && (await teeSettlementReady(chain, bridge.escrow!));
+    if (attestationValid && !useTEE) {
+      console.warn(
+        `[a2aSettlement] valid TEE attestation but ${chain} escrow has no matching teeSigner — settling via the legacy path for taskId=${taskId}`,
+      );
     }
 
     let tx: ContractTransactionResponse;
@@ -445,15 +496,15 @@ export async function settleVerification(
     await a2aStore.updateState(taskHash, { verifyTxHash: tx.hash, verifyError: undefined });
     const mode = useTEE ? 'TEE' : 'legacy';
     console.log(
-      `[a2aSettlement] completeVerification (${mode}, Base) broadcast taskId=${taskId} passed=${passed} tx=${tx.hash}`,
+      `[a2aSettlement] completeVerification (${mode}, ${chain}) broadcast taskId=${taskId} passed=${passed} tx=${tx.hash}`,
     );
 
     const receipt = await tx.wait(1, 60_000);
     console.log(
-      `[a2aSettlement] completeVerification (${mode}, Base) confirmed taskId=${taskId} passed=${passed} block=${receipt?.blockNumber} status=${receipt?.status}`,
+      `[a2aSettlement] completeVerification (${mode}, ${chain}) confirmed taskId=${taskId} passed=${passed} block=${receipt?.blockNumber} status=${receipt?.status}`,
     );
     if (receipt?.status !== 1) {
-      const msg = `completeVerification tx ${tx.hash} reverted on Base chain`;
+      const msg = `completeVerification tx ${tx.hash} reverted on the ${chain} chain`;
       await safePersistVerifyError(taskHash, msg);
       return { success: false, error: msg, txHash: tx.hash };
     }

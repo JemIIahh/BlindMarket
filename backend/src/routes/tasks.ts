@@ -300,7 +300,7 @@ tasksRouter.post('/', requireAuth, async (req: AuthRequest, res, next) => {
 
     // Record escrow_lock accounting event
     try {
-      const decimals = await getTokenDecimals(data.token);
+      const decimals = await getTokenDecimals(data.token, useBase ? 'base' : '0g');
       accountingService.recordTransaction({
         address: from,
         role: 'agent',

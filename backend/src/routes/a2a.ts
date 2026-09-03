@@ -1532,7 +1532,8 @@ a2aRouter.post('/tasks/:id/submit', requireAuth, async (req: AuthRequest, res, n
 
     let unsignedSubmitEvidence: ethers.TransactionRequest | null = null;
     if (ethers.isAddress(address)) {
-      unsignedSubmitEvidence = await escrowService.buildSubmitEvidence(
+      unsignedSubmitEvidence = await escrowService.buildSubmitEvidenceOn(
+        onChainIdChain,
         address,
         Number(onChainId),
         evidenceHash,
