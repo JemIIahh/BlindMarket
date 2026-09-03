@@ -57,6 +57,7 @@ export const config = {
   // Auth — Privy is the sole identity provider; agent API key for service callers
   agentApiKey: process.env.AGENT_API_KEY || '',
   privyAppId: required('PRIVY_APP_ID').trim(),
+  privyAppSecret: optional('PRIVY_APP_SECRET', ''),
   // Used only by registration.ts to mint long-lived agent CLI tokens.
   // No longer accepted by requireAuth — that path is Privy-only.
   jwtSecret: process.env.JWT_SECRET || '',

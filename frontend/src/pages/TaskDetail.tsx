@@ -1,7 +1,7 @@
 import { useParams, Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { useSendTransaction } from '@privy-io/react-auth';
+import { useWallets, useAuthorizationSignature } from '@privy-io/react-auth';
 import { useTask } from '../hooks/useTasks';
 import { useWallet } from '../context/WalletContext';
 import { useChain } from '../context/ChainContext';
@@ -12,8 +12,8 @@ import { TxPendingModal } from '../components/TxPendingModal';
 import { CustodyChain } from '../components/CustodyChain';
 import { truncateAddress, formatDate } from '../lib/utils';
 import { buildCancelTask, buildClaimTimeout } from '../services/tasks';
-import { signAndSendTx } from '../lib/txSigner';
-import { getNativeCurrency, getPaymentDecimals, WORKER_SHARE_PCT, PLATFORM_FEE_PCT, API_BASE_URL } from '../config/constants';
+import { signAndSendTx, sendSponsoredTx, buildPrivyRpcBody, buildAuthRequestInput } from '../lib/txSigner';
+import { getNativeCurrency, getPaymentDecimals, WORKER_SHARE_PCT, PLATFORM_FEE_PCT, API_BASE_URL, BASE_CHAIN_ID } from '../config/constants';
 import { useChainExplorerUrl } from '../hooks/useChainWallet';
 import { TaskStatus, TaskStatusLabels } from '../types/api';
 
@@ -51,7 +51,8 @@ export default function TaskDetail() {
   const { id } = useParams();
   const { data, isLoading, isError, refetch } = useTask(id || '');
   const { address, signer } = useWallet();
-  const { sendTransaction } = useSendTransaction();
+  const { wallets } = useWallets();
+  const { generateAuthorizationSignature } = useAuthorizationSignature();
   const { activeChain } = useChain();
   const explorerUrl = useChainExplorerUrl();
   const native = getNativeCurrency(activeChain);
@@ -68,7 +69,15 @@ export default function TaskDetail() {
       if (!id) throw new Error('Missing task id');
       if (!signer) throw new Error('Wallet not connected');
       const tx = await buildCancelTask(id);
-      await signAndSendTx(signer, tx, undefined, sendTransaction);
+      const privyWallet = wallets[0];
+      if (privyWallet) {
+        const privyRpcBody = buildPrivyRpcBody(tx, undefined, BASE_CHAIN_ID);
+        const authInput = buildAuthRequestInput(privyRpcBody, address!, import.meta.env.VITE_PRIVY_APP_ID);
+        const authSig = await generateAuthorizationSignature(authInput);
+        await sendSponsoredTx(signer, tx, undefined, BASE_CHAIN_ID, address!, authSig.signature, privyRpcBody);
+      } else {
+        await signAndSendTx(signer, tx);
+      }
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['tasks', id] }),
   });
@@ -78,7 +87,15 @@ export default function TaskDetail() {
       if (!id) throw new Error('Missing task id');
       if (!signer) throw new Error('Wallet not connected');
       const tx = await buildClaimTimeout(id);
-      await signAndSendTx(signer, tx, undefined, sendTransaction);
+      const privyWallet = wallets[0];
+      if (privyWallet) {
+        const privyRpcBody = buildPrivyRpcBody(tx, undefined, BASE_CHAIN_ID);
+        const authInput = buildAuthRequestInput(privyRpcBody, address!, import.meta.env.VITE_PRIVY_APP_ID);
+        const authSig = await generateAuthorizationSignature(authInput);
+        await sendSponsoredTx(signer, tx, undefined, BASE_CHAIN_ID, address!, authSig.signature, privyRpcBody);
+      } else {
+        await signAndSendTx(signer, tx);
+      }
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['tasks', id] }),
   });

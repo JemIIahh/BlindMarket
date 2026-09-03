@@ -32,6 +32,7 @@ import { adminRouter } from './routes/admin.js';
 import { sandboxRouter } from './routes/sandbox.js';
 import { toolsRouter } from './routes/tools.js';
 import { skillsRouter } from './routes/skills.js';
+import { txRouter } from './routes/tx.js';
 import { mcpRouter } from './routes/mcp.js';
 import { wellKnownRouter, openapiRouter } from './routes/discovery.js';
 import { getDb } from './services/database.js';
@@ -92,7 +93,8 @@ app.use('/api/v1/api-keys', apiKeysRouter);
 app.use('/api/v1/admin', adminRouter);
 app.use('/api/v1/sandbox', sandboxRouter);
 app.use('/api/v1/tools', toolsRouter);
-app.use('/api/v1/skills', skillsRouter);
+  app.use('/api/v1/skills', skillsRouter);
+  app.use('/api/v1/tx', txRouter);
 app.use('/a2a/v1', a2aProtocolRouter);
 // Remote MCP endpoint (Streamable HTTP) — how external agent harnesses
 // (Claude Code / Claude connectors / ChatGPT / Hermes / Cursor) reach the

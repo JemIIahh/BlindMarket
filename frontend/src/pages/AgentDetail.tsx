@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import { useBalance, useWalletClient } from 'wagmi';
-import { useSendTransaction } from '@privy-io/react-auth';
+import { useWallets, useAuthorizationSignature } from '@privy-io/react-auth';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { BrowserProvider, parseEther, formatUnits } from 'ethers';
 import {
@@ -14,7 +14,7 @@ import {
 } from '../components/bb';
 import { get, authedGet, authedPost } from '../lib/api';
 import { useChainAddress } from '../hooks/useChainWallet';
-import { getNativeCurrency } from '../config/constants';
+import { getNativeCurrency, BASE_CHAIN_ID } from '../config/constants';
 import {
   getAgentReviews,
   getAgentBadges,
@@ -52,7 +52,8 @@ export default function AgentDetail() {
   const { id } = useParams<{ id: string }>();
   const address = useChainAddress();
   const { data: walletClient } = useWalletClient();
-  const { sendTransaction } = useSendTransaction();
+  const { wallets } = useWallets();
+  const { generateAuthorizationSignature } = useAuthorizationSignature();
   const qc = useQueryClient();
 
   const [agent, setAgent] = useState<AgentDetails | null>(null);
@@ -246,19 +247,31 @@ export default function AgentDetail() {
     setTopUpStatus('sending');
     setTopUpError('');
     try {
-      const tx = await sendTransaction(
-        {
-          to: agent.walletAddress,
-          value: parseEther(TOP_UP_AMOUNT),
-        },
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        { sponsor: true, sponsor_options: { asset: 'usdc' } } as any,
-      );
-      // Poll for receipt — Privy's sendTransaction returns { hash } without wait().
       const provider = new BrowserProvider(walletClient!.transport);
+      const signer = await provider.getSigner();
+      const value = parseEther(TOP_UP_AMOUNT);
+      const privyWallet = wallets[0];
+
+      let txHash: string;
+      if (privyWallet) {
+        // Relay through backend for Privy user_pays gas sponsorship
+        const { sendSponsoredTx, buildPrivyRpcBody, buildAuthRequestInput } = await import('../lib/txSigner');
+        const unsignedTx = { to: agent.walletAddress, data: '0x', from: address };
+        const privyRpcBody = buildPrivyRpcBody(unsignedTx, value, BASE_CHAIN_ID);
+        const authInput = buildAuthRequestInput(privyRpcBody, address, import.meta.env.VITE_PRIVY_APP_ID);
+        const authSig = await generateAuthorizationSignature(authInput);
+        const sent = await sendSponsoredTx(signer, unsignedTx, value, BASE_CHAIN_ID, address, authSig.signature, privyRpcBody);
+        txHash = sent.hash;
+      } else {
+        // Fallback: direct send
+        const { signAndSendTx } = await import('../lib/txSigner');
+        const sent = await signAndSendTx(signer, { to: agent.walletAddress, data: '0x', from: address }, value);
+        txHash = sent.hash;
+      }
+      // Poll for receipt
       for (let i = 0; i < 30; i++) {
         await new Promise(r => setTimeout(r, 3000));
-        const receipt = await provider.getTransactionReceipt(tx.hash);
+        const receipt = await provider.getTransactionReceipt(txHash);
         if (receipt) break;
       }
       await refetchBalance();
