@@ -29,8 +29,7 @@ import type { ContractTransactionResponse } from 'ethers';
 import { isAddress, verifyMessage, toUtf8Bytes, isHexString, hexlify, getBytes } from 'ethers';
 import { escrowAsMarketplace, marketplaceSigner, baseEscrowAsMarketplace, baseMarketplaceSigner } from './chain.js';
 import { config } from '../config.js';
-import { getTaskIdByHash } from './escrowEvents.js';
-import { getBaseTaskIdByHash } from './baseEscrowEvents.js';
+import { resolveTaskByHash, type TaskChain, type ResolvedTask } from './taskChain.js';
 import * as a2aStore from './a2aStore.js';
 import { rooms } from './socket.js';
 
@@ -62,41 +61,46 @@ function enqueueBaseSignerTx<T>(fn: () => Promise<T>): Promise<T> {
   return next;
 }
 
-function assignmentBridgeReady(): boolean {
-  if (!escrowAsMarketplace || !marketplaceSigner) {
-    console.error(
-      '[a2aSettlement] assignment bridge disabled — MARKETPLACE_SIGNER_PRIVATE_KEY not set.',
-    );
-    return false;
+/**
+ * The escrow a task actually lives on, plus the signer that can act on it.
+ *
+ * Both halves of the bridge used to be hard-wired to one chain each —
+ * assignment to 0G, verification to Base — which only works if every task
+ * exists on both with the same id. It doesn't: a task is funded on exactly one
+ * escrow, so one half was always pointed at the wrong contract. A 0G task
+ * could never be settled and a Base task could never be assigned.
+ */
+function bridgeFor(chain: TaskChain): {
+  escrow: typeof escrowAsMarketplace;
+  ready: boolean;
+  enqueue: <T>(fn: () => Promise<T>) => Promise<T>;
+  label: string;
+} {
+  if (chain === 'base') {
+    return {
+      escrow: baseEscrowAsMarketplace,
+      ready: !!(baseEscrowAsMarketplace && baseMarketplaceSigner),
+      enqueue: enqueueBaseSignerTx,
+      label: 'Base (BASE_MARKETPLACE_SIGNER_PRIVATE_KEY)',
+    };
   }
-  return true;
+  return {
+    escrow: escrowAsMarketplace,
+    ready: !!(escrowAsMarketplace && marketplaceSigner),
+    enqueue: enqueueOgSignerTx,
+    label: '0G (MARKETPLACE_SIGNER_PRIVATE_KEY)',
+  };
 }
 
-function verificationBridgeReady(): boolean {
-  if (!baseEscrowAsMarketplace || !baseMarketplaceSigner) {
-    console.error(
-      '[a2aSettlement] verification bridge disabled — BASE_MARKETPLACE_SIGNER_PRIVATE_KEY not set.',
-    );
-    return false;
-  }
-  return true;
-}
-
-async function waitForTaskId(taskHash: string): Promise<string | null> {
+/**
+ * Wait for the indexer to catch up, and report which chain holds the task.
+ * A create tx that just confirmed may not be indexed for a few seconds.
+ */
+async function waitForResolvedTask(taskHash: string): Promise<ResolvedTask | null> {
   const deadline = Date.now() + HASH_LOOKUP_TIMEOUT_MS;
   while (true) {
-    const id = await getTaskIdByHash(taskHash);
-    if (id) return id;
-    if (Date.now() >= deadline) return null;
-    await new Promise((r) => setTimeout(r, HASH_LOOKUP_POLL_INTERVAL_MS));
-  }
-}
-
-async function waitForBaseTaskId(taskHash: string): Promise<string | null> {
-  const deadline = Date.now() + HASH_LOOKUP_TIMEOUT_MS;
-  while (true) {
-    const id = await getBaseTaskIdByHash(taskHash);
-    if (id) return id;
+    const resolved = await resolveTaskByHash(taskHash);
+    if (resolved) return resolved;
     if (Date.now() >= deadline) return null;
     await new Promise((r) => setTimeout(r, HASH_LOOKUP_POLL_INTERVAL_MS));
   }
@@ -152,9 +156,10 @@ async function confirmAssignedWorker(
   taskId: number | string,
   executor: string,
   taskHash: string,
+  chain: TaskChain = '0g',
 ): Promise<SettleResult> {
   try {
-    const t = await escrowAsMarketplace!.getTask(BigInt(taskId));
+    const t = await bridgeFor(chain).escrow!.getTask(BigInt(taskId));
     const onChainWorker = String(t.worker);
     if (onChainWorker.toLowerCase() === executor.toLowerCase()) {
       console.log(`[a2aSettlement] assignment skipped — task ${taskId} already assigned to this executor`);
@@ -197,21 +202,24 @@ async function confirmAssignedWorker(
  * Unexpected errors (not bridge-not-ready, not already-settled) propagate.
  */
 export async function settleAssignment(taskHash: string, executor: string): Promise<SettleResult> {
-  if (!assignmentBridgeReady()) {
-    const msg = 'Bridge disabled: MARKETPLACE_SIGNER_PRIVATE_KEY not set';
-    await safePersistAssignError(taskHash, msg);
-    return { success: false, error: msg };
-  }
-
   if (!isAddress(executor)) {
     const msg = `Executor address is not a valid EVM address: ${executor}`;
     await safePersistAssignError(taskHash, msg);
     return { success: false, error: msg };
   }
 
-  const taskId = await waitForTaskId(taskHash);
-  if (taskId === null) {
-    const msg = `hash2id lookup timed out — createTask event never seen by indexer (taskHash=${taskHash.slice(0, 10)}…)`;
+  const resolved = await waitForResolvedTask(taskHash);
+  if (resolved === null) {
+    const msg = `hash2id lookup timed out — createTask event never seen by indexer on either chain (taskHash=${taskHash.slice(0, 10)}…)`;
+    console.error(`[a2aSettlement] ${msg}`);
+    await safePersistAssignError(taskHash, msg);
+    return { success: false, error: msg };
+  }
+
+  const { taskId, chain } = resolved;
+  const bridge = bridgeFor(chain);
+  if (!bridge.ready) {
+    const msg = `Bridge disabled for ${chain}: signer not configured — ${bridge.label}`;
     console.error(`[a2aSettlement] ${msg}`);
     await safePersistAssignError(taskHash, msg);
     return { success: false, error: msg };
@@ -220,10 +228,10 @@ export async function settleAssignment(taskHash: string, executor: string): Prom
   let tx: ContractTransactionResponse;
   try {
     try {
-      await escrowAsMarketplace!.marketplaceAssign.staticCall(BigInt(taskId), executor);
+      await bridge.escrow!.marketplaceAssign.staticCall(BigInt(taskId), executor);
     } catch (staticErr) {
       if (isAlreadySettled(staticErr)) {
-        return confirmAssignedWorker(taskId, executor, taskHash);
+        return confirmAssignedWorker(taskId, executor, taskHash, chain);
       }
       if (isDeadlineReached(staticErr)) {
         console.warn(`[a2aSettlement] assignment refused — task ${taskId} deadline has passed (terminal)`);
@@ -233,12 +241,12 @@ export async function settleAssignment(taskHash: string, executor: string): Prom
       throw staticErr;
     }
 
-    tx = await enqueueOgSignerTx(() =>
-      escrowAsMarketplace!.marketplaceAssign(BigInt(taskId), executor) as Promise<ContractTransactionResponse>,
+    tx = await bridge.enqueue(() =>
+      bridge.escrow!.marketplaceAssign(BigInt(taskId), executor) as Promise<ContractTransactionResponse>,
     );
   } catch (err) {
     if (isAlreadySettled(err)) {
-      return confirmAssignedWorker(taskId, executor, taskHash);
+      return confirmAssignedWorker(taskId, executor, taskHash, chain);
     }
     if (isDeadlineReached(err)) {
       console.warn(`[a2aSettlement] assignment refused — task ${taskId} deadline has passed (terminal)`);
@@ -358,11 +366,6 @@ export async function settleVerification(
   passed: boolean,
   teeAttestation?: TeeAttestation | null,
 ): Promise<SettleResult> {
-  if (!verificationBridgeReady()) {
-    const msg = 'Verification bridge disabled: BASE_MARKETPLACE_SIGNER_PRIVATE_KEY not set';
-    await safePersistVerifyError(taskHash, msg);
-    return { success: false, error: msg };
-  }
 
   const _vState = await a2aStore.getState(taskHash).catch(() => null);
   const _vExecutor = _vState?.executorAddress;
@@ -381,9 +384,18 @@ export async function settleVerification(
   const useTEE = isTeeAttestationValid(teeAttestation);
 
   try {
-    const taskId = await waitForBaseTaskId(taskHash);
-    if (taskId === null) {
-      const msg = `hash2id lookup timed out — Base createTask event never seen by indexer (taskHash=${taskHash.slice(0, 10)}…)`;
+    const resolved = await waitForResolvedTask(taskHash);
+    if (resolved === null) {
+      const msg = `hash2id lookup timed out — createTask event never seen by indexer on either chain (taskHash=${taskHash.slice(0, 10)}…)`;
+      console.error(`[a2aSettlement] ${msg}`);
+      await safePersistVerifyError(taskHash, msg);
+      return { success: false, error: msg };
+    }
+
+    const { taskId, chain } = resolved;
+    const bridge = bridgeFor(chain);
+    if (!bridge.ready) {
+      const msg = `Verification bridge disabled for ${chain}: signer not configured — ${bridge.label}`;
       console.error(`[a2aSettlement] ${msg}`);
       await safePersistVerifyError(taskHash, msg);
       return { success: false, error: msg };
@@ -393,8 +405,8 @@ export async function settleVerification(
     try {
       if (useTEE) {
         console.log(`[a2aSettlement] using TEE settlement for taskId=${taskId}`);
-        tx = await enqueueBaseSignerTx(() =>
-          baseEscrowAsMarketplace!.completeVerificationWithTEE(
+        tx = await bridge.enqueue(() =>
+          bridge.escrow!.completeVerificationWithTEE(
             BigInt(taskId),
             passed,
             teeAttestation!.signature,
@@ -402,14 +414,14 @@ export async function settleVerification(
           ) as Promise<ContractTransactionResponse>,
         );
       } else {
-        tx = await enqueueBaseSignerTx(() =>
-          baseEscrowAsMarketplace!.completeVerification(BigInt(taskId), passed) as Promise<ContractTransactionResponse>,
+        tx = await bridge.enqueue(() =>
+          bridge.escrow!.completeVerification(BigInt(taskId), passed) as Promise<ContractTransactionResponse>,
         );
       }
     } catch (err) {
       if (isAlreadySettled(err)) {
         try {
-          const t = await baseEscrowAsMarketplace!.getTask(BigInt(taskId));
+          const t = await bridge.escrow!.getTask(BigInt(taskId));
           const status = Number(t.status);
           if (status === (passed ? 4 : 3)) {
             console.log(

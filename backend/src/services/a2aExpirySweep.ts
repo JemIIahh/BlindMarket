@@ -1,6 +1,6 @@
 import * as a2aStore from './a2aStore.js';
 import * as escrowService from './escrow.js';
-import { getCachedTaskIdByHash, getTaskIdByHash } from './escrowEvents.js';
+import { resolveCachedTaskByHash, resolveTaskByHash } from './taskChain.js';
 import { SWEEP_INTERVAL_MS, EXPIRY_GRACE_SEC } from '../constants.js';
 
 // Re-export for any callers that import from here (backward compat)
@@ -98,9 +98,9 @@ export async function sweepExpiredTasks(): Promise<void> {
       let deadline = meta.deadline ?? (await a2aStore.getCachedDeadline(tid).catch(() => null));
 
       if (!deadline) {
-        let onChainId = await getCachedTaskIdByHash(tid).catch(() => null);
+        let resolved = await resolveCachedTaskByHash(tid).catch(() => null);
 
-        if (!onChainId) {
+        if (!resolved) {
           // Unmapped hash. Every task that passed the verified /tasks/index
           // gate had its hash2id mapping seeded eagerly, so a missing mapping
           // means either a phantom meta (reverted createTask, pre-gate write)
@@ -111,14 +111,14 @@ export async function sweepExpiredTasks(): Promise<void> {
           heavyUsedThisTick = true;
           heavyResolveAttempted.add(tid);
           try {
-            onChainId = await withTimeout(getTaskIdByHash(tid), HEAVY_RESOLVE_TIMEOUT_MS);
+            resolved = await withTimeout(resolveTaskByHash(tid), HEAVY_RESOLVE_TIMEOUT_MS);
           } catch {
             // RPC trouble mid-scan — not a verdict on the task. Allow a retry
             // on a later tick.
             heavyResolveAttempted.delete(tid);
             continue;
           }
-          if (!onChainId) {
+          if (!resolved) {
             // Definitive: the full event history contains no TaskCreated for
             // this hash, so no escrow was ever funded — a phantom that would
             // otherwise list forever and bounce every /accept via
@@ -127,7 +127,7 @@ export async function sweepExpiredTasks(): Promise<void> {
             if (r.ok) {
               closed++;
               console.warn(
-                `[a2aExpirySweep] closed phantom task ${tid.slice(0, 10)}… — no TaskCreated event on-chain (reverted/never-funded createTask)`,
+                `[a2aExpirySweep] closed phantom task ${tid.slice(0, 10)}… — no TaskCreated event on either chain (reverted/never-funded createTask)`,
               );
             }
             continue;
@@ -135,7 +135,7 @@ export async function sweepExpiredTasks(): Promise<void> {
         }
 
         try {
-          const task = await escrowService.getTask(Number(onChainId));
+          const task = await escrowService.getTaskOn(resolved.chain, Number(resolved.taskId));
           // Identity check before trusting the read. On a Redis shared across
           // chains (the known stray-testnet-backend topology) numeric taskIds
           // collide across escrows, so a wrong-chain getTask would return a
@@ -144,7 +144,7 @@ export async function sweepExpiredTasks(): Promise<void> {
           // taskHash, which IS our task key: require it to match.
           if ((task.taskHash ?? '').toLowerCase() !== tid) {
             console.warn(
-              `[a2aExpirySweep] hash mismatch for ${tid.slice(0, 10)}… (on-chain id ${onChainId} has taskHash ${String(task.taskHash).slice(0, 10)}…) — wrong chain or stale mapping; skipping`,
+              `[a2aExpirySweep] hash mismatch for ${tid.slice(0, 10)}… (${resolved.chain} id ${resolved.taskId} has taskHash ${String(task.taskHash).slice(0, 10)}…) — wrong chain or stale mapping; skipping`,
             );
             continue;
           }
