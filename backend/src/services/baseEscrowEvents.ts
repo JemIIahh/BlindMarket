@@ -28,7 +28,7 @@ const KEY = {
 // ── Polling config ──────────────────────────────────────────────────────────
 
 const POLL_INTERVAL_MS = 5_000;
-const MAX_BLOCKS_PER_TICK = 5_000;
+const MAX_BLOCKS_PER_TICK = 500;
 
 // Fresh deployment — no backfill needed. Set to the Base deployment block
 // via env so we start indexing from contract creation.

@@ -51,6 +51,7 @@ export const inft: ethers.Contract | null = config.inftAddress
 export const baseProvider: ethers.JsonRpcProvider = new ethers.JsonRpcProvider(config.baseRpcUrl, config.baseChainId, {
   batchMaxCount: 1,
   staticNetwork: true,
+  timeout: 120_000, // 2 min — public Base RPC can be slow
 });
 
 /** Marketplace signer for Base escrow (holds verifier role on Base BlindEscrow). */
