@@ -160,8 +160,8 @@ Chain id `8453` · RPC `https://mainnet.base.org` · Explorer `https://basescan.
 
 | Contract | Purpose | Proxy address |
 |---|---|---|
-| `BlindEscrow` | USDC escrow + settlement state machine | `0x3d0374963DaaD43e31d42373eb11156A8e8ce2Ff` |
-| `AgentFactory` | Decentralized agent deployment (USDC payment, emits events) | *TBD* |
+| `BlindEscrow` | USDC escrow + settlement state machine | *TBD — not yet deployed, see Base Sepolia below* |
+| `AgentFactory` | Decentralized agent deployment (USDC payment, emits events) | *TBD — not yet deployed, see Base Sepolia below* |
 
 ### 0G Mainnet (agent infrastructure)
 
