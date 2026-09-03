@@ -717,4 +717,130 @@ describe("BlindEscrow", function () {
       expect(await escrow.isTaskExpired(1)).to.be.true;
     });
   });
+
+  // ── TEE-attested settlement ──
+
+  describe("completeVerificationWithTEE", function () {
+    // Stands in for the 0G enclave key. It only ever signs off-chain, so it
+    // needs no balance and never appears as a transaction sender.
+    const teeWallet = ethers.Wallet.createRandom();
+    const rogueWallet = ethers.Wallet.createRandom();
+
+    // What a 0G TEE actually signs: a commitment over an inference
+    // request/response pair. Note it names no task and no verdict — that is
+    // precisely why it cannot be used as an authorization token.
+    const ATTESTATION_TEXT = "0g-tee-commitment:req=0xdead...,res=0xbeef...";
+
+    let teeSig: string;
+    let rogueSig: string;
+    let signedText: string;
+
+    beforeEach(async function () {
+      await escrow.connect(admin).setTeeSigner(teeWallet.address);
+
+      signedText = ethers.hexlify(ethers.toUtf8Bytes(ATTESTATION_TEXT));
+      teeSig = await teeWallet.signMessage(ATTESTATION_TEXT);
+      rogueSig = await rogueWallet.signMessage(ATTESTATION_TEXT);
+
+      await escrow.connect(agent).createTask(TASK_HASH, await token.getAddress(), AMOUNT, "photo", "Lagos", ONE_WEEK);
+      await escrow.connect(agent).assignWorker(1, worker.address);
+      await escrow.connect(worker).submitEvidence(1, EVIDENCE_HASH);
+    });
+
+    it("does not let the worker settle its own task with a valid enclave signature", async function () {
+      // The drain: any holder of any enclave signature could previously call
+      // this and release the escrow to themselves without anyone verifying
+      // the work. Authorization must come from the verifier gate, never from
+      // a signature that is unbound to the task.
+      const workerBefore = await token.balanceOf(worker.address);
+
+      await expect(
+        escrow.connect(worker).completeVerificationWithTEE(1, true, teeSig, signedText)
+      ).to.be.revertedWithCustomError(escrow, "NotVerifier");
+
+      expect(await token.balanceOf(worker.address)).to.equal(workerBefore);
+      expect((await escrow.getTask(1)).status).to.equal(2); // still Submitted
+    });
+
+    it("does not let an unrelated account settle with a valid enclave signature", async function () {
+      await expect(
+        escrow.connect(stranger).completeVerificationWithTEE(1, true, teeSig, signedText)
+      ).to.be.revertedWithCustomError(escrow, "NotVerifier");
+    });
+
+    it("lets the marketplace verifier settle and pays 90/10", async function () {
+      const workerBefore = await token.balanceOf(worker.address);
+      const treasuryBefore = await token.balanceOf(treasury.address);
+
+      await expect(escrow.connect(verifier).completeVerificationWithTEE(1, true, teeSig, signedText))
+        .to.emit(escrow, "TEESettled")
+        .withArgs(1, true, teeWallet.address);
+
+      const expectedFee = (AMOUNT * 1000n) / 10000n;
+      const expectedPayout = AMOUNT - expectedFee;
+
+      expect((await escrow.getTask(1)).status).to.equal(4); // Completed
+      expect(await token.balanceOf(worker.address)).to.equal(workerBefore + expectedPayout);
+      expect(await token.balanceOf(treasury.address)).to.equal(treasuryBefore + expectedFee);
+      expect(await token.balanceOf(await escrow.getAddress())).to.equal(0);
+    });
+
+    it("rejects a signature from a key that is not the registered teeSigner", async function () {
+      await expect(
+        escrow.connect(verifier).completeVerificationWithTEE(1, true, rogueSig, signedText)
+      ).to.be.revertedWithCustomError(escrow, "InvalidTEESignature");
+    });
+
+    it("rejects a signature over different text than the one supplied", async function () {
+      const otherText = ethers.hexlify(ethers.toUtf8Bytes("some other attestation"));
+      await expect(
+        escrow.connect(verifier).completeVerificationWithTEE(1, true, teeSig, otherText)
+      ).to.be.revertedWithCustomError(escrow, "InvalidTEESignature");
+    });
+
+    it("rejects a malformed signature instead of recovering a junk address", async function () {
+      await expect(
+        escrow.connect(verifier).completeVerificationWithTEE(1, true, "0xdeadbeef", signedText)
+      ).to.be.revertedWithCustomError(escrow, "InvalidTEESignature");
+    });
+
+    it("reverts when no teeSigner is registered", async function () {
+      await escrow.connect(admin).setTeeSigner(ethers.ZeroAddress);
+      await expect(
+        escrow.connect(verifier).completeVerificationWithTEE(1, true, teeSig, signedText)
+      ).to.be.revertedWithCustomError(escrow, "TEESignerNotSet");
+    });
+
+    it("moves to Verified without paying out when passed is false", async function () {
+      const workerBefore = await token.balanceOf(worker.address);
+
+      await escrow.connect(verifier).completeVerificationWithTEE(1, false, teeSig, signedText);
+
+      expect((await escrow.getTask(1)).status).to.equal(3); // Verified
+      expect(await token.balanceOf(worker.address)).to.equal(workerBefore);
+    });
+
+    it("honors a per-task verifier over the global one", async function () {
+      await escrow
+        .connect(agent)
+        .createTaskWithVerifier(EVIDENCE_HASH_2, await token.getAddress(), AMOUNT, "photo", "Lagos", ONE_WEEK, stranger.address);
+      await escrow.connect(agent).assignWorker(2, worker.address);
+      await escrow.connect(worker).submitEvidence(2, EVIDENCE_HASH);
+
+      // The global verifier is not the designated one for task 2.
+      await expect(
+        escrow.connect(verifier).completeVerificationWithTEE(2, true, teeSig, signedText)
+      ).to.be.revertedWithCustomError(escrow, "NotVerifier");
+
+      await expect(escrow.connect(stranger).completeVerificationWithTEE(2, true, teeSig, signedText))
+        .to.emit(escrow, "TEESettled")
+        .withArgs(2, true, teeWallet.address);
+    });
+
+    it("only lets the admin set the teeSigner", async function () {
+      await expect(
+        escrow.connect(stranger).setTeeSigner(rogueWallet.address)
+      ).to.be.revertedWithCustomError(escrow, "NotAdmin");
+    });
+  });
 });
