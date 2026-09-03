@@ -143,3 +143,78 @@ export async function buildCreateTaskBase(
   }
   return buildUnsignedTx(baseEscrow, 'createTask', [taskHash, token, amount, category, locationZone, duration], from, value);
 }
+
+/** Read a single task from the Base escrow. */
+export async function getTaskBase(taskId: number): Promise<OnChainTask & { taskId: string }> {
+  if (!baseEscrow) throw new Error('Base escrow not configured (BASE_ESCROW_ADDRESS)');
+  const t = await baseEscrow.getTask(taskId);
+  return {
+    taskId: taskId.toString(),
+    agent: t.agent,
+    worker: t.worker,
+    token: t.token,
+    amount: t.amount,
+    taskHash: t.taskHash,
+    evidenceHash: t.evidenceHash,
+    status: Number(t.status),
+    createdAt: t.createdAt,
+    deadline: t.deadline,
+    submissionAttempts: Number(t.submissionAttempts),
+  };
+}
+
+/** Build unsigned cancelTask transaction against the Base escrow. */
+export async function buildCancelTaskBase(
+  from: string,
+  taskId: number,
+): Promise<ethers.TransactionRequest> {
+  if (!baseEscrow) throw new Error('Base escrow not configured (BASE_ESCROW_ADDRESS)');
+  return buildUnsignedTx(baseEscrow, 'cancelTask', [taskId], from);
+}
+
+/** Build unsigned claimTimeout transaction against the Base escrow. */
+export async function buildClaimTimeoutBase(
+  from: string,
+  taskId: number,
+): Promise<ethers.TransactionRequest> {
+  if (!baseEscrow) throw new Error('Base escrow not configured (BASE_ESCROW_ADDRESS)');
+  return buildUnsignedTx(baseEscrow, 'claimTimeout', [taskId], from);
+}
+
+// ── Chain-aware wrappers ───────────────────────────────────────────────────
+//
+// A taskHash resolves to a chain via taskChain.resolveTaskByHash; these pick
+// the matching escrow so a caller never has to branch. Without them a Base
+// task read through the 0G escrow returns whatever unrelated task happens to
+// share that id, or an empty one.
+
+/** Read a task from whichever chain holds it. */
+export async function getTaskOn(
+  chain: 'base' | '0g',
+  taskId: number,
+): Promise<OnChainTask & { taskId: string }> {
+  return chain === 'base' ? getTaskBase(taskId) : getTask(taskId);
+}
+
+/** Poster refund before a worker is assigned, on whichever chain holds the task. */
+export async function buildCancelTaskOn(
+  chain: 'base' | '0g',
+  from: string,
+  taskId: number,
+): Promise<ethers.TransactionRequest> {
+  return chain === 'base' ? buildCancelTaskBase(from, taskId) : buildCancelTask(from, taskId);
+}
+
+/** Post-deadline refund, on whichever chain holds the task. */
+export async function buildClaimTimeoutOn(
+  chain: 'base' | '0g',
+  from: string,
+  taskId: number,
+): Promise<ethers.TransactionRequest> {
+  return chain === 'base' ? buildClaimTimeoutBase(from, taskId) : buildClaimTimeout(from, taskId);
+}
+
+/** Read the per-task verifier from whichever chain holds the task. */
+export async function getTaskVerifierOn(chain: 'base' | '0g', taskId: number): Promise<string> {
+  return chain === 'base' ? getTaskVerifierBase(taskId) : getTaskVerifier(taskId);
+}

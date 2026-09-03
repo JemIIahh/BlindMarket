@@ -1,6 +1,6 @@
 import { getPool } from './neonDb.js';
 import * as a2aStore from './a2aStore.js';
-import { getCachedTaskIdByHash } from './escrowEvents.js';
+import { resolveCachedTaskByHash } from './taskChain.js';
 import * as escrowService from './escrow.js';
 import { config } from '../config.js';
 
@@ -164,10 +164,10 @@ async function recomputeGaps(): Promise<DemandGap[]> {
         try {
           // Cached mapping ONLY: a missing hash2id entry just means no reward
           // label this cycle (the forward poller will have it soon).
-          const id = await getCachedTaskIdByHash(g.taskHash);
-          if (!id) return;
-          g.onChainId = id;
-          const t = await escrowService.getTask(Number(id));
+          const resolved = await resolveCachedTaskByHash(g.taskHash);
+          if (!resolved) return;
+          g.onChainId = resolved.taskId;
+          const t = await escrowService.getTaskOn(resolved.chain, Number(resolved.taskId));
           g.rewardRaw = t.amount.toString();
         } catch { /* leave unenriched */ }
       }),
