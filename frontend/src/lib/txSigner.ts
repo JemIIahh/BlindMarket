@@ -1,16 +1,11 @@
 import type { ethers } from 'ethers';
 import type { UnsignedTx } from '../types/api';
-import { API_BASE_URL } from '../config/constants';
-import { getAuthHeaders } from './api';
 
 export interface SentTx {
   hash: string;
   receipt: ethers.TransactionReceipt | null;
 }
 
-/**
- * Builds the Privy RPC request body for eth_sendTransaction with sponsorship.
- */
 export function buildPrivyRpcBody(
   unsignedTx: UnsignedTx,
   value: bigint | undefined,
@@ -31,9 +26,6 @@ export function buildPrivyRpcBody(
   };
 }
 
-/**
- * Build the full Privy authorization request input for useAuthorizationSignature.
- */
 export function buildAuthRequestInput(
   privyRpcBody: ReturnType<typeof buildPrivyRpcBody>,
   walletAddress: string,
@@ -51,39 +43,42 @@ export function buildAuthRequestInput(
 }
 
 /**
- * Relays a transaction through the backend to Privy's REST API with
- * sponsor_options for "user_pays" gas sponsorship.
+ * Send a gas-sponsored transaction directly through Privy's API from the browser.
+ * No backend relay needed — the frontend signs the request via useAuthorizationSignature
+ * and calls Privy directly. sponsor_options is included in the signed body.
  */
 export async function sendSponsoredTx(
   signer: ethers.JsonRpcSigner,
-  unsignedTx: UnsignedTx,
-  value: bigint | undefined,
-  chainId: number,
+  _unsignedTx: UnsignedTx,
+  _value: bigint | undefined,
+  _chainId: number,
   walletAddress: string,
   authorizationSignature: string,
   privyRpcBody: ReturnType<typeof buildPrivyRpcBody>,
 ): Promise<SentTx> {
-  const res = await fetch(`${API_BASE_URL}/api/v1/tx/send-sponsored`, {
+  const privyAppId = import.meta.env.VITE_PRIVY_APP_ID;
+
+  const privyRes = await fetch(`https://api.privy.io/v1/wallets/${walletAddress}/rpc`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...(await getAuthHeaders()) },
-    credentials: 'include',
-    body: JSON.stringify({
-      to: unsignedTx.to,
-      data: unsignedTx.data || '0x',
-      value: value != null ? `0x${value.toString(16)}` : undefined,
-      chainId,
-      walletAddress,
-      authorizationSignature,
-      privyRpcBody,
-    }),
+    headers: {
+      'Content-Type': 'application/json',
+      'privy-app-id': privyAppId,
+      'privy-authorization-signature': authorizationSignature,
+    },
+    body: JSON.stringify(privyRpcBody),
   });
 
-  const json = await res.json();
-  if (!json.success) {
-    throw new Error(json.error?.message || `Sponsored tx failed: ${res.status}`);
+  const privyBody = await privyRes.json();
+
+  if (!privyRes.ok) {
+    const errMsg = privyBody?.message || privyBody?.error || `Privy API ${privyRes.status}`;
+    throw new Error(errMsg);
   }
 
-  const txHash: string = json.data.hash;
+  const txHash: string = privyBody?.data?.hash || privyBody?.hash || '';
+  console.log(`[sendSponsoredTx] tx hash=${txHash} chain=${privyRpcBody.caip2}`);
+
+  if (!txHash) throw new Error('No transaction hash returned from Privy');
 
   for (let i = 0; i < 30; i++) {
     await new Promise(r => setTimeout(r, 3000));
