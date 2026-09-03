@@ -78,7 +78,7 @@ export default function App() {
           // is fixed per provider mount, so a mid-session toggle applies to the
           // modal on the next reload.
           appearance: { theme: getStoredTheme() },
-          loginMethods: ['wallet', 'email'],
+          loginMethods: ['email', 'wallet'],
           // Disable Coinbase Smart Wallet — prefer Privy embedded wallet
           // for gas sponsorship flow on Base.
           externalWallets: {
@@ -90,7 +90,7 @@ export default function App() {
           },
           embeddedWallets: {
             ethereum: {
-              createOnLogin: 'users-without-wallets',
+              createOnLogin: 'all-users',
             },
           },
         }}

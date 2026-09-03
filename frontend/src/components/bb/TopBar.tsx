@@ -62,7 +62,20 @@ export function TopBar({ onMenuClick }: TopBarProps = {}) {
       <div className="flex items-center gap-2 px-3 py-1.5 border border-line text-[11px] font-mono text-ink hover:bg-surface-2 transition-colors">
         <span className="w-1.5 h-1.5 bg-blue-500 inline-block" />
         <span className="text-[10px] text-blue-600">USDC</span>
-        <span className="text-[10px] text-ink-2">${usdc.formatted}</span>
+        <span className="text-[10px] text-ink-2">{usdc.formatted}</span>
+        <button
+          onClick={() => usdc.refresh()}
+          disabled={usdc.refreshing}
+          className="text-ink-3 hover:text-ink transition-colors disabled:opacity-40"
+          title="Refresh balance"
+        >
+          <svg viewBox="0 0 16 16" className={`w-3 h-3 ${usdc.refreshing ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+            <path d="M14 2a8 8 0 0 1-12.4 9.6" />
+            <path d="M2 14a8 8 0 0 1 12.4-9.6" />
+            <path d="M14 2v3h-3" />
+            <path d="M2 14v-3h3" />
+          </svg>
+        </button>
       </div>
     </header>
   );

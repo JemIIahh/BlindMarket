@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import { useBalance, useWalletClient } from 'wagmi';
+import { useSendTransaction } from '@privy-io/react-auth';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { BrowserProvider, parseEther, formatUnits } from 'ethers';
 import {
@@ -51,6 +52,7 @@ export default function AgentDetail() {
   const { id } = useParams<{ id: string }>();
   const address = useChainAddress();
   const { data: walletClient } = useWalletClient();
+  const { sendTransaction } = useSendTransaction();
   const qc = useQueryClient();
 
   const [agent, setAgent] = useState<AgentDetails | null>(null);
@@ -244,14 +246,20 @@ export default function AgentDetail() {
     setTopUpStatus('sending');
     setTopUpError('');
     try {
-      if (!walletClient) throw new Error('EVM wallet not connected');
-      const provider = new BrowserProvider(walletClient.transport);
-      const signer = await provider.getSigner();
-      const tx = await signer.sendTransaction({
-        to: agent.walletAddress,
-        value: parseEther(TOP_UP_AMOUNT),
-      });
-      await tx.wait();
+      const tx = await sendTransaction(
+        {
+          to: agent.walletAddress,
+          value: parseEther(TOP_UP_AMOUNT),
+        },
+        { sponsor: true },
+      );
+      // Poll for receipt — Privy's sendTransaction returns { hash } without wait().
+      const provider = new BrowserProvider(walletClient!.transport);
+      for (let i = 0; i < 30; i++) {
+        await new Promise(r => setTimeout(r, 3000));
+        const receipt = await provider.getTransactionReceipt(tx.hash);
+        if (receipt) break;
+      }
       await refetchBalance();
       setTopUpStatus('idle');
     } catch (err) {

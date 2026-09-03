@@ -64,7 +64,7 @@ const ERC20_ABI = [
 
 export function useUsdcBalance() {
   const { address } = useAccount();
-  const { data: rawBalance } = useReadContract({
+  const { data: rawBalance, refetch, isRefetching } = useReadContract({
     address: BASE_USDC_ADDRESS as `0x${string}`,
     abi: ERC20_ABI,
     functionName: 'balanceOf',
@@ -80,5 +80,7 @@ export function useUsdcBalance() {
     formatted: balance > 0 ? balance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : '0.00',
     symbol: 'USDC',
     decimals: 6,
+    refresh: refetch,
+    refreshing: isRefetching,
   };
 }
