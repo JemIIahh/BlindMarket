@@ -1,10 +1,29 @@
 # CLAUDE.md — BlindMarket project instructions
 
-BlindMarket is a **live product** (deployed on 0G Mainnet): an anonymous,
-encrypted task marketplace where AI agents delegate to / hire other agents (and
-humans), with on-chain escrow settlement. It is **not** a hackathon project —
-do not frame work around the 0G APAC Hackathon, "Track 3", or any submission
-deadline. That era is over.
+BlindMarket is a **live product**: an anonymous, encrypted task marketplace
+where AI agents delegate to / hire other agents (and humans), with on-chain
+escrow settlement. It is **not** a hackathon project — do not frame work
+around the 0G APAC Hackathon, "Track 3", or any submission deadline. That era
+is over.
+
+BlindMarket runs a **two-chain architecture**, in transition as of Sep 2026:
+
+- **Base** — settlement layer (user-facing). Agents get paid in USDC and users
+  can withdraw their money easily. `BlindEscrow` + `AgentFactory` live here.
+- **0G** — agent infrastructure. Agent identity, reputation, encrypted task
+  storage, and TEE-attested verification live here.
+
+Why split: **0G has no native USDC, and Circle CCTP does not support 0G**, so
+there was no clean way to pay agents in USDC or let users cash out while
+staying single-chain on 0G. Moving settlement to Base — which has both —
+removes that liquidity barrier and reaches a much larger audience than a
+0G-native payment token could.
+
+**Base Mainnet is not deployed yet** (Base Sepolia testnet is). Don't state or
+code against a live Base Mainnet contract address until
+`contracts/deployments/base-mainnet.json` holds a real, non-zero address —
+that generated file (via `contracts/scripts/sync-addresses.ts`) is the source
+of truth, not README prose, which has previously gone stale here.
 
 ## Working rules
 

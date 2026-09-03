@@ -3,7 +3,7 @@ pragma solidity ^0.8.24;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/Ownable2Step.sol";
 
 /**
  * @title AgentFactory
@@ -17,7 +17,7 @@ import "@openzeppelin/contracts/access/Ownable.sol";
  *      3. Backend listens → creates agent record, generates wallet
  *      4. Agent signs its own 0G transactions (decentralized)
  */
-contract AgentFactory is Ownable {
+contract AgentFactory is Ownable2Step {
     using SafeERC20 for IERC20;
 
     IERC20 public usdc;
@@ -35,6 +35,10 @@ contract AgentFactory is Ownable {
 
     event TreasuryUpdated(address newTreasury);
     event DeployFeeUpdated(uint256 newFee);
+    event EmergencyWithdrawal(address indexed to, uint256 amount);
+
+    /// Agent funding has no on-chain delivery path yet — see {deployAgent}.
+    error AgentFundingNotSupported();
 
     constructor(
         address _usdc,
@@ -49,22 +53,28 @@ contract AgentFactory is Ownable {
     }
 
     /**
-     * @notice Deploy an agent by paying USDC
-     * @param usdcAmount Amount of USDC to pay (after fee deduction)
-     * @dev User must approve USDC first. Fee goes to treasury.
+     * @notice Deploy an agent by paying the USDC deploy fee.
+     * @param usdcAmount Additional agent funding. Must be 0 — see below.
+     * @dev User must approve USDC first. The fee goes straight to treasury and
+     *      nothing is retained by this contract.
+     *
+     *      `usdcAmount` is reserved for funding the agent's own wallet, which
+     *      does not exist on-chain at this point: the backend generates it in
+     *      response to the AgentDeployed event. There is therefore no address
+     *      to forward funding to, and any non-zero amount would sit in this
+     *      contract with no exit but {emergencyWithdraw}. Rather than strand
+     *      user funds silently, we reject it until a delivery path exists.
+     *      The parameter is kept so the ABI stays stable for the deployed
+     *      Sepolia factory and the frontend, which already passes 0.
      */
     function deployAgent(uint256 usdcAmount) external {
-        require(usdcAmount > 0, "Amount must be > 0");
+        if (usdcAmount != 0) revert AgentFundingNotSupported();
         require(deployFeeUsdc > 0, "Deploy not enabled");
 
         nonce++;
 
-        // Transfer total (fee + amount) from user to this contract
-        uint256 total = deployFeeUsdc + usdcAmount;
-        usdc.safeTransferFrom(msg.sender, address(this), total);
-
-        // Forward fee to treasury
-        usdc.safeTransfer(treasury, deployFeeUsdc);
+        // Fee goes directly to treasury — this contract never holds user funds.
+        usdc.safeTransferFrom(msg.sender, treasury, deployFeeUsdc);
 
         // Emit event for backend to pick up
         emit AgentDeployed(msg.sender, usdcAmount, nonce, block.timestamp);
@@ -91,9 +101,12 @@ contract AgentFactory is Ownable {
     }
 
     /**
-     * @notice Emergency withdraw stuck USDC (only owner)
+     * @notice Emergency withdraw stuck USDC (only owner). With {deployAgent}
+     *         forwarding the fee straight to treasury, this should only ever
+     *         move tokens sent here by mistake.
      */
     function emergencyWithdraw(uint256 amount) external onlyOwner {
+        emit EmergencyWithdrawal(owner(), amount);
         usdc.safeTransfer(owner(), amount);
     }
 }

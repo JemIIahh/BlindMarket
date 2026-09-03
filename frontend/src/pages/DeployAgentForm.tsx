@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useWalletClient, useChainId } from 'wagmi';
-import { BrowserProvider, parseUnits, formatUnits } from 'ethers';
+import { BrowserProvider, Contract, formatUnits } from 'ethers';
 import {
   Breadcrumb,
   PageHeader,
@@ -14,7 +14,7 @@ import {
 } from '../components/bb';
 import { ToolManager, type AnyTool } from '../components/bb/ToolManager';
 import SkillPicker from '../components/bb/SkillPicker';
-import { get, post, authedPost } from '../lib/api';
+import { get } from '../lib/api';
 import { useChainAddress } from '../hooks/useChainWallet';
 import { BASE_CHAIN_ID, MARKETPLACE_TOKEN_ADDRESS } from '../config/constants';
 import { CONTRACT_ADDRESSES } from '../config/contractAddresses';
@@ -153,16 +153,15 @@ export default function DeployAgentForm() {
   const [toolSecrets, setToolSecrets] = useState<Record<string, string>>({});
   // Installed skills (slugs).
   const [skillSlugs, setSkillSlugs] = useState<string[]>([]);
-  // Slugs imported as PRIVATE drafts via the SkillPicker importer. The
-  // unauthenticated deploy route installs public skills only, so these are
-  // attached right after deploy via the authed POST /:id/skills.
+  // Slugs imported as PRIVATE drafts via the SkillPicker importer. The deploy
+  // now happens on-chain and the backend creates the agent from the event, so
+  // there is no agent id here to attach them to — they're listed on the success
+  // screen for the owner to install from the agent's Skills panel instead.
   const [privateSkillSlugs, setPrivateSkillSlugs] = useState<string[]>([]);
-  const [privateSkillResults, setPrivateSkillResults] = useState<Array<{ slug: string; ok: boolean; error?: string }>>([]);
 
   const [status, setStatus] = useState<'idle' | 'approving' | 'deploying' | 'done' | 'error'>('idle');
   const submittingRef = useRef(false);
   const [error, setError] = useState('');
-  const [agentId, setAgentId] = useState('');
   const [deployTxHash, setDeployTxHash] = useState('');
 
   const isBaseChain = chainId === BASE_CHAIN_ID;
@@ -174,7 +173,7 @@ export default function DeployAgentForm() {
   useEffect(() => {
     if (!address || !walletClient) return;
     const provider = new BrowserProvider(walletClient.transport);
-    const usdc = new ethers.Contract(MARKETPLACE_TOKEN_ADDRESS, USDC_ABI, provider);
+    const usdc = new Contract(MARKETPLACE_TOKEN_ADDRESS, USDC_ABI, provider);
     usdc.balanceOf(address).then((b: bigint) => setUsdcBalance(b)).catch(() => {});
   }, [address, walletClient, status]);
 
@@ -248,7 +247,7 @@ export default function DeployAgentForm() {
 
       // Step 1: Approve USDC for AgentFactory
       setStatus('approving');
-      const usdc = new ethers.Contract(MARKETPLACE_TOKEN_ADDRESS, USDC_ABI, signer);
+      const usdc = new Contract(MARKETPLACE_TOKEN_ADDRESS, USDC_ABI, signer);
       const totalCost = DEPLOY_FEE_USDC; // fee only, no extra amount for now
 
       const currentAllowance = await usdc.allowance(address, AGENT_FACTORY_ADDRESS);
@@ -259,9 +258,9 @@ export default function DeployAgentForm() {
 
       // Step 2: Deploy agent via AgentFactory (pays USDC, emits event)
       setStatus('deploying');
-      const factory = new ethers.Contract(AGENT_FACTORY_ADDRESS, AGENT_FACTORY_ABI, signer);
+      const factory = new Contract(AGENT_FACTORY_ADDRESS, AGENT_FACTORY_ABI, signer);
       const deployTx = await factory.deployAgent(0); // amount=0, just pay fee
-      const receipt = await deployTx.wait();
+      await deployTx.wait();
       setDeployTxHash(deployTx.hash);
 
       // Step 3: Backend listens for AgentDeployed event and creates agent
@@ -291,15 +290,16 @@ export default function DeployAgentForm() {
             <div className="text-xs text-ink-3">Backend is creating your agent from the on-chain event...</div>
           </div>
 
-          {privateSkillResults.length > 0 && (
+          {privateSkillSlugs.length > 0 && (
             <div className="mx-auto max-w-md text-left space-y-1">
-              <div className="text-xs font-medium text-ink-2">Private skills attached</div>
-              {privateSkillResults.map((r) => (
-                <div key={r.slug} className={`flex items-start gap-2 text-xs ${r.ok ? 'text-ok' : 'text-err'}`}>
-                  <Icon name={r.ok ? 'check' : 'x'} size={12} className="mt-0.5 shrink-0" />
+              <div className="text-xs font-medium text-ink-2">Private skills still to attach</div>
+              {privateSkillSlugs.map((slug) => (
+                <div key={slug} className="flex items-start gap-2 text-xs text-ink-3">
+                  <Icon name="clock" size={12} className="mt-0.5 shrink-0" />
                   <span className="min-w-0 break-words">
-                    <span className="font-mono">{r.slug}</span>
-                    {!r.ok && <> — {r.error || 'attach failed'}. Retry from the agent's Skills panel.</>}
+                    <span className="font-mono">{slug}</span> — add this from the agent's
+                    Skills panel once it appears. Private skills can't be installed
+                    during an on-chain deploy.
                   </span>
                 </div>
               ))}
@@ -323,7 +323,7 @@ export default function DeployAgentForm() {
             <Button
               variant="ghost"
               label="Deploy another"
-              onClick={() => { setStatus('idle'); setDeployTxHash(''); setPrivateSkillResults([]); }}
+              onClick={() => { setStatus('idle'); setDeployTxHash(''); setPrivateSkillSlugs([]); }}
             />
           </div>
           </div>
@@ -466,8 +466,8 @@ export default function DeployAgentForm() {
                   <p className="text-ink-3">Loading pricing…</p>
                 ) : null}
                 <p>
-                  Wallet receives <span className="font-mono text-ink">{OG_COMPUTE_DEPOSIT} 0G</span> —
-                  covers the one-time ledger deposit (~1.0 0G) plus gas for many requests.
+                  Inference is billed to the agent's own wallet, which pays the
+                  0G Compute ledger directly.
                 </p>
               </div>
             </div>

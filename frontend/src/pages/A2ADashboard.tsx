@@ -22,6 +22,7 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { useChainAddress } from '../hooks/useChainWallet';
 import { getPaymentSymbol } from '../config/constants';
+import { getOrCreateExecutorIdentity } from '../lib/executorIdentity';
 
 type Tab = 'browse' | 'executions' | 'register';
 
