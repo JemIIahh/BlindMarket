@@ -1580,7 +1580,7 @@ async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrapp
       _lastChatID = null;
     }
 
-    // ── Upload output to 0G Storage (before submit) ─────────────────────
+    // ── Upload output to 0G Storage (required before submit) ────────────────
     let rootHash = null;
     try {
       const upRes = await fetchWithTimeout(`${BACKEND_URL}/api/v1/storage/upload`, {
@@ -1603,6 +1603,11 @@ async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrapp
       }
     } catch (upErr) {
       log(`0G Storage upload error: ${upErr.message}`);
+    }
+    if (!rootHash) {
+      log(`output upload failed — aborting submit for ${acceptedTaskHash.slice(0, 10)}…`);
+      await releaseTask(acceptedTaskHash);
+      return;
     }
 
     log(`submitting task ${acceptedTaskHash.slice(0, 10)}…`);

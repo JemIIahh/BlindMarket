@@ -48,10 +48,12 @@ export const inft: ethers.Contract | null = config.inftAddress
 // Base Chain (settlement — BlindEscrow, USDC payouts)
 // ═══════════════════════════════════════════════════════════════════════════
 
-export const baseProvider: ethers.JsonRpcProvider = new ethers.JsonRpcProvider(config.baseRpcUrl, config.baseChainId, {
+const baseFetchRequest = new ethers.FetchRequest(config.baseRpcUrl);
+baseFetchRequest.timeout = 120_000; // 2 min — public Base RPC can be slow
+
+export const baseProvider: ethers.JsonRpcProvider = new ethers.JsonRpcProvider(baseFetchRequest, config.baseChainId, {
   batchMaxCount: 1,
   staticNetwork: true,
-  timeout: 120_000, // 2 min — public Base RPC can be slow
 });
 
 /** Marketplace signer for Base escrow (holds verifier role on Base BlindEscrow). */
