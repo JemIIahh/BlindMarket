@@ -6,6 +6,7 @@ import { AppError } from '../middleware/errorHandler.js';
 import * as escrowService from '../services/escrow.js';
 import * as registryService from '../services/registry.js';
 import { getTokenDecimals } from '../services/chain.js';
+import { resolveTaskChainById } from '../services/taskChain.js';
 import type { AuthRequest, ApiResponse } from '../types.js';
 import { AGENT_CAPABILITIES } from '../types.js';
 import * as a2aStore from '../services/a2aStore.js';
@@ -299,7 +300,7 @@ tasksRouter.post('/', requireAuth, async (req: AuthRequest, res, next) => {
 
     // Record escrow_lock accounting event
     try {
-      const decimals = await getTokenDecimals(data.token);
+      const decimals = await getTokenDecimals(data.token, useBase ? 'base' : '0g');
       accountingService.recordTransaction({
         address: from,
         role: 'agent',
@@ -454,20 +455,27 @@ tasksRouter.post('/:id/cancel', requireAuth, async (req: AuthRequest, res, next)
 
     const from = req.user!.address;
 
-    // Verify caller is the task agent
-    const task = await escrowService.getTask(taskId);
     // The legacy 'agent' API-key principal has no EOA — buildUnsignedTx would
     // 500 on ethers.getAddress('agent'); this tx must be signed by the task
     // agent's real wallet (onlyAgent on-chain). Refuse it cleanly.
-    if (from === 'agent' || task.agent.toLowerCase() !== from.toLowerCase()) {
+    if (from === 'agent') {
       throw new AppError(403, 'FORBIDDEN', 'Only the task agent can cancel tasks');
     }
 
-    const tx = await escrowService.buildCancelTask(from, taskId);
+    // The task may be escrowed on Base or on 0G; resolving by ownership also
+    // does the agent check, since a chain where the caller isn't the agent
+    // never matches.
+    const chain = await resolveTaskChainById(taskId, from);
+    if (!chain) {
+      throw new AppError(403, 'FORBIDDEN', 'Only the task agent can cancel tasks');
+    }
+
+    const task = await escrowService.getTaskOn(chain, taskId);
+    const tx = await escrowService.buildCancelTaskOn(chain, from, taskId);
 
     // Record refund accounting event
     try {
-      const decimals = await getTokenDecimals(task.token);
+      const decimals = await getTokenDecimals(task.token, chain);
       const amount = Number(task.amount) / (10 ** decimals);
       accountingService.recordTransaction({
         address: from,
@@ -505,25 +513,33 @@ tasksRouter.post('/:id/timeout', requireAuth, async (req: AuthRequest, res, next
 
     const from = req.user!.address;
 
-    // Verify caller is the task agent
-    const task = await escrowService.getTask(taskId);
     // The legacy 'agent' API-key principal has no EOA — buildUnsignedTx would
     // 500 on ethers.getAddress('agent'); this tx must be signed by the task
     // agent's real wallet (onlyAgent on-chain). Refuse it cleanly.
-    if (from === 'agent' || task.agent.toLowerCase() !== from.toLowerCase()) {
+    if (from === 'agent') {
       throw new AppError(403, 'FORBIDDEN', 'Only the task agent can reclaim funds');
     }
+
+    // The task may be escrowed on Base or on 0G; resolving by ownership also
+    // does the agent check, since a chain where the caller isn't the agent
+    // never matches.
+    const chain = await resolveTaskChainById(taskId, from);
+    if (!chain) {
+      throw new AppError(403, 'FORBIDDEN', 'Only the task agent can reclaim funds');
+    }
+
+    const task = await escrowService.getTaskOn(chain, taskId);
 
     // Check if deadline passed
     if (BigInt(Math.floor(Date.now() / 1000)) < task.deadline) {
       throw new AppError(400, 'DEADLINE_NOT_REACHED', 'Cannot reclaim before deadline');
     }
 
-    const tx = await escrowService.buildClaimTimeout(from, taskId);
+    const tx = await escrowService.buildClaimTimeoutOn(chain, from, taskId);
 
     // Record refund accounting event
     try {
-      const decimals = await getTokenDecimals(task.token);
+      const decimals = await getTokenDecimals(task.token, chain);
       const amount = Number(task.amount) / (10 ** decimals);
       accountingService.recordTransaction({
         address: from,

@@ -143,3 +143,108 @@ export async function buildCreateTaskBase(
   }
   return buildUnsignedTx(baseEscrow, 'createTask', [taskHash, token, amount, category, locationZone, duration], from, value);
 }
+
+/** Read a single task from the Base escrow. */
+export async function getTaskBase(taskId: number): Promise<OnChainTask & { taskId: string }> {
+  if (!baseEscrow) throw new Error('Base escrow not configured (BASE_ESCROW_ADDRESS)');
+  const t = await baseEscrow.getTask(taskId);
+  return {
+    taskId: taskId.toString(),
+    agent: t.agent,
+    worker: t.worker,
+    token: t.token,
+    amount: t.amount,
+    taskHash: t.taskHash,
+    evidenceHash: t.evidenceHash,
+    status: Number(t.status),
+    createdAt: t.createdAt,
+    deadline: t.deadline,
+    submissionAttempts: Number(t.submissionAttempts),
+  };
+}
+
+/** Build unsigned cancelTask transaction against the Base escrow. */
+export async function buildCancelTaskBase(
+  from: string,
+  taskId: number,
+): Promise<ethers.TransactionRequest> {
+  if (!baseEscrow) throw new Error('Base escrow not configured (BASE_ESCROW_ADDRESS)');
+  return buildUnsignedTx(baseEscrow, 'cancelTask', [taskId], from);
+}
+
+/** Build unsigned claimTimeout transaction against the Base escrow. */
+export async function buildClaimTimeoutBase(
+  from: string,
+  taskId: number,
+): Promise<ethers.TransactionRequest> {
+  if (!baseEscrow) throw new Error('Base escrow not configured (BASE_ESCROW_ADDRESS)');
+  return buildUnsignedTx(baseEscrow, 'claimTimeout', [taskId], from);
+}
+
+/** Build unsigned submitEvidence transaction against the Base escrow. */
+export async function buildSubmitEvidenceBase(
+  from: string,
+  taskId: number,
+  evidenceHash: string,
+): Promise<ethers.TransactionRequest> {
+  if (!baseEscrow) throw new Error('Base escrow not configured (BASE_ESCROW_ADDRESS)');
+  return buildUnsignedTx(baseEscrow, 'submitEvidence', [taskId, evidenceHash], from);
+}
+
+// ── Chain-aware wrappers ───────────────────────────────────────────────────
+//
+// A taskHash resolves to a chain via taskChain.resolveTaskByHash; these pick
+// the matching escrow so a caller never has to branch. Without them a Base
+// task read through the 0G escrow returns whatever unrelated task happens to
+// share that id, or an empty one.
+
+/** Read a task from whichever chain holds it. */
+export async function getTaskOn(
+  chain: 'base' | '0g',
+  taskId: number,
+): Promise<OnChainTask & { taskId: string }> {
+  return chain === 'base' ? getTaskBase(taskId) : getTask(taskId);
+}
+
+/** Poster refund before a worker is assigned, on whichever chain holds the task. */
+export async function buildCancelTaskOn(
+  chain: 'base' | '0g',
+  from: string,
+  taskId: number,
+): Promise<ethers.TransactionRequest> {
+  return chain === 'base' ? buildCancelTaskBase(from, taskId) : buildCancelTask(from, taskId);
+}
+
+/** Post-deadline refund, on whichever chain holds the task. */
+export async function buildClaimTimeoutOn(
+  chain: 'base' | '0g',
+  from: string,
+  taskId: number,
+): Promise<ethers.TransactionRequest> {
+  return chain === 'base' ? buildClaimTimeoutBase(from, taskId) : buildClaimTimeout(from, taskId);
+}
+
+/**
+ * Worker evidence submission, on whichever chain holds the task.
+ *
+ * The worker signs and broadcasts this, so aiming it at the wrong escrow is
+ * unrecoverable from the backend: the tx reverts (or silently no-ops if the
+ * wallet is on the other network, since the address has no code there), the
+ * task never reaches Submitted, and settleVerification then fails InvalidStatus
+ * forever with the escrow still funded.
+ */
+export async function buildSubmitEvidenceOn(
+  chain: 'base' | '0g',
+  from: string,
+  taskId: number,
+  evidenceHash: string,
+): Promise<ethers.TransactionRequest> {
+  return chain === 'base'
+    ? buildSubmitEvidenceBase(from, taskId, evidenceHash)
+    : buildSubmitEvidence(from, taskId, evidenceHash);
+}
+
+/** Read the per-task verifier from whichever chain holds the task. */
+export async function getTaskVerifierOn(chain: 'base' | '0g', taskId: number): Promise<string> {
+  return chain === 'base' ? getTaskVerifierBase(taskId) : getTaskVerifier(taskId);
+}
