@@ -251,7 +251,8 @@ export default function AgentDetail() {
           to: agent.walletAddress,
           value: parseEther(TOP_UP_AMOUNT),
         },
-        { sponsor: true },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        { sponsor: true, sponsor_options: { asset: 'usdc' } } as any,
       );
       // Poll for receipt — Privy's sendTransaction returns { hash } without wait().
       const provider = new BrowserProvider(walletClient!.transport);

@@ -26,7 +26,8 @@ export async function signAndSendTx(
   if (sendFn) {
     const tx = await sendFn(
       { to: unsignedTx.to, data: unsignedTx.data, value, gasLimit: 1_000_000 },
-      { sponsor: true },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      { sponsor: true, sponsor_options: { asset: 'usdc' } } as any,
     );
     // Poll for receipt — Privy's sendTransaction returns { hash } without wait().
     for (let i = 0; i < 30; i++) {
