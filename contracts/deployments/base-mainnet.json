@@ -3,9 +3,10 @@
   "chainId": 8453,
   "deployer": "0x0000000000000000000000000000000000000000",
   "timestamp": null,
-  "note": "Placeholder — run deploy-base.ts to populate. BlindEscrow only; agent infra stays on 0G.",
+  "note": "Placeholder — run deploy-base.ts, then deploy-agent-factory.ts, to populate. BlindEscrow + AgentFactory only; agent infra stays on 0G.",
   "contracts": {
     "BlindEscrow": "0x0000000000000000000000000000000000000000",
+    "AgentFactory": "0x0000000000000000000000000000000000000000",
     "USDC": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
   }
 }

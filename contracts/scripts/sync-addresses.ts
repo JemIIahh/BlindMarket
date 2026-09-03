@@ -24,6 +24,10 @@ const KEYS: Record<string, string> = {
   BlindReputation: "blindReputation",
   INFT: "inft",
   ValidatorPool: "validatorPool",
+  AgentFactory: "agentFactory",
+  // Not a deployment of ours, but the settlement token address belongs to the
+  // same record so Base consumers resolve it the same way as everything else.
+  USDC: "USDC",
 };
 
 function load(file: string): Record<string, string> {
