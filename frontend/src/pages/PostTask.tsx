@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useWalletClient } from 'wagmi';
-import { useWallets, useAuthorizationSignature, getEmbeddedConnectedWallet } from '@privy-io/react-auth';
+import { useAuthorizationSignature, useUser } from '@privy-io/react-auth';
 import { getIdentityToken, getAccessToken } from '@privy-io/react-auth';
 import { BrowserProvider, parseUnits, formatUnits } from 'ethers';
 import {
@@ -67,7 +67,7 @@ export default function PostTask() {
   const native = getNativeCurrency(activeChain);
   const address = useChainAddress();
   const { data: walletClient } = useWalletClient();
-  const { wallets } = useWallets();
+  const { user } = useUser();
   const { generateAuthorizationSignature } = useAuthorizationSignature();
   const navigate = useNavigate();
   const { isAuthenticated } = useAuth();
@@ -360,16 +360,16 @@ export default function PostTask() {
       // Only pass native value for legacy 0G escrow (zero-address token).
       const isNativeToken = TOKEN === '0x0000000000000000000000000000000000000000';
       const signer = await (new BrowserProvider(walletClient!.transport)).getSigner();
-      const embeddedWallet = getEmbeddedConnectedWallet(wallets);
+      const walletId = user?.wallet?.id;
       let sent;
-      if (embeddedWallet && !isNativeToken) {
+      if (walletId && !isNativeToken) {
         // Relay through backend for Privy user_pays gas sponsorship
         const chainId = activeChain === 'base' ? BASE_CHAIN_ID : OG_CHAIN_ID;
         const privyRpcBody = buildPrivyRpcBody(taskJson.unsignedTx, undefined, chainId);
         const expiryMs = String(Date.now() + 1_800_000);
-        const authInput = buildAuthRequestInput(privyRpcBody, embeddedWallet.address, import.meta.env.VITE_PRIVY_APP_ID, expiryMs);
+        const authInput = buildAuthRequestInput(privyRpcBody, walletId, import.meta.env.VITE_PRIVY_APP_ID, expiryMs);
         const authSig = await generateAuthorizationSignature(authInput);
-        sent = await sendSponsoredTx(signer, taskJson.unsignedTx, undefined, chainId, embeddedWallet.address, authSig.signature, privyRpcBody, expiryMs);
+        sent = await sendSponsoredTx(signer, taskJson.unsignedTx, undefined, chainId, walletId, authSig.signature, privyRpcBody, expiryMs);
       } else {
         // Fallback: direct send (0G chain or no Privy wallet)
         sent = await signAndSendTx(signer, taskJson.unsignedTx, isNativeToken ? BigInt(amountBase) : undefined);

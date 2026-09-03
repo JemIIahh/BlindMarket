@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import { useBalance, useWalletClient } from 'wagmi';
-import { useWallets, useAuthorizationSignature, getEmbeddedConnectedWallet } from '@privy-io/react-auth';
+import { useAuthorizationSignature, useUser } from '@privy-io/react-auth';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { BrowserProvider, parseEther, formatUnits } from 'ethers';
 import {
@@ -52,7 +52,7 @@ export default function AgentDetail() {
   const { id } = useParams<{ id: string }>();
   const address = useChainAddress();
   const { data: walletClient } = useWalletClient();
-  const { wallets } = useWallets();
+  const { user } = useUser();
   const { generateAuthorizationSignature } = useAuthorizationSignature();
   const qc = useQueryClient();
 
@@ -250,18 +250,18 @@ export default function AgentDetail() {
       const provider = new BrowserProvider(walletClient!.transport);
       const signer = await provider.getSigner();
       const value = parseEther(TOP_UP_AMOUNT);
-      const embeddedWallet = getEmbeddedConnectedWallet(wallets);
+      const walletId = user?.wallet?.id;
 
       let txHash: string;
-      if (embeddedWallet) {
+      if (walletId) {
         // Relay through backend for Privy user_pays gas sponsorship
         const { sendSponsoredTx, buildPrivyRpcBody, buildAuthRequestInput } = await import('../lib/txSigner');
         const unsignedTx = { to: agent.walletAddress, data: '0x', from: address };
         const privyRpcBody = buildPrivyRpcBody(unsignedTx, value, BASE_CHAIN_ID);
         const expiryMs = String(Date.now() + 1_800_000);
-        const authInput = buildAuthRequestInput(privyRpcBody, embeddedWallet.address, import.meta.env.VITE_PRIVY_APP_ID, expiryMs);
+        const authInput = buildAuthRequestInput(privyRpcBody, walletId, import.meta.env.VITE_PRIVY_APP_ID, expiryMs);
         const authSig = await generateAuthorizationSignature(authInput);
-        const sent = await sendSponsoredTx(signer, unsignedTx, value, BASE_CHAIN_ID, embeddedWallet.address, authSig.signature, privyRpcBody, expiryMs);
+        const sent = await sendSponsoredTx(signer, unsignedTx, value, BASE_CHAIN_ID, walletId, authSig.signature, privyRpcBody, expiryMs);
         txHash = sent.hash;
       } else {
         // Fallback: direct send

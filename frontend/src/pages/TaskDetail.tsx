@@ -1,7 +1,7 @@
 import { useParams, Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { useWallets, useAuthorizationSignature, getEmbeddedConnectedWallet } from '@privy-io/react-auth';
+import { useAuthorizationSignature, useUser } from '@privy-io/react-auth';
 import { useTask } from '../hooks/useTasks';
 import { useWallet } from '../context/WalletContext';
 import { useChain } from '../context/ChainContext';
@@ -51,7 +51,7 @@ export default function TaskDetail() {
   const { id } = useParams();
   const { data, isLoading, isError, refetch } = useTask(id || '');
   const { address, signer } = useWallet();
-  const { wallets } = useWallets();
+  const { user } = useUser();
   const { generateAuthorizationSignature } = useAuthorizationSignature();
   const { activeChain } = useChain();
   const explorerUrl = useChainExplorerUrl();
@@ -69,13 +69,13 @@ export default function TaskDetail() {
       if (!id) throw new Error('Missing task id');
       if (!signer) throw new Error('Wallet not connected');
       const tx = await buildCancelTask(id);
-      const embeddedWallet = getEmbeddedConnectedWallet(wallets);
-      if (embeddedWallet) {
+      const walletId = user?.wallet?.id;
+      if (walletId) {
         const privyRpcBody = buildPrivyRpcBody(tx, undefined, BASE_CHAIN_ID);
         const expiryMs = String(Date.now() + 1_800_000);
-        const authInput = buildAuthRequestInput(privyRpcBody, embeddedWallet.address, import.meta.env.VITE_PRIVY_APP_ID, expiryMs);
+        const authInput = buildAuthRequestInput(privyRpcBody, walletId, import.meta.env.VITE_PRIVY_APP_ID, expiryMs);
         const authSig = await generateAuthorizationSignature(authInput);
-        await sendSponsoredTx(signer, tx, undefined, BASE_CHAIN_ID, embeddedWallet.address, authSig.signature, privyRpcBody, expiryMs);
+        await sendSponsoredTx(signer, tx, undefined, BASE_CHAIN_ID, walletId, authSig.signature, privyRpcBody, expiryMs);
       } else {
         await signAndSendTx(signer, tx);
       }
@@ -88,13 +88,13 @@ export default function TaskDetail() {
       if (!id) throw new Error('Missing task id');
       if (!signer) throw new Error('Wallet not connected');
       const tx = await buildClaimTimeout(id);
-      const embeddedWallet = getEmbeddedConnectedWallet(wallets);
-      if (embeddedWallet) {
+      const walletId = user?.wallet?.id;
+      if (walletId) {
         const privyRpcBody = buildPrivyRpcBody(tx, undefined, BASE_CHAIN_ID);
         const expiryMs = String(Date.now() + 1_800_000);
-        const authInput = buildAuthRequestInput(privyRpcBody, embeddedWallet.address, import.meta.env.VITE_PRIVY_APP_ID, expiryMs);
+        const authInput = buildAuthRequestInput(privyRpcBody, walletId, import.meta.env.VITE_PRIVY_APP_ID, expiryMs);
         const authSig = await generateAuthorizationSignature(authInput);
-        await sendSponsoredTx(signer, tx, undefined, BASE_CHAIN_ID, embeddedWallet.address, authSig.signature, privyRpcBody, expiryMs);
+        await sendSponsoredTx(signer, tx, undefined, BASE_CHAIN_ID, walletId, authSig.signature, privyRpcBody, expiryMs);
       } else {
         await signAndSendTx(signer, tx);
       }
