@@ -57,7 +57,10 @@ export const config = {
   inftAddress: optional('INFT_ADDRESS', ADDR.inft),
 
   // Contracts — Base (settlement)
-  baseEscrowAddress: optional('BASE_ESCROW_ADDRESS', BASE_ADDR.blindEscrow),
+  // Zero here means Base isn't deployed on this network yet. Left as-is it is a
+  // truthy string, which switches POST /tasks onto the Base escrow and points
+  // createTask at address(0) — so collapse it to '' and stay on the 0G path.
+  baseEscrowAddress: unsetIfZero(optional('BASE_ESCROW_ADDRESS', BASE_ADDR.blindEscrow)),
   baseUsdcAddress: optional('BASE_USDC_ADDRESS', IS_PROD ? '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' : '0x036CbD53842c5426634e7929541eC2318f3dCF7e'),
   // The generated module carries a zero-address placeholder for networks the
   // factory hasn't been deployed to yet. Treat that as "not configured" so the
