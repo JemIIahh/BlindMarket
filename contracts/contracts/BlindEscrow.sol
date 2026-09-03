@@ -4,6 +4,8 @@ pragma solidity ^0.8.24;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
@@ -291,34 +293,19 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
     }
 
     /**
-     * @dev Compute EIP-191 personal_sign hash: keccak256("\x19Ethereum Signed Message:\n" + len(message) + message)
+     * @dev Verify that `signature` is a valid enclave signature over `signedText`.
+     *      Uses OpenZeppelin's ECDSA, which rejects malleable (high-s) signatures
+     *      and bad lengths instead of returning a junk address.
      */
-    function _eip191Hash(bytes calldata message) internal pure returns (bytes32) {
-        // Convert message length to decimal string
-        uint256 len = message.length;
-        bytes memory lenStr;
-        if (len == 0) {
-            lenStr = "0";
-        } else {
-            uint256 temp = len;
-            uint256 digits;
-            while (temp > 0) {
-                digits++;
-                temp /= 10;
-            }
-            lenStr = new bytes(digits);
-            temp = len;
-            for (uint256 i = digits; i > 0; i--) {
-                lenStr[i - 1] = bytes1(uint8(48 + (temp % 10)));
-                temp /= 10;
-            }
-        }
+    function _verifyTeeSignature(bytes calldata signature, bytes calldata signedText) internal view {
+        if (teeSigner == address(0)) revert TEESignerNotSet();
 
-        return keccak256(abi.encodePacked(
-            "\x19Ethereum Signed Message:\n",
-            lenStr,
-            message
-        ));
+        bytes32 digest = MessageHashUtils.toEthSignedMessageHash(signedText);
+        (address recovered, ECDSA.RecoverError err, ) = ECDSA.tryRecoverCalldata(digest, signature);
+
+        if (err != ECDSA.RecoverError.NoError || recovered != teeSigner) {
+            revert InvalidTEESignature();
+        }
     }
 
     /**
@@ -448,13 +435,26 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
     }
 
     /**
-     * @notice Settlement via 0G TEE attestation signature.
-     *         Anyone can call this (no address gate) — the TEE signature is
-     *         verified on-chain via ecrecover against the registered teeSigner.
+     * @notice Settlement that additionally records a 0G TEE attestation on-chain.
+     *
+     * @dev Authorization is identical to {completeVerification} and is NOT
+     *      delegated to the signature. The 0G TEE signs a commitment over an
+     *      inference request/response pair — it carries no binding to `taskId`,
+     *      to `passed`, or to this contract, and the same enclave key signs for
+     *      every customer of that provider. Treating such a signature as an
+     *      authorization token would let anyone holding any enclave signature
+     *      settle any submitted task; the attestation is therefore an
+     *      *additional* requirement layered on top of the verifier gate, never
+     *      a replacement for it.
+     *
+     *      Making this path genuinely trustless requires an enclave that signs
+     *      over (chainId, address(this), taskId, passed, evidenceHash). Until
+     *      the 0G TEE can produce that commitment, the verifier gate stands.
+     *
      * @param taskId On-chain task ID
      * @param passed Whether verification passed
      * @param signature ECDSA signature from the 0G TEE (65 bytes: r + s + v)
-     * @param signedText The exact text the TEE signed via personal_sign (commitment over request+response hashes)
+     * @param signedText The exact text the TEE signed via personal_sign
      */
     function completeVerificationWithTEE(
         uint256 taskId,
@@ -462,31 +462,22 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         bytes calldata signature,
         bytes calldata signedText
     ) external nonReentrant whenNotPaused {
-        if (teeSigner == address(0)) revert TEESignerNotSet();
-        if (signature.length != 65) revert InvalidTEESignature();
-
         Task storage t = _tasks[taskId];
+
+        // Same gate as completeVerification: a per-task verifier settles its own
+        // task, everything else falls back to the global marketplace verifier,
+        // and the worker can never settle the job it was paid for.
+        address taskV = taskVerifier[taskId];
+        if (taskV != address(0)) {
+            if (msg.sender != taskV) revert NotVerifier();
+        } else {
+            if (msg.sender != verifier) revert NotVerifier();
+        }
+        if (msg.sender == t.worker) revert NotVerifier();
+
         if (t.status != TaskStatus.Submitted) revert InvalidStatus(t.status, TaskStatus.Submitted);
 
-        // Compute EIP-191 personal_sign hash on-chain
-        bytes32 msgHash = _eip191Hash(signedText);
-
-        bytes32 r;
-        bytes32 s;
-        uint8 v;
-
-        assembly {
-            r := calldataload(add(signature.offset, 0))
-            s := calldataload(add(signature.offset, 32))
-            v := byte(0, calldataload(add(signature.offset, 64)))
-        }
-
-        if (v < 27) v += 27;
-
-        address recoveredSigner = ecrecover(msgHash, v, r, s);
-        if (recoveredSigner == address(0) || recoveredSigner != teeSigner) {
-            revert InvalidTEESignature();
-        }
+        _verifyTeeSignature(signature, signedText);
 
         emit VerificationCompleted(taskId, passed);
         emit TEESettled(taskId, passed, teeSigner);

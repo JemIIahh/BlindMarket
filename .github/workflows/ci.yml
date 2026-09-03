@@ -8,6 +8,15 @@ name: CI
 # every A2A agent in prod (ECIES_PUBKEY_LENGTH). `npm test` runs the capability
 # + key-custody regression suite. To make this actually block regressions,
 # also add it as a required status check in branch protection for master.
+#
+# The contracts job exists because the code that holds the money was the only
+# part of the repo CI never looked at. An unauthenticated settlement path
+# (completeVerificationWithTEE, which let any holder of any enclave signature
+# release any submitted task's escrow) and a payment contract with no tests at
+# all both shipped to master green. `npm test` there runs the Hardhat suite;
+# `npm run check-addresses` re-derives backend/frontend contractAddresses.ts
+# from deployments/*.json and fails when someone hand-edits the generated file
+# instead of updating the deployment record.
 
 on:
   push:
@@ -45,3 +54,22 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npm run build
+
+  contracts:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: contracts/package-lock.json
+      - run: npm ci
+      - run: npm test
+      # Drift guard: the committed address modules must still match what
+      # deployments/*.json generates. Runs after the suite so a genuine test
+      # failure is the first thing reported.
+      - run: npm run check-addresses

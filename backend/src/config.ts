@@ -13,6 +13,13 @@ function optional(key: string, fallback: string): string {
   return process.env[key] || fallback;
 }
 
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
+
+/** Collapse an undeployed placeholder address to '' so callers can treat it as unset. */
+function unsetIfZero(address: string): string {
+  return address.toLowerCase() === ZERO_ADDRESS ? '' : address;
+}
+
 const IS_PROD = process.env.NODE_ENV === 'production';
 
 // Contract-address fallbacks are single-sourced from contracts/deployments/*.json
@@ -50,9 +57,20 @@ export const config = {
   inftAddress: optional('INFT_ADDRESS', ADDR.inft),
 
   // Contracts — Base (settlement)
-  baseEscrowAddress: optional('BASE_ESCROW_ADDRESS', BASE_ADDR.blindEscrow),
+  // Zero here means Base isn't deployed on this network yet. Left as-is it is a
+  // truthy string, which switches POST /tasks onto the Base escrow and points
+  // createTask at address(0) — so collapse it to '' and stay on the 0G path.
+  baseEscrowAddress: unsetIfZero(optional('BASE_ESCROW_ADDRESS', BASE_ADDR.blindEscrow)),
   baseUsdcAddress: optional('BASE_USDC_ADDRESS', IS_PROD ? '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' : '0x036CbD53842c5426634e7929541eC2318f3dCF7e'),
-  agentFactoryAddress: optional('AGENT_FACTORY_ADDRESS', BASE_ADDR?.agentFactory || ''),
+  // The generated module carries a zero-address placeholder for networks the
+  // factory hasn't been deployed to yet. Treat that as "not configured" so the
+  // listener stays disabled instead of polling address(0) forever.
+  agentFactoryAddress: unsetIfZero(optional('AGENT_FACTORY_ADDRESS', BASE_ADDR?.agentFactory || '')),
+
+  // Address of the 0G TEE enclave key, as registered on-chain via
+  // BlindEscrow.setTeeSigner. Unset disables TEE-attested settlement and the
+  // bridge falls back to the plain verifier path.
+  teeSignerAddress: unsetIfZero(optional('TEE_SIGNER_ADDRESS', '')),
 
   // Auth — Privy is the sole identity provider; agent API key for service callers
   agentApiKey: process.env.AGENT_API_KEY || '',

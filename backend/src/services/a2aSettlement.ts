@@ -26,8 +26,9 @@
  */
 
 import type { ContractTransactionResponse } from 'ethers';
-import { isAddress } from 'ethers';
+import { isAddress, verifyMessage, toUtf8Bytes, isHexString, hexlify, getBytes } from 'ethers';
 import { escrowAsMarketplace, marketplaceSigner, baseEscrowAsMarketplace, baseMarketplaceSigner } from './chain.js';
+import { config } from '../config.js';
 import { getTaskIdByHash } from './escrowEvents.js';
 import { getBaseTaskIdByHash } from './baseEscrowEvents.js';
 import * as a2aStore from './a2aStore.js';
@@ -309,16 +310,53 @@ function truncate(s: string): string {
  * for trustless settlement — the on-chain ecrecover verifies the TEE signature
  * against the registered teeSigner, removing the backend as trusted party.
  */
+export type TeeAttestation = {
+  signature: string;
+  signer?: string;
+  signedText: string;
+  chatID?: string;
+  verified?: boolean;
+};
+
+/**
+ * The 0G provider returns the signed commitment as plain text, but the contract
+ * takes `bytes`. ethers rejects a non-hex string for a bytes parameter with
+ * "invalid BytesLike value", so it has to be encoded before it goes anywhere
+ * near the ABI encoder — or the signature check below.
+ */
+export function normalizeSignedText(signedText: string): string {
+  return isHexString(signedText) ? signedText : hexlify(toUtf8Bytes(signedText));
+}
+
+/**
+ * Recover the enclave signature and check it against the configured TEE signer.
+ *
+ * The attestation is supplied by the worker agent, so nothing in it — the
+ * `verified` flag least of all — can be taken on trust. Note this establishes
+ * only that a registered enclave signed the given text: the 0G TEE signs a
+ * commitment over an inference request/response and cannot bind that to a task
+ * id or a verdict, which is why the on-chain path keeps its verifier gate.
+ */
+export function isTeeAttestationValid(att?: TeeAttestation | null): boolean {
+  if (!att?.signature || !att.signedText) return false;
+
+  const expected = config.teeSignerAddress;
+  if (!expected) return false;
+
+  try {
+    // Verify over exactly the bytes that will be sent on-chain, so a signature
+    // that passes here cannot fail the contract's own ecrecover.
+    const recovered = verifyMessage(getBytes(normalizeSignedText(att.signedText)), att.signature);
+    return recovered.toLowerCase() === expected.toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
 export async function settleVerification(
   taskHash: string,
   passed: boolean,
-  teeAttestation?: {
-    signature: string;
-    signer?: string;
-    signedText: string;
-    chatID?: string;
-    verified?: boolean;
-  } | null,
+  teeAttestation?: TeeAttestation | null,
 ): Promise<SettleResult> {
   if (!verificationBridgeReady()) {
     const msg = 'Verification bridge disabled: BASE_MARKETPLACE_SIGNER_PRIVATE_KEY not set';
@@ -334,11 +372,13 @@ export async function settleVerification(
     return { success: false, error: msg };
   }
 
-  // Determine whether to use TEE settlement
-  const useTEE = teeAttestation
-    && teeAttestation.signature
-    && teeAttestation.signedText
-    && teeAttestation.verified === true;
+  // Determine whether to use TEE settlement.
+  //
+  // `verified` arrives in the worker's own /submit payload, so it is a claim by
+  // the party being paid, not evidence. Recover the signer here instead: an
+  // attestation that doesn't check out falls back to the legacy path rather
+  // than sending a transaction the contract would revert.
+  const useTEE = isTeeAttestationValid(teeAttestation);
 
   try {
     const taskId = await waitForBaseTaskId(taskHash);
@@ -357,8 +397,8 @@ export async function settleVerification(
           baseEscrowAsMarketplace!.completeVerificationWithTEE(
             BigInt(taskId),
             passed,
-            teeAttestation.signature,
-            teeAttestation.signedText,
+            teeAttestation!.signature,
+            normalizeSignedText(teeAttestation!.signedText),
           ) as Promise<ContractTransactionResponse>,
         );
       } else {
