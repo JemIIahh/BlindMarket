@@ -1,7 +1,7 @@
 import { useParams, Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { useWallets, useAuthorizationSignature } from '@privy-io/react-auth';
+import { useWallets, useAuthorizationSignature, getEmbeddedConnectedWallet } from '@privy-io/react-auth';
 import { useTask } from '../hooks/useTasks';
 import { useWallet } from '../context/WalletContext';
 import { useChain } from '../context/ChainContext';
@@ -69,12 +69,12 @@ export default function TaskDetail() {
       if (!id) throw new Error('Missing task id');
       if (!signer) throw new Error('Wallet not connected');
       const tx = await buildCancelTask(id);
-      const privyWallet = wallets[0];
-      if (privyWallet) {
+      const embeddedWallet = getEmbeddedConnectedWallet(wallets);
+      if (embeddedWallet) {
         const privyRpcBody = buildPrivyRpcBody(tx, undefined, BASE_CHAIN_ID);
-        const authInput = buildAuthRequestInput(privyRpcBody, address!, import.meta.env.VITE_PRIVY_APP_ID);
+        const authInput = buildAuthRequestInput(privyRpcBody, embeddedWallet.address, import.meta.env.VITE_PRIVY_APP_ID);
         const authSig = await generateAuthorizationSignature(authInput);
-        await sendSponsoredTx(signer, tx, undefined, BASE_CHAIN_ID, address!, authSig.signature, privyRpcBody);
+        await sendSponsoredTx(signer, tx, undefined, BASE_CHAIN_ID, embeddedWallet.address, authSig.signature, privyRpcBody);
       } else {
         await signAndSendTx(signer, tx);
       }
@@ -87,12 +87,12 @@ export default function TaskDetail() {
       if (!id) throw new Error('Missing task id');
       if (!signer) throw new Error('Wallet not connected');
       const tx = await buildClaimTimeout(id);
-      const privyWallet = wallets[0];
-      if (privyWallet) {
+      const embeddedWallet = getEmbeddedConnectedWallet(wallets);
+      if (embeddedWallet) {
         const privyRpcBody = buildPrivyRpcBody(tx, undefined, BASE_CHAIN_ID);
-        const authInput = buildAuthRequestInput(privyRpcBody, address!, import.meta.env.VITE_PRIVY_APP_ID);
+        const authInput = buildAuthRequestInput(privyRpcBody, embeddedWallet.address, import.meta.env.VITE_PRIVY_APP_ID);
         const authSig = await generateAuthorizationSignature(authInput);
-        await sendSponsoredTx(signer, tx, undefined, BASE_CHAIN_ID, address!, authSig.signature, privyRpcBody);
+        await sendSponsoredTx(signer, tx, undefined, BASE_CHAIN_ID, embeddedWallet.address, authSig.signature, privyRpcBody);
       } else {
         await signAndSendTx(signer, tx);
       }

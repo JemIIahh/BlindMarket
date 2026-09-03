@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import { useBalance, useWalletClient } from 'wagmi';
-import { useWallets, useAuthorizationSignature } from '@privy-io/react-auth';
+import { useWallets, useAuthorizationSignature, getEmbeddedConnectedWallet } from '@privy-io/react-auth';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { BrowserProvider, parseEther, formatUnits } from 'ethers';
 import {
@@ -250,17 +250,17 @@ export default function AgentDetail() {
       const provider = new BrowserProvider(walletClient!.transport);
       const signer = await provider.getSigner();
       const value = parseEther(TOP_UP_AMOUNT);
-      const privyWallet = wallets[0];
+      const embeddedWallet = getEmbeddedConnectedWallet(wallets);
 
       let txHash: string;
-      if (privyWallet) {
+      if (embeddedWallet) {
         // Relay through backend for Privy user_pays gas sponsorship
         const { sendSponsoredTx, buildPrivyRpcBody, buildAuthRequestInput } = await import('../lib/txSigner');
         const unsignedTx = { to: agent.walletAddress, data: '0x', from: address };
         const privyRpcBody = buildPrivyRpcBody(unsignedTx, value, BASE_CHAIN_ID);
-        const authInput = buildAuthRequestInput(privyRpcBody, address, import.meta.env.VITE_PRIVY_APP_ID);
+        const authInput = buildAuthRequestInput(privyRpcBody, embeddedWallet.address, import.meta.env.VITE_PRIVY_APP_ID);
         const authSig = await generateAuthorizationSignature(authInput);
-        const sent = await sendSponsoredTx(signer, unsignedTx, value, BASE_CHAIN_ID, address, authSig.signature, privyRpcBody);
+        const sent = await sendSponsoredTx(signer, unsignedTx, value, BASE_CHAIN_ID, embeddedWallet.address, authSig.signature, privyRpcBody);
         txHash = sent.hash;
       } else {
         // Fallback: direct send

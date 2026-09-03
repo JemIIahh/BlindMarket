@@ -71,7 +71,7 @@ export function useUsdcBalance() {
     address: BASE_USDC_ADDRESS as `0x${string}`,
     abi: ERC20_ABI,
     functionName: 'balanceOf',
-    args: address ? [address] : undefined,
+    args: address ? [address as `0x${string}`] : undefined,
     chainId: BASE_CHAIN_ID,
     query: { enabled: !!address, refetchInterval: 10_000 },
   });
