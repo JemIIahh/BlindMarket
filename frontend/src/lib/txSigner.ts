@@ -1,6 +1,7 @@
 import type { ethers } from 'ethers';
 import type { UnsignedTx } from '../types/api';
 import { API_BASE_URL } from '../config/constants';
+import { getAuthHeaders } from './api';
 
 export interface SentTx {
   hash: string;
@@ -64,7 +65,7 @@ export async function sendSponsoredTx(
 ): Promise<SentTx> {
   const res = await fetch(`${API_BASE_URL}/api/v1/tx/send-sponsored`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...(await getAuthHeaders()) },
     credentials: 'include',
     body: JSON.stringify({
       to: unsignedTx.to,

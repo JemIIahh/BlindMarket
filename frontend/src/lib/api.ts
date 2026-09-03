@@ -30,7 +30,7 @@ export function setAccessTokenGetter(getter: (() => Promise<string | null>) | nu
   _getAccessToken = getter;
 }
 
-async function getAuthHeaders(overrideToken?: string): Promise<Record<string, string>> {
+export async function getAuthHeaders(overrideToken?: string): Promise<Record<string, string>> {
   const headers: Record<string, string> = {};
   if (overrideToken) {
     headers.Authorization = `Bearer ${overrideToken}`;
