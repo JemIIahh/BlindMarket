@@ -354,8 +354,11 @@ export default function PostTask() {
 
       // 7. Sign and send — EVM via ethers/MetaMask
       setStatus('signing');
-      console.log(`[PostTask] Signing registration TX with value ${amountBase}...`);
-      const sent = await signAndSendTx(await (new BrowserProvider(walletClient!.transport)).getSigner(), taskJson.unsignedTx, BigInt(amountBase), sendTransaction);
+      console.log(`[PostTask] Signing registration TX (Base escrow, no native value)...`);
+      // For Base USDC escrow, value is 0 — the USDC amount is encoded in calldata.
+      // Only pass native value for legacy 0G escrow (zero-address token).
+      const isNativeToken = TOKEN === '0x0000000000000000000000000000000000000000';
+      const sent = await signAndSendTx(await (new BrowserProvider(walletClient!.transport)).getSigner(), taskJson.unsignedTx, isNativeToken ? BigInt(amountBase) : undefined, sendTransaction);
       const txHash = sent.hash;
       console.log(`[PostTask] Task TX submitted: hash=${txHash} block=${sent.receipt?.blockNumber ?? 'pending'}`);
 
