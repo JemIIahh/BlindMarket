@@ -1,5 +1,6 @@
 import type { ethers } from 'ethers';
 import type { UnsignedTx } from '../types/api';
+import { getAccessToken } from '@privy-io/react-auth';
 
 export interface SentTx {
   hash: string;
@@ -58,13 +59,20 @@ export async function sendSponsoredTx(
 ): Promise<SentTx> {
   const privyAppId = import.meta.env.VITE_PRIVY_APP_ID;
 
+  const accessToken = await getAccessToken();
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'privy-app-id': privyAppId,
+    'privy-authorization-signature': authorizationSignature,
+  };
+  if (accessToken) {
+    headers['Authorization'] = `Bearer ${accessToken}`;
+  }
+
   const privyRes = await fetch(`https://api.privy.io/v1/wallets/${walletAddress}/rpc`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'privy-app-id': privyAppId,
-      'privy-authorization-signature': authorizationSignature,
-    },
+    headers,
     body: JSON.stringify(privyRpcBody),
   });
 
