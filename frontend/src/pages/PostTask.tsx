@@ -366,9 +366,10 @@ export default function PostTask() {
         // Relay through backend for Privy user_pays gas sponsorship
         const chainId = activeChain === 'base' ? BASE_CHAIN_ID : OG_CHAIN_ID;
         const privyRpcBody = buildPrivyRpcBody(taskJson.unsignedTx, undefined, chainId);
-        const authInput = buildAuthRequestInput(privyRpcBody, embeddedWallet.address, import.meta.env.VITE_PRIVY_APP_ID);
+        const expiryMs = String(Date.now() + 1_800_000);
+        const authInput = buildAuthRequestInput(privyRpcBody, embeddedWallet.address, import.meta.env.VITE_PRIVY_APP_ID, expiryMs);
         const authSig = await generateAuthorizationSignature(authInput);
-        sent = await sendSponsoredTx(signer, taskJson.unsignedTx, undefined, chainId, embeddedWallet.address, authSig.signature, privyRpcBody);
+        sent = await sendSponsoredTx(signer, taskJson.unsignedTx, undefined, chainId, embeddedWallet.address, authSig.signature, privyRpcBody, expiryMs);
       } else {
         // Fallback: direct send (0G chain or no Privy wallet)
         sent = await signAndSendTx(signer, taskJson.unsignedTx, isNativeToken ? BigInt(amountBase) : undefined);

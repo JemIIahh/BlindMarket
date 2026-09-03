@@ -258,9 +258,10 @@ export default function AgentDetail() {
         const { sendSponsoredTx, buildPrivyRpcBody, buildAuthRequestInput } = await import('../lib/txSigner');
         const unsignedTx = { to: agent.walletAddress, data: '0x', from: address };
         const privyRpcBody = buildPrivyRpcBody(unsignedTx, value, BASE_CHAIN_ID);
-        const authInput = buildAuthRequestInput(privyRpcBody, embeddedWallet.address, import.meta.env.VITE_PRIVY_APP_ID);
+        const expiryMs = String(Date.now() + 1_800_000);
+        const authInput = buildAuthRequestInput(privyRpcBody, embeddedWallet.address, import.meta.env.VITE_PRIVY_APP_ID, expiryMs);
         const authSig = await generateAuthorizationSignature(authInput);
-        const sent = await sendSponsoredTx(signer, unsignedTx, value, BASE_CHAIN_ID, embeddedWallet.address, authSig.signature, privyRpcBody);
+        const sent = await sendSponsoredTx(signer, unsignedTx, value, BASE_CHAIN_ID, embeddedWallet.address, authSig.signature, privyRpcBody, expiryMs);
         txHash = sent.hash;
       } else {
         // Fallback: direct send

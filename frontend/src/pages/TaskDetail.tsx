@@ -72,9 +72,10 @@ export default function TaskDetail() {
       const embeddedWallet = getEmbeddedConnectedWallet(wallets);
       if (embeddedWallet) {
         const privyRpcBody = buildPrivyRpcBody(tx, undefined, BASE_CHAIN_ID);
-        const authInput = buildAuthRequestInput(privyRpcBody, embeddedWallet.address, import.meta.env.VITE_PRIVY_APP_ID);
+        const expiryMs = String(Date.now() + 1_800_000);
+        const authInput = buildAuthRequestInput(privyRpcBody, embeddedWallet.address, import.meta.env.VITE_PRIVY_APP_ID, expiryMs);
         const authSig = await generateAuthorizationSignature(authInput);
-        await sendSponsoredTx(signer, tx, undefined, BASE_CHAIN_ID, embeddedWallet.address, authSig.signature, privyRpcBody);
+        await sendSponsoredTx(signer, tx, undefined, BASE_CHAIN_ID, embeddedWallet.address, authSig.signature, privyRpcBody, expiryMs);
       } else {
         await signAndSendTx(signer, tx);
       }
@@ -90,9 +91,10 @@ export default function TaskDetail() {
       const embeddedWallet = getEmbeddedConnectedWallet(wallets);
       if (embeddedWallet) {
         const privyRpcBody = buildPrivyRpcBody(tx, undefined, BASE_CHAIN_ID);
-        const authInput = buildAuthRequestInput(privyRpcBody, embeddedWallet.address, import.meta.env.VITE_PRIVY_APP_ID);
+        const expiryMs = String(Date.now() + 1_800_000);
+        const authInput = buildAuthRequestInput(privyRpcBody, embeddedWallet.address, import.meta.env.VITE_PRIVY_APP_ID, expiryMs);
         const authSig = await generateAuthorizationSignature(authInput);
-        await sendSponsoredTx(signer, tx, undefined, BASE_CHAIN_ID, embeddedWallet.address, authSig.signature, privyRpcBody);
+        await sendSponsoredTx(signer, tx, undefined, BASE_CHAIN_ID, embeddedWallet.address, authSig.signature, privyRpcBody, expiryMs);
       } else {
         await signAndSendTx(signer, tx);
       }
