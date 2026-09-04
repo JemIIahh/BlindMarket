@@ -76,7 +76,10 @@ vi.mock('../services/apiKeyStore.js', () => ({
 // Infra-touching modules agents.ts also imports, unused by the routes under
 // test — stubbed purely so importing the router doesn't drag in real
 // network/DB/chain access.
-vi.mock('../services/chain.js', () => ({ provider: {} }));
+// agents.ts imports both providers (the withdraw endpoint resolves a chain
+// per network), so both must be present or the module throws on import and
+// this whole file silently stops running.
+vi.mock('../services/chain.js', () => ({ provider: {}, baseProvider: {} }));
 vi.mock('../services/redis.js', () => ({
   redis: { get: vi.fn(), set: vi.fn(), exists: vi.fn(), pipeline: vi.fn() },
 }));
