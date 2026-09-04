@@ -51,14 +51,21 @@ txRouter.post('/relay-tx', requireAuth, async (req, res, next) => {
 
     const privy = getPrivyClient();
 
-    // Look up the Privy wallet ID by address
+    console.log(`[relay-tx] Looking up wallet address=${body.walletAddress} chain=${body.chain} caip2=${caip2}`);
+
+    // Look up the Privy wallet ID by address.
+    // External wallets (MetaMask connected via Privy's "wallet" login) are
+    // NOT managed by Privy — getWalletByAddress only finds embedded wallets
+    // created by Privy's social/email login.  When the lookup fails, tell
+    // the frontend to fall back to direct signing (user pays gas).
     let walletId: string;
     try {
       const wallet = await privy.wallets().getWalletByAddress({ address: body.walletAddress });
       walletId = wallet.id;
+      console.log(`[relay-tx] Found wallet id=${walletId}`);
     } catch (err: any) {
-      console.error('[relay-tx] getWalletByAddress failed:', err?.message || err);
-      throw new AppError(400, 'WALLET_NOT_FOUND', `Wallet ${body.walletAddress} not found in Privy. Is the user logged in with Privy?`);
+      console.warn('[relay-tx] getWalletByAddress failed:', err?.status, err?.message || err);
+      throw new AppError(400, 'WALLET_NOT_FOUND', `Wallet ${body.walletAddress} is not a Privy embedded wallet. Log in with email/social to create one, or the frontend will sign directly (user pays gas).`);
     }
 
     // Build the transaction params

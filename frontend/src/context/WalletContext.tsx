@@ -33,7 +33,11 @@ function PrivyWalletProvider({ children }: { children: ReactNode }) {
   // MetaMask even before the user completes the Privy login flow — causing
   // the TopBar to render "disconnect/address" instead of "connect_wallet",
   // and clicks to silently hit /sessions/logout (400, nothing to destroy).
-  const rawWallet = wallets[0] ?? null;
+  //
+  // Prefer the Privy embedded wallet (walletClientType === 'privy') over any
+  // injected wallet (MetaMask, etc.) — the embedded wallet is the one Privy
+  // manages server-side for gas sponsorship.
+  const rawWallet = wallets.find(w => w.walletClientType === 'privy') ?? wallets[0] ?? null;
   const wallet = authenticated ? rawWallet : null;
   const address = wallet?.address ?? null;
   const isCorrectChain = chainId === OG_CHAIN_ID || chainId === BASE_CHAIN_ID;
