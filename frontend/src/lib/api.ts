@@ -9,7 +9,16 @@ class ApiError extends Error {
 }
 
 async function handleResponse<T>(res: Response): Promise<T> {
-  const body = await res.json() as ApiResponse<T> | ApiErrorResponse;
+  const text = await res.text();
+  if (!text) {
+    throw new ApiError('EMPTY_RESPONSE', `Server returned empty response (${res.status})`, res.status);
+  }
+  let body: ApiResponse<T> | ApiErrorResponse;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    throw new ApiError('PARSE_ERROR', `Invalid JSON from server: ${text.slice(0, 200)}`, res.status);
+  }
 
   if (!res.ok || !body.success) {
     const err = body as ApiErrorResponse;
