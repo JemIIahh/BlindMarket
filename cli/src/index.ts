@@ -80,46 +80,102 @@ program
 
 program
   .command('post-task')
-  .description('Post a new encrypted task')
-  .requiredOption('--instructions <text>', 'Task instructions (will be encrypted)')
+  .description('Post a new task — encrypted by default; use --public for a plaintext task any agent can pick up with zero crypto')
+  .requiredOption('--instructions <text>', 'Task instructions (encrypted by default; see --public)')
   .requiredOption('--category <cat>', 'Category (e.g. photography, research, verification)')
   .requiredOption('--amount <wei>', 'Payment amount in wei')
   .requiredOption('--token <address>', 'ERC-20 token address for payment')
   .option('--zone <zone>', 'Location zone', 'global')
   .option('--duration <seconds>', 'Task duration in seconds', '86400')
-  .action(async (opts: { instructions: string; category: string; amount: string; token: string; zone: string; duration: string }) => {
+  .option('--public', 'Post the brief in plaintext — no encryption, no wrapped keys, readable by any agent')
+  .action(async (opts: { instructions: string; category: string; amount: string; token: string; zone: string; duration: string; public?: boolean }) => {
     const cfg = loadConfig();
     if (!cfg.apiKey) { console.error('Not registered. Run: blind register --name <name>'); process.exit(1); }
 
-    const spin = ora('Encrypting and posting task…').start();
+    const spin = ora(opts.public ? 'Posting task…' : 'Encrypting and posting task…').start();
     try {
-      // Encrypt instructions (AES-256-GCM via Web Crypto — use Node crypto here)
-      const { createCipheriv, randomBytes, createHash } = await import('crypto');
-      const key = randomBytes(32);
-      const iv = randomBytes(12);
-      const cipher = createCipheriv('aes-256-gcm', key, iv);
-      const encrypted = Buffer.concat([cipher.update(opts.instructions, 'utf8'), cipher.final()]);
-      const tag = cipher.getAuthTag();
-      const blob = Buffer.concat([iv, tag, encrypted]).toString('base64');
+      // Crypto lives in @blindmarket/sdk/crypto — the same AES-256-GCM /
+      // ECIES-secp256k1 wire format as backend/src/services/crypto.ts and
+      // frontend/src/lib/crypto.ts, so blobs decrypt anywhere in the stack.
+      const { generateAesKey, aesEncrypt, eciesEncrypt, sha256, bytesToHex } = await import('@blindmarket/sdk/crypto');
+      const plaintext = new TextEncoder().encode(opts.instructions);
+
+      let blob: Uint8Array;
+      let taskHash: string;
+      let wrappedKeys: Record<string, string> | undefined;
+
+      if (opts.public) {
+        blob = plaintext;
+        taskHash = '0x' + bytesToHex(await sha256(plaintext));
+      } else {
+        // Wrap the AES key to every currently-registered executor so any of
+        // them can decrypt and pick up the task — mirrors the "Use from your
+        // agent" script and the MCP server's post_task tool.
+        const { executors } = await api.get<{ executors: Array<{ address: string; publicKey: string }> }>(
+          '/api/v1/a2a/executors?capabilities=',
+          cfg.apiKey,
+        );
+        if (executors.length === 0) {
+          spin.warn('No registered executors — an encrypted task can never be picked up.');
+          console.error('  Re-run with --public to post a plaintext task any agent can read, or wait for executors to register first.');
+          process.exit(1);
+        }
+
+        const aesKey = await generateAesKey();
+        const ciphertext = await aesEncrypt(plaintext, aesKey);
+        blob = ciphertext;
+        taskHash = '0x' + bytesToHex(await sha256(ciphertext));
+
+        wrappedKeys = {};
+        for (const exec of executors) {
+          try {
+            wrappedKeys[exec.address.toLowerCase()] = bytesToHex(await eciesEncrypt(aesKey, exec.publicKey));
+          } catch {
+            // skip malformed pubkey
+          }
+        }
+      }
 
       // Upload to storage
-      const { rootHash } = await api.post<{ rootHash: string }>('/api/v1/storage/upload', { data: blob }, cfg.apiKey);
+      const { rootHash } = await api.post<{ rootHash: string }>(
+        '/api/v1/storage/upload',
+        { data: Buffer.from(blob).toString('base64') },
+        cfg.apiKey,
+      );
 
-      // taskHash = SHA-256 of ciphertext
-      const taskHash = '0x' + createHash('sha256').update(Buffer.concat([iv, tag, encrypted])).digest('hex');
-
-      // Build unsigned tx
+      // Build unsigned tx. rootHash + wrappedKeys ride along here (matching
+      // the reference MCP flow) so they're on record from the start, but
+      // POST /api/v1/tasks only builds the createTask transaction — it does
+      // NOT persist key material. That happens at POST /api/v1/a2a/tasks/index,
+      // which needs a confirmed txHash, so it must run after you sign +
+      // broadcast below (see the printed follow-up call).
       const { unsignedTx } = await api.post<{ unsignedTx: object }>(
         '/api/v1/tasks',
-        { taskHash, token: opts.token, amount: opts.amount, category: opts.category, locationZone: opts.zone, duration: opts.duration },
+        {
+          taskHash, token: opts.token, amount: opts.amount, category: opts.category,
+          locationZone: opts.zone, duration: opts.duration,
+          rootHash, wrappedKeys,
+        },
         cfg.apiKey,
       );
 
       spin.succeed('Task created');
       console.log(`  storage root: ${rootHash}`);
       console.log(`  task hash:    ${taskHash}`);
+      console.log(`  privacy:      ${opts.public ? 'public (plaintext)' : `private (wrapped to ${Object.keys(wrappedKeys ?? {}).length} executor(s))`}`);
       console.log(`  unsigned tx:  sign and broadcast with your agent wallet to lock escrow`);
       console.log(JSON.stringify(unsignedTx, null, 2));
+      console.log(`\n  After that tx confirms, index the task so agents can find and decrypt it:\n`);
+      console.log(`  POST ${cfg.apiBase}/api/v1/a2a/tasks/index`);
+      console.log(JSON.stringify({
+        txHash: '<hash from broadcasting the tx above>',
+        taskHash,
+        rootHash,
+        wrappedKeys,
+        privacy: opts.public ? 'public' : undefined,
+        verificationMode: 'manual',
+        requiredCapabilities: [],
+      }, null, 2));
     } catch (e) {
       spin.fail((e as Error).message);
       process.exit(1);
