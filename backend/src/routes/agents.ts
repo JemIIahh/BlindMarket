@@ -308,14 +308,26 @@ agentsRouter.get('/', async (req, res) => {
 });
 
 // GET /api/v1/agents/:id/logs/json — buffered log lines (for manual refresh)
-agentsRouter.get('/:id/logs/json', async (req, res) => {
+//
+// Owner-only — gated by requireAuth + authorizeOwner. The worker's stdout is
+// captured verbatim into this buffer, so an ungated route here is an
+// unauthenticated read of an agent's live activity. See authorizeOwner above.
+agentsRouter.get('/:id/logs/json', requireAuth, async (req: AuthRequest, res) => {
+  const agent = await authorizeOwner(req, res, req.params.id);
+  if (!agent) return;
   const history = await getAgentLogs(req.params.id);
   res.json({ success: true, data: history });
 });
 
 // GET /api/v1/agents/:id/logs — SSE stream
-agentsRouter.get('/:id/logs', async (req, res) => {
+//
+// Owner-only — gated by requireAuth + authorizeOwner, checked BEFORE any SSE
+// header is written/flushed so a 401/403 can still be sent as a clean JSON
+// response instead of a broken event stream.
+agentsRouter.get('/:id/logs', requireAuth, async (req: AuthRequest, res) => {
   const { id } = req.params;
+  const agent = await authorizeOwner(req, res, id);
+  if (!agent) return;
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');

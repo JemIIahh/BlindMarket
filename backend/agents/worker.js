@@ -301,6 +301,11 @@ const ANSI_DIM = COLORED ? '\x1b[2m' : '';
 const ANSI_CYAN = COLORED ? '\x1b[36m' : '';
 const ANSI_RESET = COLORED ? '\x1b[0m' : '';
 
+// Worker stdout is captured line-by-line (agentRunner.appendLog) and served
+// back via the owner-gated /agents/:id/logs REST + SSE routes and the MCP
+// get_agent_logs tool — a public-ish surface by construction. Log lines must
+// never carry decrypted task content (brief text, LLM reasoning, tool result
+// bodies); log shape instead — lengths, hashes, step indices, ok/error flags.
 function log(msg) {
   console.log(
     `${ANSI_DIM}${nowStamp()} [agent:${ANSI_CYAN}${AGENT_ID.slice(0, 8)}${ANSI_RESET}${ANSI_DIM}]${ANSI_RESET} ${msg}`
@@ -1468,7 +1473,9 @@ async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrapp
     }
 
     log(`working on task ${acceptedTaskHash.slice(0, 10)}…`);
-    log(`LLM prompt: "${briefPlaintext.slice(0, 200)}${briefPlaintext.length > 200 ? '…' : ''}"`);
+    // Length + hash prefix only — never the decrypted brief text itself. See
+    // the note on log() above: worker stdout is captured and streamed live.
+    log(`LLM prompt: ${briefPlaintext.length} chars, sha256 ${sha256Hex(briefPlaintext).slice(0, 10)}…`);
     const llmStartedAt = Date.now();
     let text = '';
     let llmElapsed = '0.0';
@@ -1498,20 +1505,31 @@ async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrapp
           const step = result.steps[si];
           const stepText = step.text?.trim();
           if (stepText) {
-            log(`[thought ${si + 1}/${result.steps.length}] ${stepText.slice(0, 500)}${stepText.length > 500 ? '…' : ''}`);
+            // Length only — the reasoning text can restate decrypted task
+            // content. See the note on log() above.
+            log(`[thought ${si + 1}/${result.steps.length}] ${stepText.length} chars`);
           }
           for (const tc of step.toolCalls || []) {
             // AI SDK v5 tool-call args live on .input (v4's .args no longer exists
             // on TypedToolCall — accessing it failed typecheck:agents).
             const args = tc.input ? JSON.stringify(tc.input) : '';
-            log(`[tool ${si + 1}] ${tc.toolName}(${args.length > 100 ? args.slice(0, 100) + '…' : args})`);
+            // Tool name + arg size only. Tool arguments routinely carry
+            // brief-derived text (a delegate_to_agent instruction, an HTTP
+            // query built from the task), so the args themselves must not
+            // reach the log buffer. See the note on log() above.
+            log(`[tool ${si + 1}] ${tc.toolName}(${args.length} chars)`);
           }
           for (const tr of step.toolResults || []) {
             // AI SDK v5 tool-result payload is .output (v4's .result no longer
             // exists — the old code both failed typecheck AND logged "undefined").
             let resultStr = typeof tr.output === 'string' ? tr.output : JSON.stringify(tr.output);
             if (!resultStr) resultStr = String(tr.output);
-            log(`[result ${si + 1}] ${resultStr.slice(0, 200)}${resultStr.length > 200 ? '…' : ''}`);
+            // Tool name + length + ok/error flag only — never the result body,
+            // which can carry decrypted content (a fetched page, a delegation
+            // reply, …). `step.toolResults` only ever holds successes (the AI
+            // SDK routes failures to separate 'tool-error' content parts,
+            // logged below), hence the literal 'ok'.
+            log(`[result ${si + 1}] ${tr.toolName}: ${resultStr.length} chars, ok`);
           }
         }
       }
@@ -1521,7 +1539,9 @@ async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrapp
           if (!tc) return 'null';
           const name = tc.toolName || 'unknown';
           const args = tc.input ? JSON.stringify(tc.input) : '';
-          return `${name}(${args.length > 50 ? args.slice(0, 50) + '…' : args})`;
+          // Size only — see the per-step tool-call log above for why args
+          // must not be echoed.
+          return `${name}(${args.length} chars)`;
         }).join(', ')}`);
       }
 
@@ -1530,7 +1550,13 @@ async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrapp
       }
       for (const part of result.content || []) {
         if (part.type === 'tool-error') {
-          log(`ERROR in tool ${part.toolName}: ${JSON.stringify(part.error)}`);
+          // Tool name + error class + size, never the serialized error: a
+          // failing tool commonly echoes the input that failed, which can be
+          // brief-derived. See the note on log() above.
+          const e = /** @type {any} */ (part.error);
+          const errName = (e && (e.name || e.code)) || (e === null ? 'null' : typeof e);
+          const errLen = (() => { try { return JSON.stringify(e)?.length ?? 0; } catch { return -1; } })();
+          log(`ERROR in tool ${part.toolName}: ${errName} (${errLen} chars)`);
         }
       }
 
