@@ -15,6 +15,10 @@ export const storageRouter = Router();
  */
 storageRouter.post('/upload', requireAuth, async (req: AuthRequest, res, next) => {
   try {
+    // 0G storage upload can take 30-60s on testnet — extend the socket
+    // timeout so Express doesn't kill the connection mid-upload.
+    req.socket.setTimeout(120_000);
+
     const body = req.body as { data?: string; chainType?: string };
     if (!body.data) {
       throw new AppError(400, 'MISSING_DATA', 'Request body must include "data" (base64 encoded)');

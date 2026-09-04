@@ -133,22 +133,35 @@ async function upload0g(data: Buffer): Promise<{ rootHash: string; txHash?: stri
   }
   const rootHash = tree.rootHash() as string;
 
-  // Upload to 0G Storage network
-  // Cast signer to `any` — 0G SDK pins ethers 6.13.1 CJS types,
-  // our project uses ethers 6.x ESM. Runtime is identical.
-  const [tx, uploadErr] = await idx.upload(memData, config.ogRpcUrl, sgn as any);
-  if (uploadErr !== null) {
-    console.error('0G upload error:', uploadErr);
-    throw new Error('Storage upload failed');
+  // Upload to 0G Storage network with retry (2 attempts).
+  // The SDK submits a chain tx AND waits for the storage node to index it.
+  // On testnet the node is often slow — a single timeout is common. A second
+  // attempt usually succeeds because the first tx already landed on-chain.
+  let lastErr: string | null = null;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    console.log(`[0G Storage] upload attempt ${attempt}/2 (rootHash=${rootHash.slice(0, 16)}…)`);
+    // Cast signer to `any` — 0G SDK pins ethers 6.13.1 CJS types,
+    // our project uses ethers 6.x ESM. Runtime is identical.
+    const [tx, uploadErr] = await idx.upload(memData, config.ogRpcUrl, sgn as any);
+    if (uploadErr === null) {
+      let txHash: string | undefined;
+      if (typeof tx === 'object' && tx !== null && 'txHash' in tx) {
+        txHash = (tx as any).txHash;
+      }
+      console.log(`[0G Storage] upload success (attempt ${attempt}, txHash=${txHash ?? 'n/a'})`);
+      return { rootHash, txHash };
+    }
+    lastErr = String(uploadErr);
+    console.warn(`[0G Storage] upload attempt ${attempt} failed: ${lastErr}`);
+    // Brief pause before retry — the chain tx may already be in-flight
+    if (attempt < 2) await new Promise(r => setTimeout(r, 5000));
   }
 
-  // Extract txHash from SDK response (shape varies by SDK version)
-  let txHash: string | undefined;
-  if (typeof tx === 'object' && tx !== null && 'txHash' in tx) {
-    txHash = (tx as any).txHash;
-  }
-
-  return { rootHash, txHash };
+  // All attempts failed — fall back to local storage so the task is not
+  // lost.  The rootHash is deterministic (from the merkle tree), so the
+  // blob can later be re-uploaded to 0G if the node recovers.
+  console.warn(`[0G Storage] all upload attempts failed — falling back to local storage`);
+  return uploadLocal(data);
 }
 
 async function download0g(rootHash: string): Promise<Buffer | null> {
