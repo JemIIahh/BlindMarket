@@ -20,7 +20,7 @@ import { buildInstalledSkill, assertComposedSizeOk } from '../services/skillComp
 import type { InstalledSkill, AgentCapability } from '../types.js';
 import { redis } from '../services/redis.js';
 import { ethers } from 'ethers';
-import { provider } from '../services/chain.js';
+import { provider, baseProvider } from '../services/chain.js';
 import { config } from '../config.js';
 
 /**
@@ -78,6 +78,29 @@ const ERC20_TRANSFER_ABI = [
   'function transfer(address to, uint256 amount) returns (bool)',
   'function decimals() view returns (uint8)',
 ];
+
+// Per-chain config for the withdraw endpoint. An agent's wallet is a plain
+// EOA — the same address is valid on 0G and Base — so it can hold a balance
+// on either (or both) depending on which chain its tasks settled on.
+// Base's gasReserve/nativeGasMin are conservative starting estimates (ETH is
+// priced very differently from the 0G token, and these haven't been
+// calibrated against real observed Base gas costs yet) — same spirit as
+// MAINNET-CHECKLIST.md §3.2's own admission that its 0G gas estimate needs
+// recalibration. Recheck before Base mainnet launch.
+const WITHDRAW_CHAINS = {
+  '0g': {
+    rpc: provider,
+    nativeLabel: '0G',
+    gasReserve: ethers.parseEther('0.001'),
+    nativeGasMin: ethers.parseEther('0.0002'),
+  },
+  base: {
+    rpc: baseProvider,
+    nativeLabel: 'ETH',
+    gasReserve: ethers.parseEther('0.0003'),
+    nativeGasMin: ethers.parseEther('0.00005'),
+  },
+} as const;
 
 export const agentsRouter = Router();
 
@@ -349,12 +372,23 @@ agentsRouter.post('/:id/export-key', requireAuth, async (req: AuthRequest, res) 
 
 // POST /api/v1/agents/:id/withdraw
 //
-// Withdraws funds from the agent wallet to the owner. Handles both native 0G
-// and ERC20 tokens in one endpoint.
+// Withdraws funds from the agent wallet to the owner. An agent's wallet is a
+// plain EOA — the same address on every EVM chain — so it can independently
+// hold a balance on 0G (agent infra) and Base (settlement), depending on
+// which chain its tasks paid out on. This endpoint checks BOTH chains and
+// sweeps whichever have a sweepable balance, rather than requiring the
+// caller to know/pick a chain up front.
 //
 //   Body: { tokenAddress?: string }
-//     - omitted / "0x0000...0000"  → sweeps native 0G (gas reserve kept)
-//     - any ERC20 address          → sweeps that token balance
+//     - omitted / "0x0000...0000"  → sweeps native balance (0G and/or ETH)
+//     - any ERC20 address          → sweeps that token balance on whichever
+//                                     chain(s) it resolves as a real ERC20
+//                                     with a nonzero balance
+//
+// Response: { data: { swept: [...], skipped: [...] } } — swept has one entry
+// per chain actually withdrawn from (0, 1, or 2 entries); skipped explains
+// why a chain was passed over (zero balance, insufficient gas, not an ERC20
+// there). If swept is empty, responds 409 instead of an empty 200.
 //
 // Authorization: requireAuth + authorizeOwner (must match agent.ownerAddress).
 // Refuses while the agent is running to avoid racing with in-flight txs.
@@ -373,87 +407,78 @@ agentsRouter.post('/:id/withdraw', requireAuth, async (req: AuthRequest, res) =>
     }
 
     const rawToken = (req.body as { tokenAddress?: string })?.tokenAddress?.trim() || '';
-    // Treat missing or zero address as native 0G sweep.
+    // Treat missing or zero address as native sweep.
     const isNative = !rawToken || rawToken === '0x0000000000000000000000000000000000000000';
+    if (!isNative && !/^0x[0-9a-fA-F]{40}$/.test(rawToken)) {
+      res.status(400).json({ success: false, error: { code: 'BAD_TOKEN', message: 'tokenAddress must be a 0x-prefixed 20-byte hex string' } });
+      return;
+    }
 
-    const wallet = new ethers.Wallet(
-      agent.rawPrivateKey.startsWith('0x') ? agent.rawPrivateKey : `0x${agent.rawPrivateKey}`,
-      provider,
-    );
+    const pk = agent.rawPrivateKey.startsWith('0x') ? agent.rawPrivateKey : `0x${agent.rawPrivateKey}`;
 
-    if (isNative) {
-      // ── Native 0G sweep ──────────────────────────────────────────────
-      const balance = await provider.getBalance(wallet.address);
-      const GAS_RESERVE = ethers.parseEther('0.001');
-      if (balance <= GAS_RESERVE) {
-        res.status(409).json({
-          success: false,
-          error: {
-            code: 'BALANCE_TOO_LOW',
-            message: `Agent wallet balance (${ethers.formatEther(balance)} 0G) is below the gas reserve required to sweep`,
-          },
-        });
-        return;
-      }
-      const sendAmount = balance - GAS_RESERVE;
-      const tx = await wallet.sendTransaction({ to: agent.ownerAddress, value: sendAmount });
-      const receipt = await tx.wait();
-      res.json({
-        success: true,
-        data: {
+    const swept: Array<{
+      chain: 'base' | '0g'; txHash: string; asset: string; recipient: string; blockNumber?: number;
+      amountSent?: string; amountRaw?: string; amountFormatted?: string; decimals?: number;
+    }> = [];
+    const skipped: Array<{ chain: 'base' | '0g'; reason: string }> = [];
+
+    // Sequential, not parallel — simpler to reason about and log than two
+    // in-flight sweep txs interleaving (nonce spaces are independent per
+    // chain so parallel would be safe too, just noisier).
+    for (const chain of ['0g', 'base'] as const) {
+      const { rpc, nativeLabel, gasReserve, nativeGasMin } = WITHDRAW_CHAINS[chain];
+      const wallet = new ethers.Wallet(pk, rpc);
+
+      if (isNative) {
+        // ── Native sweep (0G token or ETH depending on chain) ──────────
+        const balance = await rpc.getBalance(wallet.address);
+        if (balance <= gasReserve) {
+          skipped.push({ chain, reason: `balance (${ethers.formatEther(balance)} ${nativeLabel}) is below the gas reserve required to sweep` });
+          continue;
+        }
+        const sendAmount = balance - gasReserve;
+        const tx = await wallet.sendTransaction({ to: agent.ownerAddress, value: sendAmount });
+        const receipt = await tx.wait();
+        swept.push({
+          chain,
           txHash: tx.hash,
-          asset: '0G',
+          asset: nativeLabel,
           amountSent: ethers.formatEther(sendAmount),
           recipient: agent.ownerAddress,
           blockNumber: receipt?.blockNumber,
-        },
-      });
-    } else {
-      // ── ERC20 token sweep ────────────────────────────────────────────
-      const tokenAddress = rawToken;
-      if (!/^0x[0-9a-fA-F]{40}$/.test(tokenAddress)) {
-        res.status(400).json({ success: false, error: { code: 'BAD_TOKEN', message: 'tokenAddress must be a 0x-prefixed 20-byte hex string' } });
-        return;
-      }
-
-      const token = new ethers.Contract(tokenAddress, ERC20_TRANSFER_ABI, wallet);
-
-      const nativeBalance = await provider.getBalance(wallet.address);
-      const NATIVE_GAS_MIN = ethers.parseEther('0.0002');
-      if (nativeBalance < NATIVE_GAS_MIN) {
-        res.status(409).json({ success: false, error: { code: 'NO_GAS', message: `Agent wallet has insufficient native 0G to pay for the transfer tx (have ${ethers.formatEther(nativeBalance)}, need ≥0.0002). Top up gas first.` } });
-        return;
-      }
-
-      let balance: bigint;
-      try {
-        balance = await token.balanceOf(wallet.address);
-      } catch {
-        res.status(400).json({
-          success: false,
-          error: {
-            code: 'NOT_ERC20',
-            message: `The address ${tokenAddress} does not appear to be an ERC20 token — balanceOf returned empty data.`,
-          },
         });
-        return;
-      }
-      if (balance === 0n) {
-        res.status(409).json({ success: false, error: { code: 'ZERO_BALANCE', message: 'Agent wallet has no balance of that token to withdraw' } });
-        return;
-      }
+      } else {
+        // ── ERC20 token sweep ──────────────────────────────────────────
+        const tokenAddress = rawToken;
+        const nativeBalance = await rpc.getBalance(wallet.address);
+        if (nativeBalance < nativeGasMin) {
+          skipped.push({ chain, reason: `insufficient native ${nativeLabel} to pay for the transfer tx (have ${ethers.formatEther(nativeBalance)}, need ≥${ethers.formatEther(nativeGasMin)}). Top up gas first.` });
+          continue;
+        }
 
-      const tx = await token.transfer(agent.ownerAddress, balance);
-      const receipt = await tx.wait();
+        const token = new ethers.Contract(tokenAddress, ERC20_TRANSFER_ABI, wallet);
+        let balance: bigint;
+        try {
+          balance = await token.balanceOf(wallet.address);
+        } catch {
+          skipped.push({ chain, reason: `${tokenAddress} does not appear to be an ERC20 token on this chain — balanceOf returned empty data` });
+          continue;
+        }
+        if (balance === 0n) {
+          skipped.push({ chain, reason: 'no balance of that token to withdraw on this chain' });
+          continue;
+        }
 
-      let decimals = 6;
-      try { decimals = Number(await token.decimals()); } catch {}
-      const whole = balance / 10n ** BigInt(decimals);
-      const frac = (balance % 10n ** BigInt(decimals)).toString().padStart(decimals, '0');
+        const tx = await token.transfer(agent.ownerAddress, balance);
+        const receipt = await tx.wait();
 
-      res.json({
-        success: true,
-        data: {
+        let decimals = 6;
+        try { decimals = Number(await token.decimals()); } catch {}
+        const whole = balance / 10n ** BigInt(decimals);
+        const frac = (balance % 10n ** BigInt(decimals)).toString().padStart(decimals, '0');
+
+        swept.push({
+          chain,
           txHash: tx.hash,
           asset: tokenAddress,
           amountRaw: balance.toString(),
@@ -461,9 +486,23 @@ agentsRouter.post('/:id/withdraw', requireAuth, async (req: AuthRequest, res) =>
           decimals,
           recipient: agent.ownerAddress,
           blockNumber: receipt?.blockNumber,
+        });
+      }
+    }
+
+    if (swept.length === 0) {
+      res.status(409).json({
+        success: false,
+        error: {
+          code: isNative ? 'BALANCE_TOO_LOW' : 'ZERO_BALANCE',
+          message: 'Nothing to withdraw on either chain.',
+          skipped,
         },
       });
+      return;
     }
+
+    res.json({ success: true, data: { swept, skipped } });
   } catch (err) {
     res.status(500).json({
       success: false,

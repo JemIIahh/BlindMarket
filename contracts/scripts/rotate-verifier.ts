@@ -17,9 +17,8 @@
  */
 
 import { ethers } from "hardhat";
-import * as fs from "fs";
-import * as path from "path";
 import { assertSafeNetwork } from "./_guard";
+import { loadDeployment } from "./_deployments";
 
 async function main() {
   await assertSafeNetwork();
@@ -31,24 +30,7 @@ async function main() {
   }
 
   const { chainId } = await ethers.provider.getNetwork();
-  const cid = Number(chainId);
-  // Map chainId → deployment file
-  const DEPLOY_FILES: Record<number, string> = {
-    16661: "0g-mainnet.json",
-    16602: "0g-testnet.json",
-    8453:  "base-mainnet.json",
-    84532: "base-sepolia.json",
-  };
-  const deployFile = DEPLOY_FILES[cid];
-  if (!deployFile) {
-    throw new Error(`Unknown chainId ${cid} — no deployment file mapping. Add it to rotate-verifier.ts.`);
-  }
-  
-  const deploymentsPath = path.resolve(__dirname, `../deployments/${deployFile}`);
-  if (!fs.existsSync(deploymentsPath)) {
-    throw new Error(`Deployment file not found: ${deploymentsPath}`);
-  }
-  const deployments = JSON.parse(fs.readFileSync(deploymentsPath, "utf-8"));
+  const deployments = await loadDeployment(Number(chainId));
   const proxyAddress: string = deployments.contracts?.BlindEscrow;
   if (!proxyAddress) throw new Error("BlindEscrow address missing from deployments file");
 

@@ -145,6 +145,34 @@ locked in escrow.
       botched (you should have verified in 2.2 it wasn't). Cold storage
       (paper, hardware wallet, encrypted offline) is appropriate.
 
+### 2.4 Redeploy Base Sepolia's AgentFactory — MUST HAVE, either right
+      before Base mainnet deploy prep or immediately after mainnet goes live
+
+- [ ] `AgentFactory.sol`'s ownership model changed from one-step `Ownable`
+      to two-step `Ownable2Step` in commit `09ea906` (2026-09-03) — but Base
+      Sepolia's currently-deployed `AgentFactory` (`deployments/base-sepolia.json`,
+      deployed 2026-08-31 in `944d569`, *before* that fix) is still running
+      the old one-step bytecode. Confirmed live during the migrate-admin-to-safe.ts
+      test run: calling `transferOwnership()` on it changed `owner()`
+      immediately, and `pendingOwner()` reverts (the function doesn't exist
+      in the deployed bytecode) — there is no accept step guarding against a
+      mistyped address on that specific contract today.
+      Redeploy Base Sepolia's `AgentFactory` from current source
+      (`npx hardhat run scripts/deploy-agent-factory.ts --network base-sepolia`,
+      then update `deployments/base-sepolia.json`'s `AgentFactory` address
+      and rerun `sync-addresses.ts`) so the testnet contract actually
+      matches what mainnet will run.
+
+  **Why this matters:** Base mainnet's own `AgentFactory` deploy pulls from
+  whatever source is current at deploy time, so mainnet itself gets the
+  `Ownable2Step` fix automatically — this item is about keeping Base
+  Sepolia a faithful staging ground, not a mainnet-blocking bug. Left
+  unfixed, testing the admin-handoff flow against Base Sepolia (as this
+  checklist's own §2.2 verification step does) will keep observing
+  one-step behavior that no longer matches what mainnet actually enforces,
+  which could hide a real regression in the two-step flow next time
+  someone changes `migrate-admin-to-safe.ts`.
+
 ---
 
 ## 3. Marketplace signer (verifier role)
