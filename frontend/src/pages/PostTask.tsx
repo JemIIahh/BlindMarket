@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useWalletClient } from 'wagmi';
-import { useAuthorizationSignature, useUser } from '@privy-io/react-auth';
+import { useSendTransaction } from '@privy-io/react-auth';
 import { getIdentityToken, getAccessToken } from '@privy-io/react-auth';
 import { BrowserProvider, parseUnits, formatUnits } from 'ethers';
 import {
@@ -20,10 +20,10 @@ import {
 } from '../components/bb';
 import { aesEncrypt, eciesEncrypt, generateAesKey, sha256, toBase64, toBytes } from '../lib/crypto';
 import { stashAesKey } from '../lib/keyStash';
-import { signAndSendTx, sendSponsoredTx, buildPrivyRpcBody, buildAuthRequestInput } from '../lib/txSigner';
+import { signAndSendTx } from '../lib/txSigner';
 import { authedGet, authedPost } from '../lib/api';
 import { trackEvent } from '../hooks/useAnalytics';
-import { MARKETPLACE_TOKEN_ADDRESS, getNativeCurrency, getPaymentDecimals, getPaymentSymbol, WORKER_SHARE_PCT, PLATFORM_FEE_PCT, BASE_CHAIN_ID, OG_CHAIN_ID } from '../config/constants';
+import { MARKETPLACE_TOKEN_ADDRESS, getNativeCurrency, getPaymentDecimals, getPaymentSymbol, WORKER_SHARE_PCT, PLATFORM_FEE_PCT } from '../config/constants';
 import { useChain } from '../context/ChainContext';
 import { useChainAddress } from '../hooks/useChainWallet';
 import { useAuth } from '../context/AuthContext';
@@ -67,8 +67,7 @@ export default function PostTask() {
   const native = getNativeCurrency(activeChain);
   const address = useChainAddress();
   const { data: walletClient } = useWalletClient();
-  const { user } = useUser();
-  const { generateAuthorizationSignature } = useAuthorizationSignature();
+  const { sendTransaction } = useSendTransaction();
   const navigate = useNavigate();
   const { isAuthenticated } = useAuth();
 
@@ -353,27 +352,12 @@ export default function PostTask() {
         wrappedKeys: isPublicTask ? undefined : wrappedKeys,
       }, token);
 
-      // 7. Sign and send — EVM via backend relay (Privy user_pays sponsorship)
+      // 7. Sign and send — EVM via Privy with gas sponsorship
       setStatus('signing');
-      console.log(`[PostTask] Signing registration TX (Base escrow, gas-sponsored via relay)...`);
-      // For Base USDC escrow, value is 0 — the USDC amount is encoded in calldata.
-      // Only pass native value for legacy 0G escrow (zero-address token).
+      console.log(`[PostTask] Signing registration TX (Base escrow, gas-sponsored)...`);
       const isNativeToken = TOKEN === '0x0000000000000000000000000000000000000000';
       const signer = await (new BrowserProvider(walletClient!.transport)).getSigner();
-      const walletId = user?.wallet?.id;
-      let sent;
-      if (walletId && !isNativeToken) {
-        // Relay through backend for Privy user_pays gas sponsorship
-        const chainId = activeChain === 'base' ? BASE_CHAIN_ID : OG_CHAIN_ID;
-        const privyRpcBody = buildPrivyRpcBody(taskJson.unsignedTx, undefined, chainId);
-        const expiryMs = String(Date.now() + 1_800_000);
-        const authInput = buildAuthRequestInput(privyRpcBody, walletId, import.meta.env.VITE_PRIVY_APP_ID, expiryMs);
-        const authSig = await generateAuthorizationSignature(authInput);
-        sent = await sendSponsoredTx(signer, taskJson.unsignedTx, undefined, chainId, walletId, authSig.signature, privyRpcBody, expiryMs);
-      } else {
-        // Fallback: direct send (0G chain or no Privy wallet)
-        sent = await signAndSendTx(signer, taskJson.unsignedTx, isNativeToken ? BigInt(amountBase) : undefined);
-      }
+      const sent = await signAndSendTx(signer, taskJson.unsignedTx, isNativeToken ? BigInt(amountBase) : undefined, sendTransaction);
       const txHash = sent.hash;
       console.log(`[PostTask] Task TX submitted: hash=${txHash} block=${sent.receipt?.blockNumber ?? 'pending'}`);
 
