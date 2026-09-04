@@ -36,7 +36,7 @@ export async function signAndSendTx(
     asset: 'usdc',
   };
 
-  const res = await fetch(`${API_BASE_URL}/tx/relay-tx`, {
+  const res = await fetch(`${API_BASE_URL}/api/v1/tx/relay-tx`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
