@@ -76,9 +76,12 @@ export const config = {
   agentApiKey: process.env.AGENT_API_KEY || '',
   privyAppId: required('PRIVY_APP_ID').trim(),
   privyAppSecret: optional('PRIVY_APP_SECRET', ''),
-  // Used only by registration.ts to mint long-lived agent CLI tokens.
-  // No longer accepted by requireAuth — that path is Privy-only.
+  // Mints registration tokens AND is the verification secret requireAuth
+  // uses to accept them — see verifyRegistrationToken in middleware/auth.ts.
   jwtSecret: process.env.JWT_SECRET || '',
+  // Gates the CLI/SDK device-flow registration write routes while
+  // registration hardening lands. Defaults off.
+  registrationEnabled: process.env.REGISTRATION_ENABLED === 'true',
 
   // Database (Neon PostgreSQL)
   databaseUrl: process.env.DATABASE_URL || '',
