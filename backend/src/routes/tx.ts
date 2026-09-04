@@ -7,11 +7,12 @@
  * Flow:
  *   1. Frontend sends { walletAddress, to, data, value?, chain? }
  *   2. Server looks up wallet by address → gets Privy wallet ID
- *   3. Server calls wallets().ethereum().sendTransaction() with sponsor_options
- *   4. Returns { hash } (may be empty string until userop confirms)
+ *   3. Server generates authorization signature from user's Privy JWT
+ *   4. Server calls wallets().ethereum().sendTransaction() with sponsor_options
+ *   5. Returns { hash }
  */
 import { Router } from 'express';
-import { PrivyClient } from '@privy-io/node';
+import { PrivyClient, generateAuthorizationSignatures } from '@privy-io/node';
 import { z } from 'zod';
 import { requireAuth } from '../middleware/auth.js';
 import { config } from '../config.js';
@@ -25,11 +26,15 @@ const CHAIN_CAIP2: Record<string, string> = {
   'base-sepolia': 'eip155:84532',
 };
 
+let privyClient: PrivyClient | null = null;
 function getPrivyClient(): PrivyClient {
-  if (!config.privyAppId || !config.privyAppSecret) {
-    throw new AppError(500, 'MISCONFIGURED', 'PRIVY_APP_ID or PRIVY_APP_SECRET not set');
+  if (!privyClient) {
+    if (!config.privyAppId || !config.privyAppSecret) {
+      throw new AppError(500, 'MISCONFIGURED', 'PRIVY_APP_ID or PRIVY_APP_SECRET not set');
+    }
+    privyClient = new PrivyClient({ appId: config.privyAppId, appSecret: config.privyAppSecret });
   }
-  return new PrivyClient({ appId: config.privyAppId, appSecret: config.privyAppSecret });
+  return privyClient;
 }
 
 const relaySchema = z.object({
@@ -51,13 +56,16 @@ txRouter.post('/relay-tx', requireAuth, async (req, res, next) => {
 
     const privy = getPrivyClient();
 
+    // Extract the user's Privy access token — used for authorization signature
+    const authHeader = (req.headers.authorization || '') as string;
+    const userJwt = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+    if (!userJwt) {
+      throw new AppError(401, 'MISSING_AUTH', 'Authorization header required for relay');
+    }
+
     console.log(`[relay-tx] Looking up wallet address=${body.walletAddress} chain=${body.chain} caip2=${caip2}`);
 
     // Look up the Privy wallet ID by address.
-    // External wallets (MetaMask connected via Privy's "wallet" login) are
-    // NOT managed by Privy — getWalletByAddress only finds embedded wallets
-    // created by Privy's social/email login.  When the lookup fails, tell
-    // the frontend to fall back to direct signing (user pays gas).
     let walletId: string;
     try {
       const wallet = await privy.wallets().getWalletByAddress({ address: body.walletAddress });
@@ -65,7 +73,7 @@ txRouter.post('/relay-tx', requireAuth, async (req, res, next) => {
       console.log(`[relay-tx] Found wallet id=${walletId}`);
     } catch (err: any) {
       console.warn('[relay-tx] getWalletByAddress failed:', err?.status, err?.message || err);
-      throw new AppError(400, 'WALLET_NOT_FOUND', `Wallet ${body.walletAddress} is not a Privy embedded wallet. Log in with email/social to create one, or the frontend will sign directly (user pays gas).`);
+      throw new AppError(400, 'WALLET_NOT_FOUND', `Wallet ${body.walletAddress} is not a Privy embedded wallet. Log in with email/social to create one.`);
     }
 
     // Build the transaction params
@@ -79,11 +87,43 @@ txRouter.post('/relay-tx', requireAuth, async (req, res, next) => {
 
     console.log(`[relay-tx] wallet=${body.walletAddress} id=${walletId} chain=${body.chain} caip2=${caip2} to=${body.to} asset=${body.asset}`);
 
-    const result = await privy.wallets().ethereum().sendTransaction(walletId, {
+    // Generate authorization signature from the user's JWT
+    const rpcBody = {
+      method: 'eth_sendTransaction' as const,
       caip2,
       params: { transaction },
       sponsor: true,
       sponsor_options: { asset: body.asset },
+    };
+    const rpcUrl = `https://api.privy.io/v1/wallets/${walletId}/rpc`;
+
+    const signatures = await generateAuthorizationSignatures(privy, {
+      authorizationContext: { user_jwts: [userJwt] },
+      input: {
+        version: 1,
+        method: 'POST',
+        url: rpcUrl,
+        body: rpcBody,
+        headers: { 'privy-app-id': config.privyAppId! },
+      },
+    });
+
+    const authSignature = signatures[0];
+    if (!authSignature) {
+      throw new AppError(500, 'SIGN_FAILED', 'Failed to generate authorization signature from user JWT');
+    }
+
+    console.log(`[relay-tx] Authorization signature generated, sending transaction...`);
+
+    // Use _rpc with the generated signature in the header
+    const result = await privy.wallets().ethereum()._rpc(walletId, {
+      method: 'eth_sendTransaction',
+      caip2,
+      params: { transaction },
+      sponsor: true,
+      sponsor_options: { asset: body.asset },
+    } as any, {
+      headers: { 'privy-authorization-signature': authSignature },
     });
 
     const hash = result?.hash || '';
@@ -97,6 +137,7 @@ txRouter.post('/relay-tx', requireAuth, async (req, res, next) => {
 
     const status = err?.status || err?.httpStatus;
     const msg = err?.message || err?.error?.message || String(err);
+    console.error('[relay-tx] Full error:', JSON.stringify({ status, message: msg, body: err?.error || err?.body || null }, null, 2));
 
     if (msg.includes('insufficient')) {
       return next(new AppError(402, 'INSUFFICIENT_BALANCE', 'Insufficient USDC balance for gas. Please add USDC to your wallet.'));
