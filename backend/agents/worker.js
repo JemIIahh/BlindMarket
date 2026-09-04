@@ -624,10 +624,11 @@ export function buildTools(currentTaskHash = null) {
         const taskHash = '0x' + sha256Hex(ciphertext);
 
         // 2. Upload the encrypted blob to storage.
+        //    0G storage node sync + upload routinely takes 20-40s; use generous timeout.
         const upRes = await fetchWithTimeout(`${BACKEND_URL}/api/v1/storage/upload`, {
           method: 'POST', headers: jsonAuth,
           body: JSON.stringify({ data: ciphertext.toString('base64'), chainType: IS_EVM_AGENT ? 'evm' : 'sui' }),
-        });
+        }, 120_000);
         if (!upRes.ok) return `Delegation failed: storage upload ${upRes.status}`;
         const rootHash = (await upRes.json()).data?.rootHash;
         if (!rootHash) return 'Delegation failed: storage upload returned no rootHash';
@@ -1593,7 +1594,7 @@ async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrapp
           data: Buffer.from(finalOutput).toString('base64'),
           chainType: IS_EVM_AGENT ? 'evm' : 'sui',
         }),
-      }, 30_000);
+        }, 120_000);
       if (upRes.ok) {
         const upJson = await upRes.json();
         rootHash = upJson.data?.rootHash || null;

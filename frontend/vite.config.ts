@@ -15,6 +15,7 @@ export default defineConfig({
     },
   },
   build: {
+    chunkSizeWarningLimit: 2000,
     rollupOptions: {
       output: {
         // Pull a few large, slow-changing vendors into their own cacheable
@@ -31,8 +32,13 @@ export default defineConfig({
           if (/[\\/](framer-motion|motion-dom|motion-utils)[\\/]/.test(id)) return 'motion-vendor';
           if (/[\\/]@tanstack[\\/]/.test(id)) return 'query-vendor';
           if (/[\\/](react|react-dom|react-router|react-router-dom|scheduler)[\\/]/.test(id)) return 'react-vendor';
-          if (/[\\/](wagmi|viem|ethers)[\\/]/.test(id)) return 'web3-vendor';
-          // Everything else (incl. @privy-io) → Rollup default chunking.
+          if (/[\\/]@privy-io[\\/]/.test(id)) return 'privy-vendor';
+          if (/[\\/]@walletconnect[\\/]/.test(id)) return 'walletconnect-vendor';
+          if (/[\\/]@wagmi[\\/]/.test(id)) return 'wagmi-vendor';
+          if (/[\\/]wagmi[\\/]/.test(id)) return 'wagmi-vendor';
+          if (/[\\/]viem[\\/]/.test(id)) return 'viem-vendor';
+          if (/[\\/]abitype[\\/]/.test(id)) return 'viem-vendor';
+          if (/[\\/]ethers[\\/]/.test(id)) return 'ethers-vendor';
         },
       },
     },
