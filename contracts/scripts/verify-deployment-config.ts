@@ -12,15 +12,14 @@
  *     npx hardhat run scripts/verify-deployment-config.ts --network 0g-mainnet
  */
 import { ethers, network } from "hardhat";
-import * as fs from "fs";
-import * as path from "path";
+import { loadDeployment } from "./_deployments";
 
 const NATIVE = "0x0000000000000000000000000000000000000000";
 
 async function main() {
-  const dep = JSON.parse(fs.readFileSync(path.resolve(__dirname, `../deployments/${network.name}.json`), "utf-8"));
+  const dep = await loadDeployment();
   const proxy: string = dep.contracts?.BlindEscrow;
-  if (!proxy) throw new Error(`No BlindEscrow in deployments/${network.name}.json`);
+  if (!proxy) throw new Error(`No BlindEscrow in deployments for network ${network.name} (chainId ${dep.chainId})`);
   const escrow = await ethers.getContractAt("BlindEscrow", proxy);
   console.log(`network: ${network.name}\nBlindEscrow: ${proxy}\n`);
 

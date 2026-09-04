@@ -28,10 +28,11 @@
  *   PRIVATE_KEY=<admin_pk> npx hardhat run scripts/upgrade-blind-escrow.ts --network 0g-mainnet
  */
 
-import { ethers, upgrades, network } from "hardhat";
+import { ethers, upgrades } from "hardhat";
 import * as fs from "fs";
 import * as path from "path";
 import { assertSafeNetwork } from "./_guard";
+import { loadDeployment } from "./_deployments";
 
 const IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
 
@@ -54,9 +55,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function main() {
   await assertSafeNetwork();
 
-  const deploymentsPath = path.resolve(__dirname, `../deployments/${network.name}.json`);
-  if (!fs.existsSync(deploymentsPath)) throw new Error(`deployments file not found: ${deploymentsPath}`);
-  const deployments = JSON.parse(fs.readFileSync(deploymentsPath, "utf-8"));
+  const deployments = await loadDeployment();
   const proxy: string = deployments.contracts?.BlindEscrow;
   const expectedAdmin: string | undefined = deployments.deployer;
   if (!proxy) throw new Error("BlindEscrow address missing from deployments file");
