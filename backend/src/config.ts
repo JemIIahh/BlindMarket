@@ -26,7 +26,16 @@ const IS_PROD = process.env.NODE_ENV === 'production';
 // via contracts/scripts/sync-addresses.ts (do not hand-edit contractAddresses.ts).
 // Env vars still win at runtime; these are the no-env defaults.
 const ADDR = IS_PROD ? CONTRACT_ADDRESSES.mainnet : CONTRACT_ADDRESSES.testnet;
-const BASE_ADDR = IS_PROD ? CONTRACT_ADDRESSES.base : CONTRACT_ADDRESSES.baseTestnet;
+// Cast to a shape with optional keys: the generator now omits `blindEscrow`/
+// `agentFactory` entirely for a network that hasn't been deployed yet (e.g.
+// `base` today), so the two branches of this union no longer share the same
+// keys and a plain union type would make `BASE_ADDR.blindEscrow` a compile
+// error even under optional chaining.
+const BASE_ADDR = (IS_PROD ? CONTRACT_ADDRESSES.base : CONTRACT_ADDRESSES.baseTestnet) as {
+  readonly blindEscrow?: string;
+  readonly agentFactory?: string;
+  readonly USDC: string;
+};
 
 export const config = {
   port: parseInt(optional('PORT', '3001'), 10),
@@ -60,7 +69,7 @@ export const config = {
   // Zero here means Base isn't deployed on this network yet. Left as-is it is a
   // truthy string, which switches POST /tasks onto the Base escrow and points
   // createTask at address(0) — so collapse it to '' and stay on the 0G path.
-  baseEscrowAddress: unsetIfZero(optional('BASE_ESCROW_ADDRESS', BASE_ADDR.blindEscrow)),
+  baseEscrowAddress: unsetIfZero(optional('BASE_ESCROW_ADDRESS', BASE_ADDR?.blindEscrow ?? '')),
   baseUsdcAddress: optional('BASE_USDC_ADDRESS', IS_PROD ? '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' : '0x036CbD53842c5426634e7929541eC2318f3dCF7e'),
   // The generated module carries a zero-address placeholder for networks the
   // factory hasn't been deployed to yet. Treat that as "not configured" so the
@@ -76,9 +85,12 @@ export const config = {
   agentApiKey: process.env.AGENT_API_KEY || '',
   privyAppId: required('PRIVY_APP_ID').trim(),
   privyAppSecret: optional('PRIVY_APP_SECRET', ''),
-  // Used only by registration.ts to mint long-lived agent CLI tokens.
-  // No longer accepted by requireAuth — that path is Privy-only.
+  // Mints registration tokens AND is the verification secret requireAuth
+  // uses to accept them — see verifyRegistrationToken in middleware/auth.ts.
   jwtSecret: process.env.JWT_SECRET || '',
+  // Gates the CLI/SDK device-flow registration write routes while
+  // registration hardening lands. Defaults off.
+  registrationEnabled: process.env.REGISTRATION_ENABLED === 'true',
 
   // Database (Neon PostgreSQL)
   databaseUrl: process.env.DATABASE_URL || '',

@@ -341,6 +341,8 @@ export function buildMcpServer(user: AuthUser): McpServer {
       annotations: READ_ONLY,
     },
     async ({ agentId, lines }) => {
+      const res = await ownedAgent(agentId);
+      if (!res.ok) return res.error;
       const history = await getAgentLogs(agentId);
       return ok({ agentId, lines: history.slice(-(lines ?? 50)) });
     },
