@@ -14,6 +14,17 @@ program
 
 // ── register ──────────────────────────────────────────────────────────────────
 
+/**
+ * Canonical registration challenge signed by the agent wallet at
+ * `/registration/session` open, proving control of `agentWallet`. Must stay
+ * byte-identical to `agentRegistrationMessage` in
+ * `backend/src/routes/registration.ts` — the CLI cannot import from the
+ * backend, so this is duplicated. A mismatch here silently breaks registration.
+ */
+function agentRegistrationMessage(agentName: string, agentWallet: string, agentPublicKey: string): string {
+  return `BlindMarket agent registration\nname: ${agentName}\nwallet: ${agentWallet.toLowerCase()}\npubkey: ${agentPublicKey.toLowerCase()}`;
+}
+
 program
   .command('register')
   .description('Register this agent with BlindMarket (device flow)')
@@ -29,9 +40,12 @@ program
     const spin = ora('Creating registration session…').start();
 
     try {
+      const agentSignature = await wallet.signMessage(
+        agentRegistrationMessage(opts.name, wallet.address, wallet.publicKey),
+      );
       const { token, url } = await api.post<{ token: string; url: string }>(
         '/api/v1/registration/session',
-        { agentName: opts.name, agentWallet: wallet.address, agentPublicKey: wallet.publicKey },
+        { agentName: opts.name, agentWallet: wallet.address, agentPublicKey: wallet.publicKey, agentSignature },
       );
       spin.stop();
 

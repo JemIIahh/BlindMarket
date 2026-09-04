@@ -152,8 +152,14 @@ function getAddressForChain(wallets: WalletAddress[], chainType: string): string
  * routes/registration.ts). Identified by carrying both `address` and
  * `ownerAddress` claims — generic HS256 tokens without those are rejected,
  * so this isn't a re-introduction of the old SIWE end-user auth.
+ *
+ * Every token this successfully verifies came from the registration issuer
+ * by construction (it's the only minter of HS256 tokens carrying these
+ * claims), so the returned principal always carries `typ: 'agent-registration'`
+ * — including tokens minted before that claim existed in the payload. Callers
+ * that gate privileged roles (see requireFounder) must reject on this field.
  */
-export function verifyRegistrationToken(token: string): { address: string; ownerAddress?: string } | null {
+export function verifyRegistrationToken(token: string): { address: string; ownerAddress?: string; typ: 'agent-registration' } | null {
   if (!config.jwtSecret) {
     console.warn('[Auth] Registration token rejected: JWT_SECRET not configured');
     return null;
@@ -169,7 +175,12 @@ export function verifyRegistrationToken(token: string): { address: string; owner
       console.warn('[Auth] Registration token rejected: Missing address or ownerAddress claims', Object.keys(claims));
       return null;
     }
-    return { address: claims.address, ownerAddress: claims.ownerAddress as string };
+    const minIat = Number(process.env.REGISTRATION_TOKEN_MIN_IAT ?? 0);
+    if (minIat > 0 && (typeof claims.iat !== 'number' || claims.iat < minIat)) {
+      console.warn('[Auth] Registration token rejected: issued before REGISTRATION_TOKEN_MIN_IAT');
+      return null;
+    }
+    return { address: claims.address, ownerAddress: claims.ownerAddress as string, typ: 'agent-registration' };
   } catch (err: any) {
     console.debug('[Auth] Registration token check (not HS256 — trying Privy):', err.message);
     return null;
@@ -247,6 +258,15 @@ export function requireAuth(req: AuthRequest, _res: Response, next: NextFunction
  * deploys never accidentally expose admin views.
  */
 export function requireFounder(req: AuthRequest, _res: Response, next: NextFunction): void {
+  // A founder authenticates through Privy, never through an agent-registration
+  // token — reject the issuer outright, before comparing addresses. This
+  // check is keyed on the issuer (verifyRegistrationToken always sets this),
+  // not on a forgeable claim inside the token.
+  if (req.user?.typ === 'agent-registration') {
+    next(new AppError(403, 'FORBIDDEN', 'Founder access required'));
+    return;
+  }
+
   const raw = process.env.FOUNDER_ADDRESSES || '';
   const founders = new Set(
     raw.split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
