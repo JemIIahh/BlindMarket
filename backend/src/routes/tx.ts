@@ -56,12 +56,7 @@ txRouter.post('/relay-tx', requireAuth, async (req, res, next) => {
 
     const privy = getPrivyClient();
 
-    // Extract the user's Privy access token — used for authorization signature
-    const authHeader = (req.headers.authorization || '') as string;
-    const userJwt = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
-    if (!userJwt) {
-      throw new AppError(401, 'MISSING_AUTH', 'Authorization header required for relay');
-    }
+    console.log(`[relay-tx] Looking up wallet address=${body.walletAddress} chain=${body.chain} caip2=${caip2}`);
 
     console.log(`[relay-tx] Looking up wallet address=${body.walletAddress} chain=${body.chain} caip2=${caip2}`);
 
@@ -87,7 +82,12 @@ txRouter.post('/relay-tx', requireAuth, async (req, res, next) => {
 
     console.log(`[relay-tx] wallet=${body.walletAddress} id=${walletId} chain=${body.chain} caip2=${caip2} to=${body.to} asset=${body.asset}`);
 
-    // Generate authorization signature from the user's JWT
+    // Generate authorization signature using the server-side authorization key.
+    // This key must be added as a signer on the user's wallet in the Privy dashboard.
+    if (!config.privyAuthorizationKey) {
+      throw new AppError(500, 'MISCONFIGURED', 'PRIVY_AUTHORIZATION_KEY not set in backend config');
+    }
+
     const rpcBody = {
       method: 'eth_sendTransaction' as const,
       caip2,
@@ -98,7 +98,7 @@ txRouter.post('/relay-tx', requireAuth, async (req, res, next) => {
     const rpcUrl = `https://api.privy.io/v1/wallets/${walletId}/rpc`;
 
     const signatures = await generateAuthorizationSignatures(privy, {
-      authorizationContext: { user_jwts: [userJwt] },
+      authorizationContext: { authorization_private_keys: [config.privyAuthorizationKey] },
       input: {
         version: 1,
         method: 'POST',
@@ -110,12 +110,11 @@ txRouter.post('/relay-tx', requireAuth, async (req, res, next) => {
 
     const authSignature = signatures[0];
     if (!authSignature) {
-      throw new AppError(500, 'SIGN_FAILED', 'Failed to generate authorization signature from user JWT');
+      throw new AppError(500, 'SIGN_FAILED', 'Failed to generate authorization signature');
     }
 
     console.log(`[relay-tx] Authorization signature generated, sending transaction...`);
 
-    // Use _rpc with the generated signature in the header
     const result = await privy.wallets().ethereum()._rpc(walletId, {
       method: 'eth_sendTransaction',
       caip2,
