@@ -89,11 +89,26 @@ export async function buildUnsignedTx(
   };
 }
 
-/** Get decimals for an ERC-20 token. Returns 18 for native 0G. */
-export async function getTokenDecimals(tokenAddress: string): Promise<number> {
+/**
+ * Get decimals for an ERC-20 token. Returns 18 for a native-currency task
+ * (token == address(0)).
+ *
+ * `chain` selects the provider to ask. It matters: USDC on Base has 6
+ * decimals, but querying that address against the 0G provider finds no
+ * contract, throws, and falls back to 18 — silently recording a USDC amount
+ * 1e12 times too small. Callers holding a Base task must pass 'base'.
+ */
+export async function getTokenDecimals(
+  tokenAddress: string,
+  chain: 'base' | '0g' = '0g',
+): Promise<number> {
   if (tokenAddress === '0x0000000000000000000000000000000000000000') return 18;
+
+  const rpc = chain === 'base' ? baseProvider : provider;
+  if (!rpc) return 18;
+
   try {
-    const token = new ethers.Contract(tokenAddress, ['function decimals() view returns (uint8)'], provider!);
+    const token = new ethers.Contract(tokenAddress, ['function decimals() view returns (uint8)'], rpc);
     return Number(await token.decimals());
   } catch {
     return 18;

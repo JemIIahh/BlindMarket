@@ -10,7 +10,7 @@ import * as keyCustody from '../services/keyCustodyService.js';
 import { autoVerify } from '../services/autoVerify.js';
 import { settleAssignment, settleVerification } from '../services/a2aSettlement.js';
 import { recordWorkerPayout, recordWorkerDispute } from '../services/workerPayout.js';
-import { getTaskIdByHash } from '../services/escrowEvents.js';
+import { resolveTaskByHash } from '../services/taskChain.js';
 import * as escrowService from '../services/escrow.js';
 import * as reputationService from '../services/reputation.js';
 import * as reputationDecay from '../services/reputationDecay.js';
@@ -1438,7 +1438,9 @@ a2aRouter.post('/tasks/:id/submit', requireAuth, async (req: AuthRequest, res, n
     // Look up the on-chain taskId via the TaskCreated event mapping. Without
     // it we can't build the submitEvidence tx. The mapping is populated by
     // services/escrowEvents.ts within ~30s of createTask confirming on chain.
-    const onChainId = await getTaskIdByHash(taskHash);
+    const onChainIdResolved = await resolveTaskByHash(taskHash);
+    const onChainId = onChainIdResolved?.taskId ?? null;
+    const onChainIdChain = onChainIdResolved?.chain ?? '0g';
     if (!onChainId) {
       console.warn(`[a2a] submit: hash2id not indexed yet for ${taskHash}`);
       throw new AppError(
@@ -1470,12 +1472,12 @@ a2aRouter.post('/tasks/:id/submit', requireAuth, async (req: AuthRequest, res, n
     // current on-chain submissionAttempts so the state below can record which
     // round the pending evidence broadcast will become.
     let chainAttempts = 0;
-    const onChainTask = await escrowService.getTask(Number(onChainId));
+    const onChainTask = await escrowService.getTaskOn(onChainIdChain, Number(onChainId));
     chainAttempts = onChainTask.submissionAttempts;
     if (onChainTask.worker.toLowerCase() !== address.toLowerCase()) {
       // One retry after 2s — covers edge cases like reorgs.
       await new Promise((r) => setTimeout(r, 2_000));
-      const retryTask = await escrowService.getTask(Number(onChainId));
+      const retryTask = await escrowService.getTaskOn(onChainIdChain, Number(onChainId));
       chainAttempts = retryTask.submissionAttempts;
       if (retryTask.worker.toLowerCase() !== address.toLowerCase()) {
         const freshState = await a2aStore.getState(taskHash);
@@ -1492,7 +1494,7 @@ a2aRouter.post('/tasks/:id/submit', requireAuth, async (req: AuthRequest, res, n
     // hasn't passed (BlindEscrow.sol submitEvidence). Check all three here so
     // a worker is never handed a signable tx that's guaranteed to revert.
     if (state.status === 'failed') {
-      const t = await escrowService.getTask(Number(onChainId));
+      const t = await escrowService.getTaskOn(onChainIdChain, Number(onChainId));
       if (t.status !== 3) {
         throw new AppError(
           409,
@@ -1530,7 +1532,8 @@ a2aRouter.post('/tasks/:id/submit', requireAuth, async (req: AuthRequest, res, n
 
     let unsignedSubmitEvidence: ethers.TransactionRequest | null = null;
     if (ethers.isAddress(address)) {
-      unsignedSubmitEvidence = await escrowService.buildSubmitEvidence(
+      unsignedSubmitEvidence = await escrowService.buildSubmitEvidenceOn(
+        onChainIdChain,
         address,
         Number(onChainId),
         evidenceHash,
@@ -1629,11 +1632,13 @@ a2aRouter.post('/tasks/:id/release', requireAuth, async (req: AuthRequest, res, 
     // If we can't reach the chain to check, refuse with 503 rather than
     // guess. The worker's release path retries 503s; a curl rescue will
     // also retry. Better stranded for an extra minute than desynced.
-    const onChainId = await getTaskIdByHash(taskHash);
+    const onChainIdResolved = await resolveTaskByHash(taskHash);
+    const onChainId = onChainIdResolved?.taskId ?? null;
+    const onChainIdChain = onChainIdResolved?.chain ?? '0g';
     if (onChainId) {
       let onChainStatus: number;
       try {
-        const onChainTask = await escrowService.getTask(Number(onChainId));
+        const onChainTask = await escrowService.getTaskOn(onChainIdChain, Number(onChainId));
         onChainStatus = onChainTask.status;
       } catch (err) {
         throw new AppError(
@@ -1711,11 +1716,13 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
       // judge output whose verdict can never be recorded (/verdict rejects it
       // as STALE_VERDICT) — burning the verifier's LLM spend every poll.
       // 503 keeps the worker's finalize retry/resume loop driving instead.
-      const ocIdA = await getTaskIdByHash(taskHash);
+      const ocIdAResolved = await resolveTaskByHash(taskHash);
+      const ocIdA = ocIdAResolved?.taskId ?? null;
+      const ocIdAChain = ocIdAResolved?.chain ?? '0g';
       if (!ocIdA) {
         throw new AppError(503, 'NOT_INDEXED', 'On-chain taskId not yet indexed — wait a few seconds and retry');
       }
-      const tA = await escrowService.getTask(Number(ocIdA));
+      const tA = await escrowService.getTaskOn(ocIdAChain, Number(ocIdA));
       const broadcastPending =
         state.submissionRound !== undefined && tA.submissionAttempts < state.submissionRound;
       if (broadcastPending || (tA.status !== 2 && tA.status !== 3 && tA.status !== 4)) {
@@ -1757,7 +1764,9 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
     // race (the "3 tasks · 0 0G" bug). Without submitEvidence confirmed the
     // bridge's completeVerification would also revert with InvalidStatus and
     // the task would stick permanently.
-    const ocId = await getTaskIdByHash(taskHash);
+    const ocIdResolved = await resolveTaskByHash(taskHash);
+    const ocId = ocIdResolved?.taskId ?? null;
+    const ocIdChain = ocIdResolved?.chain ?? '0g';
     if (!ocId) {
       throw new AppError(
         503,
@@ -1765,7 +1774,7 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
         'On-chain taskId not yet indexed — wait a few seconds and retry',
       );
     }
-    const onChainTask = await escrowService.getTask(Number(ocId));
+    const onChainTask = await escrowService.getTaskOn(ocIdChain, Number(ocId));
 
     // Reconcile path: on-chain already settled (3=Verified/failed,
     // 4=Completed/passed) while a2a state is still 'submitted' — a previous
@@ -1900,7 +1909,9 @@ a2aRouter.post('/tasks/:id/verify', requireAuth, async (req: AuthRequest, res, n
     // earnings credit is lost (the "3 tasks · 0 0G" drift). The executor may
     // have called /finalize (manual mode defers to /verify) before the
     // submitEvidence tx mined, so confirm status=Submitted here too.
-    const ocId = await getTaskIdByHash(taskHash);
+    const ocIdResolved = await resolveTaskByHash(taskHash);
+    const ocId = ocIdResolved?.taskId ?? null;
+    const ocIdChain = ocIdResolved?.chain ?? '0g';
     if (!ocId) {
       throw new AppError(
         503,
@@ -1908,7 +1919,7 @@ a2aRouter.post('/tasks/:id/verify', requireAuth, async (req: AuthRequest, res, n
         'On-chain taskId not yet indexed — wait a few seconds and retry',
       );
     }
-    const onChainTask = await escrowService.getTask(Number(ocId));
+    const onChainTask = await escrowService.getTaskOn(ocIdChain, Number(ocId));
 
     // Reconcile path — same as /finalize: a previous verify crashed between
     // the settle confirming (status now 3/4) and the state write. Adopt the
@@ -2045,11 +2056,13 @@ a2aRouter.post('/tasks/:id/verdict', requireAuth, async (req: AuthRequest, res, 
     // isn't this task's verifier and would revert). We confirm the on-chain
     // settlement actually happened and matches `passed`, so the backend can't be
     // handed a verdict the verifier never committed on-chain.
-    const ocId = await getTaskIdByHash(taskHash);
+    const ocIdResolved = await resolveTaskByHash(taskHash);
+    const ocId = ocIdResolved?.taskId ?? null;
+    const ocIdChain = ocIdResolved?.chain ?? '0g';
     if (!ocId) {
       throw new AppError(503, 'NOT_INDEXED', 'On-chain taskId not yet indexed — retry shortly');
     }
-    const onChainTask = await escrowService.getTask(Number(ocId));
+    const onChainTask = await escrowService.getTaskOn(ocIdChain, Number(ocId));
     // 2=Submitted, 3=Verified(failed), 4=Completed(passed).
     const settledPass = onChainTask.status === 4;
     const settledFail = onChainTask.status === 3;
@@ -2060,7 +2073,7 @@ a2aRouter.post('/tasks/:id/verdict', requireAuth, async (req: AuthRequest, res, 
       // NOT_SETTLED_ON_CHAIN here would have the verifier retrying a
       // permanently un-settleable task. (New indexes refuse this combination
       // up front via VERIFIER_MISMATCH; this catches pre-existing tasks.)
-      const onChainVerifier = await escrowService.getTaskVerifier(Number(ocId));
+      const onChainVerifier = await escrowService.getTaskVerifierOn(ocIdChain, Number(ocId));
       if (onChainVerifier === ethers.ZeroAddress) {
         throw new AppError(
           409,
@@ -2147,7 +2160,7 @@ a2aRouter.get('/verifications', requireAuth, async (req: AuthRequest, res, next)
     const verifications = await Promise.all(
       pending.map(async (t) => ({
         ...t,
-        onChainId: await getTaskIdByHash(t.meta.taskId).catch(() => null),
+        onChainId: await resolveTaskByHash(t.meta.taskId).then((r) => r?.taskId ?? null).catch(() => null),
       })),
     );
     const body: ApiResponse = {
@@ -2214,9 +2227,10 @@ a2aRouter.get('/tasks/posted', requireAuth, async (req: AuthRequest, res, next) 
           !!activeCustodyKeyId &&
           t.meta.keyCustodyBlob.keyId === activeCustodyKeyId;
         try {
-          const onChainId = await getTaskIdByHash(t.meta.taskId);
-          if (!onChainId) return { ...t, wrapCount, hasCustody, onChain: null };
-          const onChainTask = await escrowService.getTask(Number(onChainId));
+          const resolved = await resolveTaskByHash(t.meta.taskId);
+          if (!resolved) return { ...t, wrapCount, hasCustody, onChain: null };
+          const onChainId = resolved.taskId;
+          const onChainTask = await escrowService.getTaskOn(resolved.chain, Number(onChainId));
           return {
             ...t,
             wrapCount,
