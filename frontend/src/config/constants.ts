@@ -51,8 +51,15 @@ export const BASE_RPC_URL =
   import.meta.env.VITE_BASE_RPC_URL ||
   (IS_PROD ? 'https://mainnet.base.org' : 'https://sepolia.base.org');
 
-export const BASE_ESCROW_ADDRESS =
-  import.meta.env.VITE_BASE_ESCROW_ADDRESS || BASE_ADDR?.blindEscrow || '';
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
+
+/** Collapse an undeployed placeholder address to '' so callers can treat it as unset. */
+export const unsetIfZero = (a: string | undefined): string =>
+  !a || a.toLowerCase() === ZERO_ADDRESS ? '' : a;
+
+export const BASE_ESCROW_ADDRESS = unsetIfZero(
+  import.meta.env.VITE_BASE_ESCROW_ADDRESS || BASE_ADDR?.blindEscrow || '',
+);
 
 export const BASE_USDC_ADDRESS =
   import.meta.env.VITE_BASE_USDC_ADDRESS ||

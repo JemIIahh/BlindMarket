@@ -30,11 +30,18 @@ const KEYS: Record<string, string> = {
   USDC: "USDC",
 };
 
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+
 function load(file: string): Record<string, string> {
   const rec = JSON.parse(fs.readFileSync(path.resolve(__dirname, `../deployments/${file}`), "utf-8"));
   const c = rec.contracts ?? {};
   const out: Record<string, string> = {};
-  for (const [recKey, genKey] of Object.entries(KEYS)) if (c[recKey]) out[genKey] = c[recKey];
+  for (const [recKey, genKey] of Object.entries(KEYS)) {
+    // An all-zero address is the deliberate "not deployed yet" placeholder
+    // (see contracts/deployments/base-mainnet.json and CLAUDE.md). Emitting it
+    // makes consumers that test truthiness believe the contract is live.
+    if (c[recKey] && c[recKey].toLowerCase() !== ZERO_ADDRESS) out[genKey] = c[recKey];
+  }
   return out;
 }
 
