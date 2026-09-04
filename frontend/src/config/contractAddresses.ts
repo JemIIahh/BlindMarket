@@ -17,8 +17,6 @@ export const CONTRACT_ADDRESSES = {
     "validatorPool": "0x1D5867cE8072d8ccD3f2C78717D48036173aa9ab"
   },
   "base": {
-    "blindEscrow": "0x0000000000000000000000000000000000000000",
-    "agentFactory": "0x0000000000000000000000000000000000000000",
     "USDC": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
   },
   "baseTestnet": {
