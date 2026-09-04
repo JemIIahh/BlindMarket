@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useWalletClient } from 'wagmi';
-import { useSendTransaction } from '@privy-io/react-auth';
 import { getIdentityToken, getAccessToken } from '@privy-io/react-auth';
 import { BrowserProvider, parseUnits, formatUnits } from 'ethers';
 import {
@@ -67,7 +66,7 @@ export default function PostTask() {
   const native = getNativeCurrency(activeChain);
   const address = useChainAddress();
   const { data: walletClient } = useWalletClient();
-  const { sendTransaction } = useSendTransaction();
+
   const navigate = useNavigate();
   const { isAuthenticated } = useAuth();
 
@@ -357,7 +356,7 @@ export default function PostTask() {
       console.log(`[PostTask] Signing registration TX (Base escrow, gas-sponsored)...`);
       const isNativeToken = TOKEN === '0x0000000000000000000000000000000000000000';
       const signer = await (new BrowserProvider(walletClient!.transport)).getSigner();
-      const sent = await signAndSendTx(signer, taskJson.unsignedTx, isNativeToken ? BigInt(amountBase) : undefined, sendTransaction);
+      const sent = await signAndSendTx(signer, taskJson.unsignedTx, isNativeToken ? BigInt(amountBase) : undefined);
       const txHash = sent.hash;
       console.log(`[PostTask] Task TX submitted: hash=${txHash} block=${sent.receipt?.blockNumber ?? 'pending'}`);
 

@@ -1,50 +1,70 @@
 import type { ethers } from 'ethers';
 import type { UnsignedTx } from '../types/api';
+import { getAuthHeaders } from './api';
+import { API_BASE_URL } from '../config/constants';
 
 export interface SentTx {
   hash: string;
   receipt: ethers.TransactionReceipt | null;
 }
 
+export class RelayError extends Error {
+  code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.code = code;
+    this.name = 'RelayError';
+  }
+}
+
 /**
- * Send a transaction via Privy's useSendTransaction with gas sponsorship.
- * Requires "app pays" mode in Privy dashboard (sponsor: true without sponsor_options).
+ * Relay a gas-sponsored transaction through the backend.
+ * The server uses @privy-io/node to call Privy's RPC with sponsor_options.
  */
 export async function signAndSendTx(
   signer: ethers.JsonRpcSigner,
   unsignedTx: UnsignedTx,
   value?: bigint,
-  sendFn?: (input: any, options?: any) => Promise<{ hash: string }>,
 ): Promise<SentTx> {
-  if (sendFn) {
-    const tx = await sendFn(
-      { to: unsignedTx.to, data: unsignedTx.data, value, gasLimit: 1_000_000 },
-      { sponsor: true },
-    );
-
-    for (let i = 0; i < 30; i++) {
-      await new Promise(r => setTimeout(r, 3000));
-      try {
-        const receipt = await signer.provider.getTransactionReceipt(tx.hash);
-        if (receipt) return { hash: tx.hash, receipt };
-      } catch { /* keep retrying */ }
-    }
-    return { hash: tx.hash, receipt: null };
-  }
-
-  const txResponse = await signer.sendTransaction({
+  const from = await signer.getAddress();
+  const body = {
+    walletAddress: from,
     to: unsignedTx.to,
     data: unsignedTx.data,
-    value: value,
-    gasLimit: 1_000_000,
+    value: value ? String(value) : undefined,
+    chain: 'base',
+    asset: 'usdc',
+  };
+
+  const res = await fetch(`${API_BASE_URL}/tx/relay-tx`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...await getAuthHeaders(),
+    },
+    body: JSON.stringify(body),
   });
+
+  const json = await res.json();
+  if (!res.ok || !json.success) {
+    const code = json.error?.code || 'RELAY_FAILED';
+    const msg = json.error?.message || json.error || `Relay failed (${res.status})`;
+    throw new RelayError(code, msg);
+  }
+
+  const txHash: string = json.data?.hash || '';
+  if (!txHash) {
+    throw new RelayError('NO_HASH', 'Relay returned empty tx hash');
+  }
+
+  console.log(`[txSigner] relay success hash=${txHash}`);
 
   for (let i = 0; i < 30; i++) {
     await new Promise(r => setTimeout(r, 3000));
     try {
-      const receipt = await txResponse.provider.getTransactionReceipt(txResponse.hash);
-      if (receipt) return { hash: txResponse.hash, receipt };
+      const receipt = await signer.provider.getTransactionReceipt(txHash);
+      if (receipt) return { hash: txHash, receipt };
     } catch { /* keep retrying */ }
   }
-  return { hash: txResponse.hash, receipt: null };
+  return { hash: txHash, receipt: null };
 }

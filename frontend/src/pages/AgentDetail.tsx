@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import { useBalance, useWalletClient } from 'wagmi';
-import { useSendTransaction } from '@privy-io/react-auth';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { BrowserProvider, parseEther, formatUnits } from 'ethers';
 import {
@@ -52,7 +51,6 @@ export default function AgentDetail() {
   const { id } = useParams<{ id: string }>();
   const address = useChainAddress();
   const { data: walletClient } = useWalletClient();
-  const { sendTransaction } = useSendTransaction();
   const qc = useQueryClient();
 
   const [agent, setAgent] = useState<AgentDetails | null>(null);
@@ -247,22 +245,13 @@ export default function AgentDetail() {
     setTopUpError('');
     try {
       const provider = new BrowserProvider(walletClient!.transport);
+      const signer = await provider.getSigner();
       const value = parseEther(TOP_UP_AMOUNT);
-      const tx = await sendTransaction(
-        {
-          to: agent.walletAddress,
-          value: value,
-        },
-        { sponsor: true },
-      );
-      let txHash = tx.hash;
-      // Poll for receipt
-      for (let i = 0; i < 30; i++) {
-        await new Promise(r => setTimeout(r, 3000));
-        const receipt = await provider.getTransactionReceipt(txHash);
-        if (receipt) break;
+      const { signAndSendTx } = await import('../lib/txSigner');
+      const sent = await signAndSendTx(signer, { to: agent.walletAddress, data: '0x', from: address! }, value);
+      if (sent.receipt) {
+        await refetchBalance();
       }
-      await refetchBalance();
       setTopUpStatus('idle');
     } catch (err) {
       setTopUpError((err as Error).message || 'Top-up failed');

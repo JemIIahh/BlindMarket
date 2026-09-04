@@ -1,7 +1,7 @@
 import { useParams, Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { useSendTransaction } from '@privy-io/react-auth';
+
 import { useTask } from '../hooks/useTasks';
 import { useWallet } from '../context/WalletContext';
 import { useChain } from '../context/ChainContext';
@@ -51,7 +51,6 @@ export default function TaskDetail() {
   const { id } = useParams();
   const { data, isLoading, isError, refetch } = useTask(id || '');
   const { address, signer } = useWallet();
-  const { sendTransaction } = useSendTransaction();
   const { activeChain } = useChain();
   const explorerUrl = useChainExplorerUrl();
   const native = getNativeCurrency(activeChain);
@@ -68,7 +67,7 @@ export default function TaskDetail() {
       if (!id) throw new Error('Missing task id');
       if (!signer) throw new Error('Wallet not connected');
       const tx = await buildCancelTask(id);
-      await signAndSendTx(signer, tx, undefined, sendTransaction);
+      await signAndSendTx(signer, tx);
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['tasks', id] }),
   });
@@ -78,7 +77,7 @@ export default function TaskDetail() {
       if (!id) throw new Error('Missing task id');
       if (!signer) throw new Error('Wallet not connected');
       const tx = await buildClaimTimeout(id);
-      await signAndSendTx(signer, tx, undefined, sendTransaction);
+      await signAndSendTx(signer, tx);
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['tasks', id] }),
   });
