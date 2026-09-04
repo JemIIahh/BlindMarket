@@ -10,6 +10,7 @@ import {
   LoadingState,
   EmptyState,
   ErrorState,
+  ConfirmDialog,
 } from '../components/bb';
 import { get, authedGet, authedPost } from '../lib/api';
 import { useChainAddress } from '../hooks/useChainWallet';
@@ -239,10 +240,15 @@ export default function AgentDetail() {
   // involvement; same primitive as the deploy-funding step. We refresh the
   // balance after the tx confirms so the UI tile updates immediately
   // instead of waiting on a poll cycle.
-  async function handleTopUp() {
+  const [topUpConfirm, setTopUpConfirm] = useState(false);
+  function requestTopUp() {
     if (!address || !agent?.walletAddress) return;
+    setTopUpConfirm(true);
+  }
+  async function confirmTopUp() {
+    if (!address || !agent?.walletAddress) return;
+    setTopUpConfirm(false);
     setTopUpStatus('sending');
-    setTopUpError('');
     try {
       const provider = new BrowserProvider(walletClient!.transport);
       const signer = await provider.getSigner();
@@ -315,6 +321,7 @@ export default function AgentDetail() {
       : null;
 
   return (
+    <>
     <div>
       <Breadcrumb items={['marketplace', 'agents', isOwner ? 'mine' : 'browse', agent.name]} />
 
@@ -429,7 +436,7 @@ export default function AgentDetail() {
               withdrawError={withdrawError}
               withdrawInfo={withdrawInfo}
               confirmOpen={withdrawConfirmOpen}
-              onTopUp={handleTopUp}
+               onTopUp={requestTopUp}
               onWithdrawRequest={() => setWithdrawConfirmOpen(true)}
               onWithdrawConfirm={handleWithdraw}
               onWithdrawCancel={() => setWithdrawConfirmOpen(false)}
@@ -445,5 +452,14 @@ export default function AgentDetail() {
         </div>
       )}
     </div>
+    <ConfirmDialog
+      open={topUpConfirm}
+      title="Top up agent gas"
+      description={`Send ${TOP_UP_AMOUNT} ETH from your wallet to ${agent?.walletAddress?.slice(0, 10)}…${agent?.walletAddress?.slice(-8)} for gas. This will be deducted from your wallet.`}
+      confirmLabel="Send ETH"
+      onConfirm={confirmTopUp}
+      onCancel={() => setTopUpConfirm(false)}
+    />
+    </>
   );
 }

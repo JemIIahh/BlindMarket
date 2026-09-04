@@ -1,4 +1,5 @@
 import { useParams, Link } from 'react-router-dom';
+import { useState } from 'react';
 import { motion } from 'framer-motion';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 
@@ -6,7 +7,7 @@ import { useTask } from '../hooks/useTasks';
 import { useWallet } from '../context/WalletContext';
 import { useChain } from '../context/ChainContext';
 import { useAuth } from '../context/AuthContext';
-import { Panel, SectionRule, Tag, Button, StatusTag, Skeleton, ErrorState, useTabParam } from '../components/bb';
+import { Panel, SectionRule, Tag, Button, StatusTag, Skeleton, ErrorState, useTabParam, ConfirmDialog } from '../components/bb';
 import { EncryptionIndicator } from '../components/EncryptionIndicator';
 import { TxPendingModal } from '../components/TxPendingModal';
 import { CustodyChain } from '../components/CustodyChain';
@@ -58,6 +59,7 @@ export default function TaskDetail() {
   void useAuth();
   const qc = useQueryClient();
   const [activeTab, setActiveTab] = useTabParam<DetailTab>('details', DETAIL_TABS.map((t) => t.id));
+  const [confirmAction, setConfirmAction] = useState<'cancel' | 'timeout' | null>(null);
 
   // Build + sign + send the cancel / timeout tx as one mutation so React Query
   // surfaces the error (auth failure, server error, user-rejected sig) instead
@@ -129,6 +131,7 @@ export default function TaskDetail() {
   const taskLabel = onChain.taskId || id?.slice(0, 10);
 
   return (
+    <>
     <motion.div initial="hidden" animate="visible" variants={fadeUp} className="max-w-3xl mx-auto">
       <TxPendingModal open={txPending} />
 
@@ -486,14 +489,14 @@ export default function TaskDetail() {
                   <Button
                     variant="outline"
                     label={cancelMutation.isPending ? 'Cancelling…' : 'Cancel & refund'}
-                    onClick={() => cancelMutation.mutate()}
+                    onClick={() => setConfirmAction('cancel')}
                     disabled={txPending}
                   />
                 ) : (
                   <Button
                     variant="outline"
                     label={timeoutMutation.isPending ? 'Claiming…' : 'Claim timeout'}
-                    onClick={() => timeoutMutation.mutate()}
+                    onClick={() => setConfirmAction('timeout')}
                     disabled={txPending}
                   />
                 )}
@@ -508,5 +511,24 @@ export default function TaskDetail() {
         </>
       )}
     </motion.div>
+    <ConfirmDialog
+      open={confirmAction === 'cancel'}
+      title="Cancel task & reclaim funds"
+      description="This will cancel the task and refund your escrowed USDC to your wallet. This action cannot be undone."
+      confirmLabel="Cancel & Refund"
+      danger
+      onConfirm={() => { setConfirmAction(null); cancelMutation.mutate(); }}
+      onCancel={() => setConfirmAction(null)}
+    />
+    <ConfirmDialog
+      open={confirmAction === 'timeout'}
+      title="Claim timeout refund"
+      description="The accepted agent missed the deadline. This will reclaim your escrowed USDC."
+      confirmLabel="Claim Refund"
+      danger
+      onConfirm={() => { setConfirmAction(null); timeoutMutation.mutate(); }}
+      onCancel={() => setConfirmAction(null)}
+    />
+    </>
   );
 }

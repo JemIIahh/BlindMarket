@@ -16,6 +16,7 @@ import {
   Icon,
   SignInGate,
   Spinner,
+  ConfirmDialog,
 } from '../components/bb';
 import { aesEncrypt, eciesEncrypt, generateAesKey, sha256, toBase64, toBytes } from '../lib/crypto';
 import { stashAesKey } from '../lib/keyStash';
@@ -111,9 +112,13 @@ export default function PostTask() {
   // verification-mode picker are removed; we hardcode the values that drive
   // the autonomous flow. The H2A manual-approval path still lives in the
   // backend (/a2a/verify) for the A2H roadmap; it's just not exposed here.
-  const [status, setStatus] = useState<'idle' | 'encrypting' | 'approving' | 'signing' | 'done' | 'error'>('idle');
+  const [status, setStatus] = useState<'idle' | 'encrypting' | 'approving' | 'confirming' | 'signing' | 'done' | 'error'>('idle');
   const [error, setError] = useState('');
   const [taskId, setTaskId] = useState<string | null>(null);
+  const [confirmAmount, setConfirmAmount] = useState('');
+  const [confirmSymbol, setConfirmSymbol] = useState('');
+  const pendingTxRef = useRef<{ unsignedTx: any; value?: bigint; amount: string; symbol: string } | null>(null);
+  const confirmResolveRef = useRef<((approve: boolean) => void) | null>(null);
   // Snapshot of how many executors the AES key was wrapped to at post time.
   // Drives the post-success copy: a non-zero count means at least one agent
   // can /accept immediately; zero means the task is awaiting bids. The
@@ -351,10 +356,29 @@ export default function PostTask() {
         wrappedKeys: isPublicTask ? undefined : wrappedKeys,
       }, token);
 
-      // 7. Sign and send — EVM via Privy with gas sponsorship
-      setStatus('signing');
-      console.log(`[PostTask] Signing registration TX (Base escrow, gas-sponsored)...`);
+      // 7. Show confirmation — user must approve the transaction before relay
+      setStatus('confirming');
       const isNativeToken = TOKEN === '0x0000000000000000000000000000000000000000';
+      const displaySymbol = getPaymentSymbol();
+      setConfirmAmount(form.amount);
+      setConfirmSymbol(displaySymbol);
+      pendingTxRef.current = {
+        unsignedTx: taskJson.unsignedTx,
+        value: isNativeToken ? BigInt(amountBase) : undefined,
+        amount: form.amount,
+        symbol: displaySymbol,
+      };
+      const approved = await new Promise<boolean>((resolve) => { confirmResolveRef.current = resolve; });
+      pendingTxRef.current = null;
+      if (!approved) {
+        setStatus('idle');
+        submittingRef.current = false;
+        return;
+      }
+
+      // 8. Sign and send — relayed through backend for Privy gas sponsorship
+      setStatus('signing');
+      console.log(`[PostTask] Signing registration TX (Base escrow, gas-sponsored via relay)...`);
       const signer = await (new BrowserProvider(walletClient!.transport)).getSigner();
       const sent = await signAndSendTx(signer, taskJson.unsignedTx, isNativeToken ? BigInt(amountBase) : undefined);
       const txHash = sent.hash;
@@ -416,6 +440,7 @@ export default function PostTask() {
             : 'Encrypt and post task';
 
   return (
+    <>
     <div>
       <Breadcrumb items={['tasks', 'post']} />
       <PageHeader
@@ -809,5 +834,14 @@ export default function PostTask() {
         </form>
       )}
     </div>
+    <ConfirmDialog
+      open={status === 'confirming'}
+      title="Authorize transaction"
+      description={`This will escrow ${confirmAmount} ${confirmSymbol} on Base. Gas is sponsored (paid in USDC from your wallet). You will be charged only the escrow amount + gas.`}
+      confirmLabel="Authorize & Post"
+      onConfirm={() => confirmResolveRef.current?.(true)}
+      onCancel={() => confirmResolveRef.current?.(false)}
+    />
+    </>
   );
 }
