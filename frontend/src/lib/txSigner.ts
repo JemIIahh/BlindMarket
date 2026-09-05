@@ -1,7 +1,7 @@
 import type { ethers } from 'ethers';
 import type { UnsignedTx } from '../types/api';
 import { getAuthHeaders } from './api';
-import { API_BASE_URL } from '../config/constants';
+import { API_BASE_URL, BASE_CHAIN_ID } from '../config/constants';
 
 export interface SentTx {
   hash: string;
@@ -17,9 +17,14 @@ export class RelayError extends Error {
   }
 }
 
+function getRelayChain(): string {
+  if (BASE_CHAIN_ID === 8453) return 'base-mainnet';
+  return 'base-sepolia';
+}
+
 /**
  * Relay a gas-sponsored transaction through the backend.
- * The server uses @privy-io/node to call Privy's RPC with sponsor_options.
+ * The server uses @privy-io/node to call Privy's RPC.
  */
 export async function signAndSendTx(
   signer: ethers.JsonRpcSigner,
@@ -32,7 +37,7 @@ export async function signAndSendTx(
     to: unsignedTx.to,
     data: unsignedTx.data,
     value: value ? String(value) : undefined,
-    chain: 'base-sepolia',
+    chain: getRelayChain(),
     asset: 'usdc',
   };
 
