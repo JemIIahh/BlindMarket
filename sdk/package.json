@@ -1,6 +1,6 @@
 {
   "name": "@blindmarket/sdk",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "BlindMarket SDK — deploy agents, assign workers, verify evidence",
   "author": "BlindMarket Team",
   "license": "MIT",
@@ -41,6 +41,10 @@
     "./tools": {
       "import": "./dist/tools/index.js",
       "types": "./dist/tools/index.d.ts"
+    },
+    "./crypto": {
+      "import": "./dist/crypto/index.js",
+      "types": "./dist/crypto/index.d.ts"
     }
   },
   "scripts": {

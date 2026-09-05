@@ -1,6 +1,6 @@
 import { ethers } from 'ethers';
 import type {
-  Address, Hex, HealthStatus, PlatformStats, OpenTask, TaskDetail,
+  Address, Hex, RootHash, HealthStatus, PlatformStats, OpenTask, TaskDetail,
   CreateTaskTx, ExecutorProfile, RegisterExecutorInput,
   DeployedAgentInfo, AgentWalletInfo, ReputationInfo, LeaderboardEntry,
   StorageUploadResult, Message, AgentSearchResult, TaskTemplate,
@@ -347,17 +347,60 @@ export class BlindMarket {
     return this.req('POST', `/api/v1/a2a/tasks/${taskId}/bid`);
   }
 
-  /** Accept a task and get wrapped AES key. Requires executor auth. */
-  async acceptTask(taskId: string): Promise<{ task: A2ATaskState; wrappedKey: Record<string, string> }> {
+  /**
+   * Accept a task and get the rootHash + ECIES-wrapped AES key for the
+   * caller's address. Requires executor auth.
+   *
+   * Note the shape here matches `backend/src/routes/a2a.ts`'s `/accept`
+   * handler exactly — there is no `task` field, and `wrappedKey` is a single
+   * hex string (this executor's slice), not a `Record`.
+   */
+  async acceptTask(taskId: string): Promise<{
+    taskId: string;
+    status: string;
+    rootHash?: RootHash;
+    /** ECIES-wrapped AES key, hex-encoded with no 0x prefix. Absent on public tasks or legacy tasks with no brief. */
+    wrappedKey?: string;
+    /** 'public' means the blob at rootHash is plaintext — no wrappedKey by design. Absent means private/encrypted. */
+    privacy?: 'public' | 'private';
+    alreadySettled?: boolean;
+    assignTxHash?: Hex;
+  }> {
     return this.req('POST', `/api/v1/a2a/tasks/${taskId}/accept`);
   }
 
-  /** Submit result for an accepted task. */
+  /**
+   * Submit result for an accepted task. Returns an unsigned `submitEvidence`
+   * transaction — the contract requires the assigned worker to sign it
+   * personally (`onlyWorker`), so the caller must sign + broadcast
+   * `unsignedSubmitEvidence` and then call `finalize()`.
+   */
   async submitResult(taskId: string, resultData: Record<string, unknown>): Promise<{
-    unsignedTx: object;
-    task: A2ATaskState;
+    taskId: string;
+    onChainTaskId?: string;
+    status: string;
+    evidenceHash?: Hex;
+    unsignedSubmitEvidence?: Record<string, unknown> | null;
   }> {
     return this.req('POST', `/api/v1/a2a/tasks/${taskId}/submit`, { resultData });
+  }
+
+  /**
+   * Tell the backend your `submitEvidence` tx has confirmed on-chain so it
+   * can proceed with verification — auto-verify, or hand off to the poster
+   * / a designated verifier agent depending on the task's verificationMode.
+   * Call this after signing and broadcasting `unsignedSubmitEvidence` from
+   * `submitResult()`. Without this the escrow never settles.
+   */
+  async finalize(taskId: string): Promise<{
+    taskId: string;
+    status: string;
+    verifier?: string;
+    awaitingPosterApproval?: boolean;
+    verificationResult?: { passed: boolean; reasons?: string[] };
+    reconciled?: boolean;
+  }> {
+    return this.req('POST', `/api/v1/a2a/tasks/${taskId}/finalize`);
   }
 
   /** Get tasks posted by the authenticated user. */
@@ -419,9 +462,14 @@ export class BlindMarket {
     return this.req<StorageUploadResult>('POST', '/api/v1/storage/upload', { data });
   }
 
-  /** Download a blob by root hash. */
-  async downloadBlob(rootHash: Hex): Promise<{ data: Hex }> {
-    return this.req<{ data: Hex }>('GET', `/api/v1/storage/${rootHash}`);
+  /**
+   * Download a blob by root hash. `blob` is base64-encoded raw bytes — the
+   * caller decodes (and, for encrypted tasks, decrypts) it client-side.
+   * Matches `backend/src/routes/storage.ts`'s `GET /:rootHash` handler,
+   * which returns `{ rootHash, blob }`, not `{ data }`.
+   */
+  async downloadBlob(rootHash: Hex): Promise<{ rootHash: Hex; blob: string }> {
+    return this.req('GET', `/api/v1/storage/${rootHash}`);
   }
 
   // ── Messages ─────────────────────────────────────────────────────────────

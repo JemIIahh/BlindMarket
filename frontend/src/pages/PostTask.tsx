@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useWalletClient } from 'wagmi';
 import { getIdentityToken, getAccessToken } from '@privy-io/react-auth';
-import { BrowserProvider, parseUnits, formatUnits, Contract, MaxUint256 } from 'ethers';
+import { BrowserProvider, parseUnits, formatUnits, Contract } from 'ethers';
 import {
   Breadcrumb,
   PageHeader,
@@ -23,7 +23,7 @@ import { stashAesKey } from '../lib/keyStash';
 import { signAndSendTx } from '../lib/txSigner';
 import { authedGet, authedPost } from '../lib/api';
 import { trackEvent } from '../hooks/useAnalytics';
-import { MARKETPLACE_TOKEN_ADDRESS, getNativeCurrency, getPaymentDecimals, getPaymentSymbol, WORKER_SHARE_PCT, PLATFORM_FEE_PCT, BASE_ESCROW_ADDRESS, BASE_USDC_ADDRESS } from '../config/constants';
+import { MARKETPLACE_TOKEN_ADDRESS, getNativeCurrency, getPaymentDecimals, getPaymentSymbol, WORKER_SHARE_PCT, PLATFORM_FEE_PCT, BASE_ESCROW_ADDRESS } from '../config/constants';
 import { useChain } from '../context/ChainContext';
 import { useChainAddress } from '../hooks/useChainWallet';
 import { useAuth } from '../context/AuthContext';
