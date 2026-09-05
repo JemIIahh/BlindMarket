@@ -117,6 +117,7 @@ export default function PostTask() {
   const [taskId, setTaskId] = useState<string | null>(null);
   const [confirmAmount, setConfirmAmount] = useState('');
   const [confirmSymbol, setConfirmSymbol] = useState('');
+  const [gasEstimate, setGasEstimate] = useState<string>('');
   const pendingTxRef = useRef<{ unsignedTx: any; value?: bigint; amount: string; symbol: string } | null>(null);
   const confirmResolveRef = useRef<((approve: boolean) => void) | null>(null);
   // Snapshot of how many executors the AES key was wrapped to at post time.
@@ -357,11 +358,27 @@ export default function PostTask() {
       }, token);
 
       // 7. Show confirmation — user must approve the transaction before relay
+      // Estimate gas cost for the createTask tx
+      let gasCostUsdc = '';
+      try {
+        const gasProvider = new BrowserProvider(walletClient!.transport);
+        const unsignedGasTx = { ...taskJson.unsignedTx, from: address };
+        const gasUnits = await gasProvider.estimateGas(unsignedGasTx);
+        const feeData = await gasProvider.getFeeData();
+        const gasPrice = feeData.gasPrice || 0n;
+        const gasCostWei = gasUnits * gasPrice;
+        const gasCostEth = parseFloat(formatUnits(gasCostWei, 18));
+        gasCostUsdc = gasCostEth.toFixed(6);
+        console.log(`[PostTask] Gas estimate: ${gasUnits} units × ${formatUnits(gasPrice, 9)} gwei = ${gasCostUsdc} ETH (≈ paid in USDC)`);
+      } catch (e) {
+        console.warn('[PostTask] Gas estimate failed:', (e as Error).message);
+      }
       setStatus('confirming');
       const isNativeToken = TOKEN === '0x0000000000000000000000000000000000000000';
       const displaySymbol = getPaymentSymbol();
       setConfirmAmount(form.amount);
       setConfirmSymbol(displaySymbol);
+      setGasEstimate(gasCostUsdc);
       pendingTxRef.current = {
         unsignedTx: taskJson.unsignedTx,
         value: isNativeToken ? BigInt(amountBase) : undefined,
@@ -889,7 +906,7 @@ export default function PostTask() {
                 <span>{confirmAmount} {confirmSymbol}</span>
               </div>
             </div>
-            <p className="text-xs text-ink-3">Gas is free — covered by the platform.</p>
+            <p className="text-xs text-ink-3">Gas is free — covered by the platform.{gasEstimate && ` Estimated gas: ~${gasEstimate} ETH (paid in USDC).`}</p>
           </div>
         ) : undefined
       }
