@@ -127,11 +127,12 @@ txRouter.post('/relay-tx', requireAuth, async (req, res, next) => {
       headers: { 'privy-authorization-signature': authSignature },
     });
 
-    const hash = result?.hash || result?.user_operation_hash || '';
-    const txId = result?.transaction_id || null;
-    console.log(`[relay-tx] success hash=${hash} txId=${txId}`);
+    const rpcResult = result?.data || result || {};
+    const hash = rpcResult.hash || rpcResult.user_operation_hash || '';
+    const txId = rpcResult.transaction_id || null;
+    console.log(`[relay-tx] success hash=${hash} txId=${txId} raw=${JSON.stringify(result).slice(0, 300)}`);
 
-    res.json({ success: true, data: { hash, userOperationHash: result?.user_operation_hash || null, transactionId: txId } });
+    res.json({ success: true, data: { hash, userOperationHash: rpcResult.user_operation_hash || null, transactionId: txId } });
   } catch (err: any) {
     if (err instanceof z.ZodError) {
       return next(new AppError(400, 'VALIDATION_ERROR', err.errors.map(e => e.message).join(', ')));
