@@ -92,6 +92,7 @@ txRouter.post('/relay-tx', requireAuth, async (req, res, next) => {
       chain_type: 'ethereum' as const,
       params: { transaction },
       sponsor: true,
+      sponsor_options: { asset: body.asset },
     };
     const rpcUrl = `https://api.privy.io/v1/wallets/${walletId}/rpc`;
 
@@ -119,6 +120,7 @@ txRouter.post('/relay-tx', requireAuth, async (req, res, next) => {
       chain_type: 'ethereum' as const,
       params: { transaction },
       sponsor: true,
+      sponsor_options: { asset: body.asset },
     };
 
     const result = await privy.wallets()._rpc(walletId, rpcInput as any, {
