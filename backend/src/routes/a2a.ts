@@ -1098,35 +1098,47 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       // Non-indexed data: [token, amount, taskHash, category, locationZone, deadline]
       // taskHash is at data index 2 (after token and amount).
       const escrowAddr = baseEscrow ? await baseEscrow.getAddress() : await escrow.getAddress();
-      for (const { prov, esc, label } of providers) {
-        const blockNum = await prov.getBlockNumber();
-        const fromBlock = Math.max(0, blockNum - 100);
-        console.log(`[tasks/index] Scanning ${label} blocks ${fromBlock}–${blockNum} for TaskCreated`);
-        const logs = await prov.getLogs({
-          fromBlock,
-          toBlock: 'latest',
-          address: escrowAddr,
-          topics: [taskCreatedTopic],
-        });
-        console.log(`[tasks/index] Found ${logs.length} TaskCreated logs on ${label}`);
-        const match = logs.find((l) => {
+
+      // Retry loop — the bundler may take a few blocks to include the user-op.
+      for (let attempt = 0; attempt < 5 && !receipt; attempt++) {
+        if (attempt > 0) {
+          console.log(`[tasks/index] Retry ${attempt + 1}/5 — waiting 5s for inclusion...`);
+          await new Promise((r) => setTimeout(r, 5000));
+        }
+        for (const { prov, esc, label } of providers) {
           try {
-            const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
-              ['address', 'uint256', 'bytes32', 'string', 'string', 'uint256'],
-              l.data,
-            );
-            const logTaskHash = decoded[2];
-            return logTaskHash?.toLowerCase() === taskHash.toLowerCase();
-          } catch { return false; }
-        });
-        if (match) {
-          console.log(`[tasks/index] Match found! txHash=${match.transactionHash} block=${match.blockNumber}`);
-          receipt = await prov.getTransactionReceipt(match.transactionHash);
-          if (receipt) {
-            activeProvider = prov;
-            activeEscrow = esc;
-            console.log(`[tasks/index] Receipt confirmed at block ${receipt.blockNumber}`);
-            break;
+            const blockNum = await prov.getBlockNumber();
+            const fromBlock = Math.max(0, blockNum - 200);
+            console.log(`[tasks/index] Scanning ${label} blocks ${fromBlock}–${blockNum} for TaskCreated`);
+            const logs = await prov.getLogs({
+              fromBlock,
+              toBlock: 'latest',
+              address: escrowAddr,
+              topics: [taskCreatedTopic],
+            });
+            console.log(`[tasks/index] Found ${logs.length} TaskCreated logs on ${label}`);
+            const match = logs.find((l) => {
+              try {
+                const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
+                  ['address', 'uint256', 'bytes32', 'string', 'string', 'uint256'],
+                  l.data,
+                );
+                const logTaskHash = decoded[2];
+                return logTaskHash?.toLowerCase() === taskHash.toLowerCase();
+              } catch { return false; }
+            });
+            if (match) {
+              console.log(`[tasks/index] Match found! txHash=${match.transactionHash} block=${match.blockNumber}`);
+              receipt = await prov.getTransactionReceipt(match.transactionHash);
+              if (receipt) {
+                activeProvider = prov;
+                activeEscrow = esc;
+                console.log(`[tasks/index] Receipt confirmed at block ${receipt.blockNumber}`);
+                break;
+              }
+            }
+          } catch (e) {
+            console.error(`[tasks/index] getLogs scan failed on ${label}:`, (e as Error).message?.slice(0, 200));
           }
         }
       }

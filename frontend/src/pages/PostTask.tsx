@@ -429,37 +429,38 @@ export default function PostTask() {
       // needs the on-chain receipt to parse the TaskCreated event.
       if (sent.userOp) {
         console.log(`[PostTask] Waiting for user-op inclusion on-chain...`);
-        await new Promise(r => setTimeout(r, 10000));
+        await new Promise(r => setTimeout(r, 15000));
       }
 
-      // 8. Register A2A meta on the backend, gated on the receipt. Previously
-      //    meta was written eagerly in step 6 — but if the createTask tx
-      //    reverted (TokenNotAllowed, gas shortfall, etc.) Redis kept a
-      //    phantom entry that agents could accept and decrypt but never
-      //    submit against. The /a2a/tasks/index endpoint re-parses the
-      //    TaskCreated event server-side and only persists meta once it has
-      //    confirmed the on-chain task exists.
-      const indexResp = await authedPost<any>('/api/v1/a2a/tasks/index', {
-        txHash,
-        taskHash,
-        isUserOp: sent.userOp ?? false,
-        verificationMode,
-        verificationCriteria,
-        verifierAddress,
-        requiredCapabilities: [],
-        rootHash,
-        wrappedKeys: isPublicTask ? undefined : wrappedKeys,
-        // Only sent when key-custody is enabled (else undefined → omitted by
-        // JSON.stringify). Lets the backend self-heal late joiners on /accept.
-        keyCustodyBlob,
-        // Public task: plaintext brief, no key material (backend enforces),
-        // plus a bounded display copy for browse/detail surfaces.
-        privacy: isPublicTask ? ('public' as const) : undefined,
-        publicBrief: isPublicTask ? form.instructions.slice(0, 4000) : undefined,
-        // Semantic routing text — matters most for private tasks (the matcher
-        // can't read the encrypted brief). Public tasks match on publicBrief.
-        routingSummary: form.routingSummary.trim() ? form.routingSummary.trim().slice(0, 500) : undefined,
-      }, token);
+      // 8. Register A2A meta on the backend, gated on the receipt.
+      // Retry up to 3 times — user-op inclusion can take a few blocks.
+      let indexResp: any = null;
+      let lastErr: any = null;
+      for (let i = 0; i < 3; i++) {
+        try {
+          indexResp = await authedPost<any>('/api/v1/a2a/tasks/index', {
+            txHash,
+            taskHash,
+            isUserOp: sent.userOp ?? false,
+            verificationMode,
+            verificationCriteria,
+            verifierAddress,
+            requiredCapabilities: [],
+            rootHash,
+            wrappedKeys: isPublicTask ? undefined : wrappedKeys,
+            keyCustodyBlob,
+            privacy: isPublicTask ? ('public' as const) : undefined,
+            publicBrief: isPublicTask ? form.instructions.slice(0, 4000) : undefined,
+            routingSummary: form.routingSummary.trim() ? form.routingSummary.trim().slice(0, 500) : undefined,
+          }, token);
+          break;
+        } catch (e) {
+          lastErr = e;
+          console.warn(`[PostTask] /tasks/index attempt ${i + 1} failed:`, (e as Error).message);
+          if (i < 2) await new Promise(r => setTimeout(r, 10000));
+        }
+      }
+      if (!indexResp) throw lastErr!;
 
       const finalTaskId = indexResp.onChainTaskId ?? taskJson?.taskId ?? null;
       setTaskId(finalTaskId);
