@@ -128,11 +128,46 @@ txRouter.post('/relay-tx', requireAuth, async (req, res, next) => {
     });
 
     const rpcResult = result?.data || result || {};
-    const hash = rpcResult.hash || rpcResult.user_operation_hash || '';
+    const userOpHash = rpcResult.user_operation_hash || '';
     const txId = rpcResult.transaction_id || null;
-    console.log(`[relay-tx] success hash=${hash} txId=${txId} raw=${JSON.stringify(result).slice(0, 300)}`);
+    console.log(`[relay-tx] userOpHash=${userOpHash} txId=${txId} raw=${JSON.stringify(result).slice(0, 300)}`);
 
-    res.json({ success: true, data: { hash, userOperationHash: rpcResult.user_operation_hash || null, transactionId: txId } });
+    // Wait for the user-op to be included on-chain and get the real tx hash.
+    // The bundler takes 1-3 blocks (~3-9s on Base). We poll
+    // eth_getUserOperationReceipt via Privy's RPC.
+    let finalHash = rpcResult.hash || '';
+    let receipt = null;
+    if (userOpHash && !finalHash) {
+      for (let i = 0; i < 10; i++) {
+        await new Promise(r => setTimeout(r, 3000));
+        try {
+          const opReceipt = await privy.wallets()._rpc(walletId, {
+            method: 'eth_getUserOperationReceipt',
+            params: [userOpHash],
+            caip2,
+            chain_type: 'ethereum' as const,
+          } as any);
+          const rData = (opReceipt as any)?.data || opReceipt || {};
+          if (rData.transactionHash) {
+            finalHash = rData.transactionHash;
+            receipt = rData;
+            console.log(`[relay-tx] user-op included at block ${rData.blockNumber} txHash=${finalHash}`);
+            break;
+          }
+        } catch {
+          // eth_getUserOperationReceipt may not be supported — fall through
+          console.log(`[relay-tx] poll ${i + 1}: no receipt yet`);
+        }
+      }
+      // Fallback: if we couldn't get txHash from UserOp receipt,
+      // use the userOpHash itself — backend /tasks/index will retry.
+      if (!finalHash) {
+        finalHash = userOpHash;
+        console.log(`[relay-tx] fallback: using userOpHash as txHash`);
+      }
+    }
+
+    res.json({ success: true, data: { hash: finalHash, userOperationHash: userOpHash || null, transactionId: txId } });
   } catch (err: any) {
     if (err instanceof z.ZodError) {
       return next(new AppError(400, 'VALIDATION_ERROR', err.errors.map(e => e.message).join(', ')));

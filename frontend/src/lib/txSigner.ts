@@ -67,17 +67,6 @@ export async function signAndSendTx(
   console.log(`[txSigner] relay success hash=${txHash} userOp=${isUserOp}`);
 
   if (isUserOp) {
-    for (let i = 0; i < 40; i++) {
-      await new Promise(r => setTimeout(r, 3000));
-      try {
-        const receipt = await signer.provider.getTransactionReceipt(txHash);
-        if (receipt) {
-          console.log(`[txSigner] user-op confirmed at block ${receipt.blockNumber}`);
-          return { hash: txHash, receipt };
-        }
-      } catch { /* keep retrying */ }
-    }
-    console.log(`[txSigner] user-op receipt not found after 120s, continuing without receipt`);
     return { hash: txHash, receipt: null, userOp: true };
   }
 
