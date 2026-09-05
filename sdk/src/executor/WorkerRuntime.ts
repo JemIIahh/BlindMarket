@@ -1,3 +1,4 @@
+import { ethers } from 'ethers';
 import { BlindMarket } from '../index.js';
 import { eciesDecrypt, aesDecrypt } from '../crypto/index.js';
 import type {
@@ -20,6 +21,12 @@ export interface WorkerRuntimeConfig {
   browseIntervalMs?: number;
   watchIntervalMs?: number;
   maxConcurrentTasks?: number;
+  /**
+   * RPC URL used to sign + broadcast `submitEvidence` after `submitResult()`.
+   * Defaults to the 0G testnet RPC (matches `backend/agents/worker.js`'s
+   * default). Point this at the RPC for whichever chain your tasks settle on.
+   */
+  rpcUrl?: string;
 }
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -53,6 +60,7 @@ export type WorkerRuntimeEvent =
   | { type: 'task_working'; taskId: string }
   | { type: 'task_executed'; taskId: string }
   | { type: 'task_submitted'; taskId: string; result: Record<string, unknown> }
+  | { type: 'task_finalized'; taskId: string; finalize: Awaited<ReturnType<BlindMarket['finalize']>> }
   | { type: 'task_failed'; taskId: string; error: string }
   | { type: 'message_received'; message: Message; count: number }
   | { type: 'browse_done'; found: number }
@@ -64,6 +72,7 @@ const DEFAULTS = {
   browseIntervalMs: 15_000,
   watchIntervalMs: 5_000,
   maxConcurrentTasks: 3,
+  rpcUrl: 'https://evmrpc-testnet.0g.ai',
 };
 
 // ── WorkerRuntime ───────────────────────────────────────────────────────────
@@ -264,28 +273,32 @@ export class WorkerRuntime {
     try {
       exec.status = 'assigned';
 
-      // Accept task — get the ECIES-wrapped AES key
+      // Accept task — get the rootHash + this executor's ECIES-wrapped AES
+      // key. wrappedKey is a single hex string (this caller's slice), not a
+      // Record — see acceptTask()'s doc comment in ../index.ts.
       const acceptResult = await this.bb.acceptTask(taskId);
-      exec.task = acceptResult.task;
+      exec.task = a2a;
       this.emit({ type: 'task_accepted', taskId });
 
-      // Get full task detail for the storage root hash
-      const detail = await this.bb.getTask(taskId);
-      const taskHash = detail.taskHash;
-
-      // Decrypt the wrapped key with the worker's private key
+      // Decrypt the brief. 'public' tasks carry no wrappedKey by design — the
+      // blob at rootHash is already plaintext, so skip ECIES/AES entirely.
+      // Download by acceptResult.rootHash (the 0G Storage pointer) — NOT the
+      // on-chain taskHash, which is a different value (sha256 of the
+      // ciphertext, used as the escrow's commitment) and isn't a valid
+      // storage lookup key.
       let instructions = '';
-      if (acceptResult.wrappedKey && taskHash) {
-        const wrappedBytes = this.decodeWrappedKey(acceptResult.wrappedKey);
-        const aesKey = await eciesDecrypt(wrappedBytes, this.wallet!.privateKey);
+      if (acceptResult.rootHash) {
+        const storageResult = await this.bb.downloadBlob(acceptResult.rootHash);
+        const blobBytes = this.base64ToBytes(storageResult.blob);
 
-        // Download ciphertext from storage via REST API
-        const storageResult = await this.bb.downloadBlob(taskHash);
-        const ciphertext = this.hexToBytes(storageResult.data);
-
-        // AES decrypt to get plaintext instructions
-        const plaintext = await aesDecrypt(ciphertext, aesKey);
-        instructions = new TextDecoder().decode(plaintext);
+        if (acceptResult.privacy === 'public') {
+          instructions = new TextDecoder().decode(blobBytes);
+        } else if (acceptResult.wrappedKey) {
+          const wrappedBytes = this.decodeWrappedKey(acceptResult.wrappedKey);
+          const aesKey = await eciesDecrypt(wrappedBytes, this.wallet!.privateKey);
+          const plaintext = await aesDecrypt(blobBytes, aesKey);
+          instructions = new TextDecoder().decode(plaintext);
+        }
       }
 
       exec.status = 'working';
@@ -294,18 +307,36 @@ export class WorkerRuntime {
       // Call the user-provided execution handler with decrypted instructions
       const result = await this.config.executeTask({
         taskId,
-        task: acceptResult.task,
+        task: a2a,
         instructions,
       });
 
       exec.status = 'submitted';
       this.emit({ type: 'task_executed', taskId });
 
-      // Submit result
+      // Submit result — the contract requires the assigned worker to sign
+      // submitEvidence personally (onlyWorker), so the backend hands back an
+      // unsigned tx instead of broadcasting it for us.
       const submitResult = await this.bb.submitResult(taskId, result);
 
+      // Sign + broadcast submitEvidence with the runtime's own wallet, wait
+      // for confirmation, then tell the backend to proceed with
+      // verification. Without this the on-chain task never leaves
+      // 'Assigned' and completeVerification always reverts — the task only
+      // LOOKS complete.
+      if (submitResult.unsignedSubmitEvidence) {
+        const provider = new ethers.JsonRpcProvider(this.config.rpcUrl);
+        const signer = new ethers.Wallet(this.wallet!.privateKey, provider);
+        const tx = await signer.sendTransaction(
+          submitResult.unsignedSubmitEvidence as ethers.TransactionRequest,
+        );
+        await tx.wait();
+      }
+      const finalizeResult = await this.bb.finalize(taskId);
+
       exec.status = 'completed';
-      this.emit({ type: 'task_submitted', taskId, result: submitResult });
+      this.emit({ type: 'task_submitted', taskId, result });
+      this.emit({ type: 'task_finalized', taskId, finalize: finalizeResult });
     } catch (err) {
       exec.status = 'failed';
       exec.error = String(err);
@@ -315,16 +346,17 @@ export class WorkerRuntime {
 
   // ── Helpers ─────────────────────────────────────────────────────────────
 
-  private decodeWrappedKey(wrappedKey: Record<string, string>): Uint8Array {
-    // Backend returns wrapped key as hex or base64 in a record
-    const hex = Object.values(wrappedKey)[0];
+  /**
+   * Decode a wrapped-key hex string — acceptTask()'s wrappedKey field is a
+   * single hex string (this executor's ECIES-wrapped AES key), not a
+   * Record. The old code here called `Object.values` on that STRING
+   * argument (treating it as if it were a Record), which returned its
+   * first CHARACTER (e.g. "0" from "04a1b2…") — `clean.length / 2` was
+   * then 0 and every decrypt got an empty key.
+   */
+  private decodeWrappedKey(hex: string): Uint8Array {
     if (!hex) throw new Error('Empty wrapped key');
-    const clean = hex.startsWith('0x') ? hex.slice(2) : hex;
-    const bytes = new Uint8Array(clean.length / 2);
-    for (let i = 0; i < bytes.length; i++) {
-      bytes[i] = parseInt(clean.substring(i * 2, i * 2 + 2), 16);
-    }
-    return bytes;
+    return this.hexToBytes(hex);
   }
 
   private hexToBytes(hex: string): Uint8Array {
@@ -334,5 +366,10 @@ export class WorkerRuntime {
       bytes[i] = parseInt(clean.substring(i * 2, i * 2 + 2), 16);
     }
     return bytes;
+  }
+
+  /** Decode a base64 string (e.g. downloadBlob()'s `blob` field) into bytes. */
+  private base64ToBytes(b64: string): Uint8Array {
+    return new Uint8Array(Buffer.from(b64, 'base64'));
   }
 }
