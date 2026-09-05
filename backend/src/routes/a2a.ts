@@ -1098,8 +1098,8 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       // Non-indexed data: [token, amount, taskHash, category, locationZone, deadline]
       // taskHash is at data index 2 (after token and amount).
       const escrowAddr = baseEscrow ? await baseEscrow.getAddress() : await escrow.getAddress();
-      const blockNum = await (baseProvider || provider).getBlockNumber();
       for (const { prov, esc, label } of providers) {
+        const blockNum = await prov.getBlockNumber();
         const fromBlock = Math.max(0, blockNum - 100);
         console.log(`[tasks/index] Scanning ${label} blocks ${fromBlock}–${blockNum} for TaskCreated`);
         const logs = await prov.getLogs({
