@@ -390,8 +390,21 @@ export default function PostTask() {
         if (currentAllowance < BigInt(amountBase)) {
           console.log(`[PostTask] Approving USDC spend: ${amountBase} for ${BASE_ESCROW_ADDRESS}`);
           const approveTx = await usdcContract.approve.populateTransaction(BASE_ESCROW_ADDRESS, BigInt(amountBase));
-          await signAndSendTx(signer, approveTx as any);
-          console.log(`[PostTask] USDC approve confirmed`);
+          const approveResult = await signAndSendTx(signer, approveTx as any);
+          if (approveResult.userOp) {
+            console.log(`[PostTask] USDC approve is a user-op, waiting for on-chain inclusion...`);
+            for (let i = 0; i < 20; i++) {
+              await new Promise(r => setTimeout(r, 3000));
+              const updated = await usdcContract.allowance(address, BASE_ESCROW_ADDRESS);
+              if (updated >= BigInt(amountBase)) {
+                console.log(`[PostTask] USDC allowance confirmed (${updated})`);
+                break;
+              }
+              if (i === 19) throw new Error('USDC approve did not confirm within 60s');
+            }
+          } else {
+            console.log(`[PostTask] USDC approve confirmed`);
+          }
         } else {
           console.log(`[PostTask] USDC allowance sufficient (${currentAllowance})`);
         }

@@ -6,6 +6,7 @@ import { API_BASE_URL, BASE_CHAIN_ID } from '../config/constants';
 export interface SentTx {
   hash: string;
   receipt: ethers.TransactionReceipt | null;
+  userOp?: boolean;
 }
 
 export class RelayError extends Error {
@@ -57,12 +58,28 @@ export async function signAndSendTx(
     throw new RelayError(code, msg);
   }
 
-  const txHash: string = json.data?.hash || '';
+  const txHash: string = json.data?.hash || json.data?.userOperationHash || '';
   if (!txHash) {
     throw new RelayError('NO_HASH', 'Relay returned empty tx hash');
   }
 
-  console.log(`[txSigner] relay success hash=${txHash}`);
+  const isUserOp = !json.data?.hash && !!json.data?.userOperationHash;
+  console.log(`[txSigner] relay success hash=${txHash} userOp=${isUserOp}`);
+
+  if (isUserOp) {
+    for (let i = 0; i < 40; i++) {
+      await new Promise(r => setTimeout(r, 3000));
+      try {
+        const receipt = await signer.provider.getTransactionReceipt(txHash);
+        if (receipt) {
+          console.log(`[txSigner] user-op confirmed at block ${receipt.blockNumber}`);
+          return { hash: txHash, receipt };
+        }
+      } catch { /* keep retrying */ }
+    }
+    console.log(`[txSigner] user-op receipt not found after 120s, continuing without receipt`);
+    return { hash: txHash, receipt: null, userOp: true };
+  }
 
   for (let i = 0; i < 30; i++) {
     await new Promise(r => setTimeout(r, 3000));
