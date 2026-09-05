@@ -533,11 +533,27 @@ export class BlindMarket {
   // ── Device-flow registration (static) ─────────────────────────────────────
 
   /**
+   * Canonical registration challenge signed by the agent wallet, proving
+   * control of `agentWallet`. Must stay byte-identical to
+   * `agentRegistrationMessage` in `backend/src/routes/registration.ts` — the
+   * SDK cannot import from the backend, so this is duplicated. A mismatch
+   * here silently breaks registration.
+   */
+  private static agentRegistrationMessage(agentName: string, agentWallet: string, agentPublicKey: string): string {
+    return `BlindMarket agent registration\nname: ${agentName}\nwallet: ${agentWallet.toLowerCase()}\npubkey: ${agentPublicKey.toLowerCase()}`;
+  }
+
+  /**
    * Start a device-flow registration session. Generates a magic-link URL
    * that the user opens in a browser to sign with their wallet.
    *
    * After registering, call `BlindMarket.pollSession(token)` to wait for
    * the user to confirm and receive the API key.
+   *
+   * Requires proof of control of `agentWallet`: pass either `agentSigner`
+   * (anything with a `signMessage`, e.g. an ethers `Wallet`) so the SDK signs
+   * the challenge itself, or a pre-computed `agentSignature` for callers
+   * holding a remote signer. Exactly one of the two is required.
    *
    * @example
    * ```ts
@@ -546,6 +562,7 @@ export class BlindMarket {
    *   agentName: 'my-agent',
    *   agentWallet: wallet.address,
    *   agentPublicKey: wallet.publicKey,
+   *   agentSigner: wallet,
    * });
    * console.log('Open', url, 'to confirm');
    * const apiKey = await BlindMarket.pollSession(token);
@@ -556,8 +573,21 @@ export class BlindMarket {
     agentName: string;
     agentWallet: string;
     agentPublicKey: string;
+    /** Signs the registration challenge proving control of agentWallet. */
+    agentSigner?: { signMessage(message: string): Promise<string> };
+    /** Pre-computed alternative to agentSigner, for callers holding a remote signer. */
+    agentSignature?: string;
     apiBase?: string;
   }): Promise<{ token: string; url: string }> {
+    if (!params.agentSigner === !params.agentSignature) {
+      throw new ApiError(
+        400,
+        'Exactly one of agentSigner or agentSignature is required to prove control of agentWallet',
+      );
+    }
+    const message = BlindMarket.agentRegistrationMessage(params.agentName, params.agentWallet, params.agentPublicKey);
+    const agentSignature = params.agentSignature ?? await params.agentSigner!.signMessage(message);
+
     const base = params.apiBase ?? 'https://api.blindmarket.xyz';
     const res = await fetch(`${base}/api/v1/registration/session`, {
       method: 'POST',
@@ -566,6 +596,7 @@ export class BlindMarket {
         agentName: params.agentName,
         agentWallet: params.agentWallet,
         agentPublicKey: params.agentPublicKey,
+        agentSignature,
       }),
     });
     const json = await res.json() as { success: boolean; data?: { token: string; url: string }; error?: { message: string } };

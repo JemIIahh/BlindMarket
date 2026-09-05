@@ -11,7 +11,7 @@ import {
   EmptyState,
   useTabParam,
 } from '../bb';
-import { authedGet, authedPatch, authedPost } from '../../lib/api';
+import { authedGet, authedPatch, authedPost, getAuthHeaders } from '../../lib/api';
 import { API_BASE_URL } from '../../config/constants';
 import { AGENT_CAPABILITIES } from '../../config/capabilities';
 import { ToolManager, type AnyTool } from '../bb/ToolManager';
@@ -39,7 +39,7 @@ const TABS = Object.keys(TAB_LABELS) as Tab[];
 /**
  * Owner-only operations console. Everything a buyer has no use for lives
  * here — including the log stream, which visitors no longer open at all
- * because this component (and its EventSource) never mounts for them.
+ * because this component (and its live log connection) never mounts for them.
  *
  * Mount with key={agent.id} so the edit form re-initialises when the route
  * switches to a different agent.
@@ -59,6 +59,7 @@ export function OpsConsole({
 
   // Logs (SSE, capped at 200 lines)
   const [logs, setLogs] = useState<string[]>([]);
+  const [logsError, setLogsError] = useState<string | null>(null);
   const [autoScroll, setAutoScroll] = useState(true);
   const logContainerRef = useRef<HTMLDivElement>(null);
 
@@ -82,25 +83,80 @@ export function OpsConsole({
   const [toolsSaved, setToolsSaved] = useState(false);
   const [installedSkills, setInstalledSkills] = useState<InstalledSkillMeta[]>(agent.skills ?? []);
 
+  // Log stream — a fetch-based SSE reader. The old browser SSE client could
+  // not send an Authorization header, and the route is now owner-gated
+  // (requireAuth + authorizeOwner). A 401/403 here is terminal (no retry) —
+  // retrying an auth failure every 3s would hammer the API forever with no
+  // visible error. Genuine network hiccups still reconnect with backoff.
   useEffect(() => {
     if (!agentId) return;
-    let es: EventSource | null = null;
+    const ctrl = new AbortController();
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let cancelled = false;
 
-    function connect() {
-      es = new EventSource(`${API_BASE_URL}/api/v1/agents/${agentId}/logs`);
-      es.onmessage = e => {
-        try { setLogs(prev => [...prev.slice(-199), JSON.parse(e.data)]); } catch { }
-      };
-      es.onerror = () => {
-        es?.close();
-        retryTimer = setTimeout(connect, 3000);
-      };
+    function scheduleRetry() {
+      if (cancelled) return;
+      retryTimer = setTimeout(connect, 3000);
+    }
+
+    async function connect() {
+      let res: Response;
+      try {
+        res = await fetch(`${API_BASE_URL}/api/v1/agents/${agentId}/logs`, {
+          headers: await getAuthHeaders(),
+          signal: ctrl.signal,
+        });
+      } catch {
+        // Network error (offline, DNS, connection reset, or our own abort on
+        // unmount) — retry with backoff; aborts no-op once cancelled is true.
+        scheduleRetry();
+        return;
+      }
+
+      if (res.status === 401 || res.status === 403) {
+        // Terminal — do NOT retry, or an unauthorised viewer hammers the API
+        // forever with no visible sign anything is wrong.
+        setLogsError('Not authorised to view this agent\'s logs.');
+        return;
+      }
+
+      if (!res.ok || !res.body) {
+        // Any other failure (5xx, no body) is treated as transient.
+        scheduleRetry();
+        return;
+      }
+
+      setLogsError(null);
+      const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+      let buffer = '';
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += value;
+          const frames = buffer.split('\n\n');
+          buffer = frames.pop() ?? '';
+          for (const frame of frames) {
+            const payload = frame
+              .split('\n')
+              .filter(line => line.startsWith('data:'))
+              .map(line => line.slice(5).replace(/^ /, ''))
+              .join('\n');
+            if (!payload) continue;
+            try { setLogs(prev => [...prev.slice(-199), JSON.parse(payload)]); } catch { }
+          }
+        }
+      } catch {
+        // Stream aborted (unmount) or dropped mid-read — fall through to the
+        // reconnect below; a no-op once cancelled.
+      }
+      scheduleRetry();
     }
     connect();
 
     return () => {
-      es?.close();
+      cancelled = true;
+      ctrl.abort();
       if (retryTimer) clearTimeout(retryTimer);
     };
   }, [agentId]);
@@ -138,8 +194,13 @@ export function OpsConsole({
 
   const refreshLogs = async () => {
     try {
-      const res = await authedGet<{ success: boolean; data: string[] }>(`/api/v1/agents/${agentId}/logs/json`);
-      setLogs(Array.isArray(res?.data) ? res.data.slice(-200) : []);
+      // authedGet already unwraps the {success, data} envelope (see
+      // handleResponse in lib/api.ts), so the resolved value IS the line
+      // array — typing it as the envelope and reading `res?.data` was always
+      // undefined, silently blanking the pane on every Refresh click.
+      const lines = await authedGet<string[]>(`/api/v1/agents/${agentId}/logs/json`);
+      setLogs(Array.isArray(lines) ? lines.slice(-200) : []);
+      setLogsError(null);
     } catch { }
   };
 
@@ -218,7 +279,11 @@ export function OpsConsole({
             ref={logContainerRef}
             onScroll={handleLogScroll}
           >
-            {logs.length > 0 ? logs.map((line, i) => {
+            {logsError ? (
+              <div className="flex flex-col items-center gap-3 py-8">
+                <EmptyState icon="lock" title="Not authorised" description={logsError} />
+              </div>
+            ) : logs.length > 0 ? logs.map((line, i) => {
               const clean = line.replace(/\x1b\[[0-9;]*m/g, '');
               const tsMatch = clean.match(/^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:Z|))\s+(.*)$/);
               const isErr = clean.includes('[err]');

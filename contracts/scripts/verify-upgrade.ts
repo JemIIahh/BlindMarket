@@ -6,20 +6,30 @@
  * in the deployed bytecode, then does a non-state-changing eth_call as the
  * verifier with a guaranteed-to-revert payload to confirm the function
  * dispatches with a structured error rather than "function does not exist".
+ *
+ * Network-aware: resolves the BlindEscrow proxy address from the connected
+ * chain's deployment file (via --network) instead of a hardcoded address, so
+ * this runs against 0G or Base alike.
+ *
+ * Usage:
+ *   npx hardhat run scripts/verify-upgrade.ts --network 0g-mainnet
+ *   npx hardhat run scripts/verify-upgrade.ts --network base-sepolia
  */
 
 import { ethers } from "hardhat";
-import * as fs from "fs";
-import * as path from "path";
+import { loadDeployment } from "./_deployments";
 
-const PROXY = "0x037529B296a89E6Dd1abAF84D413cb2dD70C5be5";
 const EIP1967_IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
 
 async function main() {
   const [signer] = await ethers.getSigners();
   console.log("signer:", signer.address);
 
-  const rpcUrl = process.env.OG_RPC_URL ?? "https://evmrpc-testnet.0g.ai";
+  const dep = await loadDeployment();
+  const PROXY = dep.contracts?.BlindEscrow;
+  if (!PROXY) throw new Error(`No BlindEscrow in deployments for chainId ${dep.chainId}`);
+  console.log("network:", dep.network, " BlindEscrow:", PROXY);
+
   const raw = await ethers.provider.getStorage(PROXY, EIP1967_IMPL_SLOT);
   const impl = ethers.getAddress("0x" + raw.slice(-40));
   console.log("live impl (EIP-1967):", impl);

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useAccount } from 'wagmi';
-import { usePrivy, useUnlinkWallet } from '@privy-io/react-auth';
+import { usePrivy, useUnlinkWallet, useSigners } from '@privy-io/react-auth';
 import {
   Breadcrumb,
   PageHeader,
@@ -52,6 +52,27 @@ export default function Settings() {
   const { data: reputation } = useReputation(address ?? null);
   const { user, linkWallet } = usePrivy();
   const { unlink } = useUnlinkWallet();
+  const { addSigners } = useSigners();
+
+  const [relaySignerLoading, setRelaySignerLoading] = useState(false);
+  const [relaySignerStatus, setRelaySignerStatus] = useState<'idle' | 'done' | 'error'>('idle');
+
+  const handleAddRelaySigner = async () => {
+    if (!address) return;
+    setRelaySignerLoading(true);
+    try {
+      await addSigners({
+        address,
+        signers: [{ signerId: 'ed0tw7ng40gyfd6zu77cf0ol' }],
+      });
+      setRelaySignerStatus('done');
+    } catch (err) {
+      console.error('Failed to add relay signer:', err);
+      setRelaySignerStatus('error');
+    } finally {
+      setRelaySignerLoading(false);
+    }
+  };
   const chainLabel = `0G ${isMainnet ? 'Mainnet' : 'Testnet'}`;
   const baseChainLabel = `Base ${BASE_CHAIN_ID === 8453 ? 'Mainnet' : 'Sepolia'}`;
   const ogRpcDisplay = OG_RPC_URL.replace(/^https?:\/\//, '');
@@ -257,6 +278,31 @@ export default function Settings() {
                 </Tag>
                 <span className="ml-auto text-xs text-ink-2">{chainLabel}</span>
               </div>
+            </FormField>
+
+            <FormField
+              label="Server relay access"
+              hint="One-time setup: allows the backend to sign transactions on your behalf."
+            >
+              {relaySignerStatus === 'done' ? (
+                <div className="px-3 py-2.5 bg-surface-2 border border-line text-sm text-ok flex items-center gap-2">
+                  <Tag tone="ok">Enabled</Tag>
+                  <span className="text-xs text-ink-3">Relay signer added to your wallet.</span>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    label={relaySignerLoading ? 'Approve in wallet…' : 'Enable relay'}
+                    onClick={handleAddRelaySigner}
+                    disabled={relaySignerLoading || !address}
+                  />
+                  {relaySignerStatus === 'error' && (
+                    <span className="text-xs text-err">Failed. Try again.</span>
+                  )}
+                </div>
+              )}
             </FormField>
           </div>
 

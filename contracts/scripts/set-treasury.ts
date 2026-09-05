@@ -12,9 +12,8 @@
  *     npx hardhat run scripts/set-treasury.ts --network 0g-mainnet
  */
 import { ethers, network } from "hardhat";
-import * as fs from "fs";
-import * as path from "path";
 import { assertSafeNetwork } from "./_guard";
+import { loadDeployment } from "./_deployments";
 
 async function main() {
   await assertSafeNetwork();
@@ -24,9 +23,9 @@ async function main() {
     throw new Error(`NEW_TREASURY must be a valid non-zero address. Got: ${next}`);
   }
 
-  const dep = JSON.parse(fs.readFileSync(path.resolve(__dirname, `../deployments/${network.name}.json`), "utf-8"));
+  const dep = await loadDeployment();
   const proxy: string = dep.contracts?.BlindEscrow;
-  if (!proxy) throw new Error(`No BlindEscrow in deployments/${network.name}.json`);
+  if (!proxy) throw new Error(`No BlindEscrow in deployments for network ${network.name} (chainId ${dep.chainId})`);
 
   const [signer] = await ethers.getSigners();
   const escrow = await ethers.getContractAt("BlindEscrow", proxy);

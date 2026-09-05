@@ -81,7 +81,7 @@ export default function AgentDetail() {
   const [topUpError, setTopUpError] = useState('');
   const [withdrawStatus, setWithdrawStatus] = useState<'idle' | 'sending' | 'done' | 'error'>('idle');
   const [withdrawConfirmOpen, setWithdrawConfirmOpen] = useState(false);
-  const [withdrawInfo, setWithdrawInfo] = useState<{ txHash: string; amount: string } | null>(null);
+  const [withdrawInfo, setWithdrawInfo] = useState<Array<{ chain: string; asset: string; amount: string; txHash: string }> | null>(null);
   const [withdrawError, setWithdrawError] = useState('');
 
   // Owner-link recovery state — for the "deployed with one wallet, signed in
@@ -266,9 +266,11 @@ export default function AgentDetail() {
   }
 
   // Backend signs the withdrawal tx using the agent's stored rawPrivateKey and
-  // sends funds back to the owner. Handles both native 0G and ERC20 tokens
-  // via the single /withdraw endpoint — omit tokenAddress for native 0G sweep,
-  // or pass a specific ERC20 address to withdraw that token.
+  // sends funds back to the owner. The agent's wallet is the same EOA on both
+  // 0G and Base, so the single /withdraw endpoint checks both chains and
+  // sweeps whichever have a sweepable balance — omit tokenAddress for a
+  // native sweep, or pass a specific ERC20 address to withdraw that token.
+  // The response lists one entry per chain actually swept (0, 1, or 2).
   //
   // Uses authedPost so the JWT (Privy identity) flows to the backend, where
   // requireAuth + authorizeOwner verify the caller is the agent's owner.
@@ -279,12 +281,21 @@ export default function AgentDetail() {
     setWithdrawStatus('sending');
     setWithdrawError('');
     try {
-      const data = await authedPost<{ txHash: string; amountSent: string; amountFormatted?: string; recipient: string }>(
-        `/api/v1/agents/${apiId}/withdraw`,
-        {},
+      const data = await authedPost<{
+        swept: Array<{ chain: string; asset: string; txHash: string; amountSent?: string; amountFormatted?: string; amountRaw?: string }>;
+        skipped?: Array<{ chain: string; reason: string }>;
+      }>(`/api/v1/agents/${apiId}/withdraw`, {});
+      if (!data.swept.length) {
+        throw new Error('Nothing to withdraw on either chain.');
+      }
+      setWithdrawInfo(
+        data.swept.map((s) => ({
+          chain: s.chain,
+          asset: s.asset,
+          amount: s.amountFormatted ?? s.amountSent ?? s.amountRaw ?? '0',
+          txHash: s.txHash,
+        })),
       );
-      const amount = data.amountFormatted ?? data.amountSent;
-      setWithdrawInfo({ txHash: data.txHash, amount });
       setWithdrawStatus('done');
       await refetchBalance();
       try {

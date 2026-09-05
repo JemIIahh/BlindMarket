@@ -58,8 +58,6 @@ txRouter.post('/relay-tx', requireAuth, async (req, res, next) => {
 
     console.log(`[relay-tx] Looking up wallet address=${body.walletAddress} chain=${body.chain} caip2=${caip2}`);
 
-    console.log(`[relay-tx] Looking up wallet address=${body.walletAddress} chain=${body.chain} caip2=${caip2}`);
-
     // Look up the Privy wallet ID by address.
     let walletId: string;
     try {
@@ -77,7 +75,7 @@ txRouter.post('/relay-tx', requireAuth, async (req, res, next) => {
       data: body.data,
     };
     if (body.value) {
-      transaction.value = BigInt(body.value);
+      transaction.value = `0x${BigInt(body.value).toString(16)}`;
     }
 
     console.log(`[relay-tx] wallet=${body.walletAddress} id=${walletId} chain=${body.chain} caip2=${caip2} to=${body.to} asset=${body.asset}`);
@@ -88,9 +86,10 @@ txRouter.post('/relay-tx', requireAuth, async (req, res, next) => {
       throw new AppError(500, 'MISCONFIGURED', 'PRIVY_AUTHORIZATION_KEY not set in backend config');
     }
 
-    const rpcBody = {
+    const rpcBody: Record<string, unknown> = {
       method: 'eth_sendTransaction' as const,
       caip2,
+      chain_type: 'ethereum' as const,
       params: { transaction },
       sponsor: true,
       sponsor_options: { asset: body.asset },
@@ -115,13 +114,16 @@ txRouter.post('/relay-tx', requireAuth, async (req, res, next) => {
 
     console.log(`[relay-tx] Authorization signature generated, sending transaction...`);
 
-    const result = await privy.wallets().ethereum()._rpc(walletId, {
-      method: 'eth_sendTransaction',
+    const rpcInput = {
+      method: 'eth_sendTransaction' as const,
       caip2,
+      chain_type: 'ethereum' as const,
       params: { transaction },
       sponsor: true,
       sponsor_options: { asset: body.asset },
-    } as any, {
+    };
+
+    const result = await privy.wallets()._rpc(walletId, rpcInput as any, {
       headers: { 'privy-authorization-signature': authSignature },
     });
 
@@ -136,7 +138,7 @@ txRouter.post('/relay-tx', requireAuth, async (req, res, next) => {
 
     const status = err?.status || err?.httpStatus;
     const msg = err?.message || err?.error?.message || String(err);
-    console.error('[relay-tx] Full error:', JSON.stringify({ status, message: msg, body: err?.error || err?.body || null }, null, 2));
+    console.log(`[relay-tx] Full error:`, JSON.stringify({ status, message: msg, body: err?.error || err?.body || err?.response || null, stack: err?.stack?.slice(0, 300) }, null, 2));
 
     if (msg.includes('insufficient')) {
       return next(new AppError(402, 'INSUFFICIENT_BALANCE', 'Insufficient USDC balance for gas. Please add USDC to your wallet.'));

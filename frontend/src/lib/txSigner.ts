@@ -32,7 +32,7 @@ export async function signAndSendTx(
     to: unsignedTx.to,
     data: unsignedTx.data,
     value: value ? String(value) : undefined,
-    chain: 'base',
+    chain: 'base-sepolia',
     asset: 'usdc',
   };
 

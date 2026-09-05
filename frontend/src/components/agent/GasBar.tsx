@@ -35,7 +35,7 @@ export function GasBar({
   topUpError: string;
   withdrawStatus: 'idle' | 'sending' | 'done' | 'error';
   withdrawError: string;
-  withdrawInfo: { txHash: string; amount: string } | null;
+  withdrawInfo: Array<{ chain: string; asset: string; amount: string; txHash: string }> | null;
   confirmOpen: boolean;
   onTopUp: () => void;
   onWithdrawRequest: () => void;
@@ -57,9 +57,10 @@ export function GasBar({
             disabled={topUpStatus === 'sending'}
             label={topUpStatus === 'sending' ? `Sending ${topUpAmount} ${symbol}…` : `Top up gas (+${topUpAmount} ${symbol})`}
           />
-          {/* Withdraw — single button for both native 0G and ERC20 tokens.
-              The backend's /withdraw endpoint auto-detects; empty body sweeps
-              native 0G (gas reserve kept). */}
+          {/* Withdraw — single button sweeps whichever chain(s) the agent's
+              wallet actually holds a balance on (0G and/or Base) in one
+              call. Empty body sweeps native balance on both; pass
+              tokenAddress to sweep that ERC20 instead. */}
           {agentStatus !== 'running' && (
             <>
               <Button
@@ -89,10 +90,15 @@ export function GasBar({
         (isLowGas && agentStatus !== 'stopped')) && (
         <div className="mt-3 space-y-1.5 text-xs">
           {topUpStatus === 'error' && <div className="text-err">{topUpError}</div>}
-          {withdrawStatus === 'done' && withdrawInfo && (
-            <div className="text-ok">
-              Withdrew <span className="font-mono">{parseFloat(withdrawInfo.amount).toFixed(4)} {symbol}</span> ·
-              tx <span className="font-mono">{withdrawInfo.txHash.slice(0, 10)}…</span>
+          {withdrawStatus === 'done' && withdrawInfo && withdrawInfo.length > 0 && (
+            <div className="text-ok space-y-0.5">
+              {withdrawInfo.map((w) => (
+                <div key={`${w.chain}-${w.txHash}`}>
+                  Withdrew <span className="font-mono">{parseFloat(w.amount).toFixed(4)} {w.asset}</span> from{' '}
+                  <span className="font-mono">{w.chain === 'base' ? 'Base' : '0G'}</span> ·
+                  tx <span className="font-mono">{w.txHash.slice(0, 10)}…</span>
+                </div>
+              ))}
             </div>
           )}
           {withdrawStatus === 'error' && <div className="text-err">{withdrawError}</div>}

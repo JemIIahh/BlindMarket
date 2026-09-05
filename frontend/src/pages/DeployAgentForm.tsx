@@ -16,7 +16,7 @@ import { ToolManager, type AnyTool } from '../components/bb/ToolManager';
 import SkillPicker from '../components/bb/SkillPicker';
 import { get } from '../lib/api';
 import { useChainAddress } from '../hooks/useChainWallet';
-import { BASE_CHAIN_ID, MARKETPLACE_TOKEN_ADDRESS } from '../config/constants';
+import { BASE_CHAIN_ID, MARKETPLACE_TOKEN_ADDRESS, unsetIfZero } from '../config/constants';
 import { CONTRACT_ADDRESSES } from '../config/contractAddresses';
 import { isMainnet } from '../config/constants';
 
@@ -33,9 +33,11 @@ const USDC_ABI = [
   'function balanceOf(address owner) external view returns (uint256)',
 ];
 
-const AGENT_FACTORY_ADDRESS = isMainnet
-  ? CONTRACT_ADDRESSES.base?.agentFactory
-  : CONTRACT_ADDRESSES.baseTestnet?.agentFactory;
+const AGENT_FACTORY_ADDRESS = unsetIfZero(
+  isMainnet
+    ? (CONTRACT_ADDRESSES.base as any)?.agentFactory
+    : CONTRACT_ADDRESSES.baseTestnet?.agentFactory,
+);
 
 // Deploy fee: 1 USDC (6 decimals)
 const DEPLOY_FEE_USDC = 1_000_000n;
