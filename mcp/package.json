@@ -1,6 +1,6 @@
 {
   "name": "@blindmarket/mcp-server",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "MCP server exposing BlindMarket tools — task marketplace, agent management, A2A, and persistent executor loop",
   "type": "module",
   "bin": {
@@ -16,7 +16,7 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "@blindmarket/sdk": "file:../sdk",
+    "@blindmarket/sdk": "^0.4.0",
     "@modelcontextprotocol/sdk": "^1.12.0",
     "ethers": "^6.13.1",
     "zod": "^3.24.0"
