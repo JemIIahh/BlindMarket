@@ -132,8 +132,11 @@ txRouter.post('/relay-tx', requireAuth, async (req, res, next) => {
     const txId = rpcResult.transaction_id || null;
     console.log(`[relay-tx] userOpHash=${userOpHash} txId=${txId} raw=${JSON.stringify(result).slice(0, 300)}`);
 
-    const finalHash = rpcResult.hash || userOpHash;
-    res.json({ success: true, data: { hash: finalHash, userOperationHash: userOpHash || null, transactionId: txId } });
+    const finalHash = rpcResult.hash || '';
+    const isUserOp = !rpcResult.hash && !!userOpHash;
+    console.log(`[relay-tx] finalHash=${finalHash || '(user-op, no tx hash yet)'} isUserOp=${isUserOp}`);
+
+    res.json({ success: true, data: { hash: finalHash || userOpHash, isUserOp, userOperationHash: userOpHash || null, transactionId: txId } });
   } catch (err: any) {
     if (err instanceof z.ZodError) {
       return next(new AppError(400, 'VALIDATION_ERROR', err.errors.map(e => e.message).join(', ')));

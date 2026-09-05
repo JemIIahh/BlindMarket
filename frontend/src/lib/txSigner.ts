@@ -58,12 +58,12 @@ export async function signAndSendTx(
     throw new RelayError(code, msg);
   }
 
-  const txHash: string = json.data?.hash || json.data?.userOperationHash || '';
+  const txHash: string = json.data?.hash || '';
   if (!txHash) {
     throw new RelayError('NO_HASH', 'Relay returned empty tx hash');
   }
 
-  const isUserOp = !json.data?.hash && !!json.data?.userOperationHash;
+  const isUserOp = json.data?.isUserOp === true;
   console.log(`[txSigner] relay success hash=${txHash} userOp=${isUserOp}`);
 
   if (isUserOp) {
