@@ -442,6 +442,7 @@ export default function PostTask() {
       const indexResp = await authedPost<any>('/api/v1/a2a/tasks/index', {
         txHash,
         taskHash,
+        isUserOp: sent.userOp ?? false,
         verificationMode,
         verificationCriteria,
         verifierAddress,

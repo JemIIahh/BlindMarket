@@ -157,6 +157,7 @@ const indexTaskSchema = z.object({
   // PRIVATE task be matched by meaning without unsealing anything — allowed in
   // both privacy modes (public tasks usually rely on publicBrief instead).
   routingSummary: z.string().min(1).max(500).optional(),
+  isUserOp: z.boolean().optional(),
 });
 
 const verifySchema = z.object({
@@ -1068,47 +1069,63 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
         ]
       : [{ prov: provider, esc: escrow, label: '0G' }];
 
-    for (const { prov, esc, label } of providers) {
-      receipt = await prov.getTransactionReceipt(data.txHash);
-      for (let i = 0; i < 8 && !receipt; i++) {
-        await new Promise((r) => setTimeout(r, 3000));
+    // If no receipt found, this is likely a user-op hash. Accept an
+    // isUserOp flag from the frontend to skip the (always-failing)
+    // getTransactionReceipt loop and go straight to the logs scan.
+    const isUserOp = (data as any).isUserOp === true;
+    if (isUserOp) {
+      console.log(`[tasks/index] isUserOp=true, skipping receipt poll — scanning logs`);
+    } else {
+      for (const { prov, esc, label } of providers) {
         receipt = await prov.getTransactionReceipt(data.txHash);
-      }
-      if (receipt) {
-        activeProvider = prov;
-        activeEscrow = esc;
-        break;
+        for (let i = 0; i < 3 && !receipt; i++) {
+          await new Promise((r) => setTimeout(r, 3000));
+          receipt = await prov.getTransactionReceipt(data.txHash);
+        }
+        if (receipt) {
+          activeProvider = prov;
+          activeEscrow = esc;
+          break;
+        }
       }
     }
 
     // If no receipt found, this is likely a user-op hash. Scan recent blocks
     // for TaskCreated events matching our taskHash.
     if (!receipt) {
+      // Event: TaskCreated(uint256 indexed taskId, address indexed agent,
+      //   address token, uint256 amount, bytes32 taskHash, ...)
+      // Non-indexed data: [token, amount, taskHash, category, locationZone, deadline]
+      // taskHash is at data index 2 (after token and amount).
       const escrowAddr = baseEscrow ? await baseEscrow.getAddress() : await escrow.getAddress();
       const blockNum = await (baseProvider || provider).getBlockNumber();
       for (const { prov, esc, label } of providers) {
-        const fromBlock = Math.max(0, blockNum - 50);
+        const fromBlock = Math.max(0, blockNum - 100);
+        console.log(`[tasks/index] Scanning ${label} blocks ${fromBlock}–${blockNum} for TaskCreated`);
         const logs = await prov.getLogs({
           fromBlock,
           toBlock: 'latest',
           address: escrowAddr,
           topics: [taskCreatedTopic],
         });
+        console.log(`[tasks/index] Found ${logs.length} TaskCreated logs on ${label}`);
         const match = logs.find((l) => {
           try {
             const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
-              ['uint256', 'address', 'address', 'uint256', 'bytes32', 'string', 'string', 'uint256'],
+              ['address', 'uint256', 'bytes32', 'string', 'string', 'uint256'],
               l.data,
             );
-            return decoded[4]?.toLowerCase() === taskHash.toLowerCase();
+            const logTaskHash = decoded[2];
+            return logTaskHash?.toLowerCase() === taskHash.toLowerCase();
           } catch { return false; }
         });
         if (match) {
+          console.log(`[tasks/index] Match found! txHash=${match.transactionHash} block=${match.blockNumber}`);
           receipt = await prov.getTransactionReceipt(match.transactionHash);
           if (receipt) {
             activeProvider = prov;
             activeEscrow = esc;
-            console.log(`[tasks/index] Found via eth_getLogs scan: txHash=${match.transactionHash}`);
+            console.log(`[tasks/index] Receipt confirmed at block ${receipt.blockNumber}`);
             break;
           }
         }
