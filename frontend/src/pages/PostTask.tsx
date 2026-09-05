@@ -429,7 +429,14 @@ export default function PostTask() {
 
       const sent = await signAndSendTx(signer, taskJson.unsignedTx, isNativeToken ? BigInt(amountBase) : undefined);
       const txHash = sent.hash;
-      console.log(`[PostTask] Task TX submitted: hash=${txHash} block=${sent.receipt?.blockNumber ?? 'pending'}`);
+      console.log(`[PostTask] Task TX submitted: hash=${txHash} userOp=${sent.userOp ?? false}`);
+
+      // Wait for user-op inclusion before calling /tasks/index — the backend
+      // needs the on-chain receipt to parse the TaskCreated event.
+      if (sent.userOp) {
+        console.log(`[PostTask] Waiting for user-op inclusion on-chain...`);
+        await new Promise(r => setTimeout(r, 10000));
+      }
 
       // 8. Register A2A meta on the backend, gated on the receipt. Previously
       //    meta was written eagerly in step 6 — but if the createTask tx

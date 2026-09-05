@@ -1051,9 +1051,16 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
     // executors). Retry across ~24s to ride out that replica lag.
     // Poll for the receipt from both chains — the tx may target 0G or Base escrow.
     // Try Base first (if configured) since new tasks are funded on Base, then 0G.
+    // For ERC-4337 user-ops the relay returns a userOperationHash, not a tx hash.
+    // getTransactionReceipt(userOpHash) always returns null, so when the first
+    // attempt fails we fall back to scanning recent blocks for TaskCreated events
+    // matching the taskHash via eth_getLogs.
     let receipt = null;
     let activeProvider = provider;
     let activeEscrow = escrow;
+    const taskCreatedTopic = ethers.id(
+      'TaskCreated(uint256,address,address,uint256,bytes32,string,string,uint256)',
+    );
     const providers = baseProvider && baseEscrow
       ? [
           { prov: baseProvider, esc: baseEscrow, label: 'Base' },
@@ -1073,6 +1080,41 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
         break;
       }
     }
+
+    // If no receipt found, this is likely a user-op hash. Scan recent blocks
+    // for TaskCreated events matching our taskHash.
+    if (!receipt) {
+      const escrowAddr = baseEscrow ? await baseEscrow.getAddress() : await escrow.getAddress();
+      const blockNum = await (baseProvider || provider).getBlockNumber();
+      for (const { prov, esc, label } of providers) {
+        const fromBlock = Math.max(0, blockNum - 50);
+        const logs = await prov.getLogs({
+          fromBlock,
+          toBlock: 'latest',
+          address: escrowAddr,
+          topics: [taskCreatedTopic],
+        });
+        const match = logs.find((l) => {
+          try {
+            const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
+              ['uint256', 'address', 'address', 'uint256', 'bytes32', 'string', 'string', 'uint256'],
+              l.data,
+            );
+            return decoded[4]?.toLowerCase() === taskHash.toLowerCase();
+          } catch { return false; }
+        });
+        if (match) {
+          receipt = await prov.getTransactionReceipt(match.transactionHash);
+          if (receipt) {
+            activeProvider = prov;
+            activeEscrow = esc;
+            console.log(`[tasks/index] Found via eth_getLogs scan: txHash=${match.transactionHash}`);
+            break;
+          }
+        }
+      }
+    }
+
     if (!receipt) {
       throw new AppError(
         404,
@@ -1093,9 +1135,6 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
     // could otherwise pass a tx hash from a different escrow with a colliding
     // taskHash.
     const escrowAddress = (await activeEscrow.getAddress()).toLowerCase();
-    const taskCreatedTopic = ethers.id(
-      'TaskCreated(uint256,address,address,uint256,bytes32,string,string,uint256)',
-    );
     const matching = receipt.logs.filter(
       (l) => l.address.toLowerCase() === escrowAddress && l.topics[0] === taskCreatedTopic,
     );
