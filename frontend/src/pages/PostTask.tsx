@@ -117,7 +117,7 @@ export default function PostTask() {
   const [taskId, setTaskId] = useState<string | null>(null);
   const [confirmAmount, setConfirmAmount] = useState('');
   const [confirmSymbol, setConfirmSymbol] = useState('');
-  const [gasEstimate, setGasEstimate] = useState<{ units: bigint; gwei: number; usd: number } | null>(null);
+  const [gasEstimate, setGasEstimate] = useState<{ units: bigint; gwei: number; usdc: number } | null>(null);
   const pendingTxRef = useRef<{ unsignedTx: any; value?: bigint; amount: string; symbol: string } | null>(null);
   const confirmResolveRef = useRef<((approve: boolean) => void) | null>(null);
   // Snapshot of how many executors the AES key was wrapped to at post time.
@@ -360,7 +360,7 @@ export default function PostTask() {
       // 7. Show confirmation — estimate gas cost using EIP-1559 fees
       const isNativeToken = TOKEN === '0x0000000000000000000000000000000000000000';
       const displaySymbol = getPaymentSymbol();
-      let gasInfo: { units: bigint; gwei: number; usd: number } | null = null;
+      let gasInfo: { units: bigint; gwei: number; usdc: number } | null = null;
       try {
         const gp = new BrowserProvider(walletClient!.transport);
         const fd = await gp.getFeeData();
@@ -370,8 +370,8 @@ export default function PostTask() {
         const ethPerWei = parseFloat(formatUnits(totalWei, 18));
         const ethPriceResp = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd');
         const ethPrice = (await ethPriceResp.json())?.ethereum?.usd ?? 3500;
-        gasInfo = { units, gwei: parseFloat(formatUnits(feePerUnit, 9)), usd: ethPerWei * ethPrice };
-        console.log(`[PostTask] Gas: ${formatUnits(units, 0)} units × ${gasInfo.gwei.toFixed(1)} gwei ≈ $${gasInfo.usd.toFixed(4)} USD`);
+        gasInfo = { units, gwei: parseFloat(formatUnits(feePerUnit, 9)), usdc: ethPerWei * ethPrice };
+        console.log(`[PostTask] Gas: ${formatUnits(units, 0)} units × ${gasInfo.gwei.toFixed(1)} gwei ≈ $${gasInfo.usdc.toFixed(4)} USDC`);
       } catch (e) {
         console.warn('[PostTask] Gas estimate failed:', (e as Error).message);
       }
@@ -919,12 +919,12 @@ export default function PostTask() {
               {gasEstimate && (
                 <div className="flex justify-between">
                   <span className="text-ink-3">Network gas fee</span>
-                  <span>~${gasEstimate.usd.toFixed(4)} USD</span>
+                  <span>~${gasEstimate.usdc.toFixed(4)} USDC</span>
                 </div>
               )}
               <div className="border-t border-line pt-1.5 flex justify-between font-semibold">
                 <span>Total cost</span>
-                <span>{confirmAmount} {confirmSymbol}{gasEstimate ? ` + ~$${gasEstimate.usd.toFixed(4)} gas` : ''}</span>
+                <span>{confirmAmount} {confirmSymbol}{gasEstimate ? ` + ~${gasEstimate.usdc.toFixed(4)} USDC gas` : ''}</span>
               </div>
             </div>
             <p className="text-xs text-ink-3">Gas is paid in USDC — deducted on top of the escrow amount.</p>
