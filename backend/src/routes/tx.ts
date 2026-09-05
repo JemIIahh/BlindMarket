@@ -65,7 +65,7 @@ txRouter.post('/relay-tx', requireAuth, async (req, res, next) => {
       walletId = wallet.id;
       console.log(`[relay-tx] Found wallet id=${walletId}`);
     } catch (err: any) {
-      console.warn('[relay-tx] getWalletByAddress failed:', err?.status, err?.message || err);
+      console.warn('[relay-tx] getWalletByAddress failed:', JSON.stringify({ status: err?.status, message: err?.message, body: err?.body || err?.error }, null, 2));
       throw new AppError(400, 'WALLET_NOT_FOUND', `Wallet ${body.walletAddress} is not a Privy embedded wallet. Log in with email/social to create one.`);
     }
 
@@ -91,8 +91,6 @@ txRouter.post('/relay-tx', requireAuth, async (req, res, next) => {
       caip2,
       chain_type: 'ethereum' as const,
       params: { transaction },
-      sponsor: true,
-      sponsor_options: { asset: body.asset },
     };
     const rpcUrl = `https://api.privy.io/v1/wallets/${walletId}/rpc`;
 
@@ -119,8 +117,6 @@ txRouter.post('/relay-tx', requireAuth, async (req, res, next) => {
       caip2,
       chain_type: 'ethereum' as const,
       params: { transaction },
-      sponsor: true,
-      sponsor_options: { asset: body.asset },
     };
 
     const result = await privy.wallets()._rpc(walletId, rpcInput as any, {
