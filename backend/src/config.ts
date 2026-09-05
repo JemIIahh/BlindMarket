@@ -185,6 +185,22 @@ export const config = {
   // Cost per second in micro-units (USDC 6 decimals) for billing agents
   sandboxCostPerSecond: parseInt(optional('SANDBOX_COST_PER_SECOND', '1000'), 10),
 
+  // Per-principal rate limits (plan 014) on the two routes that spend real
+  // money per call — /sandbox/exec runs an arbitrary shell command billed to
+  // the platform, /verification/verify spends a paid 0G Compute inference.
+  // Tunable without a code change; sandbox is tighter since a job can run for
+  // up to 600s (execSchema's ceiling) while verify is a single bounded call.
+  sandboxRatePerMin: parseInt(optional('SANDBOX_RATE_PER_MIN', '10'), 10),
+  verifyRatePerMin: parseInt(optional('VERIFY_RATE_PER_MIN', '20'), 10),
+  // Rolling daily cost ceiling per principal for /sandbox/exec, in the same
+  // micro-units as sandboxCostPerSecond. Enforced via Redis
+  // (sandbox:spend:<address>:<YYYY-MM-DD>) so it survives restarts and is
+  // shared across instances — unlike railwaySandbox.ts's in-memory
+  // usageHistory array. This is a runaway brake, not a billing plan: the
+  // default (10,000,000 micro-units = $10 at the default cost-per-second) is
+  // generous relative to real per-agent usage.
+  sandboxDailyCostCapMicro: parseInt(optional('SANDBOX_DAILY_COST_CAP_MICRO', '10000000'), 10),
+
   // Key custody / late-joiner re-wrap (docs/TEE-REWRAP-SPEC.md). DEFAULT OFF.
   // When enabled, posters seal the brief AES key to a platform-held custody key
   // so an agent that registers AFTER a task was posted can be served a
