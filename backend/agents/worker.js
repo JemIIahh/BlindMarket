@@ -28,7 +28,6 @@ import { createHash, randomBytes, createECDH, createCipheriv, createDecipheriv, 
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname as pathDirname, join as pathJoin } from 'path';
-import { runInNewContext } from 'vm';
 import { ethers } from 'ethers';
 import { io as socketClient } from 'socket.io-client';
 import {
@@ -567,6 +566,13 @@ async function fetchWithTimeout(url, options = {}, timeout = 30000) {
 
 // ── Tool builders ────────────────────────────────────────────────────────────
 
+// Marker the sandboxed `js`-tool wrapper script prefixes its result line
+// with, so it can be located in stdout even when the user's own code also
+// console.log()s (the sentinel is always the wrapper's LAST write, so
+// `lastIndexOf` + slice-to-end recovers it regardless of what came before).
+// Exported so the test file doesn't have to duplicate the literal.
+export const JS_TOOL_SENTINEL = '###BM_JS_TOOL_RESULT###:';
+
 export function buildTools(currentTaskHash = null) {
   /** @type {import('ai').ToolSet} */
   const tools = {};
@@ -805,13 +811,111 @@ export function buildTools(currentTaskHash = null) {
         },
       });
     } else if (t.type === 'js') {
+      // `js` tools used to run caller-supplied code via Node's `vm` module.
+      // Node explicitly documents `vm` as NOT a security boundary — the
+      // standard constructor.constructor escape reaches the real `process`.
+      // Route through the same Railway sandbox transport the `sandbox`
+      // branch below already uses, instead of eval'ing in this process.
+      // Deliberately NO fallback to vm when the sandbox is unavailable
+      // (RAILWAY_API_TOKEN/RAILWAY_ENVIRONMENT_ID unset — production's
+      // current state): that would leave the escape open in exactly the
+      // configuration that runs today. `js` tools failing until Railway is
+      // provisioned is the intended outcome, not a bug.
+      //
+      // Base64-encode both the tool's code and the runtime input and decode
+      // them inside the sandbox — never interpolate either into a shell
+      // string, which would be command injection (strictly worse than the
+      // bug this replaces). Only the base64 text (alphanumeric + '+/=', so
+      // safe inside single quotes no matter what it decodes to) is
+      // interpolated into `setup`; `command` is a fixed string with no
+      // user data in it at all.
       tools[safeName] = tool({
         description: t.description,
         inputSchema: z.object({ input: z.string() }),
         execute: async ({ input }) => {
           try {
-            const fn = runInNewContext(`(function(input) { ${t.code} })`, { console }, { timeout: 5000 });
-            return { result: fn(input) };
+            const b64Code = Buffer.from(t.code, 'utf8').toString('base64');
+            const b64Input = Buffer.from(input, 'utf8').toString('base64');
+
+            // `setup` writes the base64 blobs to files, then a fully static
+            // wrapper script (no user data appears in its literal text) that
+            // decodes them and runs the user's code as a plain function body
+            // — same shape the old `vm` context gave it: an `input` param,
+            // and whatever the code `return`s (or undefined) becomes the result.
+            // The wrapper JSON.stringify's { ok, result|error } behind the
+            // sentinel so a thrown error is distinguishable from a normal
+            // return without relying on the process exit code.
+            const setup = [
+              `printf '%s' '${b64Code}' > /tmp/bm_js_code.b64`,
+              `printf '%s' '${b64Input}' > /tmp/bm_js_input.b64`,
+              `cat > /tmp/bm_js_wrap.js <<'BM_JS_WRAP_EOF'
+const fs = require('fs');
+const SENTINEL = ${JSON.stringify(JS_TOOL_SENTINEL)};
+const code = Buffer.from(fs.readFileSync('/tmp/bm_js_code.b64', 'utf8'), 'base64').toString('utf8');
+const input = Buffer.from(fs.readFileSync('/tmp/bm_js_input.b64', 'utf8'), 'base64').toString('utf8');
+try {
+  const fn = new Function('input', code);
+  const result = fn(input);
+  process.stdout.write(SENTINEL + JSON.stringify({ ok: true, result: result }));
+} catch (e) {
+  process.stdout.write(SENTINEL + JSON.stringify({ ok: false, error: (e && e.message) || String(e) }));
+}
+BM_JS_WRAP_EOF`,
+            ].join(' && ');
+
+            const res = await fetchWithTimeout(`${BACKEND_URL}/api/v1/sandbox/exec`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${AGENT_PLATFORM_TOKEN}`,
+              },
+              body: JSON.stringify({
+                command: 'node /tmp/bm_js_wrap.js',
+                setup,
+                taskId: currentTaskHash,
+                // Old vm timeout was a hard 5s. Do NOT inherit the `sandbox`
+                // branch's `?? 300` default here — that would be a 60x jump
+                // in worst-case billed time for what used to be a ~5ms
+                // in-process eval. 30s gives the sandbox spin-up itself
+                // (which the old path never paid) some room without handing
+                // out 5 minutes by default.
+                timeoutSeconds: t.timeout ?? 30,
+              }),
+            });
+
+            const data = await res.json();
+            if (!data.success) {
+              // 503 SANDBOX_UNAVAILABLE is the expected state in production
+              // today (no Railway credentials configured) — give the agent
+              // an actionable message instead of a generic failure.
+              if (data.error?.code === 'SANDBOX_UNAVAILABLE') {
+                return { error: 'js tools require the sandbox; it is not configured' };
+              }
+              return { error: data.error?.message || 'Sandbox execution failed' };
+            }
+
+            const stdout = data.data?.stdout ?? '';
+            const exitCode = data.data?.exitCode;
+            if (exitCode != null && exitCode !== 0) {
+              return { error: (data.data?.stderr || 'js tool execution failed').slice(0, 2000) };
+            }
+
+            const idx = stdout.lastIndexOf(JS_TOOL_SENTINEL);
+            if (idx === -1) {
+              return { error: (data.data?.stderr || 'js tool produced no result').slice(0, 2000) };
+            }
+
+            let parsed;
+            try {
+              parsed = JSON.parse(stdout.slice(idx + JS_TOOL_SENTINEL.length).trim());
+            } catch {
+              return { error: (data.data?.stderr || 'js tool result could not be parsed').slice(0, 2000) };
+            }
+
+            if (!parsed.ok) {
+              return { error: String(parsed.error ?? 'js tool execution failed').slice(0, 2000) };
+            }
+            return { result: parsed.result };
           } catch (e) {
             return { error: e.message };
           }
