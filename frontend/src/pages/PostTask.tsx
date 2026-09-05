@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useWalletClient } from 'wagmi';
 import { getIdentityToken, getAccessToken } from '@privy-io/react-auth';
-import { BrowserProvider, parseUnits, formatUnits, Contract, MaxUint256 } from 'ethers';
+import { BrowserProvider, JsonRpcProvider, parseUnits, formatUnits, Contract, MaxUint256 } from 'ethers';
 import {
   Breadcrumb,
   PageHeader,
@@ -401,26 +401,28 @@ export default function PostTask() {
       // 8a. Approve USDC spend if needed (createTask calls transferFrom)
       if (!isNativeToken && address && BASE_ESCROW_ADDRESS) {
         const ERC20_ABI = ['function approve(address spender, uint256 amount) returns (bool)', 'function allowance(address owner, address spender) view returns (uint256)'];
-        const provider = new BrowserProvider(walletClient!.transport);
-        const usdcContract = new Contract(TOKEN, ERC20_ABI, await provider.getSigner());
+        const readProvider = new JsonRpcProvider('https://sepolia.base.org');
+        const usdcContract = new Contract(TOKEN, ERC20_ABI, readProvider);
         const currentAllowance = await usdcContract.allowance(address, BASE_ESCROW_ADDRESS);
         if (currentAllowance < BigInt(amountBase)) {
           console.log(`[PostTask] Approving USDC spend: ${amountBase} for ${BASE_ESCROW_ADDRESS}`);
           const approveTx = await usdcContract.approve.populateTransaction(BASE_ESCROW_ADDRESS, BigInt(amountBase));
-          const approveResult = await signAndSendTx(signer, approveTx as any);
-          if (approveResult.userOp) {
-            console.log(`[PostTask] USDC approve is a user-op, waiting for on-chain inclusion...`);
-            for (let i = 0; i < 20; i++) {
-              await new Promise(r => setTimeout(r, 3000));
-              const updated = await usdcContract.allowance(address, BASE_ESCROW_ADDRESS);
+          await signAndSendTx(signer, approveTx as any);
+          console.log(`[PostTask] USDC approve submitted, waiting for inclusion...`);
+          for (let i = 0; i < 20; i++) {
+            await new Promise(r => setTimeout(r, 3000));
+            try {
+              const updated = await new Contract(TOKEN, ERC20_ABI, readProvider).allowance(address, BASE_ESCROW_ADDRESS);
               if (updated >= BigInt(amountBase)) {
                 console.log(`[PostTask] USDC allowance confirmed (${updated})`);
                 break;
               }
-              if (i === 19) throw new Error('USDC approve did not confirm within 60s');
+            } catch (e) {
+              console.warn(`[PostTask] allowance poll ${i + 1} failed:`, (e as Error).message);
             }
-          } else {
-            console.log(`[PostTask] USDC approve confirmed`);
+            if (i === 19) {
+              console.warn(`[PostTask] USDC approve not confirmed after 60s — proceeding anyway (user-op may still be pending)`);
+            }
           }
         } else {
           console.log(`[PostTask] USDC allowance sufficient (${currentAllowance})`);
