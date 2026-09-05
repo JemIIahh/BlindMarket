@@ -854,7 +854,7 @@ export default function PostTask() {
     <ConfirmDialog
       open={status === 'confirming'}
       title="Authorize transaction"
-      description={`This will escrow ${confirmAmount} ${confirmSymbol} from your wallet. Gas is covered by the platform (no extra charge). Your wallet balance will decrease by ${confirmAmount} ${confirmSymbol}.`}
+      description={`This will escrow ${confirmAmount} ${confirmSymbol} from your wallet. Gas is free — covered by the platform.`}
       confirmLabel="Authorize & Post"
       onConfirm={() => confirmResolveRef.current?.(true)}
       onCancel={() => confirmResolveRef.current?.(false)}
