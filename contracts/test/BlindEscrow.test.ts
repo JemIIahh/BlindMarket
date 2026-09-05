@@ -613,6 +613,122 @@ describe("BlindEscrow", function () {
     });
   });
 
+  // ── dispute window (claimTimeout can recover a stale dispute, #013) ──
+
+  describe("dispute window (claimTimeout recovery)", function () {
+    const DISPUTE_WINDOW = 14 * ONE_DAY;
+
+    /**
+     * Directly zero out `_tasks[taskId].disputedAt` to simulate a dispute
+     * raised BEFORE this upgrade shipped — those tasks never had a
+     * `disputedAt` field, so the newly-appended storage slot reads as 0 for
+     * them. `_tasks` lives at storage slot 1 (confirmed against the compiled
+     * storageLayout); `disputedAt` is the struct's last member, at relative
+     * slot offset 12 within each entry.
+     */
+    async function zeroOutDisputedAt(taskId: number) {
+      const mappingSlot = 1n;
+      const base = BigInt(
+        ethers.keccak256(
+          ethers.AbiCoder.defaultAbiCoder().encode(["uint256", "uint256"], [taskId, mappingSlot])
+        )
+      );
+      const disputedAtSlot = ethers.toBeHex(base + 12n, 32);
+      await ethers.provider.send("hardhat_setStorageAt", [
+        await escrow.getAddress(),
+        disputedAtSlot,
+        ethers.ZeroHash,
+      ]);
+    }
+
+    beforeEach(async function () {
+      await escrow.connect(agent).createTask(TASK_HASH, await token.getAddress(), AMOUNT, "photo", "Lagos", ONE_WEEK);
+      await escrow.connect(agent).assignWorker(1, worker.address);
+      await escrow.connect(worker).submitEvidence(1, EVIDENCE_HASH);
+    });
+
+    it("lets claimTimeout refund the poster once a stale dispute's window has elapsed (regression)", async function () {
+      await escrow.connect(agent).raiseDispute(1);
+      expect((await escrow.getTask(1)).status).to.equal(6); // Disputed
+
+      await time.increase(ONE_WEEK + 1); // past the deadline
+      await time.increase(DISPUTE_WINDOW + 1); // past DISPUTE_WINDOW since disputedAt
+
+      const before = await token.balanceOf(agent.address);
+      const tx = await escrow.connect(agent).claimTimeout(1);
+
+      expect((await escrow.getTask(1)).status).to.equal(5); // Cancelled
+      expect(await token.balanceOf(agent.address)).to.equal(before + AMOUNT);
+      await expect(tx).to.emit(escrow, "DeadlineExpired").withArgs(1, AMOUNT);
+    });
+
+    it("reverts DisputeWindowActive when past the deadline but still inside the window", async function () {
+      await escrow.connect(agent).raiseDispute(1);
+      await time.increase(ONE_WEEK + 1); // past deadline, window not yet elapsed
+
+      await expect(
+        escrow.connect(agent).claimTimeout(1)
+      ).to.be.revertedWithCustomError(escrow, "DisputeWindowActive");
+    });
+
+    it("reverts DeadlineNotReached when past the window but still before the deadline (conditions compose)", async function () {
+      // A long deadline so DISPUTE_WINDOW can fully elapse while still pre-deadline.
+      await escrow.connect(agent).createTask(TASK_HASH, await token.getAddress(), AMOUNT, "photo", "Lagos", 30 * ONE_DAY);
+      await escrow.connect(agent).assignWorker(2, worker.address);
+      await escrow.connect(worker).submitEvidence(2, EVIDENCE_HASH);
+      await escrow.connect(agent).raiseDispute(2);
+
+      await time.increase(DISPUTE_WINDOW + 1); // window elapsed, 30-day deadline still far off
+
+      await expect(
+        escrow.connect(agent).claimTimeout(2)
+      ).to.be.revertedWithCustomError(escrow, "DeadlineNotReached");
+    });
+
+    it("never lets claimTimeout recover a dispute with disputedAt == 0 (pre-upgrade case)", async function () {
+      await escrow.connect(agent).raiseDispute(1);
+      await zeroOutDisputedAt(1);
+      expect((await escrow.getTask(1)).disputedAt).to.equal(0);
+
+      await time.increase(ONE_WEEK + 1);
+      await time.increase(DISPUTE_WINDOW * 10); // would be "elapsed" many times over if 0 were a real timestamp
+
+      await expect(
+        escrow.connect(agent).claimTimeout(1)
+      ).to.be.revertedWithCustomError(escrow, "DisputeWindowActive");
+    });
+
+    it("still lets the admin resolveDispute during and after the window — the admin path is unchanged", async function () {
+      // During the window.
+      await escrow.connect(agent).raiseDispute(1);
+      const workerBefore = await token.balanceOf(worker.address);
+      await escrow.connect(admin).resolveDispute(1, true);
+      expect((await escrow.getTask(1)).status).to.equal(4); // Completed
+      const fee = (AMOUNT * 1000n) / 10000n;
+      expect(await token.balanceOf(worker.address)).to.equal(workerBefore + AMOUNT - fee);
+
+      // After the window has elapsed too — admin resolution still works, is
+      // not superseded by the new claimTimeout path.
+      await escrow.connect(agent).createTask(TASK_HASH, await token.getAddress(), AMOUNT, "photo", "Lagos", ONE_WEEK);
+      await escrow.connect(agent).assignWorker(2, worker.address);
+      await escrow.connect(worker).submitEvidence(2, EVIDENCE_HASH);
+      await escrow.connect(agent).raiseDispute(2);
+      await time.increase(DISPUTE_WINDOW + 1);
+
+      const agentBefore = await token.balanceOf(agent.address);
+      await escrow.connect(admin).resolveDispute(2, false);
+      expect((await escrow.getTask(2)).status).to.equal(5); // Cancelled
+      expect(await token.balanceOf(agent.address)).to.equal(agentBefore + AMOUNT);
+    });
+
+    it("still rejects raiseDispute after the deadline (existing griefing guard unaffected)", async function () {
+      await time.increase(ONE_WEEK + 1);
+      await expect(
+        escrow.connect(agent).raiseDispute(1)
+      ).to.be.revertedWithCustomError(escrow, "DeadlineReached");
+    });
+  });
+
   // ── Admin functions ──
 
   describe("admin functions", function () {

@@ -57,6 +57,7 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         uint256 createdAt;
         uint256 deadline;       // block.timestamp after which agent can reclaim
         uint8 submissionAttempts; // how many times worker has submitted
+        uint256 disputedAt;     // block.timestamp raiseDispute was called (0 = never disputed / pre-upgrade)
     }
 
     // ── Constants ──
@@ -65,6 +66,7 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
     uint8 public constant MAX_SUBMISSION_ATTEMPTS = 3; // max resubmissions after failed verification
     uint256 public constant MIN_DEADLINE = 1 hours;    // minimum task duration
     uint256 public constant MAX_DEADLINE = 90 days;    // maximum task duration
+    uint256 public constant DISPUTE_WINDOW = 14 days;  // time after a dispute is raised before claimTimeout can recover it
 
     // ── State ──
 
@@ -135,6 +137,7 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
     error SelfAssignment();
     error DeadlineNotReached();
     error DeadlineReached();
+    error DisputeWindowActive();
     error MaxSubmissionAttemptsReached();
     error FeeExceedsMax();
     error InvalidTEESignature();
@@ -255,7 +258,8 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
             locationZone: locationZone,
             createdAt: block.timestamp,
             deadline: deadline,
-            submissionAttempts: 0
+            submissionAttempts: 0,
+            disputedAt: 0
         });
 
         if (verifierAgent != address(0)) {
@@ -536,12 +540,29 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         Task storage t = _tasks[taskId];
         if (block.timestamp < t.deadline) revert DeadlineNotReached();
 
-        // Only allow timeout on active-but-incomplete statuses
-        bool canTimeout = t.status == TaskStatus.Assigned ||
-                          t.status == TaskStatus.Submitted ||
-                          t.status == TaskStatus.Verified;
+        if (t.status == TaskStatus.Disputed) {
+            // A stale dispute must not freeze escrow forever if the admin key
+            // is ever lost or unavailable. Once DISPUTE_WINDOW has elapsed
+            // since raiseDispute, the poster's timeout refund becomes
+            // available again, same as any other unresolved task.
+            //
+            // The disputedAt != 0 guard matters: tasks disputed BEFORE this
+            // upgrade never had disputedAt set, so it reads 0 for them. Without
+            // this guard, `0 + DISPUTE_WINDOW` is long past, making every
+            // pre-existing dispute instantly claimable the moment the upgrade
+            // lands. Those must keep requiring admin resolution via
+            // resolveDispute — so windowElapsed is false whenever disputedAt
+            // is still 0, not just when the window hasn't yet run.
+            bool windowElapsed = t.disputedAt != 0 && block.timestamp >= t.disputedAt + DISPUTE_WINDOW;
+            if (!windowElapsed) revert DisputeWindowActive();
+        } else {
+            // Only allow timeout on active-but-incomplete statuses
+            bool canTimeout = t.status == TaskStatus.Assigned ||
+                              t.status == TaskStatus.Submitted ||
+                              t.status == TaskStatus.Verified;
 
-        if (!canTimeout) revert InvalidStatus(t.status, TaskStatus.Assigned);
+            if (!canTimeout) revert InvalidStatus(t.status, TaskStatus.Assigned);
+        }
 
         // Effects
         t.status = TaskStatus.Cancelled;
@@ -572,6 +593,7 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         if (block.timestamp >= t.deadline) revert DeadlineReached();
 
         t.status = TaskStatus.Disputed;
+        t.disputedAt = block.timestamp;
         emit TaskDisputed(taskId, msg.sender);
     }
 
