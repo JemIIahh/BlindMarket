@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { requireAuth } from '../middleware/auth.js';
+import { createUserRateLimiter } from '../middleware/rateLimit.js';
+import { config } from '../config.js';
 import * as verificationService from '../services/verification.js';
 import { forensicStore } from '../services/forensicStore.js';
 import type { AuthRequest, ApiResponse } from '../types.js';
@@ -16,6 +18,12 @@ const verifySchema = z.object({
   evidenceSummary: z.string().min(1).max(10000),
 });
 
+// Per-principal rate limit (plan 014): every call spends a paid 0G Compute
+// inference. This bounds call RATE only — it does NOT check that the caller
+// is a party to `taskId` (see maintenance notes in plan 014; the right helper,
+// `assertTaskParticipant`, arrives with PR #35 and isn't in master yet).
+const verifyLimiter = createUserRateLimiter(config.verifyRatePerMin);
+
 /**
  * POST /api/v1/verification/verify
  *
@@ -25,7 +33,7 @@ const verifySchema = z.object({
  *
  * Auth: Agent only (the agent who created the task triggers verification).
  */
-verificationRouter.post('/verify', requireAuth, async (req: AuthRequest, res, next) => {
+verificationRouter.post('/verify', requireAuth, verifyLimiter, async (req: AuthRequest, res, next) => {
   try {
     const input = verifySchema.parse(req.body);
 
