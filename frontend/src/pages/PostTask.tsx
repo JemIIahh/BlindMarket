@@ -867,7 +867,32 @@ export default function PostTask() {
     <ConfirmDialog
       open={status === 'confirming'}
       title="Authorize transaction"
-      description={`This will escrow ${confirmAmount} ${confirmSymbol} from your wallet. Gas is free — covered by the platform.`}
+      description={
+        confirmAmount && confirmSymbol ? (
+          <div className="space-y-2">
+            <p className="text-sm text-ink-2">Review the cost before posting:</p>
+            <div className="rounded-lg bg-surface-2 p-3 space-y-1.5 font-mono text-xs">
+              <div className="flex justify-between">
+                <span className="text-ink-3">Escrow amount</span>
+                <span>{confirmAmount} {confirmSymbol}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-ink-3">Worker reward ({WORKER_SHARE_PCT}%)</span>
+                <span>{(parseFloat(confirmAmount) * WORKER_SHARE_PCT / 100).toFixed(4)} {confirmSymbol}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-ink-3">Platform fee ({PLATFORM_FEE_PCT}%)</span>
+                <span>{(parseFloat(confirmAmount) * PLATFORM_FEE_PCT / 100).toFixed(4)} {confirmSymbol}</span>
+              </div>
+              <div className="border-t border-line pt-1.5 flex justify-between font-semibold">
+                <span>Total deducted</span>
+                <span>{confirmAmount} {confirmSymbol}</span>
+              </div>
+            </div>
+            <p className="text-xs text-ink-3">Gas is free — covered by the platform.</p>
+          </div>
+        ) : undefined
+      }
       confirmLabel="Authorize & Post"
       onConfirm={() => confirmResolveRef.current?.(true)}
       onCancel={() => confirmResolveRef.current?.(false)}
