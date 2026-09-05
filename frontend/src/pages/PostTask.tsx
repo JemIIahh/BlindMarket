@@ -901,15 +901,18 @@ export default function PostTask() {
                 <span className="text-ink-3">Platform fee ({PLATFORM_FEE_PCT}%)</span>
                 <span>{(parseFloat(confirmAmount) * PLATFORM_FEE_PCT / 100).toFixed(4)} {confirmSymbol}</span>
               </div>
+              {gasEstimate && (
+                <div className="flex justify-between">
+                  <span className="text-ink-3">Network gas fee</span>
+                  <span>~${gasEstimate.usdc.toFixed(4)} USD</span>
+                </div>
+              )}
               <div className="border-t border-line pt-1.5 flex justify-between font-semibold">
-                <span>Total deducted</span>
-                <span>{confirmAmount} {confirmSymbol}</span>
+                <span>Total cost</span>
+                <span>{confirmAmount} {confirmSymbol}{gasEstimate ? ` + ~$${gasEstimate.usdc.toFixed(4)} gas` : ''}</span>
               </div>
             </div>
-            <p className="text-xs text-ink-3">
-              Gas is free — covered by the platform.
-              {gasEstimate && ` Estimated network fee: ~$${gasEstimate.usdc.toFixed(4)} USD (${formatUnits(gasEstimate.units, 0)} gas × ${gasEstimate.gwei.toFixed(1)} gwei).`}
-            </p>
+            <p className="text-xs text-ink-3">Gas is paid in USDC — deducted on top of the escrow amount.</p>
           </div>
         ) : undefined
       }
