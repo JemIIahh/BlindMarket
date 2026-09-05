@@ -614,7 +614,8 @@ export default function PostTask() {
                       <button
                         key={mode}
                         type="button"
-                        onClick={() => setForm(f => ({ ...f, privacy: mode }))}
+                        onClick={() => { if (!busy) setForm(f => ({ ...f, privacy: mode })); }}
+                        disabled={busy}
                         className={`px-2.5 py-1 text-xs border transition-colors ${active
                           ? 'bg-cream/10 border-cream/40 text-cream'
                           : 'bg-surface-2 border-line text-ink-3 hover:text-ink-2'
@@ -645,6 +646,7 @@ export default function PostTask() {
                   value={form.instructions}
                   onChange={e => setForm(f => ({ ...f, instructions: e.target.value }))}
                   placeholder="Describe exactly what needs to be done."
+                  disabled={busy}
                 />
               </FormField>
 
@@ -658,6 +660,7 @@ export default function PostTask() {
                     value={form.routingSummary}
                     onChange={e => setForm(f => ({ ...f, routingSummary: e.target.value }))}
                     placeholder='e.g. "Summarize a technical article into 5 bullets"'
+                    disabled={busy}
                   />
                 </FormField>
               )}
@@ -668,6 +671,7 @@ export default function PostTask() {
                   value={form.locationZone}
                   onChange={e => setForm(f => ({ ...f, locationZone: e.target.value }))}
                   placeholder="global, US-NY, EU, etc."
+                  disabled={busy}
                 />
               </FormField>
 
@@ -688,7 +692,8 @@ export default function PostTask() {
                       <button
                         key={mode}
                         type="button"
-                        onClick={() => setForm(f => ({ ...f, verificationMode: mode }))}
+                        onClick={() => { if (!busy) setForm(f => ({ ...f, verificationMode: mode })); }}
+                        disabled={busy}
                         className={`px-2.5 py-1 text-xs border transition-colors ${active
                           ? 'bg-cream/10 border-cream/40 text-cream'
                           : 'bg-surface-2 border-line text-ink-3 hover:text-ink-2'
@@ -710,6 +715,7 @@ export default function PostTask() {
                         value={form.criteriaContains}
                         onChange={e => setForm(f => ({ ...f, criteriaContains: e.target.value }))}
                         placeholder="e.g. function, return, sort"
+                        disabled={busy}
                       />
                     </FormField>
                     <FormField label="Forbidden phrases" hint="Comma-separated. Output must NOT contain these — catches excuses like 'unable to complete'.">
@@ -717,6 +723,7 @@ export default function PostTask() {
                         value={form.criteriaForbidden}
                         onChange={e => setForm(f => ({ ...f, criteriaForbidden: e.target.value }))}
                         placeholder="e.g. unable to complete, service unavailable, outside my control"
+                        disabled={busy}
                       />
                     </FormField>
                     <FormField label={`Pass threshold: ${form.criteriaPassThreshold}%`} hint="Minimum score (0–100) to auto-approve. Higher = stricter.">
@@ -728,6 +735,7 @@ export default function PostTask() {
                         value={form.criteriaPassThreshold}
                         onChange={e => setForm(f => ({ ...f, criteriaPassThreshold: e.target.value }))}
                         className="w-full accent-cream"
+                        disabled={busy}
                       />
                     </FormField>
                   </div>
@@ -740,6 +748,7 @@ export default function PostTask() {
                       <select
                         className="w-full bg-surface-2 border border-line text-ink-2 text-sm px-3 py-2 font-mono focus:border-cream/40 outline-none"
                         value={form.verifierAddress}
+                        disabled={busy}
                         onChange={(e) => {
                           const v = verifiers.find(x => x.address.toLowerCase() === e.target.value.toLowerCase());
                           setForm(f => ({ ...f, verifierAddress: v?.address ?? '', verifierPublicKey: v?.publicKey ?? '' }));
@@ -764,6 +773,7 @@ export default function PostTask() {
                         value={form.acceptance}
                         onChange={e => setForm(f => ({ ...f, acceptance: e.target.value }))}
                         placeholder="e.g. A runnable Python function that sorts a list and handles the empty case."
+                        disabled={busy}
                       />
                     </FormField>
                     <div className="flex gap-2.5 border border-warn/30 bg-warn/5 px-3 py-2">
@@ -796,6 +806,7 @@ export default function PostTask() {
                   required
                   value={form.amount}
                   onChange={e => setForm(f => ({ ...f, amount: e.target.value }))}
+                  disabled={busy}
                 />
                 {form.amount && !isNaN(parseFloat(form.amount)) && (() => {
                         const amt = parseUnits(form.amount, PAYMENT_DECIMALS);
@@ -828,6 +839,7 @@ export default function PostTask() {
                   required
                   value={form.deadlineAt}
                   onChange={e => setForm(f => ({ ...f, deadlineAt: e.target.value }))}
+                  disabled={busy}
                 />
               </FormField>
             </div>
