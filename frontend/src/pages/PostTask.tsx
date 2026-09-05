@@ -117,7 +117,7 @@ export default function PostTask() {
   const [taskId, setTaskId] = useState<string | null>(null);
   const [confirmAmount, setConfirmAmount] = useState('');
   const [confirmSymbol, setConfirmSymbol] = useState('');
-  const [gasEstimate, setGasEstimate] = useState<string>('');
+  const [gasEstimate, setGasEstimate] = useState<{ units: bigint; gwei: number; usdc: number } | null>(null);
   const pendingTxRef = useRef<{ unsignedTx: any; value?: bigint; amount: string; symbol: string } | null>(null);
   const confirmResolveRef = useRef<((approve: boolean) => void) | null>(null);
   // Snapshot of how many executors the AES key was wrapped to at post time.
@@ -357,28 +357,28 @@ export default function PostTask() {
         wrappedKeys: isPublicTask ? undefined : wrappedKeys,
       }, token);
 
-      // 7. Show confirmation — user must approve the transaction before relay
-      // Estimate gas cost for the createTask tx
-      let gasCostUsdc = '';
+      // 7. Show confirmation — estimate gas cost using EIP-1559 fees
+      const isNativeToken = TOKEN === '0x0000000000000000000000000000000000000000';
+      const displaySymbol = getPaymentSymbol();
+      let gasInfo: { units: bigint; gwei: number; usdc: number } | null = null;
       try {
-        const gasProvider = new BrowserProvider(walletClient!.transport);
-        const unsignedGasTx = { ...taskJson.unsignedTx, from: address };
-        const gasUnits = await gasProvider.estimateGas(unsignedGasTx);
-        const feeData = await gasProvider.getFeeData();
-        const gasPrice = feeData.gasPrice || 0n;
-        const gasCostWei = gasUnits * gasPrice;
-        const gasCostEth = parseFloat(formatUnits(gasCostWei, 18));
-        gasCostUsdc = gasCostEth.toFixed(6);
-        console.log(`[PostTask] Gas estimate: ${gasUnits} units × ${formatUnits(gasPrice, 9)} gwei = ${gasCostUsdc} ETH (≈ paid in USDC)`);
+        const gp = new BrowserProvider(walletClient!.transport);
+        const fd = await gp.getFeeData();
+        const feePerUnit = fd.maxFeePerGas ?? fd.gasPrice ?? 0n;
+        const units = await gp.estimateGas({ ...taskJson.unsignedTx, from: address });
+        const totalWei = units * feePerUnit;
+        const ethPerWei = parseFloat(formatUnits(totalWei, 18));
+        const ethPriceResp = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd');
+        const ethPrice = (await ethPriceResp.json())?.ethereum?.usd ?? 3500;
+        gasInfo = { units, gwei: parseFloat(formatUnits(feePerUnit, 9)), usdc: ethPerWei * ethPrice };
+        console.log(`[PostTask] Gas: ${formatUnits(units, 0)} units × ${gasInfo.gwei.toFixed(1)} gwei ≈ $${gasInfo.usdc.toFixed(4)} USD`);
       } catch (e) {
         console.warn('[PostTask] Gas estimate failed:', (e as Error).message);
       }
-      setStatus('confirming');
-      const isNativeToken = TOKEN === '0x0000000000000000000000000000000000000000';
-      const displaySymbol = getPaymentSymbol();
       setConfirmAmount(form.amount);
       setConfirmSymbol(displaySymbol);
-      setGasEstimate(gasCostUsdc);
+      setGasEstimate(gasInfo);
+      setStatus('confirming');
       pendingTxRef.current = {
         unsignedTx: taskJson.unsignedTx,
         value: isNativeToken ? BigInt(amountBase) : undefined,
@@ -906,7 +906,10 @@ export default function PostTask() {
                 <span>{confirmAmount} {confirmSymbol}</span>
               </div>
             </div>
-            <p className="text-xs text-ink-3">Gas is free — covered by the platform.{gasEstimate && ` Estimated gas: ~${gasEstimate} ETH (paid in USDC).`}</p>
+            <p className="text-xs text-ink-3">
+              Gas is free — covered by the platform.
+              {gasEstimate && ` Estimated network fee: ~$${gasEstimate.usdc.toFixed(4)} USD (${formatUnits(gasEstimate.units, 0)} gas × ${gasEstimate.gwei.toFixed(1)} gwei).`}
+            </p>
           </div>
         ) : undefined
       }
