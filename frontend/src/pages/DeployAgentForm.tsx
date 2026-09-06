@@ -15,6 +15,7 @@ import {
 import { ToolManager, type AnyTool } from '../components/bb/ToolManager';
 import SkillPicker from '../components/bb/SkillPicker';
 import { get, authedPost } from '../lib/api';
+import { signAndSendTx } from '../lib/txSigner';
 import { useChainAddress } from '../hooks/useChainWallet';
 import { getOrCreateExecutorIdentity } from '../lib/executorIdentity';
 import { BASE_CHAIN_ID, MARKETPLACE_TOKEN_ADDRESS, unsetIfZero } from '../config/constants';
@@ -248,21 +249,31 @@ export default function DeployAgentForm() {
       const provider = new BrowserProvider(walletClient.transport);
       const signer = await provider.getSigner();
 
-      // Step 1: Approve USDC for AgentFactory
+      // Step 1: Approve USDC spend (relayed — gas paid in USDC)
       setStatus('approving');
-      const usdc = new Contract(MARKETPLACE_TOKEN_ADDRESS, USDC_ABI, signer);
+      const usdc = new Contract(MARKETPLACE_TOKEN_ADDRESS, USDC_ABI, provider);
       const currentAllowance = await usdc.allowance(address, AGENT_FACTORY_ADDRESS);
       if (currentAllowance < DEPLOY_FEE_USDC) {
-        const approveTx = await usdc.approve(AGENT_FACTORY_ADDRESS, DEPLOY_FEE_USDC);
-        await approveTx.wait();
+        const approveTx = await usdc.approve.populateTransaction(AGENT_FACTORY_ADDRESS, DEPLOY_FEE_USDC);
+        const approveResult = await signAndSendTx(signer, approveTx as any);
+        console.log(`[deploy] USDC approve relay done hash=${approveResult.hash} userOp=${approveResult.userOp ?? false}`);
+        if (approveResult.receipt) {
+          console.log(`[deploy] USDC approve confirmed at block ${approveResult.receipt.blockNumber}`);
+        } else {
+          await new Promise(r => setTimeout(r, 12000));
+        }
       }
 
-      // Step 2: Pay via AgentFactory (pays 1 USDC, emits event)
+      // Step 2: Pay via AgentFactory (relayed — gas paid in USDC)
       setStatus('deploying');
-      const factory = new Contract(AGENT_FACTORY_ADDRESS, AGENT_FACTORY_ABI, signer);
-      const deployTx = await factory.deployAgent(0);
-      await deployTx.wait();
-      setDeployTxHash(deployTx.hash);
+      const factory = new Contract(AGENT_FACTORY_ADDRESS, AGENT_FACTORY_ABI, provider);
+      const deployTx = await factory.deployAgent.populateTransaction(0);
+      const deployResult = await signAndSendTx(signer, deployTx as any);
+      console.log(`[deploy] AgentFactory relay done hash=${deployResult.hash} userOp=${deployResult.userOp ?? false}`);
+      if (deployResult.userOp) {
+        await new Promise(r => setTimeout(r, 15000));
+      }
+      setDeployTxHash(deployResult.hash);
 
       // Step 3: Create agent via backend (consumes credit, creates wallet, mints INFT)
       // The AgentFactory listener polls every 15s — retry until credit is available.
