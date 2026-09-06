@@ -11,6 +11,7 @@ import {
   FormField,
   FormInput,
   FormSelect,
+  ConfirmDialog,
 } from '../components/bb';
 import { ToolManager, type AnyTool } from '../components/bb/ToolManager';
 import SkillPicker from '../components/bb/SkillPicker';
@@ -163,8 +164,9 @@ export default function DeployAgentForm() {
   // screen for the owner to install from the agent's Skills panel instead.
   const [privateSkillSlugs, setPrivateSkillSlugs] = useState<string[]>([]);
 
-  const [status, setStatus] = useState<'idle' | 'approving' | 'deploying' | 'done' | 'error'>('idle');
+  const [status, setStatus] = useState<'idle' | 'confirming' | 'approving' | 'deploying' | 'done' | 'error'>('idle');
   const submittingRef = useRef(false);
+  const confirmResolveRef = useRef<((approve: boolean) => void) | null>(null);
   const [error, setError] = useState('');
   const [deployTxHash, setDeployTxHash] = useState('');
 
@@ -242,8 +244,12 @@ export default function DeployAgentForm() {
     }
     if (submittingRef.current) return;
     submittingRef.current = true;
-    setStatus('approving');
     setError('');
+
+    // Show confirmation dialog before spending
+    setStatus('confirming');
+    const approved = await new Promise<boolean>((resolve) => { confirmResolveRef.current = resolve; });
+    if (!approved) { setStatus('idle'); submittingRef.current = false; return; }
 
     try {
       const provider = new BrowserProvider(walletClient.transport);
@@ -257,10 +263,18 @@ export default function DeployAgentForm() {
         const approveTx = await usdc.approve.populateTransaction(AGENT_FACTORY_ADDRESS, DEPLOY_FEE_USDC);
         const approveResult = await signAndSendTx(signer, approveTx as any);
         console.log(`[deploy] USDC approve relay done hash=${approveResult.hash} userOp=${approveResult.userOp ?? false}`);
-        if (approveResult.receipt) {
-          console.log(`[deploy] USDC approve confirmed at block ${approveResult.receipt.blockNumber}`);
-        } else {
-          await new Promise(r => setTimeout(r, 12000));
+
+        // Poll allowance until on-chain — UserOps can take several blocks
+        console.log(`[deploy] Waiting for USDC allowance to be confirmed on-chain...`);
+        for (let i = 0; i < 20; i++) {
+          await new Promise(r => setTimeout(r, 3000));
+          const fresh = new Contract(MARKETPLACE_TOKEN_ADDRESS, USDC_ABI, provider);
+          const allowance = await fresh.allowance(address, AGENT_FACTORY_ADDRESS);
+          if (allowance >= DEPLOY_FEE_USDC) {
+            console.log(`[deploy] USDC allowance confirmed: ${allowance}`);
+            break;
+          }
+          if (i === 19) throw new Error('USDC approve timed out — allowance not confirmed after 60s');
         }
       }
 
@@ -583,9 +597,11 @@ export default function DeployAgentForm() {
                 <Button
                   type="submit"
                   variant="primary"
-                  disabled={status === 'approving' || status === 'deploying' || !hasEnoughUsdc}
+                  disabled={status === 'confirming' || status === 'approving' || status === 'deploying' || !hasEnoughUsdc}
                   label={
-                    status === 'approving'
+                    status === 'confirming'
+                      ? 'Confirm deploy…'
+                      : status === 'approving'
                       ? 'Approving USDC…'
                       : status === 'deploying'
                       ? 'Deploying agent…'
@@ -598,6 +614,33 @@ export default function DeployAgentForm() {
           {status === 'error' && <p className="mt-3 text-sm text-err break-words">{error}</p>}
         </div>
       </form>
+      <ConfirmDialog
+        open={status === 'confirming'}
+        title="Deploy agent"
+        description={
+          <div className="space-y-2">
+            <p className="text-sm text-ink-2">Review before deploying:</p>
+            <div className="rounded-lg bg-surface-2 p-3 space-y-1.5 font-mono text-xs">
+              <div className="flex justify-between">
+                <span className="text-ink-3">Deploy fee</span>
+                <span>1 USDC</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-ink-3">Gas (paid in USDC)</span>
+                <span>~0.001 USDC</span>
+              </div>
+              <div className="border-t border-line pt-1.5 flex justify-between font-semibold">
+                <span>Total</span>
+                <span>~1.001 USDC</span>
+              </div>
+            </div>
+            <p className="text-xs text-ink-3">Gas is sponsored by Privy and paid in USDC — no ETH needed.</p>
+          </div>
+        }
+        confirmLabel="Confirm deploy"
+        onConfirm={() => confirmResolveRef.current?.(true)}
+        onCancel={() => confirmResolveRef.current?.(false)}
+      />
     </div>
   );
 }
