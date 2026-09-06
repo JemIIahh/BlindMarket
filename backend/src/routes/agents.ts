@@ -22,6 +22,7 @@ import { redis } from '../services/redis.js';
 import { ethers } from 'ethers';
 import { provider, baseProvider } from '../services/chain.js';
 import { config } from '../config.js';
+import { claimDeployCredit } from '../services/agentFactoryListener.js';
 
 /**
  * Owner-only guard for any agent endpoint that touches funds, keys, or
@@ -207,7 +208,6 @@ const ToolSchema = z.discriminatedUnion('type', [
 ]);
 
 const DeploySchema = z.object({
-  ownerAddress: z.string().min(1),
   ownerPublicKey: z.string()
     .regex(/^[0-9a-fA-F]{64,512}$/, 'Must be a hex-encoded public key (64-512 hex chars)')
     .transform(k => {
@@ -256,15 +256,31 @@ agentsRouter.get('/providers', (_req, res) => {
 });
 
 // POST /api/v1/agents/deploy
-agentsRouter.post('/deploy', async (req, res, next) => {
+agentsRouter.post('/deploy', requireAuth, async (req: AuthRequest, res, next) => {
   try {
     const parsed = DeploySchema.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ success: false, error: parsed.error.flatten() }); return; }
-    console.log(`[deploy] ownerPublicKey length=${parsed.data.ownerPublicKey.length / 2} bytes, hex=${parsed.data.ownerPublicKey.slice(0, 8)}...`);
 
-    // Resolve skill slugs → frozen snapshots (server-side only). Deploy is an
-    // unauthenticated route, so only PUBLIC skills are installable here —
-    // private drafts install via the authed POST /:id/skills after deploy.
+    const ownerAddress = req.user!.address!;
+    console.log(`[deploy] owner=${ownerAddress.slice(0, 10)}… ownerPublicKey length=${parsed.data.ownerPublicKey.length / 2} bytes, hex=${parsed.data.ownerPublicKey.slice(0, 8)}...`);
+
+    // Optional: consume a deploy credit if the AgentFactory paywall is enabled.
+    // During growth phase this is OFF (free deploys). Flip AGENT_FACTORY_PAYWALL
+    // to true before mainnet launch.
+    if (config.agentFactoryPaywall) {
+      const credit = await claimDeployCredit(ownerAddress);
+      if (!credit) {
+        res.status(402).json({
+          success: false,
+          error: { code: 'NO_DEPLOY_CREDIT', message: 'No deploy credit found. Pay 1 USDC via AgentFactory first.' },
+        });
+        return;
+      }
+      console.log(`[deploy] consumed credit nonce=${credit.nonce} tx=${credit.txHash}`);
+    }
+
+    // Resolve skill slugs → frozen snapshots (server-side only). Authenticated
+    // route — both PUBLIC and PRIVATE skills are installable here.
     const { skillSlugs, ...deployParams } = parsed.data;
     const skills: InstalledSkill[] = [];
     // Dedupe: a crafted request could repeat a slug and duplicate its
@@ -288,6 +304,7 @@ agentsRouter.post('/deploy', async (req, res, next) => {
 
     const agent = await deployAgent({
       ...deployParams,
+      ownerAddress,
       capabilities,
       skills: skills.length ? skills : undefined,
     } as Parameters<typeof deployAgent>[0]);

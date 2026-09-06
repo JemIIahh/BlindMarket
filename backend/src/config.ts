@@ -201,6 +201,11 @@ export const config = {
   // generous relative to real per-agent usage.
   sandboxDailyCostCapMicro: parseInt(optional('SANDBOX_DAILY_COST_CAP_MICRO', '10000000'), 10),
 
+  // AgentFactory paywall. When enabled, deploying an agent requires a paid
+  // credit (1 USDC via AgentFactory on Base). Disabled during growth phase;
+  // flip to true before mainnet launch.
+  agentFactoryPaywall: optional('AGENT_FACTORY_PAYWALL', 'true').toLowerCase() === 'true',
+
   // Key custody / late-joiner re-wrap (docs/TEE-REWRAP-SPEC.md). DEFAULT OFF.
   // When enabled, posters seal the brief AES key to a platform-held custody key
   // so an agent that registers AFTER a task was posted can be served a

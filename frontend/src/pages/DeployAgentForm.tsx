@@ -14,8 +14,9 @@ import {
 } from '../components/bb';
 import { ToolManager, type AnyTool } from '../components/bb/ToolManager';
 import SkillPicker from '../components/bb/SkillPicker';
-import { get } from '../lib/api';
+import { get, authedPost } from '../lib/api';
 import { useChainAddress } from '../hooks/useChainWallet';
+import { getOrCreateExecutorIdentity } from '../lib/executorIdentity';
 import { BASE_CHAIN_ID, MARKETPLACE_TOKEN_ADDRESS, unsetIfZero } from '../config/constants';
 import { CONTRACT_ADDRESSES } from '../config/contractAddresses';
 import { isMainnet } from '../config/constants';
@@ -250,23 +251,50 @@ export default function DeployAgentForm() {
       // Step 1: Approve USDC for AgentFactory
       setStatus('approving');
       const usdc = new Contract(MARKETPLACE_TOKEN_ADDRESS, USDC_ABI, signer);
-      const totalCost = DEPLOY_FEE_USDC; // fee only, no extra amount for now
-
       const currentAllowance = await usdc.allowance(address, AGENT_FACTORY_ADDRESS);
-      if (currentAllowance < totalCost) {
-        const approveTx = await usdc.approve(AGENT_FACTORY_ADDRESS, totalCost);
+      if (currentAllowance < DEPLOY_FEE_USDC) {
+        const approveTx = await usdc.approve(AGENT_FACTORY_ADDRESS, DEPLOY_FEE_USDC);
         await approveTx.wait();
       }
 
-      // Step 2: Deploy agent via AgentFactory (pays USDC, emits event)
+      // Step 2: Pay via AgentFactory (pays 1 USDC, emits event)
       setStatus('deploying');
       const factory = new Contract(AGENT_FACTORY_ADDRESS, AGENT_FACTORY_ABI, signer);
-      const deployTx = await factory.deployAgent(0); // amount=0, just pay fee
+      const deployTx = await factory.deployAgent(0);
       await deployTx.wait();
       setDeployTxHash(deployTx.hash);
 
-      // Step 3: Backend listens for AgentDeployed event and creates agent
-      // Poll for agent creation (backend creates it from event)
+      // Step 3: Create agent via backend (consumes credit, creates wallet, mints INFT)
+      // The AgentFactory listener polls every 15s — retry until credit is available.
+      const ownerIdentity = getOrCreateExecutorIdentity(address);
+      const deployBody = {
+        ownerPublicKey: ownerIdentity.publicKey,
+        name: form.name,
+        instructions: form.instructions,
+        provider: form.provider,
+        model: form.model,
+        apiKey: form.apiKey,
+        capabilities: [],
+        tools,
+        toolSecrets,
+        skillSlugs,
+      };
+      let result: { id: string } | null = null;
+      for (let attempt = 0; attempt < 6; attempt++) {
+        try {
+          result = await authedPost<{ id: string }>('/api/v1/agents/deploy', deployBody);
+          break;
+        } catch (err: any) {
+          if (err.code === 'NO_DEPLOY_CREDIT' && attempt < 5) {
+            // Credit not indexed yet — wait for AgentFactory listener
+            await new Promise(r => setTimeout(r, 3000));
+            continue;
+          }
+          throw err;
+        }
+      }
+      if (!result) throw new Error('Deploy credit not found after payment. Try again in a moment.');
+      setDeployTxHash(result.id);
       setStatus('done');
     } catch (err) {
       setError((err as Error).message);
