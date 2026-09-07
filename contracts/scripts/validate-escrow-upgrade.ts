@@ -8,20 +8,30 @@
  * Usage:
  *   npx hardhat run scripts/validate-escrow-upgrade.ts --network 0g-mainnet
  *   npx hardhat run scripts/validate-escrow-upgrade.ts --network 0g-testnet
+ *   npx hardhat run scripts/validate-escrow-upgrade.ts --network base
  */
 import { ethers, upgrades, network } from "hardhat";
-import * as fs from "fs";
-import * as path from "path";
+import { loadDeployment } from "./_deployments";
 
 async function main() {
-  const depPath = path.join(__dirname, `../deployments/${network.name}.json`);
-  const dep = JSON.parse(fs.readFileSync(depPath, "utf8"));
-  const proxy: string = dep.BlindEscrow ?? dep.contracts?.BlindEscrow;
-  if (!proxy) throw new Error(`No BlindEscrow address in ${depPath}`);
+  // Resolve by chainId, never by network.name. The old
+  // `deployments/${network.name}.json` worked only where the hardhat key and
+  // the filename happen to coincide — true for 0g-testnet, 0g-mainnet and
+  // base-sepolia, but NOT for Base mainnet, whose hardhat key is "base" while
+  // the record is "base-mainnet.json", so that one lookup threw ENOENT.
+  const chainId = Number((await ethers.provider.getNetwork()).chainId);
+  const dep = await loadDeployment(chainId);
+  const proxy: string | undefined = dep.contracts?.BlindEscrow;
+  if (!proxy || /^0x0{40}$/i.test(proxy)) {
+    throw new Error(
+      `No deployed BlindEscrow for chainId ${chainId} — the record holds ` +
+        `${proxy ?? "no address"}. Deploy before validating an upgrade.`,
+    );
+  }
 
   const Factory = await ethers.getContractFactory("BlindEscrow");
 
-  console.log(`Network: ${network.name}`);
+  console.log(`Network: ${network.name} (chainId ${chainId})`);
   console.log(`Proxy:   ${proxy}`);
   console.log("Validating new BlindEscrow implementation against the deployed proxy…");
 
