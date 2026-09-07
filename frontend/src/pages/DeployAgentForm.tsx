@@ -306,14 +306,16 @@ export default function DeployAgentForm() {
         skillSlugs,
       };
       let result: { id: string } | null = null;
-      for (let attempt = 0; attempt < 6; attempt++) {
+      for (let attempt = 0; attempt < 20; attempt++) {
         try {
+          console.log(`[deploy] POST /agents/deploy attempt ${attempt + 1}/20`);
           result = await authedPost<{ id: string }>('/api/v1/agents/deploy', deployBody);
           break;
         } catch (err: any) {
-          if (err.code === 'NO_DEPLOY_CREDIT' && attempt < 5) {
-            // Credit not indexed yet — wait for AgentFactory listener
-            await new Promise(r => setTimeout(r, 3000));
+          console.log(`[deploy] attempt ${attempt + 1} failed:`, err.code, err.message);
+          if (err.code === 'NO_DEPLOY_CREDIT' && attempt < 19) {
+            // Credit not indexed yet — listener polls every 15s, wait up to 60s total
+            await new Promise(r => setTimeout(r, 5000));
             continue;
           }
           throw err;
