@@ -21,18 +21,17 @@ name: CI
 # The packages job exists because sdk/ and mcp/ were the remaining blind spot,
 # and it is the SAME failure class the backend job was created for: a change to
 # a backend route's request shape was made along with the sdk wrapper, every
-# covered package stayed green, and the third caller — mcp/src/tools.ts, which
+# covered package stayed green, and a third caller — mcp/src/tools.ts, which
 # reaches the endpoint through the sdk wrapper rather than the URL — was left
 # passing the old shape. Grepping for the route path does not find a caller that
-# goes through a wrapper; a typecheck does. Order matters: mcp depends on
-# `file:../sdk` and compiles against the sdk's BUILT dist/, so the sdk must be
-# built first or mcp type-checks against stale declarations.
+# goes through a wrapper; a typecheck does. (A fourth caller,
+# sdk/src/tools/helpers.ts, hid behind an `as any` and needed a grep even so —
+# a typecheck is necessary, not sufficient.)
 #
-# cli/ is deliberately NOT here: it depends on the PUBLISHED `@blindmarket/sdk`
-# (`^0.3.0`), not the local path, so it cannot catch local API drift anyway —
-# and `npm ci` there currently fails outright because 0.3.0 was never published
-# (npm has 0.1.8 and 0.4.0). Adding it would pin CI red on a pre-existing issue
-# already tracked as plan 009. Add cli once that is resolved.
+# cli/ is deliberately NOT here: like mcp it now depends on the published
+# `@blindmarket/sdk` (`^0.4.0`), but unlike mcp it has no local-override step
+# and no consumer of the changed surface, so a job would add cost without
+# adding signal. Add it when it gains something worth type-checking.
 
 on:
   push:
@@ -89,11 +88,17 @@ jobs:
         run: |
           npm ci
           npm run build
-      # Must run after the sdk build above: mcp compiles against sdk/dist.
-      - name: mcp — install and type-check against the freshly built sdk
+      # mcp depends on the PUBLISHED @blindmarket/sdk, so `npm ci` alone would
+      # type-check it against the last release — which cannot catch drift
+      # between the sdk source in this commit and its consumers, the whole
+      # reason this job exists. Overriding with the local build (--no-save, so
+      # package.json is untouched) asks the question that actually matters:
+      # does mcp still compile against the sdk we are about to publish?
+      - name: mcp — install and type-check against the LOCAL sdk, not the registry copy
         working-directory: mcp
         run: |
           npm ci
+          npm i --no-save ../sdk
           npm run build
 
   contracts:

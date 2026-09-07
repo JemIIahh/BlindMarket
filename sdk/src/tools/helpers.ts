@@ -147,13 +147,22 @@ export function createBlindMarketTools(bb: BlindMarket): Tool[] {
     }, ['agentId']),
 
     tool(bb, 'verify_task', 'Trigger AI/TEE verification for a submitted task result', {
-      taskId: num('Numeric task ID'),
-      taskCategory: str('Task category (e.g. photography, research)'),
-      taskRequirements: str('What the task required'),
+      // taskHash, not a numeric id: ids collide across 0G and Base, so a number
+      // cannot identify a task. taskRequirements is optional and privileged —
+      // the backend builds the standard from the task the poster created and
+      // accepts this only from the poster or designated verifier.
+      taskHash: str('Task hash (bytes32 hex, 0x-prefixed)'),
+      taskCategory: str('Task category slug (letters, numbers, spaces, _ and - only)'),
+      taskRequirements: str('Optional supplemental requirements (poster/verifier only)'),
       evidenceSummary: str('Summary of submitted evidence'),
     }, async (a) => {
-      return bb.verify(a as any);
-    }, ['taskId', 'taskCategory', 'taskRequirements', 'evidenceSummary']),
+      return bb.verify({
+        taskHash: a.taskHash as string,
+        taskCategory: a.taskCategory as string,
+        ...(a.taskRequirements ? { taskRequirements: a.taskRequirements as string } : {}),
+        evidenceSummary: a.evidenceSummary as string,
+      });
+    }, ['taskHash', 'taskCategory', 'evidenceSummary']),
 
     tool(bb, 'get_reputation', "Get an address's on-chain + off-chain reputation", {
       address: str('Wallet address (0x...)'),

@@ -20,12 +20,38 @@ const verifySchema = z.object({
   // key the forensic store (which — like every other A2A surface — is keyed by
   // hash; the old `String(numericId)` lookup here never matched a real report).
   taskHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/, 'taskHash must be a bytes32 hex string'),
-  taskCategory: z.string().min(1).max(100),
+  // Charset-restricted deliberately. taskCategory is rendered ABOVE the fenced
+  // sections in the prompt, so a newline here lets the caller open their own
+  // pseudo-section and address the model directly — and the assigned executor,
+  // the party this route exists to constrain, is a permitted caller. Slugs are
+  // all this ever legitimately carries (`data_processing`, `physical_presence`).
+  taskCategory: z.string().min(1).max(100).regex(
+    /^[a-zA-Z0-9 _-]+$/,
+    'taskCategory may only contain letters, numbers, spaces, underscores and hyphens',
+  ),
   // Supplemental only, and only from the poster/verifier — see the role gate in
   // the handler. The standard being judged against is built server-side.
   taskRequirements: z.string().min(1).max(5000).optional(),
   evidenceSummary: z.string().min(1).max(10000),
 });
+
+/**
+ * The published SDK (0.4.0), CLI (0.3.0) and MCP server (0.3.0) on npm still
+ * send the pre-two-chain `taskId: number`. They cannot be served correctly —
+ * numeric ids collide across 0G and Base, so the value does not identify a
+ * task — but they deserve a diagnosis rather than a bare zod "taskHash
+ * Required" naming a field they have never heard of.
+ */
+function rejectLegacyNumericTaskId(body: unknown): void {
+  const b = body as { taskId?: unknown; taskHash?: unknown } | null;
+  if (b && b.taskHash === undefined && typeof b.taskId === 'number') {
+    throw new AppError(
+      400,
+      'TASK_ID_DEPRECATED',
+      'This endpoint now takes `taskHash` (bytes32 hex), not a numeric `taskId`: on-chain ids collide between 0G and Base, so a number cannot identify a task. Send the task hash instead, and upgrade @blindmarket/sdk past 0.4.0.',
+    );
+  }
+}
 
 // Per-principal rate limit (plan 014): every call spends a paid 0G Compute
 // inference. Rate is bounded here; WHO may call for a given task is enforced
@@ -41,24 +67,51 @@ const verifyLimiter = createUserRateLimiter(config.verifyRatePerMin);
  * machine-readable acceptance criteria, their public routing summary, and the
  * declared capabilities. Only a task the poster explicitly marked public has a
  * plaintext brief to include, and only then is it included.
+ *
+ * "Authoritative" here means the CALLER of this route cannot forge it — not
+ * that it is immutable. POST /a2a/tasks/index is deliberately re-runnable and
+ * overwrites verificationCriteria / requiredCapabilities / routingSummary from
+ * its body with no task-state gate (only `privacy` is pinned), so the on-chain
+ * creator can still rewrite the rubric after evidence is submitted. Closing
+ * that needs a state gate on re-index, which is out of scope here.
+ *
+ * routingSummary is included knowingly: types.ts documents it as a routing
+ * hint, not an acceptance criterion, and "need a Python dev" is a weak
+ * standard. It is included because on a private task it is often the only
+ * poster-authored prose that exists — but it is why a capability tag alone
+ * does not count as substantive below.
  */
-function buildAuthoritativeRequirements(meta: A2ATaskMeta): string {
+function buildAuthoritativeRequirements(meta: A2ATaskMeta): {
+  text: string;
+  /** True when the task carries something a verdict can actually rest on. A
+   *  capability tag alone is NOT that: `requiredCapabilities` is written on
+   *  every task at /tasks/index, so counting it would make the fail-closed
+   *  guard below fire only on the strictly-empty case, and leave the model
+   *  ruling on the single word "data_processing" — which passes almost
+   *  anything, the exact outcome the guard exists to prevent. */
+  substantive: boolean;
+} {
   const parts: string[] = [];
+  let substantive = false;
   if (meta.privacy === 'public' && meta.publicBrief) {
     parts.push(`Task brief (public): ${meta.publicBrief}`);
+    substantive = true;
   }
   if (meta.routingSummary) {
     parts.push(`Poster's summary of what they need: ${meta.routingSummary}`);
+    substantive = true;
   }
   if (meta.requiredCapabilities?.length) {
+    // Context only — never on its own a standard. See `substantive` above.
     parts.push(`Required capabilities: ${meta.requiredCapabilities.join(', ')}`);
   }
   if (meta.verificationCriteria && Object.keys(meta.verificationCriteria).length > 0) {
     parts.push(
       `Acceptance criteria recorded by the poster: ${JSON.stringify(meta.verificationCriteria)}`,
     );
+    substantive = true;
   }
-  return parts.join('\n');
+  return { text: parts.join('\n'), substantive };
 }
 
 /**
@@ -82,6 +135,7 @@ function buildAuthoritativeRequirements(meta: A2ATaskMeta): string {
  */
 verificationRouter.post('/verify', requireAuth, verifyLimiter, async (req: AuthRequest, res, next) => {
   try {
+    rejectLegacyNumericTaskId(req.body);
     const input = verifySchema.parse(req.body);
     const taskHash = input.taskHash;
 
@@ -122,15 +176,16 @@ verificationRouter.post('/verify', requireAuth, verifyLimiter, async (req: AuthR
         : 'poster';
     }
 
-    const taskRequirements = buildAuthoritativeRequirements(meta);
-    if (!taskRequirements && !claimedRequirements) {
-      // Nothing the poster recorded and nothing a privileged party supplied —
-      // there is no standard to judge against. Fail closed rather than ask the
-      // model to rule on an empty rubric (it would pass almost anything).
+    const authoritative = buildAuthoritativeRequirements(meta);
+    const taskRequirements = authoritative.text;
+    if (!authoritative.substantive && !claimedRequirements) {
+      // Nothing a verdict can rest on, and nothing a privileged party supplied.
+      // Fail closed rather than ask the model to rule on a bare capability tag
+      // (it would pass almost anything).
       throw new AppError(
         409,
         'NO_REQUIREMENTS',
-        'This task records no acceptance criteria, routing summary, or public brief to verify against. Add verification criteria to the task, or have the poster/verifier supply requirements with the request.',
+        'This task records no acceptance criteria, routing summary, or public brief to verify against — a capability tag alone is not a standard. Add verification criteria to the task, or have the poster/verifier supply requirements with the request.',
       );
     }
 
@@ -143,8 +198,14 @@ verificationRouter.post('/verify', requireAuth, verifyLimiter, async (req: AuthR
     // body-supplied taskId, and validateForensicReport RECORDS a bad signature
     // as a flag rather than rejecting the report. An unsigned or mis-signed
     // report therefore has unproven provenance and must not be dressed up as
-    // platform-verified — attaching one would let a third party steer a
-    // verdict on someone else's task. Drop those; keep validly-signed ones.
+    // platform-verified. Drop those; keep validly-signed ones.
+    //
+    // This narrows the hole, it does not close it: /forensics/submit never
+    // binds report.workerAddress to the caller, never binds the body taskId to
+    // report.taskId, and saveReport overwrites by key — so a third party can
+    // self-sign a well-formed report naming their OWN address against someone
+    // else's taskHash, and it passes this gate with zero flags. Binding the
+    // submitter belongs in routes/forensics.ts (SEC-08), not here.
     const stored = forensicStore.getReport(taskHash);
     const badProvenance = stored?.validation.flags.some(
       (f) => f === 'signature_mismatch' || f === 'signature_invalid',
