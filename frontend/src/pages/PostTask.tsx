@@ -23,7 +23,7 @@ import { stashAesKey } from '../lib/keyStash';
 import { signAndSendTx } from '../lib/txSigner';
 import { authedGet, authedPost } from '../lib/api';
 import { trackEvent } from '../hooks/useAnalytics';
-import { MARKETPLACE_TOKEN_ADDRESS, getNativeCurrency, getPaymentDecimals, getPaymentSymbol, WORKER_SHARE_PCT, PLATFORM_FEE_PCT, BASE_ESCROW_ADDRESS } from '../config/constants';
+import { MARKETPLACE_TOKEN_ADDRESS, getPaymentDecimals, getPaymentSymbol, WORKER_SHARE_PCT, PLATFORM_FEE_PCT, BASE_ESCROW_ADDRESS } from '../config/constants';
 import { useChain } from '../context/ChainContext';
 import { useChainAddress } from '../hooks/useChainWallet';
 import { useAuth } from '../context/AuthContext';
@@ -64,7 +64,6 @@ function durationHint(secs: number): string {
 
 export default function PostTask() {
   const { activeChain } = useChain();
-  const native = getNativeCurrency(activeChain);
   const address = useChainAddress();
   const { data: walletClient } = useWalletClient();
 
@@ -371,7 +370,7 @@ export default function PostTask() {
         const ethPriceResp = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd');
         const ethPrice = (await ethPriceResp.json())?.ethereum?.usd ?? 3500;
         gasInfo = { units, gwei: parseFloat(formatUnits(feePerUnit, 9)), usdc: ethPerWei * ethPrice };
-        console.log(`[PostTask] Gas: ${formatUnits(units, 0)} units × ${gasInfo.gwei.toFixed(1)} gwei ≈ $${gasInfo.usdc.toFixed(4)} USD`);
+        console.log(`[PostTask] Gas: ${formatUnits(units, 0)} units × ${gasInfo.gwei.toFixed(1)} gwei ≈ $${gasInfo.usdc.toFixed(4)} USDC`);
       } catch (e) {
         console.warn('[PostTask] Gas estimate failed:', (e as Error).message);
       }
@@ -796,7 +795,7 @@ export default function PostTask() {
             <SectionRule num="02" title="Payment" />
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <FormField
-                label={`Reward (${native.symbol})`}
+                label={`Reward (${PAYMENT_SYMBOL})`}
                 required
                 hint={`${WORKER_SHARE_PCT}% to worker, ${PLATFORM_FEE_PCT}% protocol fee.`}
               >
@@ -919,12 +918,12 @@ export default function PostTask() {
               {gasEstimate && (
                 <div className="flex justify-between">
                   <span className="text-ink-3">Network gas fee</span>
-                  <span>~${gasEstimate.usdc.toFixed(4)} USD</span>
+                  <span>~${gasEstimate.usdc.toFixed(4)} USDC</span>
                 </div>
               )}
               <div className="border-t border-line pt-1.5 flex justify-between font-semibold">
                 <span>Total cost</span>
-                <span>{confirmAmount} {confirmSymbol}{gasEstimate ? ` + ~$${gasEstimate.usdc.toFixed(4)} gas` : ''}</span>
+                <span>{confirmAmount} {confirmSymbol}{gasEstimate ? ` + ~${gasEstimate.usdc.toFixed(4)} USDC gas` : ''}</span>
               </div>
             </div>
             <p className="text-xs text-ink-3">Gas is paid in USDC — deducted on top of the escrow amount.</p>

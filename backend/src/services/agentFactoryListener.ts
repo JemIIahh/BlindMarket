@@ -33,7 +33,7 @@ const KEY = {
   credit: (user: string, nonce: bigint | string) =>
     `agentfactory:credit:${user.toLowerCase()}:${String(nonce)}`,
   creditsByUser: (user: string) => `agentfactory:credits:${user.toLowerCase()}`,
-  checkpoint: 'agentfactory:events:checkpoint',
+  checkpoint: (addr: string) => `agentfactory:events:checkpoint:${addr.toLowerCase()}`,
 };
 
 // ── Polling config ──────────────────────────────────────────────────────────
@@ -125,8 +125,10 @@ async function tick(): Promise<void> {
     if (!contract || !baseProvider) return;
 
     try {
+      const addr = await contract.getAddress();
       const latest = await baseProvider.getBlockNumber();
-      const checkpointRaw = await redis.get(KEY.checkpoint);
+      const checkpointKey = KEY.checkpoint(addr);
+      const checkpointRaw = await redis.get(checkpointKey);
 
       let from: number;
       if (checkpointRaw) {
@@ -135,7 +137,7 @@ async function tick(): Promise<void> {
         // First boot with no checkpoint: start at the deployment block if one
         // is configured, otherwise here. Never scan from block 0.
         from = DEPLOYMENT_BLOCK > 0 ? DEPLOYMENT_BLOCK : latest;
-        await redis.set(KEY.checkpoint, String(from));
+        await redis.set(checkpointKey, String(from));
       }
       if (from > latest) return;
 
@@ -153,7 +155,7 @@ async function tick(): Promise<void> {
         );
       }
 
-      await redis.set(KEY.checkpoint, String(to));
+      await redis.set(checkpointKey, String(to));
     } catch (e) {
       // Leave the checkpoint where it is so the chunk is retried next tick
       // rather than skipped — a paid deploy must never be dropped.

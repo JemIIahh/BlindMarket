@@ -11,11 +11,14 @@ import {
   FormField,
   FormInput,
   FormSelect,
+  ConfirmDialog,
 } from '../components/bb';
 import { ToolManager, type AnyTool } from '../components/bb/ToolManager';
 import SkillPicker from '../components/bb/SkillPicker';
-import { get } from '../lib/api';
+import { get, authedPost } from '../lib/api';
+import { signAndSendTx } from '../lib/txSigner';
 import { useChainAddress } from '../hooks/useChainWallet';
+import { getOrCreateExecutorIdentity } from '../lib/executorIdentity';
 import { BASE_CHAIN_ID, MARKETPLACE_TOKEN_ADDRESS, unsetIfZero } from '../config/constants';
 import { CONTRACT_ADDRESSES } from '../config/contractAddresses';
 import { isMainnet } from '../config/constants';
@@ -161,8 +164,9 @@ export default function DeployAgentForm() {
   // screen for the owner to install from the agent's Skills panel instead.
   const [privateSkillSlugs, setPrivateSkillSlugs] = useState<string[]>([]);
 
-  const [status, setStatus] = useState<'idle' | 'approving' | 'deploying' | 'done' | 'error'>('idle');
+  const [status, setStatus] = useState<'idle' | 'confirming' | 'approving' | 'deploying' | 'done' | 'error'>('idle');
   const submittingRef = useRef(false);
+  const confirmResolveRef = useRef<((approve: boolean) => void) | null>(null);
   const [error, setError] = useState('');
   const [deployTxHash, setDeployTxHash] = useState('');
 
@@ -240,33 +244,85 @@ export default function DeployAgentForm() {
     }
     if (submittingRef.current) return;
     submittingRef.current = true;
-    setStatus('approving');
     setError('');
+
+    // Show confirmation dialog before spending
+    setStatus('confirming');
+    const approved = await new Promise<boolean>((resolve) => { confirmResolveRef.current = resolve; });
+    if (!approved) { setStatus('idle'); submittingRef.current = false; return; }
 
     try {
       const provider = new BrowserProvider(walletClient.transport);
       const signer = await provider.getSigner();
 
-      // Step 1: Approve USDC for AgentFactory
+      // Step 1: Approve USDC spend (relayed — gas paid in USDC)
       setStatus('approving');
-      const usdc = new Contract(MARKETPLACE_TOKEN_ADDRESS, USDC_ABI, signer);
-      const totalCost = DEPLOY_FEE_USDC; // fee only, no extra amount for now
-
+      const usdc = new Contract(MARKETPLACE_TOKEN_ADDRESS, USDC_ABI, provider);
       const currentAllowance = await usdc.allowance(address, AGENT_FACTORY_ADDRESS);
-      if (currentAllowance < totalCost) {
-        const approveTx = await usdc.approve(AGENT_FACTORY_ADDRESS, totalCost);
-        await approveTx.wait();
+      if (currentAllowance < DEPLOY_FEE_USDC) {
+        const approveTx = await usdc.approve.populateTransaction(AGENT_FACTORY_ADDRESS, DEPLOY_FEE_USDC);
+        const approveResult = await signAndSendTx(signer, approveTx as any);
+        console.log(`[deploy] USDC approve relay done hash=${approveResult.hash} userOp=${approveResult.userOp ?? false}`);
+
+        // Poll allowance until on-chain — UserOps can take several blocks
+        console.log(`[deploy] Waiting for USDC allowance to be confirmed on-chain...`);
+        for (let i = 0; i < 20; i++) {
+          await new Promise(r => setTimeout(r, 3000));
+          const fresh = new Contract(MARKETPLACE_TOKEN_ADDRESS, USDC_ABI, provider);
+          const allowance = await fresh.allowance(address, AGENT_FACTORY_ADDRESS);
+          if (allowance >= DEPLOY_FEE_USDC) {
+            console.log(`[deploy] USDC allowance confirmed: ${allowance}`);
+            break;
+          }
+          if (i === 19) throw new Error('USDC approve timed out — allowance not confirmed after 60s');
+        }
       }
 
-      // Step 2: Deploy agent via AgentFactory (pays USDC, emits event)
+      // Step 2: Pay via AgentFactory (relayed — gas paid in USDC)
       setStatus('deploying');
-      const factory = new Contract(AGENT_FACTORY_ADDRESS, AGENT_FACTORY_ABI, signer);
-      const deployTx = await factory.deployAgent(0); // amount=0, just pay fee
-      await deployTx.wait();
-      setDeployTxHash(deployTx.hash);
+      const factory = new Contract(AGENT_FACTORY_ADDRESS, AGENT_FACTORY_ABI, provider);
+      console.log('[deploy] Calling deployAgent(0)...');
+      const deployTx = await factory.deployAgent.populateTransaction(0);
+      const deployResult = await signAndSendTx(signer, deployTx as any);
+      console.log(`[deploy] AgentFactory relay done hash=${deployResult.hash} userOp=${deployResult.userOp ?? false}`);
+      if (deployResult.userOp) {
+        await new Promise(r => setTimeout(r, 15000));
+      }
+      setDeployTxHash(deployResult.hash);
 
-      // Step 3: Backend listens for AgentDeployed event and creates agent
-      // Poll for agent creation (backend creates it from event)
+      // Step 3: Create agent via backend (consumes credit, creates wallet, mints INFT)
+      // The AgentFactory listener polls every 15s — retry until credit is available.
+      const ownerIdentity = getOrCreateExecutorIdentity(address);
+      const deployBody = {
+        ownerPublicKey: ownerIdentity.publicKey,
+        name: form.name,
+        instructions: form.instructions,
+        provider: form.provider,
+        model: form.model,
+        apiKey: form.apiKey,
+        capabilities: [],
+        tools,
+        toolSecrets,
+        skillSlugs,
+      };
+      let result: { id: string } | null = null;
+      for (let attempt = 0; attempt < 20; attempt++) {
+        try {
+          console.log(`[deploy] POST /agents/deploy attempt ${attempt + 1}/20`);
+          result = await authedPost<{ id: string }>('/api/v1/agents/deploy', deployBody);
+          break;
+        } catch (err: any) {
+          console.log(`[deploy] attempt ${attempt + 1} failed:`, err.code, err.message);
+          if (err.code === 'NO_DEPLOY_CREDIT' && attempt < 19) {
+            // Credit not indexed yet — listener polls every 15s, wait up to 60s total
+            await new Promise(r => setTimeout(r, 5000));
+            continue;
+          }
+          throw err;
+        }
+      }
+      if (!result) throw new Error('Deploy credit not found after payment. Try again in a moment.');
+      setDeployTxHash(result.id);
       setStatus('done');
     } catch (err) {
       setError((err as Error).message);
@@ -544,9 +600,11 @@ export default function DeployAgentForm() {
                 <Button
                   type="submit"
                   variant="primary"
-                  disabled={status === 'approving' || status === 'deploying' || !hasEnoughUsdc}
+                  disabled={status === 'confirming' || status === 'approving' || status === 'deploying' || !hasEnoughUsdc}
                   label={
-                    status === 'approving'
+                    status === 'confirming'
+                      ? 'Confirm deploy…'
+                      : status === 'approving'
                       ? 'Approving USDC…'
                       : status === 'deploying'
                       ? 'Deploying agent…'
@@ -559,6 +617,33 @@ export default function DeployAgentForm() {
           {status === 'error' && <p className="mt-3 text-sm text-err break-words">{error}</p>}
         </div>
       </form>
+      <ConfirmDialog
+        open={status === 'confirming'}
+        title="Deploy agent"
+        description={
+          <div className="space-y-2">
+            <p className="text-sm text-ink-2">Review before deploying:</p>
+            <div className="rounded-lg bg-surface-2 p-3 space-y-1.5 font-mono text-xs">
+              <div className="flex justify-between">
+                <span className="text-ink-3">Deploy fee</span>
+                <span>~1 USDC</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-ink-3">Gas (paid in USDC)</span>
+                <span>~0.001 USDC</span>
+              </div>
+              <div className="border-t border-line pt-1.5 flex justify-between font-semibold">
+                <span>Total</span>
+                <span>~1.001 USDC</span>
+              </div>
+            </div>
+            <p className="text-xs text-ink-3">Gas is sponsored by Privy and paid in USDC — no ETH needed.</p>
+          </div>
+        }
+        confirmLabel="Confirm deploy"
+        onConfirm={() => confirmResolveRef.current?.(true)}
+        onCancel={() => confirmResolveRef.current?.(false)}
+      />
     </div>
   );
 }

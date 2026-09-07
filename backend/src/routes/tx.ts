@@ -18,6 +18,15 @@ import { requireAuth } from '../middleware/auth.js';
 import { config } from '../config.js';
 import { AppError } from '../middleware/errorHandler.js';
 
+/** Privy eth_sendTransaction RPC response — fields not in WalletRpcResponse. */
+interface PrivySendTxResult {
+  hash?: string;
+  user_operation_hash?: string;
+  transaction_id?: string;
+  sponsorship_provider?: string;
+  caip2?: string;
+}
+
 export const txRouter = Router();
 
 const CHAIN_CAIP2: Record<string, string> = {
@@ -127,7 +136,7 @@ txRouter.post('/relay-tx', requireAuth, async (req, res, next) => {
       headers: { 'privy-authorization-signature': authSignature },
     });
 
-    const rpcResult = result?.data || result || {};
+    const rpcResult = (result as any)?.data as PrivySendTxResult | undefined || result as unknown as PrivySendTxResult;
     const userOpHash = rpcResult.user_operation_hash || '';
     const txId = rpcResult.transaction_id || null;
     console.log(`[relay-tx] userOpHash=${userOpHash} txId=${txId} raw=${JSON.stringify(result).slice(0, 300)}`);
