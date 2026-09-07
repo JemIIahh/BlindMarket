@@ -36,10 +36,20 @@ const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
  *  rather than after the merge matters: base-mainnet.json carries
  *  `AgentFactory: 0x000…0` as its not-deployed-yet placeholder, and a zero left
  *  in place would shadow a real address from the companion record and then be
- *  filtered out — losing the deployment entirely. */
-function readContracts(file: string): Record<string, string> {
+ *  filtered out — losing the deployment entirely.
+ *
+ *  `optional` is for the companion record ONLY. A missing MAIN record must stay
+ *  fatal: it used to throw ENOENT, and making it lenient would let a plain
+ *  `sync-addresses` run exit 0 while emitting a module with `blindEscrow`
+ *  silently absent. CHECK=1 catches that only until someone commits the
+ *  truncated module — after which generated and committed agree and the drift
+ *  guard goes quiet. */
+function readContracts(file: string, optional = false): Record<string, string> {
   const p = path.resolve(__dirname, `../deployments/${file}`);
-  if (!fs.existsSync(p)) return {};
+  if (!fs.existsSync(p)) {
+    if (optional) return {};
+    throw new Error(`Deployment record not found: ${p}`);
+  }
   const raw: Record<string, string> = JSON.parse(fs.readFileSync(p, "utf-8")).contracts ?? {};
   return Object.fromEntries(
     Object.entries(raw).filter(([, v]) => v && v.toLowerCase() !== ZERO_ADDRESS),
@@ -56,7 +66,7 @@ function load(file: string): Record<string, string> {
   // AgentFactory. Reading the companion record makes the mirror unnecessary:
   // the main record still wins where both carry a key, so an existing mirrored
   // value keeps working.
-  const c = { ...readContracts(`agent-factory-${file}`), ...readContracts(file) };
+  const c = { ...readContracts(`agent-factory-${file}`, true), ...readContracts(file) };
   const out: Record<string, string> = {};
   for (const [recKey, genKey] of Object.entries(KEYS)) {
     // An all-zero address is the deliberate "not deployed yet" placeholder

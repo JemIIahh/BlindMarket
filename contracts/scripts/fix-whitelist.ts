@@ -34,8 +34,15 @@ async function resolveEscrowAddress(chainId: number): Promise<string> {
   // Resolve by chainId, never by network.name. The old code did
   // `network.name.includes("mainnet") ? "0g-mainnet" : "0g-testnet"`, so
   // `--network base` (hardhat's key for Base MAINNET, which does not contain
-  // "mainnet") silently resolved the 0G TESTNET escrow and pointed an
-  // admin-gated write at the wrong chain with no error.
+  // "mainnet") silently resolved a 0G escrow address while connected to Base.
+  //
+  // Measured, not assumed: that did NOT reach the admin-gated write. The 0G
+  // address holds no code on Base, so `escrow.admin()` fails first with
+  // ethers BAD_DATA ("could not decode result data") and main() throws. The
+  // resolution is silently wrong; the script is loud. Same shape as the
+  // worked example in CLAUDE.md — whether a wrong-chain call reverts or
+  // succeeds depends on whether that address happens to hold code over there,
+  // which is luck, not a safety property. Hence resolving by chainId.
   const rec = await loadDeployment(chainId);
   const addr = rec.contracts?.BlindEscrow;
   if (addr && /^0x[0-9a-fA-F]{40}$/.test(addr)) return ethers.getAddress(addr);

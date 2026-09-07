@@ -14,9 +14,11 @@ import { ethers, upgrades, network } from "hardhat";
 import { loadDeployment } from "./_deployments";
 
 async function main() {
-  // Resolve by chainId, never by network.name: hardhat's key for Base mainnet
-  // is "base" while the record is "base-mainnet.json", so the old
-  // `deployments/${network.name}.json` threw ENOENT for every Base network.
+  // Resolve by chainId, never by network.name. The old
+  // `deployments/${network.name}.json` worked only where the hardhat key and
+  // the filename happen to coincide — true for 0g-testnet, 0g-mainnet and
+  // base-sepolia, but NOT for Base mainnet, whose hardhat key is "base" while
+  // the record is "base-mainnet.json", so that one lookup threw ENOENT.
   const chainId = Number((await ethers.provider.getNetwork()).chainId);
   const dep = await loadDeployment(chainId);
   const proxy: string | undefined = dep.contracts?.BlindEscrow;
