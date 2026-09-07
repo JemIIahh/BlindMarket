@@ -17,6 +17,22 @@ name: CI
 # `npm run check-addresses` re-derives backend/frontend contractAddresses.ts
 # from deployments/*.json and fails when someone hand-edits the generated file
 # instead of updating the deployment record.
+#
+# The packages job exists because sdk/ and mcp/ were the remaining blind spot,
+# and it is the SAME failure class the backend job was created for: a change to
+# a backend route's request shape was made along with the sdk wrapper, every
+# covered package stayed green, and the third caller — mcp/src/tools.ts, which
+# reaches the endpoint through the sdk wrapper rather than the URL — was left
+# passing the old shape. Grepping for the route path does not find a caller that
+# goes through a wrapper; a typecheck does. Order matters: mcp depends on
+# `file:../sdk` and compiles against the sdk's BUILT dist/, so the sdk must be
+# built first or mcp type-checks against stale declarations.
+#
+# cli/ is deliberately NOT here: it depends on the PUBLISHED `@blindmarket/sdk`
+# (`^0.3.0`), not the local path, so it cannot catch local API drift anyway —
+# and `npm ci` there currently fails outright because 0.3.0 was never published
+# (npm has 0.1.8 and 0.4.0). Adding it would pin CI red on a pre-existing issue
+# already tracked as plan 009. Add cli once that is resolved.
 
 on:
   push:
@@ -54,6 +70,31 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npm run build
+
+  packages:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            sdk/package-lock.json
+            mcp/package-lock.json
+      # `build` is `tsc` in both packages, so this type-checks them. Neither
+      # declares a test script yet (see DX-1); when they do, add `npm test`.
+      - name: sdk — install and type-check
+        working-directory: sdk
+        run: |
+          npm ci
+          npm run build
+      # Must run after the sdk build above: mcp compiles against sdk/dist.
+      - name: mcp — install and type-check against the freshly built sdk
+        working-directory: mcp
+        run: |
+          npm ci
+          npm run build
 
   contracts:
     runs-on: ubuntu-latest
