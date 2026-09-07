@@ -49,7 +49,7 @@ export default function DeployAgent() {
             to={c.to}
             className="group flex flex-col bg-surface p-7 hover:bg-surface-2 transition-colors"
           >
-            <Tag tone="info" className="self-start">
+            <Tag className="self-start">
               {c.tag}
             </Tag>
             <h2 className="mt-4 text-lg font-semibold text-ink">{c.title}</h2>

@@ -190,6 +190,29 @@ html[data-theme="dark"] {
   --bb-info:       #1d4ed8;
 }
 
+/* ── Marketing (mk-) ink scope ─────────────────────────────────── */
+/* Inverse of .mk-paper-scope: pins the bb tokens to light-on-ink so a
+   single card can go dark inside the paper band without prop-plumbing
+   colors through every child. Used by the explainer's concept cards to
+   break the all-white rhythm; schematics inside invert for free. */
+.mk-ink-scope {
+  --bb-bg:         #1c1c20;
+  --bb-surface:    #101013;
+  --bb-surface-2:  #26262b;
+  --bb-line:       #33333a;
+  --bb-line-2:     #4b4b54;
+  --bb-ink:        #fafaf9;
+  --bb-ink-2:      #c7c7cc;
+  --bb-ink-3:      #8b8b94;
+  --bb-invert:     #fafaf9;
+  --bb-invert-fg:  #0a0a0b;
+  --bb-cream:      #f5efe0;
+  --bb-ok:         #34d399;
+  --bb-warn:       #fbbf24;
+  --bb-err:        #f87171;
+  --bb-info:       #60a5fa;
+}
+
 /* ── Marketing (mk-) marquee — landing ticker band ─────────────── */
 /* Track holds TWO copies of the item list; translating -50% loops
    seamlessly. Outside @layer so it can't be purged oddly; gated for

@@ -76,10 +76,13 @@ export function EncryptedFlow() {
         {STEPS.map((step, i) => (
           <motion.div
             key={step.label}
-            initial={{ opacity: 0, y: 16 }}
+            // Opacity gated on reduced motion, not just the travel: an
+            // opacity-0 initial state renders a blank strip anywhere the
+            // whileInView trigger doesn't fire.
+            initial={{ opacity: reduceMotion ? 1 : 0, y: reduceMotion ? 0 : 16 }}
             whileInView={{ opacity: 1, y: 0 }}
             viewport={{ once: true, margin: '-80px' }}
-            transition={{ duration: 0.5, delay: reduceMotion ? 0 : i * 0.12, ease: [0.16, 1, 0.3, 1] }}
+            transition={{ duration: reduceMotion ? 0 : 0.5, delay: reduceMotion ? 0 : i * 0.12, ease: [0.16, 1, 0.3, 1] }}
             className="flex flex-col items-center text-center"
           >
             {/* Icon disk — arbitrary radius: the theme zeroes named rounded-*,
