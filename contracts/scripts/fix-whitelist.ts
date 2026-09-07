@@ -16,35 +16,50 @@
 // back to a hardcoded value that goes stale across redeploys.
 
 import { ethers, network } from "hardhat";
-import { readFileSync } from "fs";
-import { join } from "path";
+import { loadDeployment, DEPLOY_FILES } from "./_deployments";
 
-function resolveEscrowAddress(): string {
+/** 0G chain ids. This script whitelists the NATIVE token (address(0)), which
+ *  on 0G is 0G itself. On Base, address(0) is ETH — whitelisting it on a USDC
+ *  settlement escrow is not a thing we ever want, so the script refuses rather
+ *  than doing it by accident. */
+const OG_CHAIN_IDS = new Set([16661, 16602]);
+
+async function resolveEscrowAddress(chainId: number): Promise<string> {
   const fromArg = process.argv.find((a) => /^0x[0-9a-fA-F]{40}$/.test(a));
   if (fromArg) return ethers.getAddress(fromArg);
 
   const fromEnv = process.env.BLIND_ESCROW_ADDRESS;
   if (fromEnv && /^0x[0-9a-fA-F]{40}$/.test(fromEnv)) return ethers.getAddress(fromEnv);
 
-  const netName = network.name.includes("mainnet") ? "0g-mainnet" : "0g-testnet";
-  const path = join(__dirname, "..", "deployments", `${netName}.json`);
-  try {
-    const j = JSON.parse(readFileSync(path, "utf-8")) as { contracts?: { BlindEscrow?: string } };
-    const addr = j?.contracts?.BlindEscrow;
-    if (addr && /^0x[0-9a-fA-F]{40}$/.test(addr)) return ethers.getAddress(addr);
-  } catch {}
+  // Resolve by chainId, never by network.name. The old code did
+  // `network.name.includes("mainnet") ? "0g-mainnet" : "0g-testnet"`, so
+  // `--network base` (hardhat's key for Base MAINNET, which does not contain
+  // "mainnet") silently resolved the 0G TESTNET escrow and pointed an
+  // admin-gated write at the wrong chain with no error.
+  const rec = await loadDeployment(chainId);
+  const addr = rec.contracts?.BlindEscrow;
+  if (addr && /^0x[0-9a-fA-F]{40}$/.test(addr)) return ethers.getAddress(addr);
 
   throw new Error(
     "Could not resolve BlindEscrow address. Pass as CLI arg, set BLIND_ESCROW_ADDRESS env, " +
-      `or populate contracts/deployments/${netName}.json`,
+      `or populate contracts/deployments/${DEPLOY_FILES[chainId] ?? `<chainId ${chainId}>`}`,
   );
 }
 
 async function main() {
-  const escrowAddr = resolveEscrowAddress();
+  const chainId = Number((await ethers.provider.getNetwork()).chainId);
+  if (!OG_CHAIN_IDS.has(chainId)) {
+    throw new Error(
+      `Refusing to run on chainId ${chainId} (${network.name}). This script whitelists the ` +
+        `native token (address(0)); that is only meaningful on 0G. Base settles in USDC, ` +
+        `which deploy-base.ts already whitelists.`,
+    );
+  }
+
+  const escrowAddr = await resolveEscrowAddress(chainId);
   const nativeAddr = "0x0000000000000000000000000000000000000000";
 
-  console.log(`Network:  ${network.name}`);
+  console.log(`Network:  ${network.name} (chainId ${chainId})`);
   console.log(`Escrow:   ${escrowAddr}`);
 
   const BlindEscrow = await ethers.getContractFactory("BlindEscrow");

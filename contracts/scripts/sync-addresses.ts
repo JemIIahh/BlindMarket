@@ -32,9 +32,31 @@ const KEYS: Record<string, string> = {
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 
+/** A record's `contracts` map with placeholders stripped. Dropping zeros HERE
+ *  rather than after the merge matters: base-mainnet.json carries
+ *  `AgentFactory: 0x000…0` as its not-deployed-yet placeholder, and a zero left
+ *  in place would shadow a real address from the companion record and then be
+ *  filtered out — losing the deployment entirely. */
+function readContracts(file: string): Record<string, string> {
+  const p = path.resolve(__dirname, `../deployments/${file}`);
+  if (!fs.existsSync(p)) return {};
+  const raw: Record<string, string> = JSON.parse(fs.readFileSync(p, "utf-8")).contracts ?? {};
+  return Object.fromEntries(
+    Object.entries(raw).filter(([, v]) => v && v.toLowerCase() !== ZERO_ADDRESS),
+  );
+}
+
 function load(file: string): Record<string, string> {
-  const rec = JSON.parse(fs.readFileSync(path.resolve(__dirname, `../deployments/${file}`), "utf-8"));
-  const c = rec.contracts ?? {};
+  // deploy-agent-factory.ts writes its own record to `agent-factory-<net>.json`
+  // and never touches `<net>.json`, but AgentFactory is read from `<net>.json`
+  // here — so the address reached the generated modules only if a human
+  // remembered to mirror it across (base-sepolia.json's note documents exactly
+  // that manual step). Worse, deploy-base.ts rewrites `contracts` wholesale as
+  // { BlindEscrow, USDC }, so re-running it silently DELETED a mirrored
+  // AgentFactory. Reading the companion record makes the mirror unnecessary:
+  // the main record still wins where both carry a key, so an existing mirrored
+  // value keeps working.
+  const c = { ...readContracts(`agent-factory-${file}`), ...readContracts(file) };
   const out: Record<string, string> = {};
   for (const [recKey, genKey] of Object.entries(KEYS)) {
     // An all-zero address is the deliberate "not deployed yet" placeholder
