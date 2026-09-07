@@ -262,9 +262,14 @@ export interface TaskTemplate {
 }
 
 export interface VerifyTaskInput {
-  taskId: number;
+  /** taskHash (bytes32 hex). Not the numeric on-chain id — those collide
+   *  across 0G and Base, so they cannot identify a task. */
+  taskHash: string;
   taskCategory: string;
-  taskRequirements: string;
+  /** Optional supplemental requirements. The backend builds the standard being
+   *  judged against from the task the poster created; this is accepted only
+   *  from the poster or the designated verifier, never the executor. */
+  taskRequirements?: string;
   evidenceSummary: string;
 }
 

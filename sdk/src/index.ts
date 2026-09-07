@@ -426,9 +426,9 @@ export class BlindMarket {
     teeVerified?: boolean;
   }> {
     return this.req('POST', '/api/v1/verification/verify', {
-      taskId: params.taskId,
+      taskHash: params.taskHash,
       taskCategory: params.taskCategory,
-      taskRequirements: params.taskRequirements,
+      ...(params.taskRequirements ? { taskRequirements: params.taskRequirements } : {}),
       evidenceSummary: params.evidenceSummary,
     });
   }

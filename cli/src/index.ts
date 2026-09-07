@@ -238,20 +238,38 @@ program
 
 program
   .command('verify')
-  .description('Trigger TEE verification for a task')
-  .requiredOption('--task <id>', 'Task ID')
-  .requiredOption('--requirements <text>', 'What the worker was asked to do')
+  .description('Trigger verification for a task')
+  // Was `--task <id>` posting a numeric taskId to /verification/trigger — a
+  // route that has never existed (the router registers /verify, /providers and
+  // /status), so this command 404'd on every invocation. Now on the same
+  // surface as the SDK and MCP server: /verify, keyed by taskHash, because
+  // numeric ids collide across 0G and Base and cannot identify a task.
+  .requiredOption('--task <hash>', 'Task hash (bytes32 hex, 0x-prefixed)')
   .requiredOption('--evidence <text>', 'Summary of submitted evidence')
-  .option('--category <cat>', 'Task category', 'general')
-  .action(async (opts: { task: string; requirements: string; evidence: string; category: string }) => {
+  // Optional and privileged: the backend builds the standard from what the
+  // poster recorded, and accepts this only from the poster or the designated
+  // verifier. An executor sending it is refused.
+  .option('--requirements <text>', 'Supplemental requirements (poster/verifier only)')
+  .option('--category <cat>', 'Task category slug', 'general')
+  .action(async (opts: { task: string; requirements?: string; evidence: string; category: string }) => {
     const cfg = loadConfig();
     if (!cfg.apiKey) { console.error('Not registered. Run: blind register --name <name>'); process.exit(1); }
 
-    const spin = ora('Triggering TEE verification…').start();
+    if (!/^0x[0-9a-fA-F]{64}$/.test(opts.task)) {
+      console.error(`--task must be a bytes32 task hash (0x + 64 hex chars), got: ${opts.task}`);
+      process.exit(1);
+    }
+
+    const spin = ora('Triggering verification…').start();
     try {
       const result = await api.post<{ passed: boolean; confidence: number; reasoning: string }>(
-        '/api/v1/verification/trigger',
-        { taskId: parseInt(opts.task), taskCategory: opts.category, taskRequirements: opts.requirements, evidenceSummary: opts.evidence },
+        '/api/v1/verification/verify',
+        {
+          taskHash: opts.task,
+          taskCategory: opts.category,
+          ...(opts.requirements ? { taskRequirements: opts.requirements } : {}),
+          evidenceSummary: opts.evidence,
+        },
         cfg.apiKey,
       );
       spin.stop();
@@ -411,7 +429,27 @@ validator
         return;
       }
 
-      // Ask TEE to evaluate
+      // FIXME(dispute-autovote): this path is broken and fails OPEN.
+      //
+      // Three compounding problems, verified rather than inferred:
+      //   1. /api/v1/verification/trigger does not exist — the router
+      //      registers only /verify, /providers and /status — so this 404s on
+      //      every dispute.
+      //   2. `.catch(() => null)` swallows that, and `result?.passed !== false`
+      //      is TRUE for null, so `vote` is always 1. Executed: the validator
+      //      votes WORKER on every dispute it sees, silently, without any
+      //      verification having happened.
+      //   3. It cannot simply be repointed at /verify. That route is keyed by
+      //      taskHash (numeric ids collide across 0G and Base) and this handler
+      //      has only the numeric taskId from the DisputeOpened event; and it
+      //      supplies its own `taskRequirements`, which /verify now accepts
+      //      only from the poster or designated verifier — a validator is
+      //      neither, so it would be refused even with the right key.
+      //
+      // Left as-is deliberately: making a validator abstain instead of
+      // fail-open changes dispute economics and is a product decision, not a
+      // cleanup. Not introduced by the oracle-gate work — it 404'd before it
+      // too — but that work is what surfaced it.
       const result = await api.post<{ passed: boolean; confidence: number }>(
         '/api/v1/verification/trigger',
         {

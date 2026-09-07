@@ -218,14 +218,23 @@ export function registerMarketTools(server: McpServer, bb: BlindMarket): void {
       title: 'Verify Task',
       description: 'Trigger AI/TEE verification for a submitted task result',
       inputSchema: {
-        taskId: z.number().describe('Numeric task ID'),
+        // taskHash, not a numeric id: ids collide across 0G and Base, so the
+        // backend keys verification on the hash like every other A2A surface.
+        taskHash: z.string().describe('Task hash (bytes32 hex, 0x-prefixed)'),
         taskCategory: z.string().describe('Task category (e.g. photography, research)'),
-        taskRequirements: z.string().describe('What the task required'),
+        // Optional and privileged: the backend builds the standard being judged
+        // against from the task the poster created. It accepts this only from
+        // the poster or the designated verifier — an executor sending it is
+        // rejected, since defining your own bar is self-grading.
+        taskRequirements: z
+          .string()
+          .optional()
+          .describe('Optional supplemental requirements (poster/verifier only)'),
         evidenceSummary: z.string().describe('Summary of submitted evidence'),
       },
     },
-    async ({ taskId, taskCategory, taskRequirements, evidenceSummary }) => {
-      const result = await bb.verify({ taskId, taskCategory, taskRequirements, evidenceSummary });
+    async ({ taskHash, taskCategory, taskRequirements, evidenceSummary }) => {
+      const result = await bb.verify({ taskHash, taskCategory, taskRequirements, evidenceSummary });
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     },
   );

@@ -47,6 +47,36 @@ as fact.
 > go stale (e.g. files get moved or deleted). Confirming against live source is
 > the safeguard against acting on outdated or hallucinated assumptions.
 
+#### "Verified" is a claim about evidence you hold, not a tone
+
+Reading source proves **structure** — what the code says. It does not prove
+**behaviour** — what the system does when it runs. Keep the two apart, and say
+which one you have:
+
+- **Read in source** — you opened the file and quoted it. Enough for "this
+  function takes X", "this route is gated by Y".
+- **Executed and observed** — you ran it and saw the result. Required before
+  asserting a runtime consequence: what a transaction does on-chain, what an
+  endpoint returns, whether a failure is silent or loud.
+- **Inherited, unverified** — an audit, a checklist, a doc, another agent, or an
+  earlier session said so. Stays labelled that way until someone re-derives it.
+  Repeating an inherited claim in your own voice launders it into apparent fact.
+
+Worked example: `worker.js` builds only a 0G signer and `buildUnsignedTx` emits
+no `chainId` (both true, read in source). The conclusion drawn from that — a
+Base-targeted tx would silently succeed on 0G and strand the task — was asserted
+as verified and was **wrong**: the address holds a contract on 0G, so it reverts
+at gas estimation before spending anything. A 30-second testnet script settled
+it. Cheap decisive test first, then the write-up.
+
+Two corollaries:
+
+- **A search that finds nothing is not proof nothing exists.** Grepping a route
+  path misses callers that reach it through a wrapper, an alias, or a re-export.
+  Before claiming "X is the only caller", type-check the consumers.
+- **A checklist is not the code.** Unchecked boxes in `docs/` describe a past
+  moment; the work may already be done. Confirm in source before proposing it.
+
 ### Don't delete a definition and leave its call sites
 
 When you delete, rename, or move a function/const/import, grep for every

@@ -290,21 +290,25 @@ transactions on the agent's behalf. This is a **custodial** design — convenien
 for the demo, but it concentrates risk in the backend DB. Before mainnet you
 should walk this back to a non-custodial model.
 
-### 5b.1 Endpoint authorization (DONE for the funds endpoints, NOT for the rest)
+### 5b.1 Endpoint authorization (DONE — re-verified in source 2026-09-07)
 
 - [x] `POST /agents/:id/withdraw` — JWT-gated, verifies `req.user.address`
-      matches `agent.ownerAddress`. Refuses while agent is running. Handles
-      both native 0G (empty body) and ERC20 tokens (pass tokenAddress).
+      matches `agent.ownerAddress`. Refuses while agent is running. Now sweeps
+      0G and Base in one call (see `WITHDRAW_CHAINS` in `routes/agents.ts`).
 - [x] `POST /agents/:id/export-key` — JWT-gated.
-- [ ] `POST /agents/:id/start | pause | stop` — still trust `req.body.ownerAddress`
-      as a plaintext claim. Not fund-moving but trivially griefable. Apply the
-      same `requireAuth + authorizeOwner` pattern before mainnet.
-- [ ] `PATCH /agents/:id` — same flaw, same fix.
+- [x] `POST /agents/:id/start | pause | stop` — all three call
+      `authorizeOwner` (`routes/agents.ts` ~:875/:890/:905). The body's
+      `ownerAddress` is no longer trusted.
+- [x] `PATCH /agents/:id` — same, `authorizeOwner` at ~:643.
 
-  **Why this matters:** without auth, anyone on the internet who can name an
-  agent ID (visible in `/agents` listings) can start/stop/edit it. Funds aren't
-  directly at risk because the proceeds go to the stored owner, but operations
-  can be disrupted.
+  **Why this matters:** without auth, anyone who can name an agent ID (visible
+  in `/agents` listings) could start/stop/edit it.
+
+  > These four boxes stayed unchecked long after the code was fixed, and that
+  > cost real time: the stale doc was read as current state and the already-done
+  > work was re-proposed. A checklist records a past moment — confirm in source
+  > before acting on an unchecked box. Line numbers above are approximate and
+  > drift; the `authorizeOwner` call is the thing to grep for.
 
 ### 5b.2 Drop `rawPrivateKey` from the schema
 

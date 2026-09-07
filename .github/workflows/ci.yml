@@ -17,6 +17,21 @@ name: CI
 # `npm run check-addresses` re-derives backend/frontend contractAddresses.ts
 # from deployments/*.json and fails when someone hand-edits the generated file
 # instead of updating the deployment record.
+#
+# The packages job exists because sdk/ and mcp/ were the remaining blind spot,
+# and it is the SAME failure class the backend job was created for: a change to
+# a backend route's request shape was made along with the sdk wrapper, every
+# covered package stayed green, and a third caller — mcp/src/tools.ts, which
+# reaches the endpoint through the sdk wrapper rather than the URL — was left
+# passing the old shape. Grepping for the route path does not find a caller that
+# goes through a wrapper; a typecheck does. (A fourth caller,
+# sdk/src/tools/helpers.ts, hid behind an `as any` and needed a grep even so —
+# a typecheck is necessary, not sufficient.)
+#
+# cli/ is deliberately NOT here: like mcp it now depends on the published
+# `@blindmarket/sdk` (`^0.4.0`), but unlike mcp it has no local-override step
+# and no consumer of the changed surface, so a job would add cost without
+# adding signal. Add it when it gains something worth type-checking.
 
 on:
   push:
@@ -54,6 +69,37 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npm run build
+
+  packages:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            sdk/package-lock.json
+            mcp/package-lock.json
+      # `build` is `tsc` in both packages, so this type-checks them. Neither
+      # declares a test script yet (see DX-1); when they do, add `npm test`.
+      - name: sdk — install and type-check
+        working-directory: sdk
+        run: |
+          npm ci
+          npm run build
+      # mcp depends on the PUBLISHED @blindmarket/sdk, so `npm ci` alone would
+      # type-check it against the last release — which cannot catch drift
+      # between the sdk source in this commit and its consumers, the whole
+      # reason this job exists. Overriding with the local build (--no-save, so
+      # package.json is untouched) asks the question that actually matters:
+      # does mcp still compile against the sdk we are about to publish?
+      - name: mcp — install and type-check against the LOCAL sdk, not the registry copy
+        working-directory: mcp
+        run: |
+          npm ci
+          npm i --no-save ../sdk
+          npm run build
 
   contracts:
     runs-on: ubuntu-latest
