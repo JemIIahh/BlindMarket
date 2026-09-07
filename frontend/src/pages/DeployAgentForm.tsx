@@ -281,6 +281,7 @@ export default function DeployAgentForm() {
       // Step 2: Pay via AgentFactory (relayed — gas paid in USDC)
       setStatus('deploying');
       const factory = new Contract(AGENT_FACTORY_ADDRESS, AGENT_FACTORY_ABI, provider);
+      console.log('[deploy] Calling deployAgent(0)...');
       const deployTx = await factory.deployAgent.populateTransaction(0);
       const deployResult = await signAndSendTx(signer, deployTx as any);
       console.log(`[deploy] AgentFactory relay done hash=${deployResult.hash} userOp=${deployResult.userOp ?? false}`);
@@ -623,7 +624,7 @@ export default function DeployAgentForm() {
             <div className="rounded-lg bg-surface-2 p-3 space-y-1.5 font-mono text-xs">
               <div className="flex justify-between">
                 <span className="text-ink-3">Deploy fee</span>
-                <span>1 USDC</span>
+                <span>~1 USDC</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-ink-3">Gas (paid in USDC)</span>
