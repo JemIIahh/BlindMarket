@@ -19,6 +19,24 @@ import type { DeployedAgent, AgentCapability, AgentStatus, LLMProvider, AgentToo
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const WORKER_PATH = join(__dirname, '../../agents/worker.js');
 
+// The worker is a sandbox boundary: it executes user-supplied tool code, and
+// Node's `vm` is explicitly not a security boundary. Pass only what
+// backend/agents/worker.js actually reads, so a worker-side escape cannot
+// reach the marketplace signer keys, JWT_SECRET, or the database.
+// Derived by enumerating every process.env read in worker.js.
+const WORKER_ENV_PASSTHROUGH = [
+  'NODE_ENV',
+  'BACKEND_URL',
+  'OG_RPC_URL',
+  'OG_CHAIN_ID',
+  'HEARTBEAT_INTERVAL_MS',
+  'POLL_INTERVAL_MS',
+  'DELEGATE_REWARD_OG',
+  'DELEGATE_GAS_RESERVE_OG',
+  // OS/runtime vars node + tsx need to start at all:
+  'PATH', 'HOME', 'TMPDIR', 'LANG', 'TZ', 'NODE_OPTIONS',
+] as const;
+
 // Running child processes (in-memory only — processes don't survive restarts)
 const processes = new Map<string, ChildProcess>();
 
@@ -274,7 +292,11 @@ export async function startAgent(id: string, opts?: { skipResume?: boolean }): P
   const child = fork(WORKER_PATH, [], {
     execArgv: ['--max-old-space-size=128', '--import', 'tsx/esm'],
     env: {
-      ...process.env,
+      ...Object.fromEntries(
+        WORKER_ENV_PASSTHROUGH
+          .filter((k) => process.env[k] !== undefined)
+          .map((k) => [k, process.env[k] as string]),
+      ),
       AGENT_ID: agent.id,
       AGENT_NAME: agent.name,
       AGENT_INSTRUCTIONS: composed.instructions,
