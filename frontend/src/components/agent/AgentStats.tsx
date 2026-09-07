@@ -1,6 +1,6 @@
 import { StatCard } from '../bb';
 import { truncateAddress } from '../../lib/utils';
-import { OG_CHAIN_CONFIG } from '../../config/constants';
+import { OG_CHAIN_CONFIG, getPaymentSymbol } from '../../config/constants';
 import type { AgentReviewStats } from '../../services/marketplace';
 
 /**
@@ -39,7 +39,7 @@ export function AgentStats({
   className?: string;
 }) {
   const hasReviews = !!reviewStats && reviewStats.totalReviews > 0;
-  const earnedValue = `${parseFloat(totalEarned || '0').toLocaleString(undefined, { maximumFractionDigits: 4 })} ${symbol}`;
+  const earnedValue = `${parseFloat(totalEarned || '0').toLocaleString(undefined, { maximumFractionDigits: 4 })} ${getPaymentSymbol()}`;
 
   return (
     <div className={`grid grid-cols-1 sm:grid-cols-4 gap-px bg-line border border-line ${className}`}>
@@ -62,7 +62,7 @@ export function AgentStats({
           className="border-0"
           label="Earned"
           value={earnedValue}
-          sub={symbol}
+          sub={getPaymentSymbol()}
           subColor="ok"
         />
       ) : (
