@@ -15,7 +15,7 @@ import {
   SignInGate,
 } from '../components/bb';
 import { truncateAddress } from '../lib/utils';
-import { API_BASE_URL } from '../config/constants';
+import { API_BASE_URL, getPaymentSymbol } from '../config/constants';
 import { authedPost } from '../lib/api';
 import { useChainAddress } from '../hooks/useChainWallet';
 import { useAuth } from '../context/AuthContext';
@@ -174,8 +174,8 @@ export default function MyAgents() {
         <div className="border-t sm:border-t-0 sm:border-l border-line">
           <StatCard
             label="Total earned"
-            value={`${totalEarned.toLocaleString(undefined, { maximumFractionDigits: 2 })} 0G`}
-            sub="Native 0G · all agents"
+            value={`${totalEarned.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${getPaymentSymbol()}`}
+            sub={`${getPaymentSymbol()} · all agents`}
             subColor="ok"
           />
         </div>
@@ -250,7 +250,7 @@ export default function MyAgents() {
                         {arrow && <span className={arrow.cls}>{arrow.glyph}</span>}
                       </div>
                       <span className="font-mono font-semibold text-ink text-right">
-                        {parseFloat(agent.totalEarned ?? '0').toLocaleString(undefined, { maximumFractionDigits: 2 })} 0G
+                        {parseFloat(agent.totalEarned ?? '0').toLocaleString(undefined, { maximumFractionDigits: 2 })} {getPaymentSymbol()}
                       </span>
                       <span className="font-mono text-ink-3 text-right">{agent.tasksCompleted ?? 0}</span>
                       <span>{isActing ? <StatusTag status={action.variables?.act} /> : <StatusTag status={agent.status} />}</span>
@@ -303,7 +303,7 @@ export default function MyAgents() {
                       <div>
                         <div className="text-[11px] uppercase tracking-wider text-ink-3">Earned</div>
                         <div className="text-sm font-mono font-semibold text-ink mt-0.5">
-                          {parseFloat(agent.totalEarned ?? '0').toLocaleString(undefined, { maximumFractionDigits: 2 })} 0G
+                          {parseFloat(agent.totalEarned ?? '0').toLocaleString(undefined, { maximumFractionDigits: 2 })} {getPaymentSymbol()}
                         </div>
                       </div>
                       <div>

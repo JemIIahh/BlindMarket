@@ -62,7 +62,7 @@ export function AgentStats({
           className="border-0"
           label="Earned"
           value={earnedValue}
-          sub={`Native ${symbol}`}
+          sub={symbol}
           subColor="ok"
         />
       ) : (

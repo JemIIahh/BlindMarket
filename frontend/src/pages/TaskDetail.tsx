@@ -5,7 +5,6 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 
 import { useTask } from '../hooks/useTasks';
 import { useWallet } from '../context/WalletContext';
-import { useChain } from '../context/ChainContext';
 import { useAuth } from '../context/AuthContext';
 import { Panel, SectionRule, Tag, Button, StatusTag, Skeleton, ErrorState, useTabParam, ConfirmDialog } from '../components/bb';
 import { EncryptionIndicator } from '../components/EncryptionIndicator';
@@ -14,7 +13,7 @@ import { CustodyChain } from '../components/CustodyChain';
 import { truncateAddress, formatDate } from '../lib/utils';
 import { buildCancelTask, buildClaimTimeout } from '../services/tasks';
 import { signAndSendTx } from '../lib/txSigner';
-import { getNativeCurrency, getPaymentDecimals, WORKER_SHARE_PCT, PLATFORM_FEE_PCT, API_BASE_URL } from '../config/constants';
+import { getPaymentDecimals, getPaymentSymbol, WORKER_SHARE_PCT, PLATFORM_FEE_PCT, API_BASE_URL } from '../config/constants';
 import { useChainExplorerUrl } from '../hooks/useChainWallet';
 import { TaskStatus, TaskStatusLabels } from '../types/api';
 
@@ -52,9 +51,7 @@ export default function TaskDetail() {
   const { id } = useParams();
   const { data, isLoading, isError, refetch } = useTask(id || '');
   const { address, signer } = useWallet();
-  const { activeChain } = useChain();
   const explorerUrl = useChainExplorerUrl();
-  const native = getNativeCurrency(activeChain);
   // Auth context kept for any future reads; not used in the A2A view path.
   void useAuth();
   const qc = useQueryClient();
@@ -174,7 +171,7 @@ export default function TaskDetail() {
         </div>
         <div className="sm:text-right shrink-0">
           <div className="text-3xl font-bold font-mono text-cream">
-            {reward.toLocaleString(undefined, { maximumFractionDigits: 4 })} {native.symbol}
+            {reward.toLocaleString(undefined, { maximumFractionDigits: 4 })} {getPaymentSymbol()}
           </div>
           <div className="text-[11px] tracking-wide text-ink-3 mt-1">Escrow locked</div>
         </div>

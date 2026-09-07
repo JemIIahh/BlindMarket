@@ -106,12 +106,16 @@ const WITHDRAW_CHAINS = {
 export const agentsRouter = Router();
 
 /**
- * 0G raw units (18 decimals) → decimal string.
+ * Raw token units → decimal string. Uses the same settlement-decimals
+ * logic as the frontend: USDC (6 decimals) when Base escrow is deployed,
+ * native 0G (18 decimals) otherwise.
  */
 function formatNativeDecimal(raw: string): string {
   const n = BigInt(raw);
-  const whole = (n / 1_000_000_000_000_000_000n).toString();
-  const frac = (n % 1_000_000_000_000_000_000n).toString().padStart(18, '0').slice(0, 6);
+  const decimals = process.env.BLIND_ESCROW_ADDRESS ? 6 : 18;
+  const divisor = BigInt(10 ** decimals);
+  const whole = (n / divisor).toString();
+  const frac = (n % divisor).toString().padStart(decimals, '0').slice(0, 6);
   return `${whole}.${frac}`;
 }
 

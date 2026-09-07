@@ -12,7 +12,7 @@ import {
   useTabParam,
 } from '../bb';
 import { authedGet, authedPatch, authedPost, getAuthHeaders } from '../../lib/api';
-import { API_BASE_URL } from '../../config/constants';
+import { API_BASE_URL, getPaymentSymbol } from '../../config/constants';
 import { AGENT_CAPABILITIES } from '../../config/capabilities';
 import { ToolManager, type AnyTool } from '../bb/ToolManager';
 import AgentMetricsPanel from '../AgentMetricsPanel';
@@ -462,7 +462,7 @@ export function OpsConsole({
               )}
             </FormField>
 
-            <FormField label="Min reward" hint="0G per task — tasks below this threshold won't be offered to this agent (requires restart)">
+            <FormField label="Min reward" hint={`${getPaymentSymbol()} per task — tasks below this threshold won't be offered to this agent (requires restart)`}>
               <FormInput className="font-mono" placeholder="0" value={editMinReward} onChange={e => setEditMinReward(e.target.value)} />
             </FormField>
 
