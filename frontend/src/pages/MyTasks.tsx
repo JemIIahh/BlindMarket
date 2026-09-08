@@ -19,7 +19,6 @@ import {
 import { useSocket } from '../hooks/useSocket';
 import { authedGet } from '../lib/api';
 import { getAesKey } from '../lib/keyStash';
-import { getPaymentDecimals, getPaymentSymbol } from '../config/constants';
 import { useChainAddress } from '../hooks/useChainWallet';
 
 // ── Shapes returned by GET /api/v1/a2a/tasks/posted ──────────────────────
@@ -60,6 +59,7 @@ interface PostedTask {
   hasCustody?: boolean;
   onChain: null | {
     taskId: string;           // numeric on-chain id, as string
+    chain: 'base' | '0g';
     status: number;           // 0=Funded 1=Assigned 2=Submitted 3=Verified(=failed, retryable) 4=Completed 5=Cancelled 6=Disputed
     reward: string;           // raw bigint as string
     token: string;
@@ -77,6 +77,14 @@ interface PostedTask {
 const STATUS_LABELS: Record<number, string> = {
   0: 'open', 1: 'assigned', 2: 'submitted', 3: 'verification failed', 4: 'completed', 5: 'cancelled', 6: 'disputed',
 };
+
+// Chain-aware decimals: Base tasks settle in USDC (6), 0G in native (18).
+function chainDecimals(chain?: 'base' | '0g'): number {
+  return chain === 'base' ? 6 : 18;
+}
+function chainSymbol(chain?: 'base' | '0g'): string {
+  return chain === 'base' ? 'USDC' : '0G';
+}
 
 // ── Chain-aware helpers ─────────────────────────────────────────────────
 
@@ -109,6 +117,10 @@ function formatReward(raw: string | undefined, decimals: number, symbol: string)
   } catch {
     return raw;
   }
+}
+
+function formatRewardForChain(raw: string | undefined, chain?: 'base' | '0g') {
+  return formatReward(raw, chainDecimals(chain), chainSymbol(chain));
 }
 
 // Short id for the visible task identifier — we display the on-chain numeric
@@ -214,11 +226,12 @@ export default function MyTasks() {
   // isn't "spent" yet. Summed as BigInt wei, then formatted once, to avoid the
   // per-task Number() precision loss above 0.009 0G.
   const completedTasks = tasks.filter(t => effectiveStatus(t) === 4);
-  const totalSpentWei = completedTasks.reduce(
-    (s, t) => s + rewardToWei(t.onChain?.reward),
-    0n,
+  // Sum rewards per chain — Base tasks are USDC (6 decimals), 0G tasks native (18).
+  // Can't mix decimals in a single BigInt sum, so convert each to a number first.
+  const totalSpent = completedTasks.reduce(
+    (s, t) => s + rewardToNumber(t.onChain?.reward, chainDecimals(t.onChain?.chain)),
+    0,
   );
-  const totalSpent = Number(formatUnits(totalSpentWei, getPaymentDecimals()));
 
   const FILTERS: { id: 'all' | 'open' | 'active' | 'completed'; label: string }[] = [
     { id: 'all', label: 'All' },
@@ -250,7 +263,7 @@ export default function MyTasks() {
         <StatCard label="Open" value={String(openCount)} sub="Awaiting worker" />
         <div className="border-l border-line"><StatCard label="Active" value={String(activeCount)} sub="In progress" subColor="warn" /></div>
         <div className="border-t border-l-0 sm:border-t-0 sm:border-l border-line"><StatCard label="Completed" value={String(completedCount)} sub="All time" subColor="ok" /></div>
-        <div className="border-t border-l border-line sm:border-t-0"><StatCard label="Total spent" value={`${totalSpent.toLocaleString(undefined, { maximumFractionDigits: 4 })} ${getPaymentSymbol()}`} sub="Paid out on completed tasks" /></div>
+        <div className="border-t border-l border-line sm:border-t-0"><StatCard label="Total spent" value={`${totalSpent.toLocaleString(undefined, { maximumFractionDigits: 4 })} USDC`} sub="Paid out on completed tasks" /></div>
       </div>
 
       <div className="border border-line">
@@ -384,7 +397,7 @@ export default function MyTasks() {
                   <div className="pt-3 border-t border-line flex items-end justify-between">
                     <div>
                       <div className="text-lg font-mono font-semibold text-cream leading-none">
-                        {formatReward(t.onChain?.reward, getPaymentDecimals(), getPaymentSymbol())}
+                        {formatRewardForChain(t.onChain?.reward, t.onChain?.chain)}
                       </div>
                       <div className="text-[11px] text-ink-3 mt-1.5">
                         {worker ? (

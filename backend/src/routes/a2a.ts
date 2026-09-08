@@ -2305,6 +2305,7 @@ a2aRouter.get('/tasks/posted', requireAuth, async (req: AuthRequest, res, next) 
             hasCustody,
             onChain: {
               taskId: onChainId.toString(),
+              chain: resolved.chain,
               status: onChainTask.status,
               reward: onChainTask.amount.toString(),
               token: onChainTask.token,
