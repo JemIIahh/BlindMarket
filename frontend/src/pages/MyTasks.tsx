@@ -14,6 +14,7 @@ import {
   LoadingState,
   EmptyState,
   ErrorState,
+  Pagination,
 } from '../components/bb';
 import { useSocket } from '../hooks/useSocket';
 import { authedGet } from '../lib/api';
@@ -131,6 +132,8 @@ function workerAddress(t: PostedTask): string | null {
   return `${w.slice(0, 6)}…${w.slice(-4)}`;
 }
 
+const PAGE_SIZE = 15;
+
 export default function MyTasks() {
   const address = useChainAddress();
   const { activeChain } = useChain();
@@ -138,6 +141,7 @@ export default function MyTasks() {
   const qc = useQueryClient();
   const [filter, setFilter] = useState<'all' | 'open' | 'active' | 'completed'>('all');
   const [sort, setSort] = useState<'newest' | 'oldest' | 'highest-reward' | 'lowest-reward'>('newest');
+  const [page, setPage] = useState(1);
 
   // /a2a/tasks/posted returns every task the authed wallet posted, across
   // the full lifecycle. /api/v1/tasks would only return Funded ones, which
@@ -156,9 +160,6 @@ export default function MyTasks() {
 
   useSocket('tasks', {
     'task:created': () => qc.invalidateQueries({ queryKey: ['my-tasks-posted', address] }),
-    // No 'task:assigned' listener: nothing emits it anymore — the only emitter
-    // fired at unsigned-tx BUILD time (before the poster signed) and was
-    // removed as misleading. Assignment shows up via staleTime/refocus refetch.
     'task:completed': () => qc.invalidateQueries({ queryKey: ['my-tasks-posted', address] }),
   });
 
@@ -202,6 +203,9 @@ export default function MyTasks() {
         default: return 0;
       }
     });
+
+  const totalPages = Math.max(1, Math.ceil(filteredTasks.length / PAGE_SIZE));
+  const paginatedTasks = filteredTasks.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
   const openCount = tasks.filter(t => effectiveStatus(t) === 0).length;
   const activeCount = tasks.filter(t => [1, 2].includes(effectiveStatus(t))).length;
@@ -259,7 +263,7 @@ export default function MyTasks() {
             {FILTERS.map(f => (
               <button
                 key={f.id}
-                onClick={() => setFilter(f.id)}
+                onClick={() => { setFilter(f.id); setPage(1); }}
                 className={`text-[11px] px-2.5 py-1 border transition-colors ${
                   filter === f.id ? 'bg-cream text-bg border-cream' : 'text-ink-3 border-line hover:border-cream/50'
                 }`}
@@ -271,7 +275,7 @@ export default function MyTasks() {
             {SORTS.map(s => (
               <button
                 key={s.id}
-                onClick={() => setSort(s.id)}
+                onClick={() => { setSort(s.id); setPage(1); }}
                 className={`text-[11px] px-2.5 py-1 border transition-colors ${
                   sort === s.id ? 'bg-cream text-bg border-cream' : 'text-ink-3 border-line hover:border-cream/50'
                 }`}
@@ -309,7 +313,7 @@ export default function MyTasks() {
           />
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-px bg-line border-t border-line">
-            {filteredTasks.map(t => {
+            {paginatedTasks.map(t => {
               const status = effectiveStatus(t);
               // Label from the actual source: the numeric map is only correct
               // for on-chain statuses (where 3 = verification failed). For
@@ -421,6 +425,15 @@ export default function MyTasks() {
           </div>
         )}
       </div>
+      {filteredTasks.length > 0 && (
+        <Pagination
+          page={page}
+          totalPages={totalPages}
+          totalItems={filteredTasks.length}
+          pageSize={PAGE_SIZE}
+          onPageChange={setPage}
+        />
+      )}
     </div>
   );
 }

@@ -14,6 +14,7 @@ import {
   EmptyState,
   ErrorState,
   SignInGate,
+  Pagination,
 } from '../components/bb';
 import { truncateAddress } from '../lib/utils';
 import { API_BASE_URL, MARKETPLACE_TOKEN_ADDRESS, getPaymentSymbol, getPaymentDecimals } from '../config/constants';
@@ -334,26 +335,14 @@ export default function MyAgents() {
             </div>
           </>
         )}
-        {agents.length > 0 && totalPages > 1 && (
-          <div className="flex items-center justify-between px-5 py-3 border-t border-line text-xs text-ink-3">
-            <span>Page {page} of {totalPages}</span>
-            <div className="flex gap-2">
-              <button
-                onClick={() => setPage(p => Math.max(1, p - 1))}
-                disabled={page <= 1}
-                className="px-3 py-1 border border-line bg-surface-2 hover:bg-surface-3 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-              >
-                Previous
-              </button>
-              <button
-                onClick={() => setPage(p => Math.min(totalPages, p + 1))}
-                disabled={page >= totalPages}
-                className="px-3 py-1 border border-line bg-surface-2 hover:bg-surface-3 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-              >
-                Next
-              </button>
-            </div>
-          </div>
+        {agents.length > 0 && (
+          <Pagination
+            page={page}
+            totalPages={totalPages}
+            totalItems={totalAgents}
+            pageSize={AGENTS_PAGE_SIZE}
+            onPageChange={setPage}
+          />
         )}
       </div>
     </div>

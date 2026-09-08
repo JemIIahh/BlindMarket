@@ -11,6 +11,7 @@ import {
   FormInput,
   Modal,
   ConfirmDialog,
+  Toggle,
 } from '../components/bb';
 import { useReputation } from '../hooks/useReputation';
 import {
@@ -362,17 +363,11 @@ export default function Settings() {
                     <div className="text-sm text-ink">{toggle.label}</div>
                     <div className="text-xs text-ink-3 mt-0.5 leading-relaxed">{toggle.description}</div>
                   </div>
-                  <button
-                    role="switch"
-                    aria-checked={toggle.value}
-                    aria-label={toggle.label}
-                    onClick={() => toggle.set(!toggle.value)}
-                    className={`shrink-0 w-10 h-5 border transition-colors flex items-center ${toggle.value ? 'bg-cream/20 border-cream/40' : 'bg-surface-2 border-line'}`}
-                  >
-                    <div
-                      className={`w-3 h-3 transition-all ${toggle.value ? 'bg-cream ml-5' : 'bg-ink-3 ml-1'}`}
-                    />
-                  </button>
+                  <Toggle
+                    checked={toggle.value}
+                    onChange={toggle.set}
+                    label={toggle.label}
+                  />
                 </div>
               ))}
             </div>
