@@ -1,0 +1,50 @@
+import { describe, it, expect, vi } from 'vitest';
+
+vi.mock('ai', () => ({ tool: (d: unknown) => d, generateText: vi.fn(), generateObject: vi.fn(), stepCountIs: (n: number) => n }));
+vi.mock('@ai-sdk/openai', () => ({ createOpenAI: () => () => 'm' }));
+vi.mock('@ai-sdk/anthropic', () => ({ createAnthropic: () => () => 'm' }));
+vi.mock('@ai-sdk/groq', () => ({ createGroq: () => () => 'm' }));
+vi.mock('socket.io-client', () => ({ io: () => ({ on: vi.fn(), emit: vi.fn() }) }));
+
+// @ts-expect-error — plain-JS worker, no d.ts
+import { shouldScanFeed, WS_RECONCILE_MS } from './worker.js';
+
+/**
+ * The stranding bug. The offer cascade lives in a setTimeout (routes/a2a.ts)
+ * and dies with the process on restart; its documented fallback is that agents
+ * "pick it up via CAS race", which requires them to poll. But the worker
+ * skipped the feed scan outright whenever its socket was up — so the fallback
+ * could never fire, and any task open across a restart stayed invisible until
+ * it expired with the escrow still funded.
+ *
+ * A connected agent must therefore still sweep the board on a floor cadence.
+ */
+describe('shouldScanFeed — a connected agent still sweeps the board', () => {
+  const T0 = 1_700_000_000_000;
+
+  it('scans every tick while disconnected', () => {
+    expect(shouldScanFeed(false, T0, T0)).toBe(true);
+  });
+
+  it('does NOT scan on every tick while connected — WS is still the fast path', () => {
+    expect(shouldScanFeed(true, T0 + 1_000, T0)).toBe(false);
+  });
+
+  it('scans again once the reconcile floor elapses, even while connected', () => {
+    expect(shouldScanFeed(true, T0 + WS_RECONCILE_MS, T0)).toBe(true);
+  });
+
+  it('never lets a connected agent go longer than the floor without a sweep', () => {
+    // The regression: previously this was `if (wsConnected) return;` — false forever.
+    expect(shouldScanFeed(true, T0 + WS_RECONCILE_MS * 5, T0)).toBe(true);
+  });
+
+  it('scans on first tick after boot (no prior scan recorded)', () => {
+    expect(shouldScanFeed(true, T0, 0)).toBe(true);
+  });
+
+  it('floor is long enough to stay cheap, short enough to rescue a task', () => {
+    expect(WS_RECONCILE_MS).toBeGreaterThanOrEqual(60_000);
+    expect(WS_RECONCILE_MS).toBeLessThanOrEqual(600_000);
+  });
+});

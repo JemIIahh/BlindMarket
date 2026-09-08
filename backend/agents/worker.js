@@ -116,6 +116,41 @@ const AGENT_TOOL_SECRETS_RAW = process.env.AGENT_TOOL_SECRETS ?? '{}';
 const AGENT_CAPABILITIES_RAW = process.env.AGENT_CAPABILITIES ?? '[]';
 const BACKEND_URL = process.env.BACKEND_URL ?? 'http://localhost:3001';
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? 30_000);
+
+/**
+ * Floor cadence for the full feed scan while the WebSocket is up.
+ *
+ * WS is the fast path and stays that way — an offer still arrives in
+ * milliseconds. This is the reconciling sweep underneath it, and it exists
+ * because the two halves of the system each assumed the other would cover a
+ * missed broadcast. The offer cascade lives in a setTimeout that dies with the
+ * process on restart, and its comment says the task "can be picked up via CAS
+ * race (graceful degradation)" — which needs an agent to poll. This worker
+ * skipped the feed scan outright whenever the socket was up, so that fallback
+ * could never fire: any task open across a backend restart stayed invisible to
+ * every connected agent until it expired, escrow still funded, nobody alerted.
+ *
+ * The disconnect handler polls once immediately, but that fires while the
+ * backend is still down — precisely when it cannot answer — and two seconds
+ * later the reconnect silences polling again.
+ */
+const WS_RECONCILE_MS = Number(process.env.WS_RECONCILE_MS ?? 300_000);
+export { WS_RECONCILE_MS };
+
+/** Timestamp of the last full feed scan; 0 until the first one runs. */
+let lastFeedScanAt = 0;
+
+/**
+ * Should this tick run the full feed scan?
+ *
+ * Disconnected: always — WS is delivering nothing, polling is the only path.
+ * Connected: only once the reconcile floor has elapsed, so the sweep costs one
+ * paginated read per WS_RECONCILE_MS rather than one per poll tick.
+ */
+export function shouldScanFeed(wsConnected, now, lastScanAt, reconcileMs = WS_RECONCILE_MS) {
+  if (!wsConnected) return true;
+  return now - lastScanAt >= reconcileMs;
+}
 // Liveness heartbeat cadence — DECOUPLED from POLL_INTERVAL_MS. The parent
 // refreshes a Redis key with a 90s TTL on each heartbeat (see redis.ts
 // HEARTBEAT_TTL_S / isAgentLive); if liveness were tied to the poll loop, an
@@ -1288,11 +1323,14 @@ async function pollAndWork() {
     // Then judge any tasks we're the designated verifier for.
     await pollAndVerify();
 
-    // When WS is connected, it pushes task:offer/task:available events —
-    // no need to poll the full task feed. Skip the expensive feed scan and
-    // just rely on WS for new work. The resume + verify calls above still
-    // handle stale/crashed tasks and pending verifications.
-    if (wsConnected) return;
+    // WS pushes task:offer/task:available, so the feed scan is not needed on
+    // every tick while it is up — but it cannot be skipped entirely. A missed
+    // broadcast (server restart kills the cascade's setTimeout) is otherwise
+    // never recoverable, because nothing re-emits and `join` replays no
+    // backlog. Sweep on a floor cadence so a stranded task is picked up within
+    // WS_RECONCILE_MS instead of never.
+    if (!shouldScanFeed(wsConnected, Date.now(), lastFeedScanAt)) return;
+    lastFeedScanAt = Date.now();
 
     // The browse endpoint is paginated (max 200/page) — walk every page so a
     // board with >200 open tasks doesn't hide its tail from us. Redis set order
