@@ -7,7 +7,7 @@
  * MCP tools are normalized to ToolDefinition shape for the execution layer.
  */
 
-import type { ToolDefinition, ToolDSL, ToolParamSchema } from '../types.js';
+import type { ToolDefinition, ToolDSL } from '../types.js';
 import { compileFromMcp, type McpToolInput } from './toolDslCompiler.js';
 import { renderToolDefinition } from './toolDslRenderer.js';
 

@@ -4,7 +4,6 @@ import { requireAuth } from '../middleware/auth.js';
 import type { AuthRequest } from '../types.js';
 import * as messageStore from '../services/messageStore.js';
 import * as a2aStore from '../services/a2aStore.js';
-import { loadAgent } from '../services/deployedAgentStore.js';
 import { emit } from '../services/socket.js';
 import type { ApiResponse } from '../types.js';
 

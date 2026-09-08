@@ -1,6 +1,5 @@
 import { Router } from 'express';
 import * as a2aStore from '../services/a2aStore.js';
-import type { ApiResponse } from '../types.js';
 
 export const a2aProtocolRouter = Router();
 

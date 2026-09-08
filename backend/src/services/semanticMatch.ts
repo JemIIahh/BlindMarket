@@ -223,7 +223,6 @@ export async function semanticCascadeRanking(
     const agents = await Promise.all(
       ranked.map((c) => agentStore.getAgent(c.address).catch(() => undefined)),
     );
-    const requiredCaps = (meta.requiredCapabilities ?? []) as AgentCapability[];
     const posterLc = meta.posterAddress?.toLowerCase();
     const verifierLc = meta.verifierAddress?.toLowerCase();
     // A sealed brief is only acceptable to agents holding a wrapped slice, or

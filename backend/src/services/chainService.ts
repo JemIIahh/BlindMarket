@@ -6,8 +6,6 @@
  */
 import { config } from '../config.js';
 
-import { provider, signer, escrow } from './chain.js';
-import { baseProvider, baseEscrow } from './chain.js';
 
 /**
  * Log the active chain configuration at boot.

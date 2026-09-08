@@ -108,7 +108,6 @@ vi.mock('../services/redis.js', () => {
       setex: vi.fn(async (key: string, _ttl: number, value: string) => { redisStore.set(key, value); }),
       set: vi.fn(async (key: string, value: string, ...args: any[]) => {
         const nx = args.some((a: any) => a === 'NX');
-        const ex = args.find((a: any) => a === 'EX');
         if (nx && redisStore.has(key)) return null;
         redisStore.set(key, value);
         return 'OK';
