@@ -15,7 +15,6 @@
 import type { EventLog } from 'ethers';
 import { baseEscrow, baseProvider } from './chain.js';
 import { redis } from './redis.js';
-import { config } from '../config.js';
 
 // ── Redis keys ──────────────────────────────────────────────────────────────
 

@@ -27,7 +27,7 @@ vi.mock('./chain.js', () => ({
   buildUnsignedTx,
 }));
 
-const { buildSubmitEvidenceOn, buildSubmitEvidenceBase, buildSubmitEvidence } =
+const { buildSubmitEvidenceOn, buildSubmitEvidence } =
   await import('./escrow.js');
 
 const WORKER = '0x1111111111111111111111111111111111111111';

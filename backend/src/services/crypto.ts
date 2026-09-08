@@ -202,12 +202,32 @@ function eciesDecryptSecp256k1(blob: Buffer, recipientPrivKeyHex: string): Buffe
  * 5. AES-256-GCM encrypt
  * 6. Return [32 bytes ephemeral X25519 pubkey][encrypted blob]
  */
+/** DER prefixes for wrapping a raw 32-byte X25519 key as SPKI / PKCS#8.
+ *  OID 1.3.101.110 (2b656e) is X25519; 1.3.101.112 (2b6570) is Ed25519 — the
+ *  decrypt path used the Ed25519 OID against an X25519 key, which is why
+ *  createPrivateKey threw "not enough data" on every attempt. */
+const X25519_SPKI_PREFIX = Buffer.from('302a300506032b656e032100', 'hex');
+const X25519_PKCS8_PREFIX = Buffer.from('302e020100300506032b656e04220420', 'hex');
+
+const x25519PublicFromRaw = (raw: Buffer) =>
+  createPublicKey({ key: Buffer.concat([X25519_SPKI_PREFIX, raw]), format: 'der', type: 'spki' });
+
 function eciesEncryptX25519(data: Buffer, ed25519PubKey: Buffer): Buffer {
   const x25519PubKey = edwardsToMontgomeryPub(ed25519PubKey);
   const eph = generateKeyPairSync('x25519');
   const ephPubRaw = eph.publicKey.export({ type: 'spki', format: 'der' }).subarray(-32);
 
-  const sharedSecret = diffieHellman({ privateKey: eph.privateKey, publicKey: eph.publicKey });
+  // ECDH against the RECIPIENT's key. This previously read
+  // `publicKey: eph.publicKey` — a Diffie-Hellman of the ephemeral keypair
+  // with itself, so the recipient never entered the shared secret and the
+  // blob was not encrypted to them at all. The decrypt side made the mirror
+  // mistake, so the two never agreed and nothing sealed this way could be
+  // opened. Latent rather than live: every registered agent uses a 65-byte
+  // secp256k1 key, and only a 32-byte Ed25519 key reaches this branch.
+  const sharedSecret = diffieHellman({
+    privateKey: eph.privateKey,
+    publicKey: x25519PublicFromRaw(Buffer.from(x25519PubKey)),
+  });
   const derivedKey = Buffer.from(hkdfSync('sha256', sharedSecret, '', ECIES_X25519_HKDF_INFO, KEY_LENGTH));
 
   const encrypted = aesEncrypt(data, derivedKey);
@@ -237,17 +257,21 @@ function eciesDecryptX25519(blob: Buffer, ed25519PrivKeyHex: string): Buffer {
   const ed25519PrivBytes = Buffer.from(ed25519PrivKeyHex, 'hex');
   const x25519PrivKey = edwardsToMontgomeryPriv(ed25519PrivBytes);
 
-  // Build X25519 private key object
+  // Build X25519 private key object. The OID here was 2b6570 (Ed25519) with a
+  // length header one byte short — an X25519 key described as an Ed25519 one.
   const privKeyObj = createPrivateKey({
-    key: Buffer.concat([Buffer.from('302e020100300506032b6570042204', 'hex'), x25519PrivKey]),
+    key: Buffer.concat([X25519_PKCS8_PREFIX, Buffer.from(x25519PrivKey)]),
     format: 'der',
     type: 'pkcs8',
   });
 
-  // Derive X25519 public key from private key
-  const pubKeyObj = createPublicKey(privKeyObj);
-
-  const sharedSecret = diffieHellman({ privateKey: privKeyObj, publicKey: pubKeyObj });
+  // ECDH against the EPHEMERAL key carried in the blob — previously this
+  // derived the recipient's own public key and did DH with itself, so the
+  // sender's ephemeral key never entered the secret.
+  const sharedSecret = diffieHellman({
+    privateKey: privKeyObj,
+    publicKey: x25519PublicFromRaw(Buffer.from(ephemeralPub)),
+  });
   const derivedKey = Buffer.from(hkdfSync('sha256', sharedSecret, '', ECIES_X25519_HKDF_INFO, KEY_LENGTH));
 
   return aesDecrypt(encrypted, derivedKey);

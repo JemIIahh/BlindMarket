@@ -156,7 +156,7 @@ toolsRouter.post('/test', requireAuth, async (req: AuthRequest, res, next) => {
 
 toolsRouter.post('/execute', requireAuth, async (req: AuthRequest, res, next) => {
   try {
-    const { tool, args, taskId, secrets: reqSecrets } = z.object({
+    const { tool, args, secrets: reqSecrets } = z.object({
       tool: z.custom<ToolDefinition>(),
       args: z.record(z.unknown()),
       taskId: z.string().optional(),
