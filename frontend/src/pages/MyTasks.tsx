@@ -19,8 +19,7 @@ import {
 import { useSocket } from '../hooks/useSocket';
 import { authedGet } from '../lib/api';
 import { getAesKey } from '../lib/keyStash';
-import { getNativeCurrency } from '../config/constants';
-import { useChain } from '../context/ChainContext';
+import { getPaymentDecimals, getPaymentSymbol } from '../config/constants';
 import { useChainAddress } from '../hooks/useChainWallet';
 
 // ── Shapes returned by GET /api/v1/a2a/tasks/posted ──────────────────────
@@ -136,8 +135,6 @@ const PAGE_SIZE = 15;
 
 export default function MyTasks() {
   const address = useChainAddress();
-  const { activeChain } = useChain();
-  const native = getNativeCurrency(activeChain);
   const qc = useQueryClient();
   const [filter, setFilter] = useState<'all' | 'open' | 'active' | 'completed'>('all');
   const [sort, setSort] = useState<'newest' | 'oldest' | 'highest-reward' | 'lowest-reward'>('newest');
@@ -221,7 +218,7 @@ export default function MyTasks() {
     (s, t) => s + rewardToWei(t.onChain?.reward),
     0n,
   );
-  const totalSpent = Number(formatUnits(totalSpentWei, native.decimals));
+  const totalSpent = Number(formatUnits(totalSpentWei, getPaymentDecimals()));
 
   const FILTERS: { id: 'all' | 'open' | 'active' | 'completed'; label: string }[] = [
     { id: 'all', label: 'All' },
@@ -253,7 +250,7 @@ export default function MyTasks() {
         <StatCard label="Open" value={String(openCount)} sub="Awaiting worker" />
         <div className="border-l border-line"><StatCard label="Active" value={String(activeCount)} sub="In progress" subColor="warn" /></div>
         <div className="border-t border-l-0 sm:border-t-0 sm:border-l border-line"><StatCard label="Completed" value={String(completedCount)} sub="All time" subColor="ok" /></div>
-        <div className="border-t border-l border-line sm:border-t-0"><StatCard label="Total spent" value={`${totalSpent.toLocaleString(undefined, { maximumFractionDigits: 4 })} ${native.symbol}`} sub="Paid out on completed tasks" /></div>
+        <div className="border-t border-l border-line sm:border-t-0"><StatCard label="Total spent" value={`${totalSpent.toLocaleString(undefined, { maximumFractionDigits: 4 })} ${getPaymentSymbol()}`} sub="Paid out on completed tasks" /></div>
       </div>
 
       <div className="border border-line">
@@ -387,7 +384,7 @@ export default function MyTasks() {
                   <div className="pt-3 border-t border-line flex items-end justify-between">
                     <div>
                       <div className="text-lg font-mono font-semibold text-cream leading-none">
-                        {formatReward(t.onChain?.reward, native.decimals, native.symbol)}
+                        {formatReward(t.onChain?.reward, getPaymentDecimals(), getPaymentSymbol())}
                       </div>
                       <div className="text-[11px] text-ink-3 mt-1.5">
                         {worker ? (
