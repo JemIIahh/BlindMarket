@@ -312,7 +312,29 @@ agentsRouter.post('/deploy', requireAuth, async (req: AuthRequest, res, next) =>
     // Popularity counters — best-effort, never blocks the deploy.
     for (const s of skills) void skillStore.incrementInstallCount(s.skillId).catch(() => {});
 
-    res.status(201).json({ success: true, data: strip(agent) });
+    // Start it. deployAgent() persists status 'stopped' and nothing else moved
+    // it to 'running': the UI shows "deployment initiated" and returns to the
+    // dashboard, reconcileAgents() on boot only re-forks agents already marked
+    // 'running', and every other path into that status (crash-loop cap, the
+    // zombie reaper, a non-zero exit) is one-way. So every agent ever deployed
+    // was born switched off, after its owner had paid the deploy fee — which
+    // is why production currently shows 0 of 20 agents running and why open
+    // tasks expired with nobody to take them.
+    //
+    // Best-effort, exactly like the INFT mint above: the fee is already spent,
+    // so a start failure must not fail the deploy. MAX_CONCURRENT_AGENTS is the
+    // expected refusal here; the agent stays 'stopped' and Start still works.
+    let started = false;
+    try {
+      await startAgent(agent.id);
+      started = true;
+    } catch (startErr) {
+      console.warn(
+        `[agents] deploy: agent ${agent.id} created but did not start — ${(startErr as Error).message}`,
+      );
+    }
+
+    res.status(201).json({ success: true, data: { ...strip(agent), started } });
   } catch (err) {
     // deployAgent can now throw (e.g. a bad ownerPublicKey that fails ECIES wrap);
     // surface it as a clean error instead of an unhandled promise rejection.
