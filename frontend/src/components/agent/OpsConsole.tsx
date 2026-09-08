@@ -247,9 +247,11 @@ export function OpsConsole({
 
   // authedPatch so the Privy JWT flows to the backend, where requireAuth +
   // authorizeOwner verify the caller (no more plaintext ownerAddress claim).
+  // After saving, auto-restart the agent so instruction/provider/model changes
+  // take effect immediately (the running worker holds spawn-time config).
   const save = useMutation({
-    mutationFn: () =>
-      authedPatch<AgentDetails>(`/api/v1/agents/${agentId}`, {
+    mutationFn: async () => {
+      const data = await authedPatch<AgentDetails>(`/api/v1/agents/${agentId}`, {
         instructions: editInstructions,
         provider: editProvider,
         model: editModel,
@@ -257,7 +259,14 @@ export function OpsConsole({
         minReward: editMinReward
           ? (BigInt(Math.round(Number(editMinReward) * 1e18))).toString()
           : undefined,
-      }),
+      });
+      // Auto-restart if agent is running so changes take effect.
+      if (agent.status === 'running' || agent.status === 'active') {
+        await authedPost(`/api/v1/agents/${agentId}/stop`, {});
+        await authedPost(`/api/v1/agents/${agentId}/start`, {});
+      }
+      return data;
+    },
     onSuccess: (data) => { onAgentUpdated(data); setTab('logs'); },
   });
 
@@ -529,7 +538,7 @@ export function OpsConsole({
                 variant="primary"
                 onClick={() => save.mutate()}
                 disabled={save.isPending || (editProvider !== agent.provider && !editApiKey)}
-                label={save.isPending ? 'Saving…' : 'Save changes'}
+                label={save.isPending ? 'Saving & restarting…' : 'Save & restart'}
               />
               {editProvider !== agent.provider && !editApiKey && (
                 <span className="text-xs text-ink-3">Enter a new API key to save provider change</span>
