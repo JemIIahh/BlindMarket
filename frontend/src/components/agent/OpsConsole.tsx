@@ -14,11 +14,9 @@ import {
 } from '../bb';
 import { authedGet, authedPatch, authedPost, getAuthHeaders } from '../../lib/api';
 import { API_BASE_URL, getPaymentSymbol } from '../../config/constants';
-import { AGENT_CAPABILITIES } from '../../config/capabilities';
 import { ToolManager, type AnyTool } from '../bb/ToolManager';
 import AgentMetricsPanel from '../AgentMetricsPanel';
 import { AgentTasks } from './AgentTasks';
-import { ChoiceChip } from './ChoiceChip';
 import { SkillsManager } from './SkillsManager';
 import { WebhooksPanel } from './WebhooksPanel';
 import type { AgentDetails, InstalledSkillMeta } from './types';
@@ -87,7 +85,8 @@ export function OpsConsole({
   const [editApiKey, setEditApiKey] = useState('');
   const [apiKeyVisible, setApiKeyVisible] = useState(false);
   const [providers, setProviders] = useState<Record<string, string[]>>({});
-  const [editCapabilities, setEditCapabilities] = useState<string[]>(agent.capabilities ?? []);
+  // Capabilities deprecated — semantic KNN is the primary routing signal.
+  // Removed from save payload; capabilities still stored as metadata for embeddings.
   const [editMinReward, setEditMinReward] = useState(
     // Decimal-preserving: integer BigInt division floored a fractional
     // minReward (0.5 0G -> '0'), which Save then persisted as 0, silently
@@ -255,7 +254,6 @@ export function OpsConsole({
         provider: editProvider,
         model: editModel,
         ...(editApiKey ? { apiKey: editApiKey } : {}),
-        capabilities: editCapabilities,
         minReward: editMinReward
           ? (BigInt(Math.round(Number(editMinReward) * 1e18))).toString()
           : undefined,
@@ -522,29 +520,6 @@ export function OpsConsole({
               )}
             </FormField>
 
-            <FormField
-              label="Capabilities"
-              required
-              hint="What tasks this agent can accept. Changes take effect on the next agent restart (stop then start)."
-            >
-              <div className="flex flex-wrap gap-2">
-                {AGENT_CAPABILITIES.map(cap => (
-                  <ChoiceChip
-                    key={cap}
-                    selected={editCapabilities.includes(cap)}
-                    onClick={() => setEditCapabilities(cs => cs.includes(cap) ? cs.filter(c => c !== cap) : [...cs, cap])}
-                  >
-                    {cap.replace(/_/g, ' ')}
-                  </ChoiceChip>
-                ))}
-              </div>
-              {editCapabilities.length === 0 && (
-                <div className="mt-2 text-xs text-err">
-                  Pick at least one — without capabilities the agent can't accept any task.
-                </div>
-              )}
-            </FormField>
-
             <FormField label="Min reward" hint={`${getPaymentSymbol()} per task — tasks below this threshold won't be offered to this agent (requires restart)`}>
               <FormInput className="font-mono" placeholder="0" value={editMinReward} onChange={e => setEditMinReward(e.target.value)} />
             </FormField>
@@ -553,7 +528,7 @@ export function OpsConsole({
               <Button
                 variant="primary"
                 onClick={() => save.mutate()}
-                disabled={save.isPending || editCapabilities.length === 0 || (editProvider !== agent.provider && !editApiKey)}
+                disabled={save.isPending || (editProvider !== agent.provider && !editApiKey)}
                 label={save.isPending ? 'Saving…' : 'Save changes'}
               />
               {editProvider !== agent.provider && !editApiKey && (
