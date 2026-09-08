@@ -15,6 +15,7 @@ import { Router } from 'express';
 import { PrivyClient, generateAuthorizationSignatures } from '@privy-io/node';
 import { z } from 'zod';
 import { requireAuth } from '../middleware/auth.js';
+import type { AuthRequest, AuthUser } from '../types.js';
 import { config } from '../config.js';
 import { AppError } from '../middleware/errorHandler.js';
 
@@ -55,9 +56,48 @@ const relaySchema = z.object({
   asset: z.string().default('usdc'),
 });
 
-txRouter.post('/relay-tx', requireAuth, async (req, res, next) => {
+/**
+ * The Privy wallets this principal is entitled to move funds from.
+ *
+ * `ownerAddress` is deliberately EXCLUDED. It is set on agent platform tokens
+ * and names the human who owns the agent — and agent private keys live in
+ * plaintext in Postgres, so honouring it would turn any agent-key compromise
+ * into a compromise of that owner's personal wallet. An agent has its own
+ * wallet and does not relay from its owner's.
+ */
+function callerWallets(user: AuthUser | undefined): Set<string> {
+  if (!user) return new Set();
+  return new Set(
+    [user.address, ...(user.addresses ?? [])]
+      .filter((a): a is string => typeof a === 'string' && /^0x[0-9a-fA-F]{40}$/.test(a))
+      .map((a) => a.toLowerCase()),
+  );
+}
+
+txRouter.post('/relay-tx', requireAuth, async (req: AuthRequest, res, next) => {
   try {
     const body = relaySchema.parse(req.body);
+
+    // The wallet must belong to the caller.
+    //
+    // This endpoint hands the platform's PRIVY_AUTHORIZATION_KEY an arbitrary
+    // `to` + `data` and signs it from the wallet named in the BODY, with gas
+    // sponsored. requireAuth proves the caller is *someone*; until this check
+    // nothing proved the wallet was theirs, so any authenticated principal
+    // could have the platform sign `transfer(attacker, balance)` out of a
+    // victim's embedded wallet and pay the gas for it. Reproduced before
+    // fixing: that request returned 200.
+    //
+    // The check runs FIRST, before the Privy lookup, so an unauthorised caller
+    // cannot even probe which addresses are embedded wallets.
+    if (!callerWallets(req.user).has(body.walletAddress.toLowerCase())) {
+      throw new AppError(
+        403,
+        'NOT_WALLET_OWNER',
+        'This wallet is not linked to your account. You can only relay transactions from your own embedded wallet.',
+      );
+    }
+
     const caip2 = CHAIN_CAIP2[body.chain];
     if (!caip2) {
       throw new AppError(400, 'INVALID_CHAIN', `Unsupported chain "${body.chain}". Supported: ${Object.keys(CHAIN_CAIP2).join(', ')}`);
@@ -149,6 +189,17 @@ txRouter.post('/relay-tx', requireAuth, async (req, res, next) => {
   } catch (err: any) {
     if (err instanceof z.ZodError) {
       return next(new AppError(400, 'VALIDATION_ERROR', err.errors.map(e => e.message).join(', ')));
+    }
+
+    // Deliberate AppErrors raised by this handler are already the answer we
+    // want the caller to get — pass them straight through. Without this they
+    // fall into the Privy-error branch below and are relabelled 502
+    // UPSTREAM_ERROR: the 403 ownership refusal reported as a Privy outage,
+    // and the pre-existing WALLET_NOT_FOUND (400) and MISCONFIGURED (500)
+    // likewise. Same shape as the auth-middleware bug where a 401 thrown
+    // inside a .then() was rewrapped as a 500.
+    if (err instanceof AppError) {
+      return next(err);
     }
 
     const status = err?.status || err?.httpStatus;
