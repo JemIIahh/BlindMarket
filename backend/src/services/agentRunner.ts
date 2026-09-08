@@ -527,7 +527,7 @@ export async function listAgents(ownerAddress?: string): Promise<DeployedAgent[]
     : all;
 }
 
-export async function updateAgent(id: string, patch: Partial<Pick<DeployedAgent, 'instructions' | 'model' | 'tools' | 'capabilities' | 'minReward' | 'skills'>>): Promise<DeployedAgent | undefined> {
+export async function updateAgent(id: string, patch: Partial<Pick<DeployedAgent, 'instructions' | 'provider' | 'model' | 'tools' | 'capabilities' | 'minReward' | 'skills'>>): Promise<DeployedAgent | undefined> {
   const agent = await loadAgent(id);
   if (!agent) return undefined;
   // Strip undefined values before merging. Callers can send a subset of the

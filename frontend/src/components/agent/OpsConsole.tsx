@@ -7,6 +7,7 @@ import {
   Icon,
   FormField,
   FormInput,
+  FormSelect,
   FormTextarea,
   LoadingState,
   useTabParam,
@@ -81,7 +82,9 @@ export function OpsConsole({
   // Edit form — seeded from the loaded agent; the page remounts this
   // component when the agent changes, so no re-sync effect is needed.
   const [editInstructions, setEditInstructions] = useState(agent.instructions ?? '');
+  const [editProvider, setEditProvider] = useState(agent.provider ?? '');
   const [editModel, setEditModel] = useState(agent.model ?? '');
+  const [providers, setProviders] = useState<Record<string, string[]>>({});
   const [editCapabilities, setEditCapabilities] = useState<string[]>(agent.capabilities ?? []);
   const [editMinReward, setEditMinReward] = useState(
     // Decimal-preserving: integer BigInt division floored a fractional
@@ -92,6 +95,13 @@ export function OpsConsole({
   const [editTools, setEditTools] = useState<AnyTool[]>((agent.tools ?? []) as AnyTool[]);
   const [toolsSaved, setToolsSaved] = useState(false);
   const [installedSkills, setInstalledSkills] = useState<InstalledSkillMeta[]>(agent.skills ?? []);
+
+  // Fetch available providers + models for the edit form
+  useEffect(() => {
+    authedGet<{ models?: Record<string, string[]> }>('/api/v1/agents/providers')
+      .then(r => { if (r.models) setProviders(r.models); })
+      .catch(() => {});
+  }, []);
 
   // Log stream — a fetch-based SSE reader. The old browser SSE client could
   // not send an Authorization header, and the route is now owner-gated
@@ -240,6 +250,7 @@ export function OpsConsole({
     mutationFn: () =>
       authedPatch<AgentDetails>(`/api/v1/agents/${agentId}`, {
         instructions: editInstructions,
+        provider: editProvider,
         model: editModel,
         capabilities: editCapabilities,
         minReward: editMinReward
@@ -448,9 +459,30 @@ export function OpsConsole({
               <FormTextarea rows={6} value={editInstructions} onChange={e => setEditInstructions(e.target.value)} />
             </FormField>
 
-            <FormField label="Model">
-              <FormInput className="font-mono" value={editModel} onChange={e => setEditModel(e.target.value)} />
-            </FormField>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <FormField label="Provider">
+                <FormSelect value={editProvider} onChange={e => {
+                  const p = e.target.value;
+                  setEditProvider(p);
+                  // Reset model to first available for this provider
+                  const models = providers[p];
+                  if (models?.length) setEditModel(models[0]);
+                }}>
+                  {Object.keys(providers).length === 0 && <option value={editProvider}>{editProvider || 'Loading…'}</option>}
+                  {Object.keys(providers).map(p => <option key={p} value={p}>{p}</option>)}
+                </FormSelect>
+              </FormField>
+
+              <FormField label="Model">
+                <FormSelect value={editModel} onChange={e => setEditModel(e.target.value)}>
+                  {(providers[editProvider] ?? []).map(m => <option key={m} value={m}>{m}</option>)}
+                  {/* If current model isn't in the list (e.g. custom), show it */}
+                  {editModel && !(providers[editProvider] ?? []).includes(editModel) && (
+                    <option value={editModel}>{editModel}</option>
+                  )}
+                </FormSelect>
+              </FormField>
+            </div>
 
             <FormField
               label="Capabilities"
