@@ -6,6 +6,7 @@ import { forensicStore } from '../services/forensicStore.js';
 import { validateForensicReport } from '../services/forensicValidation.js';
 import * as custodyVault from '../services/custodyVault.js';
 import * as a2aStore from '../services/a2aStore.js';
+import { assertTaskExecutor } from '../services/taskParticipant.js';
 
 const router = Router();
 
@@ -52,13 +53,70 @@ const submitSchema = z.object({
   }),
 });
 
+const deny = (res: any, status: number, code: string, message: string) =>
+  res.status(status).json({ success: false, error: { code, message } });
+
 // POST /api/v1/forensics/submit
+//
+// SEC-08. This was requireAuth only, and nothing tied the report to the caller
+// or to the task it was filed under. Proven before fixing: an unrelated
+// authenticated wallet self-signs a report naming its OWN address — so
+// ethers.verifyMessage matches and no provenance flag fires — files it under a
+// victim's taskHash, and saveReport (last-write-wins) makes it THE forensic
+// record for that task. It then reaches the victim's verification prompt via
+// verification.ts, inside the block labelled "verified by platform".
+//
+// Note the asymmetry this closes: GET /:taskId below has always required the
+// caller to be a task participant, because the report carries GPS and device
+// fingerprints. So a stranger could not READ a report but could WRITE one.
+//
+// Four bindings, each closing one leg:
 router.post('/submit', requireAuth, async (req: AuthRequest, res, next) => {
   try {
     const parsed = submitSchema.parse(req.body);
     const { taskId, signedReport } = parsed;
+    const { report } = signedReport;
+
+    // 1. The report must be about the task it is filed under. The body taskId
+    //    keys the store while report.taskId was never compared to it, so a
+    //    report could describe one task and become the record for another.
+    if (report.taskId !== taskId) {
+      return deny(res, 400, 'TASK_ID_MISMATCH',
+        'signedReport.report.taskId does not match the taskId this report is being filed under');
+    }
+
+    // 2. Only the task's assigned executor may file its evidence. Uses the
+    //    shared predicate rather than req.user.address alone, so an agent
+    //    owner acting for their agent (ownerAddress/addresses[]) still passes.
+    if (!(await assertTaskExecutor(taskId, req.user))) {
+      return deny(res, 403, 'NOT_TASK_EXECUTOR',
+        'Only the task\'s assigned executor can submit its forensic report');
+    }
+
+    // 3. The report must name that executor. Without this the executor could
+    //    still file a report attributing the work — and its GPS and device
+    //    fingerprint — to somebody else.
+    const state = await a2aStore.getState(taskId);
+    const executor = state?.executorAddress?.toLowerCase();
+    if (!executor || report.workerAddress.toLowerCase() !== executor) {
+      return deny(res, 400, 'WORKER_ADDRESS_MISMATCH',
+        'signedReport.report.workerAddress must be the task\'s assigned executor');
+    }
 
     const validation = await validateForensicReport(signedReport);
+
+    // 4. Reject an unprovable signature instead of recording it as a flag and
+    //    saving anyway. validateForensicReport pushes signature_mismatch /
+    //    signature_invalid and returns normally, and the old code saved
+    //    regardless — so a report with no valid signature became the record.
+    if (validation.flags.some((f) => f === 'signature_mismatch' || f === 'signature_invalid')) {
+      return deny(res, 400, 'INVALID_SIGNATURE',
+        'Forensic report signature does not verify against report.workerAddress');
+    }
+
+    // saveReport is still last-write-wins, which is now fine: the only caller
+    // that reaches it is the task's own executor, so a re-submission overwrites
+    // that executor's own earlier report — which is what a retry should do.
     forensicStore.saveReport(taskId, signedReport, validation);
 
     // Ingest into custody vault for chain-of-custody tracking
