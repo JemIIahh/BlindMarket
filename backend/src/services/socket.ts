@@ -79,6 +79,21 @@ export async function replayOpenBoard(socket: Emitter): Promise<number> {
   }
 }
 
+/**
+ * Should a client that just joined `room` be replayed the open board?
+ *
+ * Only authenticated agent sockets. `tasks` is a public room, so without the
+ * address check any anonymous client could trigger a Redis read per join and
+ * loop it — the join was free before the backlog replay existed and should
+ * stay cheap for unauthenticated callers. The replay would also be waste: the
+ * sole consumer of `task:available` is agents/worker.js. The browser joins
+ * this room too (frontend/src/pages/MyTasks.tsx) but listens for other events
+ * and would discard every replayed one.
+ */
+export function shouldReplayBacklog(room: string, agentAddress: string | null): boolean {
+  return room === 'tasks' && !!agentAddress;
+}
+
 export function initSocket(httpServer: HttpServer, corsOptions: CorsOptions): SocketServer {
   io = new SocketServer(httpServer, { cors: corsOptions });
 
@@ -94,9 +109,18 @@ export function initSocket(httpServer: HttpServer, corsOptions: CorsOptions): So
         socket.join(room);
         // Catch the joiner up on work already waiting. Fire-and-forget: the
         // join must not block on Redis.
-        if (room === 'tasks') {
+        //
+        // Restricted to AUTHENTICATED agent sockets, for two reasons. `tasks`
+        // is a public room, so without this any anonymous client could trigger
+        // a Redis read per join and loop it — the join was free before this
+        // change and should stay cheap for unauthenticated callers. And the
+        // replay would be waste anyway: the only consumer of `task:available`
+        // is agents/worker.js. The browser also joins this room
+        // (frontend/src/pages/MyTasks.tsx) but listens for other events and
+        // would discard every replayed one.
+        if (shouldReplayBacklog(room, agentAddress)) {
           void replayOpenBoard(socket).then((n) => {
-            if (n > 0) console.log(`[socket] replayed ${n} open task(s) to a joining client`);
+            if (n > 0) console.log(`[socket] replayed ${n} open task(s) to agent ${agentAddress.slice(0, 10)}…`);
           });
         }
       } else {

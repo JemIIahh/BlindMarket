@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 vi.mock('./a2aStore.js', () => ({ browseAgentTasks: vi.fn() }));
 vi.mock('../middleware/auth.js', () => ({ verifyRegistrationToken: vi.fn(() => null) }));
 
-import { replayOpenBoard, BACKLOG_REPLAY_LIMIT } from './socket.js';
+import { replayOpenBoard, BACKLOG_REPLAY_LIMIT, shouldReplayBacklog } from './socket.js';
 import * as a2aStore from './a2aStore.js';
 
 /**
@@ -75,5 +75,23 @@ describe('replayOpenBoard — a joining agent is told what is already open', () 
       emit: vi.fn(() => { throw new Error('socket closed'); }),
     };
     await expect(replayOpenBoard(s)).resolves.toBe(0);
+  });
+});
+
+describe('shouldReplayBacklog — only authenticated agents get the backlog', () => {
+  const AGENT = '0xagent';
+
+  it('replays to an authenticated agent joining the tasks room', () => {
+    expect(shouldReplayBacklog('tasks', AGENT)).toBe(true);
+  });
+
+  it('does NOT replay to an anonymous client — tasks is a public room, and a\n     free join must not become a Redis read anyone can loop', () => {
+    expect(shouldReplayBacklog('tasks', null)).toBe(false);
+  });
+
+  it('does not replay for other rooms', () => {
+    expect(shouldReplayBacklog('platform', AGENT)).toBe(false);
+    expect(shouldReplayBacklog('disputes', AGENT)).toBe(false);
+    expect(shouldReplayBacklog(`agent:${AGENT}`, AGENT)).toBe(false);
   });
 });
