@@ -1,13 +1,16 @@
-import { StatCard } from '../bb';
+import { Icon } from '../bb/Icon';
+import { Button } from '../bb/Button';
 import { truncateAddress } from '../../lib/utils';
 import { OG_CHAIN_CONFIG, getPaymentSymbol } from '../../config/constants';
 import type { AgentReviewStats } from '../../services/marketplace';
 
 /**
- * Buy-signal strip. One hairline grid (gap-px over bg-line) instead of the
- * hand-rolled per-cell dividers, so the cells never double up borders.
- * The 4th cell is audience-aware: owners get the wallet balance they operate
- * on, buyers get the on-chain identity they'd verify.
+ * Buy-signal strip — 4-column grid of stat cards.
+ *
+ * Cards 1-2 (Score, Tasks) are neutral surface cards.
+ * Card 3 (Earned) is tinted success/green.
+ * Card 4 (Wallet / On-chain) is tinted warning/amber when gas is low,
+ * and includes a "Fund" outline button for the owner.
  */
 export function AgentStats({
   isOwner,
@@ -23,6 +26,7 @@ export function AgentStats({
   servicesSold,
   walletAddress,
   className = '',
+  onFund,
 }: {
   isOwner: boolean;
   reviewStats: AgentReviewStats | null;
@@ -37,55 +41,122 @@ export function AgentStats({
   servicesSold: number | null;
   walletAddress?: string;
   className?: string;
+  onFund?: () => void;
 }) {
   const hasReviews = !!reviewStats && reviewStats.totalReviews > 0;
   const earnedValue = `${parseFloat(totalEarned || '0').toLocaleString(undefined, { maximumFractionDigits: 4 })} ${getPaymentSymbol()}`;
 
   return (
-    <div className={`grid grid-cols-1 sm:grid-cols-4 gap-px bg-line border border-line ${className}`}>
-      <StatCard
-        className="border-0"
-        label="Score"
-        value={hasReviews ? `★ ${reviewStats!.avgRating.toFixed(2)}` : '—'}
-        sub={hasReviews ? `${positivePct}% positive · ${reviewStats!.totalReviews} reviews` : 'No reviews yet'}
-        subColor={positivePct != null && positivePct >= 80 ? 'ok' : 'default'}
-      />
-      <StatCard
-        className="border-0"
-        label="Tasks completed"
-        value={String(tasksCompleted)}
-        sub={`Reputation ${reputationScore}${disputes ? ` · ${disputes} disputes` : ''}`}
-        subColor={disputes > 0 ? 'warn' : 'default'}
-      />
+    <div className={`grid grid-cols-2 sm:grid-cols-4 gap-3 ${className}`}>
+      {/* ── Score ─────────────────────────────────────────────── */}
+      <div className="card-dark p-5 min-w-0 overflow-hidden flex flex-col">
+        <div className="flex items-center gap-1.5 text-ink-3 mb-2">
+          <Icon name="bolt" size={12} className="text-ink-3" />
+          <span className="text-[10px] font-mono font-semibold uppercase tracking-widest truncate">
+            Score
+          </span>
+        </div>
+        <div className="text-[28px] sm:text-[32px] font-mono font-bold text-ink leading-none tracking-tightest truncate">
+          {hasReviews ? reviewStats!.avgRating.toFixed(2) : '—'}
+        </div>
+        <div className="mt-1.5 text-[11px] font-mono text-ink-3 truncate">
+          {hasReviews
+            ? `${positivePct}% positive · ${reviewStats!.totalReviews} reviews`
+            : 'No reviews yet'}
+        </div>
+      </div>
+
+      {/* ── Tasks Completed ───────────────────────────────────── */}
+      <div className="card-dark p-5 min-w-0 overflow-hidden flex flex-col">
+        <div className="flex items-center gap-1.5 text-ink-3 mb-2">
+          <Icon name="check" size={12} className="text-ink-3" />
+          <span className="text-[10px] font-mono font-semibold uppercase tracking-widest truncate">
+            Tasks
+          </span>
+        </div>
+        <div className="text-[28px] sm:text-[32px] font-mono font-bold text-ink leading-none tracking-tightest truncate">
+          {String(tasksCompleted)}
+        </div>
+        <div className="mt-1.5 text-[11px] font-mono text-ink-3 truncate">
+          Reputation {reputationScore}
+          {disputes > 0 ? ` · ${disputes} disputes` : ''}
+        </div>
+      </div>
+
+      {/* ── Earned ────────────────────────────────────────────── */}
       {isOwner || servicesSold == null ? (
-        <StatCard
-          className="border-0"
-          label="Earned"
-          value={earnedValue}
-          sub={getPaymentSymbol()}
-          subColor="ok"
-        />
+        <div className="p-5 min-w-0 overflow-hidden flex flex-col" style={{ background: 'rgba(16, 185, 129, 0.1)' }}>
+          <div className="flex items-center gap-1.5 text-ok mb-2">
+            <Icon name="chart" size={12} className="text-ok" />
+            <span className="text-[10px] font-mono font-semibold uppercase tracking-widest truncate">
+              Earned
+            </span>
+          </div>
+          <div className="text-[28px] sm:text-[32px] font-mono font-bold text-ok leading-none tracking-tightest truncate">
+            {earnedValue}
+          </div>
+          <div className="mt-1.5 text-[11px] font-mono text-ok truncate">
+            lifetime
+          </div>
+        </div>
       ) : (
-        <StatCard
-          className="border-0"
-          label="Services sold"
-          value={String(servicesSold)}
-          sub={`${earnedValue} earned`}
-          subColor="ok"
-        />
+        <div className="p-5 min-w-0 overflow-hidden flex flex-col" style={{ background: 'rgba(16, 185, 129, 0.1)' }}>
+          <div className="flex items-center gap-1.5 text-ok mb-2">
+            <Icon name="briefcase" size={12} className="text-ok" />
+            <span className="text-[10px] font-mono font-semibold uppercase tracking-widest truncate">
+              Services sold
+            </span>
+          </div>
+          <div className="text-[28px] sm:text-[32px] font-mono font-bold text-ok leading-none tracking-tightest truncate">
+            {String(servicesSold)}
+          </div>
+          <div className="mt-1.5 text-[11px] font-mono text-ok truncate">
+            {earnedValue} earned
+          </div>
+        </div>
       )}
+
+      {/* ── Wallet Balance / On-chain ─────────────────────────── */}
       {isOwner ? (
-        <StatCard
-          className="border-0"
-          label="Wallet balance"
-          value={balanceEther > 0 ? balanceEther.toFixed(4) : '—'}
-          sub={isLowGas ? 'Low gas — top up' : symbol}
-          subColor={isLowGas ? 'warn' : 'default'}
-        />
+        <div
+          className="p-5 min-w-0 overflow-hidden flex flex-col"
+          style={{
+            background: isLowGas
+              ? 'rgba(245, 158, 11, 0.1)'
+              : 'var(--bb-surface)',
+          }}
+        >
+          <div className={`flex items-center gap-1.5 mb-2 ${isLowGas ? 'text-warn' : 'text-ink-3'}`}>
+            <Icon name="wallet" size={12} className={isLowGas ? 'text-warn' : 'text-ink-3'} />
+            <span className="text-[10px] font-mono font-semibold uppercase tracking-widest truncate">
+              Wallet
+            </span>
+          </div>
+          <div className="text-[28px] sm:text-[32px] font-mono font-bold text-ink leading-none tracking-tightest truncate">
+            {balanceEther > 0 ? balanceEther.toFixed(4) : '—'}
+          </div>
+          <div className="mt-1.5 text-[11px] font-mono text-ink-3 truncate">
+            {symbol}
+          </div>
+          {isLowGas && (
+            <div className="mt-2">
+              <Button
+                variant="outline"
+                size="sm"
+                label="Fund"
+                className="!border-warn !text-warn hover:!bg-warn/10"
+                onClick={onFund}
+              />
+            </div>
+          )}
+        </div>
       ) : (
-        <div className="bg-surface p-5 min-w-0 overflow-hidden flex flex-col justify-center">
-          <div className="text-[10px] font-mono font-semibold uppercase tracking-widest text-ink-3 mb-2 truncate">
-            On-chain
+        <div className="card-dark p-5 min-w-0 overflow-hidden flex flex-col justify-center">
+          <div className="flex items-center gap-1.5 text-ink-3 mb-2">
+            <Icon name="wallet" size={12} className="text-ink-3" />
+            <span className="text-[10px] font-mono font-semibold uppercase tracking-widest truncate">
+              On-chain
+            </span>
           </div>
           {walletAddress ? (
             <>

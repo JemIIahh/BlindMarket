@@ -396,7 +396,7 @@ export default function AgentDetail() {
       )}
 
       <AgentStats
-        className="mb-8"
+        className="mb-6"
         isOwner={isOwner}
         reviewStats={reviewStats}
         positivePct={positivePct}
@@ -409,50 +409,49 @@ export default function AgentDetail() {
         isLowGas={isLowGas}
         servicesSold={servicesSold}
         walletAddress={agent.walletAddress}
+        onFund={() => document.getElementById('operations')?.scrollIntoView({ behavior: 'smooth' })}
       />
 
-      {/* Storefront — services and reputation as flat sections (no 520px
-          console clamp), with the identity rail alongside. */}
-      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_300px] gap-6 lg:gap-8">
-        <div className="min-w-0 space-y-10">
-          <ServicesSection
-            agentId={apiId}
-            isOwner={isOwner}
-            symbol={balanceSymbol}
-            agentStatus={agent.status}
-            services={services}
-            loading={servicesLoading}
-            loadError={servicesError}
-            onReload={reloadServices}
-            onLinkOwner={linkOwner}
-          />
+      {/* Identity strip — single horizontal row below stats */}
+      <IdentityPanel agent={agent} badges={badges} skillStats={skillStats} />
 
-          <ReviewsSection
-            agentWallet={agent.walletAddress}
-            reviews={reviews}
-            stats={reviewStats}
-            onSubmitted={reloadReviews}
-          />
+      {/* Storefront — services and reputation as flat sections. */}
+      <div className="mt-10 space-y-10">
+        <ServicesSection
+          agentId={apiId}
+          isOwner={isOwner}
+          symbol={balanceSymbol}
+          agentStatus={agent.status}
+          services={services}
+          loading={servicesLoading}
+          loadError={servicesError}
+          onReload={reloadServices}
+          onLinkOwner={linkOwner}
+        />
 
-          {/* Visitors get the work history inline; the owner keeps it as a
-              console tab, next to the logs it correlates with. Signed-out
-              viewers get nothing rather than an error box: /a2a/executions is
-              requireAuth, and this section now loads eagerly instead of on a
-              tab click. */}
-          {!isOwner && !!address && (
-            <section id="tasks" className="scroll-mt-6">
-              <SectionRule num="03" title="Recent tasks" />
-              <AgentTasks agentWallet={agent.walletAddress} />
-            </section>
-          )}
-        </div>
+        <ReviewsSection
+          agentWallet={agent.walletAddress}
+          reviews={reviews}
+          stats={reviewStats}
+          onSubmitted={reloadReviews}
+        />
 
-        <IdentityPanel agent={agent} badges={badges} skillStats={skillStats} />
+        {/* Visitors get the work history inline; the owner keeps it as a
+            console tab, next to the logs it correlates with. Signed-out
+            viewers get nothing rather than an error box: /a2a/executions is
+            requireAuth, and this section now loads eagerly instead of on a
+            tab click. */}
+        {!isOwner && !!address && (
+          <section id="tasks" className="scroll-mt-6">
+            <SectionRule num="03" title="Recent tasks" />
+            <AgentTasks agentWallet={agent.walletAddress} />
+          </section>
+        )}
       </div>
 
       {/* Operations — owner-only. Gas strip fused to the console below it. */}
       {isOwner && (
-        <div className="mt-12">
+        <div id="operations" className="mt-12 scroll-mt-6">
           <SectionRule num="03" title="Operations" />
           {agent.walletAddress && (
             <GasBar
