@@ -84,6 +84,7 @@ export function OpsConsole({
   const [editInstructions, setEditInstructions] = useState(agent.instructions ?? '');
   const [editProvider, setEditProvider] = useState(agent.provider ?? '');
   const [editModel, setEditModel] = useState(agent.model ?? '');
+  const [editApiKey, setEditApiKey] = useState('');
   const [providers, setProviders] = useState<Record<string, string[]>>({});
   const [editCapabilities, setEditCapabilities] = useState<string[]>(agent.capabilities ?? []);
   const [editMinReward, setEditMinReward] = useState(
@@ -252,6 +253,7 @@ export function OpsConsole({
         instructions: editInstructions,
         provider: editProvider,
         model: editModel,
+        ...(editApiKey ? { apiKey: editApiKey } : {}),
         capabilities: editCapabilities,
         minReward: editMinReward
           ? (BigInt(Math.round(Number(editMinReward) * 1e18))).toString()
@@ -483,6 +485,16 @@ export function OpsConsole({
                 </FormSelect>
               </FormField>
             </div>
+
+            <FormField label="API key" hint="Your provider API key. Leave blank to keep the existing key.">
+              <FormInput
+                className="font-mono"
+                type="password"
+                placeholder="sk-…"
+                value={editApiKey}
+                onChange={e => setEditApiKey(e.target.value)}
+              />
+            </FormField>
 
             <FormField
               label="Capabilities"

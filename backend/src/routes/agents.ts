@@ -664,10 +664,10 @@ agentsRouter.post('/:id/link-owner', requireAuth, async (req: AuthRequest, res) 
 agentsRouter.patch('/:id', requireAuth, async (req: AuthRequest, res) => {
   const agent = await authorizeOwner(req, res, req.params.id);
   if (!agent) return;
-  const { instructions, provider, model, tools, capabilities, minReward } = req.body as {
-    instructions?: string; provider?: string; model?: string; tools?: object[]; capabilities?: string[]; minReward?: string;
+  const { instructions, provider, model, apiKey, tools, capabilities, minReward } = req.body as {
+    instructions?: string; provider?: string; model?: string; apiKey?: string; tools?: object[]; capabilities?: string[]; minReward?: string;
   };
-  const updated = await updateAgent(req.params.id, { instructions, provider: provider as any, model, tools: tools as any, capabilities: capabilities as any, minReward });
+  const updated = await updateAgent(req.params.id, { instructions, provider: provider as any, model, apiKey, tools: tools as any, capabilities: capabilities as any, minReward });
   // Semantic matching (Phase 0): instructions/capabilities changed — re-embed.
   if (updated) agentEmbedding.recomputeForWalletBestEffort(updated.walletAddress);
   res.json({ success: true, data: strip(updated) });

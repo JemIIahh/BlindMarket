@@ -527,20 +527,21 @@ export async function listAgents(ownerAddress?: string): Promise<DeployedAgent[]
     : all;
 }
 
-export async function updateAgent(id: string, patch: Partial<Pick<DeployedAgent, 'instructions' | 'provider' | 'model' | 'tools' | 'capabilities' | 'minReward' | 'skills'>>): Promise<DeployedAgent | undefined> {
+export async function updateAgent(id: string, patch: Partial<Pick<DeployedAgent, 'instructions' | 'provider' | 'model' | 'apiKey' | 'tools' | 'capabilities' | 'minReward' | 'skills'>>): Promise<DeployedAgent | undefined> {
   const agent = await loadAgent(id);
   if (!agent) return undefined;
-  // Strip undefined values before merging. Callers can send a subset of the
-  // patch keys (e.g. the EDIT tab on AgentDetail only sends instructions +
-  // model), and {...agent, ...patch} with `patch.capabilities === undefined`
-  // would overwrite the existing array with undefined → JSON.stringify drops
-  // the field → next worker spawn reads `agent.capabilities ?? []` as [] →
-  // worker defaults to ['data_processing']. Same hazard for tools. Surfaced
-  // as "agent registered with caps=data_processing even though I picked
-  // code_review" after the user edited the prompt on a deployed agent.
+  // Strip undefined values before merging.
   const cleanPatch: typeof patch = {};
   for (const [k, v] of Object.entries(patch)) {
     if (v !== undefined) (cleanPatch as Record<string, unknown>)[k] = v;
+  }
+  // Re-encrypt API key if it changed
+  if (cleanPatch.apiKey !== undefined && agent.publicKey) {
+    const encryptedApiKey = eciesEncrypt(
+      Buffer.from(cleanPatch.apiKey as string, 'utf8'),
+      agent.publicKey,
+    ).toString('hex');
+    (cleanPatch as Record<string, unknown>).encryptedApiKey = encryptedApiKey;
   }
   const updated = { ...agent, ...cleanPatch };
   await saveAgent(updated);
