@@ -189,14 +189,15 @@ function randomPick<T>(arr: T[]): T {
  * or exploration doesn't trigger.
  */
 export async function pickExplorationAgent(
-  requiredCapabilities: AgentCapability[],
+  _requiredCapabilities: AgentCapability[],
   mode: 'merit' | 'balanced' = 'merit',
   taskRewardWei?: string,
 ): Promise<ScoredAgent | null> {
   const rate = mode === 'balanced' ? EXPLORATION_RATE_BALANCED : EXPLORATION_RATE;
   if (Math.random() >= rate) return null;
 
-  const agents = await agentStore.listAgents(requiredCapabilities);
+  // Semantic matching is the primary router — list ALL agents, KNN ranks them.
+  const agents = await agentStore.listAgents();
   if (agents.length === 0) return null;
 
   // Filter to eligible agents (minReward check)
@@ -211,7 +212,7 @@ export async function pickExplorationAgent(
   if (newAgents.length === 0) return null;
 
   const chosen = randomPick(newAgents);
-  return scoreAgent(chosen, requiredCapabilities);
+  return scoreAgent(chosen, _requiredCapabilities);
 }
 
 /**
@@ -225,7 +226,8 @@ export async function rankAgents(
   requiredCapabilities: AgentCapability[],
   taskRewardWei?: string,
 ): Promise<ScoredAgent[]> {
-  const agents = await agentStore.listAgents(requiredCapabilities);
+  // Semantic matching is the primary router — list ALL agents, KNN ranks them.
+  const agents = await agentStore.listAgents();
   if (agents.length === 0) return [];
 
   // Filter by minReward

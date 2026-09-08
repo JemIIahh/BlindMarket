@@ -229,12 +229,8 @@ const DeploySchema = z.object({
   provider: z.enum(PROVIDERS),
   model: z.string().min(1),
   apiKey: z.string().optional().default(''),
-  // An agent with no capabilities can never accept a task that declares
-  // requiredCapabilities — the /a2a/accept handler 403s with CAPABILITY_MISMATCH.
-  // Deploying with caps=[] produces an agent that looks "running" but is a no-op,
-  // which is the worst UX. At least one capability is required AFTER unioning
-  // in the installed skills' tags (checked in the handler), so an agent can be
-  // deployed from skills alone.
+  // Capabilities are deprecated — semantic KNN is the primary routing signal.
+  // Kept as optional metadata that feeds into agent embeddings.
   capabilities: z.array(z.enum(AGENT_CAPABILITIES as unknown as [string, ...string[]])).default([]),
   tools: z.array(ToolSchema).default([]),
   toolSecrets: z.record(z.string()).default({}),

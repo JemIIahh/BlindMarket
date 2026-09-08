@@ -35,7 +35,7 @@ export const a2aRouter = Router();
 
 const registerSchema = z.object({
   displayName: z.string().min(1).max(100),
-  capabilities: z.array(z.enum(AGENT_CAPABILITIES as unknown as [string, ...string[]])).max(20).transform(c => c.length ? c : ['data_processing']),
+  capabilities: z.array(z.enum(AGENT_CAPABILITIES as unknown as [string, ...string[]])).max(20).default([]),
   // Uncompressed secp256k1 hex (130 chars, leading `04`, no 0x prefix).
   // REQUIRED. An executor without a pubkey can't be sent a wrapped AES key, so
   // it could never decrypt an encrypted brief — and every task posted from the
@@ -976,8 +976,8 @@ async function startRankedCascade(
       score: r.score,
       displayName: r.displayName,
     }));
-  let entries = semantic ?? (requiredCaps.length > 0 ? await tagEntries() : []);
-  if (semantic && requiredCaps.length > 0) {
+  let entries = semantic ?? (await tagEntries());
+  if (semantic) {
     // Coverage guarantee carried over from the tag era: every registered
     // agent holding the required caps still gets a cascade position. Semantic
     // decides the FRONT of the queue; the tag ranking appends anyone the

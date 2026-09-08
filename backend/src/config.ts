@@ -154,7 +154,7 @@ export const config = {
   // error) and CAS-race broadcast remains the floor — the flip can never
   // strand a task. Default OFF; enable as a monitored canary only after the
   // shadow report agrees semantic ≥ tag on real outcomes.
-  semanticRoutingEnabled: optional('SEMANTIC_ROUTING_ENABLED', 'false').toLowerCase() === 'true',
+  semanticRoutingEnabled: optional('SEMANTIC_ROUTING_ENABLED', 'true').toLowerCase() === 'true',
   // Unmatched-demand feed (the public "Wanted" board): a still-open task
   // counts as a GAP once it is older than minAge (the cascade + early
   // broadcast demonstrably found no taker) and its best semantic fit is below

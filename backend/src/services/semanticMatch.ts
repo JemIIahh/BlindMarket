@@ -239,9 +239,8 @@ export async function semanticCascadeRanking(
       if (posterLc && addrLc === posterLc) continue;   // SELF_ACCEPT
       if (verifierLc && addrLc === verifierLc) continue; // IS_VERIFIER
       if (sealed && !meta.wrappedKeys?.[addrLc] && (!meta.keyCustodyBlob || !agent.publicKey)) continue; // NEEDS_WRAP
-      // Mirror of the /accept CAPABILITY_MISMATCH gate (full capability set,
-      // not preferredCapabilities — accept checks the full set).
-      if (requiredCaps.length > 0 && !hasAllCapabilities(agent, requiredCaps)) continue;
+      // Capability gate removed — semantic KNN is the primary routing signal.
+      // Agents are ranked by embedding similarity, not declared capability tags.
       if (!meetsRewardFloor(agent, taskReward)) continue;
       entries.push({
         address: ranked[i].address,
