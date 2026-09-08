@@ -93,6 +93,7 @@ export default function AgentDetail() {
   // banner (signature-gated POST /agents/:id/link-owner).
   const [linkStatus, setLinkStatus] = useState<'idle' | 'signing' | 'linking' | 'error'>('idle');
   const [linkError, setLinkError] = useState('');
+  const [refreshing, setRefreshing] = useState(false);
 
   // USDC balance on Base
   const [usdcBalance, setUsdcBalance] = useState<bigint | null>(null);
@@ -468,7 +469,9 @@ export default function AgentDetail() {
               withdrawError={withdrawError}
               withdrawInfo={withdrawInfo}
               confirmOpen={withdrawConfirmOpen}
-               onTopUp={requestTopUp}
+              refreshing={refreshing}
+              onTopUp={requestTopUp}
+              onRefresh={async () => { setRefreshing(true); await refetchBalance(); setRefreshing(false); }}
               onWithdrawRequest={() => setWithdrawConfirmOpen(true)}
               onWithdrawConfirm={handleWithdraw}
               onWithdrawCancel={() => setWithdrawConfirmOpen(false)}

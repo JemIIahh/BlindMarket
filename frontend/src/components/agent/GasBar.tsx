@@ -19,7 +19,9 @@ export function GasBar({
   withdrawError,
   withdrawInfo,
   confirmOpen,
+  refreshing,
   onTopUp,
+  onRefresh,
   onWithdrawRequest,
   onWithdrawConfirm,
   onWithdrawCancel,
@@ -37,7 +39,9 @@ export function GasBar({
   withdrawError: string;
   withdrawInfo: Array<{ chain: string; asset: string; amount: string; txHash: string }> | null;
   confirmOpen: boolean;
+  refreshing?: boolean;
   onTopUp: () => void;
+  onRefresh: () => void;
   onWithdrawRequest: () => void;
   onWithdrawConfirm: () => void;
   onWithdrawCancel: () => void;
@@ -48,6 +52,15 @@ export function GasBar({
         <div className="flex items-center gap-2.5 text-ink-2">
           <Icon name="bolt" size={16} className={isLowGas ? 'text-warn' : 'text-ink-3'} />
           <span className="text-[13px] font-medium">Wallet</span>
+          <span className="font-mono text-sm text-ink">{balanceEther.toFixed(4)} {symbol}</span>
+          <button
+            onClick={onRefresh}
+            disabled={refreshing}
+            title="Refresh balance"
+            className="text-ink-3 hover:text-cream transition-colors disabled:opacity-50"
+          >
+            <Icon name={refreshing ? 'clock' : 'search'} size={14} className={refreshing ? 'animate-spin' : ''} />
+          </button>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Button
