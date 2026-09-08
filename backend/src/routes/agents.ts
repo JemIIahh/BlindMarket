@@ -865,6 +865,10 @@ agentsRouter.get('/:id', async (req, res) => {
   }
   if (!agent) { res.status(404).json({ success: false, error: 'Not found' }); return; }
   const stripped = strip(agent)!;
+  // Expose a masked hint of the API key so the Edit tab can show "key on file · sk-••••xxxx"
+  const apiKeyHint = agent.apiKey
+    ? `••••${agent.apiKey.slice(-4)}`
+    : null;
   const [onChain, decayed] = await Promise.all([
     reputationService.getReputationWithScore(agent.walletAddress).catch(() => null),
     reputationDecay.getDecayedReputation(agent.walletAddress).catch(() => ({
@@ -875,6 +879,7 @@ agentsRouter.get('/:id', async (req, res) => {
     success: true,
     data: {
       ...(await withExecutorStats(stripped)),
+      apiKeyHint,
       reputation: onChain ?? { address: agent.walletAddress, tasksCompleted: 0, avgScore: 0, disputes: 0, disputeRatio: 0, score: 0 },
       decayedReputation: decayed,
     }

@@ -85,6 +85,7 @@ export function OpsConsole({
   const [editProvider, setEditProvider] = useState(agent.provider ?? '');
   const [editModel, setEditModel] = useState(agent.model ?? '');
   const [editApiKey, setEditApiKey] = useState('');
+  const [apiKeyVisible, setApiKeyVisible] = useState(false);
   const [providers, setProviders] = useState<Record<string, string[]>>({});
   const [editCapabilities, setEditCapabilities] = useState<string[]>(agent.capabilities ?? []);
   const [editMinReward, setEditMinReward] = useState(
@@ -272,10 +273,10 @@ export function OpsConsole({
 
   return (
     <div className={`border border-line flex flex-col min-w-0 ${className}`}>
-      {/* Tab strip — own card header, scrollable on narrow viewports */}
+      {/* Tab strip — active tab tinted bg, visually attached to panel */}
       <div
         role="tablist"
-        className="flex bg-surface-2 border-b border-line overflow-x-auto [&::-webkit-scrollbar]:hidden"
+        className="flex border-b border-line overflow-x-auto [&::-webkit-scrollbar]:hidden"
         style={{ scrollbarWidth: 'none' }}
       >
         {TABS.map(t => {
@@ -288,8 +289,8 @@ export function OpsConsole({
               onClick={() => setTab(t)}
               className={`flex items-center gap-2 px-4 pt-3 pb-3 -mb-px text-sm whitespace-nowrap border-b-2 transition-colors shrink-0 ${
                 active
-                  ? 'text-cream border-cream font-medium'
-                  : 'text-ink-3 border-transparent hover:bg-surface hover:text-ink-2'
+                  ? 'text-cream border-cream bg-cream/10 font-medium'
+                  : 'text-ink-3 border-transparent hover:bg-surface-2 hover:text-ink-2'
               }`}
             >
               <Icon name={TAB_ICONS[t]} size={16} />
@@ -463,22 +464,27 @@ export function OpsConsole({
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <FormField label="Provider">
-                <FormSelect value={editProvider} onChange={e => {
-                  const p = e.target.value;
-                  setEditProvider(p);
-                  // Reset model to first available for this provider
-                  const models = providers[p];
-                  if (models?.length) setEditModel(models[0]);
-                }}>
-                  {Object.keys(providers).length === 0 && <option value={editProvider}>{editProvider || 'Loading…'}</option>}
-                  {Object.keys(providers).map(p => <option key={p} value={p}>{p}</option>)}
-                </FormSelect>
+                <div className="flex items-center gap-2">
+                  <FormSelect value={editProvider} onChange={e => {
+                    const p = e.target.value;
+                    setEditProvider(p);
+                    const models = providers[p];
+                    if (models?.length) setEditModel(models[0]);
+                  }}>
+                    {Object.keys(providers).length === 0 && <option value={editProvider}>{editProvider || 'Loading…'}</option>}
+                    {Object.keys(providers).map(p => <option key={p} value={p}>{p}</option>)}
+                  </FormSelect>
+                  {editProvider === agent.provider && (
+                    <span className="flex items-center gap-1 text-xs text-ok shrink-0">
+                      <Icon name="check" size={14} /> configured
+                    </span>
+                  )}
+                </div>
               </FormField>
 
               <FormField label="Model">
                 <FormSelect value={editModel} onChange={e => setEditModel(e.target.value)}>
                   {(providers[editProvider] ?? []).map(m => <option key={m} value={m}>{m}</option>)}
-                  {/* If current model isn't in the list (e.g. custom), show it */}
                   {editModel && !(providers[editProvider] ?? []).includes(editModel) && (
                     <option value={editModel}>{editModel}</option>
                   )}
@@ -486,14 +492,34 @@ export function OpsConsole({
               </FormField>
             </div>
 
-            <FormField label="API key" hint="Your provider API key. Leave blank to keep the existing key.">
-              <FormInput
-                className="font-mono"
-                type="password"
-                placeholder="sk-…"
-                value={editApiKey}
-                onChange={e => setEditApiKey(e.target.value)}
-              />
+            {editProvider !== agent.provider && (
+              <div className="flex items-start gap-2 p-3 bg-warn/10 border border-warn/30 text-warn text-xs">
+                <Icon name="alert" size={14} className="shrink-0 mt-0.5" />
+                <span>Changing provider will clear the current API key. Enter a new key before saving.</span>
+              </div>
+            )}
+
+            <FormField label="API key">
+              {agent.apiKeyHint && !apiKeyVisible ? (
+                <div className="flex items-center gap-3 p-3 bg-ok/10 border border-ok/30 rounded">
+                  <span className="text-sm text-ok font-mono">key on file · {agent.apiKeyHint}</span>
+                  <button
+                    type="button"
+                    onClick={() => setApiKeyVisible(true)}
+                    className="text-xs text-cream hover:underline ml-auto"
+                  >
+                    Replace
+                  </button>
+                </div>
+              ) : (
+                <FormInput
+                  className="font-mono"
+                  type="password"
+                  placeholder={agent.apiKeyHint ? `Replace ${agent.apiKeyHint}…` : 'sk-…'}
+                  value={editApiKey}
+                  onChange={e => setEditApiKey(e.target.value)}
+                />
+              )}
             </FormField>
 
             <FormField
@@ -527,9 +553,12 @@ export function OpsConsole({
               <Button
                 variant="primary"
                 onClick={() => save.mutate()}
-                disabled={save.isPending || editCapabilities.length === 0}
+                disabled={save.isPending || editCapabilities.length === 0 || (editProvider !== agent.provider && !editApiKey)}
                 label={save.isPending ? 'Saving…' : 'Save changes'}
               />
+              {editProvider !== agent.provider && !editApiKey && (
+                <span className="text-xs text-ink-3">Enter a new API key to save provider change</span>
+              )}
               {save.isError && <span className="text-xs text-err">Save failed</span>}
             </div>
 
