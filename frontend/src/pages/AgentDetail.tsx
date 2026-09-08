@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
-import { useBalance, useWalletClient } from 'wagmi';
+import { useWalletClient } from 'wagmi';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { BrowserProvider, parseEther, formatUnits } from 'ethers';
+import { BrowserProvider, Contract, parseUnits, formatUnits } from 'ethers';
 import {
   Breadcrumb,
   SectionRule,
@@ -14,7 +14,7 @@ import {
 } from '../components/bb';
 import { get, authedGet, authedPost } from '../lib/api';
 import { useChainAddress } from '../hooks/useChainWallet';
-import { getNativeCurrency } from '../config/constants';
+import { MARKETPLACE_TOKEN_ADDRESS, getPaymentSymbol, getPaymentDecimals } from '../config/constants';
 import {
   getAgentReviews,
   getAgentBadges,
@@ -32,14 +32,18 @@ import { ReviewsSection } from '../components/agent/ReviewsSection';
 import { ServicesSection } from '../components/agent/ServicesSection';
 import type { AgentDetails, SkillStat } from '../components/agent/types';
 
-// Top-up amount when the agent runs low on gas. Same default as the deploy
-// funding step — round trip + LLM call + submitEvidence costs ~0.0004 0G, so
-// 0.005 0G covers ~125 tasks before the next top-up.
-const TOP_UP_AMOUNT = '0.005';
+// Top-up amount in USDC. Covers ~100 task executions before next top-up.
+const TOP_UP_AMOUNT = '1';
+const TOP_UP_RAW = parseUnits(TOP_UP_AMOUNT, getPaymentDecimals());
 
-// Below this the agent can't reliably pay for a submitEvidence + a USDC sweep
-// tx. UI surfaces a "Top up gas" call to action when balance is under this.
-const LOW_GAS_THRESHOLD = 0.005;
+// Below this the agent can't reliably pay for operations. UI surfaces a
+// "Fund wallet" call to action when balance is under this.
+const LOW_BALANCE_THRESHOLD = parseUnits('1', getPaymentDecimals());
+
+const USDC_ABI = [
+  'function balanceOf(address owner) view returns (uint256)',
+  'function transfer(address to, uint256 amount) returns (bool)',
+];
 
 const ACTION_LABELS: Record<'start' | 'pause' | 'stop' | 'restart', string> = {
   start: 'Start',
@@ -90,20 +94,22 @@ export default function AgentDetail() {
   const [linkStatus, setLinkStatus] = useState<'idle' | 'signing' | 'linking' | 'error'>('idle');
   const [linkError, setLinkError] = useState('');
 
-  // EVM balance (for 0G chain)
-  const { data: evmBalance, refetch: refetchEvmBalance } = useBalance({
-    address: agent?.walletAddress as `0x${string}` | undefined,
-    query: { enabled: !!agent?.walletAddress },
-  });
+  // USDC balance on Base
+  const [usdcBalance, setUsdcBalance] = useState<bigint | null>(null);
 
-  const balanceEther = evmBalance ? parseFloat(evmBalance.formatted) : 0;
-  const agentCurrency = getNativeCurrency('og');
-  const balanceSymbol = agentCurrency.symbol;
-  const isLowGas = !!evmBalance && balanceEther < LOW_GAS_THRESHOLD;
+  const balanceEther = usdcBalance !== null ? Number(formatUnits(usdcBalance, getPaymentDecimals())) : 0;
+  const balanceSymbol = getPaymentSymbol();
+  const isLowGas = usdcBalance !== null && usdcBalance < LOW_BALANCE_THRESHOLD;
 
-  const refetchBalance = useCallback(() => {
-    refetchEvmBalance();
-  }, [refetchEvmBalance]);
+  const refetchBalance = useCallback(async () => {
+    if (!agent?.walletAddress) return;
+    try {
+      const provider = new BrowserProvider(walletClient!.transport);
+      const usdc = new Contract(MARKETPLACE_TOKEN_ADDRESS, USDC_ABI, provider);
+      const bal = await usdc.balanceOf(agent.walletAddress);
+      setUsdcBalance(bal as bigint);
+    } catch { /* non-blocking */ }
+  }, [agent?.walletAddress, walletClient]);
 
   const loadAgent = useCallback(() => {
     if (!id) return;
@@ -130,6 +136,21 @@ export default function AgentDetail() {
     ).then(r => { if (!cancelled) setSkillStats(r.stats ?? []); }).catch(() => {});
     return () => { cancelled = true; };
   }, [agentWallet]);
+
+  // Fetch USDC balance when agent loads
+  useEffect(() => {
+    if (!agent?.walletAddress || !walletClient) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const provider = new BrowserProvider(walletClient.transport);
+        const usdc = new Contract(MARKETPLACE_TOKEN_ADDRESS, USDC_ABI, provider);
+        const bal = await usdc.balanceOf(agent.walletAddress);
+        if (!cancelled) setUsdcBalance(bal as bigint);
+      } catch { /* non-blocking */ }
+    })();
+    return () => { cancelled = true; };
+  }, [agent?.walletAddress, walletClient]);
 
   // Public service list — lifted out of the services section because the
   // header's from-price and the "services sold" stat read the same data.
@@ -252,9 +273,10 @@ export default function AgentDetail() {
     try {
       const provider = new BrowserProvider(walletClient!.transport);
       const signer = await provider.getSigner();
-      const value = parseEther(TOP_UP_AMOUNT);
+      const usdc = new Contract(MARKETPLACE_TOKEN_ADDRESS, USDC_ABI, signer);
+      const tx = await usdc.transfer.populateTransaction(agent.walletAddress, TOP_UP_RAW);
       const { signAndSendTx } = await import('../lib/txSigner');
-      const sent = await signAndSendTx(signer, { to: agent.walletAddress, data: '0x', from: address! }, value);
+      const sent = await signAndSendTx(signer, tx as any);
       if (sent.receipt) {
         await refetchBalance();
       }
@@ -436,7 +458,7 @@ export default function AgentDetail() {
             <GasBar
               symbol={balanceSymbol}
               topUpAmount={TOP_UP_AMOUNT}
-              lowGasThreshold={LOW_GAS_THRESHOLD}
+              lowGasThreshold={1}
               isLowGas={isLowGas}
               balanceEther={balanceEther}
               agentStatus={agent.status}
@@ -465,9 +487,9 @@ export default function AgentDetail() {
     </div>
     <ConfirmDialog
       open={topUpConfirm}
-      title="Top up agent gas"
-      description={`Send ${TOP_UP_AMOUNT} ETH from your wallet to ${agent?.walletAddress?.slice(0, 10)}…${agent?.walletAddress?.slice(-8)} for gas. This will be deducted from your wallet.`}
-      confirmLabel="Send ETH"
+      title="Fund agent wallet"
+      description={`Send ${TOP_UP_AMOUNT} USDC from your wallet to ${agent?.walletAddress?.slice(0, 10)}…${agent?.walletAddress?.slice(-8)} for operations. This will be deducted from your wallet.`}
+      confirmLabel="Send USDC"
       onConfirm={confirmTopUp}
       onCancel={() => setTopUpConfirm(false)}
     />

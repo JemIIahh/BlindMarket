@@ -1,5 +1,6 @@
-import { useState } from 'react';
-import { useBalance } from 'wagmi';
+import { useState, useEffect } from 'react';
+import { useWalletClient } from 'wagmi';
+import { Contract, formatUnits } from 'ethers';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import {
@@ -15,36 +16,42 @@ import {
   SignInGate,
 } from '../components/bb';
 import { truncateAddress } from '../lib/utils';
-import { API_BASE_URL, getPaymentSymbol } from '../config/constants';
+import { API_BASE_URL, MARKETPLACE_TOKEN_ADDRESS, getPaymentSymbol, getPaymentDecimals } from '../config/constants';
 import { authedPost } from '../lib/api';
 import { useChainAddress } from '../hooks/useChainWallet';
 import { useAuth } from '../context/AuthContext';
 
-// Mirrors AgentDetail's threshold so a low-gas chip here is consistent with
-// the warning the user sees once they click into the agent. If you change one,
-// change the other.
-const LOW_GAS_THRESHOLD = 0.005;
+const LOW_BALANCE_THRESHOLD = 1; // 1 USDC
+const USDC_ABI = ['function balanceOf(address owner) view returns (uint256)'];
 
-// Per-row balance probe. wagmi's useBalance is a hook, so it must run at the
-// component-render level, not inside a loop callback — hence this little leaf
-// component. Returns null (renders nothing) when balance is healthy or still
-// loading, a warning chip when below the gas threshold.
+// Per-row USDC balance probe. Returns null when balance is healthy or still
+// loading, a warning chip when below the threshold.
 function GasChip({ walletAddress }: { walletAddress: string }) {
-  const { data: balance } = useBalance({
-    address: walletAddress as `0x${string}`,
-    // Cache per-agent balance so navigating to/from this page doesn't refire an
-    // eth_getBalance per row against the rate-limited public RPC every time.
-    query: { enabled: !!walletAddress, staleTime: 60_000, gcTime: 300_000 },
-  });
-  if (!balance) return null;
-  const ether = parseFloat(balance.formatted);
-  if (ether >= LOW_GAS_THRESHOLD) return null;
+  const { data: walletClient } = useWalletClient();
+  const [balance, setBalance] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!walletAddress || !walletClient) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const provider = new (await import('ethers')).BrowserProvider(walletClient.transport);
+        const usdc = new Contract(MARKETPLACE_TOKEN_ADDRESS, USDC_ABI, provider);
+        const bal: bigint = await usdc.balanceOf(walletAddress);
+        if (!cancelled) setBalance(Number(formatUnits(bal, getPaymentDecimals())));
+      } catch { /* non-blocking */ }
+    })();
+    return () => { cancelled = true; };
+  }, [walletAddress, walletClient]);
+
+  if (balance === null) return null;
+  if (balance >= LOW_BALANCE_THRESHOLD) return null;
   return (
     <span
-      title={`Low gas: ${ether.toFixed(4)} 0G — top up to keep this agent running`}
+      title={`Low balance: ${balance.toFixed(2)} ${getPaymentSymbol()} — fund wallet to keep this agent running`}
       className="inline-flex items-center gap-1 text-[10px] font-mono text-warn"
     >
-      ⚠ Low gas
+      ⚠ Low balance
     </span>
   );
 }

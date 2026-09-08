@@ -47,7 +47,7 @@ export function GasBar({
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2.5 text-ink-2">
           <Icon name="bolt" size={16} className={isLowGas ? 'text-warn' : 'text-ink-3'} />
-          <span className="text-[13px] font-medium">Gas management</span>
+          <span className="text-[13px] font-medium">Wallet</span>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Button
@@ -55,7 +55,7 @@ export function GasBar({
             size="sm"
             onClick={onTopUp}
             disabled={topUpStatus === 'sending'}
-            label={topUpStatus === 'sending' ? `Sending ${topUpAmount} ${symbol}…` : `Top up gas (+${topUpAmount} ${symbol})`}
+            label={topUpStatus === 'sending' ? `Sending ${topUpAmount} ${symbol}…` : `Fund wallet (+${topUpAmount} ${symbol})`}
           />
           {/* Withdraw — single button sweeps whichever chain(s) the agent's
               wallet actually holds a balance on (0G and/or Base) in one
