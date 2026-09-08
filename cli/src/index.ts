@@ -282,6 +282,29 @@ program
     }
   });
 
+/**
+ * Verification verdict for a disputed submission, or null when none can be
+ * obtained — in which case the caller must abstain rather than guess.
+ *
+ * Returns null unconditionally today, and that is the honest answer rather
+ * than a stub: POST /api/v1/verification/verify is keyed by taskHash, while a
+ * DisputeOpened event carries only the numeric on-chain taskId, and the route
+ * accepts supplemental requirements solely from the poster or the designated
+ * verifier. A validator is neither, so there is no call this function could
+ * make that would return a verdict it is entitled to.
+ *
+ * Closing that needs a validator-legitimate verification path (a taskId ->
+ * taskHash lookup plus a validator role on the route). Until then this is the
+ * one place to change, and the caller's abstain branch is what runs.
+ */
+async function verifyDisputedSubmission(
+  _disputeId: string,
+  _taskId: bigint,
+  _apiKey: string | undefined,
+): Promise<{ passed: boolean; confidence: number } | null> {
+  return null;
+}
+
 // ── status ────────────────────────────────────────────────────────────────────
 
 program
@@ -429,40 +452,34 @@ validator
         return;
       }
 
-      // FIXME(dispute-autovote): this path is broken and fails OPEN.
+      // Ask the marketplace to verify the disputed submission.
       //
-      // Three compounding problems, verified rather than inferred:
-      //   1. /api/v1/verification/trigger does not exist — the router
-      //      registers only /verify, /providers and /status — so this 404s on
-      //      every dispute.
-      //   2. `.catch(() => null)` swallows that, and `result?.passed !== false`
-      //      is TRUE for null, so `vote` is always 1. Executed: the validator
-      //      votes WORKER on every dispute it sees, silently, without any
-      //      verification having happened.
-      //   3. It cannot simply be repointed at /verify. That route is keyed by
-      //      taskHash (numeric ids collide across 0G and Base) and this handler
-      //      has only the numeric taskId from the DisputeOpened event; and it
-      //      supplies its own `taskRequirements`, which /verify now accepts
-      //      only from the poster or designated verifier — a validator is
-      //      neither, so it would be refused even with the right key.
+      // This used to POST /api/v1/verification/trigger — a route that has
+      // never existed (the router registers /verify, /providers and /status),
+      // so it 404'd on every dispute. The 404 was swallowed by
+      // `.catch(() => null)` and the vote was `result?.passed !== false ? 1 : 2`,
+      // which is 1 for null — so the validator voted WORKER on every dispute
+      // it ever saw, without a single verification having run. Reproduced
+      // against the real router before changing it.
       //
-      // Left as-is deliberately: making a validator abstain instead of
-      // fail-open changes dispute economics and is a product decision, not a
-      // cleanup. Not introduced by the oracle-gate work — it 404'd before it
-      // too — but that work is what surfaced it.
-      const result = await api.post<{ passed: boolean; confidence: number }>(
-        '/api/v1/verification/trigger',
-        {
-          taskId: Number(taskId),
-          taskCategory: 'general',
-          taskRequirements: 'Evidence must demonstrate task completion',
-          evidenceSummary: `Dispute #${dId} on task #${taskId}`,
-        },
-        cfg.apiKey,
-      ).catch(() => null);
+      // The endpoint is /verify and is keyed by taskHash, but this handler
+      // only has the numeric taskId from the DisputeOpened event, and /verify
+      // accepts supplemental requirements solely from the poster or the
+      // designated verifier — a validator is neither. So there is no verified
+      // verdict available here today, and the honest behaviour is to abstain
+      // rather than cast an unbacked vote. Wiring a validator-legitimate
+      // verification path is separate work.
+      const result = await verifyDisputedSubmission(dId, taskId, cfg.apiKey);
 
-      const vote = result?.passed !== false ? 1 : 2; // default worker-favored if TEE unavailable
-      console.log(`  voting ${vote === 1 ? 'worker' : 'agent'} (confidence: ${result ? (result.confidence * 100).toFixed(0) : '?'}%)`);
+      if (!result) {
+        console.log(
+          `  verification unavailable for #${dId} — ABSTAINING (no vote cast)\n`,
+        );
+        return;
+      }
+
+      const vote = result.passed ? 1 : 2;
+      console.log(`  voting ${vote === 1 ? 'worker' : 'agent'} (confidence: ${(result.confidence * 100).toFixed(0)}%)`);
 
       const { unsignedTx } = await api.post<{ unsignedTx: object }>(
         '/api/v1/validators/vote',
