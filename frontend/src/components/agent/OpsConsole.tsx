@@ -4,11 +4,11 @@ import { formatUnits } from 'ethers';
 import {
   Tag,
   Button,
+  Icon,
   FormField,
   FormInput,
   FormTextarea,
   LoadingState,
-  EmptyState,
   useTabParam,
 } from '../bb';
 import { authedGet, authedPatch, authedPost, getAuthHeaders } from '../../lib/api';
@@ -32,6 +32,16 @@ const TAB_LABELS: Record<Tab, string> = {
   webhooks: 'Webhooks',
   edit: 'Edit',
   metrics: 'Metrics',
+};
+
+const TAB_ICONS: Record<Tab, string> = {
+  logs: 'list',
+  errors: 'alert',
+  tasks: 'briefcase',
+  tools: 'settings',
+  webhooks: 'send',
+  edit: 'compose',
+  metrics: 'chart',
 };
 
 const TABS = Object.keys(TAB_LABELS) as Tab[];
@@ -249,25 +259,31 @@ export function OpsConsole({
 
   return (
     <div className={`border border-line flex flex-col min-w-0 ${className}`}>
-      {/* Tabs — clean sans tab bar with a cream underline on the active tab,
-          matching the marketplace dashboard. Horizontal scroll on narrow
-          viewports so they never wrap into a broken two-line bar. */}
-      <div role="tablist" className="flex gap-6 border-b border-line px-5 overflow-x-auto scrollbar-thin">
-        {TABS.map(t => (
-          <button
-            key={t}
-            role="tab"
-            aria-selected={tab === t}
-            onClick={() => setTab(t)}
-            className={`pt-4 pb-3 -mb-px text-sm whitespace-nowrap border-b-2 transition-colors ${
-              tab === t
-                ? 'text-ink font-medium border-cream'
-                : 'text-ink-3 border-transparent hover:text-ink-2'
-            }`}
-          >
-            {TAB_LABELS[t]}
-          </button>
-        ))}
+      {/* Tab strip — own card header, scrollable on narrow viewports */}
+      <div
+        role="tablist"
+        className="flex bg-surface-2 border-b border-line overflow-x-auto [&::-webkit-scrollbar]:hidden"
+        style={{ scrollbarWidth: 'none' }}
+      >
+        {TABS.map(t => {
+          const active = tab === t;
+          return (
+            <button
+              key={t}
+              role="tab"
+              aria-selected={active}
+              onClick={() => setTab(t)}
+              className={`flex items-center gap-2 px-4 pt-3 pb-3 -mb-px text-sm whitespace-nowrap border-b-2 transition-colors shrink-0 ${
+                active
+                  ? 'text-cream border-cream font-medium'
+                  : 'text-ink-3 border-transparent hover:bg-surface hover:text-ink-2'
+              }`}
+            >
+              <Icon name={TAB_ICONS[t]} size={16} />
+              {TAB_LABELS[t]}
+            </button>
+          );
+        })}
       </div>
 
       <div className="flex-1 relative">
@@ -280,8 +296,9 @@ export function OpsConsole({
             onScroll={handleLogScroll}
           >
             {logsError ? (
-              <div className="flex flex-col items-center gap-3 py-8">
-                <EmptyState icon="lock" title="Not authorised" description={logsError} />
+              <div className="flex flex-col items-center gap-2 py-10">
+                <Icon name="lock" size={20} className="text-ink-3" />
+                <p className="text-xs text-ink-3">{logsError}</p>
               </div>
             ) : logs.length > 0 ? logs.map((line, i) => {
               const clean = line.replace(/\x1b\[[0-9;]*m/g, '');
@@ -301,18 +318,15 @@ export function OpsConsole({
                   )}
                 </div>
               );
-            }) : (
-              <div className="flex flex-col items-center gap-3 py-8">
-                <EmptyState
-                  icon="list"
-                  title={agent.status === 'running' ? 'Waiting for logs' : 'No logs yet'}
-                  description={agent.status === 'running'
-                    ? 'Live output will stream here as the agent works.'
-                    : 'Start the agent to begin streaming its logs.'}
-                />
+            }            ) : (
+              <div className="flex flex-col items-center gap-2 py-10">
+                <Icon name="list" size={20} className="text-ink-3" />
+                <p className="text-xs text-ink-3">
+                  {agent.status === 'running' ? 'Waiting for logs…' : 'No logs yet'}
+                </p>
                 <button
                   onClick={refreshLogs}
-                  className="text-xs text-ink-3 hover:text-ink transition-colors flex items-center gap-1"
+                  className="text-xs text-ink-3 hover:text-ink transition-colors flex items-center gap-1 mt-1"
                 >
                   <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M2 8a6 6 0 0 1 10.472-4M14 8a6 6 0 0 1-10.472 4" />
@@ -347,11 +361,10 @@ export function OpsConsole({
             {errorLogsLoading ? (
               <LoadingState />
             ) : errorLogs.length === 0 ? (
-              <EmptyState
-                icon="check"
-                title="No errors"
-                description="Tool executions are running cleanly."
-              />
+              <div className="flex flex-col items-center gap-2 py-10">
+                <Icon name="check" size={20} className="text-ink-3" />
+                <p className="text-xs text-ink-3">No errors — tool executions are clean.</p>
+              </div>
             ) : (
               <div className="space-y-3">
                 {errorLogs.map((e: any) => (

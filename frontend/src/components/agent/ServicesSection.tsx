@@ -4,11 +4,12 @@ import {
   SectionRule,
   Tag,
   Button,
+  Icon,
   FormField,
   FormInput,
   FormTextarea,
+  FormSelect,
   LoadingState,
-  EmptyState,
   ErrorState,
 } from '../bb';
 import {
@@ -18,7 +19,6 @@ import {
   deleteService,
 } from '../../services/marketplace';
 import type { AgentService } from '../../services/marketplace';
-import { ChoiceChip } from './ChoiceChip';
 import UseServiceModal from '../UseServiceModal';
 import UseFromAgentModal from '../UseFromAgentModal';
 
@@ -49,9 +49,6 @@ export function ServicesSection({
   onLinkOwner: () => Promise<void>;
 }) {
   const [useService, setUseService] = useState<AgentService | null>(null);
-  // "Use from your agent" — copyable prompt/script for the buyer's OWN agent
-  // to run this rent flow headlessly (works even while this agent is stopped:
-  // the copy block is documentation, the task just waits for it to start).
   const [agentUseService, setAgentUseService] = useState<AgentService | null>(null);
   const [needsLink, setNeedsLink] = useState(false);
   const [linking, setLinking] = useState(false);
@@ -64,6 +61,7 @@ export function ServicesSection({
   const [serviceType, setServiceType] = useState<'api' | 'a2a'>('api');
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState('');
+  const [showDesc, setShowDesc] = useState(false);
 
   const loadOwnerServices = useCallback(async () => {
     if (!isOwner) { setOwnerServices(null); return; }
@@ -72,7 +70,6 @@ export function ServicesSection({
 
   useEffect(() => { loadOwnerServices(); }, [loadOwnerServices]);
 
-  // Any mutation (and a settled Use-now) refreshes both views.
   const load = useCallback(async () => {
     await Promise.all([onReload(), loadOwnerServices()]);
   }, [onReload, loadOwnerServices]);
@@ -81,8 +78,6 @@ export function ServicesSection({
     try { return `${formatUnits(wei, 18)} ${symbol}`; } catch { return `${wei} wei`; }
   };
 
-  // On an owner-mismatch 403, stash the failed mutation so a one-click
-  // "Link this wallet & retry" can re-run it after linking (mirrors Start/Stop).
   function onMutationError(err: unknown, retry: () => Promise<void>) {
     if ((err as { code?: string }).code === 'FORBIDDEN') {
       setNeedsLink(true);
@@ -120,6 +115,7 @@ export function ServicesSection({
       await createService(agentId, { name: name.trim(), description: description.trim(), priceRaw, serviceType });
       setName(''); setDescription(''); setPrice(''); setServiceType('api');
       setNeedsLink(false);
+      setShowDesc(false);
       await load();
     } catch (err) {
       onMutationError(err, handleCreate);
@@ -137,9 +133,18 @@ export function ServicesSection({
     catch (err) { onMutationError(err, () => remove(s)); }
   }
 
+  const scrollToForm = () => {
+    document.getElementById('owner-services-form')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  };
+
   return (
     <section id="services" className="scroll-mt-6">
-      <SectionRule num="01" title="Services" side={services?.length ? `${services.length} listed` : undefined} />
+      <div className="flex items-center gap-3 mb-5">
+        <SectionRule num="01" title="Services" side={services?.length ? `${services.length} listed` : undefined} className="flex-1 mb-0" />
+        {isOwner && (
+          <Button variant="outline" size="sm" label="Add service" onClick={scrollToForm} />
+        )}
+      </div>
 
       {loading ? (
         <LoadingState label="Loading services…" />
@@ -192,48 +197,27 @@ export function ServicesSection({
               ))}
             </div>
           ) : (
-            <EmptyState
-              icon="briefcase"
-              title="No services listed"
-              description={isOwner ? 'Publish a service below to let others rent this agent per call.' : 'This agent has no rentable services yet.'}
-            />
+            <div className="border border-dashed border-line bg-surface-2 px-5 py-6 text-center">
+              <div className="flex justify-center mb-2">
+                <Icon name="briefcase" size={20} className="text-ink-3" />
+              </div>
+              <div className="text-sm text-ink font-medium">
+                {isOwner ? 'No services yet' : 'No rentable services'}
+              </div>
+              <div className="text-xs text-ink-3 mt-1">
+                {isOwner
+                  ? 'Publish a service to let others call this agent.'
+                  : 'This agent has no rentable services yet.'}
+              </div>
+            </div>
           )}
         </>
       )}
 
       {isOwner && (
-        <div className="mt-8 pt-6 border-t border-line">
-          <div className="text-sm font-semibold text-ink mb-4">Manage services</div>
-          <div className="border border-line bg-surface-2 p-4 space-y-4">
-            <FormField label="Service name" required>
-              <FormInput placeholder="e.g. Market sentiment analysis" value={name} onChange={e => setName(e.target.value)} />
-            </FormField>
-            <FormField label="Description">
-              <FormTextarea rows={2} placeholder="What the buyer gets per call" value={description} onChange={e => setDescription(e.target.value)} />
-            </FormField>
-            <div className="grid grid-cols-2 gap-4">
-              <FormField label={`Price per call (${symbol})`} required>
-                <FormInput className="font-mono" placeholder="0.5" value={price} onChange={e => setPrice(e.target.value)} />
-              </FormField>
-              <FormField label="Type">
-                <div className="flex gap-2">
-                  {(['api', 'a2a'] as const).map(t => (
-                    <ChoiceChip key={t} selected={serviceType === t} onClick={() => setServiceType(t)}>
-                      {t}
-                    </ChoiceChip>
-                  ))}
-                </div>
-              </FormField>
-            </div>
-            {formError && <div className="text-xs text-err">{formError}</div>}
-            {needsLink && (
-              <Button variant="outline" size="sm" label={linking ? 'Linking…' : 'Link this wallet & retry'} disabled={linking} onClick={linkAndRetry} />
-            )}
-            <Button variant="primary" size="sm" label={saving ? 'Publishing…' : 'Publish service'} disabled={saving} onClick={handleCreate} />
-          </div>
-
+        <div className="mt-8 pt-6 border-t border-line" id="owner-services-form">
           {ownerServices && ownerServices.length > 0 && (
-            <div className="mt-4 space-y-2">
+            <div className="mb-4 space-y-2">
               {ownerServices.map(s => (
                 <div key={s.id} className="flex items-center justify-between gap-3 border border-line bg-surface-2 px-4 py-2.5">
                   <div className="min-w-0">
@@ -250,6 +234,63 @@ export function ServicesSection({
               ))}
             </div>
           )}
+
+          <div className="border border-line bg-surface-2 p-4 space-y-3">
+            <div className="flex flex-col sm:flex-row gap-3">
+              <FormField label="Service name" required className="flex-[2] min-w-0">
+                <FormInput placeholder="e.g. Market sentiment analysis" value={name} onChange={e => setName(e.target.value)} />
+              </FormField>
+              <FormField label={`Price (${symbol})`} required className="flex-1 min-w-0">
+                <FormInput className="font-mono" placeholder="0.5" value={price} onChange={e => setPrice(e.target.value)} />
+              </FormField>
+              <FormField label="Type" className="flex-1 min-w-0">
+                <FormSelect value={serviceType} onChange={e => setServiceType(e.target.value as 'api' | 'a2a')}>
+                  <option value="api">API</option>
+                  <option value="a2a">A2A</option>
+                </FormSelect>
+              </FormField>
+              <div className="flex items-end">
+                <Button
+                  variant="primary"
+                  size="sm"
+                  label={saving ? 'Publishing…' : 'Publish'}
+                  disabled={saving}
+                  onClick={handleCreate}
+                  className="w-full sm:w-auto"
+                />
+              </div>
+            </div>
+
+            {showDesc ? (
+              <div className="flex items-start gap-2">
+                <FormField label="Description" className="flex-1">
+                  <FormTextarea rows={2} placeholder="What the buyer gets per call" value={description} onChange={e => setDescription(e.target.value)} />
+                </FormField>
+                <button
+                  type="button"
+                  onClick={() => { setShowDesc(false); setDescription(''); }}
+                  className="mt-6 text-ink-3 hover:text-ink transition-colors shrink-0"
+                  aria-label="Remove description"
+                >
+                  <Icon name="x" size={14} />
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setShowDesc(true)}
+                className="text-xs text-ink-3 hover:text-ink transition-colors flex items-center gap-1"
+              >
+                <Icon name="plus" size={12} />
+                Add description
+              </button>
+            )}
+
+            {formError && <div className="text-xs text-err">{formError}</div>}
+            {needsLink && (
+              <Button variant="outline" size="sm" label={linking ? 'Linking…' : 'Link this wallet & retry'} disabled={linking} onClick={linkAndRetry} />
+            )}
+          </div>
         </div>
       )}
 
