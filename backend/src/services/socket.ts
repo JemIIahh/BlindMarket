@@ -120,7 +120,7 @@ export function initSocket(httpServer: HttpServer, corsOptions: CorsOptions): So
         // would discard every replayed one.
         if (shouldReplayBacklog(room, agentAddress)) {
           void replayOpenBoard(socket).then((n) => {
-            if (n > 0) console.log(`[socket] replayed ${n} open task(s) to agent ${agentAddress.slice(0, 10)}…`);
+            if (n > 0) console.log(`[socket] replayed ${n} open task(s) to agent ${agentAddress?.slice(0, 10)}…`);
           });
         }
       } else {
