@@ -4,6 +4,7 @@ import { randomBytes } from 'crypto';
 import { AGENT_CAPABILITIES, LLM_PROVIDER_MODELS, LLM_MODEL_IDS } from '../types.js';
 import type { AuthRequest } from '../types.js';
 import { requireAuth } from '../middleware/auth.js';
+import { createUserRateLimiter } from '../middleware/rateLimit.js';
 import {
   deployAgent, startAgent, pauseAgent, stopAgent, resumeAgent,
   getAgent, listAgents, getAgentLogs, subscribeAgentLogs, updateAgent,
@@ -17,12 +18,13 @@ import { isAgentOwner, stripAgentSecrets } from '../services/agentOwnership.js';
 import * as skillStore from '../services/skillStore.js';
 import * as agentEmbedding from '../services/agentEmbedding.js';
 import { buildInstalledSkill, assertComposedSizeOk } from '../services/skillComposer.js';
-import type { InstalledSkill, AgentCapability } from '../types.js';
+import type { InstalledSkill, AgentCapability, LLMProvider } from '../types.js';
 import { redis } from '../services/redis.js';
 import { ethers } from 'ethers';
 import { provider, baseProvider } from '../services/chain.js';
 import { config } from '../config.js';
 import { claimDeployCredit } from '../services/agentFactoryListener.js';
+import { discoverModels, ProviderModelsError } from '../services/providerModels.js';
 
 /**
  * Owner-only guard for any agent endpoint that touches funds, keys, or
@@ -253,6 +255,36 @@ agentsRouter.get('/providers', (_req, res) => {
       pricing: LLM_PROVIDER_MODELS, // full ModelInfo[] with costs
     },
   });
+});
+
+// POST /api/v1/agents/provider-models — live model list for the deploy form.
+// Relays the user's own key (pasted into the form) to that provider's fixed
+// models endpoint and returns what the key can use; the key is not stored.
+// Auth'd + per-user limited so this isn't an anonymous key-validity oracle.
+const providerModelsLimiter = createUserRateLimiter(12);
+const ProviderModelsSchema = z.object({
+  provider: z.enum(PROVIDERS),
+  apiKey: z.string().trim().max(512).default(''),
+});
+agentsRouter.post('/provider-models', requireAuth, providerModelsLimiter, async (req: AuthRequest, res, next) => {
+  try {
+    const parsed = ProviderModelsSchema.safeParse(req.body);
+    if (!parsed.success) { res.status(400).json({ success: false, error: parsed.error.flatten() }); return; }
+    const provider = parsed.data.provider as LLMProvider;
+    const { apiKey } = parsed.data;
+    if (provider !== '0g-compute' && !apiKey) {
+      res.status(400).json({ success: false, error: { code: 'API_KEY_REQUIRED', message: `${provider} needs an API key to list its models` } });
+      return;
+    }
+    const models = await discoverModels(provider, apiKey);
+    res.json({ success: true, data: { provider, models } });
+  } catch (err) {
+    if (err instanceof ProviderModelsError) {
+      res.status(err.code === 'PROVIDER_AUTH' ? 400 : 502).json({ success: false, error: { code: err.code, message: err.message } });
+      return;
+    }
+    next(err);
+  }
 });
 
 // POST /api/v1/agents/deploy

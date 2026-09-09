@@ -55,7 +55,7 @@ const agent = await bb.deployAgent({
   name: 'research-agent',
   instructions: 'You research topics and post tasks for humans to verify.',
   provider: 'anthropic',
-  model: 'claude-sonnet-4-5',
+  model: 'claude-sonnet-5',
   apiKey: process.env.ANTHROPIC_API_KEY,
   ownerAddress: wallet.address,
   ownerPublicKey: wallet.publicKey,

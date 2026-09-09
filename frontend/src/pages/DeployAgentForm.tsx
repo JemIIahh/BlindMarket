@@ -50,6 +50,8 @@ type Provider = 'openai' | 'anthropic' | 'groq' | 'gemini' | '0g-compute';
 type ProviderModels = Record<Provider, string[]>;
 interface ModelPricing { id: string; inputCostPer1M: number; outputCostPer1M: number; }
 type PricingMap = Record<Provider, ModelPricing[]>;
+/** A model the provider's own /models endpoint listed for the user's key. Priced only when our table knows it. */
+interface DiscoveredModel { id: string; inputCostPer1M?: number; outputCostPer1M?: number; }
 
 /** snake_case capability id → human label ("web_research" → "Web research"). */
 const INSTRUCTION_TEMPLATES: Record<string, string> = {
@@ -122,12 +124,14 @@ export default function DeployAgentForm() {
   const chainId = useChainId();
   const navigate = useNavigate();
 
+  // Pre-fetch fallback — mirrors LLM_PROVIDER_MODELS in backend/src/types.ts,
+  // which /api/v1/agents/providers replaces as soon as it answers.
   const [providers, setProviders] = useState<ProviderModels>({
-    openai: ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'gpt-4.1-mini', 'gpt-4.1-nano', 'o3', 'o3-mini'],
-    anthropic: ['claude-opus-4-8', 'claude-sonnet-5', 'claude-haiku-4-5', 'claude-opus-4-5', 'claude-sonnet-4-6', 'claude-sonnet-4-5'],
-    groq: ['llama-3.1-8b-instant', 'llama-3.3-70b-versatile', 'qwen3-32b', 'gpt-oss-120b', 'gpt-oss-20b'],
-    gemini: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash'],
-    '0g-compute': ['deepseek-ai/DeepSeek-V3.1', 'qwen/qwen-2.5-7b-instruct', 'google/gemma-3-27b-it'],
+    openai: ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.4-nano', 'gpt-5', 'gpt-5-mini', 'gpt-5-nano', 'gpt-4.1', 'gpt-4o', 'gpt-4o-mini'],
+    anthropic: ['claude-fable-5-1', 'claude-fable-5', 'claude-opus-5', 'claude-opus-4-8', 'claude-opus-4-7', 'claude-sonnet-5', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
+    groq: ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'llama-3.3-70b-versatile', 'llama-3.1-8b-instant'],
+    gemini: ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-pro-preview', 'gemini-3.1-flash-lite', 'gemini-2.5-pro', 'gemini-2.5-flash'],
+    '0g-compute': ['deepseek-v4-flash', 'qwen3.8-flash', 'glm-5.3-flash', 'deepseek-v4-pro', 'kimi-k3', 'claude-sonnet-5', 'claude-opus-5', 'gpt-5.6-terra', '0gm-1.0-35b-a3b'],
   });
   const [pricing, setPricing] = useState<PricingMap>({} as PricingMap);
 
@@ -135,12 +139,23 @@ export default function DeployAgentForm() {
     name: '',
     instructions: '',
     provider: '0g-compute' as Provider,
-    model: 'deepseek-ai/DeepSeek-V3.1',
+    model: 'deepseek-v4-flash',
     apiKey: '',
   });
 
-  // Lookup current model's pricing
-  const currentModelPricing = pricing[form.provider]?.find(m => m.id === form.model);
+  // Live list from the selected provider's own /models endpoint, fetched with
+  // the key the user pasted (keyless for 0G). Null until a key is present or
+  // if the lookup failed — the static catalog stands in until then.
+  const [live, setLive] = useState<{ provider: Provider; models: DiscoveredModel[] } | null>(null);
+  const [liveStatus, setLiveStatus] = useState<'idle' | 'loading' | 'ok' | 'error'>('idle');
+  const [liveError, setLiveError] = useState('');
+
+  const modelOptions: DiscoveredModel[] = live && live.provider === form.provider
+    ? live.models
+    : (providers[form.provider] ?? []).map(id => pricing[form.provider]?.find(p => p.id === id) ?? { id });
+  const currentModelPricing = modelOptions.find(m => m.id === form.model);
+  const priceIn = currentModelPricing?.inputCostPer1M;
+  const priceOut = currentModelPricing?.outputCostPer1M;
 
   const [showTemplateMenu, setShowTemplateMenu] = useState(false);
 
@@ -186,33 +201,42 @@ export default function DeployAgentForm() {
   const usdcBalanceHuman = usdcBalance !== null ? Number(formatUnits(usdcBalance, 6)) : null;
   const hasEnoughUsdc = usdcBalanceHuman !== null && usdcBalanceHuman >= DEPLOY_FEE_HUMAN;
 
-  const [ogPricing, setOgPricing] = useState<Record<string, { promptUsd: string; completionUsd: string } | null>>({});
-
   useEffect(() => {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 2000);
-    fetch('https://router-api.0g.ai/v1/models', { signal: ctrl.signal })
-      .then(r => r.json())
-      .then(res => {
-        const routerModels = (res.data || []) as Array<{ id: string; pricing_usd?: { prompt: string; completion: string } }>;
-        const map: Record<string, { promptUsd: string; completionUsd: string } | null> = {};
-        for (const modelId of (providers['0g-compute'] ?? [])) {
-          const parts = modelId.toLowerCase().split(/[/\-_.]+/).filter(Boolean);
-          let best: { id: string; score: number; promptUsd: string; completionUsd: string } | null = null;
-          for (const rm of routerModels) {
-            const rid = rm.id.toLowerCase();
-            const score = parts.reduce((s, p) => s + (rid.includes(p) ? 1 : 0), 0);
-            if (score > (best?.score ?? -1) && rm.pricing_usd) {
-              best = { id: rm.id, score, promptUsd: rm.pricing_usd.prompt, completionUsd: rm.pricing_usd.completion };
-            }
+    if (!address) return; // the lookup is authenticated — deploy needs a session anyway
+    const provider = form.provider;
+    const apiKey = form.apiKey.trim();
+    const keyed = provider !== '0g-compute';
+    if (keyed && apiKey.length < 20) { setLive(null); setLiveStatus('idle'); return; }
+    let cancelled = false;
+    setLiveStatus('loading');
+    // Debounce while the key is being typed/pasted; 0G needs no key, so go now.
+    const t = setTimeout(() => {
+      authedPost<{ provider: Provider; models: DiscoveredModel[] }>('/api/v1/agents/provider-models', { provider, apiKey })
+        .then(d => {
+          if (cancelled) return;
+          if (d.models.length === 0) {
+            setLive(null);
+            setLiveStatus('error');
+            setLiveError(`${provider} listed no chat models for this key — showing our defaults`);
+            return;
           }
-          map[modelId] = best ? { promptUsd: best.promptUsd, completionUsd: best.completionUsd } : null;
-        }
-        setOgPricing(map);
-      })
-      .catch(() => {});
-    return () => { clearTimeout(t); ctrl.abort(); };
-  }, []);
+          setLive(d);
+          setLiveStatus('ok');
+          setLiveError('');
+          // A catalog pick the provider no longer lists → first live model.
+          setForm(f => (d.models.some(m => m.id === f.model) ? f : { ...f, model: d.models[0].id }));
+        })
+        .catch((err: { code?: string }) => {
+          if (cancelled) return;
+          setLive(null);
+          setLiveStatus('error');
+          setLiveError(err?.code === 'PROVIDER_AUTH'
+            ? `${provider} rejected this API key`
+            : 'Could not list models from the provider — showing our defaults');
+        });
+    }, keyed ? 600 : 0);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [form.provider, form.apiKey, address]);
 
   useEffect(() => {
     let cancelled = false;
@@ -461,14 +485,24 @@ export default function DeployAgentForm() {
                 {Object.keys(providers).map(p => <option key={p} value={p}>{p}</option>)}
               </FormSelect>
             </FormField>
-            <FormField label="Model">
+            <FormField
+              label="Model"
+              hint={
+                liveStatus === 'loading' ? 'Checking which models this key can use…'
+                : liveStatus === 'ok' && live ? `Live from ${form.provider} · ${live.models.length} models`
+                : liveStatus === 'error' ? liveError
+                : form.provider === '0g-compute' ? undefined
+                : 'Paste your API key to list every model it can use.'
+              }
+            >
               <FormSelect value={form.model} onChange={e => set('model', e.target.value)} className="font-mono">
-                {(providers[form.provider] ?? []).map(m => {
-                  const p = pricing[form.provider]?.find(x => x.id === m);
-                  const cost = p ? (p.inputCostPer1M + p.outputCostPer1M) / 2 : null;
+                {modelOptions.map(m => {
+                  const cost = m.inputCostPer1M !== undefined && m.outputCostPer1M !== undefined
+                    ? (m.inputCostPer1M + m.outputCostPer1M) / 2
+                    : null;
                   return (
-                    <option key={m} value={m}>
-                      {m}{cost !== null ? (cost === 0 ? ' (free)' : ` (~$${cost.toFixed(2)}/1M)`) : ''}
+                    <option key={m.id} value={m.id}>
+                      {m.id}{cost !== null ? ` (~$${cost.toFixed(2)}/1M)` : ''}
                     </option>
                   );
                 })}
@@ -488,24 +522,23 @@ export default function DeployAgentForm() {
           </div>
 
           {/* Model pricing display */}
-          {currentModelPricing && (currentModelPricing.inputCostPer1M > 0 || currentModelPricing.outputCostPer1M > 0) && (
+          {priceIn !== undefined && priceOut !== undefined ? (
             <div className="mt-3 flex items-center gap-4 text-[12px] text-ink-3">
               <span>
-                Input: <span className="font-mono text-ink">${currentModelPricing.inputCostPer1M.toFixed(2)}</span> / 1M tokens
+                Input: <span className="font-mono text-ink">${priceIn.toFixed(2)}</span> / 1M tokens
               </span>
               <span>
-                Output: <span className="font-mono text-ink">${currentModelPricing.outputCostPer1M.toFixed(2)}</span> / 1M tokens
+                Output: <span className="font-mono text-ink">${priceOut.toFixed(2)}</span> / 1M tokens
               </span>
               <span className="text-ink-4">
-                ~${((currentModelPricing.inputCostPer1M + currentModelPricing.outputCostPer1M) / 2).toFixed(2)} avg / 1M
+                ~${((priceIn + priceOut) / 2).toFixed(2)} avg / 1M
               </span>
             </div>
-          )}
-          {currentModelPricing && currentModelPricing.inputCostPer1M === 0 && currentModelPricing.outputCostPer1M === 0 && (
-            <div className="mt-3 text-[12px] text-green-400">
-              Free — billed via {form.provider === '0g-compute' ? 'agent wallet' : 'provider free tier'}
+          ) : currentModelPricing ? (
+            <div className="mt-3 text-[12px] text-ink-3">
+              No price on file for <span className="font-mono text-ink">{currentModelPricing.id}</span> — check {form.provider}'s pricing page.
             </div>
-          )}
+          ) : null}
 
           {form.provider === '0g-compute' && (
             <div className="mt-4 border border-cream/20 bg-cream/[0.03] px-4 py-3.5 text-[13px] leading-relaxed space-y-2">
@@ -514,15 +547,6 @@ export default function DeployAgentForm() {
                 <span>0G Compute — billed to agent wallet</span>
               </div>
               <div className="text-ink-2 space-y-1">
-                {ogPricing[form.model] ? (
-                  <p>
-                    <span className="font-mono text-ink">{form.model}</span> pricing:
-                    {' '}{(+ogPricing[form.model]!.promptUsd * 1000).toFixed(3)}¢ / 1K prompt tokens,
-                    {' '}{(+ogPricing[form.model]!.completionUsd * 1000).toFixed(3)}¢ / 1K completion tokens.
-                  </p>
-                ) : ogPricing[form.model] === undefined ? (
-                  <p className="text-ink-3">Loading pricing…</p>
-                ) : null}
                 <p>
                   Inference is billed to the agent's own wallet, which pays the
                   0G Compute ledger directly.
