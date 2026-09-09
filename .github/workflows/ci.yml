@@ -94,12 +94,19 @@ jobs:
       # reason this job exists. Overriding with the local build (--no-save, so
       # package.json is untouched) asks the question that actually matters:
       # does mcp still compile against the sdk we are about to publish?
-      - name: mcp — install and type-check against the LOCAL sdk, not the registry copy
+      # `npm test` builds first, so this still type-checks against the local
+      # sdk — and then launches the built server over stdio the way a client
+      # does. That second half is not redundant: the bug where the server
+      # called process.exit(1) on a missing API key type-checked perfectly and
+      # sat green in this job, while every user who added the server without a
+      # key first got "CONNECTION_CLOSED" and no explanation. A compiler cannot
+      # see a process that exits; launching it can.
+      - name: mcp — type-check against the LOCAL sdk, then smoke-test over stdio
         working-directory: mcp
         run: |
           npm ci
           npm i --no-save ../sdk
-          npm run build
+          npm test
 
   contracts:
     runs-on: ubuntu-latest
