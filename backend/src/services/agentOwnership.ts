@@ -1,4 +1,4 @@
-import type { DeployedAgent, AgentCapability, InstalledSkill } from '../types.js';
+import type { DeployedAgent, InstalledSkill } from '../types.js';
 
 /**
  * Shared ownership predicate for deployed agents. Owner set = the original

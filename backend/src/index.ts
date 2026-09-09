@@ -42,7 +42,7 @@ import { startAgentFactoryListener } from './services/agentFactoryListener.js';
 import { startExpirySweepLoop } from './services/a2aExpirySweep.js';
 import { auditCustodySealedTasks } from './services/keyCustodyService.js';
 import { isBridgeConfigured } from './services/a2aSettlement.js';
-import { marketplaceSigner, escrow, provider } from './services/chain.js';
+import { marketplaceSigner, escrow } from './services/chain.js';
 import { logChainConfig } from './services/chainService.js';
 import { reconcileAgents, startZombieReaper } from './services/agentRunner.js';
 

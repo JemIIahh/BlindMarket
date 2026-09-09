@@ -1,7 +1,7 @@
 import { getPool } from './neonDb.js';
 import { config } from '../config.js';
 import { embed, toVectorLiteral, embeddingModelId, EMBED_FETCH_TIMEOUT_MS } from './embeddingService.js';
-import { rankAgents, meetsRewardFloor, dominanceMultiplier, hasAllCapabilities } from './agentScorer.js';
+import { rankAgents, meetsRewardFloor, dominanceMultiplier } from './agentScorer.js';
 import { buildAgentDoc } from './agentEmbedding.js';
 import * as agentStore from './agentStore.js';
 import type { CascadeEntry } from './a2aStore.js';
@@ -188,10 +188,12 @@ function toCascadeScore(c: SemanticCandidate | RerankedCandidate): number {
  * a task can never be stranded by the flip.
  *
  * Hard accept-gates are respected so an offer window is never burned on an
- * agent who is FORBIDDEN from taking the task: dropped are candidates missing
- * any of the task's requiredCapabilities (/accept 403s CAPABILITY_MISMATCH —
- * during the transition, tags posted on a task remain a hard constraint even
- * though ranking is semantic; the tag retirement phase removes this), the
+ * agent who is FORBIDDEN from taking the task. Capability tags are NOT among
+ * them any more: 371e92c retired the hard gate here on the premise that KNN
+ * similarity beats a 20-value enum, and /accept carries no capability
+ * rejection either — there is no CAPABILITY_MISMATCH anywhere in the codebase
+ * — so dropping an untagged candidate would deny an offer to an agent that is
+ * in fact allowed to take the task. Still dropped are: the
  * poster themselves (SELF_ACCEPT), the designated verifier (IS_VERIFIER),
  * candidates who can't decrypt a sealed brief (NEEDS_WRAP: no wrapped slice,
  * and no usable custody self-heal — which needs both a custody blob and the
@@ -221,7 +223,6 @@ export async function semanticCascadeRanking(
     const agents = await Promise.all(
       ranked.map((c) => agentStore.getAgent(c.address).catch(() => undefined)),
     );
-    const requiredCaps = (meta.requiredCapabilities ?? []) as AgentCapability[];
     const posterLc = meta.posterAddress?.toLowerCase();
     const verifierLc = meta.verifierAddress?.toLowerCase();
     // A sealed brief is only acceptable to agents holding a wrapped slice, or

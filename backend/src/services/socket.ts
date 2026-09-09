@@ -2,6 +2,7 @@ import { Server as HttpServer } from 'http';
 import { Server as SocketServer } from 'socket.io';
 import type { CorsOptions } from 'cors';
 import { verifyRegistrationToken } from '../middleware/auth.js';
+import * as a2aStore from './a2aStore.js';
 
 let io: SocketServer | null = null;
 
@@ -26,6 +27,73 @@ export function canJoin(room: string, agentAddress: string | null): boolean {
   return false;
 }
 
+/**
+ * How many open tasks a joining client is told about at once.
+ *
+ * Bounded because the worker fires an /accept per `task:available`
+ * (agents/worker.js), so an unbounded replay would turn one reconnect into a
+ * burst of accept attempts against the same board.
+ */
+export const BACKLOG_REPLAY_LIMIT = 25;
+
+/** Minimal emitter surface — lets the replay be tested without a live server. */
+interface Emitter { emit(event: string, data: unknown): unknown }
+
+/**
+ * Tell a client joining the `tasks` room what is already open.
+ *
+ * Without this, joining a room is the end of the story: nothing replays, and
+ * `emitTaskAvailable` is only ever called from the request and cascade paths in
+ * routes/a2a.ts — no sweeper re-emits. So a task broadcast while an agent was
+ * disconnected (a backend restart kills the cascade's setTimeout) was never
+ * mentioned to it again, and sat open until it expired with escrow still
+ * funded.
+ *
+ * Deliberately reuses the existing `task:available` event rather than adding a
+ * `task:backlog` one: workers already handle it, so every agent already
+ * deployed gets the fix without being redeployed.
+ *
+ * browseAgentTasks() supplies the list, so the deadline filter and capability
+ * shape match what the REST board would return — an expired task is not
+ * replayed. The payload carries only requiredCapabilities, exactly as
+ * emitTaskAvailable does; no key material crosses this channel.
+ */
+export async function replayOpenBoard(socket: Emitter): Promise<number> {
+  try {
+    const open = await a2aStore.browseAgentTasks();
+    const slice = open.slice(0, BACKLOG_REPLAY_LIMIT);
+    for (const { meta } of slice) {
+      socket.emit('task:available', {
+        taskId: meta.taskId,
+        meta: meta.requiredCapabilities?.length
+          ? { requiredCapabilities: meta.requiredCapabilities }
+          : {},
+      });
+    }
+    return slice.length;
+  } catch (err) {
+    // Never let a replay failure break the join itself — the client is still
+    // connected and WS delivery still works; it just missed the backlog.
+    console.warn('[socket] backlog replay failed:', (err as Error).message);
+    return 0;
+  }
+}
+
+/**
+ * Should a client that just joined `room` be replayed the open board?
+ *
+ * Only authenticated agent sockets. `tasks` is a public room, so without the
+ * address check any anonymous client could trigger a Redis read per join and
+ * loop it — the join was free before the backlog replay existed and should
+ * stay cheap for unauthenticated callers. The replay would also be waste: the
+ * sole consumer of `task:available` is agents/worker.js. The browser joins
+ * this room too (frontend/src/pages/MyTasks.tsx) but listens for other events
+ * and would discard every replayed one.
+ */
+export function shouldReplayBacklog(room: string, agentAddress: string | null): boolean {
+  return room === 'tasks' && !!agentAddress;
+}
+
 export function initSocket(httpServer: HttpServer, corsOptions: CorsOptions): SocketServer {
   io = new SocketServer(httpServer, { cors: corsOptions });
 
@@ -39,6 +107,22 @@ export function initSocket(httpServer: HttpServer, corsOptions: CorsOptions): So
       if (typeof room !== 'string' || room.length > 128) return;
       if (canJoin(room, agentAddress)) {
         socket.join(room);
+        // Catch the joiner up on work already waiting. Fire-and-forget: the
+        // join must not block on Redis.
+        //
+        // Restricted to AUTHENTICATED agent sockets, for two reasons. `tasks`
+        // is a public room, so without this any anonymous client could trigger
+        // a Redis read per join and loop it — the join was free before this
+        // change and should stay cheap for unauthenticated callers. And the
+        // replay would be waste anyway: the only consumer of `task:available`
+        // is agents/worker.js. The browser also joins this room
+        // (frontend/src/pages/MyTasks.tsx) but listens for other events and
+        // would discard every replayed one.
+        if (shouldReplayBacklog(room, agentAddress)) {
+          void replayOpenBoard(socket).then((n) => {
+            if (n > 0) console.log(`[socket] replayed ${n} open task(s) to agent ${agentAddress?.slice(0, 10)}…`);
+          });
+        }
       } else {
         console.warn(`[socket] join denied: room=${room} authed=${agentAddress ?? 'anon'}`);
         socket.emit('join:denied', { room });

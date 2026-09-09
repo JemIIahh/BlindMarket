@@ -14,7 +14,7 @@ import {
 } from './redis.js';
 import { saveAgent, loadAgent, loadAllAgents } from './deployedAgentStore.js';
 import { composeAgentRuntime } from './skillComposer.js';
-import type { DeployedAgent, AgentCapability, AgentStatus, LLMProvider, AgentTool, InstalledSkill } from '../types.js';
+import type { DeployedAgent, AgentCapability, LLMProvider, AgentTool, InstalledSkill } from '../types.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const WORKER_PATH = join(__dirname, '../../agents/worker.js');

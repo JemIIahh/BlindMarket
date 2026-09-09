@@ -212,7 +212,13 @@ describe('semanticCascadeRanking (Phase 2 flip — cascade offer queue)', () => 
     ]);
   });
 
-  it('drops candidates missing a required capability (their /accept would 403)', async () => {
+  // Capability tags no longer gate the cascade. 371e92c removed the
+  // hasAllCapabilities hard gate on the premise that KNN similarity is a
+  // better fit signal than a 20-value enum, and there is no longer a
+  // capability rejection on /accept either — so dropping a candidate here
+  // would deny an offer to an agent that is in fact allowed to take the task.
+  // This test asserted the old gate and was not updated with that change.
+  it('ranks every candidate, tags or not — capability tags do not gate', async () => {
     arm();
     vi.mocked(getAgent).mockImplementation(async (addr: string) =>
       ({ ...(agentRow(addr) as Record<string, unknown>), capabilities: addr === '0xbbb' ? ['code_review'] : [] }) as never);
@@ -220,7 +226,8 @@ describe('semanticCascadeRanking (Phase 2 flip — cascade offer queue)', () => 
       publicBrief: 'Review my PR',
       requiredCapabilities: ['code_review'] as never,
     });
-    expect(out?.map((e) => e.address)).toEqual(['0xbbb']);
+    // 0xaaa carries no tags at all and is still offered — KNN order decides.
+    expect(out?.map((e) => e.address)).toEqual(['0xaaa', '0xbbb']);
   });
 
   it('drops candidates whose minReward floor exceeds the task reward', async () => {

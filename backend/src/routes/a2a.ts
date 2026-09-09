@@ -22,7 +22,7 @@ import { redis } from '../services/redis.js';
 import { ethers } from 'ethers';
 import type { AuthRequest, ApiResponse, AgentCapability } from '../types.js';
 import { AGENT_CAPABILITIES } from '../types.js';
-import { rankAgents, pickExplorationAgent, hasAllCapabilities } from '../services/agentScorer.js';
+import { rankAgents, pickExplorationAgent } from '../services/agentScorer.js';
 import { emitTaskOffer, emitTaskAvailable } from '../services/socket.js';
 import { EXPIRY_GRACE_SEC } from '../constants.js';
 import { config } from '../config.js';
@@ -1057,7 +1057,6 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
     // attempt fails we fall back to scanning recent blocks for TaskCreated events
     // matching the taskHash via eth_getLogs.
     let receipt = null;
-    let activeProvider = provider;
     let activeEscrow = escrow;
     const taskCreatedTopic = ethers.id(
       'TaskCreated(uint256,address,address,uint256,bytes32,string,string,uint256)',
@@ -1076,14 +1075,13 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
     if (isUserOp) {
       console.log(`[tasks/index] isUserOp=true, skipping receipt poll — scanning logs`);
     } else {
-      for (const { prov, esc, label } of providers) {
+      for (const { prov, esc } of providers) {
         receipt = await prov.getTransactionReceipt(data.txHash);
         for (let i = 0; i < 3 && !receipt; i++) {
           await new Promise((r) => setTimeout(r, 3000));
           receipt = await prov.getTransactionReceipt(data.txHash);
         }
         if (receipt) {
-          activeProvider = prov;
           activeEscrow = esc;
           break;
         }
@@ -1131,7 +1129,6 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
               console.log(`[tasks/index] Match found! txHash=${match.transactionHash} block=${match.blockNumber}`);
               receipt = await prov.getTransactionReceipt(match.transactionHash);
               if (receipt) {
-                activeProvider = prov;
                 activeEscrow = esc;
                 console.log(`[tasks/index] Receipt confirmed at block ${receipt.blockNumber}`);
                 break;

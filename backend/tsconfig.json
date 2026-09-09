@@ -1,5 +1,9 @@
 {
   "compilerOptions": {
+    /* Dead code is a correctness signal here: two unused imports of
+       hasAllCapabilities survived the capability-gate removal because nothing
+       flagged them. The frontend already sets this. */
+    "noUnusedLocals": true,
     "target": "ES2020",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
