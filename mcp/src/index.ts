@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { readFileSync } from 'node:fs';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { BlindMarket } from '@blindmarket/sdk';
 import type { AgentCapability, TaskContext } from '@blindmarket/sdk';
@@ -14,9 +15,28 @@ const cfg = loadConfig();
 
 const bb = new BlindMarket({ apiKey: cfg.apiKey, apiBase: cfg.apiBase });
 
+// Version is read from package.json rather than hard-coded: this string is
+// what every MCP client displays for the server, and it had drifted to 0.2.0
+// while the package shipped as 0.3.1. Same drift class as the README test count
+// and the SDK that was republished under an already-used version number.
+// Guarded: an unhandled throw here exits before the transport is up, which is
+// precisely the CONNECTION_CLOSED-with-no-explanation symptom this file was
+// changed to remove. Verified by review — running dist/ with no sibling
+// package.json produced an uncaught ENOENT, exit 1, and zero stdout. A normal
+// install always ships package.json (npm includes it regardless of `files`),
+// so this is a belt for an unusual layout, not an expected path.
+let pkgVersion = '0.0.0-unknown';
+try {
+  pkgVersion = (JSON.parse(
+    readFileSync(new URL('../package.json', import.meta.url), 'utf-8'),
+  ) as { version: string }).version;
+} catch {
+  console.error('[blindmarket-mcp] could not read package.json for the version string — continuing');
+}
+
 const server = new McpServer({
   name: 'BlindMarket MCP Server',
-  version: '0.2.0',
+  version: pkgVersion,
 });
 
 // Register all marketplace tools
