@@ -1,6 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { formatEther, parseEther } from 'ethers';
+import { formatEther, formatUnits, parseEther } from 'ethers';
 import type { McpConfig } from './config.js';
 import type { WalletCtx } from './wallet.js';
 import { aesEncrypt, eciesEncrypt, generateAesKey, sha256Hex } from './crypto.js';
@@ -398,5 +398,269 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ taskHash, waitSeconds }) => ok(await pollPosted(taskHash, waitSeconds ?? 30)),
+  );
+
+  // ── cancel_task / claim_timeout ───────────────────────────────────────────
+  //
+  // The two ways escrow comes back to the poster. BlindEscrow splits them by
+  // task status and they are NOT interchangeable — calling the wrong one
+  // reverts on-chain:
+  //
+  //   Funded (0)                        → cancelTask, no deadline required
+  //   Assigned/Submitted/Verified (1-3) → claimTimeout, deadline must have passed
+  //   Disputed (6)                      → claimTimeout, but only once
+  //                                       DISPUTE_WINDOW has elapsed
+  //
+  // So the quote step reads the live status first and refuses a path the
+  // contract would reject, rather than letting the caller burn gas to find out.
+  //
+  // Both send a transaction, so both carry the same quote/confirm +
+  // idempotencyKey treatment as post_task. Here the ledger's job is to stop a
+  // retry from broadcasting a SECOND refund tx while the first is still
+  // unconfirmed — the first would land and the second would revert.
+  //
+  // Chain note: like post_task, these sign with the local wallet against
+  // whatever RPC it is configured for (0G by default). A task escrowed on Base
+  // is resolved server-side by resolveTaskChainById, but the resulting tx still
+  // goes out on the wallet's own chain — the same single-chain assumption
+  // post_task already makes, not a new one introduced here.
+
+  const STATUS_NAMES = ['Funded', 'Assigned', 'Submitted', 'Verified', 'Completed', 'Cancelled', 'Disputed'] as const;
+
+  function statusName(status: number): string {
+    return STATUS_NAMES[status] ?? `Unknown(${status})`;
+  }
+
+  interface TaskDetail {
+    taskId: string;
+    taskHash: string;
+    status: number;
+    amount: string;
+    deadline: string;
+    token: string;
+    decimals: number;
+  }
+
+  /** Resolve a task id-or-hash to its live on-chain state. GET /tasks/:id takes
+   *  either form, so callers can pass the taskHash post_task handed them. */
+  async function loadTask(task: string): Promise<TaskDetail> {
+    return api<TaskDetail>('GET', `/api/v1/tasks/${encodeURIComponent(task)}`);
+  }
+
+  /** Amount formatted against the task's OWN decimals — a Base task settles in
+   *  USDC (6), not the wallet's native 18. */
+  function refundAmount(detail: TaskDetail): string {
+    return formatUnits(BigInt(detail.amount), detail.decimals ?? 18);
+  }
+
+  /** Broadcast the refund and wait for it — the shared tail of both tools.
+   *  Resumable: a record past 'created' waits on the tx it already saved. */
+  async function sendRefund(record: SpendRecord): Promise<{ taskId: number; txHash: string }> {
+    const ctx = walletCtx!;
+    const taskId = record.taskId!;
+    let { txHash } = record;
+
+    if (record.stage === 'created') {
+      const route = record.kind === 'cancel' ? 'cancel' : 'timeout';
+      const { unsignedTx } = await api<{ unsignedTx: { to: string; data: string } }>(
+        'POST', `/api/v1/tasks/${taskId}/${route}`,
+      );
+      const tx = await ctx.wallet.sendTransaction({
+        to: unsignedTx.to,
+        data: unsignedTx.data,
+        gasLimit: GAS_LIMIT,
+      });
+      // Persist the hash BEFORE waiting, same reasoning as fundAndIndex: a crash
+      // mid-confirmation must resume onto THIS tx, not broadcast another one.
+      updateSpend(record.idempotencyKey, { stage: 'sent', txHash: tx.hash });
+      txHash = tx.hash;
+      await tx.wait();
+    } else if (txHash) {
+      await ctx.provider.waitForTransaction(txHash);
+    } else {
+      throw new Error(`Spend record ${record.idempotencyKey} is at stage '${record.stage}' with no txHash — cannot resume safely`);
+    }
+
+    updateSpend(record.idempotencyKey, { stage: 'confirmed' });
+    return { taskId, txHash: txHash! };
+  }
+
+  /** Shared resume arm: an idempotencyKey that has already moved. The kind
+   *  guard matters — the ledger is one namespace shared with rent/post, and
+   *  resuming a 'post' record through the refund path would wait on the FUNDING
+   *  tx and then mark that record confirmed, corrupting it. */
+  async function resumeRefund(existing: SpendRecord, kind: 'cancel' | 'timeout') {
+    if (existing.kind !== kind) {
+      return fail('IDEMPOTENCY_KEY_REUSED', `idempotencyKey "${existing.idempotencyKey}" already belongs to a '${existing.kind}' spend (task ${existing.taskId ?? existing.taskHash}). Use a fresh key for this refund.`);
+    }
+    if (existing.stage === 'confirmed') {
+      return ok({
+        resumed: true,
+        taskId: existing.taskId,
+        txHash: existing.txHash,
+        hint: 'Already refunded — this idempotencyKey completed earlier.',
+      });
+    }
+    try {
+      return ok({ resumed: true, ...(await sendRefund(existing)) });
+    } catch (err) {
+      return fail((err as ApiError).code ?? 'RESUME_FAILED', (err as Error).message);
+    }
+  }
+
+  server.registerTool(
+    'cancel_task',
+    {
+      title: 'Cancel a Task and Reclaim Escrow',
+      description: 'Reclaim the escrow on a task you posted that has NOT been assigned to a worker (status Funded). Works immediately — no deadline wait. For a task that was assigned but never delivered, use claim_timeout instead. TWO-STEP quote/confirm; requires a unique idempotencyKey.',
+      inputSchema: {
+        task: z.string().min(1).describe('Task id (e.g. "51") or the 0x task hash returned by post_task'),
+        idempotencyKey: z.string().min(8).max(128).describe('Unique key for this refund — reuse it on retries'),
+        confirm: z.boolean().optional().describe('Set true (with quoteId) to send the transaction'),
+        quoteId: z.string().optional().describe('From the quote step'),
+      },
+      annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ task, idempotencyKey, confirm, quoteId }) => {
+      const w = requireWallet();
+      if ('error' in w) return w.error;
+
+      const existing = getSpend(idempotencyKey);
+      if (existing) return resumeRefund(existing, 'cancel');
+
+      let detail: TaskDetail;
+      try {
+        detail = await loadTask(task);
+      } catch (err) {
+        return fail((err as ApiError).code ?? 'TASK_LOOKUP_FAILED', (err as Error).message);
+      }
+
+      const status = Number(detail.status);
+      if (status !== 0) {
+        const alt = status >= 1 && status <= 3
+          ? ' Use claim_timeout instead, once the deadline has passed.'
+          : ' The escrow is already settled — nothing to reclaim.';
+        return fail('WRONG_REFUND_PATH', `Task ${detail.taskId} is ${statusName(status)}, and cancelTask only accepts Funded tasks.${alt}`);
+      }
+
+      if (!confirm) {
+        const quote = createQuote('cancel', { taskId: detail.taskId });
+        return ok({
+          quote: {
+            action: 'cancelTask',
+            taskId: detail.taskId,
+            status: statusName(status),
+            refund: refundAmount(detail),
+            refundTo: w.wallet.address,
+            quoteId: quote.quoteId,
+          },
+          next: `Re-call cancel_task with confirm=true, quoteId="${quote.quoteId}", and the SAME idempotencyKey to send it.`,
+        });
+      }
+      if (!quoteId || !consumeQuote(quoteId, 'cancel')) {
+        return fail('QUOTE_REQUIRED', 'Get a quote first (call without confirm), then re-call with confirm=true and the returned quoteId (quotes are single-use and expire after 10 minutes)');
+      }
+
+      try {
+        const record: SpendRecord = {
+          idempotencyKey,
+          kind: 'cancel',
+          stage: 'created',
+          taskId: Number(detail.taskId),
+          taskHash: detail.taskHash,
+          amountWei: detail.amount,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+        putSpend(record);
+        const done = await sendRefund(record);
+        return ok({ ...done, refunded: refundAmount(detail), hint: 'Escrow returned to the posting wallet.' });
+      } catch (err) {
+        return fail((err as ApiError).code ?? 'CANCEL_FAILED', (err as Error).message);
+      }
+    },
+  );
+
+  server.registerTool(
+    'claim_timeout',
+    {
+      title: 'Reclaim Escrow After the Deadline',
+      description: 'Reclaim the escrow on a task that WAS assigned but never completed, once its deadline has passed (status Assigned, Submitted, or Verified-failed). For a task no worker ever picked up, use cancel_task instead — it needs no deadline. TWO-STEP quote/confirm; requires a unique idempotencyKey.',
+      inputSchema: {
+        task: z.string().min(1).describe('Task id (e.g. "51") or the 0x task hash returned by post_task'),
+        idempotencyKey: z.string().min(8).max(128).describe('Unique key for this refund — reuse it on retries'),
+        confirm: z.boolean().optional().describe('Set true (with quoteId) to send the transaction'),
+        quoteId: z.string().optional().describe('From the quote step'),
+      },
+      annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ task, idempotencyKey, confirm, quoteId }) => {
+      const w = requireWallet();
+      if ('error' in w) return w.error;
+
+      const existing = getSpend(idempotencyKey);
+      if (existing) return resumeRefund(existing, 'timeout');
+
+      let detail: TaskDetail;
+      try {
+        detail = await loadTask(task);
+      } catch (err) {
+        return fail((err as ApiError).code ?? 'TASK_LOOKUP_FAILED', (err as Error).message);
+      }
+
+      const status = Number(detail.status);
+      if (status === 0) {
+        return fail('WRONG_REFUND_PATH', `Task ${detail.taskId} is Funded — claimTimeout reverts on Funded tasks because no worker was ever assigned. Use cancel_task, which works right now with no deadline wait.`);
+      }
+      if (status === 4 || status === 5) {
+        return fail('NOTHING_TO_REFUND', `Task ${detail.taskId} is ${statusName(status)} — the escrow is already settled.`);
+      }
+
+      const deadline = BigInt(detail.deadline);
+      const now = BigInt(Math.floor(Date.now() / 1000));
+      if (now < deadline) {
+        return fail('DEADLINE_NOT_REACHED', `Task ${detail.taskId} is still live until ${new Date(Number(deadline) * 1000).toISOString()} — claimTimeout reverts before then.`);
+      }
+
+      if (!confirm) {
+        const quote = createQuote('timeout', { taskId: detail.taskId });
+        return ok({
+          quote: {
+            action: 'claimTimeout',
+            taskId: detail.taskId,
+            status: statusName(status),
+            deadlinePassed: new Date(Number(deadline) * 1000).toISOString(),
+            refund: refundAmount(detail),
+            refundTo: w.wallet.address,
+            // DISPUTE_WINDOW is enforced on-chain and disputedAt is not exposed
+            // here, so a disputed task can still revert after this quote.
+            ...(status === 6 ? { note: 'Task is Disputed — this only succeeds once the on-chain DISPUTE_WINDOW has elapsed since the dispute was raised, otherwise it reverts with DisputeWindowActive.' } : {}),
+            quoteId: quote.quoteId,
+          },
+          next: `Re-call claim_timeout with confirm=true, quoteId="${quote.quoteId}", and the SAME idempotencyKey to send it.`,
+        });
+      }
+      if (!quoteId || !consumeQuote(quoteId, 'timeout')) {
+        return fail('QUOTE_REQUIRED', 'Get a quote first (call without confirm), then re-call with confirm=true and the returned quoteId (quotes are single-use and expire after 10 minutes)');
+      }
+
+      try {
+        const record: SpendRecord = {
+          idempotencyKey,
+          kind: 'timeout',
+          stage: 'created',
+          taskId: Number(detail.taskId),
+          taskHash: detail.taskHash,
+          amountWei: detail.amount,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+        putSpend(record);
+        const done = await sendRefund(record);
+        return ok({ ...done, refunded: refundAmount(detail), hint: 'Escrow returned to the posting wallet.' });
+      } catch (err) {
+        return fail((err as ApiError).code ?? 'TIMEOUT_CLAIM_FAILED', (err as Error).message);
+      }
+    },
   );
 }
