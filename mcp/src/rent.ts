@@ -39,7 +39,19 @@ function fail(code: string, message: string) {
 interface ApiError extends Error { code?: string }
 
 export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: WalletCtx | null): void {
+  /** Every authenticated call funnels through api(), so this is the one place
+   *  the missing-key case needs handling. Without it the caller gets the
+   *  backend's generic "Authentication required", which never names the
+   *  variable to set — an agent reading that cannot tell what to fix. Also the
+   *  only consumer of cfg.authenticated, which was otherwise dead weight. */
   async function api<T = any>(method: string, path: string, body?: unknown): Promise<T> {
+    if (!cfg.authenticated) {
+      const err: ApiError = new Error(
+        `${path} needs credentials — set BLINDMARKET_API_KEY. Mint one in the web app under Settings -> API keys.`,
+      );
+      err.code = 'NO_API_KEY';
+      throw err;
+    }
     const res = await fetch(`${cfg.apiBase}${path}`, {
       method,
       headers: { 'Content-Type': 'application/json', 'X-API-Key': cfg.apiKey },
