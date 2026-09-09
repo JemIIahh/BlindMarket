@@ -551,40 +551,78 @@ export interface ModelInfo {
   outputCostPer1M: number;  // USD per 1M output tokens
 }
 
+// Curated catalog behind the deploy form's dropdown and its price hints.
+// NOT an allowlist: DeploySchema takes any model string and worker.js hands it
+// straight to the provider SDK, so an agent on a model that has since dropped
+// off this list keeps running. POST /agents/provider-models supplements this
+// with a live list from the provider once the user has pasted a key — this
+// table is the no-key fallback and the source of the price hints.
+//
+// Prices are USD per 1M tokens, standard tier, checked against each provider's
+// pricing page on 2026-09-08 (Groq's llama rates carried from 2026-08-05).
+// Newest first: the form defaults to the first entry when a provider is picked.
 export const LLM_PROVIDER_MODELS: Record<LLMProvider, ModelInfo[]> = {
   openai: [
-    { id: 'gpt-4o',         inputCostPer1M: 2.50,  outputCostPer1M: 10.00 },
-    { id: 'gpt-4o-mini',    inputCostPer1M: 0.15,  outputCostPer1M: 0.60  },
-    { id: 'gpt-4.1',        inputCostPer1M: 2.00,  outputCostPer1M: 8.00  },
-    { id: 'gpt-4.1-mini',   inputCostPer1M: 0.40,  outputCostPer1M: 1.60  },
-    { id: 'gpt-4.1-nano',   inputCostPer1M: 0.10,  outputCostPer1M: 0.40  },
-    { id: 'o3',             inputCostPer1M: 2.00,  outputCostPer1M: 8.00  },
-    { id: 'o3-mini',        inputCostPer1M: 1.10,  outputCostPer1M: 4.40  },
+    { id: 'gpt-6-astra',   inputCostPer1M: 10.00, outputCostPer1M: 50.00 },
+    { id: 'gpt-5.6-sol',   inputCostPer1M: 4.00,  outputCostPer1M: 20.00 },
+    { id: 'gpt-5.6-terra', inputCostPer1M: 2.00,  outputCostPer1M: 12.00 },
+    { id: 'gpt-5.6-luna',  inputCostPer1M: 0.20,  outputCostPer1M: 1.20  },
+    { id: 'gpt-5.5',       inputCostPer1M: 5.00,  outputCostPer1M: 30.00 },
+    { id: 'gpt-5.4',       inputCostPer1M: 2.50,  outputCostPer1M: 15.00 },
+    { id: 'gpt-5.4-mini',  inputCostPer1M: 0.75,  outputCostPer1M: 4.50  },
+    { id: 'gpt-5.4-nano',  inputCostPer1M: 0.20,  outputCostPer1M: 1.25  },
+    { id: 'gpt-5',         inputCostPer1M: 1.25,  outputCostPer1M: 10.00 },
+    { id: 'gpt-5-mini',    inputCostPer1M: 0.25,  outputCostPer1M: 2.00  },
+    { id: 'gpt-5-nano',    inputCostPer1M: 0.05,  outputCostPer1M: 0.40  },
+    { id: 'gpt-4.1',       inputCostPer1M: 2.00,  outputCostPer1M: 8.00  },
+    { id: 'gpt-4o',        inputCostPer1M: 2.50,  outputCostPer1M: 10.00 },
+    { id: 'gpt-4o-mini',   inputCostPer1M: 0.15,  outputCostPer1M: 0.60  },
   ],
   anthropic: [
-    { id: 'claude-opus-4-8',  inputCostPer1M: 5.00,  outputCostPer1M: 25.00 },
-    { id: 'claude-opus-4-5',  inputCostPer1M: 5.00,  outputCostPer1M: 25.00 },
-    { id: 'claude-sonnet-5',  inputCostPer1M: 3.00,  outputCostPer1M: 15.00 },
-    { id: 'claude-sonnet-4-6', inputCostPer1M: 3.00, outputCostPer1M: 15.00 },
-    { id: 'claude-sonnet-4-5', inputCostPer1M: 3.00, outputCostPer1M: 15.00 },
-    { id: 'claude-haiku-4-5', inputCostPer1M: 1.00,  outputCostPer1M: 5.00  },
+    { id: 'claude-fable-5-1',  inputCostPer1M: 10.00, outputCostPer1M: 50.00 },
+    { id: 'claude-fable-5',    inputCostPer1M: 10.00, outputCostPer1M: 50.00 },
+    { id: 'claude-opus-5',     inputCostPer1M: 5.00,  outputCostPer1M: 25.00 },
+    { id: 'claude-opus-4-8',   inputCostPer1M: 5.00,  outputCostPer1M: 25.00 },
+    { id: 'claude-opus-4-7',   inputCostPer1M: 5.00,  outputCostPer1M: 25.00 },
+    { id: 'claude-sonnet-5',   inputCostPer1M: 2.00,  outputCostPer1M: 10.00 },
+    { id: 'claude-sonnet-4-6', inputCostPer1M: 3.00,  outputCostPer1M: 15.00 },
+    { id: 'claude-haiku-4-5',  inputCostPer1M: 1.00,  outputCostPer1M: 5.00  },
   ],
   groq: [
-    { id: 'llama-3.1-8b-instant',    inputCostPer1M: 0.05,  outputCostPer1M: 0.08  },
-    { id: 'llama-3.3-70b-versatile',  inputCostPer1M: 0.59,  outputCostPer1M: 0.79  },
-    { id: 'qwen3-32b',               inputCostPer1M: 0.29,  outputCostPer1M: 0.59  },
-    { id: 'gpt-oss-120b',            inputCostPer1M: 0.15,  outputCostPer1M: 0.60  },
-    { id: 'gpt-oss-20b',             inputCostPer1M: 0.075, outputCostPer1M: 0.30  },
+    // Groq namespaces the OSS GPT models — the bare 'gpt-oss-120b' this list
+    // used to carry is not a Groq model id.
+    { id: 'openai/gpt-oss-120b',     inputCostPer1M: 0.15,  outputCostPer1M: 0.60 },
+    { id: 'openai/gpt-oss-20b',      inputCostPer1M: 0.075, outputCostPer1M: 0.30 },
+    { id: 'llama-3.3-70b-versatile', inputCostPer1M: 0.59,  outputCostPer1M: 0.79 },
+    { id: 'llama-3.1-8b-instant',    inputCostPer1M: 0.05,  outputCostPer1M: 0.08 },
   ],
   gemini: [
-    { id: 'gemini-2.5-pro',   inputCostPer1M: 1.25,  outputCostPer1M: 10.00 },
-    { id: 'gemini-2.5-flash', inputCostPer1M: 0.15,  outputCostPer1M: 0.60  },
-    { id: 'gemini-2.0-flash', inputCostPer1M: 0.10,  outputCostPer1M: 0.40  },
+    // 3.x Flash is $0.75/$3.75 through 2026-12-31, then $1.50/$7.50.
+    { id: 'gemini-3.8-flash',       inputCostPer1M: 0.75,  outputCostPer1M: 3.75  },
+    { id: 'gemini-3.7-flash',       inputCostPer1M: 0.75,  outputCostPer1M: 3.75  },
+    { id: 'gemini-3.6-flash',       inputCostPer1M: 0.75,  outputCostPer1M: 3.75  },
+    { id: 'gemini-3.5-flash',       inputCostPer1M: 1.50,  outputCostPer1M: 9.00  },
+    { id: 'gemini-3.5-flash-lite',  inputCostPer1M: 0.30,  outputCostPer1M: 2.50  },
+    { id: 'gemini-3.1-pro-preview', inputCostPer1M: 2.00,  outputCostPer1M: 12.00 },
+    { id: 'gemini-3.1-flash-lite',  inputCostPer1M: 0.25,  outputCostPer1M: 1.50  },
+    { id: 'gemini-2.5-pro',         inputCostPer1M: 1.25,  outputCostPer1M: 10.00 },
+    { id: 'gemini-2.5-flash',       inputCostPer1M: 0.30,  outputCostPer1M: 2.50  },
   ],
+  // No API key: inference is billed to the agent's own wallet through the 0G
+  // Compute Router, which now fronts frontier closed models as well as open
+  // ones. Prices are the router's pricing_usd × 1e6 as of 2026-09-09 — they
+  // drift day to day, so the live list (same endpoint, keyless) is the
+  // authority and overrides these whenever the form can reach it.
   '0g-compute': [
-    { id: 'deepseek-ai/DeepSeek-V3.1',        inputCostPer1M: 0, outputCostPer1M: 0 },
-    { id: 'qwen/qwen-2.5-7b-instruct',        inputCostPer1M: 0, outputCostPer1M: 0 },
-    { id: 'google/gemma-3-27b-it',             inputCostPer1M: 0, outputCostPer1M: 0 },
+    { id: 'deepseek-v4-flash', inputCostPer1M: 0.138, outputCostPer1M: 0.275 },
+    { id: 'qwen3.8-flash',     inputCostPer1M: 0.113, outputCostPer1M: 0.382 },
+    { id: 'glm-5.3-flash',     inputCostPer1M: 0.111, outputCostPer1M: 0.389 },
+    { id: 'deepseek-v4-pro',   inputCostPer1M: 0.792, outputCostPer1M: 2.376 },
+    { id: 'kimi-k3',           inputCostPer1M: 3.00,  outputCostPer1M: 15.00 },
+    { id: 'claude-sonnet-5',   inputCostPer1M: 1.90,  outputCostPer1M: 9.50  },
+    { id: 'claude-opus-5',     inputCostPer1M: 5.00,  outputCostPer1M: 25.00 },
+    { id: 'gpt-5.6-terra',     inputCostPer1M: 2.00,  outputCostPer1M: 12.00 },
+    { id: '0gm-1.0-35b-a3b',   inputCostPer1M: 0.08,  outputCostPer1M: 0.48  },
   ],
 };
 
