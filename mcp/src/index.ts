@@ -9,6 +9,12 @@ import { registerMarketTools } from './tools.js';
 import { registerRuntimeTools } from './runtime.js';
 import { loadWallet, registerWalletTools } from './wallet.js';
 import { registerRentTools } from './rent.js';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8'));
 
 const cfg = loadConfig();
 
@@ -16,7 +22,7 @@ const bb = new BlindMarket({ apiKey: cfg.apiKey, apiBase: cfg.apiBase });
 
 const server = new McpServer({
   name: 'BlindMarket MCP Server',
-  version: '0.2.0',
+  version: pkg.version,
 });
 
 // Register all marketplace tools

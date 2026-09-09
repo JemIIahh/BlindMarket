@@ -4,10 +4,9 @@ export interface McpConfig {
 }
 
 export function loadConfig(): McpConfig {
-  const apiKey = process.env.BLINDMARKET_API_KEY;
+  const apiKey = process.env.BLINDMARKET_API_KEY ?? '';
   if (!apiKey) {
-    console.error('FATAL: BLINDMARKET_API_KEY environment variable is required');
-    process.exit(1);
+    console.error('[blindmarket-mcp] BLINDMARKET_API_KEY not set — write tools will fail, read-only tools still work');
   }
   return {
     apiKey,
