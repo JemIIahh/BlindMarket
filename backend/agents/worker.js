@@ -175,8 +175,9 @@ const DELEGATE_GAS_RESERVE_OG = process.env.DELEGATE_GAS_RESERVE_OG ?? '0.005';
 
 // 0G Compute Router — when no AGENT_API_KEY is set, the agent uses its own
 // wallet to pay for inference on the 0G Compute Network (decentralized AI).
-// Models available: qwen/qwen-2.5-7b-instruct, deepseek-ai/DeepSeek-V3.1, etc.
-// The agent wallet must have 0G tokens to cover per-call costs.
+// The model set changes often (GET https://router-api.0g.ai/v1/models is the
+// authority; the deploy form reads it live). The agent wallet must hold 0G
+// tokens to cover per-call costs.
 const OG_COMPUTE_ENABLED = !AGENT_API_KEY && !!AGENT_PRIVATE_KEY;
 const OG_COMPUTE_ROUTER_BASE_URL = 'https://router-api.0g.ai/v1';
 

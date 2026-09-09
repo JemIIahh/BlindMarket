@@ -499,6 +499,7 @@ export default function DeployAgentForm() {
                 : liveStatus === 'ok' && live ? `Live from ${form.provider} · ${live.models.length} models`
                 : liveStatus === 'error' ? liveError
                 : form.provider === '0g-compute' ? undefined
+                : !address ? 'Connect a wallet to list the models your key can use.'
                 : 'Paste your API key to list every model it can use.'
               }
             >
@@ -543,7 +544,7 @@ export default function DeployAgentForm() {
                 ~${((priceIn + priceOut) / 2).toFixed(2)} avg / 1M
               </span>
             </div>
-          ) : currentModelPricing ? (
+          ) : currentModelPricing && live && live.provider === form.provider ? (
             <div className="mt-3 text-[12px] text-ink-3">
               No price on file for <span className="font-mono text-ink">{currentModelPricing.id}</span> — check {form.provider}'s pricing page.
             </div>

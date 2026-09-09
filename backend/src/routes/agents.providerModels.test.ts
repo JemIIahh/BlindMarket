@@ -11,6 +11,7 @@ import request from 'supertest';
  */
 
 const OWNER = '0x2222222222222222222222222222222222222222';
+const LIMIT_OWNER = '0x3333333333333333333333333333333333333333';
 
 vi.mock('../services/agentRunner.js', () => ({
   deployAgent: vi.fn(), startAgent: vi.fn(), pauseAgent: vi.fn(), stopAgent: vi.fn(), resumeAgent: vi.fn(),
@@ -19,7 +20,8 @@ vi.mock('../services/agentRunner.js', () => ({
   addAuthorizedOwner: vi.fn(), getAgentStats: vi.fn(),
 }));
 vi.mock('../services/apiKeyStore.js', () => ({
-  lookupApiKey: vi.fn(async (c: string) => (c === 'sk_owner' ? { ownerAddress: OWNER } : null)),
+  lookupApiKey: vi.fn(async (c: string) =>
+    c === 'sk_owner' ? { ownerAddress: OWNER } : c === 'sk_limit' ? { ownerAddress: LIMIT_OWNER } : null),
 }));
 vi.mock('../services/chain.js', () => ({ provider: {}, baseProvider: {} }));
 vi.mock('../services/redis.js', () => ({
@@ -127,5 +129,20 @@ describe('POST /agents/provider-models', () => {
     const res = await call({ provider: 'mistral', apiKey: 'x' });
     expect(res.status).toBe(400);
     expect(discoverModels).not.toHaveBeenCalled();
+  });
+
+  // Own principal so the earlier tests' calls don't count against this bucket.
+  it('rate-limits per user — the 13th lookup in a minute is refused', async () => {
+    vi.mocked(discoverModels).mockResolvedValue([{ id: 'deepseek-v4-flash' }]);
+    const limited = () => request(app).post('/api/v1/agents/provider-models')
+      .set('X-API-Key', 'sk_limit').send({ provider: '0g-compute' });
+    for (let i = 0; i < 12; i++) expect((await limited()).status).toBe(200);
+    const res = await limited();
+    expect(res.status).toBe(429);
+    expect(res.body.error.code).toBe('RATE_LIMIT');
+    expect(discoverModels).toHaveBeenCalledTimes(12);
+    // The other principal is untouched.
+    expect((await call({ provider: '0g-compute' })).status).toBe(200);
+    vi.mocked(discoverModels).mockReset();
   });
 });
