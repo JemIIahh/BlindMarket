@@ -149,6 +149,9 @@ export default function DeployAgentForm() {
   const [live, setLive] = useState<{ provider: Provider; models: DiscoveredModel[] } | null>(null);
   const [liveStatus, setLiveStatus] = useState<'idle' | 'loading' | 'ok' | 'error'>('idle');
   const [liveError, setLiveError] = useState('');
+  // The key as last pasted or blurred. Discovery keys off this rather than
+  // every keystroke, so a half-typed key is never relayed to the provider.
+  const [committedKey, setCommittedKey] = useState('');
 
   const modelOptions: DiscoveredModel[] = live && live.provider === form.provider
     ? live.models
@@ -204,39 +207,38 @@ export default function DeployAgentForm() {
   useEffect(() => {
     if (!address) return; // the lookup is authenticated — deploy needs a session anyway
     const provider = form.provider;
-    const apiKey = form.apiKey.trim();
     const keyed = provider !== '0g-compute';
-    if (keyed && apiKey.length < 20) { setLive(null); setLiveStatus('idle'); return; }
+    if (keyed && committedKey.length < 20) { setLive(null); setLiveStatus('idle'); return; }
     let cancelled = false;
     setLiveStatus('loading');
-    // Debounce while the key is being typed/pasted; 0G needs no key, so go now.
-    const t = setTimeout(() => {
-      authedPost<{ provider: Provider; models: DiscoveredModel[] }>('/api/v1/agents/provider-models', { provider, apiKey })
-        .then(d => {
-          if (cancelled) return;
-          if (d.models.length === 0) {
-            setLive(null);
-            setLiveStatus('error');
-            setLiveError(`${provider} listed no chat models for this key — showing our defaults`);
-            return;
-          }
-          setLive(d);
-          setLiveStatus('ok');
-          setLiveError('');
-          // A catalog pick the provider no longer lists → first live model.
-          setForm(f => (d.models.some(m => m.id === f.model) ? f : { ...f, model: d.models[0].id }));
-        })
-        .catch((err: { code?: string }) => {
-          if (cancelled) return;
+    authedPost<{ provider: Provider; models: DiscoveredModel[] }>('/api/v1/agents/provider-models', { provider, apiKey: keyed ? committedKey : '' })
+      .then(d => {
+        if (cancelled) return;
+        if (d.models.length === 0) {
           setLive(null);
           setLiveStatus('error');
-          setLiveError(err?.code === 'PROVIDER_AUTH'
-            ? `${provider} rejected this API key`
-            : 'Could not list models from the provider — showing our defaults');
-        });
-    }, keyed ? 600 : 0);
-    return () => { cancelled = true; clearTimeout(t); };
-  }, [form.provider, form.apiKey, address]);
+          setLiveError(`${provider} listed no chat models for this key — showing our defaults`);
+          return;
+        }
+        setLive(d);
+        setLiveStatus('ok');
+        setLiveError('');
+        // A catalog pick the provider no longer lists → first live model.
+        setForm(f => (d.models.some(m => m.id === f.model) ? f : { ...f, model: d.models[0].id }));
+      })
+      .catch((err: { code?: string; status?: number }) => {
+        if (cancelled) return;
+        setLive(null);
+        setLiveStatus('error');
+        setLiveError(
+          err?.code === 'PROVIDER_AUTH' ? `${provider} rejected this API key`
+          : err?.code === 'RATE_LIMIT' ? 'Too many lookups — wait a minute and try again'
+          : err?.status === 401 ? 'Sign in to list the models your key can use'
+          : 'Could not list models from the provider — showing our defaults',
+        );
+      });
+    return () => { cancelled = true; };
+  }, [form.provider, committedKey, address]);
 
   useEffect(() => {
     let cancelled = false;
@@ -251,9 +253,14 @@ export default function DeployAgentForm() {
   }, []);
 
   function set(k: keyof typeof form, v: string) {
+    // A key belongs to one provider — switching must never relay it to another.
+    if (k === 'provider') setCommittedKey('');
     setForm(f => {
       const next = { ...f, [k]: v };
-      if (k === 'provider') next.model = providers[v as Provider]?.[0] ?? '';
+      if (k === 'provider') {
+        next.model = providers[v as Provider]?.[0] ?? '';
+        next.apiKey = '';
+      }
       return next;
     });
   }
@@ -515,6 +522,8 @@ export default function DeployAgentForm() {
                 className={`font-mono ${form.provider === '0g-compute' ? 'opacity-40' : ''}`}
                 value={form.apiKey}
                 onChange={e => set('apiKey', e.target.value)}
+                onBlur={e => setCommittedKey(e.target.value.trim())}
+                onPaste={e => { const el = e.currentTarget; setTimeout(() => setCommittedKey(el.value.trim()), 0); }}
                 placeholder={form.provider === '0g-compute' ? 'Auto — uses agent wallet' : 'sk-...'}
                 disabled={form.provider === '0g-compute'}
               />

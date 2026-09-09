@@ -610,13 +610,14 @@ export const LLM_PROVIDER_MODELS: Record<LLMProvider, ModelInfo[]> = {
   ],
   // No API key: inference is billed to the agent's own wallet through the 0G
   // Compute Router, which now fronts frontier closed models as well as open
-  // ones. Prices are the router's pricing_usd × 1e6 as of 2026-09-08; the live
-  // list (same endpoint, keyless) is the authority and overrides these.
+  // ones. Prices are the router's pricing_usd × 1e6 as of 2026-09-09 — they
+  // drift day to day, so the live list (same endpoint, keyless) is the
+  // authority and overrides these whenever the form can reach it.
   '0g-compute': [
     { id: 'deepseek-v4-flash', inputCostPer1M: 0.138, outputCostPer1M: 0.275 },
     { id: 'qwen3.8-flash',     inputCostPer1M: 0.113, outputCostPer1M: 0.382 },
     { id: 'glm-5.3-flash',     inputCostPer1M: 0.111, outputCostPer1M: 0.389 },
-    { id: 'deepseek-v4-pro',   inputCostPer1M: 1.272, outputCostPer1M: 3.816 },
+    { id: 'deepseek-v4-pro',   inputCostPer1M: 0.792, outputCostPer1M: 2.376 },
     { id: 'kimi-k3',           inputCostPer1M: 3.00,  outputCostPer1M: 15.00 },
     { id: 'claude-sonnet-5',   inputCostPer1M: 1.90,  outputCostPer1M: 9.50  },
     { id: 'claude-opus-5',     inputCostPer1M: 5.00,  outputCostPer1M: 25.00 },

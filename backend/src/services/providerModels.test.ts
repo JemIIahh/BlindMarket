@@ -49,6 +49,7 @@ describe('list shapes', () => {
       { id: 'whisper-large-v3', active: true },
       { id: 'meta-llama/llama-guard-4-12b', active: true },
       { id: 'playai-tts', active: true },
+      { id: 'canopylabs/orpheus-v1-english', active: true },
       { id: 'qwen3-32b', active: false },
     ] });
     expect(ids).toEqual(['openai/gpt-oss-120b', 'llama-3.3-70b-versatile']);
@@ -116,6 +117,14 @@ describe('discoverModels', () => {
   it('gemini 400 is a bad key', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => json({ error: { status: 'INVALID_ARGUMENT', message: 'API key not valid' } }, 400)));
     await expect(discoverModels('gemini', 'AIza-bad')).rejects.toMatchObject({ code: 'PROVIDER_AUTH' });
+  });
+
+  it('a malformed key that undici rejects at header time is not echoed', async () => {
+    // The one branch where the key text sits in the thrown error's message.
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('Headers.append: "Bearer sk-SECRET" is an invalid header value'); }));
+    const err = await discoverModels('openai', 'sk-SECRET').catch((e: unknown) => e);
+    expect((err as ProviderModelsError).code).toBe('PROVIDER_UNAVAILABLE');
+    expect((err as Error).message).not.toContain('SECRET');
   });
 
   it('5xx or network failure → PROVIDER_UNAVAILABLE', async () => {

@@ -45,13 +45,17 @@ export function anthropicChatIds(body: unknown): string[] {
   return listIds(body);
 }
 
-/** Groq: OpenAI-shaped list plus an `active` flag; skip speech and guard models. */
+/**
+ * Groq: OpenAI-shaped list plus an `active` flag, but no modality field — so
+ * speech models are recognised by name: whisper (STT), playai/orpheus (TTS,
+ * billed per character), plus the llama-guard classifiers.
+ */
 export function groqChatIds(body: unknown): string[] {
   const data = (body as { data?: Array<{ id?: unknown; active?: unknown }> })?.data ?? [];
   return data
     .filter((m) => typeof m.id === 'string' && m.active !== false)
     .map((m) => m.id as string)
-    .filter((id) => !/(whisper|tts|guard)/i.test(id));
+    .filter((id) => !/(whisper|tts|orpheus|playai|guard)/i.test(id));
 }
 
 /** Gemini: `models/<id>` names; keep the text models that answer generateContent. */

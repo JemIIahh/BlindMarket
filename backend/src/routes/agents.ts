@@ -261,13 +261,23 @@ agentsRouter.get('/providers', (_req, res) => {
 // Relays the user's own key (pasted into the form) to that provider's fixed
 // models endpoint and returns what the key can use; the key is not stored.
 // Auth'd + per-user limited so this isn't an anonymous key-validity oracle.
+// (express-rate-limit's default store is per-process — N instances = N× the
+// ceiling; the global per-IP limiter in index.ts is the backstop.)
 const providerModelsLimiter = createUserRateLimiter(12);
 const ProviderModelsSchema = z.object({
   provider: z.enum(PROVIDERS),
-  apiKey: z.string().trim().max(512).default(''),
+  // Printable ASCII only: a pasted key with a stray newline would otherwise be
+  // rejected by undici at header time and surface as "provider unreachable".
+  apiKey: z.string().trim().max(512).regex(/^[\x21-\x7E]*$/, 'API key must be printable ASCII with no spaces').default(''),
 });
 agentsRouter.post('/provider-models', requireAuth, providerModelsLimiter, async (req: AuthRequest, res, next) => {
   try {
+    // Wallet users only — the legacy shared AGENT_API_KEY collapses every
+    // holder into one 'agent' principal, which has no deploy form to serve.
+    if (!req.user?.address || req.user.address === 'agent') {
+      res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Owner authentication required' } });
+      return;
+    }
     const parsed = ProviderModelsSchema.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ success: false, error: parsed.error.flatten() }); return; }
     const provider = parsed.data.provider as LLMProvider;

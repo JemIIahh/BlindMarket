@@ -42,6 +42,11 @@ vi.mock('../services/providerModels.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../services/providerModels.js')>();
   return { ...actual, discoverModels: vi.fn() };
 });
+// A configured legacy agent key so the 'agent' principal can be exercised.
+vi.mock('../config.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../config.js')>();
+  return { ...actual, config: { ...actual.config, agentApiKey: 'legacy-agent-key' } };
+});
 
 import { agentsRouter } from './agents.js';
 import { globalErrorHandler } from '../middleware/errorHandler.js';
@@ -103,6 +108,19 @@ describe('POST /agents/provider-models', () => {
     const res = await call({ provider: 'openai', apiKey: 'sk-abc' });
     expect(res.status).toBe(502);
     expect(res.body.error.code).toBe('PROVIDER_UNAVAILABLE');
+  });
+
+  it('rejects the shared legacy agent principal', async () => {
+    const res = await request(app).post('/api/v1/agents/provider-models')
+      .set('X-API-Key', 'legacy-agent-key').send({ provider: '0g-compute' });
+    expect(res.status).toBe(401);
+    expect(discoverModels).not.toHaveBeenCalled();
+  });
+
+  it('rejects a key with control characters before relaying it', async () => {
+    const res = await call({ provider: 'openai', apiKey: 'sk-abc\ndef' });
+    expect(res.status).toBe(400);
+    expect(discoverModels).not.toHaveBeenCalled();
   });
 
   it('rejects an unknown provider', async () => {
