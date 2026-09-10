@@ -149,59 +149,38 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
 
   /** Hand a transaction to the backend relay: Privy signs it from payFrom with
    *  gas paid in USDC. Same wire shape as frontend/src/lib/txSigner.ts. */
-  /** Whether this process has already discovered that gas sponsorship is off
-   *  for the target chain, so later sends skip the doomed sponsored attempt. */
-  let sponsorshipUnavailable = false;
+  /** How the relay ended up paying for gas — reported by the backend, never
+   *  inferred here. 'user-pays' is the product path (USDC); the other two are
+   *  fallbacks the backend negotiated because Privy refused that rung. */
+  type GasMode = 'user-pays' | 'app-pays' | 'wallet-pays';
 
-  async function relaySend(s: BaseSettlement, tx: { to: string; data: string; value?: bigint }): Promise<{ hash: string; isUserOp: boolean }> {
-    const send = (sponsor: boolean) => api<{ hash: string; isUserOp?: boolean }>('POST', '/api/v1/tx/relay-tx', {
+  async function relaySend(s: BaseSettlement, tx: { to: string; data: string; value?: bigint }): Promise<{ hash: string; isUserOp: boolean; gas: GasMode }> {
+    // gas:'auto' asks the backend to negotiate: user-pays (USDC) → app-pays →
+    // wallet-pays, advancing only on Privy's exact refusal for each rung. The
+    // negotiation lives server-side on purpose — that is the one place that
+    // sees Privy's raw errors, and it is shared with the web app, so both
+    // clients behave identically. An earlier version did the fallback here,
+    // and it skipped app-pays entirely: the wallet kept paying its own ETH
+    // even after sponsorship was switched on in the Privy dashboard.
+    const r = await api<{ hash: string; isUserOp?: boolean; gas?: GasMode }>('POST', '/api/v1/tx/relay-tx', {
       walletAddress: s.payFrom,
       to: tx.to,
       data: tx.data,
       value: tx.value === undefined ? undefined : String(tx.value),
       chain: s.relayChain,
-      // Only name a gas asset on the sponsored attempt; sending one alongside
-      // sponsor:false asks for a feature we are explicitly declining.
-      ...(sponsor ? { asset: 'usdc' } : { sponsor: false }),
+      asset: 'usdc',
+      gas: 'auto',
     });
-
-    // Sponsored first, always — gas paid in USDC so the wallet needs no native
-    // token is the point of this path, and it is what mainnet uses.
-    //
-    // But sponsorship is per-chain Privy configuration, not a given: on Base
-    // Sepolia it is off, and every relay there fails with "Gas sponsorship is
-    // not enabled" (or, when an asset is named, "Asset usdc is not configured
-    // for gas payments on chain eip155:84532"). Rather than make the whole
-    // surface unusable on such a chain, fall back to an unsponsored relay,
-    // where Privy signs and the wallet pays gas from its own native balance.
-    //
-    // The fallback is narrow on purpose: only these two sponsorship-specific
-    // errors trigger it. An insufficient balance, a rejected signature or a
-    // wrong owner must surface as itself, not be retried into a second,
-    // differently-failing request.
-    let r: { hash: string; isUserOp?: boolean };
-    try {
-      r = sponsorshipUnavailable ? await send(false) : await send(true);
-    } catch (err) {
-      // Match on the backend's error CODE first — the message is prose and has
-      // already been reworded once ("not configured for this chain/token"
-      // versus Privy's own "not configured for gas payments"), so keying the
-      // fallback to it alone silently stops working.
-      const code = (err as ApiError).code ?? '';
-      const msg = String((err as Error).message ?? '');
-      const isSponsorshipGap = code === 'UNSUPPORTED_CHAIN'
-        || /sponsorship (is )?not (enabled|configured)|not configured for gas payments|not configured for this chain/i.test(msg);
-      if (sponsorshipUnavailable || !isSponsorshipGap) throw err;
-      sponsorshipUnavailable = true;
-      r = await send(false);
-    }
 
     if (!r?.hash) {
       const e: ApiError = new Error('relay-tx returned no hash');
       e.code = 'RELAY_NO_HASH';
       throw e;
     }
-    return { hash: r.hash, isUserOp: r.isUserOp === true };
+    // A backend older than the `gas` field answers without it. That backend
+    // also has no negotiation, so the only way it succeeds is the explicit
+    // default it applies to this body: user-pays.
+    return { hash: r.hash, isUserOp: r.isUserOp === true, gas: r.gas ?? 'user-pays' };
   }
 
   /** Wait for a relayed tx to land. A plain hash can be polled for its receipt;
@@ -275,7 +254,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
    *           createTask the backend built, both through the Privy relay with
    *           no local signing at all. The backend picks the escrow; we only
    *           check it is the one we approved. */
-  async function fundAndIndex(record: SpendRecord): Promise<{ taskHash: string; txHash: string }> {
+  async function fundAndIndex(record: SpendRecord): Promise<{ taskHash: string; txHash: string; gas?: GasMode }> {
     const s = await settlement();
     let { txHash } = record;
 
@@ -310,9 +289,10 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       await verifyTarget(s, unsignedTx.to, 'createTask');
 
       if (s.mode === 'base') {
-        const { hash, isUserOp } = await relaySend(s, { to: unsignedTx.to, data: unsignedTx.data });
+        const { hash, isUserOp, gas } = await relaySend(s, { to: unsignedTx.to, data: unsignedTx.data });
         // Persist BEFORE waiting, same reasoning as the 0G branch below.
-        updateSpend(record.idempotencyKey, { stage: 'funded', txHash: hash, isUserOp });
+        updateSpend(record.idempotencyKey, { stage: 'funded', txHash: hash, isUserOp, gas });
+        record.gas = gas;
         txHash = hash;
         record.isUserOp = isUserOp;
         await waitRelayed(s, hash, isUserOp);
@@ -350,7 +330,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       publicBrief: record.privacy === 'public' ? record.publicBrief : undefined,
     });
     updateSpend(record.idempotencyKey, { stage: 'indexed' });
-    return { taskHash: record.taskHash!, txHash: txHash! };
+    return { taskHash: record.taskHash!, txHash: txHash!, gas: record.gas };
   }
 
   async function pollPosted(taskHash: string, waitSeconds: number) {
@@ -769,7 +749,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
    *  Same two paths as fundAndIndex: local wallet on 0G, Privy relay on Base.
    *  The backend resolves which chain holds the task and builds the tx for
    *  it; this only decides who signs. */
-  async function sendRefund(record: SpendRecord): Promise<{ taskId: number; txHash: string }> {
+  async function sendRefund(record: SpendRecord): Promise<{ taskId: number; txHash: string; gas?: GasMode }> {
     const s = await settlement();
     const taskId = record.taskId!;
     let { txHash } = record;
@@ -792,9 +772,10 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       await verifyTarget(s, unsignedTx.to, `${route}Task`);
 
       if (s.mode === 'base') {
-        const { hash, isUserOp } = await relaySend(s, { to: unsignedTx.to, data: unsignedTx.data });
+        const { hash, isUserOp, gas } = await relaySend(s, { to: unsignedTx.to, data: unsignedTx.data });
         // Persist BEFORE waiting, same reasoning as the 0G branch below.
-        updateSpend(record.idempotencyKey, { stage: 'sent', txHash: hash, isUserOp });
+        updateSpend(record.idempotencyKey, { stage: 'sent', txHash: hash, isUserOp, gas });
+        record.gas = gas;
         txHash = hash;
         record.isUserOp = isUserOp;
         await waitRelayed(s, hash, isUserOp);
@@ -819,7 +800,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
 
     await waitCancelled(s, taskId);
     updateSpend(record.idempotencyKey, { stage: 'confirmed' });
-    return { taskId, txHash: txHash! };
+    return { taskId, txHash: txHash!, gas: record.gas };
   }
 
   /** Shared resume arm: an idempotencyKey that has already moved. The kind

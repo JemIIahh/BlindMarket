@@ -40,6 +40,12 @@ export async function signAndSendTx(
     value: value ? String(value) : undefined,
     chain: getRelayChain(),
     asset: 'usdc',
+    // Let the backend negotiate gas: user-pays (USDC) → app-pays → wallet-pays,
+    // advancing only on Privy's exact refusal for each rung. Without this the
+    // web app hard-coded user-pays with no fallback, so on any chain where
+    // Privy has no USDC gas configured every transaction failed — and enabling
+    // app-pays sponsorship in the dashboard could not help it.
+    gas: 'auto',
   };
 
   const res = await fetch(`${API_BASE_URL}/api/v1/tx/relay-tx`, {
