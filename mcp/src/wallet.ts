@@ -67,7 +67,7 @@ export function registerWalletTools(
         try {
           const s = await settlement();
           settlementReport = s.mode === 'base'
-            ? { mode: 'base', chainId: s.chainId, escrowAddress: s.escrowAddress, usdcAddress: s.usdcAddress, relayChain: s.relayChain, payFrom: s.payFrom, signs: 'backend relay (Privy, gas in USDC) — no local key involved' }
+            ? { mode: 'base', chainId: s.chainId, escrowAddress: s.escrowAddress, usdcAddress: s.usdcAddress, relayChain: s.relayChain, payFrom: s.payFrom, signs: 'backend relay (Privy) — no local key involved. Gas: sponsored in USDC where Privy sponsorship is enabled for this chain, otherwise from payFrom\'s own native balance' }
             : { mode: '0g', payFrom: ctx?.wallet.address ?? null, signs: ctx ? 'local wallet' : 'NOTHING — set BLINDMARKET_PRIVATE_KEY' };
         } catch (err) {
           settlementReport = { mode: 'unknown', error: (err as Error).message };

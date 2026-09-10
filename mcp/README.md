@@ -46,9 +46,32 @@ How a spend is paid, by settlement mode (`wallet_status` shows which you are in)
 
 Discovery is a hint, not a proof: `/health/bridge` reports Base only when the whole bridge is configured, while task creation routes on `BASE_ESCROW_ADDRESS` alone. Every send therefore checks the unsigned tx targets the escrow the current mode expects and refuses with `ESCROW_MISMATCH` otherwise — that check is what prevents native 0G value being sent to a Base address.
 
+### Base: what the wallet and key must be
+
+Proven end-to-end on Base Sepolia (task 11 on `0xCca5ab…`, posted and refunded through this server with no private key). Three things had to be true, none of them obvious:
+
+1. **The relay wallet must be owned by the same Privy key quorum as the backend's `PRIVY_AUTHORIZATION_KEY`.** A wallet created by an ordinary email/social login is owned by a *different*, auto-generated quorum, and every relay fails with `No valid authorization keys or user signing keys available`. Create one via the Privy API with `owner_id` set to that quorum (`privy.wallets().create({ chain_type: 'ethereum', owner_id })`), then fund it.
+2. **The `sk_` key must be bound to that wallet.** A key minted in the web app binds to whichever wallet is *primary* at mint time, and `lookupApiKey` rebuilds the caller as only that address — so a key minted while an external wallet (OKX, MetaMask) is primary can never relay. `backend/scripts/mint-mcp-key.mjs` mints a key bound to a chosen address directly in Postgres.
+3. **Gas.** Sponsored first, always (`asset: usdc`), which is the mainnet path and needs no native token. Where Privy has no sponsorship configured for the chain — Base Sepolia answers `Gas sponsorship is not enabled` — the server retries once with `sponsor: false` and the wallet pays gas from its own native balance, so it needs a little ETH there. That fallback is keyed on the backend's `UNSUPPORTED_CHAIN` code; any other failure surfaces as itself.
+
+To be explicit about what is and is not proven: the relay, ownership gate, authorization signing, escrow, and refund are all observed on-chain. **"Users hold only USDC and never need native gas" is not** — it depends on Privy sponsorship being enabled for the app, and it was not. That claim can only be verified where sponsorship is configured.
+
 ## Harness configuration
 
-**Claude Code**
+**Claude Code — Base (no private key)**
+
+```bash
+claude mcp add blindmarket \
+  --env BLINDMARKET_API_KEY=sk_... \
+  --env BLINDMARKET_API_BASE=https://api.blindmarket.xyz \
+  --env BLINDMARKET_SETTLEMENT=base \
+  --env BLINDMARKET_BASE_ESCROW_ADDRESS=0xCca5ab873158b888158AD9Dc36fb4Ee683eFbEBf \
+  -- node /path/to/BlindBounty/mcp/dist/index.js
+```
+
+(`BLINDMARKET_BASE_ESCROW_ADDRESS` is only needed while `/health/bridge` cannot confirm Base — see the env table. Use the mainnet escrow once deployed.)
+
+**Claude Code — 0G (legacy, local wallet)**
 
 ```bash
 claude mcp add blindmarket \
