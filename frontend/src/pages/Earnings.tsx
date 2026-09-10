@@ -15,10 +15,9 @@ import {
 } from '../components/bb';
 import { useAccountingEntries, useAccountingSummary } from '../hooks/useAccounting';
 import { useAuth } from '../context/AuthContext';
-import { useChain } from '../context/ChainContext';
 import { useChainAddress } from '../hooks/useChainWallet';
 import type { Transaction } from '../services/accounting';
-import { API_BASE_URL, getNativeCurrency } from '../config/constants';
+import { API_BASE_URL, getPaymentSymbol } from '../config/constants';
 
 type Tab = 'transactions' | 'my_agents';
 
@@ -84,10 +83,9 @@ export default function Earnings() {
   const [tab, setTab] = useTabParam<Tab>('transactions', TABS.map((t) => t.id));
   const [txPage, setTxPage] = useState(1);
   const { isAuthenticated } = useAuth();
-  const { activeChain } = useChain();
   const address = useChainAddress();
-  const native = getNativeCurrency(activeChain);
-  const fmt = (n: number | null | undefined) => formatCurrency(n, native.symbol);
+  const paymentSymbol = getPaymentSymbol();
+  const fmt = (n: number | null | undefined) => formatCurrency(n, paymentSymbol);
   const { data: summary, isLoading: summaryLoading, isError: summaryError, refetch: refetchSummary } = useAccountingSummary();
   const { data: entriesRes, isLoading: entriesLoading, error: entriesError } = useAccountingEntries(undefined, undefined, undefined, txPage, PAGE_SIZE);
   const { data: agents, isLoading: agentsLoading, isError: agentsError, refetch: refetchAgents } = useQuery({

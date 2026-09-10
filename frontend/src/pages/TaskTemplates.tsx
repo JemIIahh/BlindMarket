@@ -14,6 +14,7 @@ import {
   LoadingState,
   EmptyState,
   ErrorState,
+  Pagination,
   useTabParam,
 } from '../components/bb';
 import {
@@ -21,11 +22,13 @@ import {
   createTemplate,
   getMyTemplates,
 } from '../services/marketplace';
-import { getNativeCurrency } from '../config/constants';
-import { useChain } from '../context/ChainContext';
+import { getPaymentSymbol } from '../config/constants';
 import { truncateAddress } from '../lib/utils';
 
 type Tab = 'browse' | 'mine' | 'create';
+
+/** The route hard-caps `limit` at 50 (marketplace.ts), so a page cannot exceed it. */
+const PAGE_SIZE = 24;
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'browse', label: 'Public templates' },
@@ -35,9 +38,9 @@ const TABS: { id: Tab; label: string }[] = [
 
 export default function TaskTemplates() {
   const [tab, setTab] = useTabParam<Tab>('browse', TABS.map((t) => t.id));
+  const [page, setPage] = useState(1);
   const { address } = useAccount();
-  const { activeChain } = useChain();
-  const native = getNativeCurrency(activeChain);
+  const paymentSymbol = getPaymentSymbol();
   const qc = useQueryClient();
 
   const [name, setName] = useState('');
@@ -46,8 +49,8 @@ export default function TaskTemplates() {
   const [isPublic, setIsPublic] = useState(true);
 
   const { data: publicData, isLoading: publicLoading, isError: publicError, refetch: refetchPublic } = useQuery({
-    queryKey: ['public-templates'],
-    queryFn: () => getPublicTemplates(50),
+    queryKey: ['public-templates', page],
+    queryFn: () => getPublicTemplates(PAGE_SIZE, (page - 1) * PAGE_SIZE),
     enabled: tab === 'browse',
   });
 
@@ -118,7 +121,7 @@ export default function TaskTemplates() {
               }
             />
           ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {publicData.templates.map((t) => (
                 <Panel key={t.id} padding="md">
                   <div className="flex items-start justify-between gap-3 mb-2">
@@ -134,11 +137,21 @@ export default function TaskTemplates() {
                   </p>
                   <div className="flex items-center justify-between text-xs text-ink-3">
                     <span className="font-mono">{truncateAddress(t.creator_address)}</span>
-                    {t.suggested_reward && <span className="font-mono text-ink-2">{t.suggested_reward} {native.symbol}</span>}
+                    {t.suggested_reward && <span className="font-mono text-ink-2">{t.suggested_reward} {paymentSymbol}</span>}
                   </div>
                 </Panel>
               ))}
             </div>
+          )}
+
+          {publicData && publicData.total > PAGE_SIZE && (
+            <Pagination
+              page={page}
+              totalPages={Math.ceil(publicData.total / PAGE_SIZE)}
+              totalItems={publicData.total}
+              pageSize={PAGE_SIZE}
+              onPageChange={setPage}
+            />
           )}
         </div>
       )}
@@ -171,7 +184,7 @@ export default function TaskTemplates() {
                   <div className="min-w-0 flex-1">
                     <div className="text-ink font-medium truncate">{t.name}</div>
                     <div className="text-xs text-ink-3 mt-0.5">
-                      {t.use_count} uses{t.suggested_reward && ` · ${t.suggested_reward} ${native.symbol}`}
+                      {t.use_count} uses{t.suggested_reward && ` · ${t.suggested_reward} ${paymentSymbol}`}
                     </div>
                   </div>
                   <Tag tone={t.is_public ? 'ok' : 'neutral'}>{t.is_public ? 'public' : 'private'}</Tag>
@@ -192,7 +205,7 @@ export default function TaskTemplates() {
             <FormTextarea rows={6} placeholder="Describe what needs to be done…" value={description} onChange={(e) => setDescription(e.target.value)} />
           </FormField>
           <div className="grid grid-cols-2 gap-4">
-            <FormField label={`Suggested reward (${native.symbol})`}>
+            <FormField label={`Suggested reward (${paymentSymbol})`}>
               <FormInput className="font-mono" placeholder="50" value={suggestedReward} onChange={(e) => setSuggestedReward(e.target.value)} />
             </FormField>
             <FormField label="Visibility">
