@@ -1,10 +1,11 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { formatEther, formatUnits, parseEther } from 'ethers';
+import { Contract, Interface, formatUnits, parseUnits } from 'ethers';
 import type { McpConfig } from './config.js';
 import type { WalletCtx } from './wallet.js';
 import { aesEncrypt, eciesEncrypt, generateAesKey, sha256Hex } from './crypto.js';
 import { createQuote, consumeQuote, getSpend, putSpend, updateSpend, type SpendRecord } from './state.js';
+import { createSettlementResolver, type BaseSettlement, type Settlement } from './settlement.js';
 
 /**
  * Tier-2 spending tools: the CURRENT encrypted post/rent flow, executed
@@ -38,7 +39,7 @@ function fail(code: string, message: string) {
 
 interface ApiError extends Error { code?: string }
 
-export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: WalletCtx | null): void {
+export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: WalletCtx | null): { settlement: () => Promise<Settlement> } {
   /** Every authenticated call funnels through api(), so this is the one place
    *  the missing-key case needs handling. Without it the caller gets the
    *  backend's generic "Authentication required", which never names the
@@ -66,23 +67,141 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     return json.data as T;
   }
 
-  function requireWallet(): WalletCtx | { error: ReturnType<typeof fail> } {
-    if (!walletCtx) {
-      return { error: fail('NO_WALLET', 'Spending tools need a local funding wallet — set BLINDMARKET_PRIVATE_KEY (see wallet_status)') };
+  const settlement = createSettlementResolver({ apiBase: cfg.apiBase ?? 'https://api.blindmarket.xyz', api });
+
+  /** How this process pays. On 0G that is the local wallet, which must exist.
+   *  On Base nothing signs locally — the relay signs from the API key's owner
+   *  wallet — so a missing BLINDMARKET_PRIVATE_KEY is not an error there. */
+  async function requireFunding(): Promise<{ s: Settlement; payFrom: string } | { error: ReturnType<typeof fail> }> {
+    let s: Settlement;
+    try {
+      s = await settlement();
+    } catch (err) {
+      return { error: fail((err as ApiError).code ?? 'SETTLEMENT_UNKNOWN', (err as Error).message) };
     }
-    return walletCtx;
+    if (s.mode === 'base') return { s, payFrom: s.payFrom };
+    if (!walletCtx) {
+      return { error: fail('NO_WALLET', 'Spending on 0G needs a local funding wallet — set BLINDMARKET_PRIVATE_KEY (see wallet_status)') };
+    }
+    return { s, payFrom: walletCtx.wallet.address };
+  }
+
+  const ERC20 = new Interface([
+    'function allowance(address owner, address spender) view returns (uint256)',
+    'function approve(address spender, uint256 amount) returns (bool)',
+    'function balanceOf(address owner) view returns (uint256)',
+  ]);
+  function usdc(s: BaseSettlement): Contract {
+    return new Contract(s.usdcAddress, ERC20, s.provider);
+  }
+
+  /** Spendable balance of whoever pays, in the settlement token's units. */
+  async function payFromBalance(s: Settlement, payFrom: string): Promise<string | null> {
+    try {
+      const raw: bigint = s.mode === 'base'
+        ? await usdc(s).balanceOf(payFrom)
+        : await walletCtx!.provider.getBalance(payFrom);
+      return formatUnits(raw, s.decimals);
+    } catch {
+      return null;
+    }
+  }
+
+  /** Hand a transaction to the backend relay: Privy signs it from payFrom with
+   *  gas paid in USDC. Same wire shape as frontend/src/lib/txSigner.ts. */
+  async function relaySend(s: BaseSettlement, tx: { to: string; data: string; value?: bigint }): Promise<{ hash: string; isUserOp: boolean }> {
+    const r = await api<{ hash: string; isUserOp?: boolean }>('POST', '/api/v1/tx/relay-tx', {
+      walletAddress: s.payFrom,
+      to: tx.to,
+      data: tx.data,
+      value: tx.value === undefined ? undefined : String(tx.value),
+      chain: s.relayChain,
+      asset: 'usdc',
+    });
+    if (!r?.hash) {
+      const e: ApiError = new Error('relay-tx returned no hash');
+      e.code = 'RELAY_NO_HASH';
+      throw e;
+    }
+    return { hash: r.hash, isUserOp: r.isUserOp === true };
+  }
+
+  /** Wait for a relayed tx to land. A plain hash can be polled for its receipt;
+   *  a user-op hash cannot (getTransactionReceipt is always null for it), so
+   *  that case returns at once and the caller confirms by on-chain STATE —
+   *  see ensureAllowance and waitCancelled. */
+  async function waitRelayed(s: BaseSettlement, hash: string, isUserOp: boolean): Promise<void> {
+    if (isUserOp) return;
+    for (let i = 0; i < 30; i++) {
+      const receipt = await s.provider.getTransactionReceipt(hash).catch(() => null);
+      if (receipt) {
+        if (receipt.status === 0) {
+          const e: ApiError = new Error(`relayed tx ${hash} reverted`);
+          e.code = 'TX_REVERTED';
+          throw e;
+        }
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+    const e: ApiError = new Error(`relayed tx ${hash} not confirmed after 90s — retry with the same idempotencyKey to resume`);
+    e.code = 'TX_PENDING';
+    throw e;
+  }
+
+  /** Base only: createTask pulls USDC via transferFrom, so the escrow needs an
+   *  allowance first. Confirmed by re-reading allowance() rather than by
+   *  receipt, which is what makes the user-op case decidable. */
+  async function ensureAllowance(s: BaseSettlement, record: SpendRecord): Promise<void> {
+    const need = BigInt(record.amountWei!);
+    const token = usdc(s);
+    if ((await token.allowance(s.payFrom, s.escrowAddress)) >= need) return;
+    if (record.stage === 'created') {
+      const data = ERC20.encodeFunctionData('approve', [s.escrowAddress, need]);
+      const { hash, isUserOp } = await relaySend(s, { to: s.usdcAddress, data });
+      // Persist BEFORE waiting: a crash here must resume into the poll below,
+      // not send a second approve.
+      updateSpend(record.idempotencyKey, { stage: 'approved', approveTxHash: hash });
+      record.stage = 'approved';
+      record.approveTxHash = hash;
+    }
+    for (let i = 0; i < 30; i++) {
+      if ((await token.allowance(s.payFrom, s.escrowAddress)) >= need) return;
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+    const e: ApiError = new Error(`USDC allowance still below ${formatUnits(need, s.decimals)} after 90s (approve ${record.approveTxHash}) — retry with the same idempotencyKey to keep waiting`);
+    e.code = 'APPROVE_PENDING';
+    throw e;
   }
 
   /** Fund escrow + index — the shared tail of rent_service and post_task.
-   *  Resumable at every stage via the spend ledger. */
+   *  Resumable at every stage via the spend ledger.
+   *
+   *  Two funding paths, chosen by settlement mode:
+   *    0g   — native value from the local wallet, signed and sent here.
+   *    base — USDC via transferFrom: approve first (ensureAllowance), then the
+   *           createTask the backend built, both through the Privy relay with
+   *           no local signing at all. The backend picks the escrow; we only
+   *           check it is the one we approved. */
   async function fundAndIndex(record: SpendRecord): Promise<{ taskHash: string; txHash: string }> {
-    const ctx = walletCtx!;
+    const s = await settlement();
     let { txHash } = record;
 
-    if (record.stage === 'created') {
+    // A record remembers the chain it started on. If the backend flips mode
+    // between attempts, re-funding through the other path would double-fund
+    // or send native value into a USDC transferFrom — refuse instead.
+    if (record.settlement && record.settlement !== s.mode) {
+      const e: ApiError = new Error(`spend ${record.idempotencyKey} started on ${record.settlement} but the backend now settles on ${s.mode} — finish or refund it from the web app`);
+      e.code = 'SETTLEMENT_CHANGED';
+      throw e;
+    }
+
+    if (record.stage === 'created' || record.stage === 'approved') {
+      if (s.mode === 'base') await ensureAllowance(s, record);
+
       const { unsignedTx } = await api('POST', '/api/v1/tasks', {
         taskHash: record.taskHash,
-        token: ZERO_TOKEN,
+        token: s.mode === 'base' ? s.usdcAddress : ZERO_TOKEN,
         amount: record.amountWei,
         locationZone: 'global',
         duration: String(record.durationSecs ?? 3600),
@@ -93,23 +212,44 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
         rootHash: record.rootHash,
         wrappedKeys: record.privacy === 'public' ? undefined : record.wrappedKeys,
       });
-      const tx = await ctx.wallet.sendTransaction({
-        to: unsignedTx.to,
-        data: unsignedTx.data,
-        value: BigInt(record.amountWei!),
-        gasLimit: GAS_LIMIT,
-      });
-      // Persist the tx hash BEFORE waiting: if we crash mid-confirmation the
-      // resume path re-runs /tasks/index with this hash instead of re-funding.
-      updateSpend(record.idempotencyKey, { stage: 'funded', txHash: tx.hash });
-      txHash = tx.hash;
-      await tx.wait();
+
+      if (s.mode === 'base') {
+        // The allowance above was granted to the escrow health/bridge named.
+        // If the backend built the tx for a different one, transferFrom would
+        // revert and we would have burned an approve for nothing.
+        if (String(unsignedTx.to).toLowerCase() !== s.escrowAddress.toLowerCase()) {
+          const e: ApiError = new Error(`backend built createTask for ${unsignedTx.to} but /health/bridge reports escrow ${s.escrowAddress}`);
+          e.code = 'ESCROW_MISMATCH';
+          throw e;
+        }
+        const { hash, isUserOp } = await relaySend(s, { to: unsignedTx.to, data: unsignedTx.data });
+        // Persist BEFORE waiting, same reasoning as the 0G branch below.
+        updateSpend(record.idempotencyKey, { stage: 'funded', txHash: hash, isUserOp });
+        txHash = hash;
+        record.isUserOp = isUserOp;
+        await waitRelayed(s, hash, isUserOp);
+      } else {
+        const tx = await walletCtx!.wallet.sendTransaction({
+          to: unsignedTx.to,
+          data: unsignedTx.data,
+          value: BigInt(record.amountWei!),
+          gasLimit: GAS_LIMIT,
+        });
+        // Persist the tx hash BEFORE waiting: if we crash mid-confirmation the
+        // resume path re-runs /tasks/index with this hash instead of re-funding.
+        updateSpend(record.idempotencyKey, { stage: 'funded', txHash: tx.hash });
+        txHash = tx.hash;
+        await tx.wait();
+      }
     }
 
     // stage 'funded' (fresh or resumed): index against the verified receipt.
-    // /a2a/tasks/index itself polls for the receipt server-side.
+    // /a2a/tasks/index polls both chains for the receipt server-side, and with
+    // isUserOp it skips the (always-null) receipt lookup and scans logs for the
+    // TaskCreated event instead — that is how the user-op case is resolved.
     await api('POST', '/api/v1/a2a/tasks/index', {
       txHash,
+      isUserOp: record.isUserOp ?? false,
       taskHash: record.taskHash,
       verificationMode: record.verificationMode,
       verificationCriteria: record.verificationCriteria,
@@ -151,7 +291,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     'rent_service',
     {
       title: 'Rent an Agent Service',
-      description: 'Hire a listed agent service for one call: encrypts your prompt locally (unless privacy=public), funds escrow from your local wallet, and pins the task to the provider agent. TWO-STEP: first call returns a price quote + quoteId; re-call with confirm=true and that quoteId to actually spend. Requires a unique idempotencyKey (safe to retry with the same key — it resumes, never double-pays).',
+      description: 'Hire a listed agent service for one call: encrypts your prompt locally (unless privacy=public), funds escrow, and pins the task to the provider agent. Escrow is USDC on Base via the gas-sponsored relay when the backend settles there (no private key needed), else native 0G from the local wallet — see wallet_status. TWO-STEP: first call returns a price quote + quoteId; re-call with confirm=true and that quoteId to actually spend. Requires a unique idempotencyKey (safe to retry with the same key — it resumes, never double-pays).',
       inputSchema: {
         serviceId: z.number().int().positive().describe('Service id from browse_services / get_service'),
         prompt: z.string().min(1).max(100_000).describe('What you want the agent to do'),
@@ -164,8 +304,9 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
     async ({ serviceId, prompt, idempotencyKey, privacy, confirm, quoteId, waitSeconds }) => {
-      const w = requireWallet();
-      if ('error' in w) return w.error;
+      const f = await requireFunding();
+      if ('error' in f) return f.error;
+      const { s, payFrom } = f;
 
       // Resume path — this key already spent (or partially spent).
       const existing = getSpend(idempotencyKey);
@@ -189,15 +330,21 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
         return fail('NO_AGENT_PUBKEY', 'This service\'s agent has no encryption public key — only privacy=public calls are possible');
       }
 
+      // price_raw is stored in the settlement token's base units (the backend
+      // compares it against the on-chain amount as-is), so it is 6-decimal
+      // USDC on Base and 18-decimal 0G otherwise — format it that way.
+      const price = formatUnits(BigInt(service.price_raw), s.decimals);
+
       if (!confirm) {
-        const balance = await w.provider.getBalance(w.wallet.address).catch(() => null);
-        const quote = createQuote('rent', { serviceId, price0G: formatEther(service.price_raw) });
+        const quote = createQuote('rent', { serviceId, price, currency: s.symbol });
         return ok({
           quote: {
             service: { id: service.id, name: service.name, agent: service.agent_address },
-            price0G: formatEther(service.price_raw),
-            payFrom: w.wallet.address,
-            walletBalance0G: balance === null ? null : formatEther(balance),
+            price,
+            currency: s.symbol,
+            settlement: s.mode,
+            payFrom,
+            walletBalance: await payFromBalance(s, payFrom),
             privacy: isPublic ? 'public' : 'private',
             quoteId: quote.quoteId,
           },
@@ -244,6 +391,8 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
           verificationCriteria: { min_length: 1 },
           requiredCapabilities: [],
           amountWei: String(service.price_raw),
+          settlement: s.mode,
+          token: s.mode === 'base' ? s.usdcAddress : ZERO_TOKEN,
           durationSecs: 3600,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
@@ -256,7 +405,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       } catch (err) {
         const code = (err as ApiError).code;
         if (code === 'NOT_TASK_AGENT') {
-          return fail(code, 'The API key\'s owner wallet does not match the funding wallet (BLINDMARKET_PRIVATE_KEY). Mint an sk_ key while signed in with the funding wallet. The escrow is funded but unindexed — retry with the same idempotencyKey after fixing the key, or cancel on-chain for a refund.');
+          return fail(code, 'The API key\'s owner wallet does not match the wallet that funded escrow. On 0G, mint an sk_ key while signed in with the BLINDMARKET_PRIVATE_KEY wallet; on Base the relay signs from the key\'s own wallet, so this means the key was rotated mid-spend. The escrow is funded but unindexed — retry with the same idempotencyKey after fixing the key, or use cancel_task for a refund.');
         }
         return fail(code ?? 'RENT_FAILED', (err as Error).message);
       }
@@ -269,10 +418,11 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     'post_task',
     {
       title: 'Post a Task to the Open Market',
-      description: 'Post a task any matching agent can pick up: encrypts the brief locally and wraps its key to every registered matching executor (or posts it in plaintext with privacy=public), then funds escrow from your local wallet. TWO-STEP quote/confirm like rent_service; requires a unique idempotencyKey.',
+      description: 'Post a task any matching agent can pick up: encrypts the brief locally and wraps its key to every registered matching executor (or posts it in plaintext with privacy=public), then funds escrow. Escrow is USDC on Base via the gas-sponsored relay when the backend settles there (no private key needed), else native 0G from the local wallet — see wallet_status. TWO-STEP quote/confirm like rent_service; requires a unique idempotencyKey.',
       inputSchema: {
         instructions: z.string().min(1).max(100_000).describe('The task brief'),
-        amount0G: z.string().regex(/^\d+(\.\d+)?$/).describe('Escrow amount in 0G (e.g. "2.5") — paid to the worker (90%) on verified completion'),
+        amount: z.string().regex(/^\d+(\.\d+)?$/).optional().describe('Escrow amount in the settlement token (e.g. "2.5" — USDC on Base, 0G on 0G) — paid to the worker (90%) on verified completion'),
+        amount0G: z.string().regex(/^\d+(\.\d+)?$/).optional().describe('Deprecated alias of `amount` kept for existing callers — same meaning, same units as the settlement token'),
         idempotencyKey: z.string().min(8).max(128).describe('Unique key for this spend — reuse it on retries'),
         capabilities: z.array(z.string()).optional().describe('Optional capability tags to route to matching agents first; empty = every agent'),
         durationSeconds: z.number().int().min(3600).max(90 * 24 * 3600).optional().describe('Deadline seconds from now (default 86400 = 24h)'),
@@ -282,9 +432,10 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       },
       annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
-    async ({ instructions, amount0G, idempotencyKey, capabilities, durationSeconds, privacy, confirm, quoteId }) => {
-      const w = requireWallet();
-      if ('error' in w) return w.error;
+    async ({ instructions, amount, amount0G, idempotencyKey, capabilities, durationSeconds, privacy, confirm, quoteId }) => {
+      const f = await requireFunding();
+      if ('error' in f) return f.error;
+      const { s, payFrom } = f;
 
       const existing = getSpend(idempotencyKey);
       if (existing) {
@@ -299,16 +450,21 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       }
 
       const isPublic = privacy === 'public';
-      const amountWei = parseEther(amount0G);
+      const amountStr = amount ?? amount0G;
+      if (!amountStr) {
+        return fail('AMOUNT_REQUIRED', `Pass \`amount\` — the escrow in ${s.symbol} (e.g. "2.5").`);
+      }
+      const amountWei = parseUnits(amountStr, s.decimals);
 
       if (!confirm) {
-        const balance = await w.provider.getBalance(w.wallet.address).catch(() => null);
-        const quote = createQuote('post', { amount0G });
+        const quote = createQuote('post', { amount: amountStr, currency: s.symbol });
         return ok({
           quote: {
-            escrow0G: amount0G,
-            payFrom: w.wallet.address,
-            walletBalance0G: balance === null ? null : formatEther(balance),
+            escrow: amountStr,
+            currency: s.symbol,
+            settlement: s.mode,
+            payFrom,
+            walletBalance: await payFromBalance(s, payFrom),
             privacy: isPublic ? 'public' : 'private',
             capabilities: capabilities ?? [],
             quoteId: quote.quoteId,
@@ -366,6 +522,8 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
           verificationCriteria: { min_length: 10, pass_threshold: 60 },
           requiredCapabilities: capabilities ?? [],
           amountWei: amountWei.toString(),
+          settlement: s.mode,
+          token: s.mode === 'base' ? s.usdcAddress : ZERO_TOKEN,
           durationSecs: durationSeconds ?? 86400,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
@@ -377,7 +535,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       } catch (err) {
         const code = (err as ApiError).code;
         if (code === 'NOT_TASK_AGENT') {
-          return fail(code, 'The API key\'s owner wallet does not match the funding wallet (BLINDMARKET_PRIVATE_KEY). Mint an sk_ key while signed in with the funding wallet. The escrow is funded but unindexed — retry with the same idempotencyKey after fixing the key, or cancel on-chain for a refund.');
+          return fail(code, 'The API key\'s owner wallet does not match the wallet that funded escrow. On 0G, mint an sk_ key while signed in with the BLINDMARKET_PRIVATE_KEY wallet; on Base the relay signs from the key\'s own wallet, so this means the key was rotated mid-spend. The escrow is funded but unindexed — retry with the same idempotencyKey after fixing the key, or use cancel_task for a refund.');
         }
         return fail(code ?? 'POST_FAILED', (err as Error).message);
       }
@@ -453,34 +611,69 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     return formatUnits(BigInt(detail.amount), detail.decimals ?? 18);
   }
 
+  /** The refund has landed when the task reads Cancelled on-chain. Checking
+   *  state rather than a receipt is what makes a relayed user-op decidable
+   *  (there is no receipt to poll), and it is a cheap truth check for the
+   *  local-signing path too. */
+  async function waitCancelled(taskId: number): Promise<void> {
+    for (let i = 0; i < 30; i++) {
+      const detail = await loadTask(String(taskId)).catch(() => null);
+      if (detail && Number(detail.status) === 5) return;
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+    const e: ApiError = new Error(`task ${taskId} still not Cancelled on-chain after 90s — retry with the same idempotencyKey to keep waiting`);
+    e.code = 'REFUND_PENDING';
+    throw e;
+  }
+
   /** Broadcast the refund and wait for it — the shared tail of both tools.
-   *  Resumable: a record past 'created' waits on the tx it already saved. */
+   *  Resumable: a record past 'created' waits on the tx it already saved.
+   *  Same two paths as fundAndIndex: local wallet on 0G, Privy relay on Base.
+   *  The backend resolves which chain holds the task and builds the tx for
+   *  it; this only decides who signs. */
   async function sendRefund(record: SpendRecord): Promise<{ taskId: number; txHash: string }> {
-    const ctx = walletCtx!;
+    const s = await settlement();
     const taskId = record.taskId!;
     let { txHash } = record;
+
+    if (record.settlement && record.settlement !== s.mode) {
+      const e: ApiError = new Error(`refund ${record.idempotencyKey} started on ${record.settlement} but the backend now settles on ${s.mode} — finish it from the web app`);
+      e.code = 'SETTLEMENT_CHANGED';
+      throw e;
+    }
 
     if (record.stage === 'created') {
       const route = record.kind === 'cancel' ? 'cancel' : 'timeout';
       const { unsignedTx } = await api<{ unsignedTx: { to: string; data: string } }>(
         'POST', `/api/v1/tasks/${taskId}/${route}`,
       );
-      const tx = await ctx.wallet.sendTransaction({
-        to: unsignedTx.to,
-        data: unsignedTx.data,
-        gasLimit: GAS_LIMIT,
-      });
-      // Persist the hash BEFORE waiting, same reasoning as fundAndIndex: a crash
-      // mid-confirmation must resume onto THIS tx, not broadcast another one.
-      updateSpend(record.idempotencyKey, { stage: 'sent', txHash: tx.hash });
-      txHash = tx.hash;
-      await tx.wait();
+      if (s.mode === 'base') {
+        const { hash, isUserOp } = await relaySend(s, { to: unsignedTx.to, data: unsignedTx.data });
+        // Persist BEFORE waiting, same reasoning as the 0G branch below.
+        updateSpend(record.idempotencyKey, { stage: 'sent', txHash: hash, isUserOp });
+        txHash = hash;
+        record.isUserOp = isUserOp;
+        await waitRelayed(s, hash, isUserOp);
+      } else {
+        const tx = await walletCtx!.wallet.sendTransaction({
+          to: unsignedTx.to,
+          data: unsignedTx.data,
+          gasLimit: GAS_LIMIT,
+        });
+        // Persist the hash BEFORE waiting, same reasoning as fundAndIndex: a
+        // crash mid-confirmation must resume onto THIS tx, not broadcast another.
+        updateSpend(record.idempotencyKey, { stage: 'sent', txHash: tx.hash });
+        txHash = tx.hash;
+        await tx.wait();
+      }
     } else if (txHash) {
-      await ctx.provider.waitForTransaction(txHash);
+      if (s.mode === 'base') await waitRelayed(s, txHash, record.isUserOp ?? false);
+      else await walletCtx!.provider.waitForTransaction(txHash);
     } else {
       throw new Error(`Spend record ${record.idempotencyKey} is at stage '${record.stage}' with no txHash — cannot resume safely`);
     }
 
+    await waitCancelled(taskId);
     updateSpend(record.idempotencyKey, { stage: 'confirmed' });
     return { taskId, txHash: txHash! };
   }
@@ -522,8 +715,9 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
     async ({ task, idempotencyKey, confirm, quoteId }) => {
-      const w = requireWallet();
-      if ('error' in w) return w.error;
+      const f = await requireFunding();
+      if ('error' in f) return f.error;
+      const { s, payFrom } = f;
 
       const existing = getSpend(idempotencyKey);
       if (existing) return resumeRefund(existing, 'cancel');
@@ -551,7 +745,8 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
             taskId: detail.taskId,
             status: statusName(status),
             refund: refundAmount(detail),
-            refundTo: w.wallet.address,
+            refundTo: payFrom,
+            settlement: s.mode,
             quoteId: quote.quoteId,
           },
           next: `Re-call cancel_task with confirm=true, quoteId="${quote.quoteId}", and the SAME idempotencyKey to send it.`,
@@ -566,6 +761,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
           idempotencyKey,
           kind: 'cancel',
           stage: 'created',
+          settlement: s.mode,
           taskId: Number(detail.taskId),
           taskHash: detail.taskHash,
           amountWei: detail.amount,
@@ -595,8 +791,9 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
     async ({ task, idempotencyKey, confirm, quoteId }) => {
-      const w = requireWallet();
-      if ('error' in w) return w.error;
+      const f = await requireFunding();
+      if ('error' in f) return f.error;
+      const { s, payFrom } = f;
 
       const existing = getSpend(idempotencyKey);
       if (existing) return resumeRefund(existing, 'timeout');
@@ -631,7 +828,8 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
             status: statusName(status),
             deadlinePassed: new Date(Number(deadline) * 1000).toISOString(),
             refund: refundAmount(detail),
-            refundTo: w.wallet.address,
+            refundTo: payFrom,
+            settlement: s.mode,
             // DISPUTE_WINDOW is enforced on-chain and disputedAt is not exposed
             // here, so a disputed task can still revert after this quote.
             ...(status === 6 ? { note: 'Task is Disputed — this only succeeds once the on-chain DISPUTE_WINDOW has elapsed since the dispute was raised, otherwise it reverts with DisputeWindowActive.' } : {}),
@@ -649,6 +847,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
           idempotencyKey,
           kind: 'timeout',
           stage: 'created',
+          settlement: s.mode,
           taskId: Number(detail.taskId),
           taskHash: detail.taskHash,
           amountWei: detail.amount,
@@ -663,4 +862,6 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       }
     },
   );
+
+  return { settlement };
 }

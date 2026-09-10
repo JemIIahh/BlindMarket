@@ -13,10 +13,12 @@ import crypto from 'node:crypto';
  * saved txHash) instead of double-funding a second escrow.
  */
 
-/** created → funded → indexed is the escrow-funding path (rent/post).
+/** created → funded → indexed is the escrow-funding path (rent/post). On
+ *  Base there is an extra 'approved' between created and funded: the USDC
+ *  approve is its own transaction, and a crash after it must not re-approve.
  *  created → sent → confirmed is the refund path (cancel/timeout), which has
  *  nothing to index — the money moves back on the one transaction. */
-export type SpendStage = 'created' | 'funded' | 'indexed' | 'sent' | 'confirmed';
+export type SpendStage = 'created' | 'approved' | 'funded' | 'indexed' | 'sent' | 'confirmed';
 
 /** Every kind moves money and so carries an idempotencyKey: rent/post pay it
  *  out of the wallet, cancel/timeout pull it back. */
@@ -30,6 +32,15 @@ export interface SpendRecord {
   /** on-chain numeric task id — the refund routes address tasks by id, not hash */
   taskId?: number;
   txHash?: string;
+  /** which chain this spend settles on — decides local-sign vs relay on resume */
+  settlement?: 'base' | '0g';
+  /** escrow token: zero address for native 0G, the USDC address on Base */
+  token?: string;
+  /** Base only: the USDC approve tx, persisted so a resume never re-approves */
+  approveTxHash?: string;
+  /** Base only: relay returned an ERC-4337 user-op hash, not a tx hash —
+   *  getTransactionReceipt on it is always null, so waits go by state instead */
+  isUserOp?: boolean;
   rootHash?: string;
   serviceId?: number;
   targetExecutor?: string;

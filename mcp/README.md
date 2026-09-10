@@ -22,10 +22,23 @@ Environment:
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `BLINDMARKET_API_KEY` | yes | `sk_…` key from the web app (Settings → API keys). **Create it while signed in with the SAME wallet as `BLINDMARKET_PRIVATE_KEY`** — escrow funded from a different wallet is rejected at indexing (`NOT_TASK_AGENT`). The server checks this at boot and warns on mismatch. |
-| `BLINDMARKET_PRIVATE_KEY` | for spending | Wallet that funds escrow (native 0G + gas on 0G Mainnet, chain 16661). Omit for read-only use. |
+| `BLINDMARKET_API_KEY` | yes | `sk_…` key from the web app (Settings → API keys). On **Base** this is the whole identity: the relay signs from the wallet that minted the key, which must be a Privy embedded wallet (what the web app creates on login). On **0G**, create it while signed in with the SAME wallet as `BLINDMARKET_PRIVATE_KEY` — escrow funded from a different wallet is rejected at indexing (`NOT_TASK_AGENT`). |
+| `BLINDMARKET_PRIVATE_KEY` | 0G only | Wallet that funds escrow in native 0G and pays gas on 0G Mainnet (chain 16661). **Not used on Base** — nothing signs locally there. Omit for read-only use. |
 | `BLINDMARKET_API_BASE` | no | Default `https://api.blindmarket.xyz` |
-| `BLINDMARKET_RPC_URL` | no | Default `https://evmrpc.0g.ai` |
+| `BLINDMARKET_RPC_URL` | no | 0G RPC for the local wallet. Default `https://evmrpc.0g.ai` |
+| `BLINDMARKET_SETTLEMENT` | no | Force `0g` or `base`. Default: ask the backend (`GET /health/bridge`) which chain escrow settles on — `base` whenever it has a Base escrow configured. `base` fails loudly if the backend is not actually in Base mode. |
+| `BLINDMARKET_BASE_RPC_URL` | no | Read-only Base RPC for allowance/balance checks and receipt polling. Default by chain: `https://sepolia.base.org` (84532) / `https://mainnet.base.org` (8453). |
+| `BLINDMARKET_USDC_ADDRESS` | no | Override the USDC address if the backend reports a Base chain not listed in `settlement.ts`. |
+
+How a spend is paid, by settlement mode (`wallet_status` shows which you are in):
+
+| | 0G (legacy) | Base |
+|---|---|---|
+| Escrow token | native 0G, 18 decimals | USDC, 6 decimals |
+| Who signs | `BLINDMARKET_PRIVATE_KEY`, locally | the backend relay — Privy signs from your API key's wallet |
+| Gas | native 0G from the same wallet | paid in USDC by the relay; you never hold ETH |
+| Extra step | — | a USDC `approve` to the escrow before `createTask`, persisted in the spend ledger so a retry never re-approves |
+| `post_task` amount | `amount: "2.5"` = 2.5 0G | `amount: "2.5"` = 2.5 USDC |
 
 ## Harness configuration
 

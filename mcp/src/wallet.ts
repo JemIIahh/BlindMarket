@@ -1,5 +1,6 @@
 import { Wallet, JsonRpcProvider, formatEther } from 'ethers';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { Settlement } from './settlement.js';
 
 /**
  * Local signing wallet for the trust-preserving (Tier 2) flows: rent_service /
@@ -32,32 +33,52 @@ export function loadWallet(): WalletCtx | null {
   return { wallet, provider, rpcUrl, chainId };
 }
 
-export function registerWalletTools(server: McpServer, ctx: WalletCtx | null): void {
+/** `settlement` is the resolver rent.ts builds — how spends are paid for. It
+ *  is reported here because "is a private key set" stopped being the whole
+ *  answer once Base landed: on Base nothing signs locally, so a missing key
+ *  is fine and the thing to show is the relay wallet instead. */
+export function registerWalletTools(
+  server: McpServer,
+  ctx: WalletCtx | null,
+  settlement?: () => Promise<Settlement>,
+): void {
   server.registerTool(
     'wallet_status',
     {
       title: 'Wallet Status',
-      description: 'The local funding wallet used by rent_service/post_task: address, native 0G balance, chain. Returns not_configured if BLINDMARKET_PRIVATE_KEY is unset.',
+      description: 'How rent_service/post_task/cancel_task/claim_timeout pay: the settlement chain the backend is in (Base USDC via the gas-sponsored relay, or native 0G from the local wallet), the wallet that pays, and its balance. The local wallet section is not_configured if BLINDMARKET_PRIVATE_KEY is unset — that only matters for 0G.',
       inputSchema: {},
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async () => {
-      if (!ctx) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ configured: false, hint: 'Set BLINDMARKET_PRIVATE_KEY (and optionally BLINDMARKET_RPC_URL) to enable spending tools' }),
-          }],
-        };
+      const localWallet: Record<string, unknown> = ctx
+        ? { configured: true, address: ctx.wallet.address, chainId: ctx.chainId, rpcUrl: ctx.rpcUrl }
+        : { configured: false, hint: 'Set BLINDMARKET_PRIVATE_KEY (and optionally BLINDMARKET_RPC_URL) to spend on 0G. Not needed when the backend settles on Base.' };
+      if (ctx) {
+        try {
+          localWallet.balance0G = formatEther(await ctx.provider.getBalance(ctx.wallet.address));
+        } catch { /* RPC unreachable — report address anyway */ }
       }
-      let balance: string | null = null;
-      try {
-        balance = formatEther(await ctx.provider.getBalance(ctx.wallet.address));
-      } catch { /* RPC unreachable — report address anyway */ }
+
+      let settlementReport: Record<string, unknown>;
+      if (!settlement) {
+        settlementReport = { mode: 'unknown' };
+      } else {
+        try {
+          const s = await settlement();
+          settlementReport = s.mode === 'base'
+            ? { mode: 'base', chainId: s.chainId, escrowAddress: s.escrowAddress, usdcAddress: s.usdcAddress, relayChain: s.relayChain, payFrom: s.payFrom, signs: 'backend relay (Privy, gas in USDC) — no local key involved' }
+            : { mode: '0g', payFrom: ctx?.wallet.address ?? null, signs: ctx ? 'local wallet' : 'NOTHING — set BLINDMARKET_PRIVATE_KEY' };
+        } catch (err) {
+          settlementReport = { mode: 'unknown', error: (err as Error).message };
+        }
+      }
+
       return {
         content: [{
           type: 'text' as const,
-          text: JSON.stringify({ configured: true, address: ctx.wallet.address, balance0G: balance, chainId: ctx.chainId, rpcUrl: ctx.rpcUrl }, null, 2),
+          // `configured` kept at top level for existing readers of this tool.
+          text: JSON.stringify({ configured: !!ctx, ...localWallet, settlement: settlementReport }, null, 2),
         }],
       };
     },
