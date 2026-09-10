@@ -53,7 +53,37 @@ const relaySchema = z.object({
   data: z.string().regex(/^0x[0-9a-fA-F]*$/),
   value: z.string().optional(),
   chain: z.string().default('base'),
-  asset: z.string().default('usdc'),
+  /**
+   * ERC-20 to charge gas in. Present => sponsor_options is sent, which asks
+   * Privy for *user-pays-in-token* gas. OMIT it to request plain sponsorship
+   * instead, where Privy fronts the native gas itself.
+   *
+   * The two are separate Privy features and are configured separately: Base
+   * Sepolia has no token gas asset, so any request naming one is refused with
+   * "Asset <x> is not configured for gas payments on chain eip155:84532" — but
+   * plain sponsorship there may still work. No default, because a default of
+   * 'usdc' silently forced every caller onto the token path. The web app and
+   * MCP both send 'usdc' explicitly, so they are unaffected.
+   */
+  asset: z.string().optional(),
+  /**
+   * Ask Privy to sponsor gas (paid in `asset`). Defaults to true, which is the
+   * whole point of this endpoint: users hold only USDC and never need the
+   * chain's native token.
+   *
+   * It is a request field rather than a constant because sponsorship depends
+   * on Privy having a gas asset configured for the target chain, and that is
+   * not universal — Base Sepolia has none, so Privy rejects EVERY relay there
+   * with "Asset <x> is not configured for gas payments on chain
+   * eip155:84532", whatever asset is named. With sponsorship hardcoded on
+   * there was no way to transact on such a chain at all, even from a wallet
+   * holding native gas.
+   *
+   * Pass false to have Privy simply sign and broadcast, gas coming from the
+   * wallet's own native balance. Callers that want the sponsored behaviour —
+   * the web app and the MCP server — send nothing and are unaffected.
+   */
+  sponsor: z.boolean().default(true),
 });
 
 /**
@@ -127,7 +157,7 @@ txRouter.post('/relay-tx', requireAuth, async (req: AuthRequest, res, next) => {
       transaction.value = `0x${BigInt(body.value).toString(16)}`;
     }
 
-    console.log(`[relay-tx] wallet=${body.walletAddress} id=${walletId} chain=${body.chain} caip2=${caip2} to=${body.to} asset=${body.asset}`);
+    console.log(`[relay-tx] wallet=${body.walletAddress} id=${walletId} chain=${body.chain} caip2=${caip2} to=${body.to} sponsor=${body.sponsor}${body.sponsor ? ` asset=${body.asset}` : " (gas from wallet native balance)"}`);
 
     // Generate authorization signature using the server-side authorization key.
     // This key must be added as a signer on the user's wallet in the Privy dashboard.
@@ -135,13 +165,18 @@ txRouter.post('/relay-tx', requireAuth, async (req: AuthRequest, res, next) => {
       throw new AppError(500, 'MISCONFIGURED', 'PRIVY_AUTHORIZATION_KEY not set in backend config');
     }
 
-    const rpcBody: Record<string, unknown> = {
+    // Built ONCE and used for both the authorization signature and the call.
+    // These were two separate object literals that happened to be identical;
+    // the signature is computed over this body, so any drift between them
+    // makes Privy reject the signature — a failure that reads as a bad
+    // authorization key rather than a mismatched payload.
+    const rpcBody = {
       method: 'eth_sendTransaction' as const,
       caip2,
       chain_type: 'ethereum' as const,
       params: { transaction },
-      sponsor: true,
-      sponsor_options: { asset: body.asset },
+      ...(body.sponsor ? { sponsor: true as const } : {}),
+      ...(body.sponsor && body.asset ? { sponsor_options: { asset: body.asset } } : {}),
     };
     const rpcUrl = `https://api.privy.io/v1/wallets/${walletId}/rpc`;
 
@@ -163,16 +198,7 @@ txRouter.post('/relay-tx', requireAuth, async (req: AuthRequest, res, next) => {
 
     console.log(`[relay-tx] Authorization signature generated, sending transaction...`);
 
-    const rpcInput = {
-      method: 'eth_sendTransaction' as const,
-      caip2,
-      chain_type: 'ethereum' as const,
-      params: { transaction },
-      sponsor: true,
-      sponsor_options: { asset: body.asset },
-    };
-
-    const result = await privy.wallets()._rpc(walletId, rpcInput as any, {
+    const result = await privy.wallets()._rpc(walletId, rpcBody as any, {
       headers: { 'privy-authorization-signature': authSignature },
     });
 
