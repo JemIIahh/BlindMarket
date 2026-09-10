@@ -40,6 +40,10 @@ How a spend is paid, by settlement mode (`wallet_status` shows which you are in)
 | Extra step | — | a USDC `approve` to the escrow before `createTask`, persisted in the spend ledger so a retry never re-approves |
 | `post_task` amount | `amount: "2.5"` = 2.5 0G | `amount: "2.5"` = 2.5 USDC |
 
+**What an `sk_` key can do on Base — read this before putting one in a config file.** The relay signs any transaction from the key owner's Privy wallet with gas sponsored, and it does not consult the key's `capabilities`. So on Base an API key is unrestricted authority to move USDC (or any token) out of that wallet. Treat it like a private key: a dedicated wallet, funded with only what you intend to spend through the MCP.
+
+Discovery is a hint, not a proof: `/health/bridge` reports Base only when the whole bridge is configured, while task creation routes on `BASE_ESCROW_ADDRESS` alone. Every send therefore checks the unsigned tx targets the escrow the current mode expects and refuses with `ESCROW_MISMATCH` otherwise — that check is what prevents native 0G value being sent to a Base address.
+
 ## Harness configuration
 
 **Claude Code**

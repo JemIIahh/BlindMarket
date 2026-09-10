@@ -142,3 +142,69 @@ test('the resolver does not cache a failure, so a transient outage can be retrie
   const s = await resolve();
   assert.equal(s.mode, 'base');
 });
+
+// ── Review-driven cases (PR #54 review) ──────────────────────────────────────
+
+test('an error envelope from /health/bridge is refused, not read as "0G"', async () => {
+  // The backend wraps every 4xx/5xx as { success:false, error } — the same
+  // shape as a healthy reply minus `data`. Reading that as "no Base block,
+  // therefore 0G" is how native value ends up sent to a Base address.
+  const fetchImpl = async () => ({ json: async () => ({ success: false, error: { code: 'INTERNAL', message: 'boom' } }) });
+  await assert.rejects(
+    discoverSettlement({ apiBase: 'https://backend.test', api: async () => ({}), fetchImpl, env: {} }),
+    (e) => e.code === 'SETTLEMENT_UNKNOWN' && /INTERNAL/.test(e.message),
+  );
+});
+
+test('a 0G answer carries the 0G escrow address when the bridge reports it', async () => {
+  // Used by verifyTarget: the only defence against a backend that says "0G"
+  // on /health/bridge (bridge half-configured) but builds Base txs on /tasks.
+  const OG_ESCROW = '0x3d0374963daad43e31d42373eb11156a8e8ce2ff'; // lowercased on purpose
+  const fetchImpl = async () => ({ json: async () => ({ success: true, data: { configured: true, escrowAddress: OG_ESCROW, chainId: 16661 } }) });
+  const s = await discoverSettlement({ apiBase: 'https://backend.test', api: async () => ({}), fetchImpl, env: {} });
+  assert.equal(s.mode, '0g');
+  assert.equal(s.escrowAddress, '0x3d0374963DaaD43e31d42373eb11156A8e8ce2Ff', 'checksummed');
+});
+
+test('a 0G answer without an escrow address leaves the field unset rather than inventing one', async () => {
+  const fetchImpl = async () => ({ json: async () => ({ success: true, data: { configured: false, reason: 'signer not set' } }) });
+  const s = await discoverSettlement({ apiBase: 'https://backend.test', api: async () => ({}), fetchImpl, env: {} });
+  assert.equal(s.mode, '0g');
+  assert.equal(s.escrowAddress, undefined);
+});
+
+test('payFrom and addresses are checksummed even though the backend stores owners lowercased', async () => {
+  const be = fakeBackend({
+    base: { configured: true, chainId: 84532, escrowAddress: SEPOLIA_ESCROW.toLowerCase() },
+    whoami: { address: PRIVY_WALLET.toLowerCase() },
+  });
+  const s = await discoverSettlement({ ...be, env: {} });
+  assert.equal(s.payFrom, PRIVY_WALLET);
+  assert.equal(s.escrowAddress, SEPOLIA_ESCROW);
+});
+
+test('the cached answer expires after the TTL, so a long-lived server notices a prod flip', async () => {
+  let base = null; // starts 0G
+  const fetchImpl = async () => ({ json: async () => ({ success: true, data: { configured: false, base } }) });
+  const api = async () => ({ address: PRIVY_WALLET });
+  let clock = 0;
+  const resolve = createSettlementResolver({ apiBase: 'https://backend.test', api, fetchImpl, env: {} }, 1000, () => clock);
+  assert.equal((await resolve()).mode, '0g');
+  base = { configured: true, chainId: 84532, escrowAddress: SEPOLIA_ESCROW }; // prod flips
+  clock = 500;
+  assert.equal((await resolve()).mode, '0g', 'still inside the TTL — cached');
+  clock = 1500;
+  assert.equal((await resolve()).mode, 'base', 'TTL elapsed — re-asked');
+});
+
+test('invalidate() forces the next call to re-discover immediately', async () => {
+  let base = null;
+  const fetchImpl = async () => ({ json: async () => ({ success: true, data: { configured: false, base } }) });
+  const api = async () => ({ address: PRIVY_WALLET });
+  const resolve = createSettlementResolver({ apiBase: 'https://backend.test', api, fetchImpl, env: {} });
+  assert.equal((await resolve()).mode, '0g');
+  base = { configured: true, chainId: 84532, escrowAddress: SEPOLIA_ESCROW };
+  assert.equal((await resolve()).mode, '0g', 'cached');
+  resolve.invalidate();
+  assert.equal((await resolve()).mode, 'base');
+});

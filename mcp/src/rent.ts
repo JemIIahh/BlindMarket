@@ -7,6 +7,13 @@ import { aesEncrypt, eciesEncrypt, generateAesKey, sha256Hex } from './crypto.js
 import { createQuote, consumeQuote, getSpend, putSpend, updateSpend, type SpendRecord } from './state.js';
 import { createSettlementResolver, type BaseSettlement, type Settlement } from './settlement.js';
 
+// Read-only view of BlindEscrow.getTask, for reading a task's state directly
+// from the chain that holds it. Field order matches contracts/BlindEscrow.sol;
+// a post-#38 deployment appends disputedAt, which ABI decoding ignores.
+const ESCROW_READ_ABI = [
+  'function getTask(uint256) view returns (tuple(address agent,address worker,address token,uint256 amount,bytes32 taskHash,bytes32 evidenceHash,uint8 status,string category,string locationZone,uint256 createdAt,uint256 deadline,uint8 submissionAttempts))',
+];
+
 /**
  * Tier-2 spending tools: the CURRENT encrypted post/rent flow, executed
  * entirely locally. This is a 1:1 port of the "Use from your agent" script
@@ -107,6 +114,39 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     }
   }
 
+  /** The backend builds every unsigned tx for whichever chain it thinks holds
+   *  the task, and the tx carries no chainId. Discovery is only a hint about
+   *  that chain (see settlement.ts). So before broadcasting, check the tx
+   *  targets the escrow THIS mode expects — otherwise native value goes to a
+   *  Base address on the 0G RPC, or a 0G refund is relayed onto Base. A
+   *  mismatch also drops the cached mode so the next call re-asks. */
+  async function verifyTarget(s: Settlement, to: string, what: string): Promise<void> {
+    const target = String(to).toLowerCase();
+    const expected = s.mode === 'base' ? s.escrowAddress : s.escrowAddress;
+    if (expected) {
+      if (target === expected.toLowerCase()) return;
+      settlement.invalidate();
+      const e: ApiError = new Error(
+        `backend built ${what} for ${to} but this process is in ${s.mode} mode expecting escrow ${expected}. ` +
+        (s.mode === 'base'
+          ? 'This task is escrowed on 0G — handle it with BLINDMARKET_SETTLEMENT=0g and a local key, or from the web app.'
+          : 'The backend is building Base transactions — re-run and discovery will re-check, or set BLINDMARKET_SETTLEMENT=base.'),
+      );
+      e.code = 'ESCROW_MISMATCH';
+      throw e;
+    }
+    // 0G with an unconfigured bridge: no escrow address to compare against.
+    // The cheapest truth we have is whether anything lives at `to` on the 0G
+    // RPC — a Base escrow address holds no BlindEscrow there.
+    const code = await walletCtx!.provider.getCode(to).catch(() => '0x');
+    if (code === '0x') {
+      settlement.invalidate();
+      const e: ApiError = new Error(`backend built ${what} for ${to}, which holds no contract on the 0G RPC — it is almost certainly a Base transaction. Set BLINDMARKET_SETTLEMENT=base.`);
+      e.code = 'ESCROW_MISMATCH';
+      throw e;
+    }
+  }
+
   /** Hand a transaction to the backend relay: Privy signs it from payFrom with
    *  gas paid in USDC. Same wire shape as frontend/src/lib/txSigner.ts. */
   async function relaySend(s: BaseSettlement, tx: { to: string; data: string; value?: bigint }): Promise<{ hash: string; isUserOp: boolean }> {
@@ -156,20 +196,34 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     const need = BigInt(record.amountWei!);
     const token = usdc(s);
     if ((await token.allowance(s.payFrom, s.escrowAddress)) >= need) return;
-    if (record.stage === 'created') {
+    const approve = async () => {
       const data = ERC20.encodeFunctionData('approve', [s.escrowAddress, need]);
-      const { hash, isUserOp } = await relaySend(s, { to: s.usdcAddress, data });
-      // Persist BEFORE waiting: a crash here must resume into the poll below,
-      // not send a second approve.
+      const { hash } = await relaySend(s, { to: s.usdcAddress, data });
+      // Persist BEFORE waiting: a crash here must resume into the poll below.
       updateSpend(record.idempotencyKey, { stage: 'approved', approveTxHash: hash });
       record.stage = 'approved';
       record.approveTxHash = hash;
+    };
+    const settled = async () => {
+      for (let i = 0; i < 30; i++) {
+        if ((await token.allowance(s.payFrom, s.escrowAddress)) >= need) return true;
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+      return false;
+    };
+
+    if (record.stage === 'created') {
+      await approve();
+      if (await settled()) return;
     }
-    for (let i = 0; i < 30; i++) {
-      if ((await token.allowance(s.payFrom, s.escrowAddress)) >= need) return;
-      await new Promise((r) => setTimeout(r, 3000));
-    }
-    const e: ApiError = new Error(`USDC allowance still below ${formatUnits(need, s.decimals)} after 90s (approve ${record.approveTxHash}) — retry with the same idempotencyKey to keep waiting`);
+    // Resumed at 'approved' (or the fresh approve never landed): the earlier
+    // approve was dropped or reverted. Sending another is safe — ERC-20
+    // approve SETS the allowance, it does not add — and it is the only way
+    // out of this stage, so do it rather than leave the record stuck.
+    if (await settled()) return;
+    await approve();
+    if (await settled()) return;
+    const e: ApiError = new Error(`USDC allowance still below ${formatUnits(need, s.decimals)} after two approves (last ${record.approveTxHash}) — check the relay wallet's USDC balance and retry with the same idempotencyKey`);
     e.code = 'APPROVE_PENDING';
     throw e;
   }
@@ -213,15 +267,11 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
         wrappedKeys: record.privacy === 'public' ? undefined : record.wrappedKeys,
       });
 
+      // Either branch: the tx must target the escrow this mode expects. On
+      // Base that is also the escrow the allowance above was granted to.
+      await verifyTarget(s, unsignedTx.to, 'createTask');
+
       if (s.mode === 'base') {
-        // The allowance above was granted to the escrow health/bridge named.
-        // If the backend built the tx for a different one, transferFrom would
-        // revert and we would have burned an approve for nothing.
-        if (String(unsignedTx.to).toLowerCase() !== s.escrowAddress.toLowerCase()) {
-          const e: ApiError = new Error(`backend built createTask for ${unsignedTx.to} but /health/bridge reports escrow ${s.escrowAddress}`);
-          e.code = 'ESCROW_MISMATCH';
-          throw e;
-        }
         const { hash, isUserOp } = await relaySend(s, { to: unsignedTx.to, data: unsignedTx.data });
         // Persist BEFORE waiting, same reasoning as the 0G branch below.
         updateSpend(record.idempotencyKey, { stage: 'funded', txHash: hash, isUserOp });
@@ -333,7 +383,15 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       // price_raw is stored in the settlement token's base units (the backend
       // compares it against the on-chain amount as-is), so it is 6-decimal
       // USDC on Base and 18-decimal 0G otherwise — format it that way.
-      const price = formatUnits(BigInt(service.price_raw), s.decimals);
+      const priceRaw = BigInt(service.price_raw);
+      // The backend still labels price_raw as wei/'0G' (discovery.ts). A
+      // service priced in 18-decimal units on a 6-decimal chain would quote as
+      // a trillion USDC and relay an approve for it before createTask failed.
+      // 1,000,000 USDC per call is far above any real listing — refuse.
+      if (s.mode === 'base' && priceRaw > 1_000_000n * 10n ** 6n) {
+        return fail('PRICE_UNITS_SUSPECT', `service ${serviceId} lists price_raw=${priceRaw} which is ${formatUnits(priceRaw, 6)} USDC — this looks like an 18-decimal 0G price on a USDC chain. Not sending. Re-list the service in USDC base units.`);
+      }
+      const price = formatUnits(priceRaw, s.decimals);
 
       if (!confirm) {
         const quote = createQuote('rent', { serviceId, price, currency: s.symbol });
@@ -454,7 +512,12 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       if (!amountStr) {
         return fail('AMOUNT_REQUIRED', `Pass \`amount\` — the escrow in ${s.symbol} (e.g. "2.5").`);
       }
-      const amountWei = parseUnits(amountStr, s.decimals);
+      let amountWei: bigint;
+      try {
+        amountWei = parseUnits(amountStr, s.decimals);
+      } catch {
+        return fail('AMOUNT_INVALID', `"${amountStr}" is not a valid ${s.symbol} amount — at most ${s.decimals} decimal places.`);
+      }
 
       if (!confirm) {
         const quote = createQuote('post', { amount: amountStr, currency: s.symbol });
@@ -577,11 +640,12 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
   // retry from broadcasting a SECOND refund tx while the first is still
   // unconfirmed — the first would land and the second would revert.
   //
-  // Chain note: like post_task, these sign with the local wallet against
-  // whatever RPC it is configured for (0G by default). A task escrowed on Base
-  // is resolved server-side by resolveTaskChainById, but the resulting tx still
-  // goes out on the wallet's own chain — the same single-chain assumption
-  // post_task already makes, not a new one introduced here.
+  // Chain note: the backend resolves which chain holds the task
+  // (resolveTaskChainById) and builds the unsigned tx for it; this side only
+  // decides who signs — the local wallet on 0G, the Privy relay on Base — and
+  // verifies the tx targets the escrow that mode expects before sending
+  // (verifyTarget). Task state is read from the chain the mode names, not
+  // from GET /tasks/:id, which is bound to the 0G escrow.
 
   const STATUS_NAMES = ['Funded', 'Assigned', 'Submitted', 'Verified', 'Completed', 'Cancelled', 'Disputed'] as const;
 
@@ -599,10 +663,33 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     decimals: number;
   }
 
-  /** Resolve a task id-or-hash to its live on-chain state. GET /tasks/:id takes
-   *  either form, so callers can pass the taskHash post_task handed them. */
-  async function loadTask(task: string): Promise<TaskDetail> {
-    return api<TaskDetail>('GET', `/api/v1/tasks/${encodeURIComponent(task)}`);
+  /** Resolve a task id-or-hash to its live on-chain state.
+   *
+   *  GET /api/v1/tasks/:id accepts either form — but it reads the 0G escrow
+   *  only (escrowService.getTask is bound to the 0G contract), so on Base its
+   *  struct is for whatever 0G task happens to share the id. In Base mode we
+   *  use it just to turn a hash into an id, then read the struct from the
+   *  Base escrow ourselves over the read-only provider. */
+  async function loadTask(s: Settlement, task: string): Promise<TaskDetail> {
+    const viaBackend = await api<TaskDetail>('GET', `/api/v1/tasks/${encodeURIComponent(task)}`);
+    if (s.mode !== 'base') return viaBackend;
+
+    const escrow = new Contract(s.escrowAddress, ESCROW_READ_ABI, s.provider);
+    const t = await escrow.getTask(BigInt(viaBackend.taskId));
+    if (String(t.agent).toLowerCase() === ZERO_TOKEN) {
+      const e: ApiError = new Error(`task ${viaBackend.taskId} does not exist on the Base escrow ${s.escrowAddress} — it is probably a 0G task; handle it with BLINDMARKET_SETTLEMENT=0g`);
+      e.code = 'TASK_NOT_ON_BASE';
+      throw e;
+    }
+    return {
+      taskId: viaBackend.taskId,
+      taskHash: String(t.taskHash),
+      status: Number(t.status),
+      amount: String(t.amount),
+      deadline: String(t.deadline),
+      token: String(t.token),
+      decimals: s.decimals,
+    };
   }
 
   /** Amount formatted against the task's OWN decimals — a Base task settles in
@@ -615,9 +702,9 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
    *  state rather than a receipt is what makes a relayed user-op decidable
    *  (there is no receipt to poll), and it is a cheap truth check for the
    *  local-signing path too. */
-  async function waitCancelled(taskId: number): Promise<void> {
+  async function waitCancelled(s: Settlement, taskId: number): Promise<void> {
     for (let i = 0; i < 30; i++) {
-      const detail = await loadTask(String(taskId)).catch(() => null);
+      const detail = await loadTask(s, String(taskId)).catch(() => null);
       if (detail && Number(detail.status) === 5) return;
       await new Promise((r) => setTimeout(r, 3000));
     }
@@ -647,6 +734,12 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       const { unsignedTx } = await api<{ unsignedTx: { to: string; data: string } }>(
         'POST', `/api/v1/tasks/${taskId}/${route}`,
       );
+      // The backend resolves the chain that holds the task and builds for it;
+      // the tx carries no chainId. If that chain is not the one this mode
+      // broadcasts on, stop here — relaying a 0G refund onto Base lands on an
+      // address with no escrow and burns the gas.
+      await verifyTarget(s, unsignedTx.to, `${route}Task`);
+
       if (s.mode === 'base') {
         const { hash, isUserOp } = await relaySend(s, { to: unsignedTx.to, data: unsignedTx.data });
         // Persist BEFORE waiting, same reasoning as the 0G branch below.
@@ -673,7 +766,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       throw new Error(`Spend record ${record.idempotencyKey} is at stage '${record.stage}' with no txHash — cannot resume safely`);
     }
 
-    await waitCancelled(taskId);
+    await waitCancelled(s, taskId);
     updateSpend(record.idempotencyKey, { stage: 'confirmed' });
     return { taskId, txHash: txHash! };
   }
@@ -724,7 +817,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
 
       let detail: TaskDetail;
       try {
-        detail = await loadTask(task);
+        detail = await loadTask(s, task);
       } catch (err) {
         return fail((err as ApiError).code ?? 'TASK_LOOKUP_FAILED', (err as Error).message);
       }
@@ -800,7 +893,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
 
       let detail: TaskDetail;
       try {
-        detail = await loadTask(task);
+        detail = await loadTask(s, task);
       } catch (err) {
         return fail((err as ApiError).code ?? 'TASK_LOOKUP_FAILED', (err as Error).message);
       }
