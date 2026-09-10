@@ -1095,7 +1095,37 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       //   address token, uint256 amount, bytes32 taskHash, ...)
       // Non-indexed data: [token, amount, taskHash, category, locationZone, deadline]
       // taskHash is at data index 2 (after token and amount).
-      const escrowAddr = baseEscrow ? await baseEscrow.getAddress() : await escrow.getAddress();
+      // Decode the non-indexed data and keep only OUR task's event. Other
+      // tasks' TaskCreated logs in the same page must not end the scan early.
+      const matchesOurHash = (l: ethers.Log): boolean => {
+        try {
+          const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
+            ['address', 'uint256', 'bytes32', 'string', 'string', 'uint256'],
+            l.data,
+          );
+          return String(decoded[2]).toLowerCase() === taskHash;
+        } catch { return false; }
+      };
+
+      // Scan BACKWARDS in pages, newest first, instead of one fixed "last 200
+      // blocks" window. 200 blocks is ~7 minutes on Base Sepolia, so any call
+      // to /index more than 7 minutes after the funding tx — a resumed spend
+      // after a crash, a client that timed out and re-called with the same
+      // idempotencyKey — could never see its own TaskCreated event and got
+      // RECEIPT_NOT_FOUND forever, with the escrow funded and the task
+      // unindexed. Observed twice from the MCP.
+      //
+      // Attempt order matters for the common case. The MCP calls /index the
+      // moment the relay returns a user-op hash, usually BEFORE the bundler
+      // has included it — so attempt 0 checks only the newest page (cheap),
+      // attempt 1 scans deep (this is the one that rescues a late retry), and
+      // later attempts go back to the newest page, since everything older was
+      // just covered. Measured: deep-first cost 38s to index a fresh op that
+      // landed one block after the deep scan's top; shallow-first makes that
+      // ~10s. Pages stay at 200 blocks (inside every RPC's getLogs limit).
+      const PAGE = 200;
+      const DEEP_PAGES = 30; // 6,000 blocks ≈ 3.3h on Base Sepolia (2s blocks)
+      const DEEP_ATTEMPT = 1;
 
       // Retry loop — the bundler may take a few blocks to include the user-op.
       for (let attempt = 0; attempt < 5 && !receipt; attempt++) {
@@ -1103,28 +1133,31 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
           console.log(`[tasks/index] Retry ${attempt + 1}/5 — waiting 5s for inclusion...`);
           await new Promise((r) => setTimeout(r, 5000));
         }
+        const maxPages = attempt === DEEP_ATTEMPT ? DEEP_PAGES : 1;
         for (const { prov, esc, label } of providers) {
           try {
+            // Each provider is scanned against ITS OWN escrow. Previously the
+            // Base escrow address was used on the 0G provider too, which could
+            // never match anything there.
+            const escrowAddr = await esc.getAddress();
             const blockNum = await prov.getBlockNumber();
-            const fromBlock = Math.max(0, blockNum - 200);
-            console.log(`[tasks/index] Scanning ${label} blocks ${fromBlock}–${blockNum} for TaskCreated`);
-            const logs = await prov.getLogs({
-              fromBlock,
-              toBlock: 'latest',
-              address: escrowAddr,
-              topics: [taskCreatedTopic],
-            });
-            console.log(`[tasks/index] Found ${logs.length} TaskCreated logs on ${label}`);
-            const match = logs.find((l) => {
-              try {
-                const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
-                  ['address', 'uint256', 'bytes32', 'string', 'string', 'uint256'],
-                  l.data,
-                );
-                const logTaskHash = decoded[2];
-                return logTaskHash?.toLowerCase() === taskHash.toLowerCase();
-              } catch { return false; }
-            });
+            let match: ethers.Log | undefined;
+            let scannedFrom = blockNum;
+            for (let page = 0; page < maxPages && !match; page++) {
+              const toBlock = blockNum - page * PAGE;
+              if (toBlock < 0) break;
+              const fromBlock = Math.max(0, toBlock - PAGE + 1);
+              scannedFrom = fromBlock;
+              const pageLogs = await prov.getLogs({
+                fromBlock,
+                toBlock,
+                address: escrowAddr,
+                topics: [taskCreatedTopic],
+              });
+              match = pageLogs.find(matchesOurHash);
+              if (fromBlock === 0) break;
+            }
+            console.log(`[tasks/index] Scanned ${label} blocks ${scannedFrom}–${blockNum} for TaskCreated: ${match ? 'match' : 'no match'}`);
             if (match) {
               console.log(`[tasks/index] Match found! txHash=${match.transactionHash} block=${match.blockNumber}`);
               receipt = await prov.getTransactionReceipt(match.transactionHash);

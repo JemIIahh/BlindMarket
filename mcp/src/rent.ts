@@ -60,11 +60,35 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       err.code = 'NO_API_KEY';
       throw err;
     }
-    const res = await fetch(`${cfg.apiBase}${path}`, {
-      method,
-      headers: { 'Content-Type': 'application/json', 'X-API-Key': cfg.apiKey },
-      body: body ? JSON.stringify(body) : undefined,
-    });
+    // Explicit, named timeout. Node's fetch otherwise fails after ~5 minutes
+    // with a bare "fetch failed" — which is what post_task reported, twice,
+    // for posts that had already landed on-chain while /a2a/tasks/index sat
+    // behind a dead Redis socket server-side. 120s is above the slowest
+    // healthy call (index polls for a receipt for ~1 min) and well below the
+    // point where a caller assumes the money is lost.
+    let res: Response;
+    try {
+      res = await fetch(`${cfg.apiBase}${path}`, {
+        method,
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': cfg.apiKey },
+        body: body ? JSON.stringify(body) : undefined,
+        signal: AbortSignal.timeout(120_000),
+      });
+    } catch (e) {
+      // Node's fetch reports every socket-level failure as a bare "fetch
+      // failed" and hides the real reason in `cause` (ECONNRESET, socket
+      // hang up, ECONNREFUSED…). Surface it: "fetch failed" alone cost a
+      // debugging session that ended in "the server restarted mid-request".
+      const cause = (e as { cause?: { code?: string; message?: string } })?.cause;
+      const detail = cause?.code ?? cause?.message ?? (e as Error)?.message ?? String(e);
+      const err: ApiError = new Error(
+        (e as Error)?.name === 'TimeoutError'
+          ? `${path} did not answer within 120s. The backend may be stalled (check its Redis connection); if this was a spend, retry with the SAME idempotencyKey — it resumes, never double-pays.`
+          : `${path} unreachable (${detail}). If the backend restarted mid-request and this was a spend, retry with the SAME idempotencyKey — it resumes from the last persisted stage.`,
+      );
+      err.code = (e as Error)?.name === 'TimeoutError' ? 'BACKEND_TIMEOUT' : 'BACKEND_UNREACHABLE';
+      throw err;
+    }
     const json: any = await res.json().catch(() => ({}));
     if (!res.ok || !json.success) {
       const err: ApiError = new Error(`${path} failed: ${json.error?.message || res.status}`);
