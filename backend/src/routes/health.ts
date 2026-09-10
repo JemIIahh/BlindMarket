@@ -4,6 +4,7 @@ import type { ApiResponse } from '../types.js';
 import { escrow, marketplaceSigner, provider, baseEscrow, baseMarketplaceSigner, baseProvider } from '../services/chain.js';
 import { isBridgeConfigured } from '../services/a2aSettlement.js';
 import { config } from '../config.js';
+import { redis, redisSub } from '../services/redis.js';
 
 export const healthRouter = Router();
 
@@ -140,4 +141,23 @@ healthRouter.get('/bridge', async (_req, res, next) => {
   } catch (err) {
     next(err);
   }
+});
+
+/**
+ * GET /health/redis — the shared ioredis clients as they are, not as they
+ * should be: connection status, how many commands are waiting for a reply,
+ * and which command is at the head of that queue. ioredis answers strictly
+ * in order, so one command Redis never replies to holds every later one —
+ * and that shows up here as a growing queue with a fixed head, which no
+ * amount of connection tuning fixes. Command names only; no arguments, so
+ * nothing sensitive is exposed.
+ */
+healthRouter.get('/redis', (_req, res) => {
+  const describe = (c: typeof redis) => {
+    const q = (c as unknown as { commandQueue?: { length: number; peekFront?: () => { command?: { name?: string } } } }).commandQueue;
+    const off = (c as unknown as { offlineQueue?: { length: number } }).offlineQueue;
+    const head = q?.peekFront?.()?.command?.name ?? null;
+    return { status: c.status, awaitingReply: q?.length ?? null, headCommand: head, offlineQueue: off?.length ?? null };
+  };
+  res.json({ success: true, data: { client: describe(redis), sub: describe(redisSub) } });
 });

@@ -640,7 +640,16 @@ async function runMigrations(p: pg.Pool): Promise<void> {
 async function migrateRedisToPg(p: pg.Pool): Promise<void> {
   let redis: Redis | null = null;
   try {
-    redis = new Redis(process.env.REDIS_URL ?? 'redis://localhost:6379');
+    // Same socket hygiene as services/redis.ts: this client walks ~100 keys
+    // sequentially against a remote Redis, and one idle-dropped socket with
+    // no command timeout would park the whole back-fill for minutes.
+    redis = new Redis(process.env.REDIS_URL ?? 'redis://localhost:6379', {
+      connectTimeout: 10_000,
+      commandTimeout: 15_000,
+      keepAlive: 10_000,
+      maxRetriesPerRequest: 3,
+      retryStrategy: (times) => Math.min(200 * times, 2_000),
+    });
 
     const keys = await redis.keys('agent:*');
     const agentKeys = keys.filter(k => !k.includes(':logs') && !k.includes(':heartbeat'));
