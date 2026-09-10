@@ -22,10 +22,29 @@ Environment:
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `BLINDMARKET_API_KEY` | yes | `sk_…` key from the web app (Settings → API keys). **Create it while signed in with the SAME wallet as `BLINDMARKET_PRIVATE_KEY`** — escrow funded from a different wallet is rejected at indexing (`NOT_TASK_AGENT`). The server checks this at boot and warns on mismatch. |
-| `BLINDMARKET_PRIVATE_KEY` | for spending | Wallet that funds escrow (native 0G + gas on 0G Mainnet, chain 16661). Omit for read-only use. |
+| `BLINDMARKET_API_KEY` | yes | `sk_…` key from the web app (Settings → API keys). On **Base** this is the whole identity: the relay signs from the wallet that minted the key, which must be a Privy embedded wallet (what the web app creates on login). On **0G**, create it while signed in with the SAME wallet as `BLINDMARKET_PRIVATE_KEY` — escrow funded from a different wallet is rejected at indexing (`NOT_TASK_AGENT`). |
+| `BLINDMARKET_PRIVATE_KEY` | 0G only | Wallet that funds escrow in native 0G and pays gas on 0G Mainnet (chain 16661). **Not used on Base** — nothing signs locally there. Omit for read-only use. |
 | `BLINDMARKET_API_BASE` | no | Default `https://api.blindmarket.xyz` |
-| `BLINDMARKET_RPC_URL` | no | Default `https://evmrpc.0g.ai` |
+| `BLINDMARKET_RPC_URL` | no | 0G RPC for the local wallet. Default `https://evmrpc.0g.ai` |
+| `BLINDMARKET_SETTLEMENT` | no | Force `0g` or `base`. Default: ask the backend (`GET /health/bridge`) which chain escrow settles on — `base` whenever it has a Base escrow configured. `base` fails loudly if the backend is not actually in Base mode. |
+| `BLINDMARKET_BASE_ESCROW_ADDRESS` | with forced `base` | The escrow the backend builds against, when `/health/bridge` cannot confirm it. Needed because that endpoint reports Base only with the **full** bridge (both marketplace signers), while task creation needs only the Base escrow address — and that falls back to the generated `contractAddresses.ts`, so a backend with an empty Base `.env` still builds Base transactions. Only read when `BLINDMARKET_SETTLEMENT=base`. |
+| `BLINDMARKET_BASE_CHAIN_ID` | no | Chain for that override. Default `84532` (Base Sepolia). |
+| `BLINDMARKET_BASE_RPC_URL` | no | Read-only Base RPC for allowance/balance checks and receipt polling. Default by chain: `https://sepolia.base.org` (84532) / `https://mainnet.base.org` (8453). |
+| `BLINDMARKET_USDC_ADDRESS` | no | Override the USDC address if the backend reports a Base chain not listed in `settlement.ts`. |
+
+How a spend is paid, by settlement mode (`wallet_status` shows which you are in):
+
+| | 0G (legacy) | Base |
+|---|---|---|
+| Escrow token | native 0G, 18 decimals | USDC, 6 decimals |
+| Who signs | `BLINDMARKET_PRIVATE_KEY`, locally | the backend relay — Privy signs from your API key's wallet |
+| Gas | native 0G from the same wallet | paid in USDC by the relay; you never hold ETH |
+| Extra step | — | a USDC `approve` to the escrow before `createTask`, persisted in the spend ledger so a retry never re-approves |
+| `post_task` amount | `amount: "2.5"` = 2.5 0G | `amount: "2.5"` = 2.5 USDC |
+
+**What an `sk_` key can do on Base — read this before putting one in a config file.** The relay signs any transaction from the key owner's Privy wallet with gas sponsored, and it does not consult the key's `capabilities`. So on Base an API key is unrestricted authority to move USDC (or any token) out of that wallet. Treat it like a private key: a dedicated wallet, funded with only what you intend to spend through the MCP.
+
+Discovery is a hint, not a proof: `/health/bridge` reports Base only when the whole bridge is configured, while task creation routes on `BASE_ESCROW_ADDRESS` alone. Every send therefore checks the unsigned tx targets the escrow the current mode expects and refuses with `ESCROW_MISMATCH` otherwise — that check is what prevents native 0G value being sent to a Base address.
 
 ## Harness configuration
 
