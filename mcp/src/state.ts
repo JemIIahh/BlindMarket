@@ -41,6 +41,9 @@ export interface SpendRecord {
   /** Base only: relay returned an ERC-4337 user-op hash, not a tx hash —
    *  getTransactionReceipt on it is always null, so waits go by state instead */
   isUserOp?: boolean;
+  /** Base only: how the relay paid gas, as reported by the backend. Persisted
+   *  so a resumed spend reports the truth rather than re-guessing. */
+  gas?: 'user-pays' | 'app-pays' | 'wallet-pays';
   rootHash?: string;
   serviceId?: number;
   targetExecutor?: string;
