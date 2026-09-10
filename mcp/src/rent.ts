@@ -149,15 +149,53 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
 
   /** Hand a transaction to the backend relay: Privy signs it from payFrom with
    *  gas paid in USDC. Same wire shape as frontend/src/lib/txSigner.ts. */
+  /** Whether this process has already discovered that gas sponsorship is off
+   *  for the target chain, so later sends skip the doomed sponsored attempt. */
+  let sponsorshipUnavailable = false;
+
   async function relaySend(s: BaseSettlement, tx: { to: string; data: string; value?: bigint }): Promise<{ hash: string; isUserOp: boolean }> {
-    const r = await api<{ hash: string; isUserOp?: boolean }>('POST', '/api/v1/tx/relay-tx', {
+    const send = (sponsor: boolean) => api<{ hash: string; isUserOp?: boolean }>('POST', '/api/v1/tx/relay-tx', {
       walletAddress: s.payFrom,
       to: tx.to,
       data: tx.data,
       value: tx.value === undefined ? undefined : String(tx.value),
       chain: s.relayChain,
-      asset: 'usdc',
+      // Only name a gas asset on the sponsored attempt; sending one alongside
+      // sponsor:false asks for a feature we are explicitly declining.
+      ...(sponsor ? { asset: 'usdc' } : { sponsor: false }),
     });
+
+    // Sponsored first, always — gas paid in USDC so the wallet needs no native
+    // token is the point of this path, and it is what mainnet uses.
+    //
+    // But sponsorship is per-chain Privy configuration, not a given: on Base
+    // Sepolia it is off, and every relay there fails with "Gas sponsorship is
+    // not enabled" (or, when an asset is named, "Asset usdc is not configured
+    // for gas payments on chain eip155:84532"). Rather than make the whole
+    // surface unusable on such a chain, fall back to an unsponsored relay,
+    // where Privy signs and the wallet pays gas from its own native balance.
+    //
+    // The fallback is narrow on purpose: only these two sponsorship-specific
+    // errors trigger it. An insufficient balance, a rejected signature or a
+    // wrong owner must surface as itself, not be retried into a second,
+    // differently-failing request.
+    let r: { hash: string; isUserOp?: boolean };
+    try {
+      r = sponsorshipUnavailable ? await send(false) : await send(true);
+    } catch (err) {
+      // Match on the backend's error CODE first — the message is prose and has
+      // already been reworded once ("not configured for this chain/token"
+      // versus Privy's own "not configured for gas payments"), so keying the
+      // fallback to it alone silently stops working.
+      const code = (err as ApiError).code ?? '';
+      const msg = String((err as Error).message ?? '');
+      const isSponsorshipGap = code === 'UNSUPPORTED_CHAIN'
+        || /sponsorship (is )?not (enabled|configured)|not configured for gas payments|not configured for this chain/i.test(msg);
+      if (sponsorshipUnavailable || !isSponsorshipGap) throw err;
+      sponsorshipUnavailable = true;
+      r = await send(false);
+    }
+
     if (!r?.hash) {
       const e: ApiError = new Error('relay-tx returned no hash');
       e.code = 'RELAY_NO_HASH';
@@ -671,18 +709,31 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
    *  use it just to turn a hash into an id, then read the struct from the
    *  Base escrow ourselves over the read-only provider. */
   async function loadTask(s: Settlement, task: string): Promise<TaskDetail> {
-    const viaBackend = await api<TaskDetail>('GET', `/api/v1/tasks/${encodeURIComponent(task)}`);
-    if (s.mode !== 'base') return viaBackend;
+    if (s.mode !== 'base') {
+      return api<TaskDetail>('GET', `/api/v1/tasks/${encodeURIComponent(task)}`);
+    }
+
+    // Base: the escrow is the authority, and we can read it directly. Only ask
+    // the backend when we need a hash resolved to an id — that endpoint makes
+    // several Redis round trips and is the slowest thing in this path, so a
+    // numeric id must not pay for it.
+    let taskId: string;
+    if (/^\d+$/.test(task)) {
+      taskId = task;
+    } else {
+      const viaBackend = await api<TaskDetail>('GET', `/api/v1/tasks/${encodeURIComponent(task)}`);
+      taskId = viaBackend.taskId;
+    }
 
     const escrow = new Contract(s.escrowAddress, ESCROW_READ_ABI, s.provider);
-    const t = await escrow.getTask(BigInt(viaBackend.taskId));
+    const t = await escrow.getTask(BigInt(taskId));
     if (String(t.agent).toLowerCase() === ZERO_TOKEN) {
-      const e: ApiError = new Error(`task ${viaBackend.taskId} does not exist on the Base escrow ${s.escrowAddress} — it is probably a 0G task; handle it with BLINDMARKET_SETTLEMENT=0g`);
+      const e: ApiError = new Error(`task ${taskId} does not exist on the Base escrow ${s.escrowAddress} — it is probably a 0G task; handle it with BLINDMARKET_SETTLEMENT=0g`);
       e.code = 'TASK_NOT_ON_BASE';
       throw e;
     }
     return {
-      taskId: viaBackend.taskId,
+      taskId,
       taskHash: String(t.taskHash),
       status: Number(t.status),
       amount: String(t.amount),
