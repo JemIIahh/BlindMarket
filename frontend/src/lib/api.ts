@@ -17,10 +17,14 @@ class ApiError extends Error {
  * backend blocked on a slow startup migration. A request that FAILS resets the
  * UI and shows the user something; one that never answers cannot.
  *
- * 30s is far above any healthy call here and well below a user's patience for
- * a button that looks frozen.
+ * 120s, not lower: POST /api/v1/storage/upload legitimately runs 30–60s on
+ * 0G testnet (the route sets its own 120s socket timeout for exactly that),
+ * and /a2a/tasks/index polls for a receipt for ~35s before answering. A 30s
+ * cap here would have cut both off mid-flight and broken task posting from
+ * the web app. Long enough for the slowest real call; short enough that a
+ * dead backend still surfaces as an error rather than a frozen button.
  */
-const REQUEST_TIMEOUT_MS = 30_000;
+const REQUEST_TIMEOUT_MS = 120_000;
 
 async function fetchWithTimeout(url: string, init: RequestInit = {}): Promise<Response> {
   const controller = new AbortController();
