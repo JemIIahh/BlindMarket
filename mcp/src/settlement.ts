@@ -152,7 +152,25 @@ export async function discoverSettlement(deps: DiscoverDeps): Promise<Settlement
 
   if (!bridge?.configured) {
     if (forced === 'base') {
-      throw err('SETTLEMENT_MISMATCH', 'BLINDMARKET_SETTLEMENT=base but the backend reports no Base escrow configured — it would build 0G tasks.');
+      // /health/bridge reports Base only when the WHOLE bridge is configured
+      // (isBridgeConfigured wants all four signers), while POST /tasks routes
+      // on config.baseEscrowAddress alone — which itself falls back to the
+      // generated contractAddresses.ts, so a backend with nothing about Base
+      // in its .env still builds Base transactions. Refusing here would block
+      // exactly that (very common) setup. So when the operator has forced
+      // base, let them name the escrow explicitly instead of asking health to
+      // vouch for it. This is not a loosening of safety: verifyTarget still
+      // checks every unsigned tx against this address before anything is
+      // sent, so a wrong guess refuses rather than misfunding.
+      const escrowOverride = env.BLINDMARKET_BASE_ESCROW_ADDRESS;
+      if (!isAddress(escrowOverride)) {
+        throw err(
+          'SETTLEMENT_MISMATCH',
+          'BLINDMARKET_SETTLEMENT=base but /health/bridge does not report a Base escrow. That endpoint needs the full bridge (both chains\' marketplace signers), while task creation needs only the Base escrow address — so this is expected on a backend that posts Base tasks without the Base signer. Set BLINDMARKET_BASE_ESCROW_ADDRESS (and BLINDMARKET_BASE_CHAIN_ID if not 84532) to the escrow the backend builds against, or complete the bridge config.',
+        );
+      }
+      const forcedChainId = Number(env.BLINDMARKET_BASE_CHAIN_ID ?? 84532);
+      return buildBaseSettlement(forcedChainId, escrowOverride, env, deps);
     }
     // Carry the 0G escrow address when the bridge reports it, so the 0G send
     // path can verify the backend really built a 0G tx (see file comment).
@@ -161,15 +179,26 @@ export async function discoverSettlement(deps: DiscoverDeps): Promise<Settlement
       : OG_SETTLEMENT;
   }
 
-  const chainId = Number(bridge.chainId);
-  const relayChain = relayChainFor(chainId);
-  if (!relayChain) {
-    throw err('UNSUPPORTED_BASE_CHAIN', `Backend reports Base chainId ${bridge.chainId}, which relay-tx does not support (8453 or 84532).`);
-  }
   if (!isAddress(bridge.escrowAddress)) {
     throw err('SETTLEMENT_UNKNOWN', `Backend reports Base configured but no escrow address (${bridge.escrowAddress}).`);
   }
-  const escrowAddress = getAddress(bridge.escrowAddress);
+  return buildBaseSettlement(Number(bridge.chainId), bridge.escrowAddress, env, deps);
+}
+
+/** Assemble a Base settlement from a chain id and escrow address, whichever
+ *  way they were learned (health, or an explicit override). Everything else —
+ *  USDC, RPC, relay label, the paying wallet — is derived here so both routes
+ *  agree. */
+async function buildBaseSettlement(
+  chainId: number,
+  escrow: string,
+  env: NodeJS.ProcessEnv,
+  deps: DiscoverDeps,
+): Promise<BaseSettlement> {
+  const relayChain = relayChainFor(chainId);
+  if (!relayChain) {
+    throw err('UNSUPPORTED_BASE_CHAIN', `Base chainId ${chainId} is not one relay-tx supports (8453 or 84532).`);
+  }
   const usdcAddress = usdcFor(chainId, env.BLINDMARKET_USDC_ADDRESS);
   if (!usdcAddress) {
     throw err('USDC_UNKNOWN', `No USDC address known for chainId ${chainId} — set BLINDMARKET_USDC_ADDRESS.`);
@@ -193,7 +222,7 @@ export async function discoverSettlement(deps: DiscoverDeps): Promise<Settlement
   return {
     mode: 'base',
     chainId,
-    escrowAddress,
+    escrowAddress: getAddress(escrow),
     usdcAddress: getAddress(usdcAddress),
     decimals: 6,
     symbol: 'USDC',

@@ -27,6 +27,8 @@ Environment:
 | `BLINDMARKET_API_BASE` | no | Default `https://api.blindmarket.xyz` |
 | `BLINDMARKET_RPC_URL` | no | 0G RPC for the local wallet. Default `https://evmrpc.0g.ai` |
 | `BLINDMARKET_SETTLEMENT` | no | Force `0g` or `base`. Default: ask the backend (`GET /health/bridge`) which chain escrow settles on — `base` whenever it has a Base escrow configured. `base` fails loudly if the backend is not actually in Base mode. |
+| `BLINDMARKET_BASE_ESCROW_ADDRESS` | with forced `base` | The escrow the backend builds against, when `/health/bridge` cannot confirm it. Needed because that endpoint reports Base only with the **full** bridge (both marketplace signers), while task creation needs only the Base escrow address — and that falls back to the generated `contractAddresses.ts`, so a backend with an empty Base `.env` still builds Base transactions. Only read when `BLINDMARKET_SETTLEMENT=base`. |
+| `BLINDMARKET_BASE_CHAIN_ID` | no | Chain for that override. Default `84532` (Base Sepolia). |
 | `BLINDMARKET_BASE_RPC_URL` | no | Read-only Base RPC for allowance/balance checks and receipt polling. Default by chain: `https://sepolia.base.org` (84532) / `https://mainnet.base.org` (8453). |
 | `BLINDMARKET_USDC_ADDRESS` | no | Override the USDC address if the backend reports a Base chain not listed in `settlement.ts`. |
 

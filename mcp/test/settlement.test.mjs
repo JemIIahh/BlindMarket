@@ -83,12 +83,58 @@ test('backend in Base mode → relay settlement derived from its chain id', asyn
   assert.equal(be.calls.whoami, 1);
 });
 
-test('forcing base against a backend that is not in Base mode fails loudly', async () => {
+test('forcing base with no health confirmation and no override fails loudly', async () => {
   const be = fakeBackend({ base: { configured: false } });
   await assert.rejects(
     discoverSettlement({ ...be, env: { BLINDMARKET_SETTLEMENT: 'base' } }),
+    (e) => e.code === 'SETTLEMENT_MISMATCH' && /BLINDMARKET_BASE_ESCROW_ADDRESS/.test(e.message),
+  );
+});
+
+test('forcing base with an explicit escrow works when health cannot vouch for it', async () => {
+  // The real default: config.baseEscrowAddress falls back to the generated
+  // contractAddresses.ts, so a backend with an empty Base .env still builds
+  // Base txs — while /health/bridge stays silent because it wants both
+  // marketplace signers. Requiring health here would block that setup.
+  const be = fakeBackend({ base: null });
+  const s = await discoverSettlement({
+    ...be,
+    env: { BLINDMARKET_SETTLEMENT: 'base', BLINDMARKET_BASE_ESCROW_ADDRESS: SEPOLIA_ESCROW },
+  });
+  assert.equal(s.mode, 'base');
+  assert.equal(s.chainId, 84532, 'defaults to Base Sepolia');
+  assert.equal(s.escrowAddress, SEPOLIA_ESCROW);
+  assert.equal(s.usdcAddress, BASE_USDC[84532]);
+  assert.equal(s.payFrom, PRIVY_WALLET);
+});
+
+test('an explicit escrow override still validates the chain id', async () => {
+  const be = fakeBackend({ base: null });
+  await assert.rejects(
+    discoverSettlement({
+      ...be,
+      env: { BLINDMARKET_SETTLEMENT: 'base', BLINDMARKET_BASE_ESCROW_ADDRESS: SEPOLIA_ESCROW, BLINDMARKET_BASE_CHAIN_ID: '1' },
+    }),
+    (e) => e.code === 'UNSUPPORTED_BASE_CHAIN',
+  );
+});
+
+test('a malformed escrow override is refused, not silently ignored', async () => {
+  const be = fakeBackend({ base: null });
+  await assert.rejects(
+    discoverSettlement({
+      ...be,
+      env: { BLINDMARKET_SETTLEMENT: 'base', BLINDMARKET_BASE_ESCROW_ADDRESS: 'not-an-address' },
+    }),
     (e) => e.code === 'SETTLEMENT_MISMATCH',
   );
+});
+
+test('the override is ignored when discovery is NOT forced to base', async () => {
+  // Safety: an override left in the environment must not flip a 0G backend.
+  const be = fakeBackend({ base: null });
+  const s = await discoverSettlement({ ...be, env: { BLINDMARKET_BASE_ESCROW_ADDRESS: SEPOLIA_ESCROW } });
+  assert.equal(s.mode, '0g');
 });
 
 test('the legacy "agent" principal cannot be a relay wallet', async () => {
