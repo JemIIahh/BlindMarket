@@ -1012,5 +1012,136 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     },
   );
 
+
+  // ── Executor side (Base) ─────────────────────────────────────────────────
+  //
+  // accept_task (tools.ts) already assigns you on-chain: the backend awaits
+  // marketplaceAssign inside POST /accept. What was missing is everything
+  // after: the worker must sign submitEvidence itself (onlyWorker), and the
+  // platform worker (backend/agents/worker.js) only carries a 0G signer, so
+  // a Base task could be accepted but never delivered. These two tools close
+  // that gap for an MCP executor whose wallet is a Privy relay wallet — no
+  // local key, gas negotiated by the backend like every other relayed send.
+
+  /** Poll the escrow until the task reads `want`, or give up. */
+  async function waitStatus(s: Settlement, taskId: string, want: number, label: string): Promise<number> {
+    let last = -1;
+    for (let i = 0; i < 30; i++) {
+      last = Number((await loadTask(s, taskId)).status);
+      if (last === want) return last;
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+    const e: ApiError = new Error(`task ${taskId} still reads ${statusName(last)} after 90s waiting for ${label} — re-call complete_task to resume from the chain's state`);
+    e.code = 'STATE_PENDING';
+    throw e;
+  }
+
+  server.registerTool(
+    'fetch_brief',
+    {
+      title: 'Fetch a Task Brief',
+      description: "Download a task's brief by rootHash (accept_task returns it). Public briefs come back as text. Private briefs are ciphertext and need the wrapped key plus a local key this process does not hold — use a platform agent for those.",
+      inputSchema: {
+        rootHash: z.string().min(32).max(80).describe('rootHash from accept_task or list_open_tasks'),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ rootHash }) => {
+      try {
+        const { blob } = await api<{ blob: string }>('GET', `/api/v1/storage/${encodeURIComponent(rootHash)}`);
+        const buf = Buffer.from(blob, 'base64');
+        const text = buf.toString('utf8');
+        if (text.includes('�')) {
+          return fail('ENCRYPTED_BRIEF', 'This brief is encrypted (private task). Decrypting needs the wrappedKey from accept_task and the executor\'s own key, which this process does not hold.');
+        }
+        return ok({ rootHash, bytes: buf.length, brief: text });
+      } catch (err) {
+        return fail((err as ApiError).code ?? 'BRIEF_FETCH_FAILED', (err as Error).message);
+      }
+    },
+  );
+
+  server.registerTool(
+    'complete_task',
+    {
+      title: 'Deliver a Task Result and Settle',
+      description: 'Executor side, after accept_task: submits your result, sends submitEvidence from YOUR wallet (Base: through the backend relay — no gas to hold), then asks the backend to verify and release the escrow to you. Safe to re-call: it resumes from whatever stage the escrow shows.',
+      inputSchema: {
+        task: z.string().regex(/^0x[0-9a-fA-F]{64}$/).describe('The 0x task hash — A2A tasks are addressed by hash, not by numeric id'),
+        output: z.string().min(1).max(200_000).describe('Your result. Verification judges this text (auto mode scores it against the poster\'s criteria).'),
+      },
+      annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ task, output }) => {
+      const f = await requireFunding();
+      if ('error' in f) return f.error;
+      const { s, payFrom } = f;
+      if (s.mode !== 'base') {
+        return fail('BASE_ONLY', 'complete_task sends submitEvidence through the Privy relay and is Base-only. On 0G, deliver with a platform agent (backend/agents/worker.js), which signs with its own key.');
+      }
+
+      let detail: TaskDetail;
+      try {
+        detail = await loadTask(s, task);
+      } catch (err) {
+        return fail((err as ApiError).code ?? 'TASK_LOOKUP_FAILED', (err as Error).message);
+      }
+      // 0 Funded · 1 Assigned · 2 Submitted · 3 Verified · 4 Completed · 5 Cancelled · 6 Disputed
+      let status = Number(detail.status);
+      if (status === 0) {
+        return fail('NOT_ASSIGNED', `Task ${detail.taskId} is still Funded — call accept_task("${task}") first; the backend assigns you on-chain as part of accept.`);
+      }
+      if (status === 3) {
+        return fail('VERIFICATION_FAILED_ON_CHAIN', `Task ${detail.taskId} reads Verified-but-not-released: the last verification failed. Re-submission after a failed round is not wired through this tool yet.`);
+      }
+      if (status >= 4) {
+        return ok({ taskId: detail.taskId, taskHash: detail.taskHash, onChainStatus: statusName(status), hint: 'Already settled — nothing to do.' });
+      }
+
+      let submitTxHash: string | undefined;
+      let gas: GasMode | undefined;
+      try {
+        if (status === 1) {
+          const sub = await api<{ onChainTaskId: number; evidenceHash: string; unsignedSubmitEvidence: { to: string; data: string } }>(
+            'POST', `/api/v1/a2a/tasks/${task}/submit`, { resultData: { output } },
+          );
+          const tx = sub.unsignedSubmitEvidence;
+          await verifyTarget(s, tx.to, 'submitEvidence');
+          const sent = await relaySend(s, { to: tx.to, data: tx.data });
+          submitTxHash = sent.hash;
+          gas = sent.gas;
+          await waitRelayed(s, sent.hash, sent.isUserOp);
+          status = await waitStatus(s, detail.taskId, 2, 'Submitted');
+        }
+
+        // Backend runs the verification for this task's mode and, on a pass,
+        // sends completeVerification from the marketplace signer — which is
+        // what releases the USDC to payFrom. The call awaits that tx.
+        const fin = await api<{ status: string; verificationResult?: { passed: boolean; score?: number; reasons?: string[] }; awaitingPosterApproval?: boolean }>(
+          'POST', `/api/v1/a2a/tasks/${task}/finalize`,
+        );
+        const after = await loadTask(s, detail.taskId);
+        const done = Number(after.status) === 4;
+        return ok({
+          taskId: detail.taskId,
+          taskHash: detail.taskHash,
+          submitTxHash,
+          gas,
+          verification: fin.verificationResult ?? null,
+          backendStatus: fin.status,
+          onChainStatus: statusName(Number(after.status)),
+          paidTo: done ? payFrom : undefined,
+          hint: done
+            ? `Escrow released: ${formatUnits(BigInt(after.amount), after.decimals ?? 6)} ${s.mode === 'base' ? 'USDC' : '0G'} minus the marketplace fee is now in ${payFrom}.`
+            : fin.awaitingPosterApproval
+              ? 'Manual-verification task: the poster must approve via verify_task before the escrow releases.'
+              : `Verification did not pass (${(fin.verificationResult?.reasons ?? []).join('; ') || 'no reasons given'}). The escrow stays locked.`,
+        });
+      } catch (err) {
+        return fail((err as ApiError).code ?? 'COMPLETE_FAILED', (err as Error).message);
+      }
+    },
+  );
+
   return { settlement };
 }
