@@ -250,8 +250,16 @@ txRouter.post('/relay-tx', requireAuth, async (req: AuthRequest, res, next) => {
         // insufficient funds, a rejected signature, a wrong owner, a policy
         // block — is the real answer and must surface as itself, not be
         // retried into a second, differently-failing request.
+        // Privy words the user-pays refusal two ways depending on app state:
+        //   "Asset usdc is not configured for gas payments on chain eip155:…"
+        //     — sponsorship off entirely (observed before the toggle)
+        //   "User-pays token gas sponsorship is not configured for this app."
+        //     — app-pays on, token gas not (observed right after the toggle;
+        //       gas:'auto' surfaced it instead of stepping down, which is
+        //       exactly the failure this list exists to prevent)
+        // Both mean the same thing for the ladder: try app-pays.
         const refusedThisRung =
-          (mode === 'user-pays' && /not configured for gas payments on chain/i.test(msg)) ||
+          (mode === 'user-pays' && /not configured for gas payments on chain|user-pays token gas sponsorship is not configured/i.test(msg)) ||
           (mode === 'app-pays' && /gas sponsorship is not enabled/i.test(msg));
         if (nextMode === undefined || !refusedThisRung) throw err;
         console.log(`[relay-tx] ${mode} refused by Privy — "${msg.slice(0, 120)}" — trying ${nextMode}`);
@@ -308,6 +316,13 @@ txRouter.post('/relay-tx', requireAuth, async (req: AuthRequest, res, next) => {
     // Exact Privy strings only. The previous bare `includes('not configured')`
     // would have relabelled any unrelated error containing those words as a
     // sponsorship gap — and clients treat that code as "safe to retry".
+    // App-level: sponsorship is on, but "user pays gas in a token" is a
+    // separate Privy feature that is not. Distinct code — the remedy is a
+    // different dashboard setting (or mainnet), not chain support.
+    if (/user-pays token gas sponsorship is not configured/i.test(msg)) {
+      return next(new AppError(400, 'USER_PAYS_DISABLED',
+        'Privy: user-pays token gas sponsorship is not configured for this app — users cannot pay gas in USDC here yet. App-pays sponsorship may still work; pass gas:\'auto\' to fall back to it.'));
+    }
     if (/not configured for gas payments on chain/i.test(msg)) {
       return next(new AppError(400, 'UNSUPPORTED_CHAIN',
         `Privy has no ${lastGas === 'user-pays' ? (body?.asset ?? 'usdc') : 'token'} gas payments configured for this chain. Pass gas:'auto' to fall back to app-pays or wallet-pays.`));
