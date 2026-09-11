@@ -11,11 +11,13 @@ export function ReviewsSection({
   agentWallet,
   reviews,
   stats,
+  isOwner,
   onSubmitted,
 }: {
   agentWallet?: string;
   reviews: AgentReview[];
   stats: AgentReviewStats | null;
+  isOwner?: boolean;
   onSubmitted: () => Promise<void>;
 }) {
   const [rating, setRating] = useState(5);
@@ -131,8 +133,9 @@ export function ReviewsSection({
         </div>
       )}
 
-      {/* Submit review — inline row */}
-      <div className="mt-4 border border-line p-4">
+      {/* Submit review — hidden for agent owners (can't review yourself) */}
+      {!isOwner && (
+        <div className="mt-4 border border-line p-4">
         <div className="flex items-center gap-3 flex-wrap">
           {/* Star picker */}
           <div className="flex items-center gap-0.5 shrink-0">
@@ -191,6 +194,7 @@ export function ReviewsSection({
           <p className="text-xs text-err mt-2">{submitError}</p>
         )}
       </div>
+      )}
     </section>
   );
 }

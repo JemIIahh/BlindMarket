@@ -434,6 +434,7 @@ export default function AgentDetail() {
           agentWallet={agent.walletAddress}
           reviews={reviews}
           stats={reviewStats}
+          isOwner={isOwner}
           onSubmitted={reloadReviews}
         />
 
