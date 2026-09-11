@@ -29,6 +29,12 @@ const WORKER_ENV_PASSTHROUGH = [
   'BACKEND_URL',
   'OG_RPC_URL',
   'OG_CHAIN_ID',
+  'BASE_RPC_URL',
+  'BASE_CHAIN_ID',
+  // @ai-sdk/openai reads this itself. Lets an operator point 'openai'-provider
+  // agents at a compatible endpoint (self-hosted model, proxy, or a local stub
+  // for end-to-end tests) without a code change.
+  'OPENAI_BASE_URL',
   'HEARTBEAT_INTERVAL_MS',
   'POLL_INTERVAL_MS',
   'DELEGATE_REWARD_OG',
@@ -315,6 +321,15 @@ export async function startAgent(id: string, opts?: { skipResume?: boolean }): P
       // Escrow proxy address — the verifier role (verificationMode='agent')
       // signs completeVerification directly against this contract.
       AGENT_ESCROW_ADDRESS: config.blindEscrowAddress,
+      // Base settlement. The worker builds one signer per chain and picks by
+      // the `chain` the backend reports on /submit and /verifications; without
+      // these it had a single 0G signer and broadcast every Base submitEvidence
+      // onto 0G, so a deployed agent could accept a Base task and never deliver
+      // it. Empty when Base is unconfigured, and the worker treats empty as
+      // "no Base signer" rather than guessing an RPC.
+      BASE_RPC_URL: config.baseEscrowAddress ? config.baseRpcUrl : '',
+      BASE_CHAIN_ID: config.baseEscrowAddress ? String(config.baseChainId) : '',
+      AGENT_BASE_ESCROW_ADDRESS: config.baseEscrowAddress ?? '',
       BACKEND_URL: `http://localhost:${config.port}`,
       AGENT_TOOLS: JSON.stringify(composed.tools),
       AGENT_TOOL_SECRETS: JSON.stringify(agent.toolSecrets ?? {}),

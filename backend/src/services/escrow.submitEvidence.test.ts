@@ -26,6 +26,7 @@ vi.mock('./chain.js', () => ({
   baseEscrow: baseEscrowStub,
   buildUnsignedTx,
 }));
+vi.mock('../config.js', () => ({ config: { baseChainId: 84532, ogChainId: 16602 } }));
 
 const { buildSubmitEvidenceOn, buildSubmitEvidence } =
   await import('./escrow.js');
@@ -69,5 +70,25 @@ describe('buildSubmitEvidenceBase', () => {
     await expect(unconfigured(WORKER, 7, EVIDENCE)).rejects.toThrow('BASE_ESCROW_ADDRESS');
     expect(buildUnsignedTx).not.toHaveBeenCalled();
     vi.doUnmock('./chain.js');
+  });
+
+  // The unsigned tx used to carry no chainId at all, so a Base submitEvidence
+  // handed to a signer bound to the 0G RPC was simply broadcast there — the
+  // worker had one signer, and a deployed agent could accept a Base task and
+  // never deliver it. Pinning chainId makes ethers refuse the wrong network
+  // at the signer, whichever client picked it.
+  it('pins the Base chainId onto a Base submitEvidence', async () => {
+    const tx = await buildSubmitEvidenceOn('base', WORKER, 7, EVIDENCE);
+    expect(tx.chainId).toBe(84532);
+  });
+
+  it('pins the 0G chainId onto a 0G submitEvidence', async () => {
+    const tx = await buildSubmitEvidenceOn('0g', WORKER, 7, EVIDENCE);
+    expect(tx.chainId).toBe(16602);
+  });
+
+  it('keeps to/data/from from the builder alongside the chainId', async () => {
+    const tx = await buildSubmitEvidenceOn('base', WORKER, 7, EVIDENCE);
+    expect(tx).toMatchObject({ to: '0xto', data: '0xdata', from: '0xfrom', chainId: 84532 });
   });
 });

@@ -27,6 +27,11 @@ export interface WorkerRuntimeConfig {
    * default). Point this at the RPC for whichever chain your tasks settle on.
    */
   rpcUrl?: string;
+  /** Per-chain RPCs. A task is escrowed on exactly one chain and /submit names
+   *  it; submitEvidence must be signed on that chain. `rpcUrl` remains the 0G
+   *  default. Without a Base entry the runtime refuses a Base task at submit
+   *  rather than broadcasting it on 0G. */
+  rpcUrls?: { '0g'?: string; base?: string };
 }
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -325,7 +330,18 @@ export class WorkerRuntime {
       // 'Assigned' and completeVerification always reverts — the task only
       // LOOKS complete.
       if (submitResult.unsignedSubmitEvidence) {
-        const provider = new ethers.JsonRpcProvider(this.config.rpcUrl);
+        // Pick the RPC for the chain the backend says holds this task. This
+        // used to be a single 0G provider, so a Base submitEvidence was
+        // broadcast onto 0G. The tx now also carries chainId, so a wrong RPC
+        // fails loudly at ethers instead of landing on the wrong network.
+        const chain = submitResult.chain === 'base' ? 'base' : '0g';
+        const rpc = this.config.rpcUrls?.[chain] ?? (chain === '0g' ? this.config.rpcUrl : undefined);
+        if (!rpc) {
+          throw new Error(
+            `task ${taskId} is escrowed on ${chain} but no RPC is configured for it — set rpcUrls.${chain} in the WorkerRuntime config`,
+          );
+        }
+        const provider = new ethers.JsonRpcProvider(rpc);
         const signer = new ethers.Wallet(this.wallet!.privateKey, provider);
         const tx = await signer.sendTransaction(
           submitResult.unsignedSubmitEvidence as ethers.TransactionRequest,

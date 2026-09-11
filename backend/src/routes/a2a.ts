@@ -1667,6 +1667,13 @@ a2aRouter.post('/tasks/:id/submit', requireAuth, async (req: AuthRequest, res, n
       data: {
         taskId: taskHash,
         onChainTaskId: onChainId,
+        // Which escrow the unsigned tx targets. The executor holds a signer
+        // per chain and must pick the right one; without this field the
+        // platform worker had no way to know and broadcast every
+        // submitEvidence on 0G, so a Base task could be accepted but never
+        // delivered. The tx also carries chainId now (escrow.ts) as a second
+        // guard, but the executor still needs to choose the signer up front.
+        chain: onChainIdChain,
         status: 'submitted',
         evidenceHash,
         unsignedSubmitEvidence,
@@ -2255,11 +2262,16 @@ a2aRouter.get('/verifications', requireAuth, async (req: AuthRequest, res, next)
     // Resolve each task's on-chain numeric id so the verifier can call
     // completeVerification(id, passed) itself. Null when not yet indexed — the
     // verifier skips it and retries on its next poll.
+    // resolveTaskByHash reports the chain alongside the id. It used to be
+    // discarded here, leaving the verifier-role worker to settle every task
+    // against its 0G escrow — including Base tasks, whose numeric id would
+    // then name an unrelated 0G task. Both are returned so the worker can
+    // pick the escrow and signer for the chain that actually holds the task.
     const verifications = await Promise.all(
-      pending.map(async (t) => ({
-        ...t,
-        onChainId: await resolveTaskByHash(t.meta.taskId).then((r) => r?.taskId ?? null).catch(() => null),
-      })),
+      pending.map(async (t) => {
+        const r = await resolveTaskByHash(t.meta.taskId).catch(() => null);
+        return { ...t, onChainId: r?.taskId ?? null, chain: r?.chain ?? null };
+      }),
     );
     const body: ApiResponse = {
       success: true,

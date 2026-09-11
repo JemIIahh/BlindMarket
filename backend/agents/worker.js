@@ -111,6 +111,11 @@ const SUI_ADMIN_CAP_ID = process.env.SUI_ADMIN_CAP_ID ?? '0x0';
 // BlindEscrow proxy address — the verifier role (verificationMode='agent')
 // signs completeVerification directly against this contract (trustless).
 const AGENT_ESCROW_ADDRESS = process.env.AGENT_ESCROW_ADDRESS ?? '';
+// Base settlement, injected by agentRunner only when the backend has a Base
+// escrow configured. Empty means "no Base signer" — never guess an RPC.
+const BASE_RPC_URL = process.env.BASE_RPC_URL ?? '';
+const BASE_CHAIN_ID = Number(process.env.BASE_CHAIN_ID ?? 0);
+const AGENT_BASE_ESCROW_ADDRESS = process.env.AGENT_BASE_ESCROW_ADDRESS ?? '';
 const AGENT_TOOLS_RAW = process.env.AGENT_TOOLS ?? '[]';
 const AGENT_TOOL_SECRETS_RAW = process.env.AGENT_TOOL_SECRETS ?? '{}';
 const AGENT_CAPABILITIES_RAW = process.env.AGENT_CAPABILITIES ?? '[]';
@@ -424,16 +429,71 @@ if (!IS_EVM_AGENT) {
     log(`Sui signer init failed (${e.message}) — falling back to EVM signer`);
   }
 }
+// One signer per chain, all from the same key. A task is escrowed on exactly
+// one chain and the backend names it on /submit and /verifications; the
+// worker must sign on THAT chain's RPC. Until this existed there was a single
+// 0G signer, so a Base submitEvidence — which carried no chainId — was quietly
+// broadcast onto 0G, and a deployed agent could accept a Base task and never
+// deliver it. `signerWallet` stays the 0G signer: delegation funds native 0G
+// and the legacy 0G-only paths read it directly.
+const signers = { '0g': null, base: null };
 if (!suiSigner && AGENT_PRIVATE_KEY) {
+  const pk = AGENT_PRIVATE_KEY.startsWith('0x') ? AGENT_PRIVATE_KEY : `0x${AGENT_PRIVATE_KEY}`;
   try {
-    const provider = new ethers.JsonRpcProvider(OG_RPC_URL, OG_CHAIN_ID);
-    signerWallet = new ethers.Wallet(
-      AGENT_PRIVATE_KEY.startsWith('0x') ? AGENT_PRIVATE_KEY : `0x${AGENT_PRIVATE_KEY}`,
-      provider,
-    );
+    signers['0g'] = new ethers.Wallet(pk, new ethers.JsonRpcProvider(OG_RPC_URL, OG_CHAIN_ID));
+    signerWallet = signers['0g'];
   } catch (e) {
-    console.error(`[agent:${(process.env.AGENT_ID ?? '').slice(0, 8)}] failed to init signer: ${e.message}`);
+    console.error(`[agent:${(process.env.AGENT_ID ?? '').slice(0, 8)}] failed to init 0G signer: ${e.message}`);
   }
+  if (BASE_RPC_URL && BASE_CHAIN_ID) {
+    try {
+      signers.base = new ethers.Wallet(pk, new ethers.JsonRpcProvider(BASE_RPC_URL, BASE_CHAIN_ID));
+    } catch (e) {
+      console.error(`[agent:${(process.env.AGENT_ID ?? '').slice(0, 8)}] failed to init Base signer: ${e.message}`);
+    }
+  }
+}
+
+/** Normalise the chain the backend reports; anything unknown is treated as 0G,
+ *  which is what every task was before Base existed. Exported for tests. */
+export function pickChain(reported) {
+  return reported === 'base' ? 'base' : '0g';
+}
+
+/** The signer bound to `chain`'s RPC, or null when that chain is not
+ *  configured for this worker. Exported for tests via `_signers`. */
+export function signerFor(chain, table = signers) {
+  return table[pickChain(chain)] ?? null;
+}
+
+export function escrowAddressFor(chain) {
+  return pickChain(chain) === 'base' ? AGENT_BASE_ESCROW_ADDRESS : AGENT_ESCROW_ADDRESS;
+}
+
+const NATIVE_SYMBOL = { '0g': '0G', base: 'ETH' };
+
+/**
+ * Gas preflight. The worker's wallet pays its own gas — the Privy relay the
+ * web app and MCP use signs only Privy-managed wallets, and this is a raw EOA
+ * (relay-tx looks the address up in Privy and answers WALLET_NOT_FOUND for
+ * anything else). On 0G the wallet is usually funded because delegation and
+ * deploy already need 0G; on Base nothing funds it, so the first Base task
+ * would fail at broadcast with an opaque "insufficient funds". Say what is
+ * missing, on which chain, for which address, before spending the attempt.
+ * Returns null when fine, else the reason.
+ */
+export async function preflightGas(chain, signer) {
+  if (!signer) return `no ${pickChain(chain)} signer — ${pickChain(chain) === 'base' ? 'BASE_RPC_URL/BASE_CHAIN_ID not injected (backend has no Base escrow configured?)' : 'AGENT_PRIVATE_KEY missing'}`;
+  let balance;
+  try {
+    balance = await signer.provider.getBalance(signer.address);
+  } catch (e) {
+    return null; // RPC blip — let the broadcast attempt report the real error
+  }
+  if (balance === 0n) {
+    return `wallet ${signer.address} holds 0 ${NATIVE_SYMBOL[pickChain(chain)]} on ${pickChain(chain)} — it pays its own gas there and cannot broadcast. Fund it (any amount covers many txs at current gas).`;
+  }
+  return null;
 }
 
 let escrowIface = null;
@@ -608,6 +668,8 @@ async function fetchWithTimeout(url, options = {}, timeout = 30000) {
 // `lastIndexOf` + slice-to-end recovers it regardless of what came before).
 // Exported so the test file doesn't have to duplicate the literal.
 export const JS_TOOL_SENTINEL = '###BM_JS_TOOL_RESULT###:';
+
+export const _signers = signers;
 
 export function buildTools(currentTaskHash = null) {
   /** @type {import('ai').ToolSet} */
@@ -1884,13 +1946,24 @@ async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrapp
       await releaseTask(acceptedTaskHash);
       return;
     } else {
+      // The backend names the chain the unsigned tx targets. Pick that chain's
+      // signer — the tx also carries chainId, so a wrong pick fails loudly at
+      // ethers rather than landing on the wrong network.
+      const submitChain = pickChain(submitJson.data?.chain);
+      const submitSigner = signerFor(submitChain);
+      const gasProblem = await preflightGas(submitChain, submitSigner);
+      if (gasProblem) {
+        log(`cannot broadcast submitEvidence for ${acceptedTaskHash.slice(0, 10)}… on ${submitChain}: ${gasProblem}`);
+        await releaseTask(acceptedTaskHash);
+        return;
+      }
       // EVM broadcast loop
       const MAX_SUBMIT_ATTEMPTS = 3;
       const RETRY_DELAY_MS = 6_000;
       for (let attempt = 1; attempt <= MAX_SUBMIT_ATTEMPTS; attempt++) {
       try {
-        const sent = await signerWallet.sendTransaction(unsignedSubmitEvidence);
-        log(`submitEvidence broadcast for ${acceptedTaskHash.slice(0, 10)}…: ${sent.hash}`);
+        const sent = await submitSigner.sendTransaction(unsignedSubmitEvidence);
+        log(`submitEvidence broadcast for ${acceptedTaskHash.slice(0, 10)}… on ${submitChain} from ${submitSigner.address}: ${sent.hash}`);
         const receipt = await sent.wait();
         log(`submitEvidence confirmed for ${acceptedTaskHash.slice(0, 10)}…: block=${receipt?.blockNumber} status=${receipt?.status}`);
         broadcastOk = true;
@@ -2080,9 +2153,11 @@ async function resumeAssignedTasks() {
 // 0=Funded, 1=Assigned, 2=Submitted, 3=Verified(failed), 4=Completed, 5=Cancelled.
 // Used by the verifier to decide whether to settle (Submitted) or just record
 // (already settled) — keeps completeVerification idempotent across polls.
-async function readOnChainStatus(onChainId) {
+async function readOnChainStatus(onChainId, chain = '0g') {
+  const signer = signerFor(chain);
+  if (!signer) throw new Error(`no ${pickChain(chain)} signer`);
   const data = escrowIface.encodeFunctionData('getTask', [BigInt(onChainId)]);
-  const raw = await signerWallet.provider.call({ to: AGENT_ESCROW_ADDRESS, data });
+  const raw = await signer.provider.call({ to: escrowAddressFor(chain), data });
   const [task] = escrowIface.decodeFunctionResult('getTask', raw);
   return Number(task.status);
 }
@@ -2215,15 +2290,21 @@ async function pollAndVerify() {
         log(`verify: ${taskHash.slice(0, 10)}… on-chain id not indexed yet; will retry`);
         continue; // transient — don't burn the cap
       }
-      if (!signerWallet || !escrowIface || !AGENT_ESCROW_ADDRESS) {
-        log(`verify: cannot settle ${taskHash.slice(0, 10)}… — signer/escrow not configured`);
+      // /verifications reports which chain holds the task. Settle against THAT
+      // escrow with THAT chain's signer — the numeric id alone is ambiguous
+      // across chains, and this used to always hit the 0G escrow.
+      const settleChain = pickChain(item.chain);
+      const settleSigner = signerFor(settleChain);
+      const settleEscrow = escrowAddressFor(settleChain);
+      if (!settleSigner || !escrowIface || !settleEscrow) {
+        log(`verify: cannot settle ${taskHash.slice(0, 10)}… — ${settleChain} signer/escrow not configured`);
         bumpVerifyFailure(taskHash);
         continue;
       }
 
       let status;
       try {
-        status = await readOnChainStatus(onChainId);
+        status = await readOnChainStatus(onChainId, settleChain);
       } catch (e) {
         log(`verify: on-chain status read failed for ${taskHash.slice(0, 10)}…: ${e.message}`);
         continue; // transient RPC blip — retry next poll
@@ -2237,8 +2318,10 @@ async function pollAndVerify() {
       } else if (status === 2) {
         // Submitted on-chain → settle now with our verdict.
         try {
+          const gasProblem = await preflightGas(settleChain, settleSigner);
+          if (gasProblem) { log(`verify: ${taskHash.slice(0, 10)}… ${gasProblem}`); bumpVerifyFailure(taskHash); continue; }
           const data = escrowIface.encodeFunctionData('completeVerification', [BigInt(onChainId), verdict.passed]);
-          const sent = await signerWallet.sendTransaction({ to: AGENT_ESCROW_ADDRESS, data });
+          const sent = await settleSigner.sendTransaction({ to: settleEscrow, data, chainId: settleChain === 'base' ? BASE_CHAIN_ID : OG_CHAIN_ID });
           log(`verify: completeVerification broadcast for ${taskHash.slice(0, 10)}… (passed=${verdict.passed}): ${sent.hash}`);
           const receipt = await sent.wait();
           if (receipt?.status !== 1) { bumpVerifyFailure(taskHash); continue; }
