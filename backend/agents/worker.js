@@ -156,6 +156,15 @@ export function shouldScanFeed(wsConnected, now, lastScanAt, reconcileMs = WS_RE
   if (!wsConnected) return true;
   return now - lastScanAt >= reconcileMs;
 }
+
+// While tasks sit skipped for lack of gas, nothing pushes an event when the
+// wallet gets funded — a balance change is invisible to WS. Re-scan the feed
+// on a short cadence until the skipped set drains, then fall back to the
+// normal WS reconcile floor.
+const GAS_RECHECK_MS = Number(process.env.GAS_RECHECK_MS ?? 60_000);
+export function feedScanCadence(hasGasSkipped, reconcileMs = WS_RECONCILE_MS, recheckMs = GAS_RECHECK_MS) {
+  return hasGasSkipped ? Math.min(reconcileMs, recheckMs) : reconcileMs;
+}
 // Liveness heartbeat cadence — DECOUPLED from POLL_INTERVAL_MS. The parent
 // refreshes a Redis key with a 90s TTL on each heartbeat (see redis.ts
 // HEARTBEAT_TTL_S / isAgentLive); if liveness were tied to the poll loop, an
@@ -482,6 +491,25 @@ const NATIVE_SYMBOL = { '0g': '0G', base: 'ETH' };
  * missing, on which chain, for which address, before spending the attempt.
  * Returns null when fine, else the reason.
  */
+/**
+ * Partition open tasks by whether this wallet can pay gas on the task's chain.
+ * `meta.chain` is recorded at /tasks/index; tasks without it (indexed before
+ * the field existed) are kept and checked after accept instead. `problemFor`
+ * is memoised per poll so a page of N Base tasks costs one balance read.
+ */
+export async function pickAffordable(entries, problemFor) {
+  const affordable = [];
+  const skipped = [];
+  for (const e of entries) {
+    const chain = e?.meta?.chain;
+    if (chain !== 'base' && chain !== '0g') { affordable.push(e); continue; }
+    const reason = await problemFor(chain);
+    if (reason) skipped.push({ taskHash: e.meta.taskId, chain, reason });
+    else affordable.push(e);
+  }
+  return { affordable, skipped };
+}
+
 export async function preflightGas(chain, signer) {
   if (!signer) return `no ${pickChain(chain)} signer — ${pickChain(chain) === 'base' ? 'BASE_RPC_URL/BASE_CHAIN_ID not injected (backend has no Base escrow configured?)' : 'AGENT_PRIVATE_KEY missing'}`;
   let balance;
@@ -574,6 +602,9 @@ let _working = false;
 // LLM calls forever.
 const resumingTasks = new Set();
 const resumeFailures = new Map();
+// taskHash → last gas-skip reason logged, so a wallet that stays unfunded
+// logs each skipped task once per reason instead of once per poll.
+const gasSkipLogged = new Map();
 const MAX_RESUME_ATTEMPTS = 3;
 // Verifier role (verificationMode='agent'): tasks this agent is currently
 // judging, plus a per-task attempt cap so a task that can't be judged/posted
@@ -1392,7 +1423,7 @@ async function pollAndWork() {
     // never recoverable, because nothing re-emits and `join` replays no
     // backlog. Sweep on a floor cadence so a stranded task is picked up within
     // WS_RECONCILE_MS instead of never.
-    if (!shouldScanFeed(wsConnected, Date.now(), lastFeedScanAt)) return;
+    if (!shouldScanFeed(wsConnected, Date.now(), lastFeedScanAt, feedScanCadence(gasSkipLogged.size > 0))) return;
     lastFeedScanAt = Date.now();
 
     // The browse endpoint is paginated (max 200/page) — walk every page so a
@@ -1439,10 +1470,33 @@ async function pollAndWork() {
       return;
     }
 
+    // Gas gate BEFORE accept: /accept assigns the task on-chain, after which
+    // the backend refuses /release (ON_CHAIN_LOCKED) — so an agent that
+    // accepts a Base task with 0 ETH strands it. Skipped tasks are NOT added
+    // to appliedTasks: once the wallet is funded the next poll picks them up.
+    const gasProblemCache = {};
+    const problemFor = async (chain) => {
+      if (!(chain in gasProblemCache)) gasProblemCache[chain] = await preflightGas(chain, signerFor(chain));
+      return gasProblemCache[chain];
+    };
+    const { affordable, skipped } = await pickAffordable(available, problemFor);
+    for (const sk of skipped) {
+      if (gasSkipLogged.get(sk.taskHash) === sk.reason) continue;
+      gasSkipLogged.set(sk.taskHash, sk.reason);
+      log(`skipping task ${sk.taskHash.slice(0, 10)}… on ${sk.chain}: ${sk.reason}`);
+    }
+    for (const e of affordable) gasSkipLogged.delete(e.meta.taskId);
+    if (affordable.length === 0) {
+      return;
+    }
+    available.length = 0;
+    available.push(...affordable);
+
     let acceptedTaskHash = null;
     let acceptedRootHash = null;
     let acceptedWrappedKey = null;
     let acceptedPrivacy = null;
+    let acceptedChain = null;
 
     for (const entry of available) {
       const taskHash = entry.meta.taskId;
@@ -1462,6 +1516,7 @@ async function pollAndWork() {
           acceptedRootHash = acceptJson.data?.rootHash ?? null;
           acceptedWrappedKey = acceptJson.data?.wrappedKey ?? null;
           acceptedPrivacy = acceptJson.data?.privacy ?? null;
+          acceptedChain = acceptJson.data?.chain ?? entry.meta?.chain ?? null;
         } catch {
           // Non-JSON response body; treat as no brief available.
         }
@@ -1574,7 +1629,7 @@ async function pollAndWork() {
     // before the HTTP response returns. No sleep needed.
     log(`assignment confirmed for ${acceptedTaskHash.slice(0, 10)}…, starting work`);
 
-    await runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrappedKey, acceptedPrivacy);
+    await runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrappedKey, acceptedPrivacy, acceptedChain);
   } catch (err) {
     log(`error: ${err.message}`);
   } finally {
@@ -1621,9 +1676,23 @@ async function downloadPublicBrief(rootHash) {
   return (await downloadBriefBlob(rootHash)).toString('utf8');
 }
 
-async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrappedKey, acceptedPrivacy) {
+async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrappedKey, acceptedPrivacy, acceptedChain = null) {
   try {
     const taskStartedAt = Date.now();
+
+    // The task is now assigned to this wallet on-chain. Before spending an
+    // LLM call, make sure we can pay for the submitEvidence tx that follows —
+    // if not, leave the off-chain state at 'accepted' (NOT 'submitted': that
+    // is set by /submit and cannot be re-driven) so resumeAssignedTasks
+    // re-runs this task once the wallet is funded. Chain unknown (older
+    // backend / legacy task) → checked at submit time instead.
+    if (acceptedChain === 'base' || acceptedChain === '0g') {
+      const gasProblem = await preflightGas(acceptedChain, signerFor(acceptedChain));
+      if (gasProblem) {
+        log(`not working on ${acceptedTaskHash.slice(0, 10)}… yet: ${gasProblem} — it is assigned to this wallet on-chain; fund the wallet and the worker resumes it on a later poll`);
+        return;
+      }
+    }
 
     const isPublicTask = acceptedPrivacy === 'public';
     let briefPlaintext = null;
@@ -2462,9 +2531,24 @@ function connectWebSocket() {
     acceptFromWs(data.taskId);
   });
 
-  wsClient.on('task:available', (data) => {
+  wsClient.on('task:available', async (data) => {
     log(`WS received task:available for ${data.taskId?.slice(0, 10) || 'unknown'}…`);
     if (!data.taskId) return;
+    // Same gas gate as the feed scan: accepting assigns on-chain, so refuse
+    // up front when the broadcast names a chain this wallet cannot pay on.
+    // Broadcasts without a chain (older backend) fall through to the
+    // post-accept check in runAcceptedTask.
+    const chain = data.meta?.chain;
+    if (chain === 'base' || chain === '0g') {
+      const reason = await preflightGas(chain, signerFor(chain)).catch(() => null);
+      if (reason) {
+        if (gasSkipLogged.get(data.taskId) !== reason) {
+          gasSkipLogged.set(data.taskId, reason);
+          log(`skipping task ${data.taskId.slice(0, 10)}… on ${chain}: ${reason}`);
+        }
+        return;
+      }
+    }
     acceptFromWs(data.taskId);
   });
 
@@ -2509,15 +2593,17 @@ async function tryAcceptTask(taskHash) {
     let rootHash = null;
     let wrappedKey = null;
     let privacy = null;
+    let chain = null;
     try {
       const acceptJson = await acceptRes.json();
       rootHash = acceptJson.data?.rootHash ?? null;
       wrappedKey = acceptJson.data?.wrappedKey ?? null;
       privacy = acceptJson.data?.privacy ?? null;
+      chain = acceptJson.data?.chain ?? null;
     } catch { /* non-JSON body */ }
     log(`assignment confirmed for ${taskHash.slice(0, 10)}…, starting work`);
     // Run the task in the foreground (blocks this handler until done)
-    await runAcceptedTask(taskHash, rootHash, wrappedKey, privacy);
+    await runAcceptedTask(taskHash, rootHash, wrappedKey, privacy, chain);
     return true;
   }
 

@@ -139,6 +139,8 @@ export interface SettleResult {
   /** Terminal: the task was cancelled/refunded on-chain (no worker). Close
    *  the off-chain state; do not reconcile to the zero address. */
   cancelled?: boolean;
+  /** Chain the assignment was settled (or confirmed) on. */
+  chain?: TaskChain;
 }
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
@@ -163,7 +165,7 @@ async function confirmAssignedWorker(
     const onChainWorker = String(t.worker);
     if (onChainWorker.toLowerCase() === executor.toLowerCase()) {
       console.log(`[a2aSettlement] assignment skipped — task ${taskId} already assigned to this executor`);
-      return { success: true, alreadySettled: true, onChainWorker };
+      return { success: true, alreadySettled: true, onChainWorker, chain };
     }
     // marketplaceAssign reverts InvalidStatus for ANY non-Funded status. The
     // only non-Funded state with no worker is Cancelled (poster reclaimed the
@@ -271,7 +273,7 @@ export async function settleAssignment(taskHash: string, executor: string): Prom
     return { success: false, error: msg, txHash: tx.hash };
   }
 
-  return { success: true, txHash: tx.hash };
+  return { success: true, txHash: tx.hash, chain };
 }
 
 // Writing to Redis can itself fail (network blip, key missing if releaseToOpen

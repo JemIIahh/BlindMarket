@@ -7,7 +7,7 @@ vi.mock('@ai-sdk/groq', () => ({ createGroq: () => () => 'm' }));
 vi.mock('socket.io-client', () => ({ io: () => ({ on: vi.fn(), emit: vi.fn() }) }));
 
 // @ts-expect-error — plain-JS worker, no d.ts
-import { shouldScanFeed, WS_RECONCILE_MS } from './worker.js';
+import { shouldScanFeed, feedScanCadence, WS_RECONCILE_MS } from './worker.js';
 
 /**
  * The stranding bug. The offer cascade lives in a setTimeout (routes/a2a.ts)
@@ -46,5 +46,15 @@ describe('shouldScanFeed — a connected agent still sweeps the board', () => {
   it('floor is long enough to stay cheap, short enough to rescue a task', () => {
     expect(WS_RECONCILE_MS).toBeGreaterThanOrEqual(60_000);
     expect(WS_RECONCILE_MS).toBeLessThanOrEqual(600_000);
+  });
+});
+
+describe('feedScanCadence', () => {
+  it('shortens the WS reconcile floor while tasks sit skipped for gas', () => {
+    expect(feedScanCadence(true, 300_000, 60_000)).toBe(60_000);
+    expect(feedScanCadence(false, 300_000, 60_000)).toBe(300_000);
+  });
+  it('never lengthens a floor that is already shorter than the recheck', () => {
+    expect(feedScanCadence(true, 30_000, 60_000)).toBe(30_000);
   });
 });

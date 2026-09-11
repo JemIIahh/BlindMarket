@@ -10,7 +10,7 @@ import * as keyCustody from '../services/keyCustodyService.js';
 import { autoVerify } from '../services/autoVerify.js';
 import { settleAssignment, settleVerification } from '../services/a2aSettlement.js';
 import { recordWorkerPayout, recordWorkerDispute } from '../services/workerPayout.js';
-import { resolveTaskByHash, seedTaskId } from '../services/taskChain.js';
+import { resolveTaskByHash, seedTaskId, type TaskChain } from '../services/taskChain.js';
 import * as escrowService from '../services/escrow.js';
 import * as reputationService from '../services/reputation.js';
 import * as reputationDecay from '../services/reputationDecay.js';
@@ -906,8 +906,14 @@ a2aRouter.get('/key-custody/pubkey', async (_req, res, next) => {
 
 /** task:available meta — caps included only when the task actually has them,
  *  so every broadcast path emits the same shape. */
-function broadcastMeta(requiredCaps: string[]): Record<string, unknown> {
-  return requiredCaps.length > 0 ? { requiredCapabilities: requiredCaps } : {};
+// `chain` rides along so a worker can refuse a broadcast for a chain it
+// cannot pay gas on BEFORE accepting (an accept assigns on-chain and is then
+// unreleasable). Omitted for rows indexed before meta.chain existed.
+function broadcastMeta(requiredCaps: string[], chain?: TaskChain): Record<string, unknown> {
+  return {
+    ...(requiredCaps.length > 0 ? { requiredCapabilities: requiredCaps } : {}),
+    ...(chain ? { chain } : {}),
+  };
 }
 
 /**
@@ -928,7 +934,8 @@ function scheduleCascadeAdvance(
 
       const next = await a2aStore.advanceCascade(taskHash);
       if (!next) {
-        emitTaskAvailable(taskHash, broadcastMeta(requiredCaps));
+        const meta = await a2aStore.getMeta(taskHash);
+        emitTaskAvailable(taskHash, broadcastMeta(requiredCaps, meta?.chain));
         return;
       }
 
@@ -991,7 +998,8 @@ async function startRankedCascade(
     }
   }
   if (entries.length === 0) {
-    emitTaskAvailable(taskHash, broadcastMeta(requiredCaps));
+    const meta = await a2aStore.getMeta(taskHash);
+    emitTaskAvailable(taskHash, broadcastMeta(requiredCaps, meta?.chain));
     return;
   }
 
@@ -1349,6 +1357,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       }
     }
 
+    const taskChain: TaskChain = activeEscrow === baseEscrow ? 'base' : '0g';
     await a2aStore.setMeta({
       taskId: taskHash,
       targetExecutorType: 'agent',
@@ -1356,6 +1365,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       verificationCriteria: data.verificationCriteria,
       requiredCapabilities: requiredCaps,
       posterAddress: address,
+      chain: taskChain,
       verifierAddress: data.verifierAddress?.toLowerCase(),
       rootHash: data.rootHash,
       wrappedKeys: mergedWrappedKeys,
@@ -1428,7 +1438,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
     // that was this same lockout.)
     const semanticEligible = semanticMatch.semanticRoutingEligible(routingMeta);
     if (!config.cascadeEnabled || targetExecutor || (requiredCaps.length === 0 && !semanticEligible)) {
-      emitTaskAvailable(taskHash, broadcastMeta(requiredCaps));
+      emitTaskAvailable(taskHash, broadcastMeta(requiredCaps, taskChain));
     } else {
       const taskRewardWei = onChainAmount;
       const broadcastAfter = (err: Error, stage: string) => {

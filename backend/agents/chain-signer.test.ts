@@ -7,7 +7,7 @@ vi.mock('@ai-sdk/groq', () => ({ createGroq: () => () => 'm' }));
 vi.mock('socket.io-client', () => ({ io: () => ({ on: vi.fn(), emit: vi.fn() }) }));
 
 // @ts-expect-error — plain-JS worker, no d.ts
-import { pickChain, signerFor, escrowAddressFor, preflightGas } from './worker.js';
+import { pickChain, signerFor, escrowAddressFor, preflightGas, pickAffordable } from './worker.js';
 
 /**
  * A deployed agent could accept a Base task and never deliver it: the worker
@@ -70,5 +70,29 @@ describe('preflightGas — refuse before spending an attempt', () => {
   });
   it('does not block on an RPC blip — the broadcast reports the real error', async () => {
     expect(await preflightGas('base', fakeSigner(new Error('ECONNRESET')))).toBeNull();
+  });
+});
+
+describe('pickAffordable', () => {
+  const entry = (taskId: string, chain?: string) => ({ meta: chain ? { taskId, chain } : { taskId } });
+
+  it('drops tasks on a chain the wallet cannot pay gas on and keeps the rest', async () => {
+    const problemFor = async (chain: string) => (chain === 'base' ? 'wallet holds 0 ETH on base' : null);
+    const { affordable, skipped } = await pickAffordable(
+      [entry('0xb1', 'base'), entry('0xo1', '0g'), entry('0xb2', 'base')],
+      problemFor,
+    );
+    expect(affordable.map((e: any) => e.meta.taskId)).toEqual(['0xo1']);
+    expect(skipped).toEqual([
+      { taskHash: '0xb1', chain: 'base', reason: 'wallet holds 0 ETH on base' },
+      { taskHash: '0xb2', chain: 'base', reason: 'wallet holds 0 ETH on base' },
+    ]);
+  });
+
+  it('keeps tasks whose chain is unknown (legacy rows) for the post-accept check', async () => {
+    const problemFor = async () => 'no signer';
+    const { affordable, skipped } = await pickAffordable([entry('0xlegacy'), entry('0xx', 'sui')], problemFor);
+    expect(affordable).toHaveLength(2);
+    expect(skipped).toEqual([]);
   });
 });
