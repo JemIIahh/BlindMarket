@@ -10,7 +10,7 @@ import * as keyCustody from '../services/keyCustodyService.js';
 import { autoVerify } from '../services/autoVerify.js';
 import { settleAssignment, settleVerification } from '../services/a2aSettlement.js';
 import { recordWorkerPayout, recordWorkerDispute } from '../services/workerPayout.js';
-import { resolveTaskByHash } from '../services/taskChain.js';
+import { resolveTaskByHash, seedTaskId } from '../services/taskChain.js';
 import * as escrowService from '../services/escrow.js';
 import * as reputationService from '../services/reputation.js';
 import * as reputationDecay from '../services/reputationDecay.js';
@@ -18,7 +18,6 @@ import * as agentEmbedding from '../services/agentEmbedding.js';
 import * as semanticMatch from '../services/semanticMatch.js';
 import { demandFeed, MAX_DEMAND_LIMIT } from '../services/demandFeed.js';
 import { provider, escrow, baseProvider, baseEscrow } from '../services/chain.js';
-import { redis } from '../services/redis.js';
 import { ethers } from 'ethers';
 import type { AuthRequest, ApiResponse, AgentCapability } from '../types.js';
 import { AGENT_CAPABILITIES } from '../types.js';
@@ -1242,13 +1241,13 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       );
     }
 
-    // All checks passed — eagerly seed the indexer mapping so /submit
-    // resolves the hash immediately without waiting for the forward-only
-    // event poller to catch up.
-    await Promise.all([
-      redis.set(`a2a:hash2id:${taskHash}`, onChainTaskId),
-      redis.set(`a2a:id2hash:${onChainTaskId}`, taskHash),
-    ]);
+    // All checks passed — eagerly seed the indexer mapping so /submit and
+    // /accept resolve the hash immediately without waiting for the
+    // forward-only event poller to catch up. Seeded in the namespace of the
+    // chain that actually holds the task: resolveTaskByHash reads the Base
+    // namespace first, so seeding a Base task under the 0G keys made it
+    // resolve as 0G until the Base poller caught up (see taskChain.seedTaskId).
+    await seedTaskId(activeEscrow === baseEscrow ? 'base' : '0g', taskHash, onChainTaskId);
 
     const wrappedKeysNormalized = data.wrappedKeys
       ? Object.fromEntries(

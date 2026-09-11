@@ -15,8 +15,8 @@
  * through resolveTaskByHash and use the chain it reports.
  */
 import { baseEscrow } from './chain.js';
-import { getCachedTaskIdByHash, getTaskIdByHash } from './escrowEvents.js';
-import { getBaseTaskIdByHash, forceBaseTick } from './baseEscrowEvents.js';
+import { getCachedTaskIdByHash, getTaskIdByHash, seedTaskIdMapping } from './escrowEvents.js';
+import { getBaseTaskIdByHash, forceBaseTick, seedBaseTaskIdMapping } from './baseEscrowEvents.js';
 
 export type TaskChain = 'base' | '0g';
 
@@ -53,6 +53,22 @@ export async function resolveTaskByHash(taskHash: string): Promise<ResolvedTask 
   // Falls through to the 0G resolver, which retries and can backfill.
   const resolved = await getTaskIdByHash(taskHash);
   return resolved ? { taskId: resolved, chain: '0g' } : null;
+}
+
+/**
+ * Seed the hash<->id mapping in the namespace of the chain that holds the task.
+ *
+ * The a2a index route used to write every task into the 0G namespace, Base
+ * tasks included. resolveTaskByHash consults the Base namespace first, so a
+ * Base task was resolved as 0G for the window between indexing and the next
+ * Base poller tick (~5 s). An agent accepting inside that window had its
+ * assignment sent to the 0G escrow with the Base task's id, which reverted
+ * NotVerifier — seen live on Base Sepolia (task 3 on 0xa1F7…): accept 1 s
+ * after index → 503 SETTLEMENT_FAILED; the same accept 3 min later succeeded.
+ */
+export async function seedTaskId(chain: TaskChain, taskHash: string, taskId: bigint | string): Promise<void> {
+  if (chain === 'base') await seedBaseTaskIdMapping(taskHash, taskId);
+  else await seedTaskIdMapping(taskHash, taskId);
 }
 
 /**

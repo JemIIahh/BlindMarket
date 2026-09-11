@@ -89,6 +89,8 @@ vi.mock('../services/redis.js', () => ({
 }));
 
 vi.mock('../services/chain.js', () => ({
+  // No Base escrow in this harness: resolveCachedTaskByHash consults only the 0G index.
+  baseEscrow: null,
   getTokenDecimals: vi.fn(async () => 18),
 }));
 
@@ -97,12 +99,16 @@ vi.mock('../services/registry.js', () => ({
   getOpenTasks: vi.fn(async () => []),
 }));
 
-vi.mock('../services/escrow.js', () => ({
-  getTask: vi.fn(async (id: number) => {
+vi.mock('../services/escrow.js', () => {
+  const getTask = vi.fn(async (id: number) => {
     if (id !== 7) throw new Error('could not decode result data');
     return F.ESCROW_TASK;
-  }),
-}));
+  });
+  // get_task_status resolves a hash to its chain and reads that escrow via
+  // getTaskOn; a numeric id stays on 0G, so it lands on the same fixture.
+  const getTaskOn = vi.fn(async (_chain: 'base' | '0g', id: number) => getTask(id));
+  return { getTask, getTaskOn };
+});
 
 vi.mock('../services/serviceStore.js', () => ({
   listActiveServices: vi.fn(async () => ({

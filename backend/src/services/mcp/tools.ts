@@ -11,12 +11,12 @@ import * as agentStore from '../agentStore.js';
 import * as badgeStore from '../badgeStore.js';
 import * as reputationService from '../reputation.js';
 import * as reputationDecay from '../reputationDecay.js';
-import { redis } from '../redis.js';
 import { loadAllAgents } from '../deployedAgentStore.js';
 import { getAgent as getDeployedAgent, startAgent, stopAgent, getAgentLogs } from '../agentRunner.js';
 import { isAgentOwner, stripAgentSecrets } from '../agentOwnership.js';
 import { canViewerSeeResult } from '../resultVisibility.js';
 import { getTokenDecimals } from '../chain.js';
+import { resolveCachedTaskByHash, type TaskChain } from '../taskChain.js';
 
 /**
  * Tier-1 remote MCP tool surface (see docs/AGENT-READY.md).
@@ -205,12 +205,16 @@ export function buildMcpServer(user: AuthUser): McpServer {
     },
     async ({ taskId }) => {
       let numericId: number;
+      // A hash resolves to whichever chain holds it; a bare number is 0G-only
+      // (ids collide across chains, so the number alone cannot name a Base task).
+      let chain: TaskChain = '0g';
       if (/^0x[0-9a-fA-F]{64}$/.test(taskId)) {
-        const resolved = await redis.get(`a2a:hash2id:${taskId.toLowerCase()}`);
-        if (!resolved || !/^\d+$/.test(resolved)) {
+        const resolved = await resolveCachedTaskByHash(taskId.toLowerCase());
+        if (!resolved || !/^\d+$/.test(resolved.taskId)) {
           return fail('NOT_INDEXED_YET', 'Task hash not found — the create transaction may not be confirmed or indexed yet. Retry in a few seconds.');
         }
-        numericId = parseInt(resolved, 10);
+        numericId = parseInt(resolved.taskId, 10);
+        chain = resolved.chain;
       } else if (/^\d+$/.test(taskId)) {
         numericId = parseInt(taskId, 10);
       } else {
@@ -219,7 +223,7 @@ export function buildMcpServer(user: AuthUser): McpServer {
 
       let task;
       try {
-        task = await escrowService.getTask(numericId);
+        task = await escrowService.getTaskOn(chain, numericId);
       } catch (err) {
         if ((err as Error).message?.includes('could not decode result data')) {
           return fail('NOT_FOUND', 'Task not found on chain');

@@ -6,11 +6,10 @@ import { AppError } from '../middleware/errorHandler.js';
 import * as escrowService from '../services/escrow.js';
 import * as registryService from '../services/registry.js';
 import { getTokenDecimals } from '../services/chain.js';
-import { resolveTaskChainById } from '../services/taskChain.js';
+import { resolveTaskChainById, resolveCachedTaskByHash, type TaskChain } from '../services/taskChain.js';
 import type { AuthRequest, ApiResponse } from '../types.js';
 import { AGENT_CAPABILITIES } from '../types.js';
 import * as a2aStore from '../services/a2aStore.js';
-import { redis } from '../services/redis.js';
 import { randomUUID } from 'crypto';
 import * as accountingService from '../services/accountingService.js';
 import { getDb } from '../services/database.js';
@@ -183,13 +182,16 @@ tasksRouter.get('/:id', optionalAuth, async (req: AuthRequest, res, next) => {
 
     const isHexHash = /^0x[0-9a-fA-F]{64}$/.test(rawId);
     let taskId: number;
+    // Numeric ids are 0G-only here (ids collide across chains); a hash names
+    // exactly one task, so it resolves to whichever chain holds it.
+    let chain: TaskChain = '0g';
     if (isHexHash) {
-      const hashKey = `a2a:hash2id:${rawId.toLowerCase()}`;
-      const resolved = await redis.get(hashKey);
-      if (!resolved || !/^\d+$/.test(resolved)) {
+      const resolved = await resolveCachedTaskByHash(rawId.toLowerCase());
+      if (!resolved || !/^\d+$/.test(resolved.taskId)) {
         throw new AppError(404, 'NOT_INDEXED_YET', 'Task hash not found — create transaction may not be confirmed or indexed yet. Retry in a few seconds.');
       }
-      taskId = parseInt(resolved, 10);
+      taskId = parseInt(resolved.taskId, 10);
+      chain = resolved.chain;
     } else {
       if (!/^\d+$/.test(rawId)) {
         throw new AppError(400, 'INVALID_TASK_ID', 'Task ID must be a positive integer or a 0x-prefixed task hash');
@@ -198,13 +200,15 @@ tasksRouter.get('/:id', optionalAuth, async (req: AuthRequest, res, next) => {
     }
 
     const [task, meta] = await Promise.all([
-      escrowService.getTask(taskId).catch((err) => {
+      escrowService.getTaskOn(chain, taskId).catch((err) => {
         if ((err as Error).message?.includes('could not decode result data')) {
           throw new AppError(404, 'NOT_FOUND', 'Task not found on chain');
         }
         throw err;
       }),
-      registryService.getTaskMeta(taskId).catch(() => null),
+      // The TaskRegistry lives on 0G; reading it with a Base id would return
+      // the meta of an unrelated 0G task that happens to share the number.
+      chain === 'base' ? Promise.resolve(null) : registryService.getTaskMeta(taskId).catch(() => null),
     ]);
 
     const taskHash = task.taskHash;
