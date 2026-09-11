@@ -42,24 +42,60 @@ const HASH_LOOKUP_POLL_INTERVAL_MS = 2_000;
 /**
  * Serial tx queues — one per signer (0G and Base use different wallets).
  *
- * All marketplaceAssign calls go through the 0G signer; all
- * completeVerification calls go through the Base signer. Each queue
- * serialises nonces within its own chain.
+ * Each queue serialises the signer's transactions through MINING, not just
+ * through broadcast. Serialising broadcasts alone is not enough: the signer
+ * reads its nonce from the RPC's pending view, and Base Sepolia has served a
+ * stale pending nonce for a tx broadcast a moment earlier — two /accept calls
+ * one second apart both got nonce N and the second failed with "replacement
+ * fee too low" (three agents racing two tasks on 0xa1F7…, task 6). So the
+ * next send waits for the previous tx's receipt, and a nonce collision that
+ * slips through anyway is retried once after the mempool settles.
  */
-let ogSignerTxQueue: Promise<unknown> = Promise.resolve();
-let baseSignerTxQueue: Promise<unknown> = Promise.resolve();
+const NONCE_RETRY_DELAY_MS = 3_000;
 
-function enqueueOgSignerTx<T>(fn: () => Promise<T>): Promise<T> {
-  const next = ogSignerTxQueue.then(fn, fn);
-  ogSignerTxQueue = next.catch(() => {});
-  return next;
+export function isNonceCollision(err: unknown): boolean {
+  const e = err as { code?: string; message?: string } | null;
+  const msg = e?.message ?? '';
+  return (
+    e?.code === 'NONCE_EXPIRED' ||
+    e?.code === 'REPLACEMENT_UNDERPRICED' ||
+    /replacement fee too low|replacement transaction underpriced|nonce too low|already known/i.test(msg)
+  );
 }
 
-function enqueueBaseSignerTx<T>(fn: () => Promise<T>): Promise<T> {
-  const next = baseSignerTxQueue.then(fn, fn);
-  baseSignerTxQueue = next.catch(() => {});
-  return next;
+type Waitable = { wait?: () => Promise<unknown> } | null | undefined;
+
+export function createSerialTxQueue(opts: { retryDelayMs?: number } = {}): <T>(fn: () => Promise<T>) => Promise<T> {
+  const retryDelayMs = opts.retryDelayMs ?? NONCE_RETRY_DELAY_MS;
+  let queue: Promise<unknown> = Promise.resolve();
+  return <T>(fn: () => Promise<T>): Promise<T> => {
+    const send = async (): Promise<T> => {
+      try {
+        return await fn();
+      } catch (err) {
+        if (!isNonceCollision(err)) throw err;
+        console.warn(`[a2aSettlement] nonce collision (${(err as Error).message?.slice(0, 60)}) — retrying once in ${retryDelayMs}ms`);
+        await new Promise((r) => setTimeout(r, retryDelayMs));
+        return await fn();
+      }
+    };
+    const next = queue.then(send, send);
+    // Hold the queue until this tx is mined (or fails), so the next send reads
+    // a nonce the RPC has already advanced. The caller gets the tx as soon as
+    // it is broadcast and runs its own wait().
+    queue = next.then(
+      (tx) => {
+        const w = (tx as Waitable)?.wait;
+        return w ? Promise.resolve(w.call(tx)).catch(() => undefined) : undefined;
+      },
+      () => undefined,
+    );
+    return next;
+  };
 }
+
+const enqueueOgSignerTx = createSerialTxQueue();
+const enqueueBaseSignerTx = createSerialTxQueue();
 
 /**
  * The escrow a task actually lives on, plus the signer that can act on it.
