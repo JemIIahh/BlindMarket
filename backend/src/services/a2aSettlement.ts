@@ -52,6 +52,13 @@ const HASH_LOOKUP_POLL_INTERVAL_MS = 2_000;
  * slips through anyway is retried once after the mempool settles.
  */
 const NONCE_RETRY_DELAY_MS = 3_000;
+// How long the queue waits for a broadcast tx to mine before letting the next
+// send through. ethers' wait() has NO timer unless one is given, and a tx
+// evicted from a public RPC's pool never resolves — which would freeze every
+// later settlement on that chain until a restart. After the timeout the next
+// send proceeds; if the RPC still hands out the old nonce, the collision retry
+// covers it.
+const HOLD_TIMEOUT_MS = 60_000;
 
 export function isNonceCollision(err: unknown): boolean {
   const e = err as { code?: string; message?: string } | null;
@@ -59,11 +66,14 @@ export function isNonceCollision(err: unknown): boolean {
   return (
     e?.code === 'NONCE_EXPIRED' ||
     e?.code === 'REPLACEMENT_UNDERPRICED' ||
-    /replacement fee too low|replacement transaction underpriced|nonce too low|already known/i.test(msg)
+    // NOT "already known": that means the identical signed tx is already in
+    // the pool, i.e. the first broadcast succeeded — re-sending would mint a
+    // second tx at nonce N+1 that reverts InvalidStatus.
+    /replacement fee too low|replacement transaction underpriced|nonce too low/i.test(msg)
   );
 }
 
-type Waitable = { wait?: () => Promise<unknown> } | null | undefined;
+type Waitable = { wait?: (confirms?: number, timeoutMs?: number) => Promise<unknown> } | null | undefined;
 
 export function createSerialTxQueue(opts: { retryDelayMs?: number } = {}): <T>(fn: () => Promise<T>) => Promise<T> {
   const retryDelayMs = opts.retryDelayMs ?? NONCE_RETRY_DELAY_MS;
@@ -86,7 +96,7 @@ export function createSerialTxQueue(opts: { retryDelayMs?: number } = {}): <T>(f
     queue = next.then(
       (tx) => {
         const w = (tx as Waitable)?.wait;
-        return w ? Promise.resolve(w.call(tx)).catch(() => undefined) : undefined;
+        return w ? Promise.resolve(w.call(tx, 1, HOLD_TIMEOUT_MS)).catch(() => undefined) : undefined;
       },
       () => undefined,
     );
@@ -299,7 +309,7 @@ export async function settleAssignment(taskHash: string, executor: string): Prom
   await a2aStore.updateState(taskHash, { assignTxHash: tx.hash, assignError: undefined });
   console.log(`[a2aSettlement] marketplaceAssign broadcast taskId=${taskId} tx=${tx.hash}`);
 
-  const receipt = await tx.wait();
+  const receipt = await tx.wait(1, HOLD_TIMEOUT_MS);
   console.log(
     `[a2aSettlement] marketplaceAssign confirmed taskId=${taskId} block=${receipt?.blockNumber} status=${receipt?.status}`,
   );

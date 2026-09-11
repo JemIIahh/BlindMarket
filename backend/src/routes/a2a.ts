@@ -677,6 +677,9 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
         // 'public' tells the worker the blob at rootHash is plaintext —
         // skip ECIES/AES entirely (there is no wrappedKey by design).
         privacy: meta.privacy,
+        // The chain this task settles on — the worker checks it holds gas
+        // there before spending an LLM call (worker.js runAcceptedTask).
+        chain: settleResult.chain ?? meta.chain,
         alreadySettled: settleResult.alreadySettled,
         assignTxHash: settleResult.txHash,
       },

@@ -335,10 +335,13 @@ export class WorkerRuntime {
         // broadcast onto 0G. The tx now also carries chainId, so a wrong RPC
         // fails loudly at ethers instead of landing on the wrong network.
         const chain = submitResult.chain === 'base' ? 'base' : '0g';
-        const rpc = this.config.rpcUrls?.[chain] ?? (chain === '0g' ? this.config.rpcUrl : undefined);
+        // rpcUrls wins per chain; otherwise the single rpcUrl (documented as
+        // "whichever chain tasks settle on") still applies. The chainId pin
+        // rejects a genuine mismatch at ethers before anything is broadcast.
+        const rpc = this.config.rpcUrls?.[chain] ?? this.config.rpcUrl;
         if (!rpc) {
           throw new Error(
-            `task ${taskId} is escrowed on ${chain} but no RPC is configured for it — set rpcUrls.${chain} in the WorkerRuntime config`,
+            `task ${taskId} is escrowed on ${chain} but no RPC is configured for it — set rpcUrls.${chain} (or rpcUrl) in the WorkerRuntime config`,
           );
         }
         const provider = new ethers.JsonRpcProvider(rpc);

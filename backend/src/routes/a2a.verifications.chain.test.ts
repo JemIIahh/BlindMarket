@@ -3,23 +3,11 @@ import express from 'express';
 import request from 'supertest';
 
 /**
- * Integration test for POST /api/v1/a2a/tasks/:id/accept — specifically the
- * key-custody self-heal branch and the regression-critical paths around it
- * (docs/TEE-REWRAP-SPEC.md §5.2). We mount the REAL a2aRouter so route wiring,
- * status codes, and the response shape are exercised; only the store, custody,
- * settlement, and auth modules are mocked so the test drives pure handler
- * logic with no Redis / chain / Privy.
- *
- * The matrix:
- *   1. own-slice fast path (custody off)        → 200, returns post-time slice, no rewrap
- *   2. encrypted + no slice + custody OFF        → 403 NEEDS_WRAP, CAS never runs  (production default)
- *   3. self-heal win (custody on)                → 200, rewrap → slice, merge + settle
- *   4. CAS loser (custody on)                    → 409, NO key, no rewrap, no settle
- *   5. rewrap failure (custody on)               → 503, task released, no settle
- *
- * Plus the batch-4 gates: rotated custody key (403 NEEDS_WRAP before the CAS,
- * never reaches rewrap) and the pre-CAS deadline check (409 TASK_EXPIRED;
- * terminal tryExpire only past the grace window).
+ * GET /api/v1/a2a/verifications must tell a verifier agent WHICH chain each
+ * pending task settles on, so its completeVerification tx is signed for and
+ * broadcast to that escrow. Mounts the real a2aRouter with the store and
+ * taskChain resolver mocked: one Base task, one 0G task, and one whose hash
+ * cannot be resolved (chain: null — the worker then falls back to 0G).
  */
 
 // ── Mocks (hoisted by vitest above the imports below) ────────────────────────

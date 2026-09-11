@@ -234,7 +234,7 @@ export function buildMcpServer(user: AuthUser): McpServer {
       const [meta, state, decimals] = await Promise.all([
         a2aStore.getMeta(task.taskHash),
         a2aStore.getState(task.taskHash),
-        getTokenDecimals(task.token).catch(() => 18),
+        getTokenDecimals(task.token, chain).catch(() => 18),
       ]);
 
       // Same poster/worker gate as REST task detail (resultVisibility.ts).

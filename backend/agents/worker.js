@@ -1457,6 +1457,11 @@ async function pollAndWork() {
       return;
     }
 
+    // Tasks that left the board (taken, expired, cancelled) no longer need
+    // the fast gas re-check; drop them so the cadence and the map both relax.
+    const onBoard = new Set(entries.map(e => e.meta.taskId));
+    for (const k of [...gasSkipLogged.keys()]) if (!onBoard.has(k)) gasSkipLogged.delete(k);
+
     const available = entries.filter(e => {
       if (!appliedTasks.has(e.meta.taskId)) return true;
       if (isAppliedTaskStale(e.meta.taskId)) {
@@ -1690,6 +1695,10 @@ async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrapp
       const gasProblem = await preflightGas(acceptedChain, signerFor(acceptedChain));
       if (gasProblem) {
         log(`not working on ${acceptedTaskHash.slice(0, 10)}… yet: ${gasProblem} — it is assigned to this wallet on-chain; fund the wallet and the worker resumes it on a later poll`);
+        // Forget the "applied" mark, or resume's re-accept would be refused
+        // for APPLIED_TASK_TTL_MS and burn its attempt budget on a task that
+        // only needs gas. resumeAssignedTasks re-checks gas before counting.
+        appliedTasks.delete(acceptedTaskHash);
         return;
       }
     }
@@ -2165,6 +2174,23 @@ async function resumeAssignedTasks() {
     // finalize-only needs no brief; a full re-run needs a decryptable slice —
     // or a PUBLIC task, whose brief is plaintext and needs no slice at all.
     if (!finalizeOnly && (!meta.rootHash || (!wrappedKey && meta.privacy !== 'public'))) continue;
+
+    // A task we hold on-chain but cannot pay gas for is not a failed resume —
+    // it is waiting for funds. Check first so the attempt budget is spent only
+    // on tasks that can actually be driven. (Chain from meta; rows without it
+    // fall through to the check inside runAcceptedTask.)
+    const metaChain = meta.chain;
+    if (!finalizeOnly && (metaChain === 'base' || metaChain === '0g')) {
+      const gasProblem = await preflightGas(metaChain, signerFor(metaChain)).catch(() => null);
+      if (gasProblem) {
+        if (gasSkipLogged.get(taskHash) !== gasProblem) {
+          gasSkipLogged.set(taskHash, gasProblem);
+          log(`resume: holding ${taskHash.slice(0, 10)}… (assigned to this wallet on ${metaChain}): ${gasProblem}`);
+        }
+        continue;
+      }
+      gasSkipLogged.delete(taskHash);
+    }
 
     const attempts = resumeFailures.get(taskHash) ?? 0;
     if (attempts >= MAX_RESUME_ATTEMPTS) {

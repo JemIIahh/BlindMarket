@@ -53,5 +53,7 @@ describe('isNonceCollision', () => {
     expect(isNonceCollision(new Error('nonce too low'))).toBe(true);
     expect(isNonceCollision({ code: 'NONCE_EXPIRED', message: '' })).toBe(true);
     expect(isNonceCollision(new Error('execution reverted: DeadlineReached()'))).toBe(false);
+    // "already known" = the first broadcast landed; a retry would double-send.
+    expect(isNonceCollision(new Error('already known'))).toBe(false);
   });
 });

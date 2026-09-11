@@ -212,7 +212,7 @@ tasksRouter.get('/:id', optionalAuth, async (req: AuthRequest, res, next) => {
     ]);
 
     const taskHash = task.taskHash;
-    const decimals = await getTokenDecimals(task.token);
+    const decimals = await getTokenDecimals(task.token, chain);
     // Same flag as the list endpoint — lets the detail page surface the
     // stranded notice when a Funded task can never be picked up by an agent.
     const indexedSet = await a2aStore.getIndexedHashes([taskHash]);
