@@ -51,6 +51,14 @@ export async function getBaseTaskIdByHash(taskHash: string): Promise<string | nu
   return redis.get(KEY.hash2id(taskHash));
 }
 
+/** Base counterpart of escrowEvents.seedTaskIdMapping — writes the `base:` keys. */
+export async function seedBaseTaskIdMapping(taskHash: string, taskId: bigint | string): Promise<void> {
+  const pipe = redis.pipeline();
+  pipe.set(KEY.hash2id(taskHash), String(taskId));
+  pipe.set(KEY.id2hash(taskId), taskHash.toLowerCase());
+  await pipe.exec();
+}
+
 export async function getBaseTaskHashById(taskId: bigint | string | number): Promise<string | null> {
   return redis.get(KEY.id2hash(typeof taskId === 'number' ? BigInt(taskId) : taskId));
 }

@@ -261,6 +261,18 @@ export async function getCachedTaskIdByHash(taskHash: string): Promise<string | 
   return redis.get(KEY.hash2id(taskHash));
 }
 
+/**
+ * Eagerly seed the 0G hash<->id mapping for a task whose create tx has been
+ * confirmed by a caller (the a2a index route) before the forward-only poller
+ * reaches that block. Same keys the poller writes, so the two never disagree.
+ */
+export async function seedTaskIdMapping(taskHash: string, taskId: bigint | string): Promise<void> {
+  const pipe = redis.pipeline();
+  pipe.set(KEY.hash2id(taskHash), String(taskId));
+  pipe.set(KEY.id2hash(taskId), taskHash.toLowerCase());
+  await pipe.exec();
+}
+
 /** Resolve a taskHash to its on-chain uint256 taskId, or null if not yet seen. */
 export async function getTaskIdByHash(taskHash: string): Promise<string | null> {
   // Try immediate lookup first

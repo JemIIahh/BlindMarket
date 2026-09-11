@@ -46,8 +46,10 @@ registerMarketTools(server, bb);
 // rent/post through the CURRENT encrypted flow (see rent.ts). Registered even
 // without a wallet so tools/list is stable; spends fail cleanly with NO_WALLET.
 const walletCtx = loadWallet();
-registerWalletTools(server, walletCtx);
-registerRentTools(server, cfg, walletCtx);
+// rent.ts owns settlement discovery (which chain escrow settles on, and so
+// whether the local wallet or the Privy relay pays); wallet_status reports it.
+const { settlement } = registerRentTools(server, cfg, walletCtx);
+registerWalletTools(server, walletCtx, settlement);
 
 // Executor runtime tools (runtime_start/stop/…) are GATED OFF by default:
 // the SDK WorkerRuntime they wrap predates the current backend shapes — it

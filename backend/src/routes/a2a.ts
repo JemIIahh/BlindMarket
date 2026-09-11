@@ -10,7 +10,7 @@ import * as keyCustody from '../services/keyCustodyService.js';
 import { autoVerify } from '../services/autoVerify.js';
 import { settleAssignment, settleVerification } from '../services/a2aSettlement.js';
 import { recordWorkerPayout, recordWorkerDispute } from '../services/workerPayout.js';
-import { resolveTaskByHash } from '../services/taskChain.js';
+import { resolveTaskByHash, seedTaskId, type TaskChain } from '../services/taskChain.js';
 import * as escrowService from '../services/escrow.js';
 import * as reputationService from '../services/reputation.js';
 import * as reputationDecay from '../services/reputationDecay.js';
@@ -18,7 +18,6 @@ import * as agentEmbedding from '../services/agentEmbedding.js';
 import * as semanticMatch from '../services/semanticMatch.js';
 import { demandFeed, MAX_DEMAND_LIMIT } from '../services/demandFeed.js';
 import { provider, escrow, baseProvider, baseEscrow } from '../services/chain.js';
-import { redis } from '../services/redis.js';
 import { ethers } from 'ethers';
 import type { AuthRequest, ApiResponse, AgentCapability } from '../types.js';
 import { AGENT_CAPABILITIES } from '../types.js';
@@ -523,6 +522,9 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
           // 'public' tells the worker the blob at rootHash is plaintext —
           // skip ECIES/AES entirely (there is no wrappedKey by design).
           privacy: currentMeta?.privacy,
+          // Same field as the fresh-accept response: resume re-accepts through
+          // this branch and needs the chain for its gas check.
+          chain: reSettleResult.chain ?? currentMeta?.chain,
           alreadySettled: reSettleResult.alreadySettled ?? true,
           assignTxHash: reSettleResult.txHash,
         },
@@ -678,6 +680,9 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
         // 'public' tells the worker the blob at rootHash is plaintext —
         // skip ECIES/AES entirely (there is no wrappedKey by design).
         privacy: meta.privacy,
+        // The chain this task settles on — the worker checks it holds gas
+        // there before spending an LLM call (worker.js runAcceptedTask).
+        chain: settleResult.chain ?? meta.chain,
         alreadySettled: settleResult.alreadySettled,
         assignTxHash: settleResult.txHash,
       },
@@ -907,8 +912,21 @@ a2aRouter.get('/key-custody/pubkey', async (_req, res, next) => {
 
 /** task:available meta — caps included only when the task actually has them,
  *  so every broadcast path emits the same shape. */
-function broadcastMeta(requiredCaps: string[]): Record<string, unknown> {
-  return requiredCaps.length > 0 ? { requiredCapabilities: requiredCaps } : {};
+// `chain` rides along so a worker can refuse a broadcast for a chain it
+// cannot pay gas on BEFORE accepting (an accept assigns on-chain and is then
+// unreleasable). Omitted for rows indexed before meta.chain existed.
+// Exclusive offers always name the required caps (empty list included) and,
+// like broadcasts, the chain — so an offered agent that cannot pay gas there
+// declines up front instead of accepting and locking the task.
+function offerMeta(requiredCaps: string[], chain?: TaskChain): Record<string, unknown> {
+  return { requiredCapabilities: requiredCaps, ...(chain ? { chain } : {}) };
+}
+
+function broadcastMeta(requiredCaps: string[], chain?: TaskChain): Record<string, unknown> {
+  return {
+    ...(requiredCaps.length > 0 ? { requiredCapabilities: requiredCaps } : {}),
+    ...(chain ? { chain } : {}),
+  };
 }
 
 /**
@@ -921,6 +939,8 @@ function broadcastMeta(requiredCaps: string[]): Record<string, unknown> {
 function scheduleCascadeAdvance(
   taskHash: string,
   requiredCaps: string[],
+  chain?: TaskChain,
+  delayMs: number = a2aStore.CASCADE_OFFER_MS,
 ): void {
   setTimeout(async () => {
     try {
@@ -929,7 +949,7 @@ function scheduleCascadeAdvance(
 
       const next = await a2aStore.advanceCascade(taskHash);
       if (!next) {
-        emitTaskAvailable(taskHash, broadcastMeta(requiredCaps));
+        emitTaskAvailable(taskHash, broadcastMeta(requiredCaps, chain));
         return;
       }
 
@@ -943,15 +963,13 @@ function scheduleCascadeAdvance(
       // unauthenticated, so a task:offer payload reaches anyone who joined the
       // room. The agent only needs the taskId to fire /accept, which returns
       // rootHash + its wrapped slice over the authenticated channel.
-      emitTaskOffer(next.address, taskHash, {
-        requiredCapabilities: requiredCaps,
-      }, next.score, deadline);
+      emitTaskOffer(next.address, taskHash, offerMeta(requiredCaps, chain), next.score, deadline);
 
-      scheduleCascadeAdvance(taskHash, requiredCaps);
+      scheduleCascadeAdvance(taskHash, requiredCaps, chain);
     } catch (err) {
       console.error(`[a2a] cascade advance failed for ${taskHash.slice(0, 10)}…:`, (err as Error).message);
     }
-  }, a2aStore.CASCADE_OFFER_MS);
+  }, delayMs);
 }
 
 /**
@@ -963,12 +981,15 @@ function scheduleCascadeAdvance(
  * nothing, and a caps-less task that can't be semantically ranked broadcasts
  * exactly as before the flip. Throws are handled by the caller (→ broadcast).
  */
-async function startRankedCascade(
+/** The offer queue: semantic ranking when eligible (tag ranking appended as
+ *  the remainder), else the capability-tag ranking. Shared by the normal
+ *  cascade start and the exploration branch, so both walk the same order. */
+async function rankedEntries(
   taskHash: string,
   requiredCaps: AgentCapability[],
   routingMeta: semanticMatch.RoutingMeta,
   taskRewardWei: string,
-): Promise<void> {
+): Promise<{ entries: a2aStore.CascadeEntry[]; semantic: boolean }> {
   const semantic = await semanticMatch.semanticCascadeRanking(routingMeta, taskRewardWei);
   const tagEntries = async () =>
     (await rankAgents(requiredCaps, taskRewardWei)).map((r) => ({
@@ -978,12 +999,14 @@ async function startRankedCascade(
     }));
   let entries = semantic ?? (await tagEntries());
   if (semantic) {
-    // Coverage guarantee carried over from the tag era: every registered
-    // agent holding the required caps still gets a cascade position. Semantic
-    // decides the FRONT of the queue; the tag ranking appends anyone the
-    // top-K KNN missed (e.g. an agent whose embedding write failed or whose
-    // vector is on a stale model). Best-effort — an append failure keeps the
-    // semantic queue rather than aborting to broadcast.
+    // Coverage guarantee carried over from the tag era: every eligible
+    // registered agent still gets a cascade position (the tag ranking scores
+    // capability overlap but does NOT filter on it — matching is soft, see
+    // semanticMatch.ts). Semantic decides the FRONT of the queue; the tag
+    // ranking appends anyone the top-K KNN missed (e.g. an agent whose
+    // embedding write failed or whose vector is on a stale model).
+    // Best-effort — an append failure keeps the semantic queue rather than
+    // aborting to broadcast.
     try {
       const seen = new Set(entries.map((e) => e.address.toLowerCase()));
       entries = entries.concat((await tagEntries()).filter((e) => !seen.has(e.address.toLowerCase())));
@@ -991,8 +1014,19 @@ async function startRankedCascade(
       console.warn(`[a2a] tag-remainder append failed for ${taskHash.slice(0, 10)}…:`, (err as Error).message);
     }
   }
+  return { entries, semantic: !!semantic };
+}
+
+async function startRankedCascade(
+  taskHash: string,
+  requiredCaps: AgentCapability[],
+  routingMeta: semanticMatch.RoutingMeta,
+  taskRewardWei: string,
+  chain?: TaskChain,
+): Promise<void> {
+  const { entries, semantic } = await rankedEntries(taskHash, requiredCaps, routingMeta, taskRewardWei);
   if (entries.length === 0) {
-    emitTaskAvailable(taskHash, broadcastMeta(requiredCaps));
+    emitTaskAvailable(taskHash, broadcastMeta(requiredCaps, chain));
     return;
   }
 
@@ -1016,10 +1050,8 @@ async function startRankedCascade(
   }).catch(() => {});
   // rootHash deliberately omitted — unauthenticated WS room, see
   // scheduleCascadeAdvance.
-  emitTaskOffer(best.address, taskHash, {
-    requiredCapabilities: requiredCaps,
-  }, best.score, deadline);
-  scheduleCascadeAdvance(taskHash, requiredCaps);
+  emitTaskOffer(best.address, taskHash, offerMeta(requiredCaps, chain), best.score, deadline);
+  scheduleCascadeAdvance(taskHash, requiredCaps, chain);
 
   // Canary dial: which ranking produced the offers that were just emitted.
   // Gated on the flag so flag-off stays a strict no-op (no new DB writes on
@@ -1095,7 +1127,37 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       //   address token, uint256 amount, bytes32 taskHash, ...)
       // Non-indexed data: [token, amount, taskHash, category, locationZone, deadline]
       // taskHash is at data index 2 (after token and amount).
-      const escrowAddr = baseEscrow ? await baseEscrow.getAddress() : await escrow.getAddress();
+      // Decode the non-indexed data and keep only OUR task's event. Other
+      // tasks' TaskCreated logs in the same page must not end the scan early.
+      const matchesOurHash = (l: ethers.Log): boolean => {
+        try {
+          const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
+            ['address', 'uint256', 'bytes32', 'string', 'string', 'uint256'],
+            l.data,
+          );
+          return String(decoded[2]).toLowerCase() === taskHash;
+        } catch { return false; }
+      };
+
+      // Scan BACKWARDS in pages, newest first, instead of one fixed "last 200
+      // blocks" window. 200 blocks is ~7 minutes on Base Sepolia, so any call
+      // to /index more than 7 minutes after the funding tx — a resumed spend
+      // after a crash, a client that timed out and re-called with the same
+      // idempotencyKey — could never see its own TaskCreated event and got
+      // RECEIPT_NOT_FOUND forever, with the escrow funded and the task
+      // unindexed. Observed twice from the MCP.
+      //
+      // Attempt order matters for the common case. The MCP calls /index the
+      // moment the relay returns a user-op hash, usually BEFORE the bundler
+      // has included it — so attempt 0 checks only the newest page (cheap),
+      // attempt 1 scans deep (this is the one that rescues a late retry), and
+      // later attempts go back to the newest page, since everything older was
+      // just covered. Measured: deep-first cost 38s to index a fresh op that
+      // landed one block after the deep scan's top; shallow-first makes that
+      // ~10s. Pages stay at 200 blocks (inside every RPC's getLogs limit).
+      const PAGE = 200;
+      const DEEP_PAGES = 30; // 6,000 blocks ≈ 3.3h on Base Sepolia (2s blocks)
+      const DEEP_ATTEMPT = 1;
 
       // Retry loop — the bundler may take a few blocks to include the user-op.
       for (let attempt = 0; attempt < 5 && !receipt; attempt++) {
@@ -1103,28 +1165,31 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
           console.log(`[tasks/index] Retry ${attempt + 1}/5 — waiting 5s for inclusion...`);
           await new Promise((r) => setTimeout(r, 5000));
         }
+        const maxPages = attempt === DEEP_ATTEMPT ? DEEP_PAGES : 1;
         for (const { prov, esc, label } of providers) {
           try {
+            // Each provider is scanned against ITS OWN escrow. Previously the
+            // Base escrow address was used on the 0G provider too, which could
+            // never match anything there.
+            const escrowAddr = await esc.getAddress();
             const blockNum = await prov.getBlockNumber();
-            const fromBlock = Math.max(0, blockNum - 200);
-            console.log(`[tasks/index] Scanning ${label} blocks ${fromBlock}–${blockNum} for TaskCreated`);
-            const logs = await prov.getLogs({
-              fromBlock,
-              toBlock: 'latest',
-              address: escrowAddr,
-              topics: [taskCreatedTopic],
-            });
-            console.log(`[tasks/index] Found ${logs.length} TaskCreated logs on ${label}`);
-            const match = logs.find((l) => {
-              try {
-                const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
-                  ['address', 'uint256', 'bytes32', 'string', 'string', 'uint256'],
-                  l.data,
-                );
-                const logTaskHash = decoded[2];
-                return logTaskHash?.toLowerCase() === taskHash.toLowerCase();
-              } catch { return false; }
-            });
+            let match: ethers.Log | undefined;
+            let scannedFrom = blockNum;
+            for (let page = 0; page < maxPages && !match; page++) {
+              const toBlock = blockNum - page * PAGE;
+              if (toBlock < 0) break;
+              const fromBlock = Math.max(0, toBlock - PAGE + 1);
+              scannedFrom = fromBlock;
+              const pageLogs = await prov.getLogs({
+                fromBlock,
+                toBlock,
+                address: escrowAddr,
+                topics: [taskCreatedTopic],
+              });
+              match = pageLogs.find(matchesOurHash);
+              if (fromBlock === 0) break;
+            }
+            console.log(`[tasks/index] Scanned ${label} blocks ${scannedFrom}–${blockNum} for TaskCreated: ${match ? 'match' : 'no match'}`);
             if (match) {
               console.log(`[tasks/index] Match found! txHash=${match.transactionHash} block=${match.blockNumber}`);
               receipt = await prov.getTransactionReceipt(match.transactionHash);
@@ -1209,13 +1274,13 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       );
     }
 
-    // All checks passed — eagerly seed the indexer mapping so /submit
-    // resolves the hash immediately without waiting for the forward-only
-    // event poller to catch up.
-    await Promise.all([
-      redis.set(`a2a:hash2id:${taskHash}`, onChainTaskId),
-      redis.set(`a2a:id2hash:${onChainTaskId}`, taskHash),
-    ]);
+    // All checks passed — eagerly seed the indexer mapping so /submit and
+    // /accept resolve the hash immediately without waiting for the
+    // forward-only event poller to catch up. Seeded in the namespace of the
+    // chain that actually holds the task: resolveTaskByHash reads the Base
+    // namespace first, so seeding a Base task under the 0G keys made it
+    // resolve as 0G until the Base poller caught up (see taskChain.seedTaskId).
+    await seedTaskId(activeEscrow === baseEscrow ? 'base' : '0g', taskHash, onChainTaskId);
 
     const wrappedKeysNormalized = data.wrappedKeys
       ? Object.fromEntries(
@@ -1317,6 +1382,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       }
     }
 
+    const taskChain: TaskChain = activeEscrow === baseEscrow ? 'base' : '0g';
     await a2aStore.setMeta({
       taskId: taskHash,
       targetExecutorType: 'agent',
@@ -1324,6 +1390,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       verificationCriteria: data.verificationCriteria,
       requiredCapabilities: requiredCaps,
       posterAddress: address,
+      chain: taskChain,
       verifierAddress: data.verifierAddress?.toLowerCase(),
       rootHash: data.rootHash,
       wrappedKeys: mergedWrappedKeys,
@@ -1396,12 +1463,12 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
     // that was this same lockout.)
     const semanticEligible = semanticMatch.semanticRoutingEligible(routingMeta);
     if (!config.cascadeEnabled || targetExecutor || (requiredCaps.length === 0 && !semanticEligible)) {
-      emitTaskAvailable(taskHash, broadcastMeta(requiredCaps));
+      emitTaskAvailable(taskHash, broadcastMeta(requiredCaps, taskChain));
     } else {
       const taskRewardWei = onChainAmount;
       const broadcastAfter = (err: Error, stage: string) => {
         console.error(`[a2a] ${stage} failed for ${taskHash.slice(0, 10)}…:`, err.message);
-        emitTaskAvailable(taskHash, broadcastMeta(requiredCaps));
+        emitTaskAvailable(taskHash, broadcastMeta(requiredCaps, taskChain));
       };
 
       if (requiredCaps.length === 0) {
@@ -1409,7 +1476,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
         // filter it would draw a random cold-start agent from the ENTIRE
         // registry, and its pass/timeout path (advanceCascade with no cascade
         // stored) broadcasts without semantic ranking ever running.
-        startRankedCascade(taskHash, requiredCaps, routingMeta, taskRewardWei)
+        startRankedCascade(taskHash, requiredCaps, routingMeta, taskRewardWei, taskChain)
           .catch((err) => broadcastAfter(err as Error, 'semantic scoring/offer'));
       } else {
         // Cold-start: try the exploration slot first. If a new agent is picked,
@@ -1424,21 +1491,31 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
               score: explorationPick.score,
               expiresAt: deadline,
             }).catch(() => {});
-            emitTaskOffer(explorationPick.address, taskHash, {
-              requiredCapabilities: requiredCaps,
-            }, explorationPick.score, deadline);
-            // If they pass/timeout, the cascade advance will run normal ranked flow.
-            scheduleCascadeAdvance(taskHash, requiredCaps);
-            return;
+            emitTaskOffer(explorationPick.address, taskHash, offerMeta(requiredCaps, taskChain), explorationPick.score, deadline);
+            // Store the ranked queue behind the pick so a pass/timeout advances
+            // into the ranking (see a2aStore.withExplorationHead). Best-effort:
+            // if ranking fails the advance falls back to broadcast as before.
+            const pickEntry = { address: explorationPick.address, score: explorationPick.score, displayName: explorationPick.displayName };
+            return rankedEntries(taskHash, requiredCaps, routingMeta, taskRewardWei)
+              .then(({ entries, semantic }) => {
+                if (config.semanticRoutingEnabled && semanticMatch.buildTaskRoutingText(routingMeta)) {
+                  void semanticMatch.markShadowRoutedBy(taskHash, semantic ? 'semantic' : 'tag');
+                }
+                return a2aStore.setCascade(taskHash, a2aStore.withExplorationHead(pickEntry, entries));
+              })
+              .catch((err) => console.warn(`[a2a] exploration cascade store failed for ${taskHash.slice(0, 10)}…:`, (err as Error).message))
+              // The pick's window started when its offer went out; arm the advance
+              // for whatever is left of it so ranking time does not extend the window.
+              .then(() => { scheduleCascadeAdvance(taskHash, requiredCaps, taskChain, Math.max(0, deadline - Date.now())); });
           }
 
           // Normal ranked flow (semantic when flipped, tag fallback inside).
-          return startRankedCascade(taskHash, requiredCaps, routingMeta, taskRewardWei)
+          return startRankedCascade(taskHash, requiredCaps, routingMeta, taskRewardWei, taskChain)
             .catch((err) => broadcastAfter(err as Error, 'scoring/offer'));
         }).catch((err) => {
           console.error(`[a2a] exploration slot failed for ${taskHash.slice(0, 10)}…:`, (err as Error).message);
           // Fallback: normal ranked flow
-          startRankedCascade(taskHash, requiredCaps, routingMeta, taskRewardWei)
+          startRankedCascade(taskHash, requiredCaps, routingMeta, taskRewardWei, taskChain)
             .catch((fallbackErr) => broadcastAfter(fallbackErr as Error, 'fallback scoring/offer'));
         });
       }
@@ -1634,6 +1711,13 @@ a2aRouter.post('/tasks/:id/submit', requireAuth, async (req: AuthRequest, res, n
       data: {
         taskId: taskHash,
         onChainTaskId: onChainId,
+        // Which escrow the unsigned tx targets. The executor holds a signer
+        // per chain and must pick the right one; without this field the
+        // platform worker had no way to know and broadcast every
+        // submitEvidence on 0G, so a Base task could be accepted but never
+        // delivered. The tx also carries chainId now (escrow.ts) as a second
+        // guard, but the executor still needs to choose the signer up front.
+        chain: onChainIdChain,
         status: 'submitted',
         evidenceHash,
         unsignedSubmitEvidence,
@@ -2222,11 +2306,16 @@ a2aRouter.get('/verifications', requireAuth, async (req: AuthRequest, res, next)
     // Resolve each task's on-chain numeric id so the verifier can call
     // completeVerification(id, passed) itself. Null when not yet indexed — the
     // verifier skips it and retries on its next poll.
+    // resolveTaskByHash reports the chain alongside the id. It used to be
+    // discarded here, leaving the verifier-role worker to settle every task
+    // against its 0G escrow — including Base tasks, whose numeric id would
+    // then name an unrelated 0G task. Both are returned so the worker can
+    // pick the escrow and signer for the chain that actually holds the task.
     const verifications = await Promise.all(
-      pending.map(async (t) => ({
-        ...t,
-        onChainId: await resolveTaskByHash(t.meta.taskId).then((r) => r?.taskId ?? null).catch(() => null),
-      })),
+      pending.map(async (t) => {
+        const r = await resolveTaskByHash(t.meta.taskId).catch(() => null);
+        return { ...t, onChainId: r?.taskId ?? null, chain: r?.chain ?? null };
+      }),
     );
     const body: ApiResponse = {
       success: true,

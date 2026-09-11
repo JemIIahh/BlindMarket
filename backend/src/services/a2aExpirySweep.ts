@@ -209,10 +209,16 @@ export async function sweepGasLiveness(): Promise<void> {
       // TTL returns -2 if key doesn't exist (expired/never set), -1 if no expiry.
       const ttl = await a2aStore.getSettlementDeadlineTTL(taskId);
       if (ttl === -2) {
-        // Key expired or was never set — but only revert if the task was
-        // recently accepted (within 2× the deadline window). Older accepted
-        // tasks may have had their key cleared by a successful settle.
-        // We check if the task has an acceptedAt timestamp that's recent.
+        // A missing key is NOT evidence that the deadline expired: the accept
+        // route clears this same key the moment marketplaceAssign confirms
+        // (routes/a2a.ts, right after settleAssignment). So every successful
+        // assignment looks exactly like an expired one from here, and the
+        // old age-only check reverted them: measured 2026-09-10, a task
+        // assigned on-chain at block 46652177 was put back to 'open' by this
+        // sweep 49s after accept, and the worker's /submit then failed
+        // FORBIDDEN ("executor in state is undefined") with the escrow still
+        // Assigned to it on-chain. Any executor slower than one sweep tick
+        // (60s) between accept and submit hit this.
         const stateRaw = await (await import('./redis.js')).redis.get(`a2a:state:${taskId.toLowerCase()}`);
         if (!stateRaw) continue;
         try {
@@ -222,6 +228,28 @@ export async function sweepGasLiveness(): Promise<void> {
           // Only revert if accepted within the last 5 minutes (settlement deadline is 120s,
           // so anything older likely settled or was handled differently)
           if (ageMs > 5 * 60_000) continue;
+
+          // Settled by this backend: the tx hash is written on confirmation.
+          if (state.assignTxHash) continue;
+
+          // No tx hash (the idempotent "already assigned to us" path writes
+          // none, or the write was lost to a restart): the chain decides. An
+          // escrow that already names this executor as worker is settled;
+          // one that has moved past Funded belongs to someone else and the
+          // accept route's ASSIGNED_ELSEWHERE handling owns it. Only a task
+          // still Funded on-chain is a genuinely failed settlement. If the
+          // chain cannot be read this tick, do nothing — reverting on an RPC
+          // blip is the exact mistake this block existed to make.
+          const resolved = await resolveTaskByHash(taskId).catch(() => null);
+          const onChain = resolved
+            ? await escrowService.getTaskOn(resolved.chain, Number(resolved.taskId)).catch(() => null)
+            : null;
+          if (!onChain) {
+            console.warn(`[a2aExpirySweep] gas-liveness: cannot read ${taskId.slice(0, 10)}… on-chain this tick — leaving it accepted`);
+            continue;
+          }
+          if (onChain.worker?.toLowerCase() === executorAddress?.toLowerCase()) continue;
+          if (Number(onChain.status) !== 0) continue;
 
           console.warn(
             `[a2aExpirySweep] gas-liveness: reverting task ${taskId.slice(0, 10)}… ` +

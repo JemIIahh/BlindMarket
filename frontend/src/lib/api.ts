@@ -8,6 +8,39 @@ class ApiError extends Error {
   }
 }
 
+/**
+ * No request may hang forever.
+ *
+ * Every call here is awaited by a component that flips a `loading` flag in a
+ * `finally`, so a promise that never settles leaves the UI stuck with no error
+ * — the Settings "Create key" button sat on "CREATING…" indefinitely while the
+ * backend blocked on a slow startup migration. A request that FAILS resets the
+ * UI and shows the user something; one that never answers cannot.
+ *
+ * 120s, not lower: POST /api/v1/storage/upload legitimately runs 30–60s on
+ * 0G testnet (the route sets its own 120s socket timeout for exactly that),
+ * and /a2a/tasks/index polls for a receipt for ~35s before answering. A 30s
+ * cap here would have cut both off mid-flight and broken task posting from
+ * the web app. Long enough for the slowest real call; short enough that a
+ * dead backend still surfaces as an error rather than a frozen button.
+ */
+const REQUEST_TIMEOUT_MS = 120_000;
+
+async function fetchWithTimeout(url: string, init: RequestInit = {}): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (err) {
+    if ((err as Error)?.name === 'AbortError') {
+      throw new ApiError('TIMEOUT', `The server did not respond within ${REQUEST_TIMEOUT_MS / 1000}s. It may be starting up — try again in a moment.`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function handleResponse<T>(res: Response): Promise<T> {
   const text = await res.text();
   if (!text) {
@@ -53,14 +86,14 @@ export async function getAuthHeaders(overrideToken?: string): Promise<Record<str
 }
 
 export async function get<T>(path: string): Promise<T> {
-  const res = await fetch(`${API_BASE_URL}${path}`, {
+  const res = await fetchWithTimeout(`${API_BASE_URL}${path}`, {
     headers: { 'Content-Type': 'application/json' },
   });
   return handleResponse<T>(res);
 }
 
 export async function post<T>(path: string, body?: unknown): Promise<T> {
-  const res = await fetch(`${API_BASE_URL}${path}`, {
+  const res = await fetchWithTimeout(`${API_BASE_URL}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined,
@@ -69,14 +102,14 @@ export async function post<T>(path: string, body?: unknown): Promise<T> {
 }
 
 export async function authedGet<T>(path: string, overrideToken?: string): Promise<T> {
-  const res = await fetch(`${API_BASE_URL}${path}`, {
+  const res = await fetchWithTimeout(`${API_BASE_URL}${path}`, {
     headers: { 'Content-Type': 'application/json', ...(await getAuthHeaders(overrideToken)) },
   });
   return handleResponse<T>(res);
 }
 
 export async function authedPost<T>(path: string, body?: unknown, overrideToken?: string): Promise<T> {
-  const res = await fetch(`${API_BASE_URL}${path}`, {
+  const res = await fetchWithTimeout(`${API_BASE_URL}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...(await getAuthHeaders(overrideToken)) },
     body: body ? JSON.stringify(body) : undefined,
@@ -85,7 +118,7 @@ export async function authedPost<T>(path: string, body?: unknown, overrideToken?
 }
 
 export async function authedPatch<T>(path: string, body?: unknown, overrideToken?: string): Promise<T> {
-  const res = await fetch(`${API_BASE_URL}${path}`, {
+  const res = await fetchWithTimeout(`${API_BASE_URL}${path}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', ...(await getAuthHeaders(overrideToken)) },
     body: body ? JSON.stringify(body) : undefined,
@@ -94,7 +127,7 @@ export async function authedPatch<T>(path: string, body?: unknown, overrideToken
 }
 
 export async function authedDelete<T = void>(path: string, overrideToken?: string): Promise<T> {
-  const res = await fetch(`${API_BASE_URL}${path}`, {
+  const res = await fetchWithTimeout(`${API_BASE_URL}${path}`, {
     method: 'DELETE',
     headers: { 'Content-Type': 'application/json', ...(await getAuthHeaders(overrideToken)) },
   });

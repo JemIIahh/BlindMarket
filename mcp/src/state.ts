@@ -13,14 +13,37 @@ import crypto from 'node:crypto';
  * saved txHash) instead of double-funding a second escrow.
  */
 
-export type SpendStage = 'created' | 'funded' | 'indexed';
+/** created → funded → indexed is the escrow-funding path (rent/post). On
+ *  Base there is an extra 'approved' between created and funded: the USDC
+ *  approve is its own transaction, and a crash after it must not re-approve.
+ *  created → sent → confirmed is the refund path (cancel/timeout), which has
+ *  nothing to index — the money moves back on the one transaction. */
+export type SpendStage = 'created' | 'approved' | 'funded' | 'indexed' | 'sent' | 'confirmed';
+
+/** Every kind moves money and so carries an idempotencyKey: rent/post pay it
+ *  out of the wallet, cancel/timeout pull it back. */
+export type SpendKind = 'rent' | 'post' | 'cancel' | 'timeout';
 
 export interface SpendRecord {
   idempotencyKey: string;
-  kind: 'rent' | 'post';
+  kind: SpendKind;
   stage: SpendStage;
   taskHash?: string;
+  /** on-chain numeric task id — the refund routes address tasks by id, not hash */
+  taskId?: number;
   txHash?: string;
+  /** which chain this spend settles on — decides local-sign vs relay on resume */
+  settlement?: 'base' | '0g';
+  /** escrow token: zero address for native 0G, the USDC address on Base */
+  token?: string;
+  /** Base only: the USDC approve tx, persisted so a resume never re-approves */
+  approveTxHash?: string;
+  /** Base only: relay returned an ERC-4337 user-op hash, not a tx hash —
+   *  getTransactionReceipt on it is always null, so waits go by state instead */
+  isUserOp?: boolean;
+  /** Base only: how the relay paid gas, as reported by the backend. Persisted
+   *  so a resumed spend reports the truth rather than re-guessing. */
+  gas?: 'user-pays' | 'app-pays' | 'wallet-pays';
   rootHash?: string;
   serviceId?: number;
   targetExecutor?: string;
@@ -89,7 +112,7 @@ export function updateSpend(idempotencyKey: string, patch: Partial<SpendRecord>)
 
 export interface Quote {
   quoteId: string;
-  kind: 'rent' | 'post';
+  kind: SpendKind;
   summary: Record<string, unknown>;
   expiresAt: number;
 }
@@ -97,7 +120,7 @@ export interface Quote {
 const QUOTE_TTL_MS = 10 * 60 * 1000;
 const quotes = new Map<string, Quote>();
 
-export function createQuote(kind: 'rent' | 'post', summary: Record<string, unknown>): Quote {
+export function createQuote(kind: SpendKind, summary: Record<string, unknown>): Quote {
   const quote: Quote = {
     quoteId: crypto.randomBytes(8).toString('hex'),
     kind,
@@ -108,7 +131,7 @@ export function createQuote(kind: 'rent' | 'post', summary: Record<string, unkno
   return quote;
 }
 
-export function consumeQuote(quoteId: string, kind: 'rent' | 'post'): Quote | null {
+export function consumeQuote(quoteId: string, kind: SpendKind): Quote | null {
   const quote = quotes.get(quoteId);
   if (!quote || quote.kind !== kind || quote.expiresAt < Date.now()) return null;
   quotes.delete(quoteId); // single use

@@ -380,6 +380,10 @@ export class BlindMarket {
     onChainTaskId?: string;
     status: string;
     evidenceHash?: Hex;
+    /** Which escrow the unsigned tx targets. Tasks are funded on exactly one
+     *  chain; sign on that chain's RPC. Absent from backends older than the
+     *  field, in which case the task is on 0G. */
+    chain?: 'base' | '0g';
     unsignedSubmitEvidence?: Record<string, unknown> | null;
   }> {
     return this.req('POST', `/api/v1/a2a/tasks/${taskId}/submit`, { resultData });

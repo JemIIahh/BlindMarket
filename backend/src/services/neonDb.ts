@@ -68,13 +68,26 @@ export async function getPool(): Promise<pg.Pool> {
   }
   await migrationPromise;
 
-  // One-shot data migration: copy agents from Redis to PG.
-  if (!dataMigrationPromise) {
+  // One-shot data migration: copy agents from Redis to PG. Started here but
+  // deliberately NOT awaited.
+  //
+  // It used to be awaited, which put a Redis round trip per agent key on the
+  // critical path of the FIRST database-backed request of every process — and
+  // getPool() gates all of them. Against a remote Redis that is ~800ms per
+  // key (measured: type + get on Redis Cloud us-east-1), so ~97 agent keys
+  // stalled every request behind ~80s of network plus the inserts. The
+  // symptom was a backend that answered /health instantly and hung on
+  // everything else, which reads as a dead database rather than a slow copy.
+  //
+  // Awaiting it was never required for correctness: the schema migration above
+  // is what queries depend on, this only back-fills rows, its failure is
+  // already swallowed as non-fatal, and every INSERT is ON CONFLICT DO
+  // NOTHING. Set SKIP_REDIS_PG_MIGRATION=true to not run it at all.
+  if (!dataMigrationPromise && process.env.SKIP_REDIS_PG_MIGRATION !== 'true') {
     dataMigrationPromise = migrateRedisToPg(pool).catch((err) => {
       console.warn('[neonDb] Redis → PG data migration failed (non-fatal):', (err as Error).message);
     });
   }
-  await dataMigrationPromise;
 
   return pool;
 }
@@ -627,7 +640,16 @@ async function runMigrations(p: pg.Pool): Promise<void> {
 async function migrateRedisToPg(p: pg.Pool): Promise<void> {
   let redis: Redis | null = null;
   try {
-    redis = new Redis(process.env.REDIS_URL ?? 'redis://localhost:6379');
+    // Same socket hygiene as services/redis.ts: this client walks ~100 keys
+    // sequentially against a remote Redis, and one idle-dropped socket with
+    // no command timeout would park the whole back-fill for minutes.
+    redis = new Redis(process.env.REDIS_URL ?? 'redis://localhost:6379', {
+      connectTimeout: 10_000,
+      commandTimeout: 15_000,
+      keepAlive: 10_000,
+      maxRetriesPerRequest: 3,
+      retryStrategy: (times) => Math.min(200 * times, 2_000),
+    });
 
     const keys = await redis.keys('agent:*');
     const agentKeys = keys.filter(k => !k.includes(':logs') && !k.includes(':heartbeat'));

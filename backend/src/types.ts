@@ -171,6 +171,12 @@ export interface A2ATaskMeta {
   // time). Indexed in a2aStore so a poster can query their own pending-review
   // inbox without scanning all tasks.
   posterAddress?: string;
+  // Which escrow holds the task ('base' or '0g'), recorded at /tasks/index
+  // from the chain that produced the TaskCreated receipt. Lets an executor
+  // skip tasks on a chain where it cannot pay gas BEFORE accepting (an
+  // accept assigns the task on-chain, after which it cannot be released).
+  // Absent on rows indexed before this field existed — treat as unknown.
+  chain?: 'base' | '0g';
   // Lowercased EOA address of a poster-designated verifier agent
   // (verificationMode='agent'). The brief AES key is ECIES-wrapped to this
   // address too (it appears in wrappedKeys), so the verifier can decrypt the

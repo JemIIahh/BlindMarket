@@ -35,6 +35,15 @@ describe('replayOpenBoard — a joining agent is told what is already open', () 
     });
   });
 
+  it('carries the task chain so a worker can gas-gate before accepting', async () => {
+    vi.mocked(a2aStore.browseAgentTasks).mockResolvedValue([
+      { meta: { taskId: '0xccc', requiredCapabilities: [], chain: 'base' }, state: {} } as never,
+    ]);
+    const s = fakeSocket();
+    await replayOpenBoard(s);
+    expect(s.emit).toHaveBeenCalledWith('task:available', { taskId: '0xccc', meta: { chain: 'base' } });
+  });
+
   it('emits nothing when the board is empty', async () => {
     vi.mocked(a2aStore.browseAgentTasks).mockResolvedValue([]);
     const s = fakeSocket();
