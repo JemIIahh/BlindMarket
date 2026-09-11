@@ -62,7 +62,13 @@ export async function scoreAgent(
   const addr = agent.address.toLowerCase();
 
   // 1. Capability overlap — use preferredCapabilities if set, else full set.
-  const effectiveCaps = agent.preferredCapabilities ?? agent.capabilities;
+  // preferredCapabilities is a narrowing hint. Rows are stored with `[]`
+  // (not null) when the agent declared no preference, and `[] ?? caps` keeps
+  // the empty list — which made every agent score 0 overlap on every task,
+  // so the tag ranking was capability-blind (seen live: a code_review-only
+  // agent was offered a data_processing task ahead of two qualified agents,
+  // all with the same 0.9 score).
+  const effectiveCaps = agent.preferredCapabilities?.length ? agent.preferredCapabilities : agent.capabilities;
   const overlap = requiredCapabilities.filter((c) => effectiveCaps.includes(c));
   const capabilityOverlap = overlap.length;
 
@@ -189,20 +195,27 @@ function randomPick<T>(arr: T[]): T {
  * or exploration doesn't trigger.
  */
 export async function pickExplorationAgent(
-  _requiredCapabilities: AgentCapability[],
+  requiredCapabilities: AgentCapability[],
   mode: 'merit' | 'balanced' = 'merit',
   taskRewardWei?: string,
+  rng: () => number = Math.random,
 ): Promise<ScoredAgent | null> {
   const rate = mode === 'balanced' ? EXPLORATION_RATE_BALANCED : EXPLORATION_RATE;
-  if (Math.random() >= rate) return null;
+  if (rng() >= rate) return null;
 
-  // Semantic matching is the primary router — list ALL agents, KNN ranks them.
   const agents = await agentStore.listAgents();
   if (agents.length === 0) return null;
 
-  // Filter to eligible agents (minReward check)
+  // Filter to eligible agents (minReward check). When the task names required
+  // capabilities, the exploration slot only considers NEW agents that hold all
+  // of them: the slot exists to give unproven-but-qualified agents a first
+  // job, not to hand a task's first exclusive offer to an agent that cannot
+  // do it while qualified agents sit idle (the ranked flow handles those).
   const taskReward = taskRewardWei ? BigInt(taskRewardWei) : null;
-  const eligible = agents.filter((a) => meetsRewardFloor(a, taskReward));
+  const eligible = agents.filter((a) =>
+    meetsRewardFloor(a, taskReward) &&
+    requiredCapabilities.every((c) => (a.capabilities ?? []).includes(c)),
+  );
 
   // Filter to "new" agents: fewer than EXPERIENCE_THRESHOLD completed tasks
   const newAgents = eligible.filter((a) => {
@@ -212,7 +225,7 @@ export async function pickExplorationAgent(
   if (newAgents.length === 0) return null;
 
   const chosen = randomPick(newAgents);
-  return scoreAgent(chosen, _requiredCapabilities);
+  return scoreAgent(chosen, requiredCapabilities);
 }
 
 /**
