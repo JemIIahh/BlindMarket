@@ -522,6 +522,9 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
           // 'public' tells the worker the blob at rootHash is plaintext —
           // skip ECIES/AES entirely (there is no wrappedKey by design).
           privacy: currentMeta?.privacy,
+          // Same field as the fresh-accept response: resume re-accepts through
+          // this branch and needs the chain for its gas check.
+          chain: reSettleResult.chain ?? currentMeta?.chain,
           alreadySettled: reSettleResult.alreadySettled ?? true,
           assignTxHash: reSettleResult.txHash,
         },

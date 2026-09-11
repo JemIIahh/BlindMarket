@@ -605,6 +605,9 @@ const resumeFailures = new Map();
 // taskHash → last gas-skip reason logged, so a wallet that stays unfunded
 // logs each skipped task once per reason instead of once per poll.
 const gasSkipLogged = new Map();
+// Same idea for tasks resume is holding for gas: they are assigned to us, so
+// they never appear on the open board and must not share the board's prune.
+const resumeHoldLogged = new Map();
 const MAX_RESUME_ATTEMPTS = 3;
 // Verifier role (verificationMode='agent'): tasks this agent is currently
 // judging, plus a per-task attempt cap so a task that can't be judged/posted
@@ -2183,13 +2186,13 @@ async function resumeAssignedTasks() {
     if (!finalizeOnly && (metaChain === 'base' || metaChain === '0g')) {
       const gasProblem = await preflightGas(metaChain, signerFor(metaChain)).catch(() => null);
       if (gasProblem) {
-        if (gasSkipLogged.get(taskHash) !== gasProblem) {
-          gasSkipLogged.set(taskHash, gasProblem);
+        if (resumeHoldLogged.get(taskHash) !== gasProblem) {
+          resumeHoldLogged.set(taskHash, gasProblem);
           log(`resume: holding ${taskHash.slice(0, 10)}… (assigned to this wallet on ${metaChain}): ${gasProblem}`);
         }
         continue;
       }
-      gasSkipLogged.delete(taskHash);
+      resumeHoldLogged.delete(taskHash);
     }
 
     const attempts = resumeFailures.get(taskHash) ?? 0;
