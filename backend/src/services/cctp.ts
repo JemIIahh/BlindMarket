@@ -9,25 +9,67 @@ import type { CctpChainConfig } from './cctpChains.js';
  * Signatures below were confirmed verbatim against
  * developers.circle.com/cctp/references/contract-interfaces (Sept 2026):
  *
- *   function depositForBurn(uint256 amount, uint32 destinationDomain,
+ *   function depositForBurnWithHook(uint256 amount, uint32 destinationDomain,
  *     bytes32 mintRecipient, address burnToken, bytes32 destinationCaller,
- *     uint256 maxFee, uint32 minFinalityThreshold) external
+ *     uint256 maxFee, uint32 minFinalityThreshold, bytes calldata hookData) external
  *
  *   function receiveMessage(bytes calldata message, bytes calldata attestation) external
  *
+ * We always use the *WithHook variant, not plain depositForBurn — Circle's
+ * Forwarding Service (auto-completing the destination mint so the caller
+ * never needs destination gas) is opt-in via hook data, confirmed verbatim
+ * against developers.circle.com/cctp/concepts/forwarding-service:
+ * "Must use: depositForBurnWithHook instead of plain depositForBurn. The
+ * forwarding request embeds in the hook data of the burn transaction on the
+ * source chain." Calling plain depositForBurn (as an earlier version of this
+ * file did) never requests forwarding at all — every transfer would sit at
+ * 'attestation_ready' forever, needing manual self-relay for every single
+ * transfer, which defeats the entire point of choosing this relay method.
+ *
+ * That same page confirms maxFee must cover BOTH the CCTP protocol fee and
+ * the separate Forwarding Service fee ("Service fees range from $0.05-$1.20
+ * USDC depending on route... maxFee parameter must cover both CCTP protocol
+ * fees and Forwarding Service fees"), and that an insufficient maxFee
+ * doesn't fail the transfer — "CCTP will prioritize forwarding execution
+ * over Fast Transfer, executing as Standard Transfer instead" (~15-19 min
+ * instead of ~8-20s, but it still completes). See estimateMaxFeeRaw() below.
+ *
  * CCTP V1 is being deprecated starting Oct 31, 2026 — this module is V2 only.
+ *
+ * Forwarding Service went generally available on CCTP mainnet Jan 28, 2026
+ * (was Early-Access/testnet-only before that), and its supported-route list
+ * explicitly includes both Base and Ethereum — no special enrollment should
+ * be needed for this integration's routes by the time it reaches mainnet.
  */
 
 export const FAST_TRANSFER_FINALITY_THRESHOLD = 1000;
 export const STANDARD_TRANSFER_FINALITY_THRESHOLD = 2000;
 
 const TOKEN_MESSENGER_ABI = [
-  'function depositForBurn(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, address burnToken, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold) external',
+  'function depositForBurnWithHook(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, address burnToken, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold, bytes calldata hookData) external',
 ];
 
 const MESSAGE_TRANSMITTER_ABI = [
   'function receiveMessage(bytes calldata message, bytes calldata attestation) external',
 ];
+
+/**
+ * Forwarding Service hook data — V0 (single-hook, no extra developer
+ * payload) format, confirmed verbatim against developers.circle.com/cctp/
+ * concepts/forwarding-service: a `bytes24` name field ("cctp-forward",
+ * right-padded with zero bytes — bytes24 is right-padded in raw/packed
+ * encoding, unlike numeric/address types), followed by a `uint32` version
+ * (0) and a `uint32` additional-data length (0). All 20 trailing bytes are
+ * zero either way (12 padding bytes to fill bytes24 + 4 version + 4
+ * length), so this is just the 12 ASCII bytes of "cctp-forward" followed by
+ * 20 zero bytes — 32 bytes total. Built programmatically rather than a
+ * hardcoded hex literal to avoid transcription error.
+ */
+function buildForwardingHookData(): string {
+  const hookData = new Uint8Array(32);
+  hookData.set(ethers.toUtf8Bytes('cctp-forward'), 0); // remaining 20 bytes stay zero
+  return ethers.hexlify(hookData);
+}
 
 export const ERC20_ABI = [
   'function balanceOf(address) view returns (uint256)',
@@ -49,20 +91,22 @@ export interface DepositForBurnParams {
   minFinalityThreshold: number;
 }
 
-/** Encode depositForBurn calldata against a given source chain's TokenMessengerV2. */
+/** Encode depositForBurnWithHook calldata (Forwarding Service opt-in) against
+ *  a given source chain's TokenMessengerV2. */
 export function buildDepositForBurnCall(
   source: CctpChainConfig,
   params: DepositForBurnParams,
 ): { to: string; data: string } {
   const iface = new ethers.Interface(TOKEN_MESSENGER_ABI);
-  const data = iface.encodeFunctionData('depositForBurn', [
+  const data = iface.encodeFunctionData('depositForBurnWithHook', [
     params.amountRaw,
     params.destinationDomain,
     addressToBytes32(params.mintRecipient),
     source.usdcAddress,
-    ethers.ZeroHash, // destinationCaller = anyone may call receiveMessage (Circle's Forwarding Service or our self-relay fallback)
+    ethers.ZeroHash, // destinationCaller = anyone may call receiveMessage (Forwarding Service requires this per Circle's docs, and it's also what permits our self-relay fallback)
     params.maxFeeRaw,
     params.minFinalityThreshold,
+    buildForwardingHookData(),
   ]);
   return { to: source.tokenMessengerAddress, data };
 }
@@ -75,17 +119,21 @@ export interface DecodedDepositForBurn {
   destinationCaller: string; // bytes32
   maxFee: bigint;
   minFinalityThreshold: number;
+  hookData: string;
 }
 
 /**
- * Decode a depositForBurn call's input data — used by routes/cctp.ts's
+ * Decode a depositForBurnWithHook call's input data — used by routes/cctp.ts's
  * /confirm endpoint to independently verify a user-submitted burn tx against
  * the parameters recorded at deposit-intent time, rather than trusting the
- * client's claim about what it signed.
+ * client's claim about what it signed. Does not enforce hookData — a burn
+ * missing the forwarding hook still succeeds and still burns/mints correctly,
+ * it just won't auto-relay (recoverable via the self-relay fallback), so a
+ * mismatch there risks a stuck transfer, not lost or redirected funds.
  */
 export function decodeDepositForBurnCalldata(data: string): DecodedDepositForBurn {
   const iface = new ethers.Interface(TOKEN_MESSENGER_ABI);
-  const result = iface.decodeFunctionData('depositForBurn', data);
+  const result = iface.decodeFunctionData('depositForBurnWithHook', data);
   return {
     amount: result[0] as bigint,
     destinationDomain: Number(result[1]),
@@ -94,15 +142,17 @@ export function decodeDepositForBurnCalldata(data: string): DecodedDepositForBur
     destinationCaller: result[4] as string,
     maxFee: result[5] as bigint,
     minFinalityThreshold: Number(result[6]),
+    hookData: result[7] as string,
   };
 }
 
 /**
- * Phase A: sign and BROADCAST depositForBurn from a server-held wallet.
- * Deliberately does not await confirmation — the caller must persist the
- * returned hash immediately (before any other await) so a crash right after
- * broadcast still leaves a recoverable row; services/cctpAttestationPoller.ts
- * polls the receipt separately from the 'burn_submitted' stage.
+ * Phase A: sign and BROADCAST depositForBurnWithHook from a server-held
+ * wallet. Deliberately does not await confirmation — the caller must persist
+ * the returned hash immediately (before any other await) so a crash right
+ * after broadcast still leaves a recoverable row; services/
+ * cctpAttestationPoller.ts polls the receipt separately from the
+ * 'burn_submitted' stage.
  */
 export async function executeDepositForBurn(
   source: CctpChainConfig,
@@ -110,7 +160,7 @@ export async function executeDepositForBurn(
   params: DepositForBurnParams,
 ): Promise<{ txHash: string }> {
   const contract = new ethers.Contract(source.tokenMessengerAddress, TOKEN_MESSENGER_ABI, wallet);
-  const tx = await contract.depositForBurn(
+  const tx = await contract.depositForBurnWithHook(
     params.amountRaw,
     params.destinationDomain,
     addressToBytes32(params.mintRecipient),
@@ -118,6 +168,7 @@ export async function executeDepositForBurn(
     ethers.ZeroHash,
     params.maxFeeRaw,
     params.minFinalityThreshold,
+    buildForwardingHookData(),
   );
   return { txHash: tx.hash as string };
 }
@@ -193,21 +244,20 @@ export async function pollIrisAttestation(
 }
 
 /**
- * Fee quote for a route — GET /v2/burn/USDC/fees/{src}/{dst}. `minimumFee` is
- * in basis points; multiply by the transfer amount for the CCTP protocol
- * portion of maxFee.
- *
- * UNVERIFIED (Step 0 item deliberately left open — see plan): `forwardFee`
- * (low/medium/high, flat USDC minor units) is Circle's SEPARATE Forwarding
- * Service fee for auto-relaying the destination mint. How it's actually
- * attached to a plain `depositForBurn` call (folded into `maxFee`? requires
- * `depositForBurnWithHook`? automatic whenever `minFinalityThreshold=1000`?)
- * was not confirmed against a real testnet round-trip. This function folds
- * the `medium` tier into `maxFeeRaw` as a conservative default — TODO:
- * confirm against an actual Base Sepolia -> Ethereum Sepolia transfer
- * (does `forwardState`/`forwardTxHash` populate with this maxFee, or does
- * the message sit `delayReason: 'insufficient_fee'` regardless?) before
- * relying on this in production.
+ * Fee quote for a route — GET /v2/burn/USDC/fees/{src}/{dst}?forward=true.
+ * `minimumFee` (bps) is the CCTP protocol's own Fast Transfer fee; multiply
+ * by the transfer amount for that portion of maxFee. `forward` MUST be
+ * `true` in the query string or Circle won't include `forwardFee` in the
+ * response at all (it defaults to false) — `forwardFee` is Circle's
+ * SEPARATE Forwarding Service fee (low/medium/high, flat USDC minor units)
+ * for auto-relaying the destination mint, and per developers.circle.com/
+ * cctp/concepts/forwarding-service, maxFee must cover BOTH fees together —
+ * confirmed verbatim: "The maxFee parameter must cover both CCTP protocol
+ * fees and Forwarding Service fees." An insufficient maxFee doesn't fail
+ * the transfer, it silently downgrades to Standard Transfer (~15-19 min
+ * instead of ~8-20s) per that same page. This function folds the `medium`
+ * forwardFee tier into maxFeeRaw as a reasonable default (not the cheapest
+ * `low` tier, to bias toward actually landing as Fast Transfer).
  */
 export async function estimateMaxFeeRaw(
   irisApiBase: string,
@@ -216,7 +266,7 @@ export async function estimateMaxFeeRaw(
   amountRaw: bigint,
   minFinalityThreshold: number,
 ): Promise<bigint> {
-  const url = `${irisApiBase}/v2/burn/USDC/fees/${sourceDomain}/${destinationDomain}`;
+  const url = `${irisApiBase}/v2/burn/USDC/fees/${sourceDomain}/${destinationDomain}?forward=true`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Iris fee quote ${res.status}: ${await res.text().catch(() => '')}`);
   const quotes = (await res.json()) as Array<{

@@ -79,7 +79,10 @@ async function tick(): Promise<void> {
   }
 }
 
-async function advance(row: CctpTransfer): Promise<void> {
+// Exported for direct unit testing of the stage-transition logic (see
+// cctpAttestationPoller.test.ts) — startCctpAttestationPoller()/tick() are
+// the real entry points; this stays the same shape either way.
+export async function advance(row: CctpTransfer): Promise<void> {
   const source = getCctpChain(row.source_chain);
   if (!source) {
     await updateTransfer(row.id, { stage: 'failed', error_message: `source chain ${row.source_chain} no longer configured` });
