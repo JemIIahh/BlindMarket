@@ -210,11 +210,11 @@ export async function pickExplorationAgent(
   // capabilities, the exploration slot only considers NEW agents that hold all
   // of them: the slot exists to give unproven-but-qualified agents a first
   // job, not to hand a task's first exclusive offer to an agent that cannot
-  // do it while qualified agents sit idle (the ranked flow handles those).
+  // do it. (The ranked flow that follows scores overlap but does not filter
+  // on it — capability tags are soft there; see semanticMatch.ts.)
   const taskReward = taskRewardWei ? BigInt(taskRewardWei) : null;
   const eligible = agents.filter((a) =>
-    meetsRewardFloor(a, taskReward) &&
-    requiredCapabilities.every((c) => (a.capabilities ?? []).includes(c)),
+    meetsRewardFloor(a, taskReward) && hasAllCapabilities(a, requiredCapabilities),
   );
 
   // Filter to "new" agents: fewer than EXPERIENCE_THRESHOLD completed tasks

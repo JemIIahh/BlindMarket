@@ -940,6 +940,7 @@ function scheduleCascadeAdvance(
   taskHash: string,
   requiredCaps: string[],
   chain?: TaskChain,
+  delayMs: number = a2aStore.CASCADE_OFFER_MS,
 ): void {
   setTimeout(async () => {
     try {
@@ -968,7 +969,7 @@ function scheduleCascadeAdvance(
     } catch (err) {
       console.error(`[a2a] cascade advance failed for ${taskHash.slice(0, 10)}…:`, (err as Error).message);
     }
-  }, a2aStore.CASCADE_OFFER_MS);
+  }, delayMs);
 }
 
 /**
@@ -998,12 +999,14 @@ async function rankedEntries(
     }));
   let entries = semantic ?? (await tagEntries());
   if (semantic) {
-    // Coverage guarantee carried over from the tag era: every registered
-    // agent holding the required caps still gets a cascade position. Semantic
-    // decides the FRONT of the queue; the tag ranking appends anyone the
-    // top-K KNN missed (e.g. an agent whose embedding write failed or whose
-    // vector is on a stale model). Best-effort — an append failure keeps the
-    // semantic queue rather than aborting to broadcast.
+    // Coverage guarantee carried over from the tag era: every eligible
+    // registered agent still gets a cascade position (the tag ranking scores
+    // capability overlap but does NOT filter on it — matching is soft, see
+    // semanticMatch.ts). Semantic decides the FRONT of the queue; the tag
+    // ranking appends anyone the top-K KNN missed (e.g. an agent whose
+    // embedding write failed or whose vector is on a stale model).
+    // Best-effort — an append failure keeps the semantic queue rather than
+    // aborting to broadcast.
     try {
       const seen = new Set(entries.map((e) => e.address.toLowerCase()));
       entries = entries.concat((await tagEntries()).filter((e) => !seen.has(e.address.toLowerCase())));
@@ -1465,7 +1468,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       const taskRewardWei = onChainAmount;
       const broadcastAfter = (err: Error, stage: string) => {
         console.error(`[a2a] ${stage} failed for ${taskHash.slice(0, 10)}…:`, err.message);
-        emitTaskAvailable(taskHash, broadcastMeta(requiredCaps));
+        emitTaskAvailable(taskHash, broadcastMeta(requiredCaps, taskChain));
       };
 
       if (requiredCaps.length === 0) {
@@ -1494,9 +1497,16 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
             // if ranking fails the advance falls back to broadcast as before.
             const pickEntry = { address: explorationPick.address, score: explorationPick.score, displayName: explorationPick.displayName };
             return rankedEntries(taskHash, requiredCaps, routingMeta, taskRewardWei)
-              .then(({ entries }) => a2aStore.setCascade(taskHash, a2aStore.withExplorationHead(pickEntry, entries)))
+              .then(({ entries, semantic }) => {
+                if (config.semanticRoutingEnabled && semanticMatch.buildTaskRoutingText(routingMeta)) {
+                  void semanticMatch.markShadowRoutedBy(taskHash, semantic ? 'semantic' : 'tag');
+                }
+                return a2aStore.setCascade(taskHash, a2aStore.withExplorationHead(pickEntry, entries));
+              })
               .catch((err) => console.warn(`[a2a] exploration cascade store failed for ${taskHash.slice(0, 10)}…:`, (err as Error).message))
-              .then(() => { scheduleCascadeAdvance(taskHash, requiredCaps, taskChain); });
+              // The pick's window started when its offer went out; arm the advance
+              // for whatever is left of it so ranking time does not extend the window.
+              .then(() => { scheduleCascadeAdvance(taskHash, requiredCaps, taskChain, Math.max(0, deadline - Date.now())); });
           }
 
           // Normal ranked flow (semantic when flipped, tag fallback inside).
