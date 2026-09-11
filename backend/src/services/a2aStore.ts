@@ -677,6 +677,23 @@ export interface TaskCascade {
  * Store the full ranked agent list for a task and start the cascade.
  * The caller should then offer to position 0 and schedule advancement.
  */
+/**
+ * Cascade order when the cold-start exploration slot fires: the picked new
+ * agent holds position 0 (its offer is already out), and the ranked agents
+ * follow so a pass/timeout advances INTO the ranking rather than straight to
+ * the broadcast race. Without this the exploration branch never stored a
+ * cascade, advanceCascade found nothing after the window, and the task fell
+ * to CAS-race among everyone — including unqualified agents — while the
+ * ranked qualified agents never got their exclusive offers (seen live:
+ * exploration offered a stopped agent, then a code_review-only agent raced
+ * a data_processing task). The pick is removed from the ranked tail so it is
+ * never offered twice.
+ */
+export function withExplorationHead(pick: CascadeEntry, ranked: CascadeEntry[]): CascadeEntry[] {
+  const head = pick.address.toLowerCase();
+  return [pick, ...ranked.filter((r) => r.address.toLowerCase() !== head)];
+}
+
 export async function setCascade(taskId: string, ranked: CascadeEntry[]): Promise<void> {
   const tid = taskId.toLowerCase();
   const cascade: TaskCascade = {
