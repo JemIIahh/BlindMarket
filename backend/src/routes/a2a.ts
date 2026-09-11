@@ -10,7 +10,7 @@ import * as keyCustody from '../services/keyCustodyService.js';
 import { autoVerify } from '../services/autoVerify.js';
 import { settleAssignment, settleVerification } from '../services/a2aSettlement.js';
 import { recordWorkerPayout, recordWorkerDispute } from '../services/workerPayout.js';
-import { resolveTaskByHash } from '../services/taskChain.js';
+import { resolveTaskByHash, seedTaskId, type TaskChain } from '../services/taskChain.js';
 import * as escrowService from '../services/escrow.js';
 import * as reputationService from '../services/reputation.js';
 import * as reputationDecay from '../services/reputationDecay.js';
@@ -18,7 +18,6 @@ import * as agentEmbedding from '../services/agentEmbedding.js';
 import * as semanticMatch from '../services/semanticMatch.js';
 import { demandFeed, MAX_DEMAND_LIMIT } from '../services/demandFeed.js';
 import { provider, escrow, baseProvider, baseEscrow } from '../services/chain.js';
-import { redis } from '../services/redis.js';
 import { ethers } from 'ethers';
 import type { AuthRequest, ApiResponse, AgentCapability } from '../types.js';
 import { AGENT_CAPABILITIES } from '../types.js';
@@ -523,6 +522,9 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
           // 'public' tells the worker the blob at rootHash is plaintext —
           // skip ECIES/AES entirely (there is no wrappedKey by design).
           privacy: currentMeta?.privacy,
+          // Same field as the fresh-accept response: resume re-accepts through
+          // this branch and needs the chain for its gas check.
+          chain: reSettleResult.chain ?? currentMeta?.chain,
           alreadySettled: reSettleResult.alreadySettled ?? true,
           assignTxHash: reSettleResult.txHash,
         },
@@ -678,6 +680,9 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
         // 'public' tells the worker the blob at rootHash is plaintext —
         // skip ECIES/AES entirely (there is no wrappedKey by design).
         privacy: meta.privacy,
+        // The chain this task settles on — the worker checks it holds gas
+        // there before spending an LLM call (worker.js runAcceptedTask).
+        chain: settleResult.chain ?? meta.chain,
         alreadySettled: settleResult.alreadySettled,
         assignTxHash: settleResult.txHash,
       },
@@ -907,8 +912,14 @@ a2aRouter.get('/key-custody/pubkey', async (_req, res, next) => {
 
 /** task:available meta — caps included only when the task actually has them,
  *  so every broadcast path emits the same shape. */
-function broadcastMeta(requiredCaps: string[]): Record<string, unknown> {
-  return requiredCaps.length > 0 ? { requiredCapabilities: requiredCaps } : {};
+// `chain` rides along so a worker can refuse a broadcast for a chain it
+// cannot pay gas on BEFORE accepting (an accept assigns on-chain and is then
+// unreleasable). Omitted for rows indexed before meta.chain existed.
+function broadcastMeta(requiredCaps: string[], chain?: TaskChain): Record<string, unknown> {
+  return {
+    ...(requiredCaps.length > 0 ? { requiredCapabilities: requiredCaps } : {}),
+    ...(chain ? { chain } : {}),
+  };
 }
 
 /**
@@ -929,7 +940,8 @@ function scheduleCascadeAdvance(
 
       const next = await a2aStore.advanceCascade(taskHash);
       if (!next) {
-        emitTaskAvailable(taskHash, broadcastMeta(requiredCaps));
+        const meta = await a2aStore.getMeta(taskHash);
+        emitTaskAvailable(taskHash, broadcastMeta(requiredCaps, meta?.chain));
         return;
       }
 
@@ -992,7 +1004,8 @@ async function startRankedCascade(
     }
   }
   if (entries.length === 0) {
-    emitTaskAvailable(taskHash, broadcastMeta(requiredCaps));
+    const meta = await a2aStore.getMeta(taskHash);
+    emitTaskAvailable(taskHash, broadcastMeta(requiredCaps, meta?.chain));
     return;
   }
 
@@ -1242,13 +1255,13 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       );
     }
 
-    // All checks passed — eagerly seed the indexer mapping so /submit
-    // resolves the hash immediately without waiting for the forward-only
-    // event poller to catch up.
-    await Promise.all([
-      redis.set(`a2a:hash2id:${taskHash}`, onChainTaskId),
-      redis.set(`a2a:id2hash:${onChainTaskId}`, taskHash),
-    ]);
+    // All checks passed — eagerly seed the indexer mapping so /submit and
+    // /accept resolve the hash immediately without waiting for the
+    // forward-only event poller to catch up. Seeded in the namespace of the
+    // chain that actually holds the task: resolveTaskByHash reads the Base
+    // namespace first, so seeding a Base task under the 0G keys made it
+    // resolve as 0G until the Base poller caught up (see taskChain.seedTaskId).
+    await seedTaskId(activeEscrow === baseEscrow ? 'base' : '0g', taskHash, onChainTaskId);
 
     const wrappedKeysNormalized = data.wrappedKeys
       ? Object.fromEntries(
@@ -1350,6 +1363,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       }
     }
 
+    const taskChain: TaskChain = activeEscrow === baseEscrow ? 'base' : '0g';
     await a2aStore.setMeta({
       taskId: taskHash,
       targetExecutorType: 'agent',
@@ -1357,6 +1371,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       verificationCriteria: data.verificationCriteria,
       requiredCapabilities: requiredCaps,
       posterAddress: address,
+      chain: taskChain,
       verifierAddress: data.verifierAddress?.toLowerCase(),
       rootHash: data.rootHash,
       wrappedKeys: mergedWrappedKeys,
@@ -1429,7 +1444,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
     // that was this same lockout.)
     const semanticEligible = semanticMatch.semanticRoutingEligible(routingMeta);
     if (!config.cascadeEnabled || targetExecutor || (requiredCaps.length === 0 && !semanticEligible)) {
-      emitTaskAvailable(taskHash, broadcastMeta(requiredCaps));
+      emitTaskAvailable(taskHash, broadcastMeta(requiredCaps, taskChain));
     } else {
       const taskRewardWei = onChainAmount;
       const broadcastAfter = (err: Error, stage: string) => {
@@ -1667,6 +1682,13 @@ a2aRouter.post('/tasks/:id/submit', requireAuth, async (req: AuthRequest, res, n
       data: {
         taskId: taskHash,
         onChainTaskId: onChainId,
+        // Which escrow the unsigned tx targets. The executor holds a signer
+        // per chain and must pick the right one; without this field the
+        // platform worker had no way to know and broadcast every
+        // submitEvidence on 0G, so a Base task could be accepted but never
+        // delivered. The tx also carries chainId now (escrow.ts) as a second
+        // guard, but the executor still needs to choose the signer up front.
+        chain: onChainIdChain,
         status: 'submitted',
         evidenceHash,
         unsignedSubmitEvidence,
@@ -2255,11 +2277,16 @@ a2aRouter.get('/verifications', requireAuth, async (req: AuthRequest, res, next)
     // Resolve each task's on-chain numeric id so the verifier can call
     // completeVerification(id, passed) itself. Null when not yet indexed — the
     // verifier skips it and retries on its next poll.
+    // resolveTaskByHash reports the chain alongside the id. It used to be
+    // discarded here, leaving the verifier-role worker to settle every task
+    // against its 0G escrow — including Base tasks, whose numeric id would
+    // then name an unrelated 0G task. Both are returned so the worker can
+    // pick the escrow and signer for the chain that actually holds the task.
     const verifications = await Promise.all(
-      pending.map(async (t) => ({
-        ...t,
-        onChainId: await resolveTaskByHash(t.meta.taskId).then((r) => r?.taskId ?? null).catch(() => null),
-      })),
+      pending.map(async (t) => {
+        const r = await resolveTaskByHash(t.meta.taskId).catch(() => null);
+        return { ...t, onChainId: r?.taskId ?? null, chain: r?.chain ?? null };
+      }),
     );
     const body: ApiResponse = {
       success: true,

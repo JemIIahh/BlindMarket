@@ -65,9 +65,11 @@ export async function replayOpenBoard(socket: Emitter): Promise<number> {
     for (const { meta } of slice) {
       socket.emit('task:available', {
         taskId: meta.taskId,
-        meta: meta.requiredCapabilities?.length
-          ? { requiredCapabilities: meta.requiredCapabilities }
-          : {},
+        meta: {
+          ...(meta.requiredCapabilities?.length ? { requiredCapabilities: meta.requiredCapabilities } : {}),
+          // Lets the worker apply its gas gate before accepting (see broadcastMeta).
+          ...(meta.chain ? { chain: meta.chain } : {}),
+        },
       });
     }
     return slice.length;

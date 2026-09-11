@@ -111,6 +111,11 @@ const SUI_ADMIN_CAP_ID = process.env.SUI_ADMIN_CAP_ID ?? '0x0';
 // BlindEscrow proxy address — the verifier role (verificationMode='agent')
 // signs completeVerification directly against this contract (trustless).
 const AGENT_ESCROW_ADDRESS = process.env.AGENT_ESCROW_ADDRESS ?? '';
+// Base settlement, injected by agentRunner only when the backend has a Base
+// escrow configured. Empty means "no Base signer" — never guess an RPC.
+const BASE_RPC_URL = process.env.BASE_RPC_URL ?? '';
+const BASE_CHAIN_ID = Number(process.env.BASE_CHAIN_ID ?? 0);
+const AGENT_BASE_ESCROW_ADDRESS = process.env.AGENT_BASE_ESCROW_ADDRESS ?? '';
 const AGENT_TOOLS_RAW = process.env.AGENT_TOOLS ?? '[]';
 const AGENT_TOOL_SECRETS_RAW = process.env.AGENT_TOOL_SECRETS ?? '{}';
 const AGENT_CAPABILITIES_RAW = process.env.AGENT_CAPABILITIES ?? '[]';
@@ -150,6 +155,15 @@ let lastFeedScanAt = 0;
 export function shouldScanFeed(wsConnected, now, lastScanAt, reconcileMs = WS_RECONCILE_MS) {
   if (!wsConnected) return true;
   return now - lastScanAt >= reconcileMs;
+}
+
+// While tasks sit skipped for lack of gas, nothing pushes an event when the
+// wallet gets funded — a balance change is invisible to WS. Re-scan the feed
+// on a short cadence until the skipped set drains, then fall back to the
+// normal WS reconcile floor.
+const GAS_RECHECK_MS = Number(process.env.GAS_RECHECK_MS ?? 60_000);
+export function feedScanCadence(hasGasSkipped, reconcileMs = WS_RECONCILE_MS, recheckMs = GAS_RECHECK_MS) {
+  return hasGasSkipped ? Math.min(reconcileMs, recheckMs) : reconcileMs;
 }
 // Liveness heartbeat cadence — DECOUPLED from POLL_INTERVAL_MS. The parent
 // refreshes a Redis key with a 90s TTL on each heartbeat (see redis.ts
@@ -424,16 +438,90 @@ if (!IS_EVM_AGENT) {
     log(`Sui signer init failed (${e.message}) — falling back to EVM signer`);
   }
 }
+// One signer per chain, all from the same key. A task is escrowed on exactly
+// one chain and the backend names it on /submit and /verifications; the
+// worker must sign on THAT chain's RPC. Until this existed there was a single
+// 0G signer, so a Base submitEvidence — which carried no chainId — was quietly
+// broadcast onto 0G, and a deployed agent could accept a Base task and never
+// deliver it. `signerWallet` stays the 0G signer: delegation funds native 0G
+// and the legacy 0G-only paths read it directly.
+const signers = { '0g': null, base: null };
 if (!suiSigner && AGENT_PRIVATE_KEY) {
+  const pk = AGENT_PRIVATE_KEY.startsWith('0x') ? AGENT_PRIVATE_KEY : `0x${AGENT_PRIVATE_KEY}`;
   try {
-    const provider = new ethers.JsonRpcProvider(OG_RPC_URL, OG_CHAIN_ID);
-    signerWallet = new ethers.Wallet(
-      AGENT_PRIVATE_KEY.startsWith('0x') ? AGENT_PRIVATE_KEY : `0x${AGENT_PRIVATE_KEY}`,
-      provider,
-    );
+    signers['0g'] = new ethers.Wallet(pk, new ethers.JsonRpcProvider(OG_RPC_URL, OG_CHAIN_ID));
+    signerWallet = signers['0g'];
   } catch (e) {
-    console.error(`[agent:${(process.env.AGENT_ID ?? '').slice(0, 8)}] failed to init signer: ${e.message}`);
+    console.error(`[agent:${(process.env.AGENT_ID ?? '').slice(0, 8)}] failed to init 0G signer: ${e.message}`);
   }
+  if (BASE_RPC_URL && BASE_CHAIN_ID) {
+    try {
+      signers.base = new ethers.Wallet(pk, new ethers.JsonRpcProvider(BASE_RPC_URL, BASE_CHAIN_ID));
+    } catch (e) {
+      console.error(`[agent:${(process.env.AGENT_ID ?? '').slice(0, 8)}] failed to init Base signer: ${e.message}`);
+    }
+  }
+}
+
+/** Normalise the chain the backend reports; anything unknown is treated as 0G,
+ *  which is what every task was before Base existed. Exported for tests. */
+export function pickChain(reported) {
+  return reported === 'base' ? 'base' : '0g';
+}
+
+/** The signer bound to `chain`'s RPC, or null when that chain is not
+ *  configured for this worker. Exported for tests via `_signers`. */
+export function signerFor(chain, table = signers) {
+  return table[pickChain(chain)] ?? null;
+}
+
+export function escrowAddressFor(chain) {
+  return pickChain(chain) === 'base' ? AGENT_BASE_ESCROW_ADDRESS : AGENT_ESCROW_ADDRESS;
+}
+
+const NATIVE_SYMBOL = { '0g': '0G', base: 'ETH' };
+
+/**
+ * Gas preflight. The worker's wallet pays its own gas — the Privy relay the
+ * web app and MCP use signs only Privy-managed wallets, and this is a raw EOA
+ * (relay-tx looks the address up in Privy and answers WALLET_NOT_FOUND for
+ * anything else). On 0G the wallet is usually funded because delegation and
+ * deploy already need 0G; on Base nothing funds it, so the first Base task
+ * would fail at broadcast with an opaque "insufficient funds". Say what is
+ * missing, on which chain, for which address, before spending the attempt.
+ * Returns null when fine, else the reason.
+ */
+/**
+ * Partition open tasks by whether this wallet can pay gas on the task's chain.
+ * `meta.chain` is recorded at /tasks/index; tasks without it (indexed before
+ * the field existed) are kept and checked after accept instead. `problemFor`
+ * is memoised per poll so a page of N Base tasks costs one balance read.
+ */
+export async function pickAffordable(entries, problemFor) {
+  const affordable = [];
+  const skipped = [];
+  for (const e of entries) {
+    const chain = e?.meta?.chain;
+    if (chain !== 'base' && chain !== '0g') { affordable.push(e); continue; }
+    const reason = await problemFor(chain);
+    if (reason) skipped.push({ taskHash: e.meta.taskId, chain, reason });
+    else affordable.push(e);
+  }
+  return { affordable, skipped };
+}
+
+export async function preflightGas(chain, signer) {
+  if (!signer) return `no ${pickChain(chain)} signer — ${pickChain(chain) === 'base' ? 'BASE_RPC_URL/BASE_CHAIN_ID not injected (backend has no Base escrow configured?)' : 'AGENT_PRIVATE_KEY missing'}`;
+  let balance;
+  try {
+    balance = await signer.provider.getBalance(signer.address);
+  } catch (e) {
+    return null; // RPC blip — let the broadcast attempt report the real error
+  }
+  if (balance === 0n) {
+    return `wallet ${signer.address} holds 0 ${NATIVE_SYMBOL[pickChain(chain)]} on ${pickChain(chain)} — it pays its own gas there and cannot broadcast. Fund it (any amount covers many txs at current gas).`;
+  }
+  return null;
 }
 
 let escrowIface = null;
@@ -514,6 +602,12 @@ let _working = false;
 // LLM calls forever.
 const resumingTasks = new Set();
 const resumeFailures = new Map();
+// taskHash → last gas-skip reason logged, so a wallet that stays unfunded
+// logs each skipped task once per reason instead of once per poll.
+const gasSkipLogged = new Map();
+// Same idea for tasks resume is holding for gas: they are assigned to us, so
+// they never appear on the open board and must not share the board's prune.
+const resumeHoldLogged = new Map();
 const MAX_RESUME_ATTEMPTS = 3;
 // Verifier role (verificationMode='agent'): tasks this agent is currently
 // judging, plus a per-task attempt cap so a task that can't be judged/posted
@@ -608,6 +702,8 @@ async function fetchWithTimeout(url, options = {}, timeout = 30000) {
 // `lastIndexOf` + slice-to-end recovers it regardless of what came before).
 // Exported so the test file doesn't have to duplicate the literal.
 export const JS_TOOL_SENTINEL = '###BM_JS_TOOL_RESULT###:';
+
+export const _signers = signers;
 
 export function buildTools(currentTaskHash = null) {
   /** @type {import('ai').ToolSet} */
@@ -1330,7 +1426,7 @@ async function pollAndWork() {
     // never recoverable, because nothing re-emits and `join` replays no
     // backlog. Sweep on a floor cadence so a stranded task is picked up within
     // WS_RECONCILE_MS instead of never.
-    if (!shouldScanFeed(wsConnected, Date.now(), lastFeedScanAt)) return;
+    if (!shouldScanFeed(wsConnected, Date.now(), lastFeedScanAt, feedScanCadence(gasSkipLogged.size > 0))) return;
     lastFeedScanAt = Date.now();
 
     // The browse endpoint is paginated (max 200/page) — walk every page so a
@@ -1364,6 +1460,11 @@ async function pollAndWork() {
       return;
     }
 
+    // Tasks that left the board (taken, expired, cancelled) no longer need
+    // the fast gas re-check; drop them so the cadence and the map both relax.
+    const onBoard = new Set(entries.map(e => e.meta.taskId));
+    for (const k of [...gasSkipLogged.keys()]) if (!onBoard.has(k)) gasSkipLogged.delete(k);
+
     const available = entries.filter(e => {
       if (!appliedTasks.has(e.meta.taskId)) return true;
       if (isAppliedTaskStale(e.meta.taskId)) {
@@ -1377,10 +1478,33 @@ async function pollAndWork() {
       return;
     }
 
+    // Gas gate BEFORE accept: /accept assigns the task on-chain, after which
+    // the backend refuses /release (ON_CHAIN_LOCKED) — so an agent that
+    // accepts a Base task with 0 ETH strands it. Skipped tasks are NOT added
+    // to appliedTasks: once the wallet is funded the next poll picks them up.
+    const gasProblemCache = {};
+    const problemFor = async (chain) => {
+      if (!(chain in gasProblemCache)) gasProblemCache[chain] = await preflightGas(chain, signerFor(chain));
+      return gasProblemCache[chain];
+    };
+    const { affordable, skipped } = await pickAffordable(available, problemFor);
+    for (const sk of skipped) {
+      if (gasSkipLogged.get(sk.taskHash) === sk.reason) continue;
+      gasSkipLogged.set(sk.taskHash, sk.reason);
+      log(`skipping task ${sk.taskHash.slice(0, 10)}… on ${sk.chain}: ${sk.reason}`);
+    }
+    for (const e of affordable) gasSkipLogged.delete(e.meta.taskId);
+    if (affordable.length === 0) {
+      return;
+    }
+    available.length = 0;
+    available.push(...affordable);
+
     let acceptedTaskHash = null;
     let acceptedRootHash = null;
     let acceptedWrappedKey = null;
     let acceptedPrivacy = null;
+    let acceptedChain = null;
 
     for (const entry of available) {
       const taskHash = entry.meta.taskId;
@@ -1400,6 +1524,7 @@ async function pollAndWork() {
           acceptedRootHash = acceptJson.data?.rootHash ?? null;
           acceptedWrappedKey = acceptJson.data?.wrappedKey ?? null;
           acceptedPrivacy = acceptJson.data?.privacy ?? null;
+          acceptedChain = acceptJson.data?.chain ?? entry.meta?.chain ?? null;
         } catch {
           // Non-JSON response body; treat as no brief available.
         }
@@ -1512,7 +1637,7 @@ async function pollAndWork() {
     // before the HTTP response returns. No sleep needed.
     log(`assignment confirmed for ${acceptedTaskHash.slice(0, 10)}…, starting work`);
 
-    await runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrappedKey, acceptedPrivacy);
+    await runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrappedKey, acceptedPrivacy, acceptedChain);
   } catch (err) {
     log(`error: ${err.message}`);
   } finally {
@@ -1559,9 +1684,27 @@ async function downloadPublicBrief(rootHash) {
   return (await downloadBriefBlob(rootHash)).toString('utf8');
 }
 
-async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrappedKey, acceptedPrivacy) {
+async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrappedKey, acceptedPrivacy, acceptedChain = null) {
   try {
     const taskStartedAt = Date.now();
+
+    // The task is now assigned to this wallet on-chain. Before spending an
+    // LLM call, make sure we can pay for the submitEvidence tx that follows —
+    // if not, leave the off-chain state at 'accepted' (NOT 'submitted': that
+    // is set by /submit and cannot be re-driven) so resumeAssignedTasks
+    // re-runs this task once the wallet is funded. Chain unknown (older
+    // backend / legacy task) → checked at submit time instead.
+    if (acceptedChain === 'base' || acceptedChain === '0g') {
+      const gasProblem = await preflightGas(acceptedChain, signerFor(acceptedChain));
+      if (gasProblem) {
+        log(`not working on ${acceptedTaskHash.slice(0, 10)}… yet: ${gasProblem} — it is assigned to this wallet on-chain; fund the wallet and the worker resumes it on a later poll`);
+        // Forget the "applied" mark, or resume's re-accept would be refused
+        // for APPLIED_TASK_TTL_MS and burn its attempt budget on a task that
+        // only needs gas. resumeAssignedTasks re-checks gas before counting.
+        appliedTasks.delete(acceptedTaskHash);
+        return;
+      }
+    }
 
     const isPublicTask = acceptedPrivacy === 'public';
     let briefPlaintext = null;
@@ -1884,13 +2027,24 @@ async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrapp
       await releaseTask(acceptedTaskHash);
       return;
     } else {
+      // The backend names the chain the unsigned tx targets. Pick that chain's
+      // signer — the tx also carries chainId, so a wrong pick fails loudly at
+      // ethers rather than landing on the wrong network.
+      const submitChain = pickChain(submitJson.data?.chain);
+      const submitSigner = signerFor(submitChain);
+      const gasProblem = await preflightGas(submitChain, submitSigner);
+      if (gasProblem) {
+        log(`cannot broadcast submitEvidence for ${acceptedTaskHash.slice(0, 10)}… on ${submitChain}: ${gasProblem}`);
+        await releaseTask(acceptedTaskHash);
+        return;
+      }
       // EVM broadcast loop
       const MAX_SUBMIT_ATTEMPTS = 3;
       const RETRY_DELAY_MS = 6_000;
       for (let attempt = 1; attempt <= MAX_SUBMIT_ATTEMPTS; attempt++) {
       try {
-        const sent = await signerWallet.sendTransaction(unsignedSubmitEvidence);
-        log(`submitEvidence broadcast for ${acceptedTaskHash.slice(0, 10)}…: ${sent.hash}`);
+        const sent = await submitSigner.sendTransaction(unsignedSubmitEvidence);
+        log(`submitEvidence broadcast for ${acceptedTaskHash.slice(0, 10)}… on ${submitChain} from ${submitSigner.address}: ${sent.hash}`);
         const receipt = await sent.wait();
         log(`submitEvidence confirmed for ${acceptedTaskHash.slice(0, 10)}…: block=${receipt?.blockNumber} status=${receipt?.status}`);
         broadcastOk = true;
@@ -2024,6 +2178,23 @@ async function resumeAssignedTasks() {
     // or a PUBLIC task, whose brief is plaintext and needs no slice at all.
     if (!finalizeOnly && (!meta.rootHash || (!wrappedKey && meta.privacy !== 'public'))) continue;
 
+    // A task we hold on-chain but cannot pay gas for is not a failed resume —
+    // it is waiting for funds. Check first so the attempt budget is spent only
+    // on tasks that can actually be driven. (Chain from meta; rows without it
+    // fall through to the check inside runAcceptedTask.)
+    const metaChain = meta.chain;
+    if (!finalizeOnly && (metaChain === 'base' || metaChain === '0g')) {
+      const gasProblem = await preflightGas(metaChain, signerFor(metaChain)).catch(() => null);
+      if (gasProblem) {
+        if (resumeHoldLogged.get(taskHash) !== gasProblem) {
+          resumeHoldLogged.set(taskHash, gasProblem);
+          log(`resume: holding ${taskHash.slice(0, 10)}… (assigned to this wallet on ${metaChain}): ${gasProblem}`);
+        }
+        continue;
+      }
+      resumeHoldLogged.delete(taskHash);
+    }
+
     const attempts = resumeFailures.get(taskHash) ?? 0;
     if (attempts >= MAX_RESUME_ATTEMPTS) {
       if (attempts === MAX_RESUME_ATTEMPTS) {
@@ -2080,9 +2251,11 @@ async function resumeAssignedTasks() {
 // 0=Funded, 1=Assigned, 2=Submitted, 3=Verified(failed), 4=Completed, 5=Cancelled.
 // Used by the verifier to decide whether to settle (Submitted) or just record
 // (already settled) — keeps completeVerification idempotent across polls.
-async function readOnChainStatus(onChainId) {
+async function readOnChainStatus(onChainId, chain = '0g') {
+  const signer = signerFor(chain);
+  if (!signer) throw new Error(`no ${pickChain(chain)} signer`);
   const data = escrowIface.encodeFunctionData('getTask', [BigInt(onChainId)]);
-  const raw = await signerWallet.provider.call({ to: AGENT_ESCROW_ADDRESS, data });
+  const raw = await signer.provider.call({ to: escrowAddressFor(chain), data });
   const [task] = escrowIface.decodeFunctionResult('getTask', raw);
   return Number(task.status);
 }
@@ -2215,15 +2388,21 @@ async function pollAndVerify() {
         log(`verify: ${taskHash.slice(0, 10)}… on-chain id not indexed yet; will retry`);
         continue; // transient — don't burn the cap
       }
-      if (!signerWallet || !escrowIface || !AGENT_ESCROW_ADDRESS) {
-        log(`verify: cannot settle ${taskHash.slice(0, 10)}… — signer/escrow not configured`);
+      // /verifications reports which chain holds the task. Settle against THAT
+      // escrow with THAT chain's signer — the numeric id alone is ambiguous
+      // across chains, and this used to always hit the 0G escrow.
+      const settleChain = pickChain(item.chain);
+      const settleSigner = signerFor(settleChain);
+      const settleEscrow = escrowAddressFor(settleChain);
+      if (!settleSigner || !escrowIface || !settleEscrow) {
+        log(`verify: cannot settle ${taskHash.slice(0, 10)}… — ${settleChain} signer/escrow not configured`);
         bumpVerifyFailure(taskHash);
         continue;
       }
 
       let status;
       try {
-        status = await readOnChainStatus(onChainId);
+        status = await readOnChainStatus(onChainId, settleChain);
       } catch (e) {
         log(`verify: on-chain status read failed for ${taskHash.slice(0, 10)}…: ${e.message}`);
         continue; // transient RPC blip — retry next poll
@@ -2237,8 +2416,10 @@ async function pollAndVerify() {
       } else if (status === 2) {
         // Submitted on-chain → settle now with our verdict.
         try {
+          const gasProblem = await preflightGas(settleChain, settleSigner);
+          if (gasProblem) { log(`verify: ${taskHash.slice(0, 10)}… ${gasProblem}`); bumpVerifyFailure(taskHash); continue; }
           const data = escrowIface.encodeFunctionData('completeVerification', [BigInt(onChainId), verdict.passed]);
-          const sent = await signerWallet.sendTransaction({ to: AGENT_ESCROW_ADDRESS, data });
+          const sent = await settleSigner.sendTransaction({ to: settleEscrow, data, chainId: settleChain === 'base' ? BASE_CHAIN_ID : OG_CHAIN_ID });
           log(`verify: completeVerification broadcast for ${taskHash.slice(0, 10)}… (passed=${verdict.passed}): ${sent.hash}`);
           const receipt = await sent.wait();
           if (receipt?.status !== 1) { bumpVerifyFailure(taskHash); continue; }
@@ -2379,9 +2560,24 @@ function connectWebSocket() {
     acceptFromWs(data.taskId);
   });
 
-  wsClient.on('task:available', (data) => {
+  wsClient.on('task:available', async (data) => {
     log(`WS received task:available for ${data.taskId?.slice(0, 10) || 'unknown'}…`);
     if (!data.taskId) return;
+    // Same gas gate as the feed scan: accepting assigns on-chain, so refuse
+    // up front when the broadcast names a chain this wallet cannot pay on.
+    // Broadcasts without a chain (older backend) fall through to the
+    // post-accept check in runAcceptedTask.
+    const chain = data.meta?.chain;
+    if (chain === 'base' || chain === '0g') {
+      const reason = await preflightGas(chain, signerFor(chain)).catch(() => null);
+      if (reason) {
+        if (gasSkipLogged.get(data.taskId) !== reason) {
+          gasSkipLogged.set(data.taskId, reason);
+          log(`skipping task ${data.taskId.slice(0, 10)}… on ${chain}: ${reason}`);
+        }
+        return;
+      }
+    }
     acceptFromWs(data.taskId);
   });
 
@@ -2426,15 +2622,17 @@ async function tryAcceptTask(taskHash) {
     let rootHash = null;
     let wrappedKey = null;
     let privacy = null;
+    let chain = null;
     try {
       const acceptJson = await acceptRes.json();
       rootHash = acceptJson.data?.rootHash ?? null;
       wrappedKey = acceptJson.data?.wrappedKey ?? null;
       privacy = acceptJson.data?.privacy ?? null;
+      chain = acceptJson.data?.chain ?? null;
     } catch { /* non-JSON body */ }
     log(`assignment confirmed for ${taskHash.slice(0, 10)}…, starting work`);
     // Run the task in the foreground (blocks this handler until done)
-    await runAcceptedTask(taskHash, rootHash, wrappedKey, privacy);
+    await runAcceptedTask(taskHash, rootHash, wrappedKey, privacy, chain);
     return true;
   }
 

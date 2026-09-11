@@ -1,4 +1,5 @@
 import { escrow, baseEscrow, buildUnsignedTx } from './chain.js';
+import { config } from '../config.js';
 import type { OnChainTask } from '../types.js';
 import { ethers } from 'ethers';
 
@@ -239,9 +240,16 @@ export async function buildSubmitEvidenceOn(
   taskId: number,
   evidenceHash: string,
 ): Promise<ethers.TransactionRequest> {
-  return chain === 'base'
-    ? buildSubmitEvidenceBase(from, taskId, evidenceHash)
-    : buildSubmitEvidence(from, taskId, evidenceHash);
+  const tx = chain === 'base'
+    ? await buildSubmitEvidenceBase(from, taskId, evidenceHash)
+    : await buildSubmitEvidence(from, taskId, evidenceHash);
+  // Pin the chain into the request. buildUnsignedTx deliberately emits no
+  // chainId, and until now nothing downstream added one — so a Base
+  // submitEvidence handed to a signer bound to the 0G RPC was simply
+  // broadcast there. ethers refuses to send a tx whose chainId disagrees with
+  // its provider's network, which turns that silent wrong-chain broadcast into
+  // a loud error at the signer regardless of how the caller chose it.
+  return { ...tx, chainId: chain === 'base' ? config.baseChainId : config.ogChainId };
 }
 
 /** Read the per-task verifier from whichever chain holds the task. */
