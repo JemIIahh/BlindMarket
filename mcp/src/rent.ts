@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { Contract, Interface, formatUnits, parseUnits } from 'ethers';
 import type { McpConfig } from './config.js';
 import type { WalletCtx } from './wallet.js';
-import { aesEncrypt, eciesEncrypt, generateAesKey, sha256Hex } from './crypto.js';
+import { aesDecrypt, aesEncrypt, eciesDecrypt, eciesEncrypt, generateAesKey, sha256Hex } from './crypto.js';
 import { createQuote, consumeQuote, getSpend, putSpend, updateSpend, type SpendRecord } from './state.js';
 import { createSettlementResolver, type BaseSettlement, type Settlement } from './settlement.js';
 
@@ -703,6 +703,9 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     deadline: string;
     token: string;
     decimals: number;
+    /** On-chain resubmission counter. The contract allows a fresh
+     *  submitEvidence from Verified(3) only while this is below 3. */
+    submissionAttempts?: number;
   }
 
   /** Resolve a task id-or-hash to its live on-chain state.
@@ -743,6 +746,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       amount: String(t.amount),
       deadline: String(t.deadline),
       token: String(t.token),
+      submissionAttempts: Number(t.submissionAttempts),
       decimals: s.decimals,
     };
   }
@@ -1040,19 +1044,48 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     'fetch_brief',
     {
       title: 'Fetch a Task Brief',
-      description: "Download a task's brief by rootHash (accept_task returns it). Public briefs come back as text. Private briefs are ciphertext and need the wrapped key plus a local key this process does not hold — use a platform agent for those.",
+      description: "Download a task's brief by rootHash (accept_task returns it). Public briefs come back as text. For a PRIVATE brief pass the wrappedKey accept_task returned: it is decrypted with BLINDMARKET_PRIVATE_KEY, which must be the key whose public half you registered (wallet_status shows it as executorPublicKey).",
       inputSchema: {
         rootHash: z.string().min(32).max(80).describe('rootHash from accept_task or list_open_tasks'),
+        wrappedKey: z.string().optional().describe('ECIES-wrapped AES key from accept_task (hex, no 0x). Required for private briefs.'),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ rootHash }) => {
+    async ({ rootHash, wrappedKey }) => {
       try {
+        // Buffer.from(x, 'hex') stops silently at the first bad char, so a
+        // pasted "0x…" or a truncated blob would otherwise surface as
+        // WRONG_KEY after a storage round-trip. Validate first.
+        // ECIES blob = 65-byte ephemeral pubkey + 12 IV + 16 tag + ciphertext.
+        const keyHex = wrappedKey?.replace(/^0x/i, '');
+        if (keyHex !== undefined && (!/^[0-9a-fA-F]+$/.test(keyHex) || keyHex.length % 2 !== 0 || keyHex.length < (65 + 12 + 16 + 1) * 2)) {
+          return fail('INVALID_WRAPPED_KEY', 'wrappedKey must be the full hex ECIES blob from accept_task (even length, at least 94 bytes). Pass it exactly as returned.');
+        }
         const { blob } = await api<{ blob: string }>('GET', `/api/v1/storage/${encodeURIComponent(rootHash)}`);
         const buf = Buffer.from(blob, 'base64');
+        if (keyHex !== undefined) {
+          if (!walletCtx) {
+            return fail('NO_WALLET', 'A private brief is decrypted with BLINDMARKET_PRIVATE_KEY — set it to the key whose public half you registered as executor.');
+          }
+          let aesKey: Buffer;
+          try {
+            aesKey = eciesDecrypt(Buffer.from(keyHex, 'hex'), walletCtx.wallet.privateKey);
+          } catch (e) {
+            return fail('WRONG_KEY', `Could not unwrap the brief key with the local wallet ${walletCtx.wallet.address}: ${(e as Error).message}. The poster wrapped it to the pubkey on your executor registration — wallet_status shows the pubkey this process derives; they must match.`);
+          }
+          let brief: string;
+          try {
+            brief = aesDecrypt(buf, aesKey).toString('utf8');
+          } catch (e) {
+            // The key unwrapped fine, so the BLOB is the problem: a public
+            // (plaintext) brief passed with a wrappedKey, or the wrong rootHash.
+            return fail('BRIEF_DECRYPT_FAILED', `The wrapped key unwrapped, but the blob at ${rootHash} did not decrypt with it: ${(e as Error).message}. If the task is public, call fetch_brief without wrappedKey; otherwise check the rootHash came from the same accept_task response.`);
+          }
+          return ok({ rootHash, bytes: buf.length, brief, decrypted: true });
+        }
         const text = buf.toString('utf8');
         if (text.includes('�')) {
-          return fail('ENCRYPTED_BRIEF', 'This brief is encrypted (private task). Decrypting needs the wrappedKey from accept_task and the executor\'s own key, which this process does not hold.');
+          return fail('ENCRYPTED_BRIEF', 'This brief is encrypted (private task). Re-call fetch_brief with the wrappedKey from accept_task.');
         }
         return ok({ rootHash, bytes: buf.length, brief: text });
       } catch (err) {
@@ -1065,7 +1098,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     'complete_task',
     {
       title: 'Deliver a Task Result and Settle',
-      description: 'Executor side, after accept_task: submits your result, sends submitEvidence from YOUR wallet (Base: through the backend relay — no gas to hold), then asks the backend to verify and release the escrow to you. Safe to re-call: it resumes from whatever stage the escrow shows.',
+      description: 'Executor side, after accept_task: submits your result, sends submitEvidence from YOUR wallet (Base: through the backend relay, gas in USDC; 0G: signed locally with BLINDMARKET_PRIVATE_KEY), then asks the backend to verify and release the escrow to you. If the last verification FAILED, calling this again resubmits — the contract allows up to 3 attempts before the deadline. Safe to re-call: it resumes from whatever stage the escrow shows.',
       inputSchema: {
         task: z.string().regex(/^0x[0-9a-fA-F]{64}$/).describe('The 0x task hash — A2A tasks are addressed by hash, not by numeric id'),
         output: z.string().min(1).max(200_000).describe('Your result. Verification judges this text (auto mode scores it against the poster\'s criteria).'),
@@ -1076,9 +1109,8 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       const f = await requireFunding();
       if ('error' in f) return f.error;
       const { s, payFrom } = f;
-      if (s.mode !== 'base') {
-        return fail('BASE_ONLY', 'complete_task sends submitEvidence through the Privy relay and is Base-only. On 0G, deliver with a platform agent (backend/agents/worker.js), which signs with its own key.');
-      }
+      // requireFunding returns an error on 0G without a wallet, so walletCtx is
+      // non-null whenever s.mode is '0g' from here on.
 
       let detail: TaskDetail;
       try {
@@ -1091,8 +1123,23 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       if (status === 0) {
         return fail('NOT_ASSIGNED', `Task ${detail.taskId} is still Funded — call accept_task("${task}") first; the backend assigns you on-chain as part of accept.`);
       }
-      if (status === 3) {
-        return fail('VERIFICATION_FAILED_ON_CHAIN', `Task ${detail.taskId} reads Verified-but-not-released: the last verification failed. Re-submission after a failed round is not wired through this tool yet.`);
+      // Verified(3) = the last round FAILED and the escrow is still locked. The
+      // contract lets the worker submitEvidence again from here, up to
+      // MAX_SUBMISSION_ATTEMPTS (3) and before the deadline. The backend's
+      // /submit enforces all three on-chain gates; check them here too so the
+      // caller gets the reason instead of a relayed revert.
+      const isRetry = status === 3;
+      // The contract reverts DeadlineReached from Assigned as well as from a
+      // retry. With an explicit gasLimit ethers skips estimateGas, so a
+      // predictable revert would be mined and charged — refuse it here.
+      if ((status === 1 || isRetry) && BigInt(Math.floor(Date.now() / 1000)) >= BigInt(detail.deadline)) {
+        return fail('DEADLINE_REACHED', `Task ${detail.taskId} is past its deadline — no further submissions are accepted on-chain. The poster can reclaim the escrow with claim_timeout.`);
+      }
+      if (isRetry) {
+        const attempts = detail.submissionAttempts ?? 0;
+        if (attempts >= 3) {
+          return fail('MAX_ATTEMPTS_REACHED', `Task ${detail.taskId} has used all 3 submission attempts (${attempts}/3). The escrow stays locked until the poster reclaims it after the deadline.`);
+        }
       }
       if (status >= 4) {
         return ok({ taskId: detail.taskId, taskHash: detail.taskHash, onChainStatus: statusName(status), hint: 'Already settled — nothing to do.' });
@@ -1101,16 +1148,36 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       let submitTxHash: string | undefined;
       let gas: GasMode | undefined;
       try {
-        if (status === 1) {
-          const sub = await api<{ onChainTaskId: number; evidenceHash: string; unsignedSubmitEvidence: { to: string; data: string } }>(
+        if (status === 1 || isRetry) {
+          const sub = await api<{ onChainTaskId: number; evidenceHash: string; chain?: string; unsignedSubmitEvidence: { to: string; data: string; from?: string; chainId?: number } }>(
             'POST', `/api/v1/a2a/tasks/${task}/submit`, { resultData: { output } },
           );
           const tx = sub.unsignedSubmitEvidence;
           await verifyTarget(s, tx.to, 'submitEvidence');
-          const sent = await relaySend(s, { to: tx.to, data: tx.data });
-          submitTxHash = sent.hash;
-          gas = sent.gas;
-          await waitRelayed(s, sent.hash, sent.isUserOp);
+          if (s.mode === 'base') {
+            const sent = await relaySend(s, { to: tx.to, data: tx.data });
+            submitTxHash = sent.hash;
+            gas = sent.gas;
+            await waitRelayed(s, sent.hash, sent.isUserOp);
+          } else {
+            // submitEvidence is onlyWorker: the backend built the tx for the
+            // API key's wallet (tx.from). If BLINDMARKET_PRIVATE_KEY is a
+            // different wallet the tx reverts on-chain — with gasLimit set,
+            // that revert is mined and paid for. Refuse before sending.
+            if (tx.from && tx.from.toLowerCase() !== walletCtx!.wallet.address.toLowerCase()) {
+              return fail('WALLET_MISMATCH', `The backend assigned this task to ${tx.from} (the wallet behind BLINDMARKET_API_KEY), but BLINDMARKET_PRIVATE_KEY is ${walletCtx!.wallet.address}. submitEvidence is worker-only — set the private key of ${tx.from}.`);
+            }
+            // 0G: sign locally, exactly as fundAndIndex does for createTask.
+            // The backend pins chainId onto the tx; ethers refuses to send it
+            // if this wallet's provider is on a different network — the guard
+            // against a Base tx reaching a 0G signer.
+            const tx0g = await walletCtx!.wallet.sendTransaction({
+              to: tx.to, data: tx.data, gasLimit: GAS_LIMIT,
+              ...(tx.chainId !== undefined ? { chainId: tx.chainId } : {}),
+            });
+            submitTxHash = tx0g.hash;
+            await tx0g.wait();
+          }
           status = await waitStatus(s, detail.taskId, 2, 'Submitted');
         }
 
@@ -1131,11 +1198,15 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
           backendStatus: fin.status,
           onChainStatus: statusName(Number(after.status)),
           paidTo: done ? payFrom : undefined,
+          submissionAttempts: after.submissionAttempts,
           hint: done
             ? `Escrow released: ${formatUnits(BigInt(after.amount), after.decimals ?? 6)} ${s.mode === 'base' ? 'USDC' : '0G'} minus the marketplace fee is now in ${payFrom}.`
             : fin.awaitingPosterApproval
               ? 'Manual-verification task: the poster must approve via verify_task before the escrow releases.'
-              : `Verification did not pass (${(fin.verificationResult?.reasons ?? []).join('; ') || 'no reasons given'}). The escrow stays locked.`,
+              : `Verification did not pass (${(fin.verificationResult?.reasons ?? []).join('; ') || 'no reasons given'}). ` +
+                ((after.submissionAttempts ?? 0) < 3
+                  ? `Revise and call complete_task again — ${3 - (after.submissionAttempts ?? 0)} attempt(s) left before the deadline.`
+                  : 'No attempts left; the escrow stays locked until the poster reclaims it.'),
         });
       } catch (err) {
         return fail((err as ApiError).code ?? 'COMPLETE_FAILED', (err as Error).message);

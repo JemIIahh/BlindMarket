@@ -13,6 +13,8 @@ import type { Settlement } from './settlement.js';
  *   BLINDMARKET_CHAIN_ID     optional; defaults to 16661 (0G Mainnet)
  */
 
+import { derivePublicKeyHex } from './crypto.js';
+
 export interface WalletCtx {
   wallet: Wallet;
   provider: JsonRpcProvider;
@@ -52,7 +54,14 @@ export function registerWalletTools(
     },
     async () => {
       const localWallet: Record<string, unknown> = ctx
-        ? { configured: true, address: ctx.wallet.address, chainId: ctx.chainId, rpcUrl: ctx.rpcUrl }
+        ? {
+            configured: true, address: ctx.wallet.address, chainId: ctx.chainId, rpcUrl: ctx.rpcUrl,
+            // What to pass as `publicKey` to register_as_executor. Posters ECIES-wrap
+            // the brief key to it, and fetch_brief decrypts with the matching
+            // private key — so an executor that registers any OTHER pubkey can
+            // accept a private task and never open it.
+            executorPublicKey: derivePublicKeyHex(ctx.wallet.privateKey),
+          }
         : { configured: false, hint: 'Set BLINDMARKET_PRIVATE_KEY (and optionally BLINDMARKET_RPC_URL) to spend on 0G. Not needed when the backend settles on Base.' };
       if (ctx) {
         try {

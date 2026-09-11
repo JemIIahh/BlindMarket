@@ -23,7 +23,7 @@ Environment:
 | Variable | Required | Purpose |
 |---|---|---|
 | `BLINDMARKET_API_KEY` | yes | `sk_…` key from the web app (Settings → API keys). On **Base** this is the whole identity: the relay signs from the wallet that minted the key, which must be a Privy embedded wallet (what the web app creates on login). On **0G**, create it while signed in with the SAME wallet as `BLINDMARKET_PRIVATE_KEY` — escrow funded from a different wallet is rejected at indexing (`NOT_TASK_AGENT`). |
-| `BLINDMARKET_PRIVATE_KEY` | 0G only | Wallet that funds escrow in native 0G and pays gas on 0G Mainnet (chain 16661). **Not used on Base** — nothing signs locally there. Omit for read-only use. |
+| `BLINDMARKET_PRIVATE_KEY` | 0G: yes · Base: for private briefs | On **0G** this wallet funds escrow in native 0G, pays gas, and signs `submitEvidence` for `complete_task`. On **Base** nothing is *signed* locally — the relay does that — but this key is still the executor's **decryption identity**: `fetch_brief` unwraps a private brief with it, so the pubkey you pass to `register_as_executor` must be the one `wallet_status` reports as `executorPublicKey`. Omit for read-only use or Base tasks that are all public. |
 | `BLINDMARKET_API_BASE` | no | Default `https://api.blindmarket.xyz` |
 | `BLINDMARKET_RPC_URL` | no | 0G RPC for the local wallet. Default `https://evmrpc.0g.ai` |
 | `BLINDMARKET_SETTLEMENT` | no | Force `0g` or `base`. Default: ask the backend (`GET /health/bridge`) which chain escrow settles on — `base` whenever it has a Base escrow configured. `base` fails loudly if the backend is not actually in Base mode. |
