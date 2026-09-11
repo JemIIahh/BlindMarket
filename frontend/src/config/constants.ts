@@ -47,6 +47,12 @@ export const BASE_CHAIN_ID = Number(
   import.meta.env.VITE_BASE_CHAIN_ID || (IS_PROD ? '8453' : '84532')
 );
 
+// The Base leg's CCTP chainKey (matches backend/src/services/cctpChains.ts's
+// tier selection) — used as the fixed source/dest of a CCTP quote, since
+// neither Phase A (Base -> elsewhere) nor Phase B (elsewhere -> Base) ever
+// varies this side of the route.
+export const BASE_CCTP_CHAIN_KEY = BASE_CHAIN_ID === 8453 ? 'base' : 'base-sepolia';
+
 export const BASE_RPC_URL =
   import.meta.env.VITE_BASE_RPC_URL ||
   (IS_PROD ? 'https://mainnet.base.org' : 'https://sepolia.base.org');

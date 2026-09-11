@@ -14,7 +14,7 @@ import {
 } from '../components/bb';
 import { get, authedGet, authedPost } from '../lib/api';
 import { useChainAddress } from '../hooks/useChainWallet';
-import { MARKETPLACE_TOKEN_ADDRESS, getPaymentSymbol, getPaymentDecimals } from '../config/constants';
+import { MARKETPLACE_TOKEN_ADDRESS, getPaymentSymbol, getPaymentDecimals, BASE_CCTP_CHAIN_KEY } from '../config/constants';
 import {
   getAgentReviews,
   getAgentBadges,
@@ -87,6 +87,19 @@ export default function AgentDetail() {
   const [withdrawConfirmOpen, setWithdrawConfirmOpen] = useState(false);
   const [withdrawInfo, setWithdrawInfo] = useState<Array<{ chain: string; asset: string; amount: string; txHash: string }> | null>(null);
   const [withdrawError, setWithdrawError] = useState('');
+
+  // CCTP (Circle Cross-Chain Transfer Protocol) outbound bridge — separate
+  // from the withdraw-to-owner flow above: this moves Base USDC to a
+  // DIFFERENT chain instead of only sweeping back to the same address on the
+  // same chain. Async (burn -> attestation -> mint), so state here tracks a
+  // pollable transferId rather than a synchronous result.
+  const [cctpChains, setCctpChains] = useState<Array<{ chainKey: string; label: string }>>([]);
+  const [cctpDestChain, setCctpDestChain] = useState('');
+  const [cctpStatus, setCctpStatus] = useState<'idle' | 'sending' | 'polling' | 'done' | 'error'>('idle');
+  const [cctpError, setCctpError] = useState('');
+  const [cctpTransfer, setCctpTransfer] = useState<{ stage: string; burnTxHash: string | null; mintTxHash: string | null } | null>(null);
+  const [cctpQuote, setCctpQuote] = useState<{ maxFeeRaw: string; estimatedReceiveRaw: string } | null>(null);
+  const [cctpQuoteLoading, setCctpQuoteLoading] = useState(false);
 
   // Owner-link recovery state — for the "deployed with one wallet, signed in
   // as another" lock-out. Drives the inline recovery button in the action-error
@@ -218,6 +231,45 @@ export default function AgentDetail() {
     document.getElementById(raw)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, [agent, searchParams]);
 
+  // CCTP destination chains — fetched once, unauthenticated (single source
+  // of truth for chain/contract config lives on the backend, same posture as
+  // /health/bridge elsewhere). Empty when CCTP isn't enabled on this
+  // deployment, which the GasBar simply doesn't render for.
+  useEffect(() => {
+    let cancelled = false;
+    get<{ enabled: boolean; chains: Array<{ chainKey: string; label: string }> }>('/api/v1/cctp/config')
+      .then((data) => {
+        if (cancelled || !data.enabled) return;
+        // Base/Base Sepolia are the source of an outbound bridge, never a
+        // valid destination for it.
+        const destinations = data.chains.filter((c) => !c.chainKey.startsWith('base'));
+        setCctpChains(destinations);
+        if (destinations.length > 0) setCctpDestChain((prev) => prev || destinations[0].chainKey);
+      })
+      .catch(() => { /* CCTP just stays hidden */ });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Fee preview for the "Bridge out" control — shown BEFORE the owner
+  // commits to a burn, not just discovered afterward by diffing balances.
+  // Debounced (300ms) since it fires on every destination-chain change;
+  // Phase A always bridges the full balance (no partial-amount UI), so the
+  // quote amount is just the current usdcBalance.
+  useEffect(() => {
+    if (!cctpDestChain || usdcBalance === null || usdcBalance <= 0n) { setCctpQuote(null); return; }
+    let cancelled = false;
+    setCctpQuoteLoading(true);
+    const t = setTimeout(() => {
+      get<{ maxFeeRaw: string; estimatedReceiveRaw: string }>(
+        `/api/v1/cctp/quote?sourceChain=${BASE_CCTP_CHAIN_KEY}&destChain=${cctpDestChain}&amountRaw=${usdcBalance}`,
+      )
+        .then((data) => { if (!cancelled) setCctpQuote(data); })
+        .catch(() => { if (!cancelled) setCctpQuote(null); })
+        .finally(() => { if (!cancelled) setCctpQuoteLoading(false); });
+    }, 300);
+    return () => { cancelled = true; clearTimeout(t); setCctpQuoteLoading(false); };
+  }, [cctpDestChain, usdcBalance]);
+
   const action = useMutation({
     mutationFn: (act: 'start' | 'pause' | 'stop' | 'restart') =>
       authedPost<AgentDetails>(`/api/v1/agents/${apiId}/${act}`, {}),
@@ -328,6 +380,50 @@ export default function AgentDetail() {
     } catch (err) {
       setWithdrawError((err as Error).message || 'Withdraw failed');
       setWithdrawStatus('error');
+    }
+  }
+
+  // CCTP outbound bridge — async (burn -> ~8-20s attestation -> mint), so
+  // this submits the burn and then polls the transfer's status rather than
+  // waiting on one long request. `crypto.randomUUID()` is the idempotency
+  // key: a retry of this exact click (e.g. a flaky network response after
+  // the burn already landed) resumes the same transfer instead of a second
+  // on-chain burn — see cctpTransferStore's UNIQUE idempotency_key.
+  async function handleCctpWithdraw() {
+    if (!id || !cctpDestChain) return;
+    setCctpStatus('sending');
+    setCctpError('');
+    setCctpTransfer(null);
+    try {
+      const data = await authedPost<{ transferId: number; stage: string; burnTxHash: string | null }>(
+        `/api/v1/agents/${apiId}/cctp/withdraw`,
+        { destinationChain: cctpDestChain, idempotencyKey: crypto.randomUUID() },
+      );
+      setCctpTransfer({ stage: data.stage, burnTxHash: data.burnTxHash, mintTxHash: null });
+      setCctpStatus('polling');
+
+      const transferId = data.transferId;
+      const poll = async () => {
+        const row = await authedGet<{ stage: string; burnTxHash: string | null; mintTxHash: string | null; errorMessage: string | null }>(
+          `/api/v1/agents/${apiId}/cctp/transfers/${transferId}`,
+        );
+        setCctpTransfer({ stage: row.stage, burnTxHash: row.burnTxHash, mintTxHash: row.mintTxHash });
+        if (row.stage === 'mint_confirmed') {
+          setCctpStatus('done');
+          await refetchBalance();
+          return;
+        }
+        if (row.stage === 'failed') {
+          setCctpError(row.errorMessage || 'Transfer failed');
+          setCctpStatus('error');
+          return;
+        }
+        setTimeout(poll, 4000);
+      };
+      setTimeout(poll, 4000);
+    } catch (err) {
+      setCctpError((err as Error).message || 'CCTP withdraw failed');
+      setCctpStatus('error');
     }
   }
 
@@ -475,6 +571,16 @@ export default function AgentDetail() {
               onWithdrawRequest={() => setWithdrawConfirmOpen(true)}
               onWithdrawConfirm={handleWithdraw}
               onWithdrawCancel={() => setWithdrawConfirmOpen(false)}
+              cctpChains={cctpChains}
+              cctpDestChain={cctpDestChain}
+              onCctpDestChainChange={setCctpDestChain}
+              cctpStatus={cctpStatus}
+              cctpError={cctpError}
+              cctpTransfer={cctpTransfer}
+              onCctpWithdraw={handleCctpWithdraw}
+              cctpQuote={cctpQuote}
+              cctpQuoteLoading={cctpQuoteLoading}
+              cctpSymbol={balanceSymbol}
             />
           )}
           <OpsConsole

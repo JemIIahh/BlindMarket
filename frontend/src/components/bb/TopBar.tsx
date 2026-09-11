@@ -1,9 +1,11 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { Button } from './Button';
 import { ConnectWalletButton } from './ConnectWalletButton';
 import { getStoredTheme } from '../ThemeSync';
 import { useUsdcBalance } from '../../hooks/useChainWallet';
+import { CctpFundModal } from '../CctpFundModal';
+import { get } from '../../lib/api';
 
 interface TopBarProps {
   onMenuClick?: () => void;
@@ -11,7 +13,15 @@ interface TopBarProps {
 
 export function TopBar({ onMenuClick }: TopBarProps = {}) {
   const [currentTheme, setCurrentTheme] = useState<'dark' | 'light'>(getStoredTheme);
+  const [fundModalOpen, setFundModalOpen] = useState(false);
+  const [cctpEnabled, setCctpEnabled] = useState(false);
   const usdc = useUsdcBalance();
+
+  useEffect(() => {
+    get<{ enabled: boolean }>('/api/v1/cctp/config')
+      .then((data) => setCctpEnabled(data.enabled))
+      .catch(() => setCctpEnabled(false));
+  }, []);
 
   const toggleTheme = () => {
     const next = currentTheme === 'light' ? 'dark' : 'light';
@@ -76,7 +86,21 @@ export function TopBar({ onMenuClick }: TopBarProps = {}) {
             <path d="M2 14v-3h3" />
           </svg>
         </button>
+        {/* Fund from another chain (Circle CCTP) — hidden entirely when the
+            backend reports CCTP isn't enabled on this deployment. */}
+        {cctpEnabled && (
+          <button
+            onClick={() => setFundModalOpen(true)}
+            className="text-ink-3 hover:text-ink transition-colors"
+            title="Fund from another chain"
+          >
+            +
+          </button>
+        )}
       </div>
+      {fundModalOpen && (
+        <CctpFundModal onClose={() => setFundModalOpen(false)} onFunded={() => usdc.refresh()} />
+      )}
     </header>
   );
 }

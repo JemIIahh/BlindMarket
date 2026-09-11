@@ -1,3 +1,4 @@
+import { formatUnits } from 'ethers';
 import { Button, Icon, ConfirmDialog } from '../bb';
 
 /**
@@ -25,6 +26,16 @@ export function GasBar({
   onWithdrawRequest,
   onWithdrawConfirm,
   onWithdrawCancel,
+  cctpChains,
+  cctpDestChain,
+  onCctpDestChainChange,
+  cctpStatus,
+  cctpError,
+  cctpTransfer,
+  onCctpWithdraw,
+  cctpQuote,
+  cctpQuoteLoading,
+  cctpSymbol,
 }: {
   symbol: string;
   topUpAmount: string;
@@ -45,6 +56,20 @@ export function GasBar({
   onWithdrawRequest: () => void;
   onWithdrawConfirm: () => void;
   onWithdrawCancel: () => void;
+  // CCTP outbound bridge (Base USDC -> another EVM chain). `cctpChains` empty
+  // means CCTP isn't enabled on this deployment — the whole control hides.
+  cctpChains: Array<{ chainKey: string; label: string }>;
+  cctpDestChain: string;
+  onCctpDestChainChange: (chainKey: string) => void;
+  cctpStatus: 'idle' | 'sending' | 'polling' | 'done' | 'error';
+  cctpError: string;
+  cctpTransfer: { stage: string; burnTxHash: string | null; mintTxHash: string | null } | null;
+  onCctpWithdraw: () => void;
+  // Fee preview — fetched from GET /api/v1/cctp/quote as soon as a
+  // destination is picked, shown BEFORE the owner commits to a burn.
+  cctpQuote: { maxFeeRaw: string; estimatedReceiveRaw: string } | null;
+  cctpQuoteLoading: boolean;
+  cctpSymbol: string;
 }) {
   return (
     <div className="border border-line px-5 py-4">
@@ -93,6 +118,47 @@ export function GasBar({
               />
             </>
           )}
+          {/* Bridge out via Circle CCTP — moves Base USDC to a DIFFERENT
+              chain, unlike Withdraw above which only sweeps back to the same
+              address on the same chain. Hidden entirely when CCTP isn't
+              enabled on this deployment (cctpChains empty). */}
+          {agentStatus !== 'running' && cctpChains.length > 0 && (
+            <div className="flex flex-col items-end gap-1">
+              <div className="flex items-center gap-1.5">
+                <select
+                  value={cctpDestChain}
+                  onChange={(e) => onCctpDestChainChange(e.target.value)}
+                  disabled={cctpStatus === 'sending' || cctpStatus === 'polling'}
+                  className="border border-line bg-transparent px-2 py-1.5 text-xs text-ink-2 disabled:opacity-50"
+                >
+                  {cctpChains.map((c) => (
+                    <option key={c.chainKey} value={c.chainKey}>{c.label}</option>
+                  ))}
+                </select>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={onCctpWithdraw}
+                  disabled={cctpStatus === 'sending' || cctpStatus === 'polling' || balanceEther < 0.0015}
+                  label={
+                    cctpStatus === 'sending' ? 'Submitting…'
+                    : cctpStatus === 'polling' ? 'Bridging…'
+                    : 'Bridge out'
+                  }
+                />
+              </div>
+              {/* Fee preview — shown before the owner commits to a burn, not
+                  only discoverable afterward by diffing balances. */}
+              {cctpStatus === 'idle' && (
+                <div className="text-[11px] text-ink-3">
+                  {cctpQuoteLoading && 'Quoting…'}
+                  {!cctpQuoteLoading && cctpQuote && (
+                    <>You'll receive ≈<span className="font-mono">{parseFloat(formatUnits(cctpQuote.estimatedReceiveRaw, 6)).toFixed(4)} {cctpSymbol}</span> (fee {formatUnits(cctpQuote.maxFeeRaw, 6)} {cctpSymbol})</>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
@@ -100,6 +166,9 @@ export function GasBar({
       {(topUpStatus === 'error' ||
         withdrawStatus === 'done' ||
         withdrawStatus === 'error' ||
+        cctpStatus === 'polling' ||
+        cctpStatus === 'done' ||
+        cctpStatus === 'error' ||
         (isLowGas && agentStatus !== 'stopped')) && (
         <div className="mt-3 space-y-1.5 text-xs">
           {topUpStatus === 'error' && <div className="text-err">{topUpError}</div>}
@@ -115,6 +184,18 @@ export function GasBar({
             </div>
           )}
           {withdrawStatus === 'error' && <div className="text-err">{withdrawError}</div>}
+          {cctpStatus === 'polling' && cctpTransfer && (
+            <div className="text-ink-2">
+              Bridging — {cctpTransfer.stage.replace(/_/g, ' ')}
+              {cctpTransfer.burnTxHash && <> · burn tx <span className="font-mono">{cctpTransfer.burnTxHash.slice(0, 10)}…</span></>}
+            </div>
+          )}
+          {cctpStatus === 'done' && cctpTransfer?.mintTxHash && (
+            <div className="text-ok">
+              Bridge complete · mint tx <span className="font-mono">{cctpTransfer.mintTxHash.slice(0, 10)}…</span>
+            </div>
+          )}
+          {cctpStatus === 'error' && <div className="text-err">{cctpError}</div>}
           {isLowGas && agentStatus !== 'stopped' && (
             <div className="text-warn">
               Agent will fail to submit evidence below <span className="font-mono">{lowGasThreshold} {symbol}</span>.

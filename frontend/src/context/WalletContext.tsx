@@ -1,9 +1,45 @@
 import { createContext, useContext, useState, useCallback, useEffect, useRef, type ReactNode } from 'react';
 import { ethers } from 'ethers';
-import { usePrivy, useWallets } from '@privy-io/react-auth';
+import { usePrivy, useWallets, type ConnectedWallet } from '@privy-io/react-auth';
 import { OG_CHAIN_CONFIG, OG_CHAIN_ID, BASE_CHAIN_ID, BASE_CHAIN_CONFIG } from '../config/constants';
 
 const HAS_PRIVY = !!import.meta.env.VITE_PRIVY_APP_ID;
+
+/** EIP-3085 `wallet_addEthereumChain` parameter shape — same fields OG_CHAIN_CONFIG/BASE_CHAIN_CONFIG use. */
+export interface AddEthereumChainParameter {
+  chainId: string; // 0x-prefixed hex
+  chainName: string;
+  nativeCurrency: { name: string; symbol: string; decimals: number };
+  rpcUrls: readonly string[];
+  blockExplorerUrls?: readonly string[];
+}
+
+/**
+ * Switch a Privy wallet to an arbitrary chain, falling back to
+ * `wallet_addEthereumChain` when the wallet doesn't recognize the chain yet
+ * (EIP-3085, error code 4902). Extracted from PrivyWalletProvider's own
+ * OG/Base switching below so Phase B's CCTP deposit flow (arbitrary source
+ * chains — Ethereum, Ethereum Sepolia, ...) can reuse the exact same retry
+ * logic instead of duplicating it.
+ */
+export async function switchWalletToChain(
+  wallet: ConnectedWallet,
+  targetChainId: number,
+  chainConfig: AddEthereumChainParameter,
+): Promise<void> {
+  try {
+    await wallet.switchChain(targetChainId);
+  } catch (err: unknown) {
+    const code = (err as { code?: number | string }).code;
+    if (code === 4902 || code === 'UNSUPPORTED_CHAIN_ID' || String(code).includes('4902')) {
+      const eth = await wallet.getEthereumProvider();
+      await eth.request({ method: 'wallet_addEthereumChain', params: [chainConfig] });
+      await wallet.switchChain(targetChainId);
+    } else {
+      throw err;
+    }
+  }
+}
 
 interface WalletState {
   address: string | null;
@@ -82,18 +118,9 @@ function PrivyWalletProvider({ children }: { children: ReactNode }) {
     if (!wallet) return;
     const chainConfig = targetChainId === OG_CHAIN_ID ? OG_CHAIN_CONFIG : BASE_CHAIN_CONFIG;
     try {
-      await wallet.switchChain(targetChainId);
-    } catch (err: unknown) {
-      const code = (err as { code?: number | string }).code;
-      if (code === 4902 || code === 'UNSUPPORTED_CHAIN_ID' || String(code).includes('4902')) {
-        try {
-          const eth = await wallet.getEthereumProvider();
-          await eth.request({ method: 'wallet_addEthereumChain', params: [chainConfig] });
-          await wallet.switchChain(targetChainId);
-        } catch (addErr) { console.error('Failed to add chain:', addErr); }
-      } else {
-        console.error('Failed to switch chain:', err);
-      }
+      await switchWalletToChain(wallet, targetChainId, chainConfig);
+    } catch (err) {
+      console.error('Failed to switch chain:', err);
     }
   }, [wallet]);
 

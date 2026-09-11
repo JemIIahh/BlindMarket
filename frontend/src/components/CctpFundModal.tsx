@@ -1,0 +1,320 @@
+import { useState, useEffect, useRef } from 'react';
+import { useWallets, usePrivy } from '@privy-io/react-auth';
+import { parseUnits, formatUnits, JsonRpcProvider, Contract } from 'ethers';
+import { Button, FormField, FormInput, FormSelect, Modal, Spinner } from './bb';
+import { get, authedPost, authedGet } from '../lib/api';
+import { useWallet, switchWalletToChain, type AddEthereumChainParameter } from '../context/WalletContext';
+import { signAndSendDirect } from '../lib/directSigner';
+import { BASE_CCTP_CHAIN_KEY } from '../config/constants';
+
+/**
+ * CCTP Phase B (inbound) — fund the user's Base wallet from USDC held on
+ * another chain, via Circle's CCTP V2 burn-and-mint. The backend only ever
+ * builds unsigned calldata for this direction (routes/cctp.ts); the actual
+ * burn is signed here, directly, by the user's own EXTERNAL wallet — the
+ * Privy EMBEDDED (Base) wallet is the mint recipient, never the signer, since
+ * it isn't set up to hold/sign on arbitrary other chains.
+ */
+
+// EIP-3085 configs for the two non-Base CCTP source chains this UI offers.
+// (Only what's needed for `wallet_addEthereumChain` — the backend's
+// /api/v1/cctp/config remains the source of truth for domain/contract/usdc
+// addresses actually used in the transfer itself.)
+const SOURCE_CHAIN_WALLET_CONFIG: Record<string, AddEthereumChainParameter> = {
+  ethereum: {
+    chainId: '0x1',
+    chainName: 'Ethereum',
+    nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+    rpcUrls: ['https://ethereum-rpc.publicnode.com'],
+    blockExplorerUrls: ['https://etherscan.io'],
+  },
+  'ethereum-sepolia': {
+    chainId: '0xaa36a7',
+    chainName: 'Ethereum Sepolia',
+    nativeCurrency: { name: 'Sepolia Ether', symbol: 'ETH', decimals: 18 },
+    rpcUrls: ['https://ethereum-sepolia-rpc.publicnode.com'],
+    blockExplorerUrls: ['https://sepolia.etherscan.io'],
+  },
+};
+
+type Phase = 'input' | 'switching' | 'approving' | 'burning' | 'confirming' | 'polling' | 'done' | 'error';
+
+interface CctpChainOption { chainKey: string; chainId: number; usdcAddress: string; label: string }
+
+export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFunded?: () => void }) {
+  const { address: baseAddress } = useWallet();
+  const { wallets } = useWallets();
+  const { connectWallet } = usePrivy();
+
+  const [chains, setChains] = useState<CctpChainOption[]>([]);
+  const [sourceChain, setSourceChain] = useState('');
+  const [amount, setAmount] = useState('');
+  const [phase, setPhase] = useState<Phase>('input');
+  const [error, setError] = useState('');
+  const [transferId, setTransferId] = useState<number | null>(null);
+  const [mintTxHash, setMintTxHash] = useState<string | null>(null);
+  // Preview state — both shown BEFORE the user commits to a chain switch +
+  // signature, not only discoverable afterward.
+  const [sourceBalance, setSourceBalance] = useState<bigint | null>(null);
+  const [quote, setQuote] = useState<{ maxFeeRaw: string; estimatedReceiveRaw: string } | null>(null);
+  const [quoteLoading, setQuoteLoading] = useState(false);
+
+  const abortedRef = useRef(false);
+  useEffect(() => () => { abortedRef.current = true; }, []);
+
+  useEffect(() => {
+    get<{ enabled: boolean; chains: Array<{ chainKey: string; chainId: number; usdcAddress: string; label: string }> }>('/api/v1/cctp/config')
+      .then((data) => {
+        if (!data.enabled) return;
+        const sources = data.chains.filter((c) => !c.chainKey.startsWith('base'));
+        setChains(sources);
+        if (sources.length > 0) setSourceChain((prev) => prev || sources[0].chainKey);
+      })
+      .catch(() => setError('Could not load supported chains.'));
+  }, []);
+
+  // The embedded (Privy-managed) wallet funds tasks on Base — it's never the
+  // signer here. Any OTHER linked wallet is a candidate to sign the burn.
+  const externalWallet = wallets.find((w) => w.walletClientType !== 'privy') ?? null;
+
+  const busy = phase === 'switching' || phase === 'approving' || phase === 'burning' || phase === 'confirming' || phase === 'polling';
+
+  // Live balance on the chosen source chain — a direct read against a public
+  // RPC, no wallet interaction (and no chain switch) needed just to read it.
+  // Lets the amount field be validated against what the user actually holds
+  // BEFORE they go through switching chains and signing.
+  useEffect(() => {
+    const chain = chains.find((c) => c.chainKey === sourceChain);
+    const rpcUrl = SOURCE_CHAIN_WALLET_CONFIG[sourceChain]?.rpcUrls[0];
+    if (!chain || !rpcUrl || !externalWallet) { setSourceBalance(null); return; }
+    let cancelled = false;
+    setSourceBalance(null);
+    (async () => {
+      try {
+        const provider = new JsonRpcProvider(rpcUrl);
+        const usdc = new Contract(chain.usdcAddress, ['function balanceOf(address) view returns (uint256)'], provider);
+        const bal: bigint = await usdc.balanceOf(externalWallet.address);
+        if (!cancelled) setSourceBalance(bal);
+      } catch {
+        if (!cancelled) setSourceBalance(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [sourceChain, externalWallet?.address, chains]);
+
+  // Fee preview — GET /api/v1/cctp/quote, debounced (400ms) since it fires
+  // on every keystroke in the amount field.
+  useEffect(() => {
+    let amountRaw: bigint;
+    try {
+      amountRaw = parseUnits(amount || '0', 6);
+      if (amountRaw <= 0n) throw new Error();
+    } catch {
+      setQuote(null);
+      return;
+    }
+    if (!sourceChain) { setQuote(null); return; }
+    let cancelled = false;
+    setQuoteLoading(true);
+    const t = setTimeout(() => {
+      get<{ maxFeeRaw: string; estimatedReceiveRaw: string }>(
+        `/api/v1/cctp/quote?sourceChain=${sourceChain}&destChain=${BASE_CCTP_CHAIN_KEY}&amountRaw=${amountRaw}`,
+      )
+        .then((data) => { if (!cancelled) setQuote(data); })
+        .catch(() => { if (!cancelled) setQuote(null); })
+        .finally(() => { if (!cancelled) setQuoteLoading(false); });
+    }, 400);
+    return () => { cancelled = true; clearTimeout(t); setQuoteLoading(false); };
+  }, [sourceChain, amount]);
+
+  // Parsed amount for the balance check below — null (not an error) while
+  // the field is empty/invalid, since that's already handled by the "Enter
+  // a valid USDC amount" check inside handleFund.
+  let amountRawForCheck: bigint | null = null;
+  try {
+    const v = parseUnits(amount || '0', 6);
+    if (v > 0n) amountRawForCheck = v;
+  } catch { /* leave null */ }
+  const exceedsBalance = sourceBalance !== null && amountRawForCheck !== null && amountRawForCheck > sourceBalance;
+
+  async function pollTransfer(id: number) {
+    for (let i = 0; i < 150; i++) { // ~10 min at 4s
+      await new Promise((r) => setTimeout(r, 4000));
+      if (abortedRef.current) return;
+      try {
+        const row = await authedGet<{ stage: string; mintTxHash: string | null; errorMessage: string | null }>(
+          `/api/v1/cctp/deposit-intent/${id}`,
+        );
+        if (row.stage === 'mint_confirmed') {
+          setMintTxHash(row.mintTxHash);
+          setPhase('done');
+          onFunded?.();
+          return;
+        }
+        if (row.stage === 'failed') {
+          setError(row.errorMessage || 'Transfer failed');
+          setPhase('error');
+          return;
+        }
+      } catch { /* transient — keep polling */ }
+    }
+    setError('Still bridging after 10 minutes. It may complete shortly — check back, or contact support with the transfer id.');
+    setPhase('error');
+  }
+
+  async function handleFund() {
+    setError('');
+    if (!baseAddress) { setError('Connect your wallet first.'); return; }
+    if (!externalWallet) { setError('Link an external wallet (e.g. MetaMask) to sign the source-chain transaction.'); return; }
+    const chain = chains.find((c) => c.chainKey === sourceChain);
+    if (!chain) { setError('Pick a source chain.'); return; }
+    let amountRaw: bigint;
+    try {
+      amountRaw = parseUnits(amount || '0', 6);
+      if (amountRaw <= 0n) throw new Error();
+    } catch {
+      setError('Enter a valid USDC amount.');
+      return;
+    }
+
+    try {
+      const chainConfig = SOURCE_CHAIN_WALLET_CONFIG[chain.chainKey];
+      if (chainConfig) {
+        setPhase('switching');
+        await switchWalletToChain(externalWallet, chain.chainId, chainConfig);
+      }
+
+      const idempotencyKey = crypto.randomUUID();
+      const intent = await authedPost<{
+        transferId: number;
+        approveTx?: { to: string; data: string; from: string };
+        burnTx: { to: string; data: string; from: string };
+      }>('/api/v1/cctp/deposit-intent', {
+        sourceChain: chain.chainKey,
+        amountRaw: amountRaw.toString(),
+        mintRecipient: baseAddress,
+        fromAddress: externalWallet.address,
+        idempotencyKey,
+      });
+      setTransferId(intent.transferId);
+
+      if (intent.approveTx) {
+        setPhase('approving');
+        await signAndSendDirect(externalWallet, intent.approveTx);
+      }
+
+      setPhase('burning');
+      const burnSent = await signAndSendDirect(externalWallet, intent.burnTx);
+
+      setPhase('confirming');
+      // The tx may not be mined yet by the time we ask — retry a few times
+      // before treating a still-pending burn as a real problem.
+      let confirmed = false;
+      for (let i = 0; i < 10 && !confirmed; i++) {
+        const row = await authedPost<{ stage: string; pending?: boolean; errorMessage?: string | null }>(
+          `/api/v1/cctp/deposit-intent/${intent.transferId}/confirm`,
+          { burnTxHash: burnSent.hash },
+        );
+        if (row.stage === 'burn_confirmed' || row.stage === 'attestation_pending' || row.stage === 'attestation_ready' || row.stage === 'mint_confirmed') {
+          confirmed = true;
+          break;
+        }
+        if (row.stage === 'failed') {
+          setError(row.errorMessage || 'Burn transaction failed');
+          setPhase('error');
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+      if (!confirmed) {
+        setError('Burn transaction is taking a while to confirm — it may still land. Check back shortly.');
+        setPhase('error');
+        return;
+      }
+
+      setPhase('polling');
+      await pollTransfer(intent.transferId);
+    } catch (err) {
+      setError((err as Error).message || 'Bridge failed');
+      setPhase('error');
+    }
+  }
+
+  const phaseLabel =
+    phase === 'switching' ? 'Switching your wallet to the source chain…'
+    : phase === 'approving' ? 'Confirm the USDC approval in your wallet…'
+    : phase === 'burning' ? 'Confirm the transfer in your wallet…'
+    : phase === 'confirming' ? 'Waiting for the burn to be mined…'
+    : phase === 'polling' ? 'Bridging — Circle is minting USDC on Base…'
+    : '';
+
+  return (
+    <Modal open onClose={onClose} dismissable={!busy} title="Fund from another chain" subtitle="Circle CCTP" size="md">
+      <>
+        {(phase === 'input' || phase === 'error') && (
+          <div className="space-y-4">
+            {!externalWallet && (
+              <div className="text-xs text-warn border border-line bg-surface-2 p-3">
+                No external wallet linked. You need one (e.g. MetaMask) to sign on the source chain — your Base
+                wallet only holds/signs on Base.
+                <div className="mt-2">
+                  <Button variant="outline" size="sm" label="Link a wallet" onClick={() => connectWallet()} />
+                </div>
+              </div>
+            )}
+            <FormField
+              label="From chain"
+              hint={externalWallet ? (sourceBalance !== null ? `Balance: ${parseFloat(formatUnits(sourceBalance, 6)).toFixed(4)} USDC` : 'Checking balance…') : undefined}
+            >
+              <FormSelect value={sourceChain} onChange={(e) => setSourceChain(e.target.value)}>
+                {chains.map((c) => (
+                  <option key={c.chainKey} value={c.chainKey}>{c.label}</option>
+                ))}
+              </FormSelect>
+            </FormField>
+            <FormField
+              label="Amount (USDC)"
+              hint={
+                exceedsBalance ? 'Exceeds your balance on this chain.'
+                : quoteLoading ? 'Quoting…'
+                : quote ? `You'll receive ≈${parseFloat(formatUnits(quote.estimatedReceiveRaw, 6)).toFixed(4)} USDC on Base (fee ${formatUnits(quote.maxFeeRaw, 6)} USDC)`
+                : undefined
+              }
+            >
+              <FormInput type="number" min="0" step="0.01" placeholder="10.00" value={amount} onChange={(e) => setAmount(e.target.value)} />
+            </FormField>
+            <div className="text-xs text-ink-3 border border-line bg-surface-2 p-3">
+              This burns USDC on the source chain and mints native USDC to your Base wallet
+              (<span className="font-mono">{baseAddress ? `${baseAddress.slice(0, 8)}…` : '—'}</span>) via Circle's
+              Fast Transfer — usually a few minutes end to end. A small Circle fee is deducted on arrival.
+            </div>
+            {error && <div className="text-xs text-err">{error}</div>}
+            <div className="flex justify-end gap-2">
+              <Button variant="ghost" size="sm" label="Cancel" onClick={onClose} />
+              <Button variant="primary" size="sm" label="Bridge USDC" onClick={handleFund} disabled={!externalWallet || chains.length === 0 || exceedsBalance} />
+            </div>
+          </div>
+        )}
+
+        {busy && (
+          <div className="py-8 text-center space-y-3">
+            <div className="flex justify-center"><Spinner size={22} /></div>
+            <div className="text-sm text-ink">{phaseLabel}</div>
+            {transferId != null && <div className="font-mono text-xs text-ink-3">transfer #{transferId}</div>}
+            <div className="text-xs text-ink-3">Don't close this window.</div>
+          </div>
+        )}
+
+        {phase === 'done' && (
+          <div className="py-6 text-center space-y-3">
+            <div className="text-sm text-ok">USDC arrived on Base.</div>
+            {mintTxHash && <div className="font-mono text-xs text-ink-3">mint tx {mintTxHash.slice(0, 10)}…</div>}
+            <div className="flex justify-center pt-2">
+              <Button variant="primary" size="sm" label="Done" onClick={onClose} />
+            </div>
+          </div>
+        )}
+      </>
+    </Modal>
+  );
+}

@@ -206,6 +206,40 @@ export const config = {
   // flip to true before mainnet launch.
   agentFactoryPaywall: optional('AGENT_FACTORY_PAYWALL', 'true').toLowerCase() === 'true',
 
+  // Circle CCTP V2 — lets a user/agent move native USDC between Base and
+  // another EVM chain (burn-and-mint, not a wrapped-asset bridge). See
+  // services/cctpChains.ts for how these compose into per-chain configs.
+  // DEFAULT OFF: routes 400 CCTP_DISABLED and the attestation poller no-ops
+  // until this is explicitly enabled per environment (plans/... CCTP plan).
+  cctp: {
+    enabled: optional('CCTP_ENABLED', 'false').toLowerCase() === 'true',
+    // TokenMessengerV2 / MessageTransmitterV2 addresses are identical across
+    // every EVM chain for a given network tier (Circle's deterministic
+    // deployment) — one pair of addresses covers both the Base and Ethereum
+    // legs. Verified against developers.circle.com Sept 2026; re-check if
+    // Circle redeploys.
+    tokenMessengerAddress: optional('CCTP_TOKEN_MESSENGER_ADDRESS', IS_PROD
+      ? '0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d'
+      : '0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA'),
+    messageTransmitterAddress: optional('CCTP_MESSAGE_TRANSMITTER_ADDRESS', IS_PROD
+      ? '0x81D40F21F12A8F0E3252Bccb954D722d4c464B64'
+      : '0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275'),
+    irisApiBase: optional('CCTP_IRIS_API_BASE', IS_PROD
+      ? 'https://iris-api.circle.com'
+      : 'https://iris-api-sandbox.circle.com'),
+    // Ethereum leg — Base already has baseRpcUrl/baseChainId/baseUsdcAddress
+    // above; CCTP is the first feature needing a second EVM chain, so its
+    // config lives here rather than growing the top-level config with an
+    // ethereum* prefix used nowhere else.
+    ethereumRpcUrl: optional('CCTP_ETHEREUM_RPC_URL', IS_PROD
+      ? 'https://ethereum-rpc.publicnode.com'
+      : 'https://ethereum-sepolia-rpc.publicnode.com'),
+    ethereumChainId: parseInt(optional('CCTP_ETHEREUM_CHAIN_ID', IS_PROD ? '1' : '11155111'), 10),
+    ethereumUsdcAddress: optional('CCTP_ETHEREUM_USDC_ADDRESS', IS_PROD
+      ? '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'
+      : '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238'),
+  },
+
   // Key custody / late-joiner re-wrap (docs/TEE-REWRAP-SPEC.md). DEFAULT OFF.
   // When enabled, posters seal the brief AES key to a platform-held custody key
   // so an agent that registers AFTER a task was posted can be served a

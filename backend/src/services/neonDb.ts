@@ -601,6 +601,50 @@ const migrations: Array<{ id: number; name: string; sql: string }> = [
       CREATE INDEX IF NOT EXISTS idx_analytics_session ON analytics_events(session_id);
     `,
   },
+  {
+    // Circle CCTP V2 transfers (Base <-> another EVM chain). One row per
+    // burn->attest->mint pipeline, crash-resumable via the background poller
+    // in services/cctpAttestationPoller.ts. `idempotency_key` is UNIQUE so a
+    // retried request resumes the existing row instead of double-burning.
+    id: 27,
+    name: 'cctp_transfers',
+    sql: `
+      CREATE TABLE IF NOT EXISTS cctp_transfers (
+        id SERIAL PRIMARY KEY,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        direction TEXT NOT NULL CHECK (direction IN ('outbound','inbound')),
+        agent_id TEXT,
+        owner_address TEXT NOT NULL,
+        source_chain TEXT NOT NULL,
+        source_domain INTEGER NOT NULL,
+        dest_chain TEXT NOT NULL,
+        dest_domain INTEGER NOT NULL,
+        usdc_amount_raw TEXT NOT NULL,
+        mint_recipient TEXT NOT NULL,
+        max_fee_raw TEXT NOT NULL,
+        min_finality_threshold INTEGER NOT NULL,
+        relay_method TEXT NOT NULL CHECK (relay_method IN ('forwarding_service','self_relay')),
+        stage TEXT NOT NULL DEFAULT 'created' CHECK (stage IN (
+          'created','approved','burn_submitted','burn_confirmed',
+          'attestation_pending','attestation_ready',
+          'mint_submitted','mint_confirmed','failed'
+        )),
+        approve_tx_hash TEXT,
+        burn_tx_hash TEXT,
+        burn_block_number BIGINT,
+        cctp_message_hex TEXT,
+        cctp_attestation_hex TEXT,
+        mint_tx_hash TEXT,
+        error_message TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_cctp_transfers_stage ON cctp_transfers(stage)
+        WHERE stage NOT IN ('mint_confirmed','failed');
+      CREATE INDEX IF NOT EXISTS idx_cctp_transfers_agent ON cctp_transfers(agent_id);
+      CREATE INDEX IF NOT EXISTS idx_cctp_transfers_owner ON cctp_transfers(owner_address);
+    `,
+  },
 ];
 
 async function runMigrations(p: pg.Pool): Promise<void> {

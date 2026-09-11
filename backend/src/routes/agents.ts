@@ -34,7 +34,7 @@ import { discoverModels, ProviderModelsError } from '../services/providerModels.
  * Returns the agent record on success, or null after writing a 401/403/404
  * response. Routes should bail immediately when null is returned.
  */
-async function authorizeOwner(req: AuthRequest, res: import('express').Response, agentId: string) {
+export async function authorizeOwner(req: AuthRequest, res: import('express').Response, agentId: string) {
   const authed = req.user?.address;
   if (!authed || authed === 'agent') {
     res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Owner authentication required' } });

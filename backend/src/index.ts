@@ -21,6 +21,8 @@ import { custodyRouter } from './routes/custody.js';
 import { stakingRouter } from './routes/staking.js';
 import { accountingRouter } from './routes/accounting.js';
 import { agentsRouter } from './routes/agents.js';
+import { agentsCctpRouter } from './routes/agentsCctp.js';
+import { cctpRouter } from './routes/cctp.js';
 import { messagesRouter } from './routes/messages.js';
 import { marketplaceRouter } from './routes/marketplace.js';
 import { registrationRouter } from './routes/registration.js';
@@ -39,6 +41,7 @@ import { getDb } from './services/database.js';
 import { startEscrowEventLoop } from './services/escrowEvents.js';
 import { startBaseEscrowEventLoop } from './services/baseEscrowEvents.js';
 import { startAgentFactoryListener } from './services/agentFactoryListener.js';
+import { startCctpAttestationPoller } from './services/cctpAttestationPoller.js';
 import { startExpirySweepLoop } from './services/a2aExpirySweep.js';
 import { auditCustodySealedTasks } from './services/keyCustodyService.js';
 import { isBridgeConfigured } from './services/a2aSettlement.js';
@@ -83,6 +86,8 @@ app.use('/api/v1/custody', custodyRouter);
 app.use('/api/v1/staking', stakingRouter);
 app.use('/api/v1/accounting', accountingRouter);
 app.use('/api/v1/agents', agentsRouter);
+app.use('/api/v1/agents', agentsCctpRouter);
+app.use('/api/v1/cctp', cctpRouter);
 app.use('/api/v1/messages', messagesRouter);
 app.use('/api/v1/marketplace', marketplaceRouter);
 app.use('/api/v1/registration', registrationRouter);
@@ -149,6 +154,10 @@ httpServer.listen(config.port, () => {
   // AgentFactory listener — creates agents from on-chain AgentDeployed events.
   // Backend never signs for agents (decentralized).
   startAgentFactoryListener();
+
+  // CCTP attestation poller — advances in-flight burn->attest->mint transfers
+  // (Base <-> another EVM chain). No-ops when CCTP_ENABLED is unset.
+  startCctpAttestationPoller();
 
   // Proactively close open tasks whose on-chain deadline has passed, instead
   // of leaving them listed until some agent burns an /accept on them.
