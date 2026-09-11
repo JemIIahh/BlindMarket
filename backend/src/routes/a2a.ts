@@ -915,6 +915,13 @@ a2aRouter.get('/key-custody/pubkey', async (_req, res, next) => {
 // `chain` rides along so a worker can refuse a broadcast for a chain it
 // cannot pay gas on BEFORE accepting (an accept assigns on-chain and is then
 // unreleasable). Omitted for rows indexed before meta.chain existed.
+// Exclusive offers always name the required caps (empty list included) and,
+// like broadcasts, the chain — so an offered agent that cannot pay gas there
+// declines up front instead of accepting and locking the task.
+function offerMeta(requiredCaps: string[], chain?: TaskChain): Record<string, unknown> {
+  return { requiredCapabilities: requiredCaps, ...(chain ? { chain } : {}) };
+}
+
 function broadcastMeta(requiredCaps: string[], chain?: TaskChain): Record<string, unknown> {
   return {
     ...(requiredCaps.length > 0 ? { requiredCapabilities: requiredCaps } : {}),
@@ -932,6 +939,7 @@ function broadcastMeta(requiredCaps: string[], chain?: TaskChain): Record<string
 function scheduleCascadeAdvance(
   taskHash: string,
   requiredCaps: string[],
+  chain?: TaskChain,
 ): void {
   setTimeout(async () => {
     try {
@@ -940,8 +948,7 @@ function scheduleCascadeAdvance(
 
       const next = await a2aStore.advanceCascade(taskHash);
       if (!next) {
-        const meta = await a2aStore.getMeta(taskHash);
-        emitTaskAvailable(taskHash, broadcastMeta(requiredCaps, meta?.chain));
+        emitTaskAvailable(taskHash, broadcastMeta(requiredCaps, chain));
         return;
       }
 
@@ -955,11 +962,9 @@ function scheduleCascadeAdvance(
       // unauthenticated, so a task:offer payload reaches anyone who joined the
       // room. The agent only needs the taskId to fire /accept, which returns
       // rootHash + its wrapped slice over the authenticated channel.
-      emitTaskOffer(next.address, taskHash, {
-        requiredCapabilities: requiredCaps,
-      }, next.score, deadline);
+      emitTaskOffer(next.address, taskHash, offerMeta(requiredCaps, chain), next.score, deadline);
 
-      scheduleCascadeAdvance(taskHash, requiredCaps);
+      scheduleCascadeAdvance(taskHash, requiredCaps, chain);
     } catch (err) {
       console.error(`[a2a] cascade advance failed for ${taskHash.slice(0, 10)}…:`, (err as Error).message);
     }
@@ -980,6 +985,7 @@ async function startRankedCascade(
   requiredCaps: AgentCapability[],
   routingMeta: semanticMatch.RoutingMeta,
   taskRewardWei: string,
+  chain?: TaskChain,
 ): Promise<void> {
   const semantic = await semanticMatch.semanticCascadeRanking(routingMeta, taskRewardWei);
   const tagEntries = async () =>
@@ -1004,8 +1010,7 @@ async function startRankedCascade(
     }
   }
   if (entries.length === 0) {
-    const meta = await a2aStore.getMeta(taskHash);
-    emitTaskAvailable(taskHash, broadcastMeta(requiredCaps, meta?.chain));
+    emitTaskAvailable(taskHash, broadcastMeta(requiredCaps, chain));
     return;
   }
 
@@ -1029,10 +1034,8 @@ async function startRankedCascade(
   }).catch(() => {});
   // rootHash deliberately omitted — unauthenticated WS room, see
   // scheduleCascadeAdvance.
-  emitTaskOffer(best.address, taskHash, {
-    requiredCapabilities: requiredCaps,
-  }, best.score, deadline);
-  scheduleCascadeAdvance(taskHash, requiredCaps);
+  emitTaskOffer(best.address, taskHash, offerMeta(requiredCaps, chain), best.score, deadline);
+  scheduleCascadeAdvance(taskHash, requiredCaps, chain);
 
   // Canary dial: which ranking produced the offers that were just emitted.
   // Gated on the flag so flag-off stays a strict no-op (no new DB writes on
@@ -1457,7 +1460,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
         // filter it would draw a random cold-start agent from the ENTIRE
         // registry, and its pass/timeout path (advanceCascade with no cascade
         // stored) broadcasts without semantic ranking ever running.
-        startRankedCascade(taskHash, requiredCaps, routingMeta, taskRewardWei)
+        startRankedCascade(taskHash, requiredCaps, routingMeta, taskRewardWei, taskChain)
           .catch((err) => broadcastAfter(err as Error, 'semantic scoring/offer'));
       } else {
         // Cold-start: try the exploration slot first. If a new agent is picked,
@@ -1472,21 +1475,19 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
               score: explorationPick.score,
               expiresAt: deadline,
             }).catch(() => {});
-            emitTaskOffer(explorationPick.address, taskHash, {
-              requiredCapabilities: requiredCaps,
-            }, explorationPick.score, deadline);
+            emitTaskOffer(explorationPick.address, taskHash, offerMeta(requiredCaps, taskChain), explorationPick.score, deadline);
             // If they pass/timeout, the cascade advance will run normal ranked flow.
-            scheduleCascadeAdvance(taskHash, requiredCaps);
+            scheduleCascadeAdvance(taskHash, requiredCaps, taskChain);
             return;
           }
 
           // Normal ranked flow (semantic when flipped, tag fallback inside).
-          return startRankedCascade(taskHash, requiredCaps, routingMeta, taskRewardWei)
+          return startRankedCascade(taskHash, requiredCaps, routingMeta, taskRewardWei, taskChain)
             .catch((err) => broadcastAfter(err as Error, 'scoring/offer'));
         }).catch((err) => {
           console.error(`[a2a] exploration slot failed for ${taskHash.slice(0, 10)}…:`, (err as Error).message);
           // Fallback: normal ranked flow
-          startRankedCascade(taskHash, requiredCaps, routingMeta, taskRewardWei)
+          startRankedCascade(taskHash, requiredCaps, routingMeta, taskRewardWei, taskChain)
             .catch((fallbackErr) => broadcastAfter(fallbackErr as Error, 'fallback scoring/offer'));
         });
       }

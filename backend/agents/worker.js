@@ -2554,30 +2554,34 @@ function connectWebSocket() {
     wsClient.emit('join', 'tasks');
   });
 
-  wsClient.on('task:offer', (data) => {
+  // Same gas gate as the feed scan, for both push paths: accepting assigns
+  // the task on-chain, so refuse up front when the event names a chain this
+  // wallet cannot pay on. An exclusive offer declined this way lets the
+  // cascade move to the next agent after its window instead of locking the
+  // task to an unfunded one. Events without a chain (older backend) fall
+  // through to the post-accept check in runAcceptedTask.
+  const gasGateBroadcast = async (taskId, chain) => {
+    if (chain !== 'base' && chain !== '0g') return false;
+    const reason = await preflightGas(chain, signerFor(chain)).catch(() => null);
+    if (!reason) return false;
+    if (gasSkipLogged.get(taskId) !== reason) {
+      gasSkipLogged.set(taskId, reason);
+      log(`skipping task ${taskId.slice(0, 10)}… on ${chain}: ${reason}`);
+    }
+    return true;
+  };
+
+  wsClient.on('task:offer', async (data) => {
     log(`WS received task:offer for ${data.taskId?.slice(0, 10) || 'unknown'}… (score=${data.score})`);
     if (!data.taskId) return;
+    if (await gasGateBroadcast(data.taskId, data.meta?.chain)) return;
     acceptFromWs(data.taskId);
   });
 
   wsClient.on('task:available', async (data) => {
     log(`WS received task:available for ${data.taskId?.slice(0, 10) || 'unknown'}…`);
     if (!data.taskId) return;
-    // Same gas gate as the feed scan: accepting assigns on-chain, so refuse
-    // up front when the broadcast names a chain this wallet cannot pay on.
-    // Broadcasts without a chain (older backend) fall through to the
-    // post-accept check in runAcceptedTask.
-    const chain = data.meta?.chain;
-    if (chain === 'base' || chain === '0g') {
-      const reason = await preflightGas(chain, signerFor(chain)).catch(() => null);
-      if (reason) {
-        if (gasSkipLogged.get(data.taskId) !== reason) {
-          gasSkipLogged.set(data.taskId, reason);
-          log(`skipping task ${data.taskId.slice(0, 10)}… on ${chain}: ${reason}`);
-        }
-        return;
-      }
-    }
+    if (await gasGateBroadcast(data.taskId, data.meta?.chain)) return;
     acceptFromWs(data.taskId);
   });
 
