@@ -1073,7 +1073,15 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
           } catch (e) {
             return fail('WRONG_KEY', `Could not unwrap the brief key with the local wallet ${walletCtx.wallet.address}: ${(e as Error).message}. The poster wrapped it to the pubkey on your executor registration — wallet_status shows the pubkey this process derives; they must match.`);
           }
-          return ok({ rootHash, bytes: buf.length, brief: aesDecrypt(buf, aesKey).toString('utf8'), decrypted: true });
+          let brief: string;
+          try {
+            brief = aesDecrypt(buf, aesKey).toString('utf8');
+          } catch (e) {
+            // The key unwrapped fine, so the BLOB is the problem: a public
+            // (plaintext) brief passed with a wrappedKey, or the wrong rootHash.
+            return fail('BRIEF_DECRYPT_FAILED', `The wrapped key unwrapped, but the blob at ${rootHash} did not decrypt with it: ${(e as Error).message}. If the task is public, call fetch_brief without wrappedKey; otherwise check the rootHash came from the same accept_task response.`);
+          }
+          return ok({ rootHash, bytes: buf.length, brief, decrypted: true });
         }
         const text = buf.toString('utf8');
         if (text.includes('�')) {

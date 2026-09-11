@@ -1,6 +1,8 @@
 import { test, describe, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { registerRentTools } from '../dist/rent.js';
+import { registerWalletTools } from '../dist/wallet.js';
+import { aesEncrypt, eciesEncrypt, generateAesKey, derivePublicKeyHex } from '../dist/crypto.js';
 
 /**
  * complete_task was Base-only and refused a Verified(3) task outright. These
@@ -15,7 +17,7 @@ const HASH = '0x' + 'ab'.repeat(32);
 const FUTURE = String(Math.floor(Date.now() / 1000) + 3600);
 const PAST = String(Math.floor(Date.now() / 1000) - 60);
 
-function harness({ status, attempts = 0, deadline = FUTURE, afterStatus = 4, verify = { passed: true, reasons: [] }, submitFrom } = {}) {
+function harness({ status, attempts = 0, deadline = FUTURE, afterStatus = 4, verify = { passed: true, reasons: [] }, submitFrom, storageBlob, noWallet = false } = {}) {
   const calls = [];
   const sentTxs = [];
   // on-chain status advances: loadTask reads it before submit, waitStatus after
@@ -28,7 +30,7 @@ function harness({ status, attempts = 0, deadline = FUTURE, afterStatus = 4, ver
     const json = (data) => ({ ok: true, status: 200, json: async () => ({ success: true, data }) });
     if (path.startsWith('/api/v1/tasks/')) return json(task());
     if (path.endsWith('/submit')) { return json({ onChainTaskId: 7, evidenceHash: '0x01', chain: '0g', unsignedSubmitEvidence: { to: ESCROW, data: '0xdead', chainId: 16602, ...(submitFrom ? { from: submitFrom } : {}) } }); }
-    if (path.startsWith('/api/v1/storage/')) return json({ blob: Buffer.from('plain brief').toString('base64') });
+    if (path.startsWith('/api/v1/storage/')) return json({ blob: (storageBlob ?? Buffer.from('plain brief')).toString('base64') });
     if (path.endsWith('/finalize')) { onChain = afterStatus; attempts += 1; return json({ status: verify.passed ? 'verified' : 'failed', verificationResult: verify }); }
     throw new Error('unexpected fetch ' + path);
   };
@@ -45,8 +47,10 @@ function harness({ status, attempts = 0, deadline = FUTURE, afterStatus = 4, ver
 
   const tools = {};
   const server = { registerTool: (name, _schema, handler) => { tools[name] = handler; } };
-  registerRentTools(server, { apiKey: 'sk_test', apiBase: 'https://backend.test', authenticated: true }, walletCtx);
-  return { tools, calls, sentTxs };
+  const ctx = noWallet ? null : walletCtx;
+  const { settlement } = registerRentTools(server, { apiKey: 'sk_test', apiBase: 'https://backend.test', authenticated: true }, ctx);
+  registerWalletTools(server, ctx, settlement);
+  return { tools, calls, sentTxs, walletCtx };
 }
 
 const parse = (r) => JSON.parse(r.content[0].text);
@@ -143,5 +147,53 @@ describe('fetch_brief validates the wrapped key before any round-trip', () => {
     const h = harness({ status: 1 });
     const out = parse(await h.tools.fetch_brief({ rootHash: '0x' + 'cd'.repeat(32), wrappedKey: 'zz'.repeat(100) }));
     assert.equal(out.error?.code ?? out.code, 'INVALID_WRAPPED_KEY');
+  });
+});
+
+// Tool-level coverage of the private-brief branch (the primitives are covered
+// in crypto.test.mjs; this pins the tool's wiring and error names).
+describe('fetch_brief private-brief branch', () => {
+  const ROOT = '0x' + 'cd'.repeat(32);
+  const wrapFor = (privKey, aesKey) => eciesEncrypt(aesKey, derivePublicKeyHex(privKey)).toString('hex');
+
+  test('decrypts a brief wrapped to this wallet\'s executorPublicKey', async () => {
+    const aesKey = generateAesKey();
+    const h = harness({ status: 1, storageBlob: aesEncrypt(Buffer.from('secret brief text'), aesKey) });
+    const wrapped = wrapFor(h.walletCtx.wallet.privateKey, aesKey);
+    const out = parse(await h.tools.fetch_brief({ rootHash: ROOT, wrappedKey: wrapped }));
+    assert.equal(out.decrypted, true);
+    assert.equal(out.brief, 'secret brief text');
+  });
+
+  test('wallet_status.executorPublicKey is the key the poster must wrap to', async () => {
+    const h = harness({ status: 1 });
+    const st = parse(await h.tools.wallet_status({}));
+    const pub = st.localWallet?.executorPublicKey ?? st.executorPublicKey;
+    assert.match(pub, /^04[0-9a-f]{128}$/);
+    assert.equal(pub, derivePublicKeyHex(h.walletCtx.wallet.privateKey));
+  });
+
+  test('wrapped to a different key → WRONG_KEY', async () => {
+    const aesKey = generateAesKey();
+    const h = harness({ status: 1, storageBlob: aesEncrypt(Buffer.from('x'), aesKey) });
+    const wrapped = wrapFor('0x' + '33'.repeat(32), aesKey);
+    const out = parse(await h.tools.fetch_brief({ rootHash: ROOT, wrappedKey: wrapped }));
+    assert.equal(out.error?.code ?? out.code, 'WRONG_KEY');
+  });
+
+  test('key unwraps but the blob is plaintext → BRIEF_DECRYPT_FAILED, not a key error', async () => {
+    const aesKey = generateAesKey();
+    const h = harness({ status: 1, storageBlob: Buffer.from('this is a PUBLIC brief, not ciphertext, long enough to look like a blob') });
+    const wrapped = wrapFor(h.walletCtx.wallet.privateKey, aesKey);
+    const out = parse(await h.tools.fetch_brief({ rootHash: ROOT, wrappedKey: wrapped }));
+    assert.equal(out.error?.code ?? out.code, 'BRIEF_DECRYPT_FAILED');
+  });
+
+  test('no local wallet → NO_WALLET', async () => {
+    const aesKey = generateAesKey();
+    const h = harness({ status: 1, noWallet: true, storageBlob: aesEncrypt(Buffer.from('x'), aesKey) });
+    const wrapped = wrapFor('0x' + '22'.repeat(32), aesKey);
+    const out = parse(await h.tools.fetch_brief({ rootHash: ROOT, wrappedKey: wrapped }));
+    assert.equal(out.error?.code ?? out.code, 'NO_WALLET');
   });
 });
