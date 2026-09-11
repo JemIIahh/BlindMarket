@@ -1053,15 +1053,23 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     },
     async ({ rootHash, wrappedKey }) => {
       try {
+        // Buffer.from(x, 'hex') stops silently at the first bad char, so a
+        // pasted "0x…" or a truncated blob would otherwise surface as
+        // WRONG_KEY after a storage round-trip. Validate first.
+        // ECIES blob = 65-byte ephemeral pubkey + 12 IV + 16 tag + ciphertext.
+        const keyHex = wrappedKey?.replace(/^0x/i, '');
+        if (keyHex !== undefined && (!/^[0-9a-fA-F]+$/.test(keyHex) || keyHex.length % 2 !== 0 || keyHex.length < (65 + 12 + 16 + 1) * 2)) {
+          return fail('INVALID_WRAPPED_KEY', 'wrappedKey must be the full hex ECIES blob from accept_task (even length, at least 94 bytes). Pass it exactly as returned.');
+        }
         const { blob } = await api<{ blob: string }>('GET', `/api/v1/storage/${encodeURIComponent(rootHash)}`);
         const buf = Buffer.from(blob, 'base64');
-        if (wrappedKey) {
+        if (keyHex !== undefined) {
           if (!walletCtx) {
             return fail('NO_WALLET', 'A private brief is decrypted with BLINDMARKET_PRIVATE_KEY — set it to the key whose public half you registered as executor.');
           }
           let aesKey: Buffer;
           try {
-            aesKey = eciesDecrypt(Buffer.from(wrappedKey, 'hex'), walletCtx.wallet.privateKey);
+            aesKey = eciesDecrypt(Buffer.from(keyHex, 'hex'), walletCtx.wallet.privateKey);
           } catch (e) {
             return fail('WRONG_KEY', `Could not unwrap the brief key with the local wallet ${walletCtx.wallet.address}: ${(e as Error).message}. The poster wrapped it to the pubkey on your executor registration — wallet_status shows the pubkey this process derives; they must match.`);
           }
@@ -1113,13 +1121,16 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       // /submit enforces all three on-chain gates; check them here too so the
       // caller gets the reason instead of a relayed revert.
       const isRetry = status === 3;
+      // The contract reverts DeadlineReached from Assigned as well as from a
+      // retry. With an explicit gasLimit ethers skips estimateGas, so a
+      // predictable revert would be mined and charged — refuse it here.
+      if ((status === 1 || isRetry) && BigInt(Math.floor(Date.now() / 1000)) >= BigInt(detail.deadline)) {
+        return fail('DEADLINE_REACHED', `Task ${detail.taskId} is past its deadline — no further submissions are accepted on-chain. The poster can reclaim the escrow with claim_timeout.`);
+      }
       if (isRetry) {
         const attempts = detail.submissionAttempts ?? 0;
         if (attempts >= 3) {
           return fail('MAX_ATTEMPTS_REACHED', `Task ${detail.taskId} has used all 3 submission attempts (${attempts}/3). The escrow stays locked until the poster reclaims it after the deadline.`);
-        }
-        if (BigInt(Math.floor(Date.now() / 1000)) >= BigInt(detail.deadline)) {
-          return fail('DEADLINE_REACHED', `Task ${detail.taskId} is past its deadline — no further submissions are accepted on-chain.`);
         }
       }
       if (status >= 4) {
@@ -1130,7 +1141,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       let gas: GasMode | undefined;
       try {
         if (status === 1 || isRetry) {
-          const sub = await api<{ onChainTaskId: number; evidenceHash: string; chain?: string; unsignedSubmitEvidence: { to: string; data: string; chainId?: number } }>(
+          const sub = await api<{ onChainTaskId: number; evidenceHash: string; chain?: string; unsignedSubmitEvidence: { to: string; data: string; from?: string; chainId?: number } }>(
             'POST', `/api/v1/a2a/tasks/${task}/submit`, { resultData: { output } },
           );
           const tx = sub.unsignedSubmitEvidence;
@@ -1141,6 +1152,13 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
             gas = sent.gas;
             await waitRelayed(s, sent.hash, sent.isUserOp);
           } else {
+            // submitEvidence is onlyWorker: the backend built the tx for the
+            // API key's wallet (tx.from). If BLINDMARKET_PRIVATE_KEY is a
+            // different wallet the tx reverts on-chain — with gasLimit set,
+            // that revert is mined and paid for. Refuse before sending.
+            if (tx.from && tx.from.toLowerCase() !== walletCtx!.wallet.address.toLowerCase()) {
+              return fail('WALLET_MISMATCH', `The backend assigned this task to ${tx.from} (the wallet behind BLINDMARKET_API_KEY), but BLINDMARKET_PRIVATE_KEY is ${walletCtx!.wallet.address}. submitEvidence is worker-only — set the private key of ${tx.from}.`);
+            }
             // 0G: sign locally, exactly as fundAndIndex does for createTask.
             // The backend pins chainId onto the tx; ethers refuses to send it
             // if this wallet's provider is on a different network — the guard
