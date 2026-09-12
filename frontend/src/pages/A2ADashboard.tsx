@@ -62,7 +62,11 @@ export default function A2ADashboard() {
   const { data: execs, isLoading: execsLoading, isError: execsError, refetch: refetchExecs } = useMyExecutions({ enabled: activeTab === 'executions' });
   const registerMutation = useRegisterAgent();
 
-  const taskId = (e: { meta: { taskId: string }; onChain?: { taskId?: string } }) => e.onChain?.taskId || e.meta.taskId;
+  // Canonical task URL uses the task hash (globally unique across chains —
+  // numeric ids collide between Base and 0G). Numeric URLs keep working
+  // (backend + route accept both). The label keeps the short numeric form
+  // when available since it reads better in a dense grid.
+  const taskId = (e: { meta: { taskId: string }; onChain?: { taskId?: string } }) => e.meta.taskId || e.onChain?.taskId;
   const taskLabel = (e: { meta: { taskId: string }; onChain?: { taskId?: string } }) =>
     e.onChain?.taskId ? `#${e.onChain.taskId}` : `${e.meta.taskId.slice(0, 10)}…`;
 
@@ -196,7 +200,7 @@ export default function A2ADashboard() {
               {execs.executions.map((e) => {
                 const hasResult = !!e.state.resultData;
                 const onChainId = (e as any).onChain?.taskId;
-                const idStr = onChainId || e.meta.taskId;
+                const idStr = e.meta.taskId || onChainId;
                 return (
                   <details key={e.meta.taskId} className="border-b border-line last:border-b-0 group">
                     <summary

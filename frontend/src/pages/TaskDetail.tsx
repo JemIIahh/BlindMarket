@@ -61,11 +61,15 @@ export default function TaskDetail() {
   // Build + sign + send the cancel / timeout tx as one mutation so React Query
   // surfaces the error (auth failure, server error, user-rejected sig) instead
   // of swallowing it in an unhandled promise.
+  //
+  // The page URL carries the task hash (globally unique), but the
+  // cancel/timeout endpoints take the numeric on-chain id — resolved from
+  // the loaded response (numericTaskId below) at call time.
   const cancelMutation = useMutation({
     mutationFn: async () => {
-      if (!id) throw new Error('Missing task id');
+      if (!numericTaskId) throw new Error('Missing task id');
       if (!signer) throw new Error('Wallet not connected');
-      const tx = await buildCancelTask(id);
+      const tx = await buildCancelTask(numericTaskId);
       await signAndSendTx(signer, tx);
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['tasks', id] }),
@@ -73,9 +77,9 @@ export default function TaskDetail() {
 
   const timeoutMutation = useMutation({
     mutationFn: async () => {
-      if (!id) throw new Error('Missing task id');
+      if (!numericTaskId) throw new Error('Missing task id');
       if (!signer) throw new Error('Wallet not connected');
-      const tx = await buildClaimTimeout(id);
+      const tx = await buildClaimTimeout(numericTaskId);
       await signAndSendTx(signer, tx);
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['tasks', id] }),
@@ -103,6 +107,9 @@ export default function TaskDetail() {
   }
 
   const { onChain, meta } = data;
+  // Numeric id for the cancel/timeout endpoints (they take the on-chain id,
+  // not the hash the URL carries). The backend always includes it.
+  const numericTaskId = onChain.taskId || id;
   // `onChain.agent` is the contract's name for the task poster — keep the
   // boolean named isPoster to make the intent clear in UI conditions.
   const isPoster = address?.toLowerCase() === onChain.agent?.toLowerCase();
@@ -373,6 +380,9 @@ export default function TaskDetail() {
                 <span className="text-ok font-medium">Completed.</span> Escrow released — {WORKER_SHARE_PCT}% to{' '}
                 <span className="font-mono text-ink">{truncateAddress(onChain.worker)}</span>, {PLATFORM_FEE_PCT}% to the
                 treasury. Reputation updated.
+                {!a2aState?.resultData && !a2aState?.verificationResult && (
+                  <> No archived output exists for this task — it settled before result archiving began, so the on-chain evidence hash above is the only record of the deliverable.</>
+                )}
               </p>
             )}
             {onChain.status === TaskStatus.Cancelled && (

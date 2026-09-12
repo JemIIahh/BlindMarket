@@ -354,8 +354,10 @@ export default function MyTasks() {
                 status === 0 && t.meta.privacy !== 'public' &&
                 !!t.meta.rootHash && (t.wrapCount ?? 0) === 0 && !t.hasCustody;
               const keyHere = keyAtRisk && !!getAesKey(t.meta.taskId);
-              const taskId = t.onChain?.taskId || t.meta.taskId;
-              const taskUrl = `/tasks/${taskId}`;
+              // Canonical task URL uses the task hash (globally unique across
+              // chains — numeric ids collide between Base and 0G). Numeric
+              // URLs keep working (backend + route accept both).
+              const taskUrl = `/tasks/${t.meta.taskId || t.onChain?.taskId}`;
               const worker = workerAddress(t);
               const cardClass = `bg-bg p-5 flex flex-col gap-3 min-h-[200px] group hover:bg-surface-2 transition-colors cursor-pointer`;
               const cardContent = (
