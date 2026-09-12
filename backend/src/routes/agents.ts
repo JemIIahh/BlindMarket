@@ -423,6 +423,69 @@ agentsRouter.get('/:id/logs/json', requireAuth, async (req: AuthRequest, res) =>
   res.json({ success: true, data: history });
 });
 
+// Usage telemetry (LLM tokens + estimated cost per model).
+const usageBodySchema = z.object({
+  taskHash: z.string().optional(),
+  provider: z.string().max(64).optional(),
+  model: z.string().max(128).optional(),
+  promptTokens: z.number().nonnegative().optional(),
+  completionTokens: z.number().nonnegative().optional(),
+  totalTokens: z.number().nonnegative().optional(),
+});
+
+// POST /api/v1/agents/:id/usage — record one LLM call (worker telemetry).
+// The worker authenticates with its platform token (caller == agent wallet);
+// owners may also post. Best-effort by design — never 500s on bad input,
+// since a telemetry failure must not break the task run it reports on.
+agentsRouter.post('/:id/usage', requireAuth, async (req: AuthRequest, res) => {
+  const agent = await getAgent(req.params.id);
+  if (!agent) {
+    res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Agent not found' } });
+    return;
+  }
+  const caller = (req.user?.address ?? '').toLowerCase();
+  const allowed =
+    caller === agent.walletAddress.toLowerCase() ||
+    isAgentOwner(agent, [req.user?.address, ...(req.user?.addresses ?? [])]);
+  if (!allowed) {
+    res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Only the agent worker or owner can record usage' } });
+    return;
+  }
+  const parsed = usageBodySchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ success: false, error: { code: 'BAD_USAGE', message: 'Invalid usage payload' } });
+    return;
+  }
+  const b = parsed.data;
+  try {
+    const { recordUsage } = await import('../services/agentUsageStore.js');
+    await recordUsage({
+      agentId: agent.id,
+      taskHash: b.taskHash,
+      provider: b.provider ?? agent.provider,
+      model: b.model ?? agent.model,
+      promptTokens: b.promptTokens ?? 0,
+      completionTokens: b.completionTokens ?? 0,
+      totalTokens: b.totalTokens ?? 0,
+    });
+  } catch (err) {
+    console.warn(`[agents] usage record failed for ${agent.id}:`, (err as Error).message);
+  }
+  res.json({ success: true, data: { recorded: true } });
+});
+
+// GET /api/v1/agents/:id/usage — token/cost summary for the Usage tab.
+// Owner-only: usage reveals what the agent works on and when.
+agentsRouter.get('/:id/usage', requireAuth, async (req: AuthRequest, res, next) => {
+  try {
+    const agent = await authorizeOwner(req, res, req.params.id);
+    if (!agent) return;
+    const windowDays = parseInt(req.query.windowDays as string) || 30;
+    const { getUsageSummary } = await import('../services/agentUsageStore.js');
+    res.json({ success: true, data: await getUsageSummary(agent.id, windowDays) });
+  } catch (err) { next(err); }
+});
+
 // GET /api/v1/agents/:id/logs — SSE stream
 //
 // Owner-only — gated by requireAuth + authorizeOwner, checked BEFORE any SSE
