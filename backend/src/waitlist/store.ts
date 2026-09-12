@@ -248,3 +248,86 @@ export const getLeaderboard = ttlCached(async (): Promise<LeaderboardEntry[]> =>
   );
   return rows.map((r, i) => ({ rank: i + 1, handle: r.x_handle, points: r.score, referrals: r.referral_count }));
 });
+
+// ── Admin: spot-checking the front of the line (admin.ts) ───────────────────
+// X tasks are self-reported, so before access goes out someone checks the
+// front of the line by hand on X and takes back tasks that didn't happen.
+// Internal only — never exposed over HTTP (emails included).
+
+export interface FrontOfLineRow {
+  position: number;
+  id: number;
+  email: string;
+  handle: string | null;
+  tasks: WaitlistTask[];
+  taskPoints: number;
+  referrals: number;
+  points: number;
+  joinedAt: Date;
+}
+
+/** The first `limit` signups in line order — the same order as positions and the leaderboard. Uncached. */
+export async function listFrontOfLine(limit: number): Promise<FrontOfLineRow[]> {
+  const db = await getPool();
+  const { rows } = await db.query<{
+    id: number; email: string; x_handle: string | null; tasks: WaitlistTask[];
+    points: number; referral_count: number; created_at: Date;
+  }>(
+    `SELECT id, email, x_handle, tasks, points, referral_count, created_at
+       FROM (
+         SELECT *, ROW_NUMBER() OVER (ORDER BY id) - (points + referral_count * $2) * $3 AS eff
+           FROM waitlist_signups
+       ) scored
+      ORDER BY eff, id
+      LIMIT $1`,
+    [limit, REFERRAL_POINTS, POSITION_BOOST_PER_POINT],
+  );
+  return rows.map((r, i) => ({
+    position: i + 1,
+    id: r.id,
+    email: r.email,
+    handle: r.x_handle,
+    tasks: r.tasks,
+    taskPoints: r.points,
+    referrals: r.referral_count,
+    points: r.points + r.referral_count * REFERRAL_POINTS,
+    joinedAt: r.created_at,
+  }));
+}
+
+/**
+ * Take back self-reported tasks that didn't check out on X. Task points are
+ * recomputed from what's left, so they can't drift; referral credit is
+ * untouched. Returns the task list before and after, or null for an unknown id.
+ */
+export async function revokeTasks(
+  id: number,
+  revoke: readonly WaitlistTask[],
+): Promise<{ before: WaitlistTask[]; after: WaitlistTask[]; taskPoints: number } | null> {
+  const db = await getPool();
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query<{ tasks: WaitlistTask[] }>(
+      'SELECT tasks FROM waitlist_signups WHERE id = $1 FOR UPDATE',
+      [id],
+    );
+    if (!rows[0]) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+    const before = rows[0].tasks;
+    const after = before.filter((t) => !revoke.includes(t));
+    await client.query(
+      'UPDATE waitlist_signups SET tasks = $2, points = $3, updated_at = NOW() WHERE id = $1',
+      [id, after, pointsFor(after)],
+    );
+    await client.query('COMMIT');
+    return { before, after, taskPoints: pointsFor(after) };
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}

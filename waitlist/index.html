@@ -182,6 +182,17 @@
   .task-card:hover{transform:rotate(0deg) translateY(-3px); border-color:var(--ink);}
   .task-icon{width:26px; height:26px; color:var(--accent);}
   .task-title{font-family:var(--font-display); font-size:1.1rem; letter-spacing:.02em; line-height:1;}
+  /* The title link stretches over the whole card, so tapping anywhere opens X. */
+  .task-open{color:inherit; text-decoration:none;}
+  .task-open::after{content:''; position:absolute; inset:0; border-radius:16px;}
+  .task-open:focus-visible{outline:none;}
+  .task-open:focus-visible::after{outline:2px solid var(--accent); outline-offset:3px;}
+  .task-confirm{
+    position:relative; z-index:1; margin-top:2px; border:0; border-radius:999px; padding:7px 13px;
+    background:var(--accent); color:var(--accent-ink); font-weight:800; font-size:.66rem; letter-spacing:.1em; text-transform:uppercase;
+    transition:filter .18s var(--ease), transform .18s var(--ease);
+  }
+  .task-confirm:hover{filter:brightness(1.1); transform:translateY(-1px);}
   .task-sub{font-size:.64rem; font-weight:800; letter-spacing:.12em; text-transform:uppercase; color:var(--text-dim);}
   .task-tag{
     position:absolute; top:11px; left:12px; font-size:.56rem; font-weight:800; letter-spacing:.12em; text-transform:uppercase;
@@ -194,8 +205,6 @@
   }
   .task-check svg{width:12px; height:12px;}
   .task-card.pending{border-style:dashed; border-color:var(--accent-line);}
-  .task-card.checking{border-color:var(--accent); animation:checkPulse .45s var(--ease);}
-  @keyframes checkPulse{50%{transform:rotate(0) scale(.97);}}
   .task-card.done{transform:rotate(0); border-color:var(--accent); background:linear-gradient(180deg, rgba(181,86,11,.12), rgba(181,86,11,.03));}
   .task-card.done .task-check{transform:scale(1);}
 
@@ -408,34 +417,38 @@
           <div class="ticket-col">
             <p class="step-label">Step 1 — Tap these on X</p>
             <div class="task-grid">
-              <a class="task-card" data-task="follow" href="https://twitter.com/intent/follow?screen_name=blindmarkt" target="_blank" rel="noopener" style="--tilt:-.9deg">
+              <div class="task-card" data-task="follow" style="--tilt:-.9deg">
                 <span class="task-check" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>
                 <svg class="task-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/></svg>
-                <span class="task-title">Follow</span>
+                <a class="task-title task-open" href="https://x.com/blindmarkt" target="_blank" rel="noopener" aria-label="Follow @blindmarkt on X">Follow</a>
                 <span class="task-sub">@blindmarkt · +1 pt</span>
-              </a>
-              <a class="task-card" data-task="like" href="https://twitter.com/blindmarkt" target="_blank" rel="noopener" style="--tilt:.7deg">
+                <button type="button" class="task-confirm" hidden>Done it? Yes ✓</button>
+              </div>
+              <div class="task-card" data-task="like" style="--tilt:.7deg">
                 <span class="task-check" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>
                 <svg class="task-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></svg>
-                <span class="task-title">Like</span>
-                <span class="task-sub">Pinned post · +1 pt</span>
-              </a>
-              <a class="task-card" data-task="repost" href="https://twitter.com/blindmarkt" target="_blank" rel="noopener" style="--tilt:.5deg">
+                <a class="task-title task-open" href="https://x.com/blindmarkt/status/2098305130835607945" target="_blank" rel="noopener" aria-label="Like our post on X">Like</a>
+                <span class="task-sub">Our post · +1 pt</span>
+                <button type="button" class="task-confirm" hidden>Done it? Yes ✓</button>
+              </div>
+              <div class="task-card" data-task="repost" style="--tilt:.5deg">
                 <span class="task-check" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>
                 <svg class="task-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m16 3 4 4-4 4"/><path d="M20 7H4"/><path d="m8 21-4-4 4-4"/><path d="M4 17h16"/></svg>
-                <span class="task-title">Repost</span>
-                <span class="task-sub">Pinned post · +1 pt</span>
-              </a>
-              <a class="task-card" data-task="comment" href="https://twitter.com/blindmarkt" target="_blank" rel="noopener" style="--tilt:-.6deg">
+                <a class="task-title task-open" href="https://x.com/blindmarkt/status/2098305130835607945" target="_blank" rel="noopener" aria-label="Repost our post on X">Repost</a>
+                <span class="task-sub">Our post · +1 pt</span>
+                <button type="button" class="task-confirm" hidden>Done it? Yes ✓</button>
+              </div>
+              <div class="task-card" data-task="comment" style="--tilt:-.6deg">
                 <span class="task-tag">Optional</span>
                 <span class="task-check" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>
                 <svg class="task-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-                <span class="task-title">Comment</span>
-                <span class="task-sub">Pinned post · +3 pts</span>
-              </a>
+                <a class="task-title task-open" href="https://x.com/blindmarkt/status/2098305130835607945" target="_blank" rel="noopener" aria-label="Reply to our post on X">Comment</a>
+                <span class="task-sub">Our post · +3 pts</span>
+                <button type="button" class="task-confirm" hidden>Done it? Yes ✓</button>
+              </div>
             </div>
             <div class="task-foot">
-              <p class="task-hint" id="task-hint">Each card opens X. Come back to this tab and it checks off.</p>
+              <p class="task-hint" id="task-hint">Tap a card to open X, do it there, then tap “Yes” here. We can't see your X account from this page — we take your word for it.</p>
               <span class="points-pill" id="points-pill">0 pts</span>
             </div>
           </div>
@@ -492,7 +505,8 @@
                 <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
                 Share your link
               </button>
-              <a class="btn-ghost" id="btn-comment-bonus" href="https://twitter.com/blindmarkt" target="_blank" rel="noopener" hidden>Leave a comment for +3 pts</a>
+              <a class="btn-ghost" id="btn-comment-bonus" href="https://x.com/blindmarkt/status/2098305130835607945" target="_blank" rel="noopener" hidden>Leave a comment for +3 pts</a>
+              <button type="button" class="btn-pill block" id="btn-comment-confirm" hidden>I've commented — add +3 pts</button>
             </div>
           </div>
         </div>
@@ -817,37 +831,26 @@
     submitHint.textContent = left.length ? 'Still to do on X: ' + left.join(', ') + '.' : '';
   }
 
-  function completeTask(t){
-    if (taskState[t] !== 'pending') return;
-    taskState[t] = 'done';
-    var card = cards[t];
-    card.classList.remove('pending'); card.classList.add('checking');
-    setTimeout(function(){
-      card.classList.remove('checking'); card.classList.add('done');
-      card.setAttribute('aria-label', card.querySelector('.task-title').textContent + ' — done');
-      updateTaskUI();
-    }, 450);
-  }
-  function completePending(){ Object.keys(taskState).forEach(completeTask); }
-
+  // The page can't see anyone's X account, so it never pretends to check: a
+  // task only counts once the person says they did it. Opening X shows the
+  // question; answering it ticks the card.
   Object.keys(cards).forEach(function(t){
-    cards[t].addEventListener('click', function(){
+    var card = cards[t], open = card.querySelector('.task-open'), confirm = card.querySelector('.task-confirm');
+    open.addEventListener('click', function(){
       if (taskState[t] !== 'idle') return;
-      taskState[t] = 'pending';
-      cards[t].classList.add('pending');
-      // Most people come back via the tab (visibilitychange/focus below); if the
-      // tab never lost focus (popup blocked, opened in background), don't strand them.
-      setTimeout(function(){ completeTask(t); }, 6000);
+      taskState[t] = 'opened';
+      card.classList.add('pending');
+      confirm.hidden = false;
+    });
+    confirm.addEventListener('click', function(){
+      if (taskState[t] !== 'opened') return;
+      taskState[t] = 'done';
+      confirm.hidden = true;
+      card.classList.remove('pending'); card.classList.add('done');
+      open.setAttribute('aria-label', open.getAttribute('aria-label') + ' — done');
+      updateTaskUI();
     });
   });
-
-  function onReturn(){
-    if (document.visibilityState !== 'visible') return;
-    if (!form.hidden) completePending();
-    if (!standingEl.hidden && commentBonusClicked) claimCommentBonus();
-  }
-  document.addEventListener('visibilitychange', onReturn);
-  window.addEventListener('focus', onReturn);
 
   /* ---------- step 2: details → POST /join ---------- */
   var pendingRef = store.get(REF_KEY);
@@ -903,7 +906,6 @@
   });
 
   /* ---------- standing: position, points, referral link ---------- */
-  var commentBonusClicked = false;
 
   function referralLink(code){ return location.origin + location.pathname + '?ref=' + encodeURIComponent(code); }
 
@@ -923,7 +925,9 @@
     $('ref-count').textContent = fmt(s.referrals);
     $('ref-count-word').textContent = s.referrals === 1 ? 'friend' : 'friends';
     // The bonus is recorded against the signup's token.
-    $('btn-comment-bonus').hidden = s.tasks.indexOf('comment') !== -1 || !store.get(TOKEN_KEY);
+    var bonusAvailable = s.tasks.indexOf('comment') === -1 && !!store.get(TOKEN_KEY);
+    $('btn-comment-bonus').hidden = !bonusAvailable;
+    if (!bonusAvailable) $('btn-comment-confirm').hidden = true;
     renderBoard();
   }
 
@@ -953,15 +957,18 @@
     window.open('https://twitter.com/intent/tweet?text=' + encodeURIComponent(text) + '&url=' + encodeURIComponent(url), '_blank', 'noopener');
   });
 
-  function claimCommentBonus(){
+  // Same rule as the task cards: opening X only asks the question; the bonus
+  // is claimed when the person confirms they commented.
+  var commentConfirm = $('btn-comment-confirm');
+  $('btn-comment-bonus').addEventListener('click', function(){ commentConfirm.hidden = false; });
+  commentConfirm.addEventListener('click', function(){
     var token = store.get(TOKEN_KEY);
     if (!token) return;
-    commentBonusClicked = false;
+    commentConfirm.disabled = true;
     api('POST', '/me/tasks', { task:'comment' }, token)
       .then(function(s){ renderStanding(s); refreshBoardSoon(); })
-      .catch(function(){ commentBonusClicked = true; });
-  }
-  $('btn-comment-bonus').addEventListener('click', function(){ commentBonusClicked = true; });
+      .catch(function(){ commentConfirm.disabled = false; });
+  });
 
   // Returning visitor: show the last known standing at once, then refresh it —
   // position is a live rank, so it moves as others join, earn points and refer.

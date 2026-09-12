@@ -7,7 +7,7 @@ Static HTML/CSS/JS in one file (`index.html`), no build step. Serve this folder 
 ## How the line works
 
 - **Position** is a live rank: join order, moved up **10 places per point**, ties to whoever joined first. It shifts as others join and earn points.
-- **X tasks** (self-reported): follow, like, repost — 1 pt each, required to submit — and an optional comment, 3 pts. Max 6 pts from tasks.
+- **X tasks** (self-reported): follow [@blindmarkt](https://x.com/blindmarkt), like and repost [our post](https://x.com/blindmarkt/status/2098305130835607945) — 1 pt each, required to submit — and an optional reply to it, 3 pts. Max 6 pts from tasks. Tapping a card opens X; the card only counts once the person answers **"Done it? Yes"** — the page never pretends to check.
 - **Referrals**: every signup gets a link like `https://waitlist.blindmarket.xyz/?ref=k7m2p9qa`. Each *new* signup made through it gives the referrer **+2 pts** (20 places), with no cap. The server credits it in the same statement that creates the signup, so it can't be claimed twice or sent from the browser; a repeat email never credits anyone. Each connection can produce at most 5 credited referrals a day — friends on their own connections all count, a script on one connection doesn't.
 - **A repeat email** gets "already on the list" and nothing else — no handle, points or position — so nobody can look up someone else's spot (or link their email to a public handle). Your spot stays with the device you signed up on.
 - **Leaderboard**: the top 25 of that same line, showing X handle, referrals and points — never emails.
@@ -39,7 +39,8 @@ Nothing about the BlindMarket app or its API changes.
 
 - **Copy and product mechanics are accurate**, pulled from this repo: encrypted briefs, Base + 0G two-chain settlement, the Post → Accept → Verify → Settle lifecycle, the 90/10 payout split, and the real X handle (`@blindmarkt`) and domain (`blindmarket.xyz`).
 - **Signups, positions, referral credit and the leaderboard are real** and scored server-side.
-- **The X tasks and the X handle are self-reported.** Checking follows/likes or proving handle ownership needs X API credentials, so the page takes the visitor's word for it. The server only accepts task *names* and scores them itself, and only accepts handles in X's own format (1–15 letters, digits, underscores).
+- **The X tasks and the X handle are self-reported**, and the page says so. X's API no longer offers follow/like checks to self-serve plans (April 2026) and its likes lookup stops at 100 people per post, so nothing here checks automatically. The server only accepts task *names* and scores them itself (6 pts at most), and only accepts handles in X's own format (1–15 letters, digits, underscores).
+- **The front of the line is checked by hand** before access goes out: `npm run waitlist:admin -- top` lists it with each person's claims and the X links to check, and `revoke` takes back what didn't happen — see the [service README](../backend/src/waitlist/README.md#spot-checking-the-front-of-the-line).
 - **Emails aren't confirmed**, so a referral counts as soon as a new email signs up through the link. The per-connection cap (5 credited referrals a day) stops one connection farming its own link with throwaway addresses; someone rotating many IPs can still farm. Email confirmation before crediting a referral is the real fix if that shows up.
 
 ## Stack

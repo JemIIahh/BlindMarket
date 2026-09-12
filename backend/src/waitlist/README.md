@@ -54,6 +54,31 @@ A database connection dropped while idle (restart, failover) is logged and repla
 6. **Page** — host the repo's [`waitlist/`](../../../waitlist/) folder as a static site at `waitlist.blindmarket.xyz` (root directory `waitlist`, no build step).
 7. **Check** — `curl https://waitlist-api.blindmarket.xyz/health` → `{"ok":true}`, then open the page and sign up once.
 
+## Spot-checking the front of the line
+
+X tasks are self-reported (the page asks "Done it? Yes" — nothing checks X), so before an access wave goes out, check the front of the line by hand:
+
+```sh
+cd backend
+WAITLIST_DATABASE_URL=… npm run waitlist:admin -- top 50          # readable table
+WAITLIST_DATABASE_URL=… npm run waitlist:admin -- top 50 --csv    # spreadsheet: one "yes" column per claimed task
+```
+
+The output lists the X pages to check against. Open them **logged in as @blindmarkt** — X only shows a post's likes to its author:
+
+- follows — `https://x.com/blindmarkt/followers`
+- likes — `https://x.com/blindmarkt/status/2098305130835607945/likes`
+- reposts — `https://x.com/blindmarkt/status/2098305130835607945/retweets`
+- replies — the post itself
+
+For anyone whose claim doesn't check out, take those tasks back by signup id (the `id` column):
+
+```sh
+WAITLIST_DATABASE_URL=… npm run waitlist:admin -- revoke 42 like repost
+```
+
+Task points are recomputed from what's left (referral credit is untouched) and the public leaderboard catches up within 10 seconds. The export contains emails — keep it internal. If the post the page links to ever changes, update it in both `waitlist/index.html` and `X_POST_ID` in `admin.ts`.
+
 ## Tests
 
-`npx vitest run src/waitlist` — route tests (`router.test.ts`) and whole-service tests (`app.test.ts`: health, only-waitlist routes, CORS, per-visitor limits behind a proxy, and tripwires on marketplace imports). The ranking and referral SQL is exercised against a real Postgres separately.
+`npx vitest run src/waitlist` — route tests (`router.test.ts`) and whole-service tests (`app.test.ts`: health, only-waitlist routes, CORS, per-visitor limits behind a proxy, and tripwires on marketplace imports), the TLS settings (`db.test.ts`) and the admin tool's parsing and exports (`admin.test.ts`). The ranking and referral SQL is exercised against a real Postgres separately.
