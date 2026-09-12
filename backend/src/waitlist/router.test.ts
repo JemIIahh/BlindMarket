@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import http from 'node:http';
 import express, { type Router } from 'express';
 import request from 'supertest';
 
@@ -45,7 +46,7 @@ async function makeApp() {
   return a;
 }
 
-let app: express.Express;
+let server: http.Server;
 const TOKEN = 'wl_abcdefghijklmnopqrstuvwxyz012345';
 const STANDING = {
   position: 7,
@@ -61,13 +62,33 @@ const JOIN = { email: 'ada@example.com', xHandle: 'ada_l' };
 
 beforeEach(async () => {
   vi.clearAllMocks();
-  app = await makeApp();
+  server = await listen(await makeApp());
 });
+
+// One server per test, bound to 127.0.0.1 and held open until the test ends.
+// supertest's default is a fresh wildcard-bound server per request on a random
+// port, and it always connects to 127.0.0.1 — on macOS another process's
+// 127.0.0.1 bind on that port wins the connection, so a request could land on
+// someone else's server (seen as a 401 from /stats). An open, specific bind
+// can't be taken over.
+function listen(a: express.Express): Promise<http.Server> {
+  return new Promise((resolve) => {
+    const s = a.listen(0, '127.0.0.1', () => resolve(s));
+  });
+}
+
+afterEach(
+  () =>
+    new Promise<void>((resolve) => {
+      server.closeAllConnections();
+      server.close(() => resolve());
+    }),
+);
 
 describe('GET /api/v1/waitlist/stats', () => {
   it('returns the total', async () => {
     store.getWaitlistTotal.mockResolvedValueOnce(42);
-    const res = await request(app).get('/api/v1/waitlist/stats');
+    const res = await request(server).get('/api/v1/waitlist/stats');
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ success: true, data: { total: 42 } });
   });
@@ -80,7 +101,7 @@ describe('GET /api/v1/waitlist/leaderboard', () => {
       { rank: 2, handle: null, points: 3, referrals: 0 },
     ];
     store.getLeaderboard.mockResolvedValueOnce(entries);
-    const res = await request(app).get('/api/v1/waitlist/leaderboard');
+    const res = await request(server).get('/api/v1/waitlist/leaderboard');
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ success: true, data: { entries } });
   });
@@ -89,7 +110,7 @@ describe('GET /api/v1/waitlist/leaderboard', () => {
 describe('POST /api/v1/waitlist/join', () => {
   it('creates a signup with a normalized email and deduped tasks, ignoring any client-sent points', async () => {
     store.joinWaitlist.mockResolvedValueOnce({ token: TOKEN, standing: STANDING });
-    const res = await request(app)
+    const res = await request(server)
       .post('/api/v1/waitlist/join')
       .send({ email: '  Ada@Example.COM ', xHandle: ' @ada_l ', tasks: ['follow', 'like', 'repost', 'like'], points: 999 });
 
@@ -105,7 +126,7 @@ describe('POST /api/v1/waitlist/join', () => {
 
   it('tells a repeat email only that it is already on the list — no token, handle or standing', async () => {
     store.joinWaitlist.mockResolvedValueOnce({ token: null, standing: null, referralCredited: false });
-    const res = await request(app).post('/api/v1/waitlist/join').send(JOIN);
+    const res = await request(server).post('/api/v1/waitlist/join').send(JOIN);
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ success: true, data: { alreadyJoined: true } });
@@ -114,7 +135,7 @@ describe('POST /api/v1/waitlist/join', () => {
   it('credits at most 5 referrals per connection per day — later signups still get in', async () => {
     store.joinWaitlist.mockResolvedValue({ token: TOKEN, standing: STANDING, referralCredited: true });
     for (let i = 0; i < 6; i++) {
-      const res = await request(app).post('/api/v1/waitlist/join').send({ email: `f${i}@example.com`, xHandle: `f${i}`, ref: 'k7m2p9qa' });
+      const res = await request(server).post('/api/v1/waitlist/join').send({ email: `f${i}@example.com`, xHandle: `f${i}`, ref: 'k7m2p9qa' });
       expect(res.status).toBe(201);
     }
     const refsSent = store.joinWaitlist.mock.calls.map(([input]) => input.ref);
@@ -125,27 +146,27 @@ describe('POST /api/v1/waitlist/join', () => {
     // e.g. an unknown code, or an address already on the list
     store.joinWaitlist.mockResolvedValue({ token: TOKEN, standing: STANDING, referralCredited: false });
     for (let i = 0; i < 7; i++) {
-      await request(app).post('/api/v1/waitlist/join').send({ email: `g${i}@example.com`, xHandle: `g${i}`, ref: 'zzzzzzzz' });
+      await request(server).post('/api/v1/waitlist/join').send({ email: `g${i}@example.com`, xHandle: `g${i}`, ref: 'zzzzzzzz' });
     }
     expect(store.joinWaitlist.mock.calls.every(([input]) => input.ref === 'zzzzzzzz')).toBe(true);
   });
 
   it('passes a referral code through, normalized to lowercase', async () => {
     store.joinWaitlist.mockResolvedValueOnce({ token: TOKEN, standing: STANDING });
-    const res = await request(app).post('/api/v1/waitlist/join').send({ ...JOIN, ref: ' K7M2P9QA ' });
+    const res = await request(server).post('/api/v1/waitlist/join').send({ ...JOIN, ref: ' K7M2P9QA ' });
     expect(res.status).toBe(201);
     expect(store.joinWaitlist).toHaveBeenCalledWith(expect.objectContaining({ ref: 'k7m2p9qa' }));
   });
 
   it('drops a malformed referral code instead of failing the signup', async () => {
     store.joinWaitlist.mockResolvedValueOnce({ token: TOKEN, standing: STANDING });
-    const res = await request(app).post('/api/v1/waitlist/join').send({ ...JOIN, ref: 'k7m2"><script>' });
+    const res = await request(server).post('/api/v1/waitlist/join').send({ ...JOIN, ref: 'k7m2"><script>' });
     expect(res.status).toBe(201);
     expect(store.joinWaitlist).toHaveBeenCalledWith(expect.objectContaining({ ref: undefined }));
   });
 
   it('requires an X handle', async () => {
-    const res = await request(app).post('/api/v1/waitlist/join').send({ email: 'ada@example.com' });
+    const res = await request(server).post('/api/v1/waitlist/join').send({ email: 'ada@example.com' });
     expect(res.status).toBe(400);
     expect(res.body.error.code).toBe('VALIDATION_ERROR');
     expect(store.joinWaitlist).not.toHaveBeenCalled();
@@ -157,20 +178,20 @@ describe('POST /api/v1/waitlist/join', () => {
     ['markup', '<b>ada</b>'],
     ['bare @', '@'],
   ])('rejects an X handle with %s', async (_why, xHandle) => {
-    const res = await request(app).post('/api/v1/waitlist/join').send({ email: 'ada@example.com', xHandle });
+    const res = await request(server).post('/api/v1/waitlist/join').send({ email: 'ada@example.com', xHandle });
     expect(res.status).toBe(400);
     expect(store.joinWaitlist).not.toHaveBeenCalled();
   });
 
   it('rejects an invalid email without touching the store', async () => {
-    const res = await request(app).post('/api/v1/waitlist/join').send({ email: 'not-an-email', xHandle: 'ada_l' });
+    const res = await request(server).post('/api/v1/waitlist/join').send({ email: 'not-an-email', xHandle: 'ada_l' });
     expect(res.status).toBe(400);
     expect(res.body.error.code).toBe('VALIDATION_ERROR');
     expect(store.joinWaitlist).not.toHaveBeenCalled();
   });
 
   it('rejects an unknown task', async () => {
-    const res = await request(app)
+    const res = await request(server)
       .post('/api/v1/waitlist/join')
       .send({ ...JOIN, tasks: ['follow', 'bribe'] });
     expect(res.status).toBe(400);
@@ -178,7 +199,7 @@ describe('POST /api/v1/waitlist/join', () => {
   });
 
   it('answers malformed JSON with 400, not a 500', async () => {
-    const res = await request(app)
+    const res = await request(server)
       .post('/api/v1/waitlist/join')
       .set('Content-Type', 'application/json')
       .send('{"email":');
@@ -189,20 +210,20 @@ describe('POST /api/v1/waitlist/join', () => {
 
 describe('GET /api/v1/waitlist/me', () => {
   it('requires a bearer token', async () => {
-    const res = await request(app).get('/api/v1/waitlist/me');
+    const res = await request(server).get('/api/v1/waitlist/me');
     expect(res.status).toBe(401);
     expect(res.body.error.code).toBe('WAITLIST_TOKEN_INVALID');
   });
 
   it('rejects an unknown token', async () => {
     store.getStandingByToken.mockResolvedValueOnce(null);
-    const res = await request(app).get('/api/v1/waitlist/me').set('Authorization', `Bearer ${TOKEN}`);
+    const res = await request(server).get('/api/v1/waitlist/me').set('Authorization', `Bearer ${TOKEN}`);
     expect(res.status).toBe(401);
   });
 
   it('returns the standing for a known token', async () => {
     store.getStandingByToken.mockResolvedValueOnce(STANDING);
-    const res = await request(app).get('/api/v1/waitlist/me').set('Authorization', `Bearer ${TOKEN}`);
+    const res = await request(server).get('/api/v1/waitlist/me').set('Authorization', `Bearer ${TOKEN}`);
     expect(res.status).toBe(200);
     expect(res.body.data).toEqual(STANDING);
     expect(store.getStandingByToken).toHaveBeenCalledWith(TOKEN);
@@ -213,7 +234,7 @@ describe('POST /api/v1/waitlist/me/tasks', () => {
   it('records a task', async () => {
     const after = { ...STANDING, points: 6, tasks: [...STANDING.tasks, 'comment'] };
     store.addTaskByToken.mockResolvedValueOnce(after);
-    const res = await request(app)
+    const res = await request(server)
       .post('/api/v1/waitlist/me/tasks')
       .set('Authorization', `Bearer ${TOKEN}`)
       .send({ task: 'comment' });
@@ -223,7 +244,7 @@ describe('POST /api/v1/waitlist/me/tasks', () => {
   });
 
   it('rejects an unknown task', async () => {
-    const res = await request(app)
+    const res = await request(server)
       .post('/api/v1/waitlist/me/tasks')
       .set('Authorization', `Bearer ${TOKEN}`)
       .send({ task: 'points' });
@@ -235,19 +256,19 @@ describe('POST /api/v1/waitlist/me/tasks', () => {
 describe('CORS', () => {
   it('allows the configured origin, without credentials', async () => {
     store.getWaitlistTotal.mockResolvedValueOnce(1);
-    const res = await request(app).get('/api/v1/waitlist/stats').set('Origin', 'https://waitlist.example');
+    const res = await request(server).get('/api/v1/waitlist/stats').set('Origin', 'https://waitlist.example');
     expect(res.headers['access-control-allow-origin']).toBe('https://waitlist.example');
     expect(res.headers['access-control-allow-credentials']).toBeUndefined();
   });
 
   it('does not allow any other origin', async () => {
     store.getWaitlistTotal.mockResolvedValueOnce(1);
-    const res = await request(app).get('/api/v1/waitlist/stats').set('Origin', 'https://evil.example');
+    const res = await request(server).get('/api/v1/waitlist/stats').set('Origin', 'https://evil.example');
     expect(res.headers['access-control-allow-origin']).toBeUndefined();
   });
 
   it('answers the JSON + Authorization preflight itself', async () => {
-    const res = await request(app)
+    const res = await request(server)
       .options('/api/v1/waitlist/me/tasks')
       .set('Origin', 'https://waitlist.example')
       .set('Access-Control-Request-Method', 'POST')
@@ -264,10 +285,10 @@ describe('rate limiting', () => {
     store.joinWaitlist.mockResolvedValue({ token: TOKEN, standing: STANDING });
 
     for (let i = 0; i < 10; i++) {
-      const ok = await request(app).post('/api/v1/waitlist/join').send({ email: `u${i}@example.com`, xHandle: `u${i}` });
+      const ok = await request(server).post('/api/v1/waitlist/join').send({ email: `u${i}@example.com`, xHandle: `u${i}` });
       expect(ok.status).toBe(201);
     }
-    const res = await request(app).post('/api/v1/waitlist/join').send({ email: 'u10@example.com', xHandle: 'u10' });
+    const res = await request(server).post('/api/v1/waitlist/join').send({ email: 'u10@example.com', xHandle: 'u10' });
     expect(res.status).toBe(429);
     expect(res.body.error.code).toBe('RATE_LIMIT');
   });
@@ -278,9 +299,9 @@ describe('rate limiting', () => {
 
     // 70 page loads' worth of public reads would blow the 60/min /me budget if they shared it.
     for (let i = 0; i < 70; i++) {
-      expect((await request(app).get('/api/v1/waitlist/stats')).status).toBe(200);
+      expect((await request(server).get('/api/v1/waitlist/stats')).status).toBe(200);
     }
-    const me = await request(app).get('/api/v1/waitlist/me').set('Authorization', `Bearer ${TOKEN}`);
+    const me = await request(server).get('/api/v1/waitlist/me').set('Authorization', `Bearer ${TOKEN}`);
     expect(me.status).toBe(200);
   });
 });
