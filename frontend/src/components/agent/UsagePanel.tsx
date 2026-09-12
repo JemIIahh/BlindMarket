@@ -65,7 +65,8 @@ export function UsagePanel({ agentId }: { agentId: string }) {
 
   return (
     <Panel padding="md" className="mb-6">
-      <div className="flex items-center justify-end mb-5">
+      <div className="flex items-center justify-between mb-5 flex-wrap gap-2">
+        <h3 className="text-sm font-semibold text-ink">Token usage</h3>
         <div className="flex gap-1.5">
           {[7, 30, 90].map((d) => (
             <button

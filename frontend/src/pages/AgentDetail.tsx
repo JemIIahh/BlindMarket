@@ -28,7 +28,6 @@ import { AgentTasks } from '../components/agent/AgentTasks';
 import { GasBar } from '../components/agent/GasBar';
 import { IdentityPanel } from '../components/agent/IdentityPanel';
 import { OpsConsole } from '../components/agent/OpsConsole';
-import { UsagePanel } from '../components/agent/UsagePanel';
 import { ReviewsSection } from '../components/agent/ReviewsSection';
 import { ServicesSection } from '../components/agent/ServicesSection';
 import type { AgentDetails, SkillStat } from '../components/agent/types';
@@ -489,10 +488,6 @@ export default function AgentDetail() {
             onAgentUpdated={setAgent}
             className={agent.walletAddress ? 'border-t-0' : ''}
           />
-          <div className="mt-10">
-            <SectionRule num="04" title="Token usage" />
-            <UsagePanel agentId={apiId} />
-          </div>
         </div>
       )}
     </div>
