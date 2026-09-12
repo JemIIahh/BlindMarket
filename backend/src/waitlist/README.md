@@ -1,6 +1,6 @@
 # Waitlist service
 
-The API behind the BlindMarket waitlist landing page ([blindmarket-waitlist](https://github.com/JemIIahh/blindmarket-waitlist)): signups, positions, referrals and the public leaderboard.
+The API behind the BlindMarket waitlist landing page ([`waitlist/`](../../../waitlist/) at the repo root): signups, positions, referrals and the public leaderboard.
 
 It lives in this repo but runs as **its own process with its own database**. The marketplace (`src/index.ts`) never imports anything from `src/waitlist/`, and the waitlist never loads the marketplace's config, database, Redis or chain pollers — `app.test.ts` fails if it ever does. Deploying, restarting or breaking one can't affect the other.
 
@@ -49,7 +49,8 @@ Limits per visitor IP: 10 signups / 10 min, 60 `/me` reads / min, 300 cached rea
 3. **Variables** — `WAITLIST_DATABASE_URL=<url from step 1>`, `NODE_ENV=production`, and `WAITLIST_CORS_ORIGIN` if the page won't be at `https://waitlist.blindmarket.xyz`.
 4. **Health check** — path `/health`.
 5. **Domain** — give the service `waitlist-api.blindmarket.xyz` (the landing page calls `https://waitlist-api.blindmarket.xyz/api/v1/waitlist`), and add the DNS record the host asks for.
-6. **Check** — `curl https://waitlist-api.blindmarket.xyz/health` → `{"ok":true}`, then open the page and sign up once.
+6. **Page** — host the repo's [`waitlist/`](../../../waitlist/) folder as a static site at `waitlist.blindmarket.xyz` (root directory `waitlist`, no build step).
+7. **Check** — `curl https://waitlist-api.blindmarket.xyz/health` → `{"ok":true}`, then open the page and sign up once.
 
 ## Tests
 
