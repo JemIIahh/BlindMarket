@@ -118,6 +118,20 @@ describe('autoVerify — fallback', () => {
     const result = autoVerify({ output: '' }, {});
     expect(result.score).toBe(0);
   });
+
+  it('hard-fails worker LLM-error markers even when they clear every rubric', () => {
+    // Regression: the platform worker used to submit its own catch text
+    // ("Error during LLM execution: ...") as the deliverable. It is long
+    // enough for min_length and contains no listed forbidden phrase, so the
+    // weighted mix scored it 100 and released escrow for zero work.
+    const result = autoVerify(
+      { output: 'Error during LLM execution: Tool call validation failed: attempted to call tool \'search\' which was not in request.tools' },
+      { min_length: 10 },
+    );
+    expect(result.passed).toBe(false);
+    expect(result.score).toBe(0);
+    expect(result.reasons[0]).toMatch(/LLM execution error/);
+  });
 });
 
 describe('autoVerify — combined criteria', () => {
