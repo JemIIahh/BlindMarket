@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "npx tsx src/index.ts",
+    "start:waitlist": "node --import tsx src/waitlist/server.ts",
+    "waitlist:admin": "node --import tsx src/waitlist/admin.ts",
     "build": "echo 'No build step needed — using tsx'",
     "typecheck": "tsc --noEmit",
     "typecheck:agents": "tsc -p tsconfig.agents.json",
