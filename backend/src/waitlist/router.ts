@@ -23,7 +23,7 @@ import type { ApiResponse } from '../types.js';
  *
  *   GET  /stats        → { total }
  *   GET  /leaderboard  → { entries: [{ rank, handle, points, referrals }] }
- *   POST /join         { email, xHandle, tasks?, ref? } → 201 { token, ...standing } | 200 { alreadyJoined, ...standing }
+ *   POST /join         { email, xHandle, tasks?, ref? } → 201 { token, ...standing } | 200 { alreadyJoined: true }
  *   GET  /me           Authorization: Bearer <token> → standing
  *   POST /me/tasks     Authorization: Bearer <token>, { task } → standing
  *
@@ -63,6 +63,42 @@ const readLimiter = limiter(60 * 1000, 60, 'Too many requests, please try again 
 // cost the database nothing per request. Every page load calls both; a looser
 // cap keeps a room full of people on one Wi-Fi from seeing blank counters.
 const publicLimiter = limiter(60 * 1000, 300, 'Too many requests, please try again later');
+
+// Referral credits per visitor connection per day. Emails aren't confirmed, so
+// without this one connection could farm its own link with a script and
+// throwaway addresses — the signup limit alone allows ~60 credits an hour.
+// Over the limit the signup still goes through; it just credits nobody. Real
+// friends, each on their own connection, all count, so referrals stay
+// uncapped per person. In memory: per process, reset by a restart — enough to
+// take the cheap attack off the table.
+export const REFERRAL_CREDITS_PER_CONNECTION_PER_DAY = 5;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const referralCredits = new Map<string, { count: number; resetAt: number }>();
+
+/** IPv6 users get a whole /64, so count per /64 — otherwise every address in it is a fresh budget. */
+export function connectionKey(ip: string): string {
+  if (ip.startsWith('::ffff:')) return ip.slice(7);
+  if (!ip.includes(':')) return ip;
+  const [head, tail = ''] = ip.split('::');
+  const front = head ? head.split(':') : [];
+  const back = tail ? tail.split(':') : [];
+  const groups = [...front, ...Array<string>(Math.max(0, 8 - front.length - back.length)).fill('0'), ...back];
+  return `${groups.slice(0, 4).map((g) => g.toLowerCase().replace(/^0+(?=.)/, '')).join(':')}::/64`;
+}
+
+function referralCreditsLeft(key: string, now: number): boolean {
+  const entry = referralCredits.get(key);
+  return !entry || entry.resetAt <= now || entry.count < REFERRAL_CREDITS_PER_CONNECTION_PER_DAY;
+}
+
+function spendReferralCredit(key: string, now: number): void {
+  if (referralCredits.size > 50_000) {
+    for (const [k, v] of referralCredits) if (v.resetAt <= now) referralCredits.delete(k);
+  }
+  const entry = referralCredits.get(key);
+  if (!entry || entry.resetAt <= now) referralCredits.set(key, { count: 1, resetAt: now + DAY_MS });
+  else entry.count += 1;
+}
 
 function bearerToken(req: Request): string {
   const match = /^Bearer\s+(wl_[A-Za-z0-9_-]{16,128})$/.exec(req.headers.authorization ?? '');
@@ -106,19 +142,25 @@ waitlistRouter.get('/leaderboard', publicLimiter, async (_req, res, next) => {
 waitlistRouter.post('/join', joinLimiter, async (req, res, next) => {
   try {
     const { email, xHandle, tasks, ref } = joinSchema.parse(req.body);
-    const { token, standing } = await joinWaitlist({ email, xHandle, tasks: [...new Set(tasks)], ref });
-    if (token) {
+    const now = Date.now();
+    const key = connectionKey(req.ip ?? '');
+    const result = await joinWaitlist({
+      email,
+      xHandle,
+      tasks: [...new Set(tasks)],
+      ref: ref && referralCreditsLeft(key, now) ? ref : undefined,
+    });
+    if (result.referralCredited) spendReferralCredit(key, now);
+    if (result.token) {
       const body: ApiResponse<WaitlistStanding & { token: string; alreadyJoined: false }> = {
         success: true,
-        data: { ...standing, token, alreadyJoined: false },
+        data: { ...result.standing, token: result.token, alreadyJoined: false },
       };
       res.status(201).json(body);
       return;
     }
-    const body: ApiResponse<WaitlistStanding & { alreadyJoined: true }> = {
-      success: true,
-      data: { ...standing, alreadyJoined: true },
-    };
+    // Nothing about the existing signup: no handle, points or position without the token.
+    const body: ApiResponse<{ alreadyJoined: true }> = { success: true, data: { alreadyJoined: true } };
     res.json(body);
   } catch (err) {
     next(err);

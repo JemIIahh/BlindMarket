@@ -103,13 +103,31 @@ describe('POST /api/v1/waitlist/join', () => {
     });
   });
 
-  it('returns the existing standing — and no token — for a repeat email', async () => {
-    store.joinWaitlist.mockResolvedValueOnce({ token: null, standing: STANDING });
+  it('tells a repeat email only that it is already on the list — no token, handle or standing', async () => {
+    store.joinWaitlist.mockResolvedValueOnce({ token: null, standing: null, referralCredited: false });
     const res = await request(app).post('/api/v1/waitlist/join').send(JOIN);
 
     expect(res.status).toBe(200);
-    expect(res.body.data).toEqual({ ...STANDING, alreadyJoined: true });
-    expect(res.body.data).not.toHaveProperty('token');
+    expect(res.body).toEqual({ success: true, data: { alreadyJoined: true } });
+  });
+
+  it('credits at most 5 referrals per connection per day — later signups still get in', async () => {
+    store.joinWaitlist.mockResolvedValue({ token: TOKEN, standing: STANDING, referralCredited: true });
+    for (let i = 0; i < 6; i++) {
+      const res = await request(app).post('/api/v1/waitlist/join').send({ email: `f${i}@example.com`, xHandle: `f${i}`, ref: 'k7m2p9qa' });
+      expect(res.status).toBe(201);
+    }
+    const refsSent = store.joinWaitlist.mock.calls.map(([input]) => input.ref);
+    expect(refsSent).toEqual(['k7m2p9qa', 'k7m2p9qa', 'k7m2p9qa', 'k7m2p9qa', 'k7m2p9qa', undefined]);
+  });
+
+  it('only spends the referral budget when a referral was actually credited', async () => {
+    // e.g. an unknown code, or an address already on the list
+    store.joinWaitlist.mockResolvedValue({ token: TOKEN, standing: STANDING, referralCredited: false });
+    for (let i = 0; i < 7; i++) {
+      await request(app).post('/api/v1/waitlist/join').send({ email: `g${i}@example.com`, xHandle: `g${i}`, ref: 'zzzzzzzz' });
+    }
+    expect(store.joinWaitlist.mock.calls.every(([input]) => input.ref === 'zzzzzzzz')).toBe(true);
   });
 
   it('passes a referral code through, normalized to lowercase', async () => {
@@ -264,5 +282,17 @@ describe('rate limiting', () => {
     }
     const me = await request(app).get('/api/v1/waitlist/me').set('Authorization', `Bearer ${TOKEN}`);
     expect(me.status).toBe(200);
+  });
+});
+
+describe('connectionKey', () => {
+  it('keys IPv4 (and IPv4-mapped IPv6) by address, and IPv6 by its /64', async () => {
+    const { connectionKey } = await import('./router.js');
+    expect(connectionKey('203.0.113.7')).toBe('203.0.113.7');
+    expect(connectionKey('::ffff:203.0.113.7')).toBe('203.0.113.7');
+    expect(connectionKey('2001:db8:1:2::1')).toBe('2001:db8:1:2::/64');
+    // Same /64 written out in full, with leading zeros and a different host part.
+    expect(connectionKey('2001:0db8:0001:0002:ffff:0:0:9')).toBe('2001:db8:1:2::/64');
+    expect(connectionKey('2001:db8:1:3::1')).not.toBe(connectionKey('2001:db8:1:2::1'));
   });
 });

@@ -123,29 +123,35 @@ async function standingById(id: number): Promise<WaitlistStanding> {
   };
 }
 
+export type JoinResult =
+  | { token: string; standing: WaitlistStanding; referralCredited: boolean }
+  | { token: null; standing: null; referralCredited: false };
+
 /**
- * Join by email. Idempotent: a repeat email returns the existing standing and
- * NO token — the token is a bearer secret, so it is handed out exactly once,
- * to whoever created the signup, never to someone who merely knows the email.
- * A repeat join also never changes the stored handle, and never credits a
- * referral: only the statement that creates a row can credit its referrer.
+ * Join by email. Idempotent: a repeat email gets NO token and learns nothing
+ * about the existing signup (standing is null) — without proof of owning the
+ * address, its handle, points and position stay private; otherwise anyone
+ * could link a private email to a public leaderboard handle. The token is a
+ * bearer secret handed out exactly once, to whoever created the signup.
+ * A repeat join never changes the stored row and never credits a referral:
+ * only the statement that creates a row can credit its referrer.
  */
 export async function joinWaitlist(input: {
   email: string;
   xHandle: string;
   tasks: readonly WaitlistTask[];
   ref?: string;
-}): Promise<{ token: string | null; standing: WaitlistStanding }> {
+}): Promise<JoinResult> {
   const db = await getPool();
   const token = `wl_${randomBytes(24).toString('base64url')}`;
 
-  let inserted: { id: number } | undefined;
+  let inserted: { id: number; credited: boolean } | undefined;
   for (let attempt = 1; ; attempt++) {
     try {
       // One statement: insert the signup and, only if a row was actually
       // created, bump the referrer. An unknown or missing ref resolves to NULL
       // and credits no one.
-      const { rows } = await db.query<{ id: number }>(
+      const { rows } = await db.query<{ id: number; credited: boolean }>(
         `WITH ins AS (
            INSERT INTO waitlist_signups (email, x_handle, tasks, points, token_hash, referral_code, referred_by)
            VALUES ($1, $2, $3, $4, $5, $6, (SELECT id FROM waitlist_signups WHERE referral_code = $7))
@@ -156,7 +162,7 @@ export async function joinWaitlist(input: {
               SET referral_count = referral_count + 1, updated_at = NOW()
             WHERE id = (SELECT referred_by FROM ins)
          )
-         SELECT id FROM ins`,
+         SELECT id, referred_by IS NOT NULL AS credited FROM ins`,
         [input.email, input.xHandle, input.tasks, pointsFor(input.tasks), hashToken(token), newReferralCode(), input.ref ?? null],
       );
       inserted = rows[0];
@@ -168,11 +174,9 @@ export async function joinWaitlist(input: {
       throw err;
     }
   }
-  if (inserted) return { token, standing: await standingById(inserted.id) };
-
-  const existing = await db.query<{ id: number }>('SELECT id FROM waitlist_signups WHERE email = $1', [input.email]);
-  if (!existing.rows[0]) throw new Error('waitlist insert conflicted but no row matched the email');
-  return { token: null, standing: await standingById(existing.rows[0].id) };
+  if (inserted) return { token, standing: await standingById(inserted.id), referralCredited: inserted.credited };
+  // ON CONFLICT (email) is the only way no row comes back: the address is already on the list.
+  return { token: null, standing: null, referralCredited: false };
 }
 
 export async function getStandingByToken(token: string): Promise<WaitlistStanding | null> {

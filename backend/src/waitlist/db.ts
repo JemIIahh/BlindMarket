@@ -76,18 +76,35 @@ async function runMigrations(p: pg.Pool): Promise<void> {
   }
 }
 
+/**
+ * Connection settings with libpq's meaning of `sslmode`, applied explicitly.
+ * node-postgres lets an `sslmode` in the URL override the `ssl` option — and
+ * today it reads `require` as "verify the certificate", which fails on hosts
+ * with private CAs — so the mode is taken out of the URL and decided here:
+ *   disable                → no TLS (local, or a host's private network)
+ *   verify-ca, verify-full → TLS, certificate verified
+ *   anything else / unset  → TLS without CA verification (libpq `require`)
+ */
+export function connectionOptions(databaseUrl: string): Pick<pg.PoolConfig, 'connectionString' | 'ssl'> {
+  const url = new URL(databaseUrl);
+  const mode = (url.searchParams.get('sslmode') ?? '').toLowerCase();
+  url.searchParams.delete('sslmode');
+  const ssl = mode === 'disable'
+    ? false
+    : { rejectUnauthorized: mode === 'verify-full' || mode === 'verify-ca' };
+  return { connectionString: url.toString(), ssl };
+}
+
 export async function getWaitlistPool(): Promise<pg.Pool> {
   if (!waitlistConfig.databaseUrl) throw new Error('WAITLIST_DATABASE_URL is not set');
   if (!pool) {
-    // Managed Postgres (Neon, Railway, Render…) wants TLS but node-postgres can't
-    // verify their chains without a configured CA, so connect over TLS without
-    // CA verification (sslmode=require semantics). A local or private-network
-    // Postgres without TLS: put `?sslmode=disable` in the URL.
-    const sslDisabled = /[?&]sslmode=disable\b/.test(waitlistConfig.databaseUrl);
-    pool = new Pool({
-      connectionString: waitlistConfig.databaseUrl,
-      ssl: sslDisabled ? false : { rejectUnauthorized: false },
-      max: 10,
+    pool = new Pool({ ...connectionOptions(waitlistConfig.databaseUrl), max: 10 });
+    // A pooled connection the server drops while idle (restart, failover, idle
+    // timeout) is reported here. Without a listener Node treats it as an
+    // uncaught error and the whole service exits; with one, the pool just
+    // discards that connection and opens a fresh one on the next query.
+    pool.on('error', (err) => {
+      console.error('[waitlist-db] idle database connection lost:', err.message);
     });
   }
   ready ??= runMigrations(pool).catch((err) => {

@@ -225,7 +225,7 @@
   .form-hint{color:var(--text-faint); font-size:.84rem; margin-top:14px; text-align:center;}
 
   /* standing (after joining) */
-  .standing-note{font-size:.88rem; color:var(--text-dim); margin:-8px 0 16px;}
+  .form-info{font-size:.86rem; color:var(--text); background:var(--accent-soft); border:1px solid var(--accent-line); border-radius:12px; padding:11px 14px; margin-top:14px;}
   /* Big numbers use the body face: Bungee's 7 reads as a "?" at display sizes. */
   .standing-pos{font-family:var(--font-body); font-weight:800; letter-spacing:-.03em; font-size:clamp(3rem, 8vw, 4.6rem); line-height:1; color:var(--accent); margin:2px 0 10px; font-variant-numeric:tabular-nums; overflow-wrap:anywhere;}
   .standing-handle{font-family:var(--font-mono); color:var(--text-dim); font-size:.95rem; margin-bottom:26px;}
@@ -455,6 +455,7 @@
             <p class="ref-note" id="ref-note" hidden>You're joining through a friend's link — they get <b>+2 pts</b> when you're in.</p>
             <button type="submit" class="btn-pill block" id="btn-submit" disabled>Submit</button>
             <p class="form-error" id="form-error" role="alert" hidden></p>
+            <p class="form-info" id="form-info" role="status" hidden></p>
             <p class="form-hint" id="submit-hint">Follow, like and repost first — then submit.</p>
           </div>
         </form>
@@ -462,7 +463,6 @@
         <div class="ticket-grid" id="standing" hidden>
           <div class="ticket-col">
             <p class="step-label">You're in</p>
-            <p class="standing-note" id="standing-note" hidden>That email is already on the list — here's its spot.</p>
             <p class="field-label">Your position</p>
             <p class="standing-pos" id="position-number">—</p>
             <p class="standing-handle" id="standing-handle"></p>
@@ -853,13 +853,15 @@
   var pendingRef = store.get(REF_KEY);
   $('ref-note').hidden = !(pendingRef && !store.get(TOKEN_KEY));
 
+  var formInfo = $('form-info');
   function showError(msg, field){
+    formInfo.hidden = true;
     formError.textContent = msg; formError.hidden = false;
     [handleInput, emailInput].forEach(function(el){ el.setAttribute('aria-invalid', el === field ? 'true' : 'false'); });
     if (field) field.focus();
   }
   function clearError(){
-    formError.hidden = true; formError.textContent = '';
+    formError.hidden = true; formError.textContent = ''; formInfo.hidden = true;
     [handleInput, emailInput].forEach(function(el){ el.removeAttribute('aria-invalid'); });
   }
   [handleInput, emailInput].forEach(function(el){ el.addEventListener('input', function(){ if (el.getAttribute('aria-invalid') === 'true') clearError(); }); });
@@ -877,10 +879,18 @@
     var body = { email: email, xHandle: handle, tasks: tasks };
     if (pendingRef) body.ref = pendingRef;
     api('POST', '/join', body)
-      .then(function(standing){
-        if (standing.token) store.set(TOKEN_KEY, standing.token);
+      .then(function(res){
+        submitBtn.disabled = false; submitBtn.textContent = 'Submit';
+        if (res.alreadyJoined){
+          // The server says nothing about an existing signup to someone who only
+          // knows its email — the spot lives with the token on the signup device.
+          formInfo.textContent = 'That email is already on the list. Your spot, points and referral link are saved on the device you signed up from.';
+          formInfo.hidden = false;
+          return;
+        }
+        store.set(TOKEN_KEY, res.token);
         store.del(REF_KEY);
-        showStanding(standing, !standing.alreadyJoined);
+        showStanding(res, true);
         refreshBoardSoon();
       })
       .catch(function(err){
@@ -912,14 +922,13 @@
     $('ref-link').value = referralLink(s.referralCode);
     $('ref-count').textContent = fmt(s.referrals);
     $('ref-count-word').textContent = s.referrals === 1 ? 'friend' : 'friends';
-    // The bonus is recorded against the signup's token; a repeat email on a new device has none.
+    // The bonus is recorded against the signup's token.
     $('btn-comment-bonus').hidden = s.tasks.indexOf('comment') !== -1 || !store.get(TOKEN_KEY);
     renderBoard();
   }
 
   function showStanding(s, celebrate){
     renderStanding(s);
-    $('standing-note').hidden = !s.alreadyJoined;
     form.hidden = true; standingEl.hidden = false;
     $('ref-note').hidden = true;
     if (celebrate && !reduceMotion) fireConfetti();

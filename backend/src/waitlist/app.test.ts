@@ -101,4 +101,19 @@ describe('waitlist service', () => {
     // A different visitor through the same proxy still gets in.
     expect((await join('198.51.100.4', 11)).status).toBe(201);
   });
+
+  it('counts referral credits per visitor behind the proxy — and per /64 for IPv6', async () => {
+    store.joinWaitlist.mockResolvedValue({ token: TOKEN, standing: STANDING, referralCredited: true });
+    let n = 0;
+    const join = (ip: string) =>
+      request(app).post('/api/v1/waitlist/join').set('X-Forwarded-For', ip).send({ email: `r${n}@example.com`, xHandle: `r${n++}`, ref: 'k7m2p9qa' });
+
+    for (let i = 0; i < 6; i++) await join('203.0.113.7'); // 6th from the same visitor: no credit
+    await join('198.51.100.4'); // someone else: credited
+    for (let i = 1; i <= 6; i++) await join(`2001:db8:1:2::${i}`); // one /64 — the 6th: no credit
+
+    const refs = store.joinWaitlist.mock.calls.map(([input]) => input.ref);
+    const credited = Array<string>(5).fill('k7m2p9qa');
+    expect(refs).toEqual([...credited, undefined, 'k7m2p9qa', ...credited, undefined]);
+  });
 });

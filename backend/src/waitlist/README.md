@@ -17,7 +17,7 @@ On start it connects, creates its one table if needed (`db.ts`), then listens. I
 
 | Variable | Required | Default | Notes |
 | --- | --- | --- | --- |
-| `WAITLIST_DATABASE_URL` | yes | — | Any Postgres 12+, no extensions needed. TLS is used by default; add `?sslmode=disable` for a database without TLS (local, or a host's private network). |
+| `WAITLIST_DATABASE_URL` | yes | — | Any Postgres 12+, no extensions needed. `sslmode` in the URL means what it means for `psql`: unset or `require` → TLS without certificate verification (works with managed hosts' private CAs); `verify-full` → TLS with verification; `disable` → no TLS (local, or a host's private network). |
 | `NODE_ENV` | in production | `development` | Set to `production` when deployed. `development` also accepts any `localhost` page origin. |
 | `WAITLIST_CORS_ORIGIN` | no | `https://waitlist.blindmarket.xyz` in production | Comma-separated origins allowed to call the API — wherever the landing page is served. |
 | `PORT` | no | `3100` | Most hosts inject this. |
@@ -32,11 +32,13 @@ Every name is `WAITLIST_`-prefixed on purpose: the service can't pick up the mar
 | `GET /health` | `{ ok: true }` — use as the host's health check |
 | `GET /api/v1/waitlist/stats` | `{ total }` (cached 10s) |
 | `GET /api/v1/waitlist/leaderboard` | top 25: `{ rank, handle, points, referrals }` — never emails (cached 10s) |
-| `POST /api/v1/waitlist/join` | `{ email, xHandle, tasks?, ref? }` → 201 with a one-time token, or 200 `alreadyJoined` |
+| `POST /api/v1/waitlist/join` | `{ email, xHandle, tasks?, ref? }` → 201 with the standing and a one-time token, or 200 `{ alreadyJoined: true }` — nothing about an existing signup (no handle, points or position) without its token |
 | `GET /api/v1/waitlist/me` | `Authorization: Bearer <token>` → position, points, referral code and count |
 | `POST /api/v1/waitlist/me/tasks` | `Authorization: Bearer <token>`, `{ task }` — e.g. the comment bonus |
 
-Limits per visitor IP: 10 signups / 10 min, 60 `/me` reads / min, 300 cached reads / min. Bodies over 4 kB are refused.
+Limits per visitor IP: 10 signups / 10 min, 60 `/me` reads / min, 300 cached reads / min, and at most 5 **credited referrals** per connection per day (IPv6: per /64) — signups past that still go through, they just credit nobody. Bodies over 4 kB are refused.
+
+A database connection dropped while idle (restart, failover) is logged and replaced on the next query; it doesn't take the service down.
 
 ## Deploy (a new service — the marketplace deploy is untouched)
 
