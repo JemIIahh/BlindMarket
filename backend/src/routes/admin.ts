@@ -5,6 +5,7 @@ import { shadowReport } from '../services/semanticMatch.js';
 import { backfillAgentEmbeddings } from '../services/agentEmbedding.js';
 import { getPool } from '../services/neonDb.js';
 import { embeddingModelId, embeddingsConfigured } from '../services/embeddingService.js';
+import { diagnoseStuckTasks, forceReleaseTask, rewindSubmittedTask } from '../services/stuckTasks.js';
 import type { AuthRequest } from '../types.js';
 
 export const adminRouter = Router();
@@ -96,4 +97,58 @@ adminRouter.post('/tasks/:id/skip-wrap', requireAuth, requireFounder, async (req
 
   console.log(`[admin] skipKeyWrap=true set for task ${id} by ${req.user?.address}`);
   res.json({ ok: true, taskId: id });
+});
+
+/**
+ * GET /api/v1/admin/stuck-tasks
+ *
+ * Diagnostic for "cooked" tasks: every task sitting in a non-terminal,
+ * non-open off-chain state, with the evidence needed to judge whether it can
+ * be freed (off-chain age, executor + agent liveness, on-chain status, and a
+ * verdict). Read-only. Logic lives in services/stuckTasks.ts, shared with
+ * scripts/stuck-tasks.ts.
+ *
+ * Founder-only. There are no founder addresses configured yet, so use the
+ * script until there are.
+ */
+adminRouter.get('/stuck-tasks', requireAuth, requireFounder, async (_req: AuthRequest, res, next) => {
+  try {
+    const tasks = await diagnoseStuckTasks();
+    res.json({ success: true, data: { tasks, total: tasks.length } });
+  } catch (err) { next(err); }
+});
+
+/**
+ * POST /api/v1/admin/tasks/:id/force-release
+ *
+ * Founder-only version of POST /api/v1/a2a/tasks/:id/release for tasks whose
+ * executor is gone. Same on-chain guard — refuses past-Funded tasks. Logic
+ * lives in services/stuckTasks.ts, shared with scripts/force-release.ts.
+ *
+ * Founder-only. There are no founder addresses configured yet, so use the
+ * script until there are.
+ */
+adminRouter.post('/tasks/:id/force-release', requireAuth, requireFounder, async (req: AuthRequest, res, next) => {
+  try {
+    const result = await forceReleaseTask(req.params.id as string, req.user?.address ?? 'admin-route');
+    res.json({ success: true, data: result });
+  } catch (err) { next(err); }
+});
+
+/**
+ * POST /api/v1/admin/tasks/:id/rewind
+ *
+ * Rewinds one task from off-chain 'submitted' back to 'accepted' when the
+ * escrow is still Assigned to the recorded executor (evidence never
+ * broadcast). The owning worker's resume then re-drives it end-to-end.
+ * Same guards as services/stuckTasks.ts#rewindSubmittedTask.
+ *
+ * Founder-only. There are no founder addresses configured yet, so use
+ * scripts/rewind-submitted.ts until there are.
+ */
+adminRouter.post('/tasks/:id/rewind', requireAuth, requireFounder, async (req: AuthRequest, res, next) => {
+  try {
+    const result = await rewindSubmittedTask(req.params.id as string, req.user?.address ?? 'admin-route');
+    res.json({ success: true, data: result });
+  } catch (err) { next(err); }
 });

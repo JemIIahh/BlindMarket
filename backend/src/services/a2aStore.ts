@@ -841,6 +841,33 @@ export async function getSettlementDeadlineTTL(taskId: string): Promise<number> 
 }
 
 /**
+ * List tasks stuck in a non-terminal, non-open state (for the admin
+ * stuck-tasks diagnostic). Covers 'accepted', 'in_progress' and 'submitted':
+ * 'accepted' alone misses tasks stranded mid-submit (state flips to
+ * 'submitted' at unsigned-tx-build time, BEFORE broadcast — a worker that
+ * dies in that gap never comes back) and tasks mid-execution.
+ */
+export async function listStuckCandidates(): Promise<Array<{ taskId: string; state: A2ATaskState }>> {
+  const result: Array<{ taskId: string; state: A2ATaskState }> = [];
+  let cursor = '0';
+  do {
+    const [nextCursor, keys] = await redis.scan(cursor, 'MATCH', 'a2a:state:*', 'COUNT', 50);
+    cursor = nextCursor;
+    for (const key of keys) {
+      const raw = await redis.get(key);
+      if (!raw) continue;
+      try {
+        const state = JSON.parse(raw) as A2ATaskState;
+        if (state.status === 'accepted' || state.status === 'in_progress' || state.status === 'submitted') {
+          result.push({ taskId: key.replace('a2a:state:', ''), state });
+        }
+      } catch { /* malformed state, skip */ }
+    }
+  } while (cursor !== '0');
+  return result;
+}
+
+/**
  * List all tasks in 'accepted' status (for gas-liveness sweep).
  * Scans for state keys and filters for accepted status.
  */
