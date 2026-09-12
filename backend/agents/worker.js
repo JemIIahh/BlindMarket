@@ -1792,16 +1792,40 @@ async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrapp
     let toolCalls = [];
     let llmFailed = false;
 
-    try {
-      const model = getModel();
+    const model = getModel();
+    const systemPrompt = `[IDENTITY]\n${AGENT_INSTRUCTIONS}\n\n[CAPABILITIES]\nYou have access to these tools ONLY: send_message, read_inbox, wait_for_reply, delegate_to_agent, plus any custom tools installed in your configuration. No other tools exist — there is NO web-search tool. Never call 'search' or any tool not in this list; the call will fail outright. If a task needs current or external information you cannot fetch with your tools, complete it from the brief and your own knowledge instead.\n\nIMPORTANT: Your final text output is the TASK RESULT that gets submitted on-chain. The task poster does NOT see your output as a live chat message.\n\nTo COMMUNICATE with the user (ask questions, give status updates), use the send_message tool — messages go to their inbox.\n\nUse send_message ONLY when you genuinely cannot proceed without more information. Prefer to work with the information you have and make reasonable assumptions. Do NOT ask for confirmation, approval, or preferences unless the task explicitly requires it.\n\nIf you truly need more information:\n  1. send_message — ask your question\n  2. wait_for_reply — waits for their response, then continues\n  3. Continue working with the reply\n\nDo NOT ask questions in your output text — use send_message instead. Only produce final output once the task is complete.`;
 
-      const result = await generateText({
-        model,
-        system: `[IDENTITY]\n${AGENT_INSTRUCTIONS}\n\n[CAPABILITIES]\nYou have access to these tools ONLY: send_message, read_inbox, wait_for_reply, delegate_to_agent, plus any custom tools installed in your configuration. No other tools exist — there is NO web-search tool. Never call 'search' or any tool not in this list; the call will fail outright. If a task needs current or external information you cannot fetch with your tools, complete it from the brief and your own knowledge instead.\n\nIMPORTANT: Your final text output is the TASK RESULT that gets submitted on-chain. The task poster does NOT see your output as a live chat message.\n\nTo COMMUNICATE with the user (ask questions, give status updates), use the send_message tool — messages go to their inbox.\n\nUse send_message ONLY when you genuinely cannot proceed without more information. Prefer to work with the information you have and make reasonable assumptions. Do NOT ask for confirmation, approval, or preferences unless the task explicitly requires it.\n\nIf you truly need more information:\n  1. send_message — ask your question\n  2. wait_for_reply — waits for their response, then continues\n  3. Continue working with the reply\n\nDo NOT ask questions in your output text — use send_message instead. Only produce final output once the task is complete.`,
-        prompt: briefPlaintext,
-        tools: buildTools(acceptedTaskHash),
-        stopWhen: stepCountIs(10),
-      });
+    // Tool-call failures get one text-only retry: when the model mangles tool
+    // syntax (unknown tool name, unparseable args — both observed live with
+    // Groq gpt-oss), a second attempt with tools disabled usually yields clean
+    // text. Either attempt's success is genuine output; two failures abort
+    // below via the fail-closed path. temperature 0: deterministic output is
+    // also far less likely to malform tool syntax in the first place.
+    let result = null;
+    try {
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        const textOnly = attempt > 1;
+        try {
+          result = await generateText({
+            model,
+            system: systemPrompt,
+            prompt: briefPlaintext,
+            tools: buildTools(acceptedTaskHash),
+            ...(textOnly ? { toolChoice: 'none' } : {}),
+            temperature: 0,
+            stopWhen: stepCountIs(10),
+          });
+          if (textOnly) log(`LLM text-only retry succeeded for ${acceptedTaskHash.slice(0, 10)}…`);
+          break;
+        } catch (e) {
+          const msg = (e && e.message) || '';
+          if (attempt < 2 && /tool call/i.test(msg)) {
+            log(`LLM tool-call malformed for ${acceptedTaskHash.slice(0, 10)}… (${msg}) — retrying text-only (no tools)`);
+            continue;
+          }
+          throw e;
+        }
+      }
 
       text = result.text;
       llmElapsed = ((Date.now() - llmStartedAt) / 1000).toFixed(1);
@@ -1809,6 +1833,27 @@ async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrapp
 
       log(`LLM finished for ${acceptedTaskHash.slice(0, 10)}… in ${llmElapsed}s (${text.length} chars)`);
       log(`LLM finish reason: ${result.finishReason}`);
+
+      // Usage telemetry for the agent Usage tab (tokens + cost per model).
+      // Best-effort — a telemetry failure must never break the task run, so
+      // failures are swallowed here, not thrown.
+      try {
+        const u = result.usage;
+        if (u && (u.totalTokens || u.inputTokens || u.outputTokens)) {
+          void fetchWithTimeout(`${BACKEND_URL}/api/v1/agents/${AGENT_ID}/usage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AGENT_PLATFORM_TOKEN}` },
+            body: JSON.stringify({
+              taskHash: acceptedTaskHash,
+              provider: AGENT_PROVIDER,
+              model: AGENT_MODEL,
+              promptTokens: u.inputTokens ?? 0,
+              completionTokens: u.outputTokens ?? 0,
+              totalTokens: u.totalTokens ?? 0,
+            }),
+          }, 10_000).catch(() => {});
+        }
+      } catch { /* never break the run on telemetry */ }
 
       // Log the agent's full thought process step by step
       if (result.steps && result.steps.length > 0) {
@@ -1879,6 +1924,14 @@ async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrapp
     } catch (llmErr) {
       log(`LLM ERROR for ${acceptedTaskHash.slice(0, 10)}…: ${llmErr.message}`);
       if (llmErr.stack) log(`LLM Stack: ${llmErr.stack.split('\n').slice(0, 3).join(' | ')}`);
+      // Transport failures surface with an empty message ("Cannot connect to
+      // API: ") — log the underlying cause when present so the next one is
+      // diagnosable (this host has no IPv6 egress; see NODE_OPTIONS).
+      try {
+        const cause = llmErr && llmErr.cause;
+        const causeStr = cause == null ? '' : (typeof cause === 'string' ? cause : JSON.stringify(cause));
+        if (causeStr) log(`LLM cause: ${causeStr.slice(0, 300)}`);
+      } catch { /* serialization must never break the abort path */ }
       llmFailed = true;
     }
 
