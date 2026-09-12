@@ -34,6 +34,7 @@ import { toolsRouter } from './routes/tools.js';
 import { skillsRouter } from './routes/skills.js';
 import { txRouter } from './routes/tx.js';
 import { mcpRouter } from './routes/mcp.js';
+import { waitlistRouter } from './routes/waitlist.js';
 import { wellKnownRouter, openapiRouter } from './routes/discovery.js';
 import { getDb } from './services/database.js';
 import { startEscrowEventLoop } from './services/escrowEvents.js';
@@ -56,6 +57,12 @@ app.set('trust proxy', 1);
 
 // Security
 app.use(helmet());
+// Public waitlist for the static landing page, which lives on its own origin.
+// Mounted ahead of the app-wide CORS so it answers its own preflights from a
+// separate, credential-less allowlist (WAITLIST_CORS_ORIGIN) instead of
+// widening the credentialed one below; it brings its own body parser and rate
+// limits too, so nothing after this line changes for any other route.
+app.use('/api/v1/waitlist', waitlistRouter);
 app.use(cors({
   origin: config.nodeEnv === 'development'
     ? [...new Set([...config.corsOrigin, 'http://localhost:5173', 'http://localhost:5174'])] as string[]

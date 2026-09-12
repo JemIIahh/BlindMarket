@@ -98,6 +98,13 @@ export const config = {
 
   // CORS
   corsOrigin: optional('CORS_ORIGIN', 'http://localhost:5173').split(',').map(s => s.trim()),
+  // Origins allowed to call the public waitlist API (routes/waitlist.ts) —
+  // the static landing page's host. Deliberately separate from corsOrigin:
+  // that list is credentialed and grants the whole app API; this one is
+  // credential-less and only reaches /api/v1/waitlist. Development also
+  // allows any localhost port (see waitlistRouter).
+  waitlistCorsOrigin: optional('WAITLIST_CORS_ORIGIN', IS_PROD ? 'https://waitlist.blindmarket.xyz' : '')
+    .split(',').map(s => s.trim()).filter(Boolean),
 
   // 0G Storage (Phase 3)
   ogStorageIndexerRpc: process.env.OG_STORAGE_INDEXER_RPC || '',

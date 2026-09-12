@@ -601,6 +601,47 @@ const migrations: Array<{ id: number; name: string; sql: string }> = [
       CREATE INDEX IF NOT EXISTS idx_analytics_session ON analytics_events(session_id);
     `,
   },
+  {
+    // Pre-launch waitlist (routes/waitlist.ts). Self-contained: no other table
+    // references it and it references nothing, so it can never block or alter
+    // an existing migration. tasks/points are the self-reported X tasks the
+    // landing page collects; token_hash is SHA-256 of the signup's bearer
+    // token (the raw token is only ever returned to the browser, once).
+    id: 27,
+    name: 'waitlist_signups',
+    sql: `
+      CREATE TABLE IF NOT EXISTS waitlist_signups (
+        id SERIAL PRIMARY KEY,
+        email TEXT NOT NULL UNIQUE,
+        tasks TEXT[] NOT NULL DEFAULT '{}',
+        points INTEGER NOT NULL DEFAULT 0,
+        token_hash TEXT NOT NULL UNIQUE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `,
+  },
+  {
+    // Waitlist referrals + public leaderboard. Still self-contained: the only
+    // new reference (referred_by) points back into waitlist_signups itself.
+    // Separate from 27 rather than folded into it, so a database that already
+    // applied 27 still gets these columns. Existing rows get a code backfilled
+    // before the NOT NULL + unique index go on.
+    id: 28,
+    name: 'waitlist_referrals',
+    sql: `
+      ALTER TABLE waitlist_signups
+        ADD COLUMN IF NOT EXISTS x_handle TEXT,
+        ADD COLUMN IF NOT EXISTS referral_code TEXT,
+        ADD COLUMN IF NOT EXISTS referred_by INTEGER REFERENCES waitlist_signups(id) ON DELETE SET NULL,
+        ADD COLUMN IF NOT EXISTS referral_count INTEGER NOT NULL DEFAULT 0;
+      UPDATE waitlist_signups
+         SET referral_code = substr(md5(random()::text || id::text), 1, 10)
+       WHERE referral_code IS NULL;
+      ALTER TABLE waitlist_signups ALTER COLUMN referral_code SET NOT NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS waitlist_signups_referral_code_key ON waitlist_signups (referral_code);
+    `,
+  },
 ];
 
 async function runMigrations(p: pg.Pool): Promise<void> {
