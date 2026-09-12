@@ -38,6 +38,14 @@ import {
   eciesDecrypt,
   generateAesKey,
 } from '../src/services/crypto.js';
+import {
+  encodeExecuteCallData,
+  buildUserOp,
+  signUserOp,
+  submitUserOp,
+  getSmartAccountNonce,
+  estimateUserOpGas,
+} from './userop.js';
 
 
 // ── Crypto: ECIES + AES helpers ──
@@ -116,6 +124,14 @@ const AGENT_ESCROW_ADDRESS = process.env.AGENT_ESCROW_ADDRESS ?? '';
 const BASE_RPC_URL = process.env.BASE_RPC_URL ?? '';
 const BASE_CHAIN_ID = Number(process.env.BASE_CHAIN_ID ?? 0);
 const AGENT_BASE_ESCROW_ADDRESS = process.env.AGENT_BASE_ESCROW_ADDRESS ?? '';
+// ERC-4337 AA — smart account on Base for gasless USDC paymaster.
+// Empty when the agent has no smart account (pre-AA or deployment failed).
+const AGENT_SMART_ACCOUNT_ADDRESS = process.env.AGENT_SMART_ACCOUNT_ADDRESS ?? '';
+const AA_ENTRY_POINT = process.env.AA_ENTRY_POINT ?? '';
+const AA_PAYMASTER = process.env.AA_PAYMASTER ?? '';
+const AA_USDC = process.env.AA_USDC ?? '';
+const PIMLICO_BUNDLER_URL = process.env.PIMLICO_BUNDLER_URL ?? '';
+const PIMLICO_API_KEY = process.env.PIMLICO_API_KEY ?? '';
 const AGENT_TOOLS_RAW = process.env.AGENT_TOOLS ?? '[]';
 const AGENT_TOOL_SECRETS_RAW = process.env.AGENT_TOOL_SECRETS ?? '{}';
 const AGENT_CAPABILITIES_RAW = process.env.AGENT_CAPABILITIES ?? '[]';
@@ -510,7 +526,15 @@ export async function pickAffordable(entries, problemFor) {
   return { affordable, skipped };
 }
 
-export async function preflightGas(chain, signer) {
+export async function preflightGas(chain, signer, viaAA = (pickChain(chain) === 'base' && !!AGENT_SMART_ACCOUNT_ADDRESS && !!AA_ENTRY_POINT)) {
+  // ERC-4337 AA path: gas is paid in USDC via the paymaster — skip the ETH
+  // balance check entirely. Callers that already resolved the on-chain
+  // submitter pass viaAA explicitly (false for legacy EOA-assigned tasks,
+  // whose raw tx still needs ETH); everyone else keeps the default.
+  if (viaAA) {
+    return null; // AA path — paymaster sponsors gas in USDC
+  }
+
   if (!signer) return `no ${pickChain(chain)} signer — ${pickChain(chain) === 'base' ? 'BASE_RPC_URL/BASE_CHAIN_ID not injected (backend has no Base escrow configured?)' : 'AGENT_PRIVATE_KEY missing'}`;
   let balance;
   try {
@@ -2032,18 +2056,96 @@ async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrapp
       // ethers rather than landing on the wrong network.
       const submitChain = pickChain(submitJson.data?.chain);
       const submitSigner = signerFor(submitChain);
-      const gasProblem = await preflightGas(submitChain, submitSigner);
+      // The contract's onlyWorker gate accepts evidence ONLY from the recorded
+      // on-chain worker. AA agents assigned after the rollout name the smart
+      // account (UserOp path); legacy tasks assigned before it name the EOA
+      // (raw-tx path, which still needs ETH).
+      let submitViaAA = submitChain === 'base' && !!AGENT_SMART_ACCOUNT_ADDRESS && !!AA_ENTRY_POINT && !!PIMLICO_BUNDLER_URL;
+      if (submitViaAA && onChainTaskId != null && escrowIface) {
+        try {
+          const recorded = (await readOnChainWorker(onChainTaskId, submitChain)).toLowerCase();
+          submitViaAA = recorded === AGENT_SMART_ACCOUNT_ADDRESS.toLowerCase();
+          if (!submitViaAA) {
+            log(`submitEvidence for ${acceptedTaskHash.slice(0, 10)}…: on-chain worker ${recorded} is not the smart account (legacy assignment) — using raw EOA tx`);
+          }
+        } catch (e) {
+          log(`submitEvidence on-chain worker read failed, staying on AA path: ${e.message}`);
+        }
+      }
+      const gasProblem = await preflightGas(submitChain, submitSigner, submitViaAA);
       if (gasProblem) {
         log(`cannot broadcast submitEvidence for ${acceptedTaskHash.slice(0, 10)}… on ${submitChain}: ${gasProblem}`);
         await releaseTask(acceptedTaskHash);
         return;
       }
-      // EVM broadcast loop
+      // EVM broadcast loop — AA path wraps in UserOp when smart account is available
       const MAX_SUBMIT_ATTEMPTS = 3;
       const RETRY_DELAY_MS = 6_000;
+      let signedUserOp = null;
+      // ERC-4337 AA path: wrap tx in UserOp and submit to bundler on Base.
+      // Built once outside the retry loop so nonce stays stable across retries.
+      // submitViaAA was resolved above against the on-chain worker.
+      if (submitViaAA) {
+        try {
+          const unsigned = typeof unsignedSubmitEvidence === 'string'
+            ? ethers.Transaction.from(unsignedSubmitEvidence)
+            : unsignedSubmitEvidence;
+          const target = unsigned.to;
+          const value = unsigned.value ?? 0n;
+          const data = unsigned.data ?? '0x';
+          if (!target) throw new Error('unsigned tx missing target address');
+          const callData = encodeExecuteCallData(target, value, data);
+          const nonce = await getSmartAccountNonce(AA_ENTRY_POINT, AGENT_SMART_ACCOUNT_ADDRESS, BASE_RPC_URL);
+          const paymaster = AA_PAYMASTER
+            ? { address: AA_PAYMASTER, verificationGasLimit: 100_000, postOpGasLimit: 50_000, data: '0x' }
+            : undefined;
+          let userOp = buildUserOp({
+            sender: AGENT_SMART_ACCOUNT_ADDRESS,
+            nonce,
+            callData,
+            paymaster,
+          });
+          // Ask the bundler for realistic gas limits (best-effort; fall back to defaults)
+          try {
+            const estimate = await estimateUserOpGas(userOp, PIMLICO_BUNDLER_URL, PIMLICO_API_KEY, AA_ENTRY_POINT);
+            if (estimate) {
+              userOp = buildUserOp({
+                sender: userOp.sender,
+                nonce: userOp.nonce,
+                callData: userOp.callData,
+                gasLimits: {
+                  callGasLimit: Number(estimate.callGasLimit) || 200_000,
+                  verificationGasLimit: Number(estimate.verificationGasLimit) || 500_000,
+                  preVerificationGas: Number(estimate.preVerificationGas) || 100_000,
+                },
+                fees: {
+                  maxFeePerGas: Number(estimate.maxFeePerGas) || 100_000_000,
+                  maxPriorityFeePerGas: Number(estimate.maxPriorityFeePerGas) || 10_000_000,
+                },
+                paymaster: userOp.paymaster,
+              });
+            }
+          } catch (e) {
+            log(`submitEvidence UserOp estimate failed, using defaults: ${e.message}`);
+          }
+          signedUserOp = signUserOp(userOp, AA_ENTRY_POINT, BASE_CHAIN_ID, AGENT_PRIVATE_KEY);
+        } catch (e) {
+          log(`submitEvidence failed to build UserOp for ${acceptedTaskHash.slice(0, 10)}…: ${e.message}`);
+          await releaseTask(acceptedTaskHash);
+          return;
+        }
+      }
       for (let attempt = 1; attempt <= MAX_SUBMIT_ATTEMPTS; attempt++) {
       try {
-        const sent = await submitSigner.sendTransaction(unsignedSubmitEvidence);
+        let sent;
+        // ERC-4337 AA path: submit signed UserOp to bundler on Base
+        if (signedUserOp) {
+          const opHash = await submitUserOp(signedUserOp, PIMLICO_BUNDLER_URL, PIMLICO_API_KEY, AA_ENTRY_POINT);
+          log(`submitEvidence UserOp submitted for ${acceptedTaskHash.slice(0, 10)}… via bundler: ${opHash}`);
+          broadcastOk = true;
+          break;
+        }
+        sent = await submitSigner.sendTransaction(unsignedSubmitEvidence);
         log(`submitEvidence broadcast for ${acceptedTaskHash.slice(0, 10)}… on ${submitChain} from ${submitSigner.address}: ${sent.hash}`);
         const receipt = await sent.wait();
         log(`submitEvidence confirmed for ${acceptedTaskHash.slice(0, 10)}…: block=${receipt?.blockNumber} status=${receipt?.status}`);
@@ -2083,6 +2185,7 @@ async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrapp
 // backend raises while its RPC catches up to the just-confirmed tx:
 //   - 503 NOT_INDEXED            → TaskCreated event not indexed yet
 //   - 503 NOT_SUBMITTED_ON_CHAIN → submitEvidence tx not visible to backend yet
+//   - 503 ON_CHAIN_CHECK_FAILED  → backend's own chain read blipped
 // Both heal within tens of seconds (the backend keeps state 'submitted' on
 // these exactly so a retry re-runs cleanly). Bailing on the first 503 used to
 // strand the task: gas already paid for submitEvidence, but verification and
@@ -2114,7 +2217,7 @@ async function finalizeAcceptedTask(taskHash) {
       // SETTLEMENT_FAILED is retryable too: /finalize leaves state 'submitted'
       // when the completeVerification bridge fails, exactly so a retry re-runs
       // the settle (and resume re-drives it later if we exhaust attempts here).
-      const isTransient = finalizeRes.status === 503 && /NOT_INDEXED|NOT_SUBMITTED_ON_CHAIN|SETTLEMENT_FAILED/.test(errText);
+      const isTransient = finalizeRes.status === 503 && /NOT_INDEXED|NOT_SUBMITTED_ON_CHAIN|SETTLEMENT_FAILED|ON_CHAIN_CHECK_FAILED/.test(errText);
       if (isTransient && attempt < FINALIZE_API_MAX_ATTEMPTS) {
         const code = /NOT_SUBMITTED_ON_CHAIN/.test(errText) ? 'NOT_SUBMITTED_ON_CHAIN'
           : /SETTLEMENT_FAILED/.test(errText) ? 'SETTLEMENT_FAILED' : 'NOT_INDEXED';
@@ -2258,6 +2361,31 @@ async function readOnChainStatus(onChainId, chain = '0g') {
   const raw = await signer.provider.call({ to: escrowAddressFor(chain), data });
   const [task] = escrowIface.decodeFunctionResult('getTask', raw);
   return Number(task.status);
+}
+
+// Read the recorded on-chain worker via a read-only getTask call. The
+// contract's onlyWorker gate accepts evidence ONLY from this address, so the
+// worker must match its broadcast path to it: smart account → UserOp,
+// EOA → raw tx. AA agents assigned before the rollout name the EOA.
+async function readOnChainWorker(onChainId, chain = '0g') {
+  const signer = signerFor(chain);
+  if (!signer) throw new Error(`no ${pickChain(chain)} signer`);
+  const data = escrowIface.encodeFunctionData('getTask', [BigInt(onChainId)]);
+  const raw = await signer.provider.call({ to: escrowAddressFor(chain), data });
+  const [task] = escrowIface.decodeFunctionResult('getTask', raw);
+  return task.worker;
+}
+
+// Read the designated on-chain verifier via the public taskVerifier mapping.
+// completeVerification reverts unless sent by this address: smart account →
+// UserOp, EOA (the usual post-time designation) → raw tx.
+async function readOnChainVerifier(onChainId, chain = '0g') {
+  const signer = signerFor(chain);
+  if (!signer) throw new Error(`no ${pickChain(chain)} signer`);
+  const data = escrowIface.encodeFunctionData('taskVerifier', [BigInt(onChainId)]);
+  const raw = await signer.provider.call({ to: escrowAddressFor(chain), data });
+  const [verifier] = escrowIface.decodeFunctionResult('taskVerifier', raw);
+  return verifier;
 }
 
 // LLM-as-judge: decide whether the worker's output fulfils the task brief.
@@ -2416,15 +2544,50 @@ async function pollAndVerify() {
       } else if (status === 2) {
         // Submitted on-chain → settle now with our verdict.
         try {
-          const gasProblem = await preflightGas(settleChain, settleSigner);
+          // The contract only accepts completeVerification from the recorded
+          // verifier (per-task taskVerifier, else the global one). Agent-verify
+          // tasks designate the agent EOA at post time → raw EOA path.
+          let settleViaAA = settleChain === 'base' && !!AGENT_SMART_ACCOUNT_ADDRESS && !!AA_ENTRY_POINT && !!PIMLICO_BUNDLER_URL;
+          if (settleViaAA && escrowIface) {
+            try {
+              const v = (await readOnChainVerifier(onChainId, settleChain)).toLowerCase();
+              settleViaAA = v === AGENT_SMART_ACCOUNT_ADDRESS.toLowerCase();
+              if (!settleViaAA) {
+                log(`verify: ${taskHash.slice(0, 10)}… on-chain verifier ${v} is not the smart account — using raw EOA tx`);
+              }
+            } catch (e) {
+              log(`verify: on-chain verifier read failed, staying on AA path: ${e.message}`);
+            }
+          }
+          const gasProblem = await preflightGas(settleChain, settleSigner, settleViaAA);
           if (gasProblem) { log(`verify: ${taskHash.slice(0, 10)}… ${gasProblem}`); bumpVerifyFailure(taskHash); continue; }
           const data = escrowIface.encodeFunctionData('completeVerification', [BigInt(onChainId), verdict.passed]);
-          const sent = await settleSigner.sendTransaction({ to: settleEscrow, data, chainId: settleChain === 'base' ? BASE_CHAIN_ID : OG_CHAIN_ID });
-          log(`verify: completeVerification broadcast for ${taskHash.slice(0, 10)}… (passed=${verdict.passed}): ${sent.hash}`);
-          const receipt = await sent.wait();
-          if (receipt?.status !== 1) { bumpVerifyFailure(taskHash); continue; }
-          log(`verify: settled ${taskHash.slice(0, 10)}… on-chain (block ${receipt?.blockNumber})`);
-          recordPass = verdict.passed;
+          // ERC-4337 AA path: wrap in UserOp when the smart account is the
+          // recorded verifier on Base.
+          if (settleViaAA) {
+            const callData = encodeExecuteCallData(settleEscrow, 0n, data);
+            const nonce = await getSmartAccountNonce(AA_ENTRY_POINT, AGENT_SMART_ACCOUNT_ADDRESS, BASE_RPC_URL);
+            const paymaster = AA_PAYMASTER
+              ? { address: AA_PAYMASTER, verificationGasLimit: 100_000, postOpGasLimit: 50_000, data: '0x' }
+              : undefined;
+            const userOp = buildUserOp({
+              sender: AGENT_SMART_ACCOUNT_ADDRESS,
+              nonce,
+              callData,
+              paymaster,
+            });
+            const signed = signUserOp(userOp, AA_ENTRY_POINT, BASE_CHAIN_ID, AGENT_PRIVATE_KEY);
+            const opHash = await submitUserOp(signed, PIMLICO_BUNDLER_URL, PIMLICO_API_KEY, AA_ENTRY_POINT);
+            log(`verify: completeVerification UserOp submitted for ${taskHash.slice(0, 10)}… via bundler: ${opHash}`);
+            recordPass = verdict.passed;
+          } else {
+            const sent = await settleSigner.sendTransaction({ to: settleEscrow, data, chainId: settleChain === 'base' ? BASE_CHAIN_ID : OG_CHAIN_ID });
+            log(`verify: completeVerification broadcast for ${taskHash.slice(0, 10)}… (passed=${verdict.passed}): ${sent.hash}`);
+            const receipt = await sent.wait();
+            if (receipt?.status !== 1) { bumpVerifyFailure(taskHash); continue; }
+            log(`verify: settled ${taskHash.slice(0, 10)}… on-chain (block ${receipt?.blockNumber})`);
+            recordPass = verdict.passed;
+          }
         } catch (e) {
           const label = formatRevert(e);
           // A race (status changed between read and tx) reverts InvalidStatus —

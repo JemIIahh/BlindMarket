@@ -601,6 +601,11 @@ const migrations: Array<{ id: number; name: string; sql: string }> = [
       CREATE INDEX IF NOT EXISTS idx_analytics_session ON analytics_events(session_id);
     `,
   },
+  {
+    id: 27,
+    name: 'smart_account_address',
+    sql: `ALTER TABLE deployed_agents ADD COLUMN IF NOT EXISTS smart_account_address TEXT;`,
+  },
 ];
 
 async function runMigrations(p: pg.Pool): Promise<void> {

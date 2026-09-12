@@ -76,6 +76,14 @@ export const config = {
   // listener stays disabled instead of polling address(0) forever.
   agentFactoryAddress: unsetIfZero(optional('AGENT_FACTORY_ADDRESS', BASE_ADDR?.agentFactory || '')),
 
+  // ERC-4337 AA infrastructure (Base) — agents pay gas in USDC instead of ETH.
+  usdcPaymasterAddress: unsetIfZero(optional('USDC_PAYMASTER_ADDRESS', (BASE_ADDR as any)?.USDCPaymaster ?? '')),
+  blindAccountFactoryAddress: unsetIfZero(optional('BLIND_ACCOUNT_FACTORY_ADDRESS', (BASE_ADDR as any)?.BlindAccountFactory ?? '')),
+  entryPointAddress: unsetIfZero(optional('ENTRY_POINT_ADDRESS', (BASE_ADDR as any)?.EntryPoint ?? '')),
+  // Pimlico bundler for UserOp submission on Base
+  pimlicoBundlerUrl: optional('PIMLICO_BUNDLER_URL', ''),
+  pimlicoApiKey: optional('PIMLICO_API_KEY', ''),
+
   // Address of the 0G TEE enclave key, as registered on-chain via
   // BlindEscrow.setTeeSigner. Unset disables TEE-attested settlement and the
   // bridge falls back to the plain verifier path.

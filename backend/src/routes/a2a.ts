@@ -5,10 +5,11 @@ import { createUserRateLimiter } from '../middleware/rateLimit.js';
 import { AppError } from '../middleware/errorHandler.js';
 import * as agentStore from '../services/agentStore.js';
 import * as a2aStore from '../services/a2aStore.js';
+import { loadAgentBySmartAccount } from '../services/deployedAgentStore.js';
 import * as bidsStore from '../services/bidsStore.js';
 import * as keyCustody from '../services/keyCustodyService.js';
 import { autoVerify } from '../services/autoVerify.js';
-import { settleAssignment, settleVerification } from '../services/a2aSettlement.js';
+import { settleAssignment, settleVerification, resolveAssignee } from '../services/a2aSettlement.js';
 import { recordWorkerPayout, recordWorkerDispute } from '../services/workerPayout.js';
 import { resolveTaskByHash, seedTaskId, type TaskChain } from '../services/taskChain.js';
 import * as escrowService from '../services/escrow.js';
@@ -648,9 +649,17 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
         // self-heal persisted is now unreachable: every meta-returning surface
         // is projected or ownership-gated, and the caller is no longer indexed
         // on this task.
+        //
+        // Off-chain identity is always the EOA: when the on-chain worker is a
+        // BlindAccount, reconcile to its OWNER, not the contract address —
+        // otherwise the owning agent (indexed by wallet) loses sight of the
+        // task in /executions and resume.
         if (settleResult.onChainWorker) {
+          let reconcileTo = settleResult.onChainWorker.toLowerCase();
+          const owner = await loadAgentBySmartAccount(reconcileTo).catch(() => null);
+          if (owner) reconcileTo = owner.walletAddress.toLowerCase();
           try {
-            await a2aStore.updateState(taskId, { executorAddress: settleResult.onChainWorker.toLowerCase() });
+            await a2aStore.updateState(taskId, { executorAddress: reconcileTo });
           } catch (recErr) {
             console.error(`[a2a] accept: could not reconcile executor for ${taskId}:`, (recErr as Error).message);
           }
@@ -1613,15 +1622,23 @@ a2aRouter.post('/tasks/:id/submit', requireAuth, async (req: AuthRequest, res, n
     // sanity check with one retry in case of RPC lag. Also captures the
     // current on-chain submissionAttempts so the state below can record which
     // round the pending evidence broadcast will become.
+    //
+    // The recorded worker is the SMART ACCOUNT for AA agents assigned after
+    // the AA rollout (settleAssignment assigns it on Base so UserOps pass
+    // onlyWorker) — but legacy tasks assigned before that name the EOA.
+    // Accept either; the worker picks the matching broadcast path.
+    const assignee = await resolveAssignee(address, onChainIdChain);
+    const isRecordedWorker = (w: string) =>
+      w.toLowerCase() === address.toLowerCase() || w.toLowerCase() === assignee.toLowerCase();
     let chainAttempts = 0;
     const onChainTask = await escrowService.getTaskOn(onChainIdChain, Number(onChainId));
     chainAttempts = onChainTask.submissionAttempts;
-    if (onChainTask.worker.toLowerCase() !== address.toLowerCase()) {
+    if (!isRecordedWorker(onChainTask.worker)) {
       // One retry after 2s — covers edge cases like reorgs.
       await new Promise((r) => setTimeout(r, 2_000));
       const retryTask = await escrowService.getTaskOn(onChainIdChain, Number(onChainId));
       chainAttempts = retryTask.submissionAttempts;
-      if (retryTask.worker.toLowerCase() !== address.toLowerCase()) {
+      if (!isRecordedWorker(retryTask.worker)) {
         const freshState = await a2aStore.getState(taskHash);
         if (freshState?.assignError) {
           throw new AppError(503, 'BRIDGE_FAILED', `Assignment bridge failed — ${freshState.assignError}. Release and retry.`);
@@ -1865,13 +1882,33 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
       // judge output whose verdict can never be recorded (/verdict rejects it
       // as STALE_VERDICT) — burning the verifier's LLM spend every poll.
       // 503 keeps the worker's finalize retry/resume loop driving instead.
-      const ocIdAResolved = await resolveTaskByHash(taskHash);
-      const ocIdA = ocIdAResolved?.taskId ?? null;
-      const ocIdAChain = ocIdAResolved?.chain ?? '0g';
+      // Chain reads are guarded: an RPC blip must 503 (retryable), never 500.
+      let ocIdA: string | null;
+      let ocIdAChain: '0g' | 'base';
+      try {
+        const ocIdAResolved = await resolveTaskByHash(taskHash);
+        ocIdA = ocIdAResolved?.taskId ?? null;
+        ocIdAChain = ocIdAResolved?.chain ?? '0g';
+      } catch (err) {
+        throw new AppError(
+          503,
+          'ON_CHAIN_CHECK_FAILED',
+          `Could not resolve on-chain task before finalize: ${(err as Error).message}`,
+        );
+      }
       if (!ocIdA) {
         throw new AppError(503, 'NOT_INDEXED', 'On-chain taskId not yet indexed — wait a few seconds and retry');
       }
-      const tA = await escrowService.getTaskOn(ocIdAChain, Number(ocIdA));
+      let tA;
+      try {
+        tA = await escrowService.getTaskOn(ocIdAChain, Number(ocIdA));
+      } catch (err) {
+        throw new AppError(
+          503,
+          'ON_CHAIN_CHECK_FAILED',
+          `Could not read on-chain task before finalize: ${(err as Error).message}`,
+        );
+      }
       const broadcastPending =
         state.submissionRound !== undefined && tA.submissionAttempts < state.submissionRound;
       if (broadcastPending || (tA.status !== 2 && tA.status !== 3 && tA.status !== 4)) {
@@ -1912,10 +1949,21 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
     // tasksCompleted, and then losing the earnings credit to the indexing-lag
     // race (the "3 tasks · 0 0G" bug). Without submitEvidence confirmed the
     // bridge's completeVerification would also revert with InvalidStatus and
-    // the task would stick permanently.
-    const ocIdResolved = await resolveTaskByHash(taskHash);
-    const ocId = ocIdResolved?.taskId ?? null;
-    const ocIdChain = ocIdResolved?.chain ?? '0g';
+    // the task would stick permanently. Chain reads are guarded: an RPC blip
+    // must 503 (retryable), never 500.
+    let ocId: string | null;
+    let ocIdChain: '0g' | 'base';
+    try {
+      const ocIdResolved = await resolveTaskByHash(taskHash);
+      ocId = ocIdResolved?.taskId ?? null;
+      ocIdChain = ocIdResolved?.chain ?? '0g';
+    } catch (err) {
+      throw new AppError(
+        503,
+        'ON_CHAIN_CHECK_FAILED',
+        `Could not resolve on-chain task before finalize: ${(err as Error).message}`,
+      );
+    }
     if (!ocId) {
       throw new AppError(
         503,
@@ -1923,7 +1971,16 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
         'On-chain taskId not yet indexed — wait a few seconds and retry',
       );
     }
-    const onChainTask = await escrowService.getTaskOn(ocIdChain, Number(ocId));
+    let onChainTask;
+    try {
+      onChainTask = await escrowService.getTaskOn(ocIdChain, Number(ocId));
+    } catch (err) {
+      throw new AppError(
+        503,
+        'ON_CHAIN_CHECK_FAILED',
+        `Could not read on-chain task before finalize: ${(err as Error).message}`,
+      );
+    }
 
     // Reconcile path: on-chain already settled (3=Verified/failed,
     // 4=Completed/passed) while a2a state is still 'submitted' — a previous

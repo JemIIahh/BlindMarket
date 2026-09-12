@@ -26,6 +26,7 @@ function rowToAgent(row: Record<string, unknown>): DeployedAgent {
     storageRef: (row.storage_ref as string) ?? undefined,
     platformToken: (row.platform_token as string) ?? undefined,
     walletAddress: row.wallet_address as string,
+    smartAccountAddress: (row.smart_account_address as string) ?? undefined,
     publicKey: row.public_key as string,
     encryptedPrivateKey: row.encrypted_private_key as string,
     rawPrivateKey: (row.raw_private_key as string) ?? undefined,
@@ -67,6 +68,7 @@ function agentToRow(agent: DeployedAgent): Record<string, unknown> {
     storage_ref: agent.storageRef ?? null,
     platform_token: agent.platformToken ?? null,
     wallet_address: agent.walletAddress,
+    smart_account_address: agent.smartAccountAddress ?? null,
     public_key: agent.publicKey,
     encrypted_private_key: agent.encryptedPrivateKey,
     raw_private_key: agent.rawPrivateKey ?? null,
@@ -77,7 +79,7 @@ function agentToRow(agent: DeployedAgent): Record<string, unknown> {
   };
 }
 
-const PG_COLS = 'id, owner_address, authorized_owners, name, instructions, provider, model, api_key, encrypted_api_key, capabilities, tools, status, deployed_at, last_active_at, storage_ref, platform_token, wallet_address, public_key, encrypted_private_key, raw_private_key, inft_token_id, min_reward, skills';
+const PG_COLS = 'id, owner_address, authorized_owners, name, instructions, provider, model, api_key, encrypted_api_key, capabilities, tools, status, deployed_at, last_active_at, storage_ref, platform_token, wallet_address, smart_account_address, public_key, encrypted_private_key, raw_private_key, inft_token_id, min_reward, skills';
 
 export async function saveAgent(agent: DeployedAgent): Promise<void> {
   if (usePg()) {
@@ -87,10 +89,11 @@ export async function saveAgent(agent: DeployedAgent): Promise<void> {
          (id, owner_address, authorized_owners, name, instructions,
           provider, model, api_key, encrypted_api_key, capabilities,
           tools, status, deployed_at, last_active_at, storage_ref,
-          platform_token, wallet_address, public_key, encrypted_private_key,
-          raw_private_key, inft_token_id, min_reward, skills, updated_at)
+          platform_token, wallet_address, smart_account_address, public_key,
+          encrypted_private_key, raw_private_key, inft_token_id, min_reward,
+          skills, updated_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-         $16, $17, $18, $19, $20, $21, $22, $23, NOW())
+         $16, $17, $18, $19, $20, $21, $22, $23, $24, NOW())
        ON CONFLICT (id) DO UPDATE SET
          owner_address = EXCLUDED.owner_address,
          authorized_owners = EXCLUDED.authorized_owners,
@@ -107,6 +110,7 @@ export async function saveAgent(agent: DeployedAgent): Promise<void> {
          storage_ref = EXCLUDED.storage_ref,
          platform_token = EXCLUDED.platform_token,
          wallet_address = EXCLUDED.wallet_address,
+         smart_account_address = EXCLUDED.smart_account_address,
          public_key = EXCLUDED.public_key,
          encrypted_private_key = EXCLUDED.encrypted_private_key,
          raw_private_key = EXCLUDED.raw_private_key,
@@ -120,7 +124,8 @@ export async function saveAgent(agent: DeployedAgent): Promise<void> {
         agent.apiKey, agent.encryptedApiKey, agent.capabilities,
         JSON.stringify(agent.tools ?? []), agent.status,
         agent.deployedAt, agent.lastActiveAt ?? null, agent.storageRef ?? null,
-        agent.platformToken ?? null, agent.walletAddress, agent.publicKey,
+        agent.platformToken ?? null, agent.walletAddress,
+        agent.smartAccountAddress ?? null, agent.publicKey,
         agent.encryptedPrivateKey, agent.rawPrivateKey ?? null,
         agent.inftTokenId ?? null, agent.minReward ?? null,
         JSON.stringify(agent.skills ?? []),
@@ -164,6 +169,25 @@ export async function loadAgentByWallet(walletAddress: string): Promise<Deployed
   }
   const db = getDb();
   const row = db.prepare(`SELECT ${PG_COLS} FROM deployed_agents WHERE LOWER(wallet_address) = LOWER(?) LIMIT 1`).get(walletAddress) as Record<string, unknown> | undefined;
+  return row ? rowToAgent(row) : null;
+}
+
+/**
+ * Reverse lookup: owner EOA for a smart-account address. Used when
+ * reconciling chain truth that names a BlindAccount (assignment, worker
+ * fields) back to the deployed agent that owns it, so off-chain identity
+ * (always the EOA) stays canonical.
+ */
+export async function loadAgentBySmartAccount(smartAccountAddress: string): Promise<DeployedAgent | null> {
+  if (usePg()) {
+    const db = await getPool();
+    const { rows } = await db.query<Record<string, unknown>>(
+      `SELECT ${PG_COLS} FROM deployed_agents WHERE LOWER(smart_account_address) = LOWER($1) LIMIT 1`, [smartAccountAddress],
+    );
+    return rows[0] ? rowToAgent(rows[0]) : null;
+  }
+  const db = getDb();
+  const row = db.prepare(`SELECT ${PG_COLS} FROM deployed_agents WHERE LOWER(smart_account_address) = LOWER(?) LIMIT 1`).get(smartAccountAddress) as Record<string, unknown> | undefined;
   return row ? rowToAgent(row) : null;
 }
 

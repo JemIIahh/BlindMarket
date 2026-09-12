@@ -662,6 +662,11 @@ export interface DeployedAgent {
   platformToken?: string;   // HS256 JWT for backend auth
   // On-chain identity — generated at deploy time
   walletAddress: string;
+  // ERC-4337 smart account address on Base (BlindAccount via BlindAccountFactory).
+  // Deterministic (CREATE2 from owner address + salt). The worker uses this as
+  // the UserOp sender when submitting on Base, so the paymaster can sponsor gas
+  // in USDC instead of requiring the EOA to hold ETH. Absent on pre-AA agents.
+  smartAccountAddress?: string;
   publicKey: string;
   encryptedPrivateKey: string;
   // Server-custodial copy of the raw signing key. Lets the worker autonomously

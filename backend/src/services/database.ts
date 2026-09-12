@@ -224,6 +224,11 @@ const migrations: Migration[] = [
       );
     `,
   },
+  {
+    id: 11,
+    name: 'smart_account_address',
+    sql: `ALTER TABLE deployed_agents ADD COLUMN smart_account_address TEXT;`,
+  },
 ];
 
 function runMigrations(database: Database.Database): void {
