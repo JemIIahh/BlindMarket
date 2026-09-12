@@ -58,13 +58,23 @@ export function AgentHeader({
               />
             )}
             {isRunning && (
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={actionPending}
-                onClick={() => onAction('stop')}
-                label="Stop"
-              />
+              <>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  disabled={actionPending}
+                  onClick={() => onAction('restart')}
+                  label="Restart"
+                  title="Stop and start in one go — re-forks the worker with fresh code, env, and retry budgets"
+                />
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={actionPending}
+                  onClick={() => onAction('stop')}
+                  label="Stop"
+                />
+              </>
             )}
           </div>
         )}
