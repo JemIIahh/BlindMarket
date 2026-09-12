@@ -206,12 +206,21 @@ async function confirmAssignedWorker(
   assignee: string,
   taskHash: string,
   chain: TaskChain = '0g',
+  executor?: string,
 ): Promise<SettleResult> {
   try {
     const t = await bridgeFor(chain).escrow!.getTask(BigInt(taskId));
     const onChainWorker = String(t.worker);
     if (onChainWorker.toLowerCase() === assignee.toLowerCase()) {
       console.log(`[a2aSettlement] assignment skipped — task ${taskId} already assigned to this executor`);
+      return { success: true, alreadySettled: true, onChainWorker, chain };
+    }
+    // Legacy: assigned to the executor EOA before the AA rollout recorded
+    // smart accounts on-chain. Same owner, same rightful worker — confirm it
+    // instead of reporting a mismatch (which wrongly tells the worker it is
+    // not assigned and sends it down the release path).
+    if (executor && onChainWorker.toLowerCase() === executor.toLowerCase()) {
+      console.log(`[a2aSettlement] assignment skipped — task ${taskId} assigned to executor EOA (pre-AA assignment)`);
       return { success: true, alreadySettled: true, onChainWorker, chain };
     }
     // marketplaceAssign reverts InvalidStatus for ANY non-Funded status. The
@@ -303,7 +312,7 @@ export async function settleAssignment(taskHash: string, executor: string): Prom
       await bridge.escrow!.marketplaceAssign.staticCall(BigInt(taskId), assignee);
     } catch (staticErr) {
       if (isAlreadySettled(staticErr)) {
-        return confirmAssignedWorker(taskId, assignee, taskHash, chain);
+        return confirmAssignedWorker(taskId, assignee, taskHash, chain, executor);
       }
       if (isDeadlineReached(staticErr)) {
         console.warn(`[a2aSettlement] assignment refused — task ${taskId} deadline has passed (terminal)`);
