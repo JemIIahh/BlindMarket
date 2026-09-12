@@ -102,15 +102,20 @@ export default function AgentDetail() {
   const balanceSymbol = getPaymentSymbol();
   const isLowGas = usdcBalance !== null && usdcBalance < LOW_BALANCE_THRESHOLD;
 
+  // ERC-4337 AA: gas is paid in USDC via paymaster from the smart account.
+  // Fallback to the EOA wallet for pre-AA agents.
+  const fundingAddress = agent?.smartAccountAddress || agent?.walletAddress;
+  const agentWallet = agent?.walletAddress;
+
   const refetchBalance = useCallback(async () => {
-    if (!agent?.walletAddress) return;
+    if (!fundingAddress || !walletClient) return;
     try {
-      const provider = new BrowserProvider(walletClient!.transport);
+      const provider = new BrowserProvider(walletClient.transport);
       const usdc = new Contract(MARKETPLACE_TOKEN_ADDRESS, USDC_ABI, provider);
-      const bal = await usdc.balanceOf(agent.walletAddress);
+      const bal = await usdc.balanceOf(fundingAddress);
       setUsdcBalance(bal as bigint);
     } catch { /* non-blocking */ }
-  }, [agent?.walletAddress, walletClient]);
+  }, [fundingAddress, walletClient]);
 
   const loadAgent = useCallback(() => {
     if (!id) return;
@@ -126,8 +131,6 @@ export default function AgentDetail() {
 
   useEffect(() => { loadAgent(); }, [loadAgent]);
 
-  const agentWallet = agent?.walletAddress;
-
   useEffect(() => {
     if (!agentWallet) return;
     let cancelled = false;
@@ -140,18 +143,18 @@ export default function AgentDetail() {
 
   // Fetch USDC balance when agent loads
   useEffect(() => {
-    if (!agent?.walletAddress || !walletClient) return;
+    if (!fundingAddress || !walletClient) return;
     let cancelled = false;
     (async () => {
       try {
         const provider = new BrowserProvider(walletClient.transport);
         const usdc = new Contract(MARKETPLACE_TOKEN_ADDRESS, USDC_ABI, provider);
-        const bal = await usdc.balanceOf(agent.walletAddress);
+        const bal = await usdc.balanceOf(fundingAddress);
         if (!cancelled) setUsdcBalance(bal as bigint);
       } catch { /* non-blocking */ }
     })();
     return () => { cancelled = true; };
-  }, [agent?.walletAddress, walletClient]);
+  }, [fundingAddress, walletClient]);
 
   // Public service list — lifted out of the services section because the
   // header's from-price and the "services sold" stat read the same data.
@@ -264,18 +267,18 @@ export default function AgentDetail() {
   // instead of waiting on a poll cycle.
   const [topUpConfirm, setTopUpConfirm] = useState(false);
   function requestTopUp() {
-    if (!address || !agent?.walletAddress) return;
+    if (!address || !fundingAddress) return;
     setTopUpConfirm(true);
   }
   async function confirmTopUp() {
-    if (!address || !agent?.walletAddress) return;
+    if (!address || !fundingAddress) return;
     setTopUpConfirm(false);
     setTopUpStatus('sending');
     try {
       const provider = new BrowserProvider(walletClient!.transport);
       const signer = await provider.getSigner();
       const usdc = new Contract(MARKETPLACE_TOKEN_ADDRESS, USDC_ABI, signer);
-      const tx = await usdc.transfer.populateTransaction(agent.walletAddress, TOP_UP_RAW);
+      const tx = await usdc.transfer.populateTransaction(fundingAddress, TOP_UP_RAW);
       const { signAndSendTx } = await import('../lib/txSigner');
       const sent = await signAndSendTx(signer, tx as any);
       if (sent.receipt) {
@@ -491,7 +494,7 @@ export default function AgentDetail() {
     <ConfirmDialog
       open={topUpConfirm}
       title="Fund agent wallet"
-      description={`Send ${TOP_UP_AMOUNT} USDC from your wallet to ${agent?.walletAddress?.slice(0, 10)}…${agent?.walletAddress?.slice(-8)} for operations. This will be deducted from your wallet.`}
+      description={`Send ${TOP_UP_AMOUNT} USDC from your wallet to ${fundingAddress?.slice(0, 10)}…${fundingAddress?.slice(-8)} for operations. This will be deducted from your wallet.`}
       confirmLabel="Send USDC"
       onConfirm={confirmTopUp}
       onCancel={() => setTopUpConfirm(false)}
