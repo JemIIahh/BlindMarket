@@ -1,8 +1,8 @@
-import express, { Router, type ErrorRequestHandler, type Request, type RequestHandler } from 'express';
+import express, { Router, type ErrorRequestHandler, type Request } from 'express';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
-import { config } from '../config.js';
+import { waitlistConfig } from './config.js';
 import { AppError } from '../middleware/errorHandler.js';
 import { requestLogger } from '../middleware/requestLogger.js';
 import {
@@ -14,11 +14,12 @@ import {
   getLeaderboard,
   type LeaderboardEntry,
   type WaitlistStanding,
-} from '../services/waitlistStore.js';
+} from './store.js';
 import type { ApiResponse } from '../types.js';
 
 /**
- * Public waitlist API for the blindmarket-waitlist landing page.
+ * Public waitlist API for the blindmarket-waitlist landing page, served by the
+ * standalone waitlist service (app.ts / server.ts) — not by the marketplace.
  *
  *   GET  /stats        → { total }
  *   GET  /leaderboard  → { entries: [{ rank, handle, points, referrals }] }
@@ -26,19 +27,17 @@ import type { ApiResponse } from '../types.js';
  *   GET  /me           Authorization: Bearer <token> → standing
  *   POST /me/tasks     Authorization: Bearer <token>, { task } → standing
  *
- * Mounted in index.ts BEFORE the app-wide cors / rate limit / json parser, so
- * it brings its own copy of each: a credential-less CORS allowlist
- * (WAITLIST_CORS_ORIGIN), a 4kb body cap, and per-IP limits. The app-wide
- * middleware — and every other route — is untouched by it.
+ * Brings its own credential-less CORS allowlist (WAITLIST_CORS_ORIGIN), a 4kb
+ * body cap, and per-IP limits.
  */
 export const waitlistRouter = Router();
 
 const LOCALHOST_ORIGIN = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
 
 waitlistRouter.use(cors({
-  origin: config.nodeEnv === 'development'
-    ? [...config.waitlistCorsOrigin, LOCALHOST_ORIGIN]
-    : [...config.waitlistCorsOrigin],
+  origin: waitlistConfig.nodeEnv === 'development'
+    ? [...waitlistConfig.corsOrigin, LOCALHOST_ORIGIN]
+    : [...waitlistConfig.corsOrigin],
   methods: ['GET', 'POST'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   maxAge: 600,
@@ -65,12 +64,6 @@ const readLimiter = limiter(60 * 1000, 60, 'Too many requests, please try again 
 // cap keeps a room full of people on one Wi-Fi from seeing blank counters.
 const publicLimiter = limiter(60 * 1000, 300, 'Too many requests, please try again later');
 
-// Without DATABASE_URL, getPool() returns a no-op pool whose INSERTs "succeed"
-// with zero rows — a signup must never look recorded when it wasn't.
-const requireStorage: RequestHandler = (_req, _res, next) => {
-  next(config.databaseUrl ? undefined : new AppError(503, 'WAITLIST_UNAVAILABLE', 'Waitlist storage is not configured'));
-};
-
 function bearerToken(req: Request): string {
   const match = /^Bearer\s+(wl_[A-Za-z0-9_-]{16,128})$/.exec(req.headers.authorization ?? '');
   if (!match) throw new AppError(401, 'WAITLIST_TOKEN_INVALID', 'Missing or malformed waitlist token');
@@ -92,7 +85,7 @@ const joinSchema = z.object({
 
 const addTaskSchema = z.object({ task: taskSchema });
 
-waitlistRouter.get('/stats', publicLimiter, requireStorage, async (_req, res, next) => {
+waitlistRouter.get('/stats', publicLimiter, async (_req, res, next) => {
   try {
     const body: ApiResponse<{ total: number }> = { success: true, data: { total: await getWaitlistTotal() } };
     res.json(body);
@@ -101,7 +94,7 @@ waitlistRouter.get('/stats', publicLimiter, requireStorage, async (_req, res, ne
   }
 });
 
-waitlistRouter.get('/leaderboard', publicLimiter, requireStorage, async (_req, res, next) => {
+waitlistRouter.get('/leaderboard', publicLimiter, async (_req, res, next) => {
   try {
     const body: ApiResponse<{ entries: LeaderboardEntry[] }> = { success: true, data: { entries: await getLeaderboard() } };
     res.json(body);
@@ -110,7 +103,7 @@ waitlistRouter.get('/leaderboard', publicLimiter, requireStorage, async (_req, r
   }
 });
 
-waitlistRouter.post('/join', joinLimiter, requireStorage, async (req, res, next) => {
+waitlistRouter.post('/join', joinLimiter, async (req, res, next) => {
   try {
     const { email, xHandle, tasks, ref } = joinSchema.parse(req.body);
     const { token, standing } = await joinWaitlist({ email, xHandle, tasks: [...new Set(tasks)], ref });
@@ -132,7 +125,7 @@ waitlistRouter.post('/join', joinLimiter, requireStorage, async (req, res, next)
   }
 });
 
-waitlistRouter.get('/me', readLimiter, requireStorage, async (req, res, next) => {
+waitlistRouter.get('/me', readLimiter, async (req, res, next) => {
   try {
     const standing = await getStandingByToken(bearerToken(req));
     if (!standing) throw new AppError(401, 'WAITLIST_TOKEN_INVALID', 'Unknown waitlist token');
@@ -143,7 +136,7 @@ waitlistRouter.get('/me', readLimiter, requireStorage, async (req, res, next) =>
   }
 });
 
-waitlistRouter.post('/me/tasks', readLimiter, requireStorage, async (req, res, next) => {
+waitlistRouter.post('/me/tasks', readLimiter, async (req, res, next) => {
   try {
     const token = bearerToken(req);
     const { task } = addTaskSchema.parse(req.body);

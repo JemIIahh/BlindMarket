@@ -1,8 +1,9 @@
 import { createHash, randomBytes } from 'crypto';
-import { getPool } from './neonDb.js';
+import { getWaitlistPool as getPool } from './db.js';
 
 /**
- * Pre-launch waitlist (table `waitlist_signups`, migrations 27–28).
+ * Pre-launch waitlist (table `waitlist_signups` in the waitlist's own
+ * database — see db.ts).
  *
  * The X follow/like/repost/comment checks on the landing page are
  * SELF-REPORTED — the page has no X API access, so nothing here can prove a
@@ -198,9 +199,8 @@ export async function addTaskByToken(token: string, task: WaitlistTask): Promise
   return rows[0] ? standingById(rows[0].id) : null;
 }
 
-// Every page view asks for the total and the leaderboard, and this table
-// shares the Neon pool with the live marketplace — so a launch-day traffic
-// spike is answered from memory, costing at most one query per TTL per
+// Every page view asks for the total and the leaderboard — so a launch-day
+// traffic spike is answered from memory, costing at most one query per TTL per
 // process instead of one per visitor.
 const PUBLIC_TTL_MS = 10_000;
 

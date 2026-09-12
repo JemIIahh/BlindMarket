@@ -3,18 +3,19 @@ import express, { type Router } from 'express';
 import request from 'supertest';
 
 /**
- * Route tests for the public waitlist API. The REAL router is mounted the way
- * index.ts mounts it — with no app-wide json parser or CORS in front — so its
- * own cors / body parser / limits are what's exercised. Only the store and
- * config are mocked; the ranking SQL is exercised against real Postgres, not
- * here.
+ * Route tests for the public waitlist API. The REAL router is mounted bare —
+ * no json parser or CORS in front — so its own cors / body parser / limits are
+ * what's exercised. Only the store and config are mocked; the ranking SQL is
+ * exercised against real Postgres, not here.
  */
 
 const { cfg, store } = vi.hoisted(() => ({
   cfg: {
-    databaseUrl: 'postgres://test',
     nodeEnv: 'test',
-    waitlistCorsOrigin: ['https://waitlist.example'],
+    port: 0,
+    databaseUrl: 'postgres://test',
+    corsOrigin: ['https://waitlist.example'],
+    trustProxy: 1,
   },
   store: {
     joinWaitlist: vi.fn(),
@@ -25,10 +26,10 @@ const { cfg, store } = vi.hoisted(() => ({
   },
 }));
 
-vi.mock('../config.js', () => ({ config: cfg }));
+vi.mock('./config.js', () => ({ waitlistConfig: cfg }));
 
-vi.mock('../services/waitlistStore.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../services/waitlistStore.js')>()),
+vi.mock('./store.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./store.js')>()),
   ...store,
 }));
 
@@ -36,7 +37,7 @@ vi.mock('../services/waitlistStore.js', async (importOriginal) => ({
 // one test spends can't 429 the next.
 async function makeApp() {
   vi.resetModules();
-  const { waitlistRouter } = await import('./waitlist.js');
+  const { waitlistRouter } = await import('./router.js');
   const { globalErrorHandler } = await import('../middleware/errorHandler.js');
   const a = express();
   a.use('/api/v1/waitlist', waitlistRouter as Router);
@@ -60,7 +61,6 @@ const JOIN = { email: 'ada@example.com', xHandle: 'ada_l' };
 
 beforeEach(async () => {
   vi.clearAllMocks();
-  cfg.databaseUrl = 'postgres://test';
   app = await makeApp();
 });
 
@@ -83,13 +83,6 @@ describe('GET /api/v1/waitlist/leaderboard', () => {
     const res = await request(app).get('/api/v1/waitlist/leaderboard');
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ success: true, data: { entries } });
-  });
-
-  it('refuses with 503 when no database is configured', async () => {
-    cfg.databaseUrl = '';
-    const res = await request(app).get('/api/v1/waitlist/leaderboard');
-    expect(res.status).toBe(503);
-    expect(store.getLeaderboard).not.toHaveBeenCalled();
   });
 });
 
@@ -173,14 +166,6 @@ describe('POST /api/v1/waitlist/join', () => {
       .send('{"email":');
     expect(res.status).toBe(400);
     expect(res.body.error.code).toBe('INVALID_JSON');
-  });
-
-  it('refuses with 503 instead of faking success when no database is configured', async () => {
-    cfg.databaseUrl = '';
-    const res = await request(app).post('/api/v1/waitlist/join').send(JOIN);
-    expect(res.status).toBe(503);
-    expect(res.body.error.code).toBe('WAITLIST_UNAVAILABLE');
-    expect(store.joinWaitlist).not.toHaveBeenCalled();
   });
 });
 
