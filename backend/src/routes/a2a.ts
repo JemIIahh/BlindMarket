@@ -2002,6 +2002,10 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
         await recordWorkerPayout(taskHash, address, ocId, onChainTask.amount, {
           serviceId: meta.serviceId,
           computeCostMicroUnits,
+          // Base settles in USDC (6 decimals); 0G in native (18). Without
+          // this the accounting ledger divides a USDC amount by 1e18 and the
+          // Earnings page never moves off zero.
+          decimals: ocIdChain === 'base' ? 6 : 18,
           meta,
         });
       } else {
@@ -2050,6 +2054,10 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
       await recordWorkerPayout(taskHash, address, ocId, onChainTask.amount, {
         serviceId: meta.serviceId,
         computeCostMicroUnits,
+        // Base settles in USDC (6 decimals); 0G in native (18). Without
+        // this the accounting ledger divides a USDC amount by 1e18 and the
+        // Earnings page never moves off zero.
+        decimals: ocIdChain === 'base' ? 6 : 18,
         meta,
       });
     } else {
@@ -2172,6 +2180,10 @@ a2aRouter.post('/tasks/:id/verify', requireAuth, async (req: AuthRequest, res, n
       const computeCostMicroUnits = consumePendingCost(taskHash);
       await recordWorkerPayout(taskHash, state.executorAddress, ocId, onChainTask.amount, {
         computeCostMicroUnits,
+        // Base settles in USDC (6 decimals); 0G in native (18). Without
+        // this the accounting ledger divides a USDC amount by 1e18 and the
+        // Earnings page never moves off zero.
+        decimals: ocIdChain === 'base' ? 6 : 18,
         meta,
       });
     } else if (!passed && state.executorAddress) {
@@ -2329,6 +2341,10 @@ a2aRouter.post('/tasks/:id/verdict', requireAuth, async (req: AuthRequest, res, 
       const computeCostMicroUnits = consumePendingCost(taskHash);
       await recordWorkerPayout(taskHash, state.executorAddress, ocId, onChainTask.amount, {
         computeCostMicroUnits,
+        // Base settles in USDC (6 decimals); 0G in native (18). Without
+        // this the accounting ledger divides a USDC amount by 1e18 and the
+        // Earnings page never moves off zero.
+        decimals: ocIdChain === 'base' ? 6 : 18,
         meta,
       });
     } else if (!passed && state.executorAddress) {

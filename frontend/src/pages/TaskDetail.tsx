@@ -13,7 +13,7 @@ import { CustodyChain } from '../components/CustodyChain';
 import { truncateAddress, formatDate } from '../lib/utils';
 import { buildCancelTask, buildClaimTimeout } from '../services/tasks';
 import { signAndSendTx } from '../lib/txSigner';
-import { getPaymentDecimals, getPaymentSymbol, WORKER_SHARE_PCT, PLATFORM_FEE_PCT, API_BASE_URL } from '../config/constants';
+import { getPaymentDecimals, getPaymentSymbol, WORKER_SHARE_PCT, PLATFORM_FEE_PCT } from '../config/constants';
 import { useChainExplorerUrl } from '../hooks/useChainWallet';
 import { TaskStatus, TaskStatusLabels } from '../types/api';
 
@@ -120,10 +120,6 @@ export default function TaskDetail() {
   const reward = Number.isFinite(rewardRaw) ? rewardRaw / 10 ** decimals : 0;
 
   const a2aState = onChain.a2aState;
-  // Storage links go through the same API base as every other call.
-  // (This used to read window.ENV?.VITE_BACKEND_URL — never defined anywhere —
-  // and fell back to localhost:3001, a dead link in every production build.)
-  const storageBase = API_BASE_URL;
 
   const isExpired = Date.now() > Number(onChain.deadline) * 1000;
   const canTimeout = isExpired && [
@@ -229,7 +225,13 @@ export default function TaskDetail() {
                   {onChain.worker === '0x0000000000000000000000000000000000000000' ? (
                     <span className="text-ink-3 font-sans">Waiting for an agent…</span>
                   ) : (
-                    <span className="text-ink">{truncateAddress(onChain.worker)}</span>
+                    <Link
+                      to={`/agents/${onChain.worker}`}
+                      title={onChain.worker}
+                      className="text-ink hover:text-cream hover:underline decoration-cream/30 transition-colors"
+                    >
+                      {truncateAddress(onChain.worker)} <span className="font-sans text-xs">→</span>
+                    </Link>
                   )}
                 </p>
               </Field>
@@ -251,28 +253,24 @@ export default function TaskDetail() {
               {meta.rootHash && (
                 <Field label="0G storage root (brief)" span2>
                   <p className="text-sm font-mono break-all">
-                    <a
-                      href={`${storageBase}/api/v1/storage/${meta.rootHash}`}
-                      target="_blank"
-                      rel="noreferrer"
+                    <Link
+                      to={`/storage/${meta.rootHash}`}
                       className="text-cream hover:underline decoration-cream/30"
                     >
                       {meta.rootHash}
-                    </a>
+                    </Link>
                   </p>
                 </Field>
               )}
               {a2aState?.outputRootHash && (
                 <Field label="0G storage root (output)" span2>
                   <p className="text-sm font-mono break-all">
-                    <a
-                      href={`${storageBase}/api/v1/storage/${a2aState.outputRootHash}`}
-                      target="_blank"
-                      rel="noreferrer"
+                    <Link
+                      to={`/storage/${a2aState.outputRootHash}`}
                       className="text-cream hover:underline decoration-cream/30"
                     >
                       {a2aState.outputRootHash}
-                    </a>
+                    </Link>
                   </p>
                 </Field>
               )}
@@ -347,8 +345,20 @@ export default function TaskDetail() {
             {onChain.status === TaskStatus.Assigned && (
               <p className="text-sm text-ink-2 leading-relaxed">
                 <span className="text-warn font-medium">Accepted.</span> Agent{' '}
-                <span className="font-mono text-ink">{truncateAddress(onChain.worker)}</span> is executing
-                the task off-chain. They'll sign and broadcast their evidence when ready.
+                <Link
+                  to={`/agents/${onChain.worker}`}
+                  title={onChain.worker}
+                  className="font-mono text-ink hover:text-cream hover:underline decoration-cream/30 transition-colors"
+                >
+                  {truncateAddress(onChain.worker)}
+                </Link>{' '}
+                is executing the task off-chain. They'll sign and broadcast their evidence when ready.{' '}
+                <Link
+                  to={`/agents/${onChain.worker}`}
+                  className="text-cream hover:underline decoration-cream/30 text-xs whitespace-nowrap"
+                >
+                  View agent →
+                </Link>
               </p>
             )}
             {onChain.status === TaskStatus.Submitted && (
@@ -378,7 +388,13 @@ export default function TaskDetail() {
             {onChain.status === TaskStatus.Completed && (
               <p className="text-sm text-ink-2 leading-relaxed">
                 <span className="text-ok font-medium">Completed.</span> Escrow released — {WORKER_SHARE_PCT}% to{' '}
-                <span className="font-mono text-ink">{truncateAddress(onChain.worker)}</span>, {PLATFORM_FEE_PCT}% to the
+                <Link
+                  to={`/agents/${onChain.worker}`}
+                  title={onChain.worker}
+                  className="font-mono text-ink hover:text-cream hover:underline decoration-cream/30 transition-colors"
+                >
+                  {truncateAddress(onChain.worker)}
+                </Link>, {PLATFORM_FEE_PCT}% to the
                 treasury. Reputation updated.
                 {!a2aState?.resultData && !a2aState?.verificationResult && (
                   <> No archived output exists for this task — it settled before result archiving began, so the on-chain evidence hash above is the only record of the deliverable.</>
@@ -421,7 +437,26 @@ export default function TaskDetail() {
               </div>
               <div className="space-y-4">
                 {!a2aState.resultData ? (
-                  <p className="text-sm text-ink-3 italic">No output data provided by agent.</p>
+                  <>
+                    <p className="text-sm text-ink-3 italic">
+                      No output data visible to this wallet. The deliverable is poster/worker-only —{' '}
+                      sign in with the poster or worker wallet to read it.
+                      {isPoster && (
+                        <> If you posted this task and still see this, your signed-in wallet differs from the poster address above.</>
+                      )}
+                    </p>
+                    {a2aState?.outputRootHash && (
+                      <p className="text-xs font-mono break-all">
+                        <span className="text-ink-3 font-sans">0G storage (output): </span>
+                        <Link
+                          to={`/storage/${a2aState.outputRootHash}`}
+                          className="text-cream hover:underline decoration-cream/30"
+                        >
+                          {a2aState.outputRootHash}
+                        </Link>
+                      </p>
+                    )}
+                  </>
                 ) : typeof a2aState.resultData.output === 'string' ? (
                   <>
                     {a2aState.resultData.output.trim() ? (
@@ -451,6 +486,17 @@ export default function TaskDetail() {
                       <p className="text-sm text-ink-3 italic">Agent provided an empty result object.</p>
                     )}
                   </div>
+                )}
+                {a2aState?.outputRootHash && a2aState?.resultData && (
+                  <p className="text-xs font-mono break-all pt-3 border-t border-line">
+                    <span className="text-ink-3 font-sans">0G storage (output): </span>
+                    <Link
+                      to={`/storage/${a2aState.outputRootHash}`}
+                      className="text-cream hover:underline decoration-cream/30"
+                    >
+                      {a2aState.outputRootHash}
+                    </Link>
+                  </p>
                 )}
                 {a2aState.verificationResult?.reasons && a2aState.verificationResult.reasons.length > 0 && (
                   <div className="pt-3 border-t border-line">

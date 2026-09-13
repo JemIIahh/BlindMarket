@@ -114,7 +114,9 @@ export const agentsRouter = Router();
  */
 function formatNativeDecimal(raw: string): string {
   const n = BigInt(raw);
-  const decimals = process.env.BLIND_ESCROW_ADDRESS ? 6 : 18;
+  // Settlement runs on Base (USDC) whenever the Base escrow is configured —
+  // BLIND_ESCROW_ADDRESS is the 0G escrow and says nothing about settlement.
+  const decimals = config.baseEscrowAddress ? 6 : 18;
   const divisor = BigInt(10 ** decimals);
   const whole = (n / divisor).toString();
   const frac = (n % divisor).toString().padStart(decimals, '0').slice(0, 6);
@@ -981,10 +983,17 @@ agentsRouter.delete('/:id/skills/:slug', requireAuth, async (req: AuthRequest, r
 agentsRouter.get('/:id', async (req, res) => {
   // The marketplace links agents by WALLET ADDRESS while MyAgents links by
   // agent id — resolve both, or every Browse-agents click 404s for visitors.
+  // Task pages also link by on-chain worker, which is the SMART ACCOUNT for
+  // AA agents (a2a accept records the smart account, not the EOA) — resolve
+  // that too, or every assigned-task agent link 404s.
   let agent = await getAgent(req.params.id);
   if (!agent && /^0x[0-9a-fA-F]{40}$/.test(req.params.id)) {
     const needle = req.params.id.toLowerCase();
-    agent = (await listAgents()).find((a) => a.walletAddress?.toLowerCase() === needle);
+    agent = (await listAgents()).find(
+      (a) =>
+        a.walletAddress?.toLowerCase() === needle ||
+        a.smartAccountAddress?.toLowerCase() === needle,
+    );
   }
   if (!agent) { res.status(404).json({ success: false, error: 'Not found' }); return; }
   const stripped = strip(agent)!;
