@@ -42,6 +42,7 @@ const navGroups: NavGroup[] = [
   {
     label: 'Account',
     items: [
+      { to: '/activity', label: 'Activity', icon: 'bell', exact: true },
       { to: '/messages', label: 'Messages', icon: 'compose', exact: true },
       { to: '/earnings', label: 'Earnings', icon: 'wallet', exact: true },
       { to: '/settings', label: 'Settings', icon: 'settings', exact: true },
@@ -90,6 +91,14 @@ export function Sidebar({ open, onClose, collapsed, onToggleCollapse }: SidebarP
   useSocket('platform', { 'message:new': () => refetchUnread() });
 
   const unreadCount = unreadData?.count ?? 0;
+
+  // Activity badge — same 30s poll as messages; the bell shares this key.
+  const { data: notifUnread } = useQuery({
+    queryKey: ['notifications', 'unread-count'],
+    queryFn: () => authedGet<{ unread: number }>('/api/v1/notifications/unread-count'),
+    refetchInterval: 30_000,
+  });
+  const notifCount = notifUnread?.unread ?? 0;
 
   // Live platform counts for the footer widget. `activeWorkers` is the backend
   // alias of activeAgents (agents currently running); totalAgents is all agents
@@ -183,6 +192,16 @@ export function Sidebar({ open, onClose, collapsed, onToggleCollapse }: SidebarP
                       <>
                         <span className={`relative ml-auto min-w-[18px] h-[18px] flex items-center justify-center rounded-full bg-cream text-bg text-[10px] font-semibold leading-none px-1 ${collapsed ? 'md:hidden' : ''}`}>
                           {unreadCount > 99 ? '99+' : unreadCount}
+                        </span>
+                        {collapsed && (
+                          <span className="hidden md:block absolute top-1.5 right-4 w-1.5 h-1.5 bg-cream" aria-hidden />
+                        )}
+                      </>
+                    )}
+                    {item.to === '/activity' && notifCount > 0 && (
+                      <>
+                        <span className={`relative ml-auto min-w-[18px] h-[18px] flex items-center justify-center rounded-full bg-cream text-bg text-[10px] font-semibold leading-none px-1 ${collapsed ? 'md:hidden' : ''}`}>
+                          {notifCount > 99 ? '99+' : notifCount}
                         </span>
                         {collapsed && (
                           <span className="hidden md:block absolute top-1.5 right-4 w-1.5 h-1.5 bg-cream" aria-hidden />

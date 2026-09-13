@@ -11,6 +11,7 @@ import * as keyCustody from '../services/keyCustodyService.js';
 import { autoVerify } from '../services/autoVerify.js';
 import { settleAssignment, settleVerification, resolveAssignee } from '../services/a2aSettlement.js';
 import { recordWorkerPayout, recordWorkerDispute } from '../services/workerPayout.js';
+import { notifyLifecycle } from '../services/notificationStore.js';
 import { resolveTaskByHash, seedTaskId, type TaskChain } from '../services/taskChain.js';
 import * as escrowService from '../services/escrow.js';
 import * as reputationService from '../services/reputation.js';
@@ -714,6 +715,9 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
       const { fireWebhooks } = await import('../services/webhookStore.js');
       fireWebhooks(address, 'task_assigned', { taskId, rootHash: meta.rootHash }).catch(() => {});
     } catch { /* webhook module optional */ }
+
+    // Poster diary: "Task accepted". Fire-and-forget — never blocks accept.
+    void notifyLifecycle(taskId, 'assigned');
   } catch (err) {
     console.error(`[a2a] accept failed for ${req.params.id}:`, (err as Error).message);
     next(err);
@@ -1723,6 +1727,9 @@ a2aRouter.post('/tasks/:id/submit', requireAuth, async (req: AuthRequest, res, n
       fireWebhooks(address, 'task_submitted', { taskId: taskHash }).catch(() => {});
     } catch { /* webhook module optional */ }
 
+    // Poster diary: "Result submitted". Fire-and-forget.
+    void notifyLifecycle(taskHash, 'submitted');
+
     const body: ApiResponse = {
       success: true,
       data: {
@@ -2011,6 +2018,8 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
       } else {
         await recordWorkerDispute(taskHash, address);
       }
+      // Diary: completed (+ review nudge) or failed, poster + worker.
+      void notifyLifecycle(taskHash, settledPass ? 'completed' : 'failed');
       const body: ApiResponse = {
         success: true,
         data: { taskId: taskHash, status: reconciledStatus, verificationResult: reconciled, reconciled: true },
@@ -2063,6 +2072,9 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
     } else {
       await recordWorkerDispute(taskHash, address);
     }
+
+    // Diary: completed (+ review nudge) or failed, poster + worker.
+    void notifyLifecycle(taskHash, verificationResult.passed ? 'completed' : 'failed');
 
     // Fire webhook for task completion (non-blocking)
     try {
@@ -2189,6 +2201,9 @@ a2aRouter.post('/tasks/:id/verify', requireAuth, async (req: AuthRequest, res, n
     } else if (!passed && state.executorAddress) {
       await recordWorkerDispute(taskHash, state.executorAddress);
     }
+
+    // Diary: completed (+ review nudge) or failed, poster + worker.
+    void notifyLifecycle(taskHash, passed ? 'completed' : 'failed');
 
     const body: ApiResponse = {
       success: true,
@@ -2350,6 +2365,9 @@ a2aRouter.post('/tasks/:id/verdict', requireAuth, async (req: AuthRequest, res, 
     } else if (!passed && state.executorAddress) {
       await recordWorkerDispute(taskHash, state.executorAddress);
     }
+
+    // Diary: completed (+ review nudge) or failed, poster + worker.
+    void notifyLifecycle(taskHash, passed ? 'completed' : 'failed');
 
     const body: ApiResponse = {
       success: true,

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Button } from './Button';
 import { ConnectWalletButton } from './ConnectWalletButton';
+import { NotificationBell } from './NotificationBell';
 import { getStoredTheme } from '../ThemeSync';
 import { useUsdcBalance } from '../../hooks/useChainWallet';
 
@@ -56,6 +57,8 @@ export function TopBar({ onMenuClick }: TopBarProps = {}) {
         </span>
       </button>
 
+      {/* Activity bell */}
+      <NotificationBell />
       {/* Wallet — Privy-driven connect/disconnect pill */}
       <ConnectWalletButton />
       {/* USDC balance */}

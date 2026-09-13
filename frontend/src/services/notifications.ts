@@ -1,0 +1,41 @@
+import { authedGet, authedPost } from '../lib/api';
+
+export type NotificationType =
+  | 'assigned'
+  | 'submitted'
+  | 'completed'
+  | 'failed'
+  | 'disputed'
+  | 'review_received';
+
+export interface Notification {
+  id: string;
+  type: NotificationType;
+  title: string;
+  body?: string;
+  taskId?: string;
+  createdAt: string;
+  read: boolean;
+}
+
+export async function listNotifications(
+  limit = 30,
+  offset = 0,
+): Promise<{ notifications: Notification[]; total: number; unread: number }> {
+  return authedGet<{ notifications: Notification[]; total: number; unread: number }>(
+    `/api/v1/notifications?limit=${limit}&offset=${offset}`,
+  );
+}
+
+export async function unreadCount(): Promise<number> {
+  const d = await authedGet<{ unread: number }>('/api/v1/notifications/unread-count');
+  return d.unread ?? 0;
+}
+
+export async function markRead(id: string): Promise<void> {
+  await authedPost(`/api/v1/notifications/${id}/read`, {});
+}
+
+export async function markAllRead(): Promise<void> {
+  await authedPost('/api/v1/notifications/read-all', {});
+}

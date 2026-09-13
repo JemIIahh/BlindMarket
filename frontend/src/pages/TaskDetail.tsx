@@ -9,6 +9,7 @@ import { useAuth } from '../context/AuthContext';
 import { Panel, SectionRule, Tag, Button, StatusTag, Skeleton, ErrorState, useTabParam, ConfirmDialog } from '../components/bb';
 import { EncryptionIndicator } from '../components/EncryptionIndicator';
 import { Markdown } from '../components/Markdown';
+import { RateAgent } from '../components/RateAgent';
 import { TxPendingModal } from '../components/TxPendingModal';
 import { CustodyChain } from '../components/CustodyChain';
 import { truncateAddress, formatDate } from '../lib/utils';
@@ -572,6 +573,18 @@ export default function TaskDetail() {
               </div>
             </Panel>
           )}
+
+          {/* Poster rates the executor after completion. The executor
+              address comes from off-chain state (the EOA the backend's
+              review gate checks) with the on-chain worker as fallback. */}
+          {isPoster &&
+            onChain.status === TaskStatus.Completed &&
+            (a2aState?.executorAddress || onChain.worker !== '0x0000000000000000000000000000000000000000') && (
+              <RateAgent
+                taskHash={onChain.taskHash}
+                executorAddress={a2aState?.executorAddress ?? onChain.worker}
+              />
+            )}
 
           {/* Poster: Cancel / Timeout actions */}
           {isPoster && (onChain.status === TaskStatus.Funded || canTimeout) && (

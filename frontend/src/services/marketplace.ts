@@ -110,6 +110,14 @@ export async function submitReview(data: {
   return authedPost<AgentReview>('/api/v1/marketplace/reviews', data);
 }
 
+export async function getMyTaskReview(
+  taskId: string,
+): Promise<{ review: AgentReview | null }> {
+  return authedGet<{ review: AgentReview | null }>(
+    `/api/v1/marketplace/reviews/task/${taskId}`,
+  );
+}
+
 export async function getAgentReviews(
   agentAddress: string,
   limit = 20,

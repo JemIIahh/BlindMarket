@@ -1,6 +1,6 @@
 import { Icon, Tag } from '../bb';
 import { truncateAddress } from '../../lib/utils';
-import { OG_CHAIN_CONFIG } from '../../config/constants';
+import { ExplorerAddressLinks } from '../ExplorerLinks';
 import type { AgentBadge } from '../../services/marketplace';
 import type { AgentDetails, SkillStat } from './types';
 
@@ -13,7 +13,6 @@ export function IdentityPanel({
   badges: AgentBadge[];
   skillStats: SkillStat[];
 }) {
-  const explorerUrl = OG_CHAIN_CONFIG.blockExplorerUrls[0];
   const score =
     agent.decayedReputation?.decayedScore ?? agent.reputation?.score ?? 0;
   const tasks = agent.reputation?.tasksCompleted ?? 0;
@@ -29,19 +28,19 @@ export function IdentityPanel({
           <span className="font-mono text-ink">{truncateAddress(agent.ownerAddress)}</span>
         </div>
 
-        {/* Agent wallet */}
+        {/* Agent wallet — same EOA on both chains (USDC on Base,
+            identity/reputation on 0G), so link both explorers. */}
         {agent.walletAddress && (
           <div className="flex items-center gap-1.5">
             <Icon name="wallet" size={14} className="text-ink-3" />
             <span className="text-ink-3 text-[12px]">Wallet</span>
-            <a
-              href={`${explorerUrl}/address/${agent.walletAddress}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="font-mono text-ink hover:text-cream transition-colors"
-            >
+            <span className="font-mono text-ink" title={agent.walletAddress}>
               {truncateAddress(agent.walletAddress)}
-            </a>
+            </span>
+            <ExplorerAddressLinks
+              address={agent.walletAddress}
+              className="font-mono text-[11px] text-ink-3"
+            />
           </div>
         )}
 

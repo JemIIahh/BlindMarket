@@ -434,11 +434,8 @@ export default function AgentDetail() {
         />
 
         <ReviewsSection
-          agentWallet={agent.walletAddress}
           reviews={reviews}
           stats={reviewStats}
-          isOwner={isOwner}
-          onSubmitted={reloadReviews}
         />
 
         {/* Visitors get the work history inline; the owner keeps it as a
