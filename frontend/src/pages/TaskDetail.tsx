@@ -30,6 +30,16 @@ const DETAIL_TABS: { id: DetailTab; label: string }[] = [
   { id: 'custody', label: 'Custody' },
 ];
 
+/**
+ * Explorer search URL for an arbitrary hash (task hash, evidence hash).
+ * Basescan and the 0G chainscan (Blockscout) use different search paths.
+ */
+function explorerSearchUrl(explorerBase: string, isBase: boolean, query: string): string {
+  return isBase
+    ? `${explorerBase}/search?f=0&q=${query}`
+    : `${explorerBase}/search?q=${query}`;
+}
+
 /** Small 2-col field: sans label, value styled by caller (mono for data). */
 function Field({
   label,
@@ -52,7 +62,10 @@ export default function TaskDetail() {
   const { id } = useParams();
   const { data, isLoading, isError, refetch } = useTask(id || '');
   const { address, signer } = useWallet();
-  const explorerUrl = useChainExplorerUrl();
+  // The backend names the escrow's chain on the detail response — Base tasks
+  // explore on Basescan, 0G tasks on the 0G chainscan. Defaults to 0G while
+  // loading or for legacy responses without the field.
+  const explorerUrl = useChainExplorerUrl(data?.onChain?.chain === 'base' ? 'base' : 'og');
   // Auth context kept for any future reads; not used in the A2A view path.
   void useAuth();
   const qc = useQueryClient();
@@ -216,10 +229,28 @@ export default function TaskDetail() {
                 </p>
               </Field>
               <Field label="Task hash">
-                <p className="text-sm text-ink font-mono truncate" title={onChain.taskHash}>{onChain.taskHash}</p>
+                <p className="text-sm font-mono truncate" title={`${onChain.taskHash} — open in chain explorer`}>
+                  <a
+                    href={explorerSearchUrl(explorerUrl, onChain.chain === 'base', onChain.taskHash)}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-ink hover:text-cream hover:underline decoration-cream/30 transition-colors"
+                  >
+                    {onChain.taskHash}
+                  </a>
+                </p>
               </Field>
               <Field label="Posted by">
-                <p className="text-sm text-ink font-mono">{truncateAddress(onChain.agent)}</p>
+                <p className="text-sm font-mono" title={`${onChain.agent} — open in chain explorer`}>
+                  <a
+                    href={`${explorerUrl}/address/${onChain.agent}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-ink hover:text-cream hover:underline decoration-cream/30 transition-colors"
+                  >
+                    {truncateAddress(onChain.agent)}
+                  </a>
+                </p>
               </Field>
               <Field label="Accepted by">
                 <p className="text-sm font-mono">
@@ -249,7 +280,20 @@ export default function TaskDetail() {
                 <p className="text-sm text-ink capitalize">{onChain.a2aMeta?.targetExecutorType || 'human'}</p>
               </Field>
               <Field label="Evidence hash" span2>
-                <p className="text-sm text-ink font-mono break-all">{onChain.evidenceHash || '—'}</p>
+                <p className="text-sm font-mono break-all" title={onChain.evidenceHash ? `${onChain.evidenceHash} — open in chain explorer` : undefined}>
+                  {onChain.evidenceHash ? (
+                    <a
+                      href={explorerSearchUrl(explorerUrl, onChain.chain === 'base', onChain.evidenceHash)}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-ink hover:text-cream hover:underline decoration-cream/30 transition-colors"
+                    >
+                      {onChain.evidenceHash}
+                    </a>
+                  ) : (
+                    <span className="text-ink">—</span>
+                  )}
+                </p>
               </Field>
               {meta.rootHash && (
                 <Field label="0G storage root (brief)" span2>

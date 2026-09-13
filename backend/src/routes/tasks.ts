@@ -240,6 +240,9 @@ tasksRouter.get('/:id', optionalAuth, async (req: AuthRequest, res, next) => {
       data: {
         ...serializeBigInts(task as unknown as Record<string, unknown>),
         taskId: taskId.toString(), // Include numeric ID explicitly
+        // Which escrow holds the task — the frontend picks the matching
+        // chain explorer (Base vs 0G) for its hash/address links.
+        chain,
         a2aIndexed,
         // Public projection — this route has no auth, and full A2A meta
         // carries the brief's key material (wrappedKeys/keyCustodyBlob) plus
