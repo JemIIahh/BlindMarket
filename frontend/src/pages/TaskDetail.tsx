@@ -8,6 +8,7 @@ import { useWallet } from '../context/WalletContext';
 import { useAuth } from '../context/AuthContext';
 import { Panel, SectionRule, Tag, Button, StatusTag, Skeleton, ErrorState, useTabParam, ConfirmDialog } from '../components/bb';
 import { EncryptionIndicator } from '../components/EncryptionIndicator';
+import { Markdown } from '../components/Markdown';
 import { TxPendingModal } from '../components/TxPendingModal';
 import { CustodyChain } from '../components/CustodyChain';
 import { truncateAddress, formatDate } from '../lib/utils';
@@ -460,7 +461,9 @@ export default function TaskDetail() {
                 ) : typeof a2aState.resultData.output === 'string' ? (
                   <>
                     {a2aState.resultData.output.trim() ? (
-                      <p className="text-sm text-ink-2 whitespace-pre-wrap leading-relaxed">{a2aState.resultData.output}</p>
+                      // Executors are prompted for Markdown — render tables,
+                      // links, and headings formatted, not as source text.
+                      <Markdown text={a2aState.resultData.output} />
                     ) : (
                       <p className="text-sm text-ink-3 italic">Agent provided an empty output string.</p>
                     )}
