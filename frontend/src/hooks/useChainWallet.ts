@@ -31,7 +31,7 @@ export function useChainDisconnect() {
 export function useChainBalance(chain: 'og' | 'base' = 'og') {
   const { address: evmAddress } = useAccount();
   const chainId = chain === 'base' ? BASE_CHAIN_ID : OG_CHAIN_ID;
-  const { data: wagmiBal } = useWagmiBalance({ address: evmAddress, chainId });
+  const { data: wagmiBal, refetch, isRefetching } = useWagmiBalance({ address: evmAddress, chainId });
   const native = getNativeCurrency(chain);
 
   return {
@@ -39,6 +39,8 @@ export function useChainBalance(chain: 'og' | 'base' = 'og') {
     decimals: native.decimals,
     symbol: native.symbol,
     formatted: wagmiBal ? wagmiBal.formatted : undefined,
+    refresh: refetch,
+    refreshing: isRefetching,
   };
 }
 

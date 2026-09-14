@@ -11,9 +11,9 @@ export function NotificationBell() {
       to="/activity"
       aria-label={unread > 0 ? `${unread} unread notifications` : 'Activity'}
       title="Activity"
-      className="relative p-2 text-ink-2 hover:text-ink transition-colors"
+      className="relative flex items-center justify-center h-8 w-8 rounded-md text-ink-2 hover:text-ink hover:bg-surface-2 transition-colors"
     >
-      <Icon name="bell" size={19} />
+      <Icon name="bell" size={17} />
       {unread > 0 && (
         <span className="absolute top-0.5 right-0.5 min-w-[16px] h-[16px] flex items-center justify-center rounded-full bg-cream text-bg text-[9px] font-semibold leading-none px-1">
           {unread > 99 ? '99+' : unread}
