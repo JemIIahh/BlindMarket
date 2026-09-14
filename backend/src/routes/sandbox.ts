@@ -55,6 +55,23 @@ sandboxRouter.post('/exec', requireAuth, sandboxExecLimiter, async (req: AuthReq
     }
 
     const { command, setup, taskId, timeoutSeconds } = execSchema.parse(req.body);
+
+    // M7 (audit): the only in-tree caller is backend worker.js (platform
+    // token → typ 'agent-registration'). Without this gate ANY authenticated
+    // principal — any Privy email login, any sk_ owner, the legacy shared
+    // key — could run arbitrary shell billed to the platform, sybiling the
+    // per-principal caps with fresh accounts. Workers only.
+    if (req.user?.typ !== 'agent-registration') {
+      res.status(403).json({
+        success: false,
+        error: {
+          code: 'SANDBOX_WORKERS_ONLY',
+          message: 'Sandbox execution is restricted to agent worker identities.',
+        },
+      });
+      return;
+    }
+
     const agentId = req.user!.address;
     const spendKey = sandboxSpendKey(agentId);
 

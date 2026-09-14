@@ -29,7 +29,12 @@ vi.mock('../middleware/auth.js', () => ({
   // its caller, bypassing Privy/JWT entirely — same pattern as
   // a2a.accept.test.ts.
   requireAuth: (req: any, _res: any, next: any) => {
-    req.user = { address: req.headers['x-test-address'] || '0xagent' };
+    // Worker identity (platform token) unless the test opts out — mirrors
+    // the M7 principal gate: only typ 'agent-registration' may exec.
+    req.user = {
+      address: req.headers['x-test-address'] || '0xagent',
+      typ: req.headers['x-test-typ'] === 'none' ? undefined : 'agent-registration',
+    };
     next();
   },
 }));
@@ -180,5 +185,18 @@ describe('POST /sandbox/exec — daily spend cap (plan 014)', () => {
     expect(redisMock.get).not.toHaveBeenCalled();
     expect(redisMock.pipeline).not.toHaveBeenCalled();
     expect(railwaySandboxMock.createAndRun).not.toHaveBeenCalled();
+  });
+
+  it('6) M7: non-worker principals get 403 and no sandbox ever spawns', async () => {
+    const res = await request(app())
+      .post('/api/v1/sandbox/exec')
+      .set('x-test-address', '0xhuman0000000000000000000000000000000007')
+      .set('x-test-typ', 'none')
+      .send({ command: 'echo hi' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe('SANDBOX_WORKERS_ONLY');
+    expect(railwaySandboxMock.createAndRun).not.toHaveBeenCalled();
+    expect(redisMock.get).not.toHaveBeenCalled();
   });
 });
