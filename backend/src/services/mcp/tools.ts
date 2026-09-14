@@ -13,7 +13,7 @@ import * as reputationService from '../reputation.js';
 import * as reputationDecay from '../reputationDecay.js';
 import { loadAllAgents } from '../deployedAgentStore.js';
 import { getAgent as getDeployedAgent, startAgent, stopAgent, getAgentLogs } from '../agentRunner.js';
-import { isAgentOwner, stripAgentSecrets } from '../agentOwnership.js';
+import { isAgentOwner, principalAddresses, stripAgentSecrets } from '../agentOwnership.js';
 import { canViewerSeeResult } from '../resultVisibility.js';
 import { getTokenDecimals } from '../chain.js';
 import { resolveCachedTaskByHash, type TaskChain } from '../taskChain.js';
@@ -52,8 +52,9 @@ export function buildMcpServer(user: AuthUser): McpServer {
 
   // The legacy shared AGENT_API_KEY resolves to the literal principal 'agent'
   // — it has no wallet, so "my"-scoped and owner-gated tools must refuse it.
-  const allAddresses = [user.address, user.ownerAddress, ...(user.addresses ?? [])]
-    .filter((a): a is string => typeof a === 'string' && a.startsWith('0x'));
+  // M6 (audit): scoped via principalAddresses — a phished registration
+  // ownerAddress must not manage other wallets' deployed agents.
+  const allAddresses = principalAddresses(user);
   const hasWallet = allAddresses.length > 0;
 
   /** Shared owner gate for agent lifecycle tools — same predicate as REST authorizeOwner. */

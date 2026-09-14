@@ -1,6 +1,13 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import type { DeployedAgent } from '../types.js';
-import { stripAgentSecrets } from './agentOwnership.js';
+import { principalAddresses, stripAgentSecrets } from './agentOwnership.js';
+
+vi.mock('./a2aStore.js', () => ({
+  getMeta: vi.fn(async () => ({ posterAddress: '0xposter' })),
+  getState: vi.fn(async () => ({ executorAddress: '0xexecutor' })),
+}));
+
+import { assertTaskParticipant } from './taskParticipant.js';
 
 /**
  * H1 regression: unauthenticated GET /agents and GET /agents/:id serve
@@ -67,5 +74,52 @@ describe('stripAgentSecrets redacts tool-embedded secrets (H1)', () => {
     expect(mcp.auth).toEqual({ type: 'header', key_name: 'Authorization', secret_ref: 'mcp:token' });
     expect(out.name).toBe('A');
     expect(out.walletAddress).toBe('0xw');
+  });
+});
+
+/**
+ * M6: a phished device-flow registration binds the victim's wallet as
+ * ownerAddress on the ATTACKER's agent JWT. That claim must not unlock other
+ * wallets' resources (deliverables, custody chains, deployed agents).
+ * First-party worker tokens ('agent-platform', server-minted) keep the full
+ * set — only the phishable flavor is scoped.
+ */
+describe('principalAddresses (M6 claim scoping)', () => {
+  const VICTIM = '0xcccccccccccccccccccccccccccccccccccccccc';
+  const ATTACKER_WALLET = '0xdddddddddddddddddddddddddddddddddddddddd';
+
+  const fixated = {
+    address: ATTACKER_WALLET,
+    ownerAddress: VICTIM,
+    typ: 'agent-registration',
+  } as const;
+
+  it('drops ownerAddress for device-flow (agent-registration) principals', () => {
+    expect(principalAddresses(fixated as any)).toEqual([ATTACKER_WALLET.toLowerCase()]);
+  });
+
+  it('keeps the full set for first-party worker (agent-platform) tokens', () => {
+    const addrs = principalAddresses({ ...fixated, typ: 'agent-platform' } as any);
+    expect(addrs).toContain(VICTIM.toLowerCase());
+    expect(addrs).toContain(ATTACKER_WALLET.toLowerCase());
+  });
+
+  it('keeps the full set for Privy / sk_ identities (no typ)', () => {
+    const addrs = principalAddresses({ address: ATTACKER_WALLET, ownerAddress: VICTIM });
+    expect(addrs).toContain(VICTIM.toLowerCase());
+  });
+
+  it('denies the fixated principal at the custody gate for a victim task', async () => {
+    // Task posted by the victim, executed by someone else entirely.
+    const { getMeta, getState } = await import('./a2aStore.js');
+    vi.mocked(getMeta).mockResolvedValue({ posterAddress: VICTIM } as any);
+    vi.mocked(getState).mockResolvedValue({ executorAddress: '0xexecutor' } as any);
+    expect(await assertTaskParticipant('0xtask', fixated as any)).toBe(false);
+  });
+
+  it('still admits the executor wallet itself through the same gate', async () => {
+    expect(
+      await assertTaskParticipant('0xtask', { address: '0xexecutor', typ: 'agent-registration' } as any),
+    ).toBe(true);
   });
 });

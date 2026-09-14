@@ -1,4 +1,4 @@
-import type { AgentTool, DeployedAgent, InstalledSkill } from '../types.js';
+import type { AgentTool, AuthUser, DeployedAgent, InstalledSkill } from '../types.js';
 
 /**
  * Shared ownership predicate for deployed agents. Owner set = the original
@@ -8,6 +8,31 @@ import type { AgentTool, DeployedAgent, InstalledSkill } from '../types.js';
  * Used by both the REST routes (agents.ts authorizeOwner) and the MCP tool
  * surface (services/mcp/tools.ts) so the two gates cannot drift apart.
  */
+/**
+ * M6 (audit): the canonical caller-address set for ownership/visibility
+ * gates. Device-flow registration JWTs carry an `ownerAddress` established
+ * by phishable consent (a substituted magic link binds the victim's wallet
+ * to the attacker's agent), so for `typ: 'agent-registration'` the
+ * ownerAddress claim confers NO rights over other wallets' resources —
+ * executor flows key on `address`. First-party worker tokens
+ * (`'agent-platform'`, server-minted, unphishable) and Privy/sk_ identities
+ * keep the full set, preserving deployed-agent behavior exactly.
+ */
+export function principalAddresses(user: AuthUser | undefined): string[] {
+  if (!user) return [];
+  const raw =
+    user.typ === 'agent-registration'
+      ? [user.address, ...(user.addresses ?? [])]
+      : [user.address, user.ownerAddress, ...(user.addresses ?? [])];
+  return [
+    ...new Set(
+      raw
+        .filter((a): a is string => typeof a === 'string' && a.startsWith('0x'))
+        .map((a) => a.toLowerCase()),
+    ),
+  ];
+}
+
 export function isAgentOwner(agent: DeployedAgent, candidateAddresses: Array<string | undefined>): boolean {
   const ownerSet = new Set(
     [agent.ownerAddress, ...(agent.authorizedOwners ?? [])].map((a) => a.toLowerCase()),

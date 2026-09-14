@@ -8,11 +8,13 @@ export interface AuthUser {
   /** Agent owner address (from platform token JWT). */
   ownerAddress?: string;
   /**
-   * Set when the principal was authenticated via a registration-minted JWT
-   * (verifyRegistrationToken), as opposed to Privy. requireFounder must
-   * reject any principal carrying this — see middleware/auth.ts.
+   * Set when the principal was authenticated via an HS256 JWT
+   * (verifyRegistrationToken), as opposed to Privy. 'agent-platform' =
+   * server-minted at deploy (first-party worker); 'agent-registration' =
+   * device-flow minted (phishable consent — see M6). requireFounder must
+   * reject any principal carrying either — see middleware/auth.ts.
    */
-  typ?: 'agent-registration';
+  typ?: 'agent-registration' | 'agent-platform';
 }
 
 /** Express request with authenticated user */

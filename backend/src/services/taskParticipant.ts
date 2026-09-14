@@ -1,4 +1,5 @@
 import * as a2aStore from './a2aStore.js';
+import { principalAddresses } from './agentOwnership.js';
 import type { AuthUser } from '../types.js';
 
 /**
@@ -15,12 +16,8 @@ import type { AuthUser } from '../types.js';
  * are checked, not just `address`.
  */
 function callerAddresses(user: AuthUser | undefined): Set<string> {
-  if (!user) return new Set();
-  return new Set(
-    [user.address, user.ownerAddress, ...(user.addresses ?? [])]
-      .filter((a): a is string => typeof a === 'string' && a.startsWith('0x'))
-      .map((a) => a.toLowerCase()),
-  );
+  // M6 (audit): scoped via principalAddresses (see agentOwnership.ts).
+  return new Set(principalAddresses(user));
 }
 
 /**

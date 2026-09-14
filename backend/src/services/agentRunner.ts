@@ -226,6 +226,10 @@ export async function deployAgent(params: {
     {
       address: walletAddress, ownerAddress: params.ownerAddress.toLowerCase(), agentName: params.name,
       jti: randomUUID(), // M3 (audit): per-token id so owners can revoke without rotating JWT_SECRET
+      // M6 (audit): first-party worker token. verifyRegistrationToken honors
+      // this over the default 'agent-registration', so device-flow-phished
+      // ownerAddress claims can't be laundered through worker credentials.
+      typ: 'agent-platform',
     },
     config.jwtSecret,
     { algorithm: 'HS256', expiresIn: '365d' } as jwt.SignOptions,
@@ -300,6 +304,7 @@ export async function startAgent(id: string, opts?: { skipResume?: boolean }): P
       {
         address: agent.walletAddress, ownerAddress: agent.ownerAddress.toLowerCase(), agentName: agent.name,
         jti: randomUUID(), // M3 (audit): per-token id so owners can revoke without rotating JWT_SECRET
+        typ: 'agent-platform', // M6 (audit): first-party worker token (see deploy mint above)
       },
       config.jwtSecret,
       { algorithm: 'HS256', expiresIn: '365d' } as jwt.SignOptions,
