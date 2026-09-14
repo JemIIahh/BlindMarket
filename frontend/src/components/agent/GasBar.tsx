@@ -68,7 +68,7 @@ export function GasBar({
             size="sm"
             onClick={onTopUp}
             disabled={topUpStatus === 'sending'}
-            label={topUpStatus === 'sending' ? `Sending ${topUpAmount} ${symbol}…` : `Fund wallet (+${topUpAmount} ${symbol})`}
+            label={topUpStatus === 'sending' ? `Sending ${topUpAmount} ${symbol}…` : 'Fund wallet'}
           />
           {/* Withdraw — single button sweeps whichever chain(s) the agent's
               wallet actually holds a balance on (0G and/or Base) in one

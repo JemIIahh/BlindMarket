@@ -10,7 +10,9 @@ import {
   LoadingState,
   EmptyState,
   ErrorState,
-  ConfirmDialog,
+  Modal,
+  FormField,
+  FormInput,
 } from '../components/bb';
 import { get, authedGet, authedPost } from '../lib/api';
 import { useChainAddress } from '../hooks/useChainWallet';
@@ -32,9 +34,9 @@ import { ReviewsSection } from '../components/agent/ReviewsSection';
 import { ServicesSection } from '../components/agent/ServicesSection';
 import type { AgentDetails, SkillStat } from '../components/agent/types';
 
-// Top-up amount in USDC. Covers ~100 task executions before next top-up.
-const TOP_UP_AMOUNT = '1';
-const TOP_UP_RAW = parseUnits(TOP_UP_AMOUNT, getPaymentDecimals());
+// Default top-up suggestion in USDC. Covers ~100 task executions — the owner
+// edits the amount in the fund dialog before confirming.
+const DEFAULT_TOP_UP_AMOUNT = '1';
 
 // Below this the agent can't reliably pay for operations. UI surfaces a
 // "Fund wallet" call to action when balance is under this.
@@ -266,19 +268,37 @@ export default function AgentDetail() {
   // balance after the tx confirms so the UI tile updates immediately
   // instead of waiting on a poll cycle.
   const [topUpConfirm, setTopUpConfirm] = useState(false);
+  const [topUpAmount, setTopUpAmount] = useState(DEFAULT_TOP_UP_AMOUNT);
   function requestTopUp() {
     if (!address || !fundingAddress) return;
+    setTopUpError('');
+    setTopUpStatus('idle');
     setTopUpConfirm(true);
   }
   async function confirmTopUp() {
     if (!address || !fundingAddress) return;
+    // Validate before closing — a bad amount keeps the dialog open so the
+    // owner can fix it instead of re-opening.
+    let raw: bigint;
+    try {
+      raw = parseUnits(topUpAmount.trim(), getPaymentDecimals());
+    } catch {
+      setTopUpError('Enter a valid amount');
+      setTopUpStatus('error');
+      return;
+    }
+    if (raw <= 0n) {
+      setTopUpError('Amount must be greater than 0');
+      setTopUpStatus('error');
+      return;
+    }
     setTopUpConfirm(false);
     setTopUpStatus('sending');
     try {
       const provider = new BrowserProvider(walletClient!.transport);
       const signer = await provider.getSigner();
       const usdc = new Contract(MARKETPLACE_TOKEN_ADDRESS, USDC_ABI, signer);
-      const tx = await usdc.transfer.populateTransaction(fundingAddress, TOP_UP_RAW);
+      const tx = await usdc.transfer.populateTransaction(fundingAddress, raw);
       const { signAndSendTx } = await import('../lib/txSigner');
       const sent = await signAndSendTx(signer, tx as any);
       if (sent.receipt) {
@@ -458,7 +478,7 @@ export default function AgentDetail() {
           {agent.walletAddress && (
             <GasBar
               symbol={balanceSymbol}
-              topUpAmount={TOP_UP_AMOUNT}
+              topUpAmount={topUpAmount.trim() || DEFAULT_TOP_UP_AMOUNT}
               lowGasThreshold={1}
               isLowGas={isLowGas}
               balanceEther={balanceEther}
@@ -488,14 +508,58 @@ export default function AgentDetail() {
         </div>
       )}
     </div>
-    <ConfirmDialog
+    <Modal
       open={topUpConfirm}
+      onClose={() => setTopUpConfirm(false)}
       title="Fund agent wallet"
-      description={`Send ${TOP_UP_AMOUNT} USDC from your wallet to ${fundingAddress?.slice(0, 10)}…${fundingAddress?.slice(-8)} for operations. This will be deducted from your wallet.`}
-      confirmLabel="Send USDC"
-      onConfirm={confirmTopUp}
-      onCancel={() => setTopUpConfirm(false)}
-    />
+      subtitle={fundingAddress ? `${fundingAddress.slice(0, 10)}…${fundingAddress.slice(-8)}` : undefined}
+      size="sm"
+    >
+      <p className="text-sm text-ink-2 leading-relaxed mb-4">
+        Send USDC from your wallet to this agent for operations. This will be deducted from your wallet.
+      </p>
+      <FormField label="Amount (USDC)" required>
+        <FormInput
+          type="number"
+          min="0"
+          step="any"
+          inputMode="decimal"
+          value={topUpAmount}
+          onChange={(e) => setTopUpAmount(e.target.value)}
+          placeholder={DEFAULT_TOP_UP_AMOUNT}
+          className="font-mono"
+        />
+      </FormField>
+      <div className="flex items-center gap-2 mt-3">
+        {['1', '5', '10'].map((preset) => (
+          <button
+            key={preset}
+            type="button"
+            onClick={() => setTopUpAmount(preset)}
+            className={`px-2.5 py-1 text-xs font-mono border transition-colors ${
+              topUpAmount.trim() === preset
+                ? 'border-cream text-ink'
+                : 'border-line text-ink-3 hover:text-cream'
+            }`}
+          >
+            {preset}
+          </button>
+        ))}
+      </div>
+      {topUpStatus === 'error' && topUpError && (
+        <div className="text-xs text-err mt-3">{topUpError}</div>
+      )}
+      <div className="flex items-center justify-end gap-2 mt-5">
+        <Button variant="ghost" size="sm" label="Cancel" onClick={() => setTopUpConfirm(false)} />
+        <Button
+          variant="primary"
+          size="sm"
+          label={topUpStatus === 'sending' ? 'Sending…' : `Send ${topUpAmount.trim() || DEFAULT_TOP_UP_AMOUNT} USDC`}
+          onClick={confirmTopUp}
+          disabled={topUpStatus === 'sending'}
+        />
+      </div>
+    </Modal>
     </>
   );
 }
