@@ -15,6 +15,7 @@ import { Router } from 'express';
 import { PrivyClient, generateAuthorizationSignatures } from '@privy-io/node';
 import { z } from 'zod';
 import { requireAuth } from '../middleware/auth.js';
+import { createUserRateLimiter } from '../middleware/rateLimit.js';
 import type { AuthRequest, AuthUser } from '../types.js';
 import { config } from '../config.js';
 import { AppError } from '../middleware/errorHandler.js';
@@ -138,7 +139,14 @@ function callerWallets(user: AuthUser | undefined): Set<string> {
   );
 }
 
-txRouter.post('/relay-tx', requireAuth, async (req: AuthRequest, res, next) => {
+// M9 (audit): every relay burns real money (Privy fees + app-pays gas), and
+// the global per-IP limiter is shared + bypassable. Cap per principal: a
+// task flow needs a handful of relays (approve + create/submit + index
+// retries), so 30/min leaves headroom while bounding a compromised or
+// abusive key. Mounted AFTER requireAuth so the key is the wallet address.
+const relayLimiter = createUserRateLimiter(30);
+
+txRouter.post('/relay-tx', requireAuth, relayLimiter, async (req: AuthRequest, res, next) => {
   // The rung that was being attempted when an error escaped. Declared outside
   // the try so the catch can word its message for the right path — an
   // "insufficient funds" on wallet-pays means "needs native ETH", not USDC.
