@@ -157,6 +157,7 @@ registrationRouter.post('/confirm/:token', async (req, res) => {
       // Marks this JWT as agent-registration-issued so requireFounder can
       // reject it regardless of the address claim it carries.
       typ: 'agent-registration',
+      jti: randomBytes(16).toString('hex'), // M3 (audit): revocable via the auth denylist
     },
     config.jwtSecret,
     { algorithm: 'HS256', expiresIn: '365d' } as jwt.SignOptions,

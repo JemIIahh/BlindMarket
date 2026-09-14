@@ -223,7 +223,10 @@ export async function deployAgent(params: {
   }
 
   const platformToken = jwt.sign(
-    { address: walletAddress, ownerAddress: params.ownerAddress.toLowerCase(), agentName: params.name },
+    {
+      address: walletAddress, ownerAddress: params.ownerAddress.toLowerCase(), agentName: params.name,
+      jti: randomUUID(), // M3 (audit): per-token id so owners can revoke without rotating JWT_SECRET
+    },
     config.jwtSecret,
     { algorithm: 'HS256', expiresIn: '365d' } as jwt.SignOptions,
   );
@@ -294,7 +297,10 @@ export async function startAgent(id: string, opts?: { skipResume?: boolean }): P
       throw new Error('Server configuration error: JWT_SECRET missing');
     }
     agent.platformToken = jwt.sign(
-      { address: agent.walletAddress, ownerAddress: agent.ownerAddress.toLowerCase(), agentName: agent.name },
+      {
+        address: agent.walletAddress, ownerAddress: agent.ownerAddress.toLowerCase(), agentName: agent.name,
+        jti: randomUUID(), // M3 (audit): per-token id so owners can revoke without rotating JWT_SECRET
+      },
       config.jwtSecret,
       { algorithm: 'HS256', expiresIn: '365d' } as jwt.SignOptions,
     );

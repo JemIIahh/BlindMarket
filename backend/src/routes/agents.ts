@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { randomBytes } from 'crypto';
+import { randomBytes, randomUUID } from 'crypto';
+import jwt from 'jsonwebtoken';
 import { AGENT_CAPABILITIES, LLM_PROVIDER_MODELS, LLM_MODEL_IDS } from '../types.js';
 import type { AuthRequest } from '../types.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -15,6 +16,8 @@ import * as reputationDecay from '../services/reputationDecay.js';
 import * as agentStore from '../services/agentStore.js';
 import * as serviceStore from '../services/serviceStore.js';
 import { isAgentOwner, stripAgentSecrets } from '../services/agentOwnership.js';
+import { saveAgent } from '../services/deployedAgentStore.js';
+import { REVOKED_JWT_TTL_S } from '../middleware/auth.js';
 import * as skillStore from '../services/skillStore.js';
 import * as agentEmbedding from '../services/agentEmbedding.js';
 import { buildInstalledSkill, assertComposedSizeOk } from '../services/skillComposer.js';
@@ -526,6 +529,56 @@ agentsRouter.post('/:id/export-key', requireAuth, async (req: AuthRequest, res) 
   const agent = await authorizeOwner(req, res, req.params.id);
   if (!agent) return;
   res.json({ success: true, data: { agentId: agent.id, walletAddress: agent.walletAddress, encryptedPrivateKey: agent.encryptedPrivateKey } });
+});
+
+// POST /api/v1/agents/:id/revoke-token
+//
+// Kills the agent's current platform token (M3 audit: 365-day bearer JWTs
+// had no per-token revocation). Sets the denylist flag the auth middleware
+// checks, then mints + persists a replacement so the next start loads fresh
+// credentials. The RUNNING worker keeps its env copy until restarted —
+// restart the agent to complete the rotation. Owner-only.
+agentsRouter.post('/:id/revoke-token', requireAuth, async (req: AuthRequest, res) => {
+  const agent = await authorizeOwner(req, res, req.params.id);
+  if (!agent) return;
+  if (!config.jwtSecret) {
+    res.status(500).json({ success: false, error: { code: 'NO_JWT_SECRET', message: 'JWT_SECRET not configured' } });
+    return;
+  }
+  // Pre-jti tokens carry no id to deny — verification is stateless, so only
+  // the denylist (jti) or a JWT_SECRET rotation can kill them. The mint below
+  // still rotates the stored token; report honestly which kill applied.
+  let denied = false;
+  if (agent.platformToken) {
+    try {
+      const decoded = jwt.decode(agent.platformToken) as { jti?: unknown } | null;
+      const jti = typeof decoded?.jti === 'string' ? decoded.jti : undefined;
+      if (jti) {
+        await redis.set(`revoked:jwt:${jti}`, '1', 'EX', REVOKED_JWT_TTL_S);
+        denied = true;
+      }
+    } catch (e) {
+      console.warn(`[agents] revoke-token denylist write failed for ${req.params.id}:`, (e as Error).message);
+    }
+  }
+  const platformToken = jwt.sign(
+    {
+      address: agent.walletAddress, ownerAddress: agent.ownerAddress.toLowerCase(), agentName: agent.name,
+      jti: randomUUID(),
+    },
+    config.jwtSecret,
+    { algorithm: 'HS256', expiresIn: '365d' } as jwt.SignOptions,
+  );
+  await saveAgent({ ...agent, platformToken });
+  res.json({
+    success: true,
+    data: {
+      revoked: denied,
+      note: denied
+        ? 'Old token is dead immediately. Restart the agent to pick up the new token.'
+        : 'Stored token rotated, but the previous token predates revocation ids and stays valid until expiry — rotate JWT_SECRET for an immediate kill, then restart the agent.',
+    },
+  });
 });
 
 // POST /api/v1/agents/:id/withdraw

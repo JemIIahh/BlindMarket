@@ -6,6 +6,7 @@ import { config } from '../config.js';
 import { AppError } from './errorHandler.js';
 import type { AuthRequest } from '../types.js';
 import { lookupApiKey } from '../services/apiKeyStore.js';
+import { redis } from '../services/redis.js';
 
 /** Constant-time string comparison to prevent timing attacks on API keys */
 function safeCompare(a: string, b: string): boolean {
@@ -159,7 +160,7 @@ function getAddressForChain(wallets: WalletAddress[], chainType: string): string
  * — including tokens minted before that claim existed in the payload. Callers
  * that gate privileged roles (see requireFounder) must reject on this field.
  */
-export function verifyRegistrationToken(token: string): { address: string; ownerAddress?: string; typ: 'agent-registration' } | null {
+export function verifyRegistrationToken(token: string): { address: string; ownerAddress?: string; typ: 'agent-registration'; jti?: string } | null {
   if (!config.jwtSecret) {
     console.warn('[Auth] Registration token rejected: JWT_SECRET not configured');
     return null;
@@ -180,10 +181,40 @@ export function verifyRegistrationToken(token: string): { address: string; owner
       console.warn('[Auth] Registration token rejected: issued before REGISTRATION_TOKEN_MIN_IAT');
       return null;
     }
-    return { address: claims.address, ownerAddress: claims.ownerAddress as string, typ: 'agent-registration' };
+    return {
+      address: claims.address,
+      ownerAddress: claims.ownerAddress as string,
+      typ: 'agent-registration',
+      jti: typeof claims.jti === 'string' ? claims.jti : undefined,
+    };
   } catch (err: any) {
     console.debug('[Auth] Registration token check (not HS256 — trying Privy):', err.message);
     return null;
+  }
+}
+
+/**
+ * M3 (audit): per-token revocation for the 365-day HS256 JWTs (worker
+ * platform tokens, registration tokens). Owners revoke via
+ * POST /agents/:id/revoke-token, which sets `revoked:jwt:<jti>`; every
+ * verifyRegistrationToken success is checked here before the principal is
+ * attached. TTL (366d) covers the max token lifetime so flags die with the
+ * tokens they kill. Pre-jti tokens grandfather through — rotate them out via
+ * REGISTRATION_TOKEN_MIN_IAT.
+ *
+ * Fail-open on Redis outage (availability over revocation, same precedent as
+ * the sandbox quota): a revoked token works until Redis recovers. Logged
+ * loudly so the gap is visible, not silent.
+ */
+export const REVOKED_JWT_TTL_S = 366 * 24 * 3600;
+
+export async function isJwtRevoked(jti: string | undefined): Promise<boolean> {
+  if (!jti) return false;
+  try {
+    return (await redis.get(`revoked:jwt:${jti}`)) !== null;
+  } catch {
+    console.warn('[Auth] revocation denylist unavailable — failing open');
+    return false;
   }
 }
 
@@ -209,7 +240,7 @@ export function requireAuth(req: AuthRequest, _res: Response, next: NextFunction
   }
 
   // Check DB-backed API key (async)
-  lookupApiKey(candidate).then((key) => {
+  lookupApiKey(candidate).then(async (key) => {
     if (key) {
       req.user = { address: key.ownerAddress, addresses: [key.ownerAddress] };
       next();
@@ -227,6 +258,10 @@ export function requireAuth(req: AuthRequest, _res: Response, next: NextFunction
     if (token) {
       const regUser = verifyRegistrationToken(token);
       if (regUser) {
+        if (await isJwtRevoked(regUser.jti)) {
+          next(new AppError(401, 'TOKEN_REVOKED', 'This token has been revoked by the owner'));
+          return;
+        }
         req.user = regUser;
         next();
         return;
@@ -296,7 +331,7 @@ export function optionalAuth(req: AuthRequest, _res: Response, next: NextFunctio
   }
 
   // Try DB-backed API key
-  lookupApiKey(candidate).then((key) => {
+  lookupApiKey(candidate).then(async (key) => {
     if (key) {
       req.user = { address: key.ownerAddress, addresses: [key.ownerAddress] };
       next();
@@ -318,6 +353,12 @@ export function optionalAuth(req: AuthRequest, _res: Response, next: NextFunctio
     // Registration-minted JWT
     const regUser = verifyRegistrationToken(token);
     if (regUser) {
+      // Revoked worker tokens must not linger via optional-auth surfaces
+      // (e.g. resultData on GET /tasks/:id).
+      if (await isJwtRevoked(regUser.jti)) {
+        next();
+        return;
+      }
       req.user = regUser;
       next();
       return;
