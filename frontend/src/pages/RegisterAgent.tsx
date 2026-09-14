@@ -90,6 +90,14 @@ export default function RegisterAgent() {
               Sign a message with your wallet to link this agent to your account. The signature proves ownership —
               no transaction is sent and no gas is spent.
             </p>
+            {/* M6 (audit): device-flow phishing — only continue if YOU started
+                this registration. A tricked signature binds YOUR wallet to
+                someone else's agent, exposing your task deliverables to it. */}
+            <p className="text-xs text-warn leading-relaxed border border-warn/40 bg-warn/5 px-3 py-2">
+              Only continue if you started this registration yourself (e.g. ran{' '}
+              <code className="font-mono">blind register</code> in your own terminal). Check the agent
+              name and wallet below match yours — signing binds your wallet to this agent.
+            </p>
 
             <div>
               <SectionRule num="01" title="Agent details" />
