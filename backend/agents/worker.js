@@ -2122,113 +2122,12 @@ async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrapp
       // signer — the tx also carries chainId, so a wrong pick fails loudly at
       // ethers rather than landing on the wrong network.
       const submitChain = pickChain(submitJson.data?.chain);
-      const submitSigner = signerFor(submitChain);
-      // The contract's onlyWorker gate accepts evidence ONLY from the recorded
-      // on-chain worker. AA agents assigned after the rollout name the smart
-      // account (UserOp path); legacy tasks assigned before it name the EOA
-      // (raw-tx path, which still needs ETH).
-      let submitViaAA = submitChain === 'base' && !!AGENT_SMART_ACCOUNT_ADDRESS && !!AA_ENTRY_POINT && !!PIMLICO_BUNDLER_URL;
-      if (submitViaAA && onChainTaskId != null && escrowIface) {
-        try {
-          const recorded = (await readOnChainWorker(onChainTaskId, submitChain)).toLowerCase();
-          submitViaAA = recorded === AGENT_SMART_ACCOUNT_ADDRESS.toLowerCase();
-          if (!submitViaAA) {
-            log(`submitEvidence for ${acceptedTaskHash.slice(0, 10)}…: on-chain worker ${recorded} is not the smart account (legacy assignment) — using raw EOA tx`);
-          }
-        } catch (e) {
-          log(`submitEvidence on-chain worker read failed, staying on AA path: ${e.message}`);
-        }
-      }
-      const gasProblem = await preflightGas(submitChain, submitSigner, submitViaAA);
-      if (gasProblem) {
-        log(`cannot broadcast submitEvidence for ${acceptedTaskHash.slice(0, 10)}… on ${submitChain}: ${gasProblem}`);
+      broadcastOk = await broadcastEvmSubmitEvidence(
+        acceptedTaskHash, unsignedSubmitEvidence, submitChain, onChainTaskId,
+      );
+      if (!broadcastOk) {
         await releaseTask(acceptedTaskHash);
         return;
-      }
-      // EVM broadcast loop — AA path wraps in UserOp when smart account is available
-      const MAX_SUBMIT_ATTEMPTS = 3;
-      const RETRY_DELAY_MS = 6_000;
-      let signedUserOp = null;
-      // ERC-4337 AA path: wrap tx in UserOp and submit to bundler on Base.
-      // Built once outside the retry loop so nonce stays stable across retries.
-      // submitViaAA was resolved above against the on-chain worker.
-      if (submitViaAA) {
-        try {
-          const unsigned = typeof unsignedSubmitEvidence === 'string'
-            ? ethers.Transaction.from(unsignedSubmitEvidence)
-            : unsignedSubmitEvidence;
-          const target = unsigned.to;
-          const value = unsigned.value ?? 0n;
-          const data = unsigned.data ?? '0x';
-          if (!target) throw new Error('unsigned tx missing target address');
-          const callData = encodeExecuteCallData(target, value, data);
-          const nonce = await getSmartAccountNonce(AA_ENTRY_POINT, AGENT_SMART_ACCOUNT_ADDRESS, BASE_RPC_URL);
-          const paymaster = AA_PAYMASTER
-            ? { address: AA_PAYMASTER, verificationGasLimit: 100_000, postOpGasLimit: 50_000, data: '0x' }
-            : undefined;
-          let userOp = buildUserOp({
-            sender: AGENT_SMART_ACCOUNT_ADDRESS,
-            nonce,
-            callData,
-            paymaster,
-          });
-          // Ask the bundler for realistic gas limits (best-effort; fall back to defaults)
-          try {
-            const estimate = await estimateUserOpGas(userOp, PIMLICO_BUNDLER_URL, PIMLICO_API_KEY, AA_ENTRY_POINT);
-            if (estimate) {
-              userOp = buildUserOp({
-                sender: userOp.sender,
-                nonce: userOp.nonce,
-                callData: userOp.callData,
-                gasLimits: {
-                  callGasLimit: Number(estimate.callGasLimit) || 200_000,
-                  verificationGasLimit: Number(estimate.verificationGasLimit) || 500_000,
-                  preVerificationGas: Number(estimate.preVerificationGas) || 100_000,
-                },
-                fees: {
-                  maxFeePerGas: Number(estimate.maxFeePerGas) || 100_000_000,
-                  maxPriorityFeePerGas: Number(estimate.maxPriorityFeePerGas) || 10_000_000,
-                },
-                paymaster: userOp.paymaster,
-              });
-            }
-          } catch (e) {
-            log(`submitEvidence UserOp estimate failed, using defaults: ${e.message}`);
-          }
-          signedUserOp = signUserOp(userOp, AA_ENTRY_POINT, BASE_CHAIN_ID, AGENT_PRIVATE_KEY);
-        } catch (e) {
-          log(`submitEvidence failed to build UserOp for ${acceptedTaskHash.slice(0, 10)}…: ${e.message}`);
-          await releaseTask(acceptedTaskHash);
-          return;
-        }
-      }
-      for (let attempt = 1; attempt <= MAX_SUBMIT_ATTEMPTS; attempt++) {
-      try {
-        let sent;
-        // ERC-4337 AA path: submit signed UserOp to bundler on Base
-        if (signedUserOp) {
-          const opHash = await submitUserOp(signedUserOp, PIMLICO_BUNDLER_URL, PIMLICO_API_KEY, AA_ENTRY_POINT);
-          log(`submitEvidence UserOp submitted for ${acceptedTaskHash.slice(0, 10)}… via bundler: ${opHash}`);
-          broadcastOk = true;
-          break;
-        }
-        sent = await submitSigner.sendTransaction(unsignedSubmitEvidence);
-        log(`submitEvidence broadcast for ${acceptedTaskHash.slice(0, 10)}… on ${submitChain} from ${submitSigner.address}: ${sent.hash}`);
-        const receipt = await sent.wait();
-        log(`submitEvidence confirmed for ${acceptedTaskHash.slice(0, 10)}…: block=${receipt?.blockNumber} status=${receipt?.status}`);
-        broadcastOk = true;
-        break;
-      } catch (e) {
-        const label = formatRevert(e);
-        if (isTransientAssignmentRevert(e) && attempt < MAX_SUBMIT_ATTEMPTS) {
-          log(`submitEvidence attempt ${attempt}/${MAX_SUBMIT_ATTEMPTS} for ${acceptedTaskHash.slice(0, 10)}…: ${label} — on-chain assignment not confirmed yet, retrying in ${RETRY_DELAY_MS / 1000}s`);
-          await sleep(RETRY_DELAY_MS);
-          continue;
-        }
-        log(`submitEvidence broadcast failed for ${acceptedTaskHash.slice(0, 10)}… after ${attempt} attempt(s): ${label}`);
-        await releaseTask(acceptedTaskHash);
-        return;
-      }
       }
     }
     if (!broadcastOk) {
@@ -2244,6 +2143,156 @@ async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrapp
     log(`task ${acceptedTaskHash.slice(0, 10)}… done in ${totalElapsed}s (LLM ${llmElapsed}s)`);
   } catch (err) {
     log(`error: ${err.message}`);
+  }
+}
+
+// Broadcast an unsigned submitEvidence tx on the target chain (raw EOA tx, or
+// UserOp via the bundler when the recorded on-chain worker is our smart
+// account). Shared by the fresh-submit path and the rebroadcast heal path.
+// Returns true on broadcast+confirmation, false on any failure. Never
+// releases the task — callers decide that (a finalize-only resume must NOT
+// release: the task is legitimately ours and off-chain 'submitted').
+async function broadcastEvmSubmitEvidence(taskHash, unsignedSubmitEvidence, submitChain, onChainTaskId) {
+  const short = taskHash.slice(0, 10);
+  const submitSigner = signerFor(submitChain);
+  // The contract's onlyWorker gate accepts evidence ONLY from the recorded
+  // on-chain worker. AA agents assigned after the rollout name the smart
+  // account (UserOp path); legacy tasks assigned before it name the EOA
+  // (raw-tx path, which still needs ETH).
+  let submitViaAA = submitChain === 'base' && !!AGENT_SMART_ACCOUNT_ADDRESS && !!AA_ENTRY_POINT && !!PIMLICO_BUNDLER_URL;
+  if (submitViaAA && onChainTaskId != null && escrowIface) {
+    try {
+      const recorded = (await readOnChainWorker(onChainTaskId, submitChain)).toLowerCase();
+      submitViaAA = recorded === AGENT_SMART_ACCOUNT_ADDRESS.toLowerCase();
+      if (!submitViaAA) {
+        log(`submitEvidence for ${short}…: on-chain worker ${recorded} is not the smart account (legacy assignment) — using raw EOA tx`);
+      }
+    } catch (e) {
+      log(`submitEvidence on-chain worker read failed, staying on AA path: ${e.message}`);
+    }
+  }
+  const gasProblem = await preflightGas(submitChain, submitSigner, submitViaAA);
+  if (gasProblem) {
+    log(`cannot broadcast submitEvidence for ${short}… on ${submitChain}: ${gasProblem}`);
+    return false;
+  }
+  // EVM broadcast loop — AA path wraps in UserOp when smart account is available
+  const MAX_SUBMIT_ATTEMPTS = 3;
+  const RETRY_DELAY_MS = 6_000;
+  let signedUserOp = null;
+  // ERC-4337 AA path: wrap tx in UserOp and submit to bundler on Base.
+  // Built once outside the retry loop so nonce stays stable across retries.
+  // submitViaAA was resolved above against the on-chain worker.
+  if (submitViaAA) {
+    try {
+      const unsigned = typeof unsignedSubmitEvidence === 'string'
+        ? ethers.Transaction.from(unsignedSubmitEvidence)
+        : unsignedSubmitEvidence;
+      const target = unsigned.to;
+      const value = unsigned.value ?? 0n;
+      const data = unsigned.data ?? '0x';
+      if (!target) throw new Error('unsigned tx missing target address');
+      const callData = encodeExecuteCallData(target, value, data);
+      const nonce = await getSmartAccountNonce(AA_ENTRY_POINT, AGENT_SMART_ACCOUNT_ADDRESS, BASE_RPC_URL);
+      const paymaster = AA_PAYMASTER
+        ? { address: AA_PAYMASTER, verificationGasLimit: 100_000, postOpGasLimit: 50_000, data: '0x' }
+        : undefined;
+      let userOp = buildUserOp({
+        sender: AGENT_SMART_ACCOUNT_ADDRESS,
+        nonce,
+        callData,
+        paymaster,
+      });
+      // Ask the bundler for realistic gas limits (best-effort; fall back to defaults)
+      try {
+        const estimate = await estimateUserOpGas(userOp, PIMLICO_BUNDLER_URL, PIMLICO_API_KEY, AA_ENTRY_POINT);
+        if (estimate) {
+          userOp = buildUserOp({
+            sender: userOp.sender,
+            nonce: userOp.nonce,
+            callData: userOp.callData,
+            gasLimits: {
+              callGasLimit: Number(estimate.callGasLimit) || 200_000,
+              verificationGasLimit: Number(estimate.verificationGasLimit) || 500_000,
+              preVerificationGas: Number(estimate.preVerificationGas) || 100_000,
+            },
+            fees: {
+              maxFeePerGas: Number(estimate.maxFeePerGas) || 100_000_000,
+              maxPriorityFeePerGas: Number(estimate.maxPriorityFeePerGas) || 10_000_000,
+            },
+            paymaster: userOp.paymaster,
+          });
+        }
+      } catch (e) {
+        log(`submitEvidence UserOp estimate failed, using defaults: ${e.message}`);
+      }
+      signedUserOp = signUserOp(userOp, AA_ENTRY_POINT, BASE_CHAIN_ID, AGENT_PRIVATE_KEY);
+    } catch (e) {
+      log(`submitEvidence failed to build UserOp for ${short}…: ${e.message}`);
+      return false;
+    }
+  }
+  for (let attempt = 1; attempt <= MAX_SUBMIT_ATTEMPTS; attempt++) {
+    try {
+      let sent;
+      // ERC-4337 AA path: submit signed UserOp to bundler on Base
+      if (signedUserOp) {
+        const opHash = await submitUserOp(signedUserOp, PIMLICO_BUNDLER_URL, PIMLICO_API_KEY, AA_ENTRY_POINT);
+        log(`submitEvidence UserOp submitted for ${short}… via bundler: ${opHash}`);
+        return true;
+      }
+      sent = await submitSigner.sendTransaction(unsignedSubmitEvidence);
+      log(`submitEvidence broadcast for ${short}… on ${submitChain} from ${submitSigner.address}: ${sent.hash}`);
+      const receipt = await sent.wait();
+      log(`submitEvidence confirmed for ${short}…: block=${receipt?.blockNumber} status=${receipt?.status}`);
+      return true;
+    } catch (e) {
+      const label = formatRevert(e);
+      if (isTransientAssignmentRevert(e) && attempt < MAX_SUBMIT_ATTEMPTS) {
+        log(`submitEvidence attempt ${attempt}/${MAX_SUBMIT_ATTEMPTS} for ${short}…: ${label} — on-chain assignment not confirmed yet, retrying in ${RETRY_DELAY_MS / 1000}s`);
+        await sleep(RETRY_DELAY_MS);
+        continue;
+      }
+      log(`submitEvidence broadcast failed for ${short}… after ${attempt} attempt(s): ${label}`);
+      return false;
+    }
+  }
+  return false;
+}
+
+// Heal for the submit-then-crash gap: off-chain state is 'submitted' but the
+// submitEvidence tx never landed (worker died or its RPC blipped between
+// /submit and broadcast — the finalize loop then 503s NOT_SUBMITTED_ON_CHAIN
+// forever). Fetches a rebuilt unsigned tx from POST /tasks/:id/rebroadcast
+// and broadcasts it. The backend gates on on-chain status Assigned(1), so a
+// stale call is refused rather than handed a reverting tx. Returns true when
+// a broadcast was attempted; the finalize retry that follows confirms it.
+async function rebroadcastSubmitEvidence(taskHash) {
+  const short = taskHash.slice(0, 10);
+  try {
+    const res = await fetchWithTimeout(`${BACKEND_URL}/api/v1/a2a/tasks/${taskHash}/rebroadcast`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${AGENT_PLATFORM_TOKEN}`,
+      },
+    }, 30_000);
+    if (!res.ok) {
+      log(`rebroadcast for ${short}… refused: ${res.status} ${(await res.text()).slice(0, 160)}`);
+      return false;
+    }
+    const json = await res.json();
+    const unsigned = json.data?.unsignedSubmitEvidence;
+    if (!unsigned) {
+      log(`rebroadcast response missing unsignedSubmitEvidence for ${short}…`);
+      return false;
+    }
+    const chain = pickChain(json.data?.chain);
+    log(`rebroadcasting submitEvidence for ${short}… on ${chain}`);
+    return await broadcastEvmSubmitEvidence(taskHash, unsigned, chain, json.data?.onChainTaskId);
+  } catch (e) {
+    log(`rebroadcast failed for ${short}…: ${e.message || e}`);
+    return false;
   }
 }
 
@@ -2289,6 +2338,13 @@ async function finalizeAcceptedTask(taskHash) {
         const code = /NOT_SUBMITTED_ON_CHAIN/.test(errText) ? 'NOT_SUBMITTED_ON_CHAIN'
           : /SETTLEMENT_FAILED/.test(errText) ? 'SETTLEMENT_FAILED' : 'NOT_INDEXED';
         log(`finalize attempt ${attempt}/${FINALIZE_API_MAX_ATTEMPTS} for ${taskHash.slice(0, 10)}…: 503 ${code} — retrying in ${FINALIZE_API_RETRY_DELAY_MS / 1000}s`);
+        if (code === 'NOT_SUBMITTED_ON_CHAIN') {
+          // The evidence tx never landed (submit-then-crash gap) — rebuild
+          // it via /rebroadcast and broadcast before the next finalize
+          // retry. The backend refuses once on-chain status moves off
+          // Assigned, so a stale call here is safe, not a double-submit.
+          await rebroadcastSubmitEvidence(taskHash);
+        }
         await sleep(FINALIZE_API_RETRY_DELAY_MS);
         continue;
       }
@@ -2334,9 +2390,9 @@ async function resumeAssignedTasks() {
     // or submitted (evidence tx likely on-chain — only /finalize is owed, e.g.
     // the process died or /finalize 503'd right after submitEvidence). Caveat:
     // 'submitted' is set by /submit at unsigned-tx-build time, BEFORE we
-    // broadcast — a worker that died in that gap can't be healed here (finalize
-    // 503s NOT_SUBMITTED_ON_CHAIN until the attempt cap; same terminal state
-    // as before this path existed, since /submit refuses 'submitted' re-runs).
+    // broadcast — a worker that died in that gap heals via /rebroadcast,
+    // which finalizeAcceptedTask calls on NOT_SUBMITTED_ON_CHAIN before
+    // retrying /finalize.
     const finalizeOnly = state.status === 'submitted';
     if (!finalizeOnly && state.status !== 'accepted' && state.status !== 'in_progress') continue;
 
