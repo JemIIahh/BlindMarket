@@ -29,6 +29,7 @@ import { EXPIRY_GRACE_SEC } from '../constants.js';
 import { config } from '../config.js';
 import * as serviceStore from '../services/serviceStore.js';
 import { consumePendingCost } from '../services/railwaySandbox.js';
+import * as accountingService from '../services/accountingService.js';
 
 export const a2aRouter = Router();
 
@@ -1421,6 +1422,12 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       publicBrief: isPublic ? data.publicBrief : undefined,
       routingSummary: data.routingSummary,
     });
+
+    // M5 (audit): the funding is receipt-verified at this point, so flip the
+    // build-time 'pending' escrow_lock row to confirmed. Fire-and-forget —
+    // indexing must not fail because the ledger write did.
+    void accountingService.confirmPendingTransactions(taskHash, ['escrow_lock'])
+      .catch((e) => console.warn(`[tasks/index] escrow_lock confirm failed for ${taskHash.slice(0, 10)}…:`, (e as Error).message));
 
     // The meta slice both the shadow record and the routing decision read —
     // built ONCE so the shadow log's routing text can never diverge from what
