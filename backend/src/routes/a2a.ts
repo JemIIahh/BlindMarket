@@ -1755,6 +1755,104 @@ a2aRouter.post('/tasks/:id/submit', requireAuth, async (req: AuthRequest, res, n
 });
 
 /**
+ * POST /api/v1/a2a/tasks/:id/rebroadcast
+ *
+ * Heal for the submit-then-crash gap: /submit flips state to 'submitted' at
+ * unsigned-tx-BUILD time, before the worker broadcasts. If the worker died
+ * (or its RPC blipped — seen live as JsonRpcProvider network failures)
+ * between the two, off-chain state says 'submitted' while on-chain status is
+ * still Assigned(1). The finalize-only resume path then 503s
+ * NOT_SUBMITTED_ON_CHAIN until every attempt cap burns out, and /submit
+ * refuses a rebuild (INVALID_STATE on 'submitted') — the task strands with
+ * escrow locked until claimTimeout.
+ *
+ * This endpoint rebuilds the SAME unsigned submitEvidence deterministically
+ * from the stored resultData (evidenceHash = keccak256(JSON(resultData))) so
+ * the executor can broadcast and proceed to /finalize. Gated on the on-chain
+ * facts so a stale caller can never be handed a reverting tx: status must
+ * still be Assigned(1) — anything else means evidence already landed (call
+ * /finalize) or the task moved on.
+ */
+a2aRouter.post('/tasks/:id/rebroadcast', requireAuth, async (req: AuthRequest, res, next) => {
+  try {
+    const taskHash = req.params.id as string;
+    const address = req.user!.address;
+
+    const meta = await a2aStore.getMeta(taskHash);
+    if (!meta) throw new AppError(404, 'NOT_FOUND', 'Task not found or not A2A-enabled');
+
+    const state = await a2aStore.getState(taskHash);
+    if (!state || state.executorAddress?.toLowerCase() !== address.toLowerCase()) {
+      throw new AppError(403, 'FORBIDDEN', 'Only the accepted executor can rebroadcast');
+    }
+    if (state.status !== 'submitted') {
+      throw new AppError(409, 'INVALID_STATE', `Only a submitted task can be rebroadcast (state=${state.status})`);
+    }
+    if (!state.resultData) {
+      throw new AppError(400, 'NO_RESULT_DATA', 'No resultData recorded for this task');
+    }
+
+    const onChainIdResolved = await resolveTaskByHash(taskHash);
+    const onChainId = onChainIdResolved?.taskId ?? null;
+    const onChainIdChain = onChainIdResolved?.chain ?? '0g';
+    if (!onChainId) {
+      throw new AppError(503, 'NOT_INDEXED', 'On-chain taskId not yet indexed — retry shortly');
+    }
+    const onChainTask = await escrowService.getTaskOn(onChainIdChain, Number(onChainId));
+    if (onChainTask.status !== 1) {
+      throw new AppError(
+        409,
+        'ALREADY_SUBMITTED',
+        `On-chain status is ${onChainTask.status}, not Assigned(1) — evidence already recorded, call /finalize instead.`,
+      );
+    }
+    if (BigInt(Math.floor(Date.now() / 1000)) >= onChainTask.deadline) {
+      throw new AppError(
+        409,
+        'DEADLINE_REACHED',
+        'The task deadline has passed — the contract would revert DeadlineReached. The poster can reclaim escrow via claimTimeout.',
+      );
+    }
+    // Same recorded-worker gate as /submit: the contract's onlyWorker
+    // reverts evidence from anyone else, so don't hand out a doomed tx.
+    const assignee = await resolveAssignee(address, onChainIdChain);
+    const isRecordedWorker = (w: string) =>
+      w.toLowerCase() === address.toLowerCase() || w.toLowerCase() === assignee.toLowerCase();
+    if (!isRecordedWorker(onChainTask.worker)) {
+      throw new AppError(503, 'NOT_ASSIGNED_YET', `On-chain assignment not confirmed — task.worker=${onChainTask.worker}, caller=${address}. Retry shortly.`);
+    }
+
+    const evidenceHash = ethers.keccak256(
+      ethers.toUtf8Bytes(JSON.stringify(state.resultData)),
+    );
+    let unsignedSubmitEvidence: ethers.TransactionRequest | null = null;
+    if (ethers.isAddress(address)) {
+      unsignedSubmitEvidence = await escrowService.buildSubmitEvidenceOn(
+        onChainIdChain,
+        address,
+        Number(onChainId),
+        evidenceHash,
+      );
+    }
+    console.log(`[a2a] rebroadcast: rebuilt unsignedSubmitEvidence for ${taskHash} (evidence never landed on-chain)`);
+    const body: ApiResponse = {
+      success: true,
+      data: {
+        taskId: taskHash,
+        onChainTaskId: onChainId,
+        chain: onChainIdChain,
+        evidenceHash,
+        unsignedSubmitEvidence,
+      },
+    };
+    res.json(body);
+  } catch (err) {
+    console.error(`[a2a] rebroadcast failed for ${req.params.id}:`, (err as Error).message);
+    next(err);
+  }
+});
+
+/**
  * POST /api/v1/a2a/tasks/:id/release
  *
  * Reverts an accepted/submitted task back to 'open' so it shows up on the
