@@ -625,6 +625,16 @@ const migrations: Array<{ id: number; name: string; sql: string }> = [
       CREATE INDEX IF NOT EXISTS idx_agent_usage_created ON agent_usage(created_at);
     `,
   },
+  {
+    // M2 (audit): agentRunner builds plaintext + ECIES toolSecrets, but no
+    // column ever stored them — the worker always saw {} after a (re)start.
+    id: 29,
+    name: 'deployed_agents_tool_secrets',
+    sql: `
+      ALTER TABLE deployed_agents ADD COLUMN IF NOT EXISTS tool_secrets JSONB NOT NULL DEFAULT '{}';
+      ALTER TABLE deployed_agents ADD COLUMN IF NOT EXISTS encrypted_tool_secrets JSONB NOT NULL DEFAULT '{}';
+    `,
+  },
 ];
 
 async function runMigrations(p: pg.Pool): Promise<void> {
@@ -690,6 +700,7 @@ async function migrateRedisToPg(p: pg.Pool): Promise<void> {
         deployedAt, lastActiveAt, storageRef, platformToken,
         walletAddress, publicKey, encryptedPrivateKey, rawPrivateKey,
         inftTokenId, minReward, authorizedOwners,
+        toolSecrets, encryptedToolSecrets,
       } = data;
       if (!id) continue;
 
@@ -699,16 +710,18 @@ async function migrateRedisToPg(p: pg.Pool): Promise<void> {
             provider, model, api_key, encrypted_api_key, capabilities,
             tools, status, deployed_at, last_active_at, storage_ref,
             platform_token, wallet_address, public_key, encrypted_private_key,
-            raw_private_key, inft_token_id, min_reward, updated_at)
+            raw_private_key, inft_token_id, min_reward,
+            tool_secrets, encrypted_tool_secrets, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-           $14, $15, $16, $17, $18, $19, $20, $21, $22, NOW())
+           $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, NOW())
          ON CONFLICT (id) DO NOTHING`,
         [id, ownerAddress, authorizedOwners ?? [], name, instructions,
          provider, model, apiKey ?? '', encryptedApiKey, capabilities ?? [],
          JSON.stringify(tools ?? []), status, deployedAt,
          lastActiveAt ?? null, storageRef ?? null, platformToken ?? null,
          walletAddress, publicKey, encryptedPrivateKey, rawPrivateKey ?? null,
-         inftTokenId ?? null, minReward ?? null],
+         inftTokenId ?? null, minReward ?? null,
+         JSON.stringify(toolSecrets ?? {}), JSON.stringify(encryptedToolSecrets ?? {})],
       );
     }
 

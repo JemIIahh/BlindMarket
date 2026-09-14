@@ -248,6 +248,14 @@ const migrations: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_agent_usage_created ON agent_usage(created_at);
     `,
   },
+  {
+    // M2 (audit): mirrors neonDb migration 29 — toolSecrets were built but
+    // never stored, so the worker saw {} after a (re)start.
+    id: 13,
+    name: 'deployed_agents_tool_secrets',
+    sql: `ALTER TABLE deployed_agents ADD COLUMN tool_secrets TEXT DEFAULT '{}';
+      ALTER TABLE deployed_agents ADD COLUMN encrypted_tool_secrets TEXT DEFAULT '{}';`,
+  },
 ];
 
 function runMigrations(database: Database.Database): void {
