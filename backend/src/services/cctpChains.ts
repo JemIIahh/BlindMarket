@@ -9,7 +9,11 @@ import { baseProvider } from './chain.js';
  * ("bridge"). CCTP never touches 0G (no native USDC, no CCTP domain there —
  * see CLAUDE.md) and covers a broader, growable set of EVM chains.
  */
-export type CctpChainKey = 'base' | 'base-sepolia' | 'ethereum' | 'ethereum-sepolia';
+export type CctpChainKey =
+  | 'base' | 'base-sepolia'
+  | 'ethereum' | 'ethereum-sepolia'
+  | 'arbitrum' | 'arbitrum-sepolia'
+  | 'optimism' | 'optimism-sepolia';
 
 export interface CctpChainConfig {
   chainKey: CctpChainKey;
@@ -35,6 +39,28 @@ function getEthereumProvider(): ethers.JsonRpcProvider {
     });
   }
   return ethereumProvider;
+}
+
+let arbitrumProvider: ethers.JsonRpcProvider | null = null;
+function getArbitrumProvider(): ethers.JsonRpcProvider {
+  if (!arbitrumProvider) {
+    arbitrumProvider = new ethers.JsonRpcProvider(config.cctp.arbitrumRpcUrl, config.cctp.arbitrumChainId, {
+      batchMaxCount: 1,
+      staticNetwork: true,
+    });
+  }
+  return arbitrumProvider;
+}
+
+let optimismProvider: ethers.JsonRpcProvider | null = null;
+function getOptimismProvider(): ethers.JsonRpcProvider {
+  if (!optimismProvider) {
+    optimismProvider = new ethers.JsonRpcProvider(config.cctp.optimismRpcUrl, config.cctp.optimismChainId, {
+      batchMaxCount: 1,
+      staticNetwork: true,
+    });
+  }
+  return optimismProvider;
 }
 
 /**
@@ -88,6 +114,50 @@ function buildChains(): Record<CctpChainKey, CctpChainConfig> {
       usdcAddress: config.cctp.ethereumUsdcAddress,
       isTestnet: true,
       label: 'Ethereum Sepolia',
+    },
+    arbitrum: {
+      chainKey: 'arbitrum',
+      chainId: 42161,
+      domain: 3,
+      rpc: getArbitrumProvider(),
+      tokenMessengerAddress,
+      messageTransmitterAddress,
+      usdcAddress: config.cctp.arbitrumUsdcAddress,
+      isTestnet: false,
+      label: 'Arbitrum',
+    },
+    'arbitrum-sepolia': {
+      chainKey: 'arbitrum-sepolia',
+      chainId: 421614,
+      domain: 3,
+      rpc: getArbitrumProvider(),
+      tokenMessengerAddress,
+      messageTransmitterAddress,
+      usdcAddress: config.cctp.arbitrumUsdcAddress,
+      isTestnet: true,
+      label: 'Arbitrum Sepolia',
+    },
+    optimism: {
+      chainKey: 'optimism',
+      chainId: 10,
+      domain: 2,
+      rpc: getOptimismProvider(),
+      tokenMessengerAddress,
+      messageTransmitterAddress,
+      usdcAddress: config.cctp.optimismUsdcAddress,
+      isTestnet: false,
+      label: 'Optimism',
+    },
+    'optimism-sepolia': {
+      chainKey: 'optimism-sepolia',
+      chainId: 11155420,
+      domain: 2,
+      rpc: getOptimismProvider(),
+      tokenMessengerAddress,
+      messageTransmitterAddress,
+      usdcAddress: config.cctp.optimismUsdcAddress,
+      isTestnet: true,
+      label: 'Optimism Sepolia',
     },
   };
 }

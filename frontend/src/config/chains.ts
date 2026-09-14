@@ -1,4 +1,5 @@
 import { defineChain } from 'viem';
+import { mainnet, sepolia, arbitrum, arbitrumSepolia, optimism, optimismSepolia } from 'viem/chains';
 import { OG_CHAIN_ID, OG_RPC_URL, BASE_CHAIN_ID, BASE_RPC_URL } from './constants';
 
 // 0G chain (agent infra)
@@ -34,3 +35,16 @@ export const baseChain = defineChain({
     },
   },
 });
+
+// CCTP source chains (Ethereum, Arbitrum, Optimism) — needed in Privy's
+// PrivyProvider `supportedChains` so `wallet.switchChain()` will actually
+// switch an external wallet to them (Privy validates the target chain
+// against this app-level list before ever touching the wallet; omitting a
+// chain here surfaces as "Unsupported chainId: <id>", not a wallet error).
+// Uses viem's canonical pre-built definitions rather than hand-rolling RPC
+// URLs, following the same mainnet-tier-follows-Base convention as
+// baseChain/ogTestnet above (this app has no separate "IS_PROD" flag at
+// this layer).
+export const ethereumChain = isBaseMainnet ? mainnet : sepolia;
+export const arbitrumChain = isBaseMainnet ? arbitrum : arbitrumSepolia;
+export const optimismChain = isBaseMainnet ? optimism : optimismSepolia;

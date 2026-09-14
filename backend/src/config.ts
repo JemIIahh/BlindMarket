@@ -238,6 +238,29 @@ export const config = {
     ethereumUsdcAddress: optional('CCTP_ETHEREUM_USDC_ADDRESS', IS_PROD
       ? '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'
       : '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238'),
+    // Arbitrum and Optimism (OP Mainnet) — both Fast-Transfer-eligible per
+    // Circle's domain table (domains 3 and 2 respectively), so they slot
+    // into the same single code path as Base/Ethereum with no new
+    // infrastructure. Polygon PoS and Avalanche are deliberately NOT added:
+    // Circle doesn't support Fast Transfer/Forwarding Service on either
+    // (Standard Transfer only), which would mean every transfer on those
+    // routes needs a human to run scripts/recover-stuck-cctp-transfer.ts by
+    // hand — a materially different (and much heavier) feature than "add a
+    // chain config entry." Revisit only alongside a real automated relayer.
+    arbitrumRpcUrl: optional('CCTP_ARBITRUM_RPC_URL', IS_PROD
+      ? 'https://arb1.arbitrum.io/rpc'
+      : 'https://sepolia-rollup.arbitrum.io/rpc'),
+    arbitrumChainId: parseInt(optional('CCTP_ARBITRUM_CHAIN_ID', IS_PROD ? '42161' : '421614'), 10),
+    arbitrumUsdcAddress: optional('CCTP_ARBITRUM_USDC_ADDRESS', IS_PROD
+      ? '0xaf88d065e77c8cC2239327C5EDb3A432268e5831'
+      : '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d'),
+    optimismRpcUrl: optional('CCTP_OPTIMISM_RPC_URL', IS_PROD
+      ? 'https://mainnet.optimism.io'
+      : 'https://sepolia.optimism.io'),
+    optimismChainId: parseInt(optional('CCTP_OPTIMISM_CHAIN_ID', IS_PROD ? '10' : '11155420'), 10),
+    optimismUsdcAddress: optional('CCTP_OPTIMISM_USDC_ADDRESS', IS_PROD
+      ? '0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85'
+      : '0x5fd84259d66Cd46123540766Be93DFE6D43130D7'),
   },
 
   // Key custody / late-joiner re-wrap (docs/TEE-REWRAP-SPEC.md). DEFAULT OFF.

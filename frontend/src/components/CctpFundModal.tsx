@@ -16,10 +16,12 @@ import { BASE_CCTP_CHAIN_KEY } from '../config/constants';
  * it isn't set up to hold/sign on arbitrary other chains.
  */
 
-// EIP-3085 configs for the two non-Base CCTP source chains this UI offers.
-// (Only what's needed for `wallet_addEthereumChain` — the backend's
+// EIP-3085 configs for the non-Base CCTP source chains this UI offers. (Only
+// what's needed for `wallet_addEthereumChain` — the backend's
 // /api/v1/cctp/config remains the source of truth for domain/contract/usdc
-// addresses actually used in the transfer itself.)
+// addresses actually used in the transfer itself.) Must also be listed in
+// Privy's `supportedChains` (App.tsx) or `switchWalletToChain` fails with
+// "Unsupported chainId" before ever reaching the wallet.
 const SOURCE_CHAIN_WALLET_CONFIG: Record<string, AddEthereumChainParameter> = {
   ethereum: {
     chainId: '0x1',
@@ -34,6 +36,34 @@ const SOURCE_CHAIN_WALLET_CONFIG: Record<string, AddEthereumChainParameter> = {
     nativeCurrency: { name: 'Sepolia Ether', symbol: 'ETH', decimals: 18 },
     rpcUrls: ['https://ethereum-sepolia-rpc.publicnode.com'],
     blockExplorerUrls: ['https://sepolia.etherscan.io'],
+  },
+  arbitrum: {
+    chainId: '0xa4b1',
+    chainName: 'Arbitrum',
+    nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+    rpcUrls: ['https://arb1.arbitrum.io/rpc'],
+    blockExplorerUrls: ['https://arbiscan.io'],
+  },
+  'arbitrum-sepolia': {
+    chainId: '0x66eee',
+    chainName: 'Arbitrum Sepolia',
+    nativeCurrency: { name: 'Sepolia Ether', symbol: 'ETH', decimals: 18 },
+    rpcUrls: ['https://sepolia-rollup.arbitrum.io/rpc'],
+    blockExplorerUrls: ['https://sepolia.arbiscan.io'],
+  },
+  optimism: {
+    chainId: '0xa',
+    chainName: 'Optimism',
+    nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+    rpcUrls: ['https://mainnet.optimism.io'],
+    blockExplorerUrls: ['https://optimistic.etherscan.io'],
+  },
+  'optimism-sepolia': {
+    chainId: '0xaa37dc',
+    chainName: 'Optimism Sepolia',
+    nativeCurrency: { name: 'Sepolia Ether', symbol: 'ETH', decimals: 18 },
+    rpcUrls: ['https://sepolia.optimism.io'],
+    blockExplorerUrls: ['https://sepolia-optimism.etherscan.io'],
   },
 };
 
