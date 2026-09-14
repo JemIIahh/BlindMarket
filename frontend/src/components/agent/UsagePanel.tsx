@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import {
-  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
+  LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
 } from 'recharts';
 import { Panel } from '../bb';
 import { authedGet } from '../../lib/api';
@@ -108,7 +108,7 @@ export function UsagePanel({ agentId }: { agentId: string }) {
               <div className="text-[11px] tracking-wide text-ink-3 mb-2">Daily tokens by model</div>
               <div style={{ width: '100%', height: 220 }}>
                 <ResponsiveContainer>
-                  <BarChart data={chartData} margin={{ top: 4, right: 4, bottom: 0, left: -12 }}>
+                  <LineChart data={chartData} margin={{ top: 4, right: 4, bottom: 0, left: -12 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#2a2a2a" vertical={false} />
                     <XAxis dataKey="day" tick={{ fill: '#8a8a8a', fontSize: 11 }} tickLine={false} axisLine={{ stroke: '#2a2a2a' }} />
                     <YAxis tick={{ fill: '#8a8a8a', fontSize: 11 }} tickLine={false} axisLine={false} tickFormatter={(v: number) => fmtTokens(v)} />
@@ -117,9 +117,9 @@ export function UsagePanel({ agentId }: { agentId: string }) {
                       formatter={(value: any, name: any) => [fmtTokens(Number(value)), name]}
                     />
                     {modelKeys.map((k) => (
-                      <Bar key={k} dataKey={k} stackId="tokens" fill={colorOf(k)} name={k} />
+                      <Line key={k} type="monotone" dataKey={k} stroke={colorOf(k)} strokeWidth={2} dot={false} name={k} />
                     ))}
-                  </BarChart>
+                  </LineChart>
                 </ResponsiveContainer>
               </div>
               <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2">
