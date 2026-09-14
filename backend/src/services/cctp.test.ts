@@ -58,18 +58,22 @@ describe('estimateMaxFeeRaw', () => {
     global.fetch = originalFetch;
   });
 
-  it('computes bps fee + forwardFee.medium from the Iris fee-quote response', async () => {
+  it('computes bps fee + forwardFee.med from the Iris fee-quote response', async () => {
+    // Field name confirmed against a real curl of iris-api-sandbox.circle.com:
+    // Circle returns `forwardFee.med`, not `.medium` — an earlier version of
+    // this test (and of estimateMaxFeeRaw itself) had the wrong key, which a
+    // self-consistent mock couldn't catch on its own.
     global.fetch = vi.fn(async () =>
       new Response(
         JSON.stringify([
-          { finalityThreshold: 1000, minimumFee: 1, forwardFee: { low: 90, medium: 110, high: 160 } },
+          { finalityThreshold: 1000, minimumFee: 1, forwardFee: { low: 90, med: 110, high: 160 } },
           { finalityThreshold: 2000, minimumFee: 0 },
         ]),
         { status: 200 },
       ),
     ) as unknown as typeof fetch;
 
-    // amount 1,000,000 (1 USDC) * 1 bps (0.01%) = 100, + forwardFee.medium 110 = 210
+    // amount 1,000,000 (1 USDC) * 1 bps (0.01%) = 100, + forwardFee.med 110 = 210
     const fee = await estimateMaxFeeRaw('https://iris-api-sandbox.circle.com', 6, 0, 1_000_000n, FAST_TRANSFER_FINALITY_THRESHOLD);
     expect(fee).toBe(210n);
   });

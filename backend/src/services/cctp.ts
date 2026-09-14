@@ -255,9 +255,18 @@ export async function pollIrisAttestation(
  * confirmed verbatim: "The maxFee parameter must cover both CCTP protocol
  * fees and Forwarding Service fees." An insufficient maxFee doesn't fail
  * the transfer, it silently downgrades to Standard Transfer (~15-19 min
- * instead of ~8-20s) per that same page. This function folds the `medium`
+ * instead of ~8-20s) per that same page. This function folds the `med`
  * forwardFee tier into maxFeeRaw as a reasonable default (not the cheapest
  * `low` tier, to bias toward actually landing as Fast Transfer).
+ *
+ * LIVE-VERIFIED against https://iris-api-sandbox.circle.com (2026-09-14):
+ * confirmed `forward=true` is required — omitting it, `forwardFee` is
+ * absent from the response entirely, exactly as documented. Also caught a
+ * real bug this way: Circle's actual field is `forwardFee.med`, NOT
+ * `.medium` as an earlier summarized doc fetch had it — that typo meant
+ * this function was silently folding in 0 instead of the real fee (~0.05
+ * USDC on ethereum-sepolia->base-sepolia, ~1.7 USDC the other direction,
+ * on testnet) despite forward=true working correctly. Fixed below.
  */
 export async function estimateMaxFeeRaw(
   irisApiBase: string,
@@ -272,12 +281,12 @@ export async function estimateMaxFeeRaw(
   const quotes = (await res.json()) as Array<{
     finalityThreshold: number;
     minimumFee: number;
-    forwardFee?: { low: number; medium: number; high: number };
+    forwardFee?: { low: number; med: number; high: number };
   }>;
   const quote = quotes.find((q) => q.finalityThreshold === minFinalityThreshold) ?? quotes[0];
   if (!quote) throw new Error('Iris returned no fee quote for this route');
 
   const bpsFee = (amountRaw * BigInt(Math.ceil(quote.minimumFee))) / 10_000n;
-  const forwardFee = BigInt(quote.forwardFee?.medium ?? 0);
+  const forwardFee = BigInt(quote.forwardFee?.med ?? 0);
   return bpsFee + forwardFee;
 }
