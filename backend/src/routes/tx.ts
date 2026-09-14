@@ -59,7 +59,16 @@ const relaySchema = z.object({
   // Decimal wei string. Validated here because BigInt() on anything else throws
   // SyntaxError inside the handler, which the catch below reported as a 502
   // "Privy relay failed" — a caller's typo labelled as an upstream outage.
-  value: z.string().regex(/^\d+$/).optional(),
+  //
+  // H2 (audit): the relay sponsors DATA calls (approve, createTask, ERC-20
+  // transfers via calldata) — never native transfers. A non-zero value would
+  // let any caller sweep the wallet's native balance to an arbitrary address
+  // with platform-sponsored gas, so only '0'/omitted passes validation.
+  // Every in-tree caller (web + MCP approve/createTask/top-up) sends no
+  // value; native funding travels via locally-signed txs, never the relay.
+  value: z.string().regex(/^\d+$/).refine((v) => BigInt(v) === 0n, {
+    message: 'Relay carries data-only calls: value must be 0 or omitted',
+  }).optional(),
   chain: z.string().default('base'),
   /**
    * 'auto' — let the backend negotiate how gas is paid, trying in order:

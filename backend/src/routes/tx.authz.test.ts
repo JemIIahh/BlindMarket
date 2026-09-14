@@ -59,12 +59,12 @@ const USDC     = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
 const DRAIN = '0xa9059cbb0000000000000000000000002222222222222222222222222222222222222222'
             + '000000000000000000000000000000000000000000000000000000003b9aca00';
 
-const relay = (caller: string, walletAddress: string, extra: Record<string, string> = {}) =>
+const relay = (caller: string, walletAddress: string, extra: Record<string, string> = {}, value?: string) =>
   request(app)
     .post('/api/v1/tx/relay-tx')
     .set('x-test-address', caller)
     .set(extra)
-    .send({ walletAddress, to: USDC, data: DRAIN, chain: 'base' });
+    .send({ walletAddress, to: USDC, data: DRAIN, chain: 'base', ...(value !== undefined ? { value } : {}) });
 
 beforeEach(() => { sendTx.mockClear(); getWalletByAddress.mockClear(); });
 
@@ -94,5 +94,21 @@ describe('POST /tx/relay-tx — the wallet must belong to the caller', () => {
   it('is case-insensitive about address checksums', async () => {
     const res = await relay(VICTIM.toUpperCase().replace('0X', '0x'), VICTIM);
     expect(res.status).toBe(200);
+  });
+});
+
+describe('POST /tx/relay-tx — H2: data-only, never native value', () => {
+  it('refuses a non-zero native value before Privy is ever reached', async () => {
+    const res = await relay(VICTIM, VICTIM, {}, '1000000000000000000');
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('VALIDATION_ERROR');
+    expect(getWalletByAddress).not.toHaveBeenCalled();
+    expect(sendTx).not.toHaveBeenCalled();
+  });
+
+  it('still relays an explicit zero value (all in-tree callers omit it)', async () => {
+    const res = await relay(VICTIM, VICTIM, {}, '0');
+    expect(res.status).toBe(200);
+    expect(sendTx).toHaveBeenCalledTimes(1);
   });
 });
