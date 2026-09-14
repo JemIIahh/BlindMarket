@@ -26,7 +26,7 @@ accountingRouter.get('/entries', requireAuth, async (req: AuthRequest, res, next
     const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize as string) || 20));
 
     const addresses = await resolveAddresses(address);
-    const result = accountingService.getTransactions(addresses, from, to, type, page, pageSize);
+    const result = await accountingService.getTransactions(addresses, from, to, type, page, pageSize);
     res.json({ success: true, data: result });
   } catch (err) {
     next(err);
@@ -41,7 +41,7 @@ accountingRouter.get('/summary', requireAuth, async (req: AuthRequest, res, next
     const to = req.query.to as string | undefined;
 
     const addresses = await resolveAddresses(address);
-    const summary = accountingService.getSummary(addresses, from, to);
+    const summary = await accountingService.getSummary(addresses, from, to);
     res.json({ success: true, data: summary });
   } catch (err) {
     next(err);
