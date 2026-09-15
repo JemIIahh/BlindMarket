@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useAccount } from 'wagmi';
-import { usePrivy, useUnlinkWallet, useSigners } from '@privy-io/react-auth';
+import { usePrivy, useUnlinkWallet, useSigners, useWallets, useExportWallet } from '@privy-io/react-auth';
 import {
   Breadcrumb,
   PageHeader,
@@ -54,9 +54,31 @@ export default function Settings() {
   const { user, linkWallet } = usePrivy();
   const { unlink } = useUnlinkWallet();
   const { addSigners } = useSigners();
+  const { wallets } = useWallets();
+  const { exportWallet } = useExportWallet();
 
   const [relaySignerLoading, setRelaySignerLoading] = useState(false);
   const [relaySignerStatus, setRelaySignerStatus] = useState<'idle' | 'done' | 'error'>('idle');
+  const [exporting, setExporting] = useState(false);
+
+  // The BlindMarket-managed wallet — the one relay-tx signs from, tasks pay
+  // from, and payouts land in. Anything else linked (MetaMask, etc.) is an
+  // external wallet the user brought themselves, useful e.g. as a CCTP
+  // bridge source or a withdrawal destination, but never the signer for
+  // gas-sponsored Base transactions.
+  const embeddedWallet = wallets.find((w) => w.walletClientType === 'privy') ?? null;
+
+  const handleExportWallet = async () => {
+    if (!embeddedWallet) return;
+    setExporting(true);
+    try {
+      await exportWallet({ address: embeddedWallet.address });
+    } catch (err) {
+      console.error('Failed to export wallet:', err);
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const handleAddRelaySigner = async () => {
     if (!address) return;
@@ -198,6 +220,19 @@ export default function Settings() {
               </div>
             </FormField>
 
+            <FormField
+              label="Export wallet"
+              hint="Reveals your BlindMarket wallet's private key / seed phrase in a Privy-hosted iframe this app can't read — for moving it into MetaMask or another wallet client."
+            >
+              <Button
+                variant="outline"
+                size="sm"
+                label={exporting ? 'Opening…' : 'Export wallet'}
+                onClick={handleExportWallet}
+                disabled={exporting || !embeddedWallet}
+              />
+            </FormField>
+
             <FormField label="Reputation" hint="Decayed on-chain + off-chain score">
               <div className="px-3 py-2.5 bg-surface-2 border border-line text-sm font-mono text-ink-2">
                 {address ? reputationDisplay : 'Connect wallet to view reputation'}
@@ -222,16 +257,21 @@ export default function Settings() {
                 <div className="px-4 py-6 text-center text-xs text-ink-3">No wallets linked yet.</div>
               ) : (
                 linkedWallets.map((w) => {
-                  const isPrimary = w.address.toLowerCase() === (address || '').toLowerCase();
+                  // The embedded wallet is the one relay-tx signs from and
+                  // payouts land in — never derived from wagmi's active
+                  // wallet, which can point at whichever wallet connected
+                  // most recently. Labelling by walletClientType keeps this
+                  // correct even before that pin takes effect.
+                  const isEmbedded = w.address.toLowerCase() === (embeddedWallet?.address ?? '').toLowerCase();
                   return (
                     <div key={w.address} className="flex items-center justify-between gap-3 px-4 py-3">
                       <div className="flex items-center gap-2 min-w-0">
                         <span className="font-mono text-sm text-ink">
                           {w.address.slice(0, 6)}…{w.address.slice(-4)}
                         </span>
-                        {isPrimary ? <Tag tone="ok">Primary</Tag> : <Tag tone="neutral">Linked</Tag>}
+                        {isEmbedded ? <Tag tone="ok">BlindMarket wallet</Tag> : <Tag tone="neutral">External</Tag>}
                       </div>
-                      {!isPrimary && (
+                      {!isEmbedded && (
                         <button
                           onClick={() => setUnlinkTarget(w.address)}
                           className="text-[10px] uppercase tracking-wider text-err hover:text-err/80 transition-colors shrink-0"
@@ -244,6 +284,10 @@ export default function Settings() {
                 })
               )}
             </div>
+            <p className="text-xs text-ink-3 leading-relaxed">
+              Your BlindMarket wallet pays for tasks and receives payouts — it's managed for you, with gas paid in
+              USDC. Link an external wallet (e.g. MetaMask) if you want to bridge funds in from another chain.
+            </p>
 
             <Button
               variant="outline"
