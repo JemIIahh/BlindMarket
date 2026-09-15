@@ -1,7 +1,6 @@
 import { createContext, useContext, useState, useCallback, useEffect, useRef, type ReactNode } from 'react';
 import { ethers } from 'ethers';
-import { usePrivy, useWallets, type ConnectedWallet } from '@privy-io/react-auth';
-import { useSetActiveWallet } from '@privy-io/wagmi';
+import { usePrivy, useWallets, type ConnectedWallet, type LinkedAccountWithMetadata } from '@privy-io/react-auth';
 import { OG_CHAIN_CONFIG, OG_CHAIN_ID, BASE_CHAIN_ID, BASE_CHAIN_CONFIG } from '../config/constants';
 
 const HAS_PRIVY = !!import.meta.env.VITE_PRIVY_APP_ID;
@@ -42,8 +41,17 @@ export async function switchWalletToChain(
   }
 }
 
+type WalletAccount = Extract<LinkedAccountWithMetadata, { type: 'wallet' }>;
+
+function isEmbeddedWalletAccount(a: LinkedAccountWithMetadata): a is WalletAccount {
+  return a.type === 'wallet' && a.chainType === 'ethereum'
+    && (a.walletClientType === 'privy' || a.walletClientType === 'privy-v2');
+}
+
 interface WalletState {
   address: string | null;
+  /** The Privy embedded (BlindMarket) wallet — what relay-tx signs from. */
+  embeddedAddress: string | null;
   provider: ethers.BrowserProvider | null;
   signer: ethers.JsonRpcSigner | null;
   chainId: number | null;
@@ -78,21 +86,10 @@ function PrivyWalletProvider({ children }: { children: ReactNode }) {
   const wallet = authenticated ? rawWallet : null;
   const address = wallet?.address ?? null;
   const isCorrectChain = chainId === OG_CHAIN_ID || chainId === BASE_CHAIN_ID;
-
-  // Pin wagmi's notion of "the connected wallet" to the same embedded-wallet
-  // preference used above. Without this, @privy-io/wagmi's active wallet
-  // defaults to whichever wallet connected/linked most recently — so once a
-  // user links an external wallet (e.g. for CCTP bridging), every wagmi
-  // consumer (useAccount/useWalletClient — PostTask's relay signer, Settings'
-  // "Enable relay" grant, agent-owner checks) can silently drift onto that
-  // external wallet instead of the Privy-managed one relay-tx actually
-  // targets. That drift is what made "Enable relay" grant co-signer rights to
-  // the wrong wallet address, so the real embedded wallet's key quorum was
-  // never updated and every relay-tx call against it kept 401ing.
-  const { setActiveWallet } = useSetActiveWallet();
-  useEffect(() => {
-    if (wallet) setActiveWallet(wallet).catch((err) => console.error('Failed to pin active wallet for wagmi:', err));
-  }, [wallet, setActiveWallet]);
+  // Read from linked accounts so it's known before the embedded wallet's iframe connects.
+  const embeddedAddress = authenticated
+    ? user?.linkedAccounts.find(isEmbeddedWalletAccount)?.address ?? null
+    : null;
 
   const switchedRef = useRef(false);
 
@@ -204,7 +201,7 @@ function PrivyWalletProvider({ children }: { children: ReactNode }) {
   }, [ready, authenticated, user?.id, wallets.length, address, chainId]);
 
   return (
-    <WalletContext.Provider value={{ address, provider, signer, chainId, connecting: connecting || !ready, connect, disconnect, switchChain, isCorrectChain }}>
+    <WalletContext.Provider value={{ address, embeddedAddress, provider, signer, chainId, connecting: connecting || !ready, connect, disconnect, switchChain, isCorrectChain }}>
       {children}
     </WalletContext.Provider>
   );
@@ -274,7 +271,7 @@ function DirectWalletProvider({ children }: { children: ReactNode }) {
   }, [disconnect]);
 
   return (
-    <WalletContext.Provider value={{ address, provider, signer, chainId, connecting, connect, disconnect, switchChain, isCorrectChain }}>
+    <WalletContext.Provider value={{ address, embeddedAddress: null, provider, signer, chainId, connecting, connect, disconnect, switchChain, isCorrectChain }}>
       {children}
     </WalletContext.Provider>
   );

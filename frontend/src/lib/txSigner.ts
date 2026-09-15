@@ -1,7 +1,7 @@
-import type { ethers } from 'ethers';
+import { JsonRpcProvider, type ethers } from 'ethers';
 import type { UnsignedTx } from '../types/api';
 import { getAuthHeaders } from './api';
-import { API_BASE_URL, BASE_CHAIN_ID } from '../config/constants';
+import { API_BASE_URL, BASE_CHAIN_ID, BASE_RPC_URL } from '../config/constants';
 
 export interface SentTx {
   hash: string;
@@ -76,10 +76,12 @@ export async function signAndSendTx(
     return { hash: txHash, receipt: null, userOp: true };
   }
 
+  // The relay always sends on Base; the signer may be sitting on 0G.
+  const baseProvider = new JsonRpcProvider(BASE_RPC_URL, BASE_CHAIN_ID, { staticNetwork: true });
   for (let i = 0; i < 30; i++) {
     await new Promise(r => setTimeout(r, 3000));
     try {
-      const receipt = await signer.provider.getTransactionReceipt(txHash);
+      const receipt = await baseProvider.getTransactionReceipt(txHash);
       if (receipt) return { hash: txHash, receipt };
     } catch { /* keep retrying */ }
   }

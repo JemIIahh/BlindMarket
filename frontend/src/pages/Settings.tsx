@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useAccount } from 'wagmi';
-import { usePrivy, useUnlinkWallet, useSigners, useWallets, useExportWallet } from '@privy-io/react-auth';
+import { usePrivy, useUnlinkWallet, useSigners, useExportWallet } from '@privy-io/react-auth';
 import {
   Breadcrumb,
   PageHeader,
@@ -14,8 +14,9 @@ import {
   Toggle,
 } from '../components/bb';
 import { useReputation } from '../hooks/useReputation';
+import { useWallet } from '../context/WalletContext';
 import {
-  isMainnet, OG_CHAIN_ID, OG_RPC_URL, BASE_CHAIN_ID, BASE_RPC_URL,
+  isMainnet, OG_CHAIN_ID, OG_RPC_URL, BASE_CHAIN_ID, BASE_RPC_URL, PRIVY_RELAY_SIGNER_ID,
 } from '../config/constants';
 import { authedGet, authedPost, authedDelete } from '../lib/api';
 import { copyToClipboard } from '../lib/utils';
@@ -54,25 +55,18 @@ export default function Settings() {
   const { user, linkWallet } = usePrivy();
   const { unlink } = useUnlinkWallet();
   const { addSigners } = useSigners();
-  const { wallets } = useWallets();
   const { exportWallet } = useExportWallet();
+  const { embeddedAddress } = useWallet();
 
   const [relaySignerLoading, setRelaySignerLoading] = useState(false);
   const [relaySignerStatus, setRelaySignerStatus] = useState<'idle' | 'done' | 'error'>('idle');
   const [exporting, setExporting] = useState(false);
 
-  // The BlindMarket-managed wallet — the one relay-tx signs from, tasks pay
-  // from, and payouts land in. Anything else linked (MetaMask, etc.) is an
-  // external wallet the user brought themselves, useful e.g. as a CCTP
-  // bridge source or a withdrawal destination, but never the signer for
-  // gas-sponsored Base transactions.
-  const embeddedWallet = wallets.find((w) => w.walletClientType === 'privy') ?? null;
-
   const handleExportWallet = async () => {
-    if (!embeddedWallet) return;
+    if (!embeddedAddress) return;
     setExporting(true);
     try {
-      await exportWallet({ address: embeddedWallet.address });
+      await exportWallet({ address: embeddedAddress });
     } catch (err) {
       console.error('Failed to export wallet:', err);
     } finally {
@@ -80,13 +74,14 @@ export default function Settings() {
     }
   };
 
+  // Always the embedded wallet: wagmi's active address may be a linked external wallet.
   const handleAddRelaySigner = async () => {
-    if (!address) return;
+    if (!embeddedAddress) return;
     setRelaySignerLoading(true);
     try {
       await addSigners({
-        address,
-        signers: [{ signerId: 'ed0tw7ng40gyfd6zu77cf0ol' }],
+        address: embeddedAddress,
+        signers: [{ signerId: PRIVY_RELAY_SIGNER_ID }],
       });
       setRelaySignerStatus('done');
     } catch (err) {
@@ -229,7 +224,7 @@ export default function Settings() {
                 size="sm"
                 label={exporting ? 'Opening…' : 'Export wallet'}
                 onClick={handleExportWallet}
-                disabled={exporting || !embeddedWallet}
+                disabled={exporting || !embeddedAddress}
               />
             </FormField>
 
@@ -257,12 +252,8 @@ export default function Settings() {
                 <div className="px-4 py-6 text-center text-xs text-ink-3">No wallets linked yet.</div>
               ) : (
                 linkedWallets.map((w) => {
-                  // The embedded wallet is the one relay-tx signs from and
-                  // payouts land in — never derived from wagmi's active
-                  // wallet, which can point at whichever wallet connected
-                  // most recently. Labelling by walletClientType keeps this
-                  // correct even before that pin takes effect.
-                  const isEmbedded = w.address.toLowerCase() === (embeddedWallet?.address ?? '').toLowerCase();
+                  const isEmbedded = w.address.toLowerCase() === embeddedAddress?.toLowerCase();
+                  const isActive = w.address.toLowerCase() === address?.toLowerCase();
                   return (
                     <div key={w.address} className="flex items-center justify-between gap-3 px-4 py-3">
                       <div className="flex items-center gap-2 min-w-0">
@@ -271,7 +262,7 @@ export default function Settings() {
                         </span>
                         {isEmbedded ? <Tag tone="ok">BlindMarket wallet</Tag> : <Tag tone="neutral">External</Tag>}
                       </div>
-                      {!isEmbedded && (
+                      {!isEmbedded && !isActive && (
                         <button
                           onClick={() => setUnlinkTarget(w.address)}
                           className="text-[10px] uppercase tracking-wider text-err hover:text-err/80 transition-colors shrink-0"
@@ -285,8 +276,8 @@ export default function Settings() {
               )}
             </div>
             <p className="text-xs text-ink-3 leading-relaxed">
-              Your BlindMarket wallet pays for tasks and receives payouts — it's managed for you, with gas paid in
-              USDC. Link an external wallet (e.g. MetaMask) if you want to bridge funds in from another chain.
+              Your BlindMarket wallet is managed for you — it pays for tasks and receives payouts. Link an external
+              wallet (e.g. MetaMask) if you want to bridge funds in from another chain.
             </p>
 
             <Button
@@ -341,7 +332,7 @@ export default function Settings() {
                     size="sm"
                     label={relaySignerLoading ? 'Approve in wallet…' : 'Enable relay'}
                     onClick={handleAddRelaySigner}
-                    disabled={relaySignerLoading || !address}
+                    disabled={relaySignerLoading || !embeddedAddress}
                   />
                   {relaySignerStatus === 'error' && (
                     <span className="text-xs text-err">Failed. Try again.</span>
