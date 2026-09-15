@@ -9,6 +9,9 @@ export interface SentTx {
   userOp?: boolean;
 }
 
+/** Read-only Base provider — the relay only ever sends on Base. */
+export const baseProvider = new JsonRpcProvider(BASE_RPC_URL, BASE_CHAIN_ID, { staticNetwork: true });
+
 export class RelayError extends Error {
   code: string;
   constructor(code: string, message: string) {
@@ -76,8 +79,7 @@ export async function signAndSendTx(
     return { hash: txHash, receipt: null, userOp: true };
   }
 
-  // The relay always sends on Base; the signer may be sitting on 0G.
-  const baseProvider = new JsonRpcProvider(BASE_RPC_URL, BASE_CHAIN_ID, { staticNetwork: true });
+  // Poll Base, not signer.provider — the signer may be sitting on 0G.
   for (let i = 0; i < 30; i++) {
     await new Promise(r => setTimeout(r, 3000));
     try {

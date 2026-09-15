@@ -1,18 +1,36 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useSigners } from '@privy-io/react-auth';
-import { parseUnits, formatUnits, Interface, isAddress, getAddress, ZeroAddress } from 'ethers';
+import { parseUnits, formatUnits, Interface, isAddress, getAddress, ZeroAddress, Contract, EventLog } from 'ethers';
 import { Button, FormField, FormInput, Modal, Spinner } from './bb';
 import { useWallet } from '../context/WalletContext';
 import { useUsdcBalance } from '../hooks/useChainWallet';
-import { signAndSendTx, RelayError, type SentTx } from '../lib/txSigner';
+import { signAndSendTx, RelayError, baseProvider, type SentTx } from '../lib/txSigner';
 import { BASE_USDC_ADDRESS, BASE_ESCROW_ADDRESS, BASE_CHAIN_CONFIG, PRIVY_RELAY_SIGNER_ID } from '../config/constants';
 
 const ERC20_TRANSFER_ABI = ['function transfer(address to, uint256 amount) returns (bool)'];
+const TRANSFER_EVENT_ABI = ['event Transfer(address indexed from, address indexed to, uint256 value)'];
 // Kept back because user-pays gas is charged in USDC from this same wallet.
 const USDC_GAS_RESERVE_RAW = 50_000n;
 const NETWORK = BASE_CHAIN_CONFIG.chainName;
 
-type Phase = 'input' | 'confirm' | 'enabling-relay' | 'sending' | 'done' | 'pending' | 'error';
+type Phase = 'input' | 'confirm' | 'enabling-relay' | 'sending' | 'confirming' | 'done' | 'pending' | 'error';
+
+/** Polls Base (~2 min) for the USDC Transfer this withdrawal emits; returns its tx hash. */
+async function waitForTransfer(
+  from: string, to: string, value: bigint, fromBlock: number, cancelled: () => boolean,
+): Promise<string | null> {
+  const usdc = new Contract(BASE_USDC_ADDRESS, TRANSFER_EVENT_ABI, baseProvider);
+  for (let i = 0; i < 40; i++) {
+    await new Promise((r) => setTimeout(r, 3000));
+    if (cancelled()) return null;
+    try {
+      const logs = await usdc.queryFilter(usdc.filters.Transfer(from, to), fromBlock);
+      const hit = logs.find((l): l is EventLog => l instanceof EventLog && l.args.value === value);
+      if (hit) return hit.transactionHash;
+    } catch { /* transient RPC error — keep polling */ }
+  }
+  return null;
+}
 
 function destinationError(value: string, self: string | null): string | null {
   if (!isAddress(value)) return 'Not a valid address — check it for typos.';
@@ -38,6 +56,12 @@ export function WithdrawModal({ onClose, onWithdrawn }: { onClose: () => void; o
   const [txHash, setTxHash] = useState<string | null>(null);
   const [needsRelay, setNeedsRelay] = useState(false);
   const relayGrantTried = useRef(false);
+  // Reset on mount too: StrictMode's mount→unmount→mount would otherwise leave it true.
+  const closedRef = useRef(false);
+  useEffect(() => {
+    closedRef.current = false;
+    return () => { closedRef.current = true; };
+  }, []);
 
   const destination = to.trim();
   const destError = destination ? destinationError(destination, embeddedAddress) : null;
@@ -76,6 +100,8 @@ export function WithdrawModal({ onClose, onWithdrawn }: { onClose: () => void; o
       return;
     }
     setPhase('sending');
+    const dest = getAddress(destination);
+    const startBlock = await baseProvider.getBlockNumber().catch(() => null);
     let sent: SentTx;
     try {
       const from = await signer.getAddress();
@@ -84,7 +110,7 @@ export function WithdrawModal({ onClose, onWithdrawn }: { onClose: () => void; o
         setPhase('confirm');
         return;
       }
-      const data = new Interface(ERC20_TRANSFER_ABI).encodeFunctionData('transfer', [getAddress(destination), amountRaw]);
+      const data = new Interface(ERC20_TRANSFER_ABI).encodeFunctionData('transfer', [dest, amountRaw]);
       sent = await signAndSendTx(signer, { to: BASE_USDC_ADDRESS, data, from });
     } catch (err) {
       if (err instanceof RelayError && err.code === 'PRIVY_AUTH_FAILED') {
@@ -106,12 +132,25 @@ export function WithdrawModal({ onClose, onWithdrawn }: { onClose: () => void; o
     }
 
     setTxHash(sent.hash);
-    if (sent.receipt && sent.receipt.status !== 1) {
-      setError('The transfer reverted on-chain — no USDC left your wallet.');
-      setPhase('error');
+    if (sent.receipt) {
+      if (sent.receipt.status !== 1) {
+        setError('The transfer reverted on-chain — no USDC left your wallet.');
+        setPhase('error');
+        return;
+      }
+      setPhase('done');
+      onWithdrawn?.();
       return;
     }
-    setPhase(sent.receipt ? 'done' : 'pending');
+
+    // Sponsored sends come back as user-ops with no tx hash, so confirm from the Transfer event.
+    setPhase('confirming');
+    const landedTx = startBlock === null
+      ? null
+      : await waitForTransfer(embeddedAddress, dest, amountRaw, Math.max(0, startBlock - 2), () => closedRef.current);
+    if (closedRef.current) return;
+    if (landedTx) setTxHash(landedTx);
+    setPhase(landedTx ? 'done' : 'pending');
     onWithdrawn?.();
   }
 
@@ -207,6 +246,14 @@ export function WithdrawModal({ onClose, onWithdrawn }: { onClose: () => void; o
               {phase === 'enabling-relay' ? 'Approve relay access in your wallet…' : 'Sending and waiting for confirmation…'}
             </div>
             <div className="text-xs text-ink-3">Don't close this window.</div>
+          </div>
+        )}
+
+        {phase === 'confirming' && (
+          <div className="py-8 text-center space-y-3">
+            <div className="flex justify-center"><Spinner size={22} /></div>
+            <div className="text-sm text-ink">Sent — waiting for it to land on {NETWORK}…</div>
+            <div className="text-xs text-ink-3">Usually a few seconds. It's already submitted, so closing this won't cancel it.</div>
           </div>
         )}
 
