@@ -63,3 +63,4 @@ docs/CELO-MULTI-CHAIN.md
 # Sui key exports
 !contracts/sui/.gitkeep
 .aider*
+backend/.env.play
