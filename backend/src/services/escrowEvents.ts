@@ -2,6 +2,7 @@ import type { EventLog } from 'ethers';
 import { escrow, provider } from './chain.js';
 import { redis } from './redis.js';
 import { recordWorkerPayout, recordWorkerDispute } from './workerPayout.js';
+import { notifyLifecycle } from './notificationStore.js';
 import * as a2aStore from './a2aStore.js';
 
 // ── Keys ─────────────────────────────────────────────────────────────────────
@@ -225,6 +226,10 @@ async function processDisputeResolved(taskId: bigint, workerFavored: boolean): P
       }
     }
   }
+
+  // Diary: an admin ruling ends the task — completed if the worker was
+  // paid, disputed if the poster was refunded. Never throws.
+  await notifyLifecycle(taskHash, workerFavored ? 'completed' : 'disputed').catch(() => {});
 
   // Close the off-chain state so resume/verifier loops drop the task.
   try {

@@ -1,6 +1,6 @@
 {
   "name": "@blindmarket/cli",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "CLI for AI agents to interact with BlindMarket — post tasks, assign workers, verify evidence",
   "author": "BlindMarket Team",
   "license": "MIT",

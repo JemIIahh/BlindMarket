@@ -5,11 +5,13 @@ import { createUserRateLimiter } from '../middleware/rateLimit.js';
 import { AppError } from '../middleware/errorHandler.js';
 import * as agentStore from '../services/agentStore.js';
 import * as a2aStore from '../services/a2aStore.js';
+import { loadAgentBySmartAccount } from '../services/deployedAgentStore.js';
 import * as bidsStore from '../services/bidsStore.js';
 import * as keyCustody from '../services/keyCustodyService.js';
 import { autoVerify } from '../services/autoVerify.js';
-import { settleAssignment, settleVerification } from '../services/a2aSettlement.js';
+import { settleAssignment, settleVerification, resolveAssignee } from '../services/a2aSettlement.js';
 import { recordWorkerPayout, recordWorkerDispute } from '../services/workerPayout.js';
+import { notifyLifecycle } from '../services/notificationStore.js';
 import { resolveTaskByHash, seedTaskId, type TaskChain } from '../services/taskChain.js';
 import * as escrowService from '../services/escrow.js';
 import * as reputationService from '../services/reputation.js';
@@ -27,6 +29,7 @@ import { EXPIRY_GRACE_SEC } from '../constants.js';
 import { config } from '../config.js';
 import * as serviceStore from '../services/serviceStore.js';
 import { consumePendingCost } from '../services/railwaySandbox.js';
+import * as accountingService from '../services/accountingService.js';
 
 export const a2aRouter = Router();
 
@@ -648,9 +651,17 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
         // self-heal persisted is now unreachable: every meta-returning surface
         // is projected or ownership-gated, and the caller is no longer indexed
         // on this task.
+        //
+        // Off-chain identity is always the EOA: when the on-chain worker is a
+        // BlindAccount, reconcile to its OWNER, not the contract address —
+        // otherwise the owning agent (indexed by wallet) loses sight of the
+        // task in /executions and resume.
         if (settleResult.onChainWorker) {
+          let reconcileTo = settleResult.onChainWorker.toLowerCase();
+          const owner = await loadAgentBySmartAccount(reconcileTo).catch(() => null);
+          if (owner) reconcileTo = owner.walletAddress.toLowerCase();
           try {
-            await a2aStore.updateState(taskId, { executorAddress: settleResult.onChainWorker.toLowerCase() });
+            await a2aStore.updateState(taskId, { executorAddress: reconcileTo });
           } catch (recErr) {
             console.error(`[a2a] accept: could not reconcile executor for ${taskId}:`, (recErr as Error).message);
           }
@@ -705,6 +716,9 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
       const { fireWebhooks } = await import('../services/webhookStore.js');
       fireWebhooks(address, 'task_assigned', { taskId, rootHash: meta.rootHash }).catch(() => {});
     } catch { /* webhook module optional */ }
+
+    // Poster diary: "Task accepted". Fire-and-forget — never blocks accept.
+    void notifyLifecycle(taskId, 'assigned');
   } catch (err) {
     console.error(`[a2a] accept failed for ${req.params.id}:`, (err as Error).message);
     next(err);
@@ -1409,6 +1423,12 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       routingSummary: data.routingSummary,
     });
 
+    // M5 (audit): the funding is receipt-verified at this point, so flip the
+    // build-time 'pending' escrow_lock row to confirmed. Fire-and-forget —
+    // indexing must not fail because the ledger write did.
+    void accountingService.confirmPendingTransactions(taskHash, ['escrow_lock'])
+      .catch((e) => console.warn(`[tasks/index] escrow_lock confirm failed for ${taskHash.slice(0, 10)}…:`, (e as Error).message));
+
     // The meta slice both the shadow record and the routing decision read —
     // built ONCE so the shadow log's routing text can never diverge from what
     // the cascade actually ranked on.
@@ -1613,15 +1633,23 @@ a2aRouter.post('/tasks/:id/submit', requireAuth, async (req: AuthRequest, res, n
     // sanity check with one retry in case of RPC lag. Also captures the
     // current on-chain submissionAttempts so the state below can record which
     // round the pending evidence broadcast will become.
+    //
+    // The recorded worker is the SMART ACCOUNT for AA agents assigned after
+    // the AA rollout (settleAssignment assigns it on Base so UserOps pass
+    // onlyWorker) — but legacy tasks assigned before that name the EOA.
+    // Accept either; the worker picks the matching broadcast path.
+    const assignee = await resolveAssignee(address, onChainIdChain);
+    const isRecordedWorker = (w: string) =>
+      w.toLowerCase() === address.toLowerCase() || w.toLowerCase() === assignee.toLowerCase();
     let chainAttempts = 0;
     const onChainTask = await escrowService.getTaskOn(onChainIdChain, Number(onChainId));
     chainAttempts = onChainTask.submissionAttempts;
-    if (onChainTask.worker.toLowerCase() !== address.toLowerCase()) {
+    if (!isRecordedWorker(onChainTask.worker)) {
       // One retry after 2s — covers edge cases like reorgs.
       await new Promise((r) => setTimeout(r, 2_000));
       const retryTask = await escrowService.getTaskOn(onChainIdChain, Number(onChainId));
       chainAttempts = retryTask.submissionAttempts;
-      if (retryTask.worker.toLowerCase() !== address.toLowerCase()) {
+      if (!isRecordedWorker(retryTask.worker)) {
         const freshState = await a2aStore.getState(taskHash);
         if (freshState?.assignError) {
           throw new AppError(503, 'BRIDGE_FAILED', `Assignment bridge failed — ${freshState.assignError}. Release and retry.`);
@@ -1706,6 +1734,9 @@ a2aRouter.post('/tasks/:id/submit', requireAuth, async (req: AuthRequest, res, n
       fireWebhooks(address, 'task_submitted', { taskId: taskHash }).catch(() => {});
     } catch { /* webhook module optional */ }
 
+    // Poster diary: "Result submitted". Fire-and-forget.
+    void notifyLifecycle(taskHash, 'submitted');
+
     const body: ApiResponse = {
       success: true,
       data: {
@@ -1726,6 +1757,104 @@ a2aRouter.post('/tasks/:id/submit', requireAuth, async (req: AuthRequest, res, n
     res.json(body);
   } catch (err) {
     console.error(`[a2a] submit failed for ${req.params.id}:`, (err as Error).message);
+    next(err);
+  }
+});
+
+/**
+ * POST /api/v1/a2a/tasks/:id/rebroadcast
+ *
+ * Heal for the submit-then-crash gap: /submit flips state to 'submitted' at
+ * unsigned-tx-BUILD time, before the worker broadcasts. If the worker died
+ * (or its RPC blipped — seen live as JsonRpcProvider network failures)
+ * between the two, off-chain state says 'submitted' while on-chain status is
+ * still Assigned(1). The finalize-only resume path then 503s
+ * NOT_SUBMITTED_ON_CHAIN until every attempt cap burns out, and /submit
+ * refuses a rebuild (INVALID_STATE on 'submitted') — the task strands with
+ * escrow locked until claimTimeout.
+ *
+ * This endpoint rebuilds the SAME unsigned submitEvidence deterministically
+ * from the stored resultData (evidenceHash = keccak256(JSON(resultData))) so
+ * the executor can broadcast and proceed to /finalize. Gated on the on-chain
+ * facts so a stale caller can never be handed a reverting tx: status must
+ * still be Assigned(1) — anything else means evidence already landed (call
+ * /finalize) or the task moved on.
+ */
+a2aRouter.post('/tasks/:id/rebroadcast', requireAuth, async (req: AuthRequest, res, next) => {
+  try {
+    const taskHash = req.params.id as string;
+    const address = req.user!.address;
+
+    const meta = await a2aStore.getMeta(taskHash);
+    if (!meta) throw new AppError(404, 'NOT_FOUND', 'Task not found or not A2A-enabled');
+
+    const state = await a2aStore.getState(taskHash);
+    if (!state || state.executorAddress?.toLowerCase() !== address.toLowerCase()) {
+      throw new AppError(403, 'FORBIDDEN', 'Only the accepted executor can rebroadcast');
+    }
+    if (state.status !== 'submitted') {
+      throw new AppError(409, 'INVALID_STATE', `Only a submitted task can be rebroadcast (state=${state.status})`);
+    }
+    if (!state.resultData) {
+      throw new AppError(400, 'NO_RESULT_DATA', 'No resultData recorded for this task');
+    }
+
+    const onChainIdResolved = await resolveTaskByHash(taskHash);
+    const onChainId = onChainIdResolved?.taskId ?? null;
+    const onChainIdChain = onChainIdResolved?.chain ?? '0g';
+    if (!onChainId) {
+      throw new AppError(503, 'NOT_INDEXED', 'On-chain taskId not yet indexed — retry shortly');
+    }
+    const onChainTask = await escrowService.getTaskOn(onChainIdChain, Number(onChainId));
+    if (onChainTask.status !== 1) {
+      throw new AppError(
+        409,
+        'ALREADY_SUBMITTED',
+        `On-chain status is ${onChainTask.status}, not Assigned(1) — evidence already recorded, call /finalize instead.`,
+      );
+    }
+    if (BigInt(Math.floor(Date.now() / 1000)) >= onChainTask.deadline) {
+      throw new AppError(
+        409,
+        'DEADLINE_REACHED',
+        'The task deadline has passed — the contract would revert DeadlineReached. The poster can reclaim escrow via claimTimeout.',
+      );
+    }
+    // Same recorded-worker gate as /submit: the contract's onlyWorker
+    // reverts evidence from anyone else, so don't hand out a doomed tx.
+    const assignee = await resolveAssignee(address, onChainIdChain);
+    const isRecordedWorker = (w: string) =>
+      w.toLowerCase() === address.toLowerCase() || w.toLowerCase() === assignee.toLowerCase();
+    if (!isRecordedWorker(onChainTask.worker)) {
+      throw new AppError(503, 'NOT_ASSIGNED_YET', `On-chain assignment not confirmed — task.worker=${onChainTask.worker}, caller=${address}. Retry shortly.`);
+    }
+
+    const evidenceHash = ethers.keccak256(
+      ethers.toUtf8Bytes(JSON.stringify(state.resultData)),
+    );
+    let unsignedSubmitEvidence: ethers.TransactionRequest | null = null;
+    if (ethers.isAddress(address)) {
+      unsignedSubmitEvidence = await escrowService.buildSubmitEvidenceOn(
+        onChainIdChain,
+        address,
+        Number(onChainId),
+        evidenceHash,
+      );
+    }
+    console.log(`[a2a] rebroadcast: rebuilt unsignedSubmitEvidence for ${taskHash} (evidence never landed on-chain)`);
+    const body: ApiResponse = {
+      success: true,
+      data: {
+        taskId: taskHash,
+        onChainTaskId: onChainId,
+        chain: onChainIdChain,
+        evidenceHash,
+        unsignedSubmitEvidence,
+      },
+    };
+    res.json(body);
+  } catch (err) {
+    console.error(`[a2a] rebroadcast failed for ${req.params.id}:`, (err as Error).message);
     next(err);
   }
 });
@@ -1865,13 +1994,33 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
       // judge output whose verdict can never be recorded (/verdict rejects it
       // as STALE_VERDICT) — burning the verifier's LLM spend every poll.
       // 503 keeps the worker's finalize retry/resume loop driving instead.
-      const ocIdAResolved = await resolveTaskByHash(taskHash);
-      const ocIdA = ocIdAResolved?.taskId ?? null;
-      const ocIdAChain = ocIdAResolved?.chain ?? '0g';
+      // Chain reads are guarded: an RPC blip must 503 (retryable), never 500.
+      let ocIdA: string | null;
+      let ocIdAChain: '0g' | 'base';
+      try {
+        const ocIdAResolved = await resolveTaskByHash(taskHash);
+        ocIdA = ocIdAResolved?.taskId ?? null;
+        ocIdAChain = ocIdAResolved?.chain ?? '0g';
+      } catch (err) {
+        throw new AppError(
+          503,
+          'ON_CHAIN_CHECK_FAILED',
+          `Could not resolve on-chain task before finalize: ${(err as Error).message}`,
+        );
+      }
       if (!ocIdA) {
         throw new AppError(503, 'NOT_INDEXED', 'On-chain taskId not yet indexed — wait a few seconds and retry');
       }
-      const tA = await escrowService.getTaskOn(ocIdAChain, Number(ocIdA));
+      let tA;
+      try {
+        tA = await escrowService.getTaskOn(ocIdAChain, Number(ocIdA));
+      } catch (err) {
+        throw new AppError(
+          503,
+          'ON_CHAIN_CHECK_FAILED',
+          `Could not read on-chain task before finalize: ${(err as Error).message}`,
+        );
+      }
       const broadcastPending =
         state.submissionRound !== undefined && tA.submissionAttempts < state.submissionRound;
       if (broadcastPending || (tA.status !== 2 && tA.status !== 3 && tA.status !== 4)) {
@@ -1912,10 +2061,21 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
     // tasksCompleted, and then losing the earnings credit to the indexing-lag
     // race (the "3 tasks · 0 0G" bug). Without submitEvidence confirmed the
     // bridge's completeVerification would also revert with InvalidStatus and
-    // the task would stick permanently.
-    const ocIdResolved = await resolveTaskByHash(taskHash);
-    const ocId = ocIdResolved?.taskId ?? null;
-    const ocIdChain = ocIdResolved?.chain ?? '0g';
+    // the task would stick permanently. Chain reads are guarded: an RPC blip
+    // must 503 (retryable), never 500.
+    let ocId: string | null;
+    let ocIdChain: '0g' | 'base';
+    try {
+      const ocIdResolved = await resolveTaskByHash(taskHash);
+      ocId = ocIdResolved?.taskId ?? null;
+      ocIdChain = ocIdResolved?.chain ?? '0g';
+    } catch (err) {
+      throw new AppError(
+        503,
+        'ON_CHAIN_CHECK_FAILED',
+        `Could not resolve on-chain task before finalize: ${(err as Error).message}`,
+      );
+    }
     if (!ocId) {
       throw new AppError(
         503,
@@ -1923,7 +2083,16 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
         'On-chain taskId not yet indexed — wait a few seconds and retry',
       );
     }
-    const onChainTask = await escrowService.getTaskOn(ocIdChain, Number(ocId));
+    let onChainTask;
+    try {
+      onChainTask = await escrowService.getTaskOn(ocIdChain, Number(ocId));
+    } catch (err) {
+      throw new AppError(
+        503,
+        'ON_CHAIN_CHECK_FAILED',
+        `Could not read on-chain task before finalize: ${(err as Error).message}`,
+      );
+    }
 
     // Reconcile path: on-chain already settled (3=Verified/failed,
     // 4=Completed/passed) while a2a state is still 'submitted' — a previous
@@ -1945,11 +2114,17 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
         await recordWorkerPayout(taskHash, address, ocId, onChainTask.amount, {
           serviceId: meta.serviceId,
           computeCostMicroUnits,
+          // Base settles in USDC (6 decimals); 0G in native (18). Without
+          // this the accounting ledger divides a USDC amount by 1e18 and the
+          // Earnings page never moves off zero.
+          decimals: ocIdChain === 'base' ? 6 : 18,
           meta,
         });
       } else {
         await recordWorkerDispute(taskHash, address);
       }
+      // Diary: completed (+ review nudge) or failed, poster + worker.
+      void notifyLifecycle(taskHash, settledPass ? 'completed' : 'failed');
       const body: ApiResponse = {
         success: true,
         data: { taskId: taskHash, status: reconciledStatus, verificationResult: reconciled, reconciled: true },
@@ -1993,11 +2168,18 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
       await recordWorkerPayout(taskHash, address, ocId, onChainTask.amount, {
         serviceId: meta.serviceId,
         computeCostMicroUnits,
+        // Base settles in USDC (6 decimals); 0G in native (18). Without
+        // this the accounting ledger divides a USDC amount by 1e18 and the
+        // Earnings page never moves off zero.
+        decimals: ocIdChain === 'base' ? 6 : 18,
         meta,
       });
     } else {
       await recordWorkerDispute(taskHash, address);
     }
+
+    // Diary: completed (+ review nudge) or failed, poster + worker.
+    void notifyLifecycle(taskHash, verificationResult.passed ? 'completed' : 'failed');
 
     // Fire webhook for task completion (non-blocking)
     try {
@@ -2115,11 +2297,18 @@ a2aRouter.post('/tasks/:id/verify', requireAuth, async (req: AuthRequest, res, n
       const computeCostMicroUnits = consumePendingCost(taskHash);
       await recordWorkerPayout(taskHash, state.executorAddress, ocId, onChainTask.amount, {
         computeCostMicroUnits,
+        // Base settles in USDC (6 decimals); 0G in native (18). Without
+        // this the accounting ledger divides a USDC amount by 1e18 and the
+        // Earnings page never moves off zero.
+        decimals: ocIdChain === 'base' ? 6 : 18,
         meta,
       });
     } else if (!passed && state.executorAddress) {
       await recordWorkerDispute(taskHash, state.executorAddress);
     }
+
+    // Diary: completed (+ review nudge) or failed, poster + worker.
+    void notifyLifecycle(taskHash, passed ? 'completed' : 'failed');
 
     const body: ApiResponse = {
       success: true,
@@ -2272,11 +2461,18 @@ a2aRouter.post('/tasks/:id/verdict', requireAuth, async (req: AuthRequest, res, 
       const computeCostMicroUnits = consumePendingCost(taskHash);
       await recordWorkerPayout(taskHash, state.executorAddress, ocId, onChainTask.amount, {
         computeCostMicroUnits,
+        // Base settles in USDC (6 decimals); 0G in native (18). Without
+        // this the accounting ledger divides a USDC amount by 1e18 and the
+        // Earnings page never moves off zero.
+        decimals: ocIdChain === 'base' ? 6 : 18,
         meta,
       });
     } else if (!passed && state.executorAddress) {
       await recordWorkerDispute(taskHash, state.executorAddress);
     }
+
+    // Diary: completed (+ review nudge) or failed, poster + worker.
+    void notifyLifecycle(taskHash, passed ? 'completed' : 'failed');
 
     const body: ApiResponse = {
       success: true,

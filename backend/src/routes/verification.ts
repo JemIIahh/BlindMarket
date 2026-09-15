@@ -7,6 +7,7 @@ import { config } from '../config.js';
 import * as verificationService from '../services/verification.js';
 import * as a2aStore from '../services/a2aStore.js';
 import { assertTaskParticipant, assertTaskExecutor } from '../services/taskParticipant.js';
+import { principalAddresses } from '../services/agentOwnership.js';
 import { forensicStore } from '../services/forensicStore.js';
 import type { AuthRequest, ApiResponse, A2ATaskMeta } from '../types.js';
 
@@ -170,8 +171,7 @@ verificationRouter.post('/verify', requireAuth, verifyLimiter, async (req: AuthR
       }
       claimedRequirements = input.taskRequirements;
       claimedBy = meta.verifierAddress &&
-        [req.user?.address, req.user?.ownerAddress, ...(req.user?.addresses ?? [])]
-          .some((a) => typeof a === 'string' && a.toLowerCase() === meta.verifierAddress!.toLowerCase())
+        principalAddresses(req.user).some((a) => a === meta.verifierAddress!.toLowerCase())
         ? 'verifier'
         : 'poster';
     }

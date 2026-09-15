@@ -8,11 +8,13 @@ export interface AuthUser {
   /** Agent owner address (from platform token JWT). */
   ownerAddress?: string;
   /**
-   * Set when the principal was authenticated via a registration-minted JWT
-   * (verifyRegistrationToken), as opposed to Privy. requireFounder must
-   * reject any principal carrying this — see middleware/auth.ts.
+   * Set when the principal was authenticated via an HS256 JWT
+   * (verifyRegistrationToken), as opposed to Privy. 'agent-platform' =
+   * server-minted at deploy (first-party worker); 'agent-registration' =
+   * device-flow minted (phishable consent — see M6). requireFounder must
+   * reject any principal carrying either — see middleware/auth.ts.
    */
-  typ?: 'agent-registration';
+  typ?: 'agent-registration' | 'agent-platform';
 }
 
 /** Express request with authenticated user */
@@ -662,6 +664,11 @@ export interface DeployedAgent {
   platformToken?: string;   // HS256 JWT for backend auth
   // On-chain identity — generated at deploy time
   walletAddress: string;
+  // ERC-4337 smart account address on Base (BlindAccount via BlindAccountFactory).
+  // Deterministic (CREATE2 from owner address + salt). The worker uses this as
+  // the UserOp sender when submitting on Base, so the paymaster can sponsor gas
+  // in USDC instead of requiring the EOA to hold ETH. Absent on pre-AA agents.
+  smartAccountAddress?: string;
   publicKey: string;
   encryptedPrivateKey: string;
   // Server-custodial copy of the raw signing key. Lets the worker autonomously

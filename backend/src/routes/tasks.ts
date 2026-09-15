@@ -5,7 +5,7 @@ import { canViewerSeeResult } from '../services/resultVisibility.js';
 import { AppError } from '../middleware/errorHandler.js';
 import * as escrowService from '../services/escrow.js';
 import * as registryService from '../services/registry.js';
-import { getTokenDecimals } from '../services/chain.js';
+import { getTokenDecimals, provider, baseProvider, escrow, baseEscrow } from '../services/chain.js';
 import { resolveTaskChainById, resolveCachedTaskByHash, type TaskChain } from '../services/taskChain.js';
 import type { AuthRequest, ApiResponse } from '../types.js';
 import { AGENT_CAPABILITIES } from '../types.js';
@@ -240,6 +240,9 @@ tasksRouter.get('/:id', optionalAuth, async (req: AuthRequest, res, next) => {
       data: {
         ...serializeBigInts(task as unknown as Record<string, unknown>),
         taskId: taskId.toString(), // Include numeric ID explicitly
+        // Which escrow holds the task — the frontend picks the matching
+        // chain explorer (Base vs 0G) for its hash/address links.
+        chain,
         a2aIndexed,
         // Public projection — this route has no auth, and full A2A meta
         // carries the brief's key material (wrappedKeys/keyCustodyBlob) plus
@@ -302,7 +305,10 @@ tasksRouter.post('/', requireAuth, async (req: AuthRequest, res, next) => {
     // endpoint verifies the receipt and the TaskCreated event before writing
     // anything. See routes/a2a.ts for the verified-write path.
 
-    // Record escrow_lock accounting event
+    // Record escrow_lock accounting event as PENDING (M5 audit): this handler
+    // builds an unsigned tx — nothing is funded until it broadcasts. The
+    // receipt-verified POST /a2a/tasks/index flips it to confirmed; an
+    // abandoned build stays visibly pending instead of masquerading as funded.
     try {
       const decimals = await getTokenDecimals(data.token, useBase ? 'base' : '0g');
       accountingService.recordTransaction({
@@ -311,6 +317,7 @@ tasksRouter.post('/', requireAuth, async (req: AuthRequest, res, next) => {
         taskId: data.taskHash,
         type: 'escrow_lock',
         amount: Number(data.amount) / (10 ** decimals),
+        status: 'pending',
       });
     } catch (accErr) {
       console.warn('[tasks] Accounting record failed (non-blocking):', accErr);
@@ -477,7 +484,8 @@ tasksRouter.post('/:id/cancel', requireAuth, async (req: AuthRequest, res, next)
     const task = await escrowService.getTaskOn(chain, taskId);
     const tx = await escrowService.buildCancelTaskOn(chain, from, taskId);
 
-    // Record refund accounting event
+    // Record refund accounting event as PENDING (M5 audit): unsigned-tx build
+    // only. POST /tasks/:id/confirm-tx flips it once the cancel lands.
     try {
       const decimals = await getTokenDecimals(task.token, chain);
       const amount = Number(task.amount) / (10 ** decimals);
@@ -487,6 +495,7 @@ tasksRouter.post('/:id/cancel', requireAuth, async (req: AuthRequest, res, next)
         taskId: String(taskId),
         type: 'refund',
         amount,
+        status: 'pending',
       });
     } catch (accErr) {
       console.warn('[tasks] Accounting record failed (non-blocking):', accErr);
@@ -541,7 +550,8 @@ tasksRouter.post('/:id/timeout', requireAuth, async (req: AuthRequest, res, next
 
     const tx = await escrowService.buildClaimTimeoutOn(chain, from, taskId);
 
-    // Record refund accounting event
+    // Record refund accounting event as PENDING (M5 audit): unsigned-tx build
+    // only. POST /tasks/:id/confirm-tx flips it once the reclaim lands.
     try {
       const decimals = await getTokenDecimals(task.token, chain);
       const amount = Number(task.amount) / (10 ** decimals);
@@ -551,6 +561,7 @@ tasksRouter.post('/:id/timeout', requireAuth, async (req: AuthRequest, res, next
         taskId: String(taskId),
         type: 'refund',
         amount,
+        status: 'pending',
       });
     } catch (accErr) {
       console.warn('[tasks] Accounting record failed (non-blocking):', accErr);
@@ -562,6 +573,84 @@ tasksRouter.post('/:id/timeout', requireAuth, async (req: AuthRequest, res, next
     };
     const replacer = (key: string, value: any) => typeof value === 'bigint' ? value.toString() : value;
     res.json(JSON.parse(JSON.stringify(body, replacer)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * POST /api/v1/tasks/:id/confirm-tx
+ *
+ * M5 (audit) companion to cancel/timeout: flips the build-time 'pending'
+ * refund row to confirmed AFTER verifying the reclaim actually landed
+ * on-chain. Requires receipt status=1 plus this task's TaskCancelled (cancel)
+ * or DeadlineExpired (timeout) event from the chain's escrow address — logs
+ * are address-filtered first so lookalike events from other contracts can't
+ * confirm. Idempotent: a repeat matches zero pending rows.
+ */
+const confirmTxSchema = z.object({
+  txHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/, 'Must be a transaction hash'),
+});
+
+tasksRouter.post('/:id/confirm-tx', requireAuth, async (req: AuthRequest, res, next) => {
+  try {
+    const rawId = req.params.id as string;
+    if (!/^\d+$/.test(rawId)) {
+      throw new AppError(400, 'INVALID_TASK_ID', 'Task ID must be a positive integer');
+    }
+    const taskId = parseInt(rawId, 10);
+    const { txHash } = confirmTxSchema.parse(req.body);
+
+    const from = req.user!.address;
+    if (from === 'agent') {
+      throw new AppError(403, 'FORBIDDEN', 'Only the task agent can confirm refunds');
+    }
+
+    // Same ownership gate as cancel/timeout: resolving by ownership doubles
+    // as the agent check.
+    const chain = await resolveTaskChainById(taskId, from);
+    if (!chain) {
+      throw new AppError(403, 'FORBIDDEN', 'Only the task agent can confirm refunds');
+    }
+    const prov = chain === 'base' ? baseProvider : provider;
+    const esc = chain === 'base' ? baseEscrow : escrow;
+    if (!prov || !esc) {
+      throw new AppError(503, 'CHAIN_NOT_CONFIGURED', `Settlement chain ${chain} is not configured on this backend`);
+    }
+
+    const receipt = await prov.getTransactionReceipt(txHash).catch(() => null);
+    if (!receipt || receipt.status !== 1) {
+      throw new AppError(409, 'NOT_CONFIRMED', 'Transaction receipt not found or reverted — broadcast the cancel/timeout tx first');
+    }
+
+    const escAddr = (await esc.getAddress()).toLowerCase();
+    let settled = false;
+    for (const log of receipt.logs) {
+      if (log.address.toLowerCase() !== escAddr) continue;
+      let parsed: { name: string; args: unknown } | null = null;
+      try {
+        parsed = esc.interface.parseLog(log) as unknown as { name: string; args: unknown };
+      } catch {
+        continue;
+      }
+      if (!parsed || typeof parsed.args !== 'object' || parsed.args === null) continue;
+      const args = parsed.args as Record<string, unknown>;
+      if (args.taskId !== BigInt(taskId)) continue;
+      if (parsed.name === 'TaskCancelled' || parsed.name === 'DeadlineExpired') {
+        settled = true;
+        break;
+      }
+    }
+    if (!settled) {
+      throw new AppError(
+        409,
+        'NO_SETTLEMENT_EVENT',
+        'Receipt carries no TaskCancelled / DeadlineExpired for this task from the escrow — nothing to confirm',
+      );
+    }
+
+    const { confirmed } = await accountingService.confirmPendingTransactions(String(taskId), ['refund']);
+    res.json({ success: true, data: { confirmed: true, alreadyConfirmed: confirmed === 0 } } as ApiResponse);
   } catch (err) {
     next(err);
   }

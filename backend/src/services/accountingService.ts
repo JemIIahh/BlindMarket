@@ -238,6 +238,32 @@ export async function getGlobalStats(): Promise<{ totalEarned: number; totalFees
   };
 }
 
+/**
+ * M5 (audit): flip build-time ('pending') rows to 'confirmed' once the
+ * broadcast is receipt-verified (A2A /index for escrow_lock, POST
+ * /tasks/:id/confirm-tx for refunds). Idempotent: a second call matches
+ * zero pending rows and reports confirmed: 0. Returns the flipped count.
+ */
+export async function confirmPendingTransactions(taskId: string, types: string[]): Promise<{ confirmed: number }> {
+  if (types.length === 0) return { confirmed: 0 };
+  if (usePg()) {
+    const pool = await getPool();
+    const res = await pool.query(
+      `UPDATE transactions SET status = 'confirmed'
+        WHERE LOWER(task_id) = LOWER($1) AND status = 'pending' AND type = ANY($2::text[])`,
+      [taskId, types],
+    );
+    return { confirmed: res.rowCount ?? 0 };
+  }
+  const db = getDb();
+  const placeholders = types.map(() => '?').join(',');
+  const info = db.prepare(
+    `UPDATE transactions SET status = 'confirmed'
+      WHERE LOWER(task_id) = LOWER(?) AND status = 'pending' AND type IN (${placeholders})`,
+  ).run(taskId, ...types);
+  return { confirmed: Number(info.changes ?? 0) };
+}
+
 export async function exportCsv(addresses: string[], from?: string, to?: string): Promise<string> {
   const { transactions } = await getTransactions(addresses, from, to);
 

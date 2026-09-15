@@ -1,4 +1,4 @@
-import type { DeployedAgent, InstalledSkill } from '../types.js';
+import type { AgentTool, AuthUser, DeployedAgent, InstalledSkill } from '../types.js';
 
 /**
  * Shared ownership predicate for deployed agents. Owner set = the original
@@ -8,6 +8,31 @@ import type { DeployedAgent, InstalledSkill } from '../types.js';
  * Used by both the REST routes (agents.ts authorizeOwner) and the MCP tool
  * surface (services/mcp/tools.ts) so the two gates cannot drift apart.
  */
+/**
+ * M6 (audit): the canonical caller-address set for ownership/visibility
+ * gates. Device-flow registration JWTs carry an `ownerAddress` established
+ * by phishable consent (a substituted magic link binds the victim's wallet
+ * to the attacker's agent), so for `typ: 'agent-registration'` the
+ * ownerAddress claim confers NO rights over other wallets' resources —
+ * executor flows key on `address`. First-party worker tokens
+ * (`'agent-platform'`, server-minted, unphishable) and Privy/sk_ identities
+ * keep the full set, preserving deployed-agent behavior exactly.
+ */
+export function principalAddresses(user: AuthUser | undefined): string[] {
+  if (!user) return [];
+  const raw =
+    user.typ === 'agent-registration'
+      ? [user.address, ...(user.addresses ?? [])]
+      : [user.address, user.ownerAddress, ...(user.addresses ?? [])];
+  return [
+    ...new Set(
+      raw
+        .filter((a): a is string => typeof a === 'string' && a.startsWith('0x'))
+        .map((a) => a.toLowerCase()),
+    ),
+  ];
+}
+
 export function isAgentOwner(agent: DeployedAgent, candidateAddresses: Array<string | undefined>): boolean {
   const ownerSet = new Set(
     [agent.ownerAddress, ...(agent.authorizedOwners ?? [])].map((a) => a.toLowerCase()),
@@ -34,9 +59,41 @@ export type PublicInstalledSkill = Pick<InstalledSkill, 'skillId' | 'slug' | 'na
  * owner and non-owner alike; skill authors manage full content via the
  * author-gated /skills routes.
  */
+const REDACTED = '•••';
+
+function redactTools(tools: AgentTool[] | undefined): AgentTool[] | undefined {
+  if (!tools) return undefined;
+  return tools.map((t) => {
+    if (!t || typeof t !== 'object') return t;
+    const rec = t as unknown as Record<string, unknown>;
+    const out: Record<string, unknown> = { ...rec };
+    // Legacy http tools carry literal header VALUES (the isSensitive flag is
+    // stored, never honored on read) — redact every value, not just flagged
+    // ones, so a mis-flagged secret can't slip through.
+    if (Array.isArray(rec.headers)) {
+      out.headers = (rec.headers as Array<Record<string, unknown>>).map((h) =>
+        h && typeof h === 'object' ? { ...h, value: REDACTED } : h,
+      );
+    }
+    // MCP-imported ToolDefinitions carry baked auth headers (mcpClient bakes
+    // the live credentials at import). Same redaction as the /skills display
+    // surfaces — predictable placeholder, key names preserved for debugging.
+    if (rec.mcp_headers && typeof rec.mcp_headers === 'object') {
+      out.mcp_headers = Object.fromEntries(
+        Object.keys(rec.mcp_headers as Record<string, string>).map((k) => [k, REDACTED]),
+      );
+    }
+    return out as unknown as AgentTool;
+  });
+}
+
 export function stripAgentSecrets<T extends DeployedAgent>(agent: T | null | undefined) {
   if (!agent) return null;
-  const { encryptedPrivateKey: _a, encryptedApiKey: _b, apiKey: _c, rawPrivateKey: _d, platformToken: _e, ...safe } = agent;
+  const {
+    encryptedPrivateKey: _a, encryptedApiKey: _b, apiKey: _c, rawPrivateKey: _d, platformToken: _e,
+    toolSecrets: _f, encryptedToolSecrets: _g,
+    ...safe
+  } = agent;
   const publicSkills: PublicInstalledSkill[] | undefined = safe.skills?.map((s) => ({
     skillId: s.skillId,
     slug: s.slug,
@@ -46,5 +103,5 @@ export function stripAgentSecrets<T extends DeployedAgent>(agent: T | null | und
     source: s.source,
     installedAt: s.installedAt,
   })) as PublicInstalledSkill[] | undefined;
-  return { ...safe, skills: publicSkills };
+  return { ...safe, skills: publicSkills, tools: redactTools(safe.tools) };
 }

@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
   Breadcrumb,
@@ -15,6 +16,7 @@ import {
 } from '../components/bb';
 import { useAccountingEntries, useAccountingSummary } from '../hooks/useAccounting';
 import { useAuth } from '../context/AuthContext';
+import { authedGet } from '../lib/api';
 import { useChainAddress } from '../hooks/useChainWallet';
 import type { Transaction } from '../services/accounting';
 import { API_BASE_URL, getPaymentSymbol } from '../config/constants';
@@ -34,10 +36,30 @@ type Agent = {
   inftTokenId?: number;
 };
 
+/** One execution tagged with the agent that ran it (executions are keyed by
+ *  the agent's own wallet, not the owner EOA, so the page fans out per agent). */
+type AgentExecution = {
+  agentId: string;
+  agentName: string;
+  meta: { taskId: string; chain?: string };
+  state: { status: string; acceptedAt?: string; submittedAt?: string };
+};
+
+/** Work my agents are currently doing (not yet delivered). */
+const ASSIGNED_STATUSES = ['accepted', 'in_progress'];
+/** Delivered by my agents but not yet settled — the real pending payments. */
+const PENDING_PAYMENT_STATUSES = ['submitted', 'awaiting_verification'];
+
+function taskTime(e: AgentExecution): number {
+  const t = e.state.submittedAt ?? e.state.acceptedAt;
+  const ms = t ? Date.parse(t) : 0;
+  return Number.isNaN(ms) ? 0 : ms;
+}
+
 function formatCurrency(n: number | null | undefined, symbol: string): string {
   if (n == null || !Number.isFinite(n)) return '—';
   const sign = n < 0 ? '-' : n > 0 ? '+' : '';
-  return `${sign}${Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 4, maximumFractionDigits: 4 })} ${symbol}`;
+  return `${sign}${Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${symbol}`;
 }
 
 function formatTime(iso: string): string {
@@ -105,48 +127,115 @@ export default function Earnings() {
   const entries: Transaction[] = entriesRes?.transactions ?? [];
   const totalEntries = entriesRes?.total ?? 0;
   const totalTxPages = Math.max(1, Math.ceil(totalEntries / PAGE_SIZE));
-  const pending = entries.filter((e) => e.status === 'pending');
 
-  const pendingColumns: Column<Transaction>[] = [
+  // Executions live under each agent's own wallet — fan out one
+  // /executions?address= call per deployed agent and merge. Cross-address
+  // rows come back projected (no deliverable), which is all a dashboard needs.
+  const agentWallets = (agents ?? [])
+    .filter((a) => a.walletAddress)
+    .map((a) => a.walletAddress.toLowerCase())
+    .sort()
+    .join(',');
+  const {
+    data: agentExecutions,
+    isLoading: execLoading,
+    isError: execError,
+    refetch: refetchExec,
+  } = useQuery({
+    queryKey: ['agent-executions', agentWallets],
+    queryFn: async (): Promise<AgentExecution[]> => {
+      const lists = await Promise.all(
+        (agents ?? []).filter((a) => a.walletAddress).map(async (a) => {
+          const d = await authedGet<{ executions?: Array<{ meta: AgentExecution['meta']; state: AgentExecution['state'] }> }>(
+            `/api/v1/a2a/executions?address=${a.walletAddress}`,
+          );
+          return (d.executions ?? []).map((e) => ({
+            agentId: a.id,
+            agentName: a.name,
+            meta: e.meta,
+            state: e.state,
+          }));
+        }),
+      );
+      return lists.flat();
+    },
+    enabled: !!address && !!agents,
+  });
+
+  const executions = agentExecutions ?? [];
+  const assigned = executions
+    .filter((e) => ASSIGNED_STATUSES.includes(e.state.status))
+    .sort((a, b) => taskTime(b) - taskTime(a));
+  const pendingTasks = executions
+    .filter((e) => PENDING_PAYMENT_STATUSES.includes(e.state.status))
+    .sort((a, b) => taskTime(b) - taskTime(a));
+
+  const taskCell = (e: AgentExecution) => (
+    <Link to={`/tasks/${e.meta.taskId}`} className="font-mono text-ink-2 hover:text-ink transition-colors">
+      {shortHash(e.meta.taskId)}
+    </Link>
+  );
+
+  const assignedColumns: Column<AgentExecution>[] = [
     {
       key: 'task',
       header: 'Task',
-      width: '90px',
-      primary: true,
-      cell: (p) => <span className="font-mono text-ink-2">{p.task_id ? `#${p.task_id}` : '—'}</span>,
-    },
-    {
-      key: 'type',
-      header: 'Type',
-      width: '110px',
-      cell: (p) => <Tag tone={typeTone(p.type)}>{typeLabel(p.type)}</Tag>,
-    },
-    {
-      key: 'amount',
-      header: 'Amount',
       width: '130px',
-      align: 'right',
-      cell: (p) => <span className="font-mono font-semibold text-ink">{fmt(p.amount)}</span>,
+      primary: true,
+      cell: taskCell,
     },
     {
-      key: 'fee',
-      header: 'Fee',
-      width: '120px',
-      align: 'right',
-      cell: (p) => <span className="font-mono text-ink-3">{fmt(p.fee)}</span>,
-    },
-    {
-      key: 'tx',
-      header: 'Tx hash',
+      key: 'agent',
+      header: 'Agent',
       width: '1fr',
-      cell: (p) => <span className="font-mono text-ink-3">{shortHash(p.tx_hash)}</span>,
+      cell: (e) => <span className="font-semibold text-ink truncate">{e.agentName}</span>,
+    },
+    {
+      key: 'status',
+      header: 'Status',
+      width: '130px',
+      cell: (e) => <StatusTag status={e.state.status} />,
+    },
+    {
+      key: 'accepted',
+      header: 'Accepted',
+      width: '110px',
+      align: 'right',
+      cell: (e) => (
+        <span className="font-mono text-ink-3">{e.state.acceptedAt ? formatTime(e.state.acceptedAt) : '—'}</span>
+      ),
+    },
+  ];
+
+  const pendingTaskColumns: Column<AgentExecution>[] = [
+    {
+      key: 'task',
+      header: 'Task',
+      width: '130px',
+      primary: true,
+      cell: taskCell,
+    },
+    {
+      key: 'agent',
+      header: 'Agent',
+      width: '1fr',
+      cell: (e) => <span className="font-semibold text-ink truncate">{e.agentName}</span>,
     },
     {
       key: 'submitted',
       header: 'Submitted',
       width: '110px',
+      cell: (e) => (
+        <span className="font-mono text-ink-3">{e.state.submittedAt ? formatTime(e.state.submittedAt) : '—'}</span>
+      ),
+    },
+    {
+      key: 'status',
+      header: 'Status',
+      width: '130px',
+      trailing: true,
       align: 'right',
-      cell: (p) => <span className="font-mono text-ink-3">{formatTime(p.created_at)}</span>,
+      cell: (e) => <StatusTag status={e.state.status} />,
     },
   ];
 
@@ -282,9 +371,9 @@ export default function Earnings() {
         <div className="border-l border-line">
           <StatCard
             label="Pending"
-            value={String(pending.length)}
-            sub="Unresolved"
-            subColor={pending.length > 0 ? 'warn' : 'ok'}
+            value={execLoading && !!address ? '…' : String(pendingTasks.length)}
+            sub="Awaiting settlement"
+            subColor={pendingTasks.length > 0 ? 'warn' : 'ok'}
           />
         </div>
       </div>
@@ -336,28 +425,67 @@ export default function Earnings() {
         </Panel>
       ) : (
         <>
-          {/* Pending payments */}
+          {/* Assigned tasks — work my agents are currently doing */}
           <div className="mb-8">
-            <SectionRule num="01" title="Pending payments" side={`${pending.length}`} />
+            <SectionRule num="01" title="Assigned tasks" side={`${assigned.length} active`} />
             <div className="mt-4">
-              <DataTable<Transaction>
-                columns={pendingColumns}
-                rows={pending}
-                rowKey={(p) => String(p.id)}
-                loading={entriesLoading}
+              <DataTable<AgentExecution>
+                columns={assignedColumns}
+                rows={address ? assigned : []}
+                rowKey={(e) => `${e.agentId}:${e.meta.taskId}`}
+                loading={execLoading}
+                loadingLabel="Loading assigned tasks…"
+                error={execError}
+                onRetry={() => refetchExec()}
+                empty={
+                  !address
+                    ? {
+                        icon: 'wallet',
+                        title: 'Connect your wallet',
+                        description: 'Connect a wallet to see the tasks your agents are working on.',
+                      }
+                    : {
+                        icon: 'briefcase',
+                        title: 'No assigned tasks',
+                        description: 'Tasks your agents accept will appear here until they deliver.',
+                      }
+                }
+              />
+            </div>
+          </div>
+
+          {/* Pending payments — delivered by my agents, awaiting settlement */}
+          <div className="mb-8">
+            <SectionRule num="02" title="Pending payments" side={`${pendingTasks.length}`} />
+            <div className="mt-4">
+              <DataTable<AgentExecution>
+                columns={pendingTaskColumns}
+                rows={address ? pendingTasks : []}
+                rowKey={(e) => `${e.agentId}:${e.meta.taskId}`}
+                loading={execLoading}
                 loadingLabel="Loading payments…"
-                empty={{
-                  icon: 'clock',
-                  title: 'No pending payments',
-                  description: 'Settled payouts appear in the transaction log below.',
-                }}
+                error={execError}
+                onRetry={() => refetchExec()}
+                empty={
+                  !address
+                    ? {
+                        icon: 'wallet',
+                        title: 'Connect your wallet',
+                        description: 'Connect a wallet to see work awaiting settlement.',
+                      }
+                    : {
+                        icon: 'clock',
+                        title: 'No pending payments',
+                        description: 'Delivered work awaiting settlement appears here. Settled payouts land in the log below.',
+                      }
+                }
               />
             </div>
           </div>
 
           {/* Transaction log */}
           <Panel>
-            <SectionRule num="02" title="Transaction log" side={`${totalEntries} entries`} />
+            <SectionRule num="03" title="Transaction log" side={`${totalEntries} entries`} />
             <div className="mt-4">
               {entriesError ? (
                 <div className="border border-line px-5 py-8 text-center text-xs font-mono text-err break-all">

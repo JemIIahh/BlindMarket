@@ -1,4 +1,5 @@
 import { loadAgentByWallet } from './deployedAgentStore.js';
+import { principalAddresses } from './agentOwnership.js';
 import type { AuthUser } from '../types.js';
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
@@ -18,11 +19,9 @@ export async function canViewerSeeResult(
   workerAddress: string | null | undefined,
 ): Promise<boolean> {
   if (!viewerIdent) return false;
-  const viewer = new Set(
-    [viewerIdent.address, viewerIdent.ownerAddress, ...(viewerIdent.addresses ?? [])]
-      .filter((a): a is string => typeof a === 'string' && a.startsWith('0x'))
-      .map((a) => a.toLowerCase()),
-  );
+  // M6 (audit): scoped via principalAddresses — a phished registration
+  // ownerAddress must not unlock other wallets' deliverables.
+  const viewer = new Set(principalAddresses(viewerIdent));
   if (viewer.size === 0) return false;
 
   const poster = posterAddress.toLowerCase();

@@ -50,6 +50,9 @@ export interface OnChainTask {
   createdAt: string;
   deadline: string;
   submissionAttempts: number;
+  // Which escrow holds the task ('base' = USDC settlement, '0g' = agent
+  // infra). Sent by GET /api/v1/tasks/:id; picks the chain explorer.
+  chain?: '0g' | 'base';
   // Whether the backend's A2A executor index has a meta entry for this task.
   // False means no agent can see it on /a2a/tasks — typically a task created
   // before the current code path was wired up.

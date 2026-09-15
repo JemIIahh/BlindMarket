@@ -16,6 +16,7 @@ import { authedGet, authedPatch, authedPost, getAuthHeaders } from '../../lib/ap
 import { API_BASE_URL, getPaymentSymbol } from '../../config/constants';
 import { ToolManager, type AnyTool } from '../bb/ToolManager';
 import AgentMetricsPanel from '../AgentMetricsPanel';
+import { UsagePanel } from './UsagePanel';
 import { AgentTasks } from './AgentTasks';
 import { SkillsManager } from './SkillsManager';
 import { WebhooksPanel } from './WebhooksPanel';
@@ -558,6 +559,9 @@ export function OpsConsole({
         {tab === 'metrics' && (
           <div className="p-5">
             <AgentMetricsPanel agentId={agentId} />
+            <div className="mt-2">
+              <UsagePanel agentId={agentId} />
+            </div>
           </div>
         )}
 

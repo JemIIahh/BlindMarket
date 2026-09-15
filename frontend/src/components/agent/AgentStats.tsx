@@ -1,7 +1,8 @@
 import { Icon } from '../bb/Icon';
 import { Button } from '../bb/Button';
 import { truncateAddress } from '../../lib/utils';
-import { OG_CHAIN_CONFIG, getPaymentSymbol } from '../../config/constants';
+import { getPaymentSymbol } from '../../config/constants';
+import { ExplorerAddressLinks } from '../ExplorerLinks';
 import type { AgentReviewStats } from '../../services/marketplace';
 
 /**
@@ -160,15 +161,11 @@ export function AgentStats({
           </div>
           {walletAddress ? (
             <>
-              <div className="font-mono text-sm text-ink truncate">{truncateAddress(walletAddress)}</div>
-              <a
-                href={`${OG_CHAIN_CONFIG.blockExplorerUrls[0]}/address/${walletAddress}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="mt-1 font-mono text-[11px] uppercase tracking-widest text-ink-3 hover:text-cream transition-colors"
-              >
-                view all ↗
-              </a>
+              <div className="font-mono text-sm text-ink truncate" title={walletAddress}>{truncateAddress(walletAddress)}</div>
+              <ExplorerAddressLinks
+                address={walletAddress}
+                className="mt-1 font-mono text-[11px] uppercase tracking-widest text-ink-3"
+              />
             </>
           ) : (
             <div className="font-mono text-sm text-ink-3">—</div>

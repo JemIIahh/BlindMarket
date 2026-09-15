@@ -6,6 +6,7 @@ import { config } from '../config.js';
 import { AppError } from './errorHandler.js';
 import type { AuthRequest } from '../types.js';
 import { lookupApiKey } from '../services/apiKeyStore.js';
+import { redis } from '../services/redis.js';
 
 /** Constant-time string comparison to prevent timing attacks on API keys */
 function safeCompare(a: string, b: string): boolean {
@@ -153,13 +154,14 @@ function getAddressForChain(wallets: WalletAddress[], chainType: string): string
  * `ownerAddress` claims — generic HS256 tokens without those are rejected,
  * so this isn't a re-introduction of the old SIWE end-user auth.
  *
- * Every token this successfully verifies came from the registration issuer
- * by construction (it's the only minter of HS256 tokens carrying these
- * claims), so the returned principal always carries `typ: 'agent-registration'`
- * — including tokens minted before that claim existed in the payload. Callers
- * that gate privileged roles (see requireFounder) must reject on this field.
+ * Every token this successfully verifies came from a backend minter by
+ * construction (only minters hold JWT_SECRET). The returned principal carries
+ * `typ: 'agent-platform'` for server-minted worker tokens and
+ * `typ: 'agent-registration'` for device-flow tokens (including tokens minted
+ * before either claim existed). Callers that gate privileged roles (see
+ * requireFounder) must reject on this field.
  */
-export function verifyRegistrationToken(token: string): { address: string; ownerAddress?: string; typ: 'agent-registration' } | null {
+export function verifyRegistrationToken(token: string): { address: string; ownerAddress?: string; typ: 'agent-registration' | 'agent-platform'; jti?: string } | null {
   if (!config.jwtSecret) {
     console.warn('[Auth] Registration token rejected: JWT_SECRET not configured');
     return null;
@@ -180,10 +182,45 @@ export function verifyRegistrationToken(token: string): { address: string; owner
       console.warn('[Auth] Registration token rejected: issued before REGISTRATION_TOKEN_MIN_IAT');
       return null;
     }
-    return { address: claims.address, ownerAddress: claims.ownerAddress as string, typ: 'agent-registration' };
+    // M6 (audit): honor the minter's typ, allowlisted — server-minted worker
+    // tokens carry 'agent-platform', device-flow tokens 'agent-registration'
+    // (or nothing, pre-typ). Anything else falls back to the unprivileged
+    // registration flavor; it can never escalate by self-declaring.
+    const typ = claims.typ === 'agent-platform' ? 'agent-platform' : 'agent-registration';
+    return {
+      address: claims.address,
+      ownerAddress: claims.ownerAddress as string,
+      typ,
+      jti: typeof claims.jti === 'string' ? claims.jti : undefined,
+    };
   } catch (err: any) {
     console.debug('[Auth] Registration token check (not HS256 — trying Privy):', err.message);
     return null;
+  }
+}
+
+/**
+ * M3 (audit): per-token revocation for the 365-day HS256 JWTs (worker
+ * platform tokens, registration tokens). Owners revoke via
+ * POST /agents/:id/revoke-token, which sets `revoked:jwt:<jti>`; every
+ * verifyRegistrationToken success is checked here before the principal is
+ * attached. TTL (366d) covers the max token lifetime so flags die with the
+ * tokens they kill. Pre-jti tokens grandfather through — rotate them out via
+ * REGISTRATION_TOKEN_MIN_IAT.
+ *
+ * Fail-open on Redis outage (availability over revocation, same precedent as
+ * the sandbox quota): a revoked token works until Redis recovers. Logged
+ * loudly so the gap is visible, not silent.
+ */
+export const REVOKED_JWT_TTL_S = 366 * 24 * 3600;
+
+export async function isJwtRevoked(jti: string | undefined): Promise<boolean> {
+  if (!jti) return false;
+  try {
+    return (await redis.get(`revoked:jwt:${jti}`)) !== null;
+  } catch {
+    console.warn('[Auth] revocation denylist unavailable — failing open');
+    return false;
   }
 }
 
@@ -209,7 +246,7 @@ export function requireAuth(req: AuthRequest, _res: Response, next: NextFunction
   }
 
   // Check DB-backed API key (async)
-  lookupApiKey(candidate).then((key) => {
+  lookupApiKey(candidate).then(async (key) => {
     if (key) {
       req.user = { address: key.ownerAddress, addresses: [key.ownerAddress] };
       next();
@@ -227,6 +264,10 @@ export function requireAuth(req: AuthRequest, _res: Response, next: NextFunction
     if (token) {
       const regUser = verifyRegistrationToken(token);
       if (regUser) {
+        if (await isJwtRevoked(regUser.jti)) {
+          next(new AppError(401, 'TOKEN_REVOKED', 'This token has been revoked by the owner'));
+          return;
+        }
         req.user = regUser;
         next();
         return;
@@ -258,11 +299,11 @@ export function requireAuth(req: AuthRequest, _res: Response, next: NextFunction
  * deploys never accidentally expose admin views.
  */
 export function requireFounder(req: AuthRequest, _res: Response, next: NextFunction): void {
-  // A founder authenticates through Privy, never through an agent-registration
-  // token — reject the issuer outright, before comparing addresses. This
-  // check is keyed on the issuer (verifyRegistrationToken always sets this),
-  // not on a forgeable claim inside the token.
-  if (req.user?.typ === 'agent-registration') {
+  // A founder authenticates through Privy, never through an HS256 worker
+  // token of either flavor — reject the issuer outright, before comparing
+  // addresses. This check is keyed on the issuer (verifyRegistrationToken
+  // always sets typ), not on a forgeable claim inside the token.
+  if (req.user?.typ !== undefined) {
     next(new AppError(403, 'FORBIDDEN', 'Founder access required'));
     return;
   }
@@ -296,7 +337,7 @@ export function optionalAuth(req: AuthRequest, _res: Response, next: NextFunctio
   }
 
   // Try DB-backed API key
-  lookupApiKey(candidate).then((key) => {
+  lookupApiKey(candidate).then(async (key) => {
     if (key) {
       req.user = { address: key.ownerAddress, addresses: [key.ownerAddress] };
       next();
@@ -318,6 +359,12 @@ export function optionalAuth(req: AuthRequest, _res: Response, next: NextFunctio
     // Registration-minted JWT
     const regUser = verifyRegistrationToken(token);
     if (regUser) {
+      // Revoked worker tokens must not linger via optional-auth surfaces
+      // (e.g. resultData on GET /tasks/:id).
+      if (await isJwtRevoked(regUser.jti)) {
+        next();
+        return;
+      }
       req.user = regUser;
       next();
       return;

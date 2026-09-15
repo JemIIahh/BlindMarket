@@ -224,6 +224,38 @@ const migrations: Migration[] = [
       );
     `,
   },
+  {
+    id: 11,
+    name: 'smart_account_address',
+    sql: `ALTER TABLE deployed_agents ADD COLUMN smart_account_address TEXT;`,
+  },
+  {
+    id: 12,
+    name: 'agent_usage',
+    sql: `
+      CREATE TABLE IF NOT EXISTS agent_usage (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_id TEXT NOT NULL,
+        task_hash TEXT,
+        provider TEXT NOT NULL DEFAULT '',
+        model TEXT NOT NULL DEFAULT '',
+        prompt_tokens INTEGER NOT NULL DEFAULT 0,
+        completion_tokens INTEGER NOT NULL DEFAULT 0,
+        total_tokens INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_agent_usage_agent ON agent_usage(agent_id);
+      CREATE INDEX IF NOT EXISTS idx_agent_usage_created ON agent_usage(created_at);
+    `,
+  },
+  {
+    // M2 (audit): mirrors neonDb migration 29 — toolSecrets were built but
+    // never stored, so the worker saw {} after a (re)start.
+    id: 13,
+    name: 'deployed_agents_tool_secrets',
+    sql: `ALTER TABLE deployed_agents ADD COLUMN tool_secrets TEXT DEFAULT '{}';
+      ALTER TABLE deployed_agents ADD COLUMN encrypted_tool_secrets TEXT DEFAULT '{}';`,
+  },
 ];
 
 function runMigrations(database: Database.Database): void {

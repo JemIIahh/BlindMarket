@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { requireAuth, requireFounder } from '../middleware/auth.js';
 import type { AuthRequest } from '../types.js';
 import * as reviewStore from '../services/reviewStore.js';
+import { notify } from '../services/notificationStore.js';
 import * as a2aStore from '../services/a2aStore.js';
 import * as templateStore from '../services/templateStore.js';
 import * as webhookStore from '../services/webhookStore.js';
@@ -55,7 +56,24 @@ marketplaceRouter.post('/reviews', requireAuth, async (req: AuthRequest, res, ne
     }
 
     const r = await reviewStore.submitReview({ taskId, agentAddress, reviewerAddress, rating, review });
+    // Worker diary: "New review". Fire-and-forget (notify never throws).
+    void notify(agentAddress, {
+      type: 'review_received',
+      title: `New ${rating}★ review`,
+      body: 'A poster rated your work — it’s live on your profile.',
+      taskId: taskId.toLowerCase(),
+    });
     res.json({ success: true, data: r } as ApiResponse);
+  } catch (err) { next(err); }
+});
+
+// The task page's "Rate your agent" panel calls this to decide between the
+// form and the already-reviewed state. Poster-scoped: returns only the
+// caller's own review for the task, never anyone else's.
+marketplaceRouter.get('/reviews/task/:taskId', requireAuth, async (req: AuthRequest, res, next) => {
+  try {
+    const review = await reviewStore.getReviewForTask(req.params.taskId, req.user!.address);
+    res.json({ success: true, data: { review } } as ApiResponse);
   } catch (err) { next(err); }
 });
 

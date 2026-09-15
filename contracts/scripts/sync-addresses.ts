@@ -25,6 +25,9 @@ const KEYS: Record<string, string> = {
   INFT: "inft",
   ValidatorPool: "validatorPool",
   AgentFactory: "agentFactory",
+  USDCPaymaster: "USDCPaymaster",
+  BlindAccountFactory: "BlindAccountFactory",
+  EntryPoint: "EntryPoint",
   // Not a deployment of ours, but the settlement token address belongs to the
   // same record so Base consumers resolve it the same way as everything else.
   USDC: "USDC",
@@ -66,7 +69,11 @@ function load(file: string): Record<string, string> {
   // AgentFactory. Reading the companion record makes the mirror unnecessary:
   // the main record still wins where both carry a key, so an existing mirrored
   // value keeps working.
-  const c = { ...readContracts(`agent-factory-${file}`, true), ...readContracts(file) };
+  const c = {
+    ...readContracts(`agent-factory-${file}`, true),
+    ...readContracts(`aa-${file}`, true),
+    ...readContracts(file),
+  };
   const out: Record<string, string> = {};
   for (const [recKey, genKey] of Object.entries(KEYS)) {
     // An all-zero address is the deliberate "not deployed yet" placeholder

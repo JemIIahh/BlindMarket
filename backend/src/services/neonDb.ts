@@ -602,11 +602,45 @@ const migrations: Array<{ id: number; name: string; sql: string }> = [
     `,
   },
   {
+    id: 27,
+    name: 'smart_account_address',
+    sql: `ALTER TABLE deployed_agents ADD COLUMN IF NOT EXISTS smart_account_address TEXT;`,
+  },
+  {
+    id: 28,
+    name: 'agent_usage',
+    sql: `
+      CREATE TABLE IF NOT EXISTS agent_usage (
+        id SERIAL PRIMARY KEY,
+        agent_id TEXT NOT NULL,
+        task_hash TEXT,
+        provider TEXT NOT NULL DEFAULT '',
+        model TEXT NOT NULL DEFAULT '',
+        prompt_tokens INTEGER NOT NULL DEFAULT 0,
+        completion_tokens INTEGER NOT NULL DEFAULT 0,
+        total_tokens INTEGER NOT NULL DEFAULT 0,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_agent_usage_agent ON agent_usage(agent_id);
+      CREATE INDEX IF NOT EXISTS idx_agent_usage_created ON agent_usage(created_at);
+    `,
+  },
+  {
+    // M2 (audit): agentRunner builds plaintext + ECIES toolSecrets, but no
+    // column ever stored them — the worker always saw {} after a (re)start.
+    id: 29,
+    name: 'deployed_agents_tool_secrets',
+    sql: `
+      ALTER TABLE deployed_agents ADD COLUMN IF NOT EXISTS tool_secrets JSONB NOT NULL DEFAULT '{}';
+      ALTER TABLE deployed_agents ADD COLUMN IF NOT EXISTS encrypted_tool_secrets JSONB NOT NULL DEFAULT '{}';
+    `,
+  },
+  {
     // Circle CCTP V2 transfers (Base <-> another EVM chain). One row per
     // burn->attest->mint pipeline, crash-resumable via the background poller
     // in services/cctpAttestationPoller.ts. `idempotency_key` is UNIQUE so a
     // retried request resumes the existing row instead of double-burning.
-    id: 27,
+    id: 30,
     name: 'cctp_transfers',
     sql: `
       CREATE TABLE IF NOT EXISTS cctp_transfers (
@@ -710,6 +744,7 @@ async function migrateRedisToPg(p: pg.Pool): Promise<void> {
         deployedAt, lastActiveAt, storageRef, platformToken,
         walletAddress, publicKey, encryptedPrivateKey, rawPrivateKey,
         inftTokenId, minReward, authorizedOwners,
+        toolSecrets, encryptedToolSecrets,
       } = data;
       if (!id) continue;
 
@@ -719,16 +754,18 @@ async function migrateRedisToPg(p: pg.Pool): Promise<void> {
             provider, model, api_key, encrypted_api_key, capabilities,
             tools, status, deployed_at, last_active_at, storage_ref,
             platform_token, wallet_address, public_key, encrypted_private_key,
-            raw_private_key, inft_token_id, min_reward, updated_at)
+            raw_private_key, inft_token_id, min_reward,
+            tool_secrets, encrypted_tool_secrets, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-           $14, $15, $16, $17, $18, $19, $20, $21, $22, NOW())
+           $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, NOW())
          ON CONFLICT (id) DO NOTHING`,
         [id, ownerAddress, authorizedOwners ?? [], name, instructions,
          provider, model, apiKey ?? '', encryptedApiKey, capabilities ?? [],
          JSON.stringify(tools ?? []), status, deployedAt,
          lastActiveAt ?? null, storageRef ?? null, platformToken ?? null,
          walletAddress, publicKey, encryptedPrivateKey, rawPrivateKey ?? null,
-         inftTokenId ?? null, minReward ?? null],
+         inftTokenId ?? null, minReward ?? null,
+         JSON.stringify(toolSecrets ?? {}), JSON.stringify(encryptedToolSecrets ?? {})],
       );
     }
 

@@ -15,6 +15,7 @@ import { Router } from 'express';
 import { PrivyClient, generateAuthorizationSignatures } from '@privy-io/node';
 import { z } from 'zod';
 import { requireAuth } from '../middleware/auth.js';
+import { createUserRateLimiter } from '../middleware/rateLimit.js';
 import type { AuthRequest, AuthUser } from '../types.js';
 import { config } from '../config.js';
 import { AppError } from '../middleware/errorHandler.js';
@@ -59,7 +60,16 @@ const relaySchema = z.object({
   // Decimal wei string. Validated here because BigInt() on anything else throws
   // SyntaxError inside the handler, which the catch below reported as a 502
   // "Privy relay failed" — a caller's typo labelled as an upstream outage.
-  value: z.string().regex(/^\d+$/).optional(),
+  //
+  // H2 (audit): the relay sponsors DATA calls (approve, createTask, ERC-20
+  // transfers via calldata) — never native transfers. A non-zero value would
+  // let any caller sweep the wallet's native balance to an arbitrary address
+  // with platform-sponsored gas, so only '0'/omitted passes validation.
+  // Every in-tree caller (web + MCP approve/createTask/top-up) sends no
+  // value; native funding travels via locally-signed txs, never the relay.
+  value: z.string().regex(/^\d+$/).refine((v) => BigInt(v) === 0n, {
+    message: 'Relay carries data-only calls: value must be 0 or omitted',
+  }).optional(),
   chain: z.string().default('base'),
   /**
    * 'auto' — let the backend negotiate how gas is paid, trying in order:
@@ -129,7 +139,14 @@ function callerWallets(user: AuthUser | undefined): Set<string> {
   );
 }
 
-txRouter.post('/relay-tx', requireAuth, async (req: AuthRequest, res, next) => {
+// M9 (audit): every relay burns real money (Privy fees + app-pays gas), and
+// the global per-IP limiter is shared + bypassable. Cap per principal: a
+// task flow needs a handful of relays (approve + create/submit + index
+// retries), so 30/min leaves headroom while bounding a compromised or
+// abusive key. Mounted AFTER requireAuth so the key is the wallet address.
+const relayLimiter = createUserRateLimiter(30);
+
+txRouter.post('/relay-tx', requireAuth, relayLimiter, async (req: AuthRequest, res, next) => {
   // The rung that was being attempted when an error escaped. Declared outside
   // the try so the catch can word its message for the right path — an
   // "insufficient funds" on wallet-pays means "needs native ETH", not USDC.

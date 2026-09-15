@@ -8,12 +8,14 @@ import { useWallet } from '../context/WalletContext';
 import { useAuth } from '../context/AuthContext';
 import { Panel, SectionRule, Tag, Button, StatusTag, Skeleton, ErrorState, useTabParam, ConfirmDialog } from '../components/bb';
 import { EncryptionIndicator } from '../components/EncryptionIndicator';
+import { Markdown } from '../components/Markdown';
+import { RateAgent } from '../components/RateAgent';
 import { TxPendingModal } from '../components/TxPendingModal';
 import { CustodyChain } from '../components/CustodyChain';
 import { truncateAddress, formatDate } from '../lib/utils';
 import { buildCancelTask, buildClaimTimeout } from '../services/tasks';
 import { signAndSendTx } from '../lib/txSigner';
-import { getPaymentDecimals, getPaymentSymbol, WORKER_SHARE_PCT, PLATFORM_FEE_PCT, API_BASE_URL } from '../config/constants';
+import { getPaymentDecimals, getPaymentSymbol, WORKER_SHARE_PCT, PLATFORM_FEE_PCT } from '../config/constants';
 import { useChainExplorerUrl } from '../hooks/useChainWallet';
 import { TaskStatus, TaskStatusLabels } from '../types/api';
 
@@ -28,6 +30,16 @@ const DETAIL_TABS: { id: DetailTab; label: string }[] = [
   { id: 'details', label: 'Details' },
   { id: 'custody', label: 'Custody' },
 ];
+
+/**
+ * Explorer search URL for an arbitrary hash (task hash, evidence hash).
+ * Basescan and the 0G chainscan (Blockscout) use different search paths.
+ */
+function explorerSearchUrl(explorerBase: string, isBase: boolean, query: string): string {
+  return isBase
+    ? `${explorerBase}/search?f=0&q=${query}`
+    : `${explorerBase}/search?q=${query}`;
+}
 
 /** Small 2-col field: sans label, value styled by caller (mono for data). */
 function Field({
@@ -51,7 +63,10 @@ export default function TaskDetail() {
   const { id } = useParams();
   const { data, isLoading, isError, refetch } = useTask(id || '');
   const { address, signer } = useWallet();
-  const explorerUrl = useChainExplorerUrl();
+  // The backend names the escrow's chain on the detail response — Base tasks
+  // explore on Basescan, 0G tasks on the 0G chainscan. Defaults to 0G while
+  // loading or for legacy responses without the field.
+  const explorerUrl = useChainExplorerUrl(data?.onChain?.chain === 'base' ? 'base' : 'og');
   // Auth context kept for any future reads; not used in the A2A view path.
   void useAuth();
   const qc = useQueryClient();
@@ -61,11 +76,15 @@ export default function TaskDetail() {
   // Build + sign + send the cancel / timeout tx as one mutation so React Query
   // surfaces the error (auth failure, server error, user-rejected sig) instead
   // of swallowing it in an unhandled promise.
+  //
+  // The page URL carries the task hash (globally unique), but the
+  // cancel/timeout endpoints take the numeric on-chain id — resolved from
+  // the loaded response (numericTaskId below) at call time.
   const cancelMutation = useMutation({
     mutationFn: async () => {
-      if (!id) throw new Error('Missing task id');
+      if (!numericTaskId) throw new Error('Missing task id');
       if (!signer) throw new Error('Wallet not connected');
-      const tx = await buildCancelTask(id);
+      const tx = await buildCancelTask(numericTaskId);
       await signAndSendTx(signer, tx);
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['tasks', id] }),
@@ -73,9 +92,9 @@ export default function TaskDetail() {
 
   const timeoutMutation = useMutation({
     mutationFn: async () => {
-      if (!id) throw new Error('Missing task id');
+      if (!numericTaskId) throw new Error('Missing task id');
       if (!signer) throw new Error('Wallet not connected');
-      const tx = await buildClaimTimeout(id);
+      const tx = await buildClaimTimeout(numericTaskId);
       await signAndSendTx(signer, tx);
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['tasks', id] }),
@@ -103,6 +122,9 @@ export default function TaskDetail() {
   }
 
   const { onChain, meta } = data;
+  // Numeric id for the cancel/timeout endpoints (they take the on-chain id,
+  // not the hash the URL carries). The backend always includes it.
+  const numericTaskId = onChain.taskId || id;
   // `onChain.agent` is the contract's name for the task poster — keep the
   // boolean named isPoster to make the intent clear in UI conditions.
   const isPoster = address?.toLowerCase() === onChain.agent?.toLowerCase();
@@ -113,10 +135,6 @@ export default function TaskDetail() {
   const reward = Number.isFinite(rewardRaw) ? rewardRaw / 10 ** decimals : 0;
 
   const a2aState = onChain.a2aState;
-  // Storage links go through the same API base as every other call.
-  // (This used to read window.ENV?.VITE_BACKEND_URL — never defined anywhere —
-  // and fell back to localhost:3001, a dead link in every production build.)
-  const storageBase = API_BASE_URL;
 
   const isExpired = Date.now() > Number(onChain.deadline) * 1000;
   const canTimeout = isExpired && [
@@ -212,17 +230,41 @@ export default function TaskDetail() {
                 </p>
               </Field>
               <Field label="Task hash">
-                <p className="text-sm text-ink font-mono truncate" title={onChain.taskHash}>{onChain.taskHash}</p>
+                <p className="text-sm font-mono truncate" title={`${onChain.taskHash} — open in chain explorer`}>
+                  <a
+                    href={explorerSearchUrl(explorerUrl, onChain.chain === 'base', onChain.taskHash)}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-ink hover:text-cream hover:underline decoration-cream/30 transition-colors"
+                  >
+                    {onChain.taskHash}
+                  </a>
+                </p>
               </Field>
               <Field label="Posted by">
-                <p className="text-sm text-ink font-mono">{truncateAddress(onChain.agent)}</p>
+                <p className="text-sm font-mono" title={`${onChain.agent} — open in chain explorer`}>
+                  <a
+                    href={`${explorerUrl}/address/${onChain.agent}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-ink hover:text-cream hover:underline decoration-cream/30 transition-colors"
+                  >
+                    {truncateAddress(onChain.agent)}
+                  </a>
+                </p>
               </Field>
               <Field label="Accepted by">
                 <p className="text-sm font-mono">
                   {onChain.worker === '0x0000000000000000000000000000000000000000' ? (
                     <span className="text-ink-3 font-sans">Waiting for an agent…</span>
                   ) : (
-                    <span className="text-ink">{truncateAddress(onChain.worker)}</span>
+                    <Link
+                      to={`/agents/${onChain.worker}`}
+                      title={onChain.worker}
+                      className="text-ink hover:text-cream hover:underline decoration-cream/30 transition-colors"
+                    >
+                      {truncateAddress(onChain.worker)} <span className="font-sans text-xs">→</span>
+                    </Link>
                   )}
                 </p>
               </Field>
@@ -239,33 +281,42 @@ export default function TaskDetail() {
                 <p className="text-sm text-ink capitalize">{onChain.a2aMeta?.targetExecutorType || 'human'}</p>
               </Field>
               <Field label="Evidence hash" span2>
-                <p className="text-sm text-ink font-mono break-all">{onChain.evidenceHash || '—'}</p>
+                <p className="text-sm font-mono break-all" title={onChain.evidenceHash ? `${onChain.evidenceHash} — open in chain explorer` : undefined}>
+                  {onChain.evidenceHash ? (
+                    <a
+                      href={explorerSearchUrl(explorerUrl, onChain.chain === 'base', onChain.evidenceHash)}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-ink hover:text-cream hover:underline decoration-cream/30 transition-colors"
+                    >
+                      {onChain.evidenceHash}
+                    </a>
+                  ) : (
+                    <span className="text-ink">—</span>
+                  )}
+                </p>
               </Field>
               {meta.rootHash && (
                 <Field label="0G storage root (brief)" span2>
                   <p className="text-sm font-mono break-all">
-                    <a
-                      href={`${storageBase}/api/v1/storage/${meta.rootHash}`}
-                      target="_blank"
-                      rel="noreferrer"
+                    <Link
+                      to={`/storage/${meta.rootHash}`}
                       className="text-cream hover:underline decoration-cream/30"
                     >
                       {meta.rootHash}
-                    </a>
+                    </Link>
                   </p>
                 </Field>
               )}
               {a2aState?.outputRootHash && (
                 <Field label="0G storage root (output)" span2>
                   <p className="text-sm font-mono break-all">
-                    <a
-                      href={`${storageBase}/api/v1/storage/${a2aState.outputRootHash}`}
-                      target="_blank"
-                      rel="noreferrer"
+                    <Link
+                      to={`/storage/${a2aState.outputRootHash}`}
                       className="text-cream hover:underline decoration-cream/30"
                     >
                       {a2aState.outputRootHash}
-                    </a>
+                    </Link>
                   </p>
                 </Field>
               )}
@@ -340,8 +391,20 @@ export default function TaskDetail() {
             {onChain.status === TaskStatus.Assigned && (
               <p className="text-sm text-ink-2 leading-relaxed">
                 <span className="text-warn font-medium">Accepted.</span> Agent{' '}
-                <span className="font-mono text-ink">{truncateAddress(onChain.worker)}</span> is executing
-                the task off-chain. They'll sign and broadcast their evidence when ready.
+                <Link
+                  to={`/agents/${onChain.worker}`}
+                  title={onChain.worker}
+                  className="font-mono text-ink hover:text-cream hover:underline decoration-cream/30 transition-colors"
+                >
+                  {truncateAddress(onChain.worker)}
+                </Link>{' '}
+                is executing the task off-chain. They'll sign and broadcast their evidence when ready.{' '}
+                <Link
+                  to={`/agents/${onChain.worker}`}
+                  className="text-cream hover:underline decoration-cream/30 text-xs whitespace-nowrap"
+                >
+                  View agent →
+                </Link>
               </p>
             )}
             {onChain.status === TaskStatus.Submitted && (
@@ -371,8 +434,17 @@ export default function TaskDetail() {
             {onChain.status === TaskStatus.Completed && (
               <p className="text-sm text-ink-2 leading-relaxed">
                 <span className="text-ok font-medium">Completed.</span> Escrow released — {WORKER_SHARE_PCT}% to{' '}
-                <span className="font-mono text-ink">{truncateAddress(onChain.worker)}</span>, {PLATFORM_FEE_PCT}% to the
+                <Link
+                  to={`/agents/${onChain.worker}`}
+                  title={onChain.worker}
+                  className="font-mono text-ink hover:text-cream hover:underline decoration-cream/30 transition-colors"
+                >
+                  {truncateAddress(onChain.worker)}
+                </Link>, {PLATFORM_FEE_PCT}% to the
                 treasury. Reputation updated.
+                {!a2aState?.resultData && !a2aState?.verificationResult && (
+                  <> No archived output exists for this task — it settled before result archiving began, so the on-chain evidence hash above is the only record of the deliverable.</>
+                )}
               </p>
             )}
             {onChain.status === TaskStatus.Cancelled && (
@@ -411,11 +483,32 @@ export default function TaskDetail() {
               </div>
               <div className="space-y-4">
                 {!a2aState.resultData ? (
-                  <p className="text-sm text-ink-3 italic">No output data provided by agent.</p>
+                  <>
+                    <p className="text-sm text-ink-3 italic">
+                      No output data visible to this wallet. The deliverable is poster/worker-only —{' '}
+                      sign in with the poster or worker wallet to read it.
+                      {isPoster && (
+                        <> If you posted this task and still see this, your signed-in wallet differs from the poster address above.</>
+                      )}
+                    </p>
+                    {a2aState?.outputRootHash && (
+                      <p className="text-xs font-mono break-all">
+                        <span className="text-ink-3 font-sans">0G storage (output): </span>
+                        <Link
+                          to={`/storage/${a2aState.outputRootHash}`}
+                          className="text-cream hover:underline decoration-cream/30"
+                        >
+                          {a2aState.outputRootHash}
+                        </Link>
+                      </p>
+                    )}
+                  </>
                 ) : typeof a2aState.resultData.output === 'string' ? (
                   <>
                     {a2aState.resultData.output.trim() ? (
-                      <p className="text-sm text-ink-2 whitespace-pre-wrap leading-relaxed">{a2aState.resultData.output}</p>
+                      // Executors are prompted for Markdown — render tables,
+                      // links, and headings formatted, not as source text.
+                      <Markdown text={a2aState.resultData.output} />
                     ) : (
                       <p className="text-sm text-ink-3 italic">Agent provided an empty output string.</p>
                     )}
@@ -441,6 +534,17 @@ export default function TaskDetail() {
                       <p className="text-sm text-ink-3 italic">Agent provided an empty result object.</p>
                     )}
                   </div>
+                )}
+                {a2aState?.outputRootHash && a2aState?.resultData && (
+                  <p className="text-xs font-mono break-all pt-3 border-t border-line">
+                    <span className="text-ink-3 font-sans">0G storage (output): </span>
+                    <Link
+                      to={`/storage/${a2aState.outputRootHash}`}
+                      className="text-cream hover:underline decoration-cream/30"
+                    >
+                      {a2aState.outputRootHash}
+                    </Link>
+                  </p>
                 )}
                 {a2aState.verificationResult?.reasons && a2aState.verificationResult.reasons.length > 0 && (
                   <div className="pt-3 border-t border-line">
@@ -469,6 +573,18 @@ export default function TaskDetail() {
               </div>
             </Panel>
           )}
+
+          {/* Poster rates the executor after completion. The executor
+              address comes from off-chain state (the EOA the backend's
+              review gate checks) with the on-chain worker as fallback. */}
+          {isPoster &&
+            onChain.status === TaskStatus.Completed &&
+            (a2aState?.executorAddress || onChain.worker !== '0x0000000000000000000000000000000000000000') && (
+              <RateAgent
+                taskHash={onChain.taskHash}
+                executorAddress={a2aState?.executorAddress ?? onChain.worker}
+              />
+            )}
 
           {/* Poster: Cancel / Timeout actions */}
           {isPoster && (onChain.status === TaskStatus.Funded || canTimeout) && (

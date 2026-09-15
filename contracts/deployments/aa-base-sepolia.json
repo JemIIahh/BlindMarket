@@ -1,0 +1,18 @@
+{
+  "network": "base-sepolia",
+  "chainId": 84532,
+  "deployer": "0x2f8b1177c83623a560B26B38dE984e154b123D75",
+  "timestamp": "2026-09-12T16:09:34.986Z",
+  "note": "ERC-4337 AA infrastructure — agents pay gas in USDC instead of ETH. Factory redeployed: BlindAccount.execute now allows the EntryPoint (onlyEntryPointOrOwner); strict onlyOwner reverted every live UserOp. Smart account addresses changed — re-migrate agents.",
+  "contracts": {
+    "USDCPaymaster": "0xb71D820Be2a1637504ACd6B76276e4C74425D3fF",
+    "BlindAccountFactory": "0x6e1F31d05F48bf98A33A4d673fb7D6DB3A13918c",
+    "BlindAccountImplementation": "0xE1C5C885Df5773B38047A1AfdE90EBf0B5Aad212",
+    "EntryPoint": "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
+    "USDC": "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+  },
+  "config": {
+    "ethPriceInUsdc": "3000000000",
+    "maxGasLimit": "1000000"
+  }
+}

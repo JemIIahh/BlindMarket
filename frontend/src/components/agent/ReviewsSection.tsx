@@ -1,52 +1,20 @@
-import { useState } from 'react';
-import { SectionRule, Button, FormInput, FormTextarea } from '../bb';
+import { Link } from 'react-router-dom';
+import { SectionRule } from '../bb';
 import { truncateAddress } from '../../lib/utils';
-import { submitReview } from '../../services/marketplace';
 import type { AgentReview, AgentReviewStats } from '../../services/marketplace';
 
 /**
  * Reviews section: score summary + review list + inline submit form.
  */
 export function ReviewsSection({
-  agentWallet,
   reviews,
   stats,
-  onSubmitted,
 }: {
-  agentWallet?: string;
   reviews: AgentReview[];
   stats: AgentReviewStats | null;
-  onSubmitted: () => Promise<void>;
 }) {
-  const [rating, setRating] = useState(5);
-  const [text, setText] = useState('');
-  const [expanded, setExpanded] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
-  const [submitError, setSubmitError] = useState('');
   const dist: Record<number, number> = stats?.distribution ?? {};
   const hasStats = !!stats && stats.totalReviews > 0;
-
-  async function handleSubmit() {
-    if (!agentWallet) return;
-    setSubmitting(true);
-    setSubmitError('');
-    try {
-      await submitReview({
-        taskId: '',
-        agentAddress: agentWallet,
-        rating,
-        review: text.trim() || undefined,
-      });
-      setText('');
-      setRating(5);
-      setExpanded(false);
-      await onSubmitted();
-    } catch (err) {
-      setSubmitError((err as Error).message);
-    } finally {
-      setSubmitting(false);
-    }
-  }
 
   const maxDist = Math.max(1, ...[1, 2, 3, 4, 5].map((s) => dist[s] ?? 0));
 
@@ -131,65 +99,16 @@ export function ReviewsSection({
         </div>
       )}
 
-      {/* Submit review — inline row */}
-      <div className="mt-4 border border-line p-4">
-        <div className="flex items-center gap-3 flex-wrap">
-          {/* Star picker */}
-          <div className="flex items-center gap-0.5 shrink-0">
-            {[1, 2, 3, 4, 5].map((star) => (
-              <button
-                key={star}
-                type="button"
-                aria-label={`Rate ${star} out of 5`}
-                onClick={() => setRating(star)}
-                className={`text-lg transition-colors ${
-                  star <= rating ? 'text-cream' : 'text-ink-3'
-                }`}
-              >
-                ★
-              </button>
-            ))}
-          </div>
-
-          <span className="text-xs text-ink-3">{rating}/5</span>
-
-          {/* Text input — single line by default, expands to textarea on focus if long */}
-          {expanded ? (
-            <FormTextarea
-              rows={2}
-              placeholder="Share your experience…"
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              onBlur={() => {
-                if (text.length <= 80) setExpanded(false);
-              }}
-              className="flex-1 min-w-0"
-              autoFocus
-            />
-          ) : (
-            <FormInput
-              placeholder="Share your experience…"
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              onFocus={() => {
-                if (text.length > 80) setExpanded(true);
-              }}
-              className="flex-1 min-w-0"
-            />
-          )}
-
-          {/* Submit */}
-          <Button
-            variant="primary"
-            size="sm"
-            label={submitting ? 'Submitting…' : 'Submit'}
-            disabled={submitting || (!text.trim() && rating === 5)}
-            onClick={handleSubmit}
-          />
-        </div>
-        {submitError && (
-          <p className="text-xs text-err mt-2">{submitError}</p>
-        )}
+      {/* Reviews are poster-only and bound to a completed task, so they are
+          left from the task page — the old inline form submitted an empty
+          taskId and could never succeed. */}
+      <div className="mt-4 border border-line px-4 py-3">
+        <p className="text-xs text-ink-3 leading-relaxed">
+          Only the poster of a completed task can leave a review. Hired this agent?{' '}
+          <Link to="/tasks/mine" className="text-cream hover:underline decoration-cream/30">
+            Open the task and rate your agent →
+          </Link>
+        </p>
       </div>
     </section>
   );

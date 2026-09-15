@@ -1,5 +1,5 @@
 import { getPool } from './neonDb.js';
-import { createHmac } from 'crypto';
+import { createHmac, randomBytes } from 'crypto';
 
 export interface AgentWebhook {
   id: number;
@@ -18,7 +18,10 @@ export async function registerWebhook(opts: {
   events?: string[];
 }): Promise<AgentWebhook> {
   const db = await getPool();
-  const secret = opts.secret ?? createHmac('sha256', String(Date.now())).digest('hex');
+  // M8 (audit): the old default keyed HMAC with Date.now() — a forgeable
+  // timestamp. Anyone guessing registration time could mint valid
+  // X-BlindMarket-Signatures. Owner-supplied secrets were always fine.
+  const secret = opts.secret ?? randomBytes(32).toString('hex');
   const { rows } = await db.query<AgentWebhook>(
     `INSERT INTO agent_webhooks (agent_address, url, secret, events)
      VALUES ($1, $2, $3, $4) RETURNING *`,

@@ -13,7 +13,7 @@ export interface InstalledSkillMeta {
 export interface AgentDetails {
   id: string; name: string; provider: string; model: string; status: string;
   ownerAddress: string; deployedAt: string; instructions: string;
-  walletAddress?: string; publicKey?: string; inftTokenId?: number;
+  walletAddress?: string; smartAccountAddress?: string; publicKey?: string; inftTokenId?: number;
   tasksCompleted?: number; totalEarned?: string; tools?: AgentTool[];
   capabilities?: string[];
   skills?: InstalledSkillMeta[];

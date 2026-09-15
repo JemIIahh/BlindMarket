@@ -40,6 +40,8 @@ const Messages = lazy(() => import('./pages/Messages'));
 const Metrics = lazy(() => import('./pages/Metrics'));
 const AgentMarketplace = lazy(() => import('./pages/AgentMarketplace'));
 const TaskTemplates = lazy(() => import('./pages/TaskTemplates'));
+const StorageView = lazy(() => import('./pages/StorageView'));
+const Activity = lazy(() => import('./pages/Activity'));
 
 const privyAppId = import.meta.env.VITE_PRIVY_APP_ID;
 // Deliberate hard fail on a misconfigured build — but render a readable
@@ -123,6 +125,7 @@ export default function App() {
                       <Route path="/tasks/mine" element={<MyTasks />} />
                       <Route path="/tasks/templates" element={<TaskTemplates />} />
                       <Route path="/tasks/:id" element={<TaskDetail />} />
+                      <Route path="/storage/:rootHash" element={<StorageView />} />
                       <Route path="/a2a" element={<A2ADashboard />} />
                       <Route path="/earnings" element={<Earnings />} />
                       <Route path="/settings" element={<Settings />} />
@@ -133,6 +136,7 @@ export default function App() {
                       <Route path="/agents/mine" element={<MyAgents />} />
                       <Route path="/agents/:id" element={<AgentDetail />} />
                       <Route path="/messages" element={<Messages />} />
+                      <Route path="/activity" element={<Activity />} />
                       <Route path="/metrics" element={<Metrics />} />
 
                       {/* Pure-A2A pivot: H2H/H2A/A2H surfaces removed from the IA.

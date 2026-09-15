@@ -46,6 +46,24 @@
         } catch (e) {}
       })();
     </script>
+    <script>
+      // Wake the API at HTML-parse time, before the module bundle is fetched.
+      // Deliberately NOT in main.tsx: ES imports are hoisted, so a fetch there
+      // can't run until the whole eager graph (App -> wagmi -> web3-vendor,
+      // ~2.5 MB) has downloaded — seconds later on a cold cache, while the
+      // Render instance needs ~1 min to spin up (docs/CLOSEOUT-FOUNDER-OPS.md
+      // item 7). Vite substitutes %VITE_API_URL% at build time; an unsubstituted
+      // token means unset, which we treat as same-origin to match API_BASE_URL
+      // in config/constants.ts (dev then hits the Vite proxy). This fetch is
+      // itself the connection warm-up, so no preconnect hint is needed.
+      (function () {
+        try {
+          var api = '%VITE_API_URL%';
+          if (api.charAt(0) === '%') api = '';
+          fetch(api + '/health', { cache: 'no-store' }).catch(function () {});
+        } catch (e) {}
+      })();
+    </script>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

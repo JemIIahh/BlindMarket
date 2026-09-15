@@ -79,6 +79,17 @@ export function autoVerify(
     return { passed: false, score: 0, reasons: ['Empty output'], breakdown: [], errors: {} };
   }
 
+  // Worker error markers are machine-generated failure admissions, not work
+  // ("Error during LLM execution: ..." is what the platform worker submits
+  // when its own LLM call throws). A weighted rubric averages them into a
+  // pass — long enough for min_length, no listed forbidden phrase — and
+  // releases escrow for zero content, which is exactly what happened live.
+  // Fail closed before any rubric runs. A separate rubric entry would NOT do:
+  // its 0 would be outvoted by the passing rubrics.
+  if (/^\s*error during llm execution:/i.test(output)) {
+    return { passed: false, score: 0, reasons: ['Worker reported an LLM execution error instead of output'], breakdown: [], errors: {} };
+  }
+
   const rubrics: Array<{ fn: (output: string) => number; weight: number; name: string }> = [];
 
   // ── Legacy checks (backward-compatible) ──────────────────────────────────

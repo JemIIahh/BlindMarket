@@ -31,6 +31,7 @@ import { escrowAsMarketplace, marketplaceSigner, baseEscrowAsMarketplace, baseMa
 import { config } from '../config.js';
 import { resolveTaskByHash, type TaskChain, type ResolvedTask } from './taskChain.js';
 import * as a2aStore from './a2aStore.js';
+import { loadAgentByWallet } from './deployedAgentStore.js';
 import { rooms } from './socket.js';
 
 // How long to wait for the TaskCreated event listener to populate the
@@ -202,15 +203,24 @@ const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
  */
 async function confirmAssignedWorker(
   taskId: number | string,
-  executor: string,
+  assignee: string,
   taskHash: string,
   chain: TaskChain = '0g',
+  executor?: string,
 ): Promise<SettleResult> {
   try {
     const t = await bridgeFor(chain).escrow!.getTask(BigInt(taskId));
     const onChainWorker = String(t.worker);
-    if (onChainWorker.toLowerCase() === executor.toLowerCase()) {
+    if (onChainWorker.toLowerCase() === assignee.toLowerCase()) {
       console.log(`[a2aSettlement] assignment skipped — task ${taskId} already assigned to this executor`);
+      return { success: true, alreadySettled: true, onChainWorker, chain };
+    }
+    // Legacy: assigned to the executor EOA before the AA rollout recorded
+    // smart accounts on-chain. Same owner, same rightful worker — confirm it
+    // instead of reporting a mismatch (which wrongly tells the worker it is
+    // not assigned and sends it down the release path).
+    if (executor && onChainWorker.toLowerCase() === executor.toLowerCase()) {
+      console.log(`[a2aSettlement] assignment skipped — task ${taskId} assigned to executor EOA (pre-AA assignment)`);
       return { success: true, alreadySettled: true, onChainWorker, chain };
     }
     // marketplaceAssign reverts InvalidStatus for ANY non-Funded status. The
@@ -223,7 +233,7 @@ async function confirmAssignedWorker(
       console.warn(`[a2aSettlement] assignment refused — task ${taskId} is cancelled on-chain (no worker)`);
       return { success: false, cancelled: true };
     }
-    const msg = `task ${taskId} is already assigned on-chain to ${onChainWorker}, not ${executor}`;
+    const msg = `task ${taskId} is already assigned on-chain to ${onChainWorker}, not ${assignee}`;
     console.error(`[a2aSettlement] ${msg} — Redis/chain divergence (check /health/bridge for cross-env poaching)`);
     // Deliberately do NOT persist assignError here: the accept route closes
     // this off-chain and reconciles executorAddress to the real worker, who
@@ -238,6 +248,22 @@ async function confirmAssignedWorker(
     await safePersistAssignError(taskHash, msg);
     return { success: false, error: msg };
   }
+}
+
+/**
+ * Resolve the address the escrow should record as worker for an executor.
+ * ERC-4337 agents submit from their BlindAccount — the EOA holds no ETH and
+ * the paymaster charges the smart account — so on Base the contract must name
+ * the smart account, otherwise its onlyWorker gate rejects every UserOp with
+ * an empty revert. Off-chain identity stays the EOA everywhere; only the
+ * on-chain worker field carries the smart account. 0G has no AA infra, so
+ * the assignee there is always the EOA. Unknown executors (never deployed
+ * here) fall back to the EOA they presented.
+ */
+export async function resolveAssignee(executor: string, chain: TaskChain): Promise<string> {
+  if (chain !== 'base') return executor;
+  const agent = await loadAgentByWallet(executor).catch(() => null);
+  return agent?.smartAccountAddress || executor;
 }
 
 /**
@@ -273,13 +299,20 @@ export async function settleAssignment(taskHash: string, executor: string): Prom
     return { success: false, error: msg };
   }
 
+  // On Base, AA agents must be assigned under their smart account (see
+  // resolveAssignee). Executor identity in logs/state stays the EOA.
+  const assignee = await resolveAssignee(executor, chain);
+  if (assignee.toLowerCase() !== executor.toLowerCase()) {
+    console.log(`[a2aSettlement] assigning smart account ${assignee} for executor ${executor} on ${chain}`);
+  }
+
   let tx: ContractTransactionResponse;
   try {
     try {
-      await bridge.escrow!.marketplaceAssign.staticCall(BigInt(taskId), executor);
+      await bridge.escrow!.marketplaceAssign.staticCall(BigInt(taskId), assignee);
     } catch (staticErr) {
       if (isAlreadySettled(staticErr)) {
-        return confirmAssignedWorker(taskId, executor, taskHash, chain);
+        return confirmAssignedWorker(taskId, assignee, taskHash, chain, executor);
       }
       if (isDeadlineReached(staticErr)) {
         console.warn(`[a2aSettlement] assignment refused — task ${taskId} deadline has passed (terminal)`);
@@ -290,11 +323,11 @@ export async function settleAssignment(taskHash: string, executor: string): Prom
     }
 
     tx = await bridge.enqueue(() =>
-      bridge.escrow!.marketplaceAssign(BigInt(taskId), executor) as Promise<ContractTransactionResponse>,
+      bridge.escrow!.marketplaceAssign(BigInt(taskId), assignee) as Promise<ContractTransactionResponse>,
     );
   } catch (err) {
     if (isAlreadySettled(err)) {
-      return confirmAssignedWorker(taskId, executor, taskHash, chain);
+      return confirmAssignedWorker(taskId, assignee, taskHash, chain);
     }
     if (isDeadlineReached(err)) {
       console.warn(`[a2aSettlement] assignment refused — task ${taskId} deadline has passed (terminal)`);

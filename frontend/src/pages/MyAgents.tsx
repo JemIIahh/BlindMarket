@@ -27,23 +27,23 @@ const USDC_ABI = ['function balanceOf(address owner) view returns (uint256)'];
 
 // Per-row USDC balance probe. Returns null when balance is healthy or still
 // loading, a warning chip when below the threshold.
-function GasChip({ walletAddress }: { walletAddress: string }) {
+function GasChip({ fundingAddress }: { fundingAddress: string }) {
   const { data: walletClient } = useWalletClient();
   const [balance, setBalance] = useState<number | null>(null);
 
   useEffect(() => {
-    if (!walletAddress || !walletClient) return;
+    if (!fundingAddress || !walletClient) return;
     let cancelled = false;
     (async () => {
       try {
         const provider = new (await import('ethers')).BrowserProvider(walletClient.transport);
         const usdc = new Contract(MARKETPLACE_TOKEN_ADDRESS, USDC_ABI, provider);
-        const bal: bigint = await usdc.balanceOf(walletAddress);
+        const bal: bigint = await usdc.balanceOf(fundingAddress);
         if (!cancelled) setBalance(Number(formatUnits(bal, getPaymentDecimals())));
       } catch { /* non-blocking */ }
     })();
     return () => { cancelled = true; };
-  }, [walletAddress, walletClient]);
+  }, [fundingAddress, walletClient]);
 
   if (balance === null) return null;
   if (balance >= LOW_BALANCE_THRESHOLD) return null;
@@ -61,6 +61,7 @@ interface Agent {
   id: string;
   name: string;
   walletAddress: string;
+  smartAccountAddress?: string;
   status: string;
   provider: string;
   model: string;
@@ -248,7 +249,7 @@ export default function MyAgents() {
                           <Link to={`/agents/${agent.id}`} className="text-ink hover:text-cream transition-colors truncate">
                             {agent.name}
                           </Link>
-                          {agent.walletAddress && <GasChip walletAddress={agent.walletAddress} />}
+                          {agent.walletAddress && <GasChip fundingAddress={agent.smartAccountAddress || agent.walletAddress} />}
                         </div>
                         <div className="text-[11px] font-mono text-ink-3 mt-0.5 truncate">{truncateAddress(agent.walletAddress)}</div>
                       </div>
@@ -290,7 +291,7 @@ export default function MyAgents() {
                           <Link to={`/agents/${agent.id}`} className="text-sm text-ink hover:text-cream transition-colors truncate">
                             {agent.name}
                           </Link>
-                          {agent.walletAddress && <GasChip walletAddress={agent.walletAddress} />}
+                          {agent.walletAddress && <GasChip fundingAddress={agent.smartAccountAddress || agent.walletAddress} />}
                         </div>
                         <div className="text-[11px] text-ink-3 mt-0.5">{agent.provider} / {agent.model}</div>
                         <div className="text-[10px] font-mono text-ink-3 mt-0.5 truncate">{truncateAddress(agent.walletAddress)}</div>

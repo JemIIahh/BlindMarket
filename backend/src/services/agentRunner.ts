@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import { join, dirname } from 'path';
 import { Wallet } from 'ethers';
 import jwt from 'jsonwebtoken';
+import { deploySmartAccount } from './aa.js';
 import pidusage from 'pidusage';
 import { config } from '../config.js';
 import { eciesEncrypt, generateKeyPair } from './crypto.js';
@@ -222,7 +223,14 @@ export async function deployAgent(params: {
   }
 
   const platformToken = jwt.sign(
-    { address: walletAddress, ownerAddress: params.ownerAddress.toLowerCase(), agentName: params.name },
+    {
+      address: walletAddress, ownerAddress: params.ownerAddress.toLowerCase(), agentName: params.name,
+      jti: randomUUID(), // M3 (audit): per-token id so owners can revoke without rotating JWT_SECRET
+      // M6 (audit): first-party worker token. verifyRegistrationToken honors
+      // this over the default 'agent-registration', so device-flow-phished
+      // ownerAddress claims can't be laundered through worker credentials.
+      typ: 'agent-platform',
+    },
     config.jwtSecret,
     { algorithm: 'HS256', expiresIn: '365d' } as jwt.SignOptions,
   );
@@ -252,6 +260,20 @@ export async function deployAgent(params: {
     skills: params.skills?.length ? params.skills : undefined,
   };
 
+  // Deploy ERC-4337 smart account on Base (non-fatal if AA infra is unconfigured).
+  // The smart account lets the worker pay gas in USDC via the paymaster instead of
+  // requiring ETH. Deterministic address: same owner always yields the same address.
+  try {
+    const smartAddr = await deploySmartAccount(agent);
+    if (smartAddr) {
+      agent.smartAccountAddress = smartAddr;
+      await saveAgent(agent);
+    }
+  } catch (e) {
+    // Non-fatal — agent runs on 0G without AA when deployment fails
+    console.warn(`[agentRunner] Smart account deployment failed for ${agent.id}: ${(e as Error).message}`);
+  }
+
   await saveAgent(agent);
   return agent;
 }
@@ -279,7 +301,11 @@ export async function startAgent(id: string, opts?: { skipResume?: boolean }): P
       throw new Error('Server configuration error: JWT_SECRET missing');
     }
     agent.platformToken = jwt.sign(
-      { address: agent.walletAddress, ownerAddress: agent.ownerAddress.toLowerCase(), agentName: agent.name },
+      {
+        address: agent.walletAddress, ownerAddress: agent.ownerAddress.toLowerCase(), agentName: agent.name,
+        jti: randomUUID(), // M3 (audit): per-token id so owners can revoke without rotating JWT_SECRET
+        typ: 'agent-platform', // M6 (audit): first-party worker token (see deploy mint above)
+      },
       config.jwtSecret,
       { algorithm: 'HS256', expiresIn: '365d' } as jwt.SignOptions,
     );
@@ -341,6 +367,14 @@ export async function startAgent(id: string, opts?: { skipResume?: boolean }): P
       // in-flight (accepted-but-unsubmitted) task so a poison brief can't loop
       // the crash. Empty on fresh starts and graceful boot-reconciles.
       AGENT_SKIP_RESUME: opts?.skipResume ? '1' : '',
+      // ERC-4337 AA — smart account on Base for gasless USDC paymaster.
+      // Empty when the agent has no smart account (pre-AA agents or deployment failed).
+      AGENT_SMART_ACCOUNT_ADDRESS: agent.smartAccountAddress ?? '',
+      AA_ENTRY_POINT: config.entryPointAddress,
+      AA_PAYMASTER: config.usdcPaymasterAddress,
+      AA_USDC: config.baseUsdcAddress,
+      PIMLICO_BUNDLER_URL: config.pimlicoBundlerUrl,
+      PIMLICO_API_KEY: config.pimlicoApiKey,
     },
     silent: true,
   });

@@ -29,6 +29,10 @@ backend/data/
 .agents/
 .claude/
 .mcp.json
+# Lockfile of the agent-skills installer. Local-only tool state: what it locks
+# installs into .agents/ (ignored above), so committing the lock would leave a
+# pointer to files that are not in the repo.
+**/skills-lock.json
 
 # Git worktrees
 .worktrees/

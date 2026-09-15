@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { randomBytes } from 'crypto';
+import { randomBytes, randomUUID } from 'crypto';
+import jwt from 'jsonwebtoken';
 import { AGENT_CAPABILITIES, LLM_PROVIDER_MODELS, LLM_MODEL_IDS } from '../types.js';
 import type { AuthRequest } from '../types.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -15,6 +16,8 @@ import * as reputationDecay from '../services/reputationDecay.js';
 import * as agentStore from '../services/agentStore.js';
 import * as serviceStore from '../services/serviceStore.js';
 import { isAgentOwner, stripAgentSecrets } from '../services/agentOwnership.js';
+import { saveAgent } from '../services/deployedAgentStore.js';
+import { REVOKED_JWT_TTL_S } from '../middleware/auth.js';
 import * as skillStore from '../services/skillStore.js';
 import * as agentEmbedding from '../services/agentEmbedding.js';
 import { buildInstalledSkill, assertComposedSizeOk } from '../services/skillComposer.js';
@@ -114,7 +117,9 @@ export const agentsRouter = Router();
  */
 function formatNativeDecimal(raw: string): string {
   const n = BigInt(raw);
-  const decimals = process.env.BLIND_ESCROW_ADDRESS ? 6 : 18;
+  // Settlement runs on Base (USDC) whenever the Base escrow is configured —
+  // BLIND_ESCROW_ADDRESS is the 0G escrow and says nothing about settlement.
+  const decimals = config.baseEscrowAddress ? 6 : 18;
   const divisor = BigInt(10 ** decimals);
   const whole = (n / divisor).toString();
   const frac = (n % divisor).toString().padStart(decimals, '0').slice(0, 6);
@@ -423,6 +428,69 @@ agentsRouter.get('/:id/logs/json', requireAuth, async (req: AuthRequest, res) =>
   res.json({ success: true, data: history });
 });
 
+// Usage telemetry (LLM tokens + estimated cost per model).
+const usageBodySchema = z.object({
+  taskHash: z.string().optional(),
+  provider: z.string().max(64).optional(),
+  model: z.string().max(128).optional(),
+  promptTokens: z.number().nonnegative().optional(),
+  completionTokens: z.number().nonnegative().optional(),
+  totalTokens: z.number().nonnegative().optional(),
+});
+
+// POST /api/v1/agents/:id/usage — record one LLM call (worker telemetry).
+// The worker authenticates with its platform token (caller == agent wallet);
+// owners may also post. Best-effort by design — never 500s on bad input,
+// since a telemetry failure must not break the task run it reports on.
+agentsRouter.post('/:id/usage', requireAuth, async (req: AuthRequest, res) => {
+  const agent = await getAgent(req.params.id);
+  if (!agent) {
+    res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Agent not found' } });
+    return;
+  }
+  const caller = (req.user?.address ?? '').toLowerCase();
+  const allowed =
+    caller === agent.walletAddress.toLowerCase() ||
+    isAgentOwner(agent, [req.user?.address, ...(req.user?.addresses ?? [])]);
+  if (!allowed) {
+    res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Only the agent worker or owner can record usage' } });
+    return;
+  }
+  const parsed = usageBodySchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ success: false, error: { code: 'BAD_USAGE', message: 'Invalid usage payload' } });
+    return;
+  }
+  const b = parsed.data;
+  try {
+    const { recordUsage } = await import('../services/agentUsageStore.js');
+    await recordUsage({
+      agentId: agent.id,
+      taskHash: b.taskHash,
+      provider: b.provider ?? agent.provider,
+      model: b.model ?? agent.model,
+      promptTokens: b.promptTokens ?? 0,
+      completionTokens: b.completionTokens ?? 0,
+      totalTokens: b.totalTokens ?? 0,
+    });
+  } catch (err) {
+    console.warn(`[agents] usage record failed for ${agent.id}:`, (err as Error).message);
+  }
+  res.json({ success: true, data: { recorded: true } });
+});
+
+// GET /api/v1/agents/:id/usage — token/cost summary for the Usage tab.
+// Owner-only: usage reveals what the agent works on and when.
+agentsRouter.get('/:id/usage', requireAuth, async (req: AuthRequest, res, next) => {
+  try {
+    const agent = await authorizeOwner(req, res, req.params.id);
+    if (!agent) return;
+    const windowDays = parseInt(req.query.windowDays as string) || 30;
+    const { getUsageSummary } = await import('../services/agentUsageStore.js');
+    res.json({ success: true, data: await getUsageSummary(agent.id, windowDays) });
+  } catch (err) { next(err); }
+});
+
 // GET /api/v1/agents/:id/logs — SSE stream
 //
 // Owner-only — gated by requireAuth + authorizeOwner, checked BEFORE any SSE
@@ -461,6 +529,56 @@ agentsRouter.post('/:id/export-key', requireAuth, async (req: AuthRequest, res) 
   const agent = await authorizeOwner(req, res, req.params.id);
   if (!agent) return;
   res.json({ success: true, data: { agentId: agent.id, walletAddress: agent.walletAddress, encryptedPrivateKey: agent.encryptedPrivateKey } });
+});
+
+// POST /api/v1/agents/:id/revoke-token
+//
+// Kills the agent's current platform token (M3 audit: 365-day bearer JWTs
+// had no per-token revocation). Sets the denylist flag the auth middleware
+// checks, then mints + persists a replacement so the next start loads fresh
+// credentials. The RUNNING worker keeps its env copy until restarted —
+// restart the agent to complete the rotation. Owner-only.
+agentsRouter.post('/:id/revoke-token', requireAuth, async (req: AuthRequest, res) => {
+  const agent = await authorizeOwner(req, res, req.params.id);
+  if (!agent) return;
+  if (!config.jwtSecret) {
+    res.status(500).json({ success: false, error: { code: 'NO_JWT_SECRET', message: 'JWT_SECRET not configured' } });
+    return;
+  }
+  // Pre-jti tokens carry no id to deny — verification is stateless, so only
+  // the denylist (jti) or a JWT_SECRET rotation can kill them. The mint below
+  // still rotates the stored token; report honestly which kill applied.
+  let denied = false;
+  if (agent.platformToken) {
+    try {
+      const decoded = jwt.decode(agent.platformToken) as { jti?: unknown } | null;
+      const jti = typeof decoded?.jti === 'string' ? decoded.jti : undefined;
+      if (jti) {
+        await redis.set(`revoked:jwt:${jti}`, '1', 'EX', REVOKED_JWT_TTL_S);
+        denied = true;
+      }
+    } catch (e) {
+      console.warn(`[agents] revoke-token denylist write failed for ${req.params.id}:`, (e as Error).message);
+    }
+  }
+  const platformToken = jwt.sign(
+    {
+      address: agent.walletAddress, ownerAddress: agent.ownerAddress.toLowerCase(), agentName: agent.name,
+      jti: randomUUID(),
+    },
+    config.jwtSecret,
+    { algorithm: 'HS256', expiresIn: '365d' } as jwt.SignOptions,
+  );
+  await saveAgent({ ...agent, platformToken });
+  res.json({
+    success: true,
+    data: {
+      revoked: denied,
+      note: denied
+        ? 'Old token is dead immediately. Restart the agent to pick up the new token.'
+        : 'Stored token rotated, but the previous token predates revocation ids and stays valid until expiry — rotate JWT_SECRET for an immediate kill, then restart the agent.',
+    },
+  });
 });
 
 // POST /api/v1/agents/:id/withdraw
@@ -918,10 +1036,17 @@ agentsRouter.delete('/:id/skills/:slug', requireAuth, async (req: AuthRequest, r
 agentsRouter.get('/:id', async (req, res) => {
   // The marketplace links agents by WALLET ADDRESS while MyAgents links by
   // agent id — resolve both, or every Browse-agents click 404s for visitors.
+  // Task pages also link by on-chain worker, which is the SMART ACCOUNT for
+  // AA agents (a2a accept records the smart account, not the EOA) — resolve
+  // that too, or every assigned-task agent link 404s.
   let agent = await getAgent(req.params.id);
   if (!agent && /^0x[0-9a-fA-F]{40}$/.test(req.params.id)) {
     const needle = req.params.id.toLowerCase();
-    agent = (await listAgents()).find((a) => a.walletAddress?.toLowerCase() === needle);
+    agent = (await listAgents()).find(
+      (a) =>
+        a.walletAddress?.toLowerCase() === needle ||
+        a.smartAccountAddress?.toLowerCase() === needle,
+    );
   }
   if (!agent) { res.status(404).json({ success: false, error: 'Not found' }); return; }
   const stripped = strip(agent)!;
