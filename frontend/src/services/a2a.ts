@@ -92,11 +92,13 @@ export async function getExecutions(): Promise<{ executions: A2ATaskEntry[]; tot
 }
 
 export async function getProfile(): Promise<{ agent: AgentExecutor | null }> {
-  // 404 NOT_REGISTERED means "this wallet hasn't registered as an executor yet"
-  // — an expected state for posters, not an error. Swallow it so the console
-  // stays clean and the caller just sees agent: null.
+  // A wallet that hasn't registered as an executor is an expected state for
+  // posters, not an error. `?optional=1` makes the backend answer
+  // 200 { agent: null } instead of 404 — catching a 404 in JS never kept the
+  // console clean, since the browser logs the failed request itself. The
+  // catch stays for a backend that predates the flag.
   try {
-    return await authedGet<{ agent: AgentExecutor }>('/api/v1/a2a/profile');
+    return await authedGet<{ agent: AgentExecutor | null }>('/api/v1/a2a/profile?optional=1');
   } catch (err: any) {
     if (err?.status === 404 && err?.code === 'NOT_REGISTERED') {
       return { agent: null };

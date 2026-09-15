@@ -132,12 +132,9 @@ function PrivyWalletProvider({ children }: { children: ReactNode }) {
    *   (c) authenticated + wallet already linked — nothing to do.
    */
   const connect = useCallback(async () => {
-    console.log('Connect called, authenticated:', authenticated, 'wallet:', !!wallet);
     if (!authenticated) {
-      console.log('Calling login...');
       login();
     } else if (!wallet) {
-      console.log('Calling connectWallet...');
       connectWallet();
     }
   }, [authenticated, wallet, login, connectWallet]);
@@ -169,10 +166,17 @@ function PrivyWalletProvider({ children }: { children: ReactNode }) {
     }
   }, [privyLogout]);
 
-  // Diagnostic — visible in the browser console so you can confirm Privy is
-  // actually mounted with the expected config at runtime.
+  // Diagnostic — confirms Privy is mounted with the expected config at
+  // runtime. Opt-in and dev-only, since it prints the Privy user id + wallet
+  // address on every state change: localStorage.setItem('bb.debug.privy', '1')
+  // then reload.
   useEffect(() => {
-    if (!ready) return;
+    if (!ready || !import.meta.env.DEV) return;
+    try {
+      if (window.localStorage.getItem('bb.debug.privy') !== '1') return;
+    } catch {
+      return;
+    }
     console.log('[BlindMarket/Privy]', {
       ready,
       authenticated,

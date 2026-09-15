@@ -5,6 +5,7 @@ import { LogoMark } from './LogoMark';
 import { Icon } from './Icon';
 import { get, authedGet } from '../../lib/api';
 import { useSocket } from '../../hooks/useSocket';
+import { useAuth } from '../../context/AuthContext';
 import { isMainnet } from '../../config/constants';
 
 // Sidebar IA — agent-to-agent lifecycle, top to bottom. Modernized: sans
@@ -67,6 +68,9 @@ interface SidebarProps {
 
 export function Sidebar({ open, onClose, collapsed, onToggleCollapse }: SidebarProps) {
   const location = useLocation();
+  // The unread badges hit authed endpoints — only query once signed in, or a
+  // signed-out visitor 401s every 30s (useUnreadNotifications gates the same way).
+  const { isAuthenticated } = useAuth();
   const { data: stats, refetch } = useQuery({
     queryKey: ['stats'],
     queryFn: () => get<{
@@ -84,6 +88,7 @@ export function Sidebar({ open, onClose, collapsed, onToggleCollapse }: SidebarP
   const { data: unreadData, refetch: refetchUnread } = useQuery({
     queryKey: ['messages', 'unread-count'],
     queryFn: () => authedGet<{ count: number }>('/api/v1/messages/unread-count'),
+    enabled: isAuthenticated,
     refetchInterval: 30_000,
   });
   // NB: refetch the UNREAD count — this was wired to the stats refetch above,
@@ -96,6 +101,7 @@ export function Sidebar({ open, onClose, collapsed, onToggleCollapse }: SidebarP
   const { data: notifUnread } = useQuery({
     queryKey: ['notifications', 'unread-count'],
     queryFn: () => authedGet<{ unread: number }>('/api/v1/notifications/unread-count'),
+    enabled: isAuthenticated,
     refetchInterval: 30_000,
   });
   const notifCount = notifUnread?.unread ?? 0;

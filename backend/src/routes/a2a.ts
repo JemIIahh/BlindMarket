@@ -2663,6 +2663,16 @@ a2aRouter.get('/profile', requireAuth, async (req: AuthRequest, res, next) => {
     const agent = await agentStore.getAgent(address);
 
     if (!agent) {
+      // `?optional=1`: the web app asks this for every signed-in wallet, and
+      // most are posters with no executor profile — answer 200 { agent: null }
+      // so the browser doesn't log a red 404 on every page. The default stays
+      // 404 NOT_REGISTERED: the published SDK (sdk/src/index.ts getProfile)
+      // calls this route and may rely on it.
+      if (req.query.optional === '1') {
+        const body: ApiResponse = { success: true, data: { agent: null } };
+        res.json(body);
+        return;
+      }
       throw new AppError(404, 'NOT_REGISTERED', 'Agent not registered');
     }
 

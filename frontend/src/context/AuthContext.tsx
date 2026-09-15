@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useRef, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { usePrivy, getIdentityToken, getAccessToken } from '@privy-io/react-auth';
 import { useAccount } from 'wagmi';
 import { setAccessTokenGetter } from '../lib/api';
@@ -36,6 +36,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const { ready, authenticated, login, logout } = usePrivy();
   const { address } = useAccount();
   const trackedRef = useRef(false);
+  // Flips only AFTER the effect below has installed the token getter. A query
+  // gated on Privy's raw `authenticated` fires in the same commit — child
+  // effects run before this parent effect — so its first request went out
+  // with no Authorization header and 401'd (verified with TanStack Query
+  // 5.100.5 under StrictMode).
+  const [tokenGetterReady, setTokenGetterReady] = useState(false);
 
   // Wire Privy's identity token into api.ts so authedGet/authedPost
   // automatically attach Authorization: Bearer <privy-id-token>.
@@ -104,6 +110,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setAccessTokenGetter(null);
       trackedRef.current = false;
     }
+    setTokenGetterReady(authenticated);
   }, [authenticated]);
 
   // Fire analytics event the first time the user authenticates this session.
@@ -117,8 +124,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   return (
     <AuthContext.Provider
       value={{
-        isAuthenticated: authenticated,
-        authenticating: !ready,
+        isAuthenticated: authenticated && tokenGetterReady,
+        authenticating: !ready || (authenticated && !tokenGetterReady),
         login,
         logout,
       }}
