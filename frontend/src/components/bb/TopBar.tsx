@@ -6,7 +6,7 @@ import { Button } from './Button';
 import { LogoMark } from './LogoMark';
 import { NotificationBell } from './NotificationBell';
 import { getStoredTheme } from '../ThemeSync';
-import { useUsdcBalance, useChainBalance } from '../../hooks/useChainWallet';
+import { useUsdcBalance } from '../../hooks/useChainWallet';
 import { baseChain, ogTestnet } from '../../config/chains';
 import { isMainnet, isCctpUsable } from '../../config/constants';
 import { copyToClipboard } from '../../lib/utils';
@@ -21,14 +21,8 @@ function shortenAddress(addr: string) {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
 
-function fmtNative(formatted: string | undefined): string {
-  if (!formatted) return '0.00';
-  const n = Number(formatted);
-  if (!Number.isFinite(n)) return '0.00';
-  return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 });
-}
 
-type AssetKey = 'usdc' | 'native';
+
 
 export function TopBar({ onMenuClick }: TopBarProps = {}) {
   const [currentTheme, setCurrentTheme] = useState<'dark' | 'light'>(getStoredTheme);
@@ -38,13 +32,10 @@ export function TopBar({ onMenuClick }: TopBarProps = {}) {
   const { switchChain } = useSwitchChain();
 
   const usdc = useUsdcBalance();
-  const nativeChain = chainId === baseChain.id ? 'base' : 'og';
-  const native = useChainBalance(nativeChain);
 
   // Balance segment: which asset the single slot displays. The chevron opens
   // the switch-asset menu; the address opens the account menu
   // (copy/disconnect). Only one menu is ever open.
-  const [asset, setAsset] = useState<AssetKey>('usdc');
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [assetMenuOpen, setAssetMenuOpen] = useState(false);
   const accountRef = useRef<HTMLDivElement | null>(null);
@@ -87,14 +78,9 @@ export function TopBar({ onMenuClick }: TopBarProps = {}) {
     ? (isMainnet ? 'Base' : 'Base Sepolia')
     : (isMainnet ? '0G Mainnet' : ogTestnet.name);
 
-  const shownAsset = asset === 'usdc'
-    ? { dot: 'bg-blue-500', symbol: 'USDC', sub: 'Base', amount: usdc.formatted }
-    : { dot: 'bg-ok', symbol: native.symbol, sub: networkName, amount: fmtNative(native.formatted) };
-  const refreshing = usdc.refreshing || native.refreshing;
-  const refreshBalances = () => {
-    usdc.refresh();
-    native.refresh();
-  };
+  const shownAsset = { dot: 'bg-blue-500', symbol: 'USDC', sub: 'Base', amount: usdc.formatted };
+  const refreshing = usdc.refreshing;
+  const refreshBalances = () => usdc.refresh();
 
   return (
     <header className="h-14 w-full border-b border-line bg-surface flex items-center justify-between px-4">
@@ -245,25 +231,14 @@ export function TopBar({ onMenuClick }: TopBarProps = {}) {
             )}
 
             {assetMenuOpen && (
-              <div role="menu" aria-label="switch asset" className="absolute right-0 top-full mt-1 min-w-[210px] border border-line bg-surface text-[11px] font-mono z-50">
-                {(
-                  [
-                    { key: 'usdc' as AssetKey, dot: 'bg-blue-500', symbol: 'USDC', sub: 'Base', amount: usdc.formatted },
-                    { key: 'native' as AssetKey, dot: 'bg-ok', symbol: native.symbol, sub: networkName, amount: fmtNative(native.formatted) },
-                  ]
-                ).map(opt => (
-                  <button
-                    key={opt.key}
-                    onClick={() => { setAsset(opt.key); setAssetMenuOpen(false); }}
-                    className="flex w-full items-center gap-2 px-3 py-2 text-ink-2 hover:bg-surface-2 hover:text-ink transition-colors"
-                  >
-                    <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${opt.dot}`} />
-                    <span>{opt.symbol}</span>
-                    <span className="text-ink-3">· {opt.sub}</span>
-                    <span className="ml-auto font-mono">{opt.amount}</span>
-                    {asset === opt.key && <span className="text-cream">✓</span>}
-                  </button>
-                ))}
+              <div role="menu" aria-label="balance options" className="absolute right-0 top-full mt-1 min-w-[210px] border border-line bg-surface text-[11px] font-mono z-50">
+                <div className="flex w-full items-center gap-2 px-3 py-2 text-ink-2">
+                  <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-blue-500" />
+                  <span>USDC</span>
+                  <span className="text-ink-3">· {networkName}</span>
+                  <span className="ml-auto font-mono">{usdc.formatted}</span>
+                  <span className="text-cream">✓</span>
+                </div>
                 {cctpEnabled && (
                   <button
                     onClick={() => { setAssetMenuOpen(false); setFundModalOpen(true); }}
