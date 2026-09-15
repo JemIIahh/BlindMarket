@@ -43,15 +43,20 @@ export async function switchWalletToChain(
 
 type WalletAccount = Extract<LinkedAccountWithMetadata, { type: 'wallet' }>;
 
-function isEmbeddedWalletAccount(a: LinkedAccountWithMetadata): a is WalletAccount {
-  return a.type === 'wallet' && a.chainType === 'ethereum'
-    && (a.walletClientType === 'privy' || a.walletClientType === 'privy-v2');
+function isEthWalletAccount(a: LinkedAccountWithMetadata): a is WalletAccount {
+  return a.type === 'wallet' && a.chainType === 'ethereum';
+}
+
+function isEmbeddedAccount(a: WalletAccount): boolean {
+  return a.walletClientType === 'privy' || a.walletClientType === 'privy-v2';
 }
 
 interface WalletState {
   address: string | null;
   /** The Privy embedded (BlindMarket) wallet — what relay-tx signs from. */
   embeddedAddress: string | null;
+  /** Wallets the user linked themselves (MetaMask, etc.). */
+  externalAddresses: string[];
   provider: ethers.BrowserProvider | null;
   signer: ethers.JsonRpcSigner | null;
   chainId: number | null;
@@ -86,10 +91,10 @@ function PrivyWalletProvider({ children }: { children: ReactNode }) {
   const wallet = authenticated ? rawWallet : null;
   const address = wallet?.address ?? null;
   const isCorrectChain = chainId === OG_CHAIN_ID || chainId === BASE_CHAIN_ID;
-  // Read from linked accounts so it's known before the embedded wallet's iframe connects.
-  const embeddedAddress = authenticated
-    ? user?.linkedAccounts.find(isEmbeddedWalletAccount)?.address ?? null
-    : null;
+  // Read from linked accounts so they're known before the embedded wallet's iframe connects.
+  const walletAccounts = authenticated ? (user?.linkedAccounts ?? []).filter(isEthWalletAccount) : [];
+  const embeddedAddress = walletAccounts.find(isEmbeddedAccount)?.address ?? null;
+  const externalAddresses = walletAccounts.filter((a) => !isEmbeddedAccount(a)).map((a) => a.address);
 
   const switchedRef = useRef(false);
 
@@ -201,7 +206,7 @@ function PrivyWalletProvider({ children }: { children: ReactNode }) {
   }, [ready, authenticated, user?.id, wallets.length, address, chainId]);
 
   return (
-    <WalletContext.Provider value={{ address, embeddedAddress, provider, signer, chainId, connecting: connecting || !ready, connect, disconnect, switchChain, isCorrectChain }}>
+    <WalletContext.Provider value={{ address, embeddedAddress, externalAddresses, provider, signer, chainId, connecting: connecting || !ready, connect, disconnect, switchChain, isCorrectChain }}>
       {children}
     </WalletContext.Provider>
   );
@@ -271,7 +276,7 @@ function DirectWalletProvider({ children }: { children: ReactNode }) {
   }, [disconnect]);
 
   return (
-    <WalletContext.Provider value={{ address, embeddedAddress: null, provider, signer, chainId, connecting, connect, disconnect, switchChain, isCorrectChain }}>
+    <WalletContext.Provider value={{ address, embeddedAddress: null, externalAddresses: [], provider, signer, chainId, connecting, connect, disconnect, switchChain, isCorrectChain }}>
       {children}
     </WalletContext.Provider>
   );

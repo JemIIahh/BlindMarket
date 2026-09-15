@@ -26,7 +26,7 @@ function destinationError(value: string, self: string | null): string | null {
 
 /** Sends USDC out of the user's embedded wallet through the gas-sponsored relay (backend routes/tx.ts). */
 export function WithdrawModal({ onClose, onWithdrawn }: { onClose: () => void; onWithdrawn?: () => void }) {
-  const { signer, embeddedAddress } = useWallet();
+  const { signer, embeddedAddress, externalAddresses } = useWallet();
   const { addSigners } = useSigners();
   const usdc = useUsdcBalance(embeddedAddress);
   const balance = (usdc.raw as bigint | undefined) ?? null;
@@ -132,6 +132,19 @@ export function WithdrawModal({ onClose, onWithdrawn }: { onClose: () => void; o
             </FormField>
             <FormField label={`Destination address (${NETWORK})`} hint={destError ?? undefined}>
               <FormInput type="text" placeholder="0x…" className="font-mono" value={to} onChange={(e) => setTo(e.target.value)} />
+              {externalAddresses.length > 0 && (
+                <div className="flex flex-wrap gap-2 mt-2">
+                  {externalAddresses.map((a) => (
+                    <Button
+                      key={a}
+                      variant="ghost"
+                      size="sm"
+                      label={`Send to my linked wallet (${a.slice(0, 6)}…${a.slice(-4)})`}
+                      onClick={() => setTo(a)}
+                    />
+                  ))}
+                </div>
+              )}
             </FormField>
             <FormField
               label="Amount (USDC)"
