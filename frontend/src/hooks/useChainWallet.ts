@@ -64,11 +64,12 @@ const ERC20_ABI = [
   },
 ] as const;
 
-export function useUsdcBalance() {
+/** Pass an address (or null) to read that wallet instead of the connected one. */
+export function useUsdcBalance(forAddress?: string | null) {
   const { address: wagmiAddress } = useAccount();
   const { address: privyAddress } = useWallet();
   // Privy embedded wallet may not sync with wagmi's useAccount immediately
-  const address = wagmiAddress || privyAddress;
+  const address = forAddress !== undefined ? forAddress : (wagmiAddress || privyAddress);
   const { data: rawBalance, refetch, isRefetching } = useReadContract({
     address: BASE_USDC_ADDRESS as `0x${string}`,
     abi: ERC20_ABI,

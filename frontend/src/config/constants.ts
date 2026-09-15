@@ -79,6 +79,10 @@ export const BASE_USDC_ADDRESS =
   import.meta.env.VITE_BASE_USDC_ADDRESS ||
   (IS_PROD ? '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' : '0x036CbD53842c5426634e7929541eC2318f3dCF7e');
 
+// Privy signer ID for the backend's PRIVY_AUTHORIZATION_KEY (Privy-app-specific).
+export const PRIVY_RELAY_SIGNER_ID: string =
+  import.meta.env.VITE_PRIVY_RELAY_SIGNER_ID || 'ed0tw7ng40gyfd6zu77cf0ol';
+
 // ── Payment token ───────────────────────────────────────────────────────────
 
 // Marketplace payment token — Base USDC when Base is configured, else native 0G.
