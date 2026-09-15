@@ -1,13 +1,16 @@
-import type { ethers } from 'ethers';
+import { JsonRpcProvider, type ethers } from 'ethers';
 import type { UnsignedTx } from '../types/api';
 import { getAuthHeaders } from './api';
-import { API_BASE_URL, BASE_CHAIN_ID } from '../config/constants';
+import { API_BASE_URL, BASE_CHAIN_ID, BASE_RPC_URL } from '../config/constants';
 
 export interface SentTx {
   hash: string;
   receipt: ethers.TransactionReceipt | null;
   userOp?: boolean;
 }
+
+/** Read-only Base provider — the relay only ever sends on Base. */
+export const baseProvider = new JsonRpcProvider(BASE_RPC_URL, BASE_CHAIN_ID, { staticNetwork: true });
 
 export class RelayError extends Error {
   code: string;
@@ -76,10 +79,11 @@ export async function signAndSendTx(
     return { hash: txHash, receipt: null, userOp: true };
   }
 
+  // Poll Base, not signer.provider — the signer may be sitting on 0G.
   for (let i = 0; i < 30; i++) {
     await new Promise(r => setTimeout(r, 3000));
     try {
-      const receipt = await signer.provider.getTransactionReceipt(txHash);
+      const receipt = await baseProvider.getTransactionReceipt(txHash);
       if (receipt) return { hash: txHash, receipt };
     } catch { /* keep retrying */ }
   }

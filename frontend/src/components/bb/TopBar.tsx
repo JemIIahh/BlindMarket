@@ -12,6 +12,7 @@ import { isMainnet, isCctpUsable } from '../../config/constants';
 import { copyToClipboard } from '../../lib/utils';
 import { get } from '../../lib/api';
 import { CctpFundModal } from '../CctpFundModal';
+import { WithdrawModal } from '../WithdrawModal';
 
 interface TopBarProps {
   onMenuClick?: () => void;
@@ -44,6 +45,7 @@ export function TopBar({ onMenuClick }: TopBarProps = {}) {
   // reports CCTP enabled on this deployment — the route 400s CCTP_DISABLED
   // otherwise, so there is nothing to offer.
   const [fundModalOpen, setFundModalOpen] = useState(false);
+  const [withdrawModalOpen, setWithdrawModalOpen] = useState(false);
   const [cctpEnabled, setCctpEnabled] = useState(false);
   useEffect(() => {
     get<{ enabled: boolean; baseChainId?: number | null }>('/api/v1/cctp/config')
@@ -250,6 +252,14 @@ export function TopBar({ onMenuClick }: TopBarProps = {}) {
                   </button>
                 )}
                 <button
+                  onClick={() => { setAssetMenuOpen(false); setWithdrawModalOpen(true); }}
+                  className="flex w-full items-center gap-2 px-3 py-2 border-t border-line text-ink-2 hover:bg-surface-2 hover:text-ink transition-colors"
+                  title="Withdraw USDC to any address"
+                >
+                  <span className="text-ink-3">→</span>
+                  Withdraw
+                </button>
+                <button
                   onClick={() => { refreshBalances(); setAssetMenuOpen(false); }}
                   className="flex w-full items-center gap-2 px-3 py-2 border-t border-line text-ink-3 hover:bg-surface-2 hover:text-ink transition-colors"
                 >
@@ -275,6 +285,9 @@ export function TopBar({ onMenuClick }: TopBarProps = {}) {
       </div>
       {fundModalOpen && (
         <CctpFundModal onClose={() => setFundModalOpen(false)} onFunded={() => refreshBalances()} />
+      )}
+      {withdrawModalOpen && (
+        <WithdrawModal onClose={() => setWithdrawModalOpen(false)} onWithdrawn={() => refreshBalances()} />
       )}
     </header>
   );
