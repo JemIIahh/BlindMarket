@@ -5,7 +5,9 @@ import {
   buildDepositForBurnCall,
   decodeDepositForBurnCalldata,
   estimateMaxFeeRaw,
+  finalityThresholdFor,
   FAST_TRANSFER_FINALITY_THRESHOLD,
+  STANDARD_TRANSFER_FINALITY_THRESHOLD,
 } from './cctp.js';
 import type { CctpChainConfig } from './cctpChains.js';
 
@@ -19,7 +21,23 @@ const FAKE_SOURCE: CctpChainConfig = {
   usdcAddress: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
   isTestnet: true,
   label: 'Base Sepolia',
+  supportsFastTransfer: true,
+  usdcGasReserveRaw: 0n,
 };
+
+describe('finalityThresholdFor', () => {
+  it('uses Fast Transfer when the source chain supports it', () => {
+    expect(finalityThresholdFor({ supportsFastTransfer: true })).toBe(FAST_TRANSFER_FINALITY_THRESHOLD);
+  });
+
+  it('uses Standard Transfer when the source chain has no Fast Transfer (Arc)', () => {
+    expect(finalityThresholdFor({ supportsFastTransfer: false })).toBe(STANDARD_TRANSFER_FINALITY_THRESHOLD);
+  });
+
+  it('keeps Fast Transfer when the flag is missing — only an explicit false opts out', () => {
+    expect(finalityThresholdFor({} as { supportsFastTransfer: boolean })).toBe(FAST_TRANSFER_FINALITY_THRESHOLD);
+  });
+});
 
 describe('addressToBytes32', () => {
   it('left-pads a 20-byte address to 32 bytes', () => {

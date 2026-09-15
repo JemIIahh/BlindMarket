@@ -65,11 +65,28 @@ const SOURCE_CHAIN_WALLET_CONFIG: Record<string, AddEthereumChainParameter> = {
     rpcUrls: ['https://sepolia.optimism.io'],
     blockExplorerUrls: ['https://sepolia-optimism.etherscan.io'],
   },
+  // Arc's gas token IS USDC (18-dec native view of the same balance whose
+  // ERC-20 view is 6-dec) — hence the backend's usdcGasReserveRaw below.
+  'arc-testnet': {
+    chainId: '0x4cef52',
+    chainName: 'Arc Testnet',
+    nativeCurrency: { name: 'USDC', symbol: 'USDC', decimals: 18 },
+    rpcUrls: ['https://rpc.testnet.arc.io'],
+    blockExplorerUrls: ['https://testnet.arcscan.app'],
+  },
 };
 
 type Phase = 'input' | 'switching' | 'approving' | 'burning' | 'confirming' | 'polling' | 'done' | 'error';
 
-interface CctpChainOption { chainKey: string; chainId: number; usdcAddress: string; label: string }
+interface CctpChainOption {
+  chainKey: string;
+  chainId: number;
+  usdcAddress: string;
+  label: string;
+  /** USDC (6-dec raw) to leave on this chain for gas — non-zero only where
+   *  gas is paid in USDC (Arc). Same number /deposit-intent enforces. */
+  usdcGasReserveRaw?: string;
+}
 
 export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFunded?: () => void }) {
   const { address: baseAddress } = useWallet();
@@ -93,7 +110,7 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
   useEffect(() => () => { abortedRef.current = true; }, []);
 
   useEffect(() => {
-    get<{ enabled: boolean; chains: Array<{ chainKey: string; chainId: number; usdcAddress: string; label: string }> }>('/api/v1/cctp/config')
+    get<{ enabled: boolean; chains: CctpChainOption[] }>('/api/v1/cctp/config')
       .then((data) => {
         if (!data.enabled) return;
         const sources = data.chains.filter((c) => !c.chainKey.startsWith('base'));
@@ -165,7 +182,12 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
     const v = parseUnits(amount || '0', 6);
     if (v > 0n) amountRawForCheck = v;
   } catch { /* leave null */ }
-  const exceedsBalance = sourceBalance !== null && amountRawForCheck !== null && amountRawForCheck > sourceBalance;
+  // On a USDC-gas chain (Arc) the approve + burn gas comes out of the same
+  // USDC, so only balance − reserve is bridgeable; bridging the full balance
+  // would revert on-chain. The reserve is 0 on ETH-gas chains.
+  const gasReserveRaw = BigInt(chains.find((c) => c.chainKey === sourceChain)?.usdcGasReserveRaw ?? '0');
+  const spendableRaw = sourceBalance === null ? null : sourceBalance > gasReserveRaw ? sourceBalance - gasReserveRaw : 0n;
+  const exceedsBalance = spendableRaw !== null && amountRawForCheck !== null && amountRawForCheck > spendableRaw;
 
   async function pollTransfer(id: number) {
     for (let i = 0; i < 150; i++) { // ~10 min at 4s
@@ -294,7 +316,11 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
             )}
             <FormField
               label="From chain"
-              hint={externalWallet ? (sourceBalance !== null ? `Balance: ${parseFloat(formatUnits(sourceBalance, 6)).toFixed(4)} USDC` : 'Checking balance…') : undefined}
+              hint={
+                !externalWallet ? undefined
+                : sourceBalance === null ? 'Checking balance…'
+                : `Balance: ${parseFloat(formatUnits(sourceBalance, 6)).toFixed(4)} USDC${gasReserveRaw > 0n ? ` (${formatUnits(gasReserveRaw, 6)} USDC kept for network fees)` : ''}`
+              }
             >
               <FormSelect value={sourceChain} onChange={(e) => setSourceChain(e.target.value)}>
                 {chains.map((c) => (
@@ -305,18 +331,33 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
             <FormField
               label="Amount (USDC)"
               hint={
-                exceedsBalance ? 'Exceeds your balance on this chain.'
+                exceedsBalance
+                  ? gasReserveRaw > 0n
+                    ? `Exceeds your balance after network fees (max ≈${formatUnits(spendableRaw ?? 0n, 6)} USDC).`
+                    : 'Exceeds your balance on this chain.'
                 : quoteLoading ? 'Quoting…'
                 : quote ? `You'll receive ≈${parseFloat(formatUnits(quote.estimatedReceiveRaw, 6)).toFixed(4)} USDC on Base (fee ${formatUnits(quote.maxFeeRaw, 6)} USDC)`
                 : undefined
               }
             >
-              <FormInput type="number" min="0" step="0.01" placeholder="10.00" value={amount} onChange={(e) => setAmount(e.target.value)} />
+              <div className="flex gap-2">
+                <FormInput type="number" min="0" step="0.01" placeholder="10.00" value={amount} onChange={(e) => setAmount(e.target.value)} />
+                {externalWallet && spendableRaw !== null && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    label="Use max"
+                    className="shrink-0"
+                    disabled={spendableRaw <= 0n}
+                    onClick={() => setAmount(formatUnits(spendableRaw, 6))}
+                  />
+                )}
+              </div>
             </FormField>
             <div className="text-xs text-ink-3 border border-line bg-surface-2 p-3">
               This burns USDC on the source chain and mints native USDC to your Base wallet
-              (<span className="font-mono">{baseAddress ? `${baseAddress.slice(0, 8)}…` : '—'}</span>) via Circle's
-              Fast Transfer — usually a few minutes end to end. A small Circle fee is deducted on arrival.
+              (<span className="font-mono">{baseAddress ? `${baseAddress.slice(0, 8)}…` : '—'}</span>) via Circle
+              CCTP — usually a few minutes end to end. A small Circle fee is deducted on arrival.
             </div>
             {error && <div className="text-xs text-err">{error}</div>}
             <div className="flex justify-end gap-2">

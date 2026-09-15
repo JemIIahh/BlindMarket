@@ -13,7 +13,8 @@ export type CctpChainKey =
   | 'base' | 'base-sepolia'
   | 'ethereum' | 'ethereum-sepolia'
   | 'arbitrum' | 'arbitrum-sepolia'
-  | 'optimism' | 'optimism-sepolia';
+  | 'optimism' | 'optimism-sepolia'
+  | 'arc-testnet';
 
 export interface CctpChainConfig {
   chainKey: CctpChainKey;
@@ -26,6 +27,12 @@ export interface CctpChainConfig {
   usdcAddress: string;
   isTestnet: boolean;
   label: string;
+  /** Whether Circle offers Fast Transfer when this chain is the SOURCE of a
+   *  burn. False on chains whose own finality is already fast (Arc). */
+  supportsFastTransfer: boolean;
+  /** USDC (6-dec raw) a burn from this chain must leave behind for gas.
+   *  Non-zero only where gas is paid in USDC (Arc); 0n on ETH-gas chains. */
+  usdcGasReserveRaw: bigint;
 }
 
 const IS_PROD = config.nodeEnv === 'production';
@@ -63,6 +70,17 @@ function getOptimismProvider(): ethers.JsonRpcProvider {
   return optimismProvider;
 }
 
+let arcProvider: ethers.JsonRpcProvider | null = null;
+function getArcProvider(): ethers.JsonRpcProvider {
+  if (!arcProvider) {
+    arcProvider = new ethers.JsonRpcProvider(config.cctp.arcRpcUrl, config.cctp.arcChainId, {
+      batchMaxCount: 1,
+      staticNetwork: true,
+    });
+  }
+  return arcProvider;
+}
+
 /**
  * Built lazily (not at module load) so tests can construct providers only
  * when CCTP is actually exercised, and so a bad CCTP_ETHEREUM_RPC_URL never
@@ -81,6 +99,8 @@ function buildChains(): Record<CctpChainKey, CctpChainConfig> {
       usdcAddress: config.baseUsdcAddress,
       isTestnet: false,
       label: 'Base',
+      supportsFastTransfer: true,
+      usdcGasReserveRaw: 0n,
     },
     'base-sepolia': {
       chainKey: 'base-sepolia',
@@ -92,6 +112,8 @@ function buildChains(): Record<CctpChainKey, CctpChainConfig> {
       usdcAddress: config.baseUsdcAddress,
       isTestnet: true,
       label: 'Base Sepolia',
+      supportsFastTransfer: true,
+      usdcGasReserveRaw: 0n,
     },
     ethereum: {
       chainKey: 'ethereum',
@@ -103,6 +125,8 @@ function buildChains(): Record<CctpChainKey, CctpChainConfig> {
       usdcAddress: config.cctp.ethereumUsdcAddress,
       isTestnet: false,
       label: 'Ethereum',
+      supportsFastTransfer: true,
+      usdcGasReserveRaw: 0n,
     },
     'ethereum-sepolia': {
       chainKey: 'ethereum-sepolia',
@@ -114,6 +138,8 @@ function buildChains(): Record<CctpChainKey, CctpChainConfig> {
       usdcAddress: config.cctp.ethereumUsdcAddress,
       isTestnet: true,
       label: 'Ethereum Sepolia',
+      supportsFastTransfer: true,
+      usdcGasReserveRaw: 0n,
     },
     arbitrum: {
       chainKey: 'arbitrum',
@@ -125,6 +151,8 @@ function buildChains(): Record<CctpChainKey, CctpChainConfig> {
       usdcAddress: config.cctp.arbitrumUsdcAddress,
       isTestnet: false,
       label: 'Arbitrum',
+      supportsFastTransfer: true,
+      usdcGasReserveRaw: 0n,
     },
     'arbitrum-sepolia': {
       chainKey: 'arbitrum-sepolia',
@@ -136,6 +164,8 @@ function buildChains(): Record<CctpChainKey, CctpChainConfig> {
       usdcAddress: config.cctp.arbitrumUsdcAddress,
       isTestnet: true,
       label: 'Arbitrum Sepolia',
+      supportsFastTransfer: true,
+      usdcGasReserveRaw: 0n,
     },
     optimism: {
       chainKey: 'optimism',
@@ -147,6 +177,8 @@ function buildChains(): Record<CctpChainKey, CctpChainConfig> {
       usdcAddress: config.cctp.optimismUsdcAddress,
       isTestnet: false,
       label: 'Optimism',
+      supportsFastTransfer: true,
+      usdcGasReserveRaw: 0n,
     },
     'optimism-sepolia': {
       chainKey: 'optimism-sepolia',
@@ -158,6 +190,24 @@ function buildChains(): Record<CctpChainKey, CctpChainConfig> {
       usdcAddress: config.cctp.optimismUsdcAddress,
       isTestnet: true,
       label: 'Optimism Sepolia',
+      supportsFastTransfer: true,
+      usdcGasReserveRaw: 0n,
+    },
+    // Testnet only — no Arc mainnet entry until Circle publishes Arc mainnet
+    // CCTP addresses (see config.ts). Same shared messenger/transmitter pair:
+    // verified deployed at those addresses on Arc testnet (localDomain() = 26).
+    'arc-testnet': {
+      chainKey: 'arc-testnet',
+      chainId: config.cctp.arcChainId,
+      domain: 26,
+      rpc: getArcProvider(),
+      tokenMessengerAddress,
+      messageTransmitterAddress,
+      usdcAddress: config.cctp.arcUsdcAddress,
+      isTestnet: true,
+      label: 'Arc Testnet',
+      supportsFastTransfer: false,
+      usdcGasReserveRaw: config.cctp.arcGasReserveRaw,
     },
   };
 }

@@ -81,7 +81,7 @@ vi.mock('../services/skillComposer.js', () => ({
   assertComposedSizeOk: vi.fn(),
 }));
 
-const { FAKE_SOURCE, FAKE_DEST, executeDepositForBurn, rows, nextIdRef } = vi.hoisted(() => {
+const { FAKE_SOURCE, FAKE_DEST, FAKE_ARC, executeApproveAndDepositForBurn, rows, nextIdRef } = vi.hoisted(() => {
   const fakeSource = {
     chainKey: 'base-sepolia',
     chainId: 84532,
@@ -95,6 +95,8 @@ const { FAKE_SOURCE, FAKE_DEST, executeDepositForBurn, rows, nextIdRef } = vi.ho
     usdcAddress: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
     isTestnet: true,
     label: 'Base Sepolia',
+    supportsFastTransfer: true,
+    usdcGasReserveRaw: 0n,
   };
   const fakeDest = {
     ...fakeSource,
@@ -103,10 +105,23 @@ const { FAKE_SOURCE, FAKE_DEST, executeDepositForBurn, rows, nextIdRef } = vi.ho
     usdcAddress: '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238',
     label: 'Ethereum Sepolia',
   };
+  // Arc as a DESTINATION: no Fast Transfer when Arc is the source, but that
+  // must not matter here — the threshold is decided by the source (Base).
+  const fakeArc = {
+    ...fakeSource,
+    chainKey: 'arc-testnet',
+    chainId: 5042002,
+    domain: 26,
+    usdcAddress: '0x3600000000000000000000000000000000000000',
+    label: 'Arc Testnet',
+    supportsFastTransfer: false,
+    usdcGasReserveRaw: 50_000n,
+  };
   return {
     FAKE_SOURCE: fakeSource,
     FAKE_DEST: fakeDest,
-    executeDepositForBurn: vi.fn(async () => ({ txHash: '0xburn' })),
+    FAKE_ARC: fakeArc,
+    executeApproveAndDepositForBurn: vi.fn(async () => ({ approveTxHash: '0xapprove', txHash: '0xburn' })),
     // Tiny in-memory fake of the store so idempotency semantics are real,
     // not asserted purely via mock call counts.
     rows: new Map<string, any>(),
@@ -116,17 +131,17 @@ const { FAKE_SOURCE, FAKE_DEST, executeDepositForBurn, rows, nextIdRef } = vi.ho
 
 vi.mock('../services/cctpChains.js', () => ({
   isCctpConfigured: vi.fn(() => true),
-  isSupportedCctpChain: vi.fn((k: string) => k === 'ethereum-sepolia'),
-  getCctpChain: vi.fn((k: string) => (k === 'ethereum-sepolia' ? FAKE_DEST : k === 'base-sepolia' ? FAKE_SOURCE : null)),
+  isSupportedCctpChain: vi.fn((k: string) => k === 'ethereum-sepolia' || k === 'arc-testnet'),
+  getCctpChain: vi.fn((k: string) => (k === 'ethereum-sepolia' ? FAKE_DEST : k === 'arc-testnet' ? FAKE_ARC : k === 'base-sepolia' ? FAKE_SOURCE : null)),
   getBaseCctpChain: vi.fn(() => FAKE_SOURCE),
-  supportedCctpChains: vi.fn(() => [FAKE_SOURCE, FAKE_DEST]),
+  supportedCctpChains: vi.fn(() => [FAKE_SOURCE, FAKE_DEST, FAKE_ARC]),
 }));
 
 vi.mock('../services/cctp.js', async () => {
   const actual = await vi.importActual<typeof import('../services/cctp.js')>('../services/cctp.js');
   return {
     ...actual,
-    executeDepositForBurn,
+    executeApproveAndDepositForBurn,
     estimateMaxFeeRaw: vi.fn(async () => 100n),
   };
 });
@@ -188,7 +203,7 @@ function app() {
 beforeEach(() => {
   rows.clear();
   nextIdRef.current = 1;
-  executeDepositForBurn.mockClear();
+  executeApproveAndDepositForBurn.mockClear();
   vi.mocked(agentRunner.getAgent).mockResolvedValue(agentRecord() as any);
 });
 
@@ -218,7 +233,7 @@ describe('POST /api/v1/agents/:id/cctp/withdraw', () => {
     expect(res.body.success).toBe(true);
     expect(res.body.data.stage).toBe('burn_submitted');
     expect(res.body.data.burnTxHash).toBe('0xburn');
-    expect(executeDepositForBurn).toHaveBeenCalledTimes(1);
+    expect(executeApproveAndDepositForBurn).toHaveBeenCalledTimes(1);
   });
 
   it('a repeated request with the SAME idempotencyKey does not submit a second burn', async () => {
@@ -227,7 +242,7 @@ describe('POST /api/v1/agents/:id/cctp/withdraw', () => {
       .set('X-API-Key', 'sk_owner')
       .send({ destinationChain: 'ethereum-sepolia', idempotencyKey: 'k-repeat' });
     expect(first.status).toBe(200);
-    expect(executeDepositForBurn).toHaveBeenCalledTimes(1);
+    expect(executeApproveAndDepositForBurn).toHaveBeenCalledTimes(1);
 
     const second = await request(app())
       .post(`/api/v1/agents/${AGENT_ID}/cctp/withdraw`)
@@ -236,7 +251,7 @@ describe('POST /api/v1/agents/:id/cctp/withdraw', () => {
 
     expect(second.status).toBe(200);
     // The critical assertion: still only ever called once.
-    expect(executeDepositForBurn).toHaveBeenCalledTimes(1);
+    expect(executeApproveAndDepositForBurn).toHaveBeenCalledTimes(1);
     expect(second.body.data.transferId).toBe(first.body.data.transferId);
   });
 
@@ -248,7 +263,7 @@ describe('POST /api/v1/agents/:id/cctp/withdraw', () => {
       .send({ destinationChain: 'ethereum-sepolia', idempotencyKey: 'k-nokey' });
     expect(res.status).toBe(409);
     expect(res.body.error.code).toBe('NO_KEY');
-    expect(executeDepositForBurn).not.toHaveBeenCalled();
+    expect(executeApproveAndDepositForBurn).not.toHaveBeenCalled();
   });
 
   it('rejects an unsupported destination chain', async () => {
@@ -258,6 +273,38 @@ describe('POST /api/v1/agents/:id/cctp/withdraw', () => {
       .send({ destinationChain: 'solana', idempotencyKey: 'k-unsupported' });
     expect(res.status).toBe(400);
     expect(res.body.error.code).toBe('CCTP_UNSUPPORTED_CHAIN');
-    expect(executeDepositForBurn).not.toHaveBeenCalled();
+    expect(executeApproveAndDepositForBurn).not.toHaveBeenCalled();
+  });
+
+  it('withdrawing to Arc keeps Fast Transfer — the threshold comes from the Base source, not the Arc destination', async () => {
+    const res = await request(app())
+      .post(`/api/v1/agents/${AGENT_ID}/cctp/withdraw`)
+      .set('X-API-Key', 'sk_owner')
+      .send({ destinationChain: 'arc-testnet', idempotencyKey: 'k-arc' });
+
+    expect(res.status).toBe(200);
+    expect(rows.get('k-arc').minFinalityThreshold).toBe(1000);
+    expect(rows.get('k-arc').approve_tx_hash).toBe('0xapprove'); // the approve is recorded on the row
+    expect(rows.get('k-arc').burn_tx_hash).toBe('0xburn');
+    expect(rows.get('k-arc').destDomain).toBe(26);
+    expect(executeApproveAndDepositForBurn).toHaveBeenCalledWith(
+      FAKE_SOURCE,
+      expect.anything(),
+      expect.objectContaining({ destinationDomain: 26, minFinalityThreshold: 1000 }),
+    );
+  });
+
+  it('marks the row failed (and never reports burn_submitted) when the approve or burn cannot be sent', async () => {
+    executeApproveAndDepositForBurn.mockRejectedValueOnce(new Error('USDC approve for the CCTP burn did not succeed (tx 0xa)'));
+    const res = await request(app())
+      .post(`/api/v1/agents/${AGENT_ID}/cctp/withdraw`)
+      .set('X-API-Key', 'sk_owner')
+      .send({ destinationChain: 'arc-testnet', idempotencyKey: 'k-approve-fail' });
+
+    expect(res.status).toBe(502);
+    expect(res.body.error.code).toBe('CCTP_BURN_FAILED');
+    expect(res.body.error.message).toContain('approve');
+    expect(rows.get('k-approve-fail').stage).toBe('failed');
+    expect(rows.get('k-approve-fail').burn_tx_hash).toBeNull();
   });
 });

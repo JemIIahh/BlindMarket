@@ -8,24 +8,30 @@ import request from 'supertest';
  * signature. See CctpFundModal.tsx / GasBar.tsx for the callers.
  */
 
-const { FAKE_SOURCE, FAKE_DEST } = vi.hoisted(() => {
+const { FAKE_SOURCE, FAKE_DEST, FAKE_ARC } = vi.hoisted(() => {
   const fakeSource = {
     chainKey: 'ethereum-sepolia', chainId: 11155111, domain: 0, rpc: {},
     tokenMessengerAddress: '0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA',
     messageTransmitterAddress: '0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275',
     usdcAddress: '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238',
     isTestnet: true, label: 'Ethereum Sepolia',
+    supportsFastTransfer: true, usdcGasReserveRaw: 0n,
   };
   const fakeDest = { ...fakeSource, chainKey: 'base-sepolia', domain: 6, usdcAddress: '0x036CbD53842c5426634e7929541eC2318f3dCF7e', label: 'Base Sepolia' };
-  return { FAKE_SOURCE: fakeSource, FAKE_DEST: fakeDest };
+  const fakeArc = {
+    ...fakeSource, chainKey: 'arc-testnet', chainId: 5042002, domain: 26,
+    usdcAddress: '0x3600000000000000000000000000000000000000', label: 'Arc Testnet',
+    supportsFastTransfer: false, usdcGasReserveRaw: 50_000n,
+  };
+  return { FAKE_SOURCE: fakeSource, FAKE_DEST: fakeDest, FAKE_ARC: fakeArc };
 });
 
 vi.mock('../services/cctpChains.js', () => ({
   isCctpConfigured: vi.fn(() => true),
-  isSupportedCctpChain: vi.fn((k: string) => k === 'ethereum-sepolia' || k === 'base-sepolia'),
-  getCctpChain: vi.fn((k: string) => (k === 'ethereum-sepolia' ? FAKE_SOURCE : k === 'base-sepolia' ? FAKE_DEST : null)),
+  isSupportedCctpChain: vi.fn((k: string) => k === 'ethereum-sepolia' || k === 'base-sepolia' || k === 'arc-testnet'),
+  getCctpChain: vi.fn((k: string) => (k === 'ethereum-sepolia' ? FAKE_SOURCE : k === 'base-sepolia' ? FAKE_DEST : k === 'arc-testnet' ? FAKE_ARC : null)),
   getBaseCctpChain: vi.fn(() => FAKE_DEST),
-  supportedCctpChains: vi.fn(() => [FAKE_SOURCE, FAKE_DEST]),
+  supportedCctpChains: vi.fn(() => [FAKE_SOURCE, FAKE_DEST, FAKE_ARC]),
 }));
 
 vi.mock('../services/cctp.js', async () => {
@@ -96,5 +102,22 @@ describe('GET /api/v1/cctp/quote', () => {
     const res = await request(app()).get('/api/v1/cctp/quote').query({ sourceChain: 'ethereum-sepolia', destChain: 'base-sepolia', amountRaw: '10000000' });
     expect(res.status).toBe(200);
     expect(res.body.data.estimatedReceiveRaw).toBe('0');
+  });
+
+  it('quotes an Arc-sourced route at Standard Transfer (2000); ETH-gas sources stay Fast (1000)', async () => {
+    await request(app()).get('/api/v1/cctp/quote').query({ sourceChain: 'arc-testnet', destChain: 'base-sepolia', amountRaw: '10000000' });
+    expect(vi.mocked(estimateMaxFeeRaw).mock.calls[0][4]).toBe(2000);
+
+    await request(app()).get('/api/v1/cctp/quote').query({ sourceChain: 'ethereum-sepolia', destChain: 'base-sepolia', amountRaw: '10000000' });
+    expect(vi.mocked(estimateMaxFeeRaw).mock.calls[1][4]).toBe(1000);
+  });
+});
+
+describe('GET /api/v1/cctp/config', () => {
+  it('publishes each chain\'s gas reserve as a string — non-zero only where gas is paid in USDC', async () => {
+    const res = await request(app()).get('/api/v1/cctp/config');
+    expect(res.status).toBe(200);
+    const byKey = Object.fromEntries(res.body.data.chains.map((c: { chainKey: string; usdcGasReserveRaw: string }) => [c.chainKey, c.usdcGasReserveRaw]));
+    expect(byKey).toEqual({ 'ethereum-sepolia': '0', 'base-sepolia': '0', 'arc-testnet': '50000' });
   });
 });

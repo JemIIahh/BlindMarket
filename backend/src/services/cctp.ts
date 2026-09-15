@@ -45,6 +45,22 @@ import type { CctpChainConfig } from './cctpChains.js';
 export const FAST_TRANSFER_FINALITY_THRESHOLD = 1000;
 export const STANDARD_TRANSFER_FINALITY_THRESHOLD = 2000;
 
+/**
+ * minFinalityThreshold for a burn — decided by the SOURCE chain (Fast Transfer
+ * eligibility depends only on where the burn happens). Chains with no Fast
+ * Transfer (Arc: its own finality is already instant) get Standard. Only an
+ * explicit `false` opts out, so a config missing the flag keeps Fast.
+ *
+ * Observed on Arc testnet (Sept 2026): Iris doesn't reject a 1000 there — it
+ * executes it at 2000 — so this is about recording/requesting what actually
+ * happens, not about avoiding a stuck transfer.
+ */
+export function finalityThresholdFor(source: Pick<CctpChainConfig, 'supportsFastTransfer'>): number {
+  return source.supportsFastTransfer === false
+    ? STANDARD_TRANSFER_FINALITY_THRESHOLD
+    : FAST_TRANSFER_FINALITY_THRESHOLD;
+}
+
 const TOKEN_MESSENGER_ABI = [
   'function depositForBurnWithHook(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, address burnToken, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold, bytes calldata hookData) external',
 ];
@@ -158,6 +174,7 @@ export async function executeDepositForBurn(
   source: CctpChainConfig,
   wallet: ethers.Wallet,
   params: DepositForBurnParams,
+  overrides: { nonce?: number; gasLimit?: bigint } = {},
 ): Promise<{ txHash: string }> {
   const contract = new ethers.Contract(source.tokenMessengerAddress, TOKEN_MESSENGER_ABI, wallet);
   const tx = await contract.depositForBurnWithHook(
@@ -169,8 +186,52 @@ export async function executeDepositForBurn(
     params.maxFeeRaw,
     params.minFinalityThreshold,
     buildForwardingHookData(),
+    overrides,
   );
   return { txHash: tx.hash as string };
+}
+
+/** Gas limit pinned on a burn sent right after its approve (see below).
+ *  Observed depositForBurnWithHook on Base Sepolia: 105.5k–115.2k gas used
+ *  (Sept 2026) — ~2x headroom; only gas actually used is charged. */
+export const CCTP_BURN_GAS_LIMIT = 250_000n;
+
+/**
+ * Phase A: approve TokenMessengerV2 for exactly `amountRaw`, wait for it to
+ * be mined, then BROADCAST depositForBurnWithHook. The burn pulls USDC via
+ * transferFrom, so without the approve every burn reverts with "ERC20:
+ * transfer amount exceeds allowance".
+ *
+ * Always approves (never reads the allowance first): the burn consumes
+ * exactly the approved amount, so a leftover allowance is normally 0 anyway,
+ * and a stale RPC read could report one a previous burn already spent.
+ *
+ * The burn pins nonce = approve.nonce + 1 and a fixed gas limit instead of
+ * letting ethers look them up: Base Sepolia's RPC serves stale reads right
+ * after a write, so the burn's own estimateGas could still see the
+ * pre-approve allowance (and revert), and its nonce lookup could hand back
+ * the approve's nonce. Nonce N+1 can't be mined before the approve (nonce N),
+ * so on-chain ordering holds whichever node answers.
+ *
+ * Returns once the burn is broadcast, not mined — same contract as
+ * executeDepositForBurn: the caller persists the hash before anything else.
+ */
+export async function executeApproveAndDepositForBurn(
+  source: CctpChainConfig,
+  wallet: ethers.Wallet,
+  params: DepositForBurnParams,
+): Promise<{ approveTxHash: string; txHash: string }> {
+  const usdc = new ethers.Contract(source.usdcAddress, ERC20_ABI, wallet);
+  const approveTx = await usdc.approve(source.tokenMessengerAddress, params.amountRaw);
+  const approveReceipt = await approveTx.wait();
+  if (!approveReceipt || approveReceipt.status !== 1) {
+    throw new Error(`USDC approve for the CCTP burn did not succeed (tx ${approveTx.hash})`);
+  }
+  const { txHash } = await executeDepositForBurn(source, wallet, params, {
+    nonce: approveTx.nonce + 1,
+    gasLimit: CCTP_BURN_GAS_LIMIT,
+  });
+  return { approveTxHash: approveTx.hash as string, txHash };
 }
 
 /** Self-relay fallback — only reachable because destinationCaller is zero

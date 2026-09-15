@@ -26,9 +26,9 @@ import {
 } from '../services/cctpChains.js';
 import {
   ERC20_ABI,
-  executeDepositForBurn,
+  executeApproveAndDepositForBurn,
   estimateMaxFeeRaw,
-  FAST_TRANSFER_FINALITY_THRESHOLD,
+  finalityThresholdFor,
 } from '../services/cctp.js';
 import {
   createTransfer,
@@ -41,10 +41,12 @@ import {
 
 export const agentsCctpRouter = Router();
 
-// Conservative starting estimate for a depositForBurn call's gas on Base —
-// same "not yet calibrated against real observed Base gas costs" caveat as
-// WITHDRAW_CHAINS.base.nativeGasMin in routes/agents.ts (a burn call does a
-// bit more work than a plain ERC20 transfer, hence the higher floor here).
+// Conservative floor for the ETH the agent's Base wallet needs to pay for the
+// approve + depositForBurnWithHook pair. Observed on Base Sepolia (Sept 2026):
+// the burn uses ≈105–115k gas at ~0.006–0.01 gwei; a USDC approve adds tens
+// of thousands more — together orders of magnitude under this floor. Kept
+// conservative like WITHDRAW_CHAINS.base.nativeGasMin in routes/agents.ts,
+// since mainnet Base fees run higher.
 const CCTP_BASE_GAS_MIN = ethers.parseEther('0.0002');
 
 const WithdrawBodySchema = z.object({
@@ -117,7 +119,7 @@ agentsCctpRouter.post('/:id/cctp/withdraw', requireAuth, async (req: AuthRequest
 
     const nativeBalance = await source.rpc.getBalance(wallet.address);
     if (nativeBalance < CCTP_BASE_GAS_MIN) {
-      res.status(400).json({ success: false, error: { code: 'CCTP_INSUFFICIENT_GAS', message: `Agent's Base wallet needs at least ${ethers.formatEther(CCTP_BASE_GAS_MIN)} ETH to pay for the burn transaction (has ${ethers.formatEther(nativeBalance)})` } });
+      res.status(400).json({ success: false, error: { code: 'CCTP_INSUFFICIENT_GAS', message: `Agent's Base wallet needs at least ${ethers.formatEther(CCTP_BASE_GAS_MIN)} ETH to pay for the approve + burn transactions (has ${ethers.formatEther(nativeBalance)})` } });
       return;
     }
 
@@ -138,9 +140,12 @@ agentsCctpRouter.post('/:id/cctp/withdraw', requireAuth, async (req: AuthRequest
       return;
     }
 
+    // Decided by the SOURCE chain (always Base here, so Fast Transfer).
+    const minFinalityThreshold = finalityThresholdFor(source);
+
     let maxFeeRaw: bigint;
     try {
-      maxFeeRaw = await estimateMaxFeeRaw(config.cctp.irisApiBase, source.domain, dest.domain, amount, FAST_TRANSFER_FINALITY_THRESHOLD);
+      maxFeeRaw = await estimateMaxFeeRaw(config.cctp.irisApiBase, source.domain, dest.domain, amount, minFinalityThreshold);
     } catch (e) {
       res.status(502).json({ success: false, error: { code: 'CCTP_FEE_QUOTE_FAILED', message: `Could not get a Fast Transfer fee quote from Circle: ${(e as Error).message}` } });
       return;
@@ -162,20 +167,26 @@ agentsCctpRouter.post('/:id/cctp/withdraw', requireAuth, async (req: AuthRequest
       usdcAmountRaw: amount.toString(),
       mintRecipient: resolvedRecipient,
       maxFeeRaw: maxFeeRaw.toString(),
-      minFinalityThreshold: FAST_TRANSFER_FINALITY_THRESHOLD,
+      minFinalityThreshold,
       relayMethod: 'forwarding_service',
     });
 
+    // Approve TokenMessengerV2 for `amount`, then burn — the burn pulls the
+    // USDC via transferFrom and reverts without the allowance. Both are signed
+    // by the agent's own key (see executeApproveAndDepositForBurn for why the
+    // burn's nonce/gas are pinned rather than looked up).
     let burnTxHash: string;
+    let approveTxHash: string;
     try {
-      const result = await executeDepositForBurn(source, wallet, {
+      const result = await executeApproveAndDepositForBurn(source, wallet, {
         amountRaw: amount,
         destinationDomain: dest.domain,
         mintRecipient: resolvedRecipient,
         maxFeeRaw,
-        minFinalityThreshold: FAST_TRANSFER_FINALITY_THRESHOLD,
+        minFinalityThreshold,
       });
       burnTxHash = result.txHash;
+      approveTxHash = result.approveTxHash;
     } catch (e) {
       await updateTransfer(row.id, { stage: 'failed', error_message: (e as Error).message });
       res.status(502).json({ success: false, error: { code: 'CCTP_BURN_FAILED', message: `Failed to submit the CCTP burn: ${(e as Error).message}` } });
@@ -185,7 +196,7 @@ agentsCctpRouter.post('/:id/cctp/withdraw', requireAuth, async (req: AuthRequest
     // Persist the hash BEFORE anything else — this is the crash-safety
     // checkpoint. If the process dies here, the poller resumes from
     // 'burn_submitted' using this hash rather than re-broadcasting.
-    const updated = await updateTransfer(row.id, { stage: 'burn_submitted', burn_tx_hash: burnTxHash });
+    const updated = await updateTransfer(row.id, { stage: 'burn_submitted', burn_tx_hash: burnTxHash, approve_tx_hash: approveTxHash });
 
     res.status(200).json({ success: true, data: serializeTransfer(updated) });
   } catch (e) {

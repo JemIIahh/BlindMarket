@@ -269,6 +269,22 @@ export const config = {
     optimismUsdcAddress: optional('CCTP_OPTIMISM_USDC_ADDRESS', IS_PROD
       ? '0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85'
       : '0x5fd84259d66Cd46123540766Be93DFE6D43130D7'),
+    // Arc — Circle's own L1 (docs.arc.io). TESTNET ONLY: Arc's docs say
+    // "Mainnet addresses are not yet available" (Sept 2026), so there is no
+    // mainnet default and no mainnet chain entry. CCTP domain 26. Fast
+    // Transfer is N/A on Arc (its finality is already instant); Forwarding
+    // Service is supported, so transfers still auto-complete. USDC is Arc's
+    // native gas token (18-dec native view, 6-dec ERC-20 view of ONE balance).
+    arcRpcUrl: optional('CCTP_ARC_RPC_URL', 'https://rpc.testnet.arc.io'),
+    arcChainId: parseInt(optional('CCTP_ARC_CHAIN_ID', '5042002'), 10),
+    arcUsdcAddress: optional('CCTP_ARC_USDC_ADDRESS', '0x3600000000000000000000000000000000000000'),
+    // USDC (6-dec raw) a Phase B deposit must leave behind on Arc to pay the
+    // approve + burn gas, since gas comes out of the same USDC being bridged.
+    // 50000 = 0.05 USDC: ~13x the observed Arc testnet cost (approve <=55k
+    // gas + depositForBurnWithHook ~126k gas at ~20.5 gwei ≈ 0.004 USDC);
+    // covers a base fee up to ~166 gwei on a 300k-gas budget. Raise via env
+    // if Arc fees move.
+    arcGasReserveRaw: BigInt(optional('CCTP_ARC_GAS_RESERVE_RAW', '50000')),
   },
 
   // Key custody / late-joiner re-wrap (docs/TEE-REWRAP-SPEC.md). DEFAULT OFF.

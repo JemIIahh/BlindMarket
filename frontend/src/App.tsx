@@ -3,7 +3,7 @@ import { Routes, Route, Navigate } from 'react-router-dom';
 import { PrivyProvider } from '@privy-io/react-auth';
 import { WagmiProvider } from '@privy-io/wagmi';
 import { wagmiConfig } from './config/wagmi';
-import { ogTestnet, baseChain, ethereumChain, arbitrumChain, optimismChain } from './config/chains';
+import { ogTestnet, baseChain, cctpSourceChains } from './config/chains';
 import { WalletProvider } from './context/WalletContext';
 import { AuthProvider } from './context/AuthContext';
 import { ChainProvider } from './context/ChainContext';
@@ -75,11 +75,10 @@ export default function App() {
         appId={privyAppId}
         config={{
           defaultChain: baseChain,
-          // ethereumChain/arbitrumChain/optimismChain are CCTP source chains
-          // (see config/chains.ts) — Privy refuses to switch an external
-          // wallet to any chain not in this list, surfacing as "Unsupported
-          // chainId: <id>" rather than a wallet-level error.
-          supportedChains: [baseChain, ogTestnet, ethereumChain, arbitrumChain, optimismChain],
+          // cctpSourceChains (see config/chains.ts) — Privy refuses to switch
+          // an external wallet to any chain not in this list, surfacing as
+          // "Unsupported chainId: <id>" rather than a wallet-level error.
+          supportedChains: [baseChain, ogTestnet, ...cctpSourceChains],
           // Follows the saved bb.theme preference at load. Privy's modal theme
           // is fixed per provider mount, so a mid-session toggle applies to the
           // modal on the next reload.

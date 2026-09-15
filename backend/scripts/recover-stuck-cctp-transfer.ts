@@ -14,8 +14,9 @@
  *   CCTP_RECOVERY_PRIVATE_KEY=0x... npx tsx scripts/recover-stuck-cctp-transfer.ts <transferId> [<transferId>...]
  *
  * The recovery wallet needs native gas on the DESTINATION chain (not Base —
- * whatever chain the stuck transfer is minting into). It does not need to be
- * the agent's or user's own wallet; anyone can complete a permissionless mint.
+ * whatever chain the stuck transfer is minting into; on Arc that native gas
+ * is USDC, not ETH). It does not need to be the agent's or user's own
+ * wallet; anyone can complete a permissionless mint.
  */
 
 import { config as loadEnv } from 'dotenv';

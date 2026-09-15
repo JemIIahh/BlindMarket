@@ -30,7 +30,7 @@ import {
   decodeDepositForBurnCalldata,
   addressToBytes32,
   estimateMaxFeeRaw,
-  FAST_TRANSFER_FINALITY_THRESHOLD,
+  finalityThresholdFor,
 } from '../services/cctp.js';
 import {
   createTransfer,
@@ -42,6 +42,10 @@ import {
 } from '../services/cctpTransferStore.js';
 
 export const cctpRouter = Router();
+
+// USDC's native view on a USDC-gas chain (Arc) is 18-dec; its ERC-20 view —
+// and every *Raw amount in this API — is 6-dec.
+const NATIVE_UNITS_PER_USDC_RAW = 10n ** 12n;
 
 // GET /api/v1/cctp/config — public, no auth. Single source of truth for
 // contract/chain config so the frontend never hardcodes addresses.
@@ -57,6 +61,11 @@ cctpRouter.get('/config', (_req, res) => {
         usdcAddress: c.usdcAddress,
         label: c.label,
         isTestnet: c.isTestnet,
+        // USDC the user must leave on this chain for gas when bridging FROM it
+        // (non-zero only where gas is paid in USDC, e.g. Arc). Published here
+        // so the UI knows it before any quote, and enforced by /deposit-intent
+        // with this same number.
+        usdcGasReserveRaw: (c.usdcGasReserveRaw ?? 0n).toString(),
       })),
     },
   });
@@ -109,14 +118,14 @@ cctpRouter.get('/quote', async (req, res) => {
   }
 
   try {
-    const maxFeeRaw = await estimateMaxFeeRaw(config.cctp.irisApiBase, source.domain, dest.domain, amount, FAST_TRANSFER_FINALITY_THRESHOLD);
+    const maxFeeRaw = await estimateMaxFeeRaw(config.cctp.irisApiBase, source.domain, dest.domain, amount, finalityThresholdFor(source));
     const estimatedReceiveRaw = maxFeeRaw >= amount ? 0n : amount - maxFeeRaw;
     res.status(200).json({
       success: true,
       data: { maxFeeRaw: maxFeeRaw.toString(), estimatedReceiveRaw: estimatedReceiveRaw.toString() },
     });
   } catch (e) {
-    res.status(502).json({ success: false, error: { code: 'CCTP_FEE_QUOTE_FAILED', message: `Could not get a Fast Transfer fee quote from Circle: ${(e as Error).message}` } });
+    res.status(502).json({ success: false, error: { code: 'CCTP_FEE_QUOTE_FAILED', message: `Could not get a CCTP fee quote from Circle: ${(e as Error).message}` } });
   }
 });
 
@@ -191,17 +200,48 @@ cctpRouter.post('/deposit-intent', requireAuth, async (req: AuthRequest, res) =>
       return;
     }
 
+    const minFinalityThreshold = finalityThresholdFor(source);
+
     let maxFeeRaw: bigint;
     try {
-      maxFeeRaw = await estimateMaxFeeRaw(config.cctp.irisApiBase, source.domain, dest.domain, amount, FAST_TRANSFER_FINALITY_THRESHOLD);
+      maxFeeRaw = await estimateMaxFeeRaw(config.cctp.irisApiBase, source.domain, dest.domain, amount, minFinalityThreshold);
     } catch (e) {
-      res.status(502).json({ success: false, error: { code: 'CCTP_FEE_QUOTE_FAILED', message: `Could not get a Fast Transfer fee quote from Circle: ${(e as Error).message}` } });
+      res.status(502).json({ success: false, error: { code: 'CCTP_FEE_QUOTE_FAILED', message: `Could not get a CCTP fee quote from Circle: ${(e as Error).message}` } });
       return;
     }
     if (maxFeeRaw >= amount) {
-      res.status(409).json({ success: false, error: { code: 'CCTP_INSUFFICIENT_USDC', message: 'Amount is too small to cover the CCTP Fast Transfer fee' } });
+      res.status(409).json({ success: false, error: { code: 'CCTP_INSUFFICIENT_USDC', message: 'Amount is too small to cover the CCTP fee' } });
       return;
     }
+
+    // On a USDC-gas source (Arc) the approve + burn gas comes out of the SAME
+    // USDC being bridged. A full-balance burn can pass the wallet's gas
+    // estimate (ethers' signer estimates with no fee fields) and then revert
+    // on-chain once the upfront gas deduction leaves less than `amount` — so
+    // require the reserve up front. Compared in the 18-dec native view, since
+    // the 6-dec ERC-20 view truncates.
+    const reserveRaw = source.usdcGasReserveRaw ?? 0n;
+    if (reserveRaw > 0n) {
+      const nativeBalance = await source.rpc.getBalance(fromChecksum);
+      if (nativeBalance < (amount + reserveRaw) * NATIVE_UNITS_PER_USDC_RAW) {
+        const availableRaw = nativeBalance / NATIVE_UNITS_PER_USDC_RAW;
+        const maxAmountRaw = availableRaw > reserveRaw ? availableRaw - reserveRaw : 0n;
+        res.status(409).json({
+          success: false,
+          error: {
+            code: 'CCTP_INSUFFICIENT_GAS_HEADROOM',
+            message: `Keep ${ethers.formatUnits(reserveRaw, 6)} USDC on ${source.label} for network fees — you can bridge up to ${ethers.formatUnits(maxAmountRaw, 6)} USDC.`,
+            details: { reserveRaw: reserveRaw.toString(), maxAmountRaw: maxAmountRaw.toString() },
+          },
+        });
+        return;
+      }
+    }
+
+    // Source-chain reads happen BEFORE createTransfer, so a refusal or an RPC
+    // failure leaves no orphan 'created' row behind.
+    const usdc = new ethers.Contract(source.usdcAddress, ERC20_ABI, source.rpc);
+    const allowance: bigint = await usdc.allowance(fromChecksum, source.tokenMessengerAddress);
 
     const row = await createTransfer({
       idempotencyKey,
@@ -215,12 +255,10 @@ cctpRouter.post('/deposit-intent', requireAuth, async (req: AuthRequest, res) =>
       usdcAmountRaw: amount.toString(),
       mintRecipient: recipientChecksum,
       maxFeeRaw: maxFeeRaw.toString(),
-      minFinalityThreshold: FAST_TRANSFER_FINALITY_THRESHOLD,
+      minFinalityThreshold,
       relayMethod: 'forwarding_service',
     });
 
-    const usdc = new ethers.Contract(source.usdcAddress, ERC20_ABI, source.rpc);
-    const allowance: bigint = await usdc.allowance(fromChecksum, source.tokenMessengerAddress);
     let approveTx: { to: string; data: string; from: string } | undefined;
     if (allowance < amount) {
       const data = usdc.interface.encodeFunctionData('approve', [source.tokenMessengerAddress, amount]);
@@ -232,7 +270,7 @@ cctpRouter.post('/deposit-intent', requireAuth, async (req: AuthRequest, res) =>
       destinationDomain: dest.domain,
       mintRecipient: recipientChecksum,
       maxFeeRaw,
-      minFinalityThreshold: FAST_TRANSFER_FINALITY_THRESHOLD,
+      minFinalityThreshold,
     });
     const burnTx = { to: burn.to, data: burn.data, from: fromChecksum };
 
