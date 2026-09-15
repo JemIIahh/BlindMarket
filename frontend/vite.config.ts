@@ -38,7 +38,13 @@ export default defineConfig({
           if (/[\\/]wagmi[\\/]/.test(id)) return 'wagmi-vendor';
           if (/[\\/]viem[\\/]/.test(id)) return 'viem-vendor';
           if (/[\\/]abitype[\\/]/.test(id)) return 'viem-vendor';
-          if (/[\\/]ethers[\\/]/.test(id)) return 'ethers-vendor';
+          // NOTE: ethers is intentionally NOT manually chunked. It shares a
+          // circular dependency edge with wagmi/viem/privy; forcing it into a
+          // separate chunk produced "Circular chunk: wagmi-vendor ->
+          // ethers-vendor -> wagmi-vendor" and a runtime TDZ crash
+          // ("can't access lexical declaration 'qx' before initialization").
+          // Leaving ethers in Rollup's default chunking lets it be co-located
+          // with the vendor that imports it, avoiding the circular chunk edge.
         },
       },
     },
