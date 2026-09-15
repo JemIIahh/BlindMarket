@@ -37,6 +37,17 @@ const BASE_ADDR = (IS_PROD ? CONTRACT_ADDRESSES.base : CONTRACT_ADDRESSES.baseTe
   readonly USDC: string;
 };
 
+// Base network this deployment settles on — hoisted so the CCTP block below
+// can key its network tier off it.
+const BASE_CHAIN_ID = parseInt(optional('BASE_CHAIN_ID', IS_PROD ? '8453' : '84532'), 10);
+
+// CCTP network tier follows the Base network, NOT NODE_ENV. The deployed app
+// runs NODE_ENV=production on Base Sepolia, and a NODE_ENV-keyed tier put CCTP
+// on mainnet contracts/chains/Iris there while the frontend (tier from its own
+// BASE_CHAIN_ID) asked for base-sepolia. CCTP's Base leg IS the app's Base
+// provider, so the two must agree — hence no separate override.
+const CCTP_MAINNET = BASE_CHAIN_ID === 8453;
+
 export const config = {
   port: parseInt(optional('PORT', '3001'), 10),
   nodeEnv: optional('NODE_ENV', 'development'),
@@ -57,7 +68,7 @@ export const config = {
 
   // Base Chain (settlement — BlindEscrow, USDC payouts)
   baseRpcUrl: optional('BASE_RPC_URL', IS_PROD ? 'https://mainnet.base.org' : 'https://sepolia.base.org'),
-  baseChainId: parseInt(optional('BASE_CHAIN_ID', IS_PROD ? '8453' : '84532'), 10),
+  baseChainId: BASE_CHAIN_ID,
 
   // Contracts — 0G (agent infra)
   blindEscrowAddress: optional('BLIND_ESCROW_ADDRESS', ADDR.blindEscrow),
@@ -221,29 +232,31 @@ export const config = {
   // until this is explicitly enabled per environment (plans/... CCTP plan).
   cctp: {
     enabled: optional('CCTP_ENABLED', 'false').toLowerCase() === 'true',
+    /** Mainnet CCTP tier iff this deployment settles on Base mainnet (8453). */
+    mainnet: CCTP_MAINNET,
     // TokenMessengerV2 / MessageTransmitterV2 addresses are identical across
     // every EVM chain for a given network tier (Circle's deterministic
     // deployment) — one pair of addresses covers both the Base and Ethereum
     // legs. Verified against developers.circle.com Sept 2026; re-check if
     // Circle redeploys.
-    tokenMessengerAddress: optional('CCTP_TOKEN_MESSENGER_ADDRESS', IS_PROD
+    tokenMessengerAddress: optional('CCTP_TOKEN_MESSENGER_ADDRESS', CCTP_MAINNET
       ? '0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d'
       : '0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA'),
-    messageTransmitterAddress: optional('CCTP_MESSAGE_TRANSMITTER_ADDRESS', IS_PROD
+    messageTransmitterAddress: optional('CCTP_MESSAGE_TRANSMITTER_ADDRESS', CCTP_MAINNET
       ? '0x81D40F21F12A8F0E3252Bccb954D722d4c464B64'
       : '0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275'),
-    irisApiBase: optional('CCTP_IRIS_API_BASE', IS_PROD
+    irisApiBase: optional('CCTP_IRIS_API_BASE', CCTP_MAINNET
       ? 'https://iris-api.circle.com'
       : 'https://iris-api-sandbox.circle.com'),
     // Ethereum leg — Base already has baseRpcUrl/baseChainId/baseUsdcAddress
     // above; CCTP is the first feature needing a second EVM chain, so its
     // config lives here rather than growing the top-level config with an
     // ethereum* prefix used nowhere else.
-    ethereumRpcUrl: optional('CCTP_ETHEREUM_RPC_URL', IS_PROD
+    ethereumRpcUrl: optional('CCTP_ETHEREUM_RPC_URL', CCTP_MAINNET
       ? 'https://ethereum-rpc.publicnode.com'
       : 'https://ethereum-sepolia-rpc.publicnode.com'),
-    ethereumChainId: parseInt(optional('CCTP_ETHEREUM_CHAIN_ID', IS_PROD ? '1' : '11155111'), 10),
-    ethereumUsdcAddress: optional('CCTP_ETHEREUM_USDC_ADDRESS', IS_PROD
+    ethereumChainId: parseInt(optional('CCTP_ETHEREUM_CHAIN_ID', CCTP_MAINNET ? '1' : '11155111'), 10),
+    ethereumUsdcAddress: optional('CCTP_ETHEREUM_USDC_ADDRESS', CCTP_MAINNET
       ? '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'
       : '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238'),
     // Arbitrum and Optimism (OP Mainnet) — both Fast-Transfer-eligible per
@@ -255,18 +268,18 @@ export const config = {
     // routes needs a human to run scripts/recover-stuck-cctp-transfer.ts by
     // hand — a materially different (and much heavier) feature than "add a
     // chain config entry." Revisit only alongside a real automated relayer.
-    arbitrumRpcUrl: optional('CCTP_ARBITRUM_RPC_URL', IS_PROD
+    arbitrumRpcUrl: optional('CCTP_ARBITRUM_RPC_URL', CCTP_MAINNET
       ? 'https://arb1.arbitrum.io/rpc'
       : 'https://sepolia-rollup.arbitrum.io/rpc'),
-    arbitrumChainId: parseInt(optional('CCTP_ARBITRUM_CHAIN_ID', IS_PROD ? '42161' : '421614'), 10),
-    arbitrumUsdcAddress: optional('CCTP_ARBITRUM_USDC_ADDRESS', IS_PROD
+    arbitrumChainId: parseInt(optional('CCTP_ARBITRUM_CHAIN_ID', CCTP_MAINNET ? '42161' : '421614'), 10),
+    arbitrumUsdcAddress: optional('CCTP_ARBITRUM_USDC_ADDRESS', CCTP_MAINNET
       ? '0xaf88d065e77c8cC2239327C5EDb3A432268e5831'
       : '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d'),
-    optimismRpcUrl: optional('CCTP_OPTIMISM_RPC_URL', IS_PROD
+    optimismRpcUrl: optional('CCTP_OPTIMISM_RPC_URL', CCTP_MAINNET
       ? 'https://mainnet.optimism.io'
       : 'https://sepolia.optimism.io'),
-    optimismChainId: parseInt(optional('CCTP_OPTIMISM_CHAIN_ID', IS_PROD ? '10' : '11155420'), 10),
-    optimismUsdcAddress: optional('CCTP_OPTIMISM_USDC_ADDRESS', IS_PROD
+    optimismChainId: parseInt(optional('CCTP_OPTIMISM_CHAIN_ID', CCTP_MAINNET ? '10' : '11155420'), 10),
+    optimismUsdcAddress: optional('CCTP_OPTIMISM_USDC_ADDRESS', CCTP_MAINNET
       ? '0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85'
       : '0x5fd84259d66Cd46123540766Be93DFE6D43130D7'),
     // Arc — Circle's own L1 (docs.arc.io). TESTNET ONLY: Arc's docs say

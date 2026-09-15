@@ -17,7 +17,7 @@ const { FAKE_SOURCE, FAKE_DEST, FAKE_ARC } = vi.hoisted(() => {
     isTestnet: true, label: 'Ethereum Sepolia',
     supportsFastTransfer: true, usdcGasReserveRaw: 0n,
   };
-  const fakeDest = { ...fakeSource, chainKey: 'base-sepolia', domain: 6, usdcAddress: '0x036CbD53842c5426634e7929541eC2318f3dCF7e', label: 'Base Sepolia' };
+  const fakeDest = { ...fakeSource, chainKey: 'base-sepolia', chainId: 84532, domain: 6, usdcAddress: '0x036CbD53842c5426634e7929541eC2318f3dCF7e', label: 'Base Sepolia' };
   const fakeArc = {
     ...fakeSource, chainKey: 'arc-testnet', chainId: 5042002, domain: 26,
     usdcAddress: '0x3600000000000000000000000000000000000000', label: 'Arc Testnet',
@@ -119,5 +119,11 @@ describe('GET /api/v1/cctp/config', () => {
     expect(res.status).toBe(200);
     const byKey = Object.fromEntries(res.body.data.chains.map((c: { chainKey: string; usdcGasReserveRaw: string }) => [c.chainKey, c.usdcGasReserveRaw]));
     expect(byKey).toEqual({ 'ethereum-sepolia': '0', 'base-sepolia': '0', 'arc-testnet': '50000' });
+  });
+
+  it('reports the Base chain its CCTP uses, so the frontend can refuse a mismatched deployment', async () => {
+    const res = await request(app()).get('/api/v1/cctp/config');
+    expect(res.body.data.baseChainId).toBe(84532); // FAKE_DEST = the Base Sepolia leg
+    expect(res.body.data.network).toBe('testnet');
   });
 });

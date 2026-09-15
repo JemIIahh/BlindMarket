@@ -16,7 +16,7 @@ import {
 } from '../components/bb';
 import { get, authedGet, authedPost } from '../lib/api';
 import { useChainAddress } from '../hooks/useChainWallet';
-import { MARKETPLACE_TOKEN_ADDRESS, getPaymentSymbol, getPaymentDecimals, BASE_CCTP_CHAIN_KEY } from '../config/constants';
+import { MARKETPLACE_TOKEN_ADDRESS, getPaymentSymbol, getPaymentDecimals, BASE_CCTP_CHAIN_KEY, isCctpUsable } from '../config/constants';
 import {
   getAgentReviews,
   getAgentBadges,
@@ -242,9 +242,9 @@ export default function AgentDetail() {
   // deployment, which the GasBar simply doesn't render for.
   useEffect(() => {
     let cancelled = false;
-    get<{ enabled: boolean; chains: Array<{ chainKey: string; label: string }> }>('/api/v1/cctp/config')
+    get<{ enabled: boolean; baseChainId?: number | null; chains: Array<{ chainKey: string; label: string }> }>('/api/v1/cctp/config')
       .then((data) => {
-        if (cancelled || !data.enabled) return;
+        if (cancelled || !isCctpUsable(data)) return;
         // Base/Base Sepolia are the source of an outbound bridge, never a
         // valid destination for it.
         const destinations = data.chains.filter((c) => !c.chainKey.startsWith('base'));

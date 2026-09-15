@@ -35,7 +35,9 @@ export interface CctpChainConfig {
   usdcGasReserveRaw: bigint;
 }
 
-const IS_PROD = config.nodeEnv === 'production';
+// Network tier = the Base network this deployment settles on
+// (config.cctp.mainnet), not NODE_ENV — see config.ts for why.
+const MAINNET_TIER = config.cctp.mainnet;
 
 let ethereumProvider: ethers.JsonRpcProvider | null = null;
 function getEthereumProvider(): ethers.JsonRpcProvider {
@@ -229,12 +231,12 @@ export function getCctpChain(chainKey: CctpChainKey): CctpChainConfig | null {
 
 /**
  * Mainnet and testnet chains are never mixed on a single CCTP transfer — the
- * running backend is always on one network tier (IS_PROD), so only that
- * tier's chains are ever offered.
+ * running backend is always on one network tier (MAINNET_TIER, from its Base
+ * chain), so only that tier's chains are ever offered.
  */
 export function supportedCctpChains(): CctpChainConfig[] {
   if (!isCctpConfigured()) return [];
-  return Object.values(chains()).filter((c) => c.isTestnet === !IS_PROD);
+  return Object.values(chains()).filter((c) => c.isTestnet === !MAINNET_TIER);
 }
 
 export function isSupportedCctpChain(chainKey: string): chainKey is CctpChainKey {
@@ -244,5 +246,5 @@ export function isSupportedCctpChain(chainKey: string): chainKey is CctpChainKey
 /** Base leg for the running network tier — Phase A's source chain and the
  *  chain Phase B ultimately mints into (the user's Base Privy wallet). */
 export function getBaseCctpChain(): CctpChainConfig | null {
-  return getCctpChain(IS_PROD ? 'base' : 'base-sepolia');
+  return getCctpChain(MAINNET_TIER ? 'base' : 'base-sepolia');
 }

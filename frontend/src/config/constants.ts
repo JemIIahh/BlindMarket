@@ -47,11 +47,19 @@ export const BASE_CHAIN_ID = Number(
   import.meta.env.VITE_BASE_CHAIN_ID || (IS_PROD ? '8453' : '84532')
 );
 
-// The Base leg's CCTP chainKey (matches backend/src/services/cctpChains.ts's
-// tier selection) — used as the fixed source/dest of a CCTP quote, since
-// neither Phase A (Base -> elsewhere) nor Phase B (elsewhere -> Base) ever
-// varies this side of the route.
+// The Base leg's CCTP chainKey — used as the fixed source/dest of a CCTP
+// quote, since neither Phase A (Base -> elsewhere) nor Phase B (elsewhere ->
+// Base) ever varies this side of the route. The backend derives its CCTP tier
+// from its own BASE_CHAIN_ID the same way (backend/src/config.ts).
 export const BASE_CCTP_CHAIN_KEY = BASE_CHAIN_ID === 8453 ? 'base' : 'base-sepolia';
+
+/** CCTP is usable only when the backend's CCTP Base leg is the Base chain
+ *  this app settles on. A mismatched deployment (e.g. backend on Base mainnet,
+ *  app on Base Sepolia) hides bridging entirely instead of listing the other
+ *  network tier's chains — a real mainnet burn from a testnet app. */
+export function isCctpUsable(cfg: { enabled: boolean; baseChainId?: number | null }): boolean {
+  return cfg.enabled && cfg.baseChainId === BASE_CHAIN_ID;
+}
 
 export const BASE_RPC_URL =
   import.meta.env.VITE_BASE_RPC_URL ||

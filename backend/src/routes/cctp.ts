@@ -54,6 +54,12 @@ cctpRouter.get('/config', (_req, res) => {
     success: true,
     data: {
       enabled: config.cctp.enabled && isCctpConfigured(),
+      // The Base chain this backend's CCTP mints into / burns from. The
+      // frontend hides CCTP unless this equals its own BASE_CHAIN_ID — a
+      // mismatched deployment must fail closed, not offer mainnet chains to a
+      // testnet app (or the reverse).
+      network: config.cctp.mainnet ? 'mainnet' : 'testnet',
+      baseChainId: getBaseCctpChain()?.chainId ?? null,
       chains: supportedCctpChains().map((c) => ({
         chainKey: c.chainKey,
         chainId: c.chainId,

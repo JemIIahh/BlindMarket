@@ -8,7 +8,7 @@ import { NotificationBell } from './NotificationBell';
 import { getStoredTheme } from '../ThemeSync';
 import { useUsdcBalance, useChainBalance } from '../../hooks/useChainWallet';
 import { baseChain, ogTestnet } from '../../config/chains';
-import { isMainnet } from '../../config/constants';
+import { isMainnet, isCctpUsable } from '../../config/constants';
 import { copyToClipboard } from '../../lib/utils';
 import { get } from '../../lib/api';
 import { CctpFundModal } from '../CctpFundModal';
@@ -55,8 +55,8 @@ export function TopBar({ onMenuClick }: TopBarProps = {}) {
   const [fundModalOpen, setFundModalOpen] = useState(false);
   const [cctpEnabled, setCctpEnabled] = useState(false);
   useEffect(() => {
-    get<{ enabled: boolean }>('/api/v1/cctp/config')
-      .then((data) => setCctpEnabled(data.enabled))
+    get<{ enabled: boolean; baseChainId?: number | null }>('/api/v1/cctp/config')
+      .then((data) => setCctpEnabled(isCctpUsable(data)))
       .catch(() => setCctpEnabled(false));
   }, []);
 

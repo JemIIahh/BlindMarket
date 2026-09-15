@@ -5,7 +5,7 @@ import { Button, FormField, FormInput, FormSelect, Modal, Spinner } from './bb';
 import { get, authedPost, authedGet } from '../lib/api';
 import { useWallet, switchWalletToChain, type AddEthereumChainParameter } from '../context/WalletContext';
 import { signAndSendDirect } from '../lib/directSigner';
-import { BASE_CCTP_CHAIN_KEY } from '../config/constants';
+import { BASE_CCTP_CHAIN_KEY, isCctpUsable } from '../config/constants';
 
 /**
  * CCTP Phase B (inbound) — fund the user's Base wallet from USDC held on
@@ -117,9 +117,9 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
   }, []);
 
   useEffect(() => {
-    get<{ enabled: boolean; chains: CctpChainOption[] }>('/api/v1/cctp/config')
+    get<{ enabled: boolean; baseChainId?: number | null; chains: CctpChainOption[] }>('/api/v1/cctp/config')
       .then((data) => {
-        if (!data.enabled) return;
+        if (!isCctpUsable(data)) return;
         // Only chains this build can actually switch a wallet to — the
         // backend can list a chain before this bundle knows it (a deploy
         // skew, or a tab left open across one).
