@@ -54,7 +54,13 @@ export default function UseServiceModal({
   // The poll loop can run ~5 min; if the parent unmounts this modal (user
   // navigates away), stop polling and stop touching state.
   const abortedRef = useRef(false);
-  useEffect(() => () => { abortedRef.current = true; }, []);
+  // Reset on mount, not just set on unmount — StrictMode's dev
+  // mount/unmount/remount otherwise leaves this stuck at true and the
+  // polling loop below quits on its first tick.
+  useEffect(() => {
+    abortedRef.current = false;
+    return () => { abortedRef.current = true; };
+  }, []);
 
   // formatUnits throws on malformed input — never let a bad listing price
   // crash the modal (and with it the whole agent page).

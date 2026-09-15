@@ -107,13 +107,23 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
   const [quoteLoading, setQuoteLoading] = useState(false);
 
   const abortedRef = useRef(false);
-  useEffect(() => () => { abortedRef.current = true; }, []);
+  // Reset on mount, not just set on unmount: StrictMode (dev) mounts,
+  // unmounts, then remounts every component, and a cleanup-only effect left
+  // this stuck at true — pollTransfer then quit on its first tick and the
+  // modal sat on "Circle is minting…" forever though the mint had landed.
+  useEffect(() => {
+    abortedRef.current = false;
+    return () => { abortedRef.current = true; };
+  }, []);
 
   useEffect(() => {
     get<{ enabled: boolean; chains: CctpChainOption[] }>('/api/v1/cctp/config')
       .then((data) => {
         if (!data.enabled) return;
-        const sources = data.chains.filter((c) => !c.chainKey.startsWith('base'));
+        // Only chains this build can actually switch a wallet to — the
+        // backend can list a chain before this bundle knows it (a deploy
+        // skew, or a tab left open across one).
+        const sources = data.chains.filter((c) => !c.chainKey.startsWith('base') && SOURCE_CHAIN_WALLET_CONFIG[c.chainKey]);
         setChains(sources);
         if (sources.length > 0) setSourceChain((prev) => prev || sources[0].chainKey);
       })
@@ -229,12 +239,15 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
       return;
     }
 
+    // Never sign without switching: calldata built for one chain's contracts
+    // must not be signed on whatever chain the wallet happens to be on.
+    const chainConfig = SOURCE_CHAIN_WALLET_CONFIG[chain.chainKey];
+    if (!chainConfig) { setError(`${chain.label} isn't supported by this version of the app — reload the page.`); return; }
+    const sendChain = { chainId: chain.chainId, rpcUrl: chainConfig.rpcUrls[0], label: chain.label };
+
     try {
-      const chainConfig = SOURCE_CHAIN_WALLET_CONFIG[chain.chainKey];
-      if (chainConfig) {
-        setPhase('switching');
-        await switchWalletToChain(externalWallet, chain.chainId, chainConfig);
-      }
+      setPhase('switching');
+      await switchWalletToChain(externalWallet, chain.chainId, chainConfig);
 
       const idempotencyKey = crypto.randomUUID();
       const intent = await authedPost<{
@@ -252,11 +265,18 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
 
       if (intent.approveTx) {
         setPhase('approving');
-        await signAndSendDirect(externalWallet, intent.approveTx);
+        const approved = await signAndSendDirect(externalWallet, intent.approveTx, sendChain);
+        // The burn pulls USDC via transferFrom — without a mined approve it
+        // can only revert, so stop here rather than ask for a doomed signature.
+        if (approved.receipt?.status !== 1) {
+          throw new Error(approved.receipt
+            ? 'The USDC approval failed on-chain.'
+            : 'The USDC approval hasn\'t confirmed yet. Check your wallet, then try again.');
+        }
       }
 
       setPhase('burning');
-      const burnSent = await signAndSendDirect(externalWallet, intent.burnTx);
+      const burnSent = await signAndSendDirect(externalWallet, intent.burnTx, sendChain);
 
       setPhase('confirming');
       // The tx may not be mined yet by the time we ask — retry a few times
