@@ -1,4 +1,7 @@
 // Vercel serverless entry — exports Express app without .listen()
+// Must precede every router: forwards async handler errors to next(err)
+// instead of crashing the process (see middleware/asyncErrors.ts).
+import './middleware/asyncErrors.js';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';

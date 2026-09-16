@@ -1,3 +1,6 @@
+// Must precede every router: forwards async handler errors to next(err)
+// instead of crashing the process (see middleware/asyncErrors.ts).
+import './middleware/asyncErrors.js';
 import express from 'express';
 import { createServer } from 'http';
 import cors from 'cors';
