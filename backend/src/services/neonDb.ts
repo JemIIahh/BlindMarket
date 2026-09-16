@@ -102,6 +102,11 @@ export async function closePool(): Promise<void> {
 
 // ── Migrations ─────────────────────────────────────────────────────────────────
 
+// Write every schema migration so it is safe to run twice (CREATE TABLE /
+// INDEX / EXTENSION IF NOT EXISTS, ADD COLUMN IF NOT EXISTS, DROP … IF EXISTS).
+// If two branches ever reuse an id, runMigrations re-applies this build's
+// migration only when isRerunSafe() says so; anything else (data fixes like
+// #16) is flagged for a person instead of being run blind.
 const migrations: Array<{ id: number; name: string; sql: string }> = [
   {
     id: 1,
@@ -704,11 +709,43 @@ export async function getSchemaStatus(p: pg.Pool): Promise<{
   };
 }
 
+const RERUN_SAFE_STATEMENT = [
+  /^CREATE TABLE IF NOT EXISTS\b/i,
+  /^CREATE (UNIQUE )?INDEX IF NOT EXISTS\b/i,
+  /^CREATE EXTENSION IF NOT EXISTS\b/i,
+  /^ALTER TABLE (IF EXISTS )?\S+ (ADD COLUMN IF NOT EXISTS|DROP COLUMN IF EXISTS|DROP CONSTRAINT IF EXISTS)\b/i,
+  /^DROP (TABLE|INDEX) IF EXISTS\b/i,
+];
+
+/**
+ * True only when every statement in `sql` is a schema change that is a no-op
+ * the second time. Conservative on purpose: anything it can't classify
+ * (UPDATE/INSERT, DO blocks, a semicolon inside a string) counts as unsafe.
+ */
+export function isRerunSafe(sql: string): boolean {
+  const statements = sql
+    .replace(/--[^\n]*/g, '')
+    .split(';')
+    .map((st) => st.replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+  return statements.length > 0 && statements.every((st) => RERUN_SAFE_STATEMENT.some((re) => re.test(st)));
+}
+
+/** This build's migrations, id + name only (for diagnostics and tests). */
+export function listMigrations(): Array<{ id: number; name: string }> {
+  return migrations.map(({ id, name }) => ({ id, name }));
+}
+
+/** Ids of this build's migrations that must never be re-run automatically. */
+export function rerunUnsafeMigrationIds(): number[] {
+  return migrations.filter((m) => !isRerunSafe(m.sql)).map((m) => m.id);
+}
+
 export function latestMigrationId(): number {
   return migrations[migrations.length - 1].id;
 }
 
-async function runMigrations(p: pg.Pool): Promise<void> {
+export async function runMigrations(p: pg.Pool): Promise<void> {
   const client = await p.connect();
   try {
     await client.query(`
@@ -719,13 +756,29 @@ async function runMigrations(p: pg.Pool): Promise<void> {
       );
     `);
 
-    const { rows: applied } = await client.query<{ id: number }>(
-      'SELECT id FROM schema_migrations',
+    const { rows: applied } = await client.query<{ id: number; name: string }>(
+      'SELECT id, name FROM schema_migrations',
     );
-    const appliedIds = new Set(applied.map((r: { id: number }) => r.id));
+    const appliedNames = new Map(applied.map((r) => [Number(r.id), r.name]));
 
     for (const m of migrations) {
-      if (appliedIds.has(m.id)) continue;
+      const recorded = appliedNames.get(m.id);
+      if (recorded === m.name) continue;
+      if (recorded !== undefined) {
+        // Same id, different name: two branches used this number, so THIS
+        // migration was never applied here. Skipping by id alone is how a
+        // local DB silently lost deployed_agents.smart_account_address.
+        // Never block startup over it — re-apply when that's a no-op-safe
+        // schema change, otherwise leave it for a person. GET /health/db
+        // keeps reporting the mismatch until schema_migrations is reconciled.
+        if (isRerunSafe(m.sql)) {
+          await client.query(m.sql);
+          console.warn(`[neonDb] ⚠ migration ${m.id} is recorded as '${recorded}', but this build's #${m.id} is '${m.name}' (two branches used the same number). Re-applied it — it is safe to re-run — so its schema change isn't lost. Reconcile schema_migrations; see GET /health/db.`);
+        } else {
+          console.error(`[neonDb] ⛔ migration ${m.id} is recorded as '${recorded}', but this build's #${m.id} is '${m.name}' (two branches used the same number). It is NOT safe to re-run automatically, so it has NOT been applied. Apply it by hand, then reconcile schema_migrations; see GET /health/db.`);
+        }
+        continue;
+      }
       await client.query(m.sql);
       await client.query(
         'INSERT INTO schema_migrations (id, name) VALUES ($1, $2)',
