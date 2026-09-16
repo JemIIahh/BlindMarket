@@ -76,6 +76,13 @@ const SOURCE_CHAIN_WALLET_CONFIG: Record<string, AddEthereumChainParameter> = {
   },
 };
 
+// Source-chain gas check — a FLOOR, not an estimate: the burn alone uses
+// ~105–126k gas (measured on Base Sepolia / Arc testnet), the approve adds
+// ~45–55k, and Arbitrum adds its L1 data cost on top. A wallet below
+// gasPrice × this floor can't possibly pay, so Bridge is blocked; above it the
+// wallet has the final say. (Arc pays gas in USDC — covered by the reserve.)
+const SOURCE_GAS_FLOOR_UNITS = 100_000n;
+
 type Phase = 'input' | 'switching' | 'approving' | 'burning' | 'confirming' | 'polling' | 'done' | 'error';
 
 interface CctpChainOption {
@@ -83,6 +90,7 @@ interface CctpChainOption {
   chainId: number;
   usdcAddress: string;
   label: string;
+  isTestnet?: boolean;
   /** USDC (6-dec raw) to leave on this chain for gas — non-zero only where
    *  gas is paid in USDC (Arc). Same number /deposit-intent enforces. */
   usdcGasReserveRaw?: string;
@@ -103,6 +111,9 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
   // Preview state — both shown BEFORE the user commits to a chain switch +
   // signature, not only discoverable afterward.
   const [sourceBalance, setSourceBalance] = useState<bigint | null>(null);
+  // Native gas balance + gas price on an ETH-gas source chain (null = unknown,
+  // or a USDC-gas chain like Arc where the reserve covers gas instead).
+  const [sourceGas, setSourceGas] = useState<{ balance: bigint; gasPrice: bigint | null } | null>(null);
   const [quote, setQuote] = useState<{ maxFeeRaw: string; estimatedReceiveRaw: string } | null>(null);
   const [quoteLoading, setQuoteLoading] = useState(false);
 
@@ -143,18 +154,35 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
   useEffect(() => {
     const chain = chains.find((c) => c.chainKey === sourceChain);
     const rpcUrl = SOURCE_CHAIN_WALLET_CONFIG[sourceChain]?.rpcUrls[0];
-    if (!chain || !rpcUrl || !externalWallet) { setSourceBalance(null); return; }
+    if (!chain || !rpcUrl || !externalWallet) { setSourceBalance(null); setSourceGas(null); return; }
     let cancelled = false;
     setSourceBalance(null);
+    setSourceGas(null);
+    const usdcGasChain = BigInt(chain.usdcGasReserveRaw ?? '0') > 0n;
     (async () => {
+      const provider = new JsonRpcProvider(rpcUrl);
+      // Native gas read is independent of the USDC read: if it fails, the
+      // check stays unknown (never blocks) instead of hiding the balance.
+      const gasRead = usdcGasChain ? Promise.resolve(null) : (async () => {
+        try {
+          const [balance, gasPriceHex] = await Promise.all([
+            provider.getBalance(externalWallet.address),
+            provider.send('eth_gasPrice', []).catch(() => null) as Promise<string | null>,
+          ]);
+          return { balance, gasPrice: gasPriceHex ? BigInt(gasPriceHex) : null };
+        } catch {
+          return null;
+        }
+      })();
       try {
-        const provider = new JsonRpcProvider(rpcUrl);
         const usdc = new Contract(chain.usdcAddress, ['function balanceOf(address) view returns (uint256)'], provider);
         const bal: bigint = await usdc.balanceOf(externalWallet.address);
         if (!cancelled) setSourceBalance(bal);
       } catch {
         if (!cancelled) setSourceBalance(null);
       }
+      const gas = await gasRead;
+      if (!cancelled) setSourceGas(gas);
     })();
     return () => { cancelled = true; };
   }, [sourceChain, externalWallet?.address, chains]);
@@ -198,6 +226,13 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
   const gasReserveRaw = BigInt(chains.find((c) => c.chainKey === sourceChain)?.usdcGasReserveRaw ?? '0');
   const spendableRaw = sourceBalance === null ? null : sourceBalance > gasReserveRaw ? sourceBalance - gasReserveRaw : 0n;
   const exceedsBalance = spendableRaw !== null && amountRawForCheck !== null && amountRawForCheck > spendableRaw;
+  const insufficientGas = sourceGas !== null
+    && (sourceGas.balance === 0n || (sourceGas.gasPrice !== null && sourceGas.balance < sourceGas.gasPrice * SOURCE_GAS_FLOOR_UNITS));
+  const selectedChain = chains.find((c) => c.chainKey === sourceChain);
+  const nativeSymbol = SOURCE_CHAIN_WALLET_CONFIG[sourceChain]?.nativeCurrency.symbol ?? 'ETH';
+  const nativeShown = sourceGas
+    ? (sourceGas.balance === 0n ? '0' : Number(formatUnits(sourceGas.balance, 18)).toLocaleString(undefined, { maximumSignificantDigits: 3 }))
+    : null;
 
   async function pollTransfer(id: number) {
     for (let i = 0; i < 150; i++) { // ~10 min at 4s
@@ -339,7 +374,7 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
               hint={
                 !externalWallet ? undefined
                 : sourceBalance === null ? 'Checking balance…'
-                : `Balance: ${parseFloat(formatUnits(sourceBalance, 6)).toFixed(4)} USDC${gasReserveRaw > 0n ? ` (${formatUnits(gasReserveRaw, 6)} USDC kept for network fees)` : ''}`
+                : `Balance: ${parseFloat(formatUnits(sourceBalance, 6)).toFixed(4)} USDC${gasReserveRaw > 0n ? ` (${formatUnits(gasReserveRaw, 6)} USDC kept for network fees)` : ''}${nativeShown !== null ? ` · ${nativeShown} ${nativeSymbol} for gas` : ''}`
               }
             >
               <FormSelect value={sourceChain} onChange={(e) => setSourceChain(e.target.value)}>
@@ -379,10 +414,17 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
               (<span className="font-mono">{baseAddress ? `${baseAddress.slice(0, 8)}…` : '—'}</span>) via Circle
               CCTP — usually a few minutes end to end. A small Circle fee is deducted on arrival.
             </div>
+            {insufficientGas && (
+              <div className="text-xs text-warn border border-warn/40 bg-warn/5 p-3">
+                You need a little {nativeSymbol} on {selectedChain?.label ?? 'this chain'} to pay the network fee for the
+                approval and transfer — this wallet has {nativeShown} {nativeSymbol}.{' '}
+                {selectedChain?.isTestnet ? 'Get test ETH from a faucet, then try again.' : 'Add some, then try again.'}
+              </div>
+            )}
             {error && <div className="text-xs text-err">{error}</div>}
             <div className="flex justify-end gap-2">
               <Button variant="ghost" size="sm" label="Cancel" onClick={onClose} />
-              <Button variant="primary" size="sm" label="Bridge USDC" onClick={handleFund} disabled={!externalWallet || chains.length === 0 || exceedsBalance} />
+              <Button variant="primary" size="sm" label="Bridge USDC" onClick={handleFund} disabled={!externalWallet || chains.length === 0 || exceedsBalance || insufficientGas} />
             </div>
           </div>
         )}
