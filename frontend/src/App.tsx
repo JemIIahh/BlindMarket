@@ -2,6 +2,7 @@ import { lazy, Suspense } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { PrivyProvider } from '@privy-io/react-auth';
 import { WagmiProvider } from '@privy-io/wagmi';
+import { Analytics } from '@vercel/analytics/react';
 import { wagmiConfig } from './config/wagmi';
 import { ogTestnet, baseChain, cctpSourceChains } from './config/chains';
 import { WalletProvider } from './context/WalletContext';
@@ -156,6 +157,7 @@ export default function App() {
                   </Routes>
                 </Suspense>
               </ErrorBoundary>
+              <Analytics />
             </AuthProvider>
           </WalletProvider>
         </WagmiProvider>
