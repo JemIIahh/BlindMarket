@@ -68,3 +68,25 @@ describe('CCTP network tier follows the Base chain, not NODE_ENV', () => {
     expect(config.cctp.mainnet).toBe(true);
   });
 });
+
+describe('Base defaults follow BASE_CHAIN_ID too', () => {
+  // Prod ran NODE_ENV=production on Base Sepolia and got Base MAINNET's USDC
+  // address — no contract on Sepolia, so balances read 0, /health/bridge
+  // reported signerUsdcBalance: null, and a CCTP burn would revert.
+  it('production on Base Sepolia uses Base SEPOLIA USDC + RPC', async () => {
+    const { config } = await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '84532', BASE_USDC_ADDRESS: '', BASE_RPC_URL: '' });
+    expect(config.baseUsdcAddress).toBe('0x036CbD53842c5426634e7929541eC2318f3dCF7e');
+    expect(config.baseRpcUrl).toBe('https://sepolia.base.org');
+  });
+
+  it('a Base mainnet deployment uses mainnet USDC + RPC', async () => {
+    const { config } = await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '8453', BASE_USDC_ADDRESS: '', BASE_RPC_URL: '' });
+    expect(config.baseUsdcAddress).toBe('0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913');
+    expect(config.baseRpcUrl).toBe('https://mainnet.base.org');
+  });
+
+  it('an explicit BASE_USDC_ADDRESS still wins', async () => {
+    const { config } = await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '84532', BASE_USDC_ADDRESS: '0x1111111111111111111111111111111111111111', BASE_RPC_URL: '' });
+    expect(config.baseUsdcAddress).toBe('0x1111111111111111111111111111111111111111');
+  });
+});
