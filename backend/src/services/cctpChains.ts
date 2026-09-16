@@ -221,7 +221,14 @@ function chains(): Record<CctpChainKey, CctpChainConfig> {
 }
 
 export function isCctpConfigured(): boolean {
-  return config.cctp.enabled && !!config.cctp.tokenMessengerAddress && !!config.cctp.messageTransmitterAddress;
+  // Every CCTP route and the poller need the cctp_transfers table. Without a
+  // DATABASE_URL, getPool() is a silent no-op (inserts return no row), so a
+  // transfer would 500 mid-flow — after the user already switched chains.
+  // Report CCTP as unavailable instead, so /cctp/config hides bridging.
+  return config.cctp.enabled
+    && !!config.cctp.tokenMessengerAddress
+    && !!config.cctp.messageTransmitterAddress
+    && !!config.databaseUrl;
 }
 
 export function getCctpChain(chainKey: CctpChainKey): CctpChainConfig | null {

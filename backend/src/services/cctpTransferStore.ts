@@ -1,4 +1,5 @@
 import { getPool } from './neonDb.js';
+import { AppError } from '../middleware/errorHandler.js';
 import type { CctpChainKey } from './cctpChains.js';
 
 export type CctpDirection = 'outbound' | 'inbound';
@@ -84,6 +85,9 @@ export async function createTransfer(opts: CreateTransferOpts): Promise<CctpTran
       opts.relayMethod,
     ],
   );
+  // The no-DB pool (neonDb.getPool without DATABASE_URL) returns no rows
+  // instead of throwing — fail loudly rather than hand back undefined.
+  if (!rows[0]) throw new AppError(503, 'DATABASE_UNAVAILABLE', 'Could not record the CCTP transfer: the database is not configured on this server.');
   return rows[0];
 }
 

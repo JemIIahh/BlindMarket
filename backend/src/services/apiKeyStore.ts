@@ -1,4 +1,5 @@
 import { randomBytes, createHash } from 'crypto';
+import { AppError } from '../middleware/errorHandler.js';
 import { getPool } from './neonDb.js';
 import { config } from '../config.js';
 
@@ -72,6 +73,9 @@ export async function createApiKey(params: {
     ],
   );
 
+  // The no-DB pool returns no rows instead of throwing — fail loudly with a
+  // real reason instead of "Cannot read properties of undefined (reading 'id')".
+  if (!rows[0]) throw new AppError(503, 'DATABASE_UNAVAILABLE', 'Could not create the API key: the database is not configured on this server.');
   return { id: rows[0].id, rawKey: raw };
 }
 

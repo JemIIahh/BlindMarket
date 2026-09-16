@@ -5,6 +5,7 @@ import { escrow, marketplaceSigner, provider, baseEscrow, baseMarketplaceSigner,
 import { isBridgeConfigured } from '../services/a2aSettlement.js';
 import { config } from '../config.js';
 import { redis, redisSub } from '../services/redis.js';
+import { getPool, getSchemaStatus, latestMigrationId } from '../services/neonDb.js';
 
 export const healthRouter = Router();
 
@@ -152,6 +153,66 @@ healthRouter.get('/bridge', async (_req, res, next) => {
  * amount of connection tuning fixes. Command names only; no arguments, so
  * nothing sensitive is exposed.
  */
+const DB_CHECK_TIMEOUT_MS = 5000;
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error('timeout')), ms)),
+  ]);
+}
+
+/**
+ * GET /health/db — is Postgres configured, reachable, and fully migrated?
+ * Answers the question that otherwise needs dashboard access: production ran
+ * without DATABASE_URL (Sep 2026) and the only outside signal was
+ * /api/v1/stats reading zero agents. Deliberately NOT part of plain /health:
+ * that route stays dependency-free so a database blip can't make the host's
+ * health check restart the whole API. No connection details are returned.
+ */
+healthRouter.get('/db', async (_req, res) => {
+  if (!config.databaseUrl) {
+    res.json({
+      success: true,
+      data: {
+        configured: false,
+        reachable: null,
+        latencyMs: null,
+        schema: { latestExpected: latestMigrationId() },
+        warning: 'DATABASE_URL is not set — Postgres-only features (API keys, bridging, messages, reviews, templates) do nothing, and agents + the ledger fall back to a SQLite file that is lost on every redeploy or restart.',
+      },
+    });
+    return;
+  }
+  const started = Date.now();
+  try {
+    const pool = await withTimeout(getPool(), DB_CHECK_TIMEOUT_MS);
+    await withTimeout(pool.query('SELECT 1'), DB_CHECK_TIMEOUT_MS);
+    const latencyMs = Date.now() - started;
+    const schema = await withTimeout(getSchemaStatus(pool), DB_CHECK_TIMEOUT_MS).catch(() => null);
+    res.json({
+      success: true,
+      data: {
+        configured: true,
+        reachable: true,
+        latencyMs,
+        schema: schema && { ...schema, upToDate: schema.missing.length === 0 && schema.nameMismatch.length === 0 },
+      },
+    });
+  } catch (e) {
+    res.json({
+      success: true,
+      data: {
+        configured: true,
+        reachable: false,
+        latencyMs: null,
+        schema: null,
+        error: (e as Error).message === 'timeout' ? 'timeout' : 'connection_failed',
+      },
+    });
+  }
+});
+
 healthRouter.get('/redis', (_req, res) => {
   const describe = (c: typeof redis) => {
     const q = (c as unknown as { commandQueue?: { length: number; peekFront?: () => { command?: { name?: string } } } }).commandQueue;

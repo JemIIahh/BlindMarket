@@ -37,7 +37,7 @@ let inFlightPromise: Promise<void> | null = null;
 export function startCctpAttestationPoller(): void {
   if (timer) return;
   if (!isCctpConfigured()) {
-    console.log('[cctp] CCTP_ENABLED is false (or contracts unset) — attestation poller disabled');
+    console.log('[cctp] CCTP unavailable (CCTP_ENABLED false, contracts unset, or no DATABASE_URL) — attestation poller disabled');
     return;
   }
   void tick();

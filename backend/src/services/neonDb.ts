@@ -681,6 +681,33 @@ const migrations: Array<{ id: number; name: string; sql: string }> = [
   },
 ];
 
+/**
+ * Compare the migrations this build expects with what the database recorded.
+ * `runMigrations` skips by id only, so an id applied under a DIFFERENT name
+ * (two branches both used id 27) is never re-applied — that is how a local DB
+ * silently missed `deployed_agents.smart_account_address`. Surfaced by
+ * GET /health/db; returns ids only, nothing sensitive.
+ */
+export async function getSchemaStatus(p: pg.Pool): Promise<{
+  latestExpected: number;
+  latestApplied: number | null;
+  missing: number[];
+  nameMismatch: number[];
+}> {
+  const { rows } = await p.query<{ id: number; name: string }>('SELECT id, name FROM schema_migrations');
+  const applied = new Map(rows.map((r) => [Number(r.id), r.name]));
+  return {
+    latestExpected: latestMigrationId(),
+    latestApplied: rows.length ? Math.max(...rows.map((r) => Number(r.id))) : null,
+    missing: migrations.filter((m) => !applied.has(m.id)).map((m) => m.id),
+    nameMismatch: migrations.filter((m) => applied.has(m.id) && applied.get(m.id) !== m.name).map((m) => m.id),
+  };
+}
+
+export function latestMigrationId(): number {
+  return migrations[migrations.length - 1].id;
+}
+
 async function runMigrations(p: pg.Pool): Promise<void> {
   const client = await p.connect();
   try {

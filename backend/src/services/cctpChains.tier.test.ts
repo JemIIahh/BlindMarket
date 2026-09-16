@@ -22,7 +22,8 @@ const CLEAR_CCTP_OVERRIDES = {
 
 async function load(env: Record<string, string>) {
   vi.resetModules();
-  process.env = { ...ORIGINAL, CCTP_ENABLED: 'true', ...CLEAR_CCTP_OVERRIDES, ...env };
+  // A DATABASE_URL is required for CCTP to report as configured; these tests never query it.
+  process.env = { ...ORIGINAL, CCTP_ENABLED: 'true', DATABASE_URL: 'postgres://tier-test@localhost:1/none', ...CLEAR_CCTP_OVERRIDES, ...env };
   const { config } = await import('../config.js');
   const chains = await import('./cctpChains.js');
   return { config, chains };
@@ -88,5 +89,34 @@ describe('Base defaults follow BASE_CHAIN_ID too', () => {
   it('an explicit BASE_USDC_ADDRESS still wins', async () => {
     const { config } = await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '84532', BASE_USDC_ADDRESS: '0x1111111111111111111111111111111111111111', BASE_RPC_URL: '' });
     expect(config.baseUsdcAddress).toBe('0x1111111111111111111111111111111111111111');
+  });
+});
+
+describe('without a database, CCTP is unavailable instead of failing mid-transfer', () => {
+  // Prod bridging 500'd with "Cannot read properties of undefined (reading 'id')":
+  // no DATABASE_URL → neonDb's no-op pool → INSERT … RETURNING * gave no row.
+  it('reports CCTP as not configured, offers no chains and no Base leg', async () => {
+    const { chains } = await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '84532', DATABASE_URL: '' });
+    expect(chains.isCctpConfigured()).toBe(false);
+    expect(chains.supportedCctpChains()).toEqual([]);
+    expect(chains.getBaseCctpChain()).toBeNull();
+  });
+
+  it('createTransfer fails with a clear reason instead of returning undefined', async () => {
+    await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '84532', DATABASE_URL: '' });
+    const store = await import('./cctpTransferStore.js');
+    await expect(store.createTransfer({
+      idempotencyKey: 'k', direction: 'inbound', agentId: null, ownerAddress: '0x1111111111111111111111111111111111111111',
+      sourceChain: 'ethereum-sepolia', sourceDomain: 0, destChain: 'base-sepolia', destDomain: 6,
+      usdcAmountRaw: '1000000', mintRecipient: '0x2222222222222222222222222222222222222222',
+      maxFeeRaw: '1000', minFinalityThreshold: 1000, relayMethod: 'forwarding_service',
+    })).rejects.toThrow(/database is not configured/);
+  });
+
+  it('createApiKey fails with a clear reason instead of "reading \'id\'"', async () => {
+    await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '84532', DATABASE_URL: '' });
+    const keys = await import('./apiKeyStore.js');
+    await expect(keys.createApiKey({ ownerAddress: '0x1111111111111111111111111111111111111111', name: 'k' }))
+      .rejects.toThrow(/database is not configured/);
   });
 });

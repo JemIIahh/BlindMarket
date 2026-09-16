@@ -353,6 +353,9 @@ export function assertBootConfig(): void {
     }
     if (!config.databaseUrl) {
       warnings.push('DATABASE_URL is empty in production — Neon-backed persistence is unavailable.');
+      if (config.cctp.enabled) {
+        warnings.push('CCTP_ENABLED=true but DATABASE_URL is empty — bridging is DISABLED (it needs the cctp_transfers table).');
+      }
     }
   }
 
