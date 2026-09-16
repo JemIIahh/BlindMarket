@@ -1,12 +1,16 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import * as a2aService from '../services/a2a';
+import { useAuth } from '../context/AuthContext';
 
 export function useAgentProfile(options?: { enabled?: boolean }) {
+  // Gated here, not per call site: this hits an authed route, and a
+  // signed-out visitor browsing /a2a otherwise 401s on every page load.
+  const { isAuthenticated } = useAuth();
   return useQuery({
     queryKey: ['a2a', 'profile'],
     queryFn: () => a2aService.getProfile(),
     retry: false,
-    enabled: options?.enabled ?? true,
+    enabled: (options?.enabled ?? true) && isAuthenticated,
   });
 }
 

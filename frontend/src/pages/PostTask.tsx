@@ -138,14 +138,16 @@ export default function PostTask() {
   }, []);
 
   // Load the list of registered agents for the verifier picker (agent-verify
-  // mode). Public endpoint; empty list just means the picker shows none.
+  // mode). Authed route — skip while signed out (the picker just shows none)
+  // instead of 401ing on every visit to this page.
   useEffect(() => {
+    if (!isAuthenticated) return;
     authedGet<{ executors: Array<{ address: string; publicKey: string; capabilities: string[]; reputation: number }> }>(
       '/api/v1/a2a/executors',
     )
       .then((r) => setVerifiers(r.executors ?? []))
       .catch(() => { /* picker stays empty; poster can use Auto */ });
-  }, []);
+  }, [isAuthenticated]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();

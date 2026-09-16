@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { formatUnits } from 'ethers';
+import { useAuth } from '../../context/AuthContext';
 import {
   Tag,
   Button,
@@ -65,6 +66,7 @@ export function OpsConsole({
   onAgentUpdated: (agent: AgentDetails) => void;
   className?: string;
 }) {
+  const { isAuthenticated } = useAuth();
   const [tab, setTab] = useTabParam<Tab>('logs', TABS);
 
   // Logs (SSE, capped at 200 lines)
@@ -98,12 +100,13 @@ export function OpsConsole({
   const [toolsSaved, setToolsSaved] = useState(false);
   const [installedSkills, setInstalledSkills] = useState<InstalledSkillMeta[]>(agent.skills ?? []);
 
-  // Fetch available providers + models for the edit form
+  // Fetch available providers + models for the edit form (authed route).
   useEffect(() => {
+    if (!isAuthenticated) return;
     authedGet<{ models?: Record<string, string[]> }>('/api/v1/agents/providers')
       .then(r => { if (r.models) setProviders(r.models); })
       .catch(() => {});
-  }, []);
+  }, [isAuthenticated]);
 
   // Log stream — a fetch-based SSE reader. The old browser SSE client could
   // not send an Authorization header, and the route is now owner-gated

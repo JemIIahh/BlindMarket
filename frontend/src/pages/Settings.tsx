@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useAccount } from 'wagmi';
+import { useAuth } from '../context/AuthContext';
 import { usePrivy, useUnlinkWallet, useSigners, useExportWallet } from '@privy-io/react-auth';
 import {
   Breadcrumb,
@@ -48,6 +49,7 @@ function saveBool(key: string, v: boolean) {
 }
 
 export default function Settings() {
+  const { isAuthenticated } = useAuth();
   const { address: evmAddress, isConnected: evmConnected } = useAccount();
   const isConnected = evmConnected;
   const address = evmAddress;
@@ -141,6 +143,9 @@ export default function Settings() {
   const [creating, setCreating] = useState(false);
 
   const loadKeys = useCallback(async () => {
+    // /api/v1/api-keys is authed — without this the page 401s on open for a
+    // signed-out (or still-signing-in) visitor.
+    if (!isAuthenticated) { setKeys([]); setLoadingKeys(false); return; }
     try {
       setLoadingKeys(true);
       const data = await authedGet<ApiKeyView[]>('/api/v1/api-keys');
@@ -148,7 +153,7 @@ export default function Settings() {
     } catch { /* ignore */ } finally {
       setLoadingKeys(false);
     }
-  }, []);
+  }, [isAuthenticated]);
 
   useEffect(() => { loadKeys(); }, [loadKeys]);
 

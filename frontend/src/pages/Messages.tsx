@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
+import { useAuth } from '../context/AuthContext';
 import {
   Breadcrumb,
   PageHeader,
@@ -45,6 +46,8 @@ function timeAgo(iso: string): string {
 
 export default function Messages() {
   const qc = useQueryClient();
+  // Authed routes — a signed-out visitor would 401 on both lists.
+  const { isAuthenticated } = useAuth();
   const [searchParams] = useSearchParams();
   const selectedTaskId = searchParams.get('task') ?? undefined;
   const [replyTo, setReplyTo] = useState<string | null>(null);
@@ -66,6 +69,7 @@ export default function Messages() {
     queryFn: () => authedGet<{ messages: Message[]; total: number; unread: number }>(
       `/api/v1/messages/inbox${selectedTaskId ? `?taskId=${selectedTaskId}` : ''}`,
     ),
+    enabled: isAuthenticated,
   });
 
   const {
@@ -77,6 +81,7 @@ export default function Messages() {
     queryFn: () => authedGet<{ messages: Message[]; total: number }>(
       `/api/v1/messages/sent${selectedTaskId ? `?taskId=${selectedTaskId}` : ''}`,
     ),
+    enabled: isAuthenticated,
   });
 
   const sendMutation = useMutation({

@@ -159,7 +159,8 @@ export default function Earnings() {
       );
       return lists.flat();
     },
-    enabled: !!address && !!agents,
+    // Authed fan-out — needs a signed-in session, not just a connected wallet.
+    enabled: isAuthenticated && !!address && !!agents,
   });
 
   const executions = agentExecutions ?? [];
