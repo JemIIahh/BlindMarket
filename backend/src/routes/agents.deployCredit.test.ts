@@ -3,22 +3,14 @@ import express from 'express';
 import request from 'supertest';
 
 /**
- * A deployed agent must actually run.
- *
- * deployAgent() persists status 'stopped' (agentRunner.ts:235) and nothing
- * moved it to 'running': the UI shows "deployment initiated" and returns,
- * reconcileAgents() on boot only re-forks agents already marked 'running', and
- * every other path into that status — the crash-loop cap, the zombie reaper, a
- * non-zero exit — is one-way. So every agent ever deployed was born switched
- * off, after its owner had paid the deploy fee. Production shows 0 of 20
- * running, and open tasks expired with nobody to take them.
- *
- * The start is best-effort: the fee is already spent, so a refusal
- * (MAX_CONCURRENT_AGENTS is the expected one) must not fail the deploy.
+ * A deploy credit is a paid 1 USDC (AgentFactory). It must only be spent on a
+ * deploy that actually happens. Found 2026-09-16 on the local stack: the route
+ * claimed the credit BEFORE validating skills, so a request with an unknown
+ * skill slug returned 404 and still consumed the payment; a deployAgent
+ * failure lost it too.
  */
 
 const OWNER = '0x2222222222222222222222222222222222222222';
-const AGENT_ID = 'agent-new';
 
 // vi.mock factories are hoisted above module-level consts, so the shared spies
 // have to be created inside vi.hoisted() to exist by the time they run.
@@ -56,12 +48,12 @@ vi.mock('../services/reputation.js', () => ({}));
 vi.mock('../services/reputationDecay.js', () => ({}));
 vi.mock('../services/agentStore.js', () => ({}));
 vi.mock('../services/serviceStore.js', () => ({}));
-vi.mock('../services/skillStore.js', () => ({ incrementInstallCount: vi.fn(async () => {}) }));
+vi.mock('../services/skillStore.js', () => ({ incrementInstallCount: vi.fn(async () => {}), getSkillBySlug: vi.fn(async () => null) }));
 vi.mock('../services/agentEmbedding.js', () => ({}));
 // The deploy paywall — a real credit comes from an on-chain AgentFactory
 // payment. Grant one so the test exercises the start, not the USDC gate.
 vi.mock('../services/agentFactoryListener.js', () => ({
-  claimDeployCredit: vi.fn(async () => ({ user: '0x2222222222222222222222222222222222222222', nonce: 1 })),
+  claimDeployCredit: vi.fn(async () => ({ user: '0x2222222222222222222222222222222222222222', nonce: '7', usdcAmount: '1000000', block: 1, txHash: '0xpaid', ts: 0 })),
   restoreDeployCredit: vi.fn(async () => {}),
 }));
 vi.mock('../services/skillComposer.js', () => ({
@@ -70,45 +62,48 @@ vi.mock('../services/skillComposer.js', () => ({
 
 import { agentsRouter } from './agents.js';
 import { globalErrorHandler } from '../middleware/errorHandler.js';
+import { claimDeployCredit, restoreDeployCredit } from '../services/agentFactoryListener.js';
 
 const app = express();
 app.use(express.json());
 app.use('/api/v1/agents', agentsRouter);
 app.use(globalErrorHandler);
 
-const deployBody = {
+const body = (extra: Record<string, unknown> = {}) => ({
   name: 'A', instructions: 'do useful things for people',
-  provider: 'openai', model: 'gpt-4o-mini', apiKey: 'sk-test',
-  ownerAddress: OWNER, capabilities: [],
-  // uncompressed secp256k1 point — the deploy schema ECIES-wraps the agent key to it
-  ownerPublicKey: '04' + 'ab'.repeat(64),
-};
+  provider: 'openai', model: 'gpt-4o-mini', apiKey: 'sk-test', capabilities: [],
+  ownerPublicKey: '04' + 'ab'.repeat(64), ...extra,
+});
+const deploy = (extra = {}) =>
+  request(app).post('/api/v1/agents/deploy').set('X-API-Key', 'sk_owner').send(body(extra));
 
-const deploy = () =>
-  request(app).post('/api/v1/agents/deploy').set('X-API-Key', 'sk_owner').send(deployBody);
+beforeEach(() => {
+  vi.mocked(claimDeployCredit).mockClear();
+  vi.mocked(restoreDeployCredit).mockClear();
+  deployAgent.mockClear();
+});
 
-beforeEach(() => { startAgent.mockClear(); startAgent.mockResolvedValue(undefined as never); });
-
-describe('POST /agents/deploy — a deployed agent actually runs', () => {
-  it('starts the agent it just created', async () => {
-    const res = await deploy();
-    expect(res.status).toBe(201);
-    expect(startAgent).toHaveBeenCalledWith(AGENT_ID);
-    expect(res.body.data.started).toBe(true);
+describe('POST /agents/deploy — the paid credit is only spent on a real deploy', () => {
+  it('an unknown skill is rejected WITHOUT claiming the credit', async () => {
+    const res = await deploy({ skillSlugs: ['no-such-skill'] });
+    expect(res.status).toBe(404);
+    expect(res.body.error.code).toBe('SKILL_NOT_FOUND');
+    expect(claimDeployCredit).not.toHaveBeenCalled();
+    expect(deployAgent).not.toHaveBeenCalled();
   });
 
-  it('still succeeds when the start is refused — the fee is already spent', async () => {
-    startAgent.mockImplementation(async () => {
-      throw new Error('MAX_CONCURRENT_AGENTS reached');
-    });
+  it('a failing deploy gives the claimed credit back', async () => {
+    deployAgent.mockRejectedValueOnce(new Error('ECIES wrap failed'));
     const res = await deploy();
-    expect(res.status).toBe(201);
-    expect(res.body.data.started).toBe(false);
-    expect(res.body.data.id).toBe(AGENT_ID);
+    expect(res.status).toBe(500);
+    expect(claimDeployCredit).toHaveBeenCalledTimes(1);
+    expect(restoreDeployCredit).toHaveBeenCalledWith(expect.objectContaining({ nonce: '7', txHash: '0xpaid' }));
   });
 
-  it('never leaks the agent private key in the deploy response', async () => {
+  it('a successful deploy spends the credit and does not restore it', async () => {
     const res = await deploy();
-    expect(JSON.stringify(res.body)).not.toContain('SECRET');
+    expect(res.status).toBe(201);
+    expect(claimDeployCredit).toHaveBeenCalledTimes(1);
+    expect(restoreDeployCredit).not.toHaveBeenCalled();
   });
 });

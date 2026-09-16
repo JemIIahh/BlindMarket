@@ -26,7 +26,7 @@ import { redis } from '../services/redis.js';
 import { ethers } from 'ethers';
 import { provider, baseProvider } from '../services/chain.js';
 import { config } from '../config.js';
-import { claimDeployCredit } from '../services/agentFactoryListener.js';
+import { claimDeployCredit, restoreDeployCredit } from '../services/agentFactoryListener.js';
 import { discoverModels, ProviderModelsError } from '../services/providerModels.js';
 
 /**
@@ -311,21 +311,6 @@ agentsRouter.post('/deploy', requireAuth, async (req: AuthRequest, res, next) =>
     const ownerAddress = req.user!.address!;
     console.log(`[deploy] owner=${ownerAddress.slice(0, 10)}… ownerPublicKey length=${parsed.data.ownerPublicKey.length / 2} bytes, hex=${parsed.data.ownerPublicKey.slice(0, 8)}...`);
 
-    // Optional: consume a deploy credit if the AgentFactory paywall is enabled.
-    // During growth phase this is OFF (free deploys). Flip AGENT_FACTORY_PAYWALL
-    // to true before mainnet launch.
-    if (config.agentFactoryPaywall) {
-      const credit = await claimDeployCredit(ownerAddress);
-      if (!credit) {
-        res.status(402).json({
-          success: false,
-          error: { code: 'NO_DEPLOY_CREDIT', message: 'No deploy credit found. Pay 1 USDC via AgentFactory first.' },
-        });
-        return;
-      }
-      console.log(`[deploy] consumed credit nonce=${credit.nonce} tx=${credit.txHash}`);
-    }
-
     // Resolve skill slugs → frozen snapshots (server-side only). Authenticated
     // route — both PUBLIC and PRIVATE skills are installable here.
     const { skillSlugs, ...deployParams } = parsed.data;
@@ -349,12 +334,41 @@ agentsRouter.post('/deploy', requireAuth, async (req: AuthRequest, res, next) =>
       ...skills.flatMap((s) => s.capabilities),
     ])] as (typeof parsed.data.capabilities);
 
-    const agent = await deployAgent({
-      ...deployParams,
-      ownerAddress,
-      capabilities,
-      skills: skills.length ? skills : undefined,
-    } as Parameters<typeof deployAgent>[0]);
+    // Consume a deploy credit if the AgentFactory paywall is enabled — only
+    // AFTER every validation above. A credit is a paid 1 USDC: claiming it
+    // first meant a rejected request (e.g. an unknown skill slug → 404) still
+    // spent the user's payment.
+    let credit: Awaited<ReturnType<typeof claimDeployCredit>> = null;
+    if (config.agentFactoryPaywall) {
+      credit = await claimDeployCredit(ownerAddress);
+      if (!credit) {
+        res.status(402).json({
+          success: false,
+          error: { code: 'NO_DEPLOY_CREDIT', message: 'No deploy credit found. Pay 1 USDC via AgentFactory first.' },
+        });
+        return;
+      }
+      console.log(`[deploy] consumed credit nonce=${credit.nonce} tx=${credit.txHash}`);
+    }
+
+    let agent: Awaited<ReturnType<typeof deployAgent>>;
+    try {
+      agent = await deployAgent({
+        ...deployParams,
+        ownerAddress,
+        capabilities,
+        skills: skills.length ? skills : undefined,
+      } as Parameters<typeof deployAgent>[0]);
+    } catch (deployErr) {
+      // No agent was created — give the paid credit back so the user can retry.
+      if (credit) {
+        await restoreDeployCredit(credit).catch((e) =>
+          console.error(`[deploy] FAILED to restore credit nonce=${credit!.nonce} for ${ownerAddress}:`, (e as Error).message),
+        );
+        console.warn(`[deploy] deploy failed — restored credit nonce=${credit.nonce}`);
+      }
+      throw deployErr;
+    }
 
     // Popularity counters — best-effort, never blocks the deploy.
     for (const s of skills) void skillStore.incrementInstallCount(s.skillId).catch(() => {});

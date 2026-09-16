@@ -77,6 +77,16 @@ export async function listDeployCredits(user: string): Promise<AgentDeployCredit
  * has none. `SREM` returning 1 is the atomic guard that makes a credit
  * single-use even under concurrent claims.
  */
+/**
+ * Put back a credit that was claimed for a deploy that then failed — the user
+ * paid for a deploy they didn't get. Writes the same keys/shape as the indexer
+ * (idempotent: SET of the same JSON + SADD of an existing member are no-ops).
+ */
+export async function restoreDeployCredit(credit: AgentDeployCredit): Promise<void> {
+  await redis.set(KEY.credit(credit.user, credit.nonce), JSON.stringify(credit));
+  await redis.sadd(KEY.creditsByUser(credit.user), credit.nonce);
+}
+
 export async function claimDeployCredit(user: string): Promise<AgentDeployCredit | null> {
   const credits = await listDeployCredits(user);
   for (const credit of credits) {
