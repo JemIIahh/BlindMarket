@@ -25,6 +25,16 @@ code against a live Base Mainnet contract address until
 that generated file (via `contracts/scripts/sync-addresses.ts`) is the source
 of truth, not README prose, which has previously gone stale here.
 
+**Arc (Circle's own L1, `docs.arc.io`) is a possible future settlement layer,
+not a current one.** Today Arc is wired only as a CCTP bridge chain
+(`backend/src/config.ts`, testnet-only, `arc-testnet`) — USDC is its native
+gas token, transfers to/from it complete via CCTP the same as any other
+supported chain. `BlindEscrow`/`AgentFactory` are not deployed on Arc, and no
+settlement code targets it yet. Treat "Arc settlement" as exploratory
+direction (see branch `feat/arc-settlement-layer`) until contracts actually
+deploy there — verify against `contracts/deployments/` before claiming
+otherwise, same as the Base Mainnet rule above.
+
 ## Working rules
 
 ### Verify against source before claiming or coding
