@@ -3,6 +3,7 @@ import { formatEther, ZeroAddress } from 'ethers';
 import type { ApiResponse } from '../types.js';
 import { escrow, marketplaceSigner, provider, baseEscrow, baseMarketplaceSigner, baseProvider } from '../services/chain.js';
 import { isBridgeReady } from '../services/a2aSettlement.js';
+import { chainNetwork } from '../services/chainNetwork.js';
 import { config } from '../config.js';
 import { redis, redisSub } from '../services/redis.js';
 import { getPool, getSchemaStatus, latestMigrationId } from '../services/neonDb.js';
@@ -21,9 +22,6 @@ healthRouter.get('/', (_req, res) => {
   };
   res.json(body);
 });
-
-const ZERO_G_MAINNET_CHAIN_ID = 16661;
-const BASE_MAINNET_CHAIN_ID = 8453;
 
 /** An escrow address as clients should see it: null when unset or the zero
  *  address (BLIND_ESCROW_ADDRESS is not zero-filtered in config), so the MCP
@@ -62,7 +60,6 @@ async function zeroGBridge(): Promise<Record<string, unknown>> {
     signerBalanceError = (e as Error).message;
   }
 
-  const network = config.ogChainId === ZERO_G_MAINNET_CHAIN_ID ? '0g-mainnet' : '0g-testnet';
   return {
     signerAddress: signerAddr,
     escrowAddress: escrowOrNull(config.blindEscrowAddress),
@@ -73,7 +70,7 @@ async function zeroGBridge(): Promise<Record<string, unknown>> {
     signerBalanceOg,
     signerGasLow,
     signerBalanceError,
-    rotateCommand: verifierMatches ? null : rotateCommand(signerAddr, network),
+    rotateCommand: verifierMatches ? null : rotateCommand(signerAddr, chainNetwork('0g').hardhatNetwork),
   };
 }
 
@@ -109,8 +106,6 @@ async function baseBridge(): Promise<Record<string, unknown>> {
   } catch {
     // non-critical
   }
-  // Each chain's own tier: production pairs 0G mainnet with Base Sepolia.
-  const network = config.baseChainId === BASE_MAINNET_CHAIN_ID ? 'base' : 'base-sepolia';
   return {
     configured: true,
     signerAddress: baseSignerAddr,
@@ -123,12 +118,18 @@ async function baseBridge(): Promise<Record<string, unknown>> {
     signerEthBalance: baseSignerEthBalance,
     signerEthLow: baseSignerEthLow,
     signerBalanceError: baseSignerBalanceError,
-    rotateCommand: baseVerifierMatches ? null : rotateCommand(baseSignerAddr, network),
+    rotateCommand: baseVerifierMatches ? null : rotateCommand(baseSignerAddr, chainNetwork('base').hardhatNetwork),
   };
 }
 
 /** Why a chain can't settle, or null when it can or isn't part of this deployment. */
-function notReadyReason(ready: boolean, escrowAddress: string | null, escrowEnv: string, signerSet: boolean, signerEnv: string): string | null {
+function notReadyReason(
+  ready: boolean,
+  escrowAddress: string | null,
+  escrowEnv: string,
+  signerSet: boolean,
+  signerEnv: string,
+): string | null {
   if (ready) return null;
   if (!escrowAddress) return signerSet ? `${escrowEnv} not set` : null;
   return `${signerEnv} not set`;
@@ -139,11 +140,15 @@ function notReadyReason(ready: boolean, escrowAddress: string | null, escrowEnv:
 // own: a task lives on exactly one chain, so one chain being ready is enough to
 // settle that chain's tasks. The 0G fields stay at the top level and Base under
 // `base` (null unless Base can settle), which the MCP server reads; `chains`
-// lists every chain with its tier. A `false` for `verifierMatches` is the root
+// lists every chain with its tier. `reason` names what's missing for any chain
+// that has only half its config, so it can appear next to `configured: true`
+// when another chain is ready. A `false` for `verifierMatches` is the root
 // cause of every "task accepted but never completes" report; the response
 // includes the exact rotate-verifier command to run from contracts/.
 healthRouter.get('/bridge', async (_req, res, next) => {
   try {
+    // isBridgeReady already implies these; checked again because the blocks
+    // below dereference them.
     const ogReady = isBridgeReady('0g') && !!marketplaceSigner;
     const baseReady = isBridgeReady('base') && !!baseEscrow && !!baseMarketplaceSigner;
     const [og, base] = await Promise.all([
@@ -176,7 +181,7 @@ healthRouter.get('/bridge', async (_req, res, next) => {
             chain: '0g',
             configured: ogReady,
             chainId: config.ogChainId,
-            tier: config.ogChainId === ZERO_G_MAINNET_CHAIN_ID ? 'mainnet' : 'testnet',
+            tier: chainNetwork('0g').tier,
             escrowAddress: ogEscrow,
             ...(ogReason ? { reason: ogReason } : {}),
           },
@@ -184,7 +189,7 @@ healthRouter.get('/bridge', async (_req, res, next) => {
             chain: 'base',
             configured: baseReady,
             chainId: config.baseChainId,
-            tier: config.baseChainId === BASE_MAINNET_CHAIN_ID ? 'mainnet' : 'testnet',
+            tier: chainNetwork('base').tier,
             escrowAddress: baseEscrowAddress,
             ...(baseReason ? { reason: baseReason } : {}),
           },

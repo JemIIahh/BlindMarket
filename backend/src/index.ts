@@ -49,6 +49,7 @@ import { startCctpAttestationPoller } from './services/cctpAttestationPoller.js'
 import { startExpirySweepLoop } from './services/a2aExpirySweep.js';
 import { auditCustodySealedTasks } from './services/keyCustodyService.js';
 import { isBridgeReady } from './services/a2aSettlement.js';
+import { chainNetwork } from './services/chainNetwork.js';
 import { marketplaceSigner, escrow, baseMarketplaceSigner, baseEscrow } from './services/chain.js';
 import { logChainConfig } from './services/chainService.js';
 import { reconcileAgents, startZombieReaper } from './services/agentRunner.js';
@@ -192,12 +193,12 @@ httpServer.listen(config.port, () => {
     {
       chain: '0g' as const, label: '0G', escrow, signer: marketplaceSigner,
       escrowAddress: config.blindEscrowAddress, escrowEnv: 'BLIND_ESCROW_ADDRESS', signerEnv: 'MARKETPLACE_SIGNER_PRIVATE_KEY',
-      network: config.ogChainId === 16661 ? '0g-mainnet' : '0g-testnet',
+      network: chainNetwork('0g').hardhatNetwork,
     },
     {
       chain: 'base' as const, label: 'Base', escrow: baseEscrow, signer: baseMarketplaceSigner,
       escrowAddress: config.baseEscrowAddress, escrowEnv: 'BASE_ESCROW_ADDRESS', signerEnv: 'BASE_MARKETPLACE_SIGNER_PRIVATE_KEY',
-      network: config.baseChainId === 8453 ? 'base' : 'base-sepolia',
+      network: chainNetwork('base').hardhatNetwork,
     },
   ];
   for (const bridge of bridgeChains) {
@@ -230,9 +231,10 @@ httpServer.listen(config.port, () => {
           console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
           console.error(`[a2aSettlement] ⛔ ${label} VERIFIER ROLE MISMATCH — bridge will silently fail every call`);
           console.error(`    escrow.verifier()        = ${onChainVerifier}`);
-          console.error(`    marketplaceSigner.addr   = ${signerAddr}`);
+          console.error(`    ${label} signer address = ${signerAddr}`);
           console.error(`    escrow contract address  = ${bridge.escrowAddress}`);
-          console.error('    Fix from contracts/ with the current admin key:');
+          console.error('    Fix from contracts/ with the current admin key (rotate-verifier.ts');
+          console.error('    targets the escrow in contracts/deployments/ for this chain):');
           console.error(`    MARKETPLACE_SIGNER_ADDRESS=${signerAddr} \\`);
           console.error(`      npx hardhat run scripts/rotate-verifier.ts --network ${bridge.network}`);
           console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
