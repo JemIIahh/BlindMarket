@@ -12,31 +12,38 @@ export const PLATFORM_FEE_PCT = PLATFORM_FEE_BPS / 100; // 10
 export const WORKER_SHARE_PCT = 100 - PLATFORM_FEE_PCT; // 90
 export const FEE_SPLIT_LABEL = `${WORKER_SHARE_PCT}/${PLATFORM_FEE_PCT}`; // "90/10"
 
-const IS_PROD = import.meta.env.PROD;
+// Chain/network configuration is driven by a single `VITE_NETWORK` env var.
+// Valid values: mainnet | testnet. Defaults to testnet.
+// Individual chain IDs / RPCs can still be overridden with VITE_OG_CHAIN_ID,
+// VITE_BASE_CHAIN_ID, VITE_OG_RPC_URL and VITE_BASE_RPC_URL.
+const NETWORK = (import.meta.env.VITE_NETWORK as 'mainnet' | 'testnet') || 'testnet';
+const networkIsMainnet = NETWORK === 'mainnet';
 
 // Contract-address fallbacks are single-sourced from contracts/deployments/*.json
 // via contracts/scripts/sync-addresses.ts (do not hand-edit contractAddresses.ts).
-// VITE_* env vars still win at build time; these are the no-env defaults.
-const ADDR = IS_PROD ? CONTRACT_ADDRESSES.mainnet : CONTRACT_ADDRESSES.testnet;
-// Base network this build settles on, and whether it's Base MAINNET. Base
-// defaults key off this, not the build mode: a production build on Base
-// Sepolia was getting Base mainnet's USDC address (no contract there → the
-// balance reads 0). Mirrors backend/src/config.ts.
-const BASE_CHAIN_ID_RAW = Number(import.meta.env.VITE_BASE_CHAIN_ID || (IS_PROD ? '8453' : '84532'));
-const BASE_IS_MAINNET = BASE_CHAIN_ID_RAW === 8453;
-const BASE_ADDR = BASE_IS_MAINNET ? (CONTRACT_ADDRESSES as any).base : (CONTRACT_ADDRESSES as any).baseTestnet;
+const OG_CHAIN_ID = Number(
+  import.meta.env.VITE_OG_CHAIN_ID || (networkIsMainnet ? '16661' : '16602'),
+);
+const BASE_CHAIN_ID = Number(
+  import.meta.env.VITE_BASE_CHAIN_ID || (networkIsMainnet ? '8453' : '84532'),
+);
+
+const isMainnet = OG_CHAIN_ID === 16661;
+const isBaseMainnet = BASE_CHAIN_ID === 8453;
+
+const ADDR = isMainnet ? CONTRACT_ADDRESSES.mainnet : CONTRACT_ADDRESSES.testnet;
+const BASE_ADDR = isBaseMainnet
+  ? (CONTRACT_ADDRESSES as any).base
+  : (CONTRACT_ADDRESSES as any).baseTestnet;
 
 // ── 0G Chain (agent infra) ─────────────────────────────────────────────────
 
-export const OG_CHAIN_ID = Number(
-  import.meta.env.VITE_OG_CHAIN_ID || (IS_PROD ? '16661' : '16602')
-);
-
-export const isMainnet = OG_CHAIN_ID === 16661;
+export { OG_CHAIN_ID };
+export { isMainnet };
 
 export const OG_RPC_URL =
   import.meta.env.VITE_OG_RPC_URL ||
-  (IS_PROD ? 'https://evmrpc.0g.ai' : 'https://evmrpc-testnet.0g.ai');
+  (networkIsMainnet ? 'https://evmrpc.0g.ai' : 'https://evmrpc-testnet.0g.ai');
 
 export const BLIND_ESCROW_ADDRESS =
   import.meta.env.VITE_BLIND_ESCROW_ADDRESS || ADDR.blindEscrow;
@@ -49,13 +56,13 @@ export const BLIND_REPUTATION_ADDRESS =
 
 // ── Base Chain (settlement — USDC payouts) ──────────────────────────────────
 
-export const BASE_CHAIN_ID = BASE_CHAIN_ID_RAW;
+export { BASE_CHAIN_ID };
 
 // The Base leg's CCTP chainKey — used as the fixed source/dest of a CCTP
 // quote, since neither Phase A (Base -> elsewhere) nor Phase B (elsewhere ->
 // Base) ever varies this side of the route. The backend derives its CCTP tier
 // from its own BASE_CHAIN_ID the same way (backend/src/config.ts).
-export const BASE_CCTP_CHAIN_KEY = BASE_CHAIN_ID === 8453 ? 'base' : 'base-sepolia';
+export const BASE_CCTP_CHAIN_KEY = isBaseMainnet ? 'base' : 'base-sepolia';
 
 /** CCTP is usable only when the backend's CCTP Base leg is the Base chain
  *  this app settles on. A mismatched deployment (e.g. backend on Base mainnet,
@@ -67,7 +74,7 @@ export function isCctpUsable(cfg: { enabled: boolean; baseChainId?: number | nul
 
 export const BASE_RPC_URL =
   import.meta.env.VITE_BASE_RPC_URL ||
-  (BASE_IS_MAINNET ? 'https://mainnet.base.org' : 'https://sepolia.base.org');
+  (networkIsMainnet ? 'https://mainnet.base.org' : 'https://sepolia.base.org');
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 
@@ -81,7 +88,9 @@ export const BASE_ESCROW_ADDRESS = unsetIfZero(
 
 export const BASE_USDC_ADDRESS =
   import.meta.env.VITE_BASE_USDC_ADDRESS ||
-  (BASE_IS_MAINNET ? '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' : '0x036CbD53842c5426634e7929541eC2318f3dCF7e');
+  (isBaseMainnet
+    ? '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
+    : '0x036CbD53842c5426634e7929541eC2318f3dCF7e');
 
 // Privy signer ID for the backend's PRIVY_AUTHORIZATION_KEY (Privy-app-specific).
 export const PRIVY_RELAY_SIGNER_ID: string =
