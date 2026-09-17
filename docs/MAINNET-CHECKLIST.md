@@ -293,8 +293,10 @@ should walk this back to a non-custodial model.
 ### 5b.1 Endpoint authorization (DONE — re-verified in source 2026-09-07)
 
 - [x] `POST /agents/:id/withdraw` — JWT-gated, verifies `req.user.address`
-      matches `agent.ownerAddress`. Refuses while agent is running. Now sweeps
-      0G and Base in one call (see `WITHDRAW_CHAINS` in `routes/agents.ts`).
+      matches `agent.ownerAddress`. Refuses while agent is running. Sweeps
+      every settlement chain in one call (the withdraw loop in
+      `routes/agents.ts`; its gas numbers come from
+      `services/settlementChains.ts`).
 - [x] `POST /agents/:id/export-key` — JWT-gated.
 - [x] `POST /agents/:id/start | pause | stop` — all three call
       `authorizeOwner` (`routes/agents.ts` ~:875/:890/:905). The body's

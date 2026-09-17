@@ -4,9 +4,8 @@ const BASE_USDC = '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
 const cfg = vi.hoisted(() => ({ baseEscrowAddress: '0xescrow' as string, baseUsdcAddress: '' as string, postingChain: '' }));
 vi.mock('../config.js', () => ({ config: cfg }));
 
-const { normalizeSettlementAmount, settlementToken, payoutCurrency, assertPostingUnitMatchesPricing } = await import(
-  './settlementUnits.js'
-);
+const { normalizeSettlementAmount, settlementToken, payoutCurrency, assertPostingUnitMatchesPricing, nativeWeiToTokenUnits } =
+  await import('./settlementUnits.js');
 
 beforeEach(() => {
   cfg.baseEscrowAddress = '0xescrow';
@@ -93,5 +92,23 @@ describe('assertPostingUnitMatchesPricing', () => {
     expect(() => assertPostingUnitMatchesPricing()).toThrow(
       /Invalid POSTING_CHAIN: 0g settles in 0G, but service prices and reward floors are in USDC/,
     );
+  });
+});
+
+// Used by the withdraw route where a chain's gas coin is its settlement token
+// (Arc's USDC), to keep the native gas reserve back while sweeping the ERC-20.
+describe('nativeWeiToTokenUnits', () => {
+  const E = 10n ** 18n;
+
+  it('converts an 18-decimal native amount to a 6-decimal token, rounding up', () => {
+    expect(nativeWeiToTokenUnits(3n * E / 10_000n, 6)).toBe(300n); // 0.0003 -> 0.000300
+    expect(nativeWeiToTokenUnits(10n ** 12n, 6)).toBe(1n);
+    expect(nativeWeiToTokenUnits(10n ** 12n + 1n, 6)).toBe(2n);
+    expect(nativeWeiToTokenUnits(1n, 6)).toBe(1n);
+    expect(nativeWeiToTokenUnits(0n, 6)).toBe(0n);
+  });
+
+  it('leaves an 18-decimal token as it is', () => {
+    expect(nativeWeiToTokenUnits(5n, 18)).toBe(5n);
   });
 });

@@ -109,7 +109,7 @@ vi.mock('../services/agentEmbedding.js', () => ({ recomputeForWalletBestEffort: 
 vi.mock('../services/agentFactoryListener.js', () => ({ claimDeployCredit: vi.fn(), restoreDeployCredit: vi.fn() }));
 vi.mock('../services/skillComposer.js', () => ({ buildInstalledSkill: vi.fn(), assertComposedSizeOk: vi.fn() }));
 
-const { agentsRouter, nativeWeiToTokenUnits } = await import('./agents.js');
+const { agentsRouter } = await import('./agents.js');
 const { globalErrorHandler } = await import('../middleware/errorHandler.js');
 
 const app = express();
@@ -272,19 +272,5 @@ describe('a chain whose gas coin is its settlement token', () => {
     const res = await withdraw({ tokenAddress: OTHER_TOKEN });
     expect(res.status).toBe(200);
     expect(state.transfers).toEqual([{ chain: 'base', token: OTHER_TOKEN, to: OWNER, amount: 42n }]);
-  });
-});
-
-describe('nativeWeiToTokenUnits', () => {
-  it('converts 18-decimal native amounts to a 6-decimal token, rounding up', () => {
-    expect(nativeWeiToTokenUnits(3n * E / 10_000n, 6)).toBe(300n);
-    expect(nativeWeiToTokenUnits(10n ** 12n, 6)).toBe(1n);
-    expect(nativeWeiToTokenUnits(10n ** 12n + 1n, 6)).toBe(2n);
-    expect(nativeWeiToTokenUnits(1n, 6)).toBe(1n);
-    expect(nativeWeiToTokenUnits(0n, 6)).toBe(0n);
-  });
-
-  it('leaves an 18-decimal token as is', () => {
-    expect(nativeWeiToTokenUnits(5n, 18)).toBe(5n);
   });
 });

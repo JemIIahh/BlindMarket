@@ -173,7 +173,7 @@ async function chainReport(
   entry: SettlementChainConfig,
   configured: boolean,
   reason: string | null,
-  posting: SettlementChainKey,
+  posting: SettlementChainKey | null,
 ): Promise<Record<string, unknown>> {
   const { key, chainId, tier, escrowAddress, token, gas } = entry;
   return {
@@ -211,7 +211,16 @@ async function chainReport(
 healthRouter.get('/bridge', async (_req, res, next) => {
   try {
     const entries = settlementChainConfigs();
-    const posting = postingChain();
+    // index.ts refuses to boot on an unknown POSTING_CHAIN, but vercel.ts
+    // mounts this router without that check — and an endpoint whose job is
+    // to report misconfiguration should report this one, not 500 on it.
+    let posting: SettlementChainKey | null = null;
+    let postingChainError: string | null = null;
+    try {
+      posting = postingChain();
+    } catch (e) {
+      postingChainError = (e as Error).message;
+    }
     const readiness = entries.map((entry) => {
       const { escrow: chainEscrow, marketplaceSigner: signer } = chainRuntime(entry.key);
       // isBridgeReady already implies the escrow and signer; checked again
@@ -247,6 +256,7 @@ healthRouter.get('/bridge', async (_req, res, next) => {
         base,
         chains,
         postingChain: posting,
+        ...(postingChainError ? { postingChainError } : {}),
       },
     };
     res.json(body);

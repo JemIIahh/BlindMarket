@@ -342,6 +342,9 @@ describe('GET /health/bridge per-chain settlement facts', () => {
     expect(data.chains.map((c: { postable: boolean }) => c.postable)).toEqual([true, false]);
   });
 
+  // Boot refuses this exact pairing today (assertPostingUnitMatchesPricing:
+  // a Base escrow with 0G posting while prices stay in USDC). The route still
+  // has to report what the registry says.
   it('follows POSTING_CHAIN', async () => {
     cfg.postingChain = '0g';
     const data = await bridge();
@@ -366,6 +369,18 @@ describe('GET /health/bridge per-chain settlement facts', () => {
     cfg.baseChainId = 8453;
     const data = await bridge();
     expect(data.chains[1]).toMatchObject({ chainId: 8453, tier: 'mainnet', relayChain: 'base-mainnet' });
+  });
+
+  // index.ts refuses to boot on this, but vercel.ts mounts the router without
+  // that check, and a diagnostic endpoint should report the misconfiguration
+  // rather than fail on it.
+  it('reports an unknown POSTING_CHAIN instead of failing', async () => {
+    cfg.postingChain = 'arc';
+    const data = await bridge();
+    expect(data.postingChain).toBeNull();
+    expect(data.postingChainError).toMatch(/POSTING_CHAIN="arc" is not a settlement chain/);
+    expect(data.chains.map((c: { postable: boolean }) => c.postable)).toEqual([false, false]);
+    expect(data.configured).toBe(true);
   });
 
   it('never returns an RPC URL', async () => {

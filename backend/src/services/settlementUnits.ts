@@ -78,3 +78,15 @@ export function normalizeSettlementAmount(raw: string): string {
   if (value < LEGACY_SCALE) return raw;
   return ((value + LEGACY_SCALE - 1n) / LEGACY_SCALE).toString();
 }
+
+/**
+ * A native-coin amount in a token's own units, rounded up. The native coin has
+ * 18 decimals. Used where the gas coin and the settlement token are one asset
+ * (Arc's USDC: 18 decimals natively, 6 through its ERC-20), so a withdraw can
+ * keep the gas reserve back while sweeping the ERC-20.
+ */
+export function nativeWeiToTokenUnits(wei: bigint, decimals: number): bigint {
+  if (decimals >= 18) return wei * 10n ** BigInt(decimals - 18);
+  const scale = 10n ** BigInt(18 - decimals);
+  return (wei + scale - 1n) / scale;
+}

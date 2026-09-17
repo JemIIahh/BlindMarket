@@ -385,7 +385,7 @@ export default function AgentDetail() {
         skipped?: Array<{ chain: string; reason: string }>;
       }>(`/api/v1/agents/${apiId}/withdraw`, {});
       if (!data.swept.length) {
-        throw new Error('Nothing to withdraw on either chain.');
+        throw new Error('Nothing to withdraw on any chain.');
       }
       setWithdrawInfo(
         data.swept.map((s) => ({

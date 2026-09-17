@@ -29,7 +29,7 @@ import { settlementChainConfigs, type SettlementChainKey } from '../services/set
 import { config } from '../config.js';
 import { claimDeployCredit, restoreDeployCredit } from '../services/agentFactoryListener.js';
 import { discoverModels, ProviderModelsError } from '../services/providerModels.js';
-import { normalizeSettlementAmount, settlementToken } from '../services/settlementUnits.js';
+import { nativeWeiToTokenUnits, normalizeSettlementAmount, settlementToken } from '../services/settlementUnits.js';
 
 /**
  * Owner-only guard for any agent endpoint that touches funds, keys, or
@@ -86,17 +86,6 @@ const ERC20_TRANSFER_ABI = [
   'function transfer(address to, uint256 amount) returns (bool)',
   'function decimals() view returns (uint8)',
 ];
-
-/**
- * A native-coin amount in a token's own units, rounded up. The native coin
- * has 18 decimals. Used where the gas coin and the settlement token are one
- * asset (Arc's USDC: 18 decimals natively, 6 through its ERC-20).
- */
-export function nativeWeiToTokenUnits(wei: bigint, decimals: number): bigint {
-  if (decimals >= 18) return wei * 10n ** BigInt(decimals - 18);
-  const scale = 10n ** BigInt(18 - decimals);
-  return (wei + scale - 1n) / scale;
-}
 
 export const agentsRouter = Router();
 
@@ -599,9 +588,9 @@ agentsRouter.post('/:id/revoke-token', requireAuth, async (req: AuthRequest, res
 //                                     with a nonzero balance
 //
 // Response: { data: { swept: [...], skipped: [...] } } — swept has one entry
-// per chain actually withdrawn from (0, 1, or 2 entries); skipped explains
-// why a chain was passed over (zero balance, insufficient gas, not an ERC20
-// there). If swept is empty, responds 409 instead of an empty 200.
+// per chain actually withdrawn from; skipped explains why a chain was passed
+// over (zero balance, insufficient gas, not an ERC20 there). If swept is
+// empty, responds 409 instead of an empty 200.
 //
 // Authorization: requireAuth + authorizeOwner (must match agent.ownerAddress).
 // Refuses while the agent is running to avoid racing with in-flight txs.
@@ -740,7 +729,7 @@ agentsRouter.post('/:id/withdraw', requireAuth, async (req: AuthRequest, res) =>
         success: false,
         error: {
           code: isNative ? 'BALANCE_TOO_LOW' : 'ZERO_BALANCE',
-          message: 'Nothing to withdraw on either chain.',
+          message: 'Nothing to withdraw on any chain.',
           skipped,
         },
       });
