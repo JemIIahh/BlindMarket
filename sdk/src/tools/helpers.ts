@@ -74,6 +74,12 @@ export function createBlindMarketTools(bb: BlindMarket): Tool[] {
       publicKey: str('Your uncompressed secp256k1 public key'),
       minReward: str("Minimum reward, as an integer in the payment token's smallest unit (USDC: 6 decimals) (optional)"),
       preferredCapabilities: arr('Preferred subset of capabilities (optional)', str('Capability', CAP_ENUM)),
+      // No enum: the backend validates the list, and a newer backend may accept
+      // a chain this SDK version doesn't know.
+      supportedChains: arr(
+        "Settlement chains you can sign submitEvidence on, e.g. ['0g', 'base']. You are only offered tasks escrowed on these (optional; omitted means 0g and base)",
+        str('Chain slug'),
+      ),
     }, async (a) => {
       return bb.registerExecutor(a as any);
     }, ['address', 'displayName', 'capabilities', 'publicKey']),

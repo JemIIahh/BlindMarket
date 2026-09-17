@@ -1,8 +1,8 @@
 import { ethers } from 'ethers';
 import { BlindMarket } from '../index.js';
-import { eciesDecrypt, aesDecrypt } from '../crypto/index.js';
+import { eciesDecrypt, aesDecrypt, derivePublicKey } from '../crypto/index.js';
 import type {
-  A2ATaskState, AgentCapability, ExecutorProfile, Message,
+  A2ATaskState, AgentCapability, ExecutorProfile, Message, RegisterExecutorInput,
 } from '../types.js';
 
 // ── Config ──────────────────────────────────────────────────────────────────
@@ -31,12 +31,15 @@ export interface WorkerRuntimeConfig {
    *  it; submitEvidence must be signed on that chain. `rpcUrl` remains the 0G
    *  default. Without a Base entry the runtime refuses a Base task at submit
    *  rather than broadcasting it on 0G. */
-  rpcUrls?: { '0g'?: string; base?: string };
+  rpcUrls?: Partial<Record<SettlementChain, string>>;
 }
 
-/** Chains this runtime can sign submitEvidence on. */
-const SETTLEMENT_CHAINS = ['0g', 'base'] as const;
-type SettlementChain = (typeof SETTLEMENT_CHAINS)[number];
+/**
+ * Chains this runtime can sign submitEvidence on. It registers them as its
+ * `supportedChains`, so the backend only offers it tasks it can settle.
+ */
+export const SETTLEMENT_CHAINS = ['0g', 'base'] as const;
+export type SettlementChain = (typeof SETTLEMENT_CHAINS)[number];
 
 /**
  * The chain the backend named for a task. Missing means 0G (backends older
@@ -52,6 +55,15 @@ function settlementChain(taskId: string, reported: string | null | undefined): S
     );
   }
   return known;
+}
+
+/** Whether `declared` holds exactly the chains in `expected`, ignoring order
+ *  and duplicates. A missing or null list matches nothing. */
+function sameChainSet(declared: readonly string[] | null | undefined, expected: readonly string[]): boolean {
+  if (!Array.isArray(declared)) return false;
+  const have = new Set(declared);
+  const want = new Set(expected);
+  return have.size === want.size && [...want].every((c) => have.has(c));
 }
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -168,13 +180,14 @@ export class WorkerRuntime {
       };
       // Fetch existing profile — backend identifies by API key
       const result = await this.bb.getExecutorProfile();
-      this.profile = result.agent;
+      this.profile = await this.declareSupportedChains(result.agent);
     } else {
       const result = await this.bb.createAgent({
         displayName: this.config.displayName,
         capabilities: this.config.capabilities,
         minReward: this.config.minReward,
         preferredCapabilities: this.config.preferredCapabilities,
+        supportedChains: [...SETTLEMENT_CHAINS],
       });
       this.wallet = {
         address: result.wallet.address,
@@ -192,6 +205,62 @@ export class WorkerRuntime {
     this.emit({ type: 'started' });
 
     return this.profile;
+  }
+
+  /**
+   * Re-register a restored executor when its stored `supportedChains` is null
+   * or differs from SETTLEMENT_CHAINS. The backend only offers an executor
+   * tasks on the chains it declared, and a restore never registers otherwise,
+   * so an executor first registered by an older SDK would keep its old list.
+   *
+   * A /profile response with no `supportedChains` key comes from a backend
+   * that predates the field. That backend would drop the field anyway, and
+   * some of its versions reset the executor's 0G earnings on every register,
+   * so this does nothing there.
+   *
+   * The public key is derived from the private key, so a stored compressed
+   * key (which /register rejects) or a stale one is replaced with the key
+   * this runtime can decrypt with. Everything else comes from the stored
+   * profile, not this runtime's config, so a restore never rewrites it. The
+   * backend overwrites agentCardUrl and mcpEndpointUrl on every register
+   * (clearing them when absent), so they are copied from the raw /profile
+   * row, which carries them even though ExecutorProfile doesn't type them.
+   *
+   * Best-effort: on failure it logs, emits 'error', and returns the stored
+   * profile, so start() still succeeds.
+   */
+  private async declareSupportedChains(stored: ExecutorProfile): Promise<ExecutorProfile> {
+    const raw = stored as unknown as Record<string, unknown>;
+    if (!('supportedChains' in raw)) return stored;
+    if (sameChainSet(stored.supportedChains, SETTLEMENT_CHAINS)) return stored;
+
+    const optionalString = (v: unknown): string | undefined =>
+      typeof v === 'string' && v !== '' ? v : undefined;
+
+    try {
+      // No `address`: /register has no such field and registers the wallet
+      // the API key authenticates.
+      const body: Omit<RegisterExecutorInput, 'address'> = {
+        displayName: stored.displayName,
+        capabilities: stored.capabilities,
+        // Uncompressed, without 0x, as /register requires.
+        publicKey: derivePublicKey(this.wallet!.privateKey),
+        agentCardUrl: optionalString(raw.agentCardUrl),
+        mcpEndpointUrl: optionalString(raw.mcpEndpointUrl),
+        minReward: optionalString(stored.minReward),
+        // The backend reads an unset list back as []; sending [] would store
+        // an empty list where there was none.
+        preferredCapabilities: stored.preferredCapabilities?.length ? stored.preferredCapabilities : undefined,
+        supportedChains: [...SETTLEMENT_CHAINS],
+      };
+      const { agent } = await this.bb.registerExecutor(body as RegisterExecutorInput);
+      return agent ?? stored;
+    } catch (err) {
+      const error = `Could not register supported chains (${SETTLEMENT_CHAINS.join(', ')}); continuing with the stored profile: ${err}`;
+      console.warn(`[WorkerRuntime] ${error}`);
+      this.emit({ type: 'error', error });
+      return stored;
+    }
   }
 
   stop(): void {

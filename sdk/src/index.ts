@@ -214,7 +214,8 @@ export class BlindMarket {
    *   model: 'claude-sonnet-4-5',
    *   apiKey: process.env.ANTHROPIC_API_KEY!,
    *   ownerAddress: wallet.address,
-   *   ownerPublicKey: wallet.publicKey,
+   *   // Uncompressed, no 0x (`wallet` is an ethers Wallet; its `publicKey` is compressed).
+   *   ownerPublicKey: wallet.signingKey.publicKey.slice(2),
    * });
    */
   async deployAgent(params: DeployAgentParams): Promise<DeployedAgent> {
@@ -239,22 +240,26 @@ export class BlindMarket {
    */
   async createAgent(params: CreateAgentParams): Promise<CreateAgentResult> {
     const wallet = ethers.Wallet.createRandom();
+    // The uncompressed key (0x04…): /register requires it, and posters wrap
+    // brief keys to it. `wallet.publicKey` is the compressed form in ethers v6.
+    const publicKey = wallet.signingKey.publicKey;
     const executor: RegisterExecutorInput = {
       address: wallet.address as Address,
       displayName: params.displayName,
       capabilities: params.capabilities,
-      publicKey: wallet.publicKey.slice(2), // strip 0x prefix — backend expects raw hex
+      publicKey: publicKey.slice(2), // strip 0x prefix — backend expects raw hex
       agentCardUrl: params.agentCardUrl,
       mcpEndpointUrl: params.mcpEndpointUrl,
       minReward: params.minReward,
       preferredCapabilities: params.preferredCapabilities,
+      supportedChains: params.supportedChains,
     };
     const result = await this.registerExecutor(executor);
     return {
       executor: result.agent,
       wallet: {
         address: wallet.address as Address,
-        publicKey: wallet.publicKey,
+        publicKey,
         privateKey: wallet.privateKey,
       },
     };
@@ -617,7 +622,7 @@ export class BlindMarket {
    * const { url, token } = await BlindMarket.register({
    *   agentName: 'my-agent',
    *   agentWallet: wallet.address,
-   *   agentPublicKey: wallet.publicKey,
+   *   agentPublicKey: wallet.signingKey.publicKey.slice(2), // uncompressed, no 0x
    *   agentSigner: wallet,
    * });
    * console.log('Open', url, 'to confirm');

@@ -150,6 +150,10 @@ export interface ExecutorProfile {
   totalEarnedUsdcRaw?: string;
   minReward?: string;
   preferredCapabilities?: AgentCapability[];
+  /** Settlement chains the executor declared at registration. `null` means it
+   *  never declared any, which the backend treats as 0G and Base. Absent from
+   *  backends that predate the field. */
+  supportedChains?: string[] | null;
   registeredAt: string;
   decayedScore?: number;
   disputeRatio?: number;
@@ -165,6 +169,11 @@ export interface RegisterExecutorInput {
   mcpEndpointUrl?: string;
   minReward?: string;
   preferredCapabilities?: AgentCapability[];
+  /** Settlement chains ('0g', 'base', …) this executor can sign
+   *  `submitEvidence` on. The backend only offers and assigns it tasks
+   *  escrowed on these chains. Omitted: the backend's default, 0G and Base.
+   *  Backends that predate the field ignore it. */
+  supportedChains?: string[];
 }
 
 /** Params for BlindMarket.createAgent() — generates wallet + registers executor in one call. */
@@ -181,6 +190,9 @@ export interface CreateAgentParams {
   agentCardUrl?: string;
   /** MCP endpoint URL for tool-based agents. */
   mcpEndpointUrl?: string;
+  /** Settlement chains the agent can sign `submitEvidence` on. See
+   *  {@link RegisterExecutorInput.supportedChains}. */
+  supportedChains?: string[];
 }
 
 /** Result of BlindMarket.createAgent(). */

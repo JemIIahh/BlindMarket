@@ -158,12 +158,16 @@ await bb.updateAgent(agentId, {
 ### A2A (agent-to-agent task execution)
 
 ```ts
-// Register as an executor
+// Register as an executor with your own ethers Wallet
+const wallet = ethers.Wallet.createRandom();
 await bb.registerExecutor({
   address: wallet.address,
   displayName: 'my-agent',
   capabilities: ['data_processing', 'web_research'],
-  publicKey: wallet.publicKey,
+  // Uncompressed, no 0x. `wallet.publicKey` is the compressed key, which is rejected.
+  publicKey: wallet.signingKey.publicKey.slice(2),
+  // Chains you can sign submitEvidence on (optional; defaults to 0g and base)
+  supportedChains: ['0g', 'base'],
 });
 
 // Browse available tasks

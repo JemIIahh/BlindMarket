@@ -1,9 +1,16 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
-import { WorkerRuntime, type ExecuteTaskHandler, type TaskExecutionInfo } from '../src/executor/index.js';
+import {
+  SETTLEMENT_CHAINS,
+  WorkerRuntime,
+  type ExecuteTaskHandler,
+  type TaskExecutionInfo,
+  type WorkerRuntimeEvent,
+} from '../src/executor/index.js';
 import {
   aesEncrypt,
   bytesToHex,
+  derivePublicKey,
   eciesEncrypt,
   generateAesKey,
   generateKeyPair,
@@ -28,14 +35,25 @@ function jsonResponse(data: unknown): Response {
   return { status: 200, json: async () => ({ success: true, data }) } as unknown as Response;
 }
 
+/** A route value that is sent as-is instead of wrapped in a success body. */
+class RawResponse {
+  constructor(readonly response: Response) {}
+}
+
+function errorResponse(status: number, message: string): RawResponse {
+  return new RawResponse(
+    { status, json: async () => ({ success: false, error: { message } }) } as unknown as Response,
+  );
+}
+
 /** Route stubbed fetch calls by a substring match against the URL. Each
  * endpoint below has a unique path segment, so substring routing is enough. */
 function stubFetch(routes: Record<string, unknown>) {
-  const fn = vi.fn(async (url: string | URL) => {
+  const fn = vi.fn(async (url: string | URL, _init?: RequestInit) => {
     const u = String(url);
     const hit = Object.entries(routes).find(([match]) => u.includes(match));
     if (!hit) throw new Error(`worker-runtime.test.ts: unhandled fetch ${u}`);
-    return jsonResponse(hit[1]);
+    return hit[1] instanceof RawResponse ? hit[1].response : jsonResponse(hit[1]);
   });
   vi.stubGlobal('fetch', fn);
   return fn;
@@ -280,5 +298,210 @@ describe('WorkerRuntime.executeTask — settle step', () => {
     expect(fetchMock.mock.calls.some((call) => String(call[0]).includes('/finalize'))).toBe(true);
     // biome-ignore lint/suspicious/noExplicitAny: reaching into private fields to assert
     expect(((runtime as any).executions.get(TASK_ID) as TaskExecutionInfo).status).toBe('completed');
+  });
+});
+
+describe('WorkerRuntime.start — supportedChains', () => {
+  const STORED_PUBKEY = `04${'a'.repeat(128)}`;
+  const ADDRESS = '0x00000000000000000000000000000000000000e1';
+
+  /** The executor row as GET /a2a/profile returns it: the whole stored row,
+   *  including agentCardUrl/mcpEndpointUrl, which ExecutorProfile doesn't type. */
+  function storedProfile(supportedChains?: string[] | null): Record<string, unknown> {
+    return {
+      address: ADDRESS,
+      displayName: 'stored-name',
+      capabilities: [AgentCap.WEB_RESEARCH],
+      publicKey: STORED_PUBKEY,
+      agentCardUrl: 'https://card.example/agent.json',
+      mcpEndpointUrl: 'https://mcp.example/mcp',
+      minReward: '5000',
+      preferredCapabilities: [AgentCap.WEB_RESEARCH],
+      reputation: 50,
+      tasksCompleted: 3,
+      totalEarnedRaw: '0',
+      registeredAt: '2026-09-01T00:00:00.000Z',
+      ...(supportedChains === undefined ? {} : { supportedChains }),
+    };
+  }
+
+  const PRIVATE_KEY = `0x${'1'.repeat(64)}`;
+  /** Uncompressed, no 0x: what a restore must register. */
+  const DERIVED_PUBKEY = derivePublicKey(PRIVATE_KEY);
+
+  /** A runtime restored from a stored key. Its config differs from the stored
+   *  profile on every field a restore must not overwrite, and its
+   *  existingPublicKey doesn't match its private key. */
+  function restoredRuntime(): WorkerRuntime {
+    return new WorkerRuntime({
+      apiKey: 'test-key',
+      displayName: 'config-name',
+      capabilities: [AgentCap.DATA_PROCESSING],
+      minReward: '1',
+      preferredCapabilities: [AgentCap.DATA_PROCESSING],
+      executeTask: async () => ({ done: true }),
+      existingPrivateKey: PRIVATE_KEY,
+      existingAddress: ADDRESS,
+      existingPublicKey: `0x04${'b'.repeat(128)}`,
+    });
+  }
+
+  function registerBodies(fetchMock: ReturnType<typeof stubFetch>): Record<string, unknown>[] {
+    return fetchMock.mock.calls
+      .filter((call) => String(call[0]).includes('/a2a/register'))
+      .map((call) => JSON.parse(String(call[1]?.body)));
+  }
+
+  let runtime: WorkerRuntime | undefined;
+
+  beforeEach(() => {
+    // start() never signs, but a regression must not reach a real RPC.
+    vi.spyOn(ethers.Wallet.prototype, 'sendTransaction').mockRejectedValue(new Error('no network in tests'));
+  });
+
+  afterEach(() => {
+    // Clears the browse timer start() sets.
+    runtime?.stop();
+    runtime = undefined;
+  });
+
+  it('createAgent registers SETTLEMENT_CHAINS as supportedChains', async () => {
+    const fetchMock = stubFetch({
+      '/a2a/register': { agent: storedProfile(['0g', 'base']) },
+      '/a2a/tasks': { tasks: [] },
+    });
+    runtime = new WorkerRuntime({
+      apiKey: 'test-key',
+      displayName: 'fresh-agent',
+      capabilities: [AgentCap.DATA_PROCESSING],
+      executeTask: async () => ({ done: true }),
+    });
+
+    await runtime.start();
+
+    const bodies = registerBodies(fetchMock);
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].supportedChains).toEqual([...SETTLEMENT_CHAINS]);
+    expect(bodies[0].displayName).toBe('fresh-agent');
+    expect(String(bodies[0].publicKey)).toMatch(/^04[0-9a-f]{128}$/);
+  });
+
+  it.each([
+    ['null (never declared)', null],
+    ['a subset', ['0g']],
+    ['a superset', ['0g', 'base', 'arc']],
+  ])('re-registers a restored executor whose supportedChains is %s, keeping the stored profile', async (_label, chains) => {
+    const fetchMock = stubFetch({
+      '/a2a/profile': { agent: storedProfile(chains), reputation: {}, decayedReputation: {} },
+      '/a2a/register': { agent: storedProfile(['0g', 'base']) },
+      '/a2a/tasks': { tasks: [] },
+    });
+    runtime = restoredRuntime();
+
+    const profile = await runtime.start();
+
+    const bodies = registerBodies(fetchMock);
+    expect(bodies).toHaveLength(1);
+    // No address: /register has no such field.
+    expect(bodies[0]).toStrictEqual({
+      displayName: 'stored-name',
+      capabilities: [AgentCap.WEB_RESEARCH],
+      publicKey: DERIVED_PUBKEY,
+      agentCardUrl: 'https://card.example/agent.json',
+      mcpEndpointUrl: 'https://mcp.example/mcp',
+      minReward: '5000',
+      preferredCapabilities: [AgentCap.WEB_RESEARCH],
+      supportedChains: ['0g', 'base'],
+    });
+    expect(profile.supportedChains).toEqual(['0g', 'base']);
+    expect(runtime.isRunning).toBe(true);
+  });
+
+  it.each([
+    ['compressed (rejected by /register)', `03${'c'.repeat(64)}`],
+    ['for a different key', STORED_PUBKEY],
+    ['missing', undefined],
+  ])('registers the key derived from existingPrivateKey when the stored key is %s', async (_label, storedKey) => {
+    const stored = storedProfile(null);
+    if (storedKey === undefined) delete stored.publicKey;
+    else stored.publicKey = storedKey;
+    const fetchMock = stubFetch({
+      '/a2a/profile': { agent: stored },
+      '/a2a/register': { agent: storedProfile(['0g', 'base']) },
+      '/a2a/tasks': { tasks: [] },
+    });
+    runtime = restoredRuntime();
+
+    await runtime.start();
+
+    const [body] = registerBodies(fetchMock);
+    expect(body.publicKey).toBe(DERIVED_PUBKEY);
+    expect(DERIVED_PUBKEY).toMatch(/^04[0-9a-f]{128}$/);
+  });
+
+  it('omits optional fields the stored profile leaves unset', async () => {
+    const stored = storedProfile(null);
+    delete stored.agentCardUrl;
+    delete stored.mcpEndpointUrl;
+    delete stored.minReward;
+    stored.preferredCapabilities = [];
+    const fetchMock = stubFetch({
+      '/a2a/profile': { agent: stored },
+      '/a2a/register': { agent: storedProfile(['0g', 'base']) },
+      '/a2a/tasks': { tasks: [] },
+    });
+    runtime = restoredRuntime();
+
+    await runtime.start();
+
+    const [body] = registerBodies(fetchMock);
+    expect(body).not.toHaveProperty('agentCardUrl');
+    expect(body).not.toHaveProperty('mcpEndpointUrl');
+    expect(body).not.toHaveProperty('minReward');
+    expect(body).not.toHaveProperty('preferredCapabilities');
+  });
+
+  it.each([
+    ['matches, in any order', ['base', '0g']],
+    // A backend that predates the field: it would drop supportedChains, and
+    // some versions reset the executor's 0G earnings on every register.
+    ['absent from the response', undefined],
+  ])('does not re-register when the stored supportedChains %s', async (_label, chains) => {
+    const fetchMock = stubFetch({
+      '/a2a/profile': { agent: storedProfile(chains) },
+      '/a2a/tasks': { tasks: [] },
+    });
+    runtime = restoredRuntime();
+    const events: WorkerRuntimeEvent[] = [];
+    runtime.on((e) => events.push(e));
+
+    const profile = await runtime.start();
+
+    expect(registerBodies(fetchMock)).toHaveLength(0);
+    expect(profile.displayName).toBe('stored-name');
+    expect(events.some((e) => e.type === 'error')).toBe(false);
+  });
+
+  it('still starts when the re-register fails, reporting the failure as an error event', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const fetchMock = stubFetch({
+      '/a2a/profile': { agent: storedProfile(null) },
+      '/a2a/register': errorResponse(400, 'Invalid request'),
+      '/a2a/tasks': { tasks: [] },
+    });
+    runtime = restoredRuntime();
+    const events: WorkerRuntimeEvent[] = [];
+    runtime.on((e) => events.push(e));
+
+    const profile = await runtime.start();
+
+    expect(registerBodies(fetchMock)).toHaveLength(1);
+    expect(profile.displayName).toBe('stored-name');
+    expect(runtime.isRunning).toBe(true);
+    const errors = events.filter((e): e is Extract<WorkerRuntimeEvent, { type: 'error' }> => e.type === 'error');
+    expect(errors).toHaveLength(1);
+    expect(errors[0].error).toMatch(/Invalid request/);
+    expect(events.some((e) => e.type === 'started')).toBe(true);
+    expect(warn).toHaveBeenCalledOnce();
   });
 });
