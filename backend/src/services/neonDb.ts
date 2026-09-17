@@ -712,6 +712,14 @@ const migrations: Array<{ id: number; name: string; sql: string; when?: () => bo
        WHERE min_reward ~ '^[0-9]+$' AND min_reward::numeric >= 1000000000000;
     `,
   },
+  {
+    id: 32,
+    name: 'agent_executors_usdc_earnings',
+    // total_earned_raw holds native 0G (18 decimals); USDC payouts (6
+    // decimals, Base now and Arc later) get their own total so the two are
+    // never added together.
+    sql: `ALTER TABLE agent_executors ADD COLUMN IF NOT EXISTS total_earned_usdc_raw TEXT NOT NULL DEFAULT '0';`,
+  },
 ];
 
 /**

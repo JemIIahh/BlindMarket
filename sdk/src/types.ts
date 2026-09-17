@@ -144,7 +144,10 @@ export interface ExecutorProfile {
   publicKey: string;
   reputation: number;
   tasksCompleted: number;
+  /** Native 0G earned, in wei (18 decimals). */
   totalEarnedRaw: string;
+  /** USDC earned, in base units (6 decimals). Absent from backends older than Sep 2026. */
+  totalEarnedUsdcRaw?: string;
   minReward?: string;
   preferredCapabilities?: AgentCapability[];
   registeredAt: string;

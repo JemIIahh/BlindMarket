@@ -6,7 +6,7 @@ import * as escrowService from '../services/escrow.js';
 import type { AuthRequest, ApiResponse } from '../types.js';
 import * as accountingService from '../services/accountingService.js';
 import { recordWorkerPayout, recordWorkerDispute } from '../services/workerPayout.js';
-import { getTokenDecimals, provider, escrow } from '../services/chain.js';
+import { provider, escrow } from '../services/chain.js';
 import { redis } from '../services/redis.js';
 
 export const submissionsRouter = Router();
@@ -169,11 +169,10 @@ submissionsRouter.post('/confirm', requireAuth, async (req: AuthRequest, res, ne
     const taskHash = task.taskHash as string;
 
     if (completed) {
-      // Exact on-chain split from the event — no recompute, no feeBps drift.
+      // Gross from the event; recordWorkerPayout splits it with the cached fee.
       // recordWorkerPayout's marker makes this idempotent with /finalize.
-      const decimals = await getTokenDecimals(task.token);
       const gross = completed.workerPayout + completed.platformFee;
-      await recordWorkerPayout(taskHash, workerAddr, String(taskId), gross, { decimals });
+      await recordWorkerPayout(taskHash, workerAddr, String(taskId), gross, { chain: '0g', token: task.token });
       res.json({ success: true, data: { confirmed: true, passed: true } } as ApiResponse);
       return;
     }

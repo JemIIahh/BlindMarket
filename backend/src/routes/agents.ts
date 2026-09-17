@@ -28,7 +28,7 @@ import { provider, baseProvider } from '../services/chain.js';
 import { config } from '../config.js';
 import { claimDeployCredit, restoreDeployCredit } from '../services/agentFactoryListener.js';
 import { discoverModels, ProviderModelsError } from '../services/providerModels.js';
-import { normalizeSettlementAmount } from '../services/settlementUnits.js';
+import { normalizeSettlementAmount, settlementToken } from '../services/settlementUnits.js';
 
 /**
  * Owner-only guard for any agent endpoint that touches funds, keys, or
@@ -111,17 +111,10 @@ const WITHDRAW_CHAINS = {
 
 export const agentsRouter = Router();
 
-/**
- * Raw token units → decimal string. Uses the same settlement-decimals
- * logic as the frontend: USDC (6 decimals) when Base escrow is deployed,
- * native 0G (18 decimals) otherwise.
- */
-function formatNativeDecimal(raw: string): string {
-  const n = BigInt(raw);
-  // Settlement runs on Base (USDC) whenever the Base escrow is configured —
-  // BLIND_ESCROW_ADDRESS is the 0G escrow and says nothing about settlement.
-  const decimals = config.baseEscrowAddress ? 6 : 18;
-  const divisor = BigInt(10 ** decimals);
+/** Raw token units → decimal string with at most 6 fraction digits. */
+export function formatUnitsDecimal(raw: string, decimals: number): string {
+  const n = BigInt(raw || '0');
+  const divisor = 10n ** BigInt(decimals);
   const whole = (n / divisor).toString();
   const frac = (n % divisor).toString().padStart(decimals, '0').slice(0, 6);
   return `${whole}.${frac}`;
@@ -129,16 +122,21 @@ function formatNativeDecimal(raw: string): string {
 
 /**
  * Merge the on-chain-executor stats (kept in agentStore keyed by walletAddress)
- * onto a stripped DeployedAgent record. tasksCompleted + totalEarned only live
- * in the executor record.
+ * onto a stripped DeployedAgent record. tasksCompleted and earnings only live
+ * in the executor record. Earnings come per currency (USDC and native 0G are
+ * never added together); `totalEarned` repeats the one services are priced
+ * in, for clients that read only that field.
  */
 async function withExecutorStats<T extends { walletAddress?: string }>(stripped: T) {
-  if (!stripped.walletAddress) return { ...stripped, tasksCompleted: 0, totalEarned: '0' };
-  const exec = await agentStore.getAgent(stripped.walletAddress);
+  const exec = stripped.walletAddress ? await agentStore.getAgent(stripped.walletAddress) : undefined;
+  const totalEarnedUsdc = formatUnitsDecimal(exec?.totalEarnedUsdcRaw ?? '0', 6);
+  const totalEarnedNative = formatUnitsDecimal(exec?.totalEarnedRaw ?? '0', 18);
   return {
     ...stripped,
     tasksCompleted: exec?.tasksCompleted ?? 0,
-    totalEarned: formatNativeDecimal(exec?.totalEarnedRaw ?? '0'),
+    totalEarned: settlementToken().symbol === 'USDC' ? totalEarnedUsdc : totalEarnedNative,
+    totalEarnedUsdc,
+    totalEarnedNative,
   };
 }
 

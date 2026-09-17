@@ -17,6 +17,8 @@ import * as a2aStore from './a2aStore.js';
 import * as semanticMatch from './semanticMatch.js';
 import * as semanticProof from './semanticProof.js';
 import { redis } from './redis.js';
+import { payoutCurrency } from './settlementUnits.js';
+import type { TaskChain } from './taskChain.js';
 
 // Earned-badge threshold: N settled completions per (agent, capability) with a
 // failure ratio under the cap. 5 real paid escrow settlements can't be faked
@@ -42,12 +44,14 @@ export async function getFeeBps(): Promise<number> {
 
 /**
  * Record a successful task completion on the executor's record: bump
- * tasksCompleted, reputation, and totalEarnedRaw TOGETHER by the worker's share
- * of the escrow (gross amount minus platform fee).
+ * tasksCompleted, reputation, and the earnings total for the task's currency
+ * TOGETHER by the worker's share of the escrow (gross amount minus platform
+ * fee). Native 0G and USDC have separate totals; `settlement` (the task's
+ * chain and escrow token) picks one, via payoutCurrency.
  *
- * The on-chain id and gross amount are resolved by the CALLER (which has already
- * confirmed the task is indexed + settled on-chain) and passed in — this
- * function never does its own getTaskIdByHash lookup. That closes the
+ * The on-chain id, gross amount and token are resolved by the CALLER (which
+ * has already confirmed the task is indexed + settled on-chain) and passed in
+ * — this function never does its own getTaskIdByHash lookup. That closes the
  * "3 tasks · 0 0G" drift: previously tasksCompleted was bumped unconditionally
  * while totalEarnedRaw was only written if a SECOND, internal getTaskIdByHash
  * happened to resolve.
@@ -57,6 +61,13 @@ export async function getFeeBps(): Promise<number> {
  * settlement (a /finalize retry after a lost response, the /verdict route, the
  * DisputeResolved listener). Without it, settle-then-credit retries and the
  * event listener could each credit the same payout.
+ *
+ * A task escrowed in a token BlindMarket doesn't settle in (or in a unit no
+ * earnings total holds) is not credited at all: it is logged, parked under
+ * a2a:uncredited:<taskHash> (listed in the set a2a:uncredited:all) for a
+ * backfill, and left unmarked so a build that knows the token can still
+ * credit it. That returns normally even with `rethrow`, because retrying
+ * cannot help, and callers have already recorded the settlement.
  *
  * Persists to the agent store so the /agents endpoint can surface these
  * stats to the UI without re-deriving from on-chain history. If anything in
@@ -68,16 +79,30 @@ export async function recordWorkerPayout(
   executorAddr: string,
   onChainId: string,
   grossAmount: bigint,
+  settlement: { chain: TaskChain; token: string },
   opts: {
     rethrow?: boolean;
     serviceId?: number;
     computeCostMicroUnits?: number;
-    /** Token decimals: 6 for USDC (Base), 18 for native 0G. */
-    decimals?: number;
     meta?: import('../types.js').A2ATaskMeta;
   } = {},
 ): Promise<void> {
   const creditedKey = `a2a:credited:${taskHash.toLowerCase()}`;
+  const unit = payoutCurrency(settlement.chain, settlement.token);
+  if (!unit || !agentStore.hasEarningsTotal(unit)) {
+    const parked = {
+      chain: settlement.chain, token: settlement.token, taskHash, onChainId,
+      executor: executorAddr.toLowerCase(), grossAmount: grossAmount.toString(),
+    };
+    console.error(`[payout] UNCREDITED_TOKEN ${JSON.stringify(parked)}`);
+    try {
+      await redis.set(`a2a:uncredited:${taskHash.toLowerCase()}`, JSON.stringify(parked));
+      await redis.sadd('a2a:uncredited:all', taskHash.toLowerCase());
+    } catch (e) {
+      console.error(`[payout] could not park ${taskHash.slice(0, 10)}…:`, (e as Error).message);
+    }
+    return;
+  }
   try {
     // At-most-once gate. NX returns null when the key already exists — some
     // other path already credited this task; nothing to do. On any FAILURE
@@ -90,23 +115,13 @@ export async function recordWorkerPayout(
       return;
     }
 
-    const agent = await agentStore.getAgent(executorAddr);
-    if (!agent) {
-      // Executor not registered (yet) — release the marker so a later
-      // observation can credit once the registration exists.
-      console.warn(`[a2a] payout for ${taskHash.slice(0, 10)}… not credited: executor ${executorAddr} is not registered`);
-      await redis.del(creditedKey).catch(() => {});
-      return;
-    }
-
     const feeBps = await getFeeBps();
-    const decimals = opts.decimals ?? 18;
-    const decimalsDivisor = 10 ** decimals;
+    const decimalsDivisor = 10 ** unit.decimals;
 
     // Convert micro-units (1e-6 USDC) to chain units.
     // USDC (6 decimals): 1 micro-unit = 1e-6, so no conversion needed.
     // Native 0G (18 decimals): 1 micro-unit = 1e-12 chain units.
-    const computeCostChain = decimals === 6
+    const computeCostChain = unit.decimals === 6
       ? BigInt(Math.floor(opts.computeCostMicroUnits ?? 0))
       : BigInt(Math.floor((opts.computeCostMicroUnits ?? 0) * 1e12));
     const afterComputeCost = grossAmount > computeCostChain ? grossAmount - computeCostChain : 0n;
@@ -114,15 +129,13 @@ export async function recordWorkerPayout(
     const workerShare = (afterComputeCost * (10_000n - BigInt(feeBps))) / 10_000n;
     const platformFee = afterComputeCost - workerShare;
 
-    // tasksCompleted, reputation, and totalEarnedRaw move as one unit — the task
-    // counter is never advanced without crediting the matching earnings.
-    agent.tasksCompleted += 1;
-    agent.reputation = Math.min(100, agent.reputation + 1);
-    const prev = BigInt(agent.totalEarnedRaw ?? '0');
-    agent.totalEarnedRaw = (prev + workerShare).toString();
-    if (!(await agentStore.updateAgentStats(executorAddr, agent))) {
-      // Removed since the read above: same as never registered.
-      console.warn(`[a2a] payout for ${taskHash.slice(0, 10)}… not credited: executor ${executorAddr} disappeared before the write`);
+    // tasksCompleted, reputation, and the earnings total move as one unit —
+    // the task counter is never advanced without crediting the matching
+    // earnings.
+    if (!(await agentStore.creditPayout(executorAddr, unit, workerShare))) {
+      // Executor not registered (yet) — release the marker so a later
+      // observation can credit once the registration exists.
+      console.warn(`[a2a] payout for ${taskHash.slice(0, 10)}… not credited: executor ${executorAddr} is not registered`);
       await redis.del(creditedKey).catch(() => {});
       return;
     }
@@ -139,7 +152,7 @@ export async function recordWorkerPayout(
     }
 
     // Mirror the payout into the accounting ledger so the Earnings page can
-    // surface it. Native 0G has 18 decimals.
+    // surface it, in whole units of the task's currency.
     try {
       // Ledger convention (must match submissions.ts /verify):
       //   amount = GROSS escrow (worker share + platform fee)
@@ -148,7 +161,9 @@ export async function recordWorkerPayout(
       // Passing `net` explicitly avoids recordTransaction's default of
       // `amount − fee`, which — when amount was the already-net workerShare —
       // subtracted the fee a second time and zeroed out Net revenue.
-      accountingService.recordTransaction({
+      // Awaited so a failed write lands in the catch below instead of becoming
+      // an unhandled rejection, which ends the process on Node 22.
+      await accountingService.recordTransaction({
         address: executorAddr.toLowerCase(),
         role: 'worker',
         taskId: onChainId,
@@ -232,11 +247,7 @@ export async function recordWorkerPayout(
  */
 export async function recordWorkerDispute(taskHash: string, executorAddr: string, opts: { rethrow?: boolean } = {}): Promise<void> {
   try {
-    const agent = await agentStore.getAgent(executorAddr);
-    if (agent) {
-      agent.reputation = Math.max(0, agent.reputation - 10);
-      await agentStore.updateAgentStats(executorAddr, agent);
-    }
+    await agentStore.adjustReputation(executorAddr, -10);
     await reputationDecay.recordDispute(executorAddr, taskHash);
     // Per-skill proof: a dispute counts against the task's capability tags
     // AND the same resolved skill slug the success path would have credited

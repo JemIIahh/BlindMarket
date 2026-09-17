@@ -155,11 +155,14 @@ export interface AgentExecutor {
   mcpEndpointUrl?: string;
   reputation: number; // 0-100
   tasksCompleted: number;
-  // Sum of worker payouts in smallest token unit (e.g. USDC micro-units; 6
-  // decimals). Stored as a decimal string because BigInt doesn't survive
-  // JSON.stringify. Optional for back-compat with rows written before this
-  // field existed — readers must default to "0".
+  // Sums of worker payouts in each currency's smallest unit, as decimal
+  // strings because BigInt doesn't survive JSON.stringify: native 0G wei (18
+  // decimals) and USDC base units (6 decimals, Base and Arc). Never add them
+  // together. Optional for back-compat — readers must default to "0". Rows
+  // written before Sep 2026 may hold USDC amounts in totalEarnedRaw until
+  // scripts/backfill-earnings-by-chain.ts runs.
   totalEarnedRaw?: string;
+  totalEarnedUsdcRaw?: string;
   registeredAt: string;
 }
 

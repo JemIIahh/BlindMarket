@@ -2142,13 +2142,9 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
       await a2aStore.updateState(taskHash, { status: reconciledStatus, verificationResult: reconciled });
       if (settledPass) {
         const computeCostMicroUnits = consumePendingCost(taskHash);
-        await recordWorkerPayout(taskHash, address, ocId, onChainTask.amount, {
+        await recordWorkerPayout(taskHash, address, ocId, onChainTask.amount, { chain: ocIdChain, token: onChainTask.token }, {
           serviceId: meta.serviceId,
           computeCostMicroUnits,
-          // Base settles in USDC (6 decimals); 0G in native (18). Without
-          // this the accounting ledger divides a USDC amount by 1e18 and the
-          // Earnings page never moves off zero.
-          decimals: ocIdChain === 'base' ? 6 : 18,
           meta,
         });
       } else {
@@ -2196,13 +2192,9 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
     if (verificationResult.passed) {
       // Deduct sandbox compute costs from worker's payout
       const computeCostMicroUnits = consumePendingCost(taskHash);
-      await recordWorkerPayout(taskHash, address, ocId, onChainTask.amount, {
+      await recordWorkerPayout(taskHash, address, ocId, onChainTask.amount, { chain: ocIdChain, token: onChainTask.token }, {
         serviceId: meta.serviceId,
         computeCostMicroUnits,
-        // Base settles in USDC (6 decimals); 0G in native (18). Without
-        // this the accounting ledger divides a USDC amount by 1e18 and the
-        // Earnings page never moves off zero.
-        decimals: ocIdChain === 'base' ? 6 : 18,
         meta,
       });
     } else {
@@ -2326,12 +2318,8 @@ a2aRouter.post('/tasks/:id/verify', requireAuth, async (req: AuthRequest, res, n
 
     if (passed && state.executorAddress) {
       const computeCostMicroUnits = consumePendingCost(taskHash);
-      await recordWorkerPayout(taskHash, state.executorAddress, ocId, onChainTask.amount, {
+      await recordWorkerPayout(taskHash, state.executorAddress, ocId, onChainTask.amount, { chain: ocIdChain, token: onChainTask.token }, {
         computeCostMicroUnits,
-        // Base settles in USDC (6 decimals); 0G in native (18). Without
-        // this the accounting ledger divides a USDC amount by 1e18 and the
-        // Earnings page never moves off zero.
-        decimals: ocIdChain === 'base' ? 6 : 18,
         meta,
       });
     } else if (!passed && state.executorAddress) {
@@ -2490,12 +2478,8 @@ a2aRouter.post('/tasks/:id/verdict', requireAuth, async (req: AuthRequest, res, 
       // ocId + onChainTask were already resolved + gated above (status must be
       // Completed=4 here), so the payout credit can't be lost to an indexing race.
       const computeCostMicroUnits = consumePendingCost(taskHash);
-      await recordWorkerPayout(taskHash, state.executorAddress, ocId, onChainTask.amount, {
+      await recordWorkerPayout(taskHash, state.executorAddress, ocId, onChainTask.amount, { chain: ocIdChain, token: onChainTask.token }, {
         computeCostMicroUnits,
-        // Base settles in USDC (6 decimals); 0G in native (18). Without
-        // this the accounting ledger divides a USDC amount by 1e18 and the
-        // Earnings page never moves off zero.
-        decimals: ocIdChain === 'base' ? 6 : 18,
         meta,
       });
     } else if (!passed && state.executorAddress) {
