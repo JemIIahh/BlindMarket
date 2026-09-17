@@ -5,9 +5,10 @@
  *
  * An admin resolveDispute pays the worker (or refunds the poster) entirely
  * outside the /finalize|/verify|/verdict routes, so this listener is the only
- * observer of the ruling. A failed event is retried on the next tick, and
- * parked after MAX_DISPUTE_ATTEMPTS so one bad event can't hold the
- * indexer's checkpoint forever.
+ * observer of the ruling. A failed event is retried on the next scan. One
+ * that is still failing after PARK_MIN_ATTEMPTS tries and PARK_MIN_FAILING_MS
+ * is parked so it stops holding the indexer's checkpoint, and the poll loop
+ * retries parked events every PARKED_RETRY_MS until they succeed.
  */
 
 import { redis } from './redis.js';
@@ -16,53 +17,136 @@ import * as a2aStore from './a2aStore.js';
 import { loadAgentBySmartAccount } from './deployedAgentStore.js';
 import { notifyLifecycle } from './notificationStore.js';
 import { recordWorkerPayout, recordWorkerDispute } from './workerPayout.js';
+import { disputeKeys } from './disputeKeys.js';
 import type { TaskChain } from './taskChain.js';
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 const ZERO_HASH = `0x${'0'.repeat(64)}`;
 
-/** Ticks one event may fail before it is parked. At the 5s poll interval,
- *  about 100s of consecutive failures. An RPC outage usually fails the
- *  event query first, which doesn't count. */
-export const MAX_DISPUTE_ATTEMPTS = 20;
+/** Both must be reached before an event is parked. Scans also run from
+ *  request paths, so the attempt count alone says little about how long an
+ *  event has been failing. */
+export const PARK_MIN_ATTEMPTS = 10;
+export const PARK_MIN_FAILING_MS = 5 * 60_000;
+export const PARKED_RETRY_MS = 10 * 60_000;
 
-const KEY = {
-  // Task ids are per-escrow counters, so the chain is part of every key.
-  attempts: (chain: TaskChain, taskId: bigint) => `a2a:dispute-attempts:${chain}:${taskId}`,
-  /** Hash of `<chain>:<taskId>` → JSON of the parked event. */
-  parked: 'a2a:dispute-parked',
-};
 const ATTEMPTS_TTL_SECONDS = 24 * 60 * 60;
+const DONE_TTL_SECONDS = 30 * 24 * 60 * 60;
+
+interface ParkedDispute {
+  workerFavored: boolean;
+  attempts: number;
+  firstFailedAt: string;
+  parkedAt: string;
+  error: string;
+  retries: number;
+  lastTriedAt?: string;
+}
 
 /**
  * Process one DisputeResolved event. Throws when it should be retried, so the
- * caller keeps its checkpoint; returns once it is processed or parked.
+ * caller keeps its checkpoint; returns once it is processed, already
+ * processed, or parked.
  */
-export async function handleDisputeResolved(chain: TaskChain, taskId: bigint, workerFavored: boolean): Promise<void> {
-  const attemptsKey = KEY.attempts(chain, taskId);
+export async function handleDisputeResolved(
+  chain: TaskChain,
+  taskId: bigint,
+  workerFavored: boolean,
+  now = Date.now(),
+): Promise<void> {
+  const keys = disputeKeys(chain);
+  const id = taskId.toString();
+  // Seen again: a chunk retried for a later event, or a re-scan.
+  if (await redis.exists(keys.done(id))) return;
+  if (await redis.hexists(keys.parked, id)) return;
+
   try {
     await processDisputeResolved(chain, taskId, workerFavored);
   } catch (err) {
-    const attempts = await redis.incr(attemptsKey);
+    const message = (err as Error).message;
+    const attemptsKey = keys.attempts(id);
+    // A Redis failure here propagates: the event is retried, never parked.
+    const attempts = await redis.hincrby(attemptsKey, 'count', 1);
+    await redis.hsetnx(attemptsKey, 'firstAt', String(now));
     await redis.expire(attemptsKey, ATTEMPTS_TTL_SECONDS).catch(() => {});
-    if (attempts < MAX_DISPUTE_ATTEMPTS) throw err;
+    const storedFirstAt = Number(await redis.hget(attemptsKey, 'firstAt'));
+    const firstAt = Number.isFinite(storedFirstAt) ? storedFirstAt : now;
+    if (attempts < PARK_MIN_ATTEMPTS || now - firstAt < PARK_MIN_FAILING_MS) {
+      throw new Error(`DisputeResolved ${chain} taskId=${id}: ${message}`);
+    }
 
-    const parked = {
-      chain,
-      taskId: taskId.toString(),
+    const parked: ParkedDispute = {
       workerFavored,
       attempts,
-      error: (err as Error).message,
-      parkedAt: new Date().toISOString(),
+      firstFailedAt: new Date(firstAt).toISOString(),
+      parkedAt: new Date(now).toISOString(),
+      error: message,
+      retries: 0,
     };
-    await redis.hset(KEY.parked, `${chain}:${taskId}`, JSON.stringify(parked));
+    await redis.hset(keys.parked, id, JSON.stringify(parked));
     await redis.del(attemptsKey).catch(() => {});
-    // Earnings can be repaired with scripts/backfill-earnings-by-chain.ts; the
-    // task state and dispute reputation need a manual look.
-    console.error(`[disputes] PARKED ${JSON.stringify(parked)}`);
+    console.error(
+      `[disputes] PARKED ${chain} taskId=${id} ${JSON.stringify(parked)}; retried every ${PARKED_RETRY_MS / 60_000} min`,
+    );
     return;
   }
-  await redis.del(attemptsKey).catch(() => {});
+  await markDone(chain, id);
+}
+
+const lastParkedRetry = new Map<TaskChain, number>();
+
+/**
+ * Retry a chain's parked events, at most once per PARKED_RETRY_MS. Called by
+ * the poll loop only, never from a request path. Never throws.
+ */
+export async function retryParkedDisputes(chain: TaskChain, now = Date.now()): Promise<void> {
+  const last = lastParkedRetry.get(chain);
+  if (last !== undefined && now - last < PARKED_RETRY_MS) return;
+  lastParkedRetry.set(chain, now);
+
+  const keys = disputeKeys(chain);
+  let entries: Record<string, string>;
+  try {
+    entries = await redis.hgetall(keys.parked);
+  } catch (err) {
+    console.warn(`[disputes] could not read parked ${chain} rulings: ${(err as Error).message}`);
+    return;
+  }
+
+  for (const [id, raw] of Object.entries(entries)) {
+    let parked: ParkedDispute;
+    try {
+      parked = JSON.parse(raw) as ParkedDispute;
+    } catch {
+      console.error(`[disputes] parked ${chain} taskId=${id} is unreadable: ${raw}`);
+      continue;
+    }
+    try {
+      if (!(await redis.exists(keys.done(id)))) {
+        await processDisputeResolved(chain, BigInt(id), parked.workerFavored);
+        await markDone(chain, id);
+      }
+      await redis.hdel(keys.parked, id);
+      console.log(`[disputes] parked ${chain} taskId=${id} processed on retry ${parked.retries + 1}`);
+    } catch (err) {
+      const next: ParkedDispute = {
+        ...parked,
+        retries: parked.retries + 1,
+        error: (err as Error).message,
+        lastTriedAt: new Date(now).toISOString(),
+      };
+      await redis.hset(keys.parked, id, JSON.stringify(next)).catch(() => {});
+      console.error(`[disputes] parked ${chain} taskId=${id} failed retry ${next.retries}: ${next.error}`);
+    }
+  }
+}
+
+async function markDone(chain: TaskChain, id: string): Promise<void> {
+  const keys = disputeKeys(chain);
+  // The work is done; a failed marker write only means a re-observed event
+  // runs again, which the credit and dispute markers make harmless.
+  await redis.set(keys.done(id), '1', 'EX', DONE_TTL_SECONDS).catch(() => {});
+  await redis.del(keys.attempts(id)).catch(() => {});
 }
 
 /**
@@ -113,10 +197,10 @@ async function processDisputeResolved(chain: TaskChain, taskId: bigint, workerFa
       meta,
     });
   } else if (!workerFavored && hasWorker) {
-    // At-most-once for this listener only (chunk retries re-observe events;
-    // recordWorkerDispute itself has no guard because the routes legitimately
-    // record one dispute per failed round). Released on failure so a
-    // transient blip stays retryable, like the a2a:credited marker.
+    // At-most-once for this listener only (recordWorkerDispute itself has no
+    // guard because the routes legitimately record one dispute per failed
+    // round). Released on failure so a transient blip stays retryable, like
+    // the a2a:credited marker.
     const disputedKey = `a2a:dispute-recorded:${taskHash}`;
     const first = await redis.set(disputedKey, executor.toLowerCase(), 'NX');
     if (first !== null) {

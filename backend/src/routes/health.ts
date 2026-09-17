@@ -5,6 +5,7 @@ import { escrow, marketplaceSigner, provider, baseEscrow, baseMarketplaceSigner,
 import { isBridgeReady } from '../services/a2aSettlement.js';
 import { chainNetwork } from '../services/chainNetwork.js';
 import { escrowFingerprintError } from '../services/escrowFingerprint.js';
+import { parkedDisputeCount } from '../services/disputeKeys.js';
 import { config } from '../config.js';
 import { redis, redisSub } from '../services/redis.js';
 import { getPool, getSchemaStatus, latestMigrationId } from '../services/neonDb.js';
@@ -142,6 +143,16 @@ function indexerError(chain: '0g' | 'base'): { indexerError?: string } {
   return error ? { indexerError: error } : {};
 }
 
+/** `parkedDisputes` when a chain has dispute rulings the listener parked. */
+async function parkedDisputes(chain: '0g' | 'base'): Promise<{ parkedDisputes?: number }> {
+  try {
+    const count = await withTimeout(parkedDisputeCount(chain), 1_000);
+    return count > 0 ? { parkedDisputes: count } : {};
+  } catch {
+    return {};
+  }
+}
+
 // GET /api/v1/health/bridge — surfaces the A2A settlement bridge config
 // without needing backend log access. Each settlement chain is reported on its
 // own: a task lives on exactly one chain, so one chain being ready is enough to
@@ -158,9 +169,11 @@ healthRouter.get('/bridge', async (_req, res, next) => {
     // below dereference them.
     const ogReady = isBridgeReady('0g') && !!marketplaceSigner;
     const baseReady = isBridgeReady('base') && !!baseEscrow && !!baseMarketplaceSigner;
-    const [og, base] = await Promise.all([
+    const [og, base, ogParked, baseParked] = await Promise.all([
       ogReady ? zeroGBridge() : null,
       baseReady ? baseBridge() : null,
+      parkedDisputes('0g'),
+      parkedDisputes('base'),
     ]);
 
     const ogEscrow = escrowOrNull(config.blindEscrowAddress);
@@ -192,6 +205,7 @@ healthRouter.get('/bridge', async (_req, res, next) => {
             escrowAddress: ogEscrow,
             ...(ogReason ? { reason: ogReason } : {}),
             ...indexerError('0g'),
+            ...ogParked,
           },
           {
             chain: 'base',
@@ -201,6 +215,7 @@ healthRouter.get('/bridge', async (_req, res, next) => {
             escrowAddress: baseEscrowAddress,
             ...(baseReason ? { reason: baseReason } : {}),
             ...indexerError('base'),
+            ...baseParked,
           },
         ],
       },

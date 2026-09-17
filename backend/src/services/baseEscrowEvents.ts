@@ -19,13 +19,14 @@
  *   base:events:dispute-checkpoint  → last block scanned for DisputeResolved
  *
  * so a failing ruling delays only other rulings, never task indexing. The
- * dispute scan never passes the TaskCreated checkpoint.
+ * dispute scan never passes the TaskCreated checkpoint, and runs from the
+ * poll loop only: request paths that force a tick need TaskCreated alone.
  */
 
 import type { EventLog } from 'ethers';
 import { baseEscrow, baseProvider } from './chain.js';
 import { redis } from './redis.js';
-import { handleDisputeResolved } from './disputeListener.js';
+import { handleDisputeResolved, retryParkedDisputes } from './disputeListener.js';
 import { checkEscrowFingerprint } from './escrowFingerprint.js';
 import { config } from '../config.js';
 
@@ -54,7 +55,9 @@ const LAG_LOG_INTERVAL_MS = 60_000;
 // ── State ───────────────────────────────────────────────────────────────────
 
 let timer: NodeJS.Timeout | null = null;
-let inFlightPromise: Promise<void> | null = null;
+let inFlightPromise: Promise<number | null> | null = null;
+let disputesInFlight = false;
+let disputeCheckpointSeeded = false;
 
 let lastFailureSig: string | null = null;
 let consecutiveFailures = 0;
@@ -63,8 +66,9 @@ let lastDisputeFailure: string | null = null;
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
+/** Index TaskCreated now (request paths). Rulings wait for the poll loop. */
 export async function forceBaseTick(): Promise<void> {
-  await tick();
+  await indexOnce();
 }
 
 export async function getBaseTaskIdByHash(taskHash: string): Promise<string | null> {
@@ -85,8 +89,8 @@ export async function getBaseTaskHashById(taskId: bigint | string | number): Pro
 
 export function startBaseEscrowEventLoop(): void {
   if (timer) return;
-  void tick();
-  timer = setInterval(tick, POLL_INTERVAL_MS);
+  void pollBaseEscrowOnce();
+  timer = setInterval(() => void pollBaseEscrowOnce(), POLL_INTERVAL_MS);
   console.log(`[baseEscrowEvents] polling Base BlindEscrow every ${POLL_INTERVAL_MS / 1000}s`);
 }
 
@@ -97,30 +101,39 @@ export function stopBaseEscrowEventLoop(): void {
 
 // ── Core poll loop ──────────────────────────────────────────────────────────
 
-async function tick(): Promise<void> {
-  if (inFlightPromise) return inFlightPromise;
+/**
+ * One iteration of the poll loop: TaskCreated, then DisputeResolved up to
+ * where tasks are indexed, then parked rulings.
+ */
+export async function pollBaseEscrowOnce(): Promise<void> {
+  const indexedTo = await indexOnce();
+  if (indexedTo === null || disputesInFlight) return;
+  disputesInFlight = true;
+  try {
+    await indexDisputes(indexedTo);
+    await retryParkedDisputes('base');
+  } finally {
+    disputesInFlight = false;
+  }
+}
 
+/** One TaskCreated pass, shared by concurrent callers. Resolves to the
+ *  TaskCreated checkpoint after the pass, or null when it failed. */
+function indexOnce(): Promise<number | null> {
+  if (inFlightPromise) return inFlightPromise;
   inFlightPromise = (async () => {
-    if (!baseEscrow) return;
     try {
-      const indexed = await indexTaskCreated();
-      if (indexed) await indexDisputes(indexed);
+      return baseEscrow ? await indexTaskCreated() : null;
     } finally {
       inFlightPromise = null;
     }
   })();
-
   return inFlightPromise;
 }
 
-/** The TaskCreated checkpoint before and after a successful pass. */
-interface IndexedRange {
-  before: number;
-  after: number;
-}
-
-/** Index TaskCreated events. Returns null when the pass failed. */
-async function indexTaskCreated(): Promise<IndexedRange | null> {
+/** Index TaskCreated events. Returns the checkpoint after the pass, or
+ *  null when it failed. */
+async function indexTaskCreated(): Promise<number | null> {
   if (!baseEscrow) return null;
 
   try {
@@ -139,7 +152,16 @@ async function indexTaskCreated(): Promise<IndexedRange | null> {
         : latest;
       await redis.set(KEY.checkpoint, String(from - 1));
     }
-    if (from > latest) return { before: from - 1, after: from - 1 };
+    if (!disputeCheckpointSeeded) {
+      // Rulings are scanned from where task indexing stood when this code
+      // first ran against this Redis: on an existing deployment, rulings
+      // before that are for the earnings backfill; on a new Redis this is
+      // the deployment block. Seeded by whichever pass runs first, forced or
+      // not, so no forced pass can move task indexing past unscanned blocks.
+      await redis.set(KEY.disputeCheckpoint, String(from - 1), 'NX');
+      disputeCheckpointSeeded = true;
+    }
+    if (from > latest) return from - 1;
 
     const to = Math.min(latest, from + MAX_BLOCKS_PER_TICK - 1);
     const lagBlocks = latest - to;
@@ -179,7 +201,7 @@ async function indexTaskCreated(): Promise<IndexedRange | null> {
       lastFailureSig = null;
       consecutiveFailures = 0;
     }
-    return { before: from - 1, after: to };
+    return to;
   } catch (e) {
     const err = e as Error & { errors?: Error[] };
     const msg = err.errors?.length
@@ -199,28 +221,20 @@ async function indexTaskCreated(): Promise<IndexedRange | null> {
 }
 
 /**
- * Mirror DisputeResolved rulings up to the TaskCreated checkpoint. With no
- * dispute checkpoint yet, scanning starts where this tick's TaskCreated pass
- * started: on an existing deployment that is where the listener was switched
- * on (earlier rulings are for the earnings backfill), on a new Redis it is
- * the deployment block. A failed event leaves the checkpoint where it was, so
- * the next tick retries it.
+ * Mirror DisputeResolved rulings up to `indexedTo`, the TaskCreated
+ * checkpoint. A failed event leaves the checkpoint where it was, so the next
+ * poll retries it.
  */
-async function indexDisputes(indexed: IndexedRange): Promise<void> {
+async function indexDisputes(indexedTo: number): Promise<void> {
   if (!baseEscrow) return;
 
   try {
     const checkpointRaw = await redis.get(KEY.disputeCheckpoint);
-    let last: number;
-    if (checkpointRaw) {
-      last = Number(checkpointRaw);
-    } else {
-      last = indexed.before;
-      await redis.set(KEY.disputeCheckpoint, String(last));
-    }
-    const from = last + 1;
-    if (from > indexed.after) return;
-    const to = Math.min(indexed.after, from + MAX_BLOCKS_PER_TICK - 1);
+    // Seeded by the TaskCreated pass; missing only if that write failed.
+    if (checkpointRaw === null) return;
+    const from = Number(checkpointRaw) + 1;
+    if (from > indexedTo) return;
+    const to = Math.min(indexedTo, from + MAX_BLOCKS_PER_TICK - 1);
 
     const events = await baseEscrow.queryFilter(baseEscrow.filters.DisputeResolved(), from, to);
     for (const ev of events) {

@@ -22,15 +22,25 @@
  * that changes while the script runs (a payout lands) is skipped and
  * reported; re-run to pick it up.
  *
+ * The backend credits payouts as increments and this script writes totals,
+ * so a DisputeResolved ruling the backend credits after this script counted
+ * it would count twice. --apply therefore reads the backend's Redis
+ * (REDIS_URL) and waits until each chain's ruling scan has passed the blocks
+ * read here and no ruling is still retrying or parked, for up to
+ * BACKFILL_LISTENER_WAIT_MS (default 10 minutes).
+ * Deploy the dispute listener before running this. --skip-listener-check
+ * bypasses the wait; use it only with the backend stopped.
+ *
  * Usage (from backend/, with the target's env):
  *   DATABASE_URL=postgres://… \
  *   OG_RPC_URL=https://evmrpc.0g.ai BLIND_ESCROW_ADDRESS=0x3d03… ESCROW_DEPLOYMENT_BLOCK=33459885 \
  *   BASE_RPC_URL=https://sepolia.base.org BASE_ESCROW_ADDRESS=0xCca5… \
  *   BASE_ESCROW_DEPLOYMENT_BLOCK=46211199 BASE_USDC_ADDRESS=0x036C… \
- *   npx tsx scripts/backfill-earnings-by-chain.ts [--apply]
+ *   REDIS_URL=redis://… \
+ *   npx tsx scripts/backfill-earnings-by-chain.ts [--apply] [--skip-listener-check]
  *
  * With --apply every variable above except the Base ones is required (a dry
- * run falls back to the 0G mainnet values). Leave BASE_ESCROW_ADDRESS empty
+ * run falls back to the 0G mainnet values; REDIS_URL is not read). Leave BASE_ESCROW_ADDRESS empty
  * to skip Base. BACKFILL_BLOCK_CHUNK sets the
  * getLogs range (default 10000; halved automatically when an RPC refuses).
  * Run migration 32 first (the backend applies it at boot).
@@ -40,6 +50,7 @@ import { config as loadEnv } from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import pg from 'pg';
+import { Redis } from 'ioredis';
 import { Contract, JsonRpcProvider, getAddress, type EventLog } from 'ethers';
 import {
   addPayout,
@@ -54,6 +65,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 loadEnv({ path: path.resolve(__dirname, '../.env') });
 
 const APPLY = process.argv.includes('--apply');
+const SKIP_LISTENER_CHECK = process.argv.includes('--skip-listener-check');
+const LISTENER_WAIT_MS = Number(process.env.BACKFILL_LISTENER_WAIT_MS ?? 10 * 60_000);
+const LISTENER_POLL_MS = 15_000;
 const CHUNK = Number(process.env.BACKFILL_BLOCK_CHUNK ?? 10_000);
 const MIN_CHUNK = 500;
 const NATIVE = '0x0000000000000000000000000000000000000000';
@@ -71,6 +85,9 @@ interface EscrowSource {
   fromBlock: number;
   /** The only token this escrow's payouts may be in. */
   token: string;
+  /** The backend's Redis keys for this chain (services/escrowFingerprint,
+   *  disputeKeys, and the indexer that scans DisputeResolved). */
+  redisKeys: { fingerprint: string; rulingsScannedTo: string; attempts: string; parked: string };
 }
 
 function required(name: string): string {
@@ -98,6 +115,13 @@ function sources(): EscrowSource[] {
     escrow: APPLY ? required('BLIND_ESCROW_ADDRESS') : process.env.BLIND_ESCROW_ADDRESS || '0x3d0374963DaaD43e31d42373eb11156A8e8ce2Ff',
     fromBlock: positiveBlock('ESCROW_DEPLOYMENT_BLOCK', APPLY ? undefined : 33_459_885),
     token: NATIVE,
+    // 0G scans rulings in its TaskCreated pass, under one checkpoint.
+    redisKeys: {
+      fingerprint: 'a2a:events:escrow',
+      rulingsScannedTo: 'a2a:events:checkpoint',
+      attempts: 'a2a:dispute-attempts:*',
+      parked: 'a2a:dispute-parked',
+    },
   }];
   const baseEscrow = process.env.BASE_ESCROW_ADDRESS;
   if (baseEscrow) {
@@ -108,6 +132,12 @@ function sources(): EscrowSource[] {
       escrow: baseEscrow,
       fromBlock: positiveBlock('BASE_ESCROW_DEPLOYMENT_BLOCK'),
       token: required('BASE_USDC_ADDRESS'),
+      redisKeys: {
+        fingerprint: 'base:events:escrow',
+        rulingsScannedTo: 'base:events:dispute-checkpoint',
+        attempts: 'base:dispute-attempts:*',
+        parked: 'base:dispute-parked',
+      },
     });
   }
   return list;
@@ -138,6 +168,62 @@ async function scanPayouts(src: EscrowSource, escrow: Contract, latest: number):
   return payouts;
 }
 
+interface ScannedChain {
+  src: EscrowSource;
+  chainId: bigint;
+  latest: number;
+}
+
+/** Why the backend could still credit a ruling this run counted, or null. */
+async function listenerLag(redis: Redis, { src, chainId, latest }: ScannedChain): Promise<string | null> {
+  const k = src.redisKeys;
+  const expected = `${chainId}:${src.escrow.toLowerCase()}`;
+  const fingerprint = await redis.get(k.fingerprint);
+  if (fingerprint === null) return `${k.fingerprint} is unset: the backend on this Redis predates the dispute listener`;
+  if (fingerprint !== expected) return `${k.fingerprint} is ${fingerprint}, not ${expected}: this Redis belongs to another deployment`;
+
+  const scannedTo = Number(await redis.get(k.rulingsScannedTo));
+  if (!(scannedTo >= latest)) return `${k.rulingsScannedTo} is ${scannedTo || 'unset'}, below block ${latest}`;
+
+  const parked = await redis.hlen(k.parked);
+  if (parked > 0) return `${parked} ruling(s) parked in ${k.parked}`;
+  // SCAN can return nothing on a round and still match later, so walk it all.
+  let cursor = '0';
+  do {
+    const [next, keys] = await redis.scan(cursor, 'MATCH', k.attempts, 'COUNT', 1000);
+    if (keys.length > 0) return `ruling(s) still retrying: ${keys.join(', ')}`;
+    cursor = next;
+  } while (cursor !== '0');
+  return null;
+}
+
+async function waitForListeners(scanned: ScannedChain[]): Promise<void> {
+  if (SKIP_LISTENER_CHECK) {
+    console.log('  listeners NOT checked (--skip-listener-check): the backend must be stopped');
+    return;
+  }
+  const redis = new Redis(required('REDIS_URL'), { lazyConnect: true, maxRetriesPerRequest: 3 });
+  try {
+    const deadline = Date.now() + LISTENER_WAIT_MS;
+    for (;;) {
+      const lags = (await Promise.all(scanned.map((c) => listenerLag(redis, c))))
+        .map((lag, i) => lag && `${scanned[i].src.label}: ${lag}`)
+        .filter((lag): lag is string => !!lag);
+      if (lags.length === 0) {
+        console.log('  listeners have scanned every block read here, none retrying or parked');
+        return;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`the backend could still credit rulings counted here, so nothing was written:\n  ${lags.join('\n  ')}`);
+      }
+      console.log(`  waiting for listeners: ${lags.join('; ')}`);
+      await new Promise((r) => setTimeout(r, LISTENER_POLL_MS));
+    }
+  } finally {
+    redis.disconnect();
+  }
+}
+
 async function main(): Promise<void> {
   const pool = new pg.Pool({
     connectionString: required('DATABASE_URL'),
@@ -158,12 +244,20 @@ async function main(): Promise<void> {
   );
   const walletBySmartAccount = new Map(accounts.map((a) => [a.smart_account_address.toLowerCase(), a.wallet_address.toLowerCase()]));
 
+  // Read before scanning: the guarded UPDATE below then also skips a row that
+  // a payout changed while the chains were being read.
+  const { rows } = await pool.query<{ address: string; tasks_completed: number; total_earned_raw: string; total_earned_usdc_raw: string }>(
+    'SELECT address, tasks_completed, total_earned_raw, total_earned_usdc_raw FROM agent_executors ORDER BY address',
+  );
+
   const totals = new Map<string, ChainEarnings>();
+  const scanned: ScannedChain[] = [];
   for (const src of sources()) {
     const provider = new JsonRpcProvider(src.rpcUrl);
     const escrow = new Contract(src.escrow, ESCROW_ABI, provider);
     const [network, latest] = await Promise.all([provider.getNetwork(), provider.getBlockNumber()]);
     console.log(`  ${src.label.padEnd(9)} chain ${network.chainId}, escrow ${src.escrow}, blocks ${src.fromBlock}..${latest}`);
+    scanned.push({ src, chainId: network.chainId, latest });
 
     const payouts = await scanPayouts(src, escrow, latest);
     let counted = 0;
@@ -179,9 +273,6 @@ async function main(): Promise<void> {
     console.log(`  ${src.label.padEnd(9)} ${payouts.size} TaskCompleted, ${counted} counted`);
   }
 
-  const { rows } = await pool.query<{ address: string; tasks_completed: number; total_earned_raw: string; total_earned_usdc_raw: string }>(
-    'SELECT address, tasks_completed, total_earned_raw, total_earned_usdc_raw FROM agent_executors ORDER BY address',
-  );
   const stored: StoredEarnings[] = rows.map((r) => ({
     address: r.address,
     tasksCompleted: r.tasks_completed,
@@ -206,6 +297,8 @@ async function main(): Promise<void> {
     await pool.end();
     return;
   }
+
+  await waitForListeners(scanned);
 
   let applied = 0;
   const moved: string[] = [];

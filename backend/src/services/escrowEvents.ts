@@ -1,7 +1,7 @@
 import type { EventLog } from 'ethers';
 import { escrow, provider } from './chain.js';
 import { redis } from './redis.js';
-import { handleDisputeResolved } from './disputeListener.js';
+import { handleDisputeResolved, retryParkedDisputes } from './disputeListener.js';
 import { checkEscrowFingerprint } from './escrowFingerprint.js';
 import { config } from '../config.js';
 
@@ -131,8 +131,10 @@ async function tick(): Promise<void> {
       // retried next tick and the event is re-observed. That's safe by this
       // file's own design (all TaskCreated writes are idempotent SETs, and
       // recordWorkerPayout has an at-most-once guard). An event that keeps
-      // failing is parked (see disputeListener), so it can't stall this
-      // checkpoint, and TaskCreated indexing with it, forever.
+      // failing is parked after a few minutes (see disputeListener), so it
+      // can't stall this checkpoint, and TaskCreated indexing with it,
+      // forever. Forced ticks from request paths run this too: the scan shares
+      // the checkpoint, so it can't be skipped.
       const disputeEvents = await escrow.queryFilter(escrow.filters.DisputeResolved(), from, to);
       for (const ev of disputeEvents) {
         const args = (ev as EventLog).args;
@@ -184,10 +186,19 @@ async function tick(): Promise<void> {
   return inFlightPromise;
 }
 
+/**
+ * One iteration of the poll loop: a tick, then parked rulings (retried from
+ * here only, never from the request paths that force ticks).
+ */
+export async function pollEscrowOnce(): Promise<void> {
+  await tick();
+  await retryParkedDisputes('0g');
+}
+
 export function startEscrowEventLoop(): void {
   if (timer) return; // idempotent — safe to call from multiple boot paths
-  void tick(); // run immediately so we don't wait 5s for the first capture
-  timer = setInterval(tick, POLL_INTERVAL_MS);
+  void pollEscrowOnce(); // run immediately so we don't wait 5s for the first capture
+  timer = setInterval(() => void pollEscrowOnce(), POLL_INTERVAL_MS);
   console.log(`[escrowEvents] polling TaskCreated + DisputeResolved every ${POLL_INTERVAL_MS / 1000}s`);
 }
 

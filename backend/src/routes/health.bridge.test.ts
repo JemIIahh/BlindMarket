@@ -10,11 +10,12 @@ import request from 'supertest';
  * fields and `base`, so their shape is pinned here.
  */
 
-const { chain, cfg, ready, fingerprintErrors } = vi.hoisted(() => {
+const { chain, cfg, ready, fingerprintErrors, parkedCounts } = vi.hoisted(() => {
   const signer = (address: string) => ({ getAddress: async () => address });
   return {
     ready: { '0g': true, base: true } as Record<string, boolean>,
     fingerprintErrors: {} as Record<string, string | null>,
+    parkedCounts: {} as Record<string, number | Error>,
     cfg: {} as Record<string, unknown>,
     chain: {
       signer,
@@ -33,6 +34,13 @@ vi.mock('../services/a2aSettlement.js', () => ({ isBridgeReady: (c: string) => r
 vi.mock('../services/redis.js', () => ({ redis: {}, redisSub: {} }));
 vi.mock('../services/escrowFingerprint.js', () => ({
   escrowFingerprintError: (c: string) => fingerprintErrors[c] ?? null,
+}));
+vi.mock('../services/disputeKeys.js', () => ({
+  parkedDisputeCount: async (c: string) => {
+    const v = parkedCounts[c] ?? 0;
+    if (v instanceof Error) throw v;
+    return v;
+  },
 }));
 vi.mock('../services/neonDb.js', () => ({ getPool: vi.fn(), getSchemaStatus: vi.fn(), latestMigrationId: vi.fn(() => 31) }));
 vi.mock('../config.js', async (importOriginal) => {
@@ -80,6 +88,7 @@ async function bridge() {
 beforeEach(() => {
   setUp({ og: true, base: true });
   for (const k of Object.keys(fingerprintErrors)) delete fingerprintErrors[k];
+  for (const k of Object.keys(parkedCounts)) delete parkedCounts[k];
 });
 
 describe('GET /health/bridge', () => {
@@ -108,6 +117,15 @@ describe('GET /health/bridge', () => {
     expect(data).not.toHaveProperty('reason');
     expect(data.chains[0]).not.toHaveProperty('indexerError');
     expect(data.chains[1]).toMatchObject({ chain: 'base', configured: true, indexerError: fingerprintErrors.base });
+  });
+
+  it('counts parked dispute rulings per chain, and survives a failed count', async () => {
+    parkedCounts.base = 2;
+    parkedCounts['0g'] = new Error('redis down');
+    const data = await bridge();
+    expect(data.chains[1]).toMatchObject({ chain: 'base', parkedDisputes: 2 });
+    expect(data.chains[0]).not.toHaveProperty('parkedDisputes');
+    expect(data.configured).toBe(true);
   });
 
   it("names Base's own network in its fix command, not 0G's", async () => {
