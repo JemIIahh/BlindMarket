@@ -18,6 +18,7 @@ import {
 } from '../components/bb';
 import { truncateAddress } from '../lib/utils';
 import { API_BASE_URL, MARKETPLACE_TOKEN_ADDRESS, getPaymentSymbol, getPaymentDecimals } from '../config/constants';
+import { formatEarnings, sumEarnings } from '../lib/paymentUnits';
 import { authedPost } from '../lib/api';
 import { useChainAddress } from '../hooks/useChainWallet';
 import { useAuth } from '../context/AuthContext';
@@ -67,6 +68,8 @@ interface Agent {
   model: string;
   tasksCompleted?: number;
   totalEarned?: string;
+  totalEarnedUsdc?: string;
+  totalEarnedNative?: string;
   createdAt?: string;
   reputation?: {
     decayedScore: number;
@@ -107,7 +110,7 @@ export default function MyAgents() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['my-agents', address] }),
   });
 
-  const totalEarned = agents.reduce((sum, a) => sum + parseFloat(a.totalEarned ?? '0'), 0);
+  const totalEarned = formatEarnings(sumEarnings(agents));
   const running = agents.filter((a) => a.status === 'running').length;
   const tasksTotal = agents.reduce((s, a) => s + (a.tasksCompleted ?? 0), 0);
 
@@ -184,8 +187,8 @@ export default function MyAgents() {
           <StatCard
             className="h-full"
             label="Total earned"
-            value={`${totalEarned.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${getPaymentSymbol()}`}
-            sub={`${getPaymentSymbol()} · all agents`}
+            value={totalEarned}
+            sub="All agents"
             subColor="ok"
           />
         </div>
@@ -260,7 +263,7 @@ export default function MyAgents() {
                         {arrow && <span className={arrow.cls}>{arrow.glyph}</span>}
                       </div>
                       <span className="font-mono font-semibold text-ink text-right">
-                        {parseFloat(agent.totalEarned ?? '0').toLocaleString(undefined, { maximumFractionDigits: 2 })} {getPaymentSymbol()}
+                        {formatEarnings(agent)}
                       </span>
                       <span className="font-mono text-ink-3 text-right">{agent.tasksCompleted ?? 0}</span>
                       <span>{isActing ? <StatusTag status={action.variables?.act} /> : <StatusTag status={agent.status} />}</span>
@@ -313,7 +316,7 @@ export default function MyAgents() {
                       <div>
                         <div className="text-[11px] uppercase tracking-wider text-ink-3">Earned</div>
                         <div className="text-sm font-mono font-semibold text-ink mt-0.5">
-                          {parseFloat(agent.totalEarned ?? '0').toLocaleString(undefined, { maximumFractionDigits: 2 })} {getPaymentSymbol()}
+                          {formatEarnings(agent)}
                         </div>
                       </div>
                       <div>

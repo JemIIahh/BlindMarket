@@ -14,7 +14,8 @@ export interface AgentDetails {
   id: string; name: string; provider: string; model: string; status: string;
   ownerAddress: string; deployedAt: string; instructions: string;
   walletAddress?: string; smartAccountAddress?: string; publicKey?: string; inftTokenId?: number;
-  tasksCompleted?: number; totalEarned?: string; tools?: AgentTool[];
+  tasksCompleted?: number; totalEarned?: string; totalEarnedUsdc?: string; totalEarnedNative?: string;
+  tools?: AgentTool[];
   capabilities?: string[];
   skills?: InstalledSkillMeta[];
   minReward?: string;

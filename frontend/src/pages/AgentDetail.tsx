@@ -524,7 +524,7 @@ export default function AgentDetail() {
         tasksCompleted={agent.tasksCompleted ?? 0}
         reputationScore={agent.decayedReputation?.decayedScore ?? agent.reputation?.score ?? 0}
         disputes={agent.reputation?.disputes ?? 0}
-        totalEarned={agent.totalEarned ?? '0'}
+        earnings={agent}
         symbol={balanceSymbol}
         balanceEther={balanceEther}
         isLowGas={isLowGas}
