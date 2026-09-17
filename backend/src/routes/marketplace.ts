@@ -237,6 +237,8 @@ marketplaceRouter.get('/agents/search', async (req, res, next) => {
     const limit = Math.min(50, parseInt(req.query.limit as string) || 20);
     const page = Math.max(1, parseInt(req.query.page as string) || 1);
     const query = ((req.query.q as string) || '').toLowerCase().trim();
+    // sort: recent (default) orders by registered_at DESC; reputation orders by reputation DESC.
+    const sort = ((req.query.sort as string) || 'recent').toLowerCase();
 
     // Search via agent store — filter by capability
     const agentStore = await import('../services/agentStore.js');
@@ -276,6 +278,13 @@ marketplaceRouter.get('/agents/search', async (req, res, next) => {
     if (provenCap) {
       filtered = filtered.filter(a => a.badges.some(b => b.capability === provenCap));
     }
+
+    // listAgents already returns agents ordered by registered_at DESC, which is
+    // the default "recently added" sort. Only override for explicit alternatives.
+    if (sort === 'reputation') {
+      filtered.sort((a, b) => b.reputation - a.reputation);
+    }
+
     const total = filtered.length;
     const offset = (page - 1) * limit;
     const paged = filtered.slice(offset, offset + limit);

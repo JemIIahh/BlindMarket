@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useState, useEffect, useRef } from 'react';
+import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { formatUnits } from 'ethers';
 import {
@@ -14,7 +14,7 @@ import {
   LoadingState,
   EmptyState,
   ErrorState,
-  Pagination,
+  FormInput,
 } from '../components/bb';
 import { useSocket } from '../hooks/useSocket';
 import { authedGet } from '../lib/api';
@@ -22,21 +22,15 @@ import { getAesKey } from '../lib/keyStash';
 import { useChainAddress } from '../hooks/useChainWallet';
 
 // ── Shapes returned by GET /api/v1/a2a/tasks/posted ──────────────────────
-//
-// The backend enriches each Redis-side task with its on-chain record so we
-// have status + reward + worker in a single call. `onChain` is null when the
-// task hasn't been indexed yet (createTask in flight) or never confirmed.
 
 interface PostedTask {
   meta: {
-    taskId: string;           // taskHash, bytes32 hex
+    taskId: string;
     targetExecutorType: 'agent' | 'human';
     verificationMode: 'manual' | 'auto' | 'oracle' | 'agent';
     posterAddress?: string;
     verifierAddress?: string;
     rootHash?: string;
-    // 'public' = plaintext brief, no key material at all (so never "key at
-    // risk"), brief + result public. Absent = private/encrypted.
     privacy?: 'public';
     publicBrief?: string;
   };
@@ -49,19 +43,13 @@ interface PostedTask {
     resultData?: Record<string, unknown>;
     verificationResult?: { passed: boolean; reasons?: string[] };
   };
-  // Count of executors the brief's AES key is ECIES-wrapped to and persisted
-  // server-side. 0 on an open encrypted task = the key exists only in a
-  // browser's localStorage (the "key at risk" state). Added by GET /tasks/posted.
   wrapCount?: number;
-  // Whether the brief AES key is also sealed to platform key-custody. If true,
-  // the key is recoverable server-side via re-wrap even at wrapCount 0, so the
-  // task is NOT "key at risk" (docs/TEE-REWRAP-SPEC.md). Added by /tasks/posted.
   hasCustody?: boolean;
   onChain: null | {
-    taskId: string;           // numeric on-chain id, as string
+    taskId: string;
     chain: 'base' | '0g';
-    status: number;           // 0=Funded 1=Assigned 2=Submitted 3=Verified(=failed, retryable) 4=Completed 5=Cancelled 6=Disputed
-    reward: string;           // raw bigint as string
+    status: number;
+    reward: string;
     token: string;
     worker: string;
     createdAt: string;
@@ -69,24 +57,16 @@ interface PostedTask {
   };
 }
 
-// On-chain status enum → status string. StatusTag derives the chip colour
-// semantically from this string, so we no longer hand-map status → tone.
-// NB: on-chain 3 (enum name "Verified") means verification ran and FAILED —
-// the worker may retry (BlindEscrow.sol). Distinct from the off-chain a2a
-// status string 'verified', which means passed.
 const STATUS_LABELS: Record<number, string> = {
   0: 'open', 1: 'assigned', 2: 'submitted', 3: 'verification failed', 4: 'completed', 5: 'cancelled', 6: 'disputed',
 };
 
-// Chain-aware decimals: Base tasks settle in USDC (6), 0G in native (18).
 function chainDecimals(chain?: 'base' | '0g'): number {
   return chain === 'base' ? 6 : 18;
 }
 function chainSymbol(chain?: 'base' | '0g'): string {
   return chain === 'base' ? 'USDC' : '0G';
 }
-
-// ── Chain-aware helpers ─────────────────────────────────────────────────
 
 function rewardToNumber(raw: string | undefined, decimals: number): number {
   if (!raw) return 0;
@@ -97,9 +77,6 @@ function rewardToNumber(raw: string | undefined, decimals: number): number {
   }
 }
 
-// BigInt(raw) THROWS on malformed input ("1.5", "0xZ"…). One bad reward from
-// the API must not blank the whole page — the sort and total-spent reduce
-// below go through this instead of calling BigInt directly.
 function rewardToWei(raw: string | undefined): bigint {
   if (!raw) return 0n;
   try {
@@ -123,20 +100,12 @@ function formatRewardForChain(raw: string | undefined, chain?: 'base' | '0g') {
   return formatReward(raw, chainDecimals(chain), chainSymbol(chain));
 }
 
-// Short id for the visible task identifier — we display the on-chain numeric
-// id when available (familiar #42 form), otherwise the truncated hash.
 function shortId(t: PostedTask): string {
-  // Use onChain taskId first, then fall back to meta.taskId (also numeric)
   const numericId = t.onChain?.taskId || t.meta.taskId;
-  // If it's a small number/string, it's our sequential ID
   if (numericId && numericId.length < 10) return `#${numericId}`;
   return `${t.meta.taskId.slice(0, 10)}…`;
 }
 
-// On-chain ZERO worker = "no one assigned yet". A non-zero, non-poster
-// worker address means an executor has been assigned via marketplaceAssign.
-// Returns the short address (mono) when assigned, or null when unassigned so
-// the card can show a plain "No worker yet" hint in sans.
 function workerAddress(t: PostedTask): string | null {
   const w = t.onChain?.worker;
   if (!w || /^0x0+$/.test(w)) return null;
@@ -150,9 +119,7 @@ export default function MyTasks() {
   const qc = useQueryClient();
   const [filter, setFilter] = useState<'all' | 'open' | 'active' | 'completed'>('all');
   const [sort, setSort] = useState<'newest' | 'oldest' | 'highest-reward' | 'lowest-reward'>('newest');
-  const [page, setPage] = useState(1);
-  // The card is a <Link>, so the result <details> can't toggle natively — a
-  // click on its summary would also navigate. Open state lives here instead.
+  const [search, setSearch] = useState('');
   const [openResults, setOpenResults] = useState<Set<string>>(new Set());
   const toggleResult = (id: string) =>
     setOpenResults(prev => {
@@ -162,33 +129,41 @@ export default function MyTasks() {
       return next;
     });
 
-  // /a2a/tasks/posted returns every task the authed wallet posted, across
-  // the full lifecycle. /api/v1/tasks would only return Funded ones, which
-  // is why completed work used to vanish from this page the moment it
-  // settled — the on-chain registry's getOpenTasks filters out non-open
-  // entries. authedGet flows the JWT (Privy identity) for the server-side
-  // posterAddress check.
-  const { data: tasks = [], isLoading, isError, refetch } = useQuery<PostedTask[]>({
-    queryKey: ['my-tasks-posted', address],
-    queryFn: async () => {
-      const data = await authedGet<{ tasks: PostedTask[]; total: number }>('/api/v1/a2a/tasks/posted');
-      return data.tasks ?? [];
+  const {
+    data,
+    isLoading,
+    isError,
+    refetch,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useInfiniteQuery<{ tasks: PostedTask[]; total: number }>({
+    queryKey: ['my-tasks-posted', address, filter, search],
+    queryFn: async ({ pageParam = 0 }) => {
+      const params = new URLSearchParams();
+      params.set('limit', String(PAGE_SIZE));
+      params.set('offset', String(pageParam));
+      if (filter !== 'all') params.set('status', filter);
+      if (search.trim()) params.set('q', search.trim());
+      return authedGet<{ tasks: PostedTask[]; total: number }>(
+        `/api/v1/a2a/tasks/posted?${params.toString()}`,
+      );
     },
+    getNextPageParam: (lastPage, allPages) => {
+      const loaded = allPages.reduce((sum, p) => sum + p.tasks.length, 0);
+      return loaded < lastPage.total ? loaded : undefined;
+    },
+    initialPageParam: 0,
     enabled: !!address,
   });
+
+  const tasks = data?.pages.flatMap(p => p.tasks) ?? [];
 
   useSocket('tasks', {
     'task:created': () => qc.invalidateQueries({ queryKey: ['my-tasks-posted', address] }),
     'task:completed': () => qc.invalidateQueries({ queryKey: ['my-tasks-posted', address] }),
   });
 
-  // Server-side key custody handles late-joiner re-wrap on /accept — no
-  // browser-side wrap loop needed. The `useBidWatcher` hook was removed.
-  // For status counts we prefer the on-chain status (source of truth for
-  // settlement); fall back to the a2a state for tasks whose chain index
-  // hasn't caught up yet (mapped to the closest matching enum). Off-chain
-  // 'verified' and 'completed' both mean the work PASSED, so they map to
-  // Completed (4) — not on-chain 3, which means verification failed.
   function effectiveStatus(t: PostedTask): number {
     if (t.onChain) return t.onChain.status;
     switch (t.state.status) {
@@ -201,45 +176,12 @@ export default function MyTasks() {
     }
   }
 
-  const filteredTasks = tasks
-    .filter(t => {
-      const status = effectiveStatus(t);
-      if (filter === 'open') return status === 0;
-      if (filter === 'active') return [1, 2].includes(status);
-      if (filter === 'completed') return status === 4;
-      return true;
-    })
-    .sort((a, b) => {
-      // Compare rewards as BigInt — they're uint256 base units, well past the safe
-      // integer range, so Number() coercion could mis-order near-equal amounts.
-      const rewardWei = (t: PostedTask) => rewardToWei(t.onChain?.reward);
-      const cmpWei = (x: bigint, y: bigint) => (x < y ? -1 : x > y ? 1 : 0);
-      const getCreatedAt = (t: PostedTask) => Number(t.onChain?.createdAt || t.state.acceptedAt || 0);
-
-      switch (sort) {
-        case 'newest': return getCreatedAt(b) - getCreatedAt(a);
-        case 'oldest': return getCreatedAt(a) - getCreatedAt(b);
-        case 'highest-reward': return cmpWei(rewardWei(b), rewardWei(a));
-        case 'lowest-reward': return cmpWei(rewardWei(a), rewardWei(b));
-        default: return 0;
-      }
-    });
-
-  const totalPages = Math.max(1, Math.ceil(filteredTasks.length / PAGE_SIZE));
-  const paginatedTasks = filteredTasks.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const totalTasks = data?.pages[0]?.total ?? 0;
 
   const openCount = tasks.filter(t => effectiveStatus(t) === 0).length;
   const activeCount = tasks.filter(t => [1, 2].includes(effectiveStatus(t))).length;
   const completedCount = tasks.filter(t => effectiveStatus(t) === 4).length;
-  // "Total spent" = gross 0G that has irreversibly left the poster — i.e. the
-  // full escrowed amount (worker share + platform fee) of tasks that
-  // reached on-chain status Completed (4). Active/open tasks are deliberately
-  // excluded: their escrow is still refundable on cancel/timeout/dispute, so it
-  // isn't "spent" yet. Summed as BigInt wei, then formatted once, to avoid the
-  // per-task Number() precision loss above 0.009 0G.
   const completedTasks = tasks.filter(t => effectiveStatus(t) === 4);
-  // Sum rewards per chain — Base tasks are USDC (6 decimals), 0G tasks native (18).
-  // Can't mix decimals in a single BigInt sum, so convert each to a number first.
   const totalSpent = completedTasks.reduce(
     (s, t) => s + rewardToNumber(t.onChain?.reward, chainDecimals(t.onChain?.chain)),
     0,
@@ -257,6 +199,36 @@ export default function MyTasks() {
     { id: 'highest-reward', label: 'Highest reward' },
     { id: 'lowest-reward', label: 'Lowest reward' },
   ];
+
+  const sortedTasks = [...tasks].sort((a, b) => {
+    const rewardWei = (t: PostedTask) => rewardToWei(t.onChain?.reward);
+    const cmpWei = (x: bigint, y: bigint) => (x < y ? -1 : x > y ? 1 : 0);
+    const getCreatedAt = (t: PostedTask) => Number(t.onChain?.createdAt || t.state.acceptedAt || 0);
+
+    switch (sort) {
+      case 'newest': return getCreatedAt(b) - getCreatedAt(a);
+      case 'oldest': return getCreatedAt(a) - getCreatedAt(b);
+      case 'highest-reward': return cmpWei(rewardWei(b), rewardWei(a));
+      case 'lowest-reward': return cmpWei(rewardWei(a), rewardWei(b));
+      default: return 0;
+    }
+  });
+
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(
+      entries => {
+        if (entries[0].isIntersecting && hasNextPage && !isFetchingNextPage) {
+          fetchNextPage();
+        }
+      },
+      { rootMargin: '200px' },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
 
   return (
     <div>
@@ -279,32 +251,42 @@ export default function MyTasks() {
       </div>
 
       <div className="border border-line">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between bg-surface-2 px-4 pt-4 lg:pt-0">
-          <SectionRule num="01" title="Posted tasks" side={`${filteredTasks.length} shown / ${tasks.length} total`} className="mb-0 flex-1 lg:py-4" />
-          <div className="flex flex-wrap gap-2 pb-4 lg:pb-0">
-            {FILTERS.map(f => (
-              <button
-                key={f.id}
-                onClick={() => { setFilter(f.id); setPage(1); }}
-                className={`text-[11px] px-2.5 py-1 border transition-colors ${
-                  filter === f.id ? 'bg-cream text-bg border-cream' : 'text-ink-3 border-line hover:border-cream/50'
-                }`}
-              >
-                {f.label}
-              </button>
-            ))}
-            <div className="hidden sm:block h-6 w-px bg-line mx-1" />
-            {SORTS.map(s => (
-              <button
-                key={s.id}
-                onClick={() => { setSort(s.id); setPage(1); }}
-                className={`text-[11px] px-2.5 py-1 border transition-colors ${
-                  sort === s.id ? 'bg-cream text-bg border-cream' : 'text-ink-3 border-line hover:border-cream/50'
-                }`}
-              >
-                {s.label}
-              </button>
-            ))}
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between bg-surface-2 px-4 pt-4 lg:pt-0">
+          <SectionRule num="01" title="Posted tasks" side={`${tasks.length} shown / ${totalTasks} total`} className="mb-0 flex-1 lg:py-4" />
+          <div className="flex flex-col sm:flex-row gap-3 pb-4 lg:pb-0 flex-1 lg:justify-end">
+            <div className="flex-1 min-w-[200px] max-w-md">
+              <FormInput
+                placeholder="Search task id or brief…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="text-xs font-mono"
+              />
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {FILTERS.map(f => (
+                <button
+                  key={f.id}
+                  onClick={() => { setFilter(f.id); }}
+                  className={`text-[11px] px-2.5 py-1 border transition-colors ${
+                    filter === f.id ? 'bg-cream text-bg border-cream' : 'text-ink-3 border-line hover:border-cream/50'
+                  }`}
+                >
+                  {f.label}
+                </button>
+              ))}
+              <div className="hidden sm:block h-6 w-px bg-line mx-1" />
+              {SORTS.map(s => (
+                <button
+                  key={s.id}
+                  onClick={() => { setSort(s.id); }}
+                  className={`text-[11px] px-2.5 py-1 border transition-colors ${
+                    sort === s.id ? 'bg-cream text-bg border-cream' : 'text-ink-3 border-line hover:border-cream/50'
+                  }`}
+                >
+                  {s.label}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
 
@@ -318,14 +300,14 @@ export default function MyTasks() {
           <LoadingState label="Loading your tasks…" />
         ) : isError ? (
           <ErrorState title="Couldn't load your tasks" onRetry={() => refetch()} />
-        ) : filteredTasks.length === 0 ? (
+        ) : tasks.length === 0 ? (
           <EmptyState
             icon="briefcase"
-            title={filter === 'all' ? 'No tasks posted yet' : `No ${filter} tasks`}
+            title={filter === 'all' && !search ? 'No tasks posted yet' : 'No tasks match'}
             description={
-              filter === 'all'
+              filter === 'all' && !search
                 ? 'Post a task and it will show up here so you can track its status, assignment, and result.'
-                : 'Try a different filter, or post a new task.'
+                : 'Try a different filter or search term, or post a new task.'
             }
             action={
               <Link to="/tasks/new">
@@ -335,11 +317,8 @@ export default function MyTasks() {
           />
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-px bg-line border-t border-line">
-            {paginatedTasks.map(t => {
+            {sortedTasks.map(t => {
               const status = effectiveStatus(t);
-              // Label from the actual source: the numeric map only names
-              // on-chain statuses. For off-chain-only tasks show the a2a status
-              // string directly ('verified' reads better than 'completed').
               const statusLabel = t.onChain
                 ? (STATUS_LABELS[status] ?? 'open')
                 : t.state.status.replace(/_/g, ' ');
@@ -350,27 +329,13 @@ export default function MyTasks() {
                 reasons?.passed === false && reasons.reasons && reasons.reasons.length > 0
                   ? reasons.reasons
                   : null;
-              // "Key at risk": an open, encrypted task whose AES key has not
-              // been wrapped to any executor server-side AND isn't sealed to
-              // key-custody. The only copy is then in a browser's localStorage —
-              // if that's cleared before an agent is wrapped, the brief becomes
-              // permanently undecryptable. A custody-sealed task (hasCustody) is
-              // recoverable server-side via re-wrap, so it's NOT at risk even at
-              // wrapCount 0. keyHere tells us whether THIS browser still holds
-              // the key (recoverable but fragile) or not.
-              // Public tasks carry NO key at all — rootHash points at a
-              // plaintext blob, so the zero-wraps state is normal, not a risk.
               const keyAtRisk =
                 status === 0 && t.meta.privacy !== 'public' &&
                 !!t.meta.rootHash && (t.wrapCount ?? 0) === 0 && !t.hasCustody;
               const keyHere = keyAtRisk && !!getAesKey(t.meta.taskId);
-              // Shown inline on phones, where the title tooltip never appears.
               const keyRiskHint = keyHere
                 ? 'Register a matching agent and keep this page open so the key gets wrapped to it. Clearing this browser before then loses the key permanently.'
                 : 'Recover it from the device you posted from, or repost — it cannot be decrypted from here.';
-              // Canonical task URL uses the task hash (globally unique across
-              // chains — numeric ids collide between Base and 0G). Numeric
-              // URLs keep working (backend + route accept both).
               const taskUrl = `/tasks/${t.meta.taskId || t.onChain?.taskId}`;
               const worker = workerAddress(t);
               const cardClass = `bg-bg p-5 flex flex-col gap-3 min-h-[200px] group hover:bg-surface-2 transition-colors cursor-pointer`;
@@ -462,16 +427,12 @@ export default function MyTasks() {
             })}
           </div>
         )}
+        {(isFetchingNextPage || hasNextPage) && (
+          <div ref={sentinelRef} className="py-4 text-center text-xs text-ink-3">
+            {isFetchingNextPage ? 'Loading more…' : 'Scroll for more'}
+          </div>
+        )}
       </div>
-      {filteredTasks.length > 0 && (
-        <Pagination
-          page={page}
-          totalPages={totalPages}
-          totalItems={filteredTasks.length}
-          pageSize={PAGE_SIZE}
-          onPageChange={setPage}
-        />
-      )}
     </div>
   );
 }

@@ -2543,6 +2543,10 @@ a2aRouter.get('/verifications', requireAuth, async (req: AuthRequest, res, next)
 a2aRouter.get('/tasks/posted', requireAuth, async (req: AuthRequest, res, next) => {
   try {
     const address = req.user!.address;
+    const limit = Math.min(50, parseInt(req.query.limit as string) || 15);
+    const offset = Math.max(0, parseInt(req.query.offset as string) || 0);
+    const q = ((req.query.q as string) || '').trim().toLowerCase();
+    const statusFilter = (req.query.status as string) || 'all';
     const tasks = await a2aStore.getPosterTasks(address);
 
     // The custody key the backend can ACTUALLY unwrap right now. A task sealed
@@ -2606,9 +2610,58 @@ a2aRouter.get('/tasks/posted', requireAuth, async (req: AuthRequest, res, next) 
       }),
     );
 
+    // Optional text search across task id, on-chain id, and public briefs.
+    let filtered = enriched;
+    if (q) {
+      filtered = enriched.filter((t: any) => {
+        const idMatch = t.meta?.taskId?.toLowerCase().includes(q);
+        const onChainIdMatch = t.onChain?.taskId?.toString().toLowerCase().includes(q);
+        const briefMatch = t.meta?.publicBrief?.toLowerCase().includes(q);
+        return idMatch || onChainIdMatch || briefMatch;
+      });
+    }
+
+    // Map a task to the coarse status used by the UI filters.
+    function effectiveStatus(t: any): number {
+      if (t.onChain) return Number(t.onChain.status);
+      switch (t.state?.status) {
+        case 'open': return 0;
+        case 'accepted':
+        case 'in_progress': return 1;
+        case 'submitted':
+        case 'awaiting_verification': return 2;
+        case 'verified':
+        case 'completed': return 4;
+        case 'failed': return 6;
+        default: return 0;
+      }
+    }
+
+    if (statusFilter !== 'all') {
+      const status = effectiveStatus;
+      filtered = filtered.filter((t: any) => {
+        const s = status(t);
+        if (statusFilter === 'open') return s === 0;
+        if (statusFilter === 'active') return s === 1 || s === 2;
+        if (statusFilter === 'completed') return s === 4;
+        return true;
+      });
+    }
+
+    // Sort newest-first by on-chain creation time. Tasks without on-chain data
+    // (still indexing) fall to the back so they don't keep jumping to the top.
+    filtered.sort((a: any, b: any) => {
+      const tsA = a.onChain?.createdAt ? Number(a.onChain.createdAt) : 0;
+      const tsB = b.onChain?.createdAt ? Number(b.onChain.createdAt) : 0;
+      return tsB - tsA;
+    });
+
+    const total = filtered.length;
+    const paged = filtered.slice(offset, offset + limit);
+
     const body: ApiResponse = {
       success: true,
-      data: { tasks: enriched, total: enriched.length },
+      data: { tasks: paged, total },
     };
     res.json(body);
   } catch (err) {

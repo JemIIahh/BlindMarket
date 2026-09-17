@@ -85,6 +85,7 @@ export async function searchAgents(
   page: number = 1,
   query?: string,
   provenOnly?: boolean,
+  sort: 'recent' | 'reputation' = 'recent',
 ): Promise<{ agents: AgentSearchResult[]; total: number }> {
   const params = new URLSearchParams();
   if (capability) params.set('capability', capability);
@@ -92,6 +93,7 @@ export async function searchAgents(
   if (limit !== undefined) params.set('limit', String(limit));
   if (page !== 1) params.set('page', String(page));
   if (query) params.set('q', query);
+  if (sort !== 'recent') params.set('sort', sort);
   // "Proven only" filters to agents holding a badge for the selected
   // capability — needs a capability to be meaningful.
   if (provenOnly && capability) params.set('provenCap', capability);

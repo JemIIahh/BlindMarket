@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useInfiniteQuery } from '@tanstack/react-query';
 import {
   Breadcrumb,
   PageHeader,
@@ -22,9 +22,6 @@ import { getPaymentDecimals, getPaymentSymbol } from '../config/constants';
 const PAGE_SIZE = 20;
 
 // ── Wanted: unserved demand ──────────────────────────────────────────────────
-// Open tasks the current roster can't serve well (weak or missing best
-// semantic fit) — the build-me signal for agent creators. Renders NOTHING
-// when the market is well served, so it adds zero chrome by default.
 
 interface DemandGapRow {
   taskHash: string;
@@ -41,9 +38,6 @@ function agoLabel(ms: number): string {
   return `${Math.floor(h / 24)}d ago`;
 }
 
-// formatUnits THROWS on non-wei strings ("0.5", garbage). One malformed
-// value from the API must not blank the whole section — shared by the Wanted
-// rows and fromPriceLabel below.
 function rewardLabel(rewardRaw: string | null | undefined, sym: string): string | null {
   if (!rewardRaw) return null;
   try {
@@ -54,13 +48,13 @@ function rewardLabel(rewardRaw: string | null | undefined, sym: string): string 
 }
 
 function WantedSection({ sym }: { sym: string }) {
-  const { data } = useQuery({
+  const { data } = useInfiniteQuery<{ gaps: DemandGapRow[] }>({
     queryKey: ['demand-gaps'],
     queryFn: () => get<{ gaps: DemandGapRow[] }>('/api/v1/a2a/demand?limit=5'),
-    staleTime: 60_000,
-    retry: false,
+    getNextPageParam: () => undefined,
+    initialPageParam: 0,
   });
-  const gaps = data?.gaps ?? [];
+  const gaps = data?.pages[0]?.gaps ?? [];
   if (gaps.length === 0) return null;
   return (
     <div className="border border-cream/25 mb-8">
@@ -101,20 +95,46 @@ function fromPriceLabel(fromPrice: string | null | undefined, sym: string): stri
 export default function AgentMarketplace() {
   const [minRating, setMinRating] = useState(0);
   const [query, setQuery] = useState('');
-  const [page, setPage] = useState(1);
+  const [sort, setSort] = useState<'recent' | 'reputation'>('recent');
   const sym = getPaymentSymbol();
 
-  const { data, isLoading, isError, refetch } = useQuery({
-    queryKey: ['agent-search', minRating, page, query],
-    queryFn: () => searchAgents(undefined, minRating || undefined, PAGE_SIZE, page, query || undefined, false),
+  const {
+    data,
+    isLoading,
+    isError,
+    refetch,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useInfiniteQuery<{ agents: AgentSearchResult[]; total: number }>({
+    queryKey: ['agent-search', minRating, query, sort],
+    queryFn: ({ pageParam = 1 }) =>
+      searchAgents(undefined, minRating || undefined, PAGE_SIZE, pageParam as number, query || undefined, false, sort),
+    getNextPageParam: (lastPage, allPages) => {
+      const loaded = allPages.reduce((sum, p) => sum + p.agents.length, 0);
+      return loaded < (lastPage.total ?? 0) ? allPages.length + 1 : undefined;
+    },
+    initialPageParam: 1,
   });
 
-  const totalAgents = data?.total ?? 0;
-  const totalPages = Math.max(1, Math.ceil(totalAgents / PAGE_SIZE));
+  const agents = data?.pages.flatMap(p => p.agents) ?? [];
+  const totalAgents = data?.pages[0]?.total ?? 0;
 
-  // Reset to page 1 when filters or the search query change — otherwise a
-  // new search can strand the user on a now-empty page N.
-  useEffect(() => { setPage(1); }, [minRating, query]);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(
+      entries => {
+        if (entries[0].isIntersecting && hasNextPage && !isFetchingNextPage) {
+          fetchNextPage();
+        }
+      },
+      { rootMargin: '200px' },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
 
   return (
     <div>
@@ -150,18 +170,26 @@ export default function AgentMarketplace() {
             <option value={4.5}>★★★ 4.5+</option>
           </FormSelect>
         </div>
+        <div className="w-[160px]">
+          <div className="text-[11px] font-medium uppercase tracking-wider text-ink-3 mb-1.5">Sort by</div>
+          <FormSelect
+            value={sort}
+            onChange={(e) => setSort(e.target.value as 'recent' | 'reputation')}
+            className="!py-1.5 !text-xs font-mono"
+          >
+            <option value="recent">Recently added</option>
+            <option value="reputation">Reputation</option>
+          </FormSelect>
+        </div>
       </div>
 
-      <SectionRule num="01" title="Agents" side={data ? `${data.total} found` : undefined} />
+      <SectionRule num="01" title="Agents" side={data ? `${agents.length} shown / ${totalAgents} found` : undefined} />
 
-      {/* Storefront cards — an agent is a product, present it like one:
-          identicon, name on the left; rating · work · price on
-          the right. The whole card is the link. */}
       {isLoading ? (
         <div className="border border-line"><LoadingState label="Searching agents…" /></div>
       ) : isError ? (
         <div className="border border-line"><ErrorState title="Couldn't load agents" onRetry={() => refetch()} /></div>
-      ) : !data?.agents?.length ? (
+      ) : !agents.length ? (
         <div className="border border-line">
           <EmptyState
             icon="search"
@@ -176,9 +204,7 @@ export default function AgentMarketplace() {
         </div>
       ) : (
         <div className="border border-line divide-y divide-line">
-          {data.agents.map((r: AgentSearchResult) => {
-            // Shape-defensive: a partial row from the API degrades that card,
-            // not the whole list.
+          {agents.map((r: AgentSearchResult) => {
             const badges = r.badges ?? [];
             const hasTee = badges.some(b => b.type === 'tee' || b.capability === 'tee_verified');
             const priceLabel = fromPriceLabel(r.fromPrice, sym);
@@ -197,7 +223,6 @@ export default function AgentMarketplace() {
                   </div>
                   <div className="text-[11px] font-mono text-ink-3 mt-0.5">{truncateAddress(r.address)}</div>
                 </div>
-                {/* Right rail: the buy signals — rating · work done · entry price */}
                 <div className="col-span-2 sm:col-span-1 flex sm:flex-col items-center sm:items-end justify-between sm:justify-center gap-x-4 gap-y-1 font-mono text-xs sm:text-right border-t sm:border-t-0 border-line/60 pt-3 sm:pt-0">
                   <span className="text-ink">
                     {r.totalReviews > 0 && r.avgRating != null
@@ -214,25 +239,9 @@ export default function AgentMarketplace() {
           })}
         </div>
       )}
-      {totalPages > 1 && (
-        <div className="flex items-center justify-between px-5 py-3 border border-t-0 border-line text-xs text-ink-3">
-          <span>Page {page} of {totalPages}</span>
-          <div className="flex gap-2">
-            <button
-              onClick={() => setPage(p => Math.max(1, p - 1))}
-              disabled={page <= 1}
-              className="px-3 py-1 border border-line bg-surface-2 hover:bg-surface-3 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-            >
-              Previous
-            </button>
-            <button
-              onClick={() => setPage(p => Math.min(totalPages, p + 1))}
-              disabled={page >= totalPages}
-              className="px-3 py-1 border border-line bg-surface-2 hover:bg-surface-3 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-            >
-              Next
-            </button>
-          </div>
+      {(isFetchingNextPage || hasNextPage) && (
+        <div ref={sentinelRef} className="py-4 text-center text-xs text-ink-3 border border-t-0 border-line">
+          {isFetchingNextPage ? 'Loading more…' : 'Scroll for more'}
         </div>
       )}
     </div>
