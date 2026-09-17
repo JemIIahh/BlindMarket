@@ -1,8 +1,8 @@
 /**
  * Upgrade the BlindEscrow UUPS proxy to the currently compiled implementation.
  *
- * Reads the proxy address from deployments/<network>.json (0g-testnet /
- * 0g-mainnet). Deploys a new implementation ONLY if the compiled bytecode
+ * Reads the proxy address from the connected chain's deployment record in the
+ * DEPLOYMENT_SET (EXPECTED_ESCROW required on Base Sepolia / 0G testnet). Deploys a new implementation ONLY if the compiled bytecode
  * actually differs from what's live (redeployImplementation defaults to
  * 'onchange'); a genuine no-op otherwise. The proxy address, all task state,
  * escrow balances, admin, verifier, treasury, fee config, token allowlist, and
@@ -24,7 +24,7 @@
  *     enforced here as a hard gate.
  *
  * Usage:
- *   PRIVATE_KEY=<admin_pk> npx hardhat run scripts/upgrade-blind-escrow.ts --network 0g-testnet
+ *   EXPECTED_ESCROW=<escrow> PRIVATE_KEY=<admin_pk> npx hardhat run scripts/upgrade-blind-escrow.ts --network 0g-testnet
  *   PRIVATE_KEY=<admin_pk> npx hardhat run scripts/upgrade-blind-escrow.ts --network 0g-mainnet
  */
 
@@ -32,7 +32,7 @@ import { ethers, upgrades } from "hardhat";
 import * as fs from "fs";
 import * as path from "path";
 import { assertSafeNetwork } from "./_guard";
-import { loadDeployment } from "./_deployments";
+import { resolveEscrowTarget } from "./_deployments";
 
 const IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
 
@@ -55,10 +55,8 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function main() {
   await assertSafeNetwork();
 
-  const deployments = await loadDeployment();
-  const proxy: string = deployments.contracts?.BlindEscrow;
+  const { escrow: proxy, record: deployments } = await resolveEscrowTarget({ sends: true });
   const expectedAdmin: string | undefined = deployments.deployer;
-  if (!proxy) throw new Error("BlindEscrow address missing from deployments file");
 
   const [signer] = await ethers.getSigners();
   if (!signer) throw new Error("No signer configured — set PRIVATE_KEY in .env");

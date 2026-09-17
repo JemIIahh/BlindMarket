@@ -10,16 +10,18 @@
  *   npx hardhat run scripts/verify-deployment-config.ts --network 0g-mainnet
  *   EXPECTED_ADMIN=0xSafe EXPECTED_VERIFIER=0xSigner EXPECTED_FEE_BPS=1500 \
  *     npx hardhat run scripts/verify-deployment-config.ts --network 0g-mainnet
+ *   DEPLOYMENT_SET=staging EXPECTED_ESCROW=0x... \
+ *     npx hardhat run scripts/verify-deployment-config.ts --network base-sepolia
  */
 import { ethers, network } from "hardhat";
-import { loadDeployment } from "./_deployments";
+import { resolveEscrowTarget } from "./_deployments";
 
 const NATIVE = "0x0000000000000000000000000000000000000000";
 
 async function main() {
-  const dep = await loadDeployment();
-  const proxy: string = dep.contracts?.BlindEscrow;
-  if (!proxy) throw new Error(`No BlindEscrow in deployments for network ${network.name} (chainId ${dep.chainId})`);
+  // Read-only: prints the resolved set/escrow; EXPECTED_ESCROW is checked below
+  // like the other EXPECTED_* values instead of being required.
+  const { escrow: proxy } = await resolveEscrowTarget({ sends: false });
   const escrow = await ethers.getContractAt("BlindEscrow", proxy);
   console.log(`network: ${network.name}\nBlindEscrow: ${proxy}\n`);
 
@@ -40,6 +42,7 @@ async function main() {
     console.log(`  ${mark} ${label}: ${actual}${expected !== undefined ? `   (expected ${expected})` : ""}`);
   };
 
+  line("escrow", proxy, process.env.EXPECTED_ESCROW);
   line("admin", admin, process.env.EXPECTED_ADMIN);
   line("verifier", verifier, process.env.EXPECTED_VERIFIER);
   line("treasury", treasury, process.env.EXPECTED_TREASURY);

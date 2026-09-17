@@ -20,27 +20,26 @@
  *     escrow<->pool wiring is separate future work — so this is forward-looking
  *     but correct (the deployer is the pool admin).
  *
- * Updates deployments/<network>.json in place.
+ * Updates the connected chain's record in the DEPLOYMENT_SET in place
+ * (EXPECTED_ESCROW=<that record's escrow> required on 0G testnet).
  *
  * Usage:
- *   npx hardhat run scripts/redeploy-validator-pool.ts --network 0g-testnet
+ *   EXPECTED_ESCROW=0x… npx hardhat run scripts/redeploy-validator-pool.ts --network 0g-testnet
  *   STAKE_TOKEN=0x… npx hardhat run scripts/redeploy-validator-pool.ts --network 0g-mainnet
  */
 
-import { ethers, network } from "hardhat";
+import { ethers } from "hardhat";
 import * as fs from "fs";
-import * as path from "path";
 import { assertSafeNetwork } from "./_guard";
+import { resolveEscrowTarget } from "./_deployments";
 
 const LOCAL_OR_TESTNET = new Set<number>([16602, 31337, 1337, 11155111]);
 
 async function main() {
   await assertSafeNetwork();
 
-  const depPath = path.resolve(__dirname, `../deployments/${network.name}.json`);
-  if (!fs.existsSync(depPath)) throw new Error(`deployments file not found: ${depPath}`);
-  const dep = JSON.parse(fs.readFileSync(depPath, "utf-8"));
-  const contracts = dep.contracts ?? dep;
+  const { file: depPath, record: dep } = await resolveEscrowTarget({ sends: true });
+  const contracts = dep.contracts;
 
   const [deployer] = await ethers.getSigners();
   console.log("Deployer:", deployer.address);
@@ -94,7 +93,6 @@ async function main() {
 
   // ── Persist ────────────────────────────────────────────────────────────────
   contracts.ValidatorPool = poolAddr;
-  if (!dep.contracts) Object.assign(dep, contracts);
   dep.validatorPoolRedeployedAt = new Date().toISOString();
   fs.writeFileSync(depPath, JSON.stringify(dep, null, 2));
   console.log("\nUpdated:", depPath);

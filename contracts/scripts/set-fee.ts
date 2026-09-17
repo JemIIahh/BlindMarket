@@ -11,13 +11,15 @@
  * will refuse, since the signer won't be admin).
  *
  * Usage:
- *   NEW_FEE_BPS=1000 npx hardhat run scripts/set-fee.ts --network 0g-testnet
+ *   EXPECTED_ESCROW=0x... NEW_FEE_BPS=1000 npx hardhat run scripts/set-fee.ts --network 0g-testnet
+ *   (DEPLOYMENT_SET=staging selects the staging records; EXPECTED_ESCROW is
+ *   required on Base Sepolia / 0G testnet, which more than one set uses.)
  *   I_HAVE_READ_MAINNET_CHECKLIST=yes NEW_FEE_BPS=1000 \
  *     npx hardhat run scripts/set-fee.ts --network 0g-mainnet
  */
 import { ethers, network } from "hardhat";
 import { assertSafeNetwork } from "./_guard";
-import { loadDeployment } from "./_deployments";
+import { resolveEscrowTarget } from "./_deployments";
 
 async function main() {
   await assertSafeNetwork();
@@ -28,9 +30,7 @@ async function main() {
     throw new Error(`NEW_FEE_BPS must be an integer 0..3000 (MAX_FEE_BPS). Got: ${raw}`);
   }
 
-  const dep = await loadDeployment();
-  const proxy: string = dep.contracts?.BlindEscrow;
-  if (!proxy) throw new Error(`No BlindEscrow in deployments for network ${network.name} (chainId ${dep.chainId})`);
+  const { escrow: proxy } = await resolveEscrowTarget({ sends: true });
 
   const [signer] = await ethers.getSigners();
   if (!signer) throw new Error("No signer configured — set PRIVATE_KEY in .env");

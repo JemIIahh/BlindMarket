@@ -1,7 +1,13 @@
+// Must stay the first import: it picks the OpenZeppelin manifest directory for
+// DEPLOYMENT_SET before upgrades-core reads it, and snapshots the guard
+// variables before dotenv loads contracts/.env.
+import { assertGuardVarsNotFromDotenv } from "./scripts/_manifest-dir";
 import { HardhatUserConfig } from "hardhat/config";
 import "@nomicfoundation/hardhat-toolbox";
 import "@openzeppelin/hardhat-upgrades";
 import "dotenv/config";
+
+assertGuardVarsNotFromDotenv();
 
 const config: HardhatUserConfig = {
   solidity: {

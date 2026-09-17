@@ -22,6 +22,71 @@ function unsetIfZero(address: string): string {
 
 const IS_PROD = process.env.NODE_ENV === 'production';
 
+/**
+ * contracts/ deployment set this backend's contracts are recorded in
+ * (contracts/scripts/_deployments.ts). '' is the default set (production and
+ * local dev); anything but default/staging is a typo and fails at load.
+ */
+export function parseDeploymentSet(raw: string | undefined): '' | 'staging' {
+  const value = (raw ?? '').trim();
+  if (value === '' || value === 'default') return '';
+  if (value === 'staging') return 'staging';
+  throw new Error(`DEPLOYMENT_SET="${value}" is not a deployment set. Use "default" (or leave it unset) or "staging".`);
+}
+
+/**
+ * Env vars a non-default deployment set must set explicitly. optional() treats
+ * an unset or empty value as missing and falls back to the generated
+ * (production) addresses or to production's RPC, so a staging stack that
+ * forgot one would talk to production's contracts. A zero address counts as
+ * set ("not deployed on this stack"). VALIDATOR_POOL_ADDRESS has no fallback
+ * but is listed so staging can't silently omit its pool.
+ */
+export const DEPLOYMENT_SET_REQUIRED_ENV = [
+  'OG_RPC_URL',
+  'BLIND_ESCROW_ADDRESS',
+  'TASK_REGISTRY_ADDRESS',
+  'BLIND_REPUTATION_ADDRESS',
+  'INFT_ADDRESS',
+  'VALIDATOR_POOL_ADDRESS',
+  'BASE_ESCROW_ADDRESS',
+  'AGENT_FACTORY_ADDRESS',
+  'USDC_PAYMASTER_ADDRESS',
+  'BLIND_ACCOUNT_FACTORY_ADDRESS',
+  'ENTRY_POINT_ADDRESS',
+] as const;
+
+/** Chains each non-default set runs on (contracts/scripts/_deployments.ts SET_CHAINS). */
+const DEPLOYMENT_SET_CHAINS: Record<'staging', { og: number; base: number }> = {
+  staging: { og: 16602, base: 84532 },
+};
+
+/** Why a backend in `set` must not boot; empty for the default set. */
+export function deploymentSetProblems(
+  set: '' | 'staging',
+  env: Record<string, string | undefined>,
+  chainIds: { og: number; base: number },
+): string[] {
+  if (!set) return [];
+  const problems: string[] = [];
+  const missing = DEPLOYMENT_SET_REQUIRED_ENV.filter((k) => !(env[k] ?? '').trim());
+  if (missing.length > 0) {
+    problems.push(
+      `DEPLOYMENT_SET=${set} but ${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} not set. ` +
+        `Unset or empty values fall back to production's addresses; set each explicitly ` +
+        `(0x0000000000000000000000000000000000000000 for a contract this stack does not deploy).`,
+    );
+  }
+  const want = DEPLOYMENT_SET_CHAINS[set];
+  if (chainIds.og !== want.og || chainIds.base !== want.base) {
+    problems.push(
+      `DEPLOYMENT_SET=${set} runs on OG_CHAIN_ID=${want.og} and BASE_CHAIN_ID=${want.base}; ` +
+        `this backend has ${chainIds.og} and ${chainIds.base}. Set both explicitly.`,
+    );
+  }
+  return problems;
+}
+
 // Base network this deployment settles on, and whether that network is Base
 // MAINNET. Every Base default (RPC, USDC, contract table) and the CCTP tier
 // key off this — NOT off NODE_ENV. The deployed app runs NODE_ENV=production
@@ -130,6 +195,11 @@ export const config = {
   // (completeVerification on Base releases USDC). Same pattern as above but
   // targets the Base BlindEscrow.
   baseMarketplaceSignerPrivateKey: process.env.BASE_MARKETPLACE_SIGNER_PRIVATE_KEY || '',
+
+  // contracts/ deployment set holding this stack's records ('' = the default
+  // records, i.e. production). Only used to print ops commands that target the
+  // right escrow — see contractsEnvPrefix in services/chainNetwork.ts.
+  deploymentSet: parseDeploymentSet(process.env.DEPLOYMENT_SET),
 
   // Forensic verification
   forensicMaxPhotoAgeMs: parseInt(optional('FORENSIC_MAX_PHOTO_AGE_MS', '1800000'), 10),  // 30 min
@@ -332,6 +402,10 @@ export function assertBootConfig(): void {
   const isProd = config.nodeEnv === 'production';
   const fatals: string[] = [];
   const warnings: string[] = [];
+
+  fatals.push(
+    ...deploymentSetProblems(config.deploymentSet, process.env, { og: config.ogChainId, base: config.baseChainId }),
+  );
 
   if (isProd) {
     // JWT_SECRET signs the 365d agent platform tokens (agentRunner). Empty in

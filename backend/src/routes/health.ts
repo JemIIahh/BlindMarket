@@ -3,7 +3,7 @@ import { formatEther, ZeroAddress } from 'ethers';
 import type { ApiResponse } from '../types.js';
 import { escrow, marketplaceSigner, provider, baseEscrow, baseMarketplaceSigner, baseProvider } from '../services/chain.js';
 import { isBridgeReady } from '../services/a2aSettlement.js';
-import { chainNetwork } from '../services/chainNetwork.js';
+import { chainNetwork, contractsEnvPrefix } from '../services/chainNetwork.js';
 import { escrowFingerprintError } from '../services/escrowFingerprint.js';
 import { parkedDisputeCount } from '../services/disputeKeys.js';
 import { config } from '../config.js';
@@ -32,8 +32,8 @@ function escrowOrNull(address: string): string | null {
   return address && address.toLowerCase() !== ZeroAddress ? address : null;
 }
 
-function rotateCommand(signerAddr: string, network: string): string {
-  return `cd contracts && MARKETPLACE_SIGNER_ADDRESS=${signerAddr} npx hardhat run scripts/rotate-verifier.ts --network ${network}`;
+function rotateCommand(signerAddr: string, network: string, escrowAddress: string | null): string {
+  return `cd contracts && ${contractsEnvPrefix(escrowAddress)}MARKETPLACE_SIGNER_ADDRESS=${signerAddr} npx hardhat run scripts/rotate-verifier.ts --network ${network}`;
 }
 
 /** The 0G half of the bridge: verifier role and native-0G gas of its signer. */
@@ -72,7 +72,9 @@ async function zeroGBridge(): Promise<Record<string, unknown>> {
     signerBalanceOg,
     signerGasLow,
     signerBalanceError,
-    rotateCommand: verifierMatches ? null : rotateCommand(signerAddr, chainNetwork('0g').hardhatNetwork),
+    rotateCommand: verifierMatches
+      ? null
+      : rotateCommand(signerAddr, chainNetwork('0g').hardhatNetwork, escrowOrNull(config.blindEscrowAddress)),
   };
 }
 
@@ -120,7 +122,9 @@ async function baseBridge(): Promise<Record<string, unknown>> {
     signerEthBalance: baseSignerEthBalance,
     signerEthLow: baseSignerEthLow,
     signerBalanceError: baseSignerBalanceError,
-    rotateCommand: baseVerifierMatches ? null : rotateCommand(baseSignerAddr, chainNetwork('base').hardhatNetwork),
+    rotateCommand: baseVerifierMatches
+      ? null
+      : rotateCommand(baseSignerAddr, chainNetwork('base').hardhatNetwork, escrowOrNull(config.baseEscrowAddress)),
   };
 }
 

@@ -11,7 +11,7 @@
  *   npx hardhat run scripts/validate-escrow-upgrade.ts --network base
  */
 import { ethers, upgrades, network } from "hardhat";
-import { loadDeployment } from "./_deployments";
+import { resolveEscrowTarget } from "./_deployments";
 
 async function main() {
   // Resolve by chainId, never by network.name. The old
@@ -19,15 +19,8 @@ async function main() {
   // the filename happen to coincide — true for 0g-testnet, 0g-mainnet and
   // base-sepolia, but NOT for Base mainnet, whose hardhat key is "base" while
   // the record is "base-mainnet.json", so that one lookup threw ENOENT.
-  const chainId = Number((await ethers.provider.getNetwork()).chainId);
-  const dep = await loadDeployment(chainId);
-  const proxy: string | undefined = dep.contracts?.BlindEscrow;
-  if (!proxy || /^0x0{40}$/i.test(proxy)) {
-    throw new Error(
-      `No deployed BlindEscrow for chainId ${chainId} — the record holds ` +
-        `${proxy ?? "no address"}. Deploy before validating an upgrade.`,
-    );
-  }
+  // Read-only; throws when the record holds no deployed escrow.
+  const { chainId, escrow: proxy } = await resolveEscrowTarget({ sends: false });
 
   const Factory = await ethers.getContractFactory("BlindEscrow");
 

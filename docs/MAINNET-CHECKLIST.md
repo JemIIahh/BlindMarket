@@ -60,7 +60,7 @@ verification, bug bounty) are listed at the bottom for completeness.
 
 ### 1.2 Storage-layout dry run
 
-- [ ] Run `npx hardhat run scripts/upgrade-blind-escrow.ts --network 0g-testnet`
+- [ ] Run `EXPECTED_ESCROW=<0g-testnet.json BlindEscrow> npx hardhat run scripts/upgrade-blind-escrow.ts --network 0g-testnet`
       one final time on testnet against the *exact* bytecode you intend to
       deploy to mainnet. The OZ plugin's storage-layout check catches
       incompatible upgrades. Verify the layout file
@@ -158,9 +158,9 @@ locked in escrow.
       in the deployed bytecode) — there is no accept step guarding against a
       mistyped address on that specific contract today.
       Redeploy Base Sepolia's `AgentFactory` from current source
-      (`npx hardhat run scripts/deploy-agent-factory.ts --network base-sepolia`,
-      then update `deployments/base-sepolia.json`'s `AgentFactory` address
-      and rerun `sync-addresses.ts`) so the testnet contract actually
+      (`EXPECTED_ESCROW=<base-sepolia.json BlindEscrow> npx hardhat run scripts/deploy-agent-factory.ts --network base-sepolia`,
+      which also updates `deployments/base-sepolia.json`'s `AgentFactory`
+      address, then rerun `sync-addresses.ts`) so the testnet contract actually
       matches what mainnet will run.
 
   **Why this matters:** Base mainnet's own `AgentFactory` deploy pulls from

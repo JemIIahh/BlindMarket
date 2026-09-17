@@ -5,14 +5,19 @@
  * events to create agent records. Each agent owns its wallet — backend
  * never signs for agents (decentralized).
  *
+ * Writes (merges into) agent-factory-<chain record>.json in the DEPLOYMENT_SET,
+ * and updates the AgentFactory mirror in the main record when it has one. On
+ * Base Sepolia EXPECTED_ESCROW must name the escrow of the stack this belongs
+ * to (so deploy-base.ts runs first for a new set).
+ *
  * Usage:
- *   npx hardhat run scripts/deploy-agent-factory.ts --network base-sepolia
+ *   DEPLOYMENT_SET=staging EXPECTED_ESCROW=0x... \
+ *     npx hardhat run scripts/deploy-agent-factory.ts --network base-sepolia
  *   I_HAVE_READ_MAINNET_CHECKLIST=yes npx hardhat run scripts/deploy-agent-factory.ts --network base
  */
 import { ethers } from "hardhat";
-import * as fs from "fs";
-import * as path from "path";
 import { assertSafeNetwork } from "./_guard";
+import { deployBlock, preflightDeploy, recordPath, writeDeployment } from "./_deployments";
 
 // Base USDC addresses
 const BASE_USDC: Record<number, string> = {
@@ -40,6 +45,9 @@ async function main() {
     throw new Error(`No USDC address for chainId ${chainId}`);
   }
   console.log("USDC:", usdcAddress);
+  const target = preflightDeploy({ chainId, deploysEscrow: false });
+  const outPath = recordPath(chainId, target.set, "agent-factory-");
+  const startBlock = await ethers.provider.getBlockNumber();
 
   // Treasury = deployer (can be updated later)
   const treasury = deployer.address;
@@ -49,12 +57,13 @@ async function main() {
   const factory = await AgentFactory.deploy(usdcAddress, treasury, DEPLOY_FEE_USDC);
   await factory.waitForDeployment();
   const factoryAddr = await factory.getAddress();
-  console.log("AgentFactory:", factoryAddr);
+  const factoryBlock = await deployBlock(factory, startBlock);
+  console.log("AgentFactory:", factoryAddr, `(block ${factoryBlock})`);
   console.log("Deploy fee:", Number(DEPLOY_FEE_USDC) / 1e6, "USDC");
 
   // Save deployment
   const networkName = chainId === 8453 ? "base-mainnet" : "base-sepolia";
-  const deployment = {
+  const deployment = writeDeployment(outPath, {
     network: networkName,
     chainId,
     deployer: deployer.address,
@@ -68,15 +77,16 @@ async function main() {
     config: {
       deployFeeUsdc: DEPLOY_FEE_USDC.toString(),
     },
-  };
-
-  const outDir = path.join(__dirname, "..", "deployments");
-  if (!fs.existsSync(outDir)) {
-    fs.mkdirSync(outDir, { recursive: true });
-  }
-  const outPath = path.join(outDir, `agent-factory-${networkName}.json`);
-  fs.writeFileSync(outPath, JSON.stringify(deployment, null, 2));
+    blocks: { AgentFactory: factoryBlock },
+  });
   console.log("\nDeployment saved to:", outPath);
+  // sync-addresses prefers the main record's AgentFactory over this companion
+  // record, so a stale mirror there would hide the new factory.
+  if (target.record && "AgentFactory" in target.record.contracts) {
+    writeDeployment(target.file, { network: target.record.network, chainId, contracts: { AgentFactory: factoryAddr } });
+    console.log("Updated AgentFactory mirror in:", target.file);
+  }
+  console.log(`Backend env: AGENT_FACTORY_ADDRESS=${factoryAddr} AGENT_FACTORY_DEPLOYMENT_BLOCK=${factoryBlock}`);
 
   console.log("\n=== DEPLOYMENT SUMMARY ===");
   console.log(JSON.stringify(deployment.contracts, null, 2));

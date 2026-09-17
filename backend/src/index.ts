@@ -49,7 +49,7 @@ import { startCctpAttestationPoller } from './services/cctpAttestationPoller.js'
 import { startExpirySweepLoop } from './services/a2aExpirySweep.js';
 import { auditCustodySealedTasks } from './services/keyCustodyService.js';
 import { isBridgeReady } from './services/a2aSettlement.js';
-import { chainNetwork } from './services/chainNetwork.js';
+import { chainNetwork, contractsEnvPrefix } from './services/chainNetwork.js';
 import { marketplaceSigner, escrow, baseMarketplaceSigner, baseEscrow } from './services/chain.js';
 import { logChainConfig } from './services/chainService.js';
 import { reconcileAgents, startZombieReaper } from './services/agentRunner.js';
@@ -233,9 +233,9 @@ httpServer.listen(config.port, () => {
           console.error(`    escrow.verifier()        = ${onChainVerifier}`);
           console.error(`    ${label} signer address = ${signerAddr}`);
           console.error(`    escrow contract address  = ${bridge.escrowAddress}`);
-          console.error('    Fix from contracts/ with the current admin key (rotate-verifier.ts');
-          console.error('    targets the escrow in contracts/deployments/ for this chain):');
-          console.error(`    MARKETPLACE_SIGNER_ADDRESS=${signerAddr} \\`);
+          console.error('    Fix from contracts/ with the current admin key. rotate-verifier.ts acts on');
+          console.error('    the escrow its deployment record names and refuses unless that is EXPECTED_ESCROW:');
+          console.error(`    ${contractsEnvPrefix(bridge.escrowAddress)}MARKETPLACE_SIGNER_ADDRESS=${signerAddr} \\`);
           console.error(`      npx hardhat run scripts/rotate-verifier.ts --network ${bridge.network}`);
           console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         } else {

@@ -17,7 +17,7 @@
  */
 
 import { ethers } from "hardhat";
-import { loadDeployment } from "./_deployments";
+import { resolveEscrowTarget } from "./_deployments";
 
 const EIP1967_IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
 
@@ -25,9 +25,8 @@ async function main() {
   const [signer] = await ethers.getSigners();
   console.log("signer:", signer.address);
 
-  const dep = await loadDeployment();
-  const PROXY = dep.contracts?.BlindEscrow;
-  if (!PROXY) throw new Error(`No BlindEscrow in deployments for chainId ${dep.chainId}`);
+  // Read-only (static call only), so EXPECTED_ESCROW is not required.
+  const { escrow: PROXY, record: dep } = await resolveEscrowTarget({ sends: false });
   console.log("network:", dep.network, " BlindEscrow:", PROXY);
 
   const raw = await ethers.provider.getStorage(PROXY, EIP1967_IMPL_SLOT);

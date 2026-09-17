@@ -4,14 +4,16 @@
  * Only deploys BlindEscrow — TaskRegistry, BlindReputation, INFT, and
  * ValidatorPool stay on 0G where agents operate.
  *
+ * Writes (merges into) the chain's record in the DEPLOYMENT_SET and refuses
+ * to replace a live BlindEscrow unless ALLOW_ESCROW_REPLACE=true.
+ *
  * Usage:
- *   npx hardhat run scripts/deploy-base.ts --network base-sepolia
+ *   DEPLOYMENT_SET=staging npx hardhat run scripts/deploy-base.ts --network base-sepolia
  *   I_HAVE_READ_MAINNET_CHECKLIST=yes npx hardhat run scripts/deploy-base.ts --network base
  */
 import { ethers, upgrades } from "hardhat";
-import * as fs from "fs";
-import * as path from "path";
 import { assertSafeNetwork } from "./_guard";
+import { deployBlock, preflightDeploy, writeDeployment } from "./_deployments";
 
 // Base USDC addresses
 const BASE_USDC: Record<number, string> = {
@@ -41,6 +43,9 @@ async function main() {
   }
   console.log("USDC:", usdcAddress);
 
+  const target = preflightDeploy({ chainId, deploysEscrow: true });
+  const startBlock = await ethers.provider.getBlockNumber();
+
   // 1. Deploy BlindEscrow (treasury = deployer, verifier = deployer for now)
   //    Verifier will be rotated to the marketplace signer post-deploy.
   console.log("\n--- Deploying BlindEscrow ---");
@@ -52,7 +57,8 @@ async function main() {
   );
   await escrow.waitForDeployment();
   const escrowAddr = await escrow.getAddress();
-  console.log("BlindEscrow:", escrowAddr);
+  const escrowBlock = await deployBlock(escrow, startBlock);
+  console.log("BlindEscrow:", escrowAddr, `(block ${escrowBlock})`);
 
   // 2. Whitelist USDC
   console.log("\n--- Whitelisting USDC ---");
@@ -61,7 +67,7 @@ async function main() {
 
   // 3. Save deployment
   const networkName = chainId === 8453 ? "base-mainnet" : "base-sepolia";
-  const deployment = {
+  const deployment = writeDeployment(target.file, {
     network: networkName,
     chainId,
     deployer: deployer.address,
@@ -71,15 +77,9 @@ async function main() {
       BlindEscrow: escrowAddr,
       USDC: usdcAddress,
     },
-  };
-
-  const outDir = path.join(__dirname, "..", "deployments");
-  if (!fs.existsSync(outDir)) {
-    fs.mkdirSync(outDir, { recursive: true });
-  }
-  const outPath = path.join(outDir, `${networkName}.json`);
-  fs.writeFileSync(outPath, JSON.stringify(deployment, null, 2));
-  console.log("\nDeployment saved to:", outPath);
+    blocks: { BlindEscrow: escrowBlock },
+  });
+  console.log("\nDeployment saved to:", target.file, `(set ${target.set})`);
 
   console.log("\n=== DEPLOYMENT SUMMARY ===");
   console.log(JSON.stringify(deployment.contracts, null, 2));
@@ -88,9 +88,17 @@ async function main() {
   console.log("\nRemaining balance:", ethers.formatEther(remaining), "ETH");
 
   console.log("\n--- Next steps ---");
-  console.log("1. Generate marketplace signer:  npx hardhat run scripts/generate-marketplace-signer.ts --network", network.name);
-  console.log("2. Rotate verifier:              MARKETPLACE_SIGNER_ADDRESS=0x... npx hardhat run scripts/rotate-verifier.ts --network", network.name);
-  console.log("   (update rotate-verifier.ts to use Base escrow address if needed)");
+  const setEnv = target.set === "default" ? "" : `DEPLOYMENT_SET=${target.set} `;
+  if (target.set === "default") {
+    console.log("1. Generate marketplace signer:  npx hardhat run scripts/generate-marketplace-signer.ts --network", network.name);
+  } else {
+    // generate-marketplace-signer.ts writes backend/.env, which is not the
+    // staging backend's environment and may hold production keys.
+    console.log(`1. Signer: create a key used only by set "${target.set}" and set it as`);
+    console.log(`   BASE_MARKETPLACE_SIGNER_PRIVATE_KEY in that stack's backend env (not backend/.env).`);
+  }
+  console.log(`2. Rotate verifier:              ${setEnv}EXPECTED_ESCROW=${escrowAddr} MARKETPLACE_SIGNER_ADDRESS=0x... npx hardhat run scripts/rotate-verifier.ts --network`, network.name);
+  console.log(`3. Backend env:                  BASE_ESCROW_ADDRESS=${escrowAddr} BASE_ESCROW_DEPLOYMENT_BLOCK=${escrowBlock}`);
 }
 
 main().catch((err) => {

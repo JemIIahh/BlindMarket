@@ -25,3 +25,16 @@ export function chainNetwork(chain: TaskChain): { tier: 'mainnet' | 'testnet'; h
     }
   }
 }
+
+/**
+ * Env prefix for a contracts/ ops command that must act on this backend's
+ * escrow. It names the escrow whenever it is known: on chains that more than
+ * one deployment set uses (Base Sepolia, 0G testnet) the scripts refuse to
+ * send without EXPECTED_ESCROW. DEPLOYMENT_SET is added only when this
+ * backend belongs to a non-default set.
+ */
+export function contractsEnvPrefix(escrowAddress: string | null): string {
+  const set = config.deploymentSet ? `DEPLOYMENT_SET=${config.deploymentSet} ` : '';
+  const known = !!escrowAddress && !/^0x0{40}$/i.test(escrowAddress);
+  return set + (known ? `EXPECTED_ESCROW=${escrowAddress} ` : '');
+}

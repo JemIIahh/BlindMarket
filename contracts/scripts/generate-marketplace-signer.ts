@@ -73,8 +73,9 @@ async function main() {
   console.log(`  1. Fund this address with gas (approx 0.1 0G): ${addr}`);
   console.log("     (Testnet faucet: https://faucet.0g.ai)");
   console.log("  2. Rotate the on-chain verifier role to it:");
-  console.log("     # For Testnet:");
-  console.log(`     MARKETPLACE_SIGNER_ADDRESS=${addr} npx hardhat run scripts/rotate-verifier.ts --network 0g-testnet`);
+  console.log("     # For Testnet (0G testnet has more than one deployment set: name the escrow;");
+  console.log("     # add DEPLOYMENT_SET=staging for the staging stack, see contracts/README.md):");
+  console.log(`     EXPECTED_ESCROW=<escrow> MARKETPLACE_SIGNER_ADDRESS=${addr} npx hardhat run scripts/rotate-verifier.ts --network 0g-testnet`);
   console.log("     # For Mainnet (Requires checklist env var):");
   console.log(`     export I_HAVE_READ_MAINNET_CHECKLIST=yes`);
   console.log(`     MARKETPLACE_SIGNER_ADDRESS=${addr} npx hardhat run scripts/rotate-verifier.ts --network 0g-mainnet`);

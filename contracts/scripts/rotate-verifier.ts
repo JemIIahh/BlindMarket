@@ -7,7 +7,11 @@
  * Verifies the rotation by re-reading the verifier slot from the live RPC.
  *
  * Usage:
- *   MARKETPLACE_SIGNER_ADDRESS=0x... npx hardhat run scripts/rotate-verifier.ts --network 0g-testnet
+ *   MARKETPLACE_SIGNER_ADDRESS=0x... npx hardhat run scripts/rotate-verifier.ts --network 0g-mainnet
+ *   DEPLOYMENT_SET=staging EXPECTED_ESCROW=0x... MARKETPLACE_SIGNER_ADDRESS=0x... \
+ *     npx hardhat run scripts/rotate-verifier.ts --network base-sepolia
+ * On Base Sepolia / 0G testnet (used by more than one deployment set)
+ * EXPECTED_ESCROW is required and must equal the resolved escrow.
  *
  * Pre-requisites:
  *   - PRIVATE_KEY in contracts/.env is the current admin (BlindEscrow.admin())
@@ -18,7 +22,7 @@
 
 import { ethers } from "hardhat";
 import { assertSafeNetwork } from "./_guard";
-import { loadDeployment } from "./_deployments";
+import { resolveEscrowTarget } from "./_deployments";
 
 async function main() {
   await assertSafeNetwork();
@@ -29,10 +33,7 @@ async function main() {
     );
   }
 
-  const { chainId } = await ethers.provider.getNetwork();
-  const deployments = await loadDeployment(Number(chainId));
-  const proxyAddress: string = deployments.contracts?.BlindEscrow;
-  if (!proxyAddress) throw new Error("BlindEscrow address missing from deployments file");
+  const { escrow: proxyAddress } = await resolveEscrowTarget({ sends: true });
 
   const [signer] = await ethers.getSigners();
   console.log("Signer (must be admin):", signer.address);

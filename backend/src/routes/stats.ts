@@ -101,7 +101,7 @@ statsRouter.get('/', async (_req, res) => {
     // Validator count from ValidatorPool if deployed
     (async () => {
       const addr = process.env.VALIDATOR_POOL_ADDRESS;
-      if (!addr) return 0;
+      if (!addr || /^0x0{40}$/i.test(addr)) return 0;
       const abi = loadAbi('ValidatorPool');
       if (!abi) return 0;
       const contract = new ethers.Contract(addr, abi, provider);

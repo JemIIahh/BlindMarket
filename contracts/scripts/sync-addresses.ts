@@ -13,6 +13,12 @@
  *   npx hardhat run scripts/sync-addresses.ts
  * CI drift guard (fails if the committed modules are stale):
  *   CHECK=1 npx hardhat run scripts/sync-addresses.ts
+ *
+ * Only the DEFAULT records feed the generated modules. DEPLOYMENT_SET is
+ * deliberately ignored and deployments/staging/ is never read: a staging
+ * stack is configured through the backend/frontend env, never through the
+ * committed defaults that production and local dev fall back to. Record
+ * fields other than `contracts` (e.g. `blocks`) are ignored too.
  */
 import * as fs from "fs";
 import * as path from "path";
@@ -35,6 +41,9 @@ const KEYS: Record<string, string> = {
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 
+/** The default records only — see the header. Not _deployments.recordPath. */
+const DEFAULT_RECORDS_DIR = path.resolve(__dirname, "../deployments");
+
 /** A record's `contracts` map with placeholders stripped. Dropping zeros HERE
  *  rather than after the merge matters: base-mainnet.json carries
  *  `AgentFactory: 0x000…0` as its not-deployed-yet placeholder, and a zero left
@@ -48,7 +57,7 @@ const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
  *  truncated module — after which generated and committed agree and the drift
  *  guard goes quiet. */
 function readContracts(file: string, optional = false): Record<string, string> {
-  const p = path.resolve(__dirname, `../deployments/${file}`);
+  const p = path.join(DEFAULT_RECORDS_DIR, file);
   if (!fs.existsSync(p)) {
     if (optional) return {};
     throw new Error(`Deployment record not found: ${p}`);
@@ -106,6 +115,9 @@ const TARGETS = [
 
 async function main() {
   const check = process.env.CHECK === "1";
+  if (process.env.DEPLOYMENT_SET) {
+    console.warn(`note: DEPLOYMENT_SET=${process.env.DEPLOYMENT_SET} is ignored; generated modules come from the default records only.`);
+  }
   const content = render();
   let stale = false;
   for (const target of TARGETS) {

@@ -181,3 +181,56 @@ describe('GET /health/bridge', () => {
     expect(data.reason).toBe('0G: MARKETPLACE_SIGNER_PRIVATE_KEY not set; Base: BASE_MARKETPLACE_SIGNER_PRIVATE_KEY not set');
   });
 });
+
+describe('GET /health/bridge rotate command per deployment set', () => {
+  const OG_TESTNET_ESCROW = '0x1111111111111111111111111111111111111111';
+
+  async function withSet<T>(deploymentSet: string, fn: () => Promise<T>): Promise<T> {
+    const saved = { deploymentSet: cfg.deploymentSet, escrow: chain.escrow };
+    // A 0G verifier mismatch too, so both chains print a command.
+    chain.escrow = { verifier: async () => '0x00000000000000000000000000000000000000bb' };
+    Object.assign(cfg, { deploymentSet, ogChainId: 16602, blindEscrowAddress: OG_TESTNET_ESCROW });
+    try {
+      return await fn();
+    } finally {
+      cfg.deploymentSet = saved.deploymentSet;
+      chain.escrow = saved.escrow;
+    }
+  }
+
+  // rotate-verifier refuses to send on Base Sepolia / 0G testnet without
+  // EXPECTED_ESCROW, so production's own command must carry it too.
+  it('names the escrow, without DEPLOYMENT_SET, when DEPLOYMENT_SET is unset', async () => {
+    const data = await withSet('', bridge);
+    expect(data.rotateCommand).toBe(
+      `cd contracts && EXPECTED_ESCROW=${OG_TESTNET_ESCROW} ` +
+        `MARKETPLACE_SIGNER_ADDRESS=${SIGNER} npx hardhat run scripts/rotate-verifier.ts --network 0g-testnet`,
+    );
+    expect(data.base.rotateCommand).toBe(
+      `cd contracts && EXPECTED_ESCROW=${BASE_ESCROW} ` +
+        `MARKETPLACE_SIGNER_ADDRESS=${SIGNER} npx hardhat run scripts/rotate-verifier.ts --network base-sepolia`,
+    );
+  });
+
+  it('leaves EXPECTED_ESCROW out when the escrow is the zero address', async () => {
+    const data = await withSet('', async () => {
+      cfg.blindEscrowAddress = '0x0000000000000000000000000000000000000000';
+      return bridge();
+    });
+    expect(data.rotateCommand).toBe(
+      `cd contracts && MARKETPLACE_SIGNER_ADDRESS=${SIGNER} npx hardhat run scripts/rotate-verifier.ts --network 0g-testnet`,
+    );
+  });
+
+  it("targets the staging records and this backend's escrow when DEPLOYMENT_SET=staging", async () => {
+    const data = await withSet('staging', bridge);
+    expect(data.rotateCommand).toBe(
+      `cd contracts && DEPLOYMENT_SET=staging EXPECTED_ESCROW=${OG_TESTNET_ESCROW} ` +
+        `MARKETPLACE_SIGNER_ADDRESS=${SIGNER} npx hardhat run scripts/rotate-verifier.ts --network 0g-testnet`,
+    );
+    expect(data.base.rotateCommand).toBe(
+      `cd contracts && DEPLOYMENT_SET=staging EXPECTED_ESCROW=${BASE_ESCROW} ` +
+        `MARKETPLACE_SIGNER_ADDRESS=${SIGNER} npx hardhat run scripts/rotate-verifier.ts --network base-sepolia`,
+    );
+  });
+});

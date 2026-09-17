@@ -26,6 +26,8 @@
  *   I_HAVE_READ_MAINNET_CHECKLIST=yes SAFE_ADDRESS=0xSafe \
  *     npx hardhat run scripts/migrate-admin-to-safe.ts --network 0g-mainnet
  *   # add INCLUDE_INFT=yes to also transfer INFT ownership (irreversible)
+ *   # on Base Sepolia / 0G testnet also set EXPECTED_ESCROW=<escrow> (and
+ *   # DEPLOYMENT_SET=staging for the staging stack)
  *
  * AFTER this runs: from the Safe, call acceptAdmin() on BlindEscrow /
  * BlindReputation / TaskRegistry, and acceptOwnership() on AgentFactory.
@@ -33,7 +35,7 @@
  */
 import { ethers, network } from "hardhat";
 import { assertSafeNetwork } from "./_guard";
-import { loadDeployment } from "./_deployments";
+import { resolveEscrowTarget } from "./_deployments";
 
 async function main() {
   await assertSafeNetwork();
@@ -51,7 +53,7 @@ async function main() {
       `Refusing to migrate control to a possibly-mistyped EOA.`);
   }
 
-  const dep = await loadDeployment();
+  const { record: dep } = await resolveEscrowTarget({ sends: true });
   const c = dep.contracts;
   const [signer] = await ethers.getSigners();
   console.log(`network: ${network.name}\nsigner (deployer EOA): ${signer.address}\ntarget Safe: ${safeAddr}\n`);
