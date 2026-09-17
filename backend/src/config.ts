@@ -347,15 +347,20 @@ export function assertBootConfig(): void {
     }
 
     // Degraded-but-not-fatal: the bridge being optional is an existing design
-    // choice, and persistence may be SQLite-only in some deploys.
+    // choice. Persistence is NOT optional in production: the SQLite fallback
+    // lives in the container and is wiped on every redeploy, so agents, API
+    // keys, messages, reviews and the earnings ledger disappear. Require an
+    // explicit opt-in to run production against SQLite.
+    if (!config.databaseUrl && process.env.ALLOW_SQLITE_PROD !== 'true') {
+      fatals.push('DATABASE_URL is empty in production — persistence is disabled and data will be lost on redeploy. Set DATABASE_URL to a Postgres (Neon) connection string, or set ALLOW_SQLITE_PROD=true to opt out of durable persistence.');
+    } else if (!config.databaseUrl) {
+      warnings.push('DATABASE_URL is empty in production — running against SQLite because ALLOW_SQLITE_PROD=true is set. Data will be lost on redeploy.');
+    }
     if (!config.marketplaceSignerPrivateKey) {
       warnings.push('MARKETPLACE_SIGNER_PRIVATE_KEY is empty — the A2A settlement bridge is DISABLED; agent tasks will accept/submit off-chain but never settle on-chain.');
     }
-    if (!config.databaseUrl) {
-      warnings.push('DATABASE_URL is empty in production — Neon-backed persistence is unavailable.');
-      if (config.cctp.enabled) {
-        warnings.push('CCTP_ENABLED=true but DATABASE_URL is empty — bridging is DISABLED (it needs the cctp_transfers table).');
-      }
+    if (!config.databaseUrl && config.cctp.enabled) {
+      warnings.push('CCTP_ENABLED=true but DATABASE_URL is empty — bridging is DISABLED (it needs the cctp_transfers table).');
     }
   }
 
