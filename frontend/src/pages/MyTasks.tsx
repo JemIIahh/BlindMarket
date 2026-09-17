@@ -42,7 +42,7 @@ interface PostedTask {
   };
   state: {
     taskId: string;
-    status: 'open' | 'accepted' | 'submitted' | 'awaiting_verification' | 'verified' | 'failed' | 'in_progress';
+    status: 'open' | 'accepted' | 'submitted' | 'awaiting_verification' | 'verified' | 'completed' | 'failed' | 'in_progress';
     executorAddress?: string;
     acceptedAt?: string;
     submittedAt?: string;
@@ -186,14 +186,16 @@ export default function MyTasks() {
   // browser-side wrap loop needed. The `useBidWatcher` hook was removed.
   // For status counts we prefer the on-chain status (source of truth for
   // settlement); fall back to the a2a state for tasks whose chain index
-  // hasn't caught up yet (mapped to the closest matching enum).
+  // hasn't caught up yet (mapped to the closest matching enum). Off-chain
+  // 'verified' and 'completed' both mean the work PASSED, so they map to
+  // Completed (4) — not on-chain 3, which means verification failed.
   function effectiveStatus(t: PostedTask): number {
     if (t.onChain) return t.onChain.status;
     switch (t.state.status) {
       case 'open': return 0;
       case 'accepted': case 'in_progress': return 1;
       case 'submitted': case 'awaiting_verification': return 2;
-      case 'verified': return 3;
+      case 'verified': case 'completed': return 4;
       case 'failed': return 6;
       default: return 0;
     }
@@ -335,11 +337,9 @@ export default function MyTasks() {
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-px bg-line border-t border-line">
             {paginatedTasks.map(t => {
               const status = effectiveStatus(t);
-              // Label from the actual source: the numeric map is only correct
-              // for on-chain statuses (where 3 = verification failed). For
-              // off-chain-only tasks show the a2a status string directly —
-              // there 'verified' means PASSED and must not pick up the
-              // on-chain 3 label via effectiveStatus's convenience mapping.
+              // Label from the actual source: the numeric map only names
+              // on-chain statuses. For off-chain-only tasks show the a2a status
+              // string directly ('verified' reads better than 'completed').
               const statusLabel = t.onChain
                 ? (STATUS_LABELS[status] ?? 'open')
                 : t.state.status.replace(/_/g, ' ');
