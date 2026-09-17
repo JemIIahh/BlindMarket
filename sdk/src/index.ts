@@ -365,6 +365,9 @@ export class BlindMarket {
     privacy?: 'public' | 'private';
     alreadySettled?: boolean;
     assignTxHash?: Hex;
+    /** Which chain holds the task's escrow ('0g', 'base', …). Absent from
+     *  backends older than the field, in which case the task is on 0G. */
+    chain?: string;
   }> {
     return this.req('POST', `/api/v1/a2a/tasks/${taskId}/accept`);
   }
@@ -382,8 +385,9 @@ export class BlindMarket {
     evidenceHash?: Hex;
     /** Which escrow the unsigned tx targets. Tasks are funded on exactly one
      *  chain; sign on that chain's RPC. Absent from backends older than the
-     *  field, in which case the task is on 0G. */
-    chain?: 'base' | '0g';
+     *  field, in which case the task is on 0G. A string, not a union: a newer
+     *  backend can name a chain this SDK version doesn't know. */
+    chain?: string;
     unsignedSubmitEvidence?: Record<string, unknown> | null;
   }> {
     return this.req('POST', `/api/v1/a2a/tasks/${taskId}/submit`, { resultData });

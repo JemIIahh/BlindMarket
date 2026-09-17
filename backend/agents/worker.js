@@ -479,10 +479,33 @@ if (!suiSigner && AGENT_PRIVATE_KEY) {
   }
 }
 
-/** Normalise the chain the backend reports; anything unknown is treated as 0G,
- *  which is what every task was before Base existed. Exported for tests. */
+const SETTLEMENT_CHAINS = ['0g', 'base'];
+
+function isSettlementChain(reported) {
+  return SETTLEMENT_CHAINS.includes(reported);
+}
+
+/** True when the backend named a chain this worker cannot sign for. A missing
+ *  chain is not unsupported: tasks indexed before the field existed are 0G.
+ *  Callers check this BEFORE accepting, because accepting assigns the task
+ *  on-chain and cannot be undone. Exported for tests. */
+export function isUnsupportedChain(reported) {
+  return reported != null && !isSettlementChain(reported);
+}
+
+/** The log/skip reason for a chain `isUnsupportedChain` flags. */
+export function unsupportedChainReason(reported) {
+  return `settlement chain "${reported}" is not supported by this worker (it signs on ${SETTLEMENT_CHAINS.join(' and ')}) — update the agent`;
+}
+
+/** Normalise the chain the backend reports. Missing means 0G, which is what
+ *  every task was before Base existed. Any other unknown value throws: signing
+ *  it with the 0G key would read and settle the 0G escrow using another
+ *  chain's task id. Exported for tests. */
 export function pickChain(reported) {
-  return reported === 'base' ? 'base' : '0g';
+  if (reported == null) return '0g';
+  if (isUnsupportedChain(reported)) throw new Error(unsupportedChainReason(reported));
+  return reported;
 }
 
 /** The signer bound to `chain`'s RPC, or null when that chain is not
@@ -498,6 +521,39 @@ export function escrowAddressFor(chain) {
 const NATIVE_SYMBOL = { '0g': '0G', base: 'ETH' };
 
 /**
+ * Why a task must not be accepted yet, or null. Accepting assigns the task
+ * on-chain, so this runs first. A chain this worker cannot sign for is refused
+ * without calling `problemFor` (preflightGas throws on it, and callers that
+ * swallow that throw would read it as "no problem"). A known chain is refused
+ * when `problemFor(chain)` names a gas problem. A missing chain (indexed
+ * before the field existed) passes and is checked after accept instead.
+ * `unsupported` lets callers keep chain skips apart from gas skips, which
+ * speed up the feed scan until the wallet is funded.
+ */
+export async function acceptBlocker(chain, problemFor) {
+  if (isUnsupportedChain(chain)) return { reason: unsupportedChainReason(chain), unsupported: true };
+  if (!isSettlementChain(chain)) return null;
+  const reason = await problemFor(chain);
+  return reason ? { reason, unsupported: false } : null;
+}
+
+/**
+ * Partition open tasks by `acceptBlocker`. `problemFor` is memoised per poll
+ * so a page of N Base tasks costs one balance read.
+ */
+export async function pickAffordable(entries, problemFor) {
+  const affordable = [];
+  const skipped = [];
+  for (const e of entries) {
+    const chain = e?.meta?.chain;
+    const blocker = await acceptBlocker(chain, problemFor);
+    if (blocker) skipped.push({ taskHash: e.meta.taskId, chain, ...blocker });
+    else affordable.push(e);
+  }
+  return { affordable, skipped };
+}
+
+/**
  * Gas preflight. The worker's wallet pays its own gas — the Privy relay the
  * web app and MCP use signs only Privy-managed wallets, and this is a raw EOA
  * (relay-tx looks the address up in Privy and answers WALLET_NOT_FOUND for
@@ -507,25 +563,6 @@ const NATIVE_SYMBOL = { '0g': '0G', base: 'ETH' };
  * missing, on which chain, for which address, before spending the attempt.
  * Returns null when fine, else the reason.
  */
-/**
- * Partition open tasks by whether this wallet can pay gas on the task's chain.
- * `meta.chain` is recorded at /tasks/index; tasks without it (indexed before
- * the field existed) are kept and checked after accept instead. `problemFor`
- * is memoised per poll so a page of N Base tasks costs one balance read.
- */
-export async function pickAffordable(entries, problemFor) {
-  const affordable = [];
-  const skipped = [];
-  for (const e of entries) {
-    const chain = e?.meta?.chain;
-    if (chain !== 'base' && chain !== '0g') { affordable.push(e); continue; }
-    const reason = await problemFor(chain);
-    if (reason) skipped.push({ taskHash: e.meta.taskId, chain, reason });
-    else affordable.push(e);
-  }
-  return { affordable, skipped };
-}
-
 export async function preflightGas(chain, signer, viaAA = (pickChain(chain) === 'base' && !!AGENT_SMART_ACCOUNT_ADDRESS && !!AA_ENTRY_POINT)) {
   // ERC-4337 AA path: gas is paid in USDC via the paymaster — skip the ETH
   // balance check entirely. Callers that already resolved the on-chain
@@ -627,8 +664,14 @@ let _working = false;
 const resumingTasks = new Set();
 const resumeFailures = new Map();
 // taskHash → last gas-skip reason logged, so a wallet that stays unfunded
-// logs each skipped task once per reason instead of once per poll.
+// logs each skipped task once per reason instead of once per poll. A non-empty
+// map speeds up the feed scan, since funding the wallet makes the tasks
+// acceptable.
 const gasSkipLogged = new Map();
+// Same, for tasks on a chain this worker cannot sign for. Kept apart because
+// nothing the operator does short of updating the agent changes the answer,
+// so these must not speed up the feed scan.
+const chainSkipLogged = new Map();
 // Same idea for tasks resume is holding for gas: they are assigned to us, so
 // they never appear on the open board and must not share the board's prune.
 const resumeHoldLogged = new Map();
@@ -639,6 +682,8 @@ const MAX_RESUME_ATTEMPTS = 3;
 const verifyingTasks = new Set();
 const verifyFailures = new Map();
 const MAX_VERIFY_ATTEMPTS = 5;
+// taskHash → last skip reason logged for a verification this worker cannot settle.
+const verifySkipLogged = new Map();
 
 process.on('disconnect', () => {
   log('parent disconnected, exiting');
@@ -1488,6 +1533,7 @@ async function pollAndWork() {
     // the fast gas re-check; drop them so the cadence and the map both relax.
     const onBoard = new Set(entries.map(e => e.meta.taskId));
     for (const k of [...gasSkipLogged.keys()]) if (!onBoard.has(k)) gasSkipLogged.delete(k);
+    for (const k of [...chainSkipLogged.keys()]) if (!onBoard.has(k)) chainSkipLogged.delete(k);
 
     const available = entries.filter(e => {
       if (!appliedTasks.has(e.meta.taskId)) return true;
@@ -1513,8 +1559,9 @@ async function pollAndWork() {
     };
     const { affordable, skipped } = await pickAffordable(available, problemFor);
     for (const sk of skipped) {
-      if (gasSkipLogged.get(sk.taskHash) === sk.reason) continue;
-      gasSkipLogged.set(sk.taskHash, sk.reason);
+      const logged = sk.unsupported ? chainSkipLogged : gasSkipLogged;
+      if (logged.get(sk.taskHash) === sk.reason) continue;
+      logged.set(sk.taskHash, sk.reason);
       log(`skipping task ${sk.taskHash.slice(0, 10)}… on ${sk.chain}: ${sk.reason}`);
     }
     for (const e of affordable) gasSkipLogged.delete(e.meta.taskId);
@@ -1631,6 +1678,7 @@ async function pollAndWork() {
             acceptedRootHash = acceptJson.data?.rootHash ?? null;
             acceptedWrappedKey = acceptJson.data?.wrappedKey ?? null;
             acceptedPrivacy = acceptJson.data?.privacy ?? null;
+            acceptedChain = acceptJson.data?.chain ?? entry.meta?.chain ?? null;
           } catch { /* non-JSON body */ }
           break;
         }
@@ -1712,13 +1760,23 @@ async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrapp
   try {
     const taskStartedAt = Date.now();
 
+    // Accept should have been refused for this chain already (pickAffordable,
+    // gasGateBroadcast). If one slipped through, hand it back rather than
+    // sign on the wrong chain: release re-opens it if the assignment never
+    // landed, else the backend answers ON_CHAIN_LOCKED and releaseTask logs it.
+    if (isUnsupportedChain(acceptedChain)) {
+      log(`not working on ${acceptedTaskHash.slice(0, 10)}…: ${unsupportedChainReason(acceptedChain)}; releasing`);
+      await releaseTask(acceptedTaskHash);
+      return;
+    }
+
     // The task is now assigned to this wallet on-chain. Before spending an
     // LLM call, make sure we can pay for the submitEvidence tx that follows —
     // if not, leave the off-chain state at 'accepted' (NOT 'submitted': that
     // is set by /submit and cannot be re-driven) so resumeAssignedTasks
     // re-runs this task once the wallet is funded. Chain unknown (older
     // backend / legacy task) → checked at submit time instead.
-    if (acceptedChain === 'base' || acceptedChain === '0g') {
+    if (isSettlementChain(acceptedChain)) {
       const gasProblem = await preflightGas(acceptedChain, signerFor(acceptedChain));
       if (gasProblem) {
         log(`not working on ${acceptedTaskHash.slice(0, 10)}… yet: ${gasProblem} — it is assigned to this wallet on-chain; fund the wallet and the worker resumes it on a later poll`);
@@ -2120,7 +2178,13 @@ async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrapp
     } else {
       // The backend names the chain the unsigned tx targets. Pick that chain's
       // signer — the tx also carries chainId, so a wrong pick fails loudly at
-      // ethers rather than landing on the wrong network.
+      // ethers rather than landing on the wrong network. /accept named no
+      // chain if we got here with one we can't sign for; hand the task back.
+      if (isUnsupportedChain(submitJson.data?.chain)) {
+        log(`cannot submit ${acceptedTaskHash.slice(0, 10)}…: ${unsupportedChainReason(submitJson.data.chain)}; releasing`);
+        await releaseTask(acceptedTaskHash);
+        return;
+      }
       const submitChain = pickChain(submitJson.data?.chain);
       broadcastOk = await broadcastEvmSubmitEvidence(
         acceptedTaskHash, unsignedSubmitEvidence, submitChain, onChainTaskId,
@@ -2380,7 +2444,14 @@ async function resumeAssignedTasks() {
     log(`resume: failed to list executions: ${e.message}`);
     return;
   }
-  if (!Array.isArray(executions) || executions.length === 0) return;
+  if (!Array.isArray(executions)) return;
+  // /executions is this executor's whole history; only tasks still owed can
+  // be held or skipped below.
+  const owed = new Set(executions
+    .filter((i) => ['accepted', 'in_progress', 'submitted'].includes(i?.state?.status))
+    .map((i) => i?.meta?.taskId));
+  for (const k of [...resumeHoldLogged.keys()]) if (!owed.has(k)) resumeHoldLogged.delete(k);
+  if (executions.length === 0) return;
 
   for (const item of executions) {
     const meta = item?.meta;
@@ -2409,7 +2480,15 @@ async function resumeAssignedTasks() {
     // on tasks that can actually be driven. (Chain from meta; rows without it
     // fall through to the check inside runAcceptedTask.)
     const metaChain = meta.chain;
-    if (!finalizeOnly && (metaChain === 'base' || metaChain === '0g')) {
+    if (isUnsupportedChain(metaChain)) {
+      const why = unsupportedChainReason(metaChain);
+      if (resumeHoldLogged.get(taskHash) !== why) {
+        resumeHoldLogged.set(taskHash, why);
+        log(`resume: skipping ${taskHash.slice(0, 10)}…: ${why}`);
+      }
+      continue;
+    }
+    if (!finalizeOnly && isSettlementChain(metaChain)) {
       const gasProblem = await preflightGas(metaChain, signerFor(metaChain)).catch(() => null);
       if (gasProblem) {
         if (resumeHoldLogged.get(taskHash) !== gasProblem) {
@@ -2580,7 +2659,10 @@ async function pollAndVerify() {
     log(`verify: failed to list verifications: ${e.message}`);
     return;
   }
-  if (!Array.isArray(queue) || queue.length === 0) return;
+  if (!Array.isArray(queue)) return;
+  const queued = new Set(queue.map((i) => i?.meta?.taskId));
+  for (const k of [...verifySkipLogged.keys()]) if (!queued.has(k)) verifySkipLogged.delete(k);
+  if (queue.length === 0) return;
 
   for (const item of queue) {
     const meta = item?.meta;
@@ -2588,6 +2670,18 @@ async function pollAndVerify() {
     if (!meta || !state) continue;
     const taskHash = meta.taskId;
     if (!taskHash || verifyingTasks.has(taskHash)) continue;
+
+    // Skip before the LLM judge: a chain we cannot sign for can't be settled,
+    // and pickChain below would throw out of the loop and drop the rest of
+    // the queue.
+    if (isUnsupportedChain(item.chain)) {
+      const why = unsupportedChainReason(item.chain);
+      if (verifySkipLogged.get(taskHash) !== why) {
+        verifySkipLogged.set(taskHash, why);
+        log(`verify: skipping ${taskHash.slice(0, 10)}…: ${why}`);
+      }
+      continue;
+    }
 
     // Never grade our own work (the backend enforces this too).
     if (state.executorAddress && state.executorAddress.toLowerCase() === myAddr) continue;
@@ -2844,15 +2938,16 @@ function connectWebSocket() {
   // the task on-chain, so refuse up front when the event names a chain this
   // wallet cannot pay on. An exclusive offer declined this way lets the
   // cascade move to the next agent after its window instead of locking the
-  // task to an unfunded one. Events without a chain (older backend) fall
-  // through to the post-accept check in runAcceptedTask.
+  // task to an unfunded one. A chain this worker cannot sign for is declined
+  // the same way. Events without a chain (older backend) fall through to the
+  // post-accept check in runAcceptedTask.
   const gasGateBroadcast = async (taskId, chain) => {
-    if (chain !== 'base' && chain !== '0g') return false;
-    const reason = await preflightGas(chain, signerFor(chain)).catch(() => null);
-    if (!reason) return false;
-    if (gasSkipLogged.get(taskId) !== reason) {
-      gasSkipLogged.set(taskId, reason);
-      log(`skipping task ${taskId.slice(0, 10)}… on ${chain}: ${reason}`);
+    const blocker = await acceptBlocker(chain, (c) => preflightGas(c, signerFor(c)).catch(() => null));
+    if (!blocker) return false;
+    const logged = blocker.unsupported ? chainSkipLogged : gasSkipLogged;
+    if (logged.get(taskId) !== blocker.reason) {
+      logged.set(taskId, blocker.reason);
+      log(`skipping task ${taskId.slice(0, 10)}… on ${chain}: ${blocker.reason}`);
     }
     return true;
   };

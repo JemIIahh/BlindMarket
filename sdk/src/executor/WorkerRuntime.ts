@@ -34,6 +34,26 @@ export interface WorkerRuntimeConfig {
   rpcUrls?: { '0g'?: string; base?: string };
 }
 
+/** Chains this runtime can sign submitEvidence on. */
+const SETTLEMENT_CHAINS = ['0g', 'base'] as const;
+type SettlementChain = (typeof SETTLEMENT_CHAINS)[number];
+
+/**
+ * The chain the backend named for a task. Missing means 0G (backends older
+ * than the field). Any other value throws: signing it on the 0G RPC would
+ * target the wrong escrow.
+ */
+function settlementChain(taskId: string, reported: string | null | undefined): SettlementChain {
+  if (reported == null) return '0g';
+  const known = SETTLEMENT_CHAINS.find((c) => c === reported);
+  if (!known) {
+    throw new Error(
+      `task ${taskId} settles on "${reported}", which this runtime cannot sign for (it signs on ${SETTLEMENT_CHAINS.join(' and ')}) — update @blindmarket/sdk`,
+    );
+  }
+  return known;
+}
+
 // ── Types ───────────────────────────────────────────────────────────────────
 
 export type ExecuteTaskHandler = (ctx: TaskContext) => Promise<Record<string, unknown>>;
@@ -284,6 +304,8 @@ export class WorkerRuntime {
       const acceptResult = await this.bb.acceptTask(taskId);
       exec.task = a2a;
       this.emit({ type: 'task_accepted', taskId });
+      // Fail before running the handler if this runtime can't settle the task.
+      settlementChain(taskId, acceptResult.chain);
 
       // Decrypt the brief. 'public' tasks carry no wrappedKey by design — the
       // blob at rootHash is already plaintext, so skip ECIES/AES entirely.
@@ -334,7 +356,7 @@ export class WorkerRuntime {
         // used to be a single 0G provider, so a Base submitEvidence was
         // broadcast onto 0G. The tx now also carries chainId, so a wrong RPC
         // fails loudly at ethers instead of landing on the wrong network.
-        const chain = submitResult.chain === 'base' ? 'base' : '0g';
+        const chain = settlementChain(taskId, submitResult.chain);
         // rpcUrls wins per chain; otherwise the single rpcUrl (documented as
         // "whichever chain tasks settle on") still applies. The chainId pin
         // rejects a genuine mismatch at ethers before anything is broadcast.
