@@ -12,7 +12,10 @@ const { chain, redisMock } = vi.hoisted(() => ({
   chain: {
     baseProvider: { getBlockNumber: vi.fn() },
     baseEscrow: {
-      filters: { TaskCreated: vi.fn(() => 'task-created-filter') },
+      filters: {
+        TaskCreated: vi.fn(() => 'task-created-filter'),
+        DisputeResolved: vi.fn(() => 'dispute-resolved-filter'),
+      },
       queryFilter: vi.fn(),
     },
   },
@@ -26,6 +29,7 @@ const { chain, redisMock } = vi.hoisted(() => ({
 
 vi.mock('./chain.js', () => chain);
 vi.mock('./redis.js', () => ({ redis: redisMock }));
+vi.mock('./disputeListener.js', () => ({ handleDisputeResolved: vi.fn() }));
 
 const HEAD = 10_000;
 
