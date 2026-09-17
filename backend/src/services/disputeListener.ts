@@ -26,6 +26,7 @@ const ZERO_HASH = `0x${'0'.repeat(64)}`;
 // Cancelled when the poster was refunded.
 const STATUS_COMPLETED = 4;
 const STATUS_CANCELLED = 5;
+const STATUS_DISPUTED = 6;
 
 /** Both must be reached before an event is parked. Scans also run from
  *  request paths, so the attempt count alone says little about how long an
@@ -170,11 +171,17 @@ async function processDisputeResolved(chain: TaskChain, taskId: bigint, workerFa
     console.warn(`[disputes] DisputeResolved ${chain} taskId=${taskId} has no task on-chain — skipping`);
     return;
   }
-  // Any other status means the id now names a different task than the
-  // ruling did: a parked ruling retried after the escrow was redeployed
-  // under the same Redis keys.
+  // Still Disputed: the node that answered hasn't seen the ruling's block
+  // yet. Retry; a ruling that stays this way is parked and shows in
+  // /health/bridge. Any other status means the id now names a different task
+  // than the ruling did (a parked ruling retried after the escrow was
+  // redeployed under the same Redis keys), so the ruling is not about it.
   const expectedStatus = workerFavored ? STATUS_COMPLETED : STATUS_CANCELLED;
-  if (Number(t.status) !== expectedStatus) {
+  const status = Number(t.status);
+  if (status === STATUS_DISPUTED) {
+    throw new Error('the task still reads as Disputed; the RPC node may be behind the ruling');
+  }
+  if (status !== expectedStatus) {
     console.warn(
       `[disputes] DisputeResolved ${chain} taskId=${taskId} workerFavored=${workerFavored} but the task's status is ${t.status}, not ${expectedStatus} — skipping`,
     );

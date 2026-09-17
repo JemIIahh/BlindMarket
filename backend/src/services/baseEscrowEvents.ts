@@ -62,6 +62,8 @@ let timer: NodeJS.Timeout | null = null;
 let inFlightPromise: Promise<number | null> | null = null;
 let disputesInFlight = false;
 let disputeCheckpointSeeded = false;
+/** The dispute checkpoint went missing after this process seeded it. */
+let disputeCheckpointLost = false;
 
 let lastFailureSig: string | null = null;
 let consecutiveFailures = 0;
@@ -168,8 +170,12 @@ async function indexTaskCreated(): Promise<number | null> {
       // indexing stood when this code first ran; earlier ones are for the
       // earnings backfill. Seeded by whichever pass runs first, forced or
       // not, so no forced pass can move task indexing past unscanned blocks.
-      await redis.set(KEY.disputeCheckpoint, String(from - 1), 'NX');
+      // A checkpoint deleted later starts again at the head: task indexing
+      // may be catching up after a flush, with the credit markers gone.
+      const seed = disputeCheckpointLost ? latest : from - 1;
+      await redis.set(KEY.disputeCheckpoint, String(seed), 'NX');
       disputeCheckpointSeeded = true;
+      disputeCheckpointLost = false;
     }
     if (from > latest) return from - 1;
 
@@ -241,9 +247,10 @@ async function indexDisputes(indexedTo: number): Promise<void> {
   try {
     const checkpointRaw = await redis.get(KEY.disputeCheckpoint);
     if (checkpointRaw === null) {
-      // Seeded by the TaskCreated pass; missing if that write failed or the
-      // key was deleted. Seed it again on the next pass.
+      // Seeded by the TaskCreated pass; missing if the key was deleted.
+      // Seed it again on the next pass.
       disputeCheckpointSeeded = false;
+      disputeCheckpointLost = true;
       return;
     }
     const from = Number(checkpointRaw) + 1;

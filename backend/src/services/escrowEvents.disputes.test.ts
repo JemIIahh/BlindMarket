@@ -160,6 +160,19 @@ describe('Base DisputeResolved scan', () => {
     ]);
   });
 
+  it('starts a checkpoint deleted during a catch-up at the head, not where tasks stand', async () => {
+    redisMock.store.set('base:events:checkpoint', '5000');
+    redisMock.store.set('base:events:dispute-checkpoint', '5000');
+    const { pollBaseEscrowOnce } = await loadBase();
+    await pollBaseEscrowOnce();
+    redisMock.store.delete('base:events:dispute-checkpoint');
+
+    await pollBaseEscrowOnce();
+    await pollBaseEscrowOnce();
+    expect(redisMock.store.get('base:events:checkpoint')).toBe('6500');
+    expect(redisMock.store.get('base:events:dispute-checkpoint')).toBe(String(HEAD));
+  });
+
   it('leaves rulings to the poll loop when a request forces a tick', async () => {
     redisMock.store.set('base:events:checkpoint', '9800');
     serve(chain.baseEscrow, [ruling(3n, true)]);

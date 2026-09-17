@@ -229,6 +229,18 @@ describe('events that change nothing off-chain', () => {
     expect(a2aStore.updateState).not.toHaveBeenCalled();
   });
 
+  it('retries, rather than skips, a task that still reads as Disputed (a node behind the ruling)', async () => {
+    onChain(WORKER_EOA, { status: 6 });
+    await expect(listener.handleDisputeResolved('base', 7n, true, T0)).rejects.toThrow('still reads as Disputed');
+    expect(store.has('base:dispute-done:7')).toBe(false);
+    expect(payout.recordWorkerPayout).not.toHaveBeenCalled();
+
+    onChain(WORKER_EOA);
+    await listener.handleDisputeResolved('base', 7n, true, T0 + 5_000);
+    expect(payout.recordWorkerPayout).toHaveBeenCalledOnce();
+    expect(store.has('base:dispute-done:7')).toBe(true);
+  });
+
   it('skips a task id with no task on-chain', async () => {
     onChain(ZERO, { taskHash: '0x' + '0'.repeat(64) });
     await listener.handleDisputeResolved('base', 7n, true);

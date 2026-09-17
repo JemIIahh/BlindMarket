@@ -24,21 +24,29 @@
  *
  * The backend credits payouts as increments and this script writes totals,
  * so a payout the backend credits after this script counted it would count
- * twice. --apply therefore works through the backend's Redis (REDIS_URL):
- *   1. It checks that the Redis belongs to these escrows (the indexers'
- *      fingerprints), and writes nothing if not.
- *   2. It claims the credit marker (a2a:credited:<taskHash>) of every payout
- *      it counted, so no backend path (the settlement routes, the dispute
- *      listener) can credit those tasks afterwards. Then it waits
- *      BACKFILL_CLAIM_SETTLE_MS (default 30s), so credits already under way
+ * twice. --apply therefore works through the backend's Redis (REDIS_URL).
+ * Steps 1-3 write nothing, and refuse the run when they fail:
+ *   1. The Redis must belong to these escrows (the indexers' fingerprints).
+ *   2. Each chain's ruling scan must pass the blocks read here, with no ruling
+ *      retrying or parked, within BACKFILL_LISTENER_WAIT_MS (default 10
+ *      minutes), so every counted ruling has closed its task.
+ *      --skip-listener-check skips this step only.
+ *   3. No counted payout may still be waiting for its settlement route
+ *      (a2a state 'submitted' or 'awaiting_verification', not yet credited).
+ *      Step 4 would stop that route from crediting it, and the route's other
+ *      writes (Earnings ledger row, reputation, sold count, skill stats) would
+ *      never happen; this script restores only the totals and task count.
+ *      The run lists those tasks; finalize them first, or pass
+ *      --claim-pending to accept that.
+ *   4. It claims the credit marker (a2a:credited:<taskHash>) of every counted
+ *      payout, so no backend path (the settlement routes, the dispute
+ *      listener) can credit those tasks afterwards, then waits
+ *      BACKFILL_CLAIM_SETTLE_MS (default 30s) so credits already under way
  *      reach the database, where the guarded UPDATE skips their rows.
- *   3. It waits, for up to BACKFILL_LISTENER_WAIT_MS (default 10 minutes),
- *      until each chain's ruling scan has passed the blocks read here and no
- *      ruling is still retrying or parked, so every counted ruling has also
- *      closed its task. --skip-listener-check skips this step only.
- * A run that stops after step 2 leaves the payouts it claimed uncounted until
- * the next successful run, which writes the full totals again. Deploy the
- * dispute listener before running this.
+ * A run that stops after step 4 leaves the payouts it claimed uncounted, and
+ * the side effects above unwritten for any still pending, until the next
+ * successful run writes the full totals again. Deploy the dispute listener
+ * before running this.
  *
  * Usage (from backend/, with the target's env):
  *   DATABASE_URL=postgres://… \
@@ -46,7 +54,7 @@
  *   BASE_RPC_URL=https://sepolia.base.org BASE_ESCROW_ADDRESS=0xCca5… \
  *   BASE_ESCROW_DEPLOYMENT_BLOCK=46211199 BASE_USDC_ADDRESS=0x036C… \
  *   REDIS_URL=redis://… \
- *   npx tsx scripts/backfill-earnings-by-chain.ts [--apply] [--skip-listener-check]
+ *   npx tsx scripts/backfill-earnings-by-chain.ts [--apply] [--skip-listener-check] [--claim-pending]
  *
  * With --apply every variable above except the Base ones is required. A dry
  * run falls back to the 0G mainnet values and never reads REDIS_URL. Leave
@@ -75,6 +83,9 @@ loadEnv({ path: path.resolve(__dirname, '../.env') });
 
 const APPLY = process.argv.includes('--apply');
 const SKIP_LISTENER_CHECK = process.argv.includes('--skip-listener-check');
+const CLAIM_PENDING = process.argv.includes('--claim-pending');
+/** a2a states in which a settlement route may still credit the task. */
+const PENDING_STATES = new Set(['submitted', 'awaiting_verification']);
 const LISTENER_WAIT_MS = Number(process.env.BACKFILL_LISTENER_WAIT_MS ?? 10 * 60_000);
 const CLAIM_SETTLE_MS = Number(process.env.BACKFILL_CLAIM_SETTLE_MS ?? 30_000);
 const ZERO_HASH = `0x${'0'.repeat(64)}`;
@@ -212,6 +223,36 @@ async function claimCredits(redis: Redis, taskHashes: Set<string>): Promise<numb
   return claimed;
 }
 
+/** Counted tasks a settlement route may still credit (see step 3). */
+async function pendingCredits(redis: Redis, taskHashes: Set<string>): Promise<string[]> {
+  const pending: string[] = [];
+  const hashes = [...taskHashes];
+  for (let i = 0; i < hashes.length; i += 500) {
+    const batch = hashes.slice(i, i + 500);
+    const pipe = redis.pipeline();
+    for (const h of batch) {
+      pipe.get(`a2a:state:${h}`);
+      pipe.exists(`a2a:credited:${h}`);
+    }
+    const replies = (await pipe.exec()) ?? [];
+    batch.forEach((h, j) => {
+      const [stateErr, rawState] = replies[2 * j];
+      const [creditedErr, credited] = replies[2 * j + 1];
+      if (stateErr) throw stateErr;
+      if (creditedErr) throw creditedErr;
+      if (credited === 1 || typeof rawState !== 'string') return;
+      let status: unknown;
+      try {
+        status = (JSON.parse(rawState) as { status?: unknown }).status;
+      } catch {
+        return;
+      }
+      if (typeof status === 'string' && PENDING_STATES.has(status)) pending.push(`${h} (${status})`);
+    });
+  }
+  return pending;
+}
+
 /** Why a ruling this run counted may not have closed its task yet, or null. */
 async function listenerLag(redis: Redis, { src, latest }: ScannedChain): Promise<string | null> {
   const k = src.redisKeys;
@@ -259,7 +300,7 @@ async function waitForListeners(redis: Redis, scanned: ScannedChain[]): Promise<
   }
 }
 
-/** Steps 1–3 of --apply (see the header). Throws when nothing may be written. */
+/** Steps 1–4 of --apply (see the header). Throws when nothing may be written. */
 async function prepareApply(scanned: ScannedChain[], taskHashes: Set<string>): Promise<void> {
   const redis = new Redis(required('REDIS_URL'), { lazyConnect: true, maxRetriesPerRequest: 3 });
   try {
@@ -268,18 +309,30 @@ async function prepareApply(scanned: ScannedChain[], taskHashes: Set<string>): P
       throw new Error(`REDIS_URL does not belong to these escrows, so nothing was written:\n  ${wrongRedis.join('\n  ')}`);
     }
 
+    if (SKIP_LISTENER_CHECK) {
+      console.log('  listeners NOT checked (--skip-listener-check)');
+    } else {
+      await waitForListeners(redis, scanned);
+    }
+
+    const pending = await pendingCredits(redis, taskHashes);
+    if (pending.length > 0) {
+      const list = pending.join('\n  ');
+      if (!CLAIM_PENDING) {
+        throw new Error(
+          `${pending.length} counted task(s) still await their settlement route, so nothing was written. ` +
+            `Finalize them first, or pass --claim-pending to skip their ledger, reputation and skill-stat writes:\n  ${list}`,
+        );
+      }
+      console.log(`  --claim-pending: these tasks will not get their route's other writes:\n  ${list}`);
+    }
+
     const claimed = await claimCredits(redis, taskHashes);
     console.log(
       `  claimed ${claimed} credit marker(s); ${taskHashes.size - claimed} task(s) were already credited. ` +
         `Waiting ${CLAIM_SETTLE_MS / 1000}s for credits under way.`,
     );
     await sleep(CLAIM_SETTLE_MS);
-
-    if (SKIP_LISTENER_CHECK) {
-      console.log('  listeners NOT checked (--skip-listener-check)');
-    } else {
-      await waitForListeners(redis, scanned);
-    }
   } finally {
     redis.disconnect();
   }
