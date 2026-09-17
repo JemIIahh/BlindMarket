@@ -64,7 +64,7 @@ export function SkillsManager({
           {installed.map((s) => (
             <span key={s.slug} className="inline-flex items-center gap-1.5 px-2 py-0.5 text-xs border border-cream/40 bg-cream/5 text-cream">
               {s.name} <span className="opacity-60">v{s.version}</span>
-              <button type="button" onClick={() => remove(s.slug)} disabled={busy} aria-label={`Remove ${s.name}`}>
+              <button type="button" onClick={() => remove(s.slug)} disabled={busy} aria-label={`Remove ${s.name}`} className="p-2 -m-2">
                 <Icon name="x" size={11} />
               </button>
             </span>

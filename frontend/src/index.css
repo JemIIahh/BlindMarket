@@ -101,6 +101,14 @@ html[data-theme="dark"] {
   }
 }
 
+/* iOS Safari zooms the page when a field under 16px gets focus. Privy's
+   dialog is left alone: its code-entry boxes are 18px and already safe. */
+@media (max-width: 639px) {
+  :is(textarea, select, input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"], [type="color"])):not(#privy-dialog *) {
+    font-size: 16px !important;
+  }
+}
+
 @layer components {
   /* ── Card — hairline border, sharp corners, no shadow ────────── */
   .card-dark {

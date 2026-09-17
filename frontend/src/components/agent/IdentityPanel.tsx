@@ -20,7 +20,7 @@ export function IdentityPanel({
 
   return (
     <div className="border border-line rounded-lg px-4 py-3 overflow-x-auto">
-      <div className="flex items-center gap-6 min-w-max text-sm text-ink-2">
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm text-ink-2 sm:flex-nowrap sm:min-w-max">
         {/* Owner */}
         <div className="flex items-center gap-1.5">
           <Icon name="user" size={14} className="text-ink-3" />

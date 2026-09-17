@@ -125,7 +125,7 @@ export default function Metrics() {
 
       {data && (
         <>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6">
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 mb-6">
             <StatCard label="Top of funnel" value={top?.uniqueVisitors.toLocaleString() ?? '—'} />
             <StatCard
               label="End-to-end conversion"

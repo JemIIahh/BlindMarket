@@ -119,12 +119,12 @@ export default function MyAgents() {
     const isActing = action.isPending && action.variables?.id === agent.id;
     const disabled = isActing || !isAuthenticated;
     return (
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs">
+      <div className="flex flex-wrap items-center -mx-2 -my-1.5 text-xs">
         {agent.status !== 'running' && (
           <button
             disabled={disabled}
             onClick={() => action.mutate({ id: agent.id, act: 'start' })}
-            className="text-ok hover:underline disabled:opacity-40"
+            className="px-2 py-1.5 min-h-[32px] text-ok hover:underline disabled:opacity-40"
           >
             Start
           </button>
@@ -133,7 +133,7 @@ export default function MyAgents() {
           <button
             disabled={disabled}
             onClick={() => action.mutate({ id: agent.id, act: 'pause' })}
-            className="text-warn hover:underline disabled:opacity-40"
+            className="px-2 py-1.5 min-h-[32px] text-warn hover:underline disabled:opacity-40"
           >
             Pause
           </button>
@@ -141,7 +141,7 @@ export default function MyAgents() {
         <button
           disabled={disabled}
           onClick={() => action.mutate({ id: agent.id, act: 'stop' })}
-          className="text-ink-3 hover:text-err hover:underline disabled:opacity-40"
+          className="px-2 py-1.5 min-h-[32px] text-ink-3 hover:text-err hover:underline disabled:opacity-40"
         >
           Stop
         </button>
@@ -149,12 +149,12 @@ export default function MyAgents() {
           <button
             disabled={disabled}
             onClick={() => action.mutate({ id: agent.id, act: 'restart' })}
-            className="text-ink-3 hover:text-ink hover:underline disabled:opacity-40"
+            className="px-2 py-1.5 min-h-[32px] text-ink-3 hover:text-ink hover:underline disabled:opacity-40"
           >
             Restart
           </button>
         )}
-        <Link to={`/agents/${agent.id}`} className="text-cream hover:underline">
+        <Link to={`/agents/${agent.id}`} className="inline-flex items-center px-2 py-1.5 min-h-[32px] text-cream hover:underline">
           Logs
         </Link>
       </div>
@@ -178,18 +178,19 @@ export default function MyAgents() {
       />
 
       {/* Stats */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-0 border border-line mb-8">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-0 border border-line mb-8">
         <StatCard label="Agents" value={String(agents.length)} sub={`${running} running`} subColor={running > 0 ? 'ok' : undefined} />
-        <div className="border-t sm:border-t-0 sm:border-l border-line">
+        <div className="border-t lg:border-t-0 lg:border-l border-line">
           <StatCard
+            className="h-full"
             label="Total earned"
             value={`${totalEarned.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${getPaymentSymbol()}`}
             sub={`${getPaymentSymbol()} · all agents`}
             subColor="ok"
           />
         </div>
-        <div className="border-t sm:border-t-0 sm:border-l border-line">
-          <StatCard label="Tasks completed" value={String(tasksTotal)} sub="All time" />
+        <div className="border-t lg:border-t-0 lg:border-l border-line">
+          <StatCard className="h-full" label="Tasks completed" value={String(tasksTotal)} sub="All time" />
         </div>
       </div>
 
@@ -227,7 +228,7 @@ export default function MyAgents() {
         ) : (
           <>
             {/* Desktop: table */}
-            <div className="hidden md:block">
+            <div className="hidden xl:block">
               <div className={`grid ${COLS} gap-6 px-5 py-3 border-t border-line text-[11px] font-medium uppercase tracking-wider text-ink-3`}>
                 <span>Agent</span>
                 <span>Model</span>
@@ -277,8 +278,8 @@ export default function MyAgents() {
               })}
             </div>
 
-            {/* Mobile: card per agent */}
-            <div className="md:hidden divide-y divide-line border-t border-line">
+            {/* Below xl: card per agent — the table needs ~900px beside the sidebar */}
+            <div className="xl:hidden divide-y divide-line border-t border-line">
               {agents.map((agent) => {
                 const isActing = action.isPending && action.variables?.id === agent.id;
                 const failed = action.isError && action.variables?.id === agent.id;

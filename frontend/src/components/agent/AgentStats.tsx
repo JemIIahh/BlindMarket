@@ -6,7 +6,7 @@ import { ExplorerAddressLinks } from '../ExplorerLinks';
 import type { AgentReviewStats } from '../../services/marketplace';
 
 /**
- * Buy-signal strip — 4-column grid of stat cards.
+ * Buy-signal strip — grid of stat cards, 2 across until xl, then 4.
  *
  * Cards 1-2 (Score, Tasks) are neutral surface cards.
  * Card 3 (Earned) is tinted success/green.
@@ -48,16 +48,16 @@ export function AgentStats({
   const earnedValue = `${parseFloat(totalEarned || '0').toLocaleString(undefined, { maximumFractionDigits: 4 })} ${getPaymentSymbol()}`;
 
   return (
-    <div className={`grid grid-cols-2 sm:grid-cols-4 gap-3 ${className}`}>
+    <div className={`grid grid-cols-2 xl:grid-cols-4 gap-3 ${className}`}>
       {/* ── Score ─────────────────────────────────────────────── */}
-      <div className="card-dark p-5 min-w-0 overflow-hidden flex flex-col">
+      <div className="card-dark p-4 xl:p-5 min-w-0 overflow-hidden flex flex-col">
         <div className="flex items-center gap-1.5 text-ink-3 mb-2">
           <Icon name="bolt" size={12} className="text-ink-3" />
           <span className="text-[10px] font-mono font-semibold uppercase tracking-widest truncate">
             Score
           </span>
         </div>
-        <div className="text-[28px] sm:text-[32px] font-mono font-bold text-ink leading-none tracking-tightest truncate">
+        <div className="text-xl sm:text-[28px] md:text-[32px] font-mono font-bold text-ink leading-none tracking-tightest break-words">
           {hasReviews ? reviewStats!.avgRating.toFixed(2) : '—'}
         </div>
         <div className="mt-1.5 text-[11px] font-mono text-ink-3 truncate">
@@ -68,14 +68,14 @@ export function AgentStats({
       </div>
 
       {/* ── Tasks Completed ───────────────────────────────────── */}
-      <div className="card-dark p-5 min-w-0 overflow-hidden flex flex-col">
+      <div className="card-dark p-4 xl:p-5 min-w-0 overflow-hidden flex flex-col">
         <div className="flex items-center gap-1.5 text-ink-3 mb-2">
           <Icon name="check" size={12} className="text-ink-3" />
           <span className="text-[10px] font-mono font-semibold uppercase tracking-widest truncate">
             Tasks
           </span>
         </div>
-        <div className="text-[28px] sm:text-[32px] font-mono font-bold text-ink leading-none tracking-tightest truncate">
+        <div className="text-xl sm:text-[28px] md:text-[32px] font-mono font-bold text-ink leading-none tracking-tightest break-words">
           {String(tasksCompleted)}
         </div>
         <div className="mt-1.5 text-[11px] font-mono text-ink-3 truncate">
@@ -86,14 +86,14 @@ export function AgentStats({
 
       {/* ── Earned ────────────────────────────────────────────── */}
       {isOwner || servicesSold == null ? (
-        <div className="p-5 min-w-0 overflow-hidden flex flex-col" style={{ background: 'rgba(16, 185, 129, 0.1)' }}>
+        <div className="p-4 xl:p-5 min-w-0 overflow-hidden flex flex-col" style={{ background: 'rgba(16, 185, 129, 0.1)' }}>
           <div className="flex items-center gap-1.5 text-ok mb-2">
             <Icon name="chart" size={12} className="text-ok" />
             <span className="text-[10px] font-mono font-semibold uppercase tracking-widest truncate">
               Earned
             </span>
           </div>
-          <div className="text-[28px] sm:text-[32px] font-mono font-bold text-ok leading-none tracking-tightest truncate">
+          <div className="text-xl sm:text-[28px] md:text-[32px] font-mono font-bold text-ok leading-none tracking-tightest break-words">
             {earnedValue}
           </div>
           <div className="mt-1.5 text-[11px] font-mono text-ok truncate">
@@ -101,14 +101,14 @@ export function AgentStats({
           </div>
         </div>
       ) : (
-        <div className="p-5 min-w-0 overflow-hidden flex flex-col" style={{ background: 'rgba(16, 185, 129, 0.1)' }}>
+        <div className="p-4 xl:p-5 min-w-0 overflow-hidden flex flex-col" style={{ background: 'rgba(16, 185, 129, 0.1)' }}>
           <div className="flex items-center gap-1.5 text-ok mb-2">
             <Icon name="briefcase" size={12} className="text-ok" />
             <span className="text-[10px] font-mono font-semibold uppercase tracking-widest truncate">
               Services sold
             </span>
           </div>
-          <div className="text-[28px] sm:text-[32px] font-mono font-bold text-ok leading-none tracking-tightest truncate">
+          <div className="text-xl sm:text-[28px] md:text-[32px] font-mono font-bold text-ok leading-none tracking-tightest break-words">
             {String(servicesSold)}
           </div>
           <div className="mt-1.5 text-[11px] font-mono text-ok truncate">
@@ -120,7 +120,7 @@ export function AgentStats({
       {/* ── Wallet Balance / On-chain ─────────────────────────── */}
       {isOwner ? (
         <div
-          className="p-5 min-w-0 overflow-hidden flex flex-col"
+          className="p-4 xl:p-5 min-w-0 overflow-hidden flex flex-col"
           style={{
             background: isLowGas
               ? 'rgba(245, 158, 11, 0.1)'
@@ -133,7 +133,7 @@ export function AgentStats({
               Wallet
             </span>
           </div>
-          <div className="text-[28px] sm:text-[32px] font-mono font-bold text-ink leading-none tracking-tightest truncate">
+          <div className="text-xl sm:text-[28px] md:text-[32px] font-mono font-bold text-ink leading-none tracking-tightest break-words">
             {balanceEther > 0 ? balanceEther.toFixed(4) : '—'}
           </div>
           <div className="mt-1.5 text-[11px] font-mono text-ink-3 truncate">
@@ -152,7 +152,7 @@ export function AgentStats({
           )}
         </div>
       ) : (
-        <div className="card-dark p-5 min-w-0 overflow-hidden flex flex-col justify-center">
+        <div className="card-dark p-4 xl:p-5 min-w-0 overflow-hidden flex flex-col justify-center">
           <div className="flex items-center gap-1.5 text-ink-3 mb-2">
             <Icon name="wallet" size={12} className="text-ink-3" />
             <span className="text-[10px] font-mono font-semibold uppercase tracking-widest truncate">

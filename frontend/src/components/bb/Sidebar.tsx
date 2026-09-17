@@ -139,10 +139,10 @@ export function Sidebar({ open, onClose, collapsed, onToggleCollapse }: SidebarP
       </AnimatePresence>
 
       <aside
-        className={`w-[240px] ${collapsed ? 'md:w-16' : 'md:w-[240px]'} h-screen fixed left-0 top-0 bg-surface border-r border-line flex flex-col z-40 overflow-x-hidden transition-[transform,width] duration-200 ease-out motion-reduce:transition-none md:translate-x-0 ${open ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}`}
+        className={`w-[240px] ${collapsed ? 'md:w-16' : 'md:w-[240px]'} h-screen supports-[height:100dvh]:h-dvh fixed left-0 top-0 bg-surface border-r border-line flex flex-col z-40 overflow-x-hidden overflow-y-auto transition-[transform,width] duration-200 ease-out motion-reduce:transition-none md:translate-x-0 ${open ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}`}
       >
         {/* Brand */}
-        <div className={`flex items-center justify-between px-5 h-16 border-b border-line ${collapsed ? 'md:justify-center md:px-0' : ''}`}>
+        <div className={`sticky top-0 z-10 bg-surface flex shrink-0 items-center justify-between px-5 h-16 border-b border-line ${collapsed ? 'md:justify-center md:px-0' : ''}`}>
           <Link to="/" className="flex items-center gap-2.5" onClick={onClose}>
             <LogoMark size={24} blade="var(--bb-ink)" slit="var(--bb-surface)" />
             <span className={`text-sm font-semibold text-ink tracking-tight ${collapsed ? 'md:hidden' : ''}`}>BlindMarket</span>
@@ -159,7 +159,7 @@ export function Sidebar({ open, onClose, collapsed, onToggleCollapse }: SidebarP
         </div>
 
         {/* Nav */}
-        <nav className="flex-1 overflow-y-auto py-4">
+        <nav className="flex-[1_0_auto] py-4">
           {navGroups.map((group, gi) => (
             <div key={group.label || `g${gi}`} className={group.label ? 'mb-1 mt-5 first:mt-0' : 'mb-1'}>
               {group.label && (

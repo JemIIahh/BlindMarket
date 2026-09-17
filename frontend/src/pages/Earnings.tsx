@@ -347,7 +347,7 @@ export default function Earnings() {
       )}
 
       {/* Stat cards — live from accounting API */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-0 border border-line mb-8">
+      <div className="grid grid-cols-2 xl:grid-cols-4 gap-0 border border-line mb-8">
         <StatCard
           label="Total earned"
           value={summaryLoading ? '…' : fmt(summary?.totalEarned)}
@@ -355,22 +355,25 @@ export default function Earnings() {
         />
         <div className="border-l border-line">
           <StatCard
+            className="h-full"
             label="Net revenue"
             value={summaryLoading ? '…' : fmt(summary?.netRevenue)}
             sub="After fees"
             subColor="ok"
           />
         </div>
-        <div className="border-l border-line">
+        <div className="border-t xl:border-t-0 xl:border-l border-line">
           <StatCard
+            className="h-full"
             label="Total fees"
             value={summaryLoading ? '…' : fmt(summary?.totalFees)}
             sub="10% platform"
             subColor="warn"
           />
         </div>
-        <div className="border-l border-line">
+        <div className="border-t border-l xl:border-t-0 border-line">
           <StatCard
+            className="h-full"
             label="Pending"
             value={execLoading && !!address ? '…' : String(pendingTasks.length)}
             sub="Awaiting settlement"

@@ -423,24 +423,26 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
         {tools.map((t, i) => {
           const dsl = 'type' in t && t.type === 'tool' ? t._dsl : undefined;
           const needsReview = dsl?.needs_review;
+          const typeLabel = t.type === 'tool' ? 'API' : t.type === 'mcp' ? 'MCP' : t.type === 'sandbox' ? 'Sandbox' : t.type === 'js' ? 'JS' : 'HTTP';
           return (
           <div key={i} className="flex items-center justify-between gap-3 border border-line px-4 py-3 text-sm cursor-pointer hover:bg-surface-2 transition-colors" onClick={() => editTool(i)}>
-            <div className="flex items-center gap-2 shrink-0 min-w-0">
+            <div className="flex flex-wrap sm:flex-nowrap items-center gap-x-2 gap-y-1 min-w-0">
               <span className="text-ink font-medium truncate">{t.name}</span>
+              <Tag tone="neutral" className="sm:hidden shrink-0">{typeLabel}</Tag>
               {needsReview && (
                 <Tag tone="warn" className="shrink-0">needs review</Tag>
               )}
             </div>
-            <span className="text-ink-3 font-mono text-xs truncate flex-1 text-right overflow-x-auto whitespace-nowrap">
+            <span className="hidden sm:block text-ink-3 font-mono text-xs truncate flex-1 text-right overflow-x-auto whitespace-nowrap">
               <Tag tone="neutral" className="mr-2 shrink-0">
-              {t.type === 'tool' ? 'API' : t.type === 'mcp' ? 'MCP' : t.type === 'sandbox' ? 'Sandbox' : t.type === 'js' ? 'JS' : 'HTTP'}
+              {typeLabel}
             </Tag>
             {t.type === 'tool' ? t.execution.url : t.url}
           </span>
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); removeTool(i); }}
-            className="text-ink-3 hover:text-err transition-colors shrink-0"
+            className="p-2 -m-2 text-ink-3 hover:text-err transition-colors shrink-0"
           >
             Remove
           </button>
@@ -494,7 +496,7 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
               <p className="text-xs text-ink-3">{mcpTools.length} tools found. Select which to import:</p>
               <div className={`space-y-1 ${mcpTools.length > 8 ? 'max-h-56 overflow-y-auto' : ''}`}>
                 {mcpTools.map((t, i) => (
-                  <label key={i} className="flex items-center gap-3 border border-line px-3 py-2 text-sm cursor-pointer hover:bg-surface-2">
+                  <label key={i} className="flex flex-wrap sm:flex-nowrap items-center gap-x-3 gap-y-1 border border-line px-3 py-2 text-sm cursor-pointer hover:bg-surface-2">
                     <input
                       type="checkbox"
                       checked={mcpSelected.has(i)}
@@ -505,11 +507,11 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
                       }}
                       className="accent-cream"
                     />
-                    <span className="font-medium text-ink shrink-0">{t.name}</span>
+                    <span className="font-medium text-ink flex-1 min-w-24 truncate sm:flex-initial sm:min-w-0">{t.name}</span>
                     {t._dsl?.needs_review && (
                       <Tag tone="warn" className="shrink-0">needs review</Tag>
                     )}
-                    <span className="text-ink-3 text-xs truncate flex-1">{t.description}</span>
+                    <span className="hidden sm:block text-ink-3 text-xs truncate flex-1">{t.description}</span>
                   </label>
                 ))}
               </div>
@@ -563,12 +565,12 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
               {/* Auth override — when spec doesn't declare security schemes */}
               <div className="border border-line p-3 space-y-2 bg-surface-2">
                 <p className="text-xs text-ink-3 font-medium">Authentication</p>
-                <div className="flex items-center gap-3">
+                <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
                   <label className="text-xs text-ink shrink-0">Auth type:</label>
                   <select
                     value={openApiAuthType}
                     onChange={e => setOpenApiAuthType(e.target.value as typeof openApiAuthType)}
-                    className="px-2 py-1 bg-surface text-ink text-xs border-0 outline-none"
+                    className="w-full min-w-0 sm:w-auto px-2 py-1 bg-surface text-ink text-xs border-0 outline-none"
                   >
                     <option value="none">None (spec-declared or no auth)</option>
                     <option value="bearer">Bearer Token</option>
@@ -578,24 +580,24 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
                 </div>
                 {openApiAuthType !== 'none' && (
                   <>
-                    <div className="flex items-center gap-3">
-                      <label className="text-xs text-ink shrink-0 w-28">Header/Param name:</label>
+                    <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
+                      <label className="text-xs text-ink shrink-0 sm:w-28">Header/Param name:</label>
                       <input
                         type="text"
                         value={openApiAuthKeyName}
                         onChange={e => setOpenApiAuthKeyName(e.target.value)}
                         placeholder={openApiAuthType === 'bearer' ? 'Authorization' : 'X-API-Key'}
-                        className="flex-1 px-2 py-1 bg-surface text-ink text-xs font-mono border-0 outline-none focus:ring-1 focus:ring-cream/30"
+                        className="flex-1 w-full min-w-0 sm:w-auto px-2 py-1 bg-surface text-ink text-xs font-mono border-0 outline-none focus:ring-1 focus:ring-cream/30"
                       />
                     </div>
-                    <div className="flex items-center gap-3">
-                      <label className="text-xs text-ink shrink-0 w-28">Secret ref:</label>
+                    <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
+                      <label className="text-xs text-ink shrink-0 sm:w-28">Secret ref:</label>
                       <input
                         type="text"
                         value={openApiAuthSecretRef}
                         onChange={e => setOpenApiAuthSecretRef(e.target.value)}
                         placeholder="e.g. github_token"
-                        className="flex-1 px-2 py-1 bg-surface text-ink text-xs font-mono border-0 outline-none focus:ring-1 focus:ring-cream/30"
+                        className="flex-1 w-full min-w-0 sm:w-auto px-2 py-1 bg-surface text-ink text-xs font-mono border-0 outline-none focus:ring-1 focus:ring-cream/30"
                       />
                     </div>
                   </>
@@ -609,8 +611,8 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
                     This API requires authentication. Enter your credentials:
                   </p>
                   {Object.entries(authRequirements).map(([ref, auth]) => (
-                    <div key={ref} className="flex items-center gap-3">
-                      <label className="text-xs text-ink font-medium shrink-0 w-40 truncate" title={ref}>
+                    <div key={ref} className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
+                      <label className="text-xs text-ink font-medium shrink-0 sm:w-40 truncate" title={ref}>
                         {auth.key_name || ref}
                         <span className="text-ink-3 ml-1">({auth.type})</span>
                       </label>
@@ -619,7 +621,7 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
                         value={secrets[ref] ?? ''}
                         onChange={e => onSecretsChange({ ...secrets, [ref]: e.target.value })}
                         placeholder={`Enter ${auth.key_name || 'secret'}`}
-                        className="flex-1 px-3 py-1.5 bg-surface text-ink text-xs font-mono border-0 outline-none focus:ring-1 focus:ring-cream/30"
+                        className="flex-1 w-full min-w-0 sm:w-auto px-3 py-1.5 bg-surface text-ink text-xs font-mono border-0 outline-none focus:ring-1 focus:ring-cream/30"
                       />
                     </div>
                   ))}
@@ -628,7 +630,7 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
 
               <div className={`space-y-1 ${openApiTools.length > 8 ? 'max-h-56 overflow-y-auto' : ''}`}>
                 {openApiTools.map((t, i) => (
-                  <label key={i} className="flex items-center gap-3 border border-line px-3 py-2 text-sm cursor-pointer hover:bg-surface-2">
+                  <label key={i} className="flex flex-wrap sm:flex-nowrap items-center gap-x-3 gap-y-1 border border-line px-3 py-2 text-sm cursor-pointer hover:bg-surface-2">
                     <input
                       type="checkbox"
                       checked={openApiSelected.has(i)}
@@ -640,11 +642,11 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
                       className="accent-cream"
                     />
                     <Tag tone="neutral" className="shrink-0">{t.execution.method}</Tag>
-                    <span className="font-medium text-ink shrink-0">{t.name}</span>
+                    <span className="font-medium text-ink flex-1 min-w-24 truncate sm:flex-initial sm:min-w-0">{t.name}</span>
                     {t._dsl?.needs_review && (
                       <Tag tone="warn" className="shrink-0">needs review</Tag>
                     )}
-                    <span className="text-ink-3 text-xs truncate flex-1">{t.description}</span>
+                    <span className="hidden sm:block text-ink-3 text-xs truncate flex-1">{t.description}</span>
                   </label>
                 ))}
               </div>
@@ -800,13 +802,13 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
                   <div className="border border-line p-3 space-y-2 bg-surface-2">
                     <div className="flex items-center justify-between">
                       <p className="text-xs text-ink-3 font-medium">Parameters</p>
-                      <button type="button" onClick={() => setManualParams(p => [...p, { name: '', type: 'string', description: '', required: false }])} className="text-xs text-cream hover:underline">+ Add</button>
+                      <button type="button" onClick={() => setManualParams(p => [...p, { name: '', type: 'string', description: '', required: false }])} className="p-2 -m-2 text-xs text-cream hover:underline">+ Add</button>
                     </div>
                     {manualParams.length === 0 && <p className="text-xs text-ink-3">No parameters — agent will send an empty body or construct one from the description.</p>}
                     {manualParams.map((p, i) => (
-                      <div key={i} className="grid grid-cols-[1fr_80px_1fr_auto_auto] gap-2 items-center">
-                        <input type="text" value={p.name} onChange={e => setManualParams(ps => ps.map((x, j) => j === i ? { ...x, name: e.target.value } : x))} placeholder="param_name" className="px-2 py-1 bg-surface text-ink text-xs font-mono border-0 outline-none focus:ring-1 focus:ring-cream/30" />
-                        <select value={p.type} onChange={e => setManualParams(ps => ps.map((x, j) => j === i ? { ...x, type: e.target.value } : x))} className="px-2 py-1 bg-surface text-ink text-xs border-0 outline-none">
+                      <div key={i} className="grid grid-cols-2 sm:grid-cols-[1fr_80px_1fr_auto_auto] gap-2 items-center">
+                        <input type="text" value={p.name} onChange={e => setManualParams(ps => ps.map((x, j) => j === i ? { ...x, name: e.target.value } : x))} placeholder="param_name" className="w-full min-w-0 px-2 py-1 bg-surface text-ink text-xs font-mono border-0 outline-none focus:ring-1 focus:ring-cream/30" />
+                        <select value={p.type} onChange={e => setManualParams(ps => ps.map((x, j) => j === i ? { ...x, type: e.target.value } : x))} className="w-full min-w-0 px-2 py-1 bg-surface text-ink text-xs border-0 outline-none">
                           <option value="string">string</option>
                           <option value="integer">integer</option>
                           <option value="number">number</option>
@@ -814,12 +816,12 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
                           <option value="object">object</option>
                           <option value="array">array</option>
                         </select>
-                        <input type="text" value={p.description} onChange={e => setManualParams(ps => ps.map((x, j) => j === i ? { ...x, description: e.target.value } : x))} placeholder="description" className="px-2 py-1 bg-surface text-ink text-xs border-0 outline-none focus:ring-1 focus:ring-cream/30" />
+                        <input type="text" value={p.description} onChange={e => setManualParams(ps => ps.map((x, j) => j === i ? { ...x, description: e.target.value } : x))} placeholder="description" className="col-span-2 sm:col-span-1 w-full min-w-0 px-2 py-1 bg-surface text-ink text-xs border-0 outline-none focus:ring-1 focus:ring-cream/30" />
                         <label className="flex items-center gap-1 text-xs text-ink-3 whitespace-nowrap">
                           <input type="checkbox" checked={p.required} onChange={e => setManualParams(ps => ps.map((x, j) => j === i ? { ...x, required: e.target.checked } : x))} className="accent-cream" />
                           req
                         </label>
-                        <button type="button" onClick={() => setManualParams(ps => ps.filter((_, j) => j !== i))} className="text-xs text-err hover:underline">✕</button>
+                        <button type="button" onClick={() => setManualParams(ps => ps.filter((_, j) => j !== i))} className="justify-self-end sm:justify-self-auto p-2 -m-2 text-xs text-err hover:underline">✕</button>
                       </div>
                     ))}
                     {manualParams.length > 0 && (
@@ -840,12 +842,12 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
                   </div>
                   <div className="border border-line p-3 space-y-2 bg-surface-2">
                     <p className="text-xs text-ink-3 font-medium">Auth (optional)</p>
-                    <div className="flex items-center gap-3">
+                    <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
                       <label className="text-xs text-ink shrink-0">Type:</label>
                       <select
                         value={manualAuthType}
                         onChange={e => setManualAuthType(e.target.value as typeof manualAuthType)}
-                        className="px-2 py-1 bg-surface text-ink text-xs border-0 outline-none"
+                        className="w-full min-w-0 sm:w-auto px-2 py-1 bg-surface text-ink text-xs border-0 outline-none"
                       >
                         <option value="none">None</option>
                         <option value="bearer">Bearer Token</option>
@@ -855,24 +857,24 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
                     </div>
                     {manualAuthType !== 'none' && (
                       <>
-                        <div className="flex items-center gap-3">
-                          <label className="text-xs text-ink shrink-0 w-28">Header/Param:</label>
+                        <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
+                          <label className="text-xs text-ink shrink-0 sm:w-28">Header/Param:</label>
                           <input
                             type="text"
                             value={manualAuthKeyName}
                             onChange={e => setManualAuthKeyName(e.target.value)}
                             placeholder={manualAuthType === 'bearer' ? 'Authorization' : 'X-API-Key'}
-                            className="flex-1 px-2 py-1 bg-surface text-ink text-xs font-mono border-0 outline-none focus:ring-1 focus:ring-cream/30"
+                            className="flex-1 w-full min-w-0 sm:w-auto px-2 py-1 bg-surface text-ink text-xs font-mono border-0 outline-none focus:ring-1 focus:ring-cream/30"
                           />
                         </div>
-                        <div className="flex items-center gap-3">
-                          <label className="text-xs text-ink shrink-0 w-28">Secret ref:</label>
+                        <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
+                          <label className="text-xs text-ink shrink-0 sm:w-28">Secret ref:</label>
                           <input
                             type="text"
                             value={manualAuthSecretRef}
                             onChange={e => setManualAuthSecretRef(e.target.value)}
                             placeholder="e.g. my_api_key"
-                            className="flex-1 px-2 py-1 bg-surface text-ink text-xs font-mono border-0 outline-none focus:ring-1 focus:ring-cream/30"
+                            className="flex-1 w-full min-w-0 sm:w-auto px-2 py-1 bg-surface text-ink text-xs font-mono border-0 outline-none focus:ring-1 focus:ring-cream/30"
                           />
                         </div>
                       </>

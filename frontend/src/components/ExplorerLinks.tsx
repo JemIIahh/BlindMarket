@@ -15,7 +15,7 @@ export function ExplorerAddressLinks({
   const base = BASE_CHAIN_CONFIG.blockExplorerUrls[0];
   const og = OG_CHAIN_CONFIG.blockExplorerUrls[0];
   const linkCls =
-    'hover:text-cream hover:underline decoration-cream/30 transition-colors';
+    '-my-1 py-1 hover:text-cream hover:underline decoration-cream/30 transition-colors';
   return (
     <span className={`inline-flex items-center gap-1.5 ${className}`}>
       <a href={`${base}/address/${address}`} target="_blank" rel="noopener noreferrer" className={linkCls} title={`View ${address} on Base explorer`}>

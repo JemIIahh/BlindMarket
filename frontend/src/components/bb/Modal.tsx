@@ -89,7 +89,7 @@ export function Modal({
         ref={panelRef}
         tabIndex={-1}
         onKeyDown={onTrapTab}
-        className={`relative w-full ${SIZE[size]} border border-line bg-surface p-6 max-h-[90vh] overflow-y-auto focus:outline-none`}
+        className={`relative w-full ${SIZE[size]} border border-line bg-surface p-6 max-h-[90vh] supports-[height:100dvh]:max-h-[90dvh] overflow-y-auto focus:outline-none`}
       >
         {(title || dismissable) && (
           <div className="flex items-start justify-between gap-3 mb-4">
@@ -101,7 +101,7 @@ export function Modal({
               <button
                 onClick={onClose}
                 aria-label="Close"
-                className="text-ink-3 hover:text-ink text-sm transition-colors shrink-0"
+                className="p-2 -m-2 text-ink-3 hover:text-ink text-sm transition-colors shrink-0"
               >
                 ✕
               </button>

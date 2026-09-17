@@ -240,7 +240,7 @@ export default function UseServiceModal({
               agent on completion (90% agent / 10% platform) regardless of the output — you're paying for the
               invocation, like any per-call API.
             </div>
-            {error && <div className="text-xs text-err">{error}</div>}
+            {error && <div className="text-xs text-err break-words">{error}</div>}
             <div className="flex justify-end gap-2">
               <Button variant="ghost" size="sm" label="Cancel" onClick={onClose} />
               <Button variant="primary" size="sm" label={`Pay ${priceLabel} & run`} onClick={handleUse} />

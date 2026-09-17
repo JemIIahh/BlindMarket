@@ -316,7 +316,7 @@ export function OpsConsole({
             log console and used to squash every other panel with it. */}
         {tab === 'logs' && (
           <div
-            className="p-5 overflow-y-auto max-h-[520px]"
+            className={`p-5 overflow-y-auto max-h-[520px] ${logs.length > 0 ? 'pr-12' : ''}`}
             ref={logContainerRef}
             onScroll={handleLogScroll}
           >
@@ -330,7 +330,7 @@ export function OpsConsole({
               const tsMatch = clean.match(/^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:Z|))\s+(.*)$/);
               const isErr = clean.includes('[err]');
               return (
-                <div key={i} className={`px-3 py-1.5 text-xs font-mono flex gap-3 ${isErr ? 'text-err bg-err/10' : 'text-ink-3 hover:bg-surface-2'}`}>
+                <div key={i} className={`px-3 py-1.5 text-xs font-mono flex flex-col gap-0.5 sm:flex-row sm:gap-3 ${isErr ? 'text-err bg-err/10' : 'text-ink-3 hover:bg-surface-2'}`}>
                   {tsMatch ? (
                     <>
                       <span className="text-ink-3/60 shrink-0" title={tsMatch[1]}>
@@ -377,7 +377,7 @@ export function OpsConsole({
                       .then(() => { setErrorLogs([]); setErrorLogsTotal(0); })
                       .catch(() => {});
                   }}
-                  className="text-xs text-ink-3 hover:text-ink transition-colors"
+                  className="px-2 py-1.5 -mx-2 -my-1.5 text-xs text-ink-3 hover:text-ink transition-colors"
                 >
                   Clear all
                 </button>
@@ -394,8 +394,8 @@ export function OpsConsole({
               <div className="space-y-3">
                 {errorLogs.map((e: any) => (
                   <div key={e.id} className="border border-line p-4 space-y-2">
-                    <div className="flex items-center gap-3">
-                      <span className="text-sm font-medium text-ink">{e.toolName}</span>
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                      <span className="text-sm font-medium text-ink break-all">{e.toolName}</span>
                       <Tag tone="neutral">{e.toolType}</Tag>
                       {e.statusCode != null && (
                         <Tag tone={e.statusCode >= 400 ? 'warn' : 'neutral'}>
@@ -404,7 +404,7 @@ export function OpsConsole({
                       )}
                       <span className="text-xs text-ink-3 ml-auto">{new Date(e.createdAt).toLocaleString()}</span>
                     </div>
-                    <div className="text-sm text-ink-3">{e.error}</div>
+                    <div className="text-sm text-ink-3 break-words">{e.error}</div>
                     {e.method && e.url && (
                       <div className="text-xs font-mono text-ink-3 break-all">
                         {e.method} {e.url}
@@ -517,7 +517,7 @@ export function OpsConsole({
                   <button
                     type="button"
                     onClick={() => setApiKeyVisible(true)}
-                    className="text-xs text-cream hover:underline ml-auto"
+                    className="px-2 py-1.5 ml-auto -mr-2 -my-1.5 text-xs text-cream hover:underline"
                   >
                     Replace
                   </button>

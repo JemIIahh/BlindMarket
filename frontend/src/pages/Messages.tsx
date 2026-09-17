@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
@@ -56,6 +56,16 @@ export default function Messages() {
   const [selectedMsg, setSelectedMsg] = useState<Message | null>(null);
   const [replyTaskId, setReplyTaskId] = useState<string | undefined>(undefined);
   const [repliedIds, setRepliedIds] = useState<Set<number>>(new Set());
+  const replyPanelRef = useRef<HTMLDivElement>(null);
+  const selectedId = selectedMsg?.id;
+
+  // Below lg the reply panel stacks under the whole list, so bring it into
+  // view on selection — otherwise tapping a message looks like a no-op.
+  useEffect(() => {
+    if (selectedId == null || !window.matchMedia('(max-width: 1023px)').matches) return;
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    replyPanelRef.current?.scrollIntoView({ block: 'start', behavior: reduceMotion ? 'auto' : 'smooth' });
+  }, [selectedId]);
 
   useSocket('platform', { 'message:new': () => qc.invalidateQueries({ queryKey: ['messages'] }) });
 
@@ -141,7 +151,7 @@ export default function Messages() {
 
       <div className="grid grid-cols-1 lg:grid-cols-[1fr_480px] gap-6">
         {/* Message list */}
-        <Panel>
+        <Panel padding="sm" className="sm:p-7">
           <div className="flex gap-4 mb-4 border-b border-line pb-3">
             <span className="text-[11px] font-mono font-semibold uppercase tracking-widest text-ink-3">
               inbox · {messages.length}
@@ -181,7 +191,7 @@ export default function Messages() {
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2 mb-1">
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 mb-1">
                         {!msg.read_at && <span className="w-1.5 h-1.5 bg-cream flex-shrink-0" />}
                         <span className="text-xs font-mono text-ink-3">
                           from {shortAddr(msg.from_address)}
@@ -238,8 +248,8 @@ export default function Messages() {
         </Panel>
 
         {/* Reply panel */}
-        <div className="space-y-4">
-          <Panel>
+        <div ref={replyPanelRef} className="space-y-4">
+          <Panel padding="sm" className="sm:p-7">
             <div className="text-[11px] font-mono font-semibold uppercase tracking-widest text-ink-3 mb-4">
               {replyTo ? `reply to ${shortAddr(replyTo)}` : 'compose'}
             </div>

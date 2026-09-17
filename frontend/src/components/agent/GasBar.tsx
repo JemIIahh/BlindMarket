@@ -82,7 +82,8 @@ export function GasBar({
             onClick={onRefresh}
             disabled={refreshing}
             title="Refresh balance"
-            className="text-ink-3 hover:text-cream transition-colors disabled:opacity-50"
+            aria-label="Refresh balance"
+            className="p-1.5 -m-1.5 text-ink-3 hover:text-cream transition-colors disabled:opacity-50"
           >
             <Icon name={refreshing ? 'clock' : 'search'} size={14} className={refreshing ? 'animate-spin' : ''} />
           </button>
@@ -171,7 +172,7 @@ export function GasBar({
         cctpStatus === 'error' ||
         (isLowGas && agentStatus !== 'stopped')) && (
         <div className="mt-3 space-y-1.5 text-xs">
-          {topUpStatus === 'error' && <div className="text-err">{topUpError}</div>}
+          {topUpStatus === 'error' && <div className="text-err break-all">{topUpError}</div>}
           {withdrawStatus === 'done' && withdrawInfo && withdrawInfo.length > 0 && (
             <div className="text-ok space-y-0.5">
               {withdrawInfo.map((w) => (
@@ -183,7 +184,7 @@ export function GasBar({
               ))}
             </div>
           )}
-          {withdrawStatus === 'error' && <div className="text-err">{withdrawError}</div>}
+          {withdrawStatus === 'error' && <div className="text-err break-all">{withdrawError}</div>}
           {cctpStatus === 'polling' && cctpTransfer && (
             <div className="text-ink-2">
               Bridging — {cctpTransfer.stage.replace(/_/g, ' ')}
@@ -195,7 +196,7 @@ export function GasBar({
               Bridge complete · mint tx <span className="font-mono">{cctpTransfer.mintTxHash.slice(0, 10)}…</span>
             </div>
           )}
-          {cctpStatus === 'error' && <div className="text-err">{cctpError}</div>}
+          {cctpStatus === 'error' && <div className="text-err break-all">{cctpError}</div>}
           {isLowGas && agentStatus !== 'stopped' && (
             <div className="text-warn">
               Agent will fail to submit evidence below <span className="font-mono">{lowGasThreshold} {symbol}</span>.

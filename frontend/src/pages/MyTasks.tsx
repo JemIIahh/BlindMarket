@@ -151,6 +151,16 @@ export default function MyTasks() {
   const [filter, setFilter] = useState<'all' | 'open' | 'active' | 'completed'>('all');
   const [sort, setSort] = useState<'newest' | 'oldest' | 'highest-reward' | 'lowest-reward'>('newest');
   const [page, setPage] = useState(1);
+  // The card is a <Link>, so the result <details> can't toggle natively — a
+  // click on its summary would also navigate. Open state lives here instead.
+  const [openResults, setOpenResults] = useState<Set<string>>(new Set());
+  const toggleResult = (id: string) =>
+    setOpenResults(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
 
   // /a2a/tasks/posted returns every task the authed wallet posted, across
   // the full lifecycle. /api/v1/tasks would only return Funded ones, which
@@ -259,11 +269,11 @@ export default function MyTasks() {
         }
       />
 
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-0 border border-line mb-8">
+      <div className="grid grid-cols-2 xl:grid-cols-4 gap-0 border border-line mb-8">
         <StatCard label="Open" value={String(openCount)} sub="Awaiting worker" />
-        <div className="border-l border-line"><StatCard label="Active" value={String(activeCount)} sub="In progress" subColor="warn" /></div>
-        <div className="border-t border-l-0 sm:border-t-0 sm:border-l border-line"><StatCard label="Completed" value={String(completedCount)} sub="All time" subColor="ok" /></div>
-        <div className="border-t border-l border-line sm:border-t-0"><StatCard label="Total spent" value={`${totalSpent.toLocaleString(undefined, { maximumFractionDigits: 4 })} USDC`} sub="Paid out on completed tasks" /></div>
+        <div className="border-l border-line"><StatCard className="h-full" label="Active" value={String(activeCount)} sub="In progress" subColor="warn" /></div>
+        <div className="border-t border-l-0 xl:border-t-0 xl:border-l border-line"><StatCard className="h-full" label="Completed" value={String(completedCount)} sub="All time" subColor="ok" /></div>
+        <div className="border-t border-l border-line xl:border-t-0"><StatCard className="h-full" label="Total spent" value={`${totalSpent.toLocaleString(undefined, { maximumFractionDigits: 4 })} USDC`} sub="Paid out on completed tasks" /></div>
       </div>
 
       <div className="border border-line">
@@ -354,6 +364,10 @@ export default function MyTasks() {
                 status === 0 && t.meta.privacy !== 'public' &&
                 !!t.meta.rootHash && (t.wrapCount ?? 0) === 0 && !t.hasCustody;
               const keyHere = keyAtRisk && !!getAesKey(t.meta.taskId);
+              // Shown inline on phones, where the title tooltip never appears.
+              const keyRiskHint = keyHere
+                ? 'Register a matching agent and keep this page open so the key gets wrapped to it. Clearing this browser before then loses the key permanently.'
+                : 'Recover it from the device you posted from, or repost — it cannot be decrypted from here.';
               // Canonical task URL uses the task hash (globally unique across
               // chains — numeric ids collide between Base and 0G). Numeric
               // URLs keep working (backend + route accept both).
@@ -381,18 +395,21 @@ export default function MyTasks() {
                     )}
                     {keyAtRisk && (
                       <div
-                        className={`mt-2 flex items-center gap-1.5 border-l-2 pl-2 py-0.5 text-[11px] leading-snug ${
+                        className={`mt-2 border-l-2 pl-2 py-0.5 text-[11px] leading-snug ${
                           keyHere ? 'border-warn text-warn' : 'border-err text-err'
                         }`}
                         onClick={(e) => e.preventDefault()}
-                        title={keyHere
-                          ? 'The encryption key for this task is only in this browser. Register a matching agent and keep this page open so the key gets wrapped to it. Clearing this browser before then loses the key permanently.'
-                          : 'The encryption key is not on the server and not in this browser. Recover it from the device you posted from, or repost — it cannot be decrypted from here.'}
+                        title={`${keyHere
+                          ? 'The encryption key for this task is only in this browser.'
+                          : 'The encryption key is not on the server and not in this browser.'} ${keyRiskHint}`}
                       >
-                        <Icon name="lock" size={12} className="shrink-0" />
-                        <span>
-                          Key at risk — {keyHere ? 'only copy is in this browser' : 'not on server or this browser'}
-                        </span>
+                        <div className="flex items-center gap-1.5">
+                          <Icon name="lock" size={12} className="shrink-0" />
+                          <span>
+                            Key at risk — {keyHere ? 'only copy is in this browser' : 'not on server or this browser'}
+                          </span>
+                        </div>
+                        <p className="mt-1 text-ink-2 sm:hidden">{keyRiskHint}</p>
                       </div>
                     )}
                   </div>
@@ -412,20 +429,29 @@ export default function MyTasks() {
                     <span className="text-[11px] text-ink-3 group-hover:text-cream transition-colors">View →</span>
                   </div>
                   {(hasResult || isDone) && (
-                    <details className="mt-1 border-t border-line pt-3 group/details" onClick={e => e.preventDefault()}>
-                      <summary className="flex items-center justify-between cursor-pointer text-[11px] text-ink-3 hover:text-cream transition-colors list-none">
+                    <details
+                      open={openResults.has(t.meta.taskId)}
+                      onClick={e => { if (e.target === e.currentTarget) { e.preventDefault(); e.stopPropagation(); } }}
+                      className="mt-1 border-t border-line group/details"
+                    >
+                      <summary
+                        onClick={e => { e.preventDefault(); e.stopPropagation(); toggleResult(t.meta.taskId); }}
+                        className="pt-3 flex items-center justify-between cursor-pointer text-[11px] text-ink-3 hover:text-cream transition-colors list-none"
+                      >
                         <span>View result</span>
                         <span className="group-open/details:rotate-90 transition-transform">▸</span>
                       </summary>
-                      {hasResult ? (
-                        <pre className="mt-3 max-h-72 overflow-auto bg-surface-2 border border-line p-3 text-[11px] font-mono text-ink leading-relaxed whitespace-pre-wrap break-words">
-                          {JSON.stringify(t.state.resultData, null, 2)}
-                        </pre>
-                      ) : (
-                        <div className="mt-3 text-[11px] text-ink-3 leading-relaxed">
-                          No result data on file.
-                        </div>
-                      )}
+                      <div onClick={e => { e.preventDefault(); e.stopPropagation(); }}>
+                        {hasResult ? (
+                          <pre className="mt-3 max-h-72 overflow-auto bg-surface-2 border border-line p-3 text-[11px] font-mono text-ink leading-relaxed whitespace-pre-wrap break-words">
+                            {JSON.stringify(t.state.resultData, null, 2)}
+                          </pre>
+                        ) : (
+                          <div className="mt-3 text-[11px] text-ink-3 leading-relaxed">
+                            No result data on file.
+                          </div>
+                        )}
+                      </div>
                     </details>
                   )}
                 </>

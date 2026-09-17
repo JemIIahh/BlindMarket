@@ -269,7 +269,7 @@ export function ServicesSection({
                 <button
                   type="button"
                   onClick={() => { setShowDesc(false); setDescription(''); }}
-                  className="mt-6 text-ink-3 hover:text-ink transition-colors shrink-0"
+                  className="-m-1.5 mt-[18px] p-1.5 text-ink-3 hover:text-ink transition-colors shrink-0"
                   aria-label="Remove description"
                 >
                   <Icon name="x" size={14} />

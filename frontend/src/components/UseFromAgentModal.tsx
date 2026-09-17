@@ -321,7 +321,7 @@ export default function UseFromAgentModal({
           {active}
         </pre>
 
-        <div className="flex items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <span className="font-mono text-[10px] uppercase tracking-widest text-ink-3">
             {tab === 'prompt' ? 'one paste — instructions + script' : 'save as use-service.mjs'}
           </span>
@@ -330,6 +330,7 @@ export default function UseFromAgentModal({
             size="sm"
             label={copied ? 'Copied' : 'Copy to clipboard'}
             onClick={copy}
+            className="shrink-0"
           />
         </div>
       </div>

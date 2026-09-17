@@ -421,7 +421,7 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
                 {selectedChain?.isTestnet ? 'Get test ETH from a faucet, then try again.' : 'Add some, then try again.'}
               </div>
             )}
-            {error && <div className="text-xs text-err">{error}</div>}
+            {error && <div className="text-xs text-err break-words">{error}</div>}
             <div className="flex justify-end gap-2">
               <Button variant="ghost" size="sm" label="Cancel" onClick={onClose} />
               <Button variant="primary" size="sm" label="Bridge USDC" onClick={handleFund} disabled={!externalWallet || chains.length === 0 || exceedsBalance || insufficientGas} />

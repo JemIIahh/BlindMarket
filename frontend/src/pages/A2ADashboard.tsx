@@ -210,7 +210,12 @@ export default function A2ADashboard() {
                         {onChainId ? `#${onChainId}` : `${e.meta.taskId.slice(0, 10)}…`}
                       </Link>
                       <span className="hidden md:block text-ink-3 truncate">{e.state.acceptedAt ? new Date(e.state.acceptedAt).toLocaleString() : '—'}</span>
-                      <span className="justify-self-end md:justify-self-auto"><StatusTag status={e.state.status} /></span>
+                      <span className="justify-self-end md:justify-self-auto flex items-center gap-2 md:block">
+                        <StatusTag status={e.state.status} />
+                        {hasResult && (
+                          <span aria-hidden className="md:hidden text-cream group-open:rotate-90 inline-block transition-transform">▸</span>
+                        )}
+                      </span>
                       <span className="hidden md:block text-ink-3 truncate">{e.state.submittedAt ? new Date(e.state.submittedAt).toLocaleString() : '—'}</span>
                       <span className="hidden md:block text-ink-3">{e.state.verificationResult?.passed ? '✓' : '—'}</span>
                       <span className={`hidden md:block text-[10px] font-mono ${e.state.verificationResult?.teeVerified ? 'text-ok' : 'text-ink-3/40'}`}>

@@ -101,7 +101,7 @@ export function TopBar({ onMenuClick }: TopBarProps = {}) {
         )}
         <Link to="/" className="flex items-center gap-2.5 min-w-0">
           <LogoMark size={22} blade="var(--bb-ink)" slit="var(--bb-surface)" className="shrink-0" />
-          <span className="hidden min-[400px]:inline font-semibold text-[15px] text-ink tracking-tight whitespace-nowrap">
+          <span className={`hidden ${authenticated ? 'min-[520px]:inline md:hidden lg:inline' : 'min-[400px]:inline'} font-semibold text-[15px] text-ink tracking-tight whitespace-nowrap`}>
             BlindMarket
           </span>
         </Link>
@@ -110,11 +110,11 @@ export function TopBar({ onMenuClick }: TopBarProps = {}) {
       {/* zone: controls */}
       <div className="flex items-center gap-3 shrink-0">
         {/* group: primary-action */}
-        <Link to="/tasks/new" className="hidden sm:block">
+        <Link to="/tasks/new" className={authenticated ? 'hidden lg:block' : 'hidden sm:block'}>
           <Button variant="outline" label="Post task" size="sm" className="h-8 rounded-md" />
         </Link>
 
-        <span aria-hidden className="hidden sm:block w-px h-5 bg-line" />
+        <span aria-hidden className={`${authenticated ? 'hidden lg:block' : 'hidden sm:block'} w-px h-5 bg-line`} />
 
         {/* group: utility */}
         <div className="flex items-center gap-1">
@@ -138,7 +138,7 @@ export function TopBar({ onMenuClick }: TopBarProps = {}) {
           <NotificationBell />
         </div>
 
-        <span aria-hidden className="w-px h-5 bg-line" />
+        <span aria-hidden className={`${authenticated ? 'hidden sm:block' : ''} w-px h-5 bg-line`} />
 
         {/* group: account — ONE bordered box, segments joined by border-r */}
         {!ready ? (
@@ -164,7 +164,7 @@ export function TopBar({ onMenuClick }: TopBarProps = {}) {
         ) : (
           <div ref={accountRef} className="relative flex items-center h-8 rounded-md border border-line text-[11px] font-mono">
             {/* segment: network */}
-            <span className="hidden sm:flex items-center gap-1.5 px-2.5 h-full border-r border-line text-ink-2 whitespace-nowrap">
+            <span className="hidden sm:flex md:hidden min-[800px]:flex items-center gap-1.5 px-2.5 h-full border-r border-line text-ink-2 whitespace-nowrap">
               <span className="w-1.5 h-1.5 rounded-full bg-ok shrink-0" />
               {networkName}
             </span>
@@ -182,7 +182,7 @@ export function TopBar({ onMenuClick }: TopBarProps = {}) {
                 onClick={() => { if (address) copyToClipboard(address); }}
                 aria-label="copy address"
                 title="Copy address"
-                className="text-ink-3 hover:text-ink transition-colors"
+                className="hidden min-[520px]:inline-flex p-1.5 -m-1.5 text-ink-3 hover:text-ink transition-colors"
               >
                 <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <rect x="9" y="9" width="12" height="12" rx="1" />
@@ -199,7 +199,7 @@ export function TopBar({ onMenuClick }: TopBarProps = {}) {
               className="flex items-center gap-1.5 px-2.5 h-full text-ink hover:bg-surface-2 rounded-r-md transition-colors whitespace-nowrap"
             >
               <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${shownAsset.dot}`} />
-              <span className="text-ink-2">{shownAsset.symbol}</span>
+              <span className="hidden min-[520px]:inline text-ink-2">{shownAsset.symbol}</span>
               <span className="font-mono">{shownAsset.amount}</span>
               <svg
                 viewBox="0 0 24 24"

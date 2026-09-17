@@ -87,7 +87,7 @@ export function WebhooksPanel({ agentId: _agentId }: { agentId: string }) {
                     setCreateError((err as Error).message || 'Delete failed');
                   }
                 }}
-                className="text-xs text-err hover:underline shrink-0"
+                className="-mx-2 px-2 py-1.5 min-h-[32px] text-xs text-err hover:underline shrink-0"
               >
                 Delete
               </button>
@@ -105,7 +105,7 @@ export function WebhooksPanel({ agentId: _agentId }: { agentId: string }) {
         <FormField label="Secret" hint="HMAC-SHA256 signing secret (auto-generated if empty)">
           <FormInput className="font-mono" placeholder="Leave empty for auto-generate" value={secret} onChange={(e) => setSecret(e.target.value)} />
         </FormField>
-        <div className="flex items-center gap-3 mt-3">
+        <div className="flex flex-wrap items-center gap-3 mt-3">
           <Button
             variant="primary"
             size="sm"

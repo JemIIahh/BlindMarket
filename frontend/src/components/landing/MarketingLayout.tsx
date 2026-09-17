@@ -76,7 +76,7 @@ export function MarketingLayout() {
               <Link
                 key={l.to}
                 to={l.to}
-                className="whitespace-nowrap font-mk text-[12.5px] text-white/70 transition-colors hover:text-white sm:text-[13.5px]"
+                className="-my-2 whitespace-nowrap py-2 font-mk text-[12.5px] text-white/70 transition-colors hover:text-white sm:text-[13.5px]"
               >
                 {l.label}
               </Link>

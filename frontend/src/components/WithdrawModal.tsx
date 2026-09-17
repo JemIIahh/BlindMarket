@@ -226,7 +226,7 @@ export function WithdrawModal({ onClose, onWithdrawn }: { onClose: () => void; o
                 transactions. You'll be asked to approve this in your wallet.
               </div>
             )}
-            {error && <div className="text-xs text-err">{error}</div>}
+            {error && <div className="text-xs text-err break-words">{error}</div>}
             <div className="flex justify-end gap-2">
               <Button variant="ghost" size="sm" label="Back" onClick={() => { setError(''); setPhase('input'); }} />
               <Button
@@ -259,7 +259,7 @@ export function WithdrawModal({ onClose, onWithdrawn }: { onClose: () => void; o
 
         {phase === 'error' && (
           <div className="space-y-4">
-            <div className="text-xs text-err">{error}</div>
+            <div className="text-xs text-err break-words">{error}</div>
             <div className="flex justify-end gap-2">
               <Button variant="ghost" size="sm" label="Close" onClick={onClose} />
               <Button variant="primary" size="sm" label="Try again" onClick={() => { setError(''); setPhase('input'); }} />

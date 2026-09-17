@@ -52,7 +52,7 @@ function Field({
   span2?: boolean;
 }) {
   return (
-    <div className={span2 ? 'col-span-2' : undefined}>
+    <div className={span2 ? 'min-w-0 sm:col-span-2' : 'min-w-0'}>
       <span className="text-[11px] text-ink-3 tracking-wide">{label}</span>
       <div className="mt-1">{children}</div>
     </div>
