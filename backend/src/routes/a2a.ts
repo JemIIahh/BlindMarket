@@ -208,8 +208,10 @@ a2aRouter.post('/register', requireAuth, async (req: AuthRequest, res, next) => 
       mcpEndpointUrl: data.mcpEndpointUrl,
       minReward: data.minReward,
       preferredCapabilities: data.preferredCapabilities as AgentCapability[] | undefined,
-      reputation: existing?.reputation ?? 50, // start at 50
-      tasksCompleted: existing?.tasksCompleted ?? 0,
+      // Counters apply to a new executor only; registerAgent never overwrites
+      // an existing one's (see its doc comment).
+      reputation: 50,
+      tasksCompleted: 0,
       registeredAt: existing?.registeredAt ?? new Date().toISOString(),
     });
 

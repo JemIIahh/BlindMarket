@@ -58,7 +58,7 @@ export async function getFeeBps(): Promise<number> {
  * DisputeResolved listener). Without it, settle-then-credit retries and the
  * event listener could each credit the same payout.
  *
- * Persists to Redis (agentStore) so the /agents endpoint can surface these
+ * Persists to the agent store so the /agents endpoint can surface these
  * stats to the UI without re-deriving from on-chain history. If anything in
  * here fails we log + continue: the worker still gets paid on chain — only the
  * UI counter is at risk.
@@ -94,6 +94,7 @@ export async function recordWorkerPayout(
     if (!agent) {
       // Executor not registered (yet) — release the marker so a later
       // observation can credit once the registration exists.
+      console.warn(`[a2a] payout for ${taskHash.slice(0, 10)}… not credited: executor ${executorAddr} is not registered`);
       await redis.del(creditedKey).catch(() => {});
       return;
     }
@@ -119,7 +120,12 @@ export async function recordWorkerPayout(
     agent.reputation = Math.min(100, agent.reputation + 1);
     const prev = BigInt(agent.totalEarnedRaw ?? '0');
     agent.totalEarnedRaw = (prev + workerShare).toString();
-    await agentStore.registerAgent(agent);
+    if (!(await agentStore.updateAgentStats(executorAddr, agent))) {
+      // Removed since the read above: same as never registered.
+      console.warn(`[a2a] payout for ${taskHash.slice(0, 10)}… not credited: executor ${executorAddr} disappeared before the write`);
+      await redis.del(creditedKey).catch(() => {});
+      return;
+    }
 
     // rent-your-agent: bump the rented service's sold_count in the SAME
     // at-most-once block so a finalize retry can't double-count. Own try/catch —
@@ -229,7 +235,7 @@ export async function recordWorkerDispute(taskHash: string, executorAddr: string
     const agent = await agentStore.getAgent(executorAddr);
     if (agent) {
       agent.reputation = Math.max(0, agent.reputation - 10);
-      await agentStore.registerAgent(agent);
+      await agentStore.updateAgentStats(executorAddr, agent);
     }
     await reputationDecay.recordDispute(executorAddr, taskHash);
     // Per-skill proof: a dispute counts against the task's capability tags

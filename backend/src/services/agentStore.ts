@@ -34,6 +34,13 @@ function safeJsonArray(v: unknown): string[] {
   return [];
 }
 
+/**
+ * Insert an executor, or update its profile if it already exists. The
+ * counters (reputation, tasksCompleted, totalEarnedRaw) are only written on
+ * insert: every worker re-registers at boot without them, and overwriting
+ * here reset each agent's earnings to 0 on restart while its task count
+ * stayed. Change counters with `updateAgentStats`.
+ */
 export async function registerAgent(agent: AgentExecutor): Promise<void> {
   const addr = agent.address.toLowerCase();
 
@@ -63,9 +70,6 @@ export async function registerAgent(agent: AgentExecutor): Promise<void> {
          mcp_endpoint_url = EXCLUDED.mcp_endpoint_url,
          min_reward = EXCLUDED.min_reward,
          preferred_capabilities = EXCLUDED.preferred_capabilities,
-         reputation = EXCLUDED.reputation,
-         tasks_completed = EXCLUDED.tasks_completed,
-         total_earned_raw = EXCLUDED.total_earned_raw,
          updated_at = NOW()`,
       [
         addr, agent.displayName, agent.capabilities, agent.publicKey,
@@ -98,9 +102,6 @@ export async function registerAgent(agent: AgentExecutor): Promise<void> {
        mcp_endpoint_url = excluded.mcp_endpoint_url,
        min_reward = excluded.min_reward,
        preferred_capabilities = excluded.preferred_capabilities,
-       reputation = excluded.reputation,
-       tasks_completed = excluded.tasks_completed,
-       total_earned_raw = excluded.total_earned_raw,
        updated_at = datetime('now')`,
   ).run(
     addr, agent.displayName, JSON.stringify(agent.capabilities), agent.publicKey,
@@ -108,6 +109,34 @@ export async function registerAgent(agent: AgentExecutor): Promise<void> {
     agent.minReward ?? null, agent.preferredCapabilities ? JSON.stringify(agent.preferredCapabilities) : null,
     agent.reputation, agent.tasksCompleted, agent.totalEarnedRaw ?? '0', addr,
   );
+}
+
+/**
+ * Write an executor's counters and nothing else. Returns false when no such
+ * executor exists.
+ */
+export async function updateAgentStats(
+  address: string,
+  stats: Pick<AgentExecutor, 'reputation' | 'tasksCompleted' | 'totalEarnedRaw'>,
+): Promise<boolean> {
+  const addr = address.toLowerCase();
+  const params = [stats.reputation, stats.tasksCompleted, stats.totalEarnedRaw ?? '0'];
+  if (usePg()) {
+    const db = await getPool();
+    const { rowCount } = await db.query(
+      `UPDATE agent_executors
+         SET reputation = $1, tasks_completed = $2, total_earned_raw = $3, updated_at = NOW()
+       WHERE address = $4`,
+      [...params, addr],
+    );
+    return (rowCount ?? 0) > 0;
+  }
+  const { changes } = getDb().prepare(
+    `UPDATE agent_executors
+       SET reputation = ?, tasks_completed = ?, total_earned_raw = ?, updated_at = datetime('now')
+     WHERE address = ?`,
+  ).run(...params, addr);
+  return changes > 0;
 }
 
 export async function getAgent(address: string): Promise<AgentExecutor | undefined> {
