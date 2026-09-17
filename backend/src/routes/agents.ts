@@ -29,7 +29,7 @@ import { settlementChainConfigs, type SettlementChainKey } from '../services/set
 import { config } from '../config.js';
 import { claimDeployCredit, restoreDeployCredit } from '../services/agentFactoryListener.js';
 import { discoverModels, ProviderModelsError } from '../services/providerModels.js';
-import { nativeWeiToTokenUnits, normalizeSettlementAmount, settlementToken } from '../services/settlementUnits.js';
+import { nativeWeiToTokenUnits, normalizeSettlementAmount, pricingUnit } from '../services/settlementUnits.js';
 
 /**
  * Owner-only guard for any agent endpoint that touches funds, keys, or
@@ -112,7 +112,7 @@ async function withExecutorStats<T extends { walletAddress?: string }>(stripped:
   return {
     ...stripped,
     tasksCompleted: exec?.tasksCompleted ?? 0,
-    totalEarned: settlementToken().symbol === 'USDC' ? totalEarnedUsdc : totalEarnedNative,
+    totalEarned: pricingUnit().symbol === 'USDC' ? totalEarnedUsdc : totalEarnedNative,
     totalEarnedUsdc,
     totalEarnedNative,
   };

@@ -4,7 +4,7 @@ const BASE_USDC = '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
 const cfg = vi.hoisted(() => ({ baseEscrowAddress: '0xescrow' as string, baseUsdcAddress: '' as string, postingChain: '' }));
 vi.mock('../config.js', () => ({ config: cfg }));
 
-const { normalizeSettlementAmount, settlementToken, payoutCurrency, assertPostingUnitMatchesPricing, nativeWeiToTokenUnits } =
+const { normalizeSettlementAmount, pricingUnit, payoutCurrency, nativeWeiToTokenUnits } =
   await import('./settlementUnits.js');
 
 beforeEach(() => {
@@ -28,8 +28,8 @@ describe('normalizeSettlementAmount (Base escrow configured)', () => {
     expect(normalizeSettlementAmount(raw)).toBe(raw);
   });
 
-  it('reports USDC with 6 decimals', () => {
-    expect(settlementToken()).toEqual({ symbol: 'USDC', decimals: 6 });
+  it('prices in USDC with 6 decimals', () => {
+    expect(pricingUnit()).toEqual({ symbol: 'USDC', decimals: 6 });
   });
 });
 
@@ -37,7 +37,30 @@ describe('0G-only deployment (no Base escrow)', () => {
   it('keeps 18-decimal amounts, which are correct there', () => {
     cfg.baseEscrowAddress = '';
     expect(normalizeSettlementAmount('1000000000000000000')).toBe('1000000000000000000');
-    expect(settlementToken()).toEqual({ symbol: '0G', decimals: 18 });
+    expect(pricingUnit()).toEqual({ symbol: '0G', decimals: 18 });
+  });
+});
+
+// The unit follows the chain tasks are POSTED on, not merely the presence of
+// a Base escrow. POSTING_CHAIN=0g on a stack that also has a Base escrow used
+// to be refused at boot (assertPostingUnitMatchesPricing); it now simply
+// prices in 0G.
+describe('a stack with a Base escrow that posts on 0G', () => {
+  beforeEach(() => { cfg.postingChain = '0g'; });
+
+  it('prices in native 0G', () => {
+    expect(pricingUnit()).toEqual({ symbol: '0G', decimals: 18 });
+  });
+
+  it('leaves 18-decimal amounts alone, because nothing is written in USDC there', () => {
+    expect(normalizeSettlementAmount('1000000000000000000')).toBe('1000000000000000000');
+  });
+});
+
+describe('POSTING_CHAIN=base', () => {
+  it('prices in USDC', () => {
+    cfg.postingChain = 'base';
+    expect(pricingUnit()).toEqual({ symbol: 'USDC', decimals: 6 });
   });
 });
 
@@ -73,30 +96,6 @@ describe('payoutCurrency', () => {
   });
 });
 
-describe('assertPostingUnitMatchesPricing', () => {
-  it('passes the default posting chain, with or without a Base escrow', () => {
-    expect(() => assertPostingUnitMatchesPricing()).not.toThrow();
-    cfg.baseEscrowAddress = '';
-    expect(() => assertPostingUnitMatchesPricing()).not.toThrow();
-  });
-
-  it('passes POSTING_CHAIN=base, and POSTING_CHAIN=0g without a Base escrow', () => {
-    cfg.postingChain = 'base';
-    expect(() => assertPostingUnitMatchesPricing()).not.toThrow();
-    Object.assign(cfg, { postingChain: '0g', baseEscrowAddress: '' });
-    expect(() => assertPostingUnitMatchesPricing()).not.toThrow();
-  });
-
-  it('refuses POSTING_CHAIN=0g while a Base escrow keeps prices in USDC', () => {
-    cfg.postingChain = '0g';
-    expect(() => assertPostingUnitMatchesPricing()).toThrow(
-      /Invalid POSTING_CHAIN: 0g settles in 0G, but service prices and reward floors are in USDC/,
-    );
-  });
-});
-
-// Used by the withdraw route where a chain's gas coin is its settlement token
-// (Arc's USDC), to keep the native gas reserve back while sweeping the ERC-20.
 describe('nativeWeiToTokenUnits', () => {
   const E = 10n ** 18n;
 

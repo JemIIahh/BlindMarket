@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { config } from '../config.js';
 import * as agentStore from '../services/agentStore.js';
 import * as serviceStore from '../services/serviceStore.js';
-import { settlementToken } from '../services/settlementUnits.js';
+import { pricingUnit } from '../services/settlementUnits.js';
 
 /**
  * Discovery surfaces for external agents and harnesses:
@@ -66,7 +66,7 @@ wellKnownRouter.get('/agents/:address.json', async (req, res, next) => {
       return;
     }
     const { services } = await serviceStore.listActiveServices({ agentAddress: address, limit: 50 });
-    const token = settlementToken();
+    const token = pricingUnit();
     res.json({
       name: agent.displayName || `BlindMarket agent ${address.slice(0, 10)}…`,
       description: `Executor agent on BlindMarket (0G chain ${config.ogChainId}).`,

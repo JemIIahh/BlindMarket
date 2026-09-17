@@ -6,9 +6,18 @@ vi.mock('./reviewStore.js', () => ({ getAgentReviews: vi.fn(async () => ({ stats
 vi.mock('./a2aStore.js', () => ({ getExecutorTasks: vi.fn(async () => []) }));
 vi.mock('./reputationDecay.js', () => ({ getDecayedReputation: vi.fn(async () => ({ decayedScore: 0, tasksCompleted: 0, disputes: 0 })) }));
 
-import { scoreAgent, rankAgents, pickExplorationAgent } from './agentScorer.js';
+vi.mock('./settlementUnits.js', () => ({ pricingUnit: () => pricing.unit }));
+
+import { scoreAgent, rankAgents, pickExplorationAgent, meetsRewardFloor } from './agentScorer.js';
 import * as agentStore from './agentStore.js';
 import type { AgentExecutor } from '../types.js';
+
+const USDC = { symbol: 'USDC' as const, decimals: 6 as const };
+const NATIVE_0G = { symbol: '0G' as const, decimals: 18 as const };
+/** What this deployment prices in; the reward floor is written in it. */
+const pricing = vi.hoisted(() => ({
+  unit: { symbol: 'USDC', decimals: 6 } as { symbol: 'USDC' | '0G'; decimals: 6 | 18 },
+}));
 
 const agent = (address: string, caps: string[], preferred?: string[]): AgentExecutor => ({
   address, displayName: address, capabilities: caps as never, preferredCapabilities: preferred as never,
@@ -103,5 +112,60 @@ describe('rankAgents — settlement chain', () => {
     expect(await addresses('0g')).toEqual(['0xlegacy', '0xzerog']);
     expect(await addresses('arc')).toEqual(['0xarc']);
     expect(await addresses(undefined)).toEqual(['0xarc', '0xlegacy', '0xzerog']);
+  });
+});
+
+describe('meetsRewardFloor', () => {
+  beforeEach(() => { pricing.unit = USDC; });
+
+  const withFloor = (minReward?: string) => ({ minReward });
+
+  it('keeps an agent with no floor, and a task with no reward', () => {
+    expect(meetsRewardFloor(withFloor(), { amount: 1n, unit: USDC })).toBe(true);
+    expect(meetsRewardFloor(withFloor('1000000'), null)).toBe(true);
+  });
+
+  it('compares amounts in the pricing unit', () => {
+    expect(meetsRewardFloor(withFloor('1000000'), { amount: 1_000_000n, unit: USDC })).toBe(true);
+    expect(meetsRewardFloor(withFloor('1000000'), { amount: 999_999n, unit: USDC })).toBe(false);
+  });
+
+  // BEHAVIOUR CHANGE: before, the raw amounts were compared whatever the
+  // units, so 10^6 wei of 0G (a millionth of a millionth of a 0G) cleared a
+  // 1 USDC floor and, below that, dropped every agent that had one.
+  it("ignores a floor when the task pays in another unit", () => {
+    expect(meetsRewardFloor(withFloor('1000000'), { amount: 1n, unit: NATIVE_0G })).toBe(true);
+    expect(meetsRewardFloor(withFloor('1000000'), { amount: 10n ** 18n, unit: NATIVE_0G })).toBe(true);
+  });
+
+  it('applies the floor to 0G tasks on a deployment that prices in 0G', () => {
+    pricing.unit = NATIVE_0G;
+    expect(meetsRewardFloor(withFloor('1000000000000000000'), { amount: 10n ** 18n, unit: NATIVE_0G })).toBe(true);
+    expect(meetsRewardFloor(withFloor('1000000000000000000'), { amount: 10n ** 17n, unit: NATIVE_0G })).toBe(false);
+    // ...and not to USDC tasks there.
+    expect(meetsRewardFloor(withFloor('1000000000000000000'), { amount: 1n, unit: USDC })).toBe(true);
+  });
+
+  it('keeps an agent whose floor is malformed, rather than excluding on bad data', () => {
+    expect(meetsRewardFloor(withFloor('not-a-number'), { amount: 1n, unit: USDC })).toBe(true);
+  });
+});
+
+describe('rankAgents with a reward floor', () => {
+  beforeEach(() => {
+    pricing.unit = USDC;
+    vi.mocked(agentStore.listAgents).mockReset();
+  });
+
+  const withMin = (address: string, minReward: string): AgentExecutor => ({ ...agent(address, ['data_processing'], []), minReward });
+
+  it('drops agents priced above a USDC task, and keeps them for a 0G one', async () => {
+    vi.mocked(agentStore.listAgents).mockResolvedValue([withMin('0xpricey', '5000000'), agent('0xcheap', ['data_processing'], [])]);
+    const usdcRanked = await rankAgents(['data_processing'] as never, { amount: 1_000_000n, unit: USDC });
+    expect(usdcRanked.map((r) => r.address)).toEqual(['0xcheap']);
+
+    vi.mocked(agentStore.listAgents).mockResolvedValue([withMin('0xpricey', '5000000'), agent('0xcheap', ['data_processing'], [])]);
+    const nativeRanked = await rankAgents(['data_processing'] as never, { amount: 1_000_000n, unit: NATIVE_0G });
+    expect(nativeRanked.map((r) => r.address).sort()).toEqual(['0xcheap', '0xpricey']);
   });
 });

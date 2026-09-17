@@ -32,7 +32,7 @@ import { config } from '../config.js';
 import * as serviceStore from '../services/serviceStore.js';
 import { consumePendingCost } from '../services/railwaySandbox.js';
 import * as accountingService from '../services/accountingService.js';
-import { normalizeSettlementAmount, payoutCurrency, settlementToken } from '../services/settlementUnits.js';
+import { normalizeSettlementAmount, payoutCurrency, pricingUnit, type TaskReward } from '../services/settlementUnits.js';
 
 export const a2aRouter = Router();
 
@@ -1038,11 +1038,11 @@ async function rankedEntries(
   taskHash: string,
   requiredCaps: AgentCapability[],
   routingMeta: semanticMatch.RoutingMeta,
-  taskRewardWei: string,
+  taskReward: TaskReward,
 ): Promise<{ entries: a2aStore.CascadeEntry[]; semantic: boolean }> {
-  const semantic = await semanticMatch.semanticCascadeRanking(routingMeta, taskRewardWei);
+  const semantic = await semanticMatch.semanticCascadeRanking(routingMeta, taskReward);
   const tagEntries = async () =>
-    (await rankAgents(requiredCaps, taskRewardWei, routingMeta.chain)).map((r) => ({
+    (await rankAgents(requiredCaps, taskReward, routingMeta.chain)).map((r) => ({
       address: r.address,
       score: r.score,
       displayName: r.displayName,
@@ -1071,10 +1071,10 @@ async function startRankedCascade(
   taskHash: string,
   requiredCaps: AgentCapability[],
   routingMeta: semanticMatch.RoutingMeta,
-  taskRewardWei: string,
+  taskReward: TaskReward,
   chain?: TaskChain,
 ): Promise<void> {
-  const { entries, semantic } = await rankedEntries(taskHash, requiredCaps, routingMeta, taskRewardWei);
+  const { entries, semantic } = await rankedEntries(taskHash, requiredCaps, routingMeta, taskReward);
   if (entries.length === 0) {
     emitTaskAvailable(taskHash, broadcastMeta(requiredCaps, chain));
     return;
@@ -1361,8 +1361,8 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
     // payout can be booked in a known unit. Refused before anything is
     // written: an unindexed task is never offered, and the poster can still
     // cancel it for a refund. (A native-0G task on a deployment that prices in
-    // USDC passes here; the "Use now" check below refuses it, but agent reward
-    // floors still compare its 18-decimal amount with USDC units.)
+    // USDC passes here; the "Use now" check below refuses it, and reward
+    // floors — written in the pricing unit — no longer apply to it.)
     const taskUnit = payoutCurrency(taskChain, onChainToken);
     if (!taskUnit) {
       throw new AppError(
@@ -1475,7 +1475,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       }
       // price_raw is in the deployment's pricing token. An amount in another
       // token is not comparable: 1,000,000 wei of 0G would pass a 1 USDC price.
-      const pricing = settlementToken();
+      const pricing = pricingUnit();
       if (taskUnit.symbol !== pricing.symbol) {
         throw new AppError(
           409,
@@ -1606,7 +1606,10 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
     if (!config.cascadeEnabled || targetExecutor || (requiredCaps.length === 0 && !semanticEligible)) {
       emitTaskAvailable(taskHash, broadcastMeta(requiredCaps, taskChain));
     } else {
-      const taskRewardWei = onChainAmount;
+      // The reward carries its unit: an agent's floor is written in this
+      // deployment's pricing unit and cannot be compared with an amount in
+      // another one.
+      const taskReward: TaskReward = { amount: BigInt(onChainAmount), unit: taskUnit };
       const broadcastAfter = (err: Error, stage: string) => {
         console.error(`[a2a] ${stage} failed for ${taskHash.slice(0, 10)}…:`, err.message);
         emitTaskAvailable(taskHash, broadcastMeta(requiredCaps, taskChain));
@@ -1617,13 +1620,13 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
         // filter it would draw a random cold-start agent from the ENTIRE
         // registry, and its pass/timeout path (advanceCascade with no cascade
         // stored) broadcasts without semantic ranking ever running.
-        startRankedCascade(taskHash, requiredCaps, routingMeta, taskRewardWei, taskChain)
+        startRankedCascade(taskHash, requiredCaps, routingMeta, taskReward, taskChain)
           .catch((err) => broadcastAfter(err as Error, 'semantic scoring/offer'));
       } else {
         // Cold-start: try the exploration slot first. If a new agent is picked,
         // offer to them; if they pass or timeout, fall back to normal ranked flow.
         const agentMode = existingMeta?.agentSelectionMode ?? 'merit';
-        pickExplorationAgent(requiredCaps, agentMode, taskRewardWei, undefined, taskChain).then((explorationPick) => {
+        pickExplorationAgent(requiredCaps, agentMode, taskReward, undefined, taskChain).then((explorationPick) => {
           if (explorationPick) {
             console.log(`[a2a] exploration slot: offering to new agent ${explorationPick.address} (score=${explorationPick.score})`);
             const deadline = Date.now() + a2aStore.CASCADE_OFFER_MS;
@@ -1637,7 +1640,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
             // into the ranking (see a2aStore.withExplorationHead). Best-effort:
             // if ranking fails the advance falls back to broadcast as before.
             const pickEntry = { address: explorationPick.address, score: explorationPick.score, displayName: explorationPick.displayName };
-            return rankedEntries(taskHash, requiredCaps, routingMeta, taskRewardWei)
+            return rankedEntries(taskHash, requiredCaps, routingMeta, taskReward)
               .then(({ entries, semantic }) => {
                 if (config.semanticRoutingEnabled && semanticMatch.buildTaskRoutingText(routingMeta)) {
                   void semanticMatch.markShadowRoutedBy(taskHash, semantic ? 'semantic' : 'tag');
@@ -1651,12 +1654,12 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
           }
 
           // Normal ranked flow (semantic when flipped, tag fallback inside).
-          return startRankedCascade(taskHash, requiredCaps, routingMeta, taskRewardWei, taskChain)
+          return startRankedCascade(taskHash, requiredCaps, routingMeta, taskReward, taskChain)
             .catch((err) => broadcastAfter(err as Error, 'scoring/offer'));
         }).catch((err) => {
           console.error(`[a2a] exploration slot failed for ${taskHash.slice(0, 10)}…:`, (err as Error).message);
           // Fallback: normal ranked flow
-          startRankedCascade(taskHash, requiredCaps, routingMeta, taskRewardWei, taskChain)
+          startRankedCascade(taskHash, requiredCaps, routingMeta, taskReward, taskChain)
             .catch((fallbackErr) => broadcastAfter(fallbackErr as Error, 'fallback scoring/offer'));
         });
       }

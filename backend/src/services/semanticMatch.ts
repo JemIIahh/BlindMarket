@@ -2,6 +2,7 @@ import { getPool } from './neonDb.js';
 import { config } from '../config.js';
 import { embed, toVectorLiteral, embeddingModelId, EMBED_FETCH_TIMEOUT_MS } from './embeddingService.js';
 import { rankAgents, meetsRewardFloor, dominanceMultiplier } from './agentScorer.js';
+import type { TaskReward } from './settlementUnits.js';
 import { supportsChain } from './executorChains.js';
 import { buildAgentDoc } from './agentEmbedding.js';
 import * as agentStore from './agentStore.js';
@@ -211,7 +212,7 @@ function toCascadeScore(c: SemanticCandidate | RerankedCandidate): number {
  */
 export async function semanticCascadeRanking(
   meta: RoutingMeta,
-  taskRewardWei?: string,
+  taskReward?: TaskReward | null,
 ): Promise<CascadeEntry[] | null> {
   if (!semanticRoutingEligible(meta)) return null;
   try {
@@ -231,8 +232,6 @@ export async function semanticCascadeRanking(
     // requires their registered publicKey. Everyone else 403s NEEDS_WRAP
     // (they can still /bid via broadcast, exactly as before the flip).
     const sealed = meta.privacy !== 'public' && !!meta.rootHash && !meta.skipKeyWrap;
-    let taskReward: bigint | null = null;
-    try { taskReward = taskRewardWei ? BigInt(taskRewardWei) : null; } catch { taskReward = null; }
     const entries: CascadeEntry[] = [];
     for (let i = 0; i < ranked.length; i++) {
       const agent = agents[i];
@@ -243,7 +242,7 @@ export async function semanticCascadeRanking(
       if (sealed && !meta.wrappedKeys?.[addrLc] && (!meta.keyCustodyBlob || !agent.publicKey)) continue; // NEEDS_WRAP
       // Capability gate removed — semantic KNN is the primary routing signal.
       // Agents are ranked by embedding similarity, not declared capability tags.
-      if (!meetsRewardFloor(agent, taskReward)) continue;
+      if (!meetsRewardFloor(agent, taskReward ?? null)) continue;
       if (!supportsChain(agent, meta.chain)) continue; // CHAIN_UNSUPPORTED
       entries.push({
         address: ranked[i].address,
