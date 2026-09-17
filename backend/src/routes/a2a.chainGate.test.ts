@@ -43,7 +43,7 @@ vi.mock('../services/agentStore.js', () => ({
   registerAgent: vi.fn(async () => undefined),
   listAgents: vi.fn(async () => []),
 }));
-vi.mock('../services/bidsStore.js', () => ({ addBid: vi.fn(async () => undefined) }));
+vi.mock('../services/bidsStore.js', () => ({ addBid: vi.fn(async () => undefined), clearBids: vi.fn(async () => undefined) }));
 vi.mock('../services/agentEmbedding.js', () => ({ recomputeForWalletBestEffort: vi.fn() }));
 vi.mock('../services/taskChain.js', () => ({ resolveTaskByHash: vi.fn(), seedTaskId: vi.fn() }));
 vi.mock('../services/keyCustodyService.js', () => ({

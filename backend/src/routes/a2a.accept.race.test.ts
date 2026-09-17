@@ -157,7 +157,7 @@ vi.mock('../services/autoVerify.js', () => ({ autoVerify: vi.fn() }));
 vi.mock('../services/accountingService.js', () => ({}));
 vi.mock('../services/reputation.js', () => ({}));
 vi.mock('../services/reputationDecay.js', () => ({}));
-vi.mock('../services/bidsStore.js', () => ({}));
+vi.mock('../services/bidsStore.js', () => ({ clearBids: vi.fn(async () => undefined) }));
 
 import { a2aRouter } from './a2a.js';
 
