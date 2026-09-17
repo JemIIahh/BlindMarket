@@ -17,7 +17,6 @@
     "@stripe/stripe-js": "^1.46.0",
     "@tanstack/react-query": "^5.100.5",
     "@vercel/analytics": "^2.0.1",
-    "@web3modal/siwe": "^5.1.11",
     "clsx": "^2.1.1",
     "ethers": "^6.13.5",
     "framer-motion": "^11.18.2",
@@ -25,7 +24,7 @@
     "react-dom": "^18.3.1",
     "react-is": "^19.2.7",
     "react-markdown": "^10.1.0",
-    "react-router-dom": "^6.28.0",
+    "react-router-dom": "^7.18.4",
     "recharts": "^3.8.1",
     "remark-gfm": "^4.0.1",
     "secp256k1": "^5.0.1",
@@ -33,7 +32,7 @@
     "tailwind-merge": "^2.6.0",
     "three": "^0.169.0",
     "viem": "^2.47.12",
-    "wagmi": "^2.19.5"
+    "wagmi": "^3.7.7"
   },
   "devDependencies": {
     "@tailwindcss/forms": "^0.5.9",
@@ -41,12 +40,16 @@
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@types/three": "^0.169.0",
-    "@vitejs/plugin-react": "^4.3.4",
+    "@vitejs/plugin-react": "^5.2.0",
     "autoprefixer": "^10.4.20",
     "postcss": "^8.4.49",
-    "puppeteer-core": "^23.11.1",
+    "puppeteer-core": "^25.11.0",
     "tailwindcss": "^3.4.17",
     "typescript": "^5.7.3",
-    "vite": "^5.4.11"
+    "vite": "^7.3.6"
+  },
+  "overrides": {
+    "@walletconnect/utils": "^2.25.0",
+    "uuid": "^11.1.1"
   }
 }

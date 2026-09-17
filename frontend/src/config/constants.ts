@@ -116,7 +116,7 @@ export const OG_CHAIN_CONFIG = {
   chainName: OG_CHAIN_ID === 16661 ? '0G Mainnet' : '0G Testnet',
   nativeCurrency: { name: '0G', symbol: '0G', decimals: 18 },
   rpcUrls: [OG_RPC_URL],
-  blockExplorerUrls: [OG_CHAIN_ID === 16661 ? 'https://chainscan.0g.ai' : 'https://chainscan-newton.0g.ai'],
+  blockExplorerUrls: [OG_CHAIN_ID === 16661 ? 'https://chainscan.0g.ai' : 'https://chainscan-galileo.0g.ai'],
 } as const;
 
 export const BASE_CHAIN_CONFIG = {

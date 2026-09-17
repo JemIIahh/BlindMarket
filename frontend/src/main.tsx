@@ -25,7 +25,7 @@ createRoot(document.getElementById('root')!).render(
       {/* Opt into React Router v7 behaviour now (silences its dev "Future
           Flag" warnings). Safe here: every Link/navigate target is absolute,
           so relative-splat resolution changes nothing. */}
-      <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+      <BrowserRouter>
         <App />
       </BrowserRouter>
     </QueryClientProvider>

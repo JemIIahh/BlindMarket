@@ -1,9 +1,10 @@
-import { HardhatUserConfig } from "hardhat/config";
-import "@nomicfoundation/hardhat-toolbox";
-import "@openzeppelin/hardhat-upgrades";
+import { defineConfig } from "hardhat/config";
+import hardhatToolboxMochaEthers from "@nomicfoundation/hardhat-toolbox-mocha-ethers";
+import openzeppelinUpgrades from "@openzeppelin/hardhat-upgrades";
 import "dotenv/config";
 
-const config: HardhatUserConfig = {
+export default defineConfig({
+  plugins: [hardhatToolboxMochaEthers, openzeppelinUpgrades],
   solidity: {
     version: "0.8.24",
     settings: {
@@ -17,26 +18,32 @@ const config: HardhatUserConfig = {
   },
   networks: {
     "0g-testnet": {
+      type: "http",
+      chainType: "l1",
       url: "https://evmrpc-testnet.0g.ai",
       chainId: 16602,
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
     },
     "0g-mainnet": {
+      type: "http",
+      chainType: "l1",
       url: "https://evmrpc.0g.ai",
       chainId: 16661,
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
     },
     "base-sepolia": {
+      type: "http",
+      chainType: "l1",
       url: process.env.BASE_RPC_URL || "https://sepolia.base.org",
       chainId: 84532,
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
     },
     "base": {
+      type: "http",
+      chainType: "l1",
       url: process.env.BASE_RPC_URL || "https://mainnet.base.org",
       chainId: 8453,
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
     },
   },
-};
-
-export default config;
+});

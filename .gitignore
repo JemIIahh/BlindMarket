@@ -16,6 +16,7 @@ typechain-types/
 # Contract build artifacts (not the source)
 contracts/cache/
 contracts/artifacts/
+contracts/types/
 
 # Ignore secrets but keep deployment addresses
 contracts/.env

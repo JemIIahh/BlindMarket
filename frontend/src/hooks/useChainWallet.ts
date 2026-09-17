@@ -1,4 +1,5 @@
 import { useCallback } from 'react';
+import { formatUnits } from 'viem';
 import { useAccount, useBalance as useWagmiBalance, useReadContract } from 'wagmi';
 import { usePrivy } from '@privy-io/react-auth';
 import { OG_CHAIN_ID, BASE_CHAIN_ID, BASE_USDC_ADDRESS, getNativeCurrency, getChainConfig } from '../config/constants';
@@ -34,11 +35,15 @@ export function useChainBalance(chain: 'og' | 'base' = 'og') {
   const { data: wagmiBal, refetch, isRefetching } = useWagmiBalance({ address: evmAddress, chainId });
   const native = getNativeCurrency(chain);
 
+  const formatted = wagmiBal?.value
+    ? `${formatUnits(wagmiBal.value, native.decimals)} ${native.symbol}`
+    : undefined;
+
   return {
     value: wagmiBal?.value,
     decimals: native.decimals,
     symbol: native.symbol,
-    formatted: wagmiBal ? wagmiBal.formatted : undefined,
+    formatted,
     refresh: refetch,
     refreshing: isRefetching,
   };
