@@ -238,6 +238,14 @@ describe('semanticCascadeRanking (Phase 2 flip — cascade offer queue)', () => 
     expect(out?.map((e) => e.address)).toEqual(['0xbbb']);
   });
 
+  it('drops candidates that did not declare the task\'s chain (their /accept would 409)', async () => {
+    arm();
+    vi.mocked(getAgent).mockImplementation(async (addr: string) =>
+      ({ ...(agentRow(addr) as object), supportedChains: addr === '0xaaa' ? ['0g'] : null }) as never);
+    expect((await semanticCascadeRanking({ ...meta, chain: 'base' }))?.map((e) => e.address)).toEqual(['0xbbb']);
+    expect((await semanticCascadeRanking({ ...meta, chain: '0g' }))?.map((e) => e.address)).toEqual(['0xaaa', '0xbbb']);
+  });
+
   it('drops the poster and the designated verifier (their /accept would 403)', async () => {
     arm();
     const out = await semanticCascadeRanking({

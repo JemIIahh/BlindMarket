@@ -66,6 +66,14 @@ vi.mock('../services/serviceStore.js', () => ({
   getActiveService: vi.fn(async () => ({ id: 9, agent_address: AGENT, price_raw: '1000000' })),
 }));
 
+// The pinned-executor chain check reads the executor; keep it off any real
+// database (config loads backend/.env).
+vi.mock('../services/agentStore.js', () => ({ getAgent: vi.fn(async () => undefined) }));
+vi.mock('../services/escrow.js', () => ({
+  getTaskVerifierBase: vi.fn(async () => '0x4444444444444444444444444444444444444444'),
+  getTaskVerifier: vi.fn(async () => '0x4444444444444444444444444444444444444444'),
+}));
+
 vi.mock('../services/accountingService.js', () => ({
   confirmPendingTransactions: vi.fn(async () => undefined),
 }));
@@ -105,6 +113,7 @@ const { a2aRouter } = await import('./a2a.js');
 const { globalErrorHandler } = await import('../middleware/errorHandler.js');
 const a2aStore = await import('../services/a2aStore.js');
 const taskChain = await import('../services/taskChain.js');
+const agentStore = await import('../services/agentStore.js');
 
 function app() {
   const a = express();
@@ -212,5 +221,42 @@ describe('POST /tasks/index "Use now" price check', () => {
     const res = await index(useNow);
     expect(res.status).toBe(409);
     expect(res.body.error.code).toBe('UNDERPAID');
+  });
+});
+
+describe('POST /tasks/index settlement chain of the pinned agent and the verifier', () => {
+  const VERIFIER = '0x4444444444444444444444444444444444444444';
+  const executor = (supportedChains: string[] | null, address: string = AGENT) => ({
+    address, displayName: 'a', capabilities: [], publicKey: '04', reputation: 50,
+    tasksCompleted: 0, registeredAt: '', supportedChains,
+  });
+
+  beforeEach(() => {
+    vi.mocked(agentStore.getAgent).mockResolvedValue(undefined);
+  });
+
+  it('refuses a task pinned to a registered agent that does not settle on its chain', async () => {
+    vi.mocked(agentStore.getAgent).mockResolvedValue(executor(['0g']) as never);
+    onBase(USDC, 1_000_000n);
+    const res = await index(useNow);
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('TARGET_CHAIN_UNSUPPORTED');
+    expect(a2aStore.setMeta).not.toHaveBeenCalled();
+  });
+
+  it('indexes a task pinned to a legacy agent on Base', async () => {
+    vi.mocked(agentStore.getAgent).mockResolvedValue(executor(null) as never);
+    onBase(USDC, 1_000_000n);
+    expect((await index(useNow)).status).toBe(200);
+  });
+
+  it('refuses a task whose designated verifier does not settle on its chain', async () => {
+    vi.mocked(agentStore.getAgent).mockImplementation(async (addr: string) =>
+      (addr.toLowerCase() === VERIFIER ? executor(['0g'], VERIFIER) : undefined) as never);
+    onBase(USDC, 5_000_000n);
+    const res = await index({ verificationMode: 'agent', verifierAddress: VERIFIER, privacy: 'public', publicBrief: 'do it' });
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('VERIFIER_CHAIN_UNSUPPORTED');
+    expect(a2aStore.setMeta).not.toHaveBeenCalled();
   });
 });

@@ -161,6 +161,8 @@ export function buildMcpServer(user: AuthUser): McpServer {
           reputation: a.reputation,
           tasksCompleted: a.tasksCompleted,
           publicKey: a.publicKey,
+          // Settlement chains the agent can take tasks on; null = 0G and Base.
+          supportedChains: a.supportedChains ?? null,
           fromPrice: priceMap.get(a.address.toLowerCase()) ?? null,
           provenSkills: badges.map((b) => ({ capability: b.capability, badge: b.badge_type })),
         };

@@ -2,6 +2,7 @@ import { getPool } from './neonDb.js';
 import { config } from '../config.js';
 import { embed, toVectorLiteral, embeddingModelId, EMBED_FETCH_TIMEOUT_MS } from './embeddingService.js';
 import { rankAgents, meetsRewardFloor, dominanceMultiplier } from './agentScorer.js';
+import { supportsChain } from './executorChains.js';
 import { buildAgentDoc } from './agentEmbedding.js';
 import * as agentStore from './agentStore.js';
 import type { CascadeEntry } from './a2aStore.js';
@@ -156,7 +157,7 @@ export type RoutingMeta = Pick<
   A2ATaskMeta,
   | 'publicBrief' | 'routingSummary' | 'requiredCapabilities' | 'targetExecutor'
   | 'posterAddress' | 'verifierAddress' | 'wrappedKeys' | 'privacy' | 'rootHash'
-  | 'skipKeyWrap' | 'keyCustodyBlob'
+  | 'skipKeyWrap' | 'keyCustodyBlob' | 'chain'
 >;
 
 /**
@@ -243,6 +244,7 @@ export async function semanticCascadeRanking(
       // Capability gate removed — semantic KNN is the primary routing signal.
       // Agents are ranked by embedding similarity, not declared capability tags.
       if (!meetsRewardFloor(agent, taskReward)) continue;
+      if (!supportsChain(agent, meta.chain)) continue; // CHAIN_UNSUPPORTED
       entries.push({
         address: ranked[i].address,
         displayName: ranked[i].displayName,
@@ -308,7 +310,7 @@ export async function recordMatchShadow(meta: A2ATaskMeta): Promise<void> {
     const vector = await embedTask(meta.taskId, routingText);
     const [semantic, tagRanked] = await Promise.all([
       semanticCandidates(vector, 10),
-      rankAgents((meta.requiredCapabilities ?? []) as AgentCapability[]).catch(() => []),
+      rankAgents((meta.requiredCapabilities ?? []) as AgentCapability[], undefined, meta.chain).catch(() => []),
     ]);
 
     // Also capture the reranked order when the reranker is enabled, so prod

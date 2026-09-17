@@ -10,7 +10,7 @@ function usePg(): boolean {
   return Boolean(config.databaseUrl);
 }
 
-const PG_COLS = 'address, display_name, capabilities, public_key, agent_card_url, mcp_endpoint_url, min_reward, preferred_capabilities, reputation, tasks_completed, total_earned_raw, total_earned_usdc_raw, registered_at';
+const PG_COLS = 'address, display_name, capabilities, public_key, agent_card_url, mcp_endpoint_url, min_reward, preferred_capabilities, reputation, tasks_completed, total_earned_raw, total_earned_usdc_raw, supported_chains, registered_at';
 
 function rowToAgent(row: Record<string, unknown>): AgentExecutor {
   return {
@@ -26,6 +26,7 @@ function rowToAgent(row: Record<string, unknown>): AgentExecutor {
     tasksCompleted: (row.tasks_completed as number) ?? 0,
     totalEarnedRaw: (row.total_earned_raw as string) ?? '0',
     totalEarnedUsdcRaw: (row.total_earned_usdc_raw as string) ?? '0',
+    supportedChains: row.supported_chains == null ? null : safeJsonArray(row.supported_chains),
     registeredAt: (row.registered_at as string) ?? new Date().toISOString(),
   };
 }
@@ -42,6 +43,10 @@ function safeJsonArray(v: unknown): string[] {
  * are only written on insert: every worker re-registers at boot without them,
  * and overwriting here reset each agent's earnings to 0 on restart while its
  * task count stayed. Change counters with `creditPayout` / `adjustReputation`.
+ *
+ * `supportedChains` is written on every registration: it describes the code
+ * that registered last, so a registration without it (older code) resets it
+ * to null, the legacy set.
  */
 export async function registerAgent(agent: AgentExecutor): Promise<void> {
   const addr = agent.address.toLowerCase();
@@ -61,8 +66,9 @@ export async function registerAgent(agent: AgentExecutor): Promise<void> {
       `INSERT INTO agent_executors
          (address, display_name, capabilities, public_key, agent_card_url,
           mcp_endpoint_url, min_reward, preferred_capabilities,
-          reputation, tasks_completed, total_earned_raw, total_earned_usdc_raw, registered_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+          reputation, tasks_completed, total_earned_raw, total_earned_usdc_raw, supported_chains,
+          registered_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
          COALESCE((SELECT registered_at FROM agent_executors WHERE address = $1), NOW()), NOW())
        ON CONFLICT (address) DO UPDATE SET
          display_name = EXCLUDED.display_name,
@@ -72,12 +78,14 @@ export async function registerAgent(agent: AgentExecutor): Promise<void> {
          mcp_endpoint_url = EXCLUDED.mcp_endpoint_url,
          min_reward = EXCLUDED.min_reward,
          preferred_capabilities = EXCLUDED.preferred_capabilities,
+         supported_chains = EXCLUDED.supported_chains,
          updated_at = NOW()`,
       [
         addr, agent.displayName, agent.capabilities, agent.publicKey,
         agent.agentCardUrl ?? null, agent.mcpEndpointUrl ?? null,
         agent.minReward ?? null, agent.preferredCapabilities ?? null,
         agent.reputation, agent.tasksCompleted, agent.totalEarnedRaw ?? '0', agent.totalEarnedUsdcRaw ?? '0',
+        agent.supportedChains ?? null,
       ],
     );
     return;
@@ -94,8 +102,9 @@ export async function registerAgent(agent: AgentExecutor): Promise<void> {
     `INSERT INTO agent_executors
        (address, display_name, capabilities, public_key, agent_card_url,
         mcp_endpoint_url, min_reward, preferred_capabilities,
-        reputation, tasks_completed, total_earned_raw, total_earned_usdc_raw, registered_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT registered_at FROM agent_executors WHERE address = ?), datetime('now')), datetime('now'))
+        reputation, tasks_completed, total_earned_raw, total_earned_usdc_raw, supported_chains,
+        registered_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT registered_at FROM agent_executors WHERE address = ?), datetime('now')), datetime('now'))
      ON CONFLICT(address) DO UPDATE SET
        display_name = excluded.display_name,
        capabilities = excluded.capabilities,
@@ -104,12 +113,14 @@ export async function registerAgent(agent: AgentExecutor): Promise<void> {
        mcp_endpoint_url = excluded.mcp_endpoint_url,
        min_reward = excluded.min_reward,
        preferred_capabilities = excluded.preferred_capabilities,
+       supported_chains = excluded.supported_chains,
        updated_at = datetime('now')`,
   ).run(
     addr, agent.displayName, JSON.stringify(agent.capabilities), agent.publicKey,
     agent.agentCardUrl ?? null, agent.mcpEndpointUrl ?? null,
     agent.minReward ?? null, agent.preferredCapabilities ? JSON.stringify(agent.preferredCapabilities) : null,
-    agent.reputation, agent.tasksCompleted, agent.totalEarnedRaw ?? '0', agent.totalEarnedUsdcRaw ?? '0', addr,
+    agent.reputation, agent.tasksCompleted, agent.totalEarnedRaw ?? '0', agent.totalEarnedUsdcRaw ?? '0',
+    agent.supportedChains ? JSON.stringify(agent.supportedChains) : null, addr,
   );
 }
 

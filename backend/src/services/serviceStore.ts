@@ -30,13 +30,17 @@ export interface AgentServicePublic extends AgentService {
   agent_capabilities: string[] | null;
   agent_reputation: number | null;
   agent_public_key: string | null; // executor secp256k1 pubkey — lets a buyer ECIES-wrap a Use-now brief
+  // Chains the agent can take tasks on; null = 0G and Base. Check it before
+  // funding a Use-now task: /tasks/index refuses a pinned agent that can't
+  // settle on the task's chain, after the escrow is funded.
+  agent_supported_chains: string[] | null;
 }
 
 const PUBLIC_COLS = `
   s.id, s.agent_address, s.owner_address, s.name, s.description, s.price_raw,
   s.service_type, s.active, s.sold_count, s.avg_rating, s.created_at, s.updated_at,
   ae.display_name AS agent_name, ae.capabilities AS agent_capabilities, ae.reputation AS agent_reputation,
-  ae.public_key AS agent_public_key
+  ae.public_key AS agent_public_key, ae.supported_chains AS agent_supported_chains
 `;
 
 export async function createService(opts: {

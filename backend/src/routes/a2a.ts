@@ -24,6 +24,7 @@ import { ethers } from 'ethers';
 import type { AuthRequest, ApiResponse, AgentCapability } from '../types.js';
 import { AGENT_CAPABILITIES } from '../types.js';
 import { rankAgents, pickExplorationAgent } from '../services/agentScorer.js';
+import { supportsChain, supportsTaskChain } from '../services/executorChains.js';
 import { emitTaskOffer, emitTaskAvailable } from '../services/socket.js';
 import { EXPIRY_GRACE_SEC } from '../constants.js';
 import { config } from '../config.js';
@@ -62,7 +63,22 @@ const registerSchema = z.object({
   // requiredCapabilities to match the task (enforced by listAgents), so this
   // only affects ranking, not eligibility.
   preferredCapabilities: z.array(z.enum(AGENT_CAPABILITIES as unknown as [string, ...string[]])).max(20).optional(),
+  // Settlement chains this executor's code can sign for. Omitted by code that
+  // predates the field, which is stored as null and treated as the legacy
+  // set. Keys this backend doesn't know yet are kept, so a newer worker can
+  // register against an older backend.
+  supportedChains: z.array(z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/i, 'supportedChains entries are chain keys such as "0g" or "base"'))
+    .min(1, 'supportedChains must name at least one chain (omit it to keep the default)')
+    .max(16)
+    .transform((keys) => [...new Set(keys.map((k) => k.toLowerCase()))])
+    .optional(),
 });
+
+function chainUnsupportedMessage(chain: string | undefined): string {
+  return chain
+    ? `This task settles on ${chain}, which your registration doesn't list — update the agent and register again with supportedChains`
+    : "This task predates recorded chains and may settle on 0G or Base; your registration doesn't list both";
+}
 
 const submitSchema = z.object({
   resultData: z.record(z.unknown()),
@@ -208,6 +224,7 @@ a2aRouter.post('/register', requireAuth, async (req: AuthRequest, res, next) => 
       mcpEndpointUrl: data.mcpEndpointUrl,
       minReward: data.minReward,
       preferredCapabilities: data.preferredCapabilities as AgentCapability[] | undefined,
+      supportedChains: data.supportedChains ?? null,
       // Counters apply to a new executor only; registerAgent never overwrites
       // an existing one's (see its doc comment).
       reputation: 50,
@@ -249,7 +266,8 @@ a2aRouter.get('/executors', async (req, res, next) => {
       ? (req.query.capabilities as string).split(',').map((s) => s.trim()).filter(Boolean)
       : undefined;
 
-    const executors = await agentStore.listAgents(caps);
+    const chain = typeof req.query.chain === 'string' ? req.query.chain.toLowerCase() : undefined;
+    const executors = (await agentStore.listAgents(caps)).filter((e) => supportsChain(e, chain));
 
     const body: ApiResponse = {
       success: true,
@@ -264,6 +282,7 @@ a2aRouter.get('/executors', async (req, res, next) => {
             publicKey: e.publicKey,
             capabilities: e.capabilities,
             reputation: e.reputation,
+            supportedChains: e.supportedChains ?? null,
           })),
       },
     };
@@ -541,6 +560,15 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
       return;
     }
 
+    // Chain gate — before the CAS, so a worker that can't sign on this task's
+    // chain never takes it (assignment is on-chain and can't be undone). After
+    // the idempotent branch above, so an executor already assigned can still
+    // re-confirm and finish.
+    if (!supportsTaskChain(agent, meta.chain)) {
+      await a2aStore.logAcceptAttempt(taskId, address, 'rejected_precheck');
+      throw new AppError(409, 'CHAIN_UNSUPPORTED', chainUnsupportedMessage(meta.chain));
+    }
+
     const accept = await a2aStore.tryAccept(taskId, address, new Date().toISOString());
     if (!accept.ok) {
       console.warn(`[a2a] accept: CAS lost for ${taskId}, currentStatus=${accept.currentStatus}`);
@@ -770,6 +798,9 @@ a2aRouter.post('/tasks/:id/bid', requireAuth, async (req: AuthRequest, res, next
         'NO_PUBKEY',
         'Your executor registration has no publicKey — re-register so posters can wrap to you',
       );
+    }
+    if (!supportsTaskChain(agent, meta.chain)) {
+      throw new AppError(409, 'CHAIN_UNSUPPORTED', chainUnsupportedMessage(meta.chain));
     }
 
     // If we already have a wrap for this address, the bid is moot — let the
@@ -1010,7 +1041,7 @@ async function rankedEntries(
 ): Promise<{ entries: a2aStore.CascadeEntry[]; semantic: boolean }> {
   const semantic = await semanticMatch.semanticCascadeRanking(routingMeta, taskRewardWei);
   const tagEntries = async () =>
-    (await rankAgents(requiredCaps, taskRewardWei)).map((r) => ({
+    (await rankAgents(requiredCaps, taskRewardWei, routingMeta.chain)).map((r) => ({
       address: r.address,
       score: r.score,
       displayName: r.displayName,
@@ -1428,6 +1459,31 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       }
     }
 
+    // A pinned executor or a designated verifier that is registered but can't
+    // sign on this chain could never finish the task. Refused before the meta
+    // is written; the poster can cancel for a refund. An unregistered address
+    // is left alone, as before (it may register later).
+    if (targetExecutor) {
+      const target = await agentStore.getAgent(targetExecutor);
+      if (target && !supportsChain(target, taskChain)) {
+        throw new AppError(
+          409,
+          'TARGET_CHAIN_UNSUPPORTED',
+          `The pinned agent doesn't settle on ${taskChain} — cancel the task to get the escrow back`,
+        );
+      }
+    }
+    if (data.verificationMode === 'agent' && data.verifierAddress) {
+      const verifier = await agentStore.getAgent(data.verifierAddress);
+      if (verifier && !supportsChain(verifier, taskChain)) {
+        throw new AppError(
+          409,
+          'VERIFIER_CHAIN_UNSUPPORTED',
+          `The designated verifier doesn't settle on ${taskChain} — cancel the task to get the escrow back`,
+        );
+      }
+    }
+
     await a2aStore.setMeta({
       taskId: taskHash,
       targetExecutorType: 'agent',
@@ -1478,6 +1534,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       rootHash: data.rootHash,
       skipKeyWrap: existingMeta?.skipKeyWrap,
       keyCustodyBlob: data.keyCustodyBlob,
+      chain: taskChain,
     };
 
     // Semantic matching (Phase 1 SHADOW): embed the task's public routing text
@@ -1533,7 +1590,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
         // Cold-start: try the exploration slot first. If a new agent is picked,
         // offer to them; if they pass or timeout, fall back to normal ranked flow.
         const agentMode = existingMeta?.agentSelectionMode ?? 'merit';
-        pickExplorationAgent(requiredCaps, agentMode, taskRewardWei).then((explorationPick) => {
+        pickExplorationAgent(requiredCaps, agentMode, taskRewardWei, undefined, taskChain).then((explorationPick) => {
           if (explorationPick) {
             console.log(`[a2a] exploration slot: offering to new agent ${explorationPick.address} (score=${explorationPick.score})`);
             const deadline = Date.now() + a2aStore.CASCADE_OFFER_MS;
@@ -2512,7 +2569,10 @@ a2aRouter.post('/tasks/:id/verdict', requireAuth, async (req: AuthRequest, res, 
 a2aRouter.get('/verifications', requireAuth, async (req: AuthRequest, res, next) => {
   try {
     const address = req.user!.address;
-    const tasks = await a2aStore.getVerifierTasks(address);
+    const [tasks, verifier] = await Promise.all([
+      a2aStore.getVerifierTasks(address),
+      agentStore.getAgent(address).catch(() => undefined),
+    ]);
     const pending = tasks.filter((t) => t.state.status === 'awaiting_verification');
     // Resolve each task's on-chain numeric id so the verifier can call
     // completeVerification(id, passed) itself. Null when not yet indexed — the
@@ -2525,7 +2585,11 @@ a2aRouter.get('/verifications', requireAuth, async (req: AuthRequest, res, next)
     const verifications = await Promise.all(
       pending.map(async (t) => {
         const r = await resolveTaskByHash(t.meta.taskId).catch(() => null);
-        return { ...t, onChainId: r?.taskId ?? null, chain: r?.chain ?? null };
+        const chain = r?.chain ?? null;
+        // Kept in the list even when false: the designated verifier is the only
+        // party that can settle the task, so hiding it would strand it.
+        const chainSupported = !verifier || supportsTaskChain(verifier, chain ?? t.meta.chain);
+        return { ...t, onChainId: r?.taskId ?? null, chain, chainSupported };
       }),
     );
     const body: ApiResponse = {

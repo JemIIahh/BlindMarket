@@ -163,6 +163,11 @@ export interface AgentExecutor {
   // scripts/backfill-earnings-by-chain.ts runs.
   totalEarnedRaw?: string;
   totalEarnedUsdcRaw?: string;
+  // Settlement chains this executor's code can sign for, as declared at its
+  // last registration. null/absent = registered by code that predates the
+  // field; treat as executorChains.LEGACY_SUPPORTED_CHAINS. May hold keys this
+  // backend doesn't know yet (a newer worker).
+  supportedChains?: string[] | null;
   registeredAt: string;
 }
 

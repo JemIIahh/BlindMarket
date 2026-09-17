@@ -263,6 +263,12 @@ const migrations: Migration[] = [
     name: 'agent_executors_usdc_earnings',
     sql: `ALTER TABLE agent_executors ADD COLUMN total_earned_usdc_raw TEXT NOT NULL DEFAULT '0';`,
   },
+  {
+    // Mirror of Postgres migration 33: a JSON array, NULL for legacy rows.
+    id: 15,
+    name: 'agent_executors_supported_chains',
+    sql: `ALTER TABLE agent_executors ADD COLUMN supported_chains TEXT;`,
+  },
 ];
 
 function runMigrations(database: Database.Database): void {

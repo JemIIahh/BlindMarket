@@ -45,7 +45,7 @@ function bootRegistration(overrides: Partial<AgentExecutor> = {}): AgentExecutor
 
 beforeEach(() => {
   db.current = new Database(':memory:');
-  // database.ts migrations 10 and 14.
+  // database.ts migrations 10, 14 and 15.
   db.current.exec(`
     CREATE TABLE agent_executors (
       address TEXT PRIMARY KEY,
@@ -63,6 +63,7 @@ beforeEach(() => {
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     ALTER TABLE agent_executors ADD COLUMN total_earned_usdc_raw TEXT NOT NULL DEFAULT '0';
+    ALTER TABLE agent_executors ADD COLUMN supported_chains TEXT;
   `);
 });
 
@@ -83,6 +84,22 @@ describe('registerAgent', () => {
     await registerAgent(bootRegistration());
     await registerAgent(bootRegistration({ displayName: 'renamed', publicKey: '04bb', minReward: '5' }));
     expect(await getAgent(ADDR)).toMatchObject({ displayName: 'renamed', publicKey: '04bb', minReward: '5' });
+  });
+
+  it.each([
+    [null, null],
+    [[], []],
+    [['0g'], ['0g']],
+    [['0g', 'base', 'arc'], ['0g', 'base', 'arc']],
+  ])('stores declared chains %j and reads them back as %j', async (declared, expected) => {
+    await registerAgent(bootRegistration({ supportedChains: declared }));
+    expect((await getAgent(ADDR))?.supportedChains).toEqual(expected);
+  });
+
+  it('resets declared chains to null when older code re-registers without them', async () => {
+    await registerAgent(bootRegistration({ supportedChains: ['0g', 'base', 'arc'] }));
+    await registerAgent(bootRegistration());
+    expect((await getAgent(ADDR))?.supportedChains).toBeNull();
   });
 
   it('starts a new executor at 50 reputation with nothing earned', async () => {
@@ -177,6 +194,19 @@ describe('Postgres statements', () => {
     const upsert = pool.query.mock.calls.map(([sql]) => sql as string).find((sql) => sql.includes('ON CONFLICT'))!;
     const onConflict = upsert.slice(upsert.indexOf('ON CONFLICT'));
     expect(onConflict).not.toMatch(/reputation|tasks_completed|total_earned/);
+    expect(onConflict).toMatch(/supported_chains = EXCLUDED\.supported_chains/);
+  });
+
+  it('passes declared chains as a Postgres array, and null when absent', async () => {
+    pool.query.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [{ n: 0 }] });
+    await registerAgent(bootRegistration({ supportedChains: ['0g', 'arc'] }));
+    const upsertCall = pool.query.mock.calls.find(([sql]) => String(sql).includes('ON CONFLICT'))!;
+    expect(upsertCall[1]).toContainEqual(['0g', 'arc']);
+
+    pool.query.mockClear();
+    await registerAgent(bootRegistration());
+    const legacyCall = pool.query.mock.calls.find(([sql]) => String(sql).includes('ON CONFLICT'))!;
+    expect((legacyCall[1] as unknown[]).at(-1)).toBeNull();
   });
 });
 

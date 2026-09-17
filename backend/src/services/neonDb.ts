@@ -720,6 +720,14 @@ const migrations: Array<{ id: number; name: string; sql: string; when?: () => bo
     // never added together.
     sql: `ALTER TABLE agent_executors ADD COLUMN IF NOT EXISTS total_earned_usdc_raw TEXT NOT NULL DEFAULT '0';`,
   },
+  {
+    id: 33,
+    name: 'agent_executors_supported_chains',
+    // Settlement chains the executor's code can sign for, as it declared at
+    // registration. NULL = registered by code that predates the field, which
+    // handles exactly 0G and Base (executorChains.LEGACY_SUPPORTED_CHAINS).
+    sql: `ALTER TABLE agent_executors ADD COLUMN IF NOT EXISTS supported_chains TEXT[];`,
+  },
 ];
 
 /**

@@ -1,4 +1,5 @@
 import * as agentStore from './agentStore.js';
+import { supportsChain } from './executorChains.js';
 import * as badgeStore from './badgeStore.js';
 import * as reviewStore from './reviewStore.js';
 import * as a2aStore from './a2aStore.js';
@@ -199,6 +200,7 @@ export async function pickExplorationAgent(
   mode: 'merit' | 'balanced' = 'merit',
   taskRewardWei?: string,
   rng: () => number = Math.random,
+  chain?: string,
 ): Promise<ScoredAgent | null> {
   const rate = mode === 'balanced' ? EXPLORATION_RATE_BALANCED : EXPLORATION_RATE;
   if (rng() >= rate) return null;
@@ -214,7 +216,9 @@ export async function pickExplorationAgent(
   // on it — capability tags are soft there; see semanticMatch.ts.)
   const taskReward = taskRewardWei ? BigInt(taskRewardWei) : null;
   const eligible = agents.filter((a) =>
-    meetsRewardFloor(a, taskReward) && hasAllCapabilities(a, requiredCapabilities),
+    meetsRewardFloor(a, taskReward)
+    && hasAllCapabilities(a, requiredCapabilities)
+    && supportsChain(a, chain),
   );
 
   // Filter to "new" agents: fewer than EXPERIENCE_THRESHOLD completed tasks
@@ -238,6 +242,7 @@ export async function pickExplorationAgent(
 export async function rankAgents(
   requiredCapabilities: AgentCapability[],
   taskRewardWei?: string,
+  chain?: string,
 ): Promise<ScoredAgent[]> {
   // Semantic matching is the primary router — list ALL agents, KNN ranks them.
   const agents = await agentStore.listAgents();
@@ -245,7 +250,7 @@ export async function rankAgents(
 
   // Filter by minReward
   const taskReward = taskRewardWei ? BigInt(taskRewardWei) : null;
-  const eligible = agents.filter((a) => meetsRewardFloor(a, taskReward));
+  const eligible = agents.filter((a) => meetsRewardFloor(a, taskReward) && supportsChain(a, chain));
   if (eligible.length === 0) return [];
 
   const scored = await Promise.all(
