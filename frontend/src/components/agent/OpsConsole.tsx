@@ -13,7 +13,7 @@ import {
   LoadingState,
   useTabParam,
 } from '../bb';
-import { authedGet, authedPatch, authedPost, getAuthHeaders } from '../../lib/api';
+import { authedDelete, authedGet, authedPatch, authedPost, getAuthHeaders } from '../../lib/api';
 import { API_BASE_URL, getPaymentSymbol } from '../../config/constants';
 import { ToolManager, type AnyTool } from '../bb/ToolManager';
 import AgentMetricsPanel from '../AgentMetricsPanel';
@@ -79,6 +79,7 @@ export function OpsConsole({
   const [errorLogs, setErrorLogs] = useState<any[]>([]);
   const [errorLogsTotal, setErrorLogsTotal] = useState(0);
   const [errorLogsLoading, setErrorLogsLoading] = useState(false);
+  const [clearErrorsFailed, setClearErrorsFailed] = useState<string | null>(null);
 
   // Edit form — seeded from the loaded agent; the page remounts this
   // component when the agent changes, so no re-sync effect is needed.
@@ -190,6 +191,7 @@ export function OpsConsole({
   useEffect(() => {
     if (!agentId || tab !== 'errors') return;
     let cancelled = false;
+    setClearErrorsFailed(null);
     setErrorLogsLoading(true);
     authedGet<{ entries: any[]; total: number }>(`/api/v1/tools/error-logs?agentId=${agentId}`)
       .then((result) => {
@@ -373,9 +375,10 @@ export function OpsConsole({
               {errorLogsTotal > 0 && (
                 <button
                   onClick={() => {
-                    authedPost(`/api/v1/tools/error-logs`, { agentId })
+                    setClearErrorsFailed(null);
+                    authedDelete(`/api/v1/tools/error-logs?agentId=${encodeURIComponent(agentId)}`)
                       .then(() => { setErrorLogs([]); setErrorLogsTotal(0); })
-                      .catch(() => {});
+                      .catch((err) => setClearErrorsFailed(err instanceof Error ? err.message : 'Could not clear the error log.'));
                   }}
                   className="px-2 py-1.5 -mx-2 -my-1.5 text-xs text-ink-3 hover:text-ink transition-colors"
                 >
@@ -383,6 +386,9 @@ export function OpsConsole({
                 </button>
               )}
             </div>
+            {clearErrorsFailed && (
+              <p className="mb-4 text-xs text-err break-words">Couldn't clear the error log: {clearErrorsFailed}</p>
+            )}
             {errorLogsLoading ? (
               <LoadingState />
             ) : errorLogs.length === 0 ? (

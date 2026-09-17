@@ -6,7 +6,7 @@
  * can add tools to their agent.
  */
 
-import { Router } from 'express';
+import { Router, type Response } from 'express';
 import { z } from 'zod';
 import { requireAuth } from '../middleware/auth.js';
 import type { AuthRequest, ApiResponse } from '../types.js';
@@ -211,27 +211,41 @@ toolsRouter.post('/error-logs', requireAuth, async (req: AuthRequest, res, next)
   }
 });
 
+// Error logs are per agent and owner-only. agentId is required: without it
+// these routes used to read or wipe every agent's log for any signed-in user.
+// Sends the error response itself and returns null when the caller may not
+// proceed.
+async function authorizeErrorLogOwner(
+  req: AuthRequest,
+  res: Response,
+  rawAgentId: unknown,
+  action: 'view' | 'clear',
+): Promise<string | null> {
+  if (typeof rawAgentId !== 'string' || !rawAgentId) {
+    res.status(400).json({ success: false, error: { code: 'AGENT_ID_REQUIRED', message: 'agentId is required' } });
+    return null;
+  }
+  const agent = await getAgent(rawAgentId);
+  if (!agent) {
+    res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Agent not found' } });
+    return null;
+  }
+  const caller = req.user!.address.toLowerCase();
+  const ownerSet = new Set([agent.ownerAddress, ...(agent.authorizedOwners ?? [])].map(a => a.toLowerCase()));
+  if (!ownerSet.has(caller)) {
+    res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: `Only the agent owner can ${action} error logs` } });
+    return null;
+  }
+  return rawAgentId;
+}
+
 // ── GET /api/v1/tools/error-logs ───────────────────────────────────────────
-// Owner views error logs, optionally filtered by agentId.
+// Owner views one agent's error logs.
 
 toolsRouter.get('/error-logs', requireAuth, async (req: AuthRequest, res, next) => {
   try {
-    const agentId = req.query.agentId as string | undefined;
-
-    // Authorization: if querying a specific agent, verify the caller owns it.
-    if (agentId) {
-      const agent = await getAgent(agentId);
-      if (!agent) {
-        res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Agent not found' } });
-        return;
-      }
-      const caller = req.user!.address.toLowerCase();
-      const ownerSet = new Set([agent.ownerAddress, ...(agent.authorizedOwners ?? [])].map(a => a.toLowerCase()));
-      if (!ownerSet.has(caller)) {
-        res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Only the agent owner can view error logs' } });
-        return;
-      }
-    }
+    const agentId = await authorizeErrorLogOwner(req, res, req.query.agentId, 'view');
+    if (!agentId) return;
 
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 50));
     const offset = Math.max(0, parseInt(req.query.offset as string) || 0);
@@ -243,26 +257,13 @@ toolsRouter.get('/error-logs', requireAuth, async (req: AuthRequest, res, next) 
 });
 
 // ── DELETE /api/v1/tools/error-logs ────────────────────────────────────────
-// Clear error logs (optionally for a specific agent).
+// Clear one agent's error logs (agentId in the query string; the JSON body is
+// still accepted for older clients).
 
 toolsRouter.delete('/error-logs', requireAuth, async (req: AuthRequest, res, next) => {
   try {
-    const agentId = (req.body as any)?.agentId as string | undefined;
-
-    // Authorization: if clearing a specific agent's logs, verify the caller owns it.
-    if (agentId) {
-      const agent = await getAgent(agentId);
-      if (!agent) {
-        res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Agent not found' } });
-        return;
-      }
-      const caller = req.user!.address.toLowerCase();
-      const ownerSet = new Set([agent.ownerAddress, ...(agent.authorizedOwners ?? [])].map(a => a.toLowerCase()));
-      if (!ownerSet.has(caller)) {
-        res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Only the agent owner can clear error logs' } });
-        return;
-      }
-    }
+    const agentId = await authorizeErrorLogOwner(req, res, req.query.agentId ?? (req.body as any)?.agentId, 'clear');
+    if (!agentId) return;
 
     const cleared = clearToolErrorLogs(agentId);
     res.json({ success: true, data: { cleared } } satisfies ApiResponse);
