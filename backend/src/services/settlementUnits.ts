@@ -12,6 +12,7 @@
 import { config } from '../config.js';
 import {
   isSettlementChainKey,
+  postingChain,
   settlementChainConfig,
   NATIVE_0G_UNIT,
   USDC_UNIT,
@@ -23,6 +24,26 @@ export type { SettlementUnit };
 
 export function settlementToken(): SettlementUnit {
   return config.baseEscrowAddress ? USDC_UNIT : NATIVE_0G_UNIT;
+}
+
+/**
+ * Throws when new tasks would be posted in a different unit from the one
+ * service prices and reward floors are written in (settlementToken()). Only an
+ * explicit POSTING_CHAIN can cause that: 0G on a stack with a Base escrow.
+ * Clients pick their token by the same rule as settlementToken(), so every
+ * post would get a 400, and a "Use now" task funded in the posting chain's
+ * token could never be indexed. Called at boot.
+ */
+export function assertPostingUnitMatchesPricing(): void {
+  const { key, token } = settlementChainConfig(postingChain());
+  const pricing = settlementToken();
+  if (token.unit.symbol !== pricing.symbol || token.unit.decimals !== pricing.decimals) {
+    throw new Error(
+      `Invalid POSTING_CHAIN: ${key} settles in ${token.unit.symbol}, but service prices and reward floors ` +
+        `are in ${pricing.symbol} on this stack (BASE_ESCROW_ADDRESS is set). Unset POSTING_CHAIN, ` +
+        `or leave out the Base escrow on a stack that posts on 0G.`,
+    );
+  }
 }
 
 /**

@@ -1,14 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const BASE_USDC = '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
-const cfg = vi.hoisted(() => ({ baseEscrowAddress: '0xescrow' as string, baseUsdcAddress: '' as string }));
+const cfg = vi.hoisted(() => ({ baseEscrowAddress: '0xescrow' as string, baseUsdcAddress: '' as string, postingChain: '' }));
 vi.mock('../config.js', () => ({ config: cfg }));
 
-const { normalizeSettlementAmount, settlementToken, payoutCurrency } = await import('./settlementUnits.js');
+const { normalizeSettlementAmount, settlementToken, payoutCurrency, assertPostingUnitMatchesPricing } = await import(
+  './settlementUnits.js'
+);
 
 beforeEach(() => {
   cfg.baseEscrowAddress = '0xescrow';
   cfg.baseUsdcAddress = BASE_USDC;
+  cfg.postingChain = '';
 });
 
 describe('normalizeSettlementAmount (Base escrow configured)', () => {
@@ -68,5 +71,27 @@ describe('payoutCurrency', () => {
 
   it('refuses a chain it does not know instead of guessing', () => {
     expect(payoutCurrency('arc' as never, NATIVE)).toBeNull();
+  });
+});
+
+describe('assertPostingUnitMatchesPricing', () => {
+  it('passes the default posting chain, with or without a Base escrow', () => {
+    expect(() => assertPostingUnitMatchesPricing()).not.toThrow();
+    cfg.baseEscrowAddress = '';
+    expect(() => assertPostingUnitMatchesPricing()).not.toThrow();
+  });
+
+  it('passes POSTING_CHAIN=base, and POSTING_CHAIN=0g without a Base escrow', () => {
+    cfg.postingChain = 'base';
+    expect(() => assertPostingUnitMatchesPricing()).not.toThrow();
+    Object.assign(cfg, { postingChain: '0g', baseEscrowAddress: '' });
+    expect(() => assertPostingUnitMatchesPricing()).not.toThrow();
+  });
+
+  it('refuses POSTING_CHAIN=0g while a Base escrow keeps prices in USDC', () => {
+    cfg.postingChain = '0g';
+    expect(() => assertPostingUnitMatchesPricing()).toThrow(
+      /Invalid POSTING_CHAIN: 0g settles in 0G, but service prices and reward floors are in USDC/,
+    );
   });
 });

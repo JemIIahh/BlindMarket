@@ -113,6 +113,7 @@ const { globalErrorHandler } = await import('../middleware/errorHandler.js');
 const a2aStore = await import('../services/a2aStore.js');
 const taskChain = await import('../services/taskChain.js');
 const agentStore = await import('../services/agentStore.js');
+const escrowService = await import('../services/escrow.js');
 
 function app() {
   const a = express();
@@ -304,5 +305,48 @@ describe('POST /tasks/index settlement chain of the pinned agent and the verifie
     expect(res.status).toBe(409);
     expect(res.body.error.code).toBe('VERIFIER_CHAIN_UNSUPPORTED');
     expect(a2aStore.setMeta).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /tasks/index reads each task on the chain that holds it', () => {
+  const VERIFIER = '0x4444444444444444444444444444444444444444';
+  const agentVerify = { verificationMode: 'agent', verifierAddress: VERIFIER, privacy: 'public', publicBrief: 'do it' };
+
+  beforeEach(() => {
+    vi.mocked(agentStore.getAgent).mockResolvedValue(undefined);
+  });
+
+  it('reads the designated verifier from the Base escrow for a Base task', async () => {
+    onBase(USDC, 5_000_000n);
+    expect((await index(agentVerify)).status).toBe(200);
+    expect(escrowService.getTaskVerifierOn).toHaveBeenCalledWith('base', 7);
+  });
+
+  it('reads the designated verifier from the 0G escrow for a 0G task', async () => {
+    onZeroG(NATIVE, 10n ** 18n);
+    expect((await index(agentVerify)).status).toBe(200);
+    expect(escrowService.getTaskVerifierOn).toHaveBeenCalledWith('0g', 7);
+  });
+
+  it('indexes a user-op task on the chain whose logs held the match, not the first chain searched', async () => {
+    const receipt = receiptFor(OG_ESCROW, NATIVE, 10n ** 18n);
+    const match = { ...receipt.logs[0], transactionHash: TX, blockNumber: 100 };
+    chain.baseProvider = {
+      getTransactionReceipt: vi.fn(async () => null),
+      getBlockNumber: vi.fn(async () => 500),
+      getLogs: vi.fn(async () => []),
+    };
+    chain.baseEscrow = escrowAt(BASE_ESCROW);
+    chain.provider = {
+      getTransactionReceipt: vi.fn(async () => receipt),
+      getBlockNumber: vi.fn(async () => 500),
+      getLogs: vi.fn(async () => [match]),
+    };
+    const res = await index({ isUserOp: true });
+    expect(res.status).toBe(200);
+    expect(chain.baseProvider.getLogs).toHaveBeenCalled();
+    expect(chain.baseProvider.getTransactionReceipt).not.toHaveBeenCalled();
+    expect(taskChain.seedTaskId).toHaveBeenCalledWith('0g', TASK, '7');
+    expect(vi.mocked(a2aStore.setMeta).mock.calls[0][0]).toMatchObject({ chain: '0g' });
   });
 });

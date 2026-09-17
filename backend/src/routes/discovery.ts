@@ -184,8 +184,12 @@ const OPENAPI_SPEC = {
                 required: ['taskHash', 'token', 'amount', 'locationZone', 'duration'],
                 properties: {
                   taskHash: { type: 'string', description: '0x sha256 of the brief blob (ciphertext for private, plaintext for public)' },
-                  token: { type: 'string', description: '0x000…0 for native 0G' },
-                  amount: { type: 'string', description: 'Escrow in wei' },
+                  token: {
+                    type: 'string',
+                    description:
+                      "The posting chain's settlement token: USDC on Base, 0x000…0 (native 0G) on 0G. Any other token is refused with 400 TOKEN_NOT_SETTLEMENT.",
+                  },
+                  amount: { type: 'string', description: "Escrow in the token's smallest unit (USDC: 6 decimals; 0G: wei)" },
                   locationZone: { type: 'string' },
                   duration: { type: 'string', description: 'Seconds until deadline (3600–7776000)' },
                   targetExecutorType: { type: 'string', enum: ['human', 'agent'] },
@@ -199,7 +203,12 @@ const OPENAPI_SPEC = {
             },
           },
         },
-        responses: { '200': respEnvelope('{ unsignedTx }'), '401': { description: 'Missing/invalid API key' } },
+        responses: {
+          '200': respEnvelope("{ unsignedTx, chain, chainId }: send unsignedTx on chain chainId ('base' or '0g')"),
+          '400': { description: "Invalid body, or TOKEN_NOT_SETTLEMENT: the token is not the posting chain's settlement token" },
+          '401': { description: 'Missing/invalid API key' },
+          '503': { description: 'CHAIN_NOT_CONFIGURED: this backend has no escrow on its posting chain' },
+        },
       },
     },
     '/api/v1/storage/upload': {

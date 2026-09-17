@@ -58,6 +58,7 @@ import {
   settlementChainConfigs,
 } from './services/settlementChains.js';
 import { marketplaceSigner, escrow, baseMarketplaceSigner, baseEscrow } from './services/chain.js';
+import { assertPostingUnitMatchesPricing } from './services/settlementUnits.js';
 import { logChainConfig } from './services/chainService.js';
 import { reconcileAgents, startZombieReaper } from './services/agentRunner.js';
 
@@ -72,6 +73,7 @@ for (const warning of assertPostingChain({
 })) {
   console.warn(`[boot] posting chain: ${warning}`);
 }
+assertPostingUnitMatchesPricing();
 
 logChainConfig();
 console.log(`[chain] New tasks post on ${settlementChainConfig(postingChain()).label}${config.postingChain ? '' : ' (default)'}`);
