@@ -7,7 +7,7 @@ vi.mock('@ai-sdk/groq', () => ({ createGroq: () => () => 'm' }));
 vi.mock('socket.io-client', () => ({ io: () => ({ on: vi.fn(), emit: vi.fn() }) }));
 
 // @ts-expect-error — plain-JS worker, no d.ts
-import { pickChain, isUnsupportedChain, signerFor, escrowAddressFor, preflightGas, pickAffordable, acceptBlocker } from './worker.js';
+import { pickChain, isUnsupportedChain, signerFor, escrowAddressFor, preflightGas, pickAffordable, acceptBlocker, registrationBody } from './worker.js';
 
 /**
  * A deployed agent could accept a Base task and never deliver it: the worker
@@ -37,6 +37,24 @@ describe('pickChain — the backend names the chain; a missing one is 0G', () =>
       expect(() => pickChain(chain)).toThrow(/not supported by this worker/);
     },
   );
+});
+
+describe('registrationBody', () => {
+  it('declares every chain this code can sign for, whatever the deployment configures', () => {
+    const body = registrationBody({ displayName: 'w', capabilities: [], publicKey: '04ab', minReward: ' 5 ' });
+    expect(body).toEqual({ displayName: 'w', capabilities: [], publicKey: '04ab', minReward: '5', supportedChains: ['0g', 'base'] });
+    // The chains it declares are exactly the ones pickChain accepts.
+    for (const chain of body.supportedChains) expect(isUnsupportedChain(chain)).toBe(false);
+  });
+
+  it('declares only sui for a Sui-keyed worker, which has no EVM signer', () => {
+    expect(registrationBody({ displayName: 'w', capabilities: [], publicKey: '04ab', sui: true }).supportedChains).toEqual(['sui']);
+  });
+
+  it('leaves out a blank minimum reward', () => {
+    expect(registrationBody({ displayName: 'w', capabilities: [], publicKey: '04ab', minReward: '  ' }).minReward).toBeUndefined();
+    expect(registrationBody({ displayName: 'w', capabilities: [], publicKey: '04ab' }).minReward).toBeUndefined();
+  });
 });
 
 describe('isUnsupportedChain', () => {

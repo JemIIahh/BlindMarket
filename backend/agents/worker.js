@@ -2872,6 +2872,26 @@ function sendHeartbeat() {
   }
 }
 
+/**
+ * The POST /a2a/register body. `supportedChains` is what this code can sign
+ * for, not which chains this deployment configures: the declaration is
+ * stored per address and the last registration wins, so a backend with a
+ * different configuration must not narrow it. A chain the wallet can't pay
+ * gas on is refused before accept by acceptBlocker instead. A Sui-keyed
+ * worker has no EVM signer, so it declares only 'sui', which no settlement
+ * chain matches: the backend then refuses it tasks it could never finish.
+ * Exported for tests.
+ */
+export function registrationBody({ displayName, capabilities, publicKey, minReward, sui = false }) {
+  return {
+    displayName,
+    capabilities,
+    publicKey,
+    minReward: (minReward || '').trim() || undefined,
+    supportedChains: sui ? ['sui'] : [...SETTLEMENT_CHAINS],
+  };
+}
+
 async function ensureRegisteredAsA2AExecutor() {
   // The backend requires a pubkey at registration. We derive it from the
   // private key when the env var is missing, so this should only ever be empty
@@ -2888,12 +2908,13 @@ async function ensureRegisteredAsA2AExecutor() {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${AGENT_PLATFORM_TOKEN}`,
       },
-      body: JSON.stringify({
+      body: JSON.stringify(registrationBody({
         displayName: AGENT_NAME,
         capabilities: agentCapabilities,
         publicKey: AGENT_PUBLIC_KEY,
-        minReward: (process.env.AGENT_MIN_REWARD || '').trim() || undefined,
-      }),
+        minReward: process.env.AGENT_MIN_REWARD,
+        sui: !!suiSigner,
+      })),
     });
     if (res.ok) {
       log(`registered as A2A executor (caps=${agentCapabilities.join(',')})`);
