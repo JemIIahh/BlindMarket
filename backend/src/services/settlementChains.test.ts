@@ -46,6 +46,7 @@ const {
   assertRegistryInvariants,
 } = await import('./settlementChains.js');
 const chain = await import('./chain.js');
+const { chainRuntime } = await import('./chainRuntime.js');
 
 beforeEach(() => {
   for (const key of Object.keys(cfg)) delete cfg[key];
@@ -234,5 +235,25 @@ describe('getTokenDecimals', () => {
     cfg.baseUsdcAddress = '';
     expect(await chain.getTokenDecimals(USDC, 'base')).toBe(18);
     expect(baseCall).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('chainRuntime', () => {
+  it("hands out each chain's own provider and escrow", () => {
+    expect(chainRuntime('0g').provider).toBe(chain.provider);
+    expect(chainRuntime('0g').escrow).toBe(chain.escrow);
+    expect(chainRuntime('base').provider).toBe(chain.baseProvider);
+    expect(chainRuntime('base').escrow).toBe(chain.baseEscrow);
+    expect(chainRuntime('base').escrow).not.toBeNull();
+  });
+
+  it('has no marketplace signer without a key', () => {
+    expect(chainRuntime('0g').marketplaceSigner).toBeNull();
+    expect(chainRuntime('base').escrowAsMarketplace).toBeNull();
+  });
+
+  it('throws on a chain it does not know', () => {
+    expect(() => chainRuntime('arc' as never)).toThrow(/unknown settlement chain arc/);
+    expect(() => chainRuntime('toString' as never)).toThrow(/unknown settlement chain/);
   });
 });

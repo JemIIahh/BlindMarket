@@ -24,7 +24,8 @@ import { buildInstalledSkill, assertComposedSizeOk } from '../services/skillComp
 import type { InstalledSkill, AgentCapability, LLMProvider } from '../types.js';
 import { redis } from '../services/redis.js';
 import { ethers } from 'ethers';
-import { provider, baseProvider } from '../services/chain.js';
+import { chainRuntime } from '../services/chainRuntime.js';
+import { SETTLEMENT_CHAIN_KEYS, settlementChainConfig, type SettlementChainKey } from '../services/settlementChains.js';
 import { config } from '../config.js';
 import { claimDeployCredit, restoreDeployCredit } from '../services/agentFactoryListener.js';
 import { discoverModels, ProviderModelsError } from '../services/providerModels.js';
@@ -89,25 +90,21 @@ const ERC20_TRANSFER_ABI = [
 // Per-chain config for the withdraw endpoint. An agent's wallet is a plain
 // EOA — the same address is valid on 0G and Base — so it can hold a balance
 // on either (or both) depending on which chain its tasks settled on.
-// Base's gasReserve/nativeGasMin are conservative starting estimates (ETH is
-// priced very differently from the 0G token, and these haven't been
+// The gas numbers are the registry's gas.withdrawReserveWei/withdrawMinWei
+// (services/settlementChains.ts). Base's are conservative starting estimates
+// (ETH is priced very differently from the 0G token, and these haven't been
 // calibrated against real observed Base gas costs yet) — same spirit as
 // MAINNET-CHECKLIST.md §3.2's own admission that its 0G gas estimate needs
 // recalibration. Recheck before Base mainnet launch.
-const WITHDRAW_CHAINS = {
-  '0g': {
-    rpc: provider,
-    nativeLabel: '0G',
-    gasReserve: ethers.parseEther('0.001'),
-    nativeGasMin: ethers.parseEther('0.0002'),
-  },
-  base: {
-    rpc: baseProvider,
-    nativeLabel: 'ETH',
-    gasReserve: ethers.parseEther('0.0003'),
-    nativeGasMin: ethers.parseEther('0.00005'),
-  },
-} as const;
+function withdrawChain(chain: SettlementChainKey) {
+  const { gas } = settlementChainConfig(chain);
+  return {
+    rpc: chainRuntime(chain).provider,
+    nativeLabel: gas.symbol,
+    gasReserve: gas.withdrawReserveWei,
+    nativeGasMin: gas.withdrawMinWei,
+  };
+}
 
 export const agentsRouter = Router();
 
@@ -641,16 +638,17 @@ agentsRouter.post('/:id/withdraw', requireAuth, async (req: AuthRequest, res) =>
     const pk = agent.rawPrivateKey.startsWith('0x') ? agent.rawPrivateKey : `0x${agent.rawPrivateKey}`;
 
     const swept: Array<{
-      chain: 'base' | '0g'; txHash: string; asset: string; recipient: string; blockNumber?: number;
+      chain: SettlementChainKey; txHash: string; asset: string; recipient: string; blockNumber?: number;
       amountSent?: string; amountRaw?: string; amountFormatted?: string; decimals?: number;
     }> = [];
-    const skipped: Array<{ chain: 'base' | '0g'; reason: string }> = [];
+    const skipped: Array<{ chain: SettlementChainKey; reason: string }> = [];
 
     // Sequential, not parallel — simpler to reason about and log than two
     // in-flight sweep txs interleaving (nonce spaces are independent per
-    // chain so parallel would be safe too, just noisier).
-    for (const chain of ['0g', 'base'] as const) {
-      const { rpc, nativeLabel, gasReserve, nativeGasMin } = WITHDRAW_CHAINS[chain];
+    // chain so parallel would be safe too, just noisier). Registry order:
+    // 0G, then Base.
+    for (const chain of SETTLEMENT_CHAIN_KEYS) {
+      const { rpc, nativeLabel, gasReserve, nativeGasMin } = withdrawChain(chain);
       const wallet = new ethers.Wallet(pk, rpc);
 
       if (isNative) {

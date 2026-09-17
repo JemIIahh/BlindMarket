@@ -45,7 +45,7 @@ export const agentsCctpRouter = Router();
 // approve + depositForBurnWithHook pair. Observed on Base Sepolia (Sept 2026):
 // the burn uses ≈105–115k gas at ~0.006–0.01 gwei; a USDC approve adds tens
 // of thousands more — together orders of magnitude under this floor. Kept
-// conservative like WITHDRAW_CHAINS.base.nativeGasMin in routes/agents.ts,
+// conservative like Base's gas.withdrawMinWei in services/settlementChains.ts,
 // since mainnet Base fees run higher.
 const CCTP_BASE_GAS_MIN = ethers.parseEther('0.0002');
 
