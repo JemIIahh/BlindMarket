@@ -94,8 +94,8 @@ test('forcing base with no health confirmation and no override fails loudly', as
 test('forcing base with an explicit escrow works when health cannot vouch for it', async () => {
   // The real default: config.baseEscrowAddress falls back to the generated
   // contractAddresses.ts, so a backend with an empty Base .env still builds
-  // Base txs — while /health/bridge stays silent because it wants both
-  // marketplace signers. Requiring health here would block that setup.
+  // Base txs — while /health/bridge stays silent because it also wants the
+  // Base marketplace signer. Requiring health here would block that setup.
   const be = fakeBackend({ base: null });
   const s = await discoverSettlement({
     ...be,
@@ -204,7 +204,8 @@ test('an error envelope from /health/bridge is refused, not read as "0G"', async
 
 test('a 0G answer carries the 0G escrow address when the bridge reports it', async () => {
   // Used by verifyTarget: the only defence against a backend that says "0G"
-  // on /health/bridge (bridge half-configured) but builds Base txs on /tasks.
+  // on /health/bridge (Base escrow set, Base signer not) but builds Base txs
+  // on /tasks.
   const OG_ESCROW = '0x3d0374963daad43e31d42373eb11156a8e8ce2ff'; // lowercased on purpose
   const fetchImpl = async () => ({ json: async () => ({ success: true, data: { configured: true, escrowAddress: OG_ESCROW, chainId: 16661 } }) });
   const s = await discoverSettlement({ apiBase: 'https://backend.test', api: async () => ({}), fetchImpl, env: {} });
@@ -212,8 +213,26 @@ test('a 0G answer carries the 0G escrow address when the bridge reports it', asy
   assert.equal(s.escrowAddress, '0x3d0374963DaaD43e31d42373eb11156A8e8ce2Ff', 'checksummed');
 });
 
-test('a 0G answer without an escrow address leaves the field unset rather than inventing one', async () => {
+test('a 0G answer from an older backend, with no escrow address, leaves the field unset', async () => {
   const fetchImpl = async () => ({ json: async () => ({ success: true, data: { configured: false, reason: 'signer not set' } }) });
+  const s = await discoverSettlement({ apiBase: 'https://backend.test', api: async () => ({}), fetchImpl, env: {} });
+  assert.equal(s.mode, '0g');
+  assert.equal(s.escrowAddress, undefined);
+});
+
+test('a backend where 0G cannot settle still reports its 0G escrow, and the MCP keeps it', async () => {
+  // Current backends send escrowAddress with configured:false and base:null.
+  const OG_ESCROW = '0x3d0374963DaaD43e31d42373eb11156A8e8ce2Ff';
+  const data = { configured: false, reason: '0G: MARKETPLACE_SIGNER_PRIVATE_KEY not set', escrowAddress: OG_ESCROW, chainId: 16661, base: null };
+  const fetchImpl = async () => ({ json: async () => ({ success: true, data }) });
+  const s = await discoverSettlement({ apiBase: 'https://backend.test', api: async () => ({}), fetchImpl, env: {} });
+  assert.equal(s.mode, '0g');
+  assert.equal(s.escrowAddress, OG_ESCROW);
+});
+
+test('the zero address is never taken as the 0G escrow', async () => {
+  const data = { configured: false, escrowAddress: '0x0000000000000000000000000000000000000000', base: null };
+  const fetchImpl = async () => ({ json: async () => ({ success: true, data }) });
   const s = await discoverSettlement({ apiBase: 'https://backend.test', api: async () => ({}), fetchImpl, env: {} });
   assert.equal(s.mode, '0g');
   assert.equal(s.escrowAddress, undefined);

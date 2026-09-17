@@ -1,8 +1,8 @@
 import { Router } from 'express';
-import { formatEther } from 'ethers';
+import { formatEther, ZeroAddress } from 'ethers';
 import type { ApiResponse } from '../types.js';
 import { escrow, marketplaceSigner, provider, baseEscrow, baseMarketplaceSigner, baseProvider } from '../services/chain.js';
-import { isBridgeConfigured } from '../services/a2aSettlement.js';
+import { isBridgeReady } from '../services/a2aSettlement.js';
 import { config } from '../config.js';
 import { redis, redisSub } from '../services/redis.js';
 import { getPool, getSchemaStatus, latestMigrationId } from '../services/neonDb.js';
@@ -22,120 +22,173 @@ healthRouter.get('/', (_req, res) => {
   res.json(body);
 });
 
+const ZERO_G_MAINNET_CHAIN_ID = 16661;
+const BASE_MAINNET_CHAIN_ID = 8453;
+
+/** An escrow address as clients should see it: null when unset or the zero
+ *  address (BLIND_ESCROW_ADDRESS is not zero-filtered in config), so the MCP
+ *  never treats address(0) as a known escrow and sends value there. */
+function escrowOrNull(address: string): string | null {
+  return address && address.toLowerCase() !== ZeroAddress ? address : null;
+}
+
+function rotateCommand(signerAddr: string, network: string): string {
+  return `cd contracts && MARKETPLACE_SIGNER_ADDRESS=${signerAddr} npx hardhat run scripts/rotate-verifier.ts --network ${network}`;
+}
+
+/** The 0G half of the bridge: verifier role and native-0G gas of its signer. */
+async function zeroGBridge(): Promise<Record<string, unknown>> {
+  const signerAddr = await marketplaceSigner!.getAddress();
+  let onChainVerifier: string | null = null;
+  let escrowReadError: string | null = null;
+  try {
+    onChainVerifier = (await escrow.verifier()) as string;
+  } catch (e) {
+    escrowReadError = (e as Error).message;
+  }
+  const verifierMatches =
+    onChainVerifier !== null &&
+    onChainVerifier.toLowerCase() === signerAddr.toLowerCase();
+
+  let signerBalanceOg: string | null = null;
+  let signerGasLow: boolean | null = null;
+  let signerBalanceError: string | null = null;
+  try {
+    const balanceWei = await provider.getBalance(signerAddr);
+    const og = Number(formatEther(balanceWei));
+    signerBalanceOg = formatEther(balanceWei);
+    signerGasLow = og < SIGNER_GAS_LOW_OG;
+  } catch (e) {
+    signerBalanceError = (e as Error).message;
+  }
+
+  const network = config.ogChainId === ZERO_G_MAINNET_CHAIN_ID ? '0g-mainnet' : '0g-testnet';
+  return {
+    signerAddress: signerAddr,
+    escrowAddress: escrowOrNull(config.blindEscrowAddress),
+    chainId: config.ogChainId,
+    onChainVerifier,
+    verifierMatches,
+    escrowReadError,
+    signerBalanceOg,
+    signerGasLow,
+    signerBalanceError,
+    rotateCommand: verifierMatches ? null : rotateCommand(signerAddr, network),
+  };
+}
+
+/** The Base half: verifier role, USDC and ETH balances of its signer. */
+async function baseBridge(): Promise<Record<string, unknown>> {
+  const baseSignerAddr = await baseMarketplaceSigner!.getAddress();
+  let baseVerifier: string | null = null;
+  let baseEscrowError: string | null = null;
+  try {
+    baseVerifier = (await baseEscrow!.verifier()) as string;
+  } catch (e) {
+    baseEscrowError = (e as Error).message;
+  }
+  const baseVerifierMatches =
+    baseVerifier !== null &&
+    baseVerifier.toLowerCase() === baseSignerAddr.toLowerCase();
+  let baseSignerBalanceUsdc: string | null = null;
+  let baseSignerBalanceError: string | null = null;
+  try {
+    // USDC balance (6 decimals)
+    const USDC_ABI = ['function balanceOf(address) view returns (uint256)'];
+    const usdc = new (await import('ethers')).ethers.Contract(config.baseUsdcAddress!, USDC_ABI, baseProvider);
+    baseSignerBalanceUsdc = (await usdc.balanceOf(baseSignerAddr)).toString();
+  } catch (e) {
+    baseSignerBalanceError = (e as Error).message;
+  }
+  let baseSignerEthBalance: string | null = null;
+  let baseSignerEthLow: boolean | null = null;
+  try {
+    const ethBal = await baseProvider.getBalance(baseSignerAddr);
+    baseSignerEthBalance = formatEther(ethBal);
+    baseSignerEthLow = Number(baseSignerEthBalance) < 0.001;
+  } catch {
+    // non-critical
+  }
+  // Each chain's own tier: production pairs 0G mainnet with Base Sepolia.
+  const network = config.baseChainId === BASE_MAINNET_CHAIN_ID ? 'base' : 'base-sepolia';
+  return {
+    configured: true,
+    signerAddress: baseSignerAddr,
+    escrowAddress: config.baseEscrowAddress,
+    chainId: config.baseChainId,
+    onChainVerifier: baseVerifier,
+    verifierMatches: baseVerifierMatches,
+    escrowReadError: baseEscrowError,
+    signerUsdcBalance: baseSignerBalanceUsdc,
+    signerEthBalance: baseSignerEthBalance,
+    signerEthLow: baseSignerEthLow,
+    signerBalanceError: baseSignerBalanceError,
+    rotateCommand: baseVerifierMatches ? null : rotateCommand(baseSignerAddr, network),
+  };
+}
+
+/** Why a chain can't settle, or null when it can or isn't part of this deployment. */
+function notReadyReason(ready: boolean, escrowAddress: string | null, escrowEnv: string, signerSet: boolean, signerEnv: string): string | null {
+  if (ready) return null;
+  if (!escrowAddress) return signerSet ? `${escrowEnv} not set` : null;
+  return `${signerEnv} not set`;
+}
+
 // GET /api/v1/health/bridge — surfaces the A2A settlement bridge config
-// without needing backend log access. Returns whether the marketplace signer
-// is set and whether it actually holds the on-chain verifier role. A `false`
-// for `verifierMatches` is the root cause of every "task accepted but never
-// completes" report; the response includes the exact rotate-verifier command
-// to run from contracts/.
+// without needing backend log access. Each settlement chain is reported on its
+// own: a task lives on exactly one chain, so one chain being ready is enough to
+// settle that chain's tasks. The 0G fields stay at the top level and Base under
+// `base` (null unless Base can settle), which the MCP server reads; `chains`
+// lists every chain with its tier. A `false` for `verifierMatches` is the root
+// cause of every "task accepted but never completes" report; the response
+// includes the exact rotate-verifier command to run from contracts/.
 healthRouter.get('/bridge', async (_req, res, next) => {
   try {
-    const configured = isBridgeConfigured();
-    if (!configured || !marketplaceSigner) {
-      const body: ApiResponse = {
-        success: true,
-        data: {
-          configured: false,
-          reason: 'MARKETPLACE_SIGNER_PRIVATE_KEY not set in backend env',
-        },
-      };
-      res.json(body);
-      return;
-    }
-    const signerAddr = await marketplaceSigner.getAddress();
-    let onChainVerifier: string | null = null;
-    let escrowReadError: string | null = null;
-    try {
-      onChainVerifier = (await escrow.verifier()) as string;
-    } catch (e) {
-      escrowReadError = (e as Error).message;
-    }
-    const verifierMatches =
-      onChainVerifier !== null &&
-      onChainVerifier.toLowerCase() === signerAddr.toLowerCase();
+    const ogReady = isBridgeReady('0g') && !!marketplaceSigner;
+    const baseReady = isBridgeReady('base') && !!baseEscrow && !!baseMarketplaceSigner;
+    const [og, base] = await Promise.all([
+      ogReady ? zeroGBridge() : null,
+      baseReady ? baseBridge() : null,
+    ]);
 
-    let signerBalanceOg: string | null = null;
-    let signerGasLow: boolean | null = null;
-    let signerBalanceError: string | null = null;
-    try {
-      const balanceWei = await provider.getBalance(signerAddr);
-      const og = Number(formatEther(balanceWei));
-      signerBalanceOg = formatEther(balanceWei);
-      signerGasLow = og < SIGNER_GAS_LOW_OG;
-    } catch (e) {
-      signerBalanceError = (e as Error).message;
-    }
-
-    const network = config.ogChainId === 16661 ? 'mainnet' : 'testnet';
-
-    // Base bridge status (USDC settlement)
-    let baseBridge: Record<string, unknown> | null = null;
-    if (config.baseEscrowAddress && baseEscrow && baseMarketplaceSigner && baseProvider) {
-      const baseSignerAddr = await baseMarketplaceSigner.getAddress();
-      let baseVerifier: string | null = null;
-      let baseEscrowError: string | null = null;
-      try {
-        baseVerifier = (await baseEscrow.verifier()) as string;
-      } catch (e) {
-        baseEscrowError = (e as Error).message;
-      }
-      const baseVerifierMatches =
-        baseVerifier !== null &&
-        baseVerifier.toLowerCase() === baseSignerAddr.toLowerCase();
-      let baseSignerBalanceUsdc: string | null = null;
-      let baseSignerBalanceError: string | null = null;
-      try {
-        // USDC balance (6 decimals)
-        const USDC_ABI = ['function balanceOf(address) view returns (uint256)'];
-        const usdc = new (await import('ethers')).ethers.Contract(config.baseUsdcAddress!, USDC_ABI, baseProvider);
-        baseSignerBalanceUsdc = (await usdc.balanceOf(baseSignerAddr)).toString();
-      } catch (e) {
-        baseSignerBalanceError = (e as Error).message;
-      }
-      let baseSignerEthBalance: string | null = null;
-      let baseSignerEthLow: boolean | null = null;
-      try {
-        const ethBal = await baseProvider.getBalance(baseSignerAddr);
-        baseSignerEthBalance = formatEther(ethBal);
-        baseSignerEthLow = Number(baseSignerEthBalance) < 0.001;
-      } catch {
-        // non-critical
-      }
-      baseBridge = {
-        configured: true,
-        signerAddress: baseSignerAddr,
-        escrowAddress: config.baseEscrowAddress,
-        chainId: config.baseChainId,
-        onChainVerifier: baseVerifier,
-        verifierMatches: baseVerifierMatches,
-        escrowReadError: baseEscrowError,
-        signerUsdcBalance: baseSignerBalanceUsdc,
-        signerEthBalance: baseSignerEthBalance,
-        signerEthLow: baseSignerEthLow,
-        signerBalanceError: baseSignerBalanceError,
-        rotateCommand: baseVerifierMatches
-          ? null
-          : `cd contracts && MARKETPLACE_SIGNER_ADDRESS=${baseSignerAddr} npx hardhat run scripts/rotate-verifier.ts --network base${network === 'mainnet' ? '' : '-sepolia'}`,
-      };
+    const ogEscrow = escrowOrNull(config.blindEscrowAddress);
+    const baseEscrowAddress = escrowOrNull(config.baseEscrowAddress);
+    const ogReason = notReadyReason(ogReady, ogEscrow, 'BLIND_ESCROW_ADDRESS', !!marketplaceSigner, 'MARKETPLACE_SIGNER_PRIVATE_KEY');
+    const baseReason = notReadyReason(baseReady, baseEscrowAddress, 'BASE_ESCROW_ADDRESS', !!baseMarketplaceSigner, 'BASE_MARKETPLACE_SIGNER_PRIVATE_KEY');
+    const reasons = [ogReason && `0G: ${ogReason}`, baseReason && `Base: ${baseReason}`].filter(Boolean);
+    if (!ogReady && !baseReady && reasons.length === 0) {
+      reasons.push('no settlement chain has both an escrow and a marketplace signer');
     }
 
     const body: ApiResponse = {
       success: true,
       data: {
-        configured: true,
-        signerAddress: signerAddr,
-        escrowAddress: config.blindEscrowAddress,
+        configured: ogReady || baseReady,
+        ...(reasons.length > 0 ? { reason: reasons.join('; ') } : {}),
+        // Reported even when 0G can't settle, so a client can still check
+        // that a 0G transaction targets this escrow.
+        escrowAddress: ogEscrow,
         chainId: config.ogChainId,
-        onChainVerifier,
-        verifierMatches,
-        escrowReadError,
-        signerBalanceOg,
-        signerGasLow,
-        signerBalanceError,
-        rotateCommand: verifierMatches
-          ? null
-          : `cd contracts && MARKETPLACE_SIGNER_ADDRESS=${signerAddr} npx hardhat run scripts/rotate-verifier.ts --network 0g-${network}`,
-        base: baseBridge,
+        ...(og ?? {}),
+        base,
+        chains: [
+          {
+            chain: '0g',
+            configured: ogReady,
+            chainId: config.ogChainId,
+            tier: config.ogChainId === ZERO_G_MAINNET_CHAIN_ID ? 'mainnet' : 'testnet',
+            escrowAddress: ogEscrow,
+            ...(ogReason ? { reason: ogReason } : {}),
+          },
+          {
+            chain: 'base',
+            configured: baseReady,
+            chainId: config.baseChainId,
+            tier: config.baseChainId === BASE_MAINNET_CHAIN_ID ? 'mainnet' : 'testnet',
+            escrowAddress: baseEscrowAddress,
+            ...(baseReason ? { reason: baseReason } : {}),
+          },
+        ],
       },
     };
     res.json(body);

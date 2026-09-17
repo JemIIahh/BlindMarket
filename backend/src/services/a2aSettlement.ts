@@ -606,7 +606,9 @@ export async function settleVerification(
   }
 }
 
-/** True if both assignment (0G) and verification (Base) bridges are configured. */
-export function isBridgeConfigured(): boolean {
-  return !!(escrowAsMarketplace && marketplaceSigner && baseEscrowAsMarketplace && baseMarketplaceSigner);
+/** True when the backend can sign assignment and settlement for tasks on
+ *  `chain`: its escrow and its marketplace signer are both configured. Each
+ *  chain is independent — a task lives on exactly one. */
+export function isBridgeReady(chain: TaskChain): boolean {
+  return bridgeFor(chain).ready;
 }

@@ -48,8 +48,8 @@ import { startAgentFactoryListener } from './services/agentFactoryListener.js';
 import { startCctpAttestationPoller } from './services/cctpAttestationPoller.js';
 import { startExpirySweepLoop } from './services/a2aExpirySweep.js';
 import { auditCustodySealedTasks } from './services/keyCustodyService.js';
-import { isBridgeConfigured } from './services/a2aSettlement.js';
-import { marketplaceSigner, escrow } from './services/chain.js';
+import { isBridgeReady } from './services/a2aSettlement.js';
+import { marketplaceSigner, escrow, baseMarketplaceSigner, baseEscrow } from './services/chain.js';
 import { logChainConfig } from './services/chainService.js';
 import { reconcileAgents, startZombieReaper } from './services/agentRunner.js';
 
@@ -185,12 +185,38 @@ httpServer.listen(config.port, () => {
   // never saw. Always runs, even when reconcile is off.
   startZombieReaper();
   // Visibility into whether the A2A settlement bridge will actually fire
-  // when an agent accepts/submits. Off-by-default if MARKETPLACE_SIGNER_PRIVATE_KEY
-  // is unset; when on, log the signer address so it's clear which key is signing.
-  if (isBridgeConfigured() && marketplaceSigner) {
+  // when an agent accepts/submits, per settlement chain: a chain with no
+  // marketplace signer is off; when on, log the signer address so it's clear
+  // which key is signing.
+  const bridgeChains = [
+    {
+      chain: '0g' as const, label: '0G', escrow, signer: marketplaceSigner,
+      escrowAddress: config.blindEscrowAddress, escrowEnv: 'BLIND_ESCROW_ADDRESS', signerEnv: 'MARKETPLACE_SIGNER_PRIVATE_KEY',
+      network: config.ogChainId === 16661 ? '0g-mainnet' : '0g-testnet',
+    },
+    {
+      chain: 'base' as const, label: 'Base', escrow: baseEscrow, signer: baseMarketplaceSigner,
+      escrowAddress: config.baseEscrowAddress, escrowEnv: 'BASE_ESCROW_ADDRESS', signerEnv: 'BASE_MARKETPLACE_SIGNER_PRIVATE_KEY',
+      network: config.baseChainId === 8453 ? 'base' : 'base-sepolia',
+    },
+  ];
+  for (const bridge of bridgeChains) {
+    const { label, signer, escrow: chainEscrow } = bridge;
+    if (!isBridgeReady(bridge.chain) || !signer || !chainEscrow) {
+      // Same rule as /health/bridge: silent only when neither is set, i.e.
+      // this chain is not part of the deployment.
+      const unset = bridge.escrowAddress ? bridge.signerEnv : signer ? bridge.escrowEnv : null;
+      if (unset) {
+        console.warn(
+          `[a2aSettlement] ${label} bridge DISABLED — ${unset} not set. ` +
+            `${label} tasks will accept/submit off-chain but will not settle on-chain.`,
+        );
+      }
+      continue;
+    }
     void (async () => {
-      const signerAddr = await marketplaceSigner.getAddress();
-      console.log(`[a2aSettlement] bridge active — marketplace signer = ${signerAddr}`);
+      const signerAddr = await signer.getAddress();
+      console.log(`[a2aSettlement] ${label} bridge active — marketplace signer = ${signerAddr}`);
       // Verify the signer actually holds the on-chain verifier role. Without
       // this, marketplaceAssign/completeVerification revert with NotVerifier()
       // on every call and the fire-and-forget bridge swallows the error,
@@ -199,19 +225,19 @@ httpServer.listen(config.port, () => {
       // never rotated. Print the exact rotation command so the operator
       // has zero ambiguity about the fix.
       try {
-        const onChainVerifier = (await escrow.verifier()) as string;
+        const onChainVerifier = (await chainEscrow.verifier()) as string;
         if (onChainVerifier.toLowerCase() !== signerAddr.toLowerCase()) {
           console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-          console.error('[a2aSettlement] ⛔ VERIFIER ROLE MISMATCH — bridge will silently fail every call');
+          console.error(`[a2aSettlement] ⛔ ${label} VERIFIER ROLE MISMATCH — bridge will silently fail every call`);
           console.error(`    escrow.verifier()        = ${onChainVerifier}`);
           console.error(`    marketplaceSigner.addr   = ${signerAddr}`);
-          console.error(`    escrow contract address  = ${config.blindEscrowAddress}`);
+          console.error(`    escrow contract address  = ${bridge.escrowAddress}`);
           console.error('    Fix from contracts/ with the current admin key:');
           console.error(`    MARKETPLACE_SIGNER_ADDRESS=${signerAddr} \\`);
-          console.error(`      npx hardhat run scripts/rotate-verifier.ts --network 0g-${config.ogChainId === 16661 ? 'mainnet' : 'testnet'}`);
+          console.error(`      npx hardhat run scripts/rotate-verifier.ts --network ${bridge.network}`);
           console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         } else {
-          console.log(`[a2aSettlement] ✓ verifier role confirmed (escrow.verifier() == signer)`);
+          console.log(`[a2aSettlement] ✓ ${label} verifier role confirmed (escrow.verifier() == signer)`);
         }
       } catch (e) {
         const err = e as Error & { errors?: Error[] };
@@ -219,15 +245,10 @@ httpServer.listen(config.port, () => {
           ? err.errors.map((ee: Error) => ee.message || String(ee)).join('; ')
           : err.message || String(e);
         console.error(
-          `[a2aSettlement] ⛔ could not read escrow.verifier() — escrow contract at ${config.blindEscrowAddress} may be wrong or unreachable: ${msg}`,
+          `[a2aSettlement] ⛔ could not read ${label} escrow.verifier() — escrow contract at ${bridge.escrowAddress} may be wrong or unreachable: ${msg}`,
         );
       }
     })();
-  } else {
-    console.warn(
-      '[a2aSettlement] bridge DISABLED — MARKETPLACE_SIGNER_PRIVATE_KEY not set. ' +
-        'A2A tasks will accept/submit off-chain but will not settle on-chain.',
-    );
   }
 });
 
