@@ -297,20 +297,23 @@ tasksRouter.post('/', requireAuth, async (req: AuthRequest, res, next) => {
     if (!escrowAddress) {
       throw new AppError(503, 'CHAIN_NOT_CONFIGURED', `This backend has no ${label} escrow to post tasks on (${escrowEnv})`);
     }
-    if (!payoutCurrency(chain, data.token)) {
+    if (!token.address || !payoutCurrency(chain, data.token)) {
       throw new AppError(
         400,
         'TOKEN_NOT_SETTLEMENT',
         `New tasks are escrowed in ${token.unit.symbol} on ${label} (token ${token.address ?? 'unset'}), not ${data.token}`,
       );
     }
+    // The match above ignores letter case. Build with the registry's spelling:
+    // a mixed-case address with a bad checksum would make ethers throw.
+    const tokenAddress = token.address;
     const isNative = token.kind === 'native';
 
     const tx = await escrowService.buildCreateTaskOn(
       chain,
       from,
       data.taskHash,
-      data.token,
+      tokenAddress,
       amountBigInt,
       'general',
       data.locationZone,
@@ -332,7 +335,7 @@ tasksRouter.post('/', requireAuth, async (req: AuthRequest, res, next) => {
     // receipt-verified POST /a2a/tasks/index flips it to confirmed; an
     // abandoned build stays visibly pending instead of masquerading as funded.
     try {
-      const decimals = await getTokenDecimals(data.token, chain);
+      const decimals = await getTokenDecimals(tokenAddress, chain);
       accountingService.recordTransaction({
         address: from,
         role: 'agent',

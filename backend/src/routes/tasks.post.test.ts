@@ -119,8 +119,15 @@ describe('POST /tasks on a deployment with a Base escrow', () => {
     );
   });
 
-  it('accepts the USDC address in any case', async () => {
+  it('accepts the USDC address in any case, and builds with the configured spelling', async () => {
     expect((await post({ token: USDC.toLowerCase() })).status).toBe(200);
+    // Mixed case with a bad checksum: ethers would refuse to encode it.
+    const badChecksum = USDC.replace('036Cb', '036cb');
+    expect(badChecksum).not.toBe(USDC);
+    const res = await post({ token: badChecksum });
+    expect(res.status).toBe(200);
+    expect(iface.parseTransaction({ data: res.body.data.unsignedTx.data })!.args.token).toBe(USDC);
+    expect(chain.getTokenDecimals).toHaveBeenLastCalledWith(USDC, 'base');
   });
 
   it('commits a designated verifier on the Base escrow', async () => {
