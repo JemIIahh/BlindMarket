@@ -131,6 +131,80 @@ const AA_ENTRY_POINT = process.env.AA_ENTRY_POINT ?? '';
 const AA_PAYMASTER = process.env.AA_PAYMASTER ?? '';
 const AA_USDC = process.env.AA_USDC ?? '';
 const PIMLICO_BUNDLER_URL = process.env.PIMLICO_BUNDLER_URL ?? '';
+
+const NATIVE_TOKEN_ADDRESS = '0x0000000000000000000000000000000000000000';
+
+/** Just enough ERC-20 to fund a delegated sub-task on a chain that settles in one. */
+const ERC20_DELEGATE_ABI = [
+  'function balanceOf(address) view returns (uint256)',
+  'function approve(address spender, uint256 amount) returns (bool)',
+];
+
+/**
+ * The settlement chains this deployment runs, as data: chain id, RPC, escrow,
+ * settlement token, gas symbol, whether the escrow records a smart account,
+ * and which one new tasks are posted on. The backend sends it as
+ * SETTLEMENT_CHAINS_JSON (services/agentRunner.ts); a worker running against
+ * an older backend builds the same shape from the legacy OG_ and BASE_ vars,
+ * which is why those are still read above.
+ *
+ * It says what this DEPLOYMENT settles on. What this worker can sign for at
+ * all is SETTLEMENT_CHAINS below, a property of this file's code, and that is
+ * what registration declares.
+ */
+function legacyChainTable() {
+  const table = [{
+    key: '0g',
+    chainId: OG_CHAIN_ID,
+    rpcUrl: OG_RPC_URL,
+    escrow: AGENT_ESCROW_ADDRESS,
+    token: { address: NATIVE_TOKEN_ADDRESS, kind: 'native', symbol: '0G', decimals: 18 },
+    gasSymbol: '0G',
+    nativeIsSettlementToken: false,
+    aa: false,
+    posting: !(BASE_RPC_URL && BASE_CHAIN_ID),
+  }];
+  if (BASE_RPC_URL && BASE_CHAIN_ID) {
+    table.push({
+      key: 'base',
+      chainId: BASE_CHAIN_ID,
+      rpcUrl: BASE_RPC_URL,
+      escrow: AGENT_BASE_ESCROW_ADDRESS,
+      token: { address: AA_USDC, kind: 'erc20', symbol: 'USDC', decimals: 6 },
+      gasSymbol: 'ETH',
+      nativeIsSettlementToken: false,
+      aa: true,
+      // Before POSTING_CHAIN existed, a configured Base escrow WAS the
+      // posting chain.
+      posting: true,
+    });
+  }
+  return table;
+}
+
+function parseChainTable(raw) {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed) || parsed.length === 0) return null;
+    return parsed.filter((c) => c && typeof c.key === 'string' && c.chainId && c.rpcUrl);
+  } catch (e) {
+    console.error(`[agent] SETTLEMENT_CHAINS_JSON is not valid JSON, falling back to the legacy chain vars: ${e.message}`);
+    return null;
+  }
+}
+
+const CHAIN_TABLE = parseChainTable(process.env.SETTLEMENT_CHAINS_JSON) ?? legacyChainTable();
+
+/** This deployment's entry for `chain`, or null when it does not settle there. Exported for tests. */
+export function chainInfo(chain, table = CHAIN_TABLE) {
+  return table.find((c) => c.key === chain) ?? null;
+}
+
+/** The chain new tasks are funded on — where a delegated sub-task is posted. */
+export function postingChainInfo(table = CHAIN_TABLE) {
+  return table.find((c) => c.posting) ?? table[0] ?? null;
+}
 const PIMLICO_API_KEY = process.env.PIMLICO_API_KEY ?? '';
 const AGENT_TOOLS_RAW = process.env.AGENT_TOOLS ?? '[]';
 const AGENT_TOOL_SECRETS_RAW = process.env.AGENT_TOOL_SECRETS ?? '{}';
@@ -195,12 +269,16 @@ const HEARTBEAT_INTERVAL_MS = Number(process.env.HEARTBEAT_INTERVAL_MS ?? 30_000
 // and is recoverable via the poster's claimTimeout. Fresh starts and graceful
 // boot-reconciles leave this unset and resume owed work normally.
 const SKIP_RESUME = process.env.AGENT_SKIP_RESUME === '1';
-// Escrow reward (in 0G) for a sub-task posted via delegate_to_agent, funded
-// from THIS agent's own wallet. Fixed default; ops can tune via env. The model
-// cannot set it (keeps a weak LLM from over-paying out of the agent's balance).
+// Escrow reward for a sub-task posted via delegate_to_agent, funded from THIS
+// agent's own wallet, in the posting chain's settlement token. Fixed default;
+// ops can tune via env. The model cannot set it (keeps a weak LLM from
+// over-paying out of the agent's balance). DELEGATE_REWARD_OG is the older
+// name and still applies when the sub-task is paid in native 0G.
 const DELEGATE_REWARD_OG = process.env.DELEGATE_REWARD_OG ?? '0.0001';
-// Native-0G headroom the agent insists on keeping after funding a sub-task, so
-// it can still pay gas for its own submitEvidence on the task it's working.
+const DELEGATE_REWARD_USDC = process.env.DELEGATE_REWARD_USDC ?? '0.01';
+// Native headroom the agent insists on keeping after funding a sub-task in
+// the native coin, so it can still pay gas for its own submitEvidence on the
+// task it's working.
 const DELEGATE_GAS_RESERVE_OG = process.env.DELEGATE_GAS_RESERVE_OG ?? '0.005';
 
 // 0G Compute Router — when no AGENT_API_KEY is set, the agent uses its own
@@ -459,26 +537,30 @@ if (!IS_EVM_AGENT) {
 // worker must sign on THAT chain's RPC. Until this existed there was a single
 // 0G signer, so a Base submitEvidence — which carried no chainId — was quietly
 // broadcast onto 0G, and a deployed agent could accept a Base task and never
-// deliver it. `signerWallet` stays the 0G signer: delegation funds native 0G
-// and the legacy 0G-only paths read it directly.
+// deliver it. Built from CHAIN_TABLE, so a chain is added by configuring it,
+// not by editing this file.
 const signers = { '0g': null, base: null };
 if (!suiSigner && AGENT_PRIVATE_KEY) {
   const pk = AGENT_PRIVATE_KEY.startsWith('0x') ? AGENT_PRIVATE_KEY : `0x${AGENT_PRIVATE_KEY}`;
-  try {
-    signers['0g'] = new ethers.Wallet(pk, new ethers.JsonRpcProvider(OG_RPC_URL, OG_CHAIN_ID));
-    signerWallet = signers['0g'];
-  } catch (e) {
-    console.error(`[agent:${(process.env.AGENT_ID ?? '').slice(0, 8)}] failed to init 0G signer: ${e.message}`);
-  }
-  if (BASE_RPC_URL && BASE_CHAIN_ID) {
+  for (const { key, rpcUrl, chainId } of CHAIN_TABLE) {
     try {
-      signers.base = new ethers.Wallet(pk, new ethers.JsonRpcProvider(BASE_RPC_URL, BASE_CHAIN_ID));
+      signers[key] = new ethers.Wallet(pk, new ethers.JsonRpcProvider(rpcUrl, chainId));
     } catch (e) {
-      console.error(`[agent:${(process.env.AGENT_ID ?? '').slice(0, 8)}] failed to init Base signer: ${e.message}`);
+      console.error(`[agent:${(process.env.AGENT_ID ?? '').slice(0, 8)}] failed to init ${key} signer: ${e.message}`);
     }
   }
+  // `signerWallet` stays the 0G signer: the legacy 0G-only paths read it
+  // directly. Delegation picks the posting chain's signer itself.
+  signerWallet = signers['0g'] ?? null;
 }
 
+/**
+ * The chains this worker's CODE can sign for — not the chains this deployment
+ * is configured with (CHAIN_TABLE). Registration declares this: a backend with
+ * a narrower config must not overwrite an agent's declared capability, and a
+ * configured chain with no signer here is acceptBlocker's problem, not a
+ * capability question.
+ */
 const SETTLEMENT_CHAINS = ['0g', 'base'];
 
 function isSettlementChain(reported) {
@@ -515,10 +597,29 @@ export function signerFor(chain, table = signers) {
 }
 
 export function escrowAddressFor(chain) {
-  return pickChain(chain) === 'base' ? AGENT_BASE_ESCROW_ADDRESS : AGENT_ESCROW_ADDRESS;
+  return chainInfo(pickChain(chain))?.escrow ?? '';
 }
 
-const NATIVE_SYMBOL = { '0g': '0G', base: 'ETH' };
+/**
+ * The native coin of the chains this worker knows, for gas messages about a
+ * chain this deployment has not configured (so it is not in CHAIN_TABLE). The
+ * table's own gasSymbol wins whenever there is an entry.
+ */
+const KNOWN_GAS_SYMBOL = { '0g': '0G', base: 'ETH' };
+
+/** How a pre-table backend injected a chain, named in the message when it did not. */
+const LEGACY_CHAIN_ENV = { '0g': 'OG_RPC_URL/OG_CHAIN_ID', base: 'BASE_RPC_URL/BASE_CHAIN_ID' };
+
+/** The native coin of `chain`, for gas messages. */
+function nativeSymbolFor(chain) {
+  const key = pickChain(chain);
+  return chainInfo(key)?.gasSymbol ?? KNOWN_GAS_SYMBOL[key] ?? key;
+}
+
+/** True when this chain's escrow records a smart account and the agent has one. */
+function usesSmartAccount(chain) {
+  return !!chainInfo(pickChain(chain))?.aa && !!AGENT_SMART_ACCOUNT_ADDRESS && !!AA_ENTRY_POINT;
+}
 
 /**
  * Why a task must not be accepted yet, or null. Accepting assigns the task
@@ -563,7 +664,7 @@ export async function pickAffordable(entries, problemFor) {
  * missing, on which chain, for which address, before spending the attempt.
  * Returns null when fine, else the reason.
  */
-export async function preflightGas(chain, signer, viaAA = (pickChain(chain) === 'base' && !!AGENT_SMART_ACCOUNT_ADDRESS && !!AA_ENTRY_POINT)) {
+export async function preflightGas(chain, signer, viaAA = usesSmartAccount(chain)) {
   // ERC-4337 AA path: gas is paid in USDC via the paymaster — skip the ETH
   // balance check entirely. Callers that already resolved the on-chain
   // submitter pass viaAA explicitly (false for legacy EOA-assigned tasks,
@@ -572,7 +673,14 @@ export async function preflightGas(chain, signer, viaAA = (pickChain(chain) === 
     return null; // AA path — paymaster sponsors gas in USDC
   }
 
-  if (!signer) return `no ${pickChain(chain)} signer — ${pickChain(chain) === 'base' ? 'BASE_RPC_URL/BASE_CHAIN_ID not injected (backend has no Base escrow configured?)' : 'AGENT_PRIVATE_KEY missing'}`;
+  if (!signer) {
+    const key = pickChain(chain);
+    // Two different faults: the chain is configured but this worker has no
+    // key, or the backend never injected the chain at all.
+    return chainInfo(key)
+      ? `no ${key} signer — AGENT_PRIVATE_KEY missing`
+      : `no ${key} signer — ${LEGACY_CHAIN_ENV[key] ?? 'SETTLEMENT_CHAINS_JSON'} not injected (backend has no ${key} escrow configured?)`;
+  }
   let balance;
   try {
     balance = await signer.provider.getBalance(signer.address);
@@ -580,7 +688,7 @@ export async function preflightGas(chain, signer, viaAA = (pickChain(chain) === 
     return null; // RPC blip — let the broadcast attempt report the real error
   }
   if (balance === 0n) {
-    return `wallet ${signer.address} holds 0 ${NATIVE_SYMBOL[pickChain(chain)]} on ${pickChain(chain)} — it pays its own gas there and cannot broadcast. Fund it (any amount covers many txs at current gas).`;
+    return `wallet ${signer.address} holds 0 ${nativeSymbolFor(chain)} on ${pickChain(chain)} — it pays its own gas there and cannot broadcast. Fund it (any amount covers many txs at current gas).`;
   }
   return null;
 }
@@ -807,8 +915,15 @@ export function buildTools(currentTaskHash = null) {
       if (!Array.isArray(requiredCapabilities) || requiredCapabilities.length === 0) {
         return 'ERROR: delegate_to_agent requires `requiredCapabilities` (non-empty string array). Either supply at least one capability tag or complete the task yourself.';
       }
-      if (!signerWallet) {
-        return 'ERROR: cannot delegate — this agent has no signer (AGENT_PRIVATE_KEY unset), so it cannot fund a sub-task escrow. Complete the task yourself.';
+      // A sub-task is funded on the chain THIS backend posts new tasks on —
+      // POST /api/v1/tasks builds createTask there and refuses any other
+      // token — so delegation uses that chain's signer, token and escrow.
+      // Before this it always signed on 0G and sent native value, which a
+      // Base-posting backend refused outright (400 TOKEN_NOT_SETTLEMENT).
+      const posting = postingChainInfo();
+      const delegateSigner = posting ? signers[posting.key] : null;
+      if (!delegateSigner) {
+        return `ERROR: cannot delegate — this agent has no signer for ${posting?.key ?? 'the posting chain'} (AGENT_PRIVATE_KEY unset, or the backend injected no chain table), so it cannot fund a sub-task escrow. Complete the task yourself.`;
       }
 
       // A delegated sub-task is a real, encrypted, escrow-funded marketplace
@@ -819,15 +934,53 @@ export function buildTools(currentTaskHash = null) {
       const auth = { 'Authorization': `Bearer ${AGENT_PLATFORM_TOKEN}` };
       const jsonAuth = { 'Content-Type': 'application/json', ...auth };
       try {
-        const NATIVE = '0x0000000000000000000000000000000000000000';
-        const rewardWei = ethers.parseEther(String(DELEGATE_REWARD_OG));
-        const reserveWei = ethers.parseEther(String(DELEGATE_GAS_RESERVE_OG));
+        const payToken = posting.token;
+        const isNativeReward = payToken.kind === 'native';
+        const rewardSetting = payToken.symbol === '0G' ? DELEGATE_REWARD_OG : DELEGATE_REWARD_USDC;
+        const rewardRaw = ethers.parseUnits(String(rewardSetting), payToken.decimals);
 
         // Balance guard — don't post a sub-task we can't fund without starving
         // our own gas. Skip cleanly so the model just completes the task itself.
-        const balance = await signerWallet.provider.getBalance(signerWallet.address);
-        if (balance < rewardWei + reserveWei) {
-          return `Delegation skipped: wallet balance ${ethers.formatEther(balance)} 0G is below reward ${DELEGATE_REWARD_OG} + gas reserve ${DELEGATE_GAS_RESERVE_OG} 0G. Complete the task yourself.`;
+        if (isNativeReward) {
+          const reserveWei = ethers.parseEther(String(DELEGATE_GAS_RESERVE_OG));
+          let balance;
+          try {
+            balance = await delegateSigner.provider.getBalance(delegateSigner.address);
+          } catch (e) {
+            return `Delegation skipped: could not read the ${payToken.symbol} balance of ${delegateSigner.address} on ${posting.key} (${e.message}). Complete the task yourself.`;
+          }
+          if (balance < rewardRaw + reserveWei) {
+            return `Delegation skipped: wallet balance ${ethers.formatUnits(balance, payToken.decimals)} ${payToken.symbol} on ${posting.key} is below reward ${rewardSetting} + gas reserve ${DELEGATE_GAS_RESERVE_OG}. Complete the task yourself.`;
+          }
+        } else {
+          // The reward is an ERC-20 and gas is a different coin, so both are
+          // checked: the token balance against the reward, and the gas balance
+          // through the same preflight an accept uses.
+          const gasProblem = await preflightGas(posting.key, delegateSigner, false);
+          if (gasProblem) {
+            return `Delegation skipped: ${gasProblem} Complete the task yourself.`;
+          }
+          const erc20 = new ethers.Contract(payToken.address, ERC20_DELEGATE_ABI, delegateSigner);
+          let tokenBalance;
+          try {
+            tokenBalance = await erc20.balanceOf(delegateSigner.address);
+          } catch (e) {
+            return `Delegation skipped: could not read the ${payToken.symbol} balance of ${delegateSigner.address} on ${posting.key} (${e.message}). Complete the task yourself.`;
+          }
+          if (tokenBalance < rewardRaw) {
+            return `Delegation skipped: wallet holds ${ethers.formatUnits(tokenBalance, payToken.decimals)} ${payToken.symbol} on ${posting.key}, below the ${rewardSetting} ${payToken.symbol} reward. Complete the task yourself.`;
+          }
+          // The escrow pulls the reward with transferFrom, so it needs an
+          // allowance first; the unsigned createTask carries no value.
+          try {
+            const approval = await erc20.approve(posting.escrow, rewardRaw);
+            const approved = await approval.wait();
+            if (!approved || approved.status !== 1) {
+              return `Delegation failed: ${payToken.symbol} approve tx reverted (${approval.hash}).`;
+            }
+          } catch (e) {
+            return `Delegation failed: could not approve the escrow to pull ${rewardSetting} ${payToken.symbol} (${e.message}).`;
+          }
         }
 
         // 1. Encrypt the brief; taskHash = sha256(ciphertext) (same as PostTask).
@@ -868,7 +1021,7 @@ export function buildTools(currentTaskHash = null) {
         const buildRes = await fetchWithTimeout(`${BACKEND_URL}/api/v1/tasks`, {
           method: 'POST', headers: jsonAuth,
           body: JSON.stringify({
-            taskHash, token: NATIVE, amount: rewardWei.toString(),
+            taskHash, token: payToken.address, amount: rewardRaw.toString(),
             category: 'delegated', locationZone: 'global', duration: '3600',
           }),
         });
@@ -876,7 +1029,7 @@ export function buildTools(currentTaskHash = null) {
         const unsignedTx = (await buildRes.json()).data?.unsignedTx;
         if (!unsignedTx) return 'Delegation failed: createTask returned no unsignedTx';
 
-        const sent = await signerWallet.sendTransaction(unsignedTx);
+        const sent = await delegateSigner.sendTransaction(unsignedTx);
         log(`delegate: createTask broadcast ${sent.hash} for sub-task ${taskHash.slice(0, 10)}…`);
         const receipt = await sent.wait();
         if (!receipt || receipt.status !== 1) return `Delegation failed: createTask tx reverted (${sent.hash})`;
@@ -891,7 +1044,7 @@ export function buildTools(currentTaskHash = null) {
           }),
         });
         if (!idxRes.ok) return `Delegation failed: index ${idxRes.status} ${(await idxRes.text()).slice(0, 120)}`;
-        log(`delegate: sub-task ${taskHash.slice(0, 10)}… posted (reward ${DELEGATE_REWARD_OG} 0G, wrapped to ${Object.keys(wrappedKeys).length} executor(s))`);
+        log(`delegate: sub-task ${taskHash.slice(0, 10)}… posted on ${posting.key} (reward ${rewardSetting} ${payToken.symbol}, wrapped to ${Object.keys(wrappedKeys).length} executor(s))`);
 
         // 6. Poll our own posted-tasks inbox for the outcome. We're the poster,
         //    so /tasks/posted carries this sub-task's state + resultData.
@@ -2223,7 +2376,7 @@ async function broadcastEvmSubmitEvidence(taskHash, unsignedSubmitEvidence, subm
   // on-chain worker. AA agents assigned after the rollout name the smart
   // account (UserOp path); legacy tasks assigned before it name the EOA
   // (raw-tx path, which still needs ETH).
-  let submitViaAA = submitChain === 'base' && !!AGENT_SMART_ACCOUNT_ADDRESS && !!AA_ENTRY_POINT && !!PIMLICO_BUNDLER_URL;
+  let submitViaAA = usesSmartAccount(submitChain) && !!PIMLICO_BUNDLER_URL;
   if (submitViaAA && onChainTaskId != null && escrowIface) {
     try {
       const recorded = (await readOnChainWorker(onChainTaskId, submitChain)).toLowerCase();
@@ -2257,7 +2410,7 @@ async function broadcastEvmSubmitEvidence(taskHash, unsignedSubmitEvidence, subm
       const data = unsigned.data ?? '0x';
       if (!target) throw new Error('unsigned tx missing target address');
       const callData = encodeExecuteCallData(target, value, data);
-      const nonce = await getSmartAccountNonce(AA_ENTRY_POINT, AGENT_SMART_ACCOUNT_ADDRESS, BASE_RPC_URL);
+      const nonce = await getSmartAccountNonce(AA_ENTRY_POINT, AGENT_SMART_ACCOUNT_ADDRESS, chainInfo(submitChain).rpcUrl);
       const paymaster = AA_PAYMASTER
         ? { address: AA_PAYMASTER, verificationGasLimit: 100_000, postOpGasLimit: 50_000, data: '0x' }
         : undefined;
@@ -2290,7 +2443,7 @@ async function broadcastEvmSubmitEvidence(taskHash, unsignedSubmitEvidence, subm
       } catch (e) {
         log(`submitEvidence UserOp estimate failed, using defaults: ${e.message}`);
       }
-      signedUserOp = signUserOp(userOp, AA_ENTRY_POINT, BASE_CHAIN_ID, AGENT_PRIVATE_KEY);
+      signedUserOp = signUserOp(userOp, AA_ENTRY_POINT, chainInfo(submitChain).chainId, AGENT_PRIVATE_KEY);
     } catch (e) {
       log(`submitEvidence failed to build UserOp for ${short}…: ${e.message}`);
       return false;
@@ -2764,7 +2917,7 @@ async function pollAndVerify() {
           // The contract only accepts completeVerification from the recorded
           // verifier (per-task taskVerifier, else the global one). Agent-verify
           // tasks designate the agent EOA at post time → raw EOA path.
-          let settleViaAA = settleChain === 'base' && !!AGENT_SMART_ACCOUNT_ADDRESS && !!AA_ENTRY_POINT && !!PIMLICO_BUNDLER_URL;
+          let settleViaAA = usesSmartAccount(settleChain) && !!PIMLICO_BUNDLER_URL;
           if (settleViaAA && escrowIface) {
             try {
               const v = (await readOnChainVerifier(onChainId, settleChain)).toLowerCase();
@@ -2783,7 +2936,7 @@ async function pollAndVerify() {
           // recorded verifier on Base.
           if (settleViaAA) {
             const callData = encodeExecuteCallData(settleEscrow, 0n, data);
-            const nonce = await getSmartAccountNonce(AA_ENTRY_POINT, AGENT_SMART_ACCOUNT_ADDRESS, BASE_RPC_URL);
+            const nonce = await getSmartAccountNonce(AA_ENTRY_POINT, AGENT_SMART_ACCOUNT_ADDRESS, chainInfo(settleChain).rpcUrl);
             const paymaster = AA_PAYMASTER
               ? { address: AA_PAYMASTER, verificationGasLimit: 100_000, postOpGasLimit: 50_000, data: '0x' }
               : undefined;
@@ -2793,12 +2946,12 @@ async function pollAndVerify() {
               callData,
               paymaster,
             });
-            const signed = signUserOp(userOp, AA_ENTRY_POINT, BASE_CHAIN_ID, AGENT_PRIVATE_KEY);
+            const signed = signUserOp(userOp, AA_ENTRY_POINT, chainInfo(settleChain).chainId, AGENT_PRIVATE_KEY);
             const opHash = await submitUserOp(signed, PIMLICO_BUNDLER_URL, PIMLICO_API_KEY, AA_ENTRY_POINT);
             log(`verify: completeVerification UserOp submitted for ${taskHash.slice(0, 10)}… via bundler: ${opHash}`);
             recordPass = verdict.passed;
           } else {
-            const sent = await settleSigner.sendTransaction({ to: settleEscrow, data, chainId: settleChain === 'base' ? BASE_CHAIN_ID : OG_CHAIN_ID });
+            const sent = await settleSigner.sendTransaction({ to: settleEscrow, data, chainId: chainInfo(settleChain).chainId });
             log(`verify: completeVerification broadcast for ${taskHash.slice(0, 10)}… (passed=${verdict.passed}): ${sent.hash}`);
             const receipt = await sent.wait();
             if (receipt?.status !== 1) { bumpVerifyFailure(taskHash); continue; }

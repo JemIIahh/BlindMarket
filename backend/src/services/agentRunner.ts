@@ -7,6 +7,40 @@ import jwt from 'jsonwebtoken';
 import { deploySmartAccount } from './aa.js';
 import pidusage from 'pidusage';
 import { config } from '../config.js';
+import { configuredChainKeys, postingChain, settlementChainConfig } from './settlementChains.js';
+
+/**
+ * The settlement chains a worker signs on, as JSON for its env.
+ *
+ * Only chains this deployment has an escrow on: a worker cannot settle
+ * anywhere else, and an entry with no escrow would make it offer to sign for
+ * a chain the backend never names. `posting` marks the chain new tasks are
+ * funded on, which is the one a worker delegating a sub-task must use.
+ *
+ * What the worker can sign for at all is its own code's business
+ * (SETTLEMENT_CHAINS in worker.js) and is NOT this list — a worker declares
+ * its capability at registration, and a backend with a narrower config must
+ * not overwrite that declaration.
+ */
+export function settlementChainsJson(): string {
+  const posting = postingChain();
+  return JSON.stringify(
+    configuredChainKeys().map((key) => {
+      const { chainId, rpcUrl, escrowAddress, token, gas, aa } = settlementChainConfig(key);
+      return {
+        key,
+        chainId,
+        rpcUrl,
+        escrow: escrowAddress,
+        token: { address: token.address, kind: token.kind, symbol: token.unit.symbol, decimals: token.unit.decimals },
+        gasSymbol: gas.symbol,
+        nativeIsSettlementToken: gas.nativeIsSettlementToken,
+        aa,
+        posting: key === posting,
+      };
+    }),
+  );
+}
 import { eciesEncrypt, generateKeyPair } from './crypto.js';
 import { inft } from './chain.js';
 import {
@@ -347,12 +381,17 @@ export async function startAgent(id: string, opts?: { skipResume?: boolean }): P
       // Escrow proxy address — the verifier role (verificationMode='agent')
       // signs completeVerification directly against this contract.
       AGENT_ESCROW_ADDRESS: config.blindEscrowAddress,
-      // Base settlement. The worker builds one signer per chain and picks by
-      // the `chain` the backend reports on /submit and /verifications; without
-      // these it had a single 0G signer and broadcast every Base submitEvidence
-      // onto 0G, so a deployed agent could accept a Base task and never deliver
-      // it. Empty when Base is unconfigured, and the worker treats empty as
-      // "no Base signer" rather than guessing an RPC.
+      // Every settlement chain this deployment is configured for, as data:
+      // the worker builds one signer per entry and picks by the `chain` the
+      // backend reports on /submit and /verifications. Before it existed the
+      // worker had a single 0G signer and broadcast every Base submitEvidence
+      // onto 0G, so a deployed agent could accept a Base task and never
+      // deliver it; before THIS table, each new chain meant another pair of
+      // env vars in both processes. An older worker ignores it and reads the
+      // legacy vars below, which stay for one more release.
+      SETTLEMENT_CHAINS_JSON: settlementChainsJson(),
+      // Base settlement (legacy). Empty when Base is unconfigured, and the
+      // worker treats empty as "no Base signer" rather than guessing an RPC.
       BASE_RPC_URL: config.baseEscrowAddress ? config.baseRpcUrl : '',
       BASE_CHAIN_ID: config.baseEscrowAddress ? String(config.baseChainId) : '',
       AGENT_BASE_ESCROW_ADDRESS: config.baseEscrowAddress ?? '',

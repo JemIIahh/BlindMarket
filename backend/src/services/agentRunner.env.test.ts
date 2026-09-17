@@ -160,6 +160,44 @@ describe('startAgent forks workers with an allowlisted env, not the full process
     expect(env.AGENT_PLATFORM_TOKEN).toBe(agent.platformToken);
   });
 
+  it('hands the worker every configured settlement chain as data', async () => {
+    const agent = makeAgent('agent-env-chains');
+    agentHolder.current = agent;
+    const { startAgent } = await import('./agentRunner.js');
+    await startAgent(agent.id, { skipResume: true });
+
+    const env = forkMock.mock.calls[0][2].env as Record<string, string>;
+    const table = JSON.parse(env.SETTLEMENT_CHAINS_JSON) as Array<Record<string, unknown>>;
+
+    // The test env has both escrows, and posts on Base by the default rule.
+    expect(table.map((c) => c.key)).toEqual(['0g', 'base']);
+    expect(table.find((c) => c.key === '0g')).toMatchObject({
+      chainId: expect.any(Number),
+      token: { kind: 'native', address: '0x0000000000000000000000000000000000000000', symbol: '0G', decimals: 18 },
+      gasSymbol: '0G',
+      nativeIsSettlementToken: false,
+      aa: false,
+      posting: false,
+    });
+    expect(table.find((c) => c.key === 'base')).toMatchObject({
+      token: { kind: 'erc20', symbol: 'USDC', decimals: 6 },
+      gasSymbol: 'ETH',
+      aa: true,
+      posting: true,
+    });
+    // Exactly one chain is the posting chain.
+    expect(table.filter((c) => c.posting)).toHaveLength(1);
+    // Each entry carries what a signer needs, and nothing secret.
+    for (const entry of table) {
+      expect(entry.rpcUrl).toBeTruthy();
+      expect(entry.escrow).toBeTruthy();
+      expect(JSON.stringify(entry)).not.toMatch(/PRIVATE_KEY|secret/i);
+    }
+    // The legacy vars stay for one more release, and still agree.
+    expect(env.OG_CHAIN_ID).toBe(String(table.find((c) => c.key === '0g')!.chainId));
+    expect(env.AGENT_BASE_ESCROW_ADDRESS).toBe(table.find((c) => c.key === 'base')!.escrow);
+  });
+
   it('leaves an unset passthrough var absent rather than the string "undefined"', async () => {
     const agent = makeAgent('agent-env-absent');
     agentHolder.current = agent;
