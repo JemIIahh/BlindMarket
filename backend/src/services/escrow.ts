@@ -46,21 +46,6 @@ export async function getTaskVerifierBase(taskId: number): Promise<string> {
   return getTaskVerifierOn('base', taskId);
 }
 
-/** Build unsigned createTask transaction */
-export async function buildCreateTask(
-  from: string,
-  taskHash: string,
-  token: string,
-  amount: bigint,
-  category: string,
-  locationZone: string,
-  duration: bigint,
-  value?: bigint,
-  verifierAgent?: string,
-): Promise<ethers.TransactionRequest> {
-  return buildCreateTaskOn('0g', from, taskHash, token, amount, category, locationZone, duration, value, verifierAgent);
-}
-
 /** Build unsigned assignWorker transaction */
 export async function buildAssignWorker(
   from: string,
@@ -105,21 +90,6 @@ export async function buildCompleteVerification(
 }
 
 // ── Base escrow (settlement — USDC payouts) ────────────────────────────────
-
-/** Build unsigned createTask transaction against Base escrow */
-export async function buildCreateTaskBase(
-  from: string,
-  taskHash: string,
-  token: string,
-  amount: bigint,
-  category: string,
-  locationZone: string,
-  duration: bigint,
-  value?: bigint,
-  verifierAgent?: string,
-): Promise<ethers.TransactionRequest> {
-  return buildCreateTaskOn('base', from, taskHash, token, amount, category, locationZone, duration, value, verifierAgent);
-}
 
 /** Read a single task from the Base escrow. */
 export async function getTaskBase(taskId: number): Promise<OnChainTask & { taskId: string }> {

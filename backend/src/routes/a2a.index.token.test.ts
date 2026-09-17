@@ -70,8 +70,7 @@ vi.mock('../services/serviceStore.js', () => ({
 // database (config loads backend/.env).
 vi.mock('../services/agentStore.js', () => ({ getAgent: vi.fn(async () => undefined) }));
 vi.mock('../services/escrow.js', () => ({
-  getTaskVerifierBase: vi.fn(async () => '0x4444444444444444444444444444444444444444'),
-  getTaskVerifier: vi.fn(async () => '0x4444444444444444444444444444444444444444'),
+  getTaskVerifierOn: vi.fn(async () => '0x4444444444444444444444444444444444444444'),
 }));
 
 vi.mock('../services/accountingService.js', () => ({
@@ -141,9 +140,9 @@ function onBase(token: string, amount: bigint) {
 
 /** Fund the task on 0G. Shortcut: the Base provider and escrow are removed
  *  while config still names a Base escrow, a pair real chain.ts never builds.
- *  The route only compares escrow identity and settlementToken() reads config
- *  alone, so the answer is the one a Base deployment gives for a 0G task,
- *  without waiting out the Base receipt retries (3 x 3 s). */
+ *  The route skips a chain with no escrow contract and settlementToken() reads
+ *  config alone, so the answer is the one a Base deployment gives for a 0G
+ *  task, without waiting out the Base receipt retries (3 x 3 s). */
 function onZeroG(token: string, amount: bigint) {
   chain.baseProvider = null;
   chain.baseEscrow = null;

@@ -19,7 +19,8 @@ import * as reputationDecay from '../services/reputationDecay.js';
 import * as agentEmbedding from '../services/agentEmbedding.js';
 import * as semanticMatch from '../services/semanticMatch.js';
 import { demandFeed, MAX_DEMAND_LIMIT } from '../services/demandFeed.js';
-import { provider, escrow, baseProvider, baseEscrow } from '../services/chain.js';
+import { chainRuntime } from '../services/chainRuntime.js';
+import { receiptSearchOrder, settlementChainConfig } from '../services/settlementChains.js';
 import { ethers } from 'ethers';
 import type { AuthRequest, ApiResponse, AgentCapability } from '../types.js';
 import { AGENT_CAPABILITIES } from '../types.js';
@@ -1132,23 +1133,25 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
     // then 404 a tx that is genuinely on-chain — funding the escrow but leaving
     // the task un-indexed (no rootHash/wrappedKeys meta → invisible to
     // executors). Retry across ~24s to ride out that replica lag.
-    // Poll for the receipt from both chains — the tx may target 0G or Base escrow.
-    // Try Base first (if configured) since new tasks are funded on Base, then 0G.
+    // Poll for the receipt on every chain this deployment has an escrow on,
+    // the posting chain first since new tasks are funded there.
     // For ERC-4337 user-ops the relay returns a userOperationHash, not a tx hash.
     // getTransactionReceipt(userOpHash) always returns null, so when the first
     // attempt fails we fall back to scanning recent blocks for TaskCreated events
     // matching the taskHash via eth_getLogs.
     let receipt = null;
-    let activeEscrow = escrow;
     const taskCreatedTopic = ethers.id(
       'TaskCreated(uint256,address,address,uint256,bytes32,string,string,uint256)',
     );
-    const providers = baseProvider && baseEscrow
-      ? [
-          { prov: baseProvider, esc: baseEscrow, label: 'Base' },
-          { prov: provider, esc: escrow, label: '0G' },
-        ]
-      : [{ prov: provider, esc: escrow, label: '0G' }];
+    const providers = receiptSearchOrder().flatMap((chain) => {
+      const { provider: prov, escrow: esc } = chainRuntime(chain);
+      return esc ? [{ chain, prov, esc, label: settlementChainConfig(chain).label }] : [];
+    });
+    if (providers.length === 0) {
+      throw new AppError(503, 'CHAIN_NOT_CONFIGURED', 'This backend has no settlement escrow to index tasks from');
+    }
+    // The chain whose escrow the receipt came from.
+    let active: (typeof providers)[number] | null = null;
 
     // If no receipt found, this is likely a user-op hash. Accept an
     // isUserOp flag from the frontend to skip the (always-failing)
@@ -1157,14 +1160,15 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
     if (isUserOp) {
       console.log(`[tasks/index] isUserOp=true, skipping receipt poll — scanning logs`);
     } else {
-      for (const { prov, esc } of providers) {
+      for (const source of providers) {
+        const { prov } = source;
         receipt = await prov.getTransactionReceipt(data.txHash);
         for (let i = 0; i < 3 && !receipt; i++) {
           await new Promise((r) => setTimeout(r, 3000));
           receipt = await prov.getTransactionReceipt(data.txHash);
         }
         if (receipt) {
-          activeEscrow = esc;
+          active = source;
           break;
         }
       }
@@ -1216,7 +1220,8 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
           await new Promise((r) => setTimeout(r, 5000));
         }
         const maxPages = attempt === DEEP_ATTEMPT ? DEEP_PAGES : 1;
-        for (const { prov, esc, label } of providers) {
+        for (const source of providers) {
+          const { prov, esc, label } = source;
           try {
             // Each provider is scanned against ITS OWN escrow. Previously the
             // Base escrow address was used on the 0G provider too, which could
@@ -1244,7 +1249,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
               console.log(`[tasks/index] Match found! txHash=${match.transactionHash} block=${match.blockNumber}`);
               receipt = await prov.getTransactionReceipt(match.transactionHash);
               if (receipt) {
-                activeEscrow = esc;
+                active = source;
                 console.log(`[tasks/index] Receipt confirmed at block ${receipt.blockNumber}`);
                 break;
               }
@@ -1256,7 +1261,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       }
     }
 
-    if (!receipt) {
+    if (!receipt || !active) {
       throw new AppError(
         404,
         'RECEIPT_NOT_FOUND',
@@ -1275,6 +1280,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
     // receipt that originated from some other contract — a malicious poster
     // could otherwise pass a tx hash from a different escrow with a colliding
     // taskHash.
+    const { esc: activeEscrow, chain: taskChain } = active;
     const escrowAddress = (await activeEscrow.getAddress()).toLowerCase();
     const matching = receipt.logs.filter(
       (l) => l.address.toLowerCase() === escrowAddress && l.topics[0] === taskCreatedTopic,
@@ -1324,8 +1330,6 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
         'Authenticated caller is not the on-chain agent (creator) for this task',
       );
     }
-
-    const taskChain: TaskChain = activeEscrow === baseEscrow ? 'base' : '0g';
 
     // Anyone can escrow any hash, so only the poster who indexed a task first
     // may index it again. Without this a stranger who funded the same hash
@@ -1407,9 +1411,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       // different verifier, the designated agent's settlement tx reverts
       // NotVerifier and the task sticks in awaiting_verification until
       // claimTimeout. Refuse the index up front instead.
-      const onChainVerifier = activeEscrow === baseEscrow
-        ? await escrowService.getTaskVerifierBase(Number(onChainTaskId))
-        : await escrowService.getTaskVerifier(Number(onChainTaskId));
+      const onChainVerifier = await escrowService.getTaskVerifierOn(taskChain, Number(onChainTaskId));
       if (onChainVerifier.toLowerCase() !== data.verifierAddress.toLowerCase()) {
         throw new AppError(
           409,

@@ -11,6 +11,11 @@ import { redis } from '../services/redis.js';
 
 export const submissionsRouter = Router();
 
+// The human submission flow runs on the 0G escrow only, by design: it names
+// tasks by numeric id, and ids collide across chains. Agent tasks on every
+// settlement chain go through routes/a2a.ts, which resolves each task's chain
+// from its hash.
+
 // --- Schemas ---
 const submitSchema = z.object({
   taskId: z.number().int().positive(),

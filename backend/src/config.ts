@@ -210,6 +210,11 @@ export const config = {
   // targets the Base BlindEscrow.
   baseMarketplaceSignerPrivateKey: process.env.BASE_MARKETPLACE_SIGNER_PRIVATE_KEY || '',
 
+  // Settlement chain POST /tasks funds new tasks on ('0g', 'base'). '' keeps
+  // the rule from before the setting: Base when it has an escrow, else 0G.
+  // Checked at boot (services/settlementChains.ts assertPostingChain).
+  postingChain: (process.env.POSTING_CHAIN ?? '').trim().toLowerCase(),
+
   // contracts/ deployment set holding this stack's records ('' = the default
   // records, i.e. production). Only used to print ops commands that target the
   // right escrow — see contractsEnvPrefix in services/chainNetwork.ts.

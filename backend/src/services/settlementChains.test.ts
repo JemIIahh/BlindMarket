@@ -32,6 +32,7 @@ const PRODUCTION = {
   baseUsdcAddress: USDC,
   baseMarketplaceSignerPrivateKey: '',
   deploymentSet: '',
+  postingChain: '',
 };
 
 const cfg = vi.hoisted(() => ({}) as Record<string, unknown>);
@@ -44,6 +45,9 @@ const {
   settlementChainConfigs,
   configuredChainKeys,
   assertRegistryInvariants,
+  postingChain,
+  receiptSearchOrder,
+  assertPostingChain,
 } = await import('./settlementChains.js');
 const chain = await import('./chain.js');
 const { chainRuntime } = await import('./chainRuntime.js');
@@ -68,6 +72,7 @@ describe('entries with production config', () => {
       token: { kind: 'native', address: NATIVE, unit: { symbol: '0G', decimals: 18 } },
       relayCaip2: null,
       aa: false,
+      hasTaskRegistry: true,
     });
   });
 
@@ -85,6 +90,7 @@ describe('entries with production config', () => {
       token: { kind: 'erc20', address: USDC, unit: { symbol: 'USDC', decimals: 6 } },
       relayCaip2: 'eip155:84532',
       aa: true,
+      hasTaskRegistry: false,
     });
   });
 
@@ -215,6 +221,66 @@ describe('assertRegistryInvariants', () => {
 
   it('returns no warnings for the entries production builds', () => {
     expect(assertRegistryInvariants(settlementChainConfigs())).toEqual([]);
+  });
+});
+
+describe('posting chain', () => {
+  const prod = { production: true, allowNonMainnet: false };
+
+  it('is Base when it has an escrow, else 0G, while POSTING_CHAIN is unset', () => {
+    expect(postingChain()).toBe('base');
+    cfg.baseEscrowAddress = '';
+    expect(postingChain()).toBe('0g');
+  });
+
+  it('follows POSTING_CHAIN', () => {
+    cfg.postingChain = '0g';
+    expect(postingChain()).toBe('0g');
+  });
+
+  it('throws on a POSTING_CHAIN this code does not know, at boot too', () => {
+    cfg.postingChain = 'arc';
+    expect(() => postingChain()).toThrow(/POSTING_CHAIN="arc" is not a settlement chain; use one of: 0g, base/);
+    expect(() => assertPostingChain(prod)).toThrow(/POSTING_CHAIN="arc"/);
+  });
+
+  it('looks for a receipt on the posting chain first, then the other chains with an escrow', () => {
+    expect(receiptSearchOrder()).toEqual(['base', '0g']);
+    cfg.postingChain = '0g';
+    expect(receiptSearchOrder()).toEqual(['0g', 'base']);
+    Object.assign(cfg, { postingChain: '', baseEscrowAddress: '' });
+    expect(receiptSearchOrder()).toEqual(['0g']);
+    cfg.blindEscrowAddress = NATIVE;
+    expect(receiptSearchOrder()).toEqual([]);
+  });
+
+  it('boots production as it is today: POSTING_CHAIN unset, posting on Base Sepolia', () => {
+    expect(assertPostingChain(prod)).toEqual([]);
+  });
+
+  it('refuses a POSTING_CHAIN with no escrow here', () => {
+    Object.assign(cfg, { postingChain: 'base', baseEscrowAddress: '' });
+    expect(() => assertPostingChain({ production: false, allowNonMainnet: false })).toThrow(
+      /POSTING_CHAIN=base but BASE_ESCROW_ADDRESS is unset or the zero address/,
+    );
+    Object.assign(cfg, { postingChain: '0g', blindEscrowAddress: NATIVE });
+    expect(() => assertPostingChain({ production: false, allowNonMainnet: false })).toThrow(/BLIND_ESCROW_ADDRESS/);
+  });
+
+  it('refuses a testnet POSTING_CHAIN on a production backend unless ALLOW_NONMAINNET_PROD is set', () => {
+    cfg.postingChain = 'base';
+    expect(() => assertPostingChain(prod)).toThrow(/POSTING_CHAIN=base is a testnet \(chain 84532\) on a production backend/);
+    expect(assertPostingChain({ production: true, allowNonMainnet: true })).toEqual([]);
+    expect(assertPostingChain({ production: false, allowNonMainnet: false })).toEqual([]);
+    cfg.postingChain = '0g';
+    expect(assertPostingChain(prod)).toEqual([]);
+  });
+
+  it('only warns when POSTING_CHAIN is unset and the default chain has no escrow', () => {
+    Object.assign(cfg, { baseEscrowAddress: '', blindEscrowAddress: NATIVE });
+    expect(assertPostingChain(prod)).toEqual([
+      expect.stringMatching(/POSTING_CHAIN is unset and the default, 0G, has no escrow \(BLIND_ESCROW_ADDRESS\)/),
+    ]);
   });
 });
 

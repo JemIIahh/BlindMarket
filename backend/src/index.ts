@@ -50,7 +50,13 @@ import { startExpirySweepLoop } from './services/a2aExpirySweep.js';
 import { auditCustodySealedTasks } from './services/keyCustodyService.js';
 import { isBridgeReady } from './services/a2aSettlement.js';
 import { contractsEnvPrefix } from './services/chainNetwork.js';
-import { assertRegistryInvariants, settlementChainConfig, settlementChainConfigs } from './services/settlementChains.js';
+import {
+  assertPostingChain,
+  assertRegistryInvariants,
+  postingChain,
+  settlementChainConfig,
+  settlementChainConfigs,
+} from './services/settlementChains.js';
 import { marketplaceSigner, escrow, baseMarketplaceSigner, baseEscrow } from './services/chain.js';
 import { logChainConfig } from './services/chainService.js';
 import { reconcileAgents, startZombieReaper } from './services/agentRunner.js';
@@ -60,8 +66,15 @@ assertBootConfig();
 for (const warning of assertRegistryInvariants(settlementChainConfigs())) {
   console.warn(`[boot] settlement chain registry: ${warning}`);
 }
+for (const warning of assertPostingChain({
+  production: config.nodeEnv === 'production',
+  allowNonMainnet: process.env.ALLOW_NONMAINNET_PROD === 'true',
+})) {
+  console.warn(`[boot] posting chain: ${warning}`);
+}
 
 logChainConfig();
+console.log(`[chain] New tasks post on ${settlementChainConfig(postingChain()).label}${config.postingChain ? '' : ' (default)'}`);
 
 const app = express();
 app.set('trust proxy', 1);

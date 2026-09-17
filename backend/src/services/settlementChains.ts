@@ -79,6 +79,12 @@ export interface SettlementChainConfig {
   relayCaip2: string | null;
   /** The escrow records an agent's ERC-4337 smart account as the worker, not its EOA. */
   aa: boolean;
+  /**
+   * The TaskRegistry (on 0G, keyed by 0G escrow ids) holds this chain's task
+   * metadata. Reading it with another chain's id returns the meta of an
+   * unrelated 0G task that shares the number.
+   */
+  hasTaskRegistry: boolean;
 }
 
 const ZERO_G_MAINNET_CHAIN_ID = 16661;
@@ -115,6 +121,7 @@ const BUILDERS: { readonly [K in SettlementChainKey]: () => SettlementChainConfi
       },
       relayCaip2: null,
       aa: false,
+      hasTaskRegistry: true,
     };
   },
   base: () => {
@@ -140,6 +147,7 @@ const BUILDERS: { readonly [K in SettlementChainKey]: () => SettlementChainConfi
       },
       relayCaip2: `eip155:${config.baseChainId}`,
       aa: true,
+      hasTaskRegistry: false,
     };
   },
 };
@@ -164,6 +172,62 @@ export function configuredChainKeys(): SettlementChainKey[] {
   return settlementChainConfigs()
     .filter((entry) => entry.escrowAddress !== null)
     .map((entry) => entry.key);
+}
+
+/**
+ * The chain POST /tasks funds new tasks on. POSTING_CHAIN names it; unset, it
+ * is Base when this deployment has a Base escrow and 0G otherwise, the rule
+ * from before the setting. Throws when POSTING_CHAIN names no chain this code
+ * knows, which boot refuses first (assertPostingChain).
+ */
+export function postingChain(): SettlementChainKey {
+  const named = config.postingChain;
+  if (!named) return settlementChainConfig('base').escrowAddress !== null ? 'base' : '0g';
+  if (!isSettlementChainKey(named)) {
+    throw new Error(`POSTING_CHAIN="${named}" is not a settlement chain; use one of: ${SETTLEMENT_CHAIN_KEYS.join(', ')}`);
+  }
+  return named;
+}
+
+/**
+ * The chains this deployment has an escrow on, the posting chain first. A
+ * createTask receipt is looked for in this order: new tasks are funded on the
+ * posting chain, and the poster picks the hash, so the same one can be
+ * escrowed on more than one chain.
+ */
+export function receiptSearchOrder(): SettlementChainKey[] {
+  const posting = postingChain();
+  const keys = configuredChainKeys();
+  return [...keys.filter((key) => key === posting), ...keys.filter((key) => key !== posting)];
+}
+
+/**
+ * Throws when POSTING_CHAIN can't be used: it names no known chain, or a
+ * chain with no escrow here, or a testnet chain on a production backend
+ * without ALLOW_NONMAINNET_PROD. An unset POSTING_CHAIN keeps the default and
+ * is never fatal (production posts on Base Sepolia today); if the default
+ * chain has no escrow, a warning is returned for the caller to log. Called at
+ * boot.
+ */
+export function assertPostingChain(opts: { production: boolean; allowNonMainnet: boolean }): string[] {
+  const entry = settlementChainConfig(postingChain());
+  if (!config.postingChain) {
+    return entry.escrowAddress === null
+      ? [`POSTING_CHAIN is unset and the default, ${entry.label}, has no escrow (${entry.escrowEnv}), so POST /tasks refuses new tasks`]
+      : [];
+  }
+  const problems: string[] = [];
+  if (entry.escrowAddress === null) {
+    problems.push(`POSTING_CHAIN=${entry.key} but ${entry.escrowEnv} is unset or the zero address`);
+  }
+  if (opts.production && entry.tier !== 'mainnet' && !opts.allowNonMainnet) {
+    problems.push(
+      `POSTING_CHAIN=${entry.key} is a testnet (chain ${entry.chainId}) on a production backend; ` +
+        `set ALLOW_NONMAINNET_PROD=true if this is a staging stack`,
+    );
+  }
+  if (problems.length > 0) throw new Error(`Invalid POSTING_CHAIN: ${problems.join('; ')}`);
+  return [];
 }
 
 /**
