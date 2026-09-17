@@ -254,13 +254,16 @@ describe('GET /health/bridge rotate command per deployment set', () => {
 describe('GET /health/bridge legacy keys', () => {
   const VERIFIER_BB = '0x00000000000000000000000000000000000000bb';
 
-  /** The body without the keys added for per-chain clients. */
+  /** Keys added after the MCP's contract; every other key is legacy. */
+  const ADDED_KEYS = ['chains', 'postingChain', 'postingChainError', 'settlementTier', 'tierSource'];
+
+  /** The body without those. */
   async function legacyBody() {
     const saved = cfg.deploymentSet;
     cfg.deploymentSet = '';
     try {
-      const { chains: _chains, postingChain: _postingChain, ...legacy } = await bridge();
-      return legacy;
+      const data = await bridge();
+      return Object.fromEntries(Object.entries(data).filter(([key]) => !ADDED_KEYS.includes(key)));
     } finally {
       cfg.deploymentSet = saved;
     }
@@ -392,5 +395,30 @@ describe('GET /health/bridge per-chain settlement facts', () => {
     expect(res.status).toBe(200);
     expect(res.text).not.toMatch(/secret-(og|base)-key|rpc\.example/);
     expect(res.text).not.toMatch(/rpcUrl/i);
+  });
+});
+
+describe('GET /health/bridge network tier', () => {
+  it('reads the tier back from the chains when SETTLEMENT_TIER is unset', async () => {
+    // Production today: 0G mainnet with Base Sepolia.
+    expect(await bridge()).toMatchObject({ settlementTier: 'mixed', tierSource: 'chains' });
+  });
+
+  it('reports one tier when the settling chains agree', async () => {
+    cfg.baseChainId = 8453;
+    expect(await bridge()).toMatchObject({ settlementTier: 'mainnet', tierSource: 'chains' });
+    Object.assign(cfg, { ogChainId: 16602, baseChainId: 84532 });
+    expect(await bridge()).toMatchObject({ settlementTier: 'testnet', tierSource: 'chains' });
+  });
+
+  it('ignores a chain this stack has no escrow on', async () => {
+    // 0G mainnet only: Base Sepolia is configured in code but not settled on.
+    setUp({ og: true, base: false, baseEscrow: false });
+    expect(await bridge()).toMatchObject({ settlementTier: 'mainnet', tierSource: 'chains' });
+  });
+
+  it('names SETTLEMENT_TIER as the source when it is set, even against the chains', async () => {
+    cfg.settlementTier = 'testnet';
+    expect(await bridge()).toMatchObject({ settlementTier: 'testnet', tierSource: 'SETTLEMENT_TIER' });
   });
 });

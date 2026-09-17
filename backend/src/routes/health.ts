@@ -11,6 +11,7 @@ import {
   type SettlementChainKey,
 } from '../services/settlementChains.js';
 import { chainRuntime } from '../services/chainRuntime.js';
+import type { SettlementTier } from '../services/settlementTier.js';
 import { relayChainName } from '../services/relayChains.js';
 import { escrowFingerprintError } from '../services/escrowFingerprint.js';
 import { parkedDisputeCount } from '../services/disputeKeys.js';
@@ -166,6 +167,25 @@ async function parkedDisputes(chain: SettlementChainKey): Promise<{ parkedDisput
 }
 
 /**
+ * The tier this stack is actually on, and where that came from. With no
+ * SETTLEMENT_TIER the tier is read back from the chains that settle here, so
+ * a half-mainnet stack (production today: 0G mainnet + Base Sepolia) reports
+ * 'mixed' rather than claiming either tier.
+ */
+function tierReport(
+  entries: readonly SettlementChainConfig[],
+  configuredTier: SettlementTier | null,
+): { settlementTier: SettlementTier | 'mixed' | null; tierSource: 'SETTLEMENT_TIER' | 'chains' } {
+  if (configuredTier) return { settlementTier: configuredTier, tierSource: 'SETTLEMENT_TIER' };
+  // Chains with an escrow, or every known chain when this stack settles
+  // nowhere — a chain it has no escrow on says nothing about its tier.
+  const settling = entries.filter((entry) => entry.escrowAddress !== null);
+  const tiers = new Set((settling.length > 0 ? settling : entries).map((entry) => entry.tier));
+  if (tiers.size === 0) return { settlementTier: null, tierSource: 'chains' };
+  return { settlementTier: tiers.size === 1 ? [...tiers][0] : 'mixed', tierSource: 'chains' };
+}
+
+/**
  * A chain as /health/bridge reports it. Fields are picked one by one: the
  * registry entry also holds the RPC URL, which can carry a provider key.
  */
@@ -256,6 +276,7 @@ healthRouter.get('/bridge', async (_req, res, next) => {
         base,
         chains,
         postingChain: posting,
+        ...tierReport(entries, config.settlementTier),
         ...(postingChainError ? { postingChainError } : {}),
       },
     };

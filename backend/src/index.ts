@@ -70,6 +70,7 @@ for (const warning of assertRegistryInvariants(settlementChainConfigs())) {
 for (const warning of assertPostingChain({
   production: config.nodeEnv === 'production',
   allowNonMainnet: process.env.ALLOW_NONMAINNET_PROD === 'true',
+  tier: config.settlementTier,
 })) {
   console.warn(`[boot] posting chain: ${warning}`);
 }

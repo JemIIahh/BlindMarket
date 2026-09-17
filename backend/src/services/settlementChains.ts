@@ -15,6 +15,7 @@
  * change `config` between cases.
  */
 import { config } from '../config.js';
+import { chainTier, type SettlementTier } from './settlementTier.js';
 
 export const SETTLEMENT_CHAIN_KEYS = ['0g', 'base'] as const;
 export type SettlementChainKey = (typeof SETTLEMENT_CHAIN_KEYS)[number];
@@ -93,9 +94,6 @@ export interface SettlementChainConfig {
   hasTaskRegistry: boolean;
 }
 
-const ZERO_G_MAINNET_CHAIN_ID = 16661;
-const BASE_MAINNET_CHAIN_ID = 8453;
-
 function isZeroAddress(address: string): boolean {
   return /^0x0{40}$/i.test(address);
 }
@@ -107,7 +105,9 @@ function addressOrNull(address: string | undefined): string | null {
 
 const BUILDERS: { readonly [K in SettlementChainKey]: () => SettlementChainConfig } = {
   '0g': () => {
-    const mainnet = config.ogChainId === ZERO_G_MAINNET_CHAIN_ID;
+    // Anything that is not the mainnet chain id is treated as a testnet, so a
+    // local or forked chain is never mistaken for mainnet.
+    const mainnet = chainTier('0g', config.ogChainId) === 'mainnet';
     return {
       key: '0g',
       label: '0G',
@@ -132,7 +132,7 @@ const BUILDERS: { readonly [K in SettlementChainKey]: () => SettlementChainConfi
     };
   },
   base: () => {
-    const mainnet = config.baseChainId === BASE_MAINNET_CHAIN_ID;
+    const mainnet = chainTier('base', config.baseChainId) === 'mainnet';
     return {
       key: 'base',
       label: 'Base',
@@ -211,13 +211,23 @@ export function receiptSearchOrder(): SettlementChainKey[] {
 
 /**
  * Throws when POSTING_CHAIN can't be used: it names no known chain, or a
- * chain with no escrow here, or a testnet chain on a production backend
- * without ALLOW_NONMAINNET_PROD. An unset POSTING_CHAIN keeps the default and
- * is never fatal (production posts on Base Sepolia today); if the default
- * chain has no escrow, a warning is returned for the caller to log. Called at
- * boot.
+ * chain with no escrow here, or a chain on the wrong network tier. An unset
+ * POSTING_CHAIN keeps the default and is never fatal (production posts on
+ * Base Sepolia today); if the default chain has no escrow, a warning is
+ * returned for the caller to log. Called at boot.
+ *
+ * The tier rule has two forms. With SETTLEMENT_TIER set, the posting chain
+ * must be on that tier — the stack said what it is, and posting elsewhere
+ * would escrow real money on the other network. With no tier set, the older
+ * stand-in applies: a testnet posting chain on a production backend needs
+ * ALLOW_NONMAINNET_PROD, which is how production (0G mainnet + Base Sepolia)
+ * runs until every chain shares a tier.
  */
-export function assertPostingChain(opts: { production: boolean; allowNonMainnet: boolean }): string[] {
+export function assertPostingChain(opts: {
+  production: boolean;
+  allowNonMainnet: boolean;
+  tier?: SettlementTier | null;
+}): string[] {
   const entry = settlementChainConfig(postingChain());
   if (!config.postingChain) {
     return entry.escrowAddress === null
@@ -228,7 +238,13 @@ export function assertPostingChain(opts: { production: boolean; allowNonMainnet:
   if (entry.escrowAddress === null) {
     problems.push(`POSTING_CHAIN=${entry.key} but ${entry.escrowEnv} is unset or the zero address`);
   }
-  if (opts.production && entry.tier !== 'mainnet' && !opts.allowNonMainnet) {
+  if (opts.tier) {
+    if (entry.tier !== opts.tier) {
+      problems.push(
+        `POSTING_CHAIN=${entry.key} is on ${entry.tier} (chain ${entry.chainId}) but SETTLEMENT_TIER=${opts.tier}`,
+      );
+    }
+  } else if (opts.production && entry.tier !== 'mainnet' && !opts.allowNonMainnet) {
     problems.push(
       `POSTING_CHAIN=${entry.key} is a testnet (chain ${entry.chainId}) on a production backend; ` +
         `set ALLOW_NONMAINNET_PROD=true if this is a staging stack`,

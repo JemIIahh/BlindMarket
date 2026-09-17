@@ -282,6 +282,31 @@ describe('posting chain', () => {
     expect(assertPostingChain(prod)).toEqual([]);
   });
 
+  it('refuses a posting chain that is not on the deployment tier', () => {
+    // With SETTLEMENT_TIER set, config refuses a contradicting chain id at
+    // boot, so this is the last guard rather than the first: it answers
+    // "posting where?" from the tier the stack declared, not from NODE_ENV.
+    cfg.postingChain = 'base'; // Base Sepolia in this config
+    expect(() => assertPostingChain({ production: false, allowNonMainnet: false, tier: 'mainnet' })).toThrow(
+      /POSTING_CHAIN=base is on testnet \(chain 84532\) but SETTLEMENT_TIER=mainnet/,
+    );
+    expect(assertPostingChain({ production: false, allowNonMainnet: false, tier: 'testnet' })).toEqual([]);
+  });
+
+  it('lets the tier, not NODE_ENV, decide once a tier is named', () => {
+    cfg.postingChain = 'base';
+    // A production backend on a declared testnet stack: the tier rule replaces
+    // the ALLOW_NONMAINNET_PROD stand-in, which config still applies to
+    // OG_CHAIN_ID separately.
+    expect(assertPostingChain({ production: true, allowNonMainnet: false, tier: 'testnet' })).toEqual([]);
+    // 0G is mainnet here, so a mainnet tier refuses it.
+    cfg.postingChain = '0g';
+    expect(assertPostingChain({ production: true, allowNonMainnet: false, tier: 'mainnet' })).toEqual([]);
+    expect(() => assertPostingChain({ production: false, allowNonMainnet: true, tier: 'testnet' })).toThrow(
+      /POSTING_CHAIN=0g is on mainnet \(chain 16661\) but SETTLEMENT_TIER=testnet/,
+    );
+  });
+
   it('only warns when POSTING_CHAIN is unset and the default chain has no escrow', () => {
     Object.assign(cfg, { baseEscrowAddress: '', blindEscrowAddress: NATIVE });
     expect(assertPostingChain(prod)).toEqual([

@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { CONTRACT_ADDRESSES } from './contractAddresses.js';
+import { chainTier, readSettlementTier, tierMismatches, TIER_CHAIN_IDS } from './services/settlementTier.js';
 
 function required(key: string): string {
   const value = process.env[key];
@@ -21,6 +22,18 @@ function unsetIfZero(address: string): string {
 }
 
 const IS_PROD = process.env.NODE_ENV === 'production';
+
+/**
+ * The network tier every chain follows, or null when each keeps its own
+ * default (see services/settlementTier.ts). Read here, at import, so a typo
+ * fails before anything is configured from it.
+ */
+const SETTLEMENT_TIER = readSettlementTier(process.env);
+
+/** The tier's chain id for `key`, or `fallback` when no tier is set. */
+function tierChainId(key: keyof typeof TIER_CHAIN_IDS, fallback: number): string {
+  return String(SETTLEMENT_TIER ? TIER_CHAIN_IDS[key][SETTLEMENT_TIER] : fallback);
+}
 
 /**
  * contracts/ deployment set this backend's contracts are recorded in
@@ -107,13 +120,22 @@ export function deploymentSetProblems(
 // on Base Sepolia: NODE_ENV-keyed defaults gave it Base MAINNET's USDC address
 // (no contract on Sepolia → balances read 0, burns revert) and would have put
 // CCTP on mainnet contracts/chains/Iris.
-const BASE_CHAIN_ID = parseInt(optional('BASE_CHAIN_ID', IS_PROD ? '8453' : '84532'), 10);
-const BASE_MAINNET = BASE_CHAIN_ID === 8453;
+const BASE_CHAIN_ID = parseInt(optional('BASE_CHAIN_ID', tierChainId('base', IS_PROD ? 8453 : 84532)), 10);
+const BASE_MAINNET = BASE_CHAIN_ID === TIER_CHAIN_IDS.base.mainnet;
+
+const OG_CHAIN_ID = parseInt(optional('OG_CHAIN_ID', tierChainId('0g', IS_PROD ? 16661 : 16602)), 10);
+const OG_MAINNET = OG_CHAIN_ID === TIER_CHAIN_IDS['0g'].mainnet;
 
 // Contract-address fallbacks are single-sourced from contracts/deployments/*.json
 // via contracts/scripts/sync-addresses.ts (do not hand-edit contractAddresses.ts).
 // Env vars still win at runtime; these are the no-env defaults.
-const ADDR = IS_PROD ? CONTRACT_ADDRESSES.mainnet : CONTRACT_ADDRESSES.testnet;
+// Keyed on the 0G chain this backend talks to, NOT NODE_ENV — the same rule
+// Base has followed since BASE_CHAIN_ID. NODE_ENV=production with
+// OG_CHAIN_ID=16602 used to load MAINNET addresses onto a testnet chain (and
+// a script with OG_CHAIN_ID=16661 and no NODE_ENV got testnet ones). The two
+// combinations that run — production on 16661, development on 16602 — resolve
+// exactly as before; config.legacy.test.ts pins them.
+const ADDR = OG_MAINNET ? CONTRACT_ADDRESSES.mainnet : CONTRACT_ADDRESSES.testnet;
 // Cast to a shape with optional keys: the generator now omits `blindEscrow`/
 // `agentFactory` entirely for a network that hasn't been deployed yet (e.g.
 // `base` today), so the two branches of this union no longer share the same
@@ -140,12 +162,18 @@ export const config = {
   allowInsecureLocalVerify: optional('ALLOW_INSECURE_LOCAL_VERIFY', 'false').toLowerCase() === 'true',
 
   // 0G Chain (agent infra — TaskRegistry, Reputation, INFT)
-  ogRpcUrl: optional('OG_RPC_URL', IS_PROD ? 'https://evmrpc.0g.ai' : 'https://evmrpc-testnet.0g.ai'),
-  ogChainId: parseInt(optional('OG_CHAIN_ID', IS_PROD ? '16661' : '16602'), 10),
+  ogRpcUrl: optional('OG_RPC_URL', OG_MAINNET ? 'https://evmrpc.0g.ai' : 'https://evmrpc-testnet.0g.ai'),
+  ogChainId: OG_CHAIN_ID,
 
   // Base Chain (settlement — BlindEscrow, USDC payouts)
   baseRpcUrl: optional('BASE_RPC_URL', BASE_MAINNET ? 'https://mainnet.base.org' : 'https://sepolia.base.org'),
   baseChainId: BASE_CHAIN_ID,
+  /**
+   * The tier SETTLEMENT_TIER names, or null when each chain follows its own
+   * default. Null does NOT mean the chains disagree: /health/bridge derives
+   * the tier the stack is actually on from the chain ids.
+   */
+  settlementTier: SETTLEMENT_TIER,
 
   // Contracts — 0G (agent infra)
   blindEscrowAddress: optional('BLIND_ESCROW_ADDRESS', ADDR.blindEscrow),
@@ -425,6 +453,32 @@ export function assertBootConfig(): void {
   fatals.push(
     ...deploymentSetProblems(config.deploymentSet, process.env, { og: config.ogChainId, base: config.baseChainId }),
   );
+
+  if (config.settlementTier) {
+    // An explicit tier is a promise about every chain. A chain id that breaks
+    // it would settle real money on the wrong network, so this is fatal even
+    // outside production.
+    for (const mismatch of tierMismatches(process.env, config.settlementTier)) {
+      fatals.push(`${mismatch}. Remove the override, or set SETTLEMENT_TIER to the tier you meant.`);
+    }
+    if (isProd && config.settlementTier === 'testnet' && !(process.env.PUBLIC_API_URL && process.env.PUBLIC_APP_URL)) {
+      warnings.push(
+        `NODE_ENV=production with SETTLEMENT_TIER=testnet, but PUBLIC_API_URL/PUBLIC_APP_URL are not both set — ` +
+          `this stack advertises ${config.publicApiUrl} to the agents that discover it, which is production's own address.`,
+      );
+    }
+  } else {
+    // No tier named: report it when the chains disagree. Production is mixed
+    // today (0G mainnet + Base Sepolia), so this cannot be fatal yet.
+    const ogTier = chainTier('0g', config.ogChainId);
+    const baseTier = chainTier('base', config.baseChainId);
+    if (ogTier && baseTier && ogTier !== baseTier) {
+      warnings.push(
+        `0G is on ${ogTier} (${config.ogChainId}) and Base is on ${baseTier} (${config.baseChainId}) — ` +
+          `this stack is half mainnet, half testnet. Set SETTLEMENT_TIER once both are on the same tier.`,
+      );
+    }
+  }
 
   if (isProd) {
     // JWT_SECRET signs the 365d agent platform tokens (agentRunner). Empty in
