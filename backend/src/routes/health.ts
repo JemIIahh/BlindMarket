@@ -4,7 +4,14 @@ import type { ApiResponse } from '../types.js';
 import { escrow, marketplaceSigner, provider, baseEscrow, baseMarketplaceSigner, baseProvider } from '../services/chain.js';
 import { isBridgeReady } from '../services/a2aSettlement.js';
 import { chainNetwork, contractsEnvPrefix } from '../services/chainNetwork.js';
-import { settlementChainConfig, type SettlementChainKey } from '../services/settlementChains.js';
+import {
+  postingChain,
+  settlementChainConfigs,
+  type SettlementChainConfig,
+  type SettlementChainKey,
+} from '../services/settlementChains.js';
+import { chainRuntime } from '../services/chainRuntime.js';
+import { relayChainName } from '../services/relayChains.js';
 import { escrowFingerprintError } from '../services/escrowFingerprint.js';
 import { parkedDisputeCount } from '../services/disputeKeys.js';
 import { config } from '../config.js';
@@ -158,73 +165,88 @@ async function parkedDisputes(chain: SettlementChainKey): Promise<{ parkedDisput
   }
 }
 
+/**
+ * A chain as /health/bridge reports it. Fields are picked one by one: the
+ * registry entry also holds the RPC URL, which can carry a provider key.
+ */
+async function chainReport(
+  entry: SettlementChainConfig,
+  configured: boolean,
+  reason: string | null,
+  posting: SettlementChainKey,
+): Promise<Record<string, unknown>> {
+  const { key, chainId, tier, escrowAddress, token, gas } = entry;
+  return {
+    chain: key,
+    configured,
+    chainId,
+    tier,
+    escrowAddress,
+    token: { kind: token.kind, address: token.address, symbol: token.unit.symbol, decimals: token.unit.decimals },
+    relayChain: relayChainName(entry),
+    gasSymbol: gas.symbol,
+    // POST /tasks builds new tasks here: the posting chain, with an escrow
+    // and a settlement token. It does not need the marketplace signer, which
+    // `configured` reports.
+    postable: key === posting && escrowAddress !== null && token.address !== null,
+    ...(reason ? { reason } : {}),
+    ...indexerError(key),
+    ...(await parkedDisputes(key)),
+  };
+}
+
 // GET /api/v1/health/bridge — surfaces the A2A settlement bridge config
 // without needing backend log access. Each settlement chain is reported on its
 // own: a task lives on exactly one chain, so one chain being ready is enough to
 // settle that chain's tasks. The 0G fields stay at the top level and Base under
-// `base` (null unless Base can settle), which the MCP server reads; `chains`
-// lists every chain with its tier. `reason` names what's missing for any chain
-// that has only half its config, so it can appear next to `configured: true`
-// when another chain is ready. A `false` for `verifierMatches` is the root
-// cause of every "task accepted but never completes" report; the response
-// includes the exact rotate-verifier command to run from contracts/.
+// `base` (null unless Base can settle), which the MCP server reads, so their
+// shape must not change. `chains` lists every chain the registry knows, with
+// its tier, settlement token, the `chain` name the relay takes for it, and
+// whether POST /tasks posts on it; `postingChain` names that chain. `reason`
+// names what's missing for any chain that has only half its config, so it can
+// appear next to `configured: true` when another chain is ready. A `false` for
+// `verifierMatches` is the root cause of every "task accepted but never
+// completes" report; the response includes the exact rotate-verifier command
+// to run from contracts/.
 healthRouter.get('/bridge', async (_req, res, next) => {
   try {
-    // isBridgeReady already implies these; checked again because the blocks
-    // below dereference them.
-    const ogReady = isBridgeReady('0g') && !!marketplaceSigner;
-    const baseReady = isBridgeReady('base') && !!baseEscrow && !!baseMarketplaceSigner;
-    const [og, base, ogParked, baseParked] = await Promise.all([
-      ogReady ? zeroGBridge() : null,
-      baseReady ? baseBridge() : null,
-      parkedDisputes('0g'),
-      parkedDisputes('base'),
+    const entries = settlementChainConfigs();
+    const posting = postingChain();
+    const readiness = entries.map((entry) => {
+      const { escrow: chainEscrow, marketplaceSigner: signer } = chainRuntime(entry.key);
+      // isBridgeReady already implies the escrow and signer; checked again
+      // because the 0G and Base blocks below dereference them.
+      const configured = isBridgeReady(entry.key) && !!chainEscrow && !!signer;
+      const reason = notReadyReason(configured, entry.escrowAddress, entry.escrowEnv, !!signer, entry.signerEnv);
+      return { entry, configured, reason };
+    });
+    const isReady = (key: SettlementChainKey) => readiness.some((r) => r.entry.key === key && r.configured);
+
+    const [og, base, chains] = await Promise.all([
+      isReady('0g') ? zeroGBridge() : null,
+      isReady('base') ? baseBridge() : null,
+      Promise.all(readiness.map(({ entry, configured, reason }) => chainReport(entry, configured, reason, posting))),
     ]);
 
-    const ogChain = settlementChainConfig('0g');
-    const baseChain = settlementChainConfig('base');
-    const ogEscrow = escrowOrNull(config.blindEscrowAddress);
-    const baseEscrowAddress = escrowOrNull(config.baseEscrowAddress);
-    const ogReason = notReadyReason(ogReady, ogEscrow, ogChain.escrowEnv, !!marketplaceSigner, ogChain.signerEnv);
-    const baseReason = notReadyReason(baseReady, baseEscrowAddress, baseChain.escrowEnv, !!baseMarketplaceSigner, baseChain.signerEnv);
-    const reasons = [ogReason && `${ogChain.label}: ${ogReason}`, baseReason && `${baseChain.label}: ${baseReason}`].filter(Boolean);
-    if (!ogReady && !baseReady && reasons.length === 0) {
+    const reasons = readiness.flatMap(({ entry, reason }) => (reason ? [`${entry.label}: ${reason}`] : []));
+    const configured = readiness.some((r) => r.configured);
+    if (!configured && reasons.length === 0) {
       reasons.push('no settlement chain has both an escrow and a marketplace signer');
     }
 
     const body: ApiResponse = {
       success: true,
       data: {
-        configured: ogReady || baseReady,
+        configured,
         ...(reasons.length > 0 ? { reason: reasons.join('; ') } : {}),
         // Reported even when 0G can't settle, so a client can still check
         // that a 0G transaction targets this escrow.
-        escrowAddress: ogEscrow,
+        escrowAddress: escrowOrNull(config.blindEscrowAddress),
         chainId: config.ogChainId,
         ...(og ?? {}),
         base,
-        chains: [
-          {
-            chain: '0g',
-            configured: ogReady,
-            chainId: config.ogChainId,
-            tier: ogChain.tier,
-            escrowAddress: ogEscrow,
-            ...(ogReason ? { reason: ogReason } : {}),
-            ...indexerError('0g'),
-            ...ogParked,
-          },
-          {
-            chain: 'base',
-            configured: baseReady,
-            chainId: config.baseChainId,
-            tier: baseChain.tier,
-            escrowAddress: baseEscrowAddress,
-            ...(baseReason ? { reason: baseReason } : {}),
-            ...indexerError('base'),
-            ...baseParked,
-          },
-        ],
+        chains,
+        postingChain: posting,
       },
     };
     res.json(body);

@@ -25,7 +25,7 @@ import type { InstalledSkill, AgentCapability, LLMProvider } from '../types.js';
 import { redis } from '../services/redis.js';
 import { ethers } from 'ethers';
 import { chainRuntime } from '../services/chainRuntime.js';
-import { SETTLEMENT_CHAIN_KEYS, settlementChainConfig, type SettlementChainKey } from '../services/settlementChains.js';
+import { settlementChainConfigs, type SettlementChainKey } from '../services/settlementChains.js';
 import { config } from '../config.js';
 import { claimDeployCredit, restoreDeployCredit } from '../services/agentFactoryListener.js';
 import { discoverModels, ProviderModelsError } from '../services/providerModels.js';
@@ -87,23 +87,15 @@ const ERC20_TRANSFER_ABI = [
   'function decimals() view returns (uint8)',
 ];
 
-// Per-chain config for the withdraw endpoint. An agent's wallet is a plain
-// EOA — the same address is valid on 0G and Base — so it can hold a balance
-// on either (or both) depending on which chain its tasks settled on.
-// The gas numbers are the registry's gas.withdrawReserveWei/withdrawMinWei
-// (services/settlementChains.ts). Base's are conservative starting estimates
-// (ETH is priced very differently from the 0G token, and these haven't been
-// calibrated against real observed Base gas costs yet) — same spirit as
-// MAINNET-CHECKLIST.md §3.2's own admission that its 0G gas estimate needs
-// recalibration. Recheck before Base mainnet launch.
-function withdrawChain(chain: SettlementChainKey) {
-  const { gas } = settlementChainConfig(chain);
-  return {
-    rpc: chainRuntime(chain).provider,
-    nativeLabel: gas.symbol,
-    gasReserve: gas.withdrawReserveWei,
-    nativeGasMin: gas.withdrawMinWei,
-  };
+/**
+ * A native-coin amount in a token's own units, rounded up. The native coin
+ * has 18 decimals. Used where the gas coin and the settlement token are one
+ * asset (Arc's USDC: 18 decimals natively, 6 through its ERC-20).
+ */
+export function nativeWeiToTokenUnits(wei: bigint, decimals: number): bigint {
+  if (decimals >= 18) return wei * 10n ** BigInt(decimals - 18);
+  const scale = 10n ** BigInt(18 - decimals);
+  return (wei + scale - 1n) / scale;
 }
 
 export const agentsRouter = Router();
@@ -645,14 +637,34 @@ agentsRouter.post('/:id/withdraw', requireAuth, async (req: AuthRequest, res) =>
 
     // Sequential, not parallel — simpler to reason about and log than two
     // in-flight sweep txs interleaving (nonce spaces are independent per
-    // chain so parallel would be safe too, just noisier). Registry order:
-    // 0G, then Base.
-    for (const chain of SETTLEMENT_CHAIN_KEYS) {
-      const { rpc, nativeLabel, gasReserve, nativeGasMin } = withdrawChain(chain);
+    // chain so parallel would be safe too, just noisier). Every chain the
+    // registry knows, in its order (0G, then Base), including one this
+    // deployment has no escrow on: the wallet can still hold funds there.
+    //
+    // The gas numbers are the registry's (services/settlementChains.ts).
+    // Base's are conservative starting estimates (ETH is priced very
+    // differently from the 0G token, and these haven't been calibrated
+    // against real observed Base gas costs yet) — same spirit as
+    // MAINNET-CHECKLIST.md §3.2's own admission that its 0G gas estimate
+    // needs recalibration. Recheck before Base mainnet launch.
+    for (const { key: chain, token: settlementToken, gas } of settlementChainConfigs()) {
+      const rpc = chainRuntime(chain).provider;
+      const nativeLabel = gas.symbol;
       const wallet = new ethers.Wallet(pk, rpc);
 
       if (isNative) {
         // ── Native sweep (0G token or ETH depending on chain) ──────────
+        // Where the gas coin is the settlement token, that asset is withdrawn
+        // one way only: through its ERC-20, in the token's own decimals,
+        // which leaves the gas reserve behind (below).
+        if (gas.nativeIsSettlementToken) {
+          skipped.push({
+            chain,
+            reason: `${nativeLabel} is this chain's settlement token; withdraw it with tokenAddress ${settlementToken.address ?? '(not configured)'}`,
+          });
+          continue;
+        }
+        const gasReserve = gas.withdrawReserveWei;
         const balance = await rpc.getBalance(wallet.address);
         if (balance <= gasReserve) {
           skipped.push({ chain, reason: `balance (${ethers.formatEther(balance)} ${nativeLabel}) is below the gas reserve required to sweep` });
@@ -673,8 +685,8 @@ agentsRouter.post('/:id/withdraw', requireAuth, async (req: AuthRequest, res) =>
         // ── ERC20 token sweep ──────────────────────────────────────────
         const tokenAddress = rawToken;
         const nativeBalance = await rpc.getBalance(wallet.address);
-        if (nativeBalance < nativeGasMin) {
-          skipped.push({ chain, reason: `insufficient native ${nativeLabel} to pay for the transfer tx (have ${ethers.formatEther(nativeBalance)}, need ≥${ethers.formatEther(nativeGasMin)}). Top up gas first.` });
+        if (nativeBalance < gas.withdrawMinWei) {
+          skipped.push({ chain, reason: `insufficient native ${nativeLabel} to pay for the transfer tx (have ${ethers.formatEther(nativeBalance)}, need ≥${ethers.formatEther(gas.withdrawMinWei)}). Top up gas first.` });
           continue;
         }
 
@@ -690,20 +702,31 @@ agentsRouter.post('/:id/withdraw', requireAuth, async (req: AuthRequest, res) =>
           skipped.push({ chain, reason: 'no balance of that token to withdraw on this chain' });
           continue;
         }
+        // When this token is also the gas coin, sweeping all of it would
+        // leave nothing to pay for this transfer or the next one.
+        const isGasCoin = gas.nativeIsSettlementToken
+          && settlementToken.address !== null
+          && settlementToken.address.toLowerCase() === tokenAddress.toLowerCase();
+        const keep = isGasCoin ? nativeWeiToTokenUnits(gas.withdrawReserveWei, settlementToken.unit.decimals) : 0n;
+        if (balance <= keep) {
+          skipped.push({ chain, reason: `balance is below the ${nativeLabel} gas reserve this chain keeps back` });
+          continue;
+        }
+        const amount = balance - keep;
 
-        const tx = await token.transfer(agent.ownerAddress, balance);
+        const tx = await token.transfer(agent.ownerAddress, amount);
         const receipt = await tx.wait();
 
         let decimals = 6;
         try { decimals = Number(await token.decimals()); } catch {}
-        const whole = balance / 10n ** BigInt(decimals);
-        const frac = (balance % 10n ** BigInt(decimals)).toString().padStart(decimals, '0');
+        const whole = amount / 10n ** BigInt(decimals);
+        const frac = (amount % 10n ** BigInt(decimals)).toString().padStart(decimals, '0');
 
         swept.push({
           chain,
           txHash: tx.hash,
           asset: tokenAddress,
-          amountRaw: balance.toString(),
+          amountRaw: amount.toString(),
           amountFormatted: `${whole}.${frac}`,
           decimals,
           recipient: agent.ownerAddress,

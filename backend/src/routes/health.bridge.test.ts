@@ -60,6 +60,9 @@ const { healthRouter } = await import('./health.js');
 const SIGNER = '0x00000000000000000000000000000000000000aa';
 const OG_ESCROW = '0x3d0374963DaaD43e31d42373eb11156A8e8ce2Ff';
 const BASE_ESCROW = '0xCca5ab873158b888158AD9Dc36fb4Ee683eFbEBf';
+const USDC = '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
+const OG_TOKEN = { kind: 'native', address: '0x0000000000000000000000000000000000000000', symbol: '0G', decimals: 18 };
+const BASE_TOKEN = { kind: 'erc20', address: USDC, symbol: 'USDC', decimals: 6 };
 
 const app = express();
 app.use('/health', healthRouter);
@@ -76,6 +79,8 @@ function setUp(opts: { og: boolean; base: boolean; baseEscrow?: boolean; baseSig
     blindEscrowAddress: OG_ESCROW,
     baseChainId: 84532,
     baseEscrowAddress: hasBaseEscrow ? BASE_ESCROW : '',
+    baseUsdcAddress: USDC,
+    postingChain: '',
   });
 }
 
@@ -105,8 +110,14 @@ describe('GET /health/bridge', () => {
     });
     expect(data).not.toHaveProperty('reason');
     expect(data.chains).toEqual([
-      { chain: '0g', configured: true, chainId: 16661, tier: 'mainnet', escrowAddress: OG_ESCROW },
-      { chain: 'base', configured: true, chainId: 84532, tier: 'testnet', escrowAddress: BASE_ESCROW },
+      {
+        chain: '0g', configured: true, chainId: 16661, tier: 'mainnet', escrowAddress: OG_ESCROW,
+        token: OG_TOKEN, relayChain: null, gasSymbol: '0G', postable: false,
+      },
+      {
+        chain: 'base', configured: true, chainId: 84532, tier: 'testnet', escrowAddress: BASE_ESCROW,
+        token: BASE_TOKEN, relayChain: 'base-sepolia', gasSymbol: 'ETH', postable: true,
+      },
     ]);
   });
 
@@ -157,7 +168,10 @@ describe('GET /health/bridge', () => {
     const data = await bridge();
     expect(data).toMatchObject({ configured: true, base: null });
     expect(data).not.toHaveProperty('reason');
-    expect(data.chains[1]).toEqual({ chain: 'base', configured: false, chainId: 84532, tier: 'testnet', escrowAddress: null });
+    expect(data.chains[1]).toEqual({
+      chain: 'base', configured: false, chainId: 84532, tier: 'testnet', escrowAddress: null,
+      token: BASE_TOKEN, relayChain: 'base-sepolia', gasSymbol: 'ETH', postable: false,
+    });
   });
 
   it('names the missing Base escrow when only its signer is set', async () => {
@@ -232,5 +246,136 @@ describe('GET /health/bridge rotate command per deployment set', () => {
       `cd contracts && DEPLOYMENT_SET=staging EXPECTED_ESCROW=${BASE_ESCROW} ` +
         `MARKETPLACE_SIGNER_ADDRESS=${SIGNER} npx hardhat run scripts/rotate-verifier.ts --network base-sepolia`,
     );
+  });
+});
+
+// The MCP reads the top-level 0G fields and `base`. These pin every one of
+// them, values and key order, so the per-chain additions can't move them.
+describe('GET /health/bridge legacy keys', () => {
+  const VERIFIER_BB = '0x00000000000000000000000000000000000000bb';
+
+  /** The body without the keys added for per-chain clients. */
+  async function legacyBody() {
+    const saved = cfg.deploymentSet;
+    cfg.deploymentSet = '';
+    try {
+      const { chains: _chains, postingChain: _postingChain, ...legacy } = await bridge();
+      return legacy;
+    } finally {
+      cfg.deploymentSet = saved;
+    }
+  }
+
+  function expectExactly(actual: Record<string, unknown>, expected: Record<string, unknown>) {
+    expect(actual).toEqual(expected);
+    expect(JSON.stringify(actual)).toBe(JSON.stringify(expected));
+  }
+
+  it('are unchanged when both chains are ready', async () => {
+    expectExactly(await legacyBody(), {
+      configured: true,
+      escrowAddress: OG_ESCROW,
+      chainId: 16661,
+      signerAddress: SIGNER,
+      onChainVerifier: SIGNER,
+      verifierMatches: true,
+      escrowReadError: null,
+      signerBalanceOg: '1.0',
+      signerGasLow: false,
+      signerBalanceError: null,
+      rotateCommand: null,
+      base: {
+        configured: true,
+        signerAddress: SIGNER,
+        escrowAddress: BASE_ESCROW,
+        chainId: 84532,
+        onChainVerifier: VERIFIER_BB,
+        verifierMatches: false,
+        escrowReadError: null,
+        signerUsdcBalance: '5000000',
+        signerEthBalance: '0.01',
+        signerEthLow: false,
+        signerBalanceError: null,
+        rotateCommand:
+          `cd contracts && EXPECTED_ESCROW=${BASE_ESCROW} ` +
+          `MARKETPLACE_SIGNER_ADDRESS=${SIGNER} npx hardhat run scripts/rotate-verifier.ts --network base-sepolia`,
+      },
+    });
+  });
+
+  it('are unchanged when neither chain can settle', async () => {
+    setUp({ og: false, base: false });
+    expectExactly(await legacyBody(), {
+      configured: false,
+      reason: '0G: MARKETPLACE_SIGNER_PRIVATE_KEY not set; Base: BASE_MARKETPLACE_SIGNER_PRIVATE_KEY not set',
+      escrowAddress: OG_ESCROW,
+      chainId: 16661,
+      base: null,
+    });
+  });
+
+  it('are unchanged on a stack with no Base escrow', async () => {
+    setUp({ og: true, base: false, baseEscrow: false });
+    expectExactly(await legacyBody(), {
+      configured: true,
+      escrowAddress: OG_ESCROW,
+      chainId: 16661,
+      signerAddress: SIGNER,
+      onChainVerifier: SIGNER,
+      verifierMatches: true,
+      escrowReadError: null,
+      signerBalanceOg: '1.0',
+      signerGasLow: false,
+      signerBalanceError: null,
+      rotateCommand: null,
+      base: null,
+    });
+  });
+});
+
+describe('GET /health/bridge per-chain settlement facts', () => {
+  it('names the posting chain: Base when it has an escrow, else 0G', async () => {
+    expect((await bridge()).postingChain).toBe('base');
+    setUp({ og: true, base: false, baseEscrow: false });
+    const data = await bridge();
+    expect(data.postingChain).toBe('0g');
+    expect(data.chains.map((c: { postable: boolean }) => c.postable)).toEqual([true, false]);
+  });
+
+  it('follows POSTING_CHAIN', async () => {
+    cfg.postingChain = '0g';
+    const data = await bridge();
+    expect(data.postingChain).toBe('0g');
+    expect(data.chains.map((c: { postable: boolean }) => c.postable)).toEqual([true, false]);
+  });
+
+  it('is not postable on a chain whose settlement token is unset, as POST /tasks refuses it', async () => {
+    cfg.baseUsdcAddress = '';
+    const data = await bridge();
+    expect(data.postingChain).toBe('base');
+    expect(data.chains[1]).toMatchObject({ token: { ...BASE_TOKEN, address: null }, postable: false });
+  });
+
+  it('is postable whether or not the chain can settle yet', async () => {
+    setUp({ og: true, base: false });
+    const data = await bridge();
+    expect(data.chains[1]).toMatchObject({ configured: false, postable: true });
+  });
+
+  it("names Base mainnet's relay chain on a Base mainnet stack", async () => {
+    cfg.baseChainId = 8453;
+    const data = await bridge();
+    expect(data.chains[1]).toMatchObject({ chainId: 8453, tier: 'mainnet', relayChain: 'base-mainnet' });
+  });
+
+  it('never returns an RPC URL', async () => {
+    Object.assign(cfg, {
+      ogRpcUrl: 'https://og-rpc.example/secret-og-key',
+      baseRpcUrl: 'https://base-rpc.example/v2/secret-base-key',
+    });
+    const res = await request(app).get('/health/bridge');
+    expect(res.status).toBe(200);
+    expect(res.text).not.toMatch(/secret-(og|base)-key|rpc\.example/);
+    expect(res.text).not.toMatch(/rpcUrl/i);
   });
 });

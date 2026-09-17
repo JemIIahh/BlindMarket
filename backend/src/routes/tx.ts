@@ -19,6 +19,7 @@ import { createUserRateLimiter } from '../middleware/rateLimit.js';
 import type { AuthRequest, AuthUser } from '../types.js';
 import { config } from '../config.js';
 import { AppError } from '../middleware/errorHandler.js';
+import { relayChainTable } from '../services/relayChains.js';
 
 /** Privy eth_sendTransaction RPC response — fields not in WalletRpcResponse. */
 interface PrivySendTxResult {
@@ -35,12 +36,6 @@ export const txRouter = Router();
  *  never has to guess — and used by the error mapping below, because the same
  *  Privy failure means different things on different rungs. */
 type GasMode = 'user-pays' | 'app-pays' | 'wallet-pays';
-
-const CHAIN_CAIP2: Record<string, string> = {
-  base: 'eip155:8453',
-  'base-mainnet': 'eip155:8453',
-  'base-sepolia': 'eip155:84532',
-};
 
 let privyClient: PrivyClient | null = null;
 function getPrivyClient(): PrivyClient {
@@ -176,9 +171,10 @@ txRouter.post('/relay-tx', requireAuth, relayLimiter, async (req: AuthRequest, r
       );
     }
 
-    const caip2 = CHAIN_CAIP2[body.chain];
+    const relayChains = relayChainTable();
+    const caip2 = relayChains.get(body.chain);
     if (!caip2) {
-      throw new AppError(400, 'INVALID_CHAIN', `Unsupported chain "${body.chain}". Supported: ${Object.keys(CHAIN_CAIP2).join(', ')}`);
+      throw new AppError(400, 'INVALID_CHAIN', `Unsupported chain "${body.chain}". Supported: ${[...relayChains.keys()].join(', ')}`);
     }
 
     const privy = getPrivyClient();

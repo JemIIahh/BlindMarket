@@ -35,6 +35,11 @@ export interface SettlementChainConfig {
   /** The chain's name in logs and messages. */
   label: string;
   chainId: number;
+  /**
+   * The JSON-RPC endpoint this backend reads the chain through. A provider
+   * URL can carry an API key: it may be logged, but no route returns it.
+   */
+  rpcUrl: string;
   /** Each chain has its own tier: production pairs 0G mainnet with Base Sepolia. */
   tier: 'mainnet' | 'testnet';
   /** The contracts/ hardhat network that operates on this chain. */
@@ -70,11 +75,12 @@ export interface SettlementChainConfig {
   };
   /**
    * CAIP-2 id of this chain for the Privy relay, or null when the relay does
-   * not serve the chain. Nothing reads it yet. routes/tx.ts keeps its own
-   * table keyed by the `chain` string a client sends, and there 'base' means
-   * Base mainnet (eip155:8453) whatever this deployment runs on, while this
-   * field follows BASE_CHAIN_ID (eip155:84532 in production today). Wiring
-   * the relay to this field changes which chain a 'base' request signs on.
+   * not serve the chain. The relay (relayChains.ts) is keyed by the `chain`
+   * string a client sends, and its fixed names win: there 'base' means Base
+   * mainnet (eip155:8453) whatever this deployment runs on, while this field
+   * follows BASE_CHAIN_ID (eip155:84532 in production today). This id only
+   * adds a chain's own key where no fixed name has it, and picks the name
+   * /health/bridge tells clients to send.
    */
   relayCaip2: string | null;
   /** The escrow records an agent's ERC-4337 smart account as the worker, not its EOA. */
@@ -106,6 +112,7 @@ const BUILDERS: { readonly [K in SettlementChainKey]: () => SettlementChainConfi
       key: '0g',
       label: '0G',
       chainId: config.ogChainId,
+      rpcUrl: config.ogRpcUrl,
       tier: mainnet ? 'mainnet' : 'testnet',
       hardhatNetwork: mainnet ? '0g-mainnet' : '0g-testnet',
       escrowAddress: addressOrNull(config.blindEscrowAddress),
@@ -130,6 +137,7 @@ const BUILDERS: { readonly [K in SettlementChainKey]: () => SettlementChainConfi
       key: 'base',
       label: 'Base',
       chainId: config.baseChainId,
+      rpcUrl: config.baseRpcUrl,
       tier: mainnet ? 'mainnet' : 'testnet',
       hardhatNetwork: mainnet ? 'base' : 'base-sepolia',
       escrowAddress: addressOrNull(config.baseEscrowAddress),

@@ -121,6 +121,12 @@ describe('entries with production config', () => {
     expect(settlementChainConfig('base')).toMatchObject({ tier: 'mainnet', hardhatNetwork: 'base', relayCaip2: 'eip155:8453' });
   });
 
+  it("reads each chain's RPC endpoint from its own setting", () => {
+    Object.assign(cfg, { ogRpcUrl: 'https://og.example/rpc', baseRpcUrl: 'https://base.example/v2/key' });
+    expect(settlementChainConfig('0g').rpcUrl).toBe('https://og.example/rpc');
+    expect(settlementChainConfig('base').rpcUrl).toBe('https://base.example/v2/key');
+  });
+
   it('throws on a chain it does not know', () => {
     expect(() => settlementChainConfig('arc' as never)).toThrow(/unknown settlement chain arc/);
   });

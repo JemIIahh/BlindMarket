@@ -57,7 +57,7 @@ import {
   settlementChainConfig,
   settlementChainConfigs,
 } from './services/settlementChains.js';
-import { marketplaceSigner, escrow, baseMarketplaceSigner, baseEscrow } from './services/chain.js';
+import { chainRuntime } from './services/chainRuntime.js';
 import { assertPostingUnitMatchesPricing } from './services/settlementUnits.js';
 import { logChainConfig } from './services/chainService.js';
 import { reconcileAgents, startZombieReaper } from './services/agentRunner.js';
@@ -207,15 +207,23 @@ httpServer.listen(config.port, () => {
   // Visibility into whether the A2A settlement bridge will actually fire
   // when an agent accepts/submits, per settlement chain: a chain with no
   // marketplace signer is off; when on, log the signer address so it's clear
-  // which key is signing.
-  // escrowAddress is the raw setting, zero address included, as these
-  // messages have always printed it.
-  const bridgeChains = [
-    { chain: '0g' as const, escrow, signer: marketplaceSigner, escrowAddress: config.blindEscrowAddress },
-    { chain: 'base' as const, escrow: baseEscrow, signer: baseMarketplaceSigner, escrowAddress: config.baseEscrowAddress },
-  ].map((bridge) => {
-    const { label, escrowEnv, signerEnv, hardhatNetwork } = settlementChainConfig(bridge.chain);
-    return { ...bridge, label, escrowEnv, signerEnv, network: hardhatNetwork };
+  // which key is signing. Every chain the registry knows is checked, so a
+  // signer set without its escrow is reported too.
+  const bridgeChains = settlementChainConfigs().map(({ key, label, escrowEnv, signerEnv, hardhatNetwork }) => {
+    const { escrow: chainEscrow, marketplaceSigner: signer } = chainRuntime(key);
+    return {
+      chain: key,
+      escrow: chainEscrow,
+      signer,
+      // The address the escrow contract was built with, zero address
+      // included (0G builds one whatever its setting), as these messages
+      // have always printed it. Empty when there is no contract.
+      escrowAddress: chainEscrow ? String(chainEscrow.target) : '',
+      label,
+      escrowEnv,
+      signerEnv,
+      network: hardhatNetwork,
+    };
   });
   for (const bridge of bridgeChains) {
     const { label, signer, escrow: chainEscrow } = bridge;
