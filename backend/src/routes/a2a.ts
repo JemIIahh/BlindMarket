@@ -1325,13 +1325,40 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       );
     }
 
+    const taskChain: TaskChain = activeEscrow === baseEscrow ? 'base' : '0g';
+
+    // Anyone can escrow any hash, so only the poster who indexed a task first
+    // may index it again. Without this a stranger who funded the same hash
+    // could re-index the task as theirs, or, with the chain lock below, lock
+    // the real poster out. Checked before anything is written.
+    const existingMeta = await a2aStore.getMeta(taskHash);
+    const callerAddresses = new Set([...userAddresses, address.toLowerCase()]);
+    if (existingMeta?.posterAddress && !callerAddresses.has(existingMeta.posterAddress.toLowerCase())) {
+      throw new AppError(
+        409,
+        'TASK_HASH_TAKEN',
+        'Another poster already indexed a task with this hash — cancel your escrow to get it back, and post with a new brief',
+      );
+    }
+
+    // A task stays on the chain it was first indexed on. The poster picks the
+    // hash, so the same one can be escrowed on both chains; re-indexing it from
+    // the other chain's receipt would move the task (and its settlement) there.
+    // Checked before seedTaskId, so a refused re-index writes nothing.
+    if (existingMeta?.chain && existingMeta.chain !== taskChain) {
+      throw new AppError(
+        409,
+        'CHAIN_IMMUTABLE',
+        `This task was indexed on ${existingMeta.chain}; a receipt from ${taskChain} can't re-index it — cancel the ${taskChain} escrow to get it back`,
+      );
+    }
+
     // Only index tasks escrowed in the token this chain settles in, so every
     // payout can be booked in a known unit. Refused before anything is
     // written: an unindexed task is never offered, and the poster can still
     // cancel it for a refund. (A native-0G task on a deployment that prices in
     // USDC passes here; the "Use now" check below refuses it, but agent reward
     // floors still compare its 18-decimal amount with USDC units.)
-    const taskChain: TaskChain = activeEscrow === baseEscrow ? 'base' : '0g';
     const taskUnit = payoutCurrency(taskChain, onChainToken);
     if (!taskUnit) {
       throw new AppError(
@@ -1344,9 +1371,9 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
     // All checks passed — eagerly seed the indexer mapping so /submit and
     // /accept resolve the hash immediately without waiting for the
     // forward-only event poller to catch up. Seeded in the namespace of the
-    // chain that actually holds the task: resolveTaskByHash reads the Base
-    // namespace first, so seeding a Base task under the 0G keys made it
-    // resolve as 0G until the Base poller caught up (see taskChain.seedTaskId).
+    // chain that actually holds the task, which is the only namespace
+    // resolveTaskByHash searches once meta.chain is written below (see
+    // taskChain.seedTaskId).
     await seedTaskId(taskChain, taskHash, onChainTaskId);
 
     const wrappedKeysNormalized = data.wrappedKeys
@@ -1396,12 +1423,6 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
 
     const requiredCaps = (data.requiredCapabilities ?? []) as AgentCapability[];
 
-    // Idempotent re-index: preserve wrappedKeys slices added since the first
-    // index (via /wrap-to or /accept self-heal) instead of overwriting them with
-    // only the original post-time set — otherwise a re-index strands late joiners
-    // back on NEEDS_WRAP. Existing meta (a superset) wins on key collisions.
-    const existingMeta = await a2aStore.getMeta(taskHash);
-
     // ── Per-task privacy ────────────────────────────────────────────────────
     // A PUBLIC task must carry ZERO key material: its blob is plaintext, so a
     // wrapped key or custody blob on the row would be incoherent (and would
@@ -1424,6 +1445,12 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
     if (existingMeta && (existingMeta.privacy === 'public') !== isPublic) {
       throw new AppError(409, 'PRIVACY_IMMUTABLE', 'A task\'s privacy mode cannot be changed after it is first indexed');
     }
+    // Idempotent re-index: preserve wrappedKeys slices added since the first
+    // index (via /wrap-to or /accept self-heal) instead of overwriting them with
+    // only the original post-time set — otherwise a re-index strands late joiners
+    // back on NEEDS_WRAP. Existing meta (a superset) wins on key collisions.
+    // The meta is read again just before it is written (below), so slices
+    // merged while this request ran are kept too.
     const mergedWrappedKeys = (existingMeta?.wrappedKeys || wrappedKeysNormalized)
       ? { ...(wrappedKeysNormalized ?? {}), ...(existingMeta?.wrappedKeys ?? {}) }
       : undefined;
@@ -1484,6 +1511,10 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       }
     }
 
+    const latestWrappedKeys = existingMeta ? (await a2aStore.getMeta(taskHash))?.wrappedKeys : undefined;
+    const finalWrappedKeys = latestWrappedKeys
+      ? { ...(mergedWrappedKeys ?? {}), ...latestWrappedKeys }
+      : mergedWrappedKeys;
     await a2aStore.setMeta({
       taskId: taskHash,
       targetExecutorType: 'agent',
@@ -1494,7 +1525,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       chain: taskChain,
       verifierAddress: data.verifierAddress?.toLowerCase(),
       rootHash: data.rootHash,
-      wrappedKeys: mergedWrappedKeys,
+      wrappedKeys: finalWrappedKeys,
       keyCustodyBlob: data.keyCustodyBlob,
       // Absolute on-chain deadline (epoch seconds) from the verified
       // TaskCreated event — lets browse hide expired tasks, /accept refuse
@@ -1529,7 +1560,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       // on a sealed no-custody task) instead of burning offer windows on them.
       posterAddress: address,
       verifierAddress: data.verifierAddress?.toLowerCase(),
-      wrappedKeys: mergedWrappedKeys,
+      wrappedKeys: finalWrappedKeys,
       privacy: isPublic ? 'public' : undefined,
       rootHash: data.rootHash,
       skipKeyWrap: existingMeta?.skipKeyWrap,

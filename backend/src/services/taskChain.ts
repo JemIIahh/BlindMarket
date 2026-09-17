@@ -17,6 +17,7 @@
 import { baseEscrow } from './chain.js';
 import { getCachedTaskIdByHash, getTaskIdByHash, seedTaskIdMapping } from './escrowEvents.js';
 import { getBaseTaskIdByHash, forceBaseTick, seedBaseTaskIdMapping } from './baseEscrowEvents.js';
+import { getMeta } from './a2aStore.js';
 
 export type TaskChain = 'base' | '0g';
 
@@ -26,30 +27,61 @@ export type ResolvedTask = {
 };
 
 /**
+ * The chain /tasks/index recorded for a task, or null for rows indexed before
+ * the field existed (or when the meta can't be read, which falls back to
+ * searching every chain, as before).
+ */
+async function recordedChain(taskHash: string): Promise<TaskChain | null> {
+  try {
+    return (await getMeta(taskHash))?.chain ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Which indexes to consult for a task, given its recorded chain. Exact
+ *  matches only: a chain this code doesn't know searches nothing, rather than
+ *  every legacy index. */
+function indexesFor(chain: TaskChain | null): { base: boolean; zeroG: boolean } {
+  return {
+    base: !!baseEscrow && (chain === null || chain === 'base'),
+    zeroG: chain === null || chain === '0g',
+  };
+}
+
+/**
  * Resolve a taskHash to its on-chain id and the chain that holds it.
  *
- * Ordering is deliberate. Both cheap cache reads happen first, because the
- * 0G resolver's slow path costs ~6s of retries and can trigger an 850k-block
- * backfill — paying that for a task that turns out to be on Base would be
- * pure waste. Only when neither index knows the hash do we escalate, and Base
- * goes first there since that is where new tasks are funded.
+ * A task stays on the chain it was indexed on: when the meta records one,
+ * only that chain is searched. The poster picks the hash, so the same hash can
+ * be escrowed on both chains, and searching both would settle whichever
+ * answered first.
+ *
+ * For older tasks with no recorded chain the ordering is deliberate. Both
+ * cheap cache reads happen first, because the 0G resolver's slow path costs
+ * ~6s of retries and can trigger an 850k-block backfill — paying that for a
+ * task that turns out to be on Base would be pure waste. Only when neither
+ * index knows the hash do we escalate, and Base goes first there since that is
+ * where new tasks are funded.
  */
 export async function resolveTaskByHash(taskHash: string): Promise<ResolvedTask | null> {
+  const use = indexesFor(await recordedChain(taskHash));
   const [baseId, ogId] = await Promise.all([
-    baseEscrow ? getBaseTaskIdByHash(taskHash) : Promise.resolve(null),
-    getCachedTaskIdByHash(taskHash),
+    use.base ? getBaseTaskIdByHash(taskHash) : Promise.resolve(null),
+    use.zeroG ? getCachedTaskIdByHash(taskHash) : Promise.resolve(null),
   ]);
 
   if (baseId) return { taskId: baseId, chain: 'base' };
   if (ogId) return { taskId: ogId, chain: '0g' };
 
   // Nothing cached — the create tx may just not be indexed yet.
-  if (baseEscrow) {
+  if (use.base) {
     await forceBaseTick();
     const retried = await getBaseTaskIdByHash(taskHash);
     if (retried) return { taskId: retried, chain: 'base' };
   }
 
+  if (!use.zeroG) return null;
   // Falls through to the 0G resolver, which retries and can backfill.
   const resolved = await getTaskIdByHash(taskHash);
   return resolved ? { taskId: resolved, chain: '0g' } : null;
@@ -59,8 +91,9 @@ export async function resolveTaskByHash(taskHash: string): Promise<ResolvedTask 
  * Seed the hash<->id mapping in the namespace of the chain that holds the task.
  *
  * The a2a index route used to write every task into the 0G namespace, Base
- * tasks included. resolveTaskByHash consults the Base namespace first, so a
- * Base task was resolved as 0G for the window between indexing and the next
+ * tasks included. resolveTaskByHash then consulted the Base namespace first
+ * (it still does for tasks with no recorded chain), so a Base task was
+ * resolved as 0G for the window between indexing and the next
  * Base poller tick (~5 s). An agent accepting inside that window had its
  * assignment sent to the 0G escrow with the Base task's id, which reverted
  * NotVerifier — seen live on Base Sepolia (task 3 on 0xa1F7…): accept 1 s
@@ -118,9 +151,10 @@ export async function resolveTaskChainById(
  * sweep) and must not pay the slow path per unresolved hash per tick.
  */
 export async function resolveCachedTaskByHash(taskHash: string): Promise<ResolvedTask | null> {
+  const use = indexesFor(await recordedChain(taskHash));
   const [baseId, ogId] = await Promise.all([
-    baseEscrow ? getBaseTaskIdByHash(taskHash) : Promise.resolve(null),
-    getCachedTaskIdByHash(taskHash),
+    use.base ? getBaseTaskIdByHash(taskHash) : Promise.resolve(null),
+    use.zeroG ? getCachedTaskIdByHash(taskHash) : Promise.resolve(null),
   ]);
 
   if (baseId) return { taskId: baseId, chain: 'base' };

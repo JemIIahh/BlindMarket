@@ -192,6 +192,53 @@ describe('POST /tasks/index settlement token', () => {
   });
 });
 
+describe('POST /tasks/index keeps a task on its first chain', () => {
+  it('refuses to re-index a task from the other chain, before writing anything', async () => {
+    vi.mocked(a2aStore.getMeta).mockResolvedValueOnce({ taskId: TASK, chain: '0g' } as never);
+    onBase(USDC, 5_000_000n);
+    const res = await index();
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('CHAIN_IMMUTABLE');
+    expect(taskChain.seedTaskId).not.toHaveBeenCalled();
+    expect(a2aStore.setMeta).not.toHaveBeenCalled();
+  });
+
+  it('refuses the other direction too: a 0G receipt for a task indexed on Base', async () => {
+    vi.mocked(a2aStore.getMeta).mockResolvedValueOnce({ taskId: TASK, chain: 'base', posterAddress: POSTER } as never);
+    onZeroG(NATIVE, 10n ** 18n);
+    const res = await index();
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('CHAIN_IMMUTABLE');
+    expect(taskChain.seedTaskId).not.toHaveBeenCalled();
+  });
+
+  it('still re-indexes a task from its own chain, keeping wrapped keys added meanwhile', async () => {
+    vi.mocked(a2aStore.getMeta)
+      .mockResolvedValueOnce({ taskId: TASK, chain: 'base', posterAddress: POSTER, wrappedKeys: { '0xa': 'k1' } } as never)
+      .mockResolvedValueOnce({ taskId: TASK, chain: 'base', posterAddress: POSTER, wrappedKeys: { '0xa': 'k1', '0xb': 'k2' } } as never);
+    onBase(USDC, 5_000_000n);
+    const res = await index();
+    expect(res.status).toBe(200);
+    expect(taskChain.seedTaskId).toHaveBeenCalledWith('base', TASK, '7');
+    expect(vi.mocked(a2aStore.setMeta).mock.calls[0][0]).toMatchObject({
+      chain: 'base',
+      wrappedKeys: { '0xa': 'k1', '0xb': 'k2' },
+    });
+  });
+
+  it('refuses a re-index by anyone but the poster who indexed the task first', async () => {
+    vi.mocked(a2aStore.getMeta).mockResolvedValueOnce({
+      taskId: TASK, chain: 'base', posterAddress: '0x9999999999999999999999999999999999999999',
+    } as never);
+    onBase(USDC, 5_000_000n);
+    const res = await index();
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('TASK_HASH_TAKEN');
+    expect(taskChain.seedTaskId).not.toHaveBeenCalled();
+    expect(a2aStore.setMeta).not.toHaveBeenCalled();
+  });
+});
+
 describe('POST /tasks/index "Use now" price check', () => {
   it('refuses a 0G task for a USDC-priced service, even when the raw amount is larger', async () => {
     onZeroG(NATIVE, 2_000_000n);

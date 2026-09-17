@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('./chain.js', () => ({ baseEscrow: {} }));
+vi.mock('./a2aStore.js', () => ({ getMeta: vi.fn(async () => null) }));
 vi.mock('./escrowEvents.js', () => ({
   getCachedTaskIdByHash: vi.fn(),
   getTaskIdByHash: vi.fn(),

@@ -16,14 +16,18 @@ const getTaskIdByHash = vi.fn();
 const getBaseTaskIdByHash = vi.fn();
 const forceBaseTick = vi.fn(async () => {});
 const getTaskOn = vi.fn();
+const getMeta = vi.fn();
+// baseEscrow just needs to be non-null for the Base branch to be considered;
+// the module reads it per call, so a test can switch Base off.
+const chainMod = vi.hoisted(() => ({ baseEscrow: {} as unknown }));
 
-// baseEscrow just needs to be non-null for the Base branch to be considered.
-vi.mock('./chain.js', () => ({ baseEscrow: {} }));
+vi.mock('./chain.js', () => chainMod);
+vi.mock('./a2aStore.js', () => ({ getMeta }));
 vi.mock('./escrowEvents.js', () => ({ getCachedTaskIdByHash, getTaskIdByHash }));
 vi.mock('./baseEscrowEvents.js', () => ({ getBaseTaskIdByHash, forceBaseTick }));
 vi.mock('./escrow.js', () => ({ getTaskOn }));
 
-const { resolveTaskByHash, resolveTaskChainById } = await import('./taskChain.js');
+const { resolveTaskByHash, resolveCachedTaskByHash, resolveTaskChainById } = await import('./taskChain.js');
 
 const HASH = '0xabc';
 
@@ -32,6 +36,63 @@ beforeEach(() => {
   getCachedTaskIdByHash.mockResolvedValue(null);
   getTaskIdByHash.mockResolvedValue(null);
   getBaseTaskIdByHash.mockResolvedValue(null);
+  // Rows indexed before the chain was recorded: every chain is searched.
+  getMeta.mockResolvedValue(null);
+  chainMod.baseEscrow = {};
+});
+
+describe('a task stays on the chain it was indexed on', () => {
+  it('resolves a hash escrowed on both chains to the recorded one', async () => {
+    getBaseTaskIdByHash.mockResolvedValue('42');
+    getCachedTaskIdByHash.mockResolvedValue('7');
+
+    getMeta.mockResolvedValue({ chain: '0g' });
+    expect(await resolveTaskByHash(HASH)).toEqual({ taskId: '7', chain: '0g' });
+    expect(await resolveCachedTaskByHash(HASH)).toEqual({ taskId: '7', chain: '0g' });
+    expect(getBaseTaskIdByHash).not.toHaveBeenCalled();
+
+    getMeta.mockResolvedValue({ chain: 'base' });
+    expect(await resolveTaskByHash(HASH)).toEqual({ taskId: '42', chain: 'base' });
+    expect(await resolveCachedTaskByHash(HASH)).toEqual({ taskId: '42', chain: 'base' });
+  });
+
+  it('never falls back to 0G for a task recorded on Base, even when Base has not indexed it yet', async () => {
+    getMeta.mockResolvedValue({ chain: 'base' });
+    getTaskIdByHash.mockResolvedValue('7');
+
+    expect(await resolveTaskByHash(HASH)).toBeNull();
+    expect(forceBaseTick).toHaveBeenCalled();
+    expect(getCachedTaskIdByHash).not.toHaveBeenCalled();
+    expect(getTaskIdByHash).not.toHaveBeenCalled();
+  });
+
+  it('resolves nothing for a task recorded on Base when this backend has no Base escrow', async () => {
+    chainMod.baseEscrow = null;
+    getMeta.mockResolvedValue({ chain: 'base' });
+    getCachedTaskIdByHash.mockResolvedValue('7');
+    getTaskIdByHash.mockResolvedValue('7');
+
+    expect(await resolveTaskByHash(HASH)).toBeNull();
+    expect(getBaseTaskIdByHash).not.toHaveBeenCalled();
+    expect(getTaskIdByHash).not.toHaveBeenCalled();
+  });
+
+  it('searches nothing for a chain this code does not know', async () => {
+    getMeta.mockResolvedValue({ chain: 'arc' });
+    getBaseTaskIdByHash.mockResolvedValue('42');
+    getCachedTaskIdByHash.mockResolvedValue('7');
+
+    expect(await resolveTaskByHash(HASH)).toBeNull();
+    expect(await resolveCachedTaskByHash(HASH)).toBeNull();
+    expect(forceBaseTick).not.toHaveBeenCalled();
+    expect(getTaskIdByHash).not.toHaveBeenCalled();
+  });
+
+  it('searches every chain when the meta cannot be read', async () => {
+    getMeta.mockRejectedValue(new Error('redis down'));
+    getBaseTaskIdByHash.mockResolvedValue('42');
+    expect(await resolveTaskByHash(HASH)).toEqual({ taskId: '42', chain: 'base' });
+  });
 });
 
 describe('resolveTaskByHash', () => {
