@@ -7,6 +7,8 @@
  *   base:hash2id:<lowercased_hash>  → string of uint256 taskId
  *   base:id2hash:<taskId>           → 0x-prefixed lowercased hash
  *   base:events:checkpoint          → last block number processed
+ *   base:events:escrow              → <chainId>:<escrow> these keys belong to
+ *                                     (see escrowFingerprint)
  *
  * All writes are idempotent (SET overwrite with identical value), so
  * at-least-once delivery from the poll loop is safe.
@@ -24,6 +26,8 @@ import type { EventLog } from 'ethers';
 import { baseEscrow, baseProvider } from './chain.js';
 import { redis } from './redis.js';
 import { handleDisputeResolved } from './disputeListener.js';
+import { checkEscrowFingerprint } from './escrowFingerprint.js';
+import { config } from '../config.js';
 
 // ── Redis keys ──────────────────────────────────────────────────────────────
 
@@ -120,6 +124,7 @@ async function indexTaskCreated(): Promise<IndexedRange | null> {
   if (!baseEscrow) return null;
 
   try {
+    await checkEscrowFingerprint('base', config.baseChainId, config.baseEscrowAddress);
     const latest = await baseProvider.getBlockNumber();
     const checkpointRaw = await redis.get(KEY.checkpoint);
 

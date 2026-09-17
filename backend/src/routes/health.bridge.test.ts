@@ -10,10 +10,11 @@ import request from 'supertest';
  * fields and `base`, so their shape is pinned here.
  */
 
-const { chain, cfg, ready } = vi.hoisted(() => {
+const { chain, cfg, ready, fingerprintErrors } = vi.hoisted(() => {
   const signer = (address: string) => ({ getAddress: async () => address });
   return {
     ready: { '0g': true, base: true } as Record<string, boolean>,
+    fingerprintErrors: {} as Record<string, string | null>,
     cfg: {} as Record<string, unknown>,
     chain: {
       signer,
@@ -30,6 +31,9 @@ const { chain, cfg, ready } = vi.hoisted(() => {
 vi.mock('../services/chain.js', () => chain);
 vi.mock('../services/a2aSettlement.js', () => ({ isBridgeReady: (c: string) => ready[c] }));
 vi.mock('../services/redis.js', () => ({ redis: {}, redisSub: {} }));
+vi.mock('../services/escrowFingerprint.js', () => ({
+  escrowFingerprintError: (c: string) => fingerprintErrors[c] ?? null,
+}));
 vi.mock('../services/neonDb.js', () => ({ getPool: vi.fn(), getSchemaStatus: vi.fn(), latestMigrationId: vi.fn(() => 31) }));
 vi.mock('../config.js', async (importOriginal) => {
   const mod = await importOriginal<typeof import('../config.js')>();
@@ -73,7 +77,10 @@ async function bridge() {
   return res.body.data;
 }
 
-beforeEach(() => setUp({ og: true, base: true }));
+beforeEach(() => {
+  setUp({ og: true, base: true });
+  for (const k of Object.keys(fingerprintErrors)) delete fingerprintErrors[k];
+});
 
 describe('GET /health/bridge', () => {
   it('keeps the response shape the MCP reads when both chains are ready', async () => {
@@ -92,6 +99,15 @@ describe('GET /health/bridge', () => {
       { chain: '0g', configured: true, chainId: 16661, tier: 'mainnet', escrowAddress: OG_ESCROW },
       { chain: 'base', configured: true, chainId: 84532, tier: 'testnet', escrowAddress: BASE_ESCROW },
     ]);
+  });
+
+  it("reports an indexer's escrow mismatch on that chain only, without changing readiness", async () => {
+    fingerprintErrors.base = 'base:events:escrow is 84532:0xa1f7… but this backend indexes 84532:0xcca5…';
+    const data = await bridge();
+    expect(data.configured).toBe(true);
+    expect(data).not.toHaveProperty('reason');
+    expect(data.chains[0]).not.toHaveProperty('indexerError');
+    expect(data.chains[1]).toMatchObject({ chain: 'base', configured: true, indexerError: fingerprintErrors.base });
   });
 
   it("names Base's own network in its fix command, not 0G's", async () => {

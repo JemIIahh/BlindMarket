@@ -2,6 +2,8 @@ import type { EventLog } from 'ethers';
 import { escrow, provider } from './chain.js';
 import { redis } from './redis.js';
 import { handleDisputeResolved } from './disputeListener.js';
+import { checkEscrowFingerprint } from './escrowFingerprint.js';
+import { config } from '../config.js';
 
 // ── Keys ─────────────────────────────────────────────────────────────────────
 //
@@ -13,6 +15,8 @@ import { handleDisputeResolved } from './disputeListener.js';
 //   a2a:hash2id:<lowercased_hash>  → string of uint256 taskId
 //   a2a:id2hash:<taskId>           → 0x-prefixed lowercased hash
 //   a2a:events:checkpoint          → last block number processed (string)
+//   a2a:events:escrow              → <chainId>:<escrow> these keys belong to
+//                                    (see escrowFingerprint)
 //
 // All writes are idempotent (SET overwrite with identical value), so
 // at-least-once delivery from the poll loop is safe.
@@ -68,6 +72,7 @@ async function tick(): Promise<void> {
 
   inFlightPromise = (async () => {
     try {
+      await checkEscrowFingerprint('0g', config.ogChainId, config.blindEscrowAddress);
       const latest = await provider.getBlockNumber();
       const checkpointRaw = await redis.get(KEY.checkpoint);
 

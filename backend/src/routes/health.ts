@@ -4,6 +4,7 @@ import type { ApiResponse } from '../types.js';
 import { escrow, marketplaceSigner, provider, baseEscrow, baseMarketplaceSigner, baseProvider } from '../services/chain.js';
 import { isBridgeReady } from '../services/a2aSettlement.js';
 import { chainNetwork } from '../services/chainNetwork.js';
+import { escrowFingerprintError } from '../services/escrowFingerprint.js';
 import { config } from '../config.js';
 import { redis, redisSub } from '../services/redis.js';
 import { getPool, getSchemaStatus, latestMigrationId } from '../services/neonDb.js';
@@ -135,6 +136,12 @@ function notReadyReason(
   return `${signerEnv} not set`;
 }
 
+/** `indexerError` when the chain's index keys belong to a different escrow. */
+function indexerError(chain: '0g' | 'base'): { indexerError?: string } {
+  const error = escrowFingerprintError(chain);
+  return error ? { indexerError: error } : {};
+}
+
 // GET /api/v1/health/bridge — surfaces the A2A settlement bridge config
 // without needing backend log access. Each settlement chain is reported on its
 // own: a task lives on exactly one chain, so one chain being ready is enough to
@@ -184,6 +191,7 @@ healthRouter.get('/bridge', async (_req, res, next) => {
             tier: chainNetwork('0g').tier,
             escrowAddress: ogEscrow,
             ...(ogReason ? { reason: ogReason } : {}),
+            ...indexerError('0g'),
           },
           {
             chain: 'base',
@@ -192,6 +200,7 @@ healthRouter.get('/bridge', async (_req, res, next) => {
             tier: chainNetwork('base').tier,
             escrowAddress: baseEscrowAddress,
             ...(baseReason ? { reason: baseReason } : {}),
+            ...indexerError('base'),
           },
         ],
       },
