@@ -30,7 +30,7 @@ import { config } from '../config.js';
 import * as serviceStore from '../services/serviceStore.js';
 import { consumePendingCost } from '../services/railwaySandbox.js';
 import * as accountingService from '../services/accountingService.js';
-import { normalizeSettlementAmount } from '../services/settlementUnits.js';
+import { normalizeSettlementAmount, payoutCurrency, settlementToken } from '../services/settlementUnits.js';
 
 export const a2aRouter = Router();
 
@@ -1089,6 +1089,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
     let onChainAgent: string;
     let onChainDeadline: number;
     let onChainAmount: string;
+    let onChainToken: string;
 
     // Poll for the receipt rather than taking a single shot. The createTask tx
     // is already confirmed by the time the frontend calls us (its signer waited
@@ -1271,6 +1272,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
     onChainAgent = (parsed.args.agent as string).toLowerCase();
     onChainDeadline = Number(parsed.args.deadline);
     onChainAmount = (parsed.args.amount as bigint).toString();
+    onChainToken = (parsed.args.token as string).toLowerCase();
 
     if (onChainTaskHash !== taskHash) {
       throw new AppError(
@@ -1290,13 +1292,29 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       );
     }
 
+    // Only index tasks escrowed in the token this chain settles in, so every
+    // payout can be booked in a known unit. Refused before anything is
+    // written: an unindexed task is never offered, and the poster can still
+    // cancel it for a refund. (A native-0G task on a deployment that prices in
+    // USDC passes here; the "Use now" check below refuses it, but agent reward
+    // floors still compare its 18-decimal amount with USDC units.)
+    const taskChain: TaskChain = activeEscrow === baseEscrow ? 'base' : '0g';
+    const taskUnit = payoutCurrency(taskChain, onChainToken);
+    if (!taskUnit) {
+      throw new AppError(
+        409,
+        'TOKEN_NOT_SETTLEMENT',
+        `Task is escrowed in ${onChainToken}, which is not the settlement token on ${taskChain} — cancel it to get the escrow back`,
+      );
+    }
+
     // All checks passed — eagerly seed the indexer mapping so /submit and
     // /accept resolve the hash immediately without waiting for the
     // forward-only event poller to catch up. Seeded in the namespace of the
     // chain that actually holds the task: resolveTaskByHash reads the Base
     // namespace first, so seeding a Base task under the 0G keys made it
     // resolve as 0G until the Base poller caught up (see taskChain.seedTaskId).
-    await seedTaskId(activeEscrow === baseEscrow ? 'base' : '0g', taskHash, onChainTaskId);
+    await seedTaskId(taskChain, taskHash, onChainTaskId);
 
     const wrappedKeysNormalized = data.wrappedKeys
       ? Object.fromEntries(
@@ -1393,12 +1411,21 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       if (svc.agent_address.toLowerCase() !== targetExecutor) {
         throw new AppError(409, 'SERVICE_AGENT_MISMATCH', "targetExecutor does not match the service's agent");
       }
+      // price_raw is in the deployment's pricing token. An amount in another
+      // token is not comparable: 1,000,000 wei of 0G would pass a 1 USDC price.
+      const pricing = settlementToken();
+      if (taskUnit.symbol !== pricing.symbol) {
+        throw new AppError(
+          409,
+          'SERVICE_TOKEN_MISMATCH',
+          `Services are priced in ${pricing.symbol}; this task is escrowed in ${taskUnit.symbol} on ${taskChain}`,
+        );
+      }
       if (BigInt(onChainAmount) < BigInt(svc.price_raw)) {
         throw new AppError(409, 'UNDERPAID', 'Escrow amount is below the service price');
       }
     }
 
-    const taskChain: TaskChain = activeEscrow === baseEscrow ? 'base' : '0g';
     await a2aStore.setMeta({
       taskId: taskHash,
       targetExecutorType: 'agent',
