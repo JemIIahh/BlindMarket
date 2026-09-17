@@ -9,6 +9,16 @@ import pidusage from 'pidusage';
 import { config } from '../config.js';
 import { configuredChainKeys, postingChain, settlementChainConfig } from './settlementChains.js';
 
+import { eciesEncrypt, generateKeyPair } from './crypto.js';
+import { inft } from './chain.js';
+import {
+  appendLog, getLogs, subscribeAgentLogs as redisSubscribe,
+  touchHeartbeat, isAlive, getHeartbeat,
+} from './redis.js';
+import { saveAgent, loadAgent, loadAllAgents } from './deployedAgentStore.js';
+import { composeAgentRuntime } from './skillComposer.js';
+import type { DeployedAgent, AgentCapability, LLMProvider, AgentTool, InstalledSkill } from '../types.js';
+
 /**
  * The settlement chains a worker signs on, as JSON for its env.
  *
@@ -41,15 +51,6 @@ export function settlementChainsJson(): string {
     }),
   );
 }
-import { eciesEncrypt, generateKeyPair } from './crypto.js';
-import { inft } from './chain.js';
-import {
-  appendLog, getLogs, subscribeAgentLogs as redisSubscribe,
-  touchHeartbeat, isAlive, getHeartbeat,
-} from './redis.js';
-import { saveAgent, loadAgent, loadAllAgents } from './deployedAgentStore.js';
-import { composeAgentRuntime } from './skillComposer.js';
-import type { DeployedAgent, AgentCapability, LLMProvider, AgentTool, InstalledSkill } from '../types.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const WORKER_PATH = join(__dirname, '../../agents/worker.js');

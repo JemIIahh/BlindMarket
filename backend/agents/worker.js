@@ -186,8 +186,16 @@ function parseChainTable(raw) {
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed) || parsed.length === 0) return null;
-    return parsed.filter((c) => c && typeof c.key === 'string' && c.chainId && c.rpcUrl);
+    if (!Array.isArray(parsed)) return null;
+    const usable = parsed.filter((c) => c && typeof c.key === 'string' && c.chainId && c.rpcUrl);
+    // An empty or wholly unusable table is not a deployment with no chains —
+    // it is a table this worker could not read. Fall back to the legacy vars
+    // rather than starting with no signer at all.
+    if (usable.length === 0) {
+      console.error('[agent] SETTLEMENT_CHAINS_JSON had no usable chain entries, falling back to the legacy chain vars');
+      return null;
+    }
+    return usable;
   } catch (e) {
     console.error(`[agent] SETTLEMENT_CHAINS_JSON is not valid JSON, falling back to the legacy chain vars: ${e.message}`);
     return null;
@@ -549,9 +557,21 @@ if (!suiSigner && AGENT_PRIVATE_KEY) {
       console.error(`[agent:${(process.env.AGENT_ID ?? '').slice(0, 8)}] failed to init ${key} signer: ${e.message}`);
     }
   }
-  // `signerWallet` stays the 0G signer: the legacy 0G-only paths read it
-  // directly. Delegation picks the posting chain's signer itself.
-  signerWallet = signers['0g'] ?? null;
+  signerWallet = pickSignerWallet();
+}
+
+/**
+ * The signer the legacy 0G-only paths read directly (submitEvidence's fallback,
+ * resume, verification polling). The wallet is one EOA and its address is the
+ * same everywhere, so any chain's signer serves them; 0G first because that is
+ * what those paths assumed, then the posting chain, then whatever exists. A
+ * null here used to be impossible (0G had a default RPC) and now would let an
+ * agent accept a task on-chain and then refuse every submit until the poster's
+ * claimTimeout — so it falls back rather than staying null. Delegation does
+ * NOT use it: it picks the posting chain's signer itself.
+ */
+export function pickSignerWallet(table = CHAIN_TABLE, bySigner = signers) {
+  return bySigner['0g'] ?? bySigner[postingChainInfo(table)?.key] ?? Object.values(bySigner).find(Boolean) ?? null;
 }
 
 /**
@@ -609,6 +629,9 @@ const KNOWN_GAS_SYMBOL = { '0g': '0G', base: 'ETH' };
 
 /** How a pre-table backend injected a chain, named in the message when it did not. */
 const LEGACY_CHAIN_ENV = { '0g': 'OG_RPC_URL/OG_CHAIN_ID', base: 'BASE_RPC_URL/BASE_CHAIN_ID' };
+
+/** How this worker names a chain in messages. */
+const CHAIN_LABEL = { '0g': '0G', base: 'Base' };
 
 /** The native coin of `chain`, for gas messages. */
 function nativeSymbolFor(chain) {
@@ -679,7 +702,7 @@ export async function preflightGas(chain, signer, viaAA = usesSmartAccount(chain
     // key, or the backend never injected the chain at all.
     return chainInfo(key)
       ? `no ${key} signer — AGENT_PRIVATE_KEY missing`
-      : `no ${key} signer — ${LEGACY_CHAIN_ENV[key] ?? 'SETTLEMENT_CHAINS_JSON'} not injected (backend has no ${key} escrow configured?)`;
+      : `no ${key} signer — ${LEGACY_CHAIN_ENV[key] ?? 'SETTLEMENT_CHAINS_JSON'} not injected (backend has no ${CHAIN_LABEL[key] ?? key} escrow configured?)`;
   }
   let balance;
   try {
@@ -882,6 +905,12 @@ export const JS_TOOL_SENTINEL = '###BM_JS_TOOL_RESULT###:';
 
 export const _signers = signers;
 
+/** The signer the legacy 0G-only paths read. Exported so a test can check the
+ *  wiring, not just pickSignerWallet's own logic. */
+export function _signerWallet() {
+  return signerWallet;
+}
+
 export function buildTools(currentTaskHash = null) {
   /** @type {import('ai').ToolSet} */
   const tools = {};
@@ -935,6 +964,8 @@ export function buildTools(currentTaskHash = null) {
       const jsonAuth = { 'Content-Type': 'application/json', ...auth };
       try {
         const payToken = posting.token;
+        /** Set on an ERC-20 chain: the escrow pulls the reward with transferFrom. */
+        let approveEscrow = null;
         const isNativeReward = payToken.kind === 'native';
         const rewardSetting = payToken.symbol === '0G' ? DELEGATE_REWARD_OG : DELEGATE_REWARD_USDC;
         const rewardRaw = ethers.parseUnits(String(rewardSetting), payToken.decimals);
@@ -967,20 +998,30 @@ export function buildTools(currentTaskHash = null) {
           } catch (e) {
             return `Delegation skipped: could not read the ${payToken.symbol} balance of ${delegateSigner.address} on ${posting.key} (${e.message}). Complete the task yourself.`;
           }
-          if (tokenBalance < rewardRaw) {
-            return `Delegation skipped: wallet holds ${ethers.formatUnits(tokenBalance, payToken.decimals)} ${payToken.symbol} on ${posting.key}, below the ${rewardSetting} ${payToken.symbol} reward. Complete the task yourself.`;
+          // Where the settlement token IS the gas coin (Arc's USDC), funding a
+          // sub-task spends the same balance that pays for this agent's own
+          // submitEvidence — so keep the reserve back, as the native branch
+          // does. Elsewhere gas is a different asset and preflightGas covered it.
+          const keepRaw = posting.nativeIsSettlementToken
+            ? ethers.parseUnits(String(DELEGATE_GAS_RESERVE_OG), payToken.decimals)
+            : 0n;
+          if (tokenBalance < rewardRaw + keepRaw) {
+            return `Delegation skipped: wallet holds ${ethers.formatUnits(tokenBalance, payToken.decimals)} ${payToken.symbol} on ${posting.key}, below the ${rewardSetting} ${payToken.symbol} reward${keepRaw > 0n ? ` plus the ${DELEGATE_GAS_RESERVE_OG} ${payToken.symbol} gas reserve` : ''}. Complete the task yourself.`;
           }
-          // The escrow pulls the reward with transferFrom, so it needs an
-          // allowance first; the unsigned createTask carries no value.
-          try {
-            const approval = await erc20.approve(posting.escrow, rewardRaw);
-            const approved = await approval.wait();
-            if (!approved || approved.status !== 1) {
-              return `Delegation failed: ${payToken.symbol} approve tx reverted (${approval.hash}).`;
+          // The approve itself waits until there is a createTask to fund:
+          // the storage upload alone takes 20-40s and any failure before then
+          // would have spent gas for nothing.
+          approveEscrow = async () => {
+            try {
+              const approval = await erc20.approve(posting.escrow, rewardRaw);
+              const approved = await approval.wait();
+              return !approved || approved.status !== 1
+                ? `Delegation failed: ${payToken.symbol} approve tx reverted (${approval.hash}).`
+                : null;
+            } catch (e) {
+              return `Delegation failed: could not approve the escrow to pull ${rewardSetting} ${payToken.symbol} (${e.message}).`;
             }
-          } catch (e) {
-            return `Delegation failed: could not approve the escrow to pull ${rewardSetting} ${payToken.symbol} (${e.message}).`;
-          }
+          };
         }
 
         // 1. Encrypt the brief; taskHash = sha256(ciphertext) (same as PostTask).
@@ -1017,7 +1058,8 @@ export function buildTools(currentTaskHash = null) {
         }
 
         // 4. Build the createTask tx server-side, then sign + broadcast it from
-        //    this agent's wallet (funds the escrow with native 0G).
+        //    this agent's wallet, funding the escrow in the posting chain's
+        //    settlement token.
         const buildRes = await fetchWithTimeout(`${BACKEND_URL}/api/v1/tasks`, {
           method: 'POST', headers: jsonAuth,
           body: JSON.stringify({
@@ -1028,6 +1070,11 @@ export function buildTools(currentTaskHash = null) {
         if (!buildRes.ok) return `Delegation failed: createTask build ${buildRes.status} ${(await buildRes.text()).slice(0, 120)}`;
         const unsignedTx = (await buildRes.json()).data?.unsignedTx;
         if (!unsignedTx) return 'Delegation failed: createTask returned no unsignedTx';
+
+        if (approveEscrow) {
+          const approveProblem = await approveEscrow();
+          if (approveProblem) return approveProblem;
+        }
 
         const sent = await delegateSigner.sendTransaction(unsignedTx);
         log(`delegate: createTask broadcast ${sent.hash} for sub-task ${taskHash.slice(0, 10)}…`);
