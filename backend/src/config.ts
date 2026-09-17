@@ -280,12 +280,14 @@ export const config = {
     optimismUsdcAddress: optional('CCTP_OPTIMISM_USDC_ADDRESS', BASE_MAINNET
       ? '0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85'
       : '0x5fd84259d66Cd46123540766Be93DFE6D43130D7'),
-    // Arc — Circle's own L1 (docs.arc.io). TESTNET ONLY: Arc's docs say
-    // "Mainnet addresses are not yet available" (Sept 2026), so there is no
-    // mainnet default and no mainnet chain entry. CCTP domain 26. Fast
-    // Transfer is N/A on Arc (its finality is already instant); Forwarding
-    // Service is supported, so transfers still auto-complete. USDC is Arc's
-    // native gas token (18-dec native view, 6-dec ERC-20 view of ONE balance).
+    // Arc — Circle's own L1 (docs.arc.io). These defaults are Arc TESTNET
+    // (5042002) and do not follow the Base tier, so no mainnet chain entry
+    // exists here. Arc Mainnet itself is live (its RPC answered chain id 5042
+    // on 2026-09-17); adding it as a CCTP chain needs its contract addresses
+    // checked first. CCTP domain 26. Fast Transfer is N/A on Arc (its finality
+    // is already instant); Forwarding Service is supported, so transfers still
+    // auto-complete. USDC is Arc's native gas token (18-dec native view, 6-dec
+    // ERC-20 view of ONE balance).
     arcRpcUrl: optional('CCTP_ARC_RPC_URL', 'https://rpc.testnet.arc.io'),
     arcChainId: parseInt(optional('CCTP_ARC_CHAIN_ID', '5042002'), 10),
     arcUsdcAddress: optional('CCTP_ARC_USDC_ADDRESS', '0x3600000000000000000000000000000000000000'),

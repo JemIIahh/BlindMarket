@@ -29,9 +29,13 @@ const KEY = {
 const POLL_INTERVAL_MS = 5_000;
 const MAX_BLOCKS_PER_TICK = 500;
 
-// Fresh deployment — no backfill needed. Set to the Base deployment block
-// via env so we start indexing from contract creation.
+// Where indexing starts when Redis has no checkpoint (first boot, or a new
+// Redis such as a staging stack). With BASE_ESCROW_DEPLOYMENT_BLOCK set it is
+// that block, so tasks created before the indexer first ran are found;
+// catching up costs MAX_BLOCKS_PER_TICK per POLL_INTERVAL_MS. Unset, it is
+// the current head. An existing checkpoint always wins.
 const DEPLOYMENT_BLOCK = Number(process.env.BASE_ESCROW_DEPLOYMENT_BLOCK ?? 0);
+const LAG_LOG_INTERVAL_MS = 60_000;
 
 // ── State ───────────────────────────────────────────────────────────────────
 
@@ -40,6 +44,7 @@ let inFlightPromise: Promise<void> | null = null;
 
 let lastFailureSig: string | null = null;
 let consecutiveFailures = 0;
+let lastLagLogAt = 0;
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
@@ -91,8 +96,12 @@ async function tick(): Promise<void> {
       if (checkpointRaw) {
         from = Number(checkpointRaw) + 1;
       } else {
-        from = Math.max(latest, DEPLOYMENT_BLOCK);
-        await redis.set(KEY.checkpoint, String(from));
+        // The checkpoint means "last block processed", so record the block
+        // before `from`: a failed first tick must not skip `from`.
+        from = Number.isSafeInteger(DEPLOYMENT_BLOCK) && DEPLOYMENT_BLOCK > 0
+          ? Math.min(DEPLOYMENT_BLOCK, latest)
+          : latest;
+        await redis.set(KEY.checkpoint, String(from - 1));
       }
       if (from > latest) return;
 
@@ -119,7 +128,9 @@ async function tick(): Promise<void> {
             (lagBlocks > 0 ? `, still ${lagBlocks} blocks behind` : '') +
             `)`,
         );
-      } else if (lagBlocks > 0) {
+      } else if (lagBlocks > 0 && Date.now() - lastLagLogAt >= LAG_LOG_INTERVAL_MS) {
+        // A catch-up from the deployment block is hours of empty chunks.
+        lastLagLogAt = Date.now();
         console.log(`[baseEscrowEvents] empty chunk ${from}..${to} (${lagBlocks} blocks behind)`);
       }
 

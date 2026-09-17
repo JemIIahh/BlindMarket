@@ -195,9 +195,10 @@ function buildChains(): Record<CctpChainKey, CctpChainConfig> {
       supportsFastTransfer: true,
       usdcGasReserveRaw: 0n,
     },
-    // Testnet only — no Arc mainnet entry until Circle publishes Arc mainnet
-    // CCTP addresses (see config.ts). Same shared messenger/transmitter pair:
-    // verified deployed at those addresses on Arc testnet (localDomain() = 26).
+    // Testnet only — there is no Arc mainnet entry until its CCTP addresses
+    // are checked on-chain (see config.ts). Same shared messenger/transmitter
+    // pair: verified deployed at those addresses on Arc testnet
+    // (localDomain() = 26).
     'arc-testnet': {
       chainKey: 'arc-testnet',
       chainId: config.cctp.arcChainId,
