@@ -186,9 +186,35 @@ describe('assertRegistryInvariants', () => {
     expect(() => assertRegistryInvariants([entry])).toThrow(/token kind is erc20/);
   });
 
-  it('refuses decimals other than 6 or 18', () => {
+  it('refuses decimals other than 6 or 18, even on a chain this deployment does not settle on', () => {
     const entry = { ...base(), token: { ...base().token, unit: { symbol: 'USDC', decimals: 8 } as never } };
     expect(() => assertRegistryInvariants([entry])).toThrow(/decimals must be 6 or 18, not 8/);
+    expect(() => assertRegistryInvariants([{ ...entry, escrowAddress: null }])).toThrow(/decimals must be 6 or 18/);
+  });
+
+  it('only warns about the token of a chain this deployment does not settle on', () => {
+    // A staging stack marks "not deployed here" with the zero address.
+    Object.assign(cfg, { baseEscrowAddress: NATIVE, baseUsdcAddress: NATIVE });
+    let warnings: string[] = [];
+    expect(() => { warnings = assertRegistryInvariants(settlementChainConfigs()); }).not.toThrow();
+    expect(warnings).toEqual([expect.stringMatching(/^base: token kind is erc20/)]);
+
+    const arcLike = {
+      ...base(),
+      escrowAddress: null,
+      token: { kind: 'erc20' as const, address: null, unit: base().token.unit },
+      gas: { ...base().gas, nativeIsSettlementToken: true },
+    };
+    expect(assertRegistryInvariants([arcLike])).toEqual([expect.stringMatching(/settlement token must be its ERC-20/)]);
+  });
+
+  it('refuses the same token on a chain this deployment settles on', () => {
+    cfg.baseUsdcAddress = NATIVE;
+    expect(() => assertRegistryInvariants(settlementChainConfigs())).toThrow(/base: token kind is erc20/);
+  });
+
+  it('returns no warnings for the entries production builds', () => {
+    expect(assertRegistryInvariants(settlementChainConfigs())).toEqual([]);
   });
 });
 

@@ -57,7 +57,9 @@ import { reconcileAgents, startZombieReaper } from './services/agentRunner.js';
 
 // Fail fast on a misconfigured (esp. production) deploy before binding the port.
 assertBootConfig();
-assertRegistryInvariants(settlementChainConfigs());
+for (const warning of assertRegistryInvariants(settlementChainConfigs())) {
+  console.warn(`[boot] settlement chain registry: ${warning}`);
+}
 
 logChainConfig();
 

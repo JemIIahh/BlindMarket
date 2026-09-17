@@ -18,7 +18,7 @@ import { baseEscrow } from './chain.js';
 import { getCachedTaskIdByHash, getTaskIdByHash, seedTaskIdMapping } from './escrowEvents.js';
 import { getBaseTaskIdByHash, forceBaseTick, seedBaseTaskIdMapping } from './baseEscrowEvents.js';
 import { getMeta } from './a2aStore.js';
-import type { SettlementChainKey } from './settlementChains.js';
+import { isSettlementChainKey, type SettlementChainKey } from './settlementChains.js';
 
 /** A settlement chain, as a task's escrow names it (services/settlementChains.ts). */
 export type TaskChain = SettlementChainKey;
@@ -134,6 +134,7 @@ export async function resolveTaskByHash(taskHash: string): Promise<ResolvedTask 
  * after index → 503 SETTLEMENT_FAILED; the same accept 3 min later succeeded.
  */
 export async function seedTaskId(chain: TaskChain, taskHash: string, taskId: bigint | string): Promise<void> {
+  if (!isSettlementChainKey(chain)) throw new Error(`unknown settlement chain ${String(chain)}`);
   await TASK_INDEX[chain].seed(taskHash, taskId);
 }
 

@@ -70,8 +70,11 @@ export interface SettlementChainConfig {
   };
   /**
    * CAIP-2 id of this chain for the Privy relay, or null when the relay does
-   * not serve the chain. routes/tx.ts keeps its own table keyed by the
-   * `chain` string a client sends, which is not this deployment's chain.
+   * not serve the chain. Nothing reads it yet. routes/tx.ts keeps its own
+   * table keyed by the `chain` string a client sends, and there 'base' means
+   * Base mainnet (eip155:8453) whatever this deployment runs on, while this
+   * field follows BASE_CHAIN_ID (eip155:84532 in production today). Wiring
+   * the relay to this field changes which chain a 'base' request signs on.
    */
   relayCaip2: string | null;
   /** The escrow records an agent's ERC-4337 smart account as the worker, not its EOA. */
@@ -163,34 +166,47 @@ export function configuredChainKeys(): SettlementChainKey[] {
     .map((entry) => entry.key);
 }
 
-/** What is wrong with the entries; empty when they are consistent. */
-export function registryProblems(entries: readonly SettlementChainConfig[]): string[] {
-  const problems: string[] = [];
-  for (const { key, token, gas } of entries) {
+/**
+ * What is wrong with the entries. A token rule broken on a chain this
+ * deployment settles on is fatal: its tasks would be booked in the wrong unit.
+ * On a chain it doesn't settle on (no escrow, which a staging stack may mark
+ * with the zero address, token included) it is only a warning. Decimals other
+ * than 6 or 18 can only come from code, so they are always fatal.
+ */
+export function registryProblems(entries: readonly SettlementChainConfig[]): { fatal: string[]; warnings: string[] } {
+  const fatal: string[] = [];
+  const warnings: string[] = [];
+  for (const { key, escrowAddress, token, gas } of entries) {
+    const tokenProblems = escrowAddress !== null ? fatal : warnings;
     const native = token.address !== null && isZeroAddress(token.address);
     if ((token.kind === 'native') !== native) {
-      problems.push(
+      tokenProblems.push(
         `${key}: token kind is ${token.kind} but its address is ${token.address ?? 'unset'}; ` +
           `a native token is address(0) and only a native token is`,
       );
     }
     if (gas.nativeIsSettlementToken && (token.kind !== 'erc20' || token.address === null || native)) {
-      problems.push(
+      tokenProblems.push(
         `${key}: the native gas coin is the settlement asset, so the settlement token must be its ERC-20 ` +
           `at a non-zero address, not ${token.address ?? 'unset'}`,
       );
     }
     if (token.unit.decimals !== 6 && token.unit.decimals !== 18) {
-      problems.push(`${key}: settlement token decimals must be 6 or 18, not ${String(token.unit.decimals)}`);
+      fatal.push(`${key}: settlement token decimals must be 6 or 18, not ${String(token.unit.decimals)}`);
     }
   }
-  return problems;
+  return { fatal, warnings };
 }
 
-/** Throws when the entries are inconsistent. Called at boot. */
-export function assertRegistryInvariants(entries: readonly SettlementChainConfig[]): void {
-  const problems = registryProblems(entries);
-  if (problems.length > 0) {
-    throw new Error(`Invalid settlement chain registry: ${problems.join('; ')}`);
+/**
+ * Throws when the entries are inconsistent for a chain this deployment
+ * settles on. Returns the problems on chains it doesn't, for the caller to
+ * log. Called at boot.
+ */
+export function assertRegistryInvariants(entries: readonly SettlementChainConfig[]): string[] {
+  const { fatal, warnings } = registryProblems(entries);
+  if (fatal.length > 0) {
+    throw new Error(`Invalid settlement chain registry: ${fatal.join('; ')}`);
   }
+  return warnings;
 }
