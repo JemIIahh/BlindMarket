@@ -75,10 +75,16 @@ const USDC = '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
 const NATIVE = '0x0000000000000000000000000000000000000000';
 const ZERO = '0x0000000000000000000000000000000000000000';
 const MINUTE = 60_000;
+// Test clock origin. Real failure times are never 0.
+const T0 = 1_700_000_000_000;
 
 // Fresh module per test: the parked-retry throttle is module state.
 let listener: typeof import('./disputeListener.js');
 
+const COMPLETED = 4;
+const CANCELLED = 5;
+
+/** The task as a ruling leaves it: Completed by default (worker paid). */
 function onChain(worker: string, extra: Record<string, unknown> = {}) {
   getTaskOn.mockResolvedValue({
     taskId: '7',
@@ -87,6 +93,7 @@ function onChain(worker: string, extra: Record<string, unknown> = {}) {
     worker,
     token: USDC,
     amount: 5_000_000n,
+    status: COMPLETED,
     ...extra,
   });
 }
@@ -154,7 +161,7 @@ describe('a ruling for the worker', () => {
 
 describe('a ruling for the poster', () => {
   it('records one dispute against the owner', async () => {
-    onChain(SMART_ACCOUNT);
+    onChain(SMART_ACCOUNT, { status: CANCELLED });
     loadAgentBySmartAccount.mockResolvedValue({ walletAddress: OWNER, smartAccountAddress: SMART_ACCOUNT });
 
     await listener.handleDisputeResolved('base', 7n, false);
@@ -166,7 +173,7 @@ describe('a ruling for the poster', () => {
   });
 
   it('records the dispute on the retry when the first write failed', async () => {
-    onChain(WORKER_EOA);
+    onChain(WORKER_EOA, { status: CANCELLED });
     payout.recordWorkerDispute.mockRejectedValueOnce(new Error('db down'));
 
     await expect(listener.handleDisputeResolved('base', 7n, false)).rejects.toThrow('db down');
@@ -179,7 +186,7 @@ describe('a ruling for the poster', () => {
 
 describe('an event seen again', () => {
   it('is not processed twice, so the parties are notified once', async () => {
-    onChain(WORKER_EOA);
+    onChain(WORKER_EOA, { status: CANCELLED });
     await listener.handleDisputeResolved('base', 7n, false);
     await listener.handleDisputeResolved('base', 7n, false);
 
@@ -209,6 +216,19 @@ describe('events that change nothing off-chain', () => {
     expect(a2aStore.updateState).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['for the worker', true, CANCELLED],
+    ['for the poster', false, COMPLETED],
+    ['for the worker', true, 1],
+  ])('skips a ruling %s when the task is not in the state that ruling leaves (status %i)', async (_, favored, status) => {
+    onChain(WORKER_EOA, { status });
+    await listener.handleDisputeResolved('base', 7n, favored as boolean);
+    expect(a2aStore.getMeta).not.toHaveBeenCalled();
+    expect(payout.recordWorkerPayout).not.toHaveBeenCalled();
+    expect(payout.recordWorkerDispute).not.toHaveBeenCalled();
+    expect(a2aStore.updateState).not.toHaveBeenCalled();
+  });
+
   it('skips a task id with no task on-chain', async () => {
     onChain(ZERO, { taskHash: '0x' + '0'.repeat(64) });
     await listener.handleDisputeResolved('base', 7n, true);
@@ -217,7 +237,7 @@ describe('events that change nothing off-chain', () => {
   });
 
   it('credits nobody when the task has no worker, but still closes it', async () => {
-    onChain(ZERO);
+    onChain(ZERO, { status: CANCELLED });
     await listener.handleDisputeResolved('base', 7n, false);
     expect(payout.recordWorkerDispute).not.toHaveBeenCalled();
     expect(loadAgentBySmartAccount).not.toHaveBeenCalled();
@@ -241,7 +261,7 @@ describe('closing the off-chain state', () => {
 
 describe('an event that keeps failing', () => {
   /** Fail `times` times, `gapMs` apart, starting at `start`. Returns the last time used. */
-  async function failRepeatedly(times: number, gapMs: number, start = 0): Promise<number> {
+  async function failRepeatedly(times: number, gapMs: number, start = T0): Promise<number> {
     let now = start;
     for (let i = 0; i < times; i++) {
       now = start + i * gapMs;
@@ -267,7 +287,7 @@ describe('an event that keeps failing', () => {
 
   it('is parked once it has failed often enough for long enough, and then skipped', async () => {
     await failRepeatedly(listener.PARK_MIN_ATTEMPTS - 1, 30_000);
-    await expect(listener.handleDisputeResolved('base', 7n, true, listener.PARK_MIN_FAILING_MS)).resolves.toBeUndefined();
+    await expect(listener.handleDisputeResolved('base', 7n, true, T0 + listener.PARK_MIN_FAILING_MS)).resolves.toBeUndefined();
 
     const parked = JSON.parse(parkedOn('base')!.get('7')!);
     expect(parked).toMatchObject({ workerFavored: true, attempts: listener.PARK_MIN_ATTEMPTS, error: 'ledger down', retries: 0 });
@@ -275,20 +295,34 @@ describe('an event that keeps failing', () => {
 
     // Seen again (a later event in its chunk failed): skipped at once.
     getTaskOn.mockClear();
-    await expect(listener.handleDisputeResolved('base', 7n, true, listener.PARK_MIN_FAILING_MS + 1)).resolves.toBeUndefined();
+    await expect(listener.handleDisputeResolved('base', 7n, true, T0 + listener.PARK_MIN_FAILING_MS + 1)).resolves.toBeUndefined();
     expect(getTaskOn).not.toHaveBeenCalled();
+  });
+
+  it('does not treat a missing first-failure time as an old failure', async () => {
+    // The first-failure time was never stored (hsetnx lost), so it reads as 0.
+    const hsetnx = redis.hsetnx.getMockImplementation()!;
+    redis.hsetnx.mockImplementation(async () => 0);
+    try {
+      for (let i = 0; i < listener.PARK_MIN_ATTEMPTS + 2; i++) {
+        await expect(listener.handleDisputeResolved('base', 7n, true, T0 + i)).rejects.toThrow();
+      }
+      expect(parkedOn('base')).toBeUndefined();
+    } finally {
+      redis.hsetnx.mockImplementation(hsetnx);
+    }
   });
 
   it('never parks when Redis fails while counting', async () => {
     redis.hincrby.mockRejectedValueOnce(new Error('redis down'));
-    await expect(listener.handleDisputeResolved('base', 7n, true, 10 * MINUTE)).rejects.toThrow('redis down');
+    await expect(listener.handleDisputeResolved('base', 7n, true, T0 + 10 * MINUTE)).rejects.toThrow('redis down');
     expect(parkedOn('base')).toBeUndefined();
   });
 
   it('starts counting again after a success', async () => {
     await failRepeatedly(3, MINUTE);
     payout.recordWorkerPayout.mockResolvedValue(undefined);
-    await listener.handleDisputeResolved('base', 7n, true, 3 * MINUTE);
+    await listener.handleDisputeResolved('base', 7n, true, T0 + 3 * MINUTE);
     expect(hashes.has('base:dispute-attempts:7')).toBe(false);
     expect(store.has('base:dispute-done:7')).toBe(true);
   });
@@ -300,7 +334,7 @@ describe('an event that keeps failing', () => {
       for (const id of [7n, 8n, 9n]) await listener.handleDisputeResolved('base', id, true, now);
     };
     let scans = 0;
-    let now = 0;
+    let now = T0;
     for (; scans < 200; scans++, now += 30_000) {
       try {
         await scan(now);
@@ -311,7 +345,7 @@ describe('an event that keeps failing', () => {
     }
     expect([...parkedOn('base')!.keys()].sort()).toEqual(['7', '8', '9']);
     // Each ruling costs about PARK_MIN_FAILING_MS, not a multiple of the others.
-    expect(now).toBeLessThanOrEqual(3 * (listener.PARK_MIN_FAILING_MS + 30_000));
+    expect(now - T0).toBeLessThanOrEqual(3 * (listener.PARK_MIN_FAILING_MS + 30_000));
   });
 });
 

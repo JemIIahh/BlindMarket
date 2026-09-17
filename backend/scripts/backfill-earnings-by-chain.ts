@@ -23,13 +23,22 @@
  * reported; re-run to pick it up.
  *
  * The backend credits payouts as increments and this script writes totals,
- * so a DisputeResolved ruling the backend credits after this script counted
- * it would count twice. --apply therefore reads the backend's Redis
- * (REDIS_URL) and waits until each chain's ruling scan has passed the blocks
- * read here and no ruling is still retrying or parked, for up to
- * BACKFILL_LISTENER_WAIT_MS (default 10 minutes).
- * Deploy the dispute listener before running this. --skip-listener-check
- * bypasses the wait; use it only with the backend stopped.
+ * so a payout the backend credits after this script counted it would count
+ * twice. --apply therefore works through the backend's Redis (REDIS_URL):
+ *   1. It checks that the Redis belongs to these escrows (the indexers'
+ *      fingerprints), and writes nothing if not.
+ *   2. It claims the credit marker (a2a:credited:<taskHash>) of every payout
+ *      it counted, so no backend path (the settlement routes, the dispute
+ *      listener) can credit those tasks afterwards. Then it waits
+ *      BACKFILL_CLAIM_SETTLE_MS (default 30s), so credits already under way
+ *      reach the database, where the guarded UPDATE skips their rows.
+ *   3. It waits, for up to BACKFILL_LISTENER_WAIT_MS (default 10 minutes),
+ *      until each chain's ruling scan has passed the blocks read here and no
+ *      ruling is still retrying or parked, so every counted ruling has also
+ *      closed its task. --skip-listener-check skips this step only.
+ * A run that stops after step 2 leaves the payouts it claimed uncounted until
+ * the next successful run, which writes the full totals again. Deploy the
+ * dispute listener before running this.
  *
  * Usage (from backend/, with the target's env):
  *   DATABASE_URL=postgres://… \
@@ -39,9 +48,9 @@
  *   REDIS_URL=redis://… \
  *   npx tsx scripts/backfill-earnings-by-chain.ts [--apply] [--skip-listener-check]
  *
- * With --apply every variable above except the Base ones is required (a dry
- * run falls back to the 0G mainnet values; REDIS_URL is not read). Leave BASE_ESCROW_ADDRESS empty
- * to skip Base. BACKFILL_BLOCK_CHUNK sets the
+ * With --apply every variable above except the Base ones is required. A dry
+ * run falls back to the 0G mainnet values and never reads REDIS_URL. Leave
+ * BASE_ESCROW_ADDRESS empty to skip Base. BACKFILL_BLOCK_CHUNK sets the
  * getLogs range (default 10000; halved automatically when an RPC refuses).
  * Run migration 32 first (the backend applies it at boot).
  */
@@ -67,6 +76,8 @@ loadEnv({ path: path.resolve(__dirname, '../.env') });
 const APPLY = process.argv.includes('--apply');
 const SKIP_LISTENER_CHECK = process.argv.includes('--skip-listener-check');
 const LISTENER_WAIT_MS = Number(process.env.BACKFILL_LISTENER_WAIT_MS ?? 10 * 60_000);
+const CLAIM_SETTLE_MS = Number(process.env.BACKFILL_CLAIM_SETTLE_MS ?? 30_000);
+const ZERO_HASH = `0x${'0'.repeat(64)}`;
 const LISTENER_POLL_MS = 15_000;
 const CHUNK = Number(process.env.BACKFILL_BLOCK_CHUNK ?? 10_000);
 const MIN_CHUNK = 500;
@@ -174,14 +185,36 @@ interface ScannedChain {
   latest: number;
 }
 
-/** Why the backend could still credit a ruling this run counted, or null. */
-async function listenerLag(redis: Redis, { src, chainId, latest }: ScannedChain): Promise<string | null> {
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Why REDIS_URL is not the Redis of the backend indexing this escrow, or null. */
+async function fingerprintProblem(redis: Redis, { src, chainId }: ScannedChain): Promise<string | null> {
   const k = src.redisKeys;
   const expected = `${chainId}:${src.escrow.toLowerCase()}`;
   const fingerprint = await redis.get(k.fingerprint);
   if (fingerprint === null) return `${k.fingerprint} is unset: the backend on this Redis predates the dispute listener`;
   if (fingerprint !== expected) return `${k.fingerprint} is ${fingerprint}, not ${expected}: this Redis belongs to another deployment`;
+  return null;
+}
 
+/** Claim the credit marker of each task. Returns how many were not yet set. */
+async function claimCredits(redis: Redis, taskHashes: Set<string>): Promise<number> {
+  let claimed = 0;
+  const hashes = [...taskHashes];
+  for (let i = 0; i < hashes.length; i += 500) {
+    const pipe = redis.pipeline();
+    for (const h of hashes.slice(i, i + 500)) pipe.set(`a2a:credited:${h}`, 'backfill', 'NX');
+    for (const [err, reply] of (await pipe.exec()) ?? []) {
+      if (err) throw err;
+      if (reply === 'OK') claimed++;
+    }
+  }
+  return claimed;
+}
+
+/** Why a ruling this run counted may not have closed its task yet, or null. */
+async function listenerLag(redis: Redis, { src, latest }: ScannedChain): Promise<string | null> {
+  const k = src.redisKeys;
   const scannedTo = Number(await redis.get(k.rulingsScannedTo));
   if (!(scannedTo >= latest)) return `${k.rulingsScannedTo} is ${scannedTo || 'unset'}, below block ${latest}`;
 
@@ -197,27 +230,55 @@ async function listenerLag(redis: Redis, { src, chainId, latest }: ScannedChain)
   return null;
 }
 
-async function waitForListeners(scanned: ScannedChain[]): Promise<void> {
-  if (SKIP_LISTENER_CHECK) {
-    console.log('  listeners NOT checked (--skip-listener-check): the backend must be stopped');
-    return;
+/** Problems per chain, labelled; empty when there are none. */
+async function problems(
+  scanned: ScannedChain[],
+  check: (c: ScannedChain) => Promise<string | null>,
+): Promise<string[]> {
+  return (await Promise.all(scanned.map(check)))
+    .map((problem, i) => problem && `${scanned[i].src.label}: ${problem}`)
+    .filter((problem): problem is string => !!problem);
+}
+
+async function waitForListeners(redis: Redis, scanned: ScannedChain[]): Promise<void> {
+  const deadline = Date.now() + LISTENER_WAIT_MS;
+  for (;;) {
+    const lags = await problems(scanned, (c) => listenerLag(redis, c));
+    if (lags.length === 0) {
+      console.log('  listeners have scanned every block read here, none retrying or parked');
+      return;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `rulings counted here may not have closed their tasks yet, so nothing was written ` +
+          `(the credit markers stay claimed; re-run once this clears):\n  ${lags.join('\n  ')}`,
+      );
+    }
+    console.log(`  waiting for listeners: ${lags.join('; ')}`);
+    await sleep(LISTENER_POLL_MS);
   }
+}
+
+/** Steps 1–3 of --apply (see the header). Throws when nothing may be written. */
+async function prepareApply(scanned: ScannedChain[], taskHashes: Set<string>): Promise<void> {
   const redis = new Redis(required('REDIS_URL'), { lazyConnect: true, maxRetriesPerRequest: 3 });
   try {
-    const deadline = Date.now() + LISTENER_WAIT_MS;
-    for (;;) {
-      const lags = (await Promise.all(scanned.map((c) => listenerLag(redis, c))))
-        .map((lag, i) => lag && `${scanned[i].src.label}: ${lag}`)
-        .filter((lag): lag is string => !!lag);
-      if (lags.length === 0) {
-        console.log('  listeners have scanned every block read here, none retrying or parked');
-        return;
-      }
-      if (Date.now() >= deadline) {
-        throw new Error(`the backend could still credit rulings counted here, so nothing was written:\n  ${lags.join('\n  ')}`);
-      }
-      console.log(`  waiting for listeners: ${lags.join('; ')}`);
-      await new Promise((r) => setTimeout(r, LISTENER_POLL_MS));
+    const wrongRedis = await problems(scanned, (c) => fingerprintProblem(redis, c));
+    if (wrongRedis.length > 0) {
+      throw new Error(`REDIS_URL does not belong to these escrows, so nothing was written:\n  ${wrongRedis.join('\n  ')}`);
+    }
+
+    const claimed = await claimCredits(redis, taskHashes);
+    console.log(
+      `  claimed ${claimed} credit marker(s); ${taskHashes.size - claimed} task(s) were already credited. ` +
+        `Waiting ${CLAIM_SETTLE_MS / 1000}s for credits under way.`,
+    );
+    await sleep(CLAIM_SETTLE_MS);
+
+    if (SKIP_LISTENER_CHECK) {
+      console.log('  listeners NOT checked (--skip-listener-check)');
+    } else {
+      await waitForListeners(redis, scanned);
     }
   } finally {
     redis.disconnect();
@@ -252,6 +313,7 @@ async function main(): Promise<void> {
 
   const totals = new Map<string, ChainEarnings>();
   const scanned: ScannedChain[] = [];
+  const countedTaskHashes = new Set<string>();
   for (const src of sources()) {
     const provider = new JsonRpcProvider(src.rpcUrl);
     const escrow = new Contract(src.escrow, ESCROW_ABI, provider);
@@ -268,6 +330,8 @@ async function main(): Promise<void> {
         continue;
       }
       addPayout(totals, executorFor(t.worker, walletBySmartAccount), src.unit, payout);
+      const taskHash = String(t.taskHash).toLowerCase();
+      if (taskHash !== ZERO_HASH) countedTaskHashes.add(taskHash);
       counted++;
     }
     console.log(`  ${src.label.padEnd(9)} ${payouts.size} TaskCompleted, ${counted} counted`);
@@ -298,7 +362,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  await waitForListeners(scanned);
+  await prepareApply(scanned, countedTaskHashes);
 
   let applied = 0;
   const moved: string[] = [];

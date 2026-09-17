@@ -49,6 +49,8 @@ vi.mock('./redis.js', () => ({ redis: redisMock }));
 vi.mock('./disputeListener.js', () => listener);
 
 const HEAD = 10_000;
+/** Rulings are scanned this far behind the head (DISPUTE_CONFIRMATIONS). */
+const RULINGS_TO = HEAD - 5;
 const ruling = (taskId: bigint, workerFavored: boolean) => ({ args: { taskId, workerFavored } });
 
 type EscrowMock = typeof chain.escrow;
@@ -91,20 +93,71 @@ describe('Base DisputeResolved scan', () => {
 
     await pollBaseEscrowOnce();
 
-    expect(rangesFor(chain.baseEscrow, 'DisputeResolved')).toEqual([{ from: 9801, to: HEAD }]);
+    expect(rangesFor(chain.baseEscrow, 'DisputeResolved')).toEqual([{ from: 9801, to: RULINGS_TO }]);
     expect(listener.handleDisputeResolved.mock.calls).toEqual([['base', 3n, true], ['base', 4n, false]]);
     expect(listener.retryParkedDisputes).toHaveBeenCalledWith('base');
     expect(redisMock.store.get('base:events:checkpoint')).toBe(String(HEAD));
-    expect(redisMock.store.get('base:events:dispute-checkpoint')).toBe(String(HEAD));
+    expect(redisMock.store.get('base:events:dispute-checkpoint')).toBe(String(RULINGS_TO));
   });
 
-  it('starts at the deployment block on a new Redis', async () => {
+  it('on a new or flushed Redis, scans rulings from the head only, so past ones are not credited again', async () => {
     const { pollBaseEscrowOnce } = await loadBase('9000');
 
     await pollBaseEscrowOnce();
 
-    expect(rangesFor(chain.baseEscrow, 'DisputeResolved')).toEqual([{ from: 9000, to: 9499 }]);
-    expect(redisMock.store.get('base:events:dispute-checkpoint')).toBe('9499');
+    // Tasks are indexed from the deployment block; rulings are not.
+    expect(rangesFor(chain.baseEscrow, 'TaskCreated')).toEqual([{ from: 9000, to: 9499 }]);
+    expect(rangesFor(chain.baseEscrow, 'DisputeResolved')).toEqual([]);
+    expect(redisMock.store.get('base:events:dispute-checkpoint')).toBe(String(HEAD));
+
+    // Once tasks catch up, rulings after the head at first boot are scanned.
+    chain.baseProvider.getBlockNumber.mockResolvedValue(HEAD + 100);
+    redisMock.store.set('base:events:checkpoint', String(HEAD));
+    await pollBaseEscrowOnce();
+    expect(rangesFor(chain.baseEscrow, 'DisputeResolved')).toEqual([{ from: HEAD + 1, to: HEAD + 95 }]);
+  });
+
+  it('seeds the ruling scan before task indexing, so a failed first pass cannot replay history', async () => {
+    const { pollBaseEscrowOnce } = await loadBase('9000');
+    const set = redisMock.set.getMockImplementation()!;
+    let failed = false;
+    redisMock.set.mockImplementation(async (k: string, v: string, mode?: string) => {
+      if (k === 'base:events:checkpoint' && !failed) {
+        failed = true;
+        throw new Error('redis blip');
+      }
+      return set(k, v, mode);
+    });
+
+    await pollBaseEscrowOnce();
+    expect(redisMock.store.get('base:events:dispute-checkpoint')).toBe(String(HEAD));
+    expect(redisMock.store.has('base:events:checkpoint')).toBe(false);
+
+    await pollBaseEscrowOnce();
+    expect(redisMock.store.get('base:events:dispute-checkpoint')).toBe(String(HEAD));
+    expect(redisMock.store.get('base:events:checkpoint')).toBe('9499');
+    redisMock.set.mockImplementation(set);
+  });
+
+  it('seeds the ruling scan again when its checkpoint is deleted', async () => {
+    redisMock.store.set('base:events:checkpoint', '9800');
+    const { pollBaseEscrowOnce } = await loadBase();
+    await pollBaseEscrowOnce();
+    redisMock.store.delete('base:events:dispute-checkpoint');
+
+    // The poll that finds it missing stops scanning; the next one reseeds it
+    // where task indexing stands.
+    await pollBaseEscrowOnce();
+    expect(redisMock.store.has('base:events:dispute-checkpoint')).toBe(false);
+    await pollBaseEscrowOnce();
+    expect(redisMock.store.get('base:events:dispute-checkpoint')).toBe(String(HEAD));
+
+    chain.baseProvider.getBlockNumber.mockResolvedValue(HEAD + 50);
+    await pollBaseEscrowOnce();
+    expect(rangesFor(chain.baseEscrow, 'DisputeResolved')).toEqual([
+      { from: 9801, to: RULINGS_TO },
+      { from: HEAD + 1, to: HEAD + 45 },
+    ]);
   });
 
   it('leaves rulings to the poll loop when a request forces a tick', async () => {
@@ -121,7 +174,7 @@ describe('Base DisputeResolved scan', () => {
     // from where it started, so the next poll still covers those blocks.
     expect(redisMock.store.get('base:events:dispute-checkpoint')).toBe('9800');
     await pollBaseEscrowOnce();
-    expect(rangesFor(chain.baseEscrow, 'DisputeResolved')).toEqual([{ from: 9801, to: HEAD }]);
+    expect(rangesFor(chain.baseEscrow, 'DisputeResolved')).toEqual([{ from: 9801, to: RULINGS_TO }]);
     expect(listener.handleDisputeResolved).toHaveBeenCalledWith('base', 3n, true);
   });
 
@@ -139,10 +192,10 @@ describe('Base DisputeResolved scan', () => {
     // Next poll: tasks are caught up, the ruling is retried.
     await pollBaseEscrowOnce();
     expect(rangesFor(chain.baseEscrow, 'DisputeResolved')).toEqual([
-      { from: 9801, to: HEAD },
-      { from: 9801, to: HEAD },
+      { from: 9801, to: RULINGS_TO },
+      { from: 9801, to: RULINGS_TO },
     ]);
-    expect(redisMock.store.get('base:events:dispute-checkpoint')).toBe(String(HEAD));
+    expect(redisMock.store.get('base:events:dispute-checkpoint')).toBe(String(RULINGS_TO));
   });
 
   it('catches up in chunks once tasks are indexed', async () => {
@@ -159,7 +212,7 @@ describe('Base DisputeResolved scan', () => {
     ]);
   });
 
-  it('never scans past the TaskCreated checkpoint', async () => {
+  it('stays a few blocks behind the TaskCreated checkpoint', async () => {
     redisMock.store.set('base:events:checkpoint', '5000');
     redisMock.store.set('base:events:dispute-checkpoint', '5200');
     const { pollBaseEscrowOnce } = await loadBase();
@@ -167,7 +220,7 @@ describe('Base DisputeResolved scan', () => {
     await pollBaseEscrowOnce();
 
     expect(rangesFor(chain.baseEscrow, 'TaskCreated')).toEqual([{ from: 5001, to: 5500 }]);
-    expect(rangesFor(chain.baseEscrow, 'DisputeResolved')).toEqual([{ from: 5201, to: 5500 }]);
+    expect(rangesFor(chain.baseEscrow, 'DisputeResolved')).toEqual([{ from: 5201, to: 5495 }]);
   });
 
   it('does not scan rulings when the TaskCreated pass failed', async () => {

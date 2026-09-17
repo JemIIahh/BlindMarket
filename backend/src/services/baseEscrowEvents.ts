@@ -51,6 +51,10 @@ const MAX_BLOCKS_PER_TICK = 500;
 // the current head. An existing checkpoint always wins.
 const DEPLOYMENT_BLOCK = Number(process.env.BASE_ESCROW_DEPLOYMENT_BLOCK ?? 0);
 const LAG_LOG_INTERVAL_MS = 60_000;
+// Rulings are scanned this far behind the head. The checkpoint never comes
+// back to a block, so a node that briefly answers from behind the head (an
+// empty log list, no error) must not move it past a ruling.
+const DISPUTE_CONFIRMATIONS = 5;
 
 // ── State ───────────────────────────────────────────────────────────────────
 
@@ -145,18 +149,24 @@ async function indexTaskCreated(): Promise<number | null> {
     if (checkpointRaw) {
       from = Number(checkpointRaw) + 1;
     } else {
-      // The checkpoint means "last block processed", so record the block
-      // before `from`: a failed first tick must not skip `from`.
       from = Number.isSafeInteger(DEPLOYMENT_BLOCK) && DEPLOYMENT_BLOCK > 0
         ? Math.min(DEPLOYMENT_BLOCK, latest)
         : latest;
+      // A new Redis (or a flushed one) has lost the markers that stop a
+      // ruling from being credited twice, while the database may still hold
+      // those credits. So rulings are scanned from the head only; earlier
+      // ones are for the earnings backfill, which writes totals. Written
+      // before the TaskCreated checkpoint, so a failure in between can't
+      // leave this pass looking like an existing deployment.
+      await redis.set(KEY.disputeCheckpoint, String(latest), 'NX');
+      // The checkpoint means "last block processed", so record the block
+      // before `from`: a failed first tick must not skip `from`.
       await redis.set(KEY.checkpoint, String(from - 1));
     }
     if (!disputeCheckpointSeeded) {
-      // Rulings are scanned from where task indexing stood when this code
-      // first ran against this Redis: on an existing deployment, rulings
-      // before that are for the earnings backfill; on a new Redis this is
-      // the deployment block. Seeded by whichever pass runs first, forced or
+      // On an existing deployment, rulings are scanned from where task
+      // indexing stood when this code first ran; earlier ones are for the
+      // earnings backfill. Seeded by whichever pass runs first, forced or
       // not, so no forced pass can move task indexing past unscanned blocks.
       await redis.set(KEY.disputeCheckpoint, String(from - 1), 'NX');
       disputeCheckpointSeeded = true;
@@ -221,20 +231,25 @@ async function indexTaskCreated(): Promise<number | null> {
 }
 
 /**
- * Mirror DisputeResolved rulings up to `indexedTo`, the TaskCreated
- * checkpoint. A failed event leaves the checkpoint where it was, so the next
- * poll retries it.
+ * Mirror DisputeResolved rulings up to DISPUTE_CONFIRMATIONS blocks below
+ * `indexedTo`, the TaskCreated checkpoint. A failed event leaves the
+ * checkpoint where it was, so the next poll retries it.
  */
 async function indexDisputes(indexedTo: number): Promise<void> {
   if (!baseEscrow) return;
 
   try {
     const checkpointRaw = await redis.get(KEY.disputeCheckpoint);
-    // Seeded by the TaskCreated pass; missing only if that write failed.
-    if (checkpointRaw === null) return;
+    if (checkpointRaw === null) {
+      // Seeded by the TaskCreated pass; missing if that write failed or the
+      // key was deleted. Seed it again on the next pass.
+      disputeCheckpointSeeded = false;
+      return;
+    }
     const from = Number(checkpointRaw) + 1;
-    if (from > indexedTo) return;
-    const to = Math.min(indexedTo, from + MAX_BLOCKS_PER_TICK - 1);
+    const upTo = indexedTo - DISPUTE_CONFIRMATIONS;
+    if (from > upTo) return;
+    const to = Math.min(upTo, from + MAX_BLOCKS_PER_TICK - 1);
 
     const events = await baseEscrow.queryFilter(baseEscrow.filters.DisputeResolved(), from, to);
     for (const ev of events) {

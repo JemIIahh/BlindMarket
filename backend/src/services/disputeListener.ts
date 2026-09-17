@@ -22,6 +22,10 @@ import type { TaskChain } from './taskChain.js';
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 const ZERO_HASH = `0x${'0'.repeat(64)}`;
+// BlindEscrow.TaskStatus after resolveDispute: Completed when the worker won,
+// Cancelled when the poster was refunded.
+const STATUS_COMPLETED = 4;
+const STATUS_CANCELLED = 5;
 
 /** Both must be reached before an event is parked. Scans also run from
  *  request paths, so the attempt count alone says little about how long an
@@ -70,7 +74,7 @@ export async function handleDisputeResolved(
     await redis.hsetnx(attemptsKey, 'firstAt', String(now));
     await redis.expire(attemptsKey, ATTEMPTS_TTL_SECONDS).catch(() => {});
     const storedFirstAt = Number(await redis.hget(attemptsKey, 'firstAt'));
-    const firstAt = Number.isFinite(storedFirstAt) ? storedFirstAt : now;
+    const firstAt = storedFirstAt > 0 ? storedFirstAt : now;
     if (attempts < PARK_MIN_ATTEMPTS || now - firstAt < PARK_MIN_FAILING_MS) {
       throw new Error(`DisputeResolved ${chain} taskId=${id}: ${message}`);
     }
@@ -164,6 +168,16 @@ async function processDisputeResolved(chain: TaskChain, taskId: bigint, workerFa
   const taskHash = String(t.taskHash).toLowerCase();
   if (taskHash === ZERO_HASH) {
     console.warn(`[disputes] DisputeResolved ${chain} taskId=${taskId} has no task on-chain — skipping`);
+    return;
+  }
+  // Any other status means the id now names a different task than the
+  // ruling did: a parked ruling retried after the escrow was redeployed
+  // under the same Redis keys.
+  const expectedStatus = workerFavored ? STATUS_COMPLETED : STATUS_CANCELLED;
+  if (Number(t.status) !== expectedStatus) {
+    console.warn(
+      `[disputes] DisputeResolved ${chain} taskId=${taskId} workerFavored=${workerFavored} but the task's status is ${t.status}, not ${expectedStatus} — skipping`,
+    );
     return;
   }
 
