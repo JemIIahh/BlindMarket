@@ -1,14 +1,16 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { getSchemaStatus, isRerunSafe, listMigrations, rerunUnsafeMigrationIds, runMigrations } from './neonDb.js';
 
-// Migration 31 (USDC units) only applies where a Base escrow is configured.
-const cfg = vi.hoisted(() => ({ baseEscrowAddress: '0xescrow' }));
+// Migration 31 (USDC units) only applies where the deployment PRICES in USDC,
+// which is the settlement token of the chain it posts tasks on.
+const cfg = vi.hoisted(() => ({ baseEscrowAddress: '0xescrow', postingChain: '' }));
 vi.mock('../config.js', async (importOriginal) => {
   const mod = await importOriginal<typeof import('../config.js')>();
   return {
     ...mod,
     config: new Proxy(mod.config, {
-      get: (target, key) => (key === 'baseEscrowAddress' ? cfg.baseEscrowAddress : Reflect.get(target, key)),
+      get: (target, key) =>
+        key in cfg ? cfg[key as keyof typeof cfg] : Reflect.get(target, key),
     }),
   };
 });
@@ -25,6 +27,7 @@ vi.mock('../config.js', async (importOriginal) => {
 afterEach(() => {
   vi.restoreAllMocks();
   cfg.baseEscrowAddress = '0xescrow';
+  cfg.postingChain = '';
 });
 
 describe('isRerunSafe', () => {
@@ -127,6 +130,26 @@ describe('conditional migration 31 (USDC units)', () => {
     await runMigrations(pool);
     expect(queries.some((q) => convertsAmounts(q.sql))).toBe(false);
     expect(inserts(queries)).not.toContain(31);
+  });
+
+  // A stack can have a Base escrow (withdrawals, CCTP) while posting — and
+  // pricing — on 0G. Its amounts are 18-decimal and dividing them by 10^12 is
+  // irreversible. A skipped `when` is not recorded, so this migration would
+  // otherwise fire on the first boot after such a stack added its Base escrow.
+  it('is skipped on a stack with a Base escrow that posts on 0G', async () => {
+    cfg.postingChain = '0g';
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { pool, queries } = fakePool([]);
+    await runMigrations(pool);
+    expect(queries.some((q) => convertsAmounts(q.sql))).toBe(false);
+    expect(inserts(queries)).not.toContain(31);
+  });
+
+  it('applies on a stack that posts on Base', async () => {
+    cfg.postingChain = 'base';
+    const { pool, queries } = fakePool([]);
+    await runMigrations(pool);
+    expect(queries.some((q) => convertsAmounts(q.sql))).toBe(true);
   });
 
   it('is not reported missing where it does not apply', async () => {

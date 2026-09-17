@@ -81,6 +81,12 @@ vi.mock('../services/semanticMatch.js', () => ({
   recordMatchShadow: vi.fn(),
   semanticRoutingEligible: vi.fn(() => false),
   buildTaskRoutingText: vi.fn(() => ''),
+  semanticCascadeRanking: vi.fn(async () => null),
+}));
+
+vi.mock('../services/agentScorer.js', () => ({
+  rankAgents: vi.fn(async () => []),
+  pickExplorationAgent: vi.fn(async () => null),
 }));
 
 vi.mock('../services/socket.js', () => ({
@@ -113,6 +119,7 @@ const { globalErrorHandler } = await import('../middleware/errorHandler.js');
 const a2aStore = await import('../services/a2aStore.js');
 const taskChain = await import('../services/taskChain.js');
 const agentStore = await import('../services/agentStore.js');
+const agentScorer = await import('../services/agentScorer.js');
 const escrowService = await import('../services/escrow.js');
 
 function app() {
@@ -141,7 +148,7 @@ function onBase(token: string, amount: bigint) {
 
 /** Fund the task on 0G. Shortcut: the Base provider and escrow are removed
  *  while config still names a Base escrow, a pair real chain.ts never builds.
- *  The route skips a chain with no escrow contract and settlementToken() reads
+ *  The route skips a chain with no escrow contract and pricingUnit() reads
  *  config alone, so the answer is the one a Base deployment gives for a 0G
  *  task, without waiting out the Base receipt retries (3 x 3 s). */
 function onZeroG(token: string, amount: bigint) {
@@ -348,5 +355,41 @@ describe('POST /tasks/index reads each task on the chain that holds it', () => {
     expect(chain.baseProvider.getTransactionReceipt).not.toHaveBeenCalled();
     expect(taskChain.seedTaskId).toHaveBeenCalledWith('0g', TASK, '7');
     expect(vi.mocked(a2aStore.setMeta).mock.calls[0][0]).toMatchObject({ chain: '0g' });
+  });
+});
+
+/**
+ * Reward floors are written in the deployment's pricing unit, so the cascade
+ * has to receive the TASK's unit with the amount — not the deployment's, which
+ * is the bug this pins: on a Base-pricing stack, a native-0G task's 10^18 wei
+ * read as USDC base units would clear every floor, and a small one would drop
+ * every agent that has one.
+ */
+describe('POST /tasks/index passes the task reward with its own unit', () => {
+  const rewardFrom = (mock: { mock: { calls: unknown[][] } }, argIndex: number) =>
+    mock.mock.calls[0]?.[argIndex] as { amount: bigint; unit: { symbol: string; decimals: number } } | undefined;
+
+  beforeEach(() => {
+    cfg.cascadeEnabled = true;
+  });
+
+  it('sends a 0G task as native 0G, on a deployment that prices in USDC', async () => {
+    onZeroG(NATIVE, 10n ** 18n);
+    const res = await index({ requiredCapabilities: ['data_processing'] });
+    expect(res.status).toBe(200);
+    expect(rewardFrom(vi.mocked(agentScorer.pickExplorationAgent), 2)).toEqual({
+      amount: 10n ** 18n,
+      unit: { symbol: '0G', decimals: 18 },
+    });
+  });
+
+  it('sends a Base task as USDC', async () => {
+    onBase(USDC, 5_000_000n);
+    const res = await index({ requiredCapabilities: ['data_processing'] });
+    expect(res.status).toBe(200);
+    expect(rewardFrom(vi.mocked(agentScorer.pickExplorationAgent), 2)).toEqual({
+      amount: 5_000_000n,
+      unit: { symbol: 'USDC', decimals: 6 },
+    });
   });
 });

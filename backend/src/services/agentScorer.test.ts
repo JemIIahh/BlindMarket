@@ -6,7 +6,11 @@ vi.mock('./reviewStore.js', () => ({ getAgentReviews: vi.fn(async () => ({ stats
 vi.mock('./a2aStore.js', () => ({ getExecutorTasks: vi.fn(async () => []) }));
 vi.mock('./reputationDecay.js', () => ({ getDecayedReputation: vi.fn(async () => ({ decayedScore: 0, tasksCompleted: 0, disputes: 0 })) }));
 
-vi.mock('./settlementUnits.js', () => ({ pricingUnit: () => pricing.unit }));
+vi.mock('./settlementUnits.js', () => ({
+  pricingUnit: () => pricing.unit,
+  sameUnit: (a: { symbol: string; decimals: number }, b: { symbol: string; decimals: number }) =>
+    a.symbol === b.symbol && a.decimals === b.decimals,
+}));
 
 import { scoreAgent, rankAgents, pickExplorationAgent, meetsRewardFloor } from './agentScorer.js';
 import * as agentStore from './agentStore.js';

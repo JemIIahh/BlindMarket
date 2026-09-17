@@ -347,9 +347,6 @@ describe('GET /health/bridge per-chain settlement facts', () => {
     expect(data.chains.map((c: { postable: boolean }) => c.postable)).toEqual([true, false]);
   });
 
-  // Boot refuses this exact pairing today (assertPostingUnitMatchesPricing:
-  // a Base escrow with 0G posting while prices stay in USDC). The route still
-  // has to report what the registry says.
   it('follows POSTING_CHAIN', async () => {
     cfg.postingChain = '0g';
     const data = await bridge();

@@ -32,7 +32,7 @@ import { config } from '../config.js';
 import * as serviceStore from '../services/serviceStore.js';
 import { consumePendingCost } from '../services/railwaySandbox.js';
 import * as accountingService from '../services/accountingService.js';
-import { normalizeSettlementAmount, payoutCurrency, pricingUnit, type TaskReward } from '../services/settlementUnits.js';
+import { normalizeSettlementAmount, payoutCurrency, pricingUnit, sameUnit, type TaskReward } from '../services/settlementUnits.js';
 
 export const a2aRouter = Router();
 
@@ -1476,7 +1476,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       // price_raw is in the deployment's pricing token. An amount in another
       // token is not comparable: 1,000,000 wei of 0G would pass a 1 USDC price.
       const pricing = pricingUnit();
-      if (taskUnit.symbol !== pricing.symbol) {
+      if (!sameUnit(taskUnit, pricing)) {
         throw new AppError(
           409,
           'SERVICE_TOKEN_MISMATCH',

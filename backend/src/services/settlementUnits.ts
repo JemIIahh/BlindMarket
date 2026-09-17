@@ -38,10 +38,48 @@ export function pricingUnit(): SettlementUnit {
   return settlementChainConfig(postingChain()).token.unit;
 }
 
+/**
+ * What clients will still get wrong about prices here, for the boot log.
+ *
+ * The web app and the MCP pick their payment token by "is a Base escrow
+ * configured?" (frontend/src/config/constants.ts), the rule the backend used
+ * before R12. On a stack that has a Base escrow but posts somewhere else they
+ * send Base's USDC address, which POST /tasks refuses, and — when the posting
+ * chain prices in another unit — show every amount out by a factor of 10^12.
+ * Loud, not silent, but worth saying at boot: until R12 this configuration
+ * refused to start at all. R16 makes clients read the posting chain from the
+ * backend.
+ */
+export function clientPricingWarnings(): string[] {
+  const posting = settlementChainConfig(postingChain());
+  if (posting.key === 'base' || settlementChainConfig('base').escrowAddress === null) return [];
+  const unit = posting.token.unit;
+  // What a configured Base escrow makes a client assume it should pay in.
+  const assumed = USDC_UNIT;
+  return [
+    `new tasks post on ${posting.label} in ${unit.symbol}, but a Base escrow is configured, so the web app ` +
+      `and the MCP will send Base's USDC address, which POST /tasks refuses (TOKEN_NOT_SETTLEMENT)` +
+      `${sameUnit(unit, assumed) ? '' : `, and will show and accept prices in ${assumed.symbol} rather than ${unit.symbol}`}. ` +
+      `Amounts already stored — service prices and reward floors — were written in whichever unit was in ` +
+      `force then, and nothing re-keys them. Unset POSTING_CHAIN, or set BASE_ESCROW_ADDRESS to the zero ` +
+      `address, unless this stack is used only through the API and its stored amounts are already in ` +
+      `${unit.symbol}.`,
+  ];
+}
+
 /** A task's reward, with the unit it is escrowed in — amounts are not comparable across units. */
 export interface TaskReward {
   amount: bigint;
   unit: SettlementUnit;
+}
+
+/**
+ * Whether two amounts are in the same unit, and so comparable. Symbol alone is
+ * not enough: Arc's USDC is 18 decimals natively and 6 through its ERC-20, so
+ * two "USDC" amounts there can differ by 10^12.
+ */
+export function sameUnit(a: SettlementUnit, b: SettlementUnit): boolean {
+  return a.symbol === b.symbol && a.decimals === b.decimals;
 }
 
 /**

@@ -17,16 +17,23 @@ vi.hoisted(() => {
 // semanticMatch imports neonDb/agentScorer at module load; the functions under
 // test here are pure, so leaf stubs are enough (same pattern as the
 // projection tests).
+/** What this deployment prices in; reward floors are written in it. */
+const PRICING = vi.hoisted(() => ({ symbol: 'USDC', decimals: 6 }));
+
 vi.mock('./neonDb.js', () => ({ getPool: vi.fn() }));
 vi.mock('./agentScorer.js', () => ({
   rankAgents: vi.fn(),
   dominanceMultiplier: vi.fn(async () => 1),
   // Real logic mirrored (importActual would drag in redis via a2aStore).
-  // Real logic mirrored, including the unit rule: a floor only applies to a
-  // task escrowed in the pricing unit (USDC here).
-  meetsRewardFloor: (a: { minReward?: string }, t: { amount: bigint; unit: { symbol: string } } | null) => {
+  // Real logic mirrored (importActual would drag in redis via a2aStore),
+  // including the unit rule: a floor is written in the deployment's pricing
+  // unit and says nothing about a task escrowed in another one.
+  meetsRewardFloor: (
+    a: { minReward?: string },
+    t: { amount: bigint; unit: { symbol: string; decimals: number } } | null,
+  ) => {
     if (t === null || !a.minReward) return true;
-    if (t.unit.symbol !== 'USDC') return true;
+    if (t.unit.symbol !== PRICING.symbol || t.unit.decimals !== PRICING.decimals) return true;
     try { return BigInt(a.minReward) <= t.amount; } catch { return true; }
   },
   hasAllCapabilities: (a: { capabilities: string[] }, req: string[]) =>

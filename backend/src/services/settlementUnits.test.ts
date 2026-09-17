@@ -4,7 +4,7 @@ const BASE_USDC = '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
 const cfg = vi.hoisted(() => ({ baseEscrowAddress: '0xescrow' as string, baseUsdcAddress: '' as string, postingChain: '' }));
 vi.mock('../config.js', () => ({ config: cfg }));
 
-const { normalizeSettlementAmount, pricingUnit, payoutCurrency, nativeWeiToTokenUnits } =
+const { normalizeSettlementAmount, pricingUnit, payoutCurrency, nativeWeiToTokenUnits, clientPricingWarnings, sameUnit } =
   await import('./settlementUnits.js');
 
 beforeEach(() => {
@@ -57,6 +57,25 @@ describe('a stack with a Base escrow that posts on 0G', () => {
   });
 });
 
+describe('clientPricingWarnings', () => {
+  it('warns when a Base escrow is configured but tasks post elsewhere', () => {
+    cfg.postingChain = '0g';
+    const [warning] = clientPricingWarnings();
+    expect(warning).toMatch(/new tasks post on 0G in 0G, but a Base escrow is configured/);
+    expect(warning).toMatch(/will show and accept prices in USDC rather than 0G/);
+    // The stored rows are the trap an API-only stack would otherwise walk into.
+    expect(warning).toMatch(/Amounts already stored .* nothing re-keys them/);
+  });
+
+  it('says nothing on a stack that posts on Base, or has no Base escrow', () => {
+    expect(clientPricingWarnings()).toEqual([]);
+    cfg.postingChain = 'base';
+    expect(clientPricingWarnings()).toEqual([]);
+    Object.assign(cfg, { postingChain: '0g', baseEscrowAddress: '' });
+    expect(clientPricingWarnings()).toEqual([]);
+  });
+});
+
 describe('POSTING_CHAIN=base', () => {
   it('prices in USDC', () => {
     cfg.postingChain = 'base';
@@ -96,6 +115,8 @@ describe('payoutCurrency', () => {
   });
 });
 
+// Used by the withdraw route where a chain's gas coin is its settlement token
+// (Arc's USDC), to keep the native gas reserve back while sweeping the ERC-20.
 describe('nativeWeiToTokenUnits', () => {
   const E = 10n ** 18n;
 
@@ -109,5 +130,18 @@ describe('nativeWeiToTokenUnits', () => {
 
   it('leaves an 18-decimal token as it is', () => {
     expect(nativeWeiToTokenUnits(5n, 18)).toBe(5n);
+  });
+});
+
+describe('sameUnit', () => {
+  it('is true only for the same symbol AND the same decimals', () => {
+    expect(sameUnit({ symbol: 'USDC', decimals: 6 }, { symbol: 'USDC', decimals: 6 })).toBe(true);
+    expect(sameUnit({ symbol: 'USDC', decimals: 6 }, { symbol: '0G', decimals: 18 })).toBe(false);
+  });
+
+  // Why decimals are part of it: Arc's USDC is 18 decimals natively and 6
+  // through its ERC-20, so two "USDC" amounts there can differ by 10^12.
+  it('separates two amounts that share a symbol but not its scale', () => {
+    expect(sameUnit({ symbol: 'USDC', decimals: 18 } as never, { symbol: 'USDC', decimals: 6 })).toBe(false);
   });
 });

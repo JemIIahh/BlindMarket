@@ -4,7 +4,7 @@ import * as badgeStore from './badgeStore.js';
 import * as reviewStore from './reviewStore.js';
 import * as a2aStore from './a2aStore.js';
 import { getDecayedReputation } from './reputationDecay.js';
-import { pricingUnit, type TaskReward } from './settlementUnits.js';
+import { pricingUnit, sameUnit, type TaskReward } from './settlementUnits.js';
 import type { AgentExecutor, AgentCapability } from '../types.js';
 
 // ── Cold-start constants (Part 2) ────────────────────────────────────────────
@@ -169,8 +169,7 @@ export function meetsRewardFloor(
   taskReward: TaskReward | null,
 ): boolean {
   if (taskReward === null || !agent.minReward) return true;
-  const pricing = pricingUnit();
-  if (taskReward.unit.symbol !== pricing.symbol || taskReward.unit.decimals !== pricing.decimals) return true;
+  if (!sameUnit(taskReward.unit, pricingUnit())) return true;
   try { return BigInt(agent.minReward) <= taskReward.amount; } catch { return true; }
 }
 

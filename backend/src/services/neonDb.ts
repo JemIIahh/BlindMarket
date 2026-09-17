@@ -1,5 +1,7 @@
 import pg from 'pg';
 import { config } from '../config.js';
+import { pricingUnit } from './settlementUnits.js';
+import { USDC_UNIT } from './settlementChains.js';
 import { Redis } from 'ioredis';
 
 const { Pool } = pg;
@@ -690,9 +692,14 @@ const migrations: Array<{ id: number; name: string; sql: string; when?: () => bo
   {
     id: 31,
     name: 'settlement_amounts_to_usdc_units',
-    // Only where Base settles in USDC: a 0G-only deployment's amounts really
-    // are 18-decimal and must stay as they are.
-    when: () => !!config.baseEscrowAddress,
+    // Only where this deployment PRICES in USDC: amounts on a stack that
+    // prices in 0G really are 18-decimal and must stay as they are. Keyed on
+    // the pricing unit, not on "a Base escrow exists", because a stack can
+    // have a Base escrow (withdrawals, CCTP) while posting — and pricing — on
+    // 0G. A skipped `when` is not recorded, so this would otherwise fire the
+    // first boot after such a stack added a Base escrow and divide every 0G
+    // price by 10^12, irreversibly.
+    when: () => pricingUnit().decimals === USDC_UNIT.decimals,
     sql: `
       -- Service prices and agent minimum rewards were written with 18
       -- decimals (the web app used parseEther, SDK samples used 1 0G = 10^18)

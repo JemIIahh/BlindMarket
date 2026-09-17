@@ -58,6 +58,7 @@ import {
   settlementChainConfigs,
 } from './services/settlementChains.js';
 import { chainRuntime } from './services/chainRuntime.js';
+import { clientPricingWarnings } from './services/settlementUnits.js';
 import { logChainConfig } from './services/chainService.js';
 import { reconcileAgents, startZombieReaper } from './services/agentRunner.js';
 
@@ -73,6 +74,10 @@ for (const warning of assertPostingChain({
 })) {
   console.warn(`[boot] posting chain: ${warning}`);
 }
+for (const warning of clientPricingWarnings()) {
+  console.warn(`[boot] pricing: ${warning}`);
+}
+
 logChainConfig();
 console.log(`[chain] New tasks post on ${settlementChainConfig(postingChain()).label}${config.postingChain ? '' : ' (default)'}`);
 
