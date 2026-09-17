@@ -123,12 +123,19 @@ With `NODE_ENV=production`, the chain defaults are 0G mainnet and Base
   `ENTRY_POINT_ADDRESS` from the staging `agent-factory-`/`aa-` records
 - `MARKETPLACE_SIGNER_PRIVATE_KEY` and `BASE_MARKETPLACE_SIGNER_PRIVATE_KEY`:
   staging-only keys
+- `PUBLIC_API_URL` and `PUBLIC_APP_URL`: the staging API and app. Unset, they
+  default to production's, and the discovery endpoints (`/.well-known/agent.json`
+  and friends) send the agents that find staging to production.
+- `REDIS_URL` and `DATABASE_URL`: staging's own. Never copy production's: two
+  backends on one Redis take each other's tasks (the escrow fingerprint in
+  `/health/bridge` only reports it).
 
 Set every contract address that staging does not deploy to
 `0x0000000000000000000000000000000000000000`. An empty value falls back to
 production's contract. With `DEPLOYMENT_SET` set, the backend refuses to boot
-unless each of the addresses above and `OG_RPC_URL` is present (zero counts)
-and the chain ids are 16602 and 84532.
+unless each of the addresses above, `OG_RPC_URL`, `PUBLIC_API_URL` and
+`PUBLIC_APP_URL` is present (zero counts), neither URL is production's, and
+the chain ids are 16602 and 84532.
 
 The staging frontend needs `VITE_OG_CHAIN_ID=16602`, `VITE_BASE_CHAIN_ID=84532`
 and the `VITE_*_ADDRESS` overrides (`VITE_BLIND_ESCROW_ADDRESS`,

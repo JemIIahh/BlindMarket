@@ -34,13 +34,20 @@ export function parseDeploymentSet(raw: string | undefined): '' | 'staging' {
   throw new Error(`DEPLOYMENT_SET="${value}" is not a deployment set. Use "default" (or leave it unset) or "staging".`);
 }
 
+/** Where a production backend says it lives, when PUBLIC_*_URL is unset. */
+export const PRODUCTION_PUBLIC_URLS = {
+  PUBLIC_API_URL: 'https://api.blindmarket.xyz',
+  PUBLIC_APP_URL: 'https://blindmarket.xyz',
+} as const;
+
 /**
  * Env vars a non-default deployment set must set explicitly. optional() treats
  * an unset or empty value as missing and falls back to the generated
- * (production) addresses or to production's RPC, so a staging stack that
- * forgot one would talk to production's contracts. A zero address counts as
- * set ("not deployed on this stack"). VALIDATOR_POOL_ADDRESS has no fallback
- * but is listed so staging can't silently omit its pool.
+ * (production) addresses, production's RPC, or production's public URLs, so a
+ * staging stack that forgot one would talk to production's contracts, or
+ * send the agents that discover it to production's API. A zero address
+ * counts as set ("not deployed on this stack"). VALIDATOR_POOL_ADDRESS has no
+ * fallback but is listed so staging can't silently omit its pool.
  */
 export const DEPLOYMENT_SET_REQUIRED_ENV = [
   'OG_RPC_URL',
@@ -54,6 +61,8 @@ export const DEPLOYMENT_SET_REQUIRED_ENV = [
   'USDC_PAYMASTER_ADDRESS',
   'BLIND_ACCOUNT_FACTORY_ADDRESS',
   'ENTRY_POINT_ADDRESS',
+  'PUBLIC_API_URL',
+  'PUBLIC_APP_URL',
 ] as const;
 
 /** Chains each non-default set runs on (contracts/scripts/_deployments.ts SET_CHAINS). */
@@ -73,9 +82,14 @@ export function deploymentSetProblems(
   if (missing.length > 0) {
     problems.push(
       `DEPLOYMENT_SET=${set} but ${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} not set. ` +
-        `Unset or empty values fall back to production's addresses; set each explicitly ` +
+        `Unset or empty values fall back to production's; set each explicitly ` +
         `(0x0000000000000000000000000000000000000000 for a contract this stack does not deploy).`,
     );
+  }
+  for (const [key, url] of Object.entries(PRODUCTION_PUBLIC_URLS)) {
+    if ((env[key] ?? '').trim().replace(/\/+$/, '') === url) {
+      problems.push(`DEPLOYMENT_SET=${set} but ${key} is production's ${url}; point it at this stack.`);
+    }
   }
   const want = DEPLOYMENT_SET_CHAINS[set];
   if (chainIds.og !== want.og || chainIds.base !== want.base) {
@@ -117,8 +131,8 @@ export const config = {
   // Public base URLs for discovery surfaces (agent cards, OpenAPI, MCP docs).
   // The agent card previously advertised config.corsOrigin (the FRONTEND
   // origin list) as the API url — wrong on both counts.
-  publicApiUrl: optional('PUBLIC_API_URL', IS_PROD ? 'https://api.blindmarket.xyz' : 'http://localhost:3001'),
-  publicAppUrl: optional('PUBLIC_APP_URL', IS_PROD ? 'https://blindmarket.xyz' : 'http://localhost:5173'),
+  publicApiUrl: optional('PUBLIC_API_URL', IS_PROD ? PRODUCTION_PUBLIC_URLS.PUBLIC_API_URL : 'http://localhost:3001'),
+  publicAppUrl: optional('PUBLIC_APP_URL', IS_PROD ? PRODUCTION_PUBLIC_URLS.PUBLIC_APP_URL : 'http://localhost:5173'),
   // Verification fails CLOSED: with 0G Compute unconfigured the sealed
   // verifier refuses to verify instead of auto-passing. Only an explicit
   // opt-in (or the vitest 'test' env) re-enables the local auto-pass stub,

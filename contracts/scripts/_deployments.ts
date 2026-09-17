@@ -271,7 +271,8 @@ export interface RecordUpdate {
 
 /**
  * Merge a deploy's output into an existing record: keys it doesn't write
- * survive, and an existing `note` (often written by hand) is kept.
+ * survive, and an existing `note` (often written by hand) is kept, unless the
+ * record was a placeholder (no live BlindEscrow) that this deploy fills.
  */
 export function mergeRecord(existing: DeploymentRecord | null, update: RecordUpdate): DeploymentRecord {
   const merged: DeploymentRecord = {
@@ -279,7 +280,9 @@ export function mergeRecord(existing: DeploymentRecord | null, update: RecordUpd
     ...Object.fromEntries(Object.entries(update).filter(([, v]) => v !== undefined)),
     contracts: { ...(existing?.contracts ?? {}), ...update.contracts },
   } as DeploymentRecord;
-  if (existing?.note !== undefined) merged.note = existing.note;
+  const fillsPlaceholder = !isLiveAddress(existing?.contracts?.BlindEscrow) && isLiveAddress(update.contracts.BlindEscrow);
+  if (existing?.note !== undefined && !fillsPlaceholder) merged.note = existing.note;
+  if (fillsPlaceholder && update.note === undefined) delete merged.note;
   if (existing?.config || update.config) merged.config = { ...(existing?.config ?? {}), ...(update.config ?? {}) };
   if (existing?.blocks || update.blocks) merged.blocks = { ...(existing?.blocks ?? {}), ...(update.blocks ?? {}) };
   return merged;

@@ -15,8 +15,11 @@ import {
 
 const ZERO = '0x0000000000000000000000000000000000000000';
 const STAGING_CHAINS = { og: 16602, base: 84532 };
-const fullEnv = (): Record<string, string | undefined> =>
-  Object.fromEntries(DEPLOYMENT_SET_REQUIRED_ENV.map((k) => [k, '0x1111111111111111111111111111111111111111']));
+const fullEnv = (): Record<string, string | undefined> => ({
+  ...Object.fromEntries(DEPLOYMENT_SET_REQUIRED_ENV.map((k) => [k, '0x1111111111111111111111111111111111111111'])),
+  PUBLIC_API_URL: 'https://api.staging.example',
+  PUBLIC_APP_URL: 'https://staging.example',
+});
 
 describe('parseDeploymentSet', () => {
   it('maps unset, empty and "default" to the default set', () => {
@@ -40,7 +43,7 @@ describe('deploymentSetProblems', () => {
     expect(deploymentSetProblems('', {}, { og: 16661, base: 8453 })).toEqual([]);
   });
 
-  it('covers every address config.ts falls back to generated values for, plus the pool and 0G RPC', () => {
+  it('covers every address config.ts falls back to generated values for, plus the pool, 0G RPC and public URLs', () => {
     expect([...DEPLOYMENT_SET_REQUIRED_ENV].sort()).toEqual([
       'AGENT_FACTORY_ADDRESS',
       'BASE_ESCROW_ADDRESS',
@@ -50,6 +53,8 @@ describe('deploymentSetProblems', () => {
       'ENTRY_POINT_ADDRESS',
       'INFT_ADDRESS',
       'OG_RPC_URL',
+      'PUBLIC_API_URL',
+      'PUBLIC_APP_URL',
       'TASK_REGISTRY_ADDRESS',
       'USDC_PAYMASTER_ADDRESS',
       'VALIDATOR_POOL_ADDRESS',
@@ -70,6 +75,17 @@ describe('deploymentSetProblems', () => {
     const [problem, ...rest] = deploymentSetProblems('staging', env, STAGING_CHAINS);
     expect(rest).toEqual([]);
     expect(problem).toContain('INFT_ADDRESS, BASE_ESCROW_ADDRESS, AGENT_FACTORY_ADDRESS are not set');
+  });
+
+  it("refuses production's public URLs, which would send agents that find staging to production", () => {
+    const env = { ...fullEnv(), PUBLIC_API_URL: 'https://api.blindmarket.xyz/', PUBLIC_APP_URL: 'https://blindmarket.xyz' };
+    expect(deploymentSetProblems('staging', env, STAGING_CHAINS)).toEqual([
+      expect.stringContaining("PUBLIC_API_URL is production's https://api.blindmarket.xyz"),
+      expect.stringContaining("PUBLIC_APP_URL is production's https://blindmarket.xyz"),
+    ]);
+    expect(deploymentSetProblems('staging', { ...fullEnv(), PUBLIC_APP_URL: undefined }, STAGING_CHAINS)).toEqual([
+      expect.stringContaining('PUBLIC_APP_URL is not set'),
+    ]);
   });
 
   it('refuses staging on other chain ids', () => {

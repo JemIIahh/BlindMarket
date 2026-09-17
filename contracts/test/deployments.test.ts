@@ -330,6 +330,35 @@ describe("deployment sets (scripts/_deployments)", function () {
       expect(merged.deployer).to.equal(OTHER);
     });
 
+    it("replaces a placeholder's note when the deploy fills its escrow (base-mainnet.json)", function () {
+      const placeholder = (): DeploymentRecord => ({
+        network: "base-mainnet",
+        chainId: BASE_MAINNET,
+        note: "Placeholder — run deploy-base.ts",
+        contracts: { BlindEscrow: ZERO, AgentFactory: ZERO, USDC: OTHER },
+      });
+      const deployed = mergeRecord(placeholder(), {
+        network: "base-mainnet",
+        chainId: BASE_MAINNET,
+        note: "BlindEscrow only",
+        contracts: { BlindEscrow: replacement },
+      });
+      expect(deployed.note).to.equal("BlindEscrow only");
+      expect(deployed.contracts).to.deep.equal({ BlindEscrow: replacement, AgentFactory: ZERO, USDC: OTHER });
+
+      const noNote = mergeRecord(placeholder(), { network: "base-mainnet", chainId: BASE_MAINNET, contracts: { BlindEscrow: replacement } });
+      expect(noNote).to.not.have.property("note");
+
+      // A deploy that leaves the escrow a placeholder keeps the note.
+      const factoryOnly = mergeRecord(placeholder(), {
+        network: "base-mainnet",
+        chainId: BASE_MAINNET,
+        note: "AgentFactory",
+        contracts: { AgentFactory: OTHER },
+      });
+      expect(factoryOnly.note).to.equal("Placeholder — run deploy-base.ts");
+    });
+
     it("creates a new record, including its directory", function () {
       const p = path.join(dir, "staging", "base-sepolia.json");
       writeDeployment(
