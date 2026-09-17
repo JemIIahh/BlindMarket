@@ -225,6 +225,20 @@ async function claimCredits(redis: Redis, taskHashes: Set<string>): Promise<numb
 
 /** Counted tasks a settlement route may still credit (see step 3). */
 async function pendingCredits(redis: Redis, taskHashes: Set<string>): Promise<string[]> {
+  // State keys are lowercased, except for legacy tasks stored under the hash
+  // as posted (see a2aStore). The chain only gives the hash, not its casing,
+  // so find those keys once.
+  const legacyStateKey = new Map<string, string>();
+  let cursor = '0';
+  do {
+    const [next, keys] = await redis.scan(cursor, 'MATCH', 'a2a:state:0x*', 'COUNT', 1000);
+    for (const key of keys) {
+      const hash = key.slice('a2a:state:'.length);
+      if (hash !== hash.toLowerCase()) legacyStateKey.set(hash.toLowerCase(), key);
+    }
+    cursor = next;
+  } while (cursor !== '0');
+
   const pending: string[] = [];
   const hashes = [...taskHashes];
   for (let i = 0; i < hashes.length; i += 500) {
@@ -232,18 +246,22 @@ async function pendingCredits(redis: Redis, taskHashes: Set<string>): Promise<st
     const pipe = redis.pipeline();
     for (const h of batch) {
       pipe.get(`a2a:state:${h}`);
+      pipe.get(legacyStateKey.get(h) ?? `a2a:state:${h}`);
       pipe.exists(`a2a:credited:${h}`);
     }
     const replies = (await pipe.exec()) ?? [];
     batch.forEach((h, j) => {
-      const [stateErr, rawState] = replies[2 * j];
-      const [creditedErr, credited] = replies[2 * j + 1];
+      const [stateErr, rawState] = replies[3 * j];
+      const [legacyErr, rawLegacyState] = replies[3 * j + 1];
+      const [creditedErr, credited] = replies[3 * j + 2];
       if (stateErr) throw stateErr;
+      if (legacyErr) throw legacyErr;
       if (creditedErr) throw creditedErr;
-      if (credited === 1 || typeof rawState !== 'string') return;
+      const raw = typeof rawState === 'string' ? rawState : rawLegacyState;
+      if (credited === 1 || typeof raw !== 'string') return;
       let status: unknown;
       try {
-        status = (JSON.parse(rawState) as { status?: unknown }).status;
+        status = (JSON.parse(raw) as { status?: unknown }).status;
       } catch {
         return;
       }
