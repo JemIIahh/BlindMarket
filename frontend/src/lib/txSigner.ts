@@ -1,4 +1,4 @@
-import { JsonRpcProvider, type ethers } from 'ethers';
+import { Interface, JsonRpcProvider, type ethers } from 'ethers';
 import type { UnsignedTx } from '../types/api';
 import { getAuthHeaders } from './api';
 import { API_BASE_URL, BASE_CHAIN_ID, BASE_RPC_URL } from '../config/constants';
@@ -88,4 +88,44 @@ export async function signAndSendTx(
     } catch { /* keep retrying */ }
   }
   return { hash: txHash, receipt: null };
+}
+
+const ERC20 = new Interface([
+  'function approve(address spender, uint256 amount) returns (bool)',
+  'function allowance(address owner, address spender) view returns (uint256)',
+]);
+
+/**
+ * Make sure `spender` (the Base escrow) may pull `amount` of `token` from the
+ * signer: createTask funds itself with transferFrom, so an ERC-20 payment
+ * needs an approval first and no native value. Reads go to Base because the
+ * wallet may be connected to another chain, and it waits until the allowance
+ * is visible there, since a sponsored approve can land as a user-op with no
+ * receipt.
+ */
+export async function ensureBaseAllowance(
+  signer: ethers.JsonRpcSigner,
+  token: string,
+  spender: string,
+  amount: bigint,
+): Promise<void> {
+  const owner = await signer.getAddress();
+  const readAllowance = async (): Promise<bigint> => {
+    const raw = await baseProvider.call({ to: token, data: ERC20.encodeFunctionData('allowance', [owner, spender]) });
+    return ERC20.decodeFunctionResult('allowance', raw)[0] as bigint;
+  };
+  if ((await readAllowance()) >= amount) return;
+
+  await signAndSendTx(signer, {
+    from: owner,
+    to: token,
+    data: ERC20.encodeFunctionData('approve', [spender, amount]),
+  });
+  for (let i = 0; i < 20; i++) {
+    try {
+      if ((await readAllowance()) >= amount) return;
+    } catch { /* RPC hiccup; keep waiting */ }
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+  throw new RelayError('APPROVAL_PENDING', 'The USDC approval has not confirmed yet. Wait a minute and try again.');
 }

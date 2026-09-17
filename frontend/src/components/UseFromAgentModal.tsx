@@ -1,9 +1,11 @@
 import { useState } from 'react';
-import { formatUnits } from 'ethers';
 import { Button, Modal } from './bb';
 import { copyToClipboard } from '../lib/utils';
+import { formatPaymentAmount } from '../lib/paymentUnits';
 import {
   API_BASE_URL,
+  BASE_CHAIN_ID,
+  BASE_ESCROW_ADDRESS,
   MARKETPLACE_TOKEN_ADDRESS,
   OG_RPC_URL,
   OG_CHAIN_ID,
@@ -34,9 +36,31 @@ import type { AgentService } from '../services/marketplace';
 
 type CopyTab = 'prompt' | 'script';
 
+/**
+ * The chain the escrow is funded on: Base (USDC) whenever a Base escrow is
+ * configured, native 0G otherwise. The script uses Base's public RPC rather
+ * than the app's own, so a keyed RPC URL never ends up in copied text.
+ */
+function settlementChain(): { name: string; id: number; rpc: string } {
+  if (BASE_ESCROW_ADDRESS) {
+    const mainnet = BASE_CHAIN_ID === 8453;
+    return {
+      name: mainnet ? 'Base' : 'Base Sepolia',
+      id: BASE_CHAIN_ID,
+      rpc: mainnet ? 'https://mainnet.base.org' : 'https://sepolia.base.org',
+    };
+  }
+  return { name: isMainnet ? '0G Mainnet' : '0G Testnet', id: OG_CHAIN_ID, rpc: OG_RPC_URL };
+}
+
+function formatPrice(raw: string): string {
+  try { return formatPaymentAmount(raw); } catch { return '?'; }
+}
+
 function buildScript(service: AgentService, symbol: string, apiBase: string, privacy: 'private' | 'public'): string {
-  const price = formatUnits(service.price_raw, 18);
-  const chainName = isMainnet ? '0G Mainnet' : '0G Testnet';
+  const price = formatPrice(service.price_raw);
+  const chain = settlementChain();
+  const isNativeToken = /^0x0{40}$/i.test(MARKETPLACE_TOKEN_ADDRESS);
   const isPublic = privacy === 'public';
   // NB: the script must stay free of backticks/template-interpolation so this
   // generator (and the prompt tab that embeds it) never fights escaping.
@@ -50,22 +74,23 @@ function buildScript(service: AgentService, symbol: string, apiBase: string, pri
 //                         MUST be created while signed in with the SAME wallet as PRIVATE_KEY —
 //                         the backend resolves the key to its owner wallet, and the funding tx
 //                         must come from that wallet or indexing is rejected (NOT_TASK_AGENT).
-//   PRIVATE_KEY           wallet that pays ${price} ${symbol} + gas on ${chainName} (chain ${OG_CHAIN_ID})
+//   PRIVATE_KEY           wallet that pays ${price} ${symbol}${isNativeToken ? ' + gas' : ', plus a little ETH for gas,'} on ${chain.name} (chain ${chain.id})
+//   RPC_URL               optional; defaults to ${chain.rpc}
 //   PROMPT                what you want the agent to do${isPublic ? ' (PUBLIC: posted in plaintext,\n//                         visible to everyone — do not include secrets)' : ' (encrypted end-to-end; the\n//                         platform only ever sees a hash)'}
 //
 // Run:  PROMPT="..." node use-service.mjs
 
-import { Wallet, JsonRpcProvider${isPublic ? '' : ', SigningKey'} } from 'ethers';
+import { Wallet, JsonRpcProvider, Contract${isPublic ? '' : ', SigningKey'} } from 'ethers';
 import crypto from 'node:crypto';
 
 const API = '${apiBase}';
-const RPC = '${OG_RPC_URL}';
+const RPC = process.env.RPC_URL || '${chain.rpc}';
 const SERVICE = {
   id: ${service.id},
   agent: '${service.agent_address.toLowerCase()}',
   publicKey: '${service.agent_public_key ?? ''}', // uncompressed secp256k1 (04...)
-  priceRaw: '${service.price_raw}',               // wei
-  token: '${MARKETPLACE_TOKEN_ADDRESS}',          // 0x000...0 = native ${symbol}
+  priceRaw: '${service.price_raw}',               // ${price} ${symbol}, in the token's smallest unit
+  token: '${MARKETPLACE_TOKEN_ADDRESS}',          // ${isNativeToken ? 'native ' + symbol : symbol + ' contract'}
 };
 
 const API_KEY = process.env.BLINDMARKET_API_KEY;
@@ -145,11 +170,29 @@ const { unsignedTx } = await api('POST', '/api/v1/tasks', {
   rootHash,${isPublic ? '' : '\n  wrappedKeys,'}
 });
 const isNative = /^0x0+$/.test(SERVICE.token);
+const price = BigInt(SERVICE.priceRaw);
+let nonce;
+if (!isNative) {
+  // The escrow pulls the payment with transferFrom, so approve it first.
+  const token = new Contract(SERVICE.token, [
+    'function allowance(address owner, address spender) view returns (uint256)',
+    'function approve(address spender, uint256 amount) returns (bool)',
+  ], wallet);
+  if ((await token.allowance(wallet.address, unsignedTx.to)) < price) {
+    const approveTx = await token.approve(unsignedTx.to, price);
+    console.log('approve tx', approveTx.hash);
+    await approveTx.wait();
+    // RPCs can answer the next nonce lookup from before the approve landed,
+    // so give the funding tx the next nonce explicitly.
+    nonce = approveTx.nonce + 1;
+  }
+}
 const tx = await wallet.sendTransaction({
   to: unsignedTx.to,
   data: unsignedTx.data,
-  value: isNative ? BigInt(SERVICE.priceRaw) : 0n,
+  value: isNative ? price : 0n,
   gasLimit: 1000000,
+  nonce,
 });
 console.log('funding tx', tx.hash);
 await tx.wait();
@@ -189,8 +232,8 @@ process.exit(1);
 }
 
 function buildPrompt(service: AgentService, symbol: string, apiBase: string, script: string, privacy: 'private' | 'public'): string {
-  const price = formatUnits(service.price_raw, 18);
-  const chainName = isMainnet ? '0G Mainnet' : '0G Testnet';
+  const price = formatPrice(service.price_raw);
+  const chain = settlementChain();
   const privacyLine = privacy === 'public'
     ? `BlindMarket is a task marketplace with on-chain escrow. This call is PUBLIC:
 my brief and the result will be visible to everyone (no encryption involved) —
@@ -204,7 +247,7 @@ ${privacyLine}
 
 Service:   ${service.name} (service #${service.id})
 ${service.description ? `About:     ${service.description}\n` : ''}Provider:  agent ${service.agent_address}
-Price:     ${price} ${symbol} per call, escrowed on ${chainName} (chain ${OG_CHAIN_ID})
+Price:     ${price} ${symbol} per call, escrowed on ${chain.name} (chain ${chain.id})
 API base:  ${apiBase}
 
 What I need you to do:
@@ -214,7 +257,7 @@ What I need you to do:
      IMPORTANT: it must have been created while I was signed in with the SAME
      wallet as PRIVATE_KEY, because the API resolves the key to its owner wallet
      and the funding transaction must come from that wallet.
-   - PRIVATE_KEY — the wallet paying ${price} ${symbol} + gas.
+   - PRIVATE_KEY — the wallet paying ${price} ${symbol} plus gas on ${chain.name}.
    - PROMPT — what I want the provider agent to do.
 3. Run:  PROMPT="..." node use-service.mjs
 4. It prints the provider agent's output on success. If it times out, the task
@@ -265,7 +308,7 @@ export default function UseFromAgentModal({
       open
       onClose={onClose}
       title="Use from your agent"
-      subtitle={`${service.name} · ${formatUnits(service.price_raw, 18)} ${symbol} / call`}
+      subtitle={`${service.name} · ${formatPrice(service.price_raw)} ${symbol} / call`}
       size="lg"
     >
       <div className="space-y-4">

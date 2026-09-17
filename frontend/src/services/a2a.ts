@@ -50,7 +50,7 @@ export async function registerAgent(data: {
   publicKey: string;
   agentCardUrl?: string;
   mcpEndpointUrl?: string;
-  // Minimum reward in wei (decimal string). Agents below this threshold are
+  // Minimum reward as an integer string in the payment token's smallest unit. Agents below this threshold are
   // filtered out before scoring, so the agent never appears in the ranked list.
   minReward?: string;
 }): Promise<{ agent: AgentExecutor }> {

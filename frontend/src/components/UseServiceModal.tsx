@@ -1,11 +1,12 @@
 import { useState, useRef, useEffect } from 'react';
 import { useWalletClient } from 'wagmi';
 import { getIdentityToken, getAccessToken } from '@privy-io/react-auth';
-import { BrowserProvider, formatUnits } from 'ethers';
+import { BrowserProvider } from 'ethers';
 import { Button, FormField, FormTextarea, Modal, Spinner } from './bb';
 import { aesEncrypt, eciesEncrypt, generateAesKey, sha256, toBase64, toBytes } from '../lib/crypto';
 import { stashAesKey } from '../lib/keyStash';
-import { signAndSendTx } from '../lib/txSigner';
+import { ensureBaseAllowance, signAndSendTx } from '../lib/txSigner';
+import { formatPaymentAmount } from '../lib/paymentUnits';
 import { authedGet, authedPost } from '../lib/api';
 import { MARKETPLACE_TOKEN_ADDRESS } from '../config/constants';
 import { useChain } from '../context/ChainContext';
@@ -62,11 +63,11 @@ export default function UseServiceModal({
     return () => { abortedRef.current = true; };
   }, []);
 
-  // formatUnits throws on malformed input — never let a bad listing price
+  // Formatting throws on malformed input — never let a bad listing price
   // crash the modal (and with it the whole agent page).
   const priceLabel = (() => {
     try {
-      return `${formatUnits(service.price_raw, 18)} ${symbol}`;
+      return `${formatPaymentAmount(service.price_raw)} ${symbol}`;
     } catch {
       return `— ${symbol}`;
     }
@@ -163,10 +164,17 @@ export default function UseServiceModal({
         wrappedKeys,
       }, token);
 
-      // 4. Sign + fund from the buyer's wallet.
+      // 4. Sign + fund from the buyer's wallet. A USDC price is pulled by the
+      //    escrow's transferFrom, so approve it first and send no native value;
+      //    only a native-token price travels as the tx value.
       setPhase('signing');
       const signer = await new BrowserProvider(walletClient.transport).getSigner();
-      const sent = await signAndSendTx(signer, taskJson.unsignedTx, BigInt(service.price_raw));
+      const price = BigInt(service.price_raw);
+      const isNativeToken = /^0x0{40}$/i.test(MARKETPLACE_TOKEN_ADDRESS);
+      if (!isNativeToken) {
+        await ensureBaseAllowance(signer, MARKETPLACE_TOKEN_ADDRESS, taskJson.unsignedTx.to, price);
+      }
+      const sent = await signAndSendTx(signer, taskJson.unsignedTx, isNativeToken ? price : undefined);
 
       // 5. Index the meta — pinned to the agent + linked to the service.
       await authedPost('/api/v1/a2a/tasks/index', {
