@@ -19,6 +19,11 @@ export type SettlementTier = (typeof SETTLEMENT_TIERS)[number];
  * Chain ids per tier for each settlement chain, with the env var that sets it.
  * The registry reads these to say which tier a chain is on; Phase 2 adds arc
  * (mainnet 5042, testnet 5042002).
+ *
+ * Adding a chain here has a second half: its chain id in config.ts must
+ * default from the tier too (see tierChainId). CCTP_ARC_CHAIN_ID is hard-coded
+ * to its testnet id today, so an arc entry added here alone would refuse an
+ * explicit mainnet Arc id while quietly keeping the default on testnet.
  */
 export const TIER_CHAIN_IDS = {
   '0g': { mainnet: 16661, testnet: 16602, env: 'OG_CHAIN_ID' },

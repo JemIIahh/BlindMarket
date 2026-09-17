@@ -263,6 +263,8 @@ describe('GET /health/bridge legacy keys', () => {
     cfg.deploymentSet = '';
     try {
       const data = await bridge();
+      // Stripping must not hide anything: this stack has a valid posting chain.
+      expect(data).not.toHaveProperty('postingChainError');
       return Object.fromEntries(Object.entries(data).filter(([key]) => !ADDED_KEYS.includes(key)));
     } finally {
       cfg.deploymentSet = saved;

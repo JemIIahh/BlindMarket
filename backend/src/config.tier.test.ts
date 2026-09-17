@@ -140,7 +140,23 @@ describe('a production backend on the testnet tier', () => {
   it('warns that it advertises production URLs it does not own', async () => {
     const { assertBootConfig } = await load({ SETTLEMENT_TIER: 'testnet', NODE_ENV: 'production', ALLOW_NONMAINNET_PROD: 'true' });
     assertBootConfig();
-    expect(warned.join('\n')).toMatch(/PUBLIC_API_URL\/PUBLIC_APP_URL are not both set/);
+    const text = warned.join('\n');
+    expect(text).toMatch(/PUBLIC_API_URL and PUBLIC_APP_URL are unset/);
+    // Both fall back, so both addresses are named.
+    expect(text).toMatch(/production's own addresses \(https:\/\/api\.blindmarket\.xyz, https:\/\/blindmarket\.xyz\)/);
+  });
+
+  it('names only the URL that is missing', async () => {
+    const { assertBootConfig } = await load({
+      SETTLEMENT_TIER: 'testnet', NODE_ENV: 'production', ALLOW_NONMAINNET_PROD: 'true',
+      PUBLIC_API_URL: 'https://staging-api.blindmarket.xyz',
+    });
+    assertBootConfig();
+    const text = warned.join('\n');
+    expect(text).toMatch(/PUBLIC_APP_URL is unset/);
+    expect(text).not.toMatch(/PUBLIC_API_URL is unset|PUBLIC_API_URL and/);
+    // The address named is the one actually falling back.
+    expect(text).toMatch(/\(https:\/\/blindmarket\.xyz\)/);
   });
 
   it('says nothing once it names its own URLs', async () => {

@@ -431,8 +431,8 @@ export const config = {
   },
 } as const;
 
-// Mainnet chain id — kept in sync with the production default above.
-const MAINNET_CHAIN_ID = 16661;
+// Mainnet chain id, from the tier table that owns it.
+const MAINNET_CHAIN_ID = TIER_CHAIN_IDS['0g'].mainnet;
 
 /**
  * Fail-fast boot assertions. Call once at startup (before the server binds) so a
@@ -461,11 +461,20 @@ export function assertBootConfig(): void {
     for (const mismatch of tierMismatches(process.env, config.settlementTier)) {
       fatals.push(`${mismatch}. Remove the override, or set SETTLEMENT_TIER to the tier you meant.`);
     }
-    if (isProd && config.settlementTier === 'testnet' && !(process.env.PUBLIC_API_URL && process.env.PUBLIC_APP_URL)) {
-      warnings.push(
-        `NODE_ENV=production with SETTLEMENT_TIER=testnet, but PUBLIC_API_URL/PUBLIC_APP_URL are not both set — ` +
-          `this stack advertises ${config.publicApiUrl} to the agents that discover it, which is production's own address.`,
-      );
+    if (isProd && config.settlementTier === 'testnet') {
+      const unset = ([
+        ['PUBLIC_API_URL', config.publicApiUrl],
+        ['PUBLIC_APP_URL', config.publicAppUrl],
+      ] as const).filter(([name]) => !process.env[name]);
+      if (unset.length > 0) {
+        const plural = unset.length > 1;
+        warnings.push(
+          `NODE_ENV=production with SETTLEMENT_TIER=testnet, but ${unset.map(([name]) => name).join(' and ')} ` +
+            `${plural ? 'are' : 'is'} unset — this stack falls back to production's own ` +
+            `${plural ? 'addresses' : 'address'} (${unset.map(([, url]) => url).join(', ')}) and advertises ` +
+            `${plural ? 'them' : 'it'} to the agents that discover it.`,
+        );
+      }
     }
   } else {
     // No tier named: report it when the chains disagree. Production is mixed

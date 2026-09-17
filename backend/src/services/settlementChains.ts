@@ -239,6 +239,10 @@ export function assertPostingChain(opts: {
     problems.push(`POSTING_CHAIN=${entry.key} but ${entry.escrowEnv} is unset or the zero address`);
   }
   if (opts.tier) {
+    // Unreachable through config today, which already refuses a contradicting
+    // chain id at boot and defaults an unset one to the tier. Kept because it
+    // is this function's own precondition, and a chain added later (Arc) is
+    // one forgotten tier entry away from needing it.
     if (entry.tier !== opts.tier) {
       problems.push(
         `POSTING_CHAIN=${entry.key} is on ${entry.tier} (chain ${entry.chainId}) but SETTLEMENT_TIER=${opts.tier}`,
