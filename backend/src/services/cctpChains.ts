@@ -3,8 +3,9 @@ import { config } from '../config.js';
 import { baseProvider } from './chain.js';
 
 /**
- * Circle CCTP V2 chain identifiers. Deliberately separate from the existing
- * `'0g' | 'base'` TaskChain union (services/a2aSettlement.ts) — that type
+ * Circle CCTP V2 chain identifiers. Deliberately separate from the
+ * settlement chain keys (SettlementChainKey, services/settlementChains.ts;
+ * TaskChain in services/taskChain.ts) — that type
  * belongs to the unrelated internal 0G<->Base marketplace-signer relay
  * ("bridge"). CCTP never touches 0G (no native USDC, no CCTP domain there —
  * see CLAUDE.md) and covers a broader, growable set of EVM chains.

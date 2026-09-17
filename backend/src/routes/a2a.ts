@@ -2115,7 +2115,7 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
       // 503 keeps the worker's finalize retry/resume loop driving instead.
       // Chain reads are guarded: an RPC blip must 503 (retryable), never 500.
       let ocIdA: string | null;
-      let ocIdAChain: '0g' | 'base';
+      let ocIdAChain: TaskChain;
       try {
         const ocIdAResolved = await resolveTaskByHash(taskHash);
         ocIdA = ocIdAResolved?.taskId ?? null;
@@ -2183,7 +2183,7 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
     // the task would stick permanently. Chain reads are guarded: an RPC blip
     // must 503 (retryable), never 500.
     let ocId: string | null;
-    let ocIdChain: '0g' | 'base';
+    let ocIdChain: TaskChain;
     try {
       const ocIdResolved = await resolveTaskByHash(taskHash);
       ocId = ocIdResolved?.taskId ?? null;

@@ -1,4 +1,5 @@
 import type { Request } from 'express';
+import type { SettlementChainKey } from './services/settlementChains.js';
 
 /** Authenticated user attached by auth middleware */
 export interface AuthUser {
@@ -186,7 +187,7 @@ export interface A2ATaskMeta {
   // skip tasks on a chain where it cannot pay gas BEFORE accepting (an
   // accept assigns the task on-chain, after which it cannot be released).
   // Absent on rows indexed before this field existed — treat as unknown.
-  chain?: 'base' | '0g';
+  chain?: SettlementChainKey;
   // Lowercased EOA address of a poster-designated verifier agent
   // (verificationMode='agent'). The brief AES key is ECIES-wrapped to this
   // address too (it appears in wrappedKeys), so the verifier can decrypt the

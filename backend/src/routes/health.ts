@@ -4,6 +4,7 @@ import type { ApiResponse } from '../types.js';
 import { escrow, marketplaceSigner, provider, baseEscrow, baseMarketplaceSigner, baseProvider } from '../services/chain.js';
 import { isBridgeReady } from '../services/a2aSettlement.js';
 import { chainNetwork, contractsEnvPrefix } from '../services/chainNetwork.js';
+import { settlementChainConfig, type SettlementChainKey } from '../services/settlementChains.js';
 import { escrowFingerprintError } from '../services/escrowFingerprint.js';
 import { parkedDisputeCount } from '../services/disputeKeys.js';
 import { config } from '../config.js';
@@ -142,13 +143,13 @@ function notReadyReason(
 }
 
 /** `indexerError` when the chain's index keys belong to a different escrow. */
-function indexerError(chain: '0g' | 'base'): { indexerError?: string } {
+function indexerError(chain: SettlementChainKey): { indexerError?: string } {
   const error = escrowFingerprintError(chain);
   return error ? { indexerError: error } : {};
 }
 
 /** `parkedDisputes` when a chain has dispute rulings the listener parked. */
-async function parkedDisputes(chain: '0g' | 'base'): Promise<{ parkedDisputes?: number }> {
+async function parkedDisputes(chain: SettlementChainKey): Promise<{ parkedDisputes?: number }> {
   try {
     const count = await withTimeout(parkedDisputeCount(chain), 1_000);
     return count > 0 ? { parkedDisputes: count } : {};
@@ -180,11 +181,13 @@ healthRouter.get('/bridge', async (_req, res, next) => {
       parkedDisputes('base'),
     ]);
 
+    const ogChain = settlementChainConfig('0g');
+    const baseChain = settlementChainConfig('base');
     const ogEscrow = escrowOrNull(config.blindEscrowAddress);
     const baseEscrowAddress = escrowOrNull(config.baseEscrowAddress);
-    const ogReason = notReadyReason(ogReady, ogEscrow, 'BLIND_ESCROW_ADDRESS', !!marketplaceSigner, 'MARKETPLACE_SIGNER_PRIVATE_KEY');
-    const baseReason = notReadyReason(baseReady, baseEscrowAddress, 'BASE_ESCROW_ADDRESS', !!baseMarketplaceSigner, 'BASE_MARKETPLACE_SIGNER_PRIVATE_KEY');
-    const reasons = [ogReason && `0G: ${ogReason}`, baseReason && `Base: ${baseReason}`].filter(Boolean);
+    const ogReason = notReadyReason(ogReady, ogEscrow, ogChain.escrowEnv, !!marketplaceSigner, ogChain.signerEnv);
+    const baseReason = notReadyReason(baseReady, baseEscrowAddress, baseChain.escrowEnv, !!baseMarketplaceSigner, baseChain.signerEnv);
+    const reasons = [ogReason && `${ogChain.label}: ${ogReason}`, baseReason && `${baseChain.label}: ${baseReason}`].filter(Boolean);
     if (!ogReady && !baseReady && reasons.length === 0) {
       reasons.push('no settlement chain has both an escrow and a marketplace signer');
     }
@@ -205,7 +208,7 @@ healthRouter.get('/bridge', async (_req, res, next) => {
             chain: '0g',
             configured: ogReady,
             chainId: config.ogChainId,
-            tier: chainNetwork('0g').tier,
+            tier: ogChain.tier,
             escrowAddress: ogEscrow,
             ...(ogReason ? { reason: ogReason } : {}),
             ...indexerError('0g'),
@@ -215,7 +218,7 @@ healthRouter.get('/bridge', async (_req, res, next) => {
             chain: 'base',
             configured: baseReady,
             chainId: config.baseChainId,
-            tier: chainNetwork('base').tier,
+            tier: baseChain.tier,
             escrowAddress: baseEscrowAddress,
             ...(baseReason ? { reason: baseReason } : {}),
             ...indexerError('base'),

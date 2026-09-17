@@ -18,13 +18,53 @@ import { baseEscrow } from './chain.js';
 import { getCachedTaskIdByHash, getTaskIdByHash, seedTaskIdMapping } from './escrowEvents.js';
 import { getBaseTaskIdByHash, forceBaseTick, seedBaseTaskIdMapping } from './baseEscrowEvents.js';
 import { getMeta } from './a2aStore.js';
+import type { SettlementChainKey } from './settlementChains.js';
 
-export type TaskChain = 'base' | '0g';
+/** A settlement chain, as a task's escrow names it (services/settlementChains.ts). */
+export type TaskChain = SettlementChainKey;
 
 export type ResolvedTask = {
   taskId: string;
   chain: TaskChain;
 };
+
+/** One chain's hash<->id index. */
+interface TaskIndex {
+  /** Whether this backend indexes the chain at all. */
+  enabled(): boolean;
+  /** Cache read only. */
+  cached(taskHash: string): Promise<string | null>;
+  /** The slower lookup once no cache knows the hash. */
+  resolve(taskHash: string): Promise<string | null>;
+  seed(taskHash: string, taskId: bigint | string): Promise<void>;
+}
+
+// Each index is read through a wrapper, when called: tests replace these
+// modules with mocks that define only what the test uses.
+//
+// Declaration order is the search order for a task with no recorded chain.
+// Base comes first, since that is where new tasks are funded.
+const TASK_INDEX: { readonly [K in TaskChain]: TaskIndex } = {
+  base: {
+    enabled: () => !!baseEscrow,
+    cached: (taskHash) => getBaseTaskIdByHash(taskHash),
+    // The create tx may just not be indexed yet.
+    resolve: async (taskHash) => {
+      await forceBaseTick();
+      return getBaseTaskIdByHash(taskHash);
+    },
+    seed: (taskHash, taskId) => seedBaseTaskIdMapping(taskHash, taskId),
+  },
+  '0g': {
+    enabled: () => true,
+    cached: (taskHash) => getCachedTaskIdByHash(taskHash),
+    // Retries, and can trigger a backfill.
+    resolve: (taskHash) => getTaskIdByHash(taskHash),
+    seed: (taskHash, taskId) => seedTaskIdMapping(taskHash, taskId),
+  },
+};
+
+const SEARCH_ORDER = Object.keys(TASK_INDEX) as TaskChain[];
 
 /**
  * The chain /tasks/index recorded for a task, or null for rows indexed before
@@ -39,14 +79,18 @@ async function recordedChain(taskHash: string): Promise<TaskChain | null> {
   }
 }
 
-/** Which indexes to consult for a task, given its recorded chain. Exact
- *  matches only: a chain this code doesn't know searches nothing, rather than
- *  every legacy index. */
-function indexesFor(chain: TaskChain | null): { base: boolean; zeroG: boolean } {
-  return {
-    base: !!baseEscrow && (chain === null || chain === 'base'),
-    zeroG: chain === null || chain === '0g',
-  };
+/** Which indexes to consult for a task, given its recorded chain, in search
+ *  order. Exact matches only: a chain this code doesn't know searches
+ *  nothing, rather than every legacy index. */
+function indexesFor(chain: TaskChain | null): TaskChain[] {
+  return SEARCH_ORDER.filter((c) => (chain === null || chain === c) && TASK_INDEX[c].enabled());
+}
+
+/** The first of `chains` whose cache knows the hash. All caches are read at once. */
+async function cachedLookup(taskHash: string, chains: TaskChain[]): Promise<ResolvedTask | null> {
+  const ids = await Promise.all(chains.map((c) => TASK_INDEX[c].cached(taskHash)));
+  const i = ids.findIndex((id) => !!id);
+  return i === -1 ? null : { taskId: ids[i]!, chain: chains[i] };
 }
 
 /**
@@ -65,26 +109,16 @@ function indexesFor(chain: TaskChain | null): { base: boolean; zeroG: boolean } 
  * where new tasks are funded.
  */
 export async function resolveTaskByHash(taskHash: string): Promise<ResolvedTask | null> {
-  const use = indexesFor(await recordedChain(taskHash));
-  const [baseId, ogId] = await Promise.all([
-    use.base ? getBaseTaskIdByHash(taskHash) : Promise.resolve(null),
-    use.zeroG ? getCachedTaskIdByHash(taskHash) : Promise.resolve(null),
-  ]);
+  const chains = indexesFor(await recordedChain(taskHash));
+  const cached = await cachedLookup(taskHash, chains);
+  if (cached) return cached;
 
-  if (baseId) return { taskId: baseId, chain: 'base' };
-  if (ogId) return { taskId: ogId, chain: '0g' };
-
-  // Nothing cached — the create tx may just not be indexed yet.
-  if (use.base) {
-    await forceBaseTick();
-    const retried = await getBaseTaskIdByHash(taskHash);
-    if (retried) return { taskId: retried, chain: 'base' };
+  // Nothing cached: try each chain's slower lookup, in search order.
+  for (const chain of chains) {
+    const taskId = await TASK_INDEX[chain].resolve(taskHash);
+    if (taskId) return { taskId, chain };
   }
-
-  if (!use.zeroG) return null;
-  // Falls through to the 0G resolver, which retries and can backfill.
-  const resolved = await getTaskIdByHash(taskHash);
-  return resolved ? { taskId: resolved, chain: '0g' } : null;
+  return null;
 }
 
 /**
@@ -100,8 +134,7 @@ export async function resolveTaskByHash(taskHash: string): Promise<ResolvedTask 
  * after index → 503 SETTLEMENT_FAILED; the same accept 3 min later succeeded.
  */
 export async function seedTaskId(chain: TaskChain, taskHash: string, taskId: bigint | string): Promise<void> {
-  if (chain === 'base') await seedBaseTaskIdMapping(taskHash, taskId);
-  else await seedTaskIdMapping(taskHash, taskId);
+  await TASK_INDEX[chain].seed(taskHash, taskId);
 }
 
 /**
@@ -133,17 +166,14 @@ export async function resolveTaskChainById(
     }
   };
 
-  const [baseAgent, ogAgent] = await Promise.all([
-    baseEscrow ? readAgent('base') : Promise.resolve(null),
-    readAgent('0g'),
-  ]);
+  const chains = indexesFor(null);
+  const agents = await Promise.all(chains.map(readAgent));
 
-  // Base first: it is where new tasks are funded, so on the vanishingly rare
-  // id collision where one address owns the same id on both chains, the newer
-  // task is the one being acted on.
-  if (baseAgent === wanted) return 'base';
-  if (ogAgent === wanted) return '0g';
-  return null;
+  // In search order, so Base first: it is where new tasks are funded, so on
+  // the vanishingly rare id collision where one address owns the same id on
+  // both chains, the newer task is the one being acted on.
+  const i = agents.findIndex((agent) => agent === wanted);
+  return i === -1 ? null : chains[i];
 }
 
 /**
@@ -151,13 +181,5 @@ export async function resolveTaskChainById(
  * sweep) and must not pay the slow path per unresolved hash per tick.
  */
 export async function resolveCachedTaskByHash(taskHash: string): Promise<ResolvedTask | null> {
-  const use = indexesFor(await recordedChain(taskHash));
-  const [baseId, ogId] = await Promise.all([
-    use.base ? getBaseTaskIdByHash(taskHash) : Promise.resolve(null),
-    use.zeroG ? getCachedTaskIdByHash(taskHash) : Promise.resolve(null),
-  ]);
-
-  if (baseId) return { taskId: baseId, chain: 'base' };
-  if (ogId) return { taskId: ogId, chain: '0g' };
-  return null;
+  return cachedLookup(taskHash, indexesFor(await recordedChain(taskHash)));
 }

@@ -49,13 +49,15 @@ import { startCctpAttestationPoller } from './services/cctpAttestationPoller.js'
 import { startExpirySweepLoop } from './services/a2aExpirySweep.js';
 import { auditCustodySealedTasks } from './services/keyCustodyService.js';
 import { isBridgeReady } from './services/a2aSettlement.js';
-import { chainNetwork, contractsEnvPrefix } from './services/chainNetwork.js';
+import { contractsEnvPrefix } from './services/chainNetwork.js';
+import { assertRegistryInvariants, settlementChainConfig, settlementChainConfigs } from './services/settlementChains.js';
 import { marketplaceSigner, escrow, baseMarketplaceSigner, baseEscrow } from './services/chain.js';
 import { logChainConfig } from './services/chainService.js';
 import { reconcileAgents, startZombieReaper } from './services/agentRunner.js';
 
 // Fail fast on a misconfigured (esp. production) deploy before binding the port.
 assertBootConfig();
+assertRegistryInvariants(settlementChainConfigs());
 
 logChainConfig();
 
@@ -189,18 +191,15 @@ httpServer.listen(config.port, () => {
   // when an agent accepts/submits, per settlement chain: a chain with no
   // marketplace signer is off; when on, log the signer address so it's clear
   // which key is signing.
+  // escrowAddress is the raw setting, zero address included, as these
+  // messages have always printed it.
   const bridgeChains = [
-    {
-      chain: '0g' as const, label: '0G', escrow, signer: marketplaceSigner,
-      escrowAddress: config.blindEscrowAddress, escrowEnv: 'BLIND_ESCROW_ADDRESS', signerEnv: 'MARKETPLACE_SIGNER_PRIVATE_KEY',
-      network: chainNetwork('0g').hardhatNetwork,
-    },
-    {
-      chain: 'base' as const, label: 'Base', escrow: baseEscrow, signer: baseMarketplaceSigner,
-      escrowAddress: config.baseEscrowAddress, escrowEnv: 'BASE_ESCROW_ADDRESS', signerEnv: 'BASE_MARKETPLACE_SIGNER_PRIVATE_KEY',
-      network: chainNetwork('base').hardhatNetwork,
-    },
-  ];
+    { chain: '0g' as const, escrow, signer: marketplaceSigner, escrowAddress: config.blindEscrowAddress },
+    { chain: 'base' as const, escrow: baseEscrow, signer: baseMarketplaceSigner, escrowAddress: config.baseEscrowAddress },
+  ].map((bridge) => {
+    const { label, escrowEnv, signerEnv, hardhatNetwork } = settlementChainConfig(bridge.chain);
+    return { ...bridge, label, escrowEnv, signerEnv, network: hardhatNetwork };
+  });
   for (const bridge of bridgeChains) {
     const { label, signer, escrow: chainEscrow } = bridge;
     if (!isBridgeReady(bridge.chain) || !signer || !chainEscrow) {
