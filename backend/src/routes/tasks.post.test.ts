@@ -130,6 +130,15 @@ describe('POST /tasks on a deployment with a Base escrow', () => {
     expect(chain.getTokenDecimals).toHaveBeenLastCalledWith(USDC, 'base');
   });
 
+  it('still builds when BASE_USDC_ADDRESS is spelled with a bad checksum', async () => {
+    cfg.baseUsdcAddress = USDC.replace('036Cb', '036cb');
+    for (const token of [USDC, USDC.toLowerCase()]) {
+      const res = await post({ token });
+      expect(res.status).toBe(200);
+      expect(iface.parseTransaction({ data: res.body.data.unsignedTx.data })!.args.token).toBe(USDC);
+    }
+  });
+
   it('commits a designated verifier on the Base escrow', async () => {
     const res = await post({ token: USDC, verificationMode: 'agent', verifierAddress: VERIFIER });
     expect(res.status).toBe(200);

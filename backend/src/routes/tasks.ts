@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import { ethers } from 'ethers';
 import { requireAuth, optionalAuth } from '../middleware/auth.js';
 import { canViewerSeeResult } from '../services/resultVisibility.js';
 import { AppError } from '../middleware/errorHandler.js';
@@ -304,9 +305,10 @@ tasksRouter.post('/', requireAuth, async (req: AuthRequest, res, next) => {
         `New tasks are escrowed in ${token.unit.symbol} on ${label} (token ${token.address ?? 'unset'}), not ${data.token}`,
       );
     }
-    // The match above ignores letter case. Build with the registry's spelling:
-    // a mixed-case address with a bad checksum would make ethers throw.
-    const tokenAddress = token.address;
+    // The match above ignores letter case. Build with the registry's address,
+    // checksummed afresh: a mixed-case spelling with a bad checksum, in the
+    // request or in BASE_USDC_ADDRESS, would make ethers throw.
+    const tokenAddress = ethers.getAddress(token.address.toLowerCase());
     const isNative = token.kind === 'native';
 
     const tx = await escrowService.buildCreateTaskOn(
