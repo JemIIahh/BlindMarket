@@ -9,11 +9,11 @@ export interface AgentSearchResult {
   avgRating: number;
   totalReviews: number;
   badges: { capability: string; type: string }[];
-  fromPrice: string | null; // min active service price (wei) for the "From" column
+  fromPrice: string | null; // min active service price (payment token's smallest unit) for the "From" column
 }
 
 /** A rentable service listing (rent-your-agent Phase 1). `agent_*` fields are
- *  present only on the public projection. `price_raw` is per-call rent in wei. */
+ *  present only on the public projection. `price_raw` is per-call rent in the settlement token's smallest unit (USDC: 6 decimals). */
 export interface AgentService {
   id: number;
   agent_address: string;

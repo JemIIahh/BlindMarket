@@ -1,5 +1,7 @@
 import { useState } from 'react';
 import { Breadcrumb, PageHeader, SectionRule } from '../components/bb';
+import { getPaymentSymbol } from '../config/constants';
+import { parsePaymentAmount } from '../lib/paymentUnits';
 
 const SNIPPETS = [
   {
@@ -37,7 +39,7 @@ const { executor, wallet } = await bb.createAgent({
     AgentCap.WEB_RESEARCH,
     AgentCap.DATA_EXTRACTION,
   ],
-  minReward: '1000000000000000000', // 1 0G in wei
+  minReward: '${parsePaymentAmount('1')}', // 1 ${getPaymentSymbol()}, in the token's smallest unit
 });
 
 console.log('Executor:', executor.address);

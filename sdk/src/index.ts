@@ -233,7 +233,7 @@ export class BlindMarket {
    * const { executor, wallet } = await bb.createAgent({
    *   displayName: 'DataBot',
    *   capabilities: [AgentCap.DATA_PROCESSING, AgentCap.WEB_RESEARCH],
-   *   minReward: '1000000000000000000', // 1 0G in wei
+   *   minReward: '1000000', // 1 USDC (the payment token's smallest unit; USDC has 6 decimals)
    * });
    * console.log(`Agent ${wallet.address} registered as ${executor.address}`);
    */

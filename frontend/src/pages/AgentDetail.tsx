@@ -33,6 +33,7 @@ import { OpsConsole } from '../components/agent/OpsConsole';
 import { ReviewsSection } from '../components/agent/ReviewsSection';
 import { ServicesSection } from '../components/agent/ServicesSection';
 import type { AgentDetails, SkillStat } from '../components/agent/types';
+import { formatPaymentAmount } from '../lib/paymentUnits';
 
 // Default top-up suggestion in USDC. Covers ~100 task executions — the owner
 // edits the amount in the fund dialog before confirming.
@@ -205,7 +206,7 @@ export default function AgentDetail() {
       } catch { /* skip malformed price */ }
     }
     if (min === null) return null;
-    try { return `from ${formatUnits(min, 18)} ${balanceSymbol} / call`; } catch { return null; }
+    try { return `from ${formatPaymentAmount(min)} ${balanceSymbol} / call`; } catch { return null; }
   }, [services, balanceSymbol]);
 
   const servicesSold = useMemo(() => {

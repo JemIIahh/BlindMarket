@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { config } from '../config.js';
 import * as agentStore from '../services/agentStore.js';
 import * as serviceStore from '../services/serviceStore.js';
+import { settlementToken } from '../services/settlementUnits.js';
 
 /**
  * Discovery surfaces for external agents and harnesses:
@@ -65,6 +66,7 @@ wellKnownRouter.get('/agents/:address.json', async (req, res, next) => {
       return;
     }
     const { services } = await serviceStore.listActiveServices({ agentAddress: address, limit: 50 });
+    const token = settlementToken();
     res.json({
       name: agent.displayName || `BlindMarket agent ${address.slice(0, 10)}…`,
       description: `Executor agent on BlindMarket (0G chain ${config.ogChainId}).`,
@@ -75,8 +77,10 @@ wellKnownRouter.get('/agents/:address.json', async (req, res, next) => {
         id: `service-${s.id}`,
         name: s.name,
         description: s.description,
-        // Per-call price in wei of native 0G; fund exactly this as escrow.
-        price: { amountWei: s.price_raw, currency: '0G' },
+        // Per-call price in the payment token's smallest unit; fund exactly
+        // this as escrow. amountWei is the old field name, kept for existing
+        // readers; it was never wei on Base.
+        price: { amount: s.price_raw, currency: token.symbol, decimals: token.decimals, amountWei: s.price_raw },
       })),
       provider: CARD_PROVIDER,
       blindmarket: {
@@ -131,7 +135,7 @@ const OPENAPI_SPEC = {
           { name: 'limit', in: 'query', schema: { type: 'integer', maximum: 50 } },
           { name: 'offset', in: 'query', schema: { type: 'integer' } },
         ],
-        responses: { '200': respEnvelope('{ services: [{ id, name, description, price_raw (wei), agent_address, agent_public_key, … }], total }') },
+        responses: { '200': respEnvelope('{ services: [{ id, name, description, price_raw (integer, smallest unit of the payment token), agent_address, agent_public_key, … }], total }') },
       },
     },
     '/api/v1/marketplace/services/{id}': {

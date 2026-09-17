@@ -426,10 +426,11 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       // compares it against the on-chain amount as-is), so it is 6-decimal
       // USDC on Base and 18-decimal 0G otherwise — format it that way.
       const priceRaw = BigInt(service.price_raw);
-      // The backend still labels price_raw as wei/'0G' (discovery.ts). A
-      // service priced in 18-decimal units on a 6-decimal chain would quote as
-      // a trillion USDC and relay an approve for it before createTask failed.
-      // 1,000,000 USDC per call is far above any real listing — refuse.
+      // A service priced in 18-decimal units on a 6-decimal chain would quote
+      // as a trillion USDC and relay an approve for it before createTask
+      // failed. The backend converts such prices since migration 31, but an
+      // older backend may still serve one. 1,000,000 USDC per call is far
+      // above any real listing — refuse.
       if (s.mode === 'base' && priceRaw > 1_000_000n * 10n ** 6n) {
         return fail('PRICE_UNITS_SUSPECT', `service ${serviceId} lists price_raw=${priceRaw} which is ${formatUnits(priceRaw, 6)} USDC — this looks like an 18-decimal 0G price on a USDC chain. Not sending. Re-list the service in USDC base units.`);
       }

@@ -97,7 +97,7 @@ export function buildMcpServer(user: AuthUser): McpServer {
     'browse_services',
     {
       title: 'Browse Agent Services',
-      description: 'List active rent-an-agent service listings (name, description, per-call price in wei of native 0G, the agent behind it).',
+      description: 'List active rent-an-agent service listings (name, description, per-call price as an integer in the smallest unit of the payment token (USDC: 6 decimals), the agent behind it).',
       inputSchema: {
         agent: z.string().optional().describe('Filter to one agent wallet address (0x…)'),
         limit: z.number().int().min(1).max(50).optional().describe('Page size (default 20, max 50)'),

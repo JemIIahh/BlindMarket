@@ -29,7 +29,7 @@ const { executor, wallet } = await bb.createAgent({
     AgentCap.WEB_RESEARCH,
     AgentCap.DATA_EXTRACTION,
   ],
-  minReward: '1000000000000000000', // 1 0G in wei
+  minReward: '1000000', // 1 USDC (the payment token's smallest unit; USDC has 6 decimals)
 });
 
 console.log('Executor:', executor.address);
@@ -151,7 +151,7 @@ await bb.stopAgent(agentId);
 await bb.updateAgent(agentId, {
   instructions: 'New instructions',
   model: 'gpt-4',
-  minReward: '1000000000000000000', // 1 0G in wei
+  minReward: '1000000', // 1 USDC (the payment token's smallest unit; USDC has 6 decimals)
 });
 ```
 

@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
 import { useMutation } from '@tanstack/react-query';
-import { formatUnits } from 'ethers';
 import { useAuth } from '../../context/AuthContext';
 import {
   Tag,
@@ -15,6 +14,7 @@ import {
 } from '../bb';
 import { authedDelete, authedGet, authedPatch, authedPost, getAuthHeaders } from '../../lib/api';
 import { API_BASE_URL, getPaymentSymbol } from '../../config/constants';
+import { formatPaymentAmount, parsePaymentAmount } from '../../lib/paymentUnits';
 import { ToolManager, type AnyTool } from '../bb/ToolManager';
 import AgentMetricsPanel from '../AgentMetricsPanel';
 import { UsagePanel } from './UsagePanel';
@@ -93,9 +93,10 @@ export function OpsConsole({
   // Removed from save payload; capabilities still stored as metadata for embeddings.
   const [editMinReward, setEditMinReward] = useState(
     // Decimal-preserving: integer BigInt division floored a fractional
-    // minReward (0.5 0G -> '0'), which Save then persisted as 0, silently
+    // minReward (0.5 -> '0'), which Save then persisted as 0, silently
     // disabling the min-reward gate so the agent accepted 0-reward tasks.
-    agent.minReward ? formatUnits(agent.minReward, 18) : '',
+    // Stored in settlement-token base units (USDC: 6 decimals).
+    agent.minReward ? formatPaymentAmount(agent.minReward) : '',
   );
   const [editTools, setEditTools] = useState<AnyTool[]>((agent.tools ?? []) as AnyTool[]);
   const [toolsSaved, setToolsSaved] = useState(false);
@@ -262,8 +263,8 @@ export function OpsConsole({
         provider: editProvider,
         model: editModel,
         ...(editApiKey ? { apiKey: editApiKey } : {}),
-        minReward: editMinReward
-          ? (BigInt(Math.round(Number(editMinReward) * 1e18))).toString()
+        minReward: editMinReward.trim()
+          ? parsePaymentAmount(editMinReward).toString()
           : undefined,
       });
       // Auto-restart if agent is running so changes take effect.
@@ -553,7 +554,7 @@ export function OpsConsole({
               {editProvider !== agent.provider && !editApiKey && (
                 <span className="text-xs text-ink-3">Enter a new API key to save provider change</span>
               )}
-              {save.isError && <span className="text-xs text-err">Save failed</span>}
+              {save.isError && <span className="text-xs text-err break-words">Save failed{save.error instanceof Error ? `: ${save.error.message}` : ''}</span>}
             </div>
 
             {/* Skills — installed as frozen snapshots; managed via the

@@ -28,6 +28,7 @@ import { provider, baseProvider } from '../services/chain.js';
 import { config } from '../config.js';
 import { claimDeployCredit, restoreDeployCredit } from '../services/agentFactoryListener.js';
 import { discoverModels, ProviderModelsError } from '../services/providerModels.js';
+import { normalizeSettlementAmount } from '../services/settlementUnits.js';
 
 /**
  * Owner-only guard for any agent endpoint that touches funds, keys, or
@@ -859,7 +860,9 @@ agentsRouter.patch('/:id', requireAuth, async (req: AuthRequest, res) => {
   const { instructions, provider, model, apiKey, tools, capabilities, minReward } = req.body as {
     instructions?: string; provider?: string; model?: string; apiKey?: string; tools?: object[]; capabilities?: string[]; minReward?: string;
   };
-  const updated = await updateAgent(req.params.id, { instructions, provider: provider as any, model, apiKey, tools: tools as any, capabilities: capabilities as any, minReward });
+  // Old clients still send 18-decimal amounts; store them in USDC units.
+  const normalizedMinReward = typeof minReward === 'string' && /^\d+$/.test(minReward) ? normalizeSettlementAmount(minReward) : minReward;
+  const updated = await updateAgent(req.params.id, { instructions, provider: provider as any, model, apiKey, tools: tools as any, capabilities: capabilities as any, minReward: normalizedMinReward });
   // Semantic matching (Phase 0): instructions/capabilities changed — re-embed.
   if (updated) agentEmbedding.recomputeForWalletBestEffort(updated.walletAddress);
   res.json({ success: true, data: strip(updated) });
@@ -874,7 +877,7 @@ agentsRouter.patch('/:id', requireAuth, async (req: AuthRequest, res) => {
 const serviceSchema = z.object({
   name: z.string().min(5).max(60),
   description: z.string().max(2000).optional().default(''),
-  priceRaw: z.string().regex(/^\d+$/, 'priceRaw must be a wei integer string'),
+  priceRaw: z.string().regex(/^\d+$/, "priceRaw must be an integer string in the payment token's smallest unit").transform(normalizeSettlementAmount),
   serviceType: z.enum(['api', 'a2a']),
   active: z.boolean().optional().default(true),
 });
@@ -883,7 +886,7 @@ const serviceSchema = z.object({
 const serviceUpdateSchema = z.object({
   name: z.string().min(5).max(60).optional(),
   description: z.string().max(2000).optional(),
-  priceRaw: z.string().regex(/^\d+$/, 'priceRaw must be a wei integer string').optional(),
+  priceRaw: z.string().regex(/^\d+$/, "priceRaw must be an integer string in the payment token's smallest unit").transform(normalizeSettlementAmount).optional(),
   serviceType: z.enum(['api', 'a2a']).optional(),
   active: z.boolean().optional(),
 });

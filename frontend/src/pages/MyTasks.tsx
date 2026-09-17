@@ -210,7 +210,7 @@ export default function MyTasks() {
       return true;
     })
     .sort((a, b) => {
-      // Compare rewards as BigInt — they're uint256 wei, well past the safe
+      // Compare rewards as BigInt — they're uint256 base units, well past the safe
       // integer range, so Number() coercion could mis-order near-equal amounts.
       const rewardWei = (t: PostedTask) => rewardToWei(t.onChain?.reward);
       const cmpWei = (x: bigint, y: bigint) => (x < y ? -1 : x > y ? 1 : 0);

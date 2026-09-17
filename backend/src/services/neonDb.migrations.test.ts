@@ -1,5 +1,17 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { isRerunSafe, listMigrations, rerunUnsafeMigrationIds, runMigrations } from './neonDb.js';
+import { getSchemaStatus, isRerunSafe, listMigrations, rerunUnsafeMigrationIds, runMigrations } from './neonDb.js';
+
+// Migration 31 (USDC units) only applies where a Base escrow is configured.
+const cfg = vi.hoisted(() => ({ baseEscrowAddress: '0xescrow' }));
+vi.mock('../config.js', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('../config.js')>();
+  return {
+    ...mod,
+    config: new Proxy(mod.config, {
+      get: (target, key) => (key === 'baseEscrowAddress' ? cfg.baseEscrowAddress : Reflect.get(target, key)),
+    }),
+  };
+});
 
 /**
  * The migration runner used to skip by id only. When two branches both used
@@ -10,7 +22,10 @@ import { isRerunSafe, listMigrations, rerunUnsafeMigrationIds, runMigrations } f
  * is never blocked.
  */
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  cfg.baseEscrowAddress = '0xescrow';
+});
 
 describe('isRerunSafe', () => {
   it.each([
@@ -30,10 +45,10 @@ describe('isRerunSafe', () => {
     expect(isRerunSafe(sql)).toBe(expected);
   });
 
-  it('flags only the data fix (#16) among the current migrations', () => {
+  it('flags only the data migrations (#16, #31) among the current ones', () => {
     // A new migration that isn't safe to re-run fails this test on purpose:
     // write it with IF NOT EXISTS, or add its id here as a conscious decision.
-    expect(rerunUnsafeMigrationIds()).toEqual([16]);
+    expect(rerunUnsafeMigrationIds()).toEqual([16, 31]);
   });
 });
 
@@ -91,5 +106,36 @@ describe('runMigrations', () => {
     const { pool, queries } = fakePool([]);
     await runMigrations(pool);
     expect(inserts(queries)).toEqual(listMigrations().map((m) => m.id));
+  });
+});
+
+describe('conditional migration 31 (USDC units)', () => {
+  const convertsAmounts = (sql: string) => /UPDATE agent_services/.test(sql);
+
+  it('runs and is recorded where Base settles in USDC', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { pool, queries } = fakePool([]);
+    await runMigrations(pool);
+    expect(queries.some((q) => convertsAmounts(q.sql))).toBe(true);
+    expect(inserts(queries)).toContain(31);
+  });
+
+  it('is skipped and left unrecorded on a 0G-only deployment', async () => {
+    cfg.baseEscrowAddress = '';
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { pool, queries } = fakePool([]);
+    await runMigrations(pool);
+    expect(queries.some((q) => convertsAmounts(q.sql))).toBe(false);
+    expect(inserts(queries)).not.toContain(31);
+  });
+
+  it('is not reported missing where it does not apply', async () => {
+    cfg.baseEscrowAddress = '';
+    const recorded = listMigrations().filter((m) => m.id !== 31);
+    const status = await getSchemaStatus({ query: async () => ({ rows: recorded }) } as never);
+    expect(status.missing).toEqual([]);
+    cfg.baseEscrowAddress = '0xescrow';
+    const withBase = await getSchemaStatus({ query: async () => ({ rows: recorded }) } as never);
+    expect(withBase.missing).toEqual([31]);
   });
 });

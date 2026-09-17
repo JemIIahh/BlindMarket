@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { parseEther, formatUnits } from 'ethers';
 import {
   SectionRule,
   Tag,
@@ -18,6 +17,7 @@ import {
   updateService,
   deleteService,
 } from '../../services/marketplace';
+import { formatPaymentAmount, parsePaymentAmount } from '../../lib/paymentUnits';
 import type { AgentService } from '../../services/marketplace';
 import UseServiceModal from '../UseServiceModal';
 import UseFromAgentModal from '../UseFromAgentModal';
@@ -74,8 +74,8 @@ export function ServicesSection({
     await Promise.all([onReload(), loadOwnerServices()]);
   }, [onReload, loadOwnerServices]);
 
-  const fmt = (wei: string) => {
-    try { return `${formatUnits(wei, 18)} ${symbol}`; } catch { return `${wei} wei`; }
+  const fmt = (raw: string) => {
+    try { return `${formatPaymentAmount(raw)} ${symbol}`; } catch { return `— ${symbol}`; }
   };
 
   function onMutationError(err: unknown, retry: () => Promise<void>) {
@@ -108,7 +108,7 @@ export function ServicesSection({
     setFormError('');
     if (name.trim().length < 5) { setFormError('Name must be at least 5 characters.'); return; }
     let priceRaw: string;
-    try { priceRaw = parseEther(price || '0').toString(); } catch { setFormError('Enter a valid price.'); return; }
+    try { priceRaw = parsePaymentAmount(price || '0').toString(); } catch { setFormError(`Enter a valid price in ${symbol}.`); return; }
     if (priceRaw === '0') { setFormError('Price must be greater than 0.'); return; }
     setSaving(true);
     try {

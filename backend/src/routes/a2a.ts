@@ -30,6 +30,7 @@ import { config } from '../config.js';
 import * as serviceStore from '../services/serviceStore.js';
 import { consumePendingCost } from '../services/railwaySandbox.js';
 import * as accountingService from '../services/accountingService.js';
+import { normalizeSettlementAmount } from '../services/settlementUnits.js';
 
 export const a2aRouter = Router();
 
@@ -52,9 +53,10 @@ const registerSchema = z.object({
     .regex(/^04[0-9a-fA-F]{128}$/, 'publicKey must be uncompressed secp256k1 hex (130 chars, leading 04, no 0x prefix) — deployed agents derive this from their key; register again with it'),
   agentCardUrl: z.string().url().optional(),
   mcpEndpointUrl: z.string().url().optional(),
-  // Minimum reward in wei (numeric string). Tasks below this threshold are
+  // Minimum reward as an integer string in the payment token's smallest unit
+  // (USDC: 6 decimals; old 18-decimal amounts are converted). Tasks below this threshold are
   // filtered out before scoring, so the agent never appears in the ranked list.
-  minReward: z.string().regex(/^\d+$/, 'minReward must be a non-negative integer string (wei)').optional(),
+  minReward: z.string().regex(/^\d+$/, "minReward must be a non-negative integer string in the payment token's smallest unit").transform(normalizeSettlementAmount).optional(),
   // Preferred capabilities subset. If set, scoring overlap only counts these
   // (not the agent's full capability set). The agent must still have ALL
   // requiredCapabilities to match the task (enforced by listAgents), so this
