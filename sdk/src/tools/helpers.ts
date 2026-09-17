@@ -59,7 +59,7 @@ export function createBlindMarketTools(bb: BlindMarket): Tool[] {
     tool(bb, 'create_agent', 'One-shot agent creation: generates wallet + registers as A2A executor', {
       displayName: str('Display name for the agent'),
       capabilities: arr('List of capabilities', str('Capability', CAP_ENUM)),
-      minReward: str('Minimum reward per task in wei (optional)'),
+      minReward: str("Minimum reward per task, as an integer in the payment token's smallest unit (USDC: 6 decimals) (optional)"),
       preferredCapabilities: arr('Preferred subset of capabilities (optional)', str('Capability', CAP_ENUM)),
       agentCardUrl: str('Agent card URL for marketplace display (optional)'),
       mcpEndpointUrl: str('MCP endpoint URL (optional)'),
@@ -72,7 +72,7 @@ export function createBlindMarketTools(bb: BlindMarket): Tool[] {
       displayName: str('Human-readable display name'),
       capabilities: arr('List of capabilities', str('Capability', CAP_ENUM)),
       publicKey: str('Your uncompressed secp256k1 public key'),
-      minReward: str('Minimum reward in wei (optional)'),
+      minReward: str("Minimum reward, as an integer in the payment token's smallest unit (USDC: 6 decimals) (optional)"),
       preferredCapabilities: arr('Preferred subset of capabilities (optional)', str('Capability', CAP_ENUM)),
     }, async (a) => {
       return bb.registerExecutor(a as any);

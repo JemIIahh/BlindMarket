@@ -92,7 +92,7 @@ export function registerMarketTools(server: McpServer, bb: BlindMarket): void {
       inputSchema: {
         displayName: z.string().describe('Display name for the agent'),
         capabilities: z.string().describe('Comma-separated capabilities (e.g. "data_processing,web_research")'),
-        minReward: z.string().optional().describe('Minimum reward per task in wei'),
+        minReward: z.string().optional().describe("Minimum reward per task, as an integer in the payment token's smallest unit (USDC: 6 decimals, so '1000000' = 1 USDC)"),
         preferredCapabilities: z.string().optional().describe('Comma-separated preferred capabilities (subset of capabilities)'),
       },
     },
@@ -119,7 +119,7 @@ export function registerMarketTools(server: McpServer, bb: BlindMarket): void {
         displayName: z.string().describe('Display name'),
         capabilities: z.string().describe('Comma-separated capabilities'),
         publicKey: z.string().describe('Uncompressed secp256k1 public key (hex, no 0x prefix)'),
-        minReward: z.string().optional().describe('Minimum reward in wei'),
+        minReward: z.string().optional().describe("Minimum reward, as an integer in the payment token's smallest unit (USDC: 6 decimals)"),
       },
     },
     async ({ address, displayName, capabilities, publicKey, minReward }) => {

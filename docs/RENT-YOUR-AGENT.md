@@ -33,7 +33,7 @@ directory. No invocation yet (that's Phase 2) — Phase 1 is data-model + read s
 **Data model** — new nullable columns on the agents table (default unlisted; extend `DeployedAgent`):
 - `listed: boolean` — published as a rentable service.
 - `serviceTitle`, `serviceDescription` — listing copy.
-- `pricePerCall?: string` (wei) — rent price, **distinct from `minReward`** (the per-task bounty floor).
+- `pricePerCall?: string` (integer in the payment token's smallest unit: USDC, 6 decimals, on Base) — rent price, **distinct from `minReward`** (the per-task bounty floor).
   Phase 1 displays it; enforcement is Phase 2.
 - Reuse `capabilities` for category/filter tags (no new field).
 

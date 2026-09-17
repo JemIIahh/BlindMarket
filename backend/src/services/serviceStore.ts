@@ -14,7 +14,7 @@ export interface AgentService {
   owner_address: string;
   name: string;
   description: string;
-  price_raw: string; // per-call rent price in wei (decimal string); distinct from min_reward
+  price_raw: string; // per-call rent price, integer string in the payment token's smallest unit (USDC: 6 decimals); distinct from min_reward
   service_type: 'api' | 'a2a';
   active: boolean;
   sold_count: number;

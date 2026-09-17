@@ -107,7 +107,10 @@ export async function closePool(): Promise<void> {
 // If two branches ever reuse an id, runMigrations re-applies this build's
 // migration only when isRerunSafe() says so; anything else (data fixes like
 // #16) is flagged for a person instead of being run blind.
-const migrations: Array<{ id: number; name: string; sql: string }> = [
+// `when` limits a migration to deployments it applies to. When it returns
+// false the migration is skipped and left unrecorded, so it runs later if the
+// deployment changes to match.
+const migrations: Array<{ id: number; name: string; sql: string; when?: () => boolean }> = [
   {
     id: 1,
     name: 'reputation_tables',
@@ -684,6 +687,31 @@ const migrations: Array<{ id: number; name: string; sql: string }> = [
       CREATE INDEX IF NOT EXISTS idx_cctp_transfers_owner ON cctp_transfers(owner_address);
     `,
   },
+  {
+    id: 31,
+    name: 'settlement_amounts_to_usdc_units',
+    // Only where Base settles in USDC: a 0G-only deployment's amounts really
+    // are 18-decimal and must stay as they are.
+    when: () => !!config.baseEscrowAddress,
+    sql: `
+      -- Service prices and agent minimum rewards were written with 18
+      -- decimals (the web app used parseEther, SDK samples used 1 0G = 10^18)
+      -- while Base settles in USDC with 6. Convert them so the amount the UI
+      -- showed is the amount charged: divide by 10^12, rounding up so no paid
+      -- listing becomes free. Values under 10^12 (1,000,000 USDC) are already
+      -- USDC base units and stay as they are. services/settlementUnits.ts
+      -- applies the same rule to amounts old clients still send.
+      UPDATE agent_services
+         SET price_raw = CEIL(price_raw::numeric / 1000000000000)::text
+       WHERE price_raw ~ '^[0-9]+$' AND price_raw::numeric >= 1000000000000;
+      UPDATE deployed_agents
+         SET min_reward = CEIL(min_reward::numeric / 1000000000000)::text
+       WHERE min_reward ~ '^[0-9]+$' AND min_reward::numeric >= 1000000000000;
+      UPDATE agent_executors
+         SET min_reward = CEIL(min_reward::numeric / 1000000000000)::text
+       WHERE min_reward ~ '^[0-9]+$' AND min_reward::numeric >= 1000000000000;
+    `,
+  },
 ];
 
 /**
@@ -704,7 +732,7 @@ export async function getSchemaStatus(p: pg.Pool): Promise<{
   return {
     latestExpected: latestMigrationId(),
     latestApplied: rows.length ? Math.max(...rows.map((r) => Number(r.id))) : null,
-    missing: migrations.filter((m) => !applied.has(m.id)).map((m) => m.id),
+    missing: migrations.filter((m) => !applied.has(m.id) && appliesHere(m)).map((m) => m.id),
     nameMismatch: migrations.filter((m) => applied.has(m.id) && applied.get(m.id) !== m.name).map((m) => m.id),
   };
 }
@@ -732,6 +760,10 @@ export function isRerunSafe(sql: string): boolean {
 }
 
 /** This build's migrations, id + name only (for diagnostics and tests). */
+function appliesHere(m: { when?: () => boolean }): boolean {
+  return m.when ? m.when() : true;
+}
+
 export function listMigrations(): Array<{ id: number; name: string }> {
   return migrations.map(({ id, name }) => ({ id, name }));
 }
@@ -764,6 +796,7 @@ export async function runMigrations(p: pg.Pool): Promise<void> {
     for (const m of migrations) {
       const recorded = appliedNames.get(m.id);
       if (recorded === m.name) continue;
+      if (!appliesHere(m)) continue;
       if (recorded !== undefined) {
         // Same id, different name: two branches used this number, so THIS
         // migration was never applied here. Skipping by id alone is how a
