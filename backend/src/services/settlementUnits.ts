@@ -40,8 +40,9 @@ export function assertPostingUnitMatchesPricing(): void {
   if (token.unit.symbol !== pricing.symbol || token.unit.decimals !== pricing.decimals) {
     throw new Error(
       `Invalid POSTING_CHAIN: ${key} settles in ${token.unit.symbol}, but service prices and reward floors ` +
-        `are in ${pricing.symbol} on this stack (BASE_ESCROW_ADDRESS is set). Unset POSTING_CHAIN, ` +
-        `or leave out the Base escrow on a stack that posts on 0G.`,
+        `are in ${pricing.symbol} because a Base escrow is configured (BASE_ESCROW_ADDRESS, or the generated ` +
+        `default when it is unset). Unset POSTING_CHAIN, or set BASE_ESCROW_ADDRESS to the zero address ` +
+        `on a stack that posts on 0G.`,
     );
   }
 }
