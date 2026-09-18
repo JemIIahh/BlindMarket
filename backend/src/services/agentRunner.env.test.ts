@@ -70,7 +70,8 @@ vi.mock('./crypto.js', () => ({ eciesEncrypt: () => Buffer.from(''), generateKey
 // separately.
 const PASSTHROUGH_KEYS = [
   'NODE_ENV',
-  'HEARTBEAT_INTERVAL_MS', 'POLL_INTERVAL_MS', 'DELEGATE_REWARD_OG',
+  'HEARTBEAT_INTERVAL_MS', 'POLL_INTERVAL_MS', 'WS_RECONCILE_MS', 'GAS_RECHECK_MS',
+  'LLM_TIMEOUT_MS', 'RELEASE_COOLDOWN_MS', 'SENTRY_DSN', 'SENTRY_ENVIRONMENT', 'DELEGATE_REWARD_OG',
   'DELEGATE_GAS_RESERVE_OG', 'PATH', 'HOME', 'TMPDIR', 'LANG', 'TZ', 'NODE_OPTIONS',
 ];
 
@@ -104,6 +105,10 @@ describe('startAgent forks workers with an allowlisted env, not the full process
     // Seed secrets that must NOT leak, plus a passthrough var.
     for (const k of SECRET_KEYS) process.env[k] = `secret-value-for-${k}`;
     process.env.NODE_ENV = 'test';
+    process.env.LLM_TIMEOUT_MS = '45000';
+    process.env.RELEASE_COOLDOWN_MS = '60000';
+    process.env.SENTRY_DSN = 'https://key@sentry.test/1';
+    process.env.SENTRY_ENVIRONMENT = 'staging';
     // A var deliberately left unset to prove absence isn't stringified.
     delete process.env.HEARTBEAT_INTERVAL_MS;
   });
@@ -133,6 +138,12 @@ describe('startAgent forks workers with an allowlisted env, not the full process
     await startAgent(agent.id, { skipResume: true });
 
     const env = forkMock.mock.calls[0][2].env as Record<string, string>;
+
+    // Seeded above, so the loop below cannot pass vacuously for these.
+    expect(env.LLM_TIMEOUT_MS).toBe('45000');
+    expect(env.RELEASE_COOLDOWN_MS).toBe('60000');
+    expect(env.SENTRY_DSN).toBe('https://key@sentry.test/1');
+    expect(env.SENTRY_ENVIRONMENT).toBe('staging');
 
     for (const k of PASSTHROUGH_KEYS) {
       if (process.env[k] !== undefined) {
@@ -170,5 +181,125 @@ describe('startAgent forks workers with an allowlisted env, not the full process
 
     expect('HEARTBEAT_INTERVAL_MS' in env).toBe(false);
     expect(env.HEARTBEAT_INTERVAL_MS).toBeUndefined();
+  });
+});
+
+describe('the passthrough list covers every process.env read in worker.js', () => {
+  it('has no unexplained gap', async () => {
+    const { readFileSync } = await import('fs');
+    const { fileURLToPath } = await import('url');
+    const src = readFileSync(fileURLToPath(new URL('../../agents/worker.js', import.meta.url)), 'utf8');
+    const read = new Set([...src.matchAll(/process\.env\.([A-Z0-9_]+)/g)].map((m) => m[1]));
+    const { WORKER_ENV_PASSTHROUGH } = await import('./agentRunner.js');
+
+    agentHolder.current = makeAgent('agent-env-coverage');
+    forkMock.mockReset();
+    forkMock.mockReturnValue({ stdout: { on: vi.fn() }, stderr: { on: vi.fn() }, on: vi.fn(), pid: 1, kill: vi.fn() });
+    const { startAgent } = await import('./agentRunner.js');
+    await startAgent('agent-env-coverage');
+    const explicit = new Set(Object.keys(forkMock.mock.calls[0][2].env));
+
+    // Sui settlement is not a deployable path (deployAgent mints EVM wallets
+    // only), so its config is deliberately not forwarded.
+    const knownUnforwarded = new Set([
+      'SUI_NETWORK_ID', 'SUI_RPC_URL', 'SUI_PACKAGE_ID', 'SUI_BLIND_ESCROW_OBJECT_ID',
+      'SUI_BLIND_REPUTATION_OBJECT_ID', 'SUI_ADMIN_CAP_ID',
+    ]);
+    const missing = [...read].filter((k) =>
+      !(WORKER_ENV_PASSTHROUGH as readonly string[]).includes(k) && !explicit.has(k) && !knownUnforwarded.has(k));
+    expect(missing).toEqual([]);
+  });
+});
+
+describe('crash memory survives the restart', () => {
+  const TASK = '0x' + 'c'.repeat(64);
+
+  it('recordCrash charges the in-flight task and counts the streak', async () => {
+    const { recordCrash, recordTaskCompleted, HEALTHY_UPTIME_MS } = await import('./agentRunner.js');
+    let mem = recordCrash(undefined, { inFlightTask: TASK, uptimeMs: 130_000 });
+    expect(mem).toEqual({ consecutive: 1, byTask: { [TASK]: 1 } });
+    mem = recordCrash(mem, { inFlightTask: TASK, uptimeMs: 130_000 });
+    expect(mem).toEqual({ consecutive: 2, byTask: { [TASK]: 2 } });
+    // No task in flight: the streak still grows, nothing is charged.
+    mem = recordCrash(mem, { inFlightTask: null, uptimeMs: 5_000 });
+    expect(mem).toEqual({ consecutive: 3, byTask: { [TASK]: 2 } });
+    // A healthy stretch starts a new streak but keeps the per-task charge.
+    mem = recordCrash(mem, { inFlightTask: null, uptimeMs: HEALTHY_UPTIME_MS });
+    expect(mem).toEqual({ consecutive: 1, byTask: { [TASK]: 2 } });
+    // Completing the task clears both.
+    expect(recordTaskCompleted(mem, TASK)).toEqual({ consecutive: 0, byTask: {} });
+    expect(recordTaskCompleted(undefined, TASK)).toBeUndefined();
+  });
+
+  it('recordCrash keeps only the most recent tasks', async () => {
+    const { recordCrash } = await import('./agentRunner.js');
+    let mem;
+    for (let i = 0; i < 30; i++) mem = recordCrash(mem, { inFlightTask: `0x${i}`, uptimeMs: 1 });
+    expect(Object.keys(mem!.byTask)).toHaveLength(20);
+    expect(mem!.byTask['0x29']).toBe(1);
+    expect(mem!.byTask['0x0']).toBeUndefined();
+  });
+
+  it('a crash with a task in flight reaches the restarted worker via env', async () => {
+    vi.useFakeTimers();
+    try {
+      const handlers: Record<string, (...a: any[]) => unknown> = {};
+      const child = {
+        stdout: { on: vi.fn() }, stderr: { on: vi.fn() }, pid: 4321, kill: vi.fn(),
+        on: vi.fn((ev: string, cb: (...a: any[]) => unknown) => { handlers[ev] = cb; }),
+      };
+      forkMock.mockReset();
+      forkMock.mockReturnValue(child);
+      const agent = makeAgent('agent-crash-memory');
+      agentHolder.current = agent;
+      const { startAgent, stopAgent } = await import('./agentRunner.js');
+      // `processes` is a module singleton: free the slots earlier tests took,
+      // or MAX_CONCURRENT_AGENTS refuses this start.
+      for (const id of ['agent-env-secrets', 'agent-env-passthrough', 'agent-env-explicit', 'agent-env-absent', 'agent-env-coverage']) {
+        await stopAgent(id);
+      }
+      forkMock.mockClear();
+
+      await startAgent(agent.id);
+      const first = forkMock.mock.calls[0][2].env as Record<string, string>;
+      expect(first.AGENT_CRASH_COUNT).toBe('0');
+      expect(first.AGENT_CRASHED_TASKS).toBe('{}');
+
+      // A run that merely returned must not clear anything; junk is ignored.
+      await handlers.message({ type: 'task-started', taskHash: TASK });
+      await handlers.message({ type: 'task-finished', taskHash: TASK, completed: false });
+      await handlers.message({ type: 'task-started', taskHash: { evil: true } });
+      await handlers.message({ type: 'task-started', taskHash: TASK });
+
+      // Second fork gets its own child object so the stale-exit guard holds.
+      forkMock.mockReturnValue({ ...child, on: vi.fn((ev: string, cb: (...a: any[]) => unknown) => { handlers[`2:${ev}`] = cb; }) });
+      await handlers.exit(1, null);
+      await vi.advanceTimersByTimeAsync(3_100);
+
+      expect(forkMock).toHaveBeenCalledTimes(2);
+      const second = forkMock.mock.calls[1][2].env as Record<string, string>;
+      expect(second.AGENT_SKIP_RESUME).toBe('1');
+      expect(second.AGENT_CRASH_COUNT).toBe('1');
+      expect(JSON.parse(second.AGENT_CRASHED_TASKS)).toEqual({ [TASK]: 1 });
+
+      // Completing the task clears its charge for the next start.
+      await handlers['2:message']({ type: 'task-started', taskHash: TASK });
+      await handlers['2:message']({ type: 'task-finished', taskHash: TASK, completed: true });
+      forkMock.mockReturnValue({ ...child, on: vi.fn() });
+      await handlers['2:exit'](1, null);
+      await vi.advanceTimersByTimeAsync(3_100);
+      const third = forkMock.mock.calls[2][2].env as Record<string, string>;
+      expect(third.AGENT_CRASH_COUNT).toBe('1');
+      expect(JSON.parse(third.AGENT_CRASHED_TASKS)).toEqual({});
+
+      // An operator stop is a clean slate.
+      await stopAgent(agent.id);
+      forkMock.mockReturnValue({ ...child, on: vi.fn() });
+      await startAgent(agent.id);
+      const fourth = forkMock.mock.calls[3][2].env as Record<string, string>;
+      expect(fourth.AGENT_CRASH_COUNT).toBe('0');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
