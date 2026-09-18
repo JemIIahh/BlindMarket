@@ -1,8 +1,8 @@
 import { ethers } from 'ethers';
 import { BlindMarket } from '../index.js';
-import { eciesDecrypt, aesDecrypt } from '../crypto/index.js';
+import { eciesDecrypt, aesDecrypt, derivePublicKey } from '../crypto/index.js';
 import type {
-  A2ATaskState, AgentCapability, ExecutorProfile, Message,
+  A2ATaskState, AgentCapability, ExecutorProfile, Message, RegisterExecutorInput,
 } from '../types.js';
 
 // ── Config ──────────────────────────────────────────────────────────────────
@@ -22,16 +22,54 @@ export interface WorkerRuntimeConfig {
   watchIntervalMs?: number;
   maxConcurrentTasks?: number;
   /**
-   * RPC URL used to sign + broadcast `submitEvidence` after `submitResult()`.
+   * The 0G RPC used to sign + broadcast `submitEvidence` for a 0G task.
    * Defaults to the 0G testnet RPC (matches `backend/agents/worker.js`'s
-   * default). Point this at the RPC for whichever chain your tasks settle on.
+   * default). It is 0G ONLY: it never stands in for another chain. For Base
+   * set `rpcUrls.base`.
    */
   rpcUrl?: string;
-  /** Per-chain RPCs. A task is escrowed on exactly one chain and /submit names
-   *  it; submitEvidence must be signed on that chain. `rpcUrl` remains the 0G
-   *  default. Without a Base entry the runtime refuses a Base task at submit
-   *  rather than broadcasting it on 0G. */
-  rpcUrls?: { '0g'?: string; base?: string };
+  /**
+   * Per-chain RPCs. A task is escrowed on exactly one chain, and
+   * submitEvidence must be signed on that chain. The runtime DECLARES, as its
+   * `supportedChains`, exactly the chains it has an RPC for — `rpcUrls` keys,
+   * plus 0G through `rpcUrl` — so the backend only offers it tasks it can
+   * settle. Without `rpcUrls.base` it is not offered Base tasks (production
+   * posts new tasks on Base).
+   */
+  rpcUrls?: Partial<Record<SettlementChain, string>>;
+}
+
+/**
+ * Chains this runtime's CODE can sign submitEvidence on. What it registers as
+ * its `supportedChains` is the subset it also has an RPC for (declaredChains).
+ */
+export const SETTLEMENT_CHAINS = ['0g', 'base'] as const;
+export type SettlementChain = (typeof SETTLEMENT_CHAINS)[number];
+
+/**
+ * The chain the backend named for a task. Missing means 0G (backends older
+ * than the field). Any other value throws: signing it on the 0G RPC would
+ * target the wrong escrow.
+ */
+function settlementChain(taskId: string, reported: string | null | undefined): SettlementChain {
+  if (reported == null) return '0g';
+  const known = SETTLEMENT_CHAINS.find((c) => c === reported);
+  if (!known) {
+    throw new Error(
+      `task ${taskId} settles on "${reported}", which this runtime cannot sign for (it signs on ${SETTLEMENT_CHAINS.join(' and ')}) — update @blindmarket/sdk`,
+    );
+  }
+  return known;
+}
+
+/**
+ * The RPC this runtime signs on for `chain`. `rpcUrls` is per chain; the
+ * single `rpcUrl` is the 0G RPC (its default is 0G testnet) and never stands
+ * in for another chain: a Base submitEvidence sent through it is rejected by
+ * ethers' chainId pin — after the handler has already run.
+ */
+function rpcFor(config: { rpcUrl?: string; rpcUrls?: Partial<Record<SettlementChain, string>> }, chain: SettlementChain): string | undefined {
+  return config.rpcUrls?.[chain] ?? (chain === '0g' ? config.rpcUrl : undefined);
 }
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -113,6 +151,16 @@ export class WorkerRuntime {
     return [...this.executions.values()];
   }
 
+  /**
+   * The chains this runtime declares to the backend: those its code can sign
+   * for AND it has an RPC for. Declaring a chain with no RPC made the backend
+   * offer tasks the runtime accepted and then could not settle, stranding
+   * them until the poster's deadline.
+   */
+  get declaredChains(): SettlementChain[] {
+    return SETTLEMENT_CHAINS.filter((chain) => !!rpcFor(this.config, chain));
+  }
+
   /** Get own executor profile (available after start). */
   get executorProfile(): ExecutorProfile | undefined {
     return this.profile;
@@ -139,6 +187,17 @@ export class WorkerRuntime {
   async start(): Promise<ExecutorProfile> {
     if (this.running) return this.profile!;
 
+    // "No tasks arrive" looks the same as "no work available", so say which
+    // chains this runtime will be offered tasks on, and what is missing.
+    const undeclared = SETTLEMENT_CHAINS.filter((c) => !this.declaredChains.includes(c));
+    if (undeclared.length > 0) {
+      console.warn(
+        `[WorkerRuntime] declaring chains: ${this.declaredChains.join(', ') || 'none'}. ` +
+          `No RPC for ${undeclared.join(', ')} — set ${undeclared.map((c) => `rpcUrls.${c}`).join(', ')} to be offered those tasks ` +
+          `(production posts new tasks on Base).`,
+      );
+    }
+
     // 1. Register or restore executor
     if (this.config.existingPrivateKey && this.config.existingAddress && this.config.existingPublicKey) {
       this.wallet = {
@@ -148,13 +207,14 @@ export class WorkerRuntime {
       };
       // Fetch existing profile — backend identifies by API key
       const result = await this.bb.getExecutorProfile();
-      this.profile = result.agent;
+      this.profile = await this.declareSupportedChains(result.agent);
     } else {
       const result = await this.bb.createAgent({
         displayName: this.config.displayName,
         capabilities: this.config.capabilities,
         minReward: this.config.minReward,
         preferredCapabilities: this.config.preferredCapabilities,
+        supportedChains: this.declaredChains,
       });
       this.wallet = {
         address: result.wallet.address,
@@ -172,6 +232,74 @@ export class WorkerRuntime {
     this.emit({ type: 'started' });
 
     return this.profile;
+  }
+
+  /**
+   * Re-register a restored executor when its stored `supportedChains` is
+   * null (a row registered by code that predates the field), or names a
+   * chain this runtime has no RPC for — it would be offered, accept and
+   * strand those tasks. A stored list that is a SUBSET of what the runtime
+   * can settle is left alone: an operator who registered ['base'] through
+   * the MCP or PATCH meant it. The backend only offers an executor
+   * tasks on the chains it declared, and a restore never registers otherwise,
+   * so an executor first registered by an older SDK would keep its old list.
+   *
+   * A /profile response with no `supportedChains` key comes from a backend
+   * that predates the field. That backend would drop the field anyway, and
+   * some of its versions reset the executor's 0G earnings on every register,
+   * so this does nothing there.
+   *
+   * The public key is derived from the private key, so a stored compressed
+   * key (which /register rejects) or a stale one is replaced with the key
+   * this runtime can decrypt with. Everything else comes from the stored
+   * profile, not this runtime's config, so a restore never rewrites it. The
+   * backend overwrites agentCardUrl and mcpEndpointUrl on every register
+   * (clearing them when absent), so they are copied from the raw /profile
+   * row, which carries them even though ExecutorProfile doesn't type them.
+   *
+   * Best-effort: on failure it logs, emits 'error', and returns the stored
+   * profile, so start() still succeeds.
+   */
+  private async declareSupportedChains(stored: ExecutorProfile): Promise<ExecutorProfile> {
+    const raw = stored as unknown as Record<string, unknown>;
+    if (!('supportedChains' in raw)) return stored;
+    const can = this.declaredChains;
+    const storedChains = Array.isArray(stored.supportedChains) ? stored.supportedChains : null;
+    // A deliberate subset of what this runtime can settle stays as it is.
+    // (An empty list cannot come from the API: both schemas require one entry.)
+    if (storedChains && storedChains.every((c) => (can as string[]).includes(c))) return stored;
+    // Otherwise declare what it can settle, keeping the operator's choice
+    // where the two overlap.
+    const kept = storedChains ? can.filter((c) => storedChains.includes(c)) : [];
+    const declare = kept.length > 0 ? kept : can;
+
+    const optionalString = (v: unknown): string | undefined =>
+      typeof v === 'string' && v !== '' ? v : undefined;
+
+    try {
+      // No `address`: /register has no such field and registers the wallet
+      // the API key authenticates.
+      const body: Omit<RegisterExecutorInput, 'address'> = {
+        displayName: stored.displayName,
+        capabilities: stored.capabilities,
+        // Uncompressed, without 0x, as /register requires.
+        publicKey: derivePublicKey(this.wallet!.privateKey),
+        agentCardUrl: optionalString(raw.agentCardUrl),
+        mcpEndpointUrl: optionalString(raw.mcpEndpointUrl),
+        minReward: optionalString(stored.minReward),
+        // The backend reads an unset list back as []; sending [] would store
+        // an empty list where there was none.
+        preferredCapabilities: stored.preferredCapabilities?.length ? stored.preferredCapabilities : undefined,
+        supportedChains: declare,
+      };
+      const { agent } = await this.bb.registerExecutor(body as RegisterExecutorInput);
+      return agent ?? stored;
+    } catch (err) {
+      const error = `Could not register supported chains (${declare.join(', ')}); continuing with the stored profile: ${err}`;
+      console.warn(`[WorkerRuntime] ${error}`);
+      this.emit({ type: 'error', error });
+      return stored;
+    }
   }
 
   stop(): void {
@@ -284,6 +412,15 @@ export class WorkerRuntime {
       const acceptResult = await this.bb.acceptTask(taskId);
       exec.task = a2a;
       this.emit({ type: 'task_accepted', taskId });
+      // Fail before running the handler if this runtime can't settle the task:
+      // an unknown chain, or one it has no RPC for (the send would fail only
+      // after the handler had spent its run, leaving the task Assigned).
+      const acceptedChain = settlementChain(taskId, acceptResult.chain);
+      if (!rpcFor(this.config, acceptedChain)) {
+        throw new Error(
+          `task ${taskId} is escrowed on ${acceptedChain} but no RPC is configured for it — set rpcUrls.${acceptedChain} in the WorkerRuntime config`,
+        );
+      }
 
       // Decrypt the brief. 'public' tasks carry no wrappedKey by design — the
       // blob at rootHash is already plaintext, so skip ECIES/AES entirely.
@@ -334,14 +471,14 @@ export class WorkerRuntime {
         // used to be a single 0G provider, so a Base submitEvidence was
         // broadcast onto 0G. The tx now also carries chainId, so a wrong RPC
         // fails loudly at ethers instead of landing on the wrong network.
-        const chain = submitResult.chain === 'base' ? 'base' : '0g';
-        // rpcUrls wins per chain; otherwise the single rpcUrl (documented as
-        // "whichever chain tasks settle on") still applies. The chainId pin
-        // rejects a genuine mismatch at ethers before anything is broadcast.
-        const rpc = this.config.rpcUrls?.[chain] ?? this.config.rpcUrl;
+        const chain = settlementChain(taskId, submitResult.chain);
+        // rpcUrls per chain; rpcUrl is the 0G RPC only (rpcFor). The chainId
+        // pin still rejects a genuine mismatch at ethers before anything is
+        // broadcast.
+        const rpc = rpcFor(this.config, chain);
         if (!rpc) {
           throw new Error(
-            `task ${taskId} is escrowed on ${chain} but no RPC is configured for it — set rpcUrls.${chain} (or rpcUrl) in the WorkerRuntime config`,
+            `task ${taskId} is escrowed on ${chain} but no RPC is configured for it — set rpcUrls.${chain} in the WorkerRuntime config`,
           );
         }
         const provider = new ethers.JsonRpcProvider(rpc);

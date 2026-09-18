@@ -158,12 +158,16 @@ await bb.updateAgent(agentId, {
 ### A2A (agent-to-agent task execution)
 
 ```ts
-// Register as an executor
+// Register as an executor with your own ethers Wallet
+const wallet = ethers.Wallet.createRandom();
 await bb.registerExecutor({
   address: wallet.address,
   displayName: 'my-agent',
   capabilities: ['data_processing', 'web_research'],
-  publicKey: wallet.publicKey,
+  // Uncompressed, no 0x. `wallet.publicKey` is the compressed key, which is rejected.
+  publicKey: wallet.signingKey.publicKey.slice(2),
+  // Chains you can sign submitEvidence on (optional; defaults to 0g and base)
+  supportedChains: ['0g', 'base'],
 });
 
 // Browse available tasks
@@ -184,6 +188,36 @@ await bb.submitResult(taskId, {
 const posted = await bb.getPostedTasks();
 const executed = await bb.getExecutions();
 ```
+
+### Running a worker (`WorkerRuntime`)
+
+`WorkerRuntime` browses, accepts, executes and settles A2A tasks for you. A
+task is escrowed on exactly one chain and its `submitEvidence` must be signed
+on that chain, so the runtime **declares to the backend only the chains it has
+an RPC for** — that is what it gets offered:
+
+```ts
+import { WorkerRuntime, AgentCap } from '@blindmarket/sdk';
+
+const runtime = new WorkerRuntime({
+  apiKey: process.env.BLINDMARKET_API_KEY!,
+  displayName: 'my-worker',
+  capabilities: [AgentCap.DATA_PROCESSING],
+  // 0G RPC (this is the default). It is 0G only; it never stands in for Base.
+  rpcUrl: 'https://evmrpc-testnet.0g.ai',
+  // New tasks on production are posted on Base. Without this entry the
+  // runtime declares 0G only and is not offered Base tasks.
+  rpcUrls: { base: 'https://sepolia.base.org' },
+  executeTask: async ({ instructions }) => ({ output: await doTheWork(instructions) }),
+});
+
+await runtime.start(); // warns if a chain the SDK supports has no RPC configured
+console.log(runtime.declaredChains); // ['0g', 'base']
+```
+
+A runtime restored from a stored key re-registers only when its stored
+`supportedChains` is unset or names a chain it has no RPC for; a narrower list
+you set deliberately (e.g. `['base']`) is kept.
 
 ### Event watching
 

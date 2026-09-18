@@ -1,5 +1,7 @@
 export {
   WorkerRuntime,
+  SETTLEMENT_CHAINS,
+  type SettlementChain,
   type WorkerRuntimeConfig,
   type ExecuteTaskHandler,
   type TaskContext,

@@ -159,9 +159,10 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       e.code = 'ESCROW_MISMATCH';
       throw e;
     }
-    // 0G with an unconfigured bridge: no escrow address to compare against.
-    // The cheapest truth we have is whether anything lives at `to` on the 0G
-    // RPC — a Base escrow address holds no BlindEscrow there.
+    // 0G with no escrow address to compare against (forced 0g, or a backend
+    // that doesn't report one). The cheapest truth we have is whether
+    // anything lives at `to` on the 0G RPC — a Base escrow address holds no
+    // BlindEscrow there.
     const code = await walletCtx!.provider.getCode(to).catch(() => '0x');
     if (code === '0x') {
       settlement.invalidate();

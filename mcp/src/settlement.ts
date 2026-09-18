@@ -12,9 +12,10 @@ import { JsonRpcProvider, getAddress } from 'ethers';
  * rest from the chain id.
  *
  * Discovery is a HINT, not a proof. /health/bridge reports Base only when the
- * whole bridge is configured (both chains' signers), while task creation
- * routes on BASE_ESCROW_ADDRESS alone — so a half-configured backend answers
- * "0G" here and builds Base transactions there. The send paths in rent.ts
+ * backend can sign for Base (its escrow and marketplace signer), while task
+ * creation routes on BASE_ESCROW_ADDRESS alone — so a backend with a Base
+ * escrow but no Base signer answers "0G" here and builds Base transactions
+ * there. The send paths in rent.ts
  * therefore verify the `to` of every unsigned tx against the escrow this
  * mode expects before broadcasting, and a mismatch invalidates the cache.
  * That check, not this lookup, is what stops native value going to a Base
@@ -43,8 +44,9 @@ export interface OgSettlement {
   mode: '0g';
   decimals: 18;
   symbol: '0G';
-  /** the 0G escrow as /health/bridge reports it, when the bridge is
-   *  configured; undefined otherwise. Used to verify unsigned txs. */
+  /** the 0G escrow as /health/bridge reports it (current backends report it
+   *  even when 0G can't settle); undefined from older backends or when
+   *  forced to 0g. Used to verify unsigned txs. */
   escrowAddress?: string;
 }
 
@@ -108,6 +110,8 @@ function err(code: string, message: string): SettlementError {
 }
 
 const isAddress = (a: unknown): a is string => typeof a === 'string' && /^0x[0-9a-fA-F]{40}$/.test(a);
+// An escrow is never address(0); treating it as one would send value there.
+const isEscrowAddress = (a: unknown): a is string => isAddress(a) && !/^0x0{40}$/.test(a);
 
 export interface DiscoverDeps {
   apiBase: string;
@@ -152,8 +156,8 @@ export async function discoverSettlement(deps: DiscoverDeps): Promise<Settlement
 
   if (!bridge?.configured) {
     if (forced === 'base') {
-      // /health/bridge reports Base only when the WHOLE bridge is configured
-      // (isBridgeConfigured wants all four signers), while POST /tasks routes
+      // /health/bridge reports Base only when the backend can sign for it
+      // (Base escrow and Base marketplace signer), while POST /tasks routes
       // on config.baseEscrowAddress alone — which itself falls back to the
       // generated contractAddresses.ts, so a backend with nothing about Base
       // in its .env still builds Base transactions. Refusing here would block
@@ -166,7 +170,7 @@ export async function discoverSettlement(deps: DiscoverDeps): Promise<Settlement
       if (!isAddress(escrowOverride)) {
         throw err(
           'SETTLEMENT_MISMATCH',
-          'BLINDMARKET_SETTLEMENT=base but /health/bridge does not report a Base escrow. That endpoint needs the full bridge (both chains\' marketplace signers), while task creation needs only the Base escrow address — so this is expected on a backend that posts Base tasks without the Base signer. Set BLINDMARKET_BASE_ESCROW_ADDRESS (and BLINDMARKET_BASE_CHAIN_ID if not 84532) to the escrow the backend builds against, or complete the bridge config.',
+          'BLINDMARKET_SETTLEMENT=base but /health/bridge does not report a Base escrow. That endpoint needs the Base marketplace signer, while task creation needs only the Base escrow address — so this is expected on a backend that posts Base tasks without the Base signer. Set BLINDMARKET_BASE_ESCROW_ADDRESS (and BLINDMARKET_BASE_CHAIN_ID if not 84532) to the escrow the backend builds against, or complete the bridge config.',
         );
       }
       const forcedChainId = Number(env.BLINDMARKET_BASE_CHAIN_ID ?? 84532);
@@ -174,12 +178,12 @@ export async function discoverSettlement(deps: DiscoverDeps): Promise<Settlement
     }
     // Carry the 0G escrow address when the bridge reports it, so the 0G send
     // path can verify the backend really built a 0G tx (see file comment).
-    return isAddress(data?.escrowAddress)
+    return isEscrowAddress(data?.escrowAddress)
       ? { ...OG_SETTLEMENT, escrowAddress: getAddress(data.escrowAddress) }
       : OG_SETTLEMENT;
   }
 
-  if (!isAddress(bridge.escrowAddress)) {
+  if (!isEscrowAddress(bridge.escrowAddress)) {
     throw err('SETTLEMENT_UNKNOWN', `Backend reports Base configured but no escrow address (${bridge.escrowAddress}).`);
   }
   return buildBaseSettlement(Number(bridge.chainId), bridge.escrowAddress, env, deps);
