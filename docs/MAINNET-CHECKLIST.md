@@ -375,12 +375,14 @@ when you have budget:
 
 ## Acknowledgment
 
-Before deploying to mainnet, set the env var that unlocks the deploy
-script's mainnet path:
+Before deploying to mainnet, pass the env var that unlocks the deploy
+script's mainnet path on the command line of that ONE run:
 
 ```bash
-export I_HAVE_READ_MAINNET_CHECKLIST=yes
+I_HAVE_READ_MAINNET_CHECKLIST=yes npx hardhat run scripts/<script>.ts --network <mainnet network>
 ```
 
-Setting this is your acknowledgment that every box above is checked.
-The script will refuse otherwise. Don't lie to it.
+Don't `export` it (it would silently unlock every later run in that shell)
+and don't put it in `contracts/.env` (hardhat refuses to start if that file
+sets it). Passing it is your acknowledgment that every box above is
+checked. The script will refuse otherwise. Don't lie to it.

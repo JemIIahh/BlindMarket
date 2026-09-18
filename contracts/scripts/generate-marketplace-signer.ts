@@ -76,9 +76,8 @@ async function main() {
   console.log("     # For Testnet (0G testnet has more than one deployment set: name the escrow;");
   console.log("     # add DEPLOYMENT_SET=staging for the staging stack, see contracts/README.md):");
   console.log(`     EXPECTED_ESCROW=<escrow> MARKETPLACE_SIGNER_ADDRESS=${addr} npx hardhat run scripts/rotate-verifier.ts --network 0g-testnet`);
-  console.log("     # For Mainnet (Requires checklist env var):");
-  console.log(`     export I_HAVE_READ_MAINNET_CHECKLIST=yes`);
-  console.log(`     MARKETPLACE_SIGNER_ADDRESS=${addr} npx hardhat run scripts/rotate-verifier.ts --network 0g-mainnet`);
+  console.log("     # For Mainnet (the checklist ack is passed on the command line of ONE run, never exported or put in .env):");
+  console.log(`     I_HAVE_READ_MAINNET_CHECKLIST=yes MARKETPLACE_SIGNER_ADDRESS=${addr} npx hardhat run scripts/rotate-verifier.ts --network 0g-mainnet`);
 }
 
 main().catch((e) => {

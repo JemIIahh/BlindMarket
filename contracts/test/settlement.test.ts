@@ -581,5 +581,13 @@ describe("DEPLOYMENT_SET=staging picks the staging manifest directory (scripts/_
       { cwd: path.resolve(__dirname, ".."), env: { ...withoutManifestDir(), DEPLOYMENT_SET: "" }, encoding: "utf-8" },
     );
     expect(unset).to.equal("undefined");
+    // DEPLOYMENT_SET=default (what a first default deploy on a shared chain
+    // must pass) is the default set: production's manifests, not staging's.
+    const explicitDefault = execFileSync(
+      process.execPath,
+      ["-r", "ts-node/register/transpile-only", "-e", "require('./scripts/_manifest-dir'); process.stdout.write(String(process.env.MANIFEST_DEFAULT_DIR))"],
+      { cwd: path.resolve(__dirname, ".."), env: { ...withoutManifestDir(), DEPLOYMENT_SET: "default" }, encoding: "utf-8" },
+    );
+    expect(explicitDefault).to.equal("undefined");
   });
 });

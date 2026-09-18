@@ -38,17 +38,17 @@ The guards (in `scripts/_deployments.ts` and `scripts/_manifest-dir.ts`):
   before the OpenZeppelin plugin reads it. Scripts refuse a run whose manifest
   directory is not the set's, including a run started outside `contracts/`.
 - Deploy scripts merge into the existing record instead of replacing it. They
-  refuse to replace a live `BlindEscrow` unless `ALLOW_ESCROW_REPLACE=true`,
-  and on a shared chain `EXPECTED_ESCROW` must also name the escrow being
-  replaced. They record the escrow's deployment block under
+  refuse to replace a live `BlindEscrow` unless `ALLOW_ESCROW_REPLACE=true`
+  AND `EXPECTED_ESCROW` names the escrow being replaced, on every chain. They record the escrow's deployment block under
   `blocks.BlindEscrow`. `sync-addresses` reads only `contracts`.
 - `sync-addresses` / `check-addresses` ignore `DEPLOYMENT_SET` and never read
   `deployments/staging/`.
 
 Pass these variables on the command line, one run at a time. Hardhat refuses
 to start if `contracts/.env` sets `DEPLOYMENT_SET`, `EXPECTED_ESCROW`,
-`ALLOW_ESCROW_REPLACE` or `MANIFEST_DEFAULT_DIR`, because that file is loaded
-into every run.
+`ALLOW_ESCROW_REPLACE`, `MANIFEST_DEFAULT_DIR` or
+`I_HAVE_READ_MAINNET_CHECKLIST` (even `=no` — delete the line the old
+template shipped), because that file is loaded into every run.
 
 ### Deploy staging
 
