@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Breadcrumb, PageHeader, SectionRule } from '../components/bb';
-import { getPaymentSymbol } from '../config/constants';
+import { getPaymentSymbol } from '../config/settlement';
 import { parsePaymentAmount } from '../lib/paymentUnits';
 
 const SNIPPETS = [

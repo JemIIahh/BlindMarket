@@ -84,6 +84,16 @@ describe('GET /tasks/:id and the TaskRegistry', () => {
     expect(registryService.getTaskMeta).toHaveBeenCalledWith(7);
   });
 
+  it('names the unit each task is escrowed in, next to its decimals', async () => {
+    // Native 0G on 0G; the mocked escrow returns address(0) as the token.
+    const og = await get(OG_HASH);
+    expect(og.body.data).toMatchObject({ chain: '0g', symbol: '0G', decimals: 18 });
+    // The Base escrow record also says address(0), which is NOT Base's
+    // settlement token (USDC): the unit is unknown, so no symbol is claimed.
+    const base = await get(BASE_HASH);
+    expect(base.body.data).toMatchObject({ chain: 'base', symbol: null });
+  });
+
   it('reads it for a numeric id, which names a 0G task', async () => {
     const res = await get('7');
     expect(res.status).toBe(200);

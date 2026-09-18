@@ -16,7 +16,8 @@ import {
 } from '../components/bb';
 import { get, authedGet, authedPost } from '../lib/api';
 import { useChainAddress } from '../hooks/useChainWallet';
-import { MARKETPLACE_TOKEN_ADDRESS, getPaymentSymbol, getPaymentDecimals, BASE_CCTP_CHAIN_KEY, isCctpUsable } from '../config/constants';
+import { BASE_CCTP_CHAIN_KEY, isCctpUsable } from '../config/constants';
+import { getMarketplaceTokenAddress, getPaymentSymbol, getPaymentDecimals } from '../config/settlement';
 import {
   getAgentReviews,
   getAgentBadges,
@@ -40,8 +41,9 @@ import { formatPaymentAmount } from '../lib/paymentUnits';
 const DEFAULT_TOP_UP_AMOUNT = '1';
 
 // Below this the agent can't reliably pay for operations. UI surfaces a
-// "Fund wallet" call to action when balance is under this.
-const LOW_BALANCE_THRESHOLD = parseUnits('1', getPaymentDecimals());
+// "Fund wallet" call to action when balance is under this. A function, not a
+// module constant: the payment unit is known once the backend has answered.
+const lowBalanceThreshold = () => parseUnits('1', getPaymentDecimals());
 
 const USDC_ABI = [
   'function balanceOf(address owner) view returns (uint256)',
@@ -116,7 +118,7 @@ export default function AgentDetail() {
 
   const balanceEther = usdcBalance !== null ? Number(formatUnits(usdcBalance, getPaymentDecimals())) : 0;
   const balanceSymbol = getPaymentSymbol();
-  const isLowGas = usdcBalance !== null && usdcBalance < LOW_BALANCE_THRESHOLD;
+  const isLowGas = usdcBalance !== null && usdcBalance < lowBalanceThreshold();
 
   // ERC-4337 AA: gas is paid in USDC via paymaster from the smart account.
   // Fallback to the EOA wallet for pre-AA agents.
@@ -127,7 +129,7 @@ export default function AgentDetail() {
     if (!fundingAddress || !walletClient) return;
     try {
       const provider = new BrowserProvider(walletClient.transport);
-      const usdc = new Contract(MARKETPLACE_TOKEN_ADDRESS, USDC_ABI, provider);
+      const usdc = new Contract(getMarketplaceTokenAddress(), USDC_ABI, provider);
       const bal = await usdc.balanceOf(fundingAddress);
       setUsdcBalance(bal as bigint);
     } catch { /* non-blocking */ }
@@ -164,7 +166,7 @@ export default function AgentDetail() {
     (async () => {
       try {
         const provider = new BrowserProvider(walletClient.transport);
-        const usdc = new Contract(MARKETPLACE_TOKEN_ADDRESS, USDC_ABI, provider);
+        const usdc = new Contract(getMarketplaceTokenAddress(), USDC_ABI, provider);
         const bal = await usdc.balanceOf(fundingAddress);
         if (!cancelled) setUsdcBalance(bal as bigint);
       } catch { /* non-blocking */ }
@@ -350,7 +352,7 @@ export default function AgentDetail() {
     try {
       const provider = new BrowserProvider(walletClient!.transport);
       const signer = await provider.getSigner();
-      const usdc = new Contract(MARKETPLACE_TOKEN_ADDRESS, USDC_ABI, signer);
+      const usdc = new Contract(getMarketplaceTokenAddress(), USDC_ABI, signer);
       const tx = await usdc.transfer.populateTransaction(fundingAddress, raw);
       const { signAndSendTx } = await import('../lib/txSigner');
       const sent = await signAndSendTx(signer, tx as any);

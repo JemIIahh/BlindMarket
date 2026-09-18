@@ -15,7 +15,8 @@ import { CustodyChain } from '../components/CustodyChain';
 import { truncateAddress, formatDate } from '../lib/utils';
 import { buildCancelTask, buildClaimTimeout } from '../services/tasks';
 import { signAndSendTx } from '../lib/txSigner';
-import { getPaymentDecimals, getPaymentSymbol, WORKER_SHARE_PCT, PLATFORM_FEE_PCT } from '../config/constants';
+import { WORKER_SHARE_PCT, PLATFORM_FEE_PCT } from '../config/constants';
+import { unitFor } from '../config/settlement';
 import { useChainExplorerUrl } from '../hooks/useChainWallet';
 import { TaskStatus, TaskStatusLabels } from '../types/api';
 
@@ -128,7 +129,11 @@ export default function TaskDetail() {
   // `onChain.agent` is the contract's name for the task poster — keep the
   // boolean named isPoster to make the intent clear in UI conditions.
   const isPoster = address?.toLowerCase() === onChain.agent?.toLowerCase();
-  const decimals = meta.decimals ?? getPaymentDecimals();
+  // The unit this task's reward is in: what the backend read from the
+  // escrow (symbol + decimals), else the task's chain's settlement token.
+  // Not the posting chain's unit — a poster's old 0G task is still in 0G.
+  const unit = unitFor(onChain.chain, { symbol: onChain.symbol, decimals: meta.decimals ?? onChain.decimals });
+  const decimals = unit.decimals;
   // meta.reward can be absent on partial/undecryptable metas — render 0
   // rather than "NaN 0G" in the page's hero number.
   const rewardRaw = Number(meta.reward);
@@ -189,7 +194,7 @@ export default function TaskDetail() {
         </div>
         <div className="sm:text-right shrink-0">
           <div className="text-3xl font-bold font-mono text-cream">
-            {reward.toLocaleString(undefined, { maximumFractionDigits: 4 })} {getPaymentSymbol()}
+            {reward.toLocaleString(undefined, { maximumFractionDigits: 4 })} {unit.symbol}
           </div>
           <div className="text-[11px] tracking-wide text-ink-3 mt-1">Escrow locked</div>
         </div>

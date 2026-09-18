@@ -8,7 +8,7 @@ import { stashAesKey } from '../lib/keyStash';
 import { ensureBaseAllowance, signAndSendTx } from '../lib/txSigner';
 import { formatPaymentAmount } from '../lib/paymentUnits';
 import { authedGet, authedPost } from '../lib/api';
-import { MARKETPLACE_TOKEN_ADDRESS } from '../config/constants';
+import { getMarketplaceTokenAddress } from '../config/settlement';
 import { useChain } from '../context/ChainContext';
 import { useChainAddress } from '../hooks/useChainWallet';
 import type { AgentService } from '../services/marketplace';
@@ -149,9 +149,10 @@ export default function UseServiceModal({
       if (!rootHash) throw new Error('Storage upload returned no rootHash');
 
       // 4. Build the funding tx — priced at the service, instant auto-verify.
-      const taskJson = await authedPost<{ unsignedTx: Parameters<typeof signAndSendTx>[1] }>('/api/v1/tasks', {
+      const paymentToken = getMarketplaceTokenAddress();
+      const taskJson = await authedPost<{ unsignedTx: Parameters<typeof signAndSendTx>[1]; chain?: string }>('/api/v1/tasks', {
         taskHash,
-        token: MARKETPLACE_TOKEN_ADDRESS,
+        token: paymentToken,
         amount: service.price_raw,
         category: 'general',
         locationZone: 'global',
@@ -170,11 +171,11 @@ export default function UseServiceModal({
       setPhase('signing');
       const signer = await new BrowserProvider(walletClient.transport).getSigner();
       const price = BigInt(service.price_raw);
-      const isNativeToken = /^0x0{40}$/i.test(MARKETPLACE_TOKEN_ADDRESS);
+      const isNativeToken = /^0x0{40}$/i.test(paymentToken);
       if (!isNativeToken) {
-        await ensureBaseAllowance(signer, MARKETPLACE_TOKEN_ADDRESS, taskJson.unsignedTx.to, price);
+        await ensureBaseAllowance(signer, paymentToken, taskJson.unsignedTx.to, price, taskJson.chain);
       }
-      const sent = await signAndSendTx(signer, taskJson.unsignedTx, isNativeToken ? price : undefined);
+      const sent = await signAndSendTx(signer, taskJson.unsignedTx, isNativeToken ? price : undefined, { chain: taskJson.chain });
 
       // 5. Index the meta — pinned to the agent + linked to the service.
       await authedPost('/api/v1/a2a/tasks/index', {

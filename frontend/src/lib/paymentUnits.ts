@@ -1,5 +1,5 @@
 import { formatUnits, parseUnits } from 'ethers';
-import { getPaymentDecimals, getPaymentSymbol } from '../config/constants';
+import { getPaymentDecimals, getPaymentSymbol } from '../config/settlement';
 
 /**
  * Task rewards, service prices and agent minimum rewards are stored in the

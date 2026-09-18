@@ -17,7 +17,8 @@ import {
   Pagination,
 } from '../components/bb';
 import { truncateAddress } from '../lib/utils';
-import { API_BASE_URL, MARKETPLACE_TOKEN_ADDRESS, getPaymentSymbol, getPaymentDecimals } from '../config/constants';
+import { API_BASE_URL } from '../config/constants';
+import { getMarketplaceTokenAddress, getPaymentSymbol, getPaymentDecimals } from '../config/settlement';
 import { formatEarnings, sumEarnings } from '../lib/paymentUnits';
 import { authedPost } from '../lib/api';
 import { useChainAddress } from '../hooks/useChainWallet';
@@ -38,7 +39,7 @@ function GasChip({ fundingAddress }: { fundingAddress: string }) {
     (async () => {
       try {
         const provider = new (await import('ethers')).BrowserProvider(walletClient.transport);
-        const usdc = new Contract(MARKETPLACE_TOKEN_ADDRESS, USDC_ABI, provider);
+        const usdc = new Contract(getMarketplaceTokenAddress(), USDC_ABI, provider);
         const bal: bigint = await usdc.balanceOf(fundingAddress);
         if (!cancelled) setBalance(Number(formatUnits(bal, getPaymentDecimals())));
       } catch { /* non-blocking */ }

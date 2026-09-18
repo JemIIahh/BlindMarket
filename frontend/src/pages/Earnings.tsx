@@ -19,7 +19,8 @@ import { useAuth } from '../context/AuthContext';
 import { authedGet } from '../lib/api';
 import { useChainAddress } from '../hooks/useChainWallet';
 import type { Transaction } from '../services/accounting';
-import { API_BASE_URL, getPaymentSymbol } from '../config/constants';
+import { API_BASE_URL } from '../config/constants';
+import { getPaymentSymbol } from '../config/settlement';
 
 type Tab = 'transactions' | 'my_agents';
 

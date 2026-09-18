@@ -222,6 +222,10 @@ tasksRouter.get('/:id', optionalAuth, async (req: AuthRequest, res, next) => {
 
     const taskHash = task.taskHash;
     const decimals = await getTokenDecimals(task.token, chain);
+    // The token's symbol when it is the chain's settlement token, else null:
+    // together with `decimals` this is the unit the reward is in, so the
+    // detail page no longer assumes every task is priced like a new one.
+    const symbol = payoutCurrency(chain, task.token)?.symbol ?? null;
     // Same flag as the list endpoint — lets the detail page surface the
     // stranded notice when a Funded task can never be picked up by an agent.
     const indexedSet = await a2aStore.getIndexedHashes([taskHash]);
@@ -252,6 +256,7 @@ tasksRouter.get('/:id', optionalAuth, async (req: AuthRequest, res, next) => {
         // Which escrow holds the task — the frontend picks the matching
         // chain explorer (Base vs 0G) for its hash/address links.
         chain,
+        symbol,
         a2aIndexed,
         // Public projection — this route has no auth, and full A2A meta
         // carries the brief's key material (wrappedKeys/keyCustodyBlob) plus

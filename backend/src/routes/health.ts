@@ -186,19 +186,15 @@ function tierReport(
 }
 
 /**
- * A chain as /health/bridge reports it. Fields are picked one by one: the
- * registry entry also holds the RPC URL, which can carry a provider key.
+ * The facts about a chain that come from config alone: what /health/settlement
+ * serves, and the part of /health/bridge's per-chain report that needs no
+ * RPC or Redis. Fields are picked one by one: the registry entry also holds
+ * the RPC URL, which can carry a provider key.
  */
-async function chainReport(
-  entry: SettlementChainConfig,
-  configured: boolean,
-  reason: string | null,
-  posting: SettlementChainKey | null,
-): Promise<Record<string, unknown>> {
+function chainFacts(entry: SettlementChainConfig, posting: SettlementChainKey | null): Record<string, unknown> {
   const { key, chainId, tier, escrowAddress, token, gas } = entry;
   return {
     chain: key,
-    configured,
     chainId,
     tier,
     escrowAddress,
@@ -207,13 +203,61 @@ async function chainReport(
     gasSymbol: gas.symbol,
     // POST /tasks builds new tasks here: the posting chain, with an escrow
     // and a settlement token. It does not need the marketplace signer, which
-    // `configured` reports.
+    // /health/bridge's `configured` reports.
     postable: key === posting && escrowAddress !== null && token.address !== null,
-    ...(reason ? { reason } : {}),
-    ...indexerError(key),
-    ...(await parkedDisputes(key)),
   };
 }
+
+/** A chain as /health/bridge reports it: its facts plus readiness. Key order is pinned by health.bridge.test.ts. */
+async function chainReport(
+  entry: SettlementChainConfig,
+  configured: boolean,
+  reason: string | null,
+  posting: SettlementChainKey | null,
+): Promise<Record<string, unknown>> {
+  const { chain, ...facts } = chainFacts(entry, posting);
+  return {
+    chain,
+    configured,
+    ...facts,
+    ...(reason ? { reason } : {}),
+    ...indexerError(entry.key),
+    ...(await parkedDisputes(entry.key)),
+  };
+}
+
+/** The posting chain, or the reason it can't be named (vercel.ts mounts this router without the boot checks). */
+function postingChainOrError(): { posting: SettlementChainKey | null; postingChainError: string | null } {
+  try {
+    return { posting: postingChain(), postingChainError: null };
+  } catch (e) {
+    return { posting: null, postingChainError: (e as Error).message };
+  }
+}
+
+// GET /api/v1/health/settlement — the settlement chains as data, for clients
+// that build and price transactions: which chain new tasks post on, and for
+// every chain its id, tier, escrow, settlement token (address, symbol,
+// decimals), the `chain` name the relay takes, and the gas coin. Config only:
+// no RPC read, no Redis, so it answers in microseconds and can gate a page
+// load. Readiness (signers, verifier roles, indexers) is /health/bridge's job.
+// The web app reads this at boot instead of deciding the payment token by
+// "is a Base escrow configured?", which is the rule POST /tasks stopped
+// following in R12.
+healthRouter.get('/settlement', (_req, res) => {
+  const entries = settlementChainConfigs();
+  const { posting, postingChainError } = postingChainOrError();
+  const body: ApiResponse = {
+    success: true,
+    data: {
+      postingChain: posting,
+      chains: entries.map((entry) => chainFacts(entry, posting)),
+      ...tierReport(entries, config.settlementTier),
+      ...(postingChainError ? { postingChainError } : {}),
+    },
+  };
+  res.json(body);
+});
 
 // GET /api/v1/health/bridge — surfaces the A2A settlement bridge config
 // without needing backend log access. Each settlement chain is reported on its
@@ -234,13 +278,7 @@ healthRouter.get('/bridge', async (_req, res, next) => {
     // index.ts refuses to boot on an unknown POSTING_CHAIN, but vercel.ts
     // mounts this router without that check — and an endpoint whose job is
     // to report misconfiguration should report this one, not 500 on it.
-    let posting: SettlementChainKey | null = null;
-    let postingChainError: string | null = null;
-    try {
-      posting = postingChain();
-    } catch (e) {
-      postingChainError = (e as Error).message;
-    }
+    const { posting, postingChainError } = postingChainOrError();
     const readiness = entries.map((entry) => {
       const { escrow: chainEscrow, marketplaceSigner: signer } = chainRuntime(entry.key);
       // isBridgeReady already implies the escrow and signer; checked again

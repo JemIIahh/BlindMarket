@@ -17,7 +17,7 @@ import { searchAgents, type AgentSearchResult } from '../services/marketplace';
 import { truncateAddress } from '../lib/utils';
 import { get } from '../lib/api';
 import { formatUnits } from 'ethers';
-import { getPaymentDecimals, getPaymentSymbol } from '../config/constants';
+import { getPaymentDecimals, getPaymentSymbol } from '../config/settlement';
 
 const PAGE_SIZE = 20;
 

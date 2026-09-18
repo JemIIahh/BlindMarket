@@ -2,17 +2,8 @@ import { useState } from 'react';
 import { Button, Modal } from './bb';
 import { copyToClipboard } from '../lib/utils';
 import { formatPaymentAmount } from '../lib/paymentUnits';
-import {
-  API_BASE_URL,
-  BASE_CHAIN_ID,
-  BASE_ESCROW_ADDRESS,
-  MARKETPLACE_TOKEN_ADDRESS,
-  OG_RPC_URL,
-  OG_CHAIN_ID,
-  isMainnet,
-  WORKER_SHARE_PCT,
-  PLATFORM_FEE_PCT,
-} from '../config/constants';
+import { API_BASE_URL, OG_RPC_URL, WORKER_SHARE_PCT, PLATFORM_FEE_PCT } from '../config/constants';
+import { getMarketplaceTokenAddress, getPostingChain } from '../config/settlement';
 import type { AgentService } from '../services/marketplace';
 
 /**
@@ -37,20 +28,20 @@ import type { AgentService } from '../services/marketplace';
 type CopyTab = 'prompt' | 'script';
 
 /**
- * The chain the escrow is funded on: Base (USDC) whenever a Base escrow is
- * configured, native 0G otherwise. The script uses Base's public RPC rather
- * than the app's own, so a keyed RPC URL never ends up in copied text.
+ * The chain the escrow is funded on: the backend's posting chain. The script
+ * uses Base's public RPC rather than the app's own, so a keyed RPC URL never
+ * ends up in copied text.
  */
 function settlementChain(): { name: string; id: number; rpc: string } {
-  if (BASE_ESCROW_ADDRESS) {
-    const mainnet = BASE_CHAIN_ID === 8453;
+  const posting = getPostingChain();
+  if (posting.key === 'base') {
     return {
-      name: mainnet ? 'Base' : 'Base Sepolia',
-      id: BASE_CHAIN_ID,
-      rpc: mainnet ? 'https://mainnet.base.org' : 'https://sepolia.base.org',
+      name: posting.label,
+      id: posting.chainId,
+      rpc: posting.chainId === 8453 ? 'https://mainnet.base.org' : 'https://sepolia.base.org',
     };
   }
-  return { name: isMainnet ? '0G Mainnet' : '0G Testnet', id: OG_CHAIN_ID, rpc: OG_RPC_URL };
+  return { name: posting.label, id: posting.chainId, rpc: OG_RPC_URL };
 }
 
 function formatPrice(raw: string): string {
@@ -60,7 +51,7 @@ function formatPrice(raw: string): string {
 function buildScript(service: AgentService, symbol: string, apiBase: string, privacy: 'private' | 'public'): string {
   const price = formatPrice(service.price_raw);
   const chain = settlementChain();
-  const isNativeToken = /^0x0{40}$/i.test(MARKETPLACE_TOKEN_ADDRESS);
+  const isNativeToken = /^0x0{40}$/i.test(getMarketplaceTokenAddress());
   const isPublic = privacy === 'public';
   // NB: the script must stay free of backticks/template-interpolation so this
   // generator (and the prompt tab that embeds it) never fights escaping.
@@ -90,7 +81,7 @@ const SERVICE = {
   agent: '${service.agent_address.toLowerCase()}',
   publicKey: '${service.agent_public_key ?? ''}', // uncompressed secp256k1 (04...)
   priceRaw: '${service.price_raw}',               // ${price} ${symbol}, in the token's smallest unit
-  token: '${MARKETPLACE_TOKEN_ADDRESS}',          // ${isNativeToken ? 'native ' + symbol : symbol + ' contract'}
+  token: '${getMarketplaceTokenAddress()}',          // ${isNativeToken ? 'native ' + symbol : symbol + ' contract'}
 };
 
 const API_KEY = process.env.BLINDMARKET_API_KEY;

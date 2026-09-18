@@ -339,6 +339,16 @@ describe('GET /health/bridge legacy keys', () => {
 });
 
 describe('GET /health/bridge per-chain settlement facts', () => {
+  it('keeps each chain entry’s key order (responses have been diffed byte for byte across configs)', async () => {
+    const data = await bridge();
+    for (const entry of data.chains) {
+      expect(Object.keys(entry)).toEqual([
+        'chain', 'configured', 'chainId', 'tier', 'escrowAddress', 'token', 'relayChain', 'gasSymbol', 'postable',
+      ]);
+      expect(Object.keys(entry.token)).toEqual(['kind', 'address', 'symbol', 'decimals']);
+    }
+  });
+
   it('names the posting chain: Base when it has an escrow, else 0G', async () => {
     expect((await bridge()).postingChain).toBe('base');
     setUp({ og: true, base: false, baseEscrow: false });

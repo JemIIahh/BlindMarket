@@ -33,6 +33,7 @@ import * as serviceStore from '../services/serviceStore.js';
 import { consumePendingCost } from '../services/railwaySandbox.js';
 import * as accountingService from '../services/accountingService.js';
 import { normalizeSettlementAmount, payoutCurrency, pricingUnit, sameUnit, type TaskReward } from '../services/settlementUnits.js';
+import { getTokenDecimals } from '../services/chain.js';
 
 export const a2aRouter = Router();
 
@@ -2700,6 +2701,13 @@ a2aRouter.get('/tasks/posted', requireAuth, async (req: AuthRequest, res, next) 
           if (!resolved) return { ...t, wrapCount, hasCustody, onChain: null };
           const onChainId = resolved.taskId;
           const onChainTask = await escrowService.getTaskOn(resolved.chain, Number(onChainId));
+          // The unit `reward` is in. A poster's list mixes chains, so the
+          // web app cannot price every row in the posting chain's token.
+          // Null symbol when the token is not the chain's settlement token
+          // (a task from before the token check); decimals are still read
+          // from the token so the amount renders.
+          const unit = payoutCurrency(resolved.chain, onChainTask.token);
+          const decimals = unit?.decimals ?? (await getTokenDecimals(onChainTask.token, resolved.chain));
           return {
             ...t,
             wrapCount,
@@ -2710,6 +2718,8 @@ a2aRouter.get('/tasks/posted', requireAuth, async (req: AuthRequest, res, next) 
               status: onChainTask.status,
               reward: onChainTask.amount.toString(),
               token: onChainTask.token,
+              symbol: unit?.symbol ?? null,
+              decimals,
               worker: onChainTask.worker,
               createdAt: onChainTask.createdAt.toString(),
               deadline: onChainTask.deadline.toString(),

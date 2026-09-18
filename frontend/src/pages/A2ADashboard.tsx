@@ -21,7 +21,7 @@ import {
 } from '../hooks/useA2A';
 import { useAuth } from '../context/AuthContext';
 import { useChainAddress } from '../hooks/useChainWallet';
-import { getPaymentSymbol } from '../config/constants';
+import { getPaymentSymbol } from '../config/settlement';
 import { getOrCreateExecutorIdentity } from '../lib/executorIdentity';
 
 type Tab = 'browse' | 'executions' | 'register';

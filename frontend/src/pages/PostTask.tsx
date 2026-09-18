@@ -23,7 +23,8 @@ import { stashAesKey } from '../lib/keyStash';
 import { signAndSendTx } from '../lib/txSigner';
 import { authedGet, authedPost } from '../lib/api';
 import { trackEvent } from '../hooks/useAnalytics';
-import { MARKETPLACE_TOKEN_ADDRESS, getPaymentDecimals, getPaymentSymbol, WORKER_SHARE_PCT, PLATFORM_FEE_PCT, BASE_ESCROW_ADDRESS } from '../config/constants';
+import { WORKER_SHARE_PCT, PLATFORM_FEE_PCT } from '../config/constants';
+import { getMarketplaceTokenAddress, getPaymentDecimals, getPaymentSymbol, getPostingEscrowAddress } from '../config/settlement';
 import { useChain } from '../context/ChainContext';
 import { useChainAddress } from '../hooks/useChainWallet';
 import { useAuth } from '../context/AuthContext';
@@ -56,7 +57,7 @@ function durationHint(secs: number): string {
   // Pulled from the shared constants module so the address lives in exactly
   // one place. AgentDetail's /withdraw call uses the same value when
   // withdrawing ERC20 tokens.
-  const TOKEN = MARKETPLACE_TOKEN_ADDRESS;
+  const TOKEN = getMarketplaceTokenAddress();
   // USDC on Base has 6 decimals; native 0G has 18. Use the token's decimals
   // for amount parsing when Base escrow is configured.
   const PAYMENT_DECIMALS = getPaymentDecimals();
@@ -400,15 +401,18 @@ export default function PostTask() {
       const signer = await (new BrowserProvider(walletClient!.transport)).getSigner();
 
       // 8a. Approve USDC spend if needed (createTask calls transferFrom)
-      if (!isNativeToken && address && BASE_ESCROW_ADDRESS) {
+      // The spender is the escrow createTask pulls from: the tx's own `to`,
+      // which POST /tasks built for the posting chain.
+      const escrowAddress = taskJson.unsignedTx.to || getPostingEscrowAddress();
+      if (!isNativeToken && address && escrowAddress) {
         const ERC20_ABI = ['function approve(address spender, uint256 amount) returns (bool)', 'function allowance(address owner, address spender) view returns (uint256)'];
         const provider = new BrowserProvider(walletClient!.transport);
         const readContract = new Contract(TOKEN, ERC20_ABI, provider);
-        const currentAllowance = await readContract.allowance(address, BASE_ESCROW_ADDRESS);
+        const currentAllowance = await readContract.allowance(address, escrowAddress);
         if (currentAllowance < BigInt(amountBase)) {
-          console.log(`[PostTask] Approving USDC spend: ${amountBase} for ${BASE_ESCROW_ADDRESS}`);
-          const approveTx = await readContract.approve.populateTransaction(BASE_ESCROW_ADDRESS, BigInt(amountBase));
-          const approveResult = await signAndSendTx(signer, approveTx as any);
+          console.log(`[PostTask] Approving USDC spend: ${amountBase} for ${escrowAddress}`);
+          const approveTx = await readContract.approve.populateTransaction(escrowAddress, BigInt(amountBase));
+          const approveResult = await signAndSendTx(signer, approveTx as any, undefined, { chain: taskJson.chain });
           console.log(`[PostTask] USDC approve relay done (hash=${approveResult.hash} userOp=${approveResult.userOp ?? false})`);
           // Wait for inclusion — either via receipt (real tx) or fixed delay (user-op)
           if (approveResult.receipt) {
@@ -422,7 +426,7 @@ export default function PostTask() {
         }
       }
 
-      const sent = await signAndSendTx(signer, taskJson.unsignedTx, isNativeToken ? BigInt(amountBase) : undefined);
+      const sent = await signAndSendTx(signer, taskJson.unsignedTx, isNativeToken ? BigInt(amountBase) : undefined, { chain: taskJson.chain });
       const txHash = sent.hash;
       console.log(`[PostTask] Task TX submitted: hash=${txHash} userOp=${sent.userOp ?? false}`);
 

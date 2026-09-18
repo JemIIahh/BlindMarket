@@ -22,7 +22,7 @@ import {
   createTemplate,
   getMyTemplates,
 } from '../services/marketplace';
-import { getPaymentSymbol } from '../config/constants';
+import { getPaymentSymbol } from '../config/settlement';
 import { truncateAddress } from '../lib/utils';
 
 type Tab = 'browse' | 'mine' | 'create';
