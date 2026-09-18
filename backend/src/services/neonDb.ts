@@ -712,6 +712,15 @@ const migrations: Array<{ id: number; name: string; sql: string; when?: () => bo
        WHERE min_reward ~ '^[0-9]+$' AND min_reward::numeric >= 1000000000000;
     `,
   },
+  {
+    // SDK 0.6.0: workers tell the backend which chains they have an RPC for
+    // so they only get offered tasks they can actually settle.
+    id: 32,
+    name: 'agent_executors_supported_chains',
+    sql: `
+      ALTER TABLE agent_executors ADD COLUMN IF NOT EXISTS supported_chains TEXT[] NOT NULL DEFAULT '{0g}';
+    `,
+  },
 ];
 
 /**

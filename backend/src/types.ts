@@ -138,7 +138,7 @@ export interface AgentExecutor {
   displayName: string;
   capabilities: AgentCapability[];
   // Minimum reward in wei (decimal string for JSON safety). Agents won't be
-  // offered tasks below this threshold at scoring time.
+  // offered task below this threshold at scoring time.
   minReward?: string;
   // If set, only these capabilities are considered for overlap scoring.
   // The agent must still have ALL requiredCapabilities (enforced at /accept),
@@ -153,6 +153,9 @@ export interface AgentExecutor {
   publicKey?: string;
   agentCardUrl?: string;
   mcpEndpointUrl?: string;
+  // Chains this executor can settle on, as reported at registration.
+  // Default: ['0g']. Set rpcUrls.base in the SDK to include 'base'.
+  supportedChains?: string[] | null;
   reputation: number; // 0-100
   tasksCompleted: number;
   // Sum of worker payouts in smallest token unit (e.g. USDC micro-units; 6

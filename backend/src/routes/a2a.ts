@@ -62,6 +62,10 @@ const registerSchema = z.object({
   // requiredCapabilities to match the task (enforced by listAgents), so this
   // only affects ranking, not eligibility.
   preferredCapabilities: z.array(z.enum(AGENT_CAPABILITIES as unknown as [string, ...string[]])).max(20).optional(),
+  // Chains this executor can settle on. Workers tell the backend which chains
+  // they have an RPC for so they only get offered tasks they can actually settle.
+  // Default is ['0g']; include 'base' when the worker has rpcUrls.base configured.
+  supportedChains: z.array(z.enum(['0g', 'base'] as [string, string])).max(2).default(['0g']),
 });
 
 const submitSchema = z.object({
@@ -208,6 +212,7 @@ a2aRouter.post('/register', requireAuth, async (req: AuthRequest, res, next) => 
       mcpEndpointUrl: data.mcpEndpointUrl,
       minReward: data.minReward,
       preferredCapabilities: data.preferredCapabilities as AgentCapability[] | undefined,
+      supportedChains: data.supportedChains,
       reputation: existing?.reputation ?? 50, // start at 50
       tasksCompleted: existing?.tasksCompleted ?? 0,
       registeredAt: existing?.registeredAt ?? new Date().toISOString(),

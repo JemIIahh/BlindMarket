@@ -256,6 +256,12 @@ const migrations: Migration[] = [
     sql: `ALTER TABLE deployed_agents ADD COLUMN tool_secrets TEXT DEFAULT '{}';
       ALTER TABLE deployed_agents ADD COLUMN encrypted_tool_secrets TEXT DEFAULT '{}';`,
   },
+  {
+    // SDK 0.6.0: workers tell the backend which chains they have an RPC for.
+    id: 14,
+    name: 'agent_executors_supported_chains',
+    sql: `ALTER TABLE agent_executors ADD COLUMN supported_chains TEXT DEFAULT '[]';`,
+  },
 ];
 
 function runMigrations(database: Database.Database): void {
