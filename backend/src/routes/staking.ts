@@ -4,6 +4,7 @@ import { requireAuth, requireFounder } from '../middleware/auth.js';
 import type { AuthRequest } from '../types.js';
 import * as stakingService from '../services/stakingService.js';
 import * as accountingService from '../services/accountingService.js';
+import { pricingUnit } from '../services/settlementUnits.js';
 
 export const stakingRouter = Router();
 
@@ -28,6 +29,7 @@ stakingRouter.post('/stake', requireAuth, async (req: AuthRequest, res, next) =>
       role: 'worker',
       taskId,
       type: 'stake',
+      unit: pricingUnit().symbol,
       amount: stake.stake_amount,
     });
 
@@ -62,6 +64,7 @@ stakingRouter.post('/release', requireAuth, requireFounder, async (req: AuthRequ
       role: 'worker',
       taskId,
       type: 'stake_return',
+      unit: pricingUnit().symbol,
       amount: stake.stake_amount,
     });
 
@@ -95,6 +98,7 @@ stakingRouter.post('/slash', requireAuth, requireFounder, async (req: AuthReques
       role: 'worker',
       taskId,
       type: 'slash',
+      unit: pricingUnit().symbol,
       amount: stake.stake_amount,
     });
 

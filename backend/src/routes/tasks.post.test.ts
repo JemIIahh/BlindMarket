@@ -116,7 +116,7 @@ describe('POST /tasks on a deployment with a Base escrow', () => {
     expect(chainId).toBe(84532);
     expect(chain.getTokenDecimals).toHaveBeenCalledWith(USDC, 'base');
     expect(accountingService.recordTransaction).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'escrow_lock', amount: 5, status: 'pending' }),
+      expect.objectContaining({ unit: 'USDC', type: 'escrow_lock', amount: 5, status: 'pending' }),
     );
   });
 
