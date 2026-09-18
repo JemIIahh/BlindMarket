@@ -9,6 +9,11 @@ function usePg(): boolean {
   return Boolean(config.databaseUrl);
 }
 
+// What an executor can settle on when it has never said. Matches the column
+// default in Postgres migration 32; SQLite's default is '[]', which reads back
+// as this too (see rowToAgent).
+export const DEFAULT_SUPPORTED_CHAINS: readonly string[] = ['0g'];
+
 const PG_COLS = 'address, display_name, capabilities, public_key, agent_card_url, mcp_endpoint_url, min_reward, preferred_capabilities, supported_chains, reputation, tasks_completed, total_earned_raw, registered_at';
 
 function rowToAgent(row: Record<string, unknown>): AgentExecutor {
@@ -21,12 +26,27 @@ function rowToAgent(row: Record<string, unknown>): AgentExecutor {
     mcpEndpointUrl: (row.mcp_endpoint_url as string) ?? undefined,
     minReward: (row.min_reward as string) ?? undefined,
     preferredCapabilities: safeJsonArray(row.preferred_capabilities) as AgentCapability[] | undefined,
-    supportedChains: safeJsonArray(row.supported_chains) as string[] | undefined,
+    supportedChains: supportedChainsOf(row.supported_chains),
     reputation: (row.reputation as number) ?? 50,
     tasksCompleted: (row.tasks_completed as number) ?? 0,
     totalEarnedRaw: (row.total_earned_raw as string) ?? '0',
     registeredAt: (row.registered_at as string) ?? new Date().toISOString(),
   };
+}
+
+function supportedChainsOf(v: unknown): string[] {
+  const chains = safeJsonArray(v);
+  return chains.length > 0 ? chains : [...DEFAULT_SUPPORTED_CHAINS];
+}
+
+/**
+ * supported_chains is NOT NULL in Postgres, and an explicit NULL parameter does
+ * not fall back to the column DEFAULT (that only applies when the column is
+ * omitted). So a caller that declares no chains sends NULL here and the SQL
+ * resolves it: keep what the row already has, else DEFAULT_SUPPORTED_CHAINS.
+ */
+function declaredChains(agent: AgentExecutor): string[] | null {
+  return agent.supportedChains && agent.supportedChains.length > 0 ? agent.supportedChains : null;
 }
 
 function safeJsonArray(v: unknown): string[] {
@@ -54,7 +74,9 @@ export async function registerAgent(agent: AgentExecutor): Promise<void> {
          (address, display_name, capabilities, public_key, agent_card_url,
           mcp_endpoint_url, min_reward, preferred_capabilities, supported_chains,
           reputation, tasks_completed, total_earned_raw, registered_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+         COALESCE($9::TEXT[], (SELECT supported_chains FROM agent_executors WHERE address = $1), $13::TEXT[]),
+         $10, $11, $12,
          COALESCE((SELECT registered_at FROM agent_executors WHERE address = $1), NOW()), NOW())
        ON CONFLICT (address) DO UPDATE SET
          display_name = EXCLUDED.display_name,
@@ -73,7 +95,9 @@ export async function registerAgent(agent: AgentExecutor): Promise<void> {
         addr, agent.displayName, agent.capabilities, agent.publicKey,
         agent.agentCardUrl ?? null, agent.mcpEndpointUrl ?? null,
         agent.minReward ?? null, agent.preferredCapabilities ?? null,
-        agent.supportedChains ?? null,
+        declaredChains(agent),
+        agent.reputation, agent.tasksCompleted, agent.totalEarnedRaw ?? '0',
+        [...DEFAULT_SUPPORTED_CHAINS],
       ],
     );
     return;
@@ -91,7 +115,9 @@ export async function registerAgent(agent: AgentExecutor): Promise<void> {
        (address, display_name, capabilities, public_key, agent_card_url,
         mcp_endpoint_url, min_reward, preferred_capabilities, supported_chains,
         reputation, tasks_completed, total_earned_raw, registered_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT registered_at FROM agent_executors WHERE address = ?), datetime('now')), datetime('now'))
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?,
+       COALESCE(?, (SELECT supported_chains FROM agent_executors WHERE address = ?), ?),
+       ?, ?, ?, COALESCE((SELECT registered_at FROM agent_executors WHERE address = ?), datetime('now')), datetime('now'))
      ON CONFLICT(address) DO UPDATE SET
        display_name = excluded.display_name,
        capabilities = excluded.capabilities,
@@ -109,7 +135,7 @@ export async function registerAgent(agent: AgentExecutor): Promise<void> {
     addr, agent.displayName, JSON.stringify(agent.capabilities), agent.publicKey,
     agent.agentCardUrl ?? null, agent.mcpEndpointUrl ?? null,
     agent.minReward ?? null, agent.preferredCapabilities ? JSON.stringify(agent.preferredCapabilities) : null,
-    agent.supportedChains ? JSON.stringify(agent.supportedChains) : null,
+    declaredChains(agent) ? JSON.stringify(declaredChains(agent)) : null, addr, JSON.stringify(DEFAULT_SUPPORTED_CHAINS),
     agent.reputation, agent.tasksCompleted, agent.totalEarnedRaw ?? '0', addr,
   );
 }

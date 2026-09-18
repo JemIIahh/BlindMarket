@@ -138,7 +138,7 @@ export interface AgentExecutor {
   displayName: string;
   capabilities: AgentCapability[];
   // Minimum reward in wei (decimal string for JSON safety). Agents won't be
-  // offered task below this threshold at scoring time.
+  // offered tasks below this threshold at scoring time.
   minReward?: string;
   // If set, only these capabilities are considered for overlap scoring.
   // The agent must still have ALL requiredCapabilities (enforced at /accept),
