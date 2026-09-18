@@ -42,12 +42,6 @@ import { txRouter } from './routes/tx.js';
 import { mcpRouter } from './routes/mcp.js';
 import { wellKnownRouter, openapiRouter } from './routes/discovery.js';
 import { getDb } from './services/database.js';
-import { startEscrowEventLoop } from './services/escrowEvents.js';
-import { startBaseEscrowEventLoop } from './services/baseEscrowEvents.js';
-import { startAgentFactoryListener } from './services/agentFactoryListener.js';
-import { startCctpAttestationPoller } from './services/cctpAttestationPoller.js';
-import { startExpirySweepLoop } from './services/a2aExpirySweep.js';
-import { checkDeploymentIdentity } from './services/deploymentIdentity.js';
 import { auditCustodySealedTasks } from './services/keyCustodyService.js';
 import { isBridgeReady } from './services/a2aSettlement.js';
 import { contractsEnvPrefix } from './services/chainNetwork.js';
@@ -61,7 +55,9 @@ import {
 import { chainRuntime } from './services/chainRuntime.js';
 import { clientPricingWarnings } from './services/settlementUnits.js';
 import { logChainConfig } from './services/chainService.js';
-import { reconcileAgents, startZombieReaper } from './services/agentRunner.js';
+import { startZombieReaper } from './services/agentRunner.js';
+import { startBackgroundWriters } from './services/backgroundWriters.js';
+import { checkDeploymentIdentity } from './services/deploymentIdentity.js';
 
 // First, so a failed boot check below is reported too. No-op without SENTRY_DSN.
 initSentry(config.sentryDsn, config.sentryEnvironment);
@@ -162,49 +158,9 @@ const corsOptions = {
 const httpServer = createServer(app);
 initSocket(httpServer, corsOptions);
 
-/**
- * The loops that write shared state (Redis indexes, task states, Postgres,
- * on-chain mints) on their own schedule. A process whose DEPLOYMENT_ID says
- * this Redis belongs to another deployment starts none of them; see
- * services/deploymentIdentity.ts. HTTP routes are not affected.
- */
-async function startBackgroundWriters(): Promise<void> {
-  const identity = await checkDeploymentIdentity();
-  if (!identity.writersAllowed) return;
-
-  // Start the BlindEscrow TaskCreated poller — populates the taskHash↔taskId
-  // mapping that the A2A settlement bridge needs to call assignWorker /
-  // completeVerification by on-chain id. Only where this stack has a 0G
-  // escrow: the loop would otherwise poll address(0) forever.
-  if (settlementChainConfig('0g').escrowAddress !== null) {
-    startEscrowEventLoop();
-  } else {
-    console.log('[chain] no 0G escrow configured; 0G event indexing off');
-  }
-  // Base escrow event loop — populates base: prefixed taskHash↔taskId
-  // mapping needed for USDC settlement on Base chain.
-  startBaseEscrowEventLoop();
-  // AgentFactory listener — creates agents from on-chain AgentDeployed events.
-  // Backend never signs for agents (decentralized).
-  startAgentFactoryListener();
-
-  // CCTP attestation poller — advances in-flight burn->attest->mint transfers
-  // (Base <-> another EVM chain). No-ops when CCTP_ENABLED is unset.
-  startCctpAttestationPoller();
-
-  // Proactively close open tasks whose on-chain deadline has passed, instead
-  // of leaving them listed until some agent burns an /accept on them.
-  startExpirySweepLoop();
-
-  // Re-fork agents that were 'running' before this restart — the in-memory
-  // process map doesn't survive a deploy/crash, so without this they show
-  // 'running' in the UI but do no work and stop heartbeating. Off only if an
-  // operator running an unusual (multi-instance) topology opts out, since each
-  // instance would otherwise re-fork the same agents.
-  if (process.env.AGENT_RECONCILE_ON_BOOT !== 'false') {
-    void reconcileAgents();
-  }
-}
+// Who owns this Redis, asked before the first request can force an indexer
+// pass; the background writers start once it answers (deploymentIdentity.ts).
+const identityCheck = checkDeploymentIdentity();
 
 httpServer.listen(config.port, () => {
   console.log(`BlindMarket backend listening on port ${config.port} (${config.nodeEnv})`);
@@ -222,7 +178,7 @@ httpServer.listen(config.port, () => {
   }
   // Indexers, sweeps, the CCTP poller and agent reconcile write shared state,
   // so they start only once this process knows the Redis is its deployment's.
-  void startBackgroundWriters();
+  void startBackgroundWriters(undefined, () => identityCheck);
 
   // Tripwire for custody-key rotation/disable while custody-sealed tasks are
   // still open (their late-joiner self-heal silently breaks). Loud log only.

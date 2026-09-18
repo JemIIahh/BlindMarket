@@ -251,8 +251,6 @@ describe('GET /health/bridge rotate command per deployment set', () => {
   });
 });
 
-// The MCP reads the top-level 0G fields and `base`. These pin every one of
-// them, values and key order, so the per-chain additions can't move them.
 describe('GET /health/bridge deployment identity', () => {
   it('is null where the boot check never ran (vercel.ts)', async () => {
     identity.current = null;
@@ -272,6 +270,8 @@ describe('GET /health/bridge deployment identity', () => {
   });
 });
 
+// The MCP reads the top-level 0G fields and `base`. These pin every one of
+// them, values and key order, so the per-chain additions can't move them.
 describe('GET /health/bridge legacy keys', () => {
   const VERIFIER_BB = '0x00000000000000000000000000000000000000bb';
 

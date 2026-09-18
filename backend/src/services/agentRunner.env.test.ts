@@ -59,6 +59,12 @@ vi.mock('./redis.js', () => ({
   redis: { set: vi.fn(), get: vi.fn(), del: vi.fn() },
 }));
 vi.mock('./chain.js', () => ({ inft: null }));
+// Open unless a test closes it: a process on another deployment's Redis.
+const gate = vi.hoisted(() => ({ allowed: true }));
+vi.mock('./deploymentIdentity.js', () => ({
+  backgroundWritesAllowed: () => gate.allowed,
+  deploymentIdentityStatus: () => (gate.allowed ? null : { reason: 'this Redis belongs to deployment "production"' }),
+}));
 vi.mock('./crypto.js', () => ({ eciesEncrypt: () => Buffer.from(''), generateKeyPair: () => ({ privateKey: 'x', publicKey: 'y' }) }));
 
 // The WORKER_ENV_PASSTHROUGH list, mirrored here so this test asserts on the
@@ -342,6 +348,25 @@ describe('crash memory survives the restart', () => {
       expect(fourth.AGENT_CRASH_COUNT).toBe('0');
     } finally {
       vi.useRealTimers();
+    }
+  });
+});
+
+describe("on another deployment's Redis (deploymentIdentity)", () => {
+  it('starts no agent and reconciles nothing: workers are what poach a shared queue', async () => {
+    const { startAgent, reconcileAgents } = await import('./agentRunner.js');
+    const store = await import('./deployedAgentStore.js');
+    agentHolder.current = makeAgent('agent-other-redis');
+    forkMock.mockClear();
+    vi.mocked(store.loadAllAgents).mockClear();
+    gate.allowed = false;
+    try {
+      await expect(startAgent('agent-other-redis')).rejects.toThrow(/another deployment's Redis .*belongs to deployment "production"/);
+      await reconcileAgents();
+      expect(forkMock).not.toHaveBeenCalled();
+      expect(store.loadAllAgents).not.toHaveBeenCalled();
+    } finally {
+      gate.allowed = true;
     }
   });
 });

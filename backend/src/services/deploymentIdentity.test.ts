@@ -1,16 +1,16 @@
 /**
- * Which deployment owns a Redis, and whether this process's background
- * writers may run on it.
+ * Which deployment owns a Redis, and whether this process may write shared
+ * state on it.
  *
  * A2A keys are shared by every backend on a Redis; a testnet backend pointed
- * at production's once poached a mainnet task. The first deployment with a
- * DEPLOYMENT_ID claims an unclaimed Redis; one that disagrees with the owner
- * stops only its own writers; the owner, and a process with no id, are never
- * stopped.
+ * at production's once poached a mainnet task. The rules: production is
+ * never stopped, whatever it finds; a staging stack claims only a Redis with
+ * no other deployment's data (DEPLOYMENT_CLAIM=true takes over on purpose);
+ * local development stops only on positive evidence of another deployment.
  *
  * Run: npx vitest run src/services/deploymentIdentity.test.ts
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const { store, redis } = vi.hoisted(() => {
   const store = new Map<string, string>();
@@ -28,7 +28,10 @@ const { store, redis } = vi.hoisted(() => {
 });
 vi.mock('./redis.js', () => ({ redis }));
 
-import { resolveIdentity, checkDeploymentIdentity, IDENTITY_KEY, type DeploymentFacts } from './deploymentIdentity.js';
+import {
+  resolveIdentity, checkDeploymentIdentity, deploymentIdentityStatus, backgroundWritesAllowed,
+  _resetIdentityForTests, IDENTITY_KEY, CHECK_TIMEOUT_MS, RETRY_MS, type DeploymentFacts, type Self,
+} from './deploymentIdentity.js';
 import { parseDeploymentId } from '../config.js';
 
 const PROD: DeploymentFacts = {
@@ -45,7 +48,12 @@ const STAGING: DeploymentFacts = {
     base: { chainId: 84532, escrow: '0xbbbb000000000000000000000000000000000001' },
   },
 };
+const production = (over: Partial<Self> = {}): Self => ({ deploymentId: 'production', facts: PROD, stoppable: false, forceClaim: false, ...over });
+const staging = (over: Partial<Self> = {}): Self => ({ deploymentId: 'staging-testnet', facts: STAGING, stoppable: true, forceClaim: false, ...over });
+const localDev = (over: Partial<Self> = {}): Self => ({ deploymentId: null, facts: STAGING, stoppable: true, forceClaim: false, ...over });
+
 const NOW = () => new Date('2026-09-19T00:00:00.000Z');
+const LATER = () => new Date('2026-09-20T00:00:00.000Z');
 const record = () => JSON.parse(store.get(IDENTITY_KEY) ?? 'null');
 
 /** A Redis production has been writing to: indexer checkpoints, and fingerprints from this release on. */
@@ -58,141 +66,255 @@ function productionHistory({ fingerprints }: { fingerprints: boolean }) {
   }
 }
 
+/** What a staging process on production's Redis could write (the review's B1). */
+function plantStagingFingerprints() {
+  store.set('a2a:events:escrow', `16602:${STAGING.chains['0g'].escrow}`);
+  store.set('base:events:escrow', `84532:${STAGING.chains.base.escrow}`);
+}
+
 beforeEach(() => {
   store.clear();
   vi.clearAllMocks();
+  _resetIdentityForTests();
 });
 
-describe('a process with a DEPLOYMENT_ID', () => {
-  it('claims an empty Redis and owns it', async () => {
-    const s = await resolveIdentity(redis, 'staging-testnet', STAGING, true, NOW);
-    expect(s).toEqual({ deploymentId: 'staging-testnet', role: 'owner', owner: 'staging-testnet', writersAllowed: true, reason: null });
-    expect(record()).toEqual({ id: 'staging-testnet', ...STAGING, claimedAt: NOW().toISOString(), updatedAt: NOW().toISOString() });
+describe('production (never stopped)', () => {
+  it('claims an empty Redis', async () => {
+    const s = await resolveIdentity(redis, production(), NOW);
+    expect(s).toEqual({ deploymentId: 'production', role: 'owner', owner: 'production', writersAllowed: true, reason: null });
+    expect(record()).toEqual({ id: 'production', ...PROD, claimedAt: NOW().toISOString(), updatedAt: NOW().toISOString() });
   });
 
-  it('stays the owner on restart, and records its redeployed escrow', async () => {
-    await resolveIdentity(redis, 'staging-testnet', STAGING, true, NOW);
-    const redeployed: DeploymentFacts = { ...STAGING, chains: { ...STAGING.chains, base: { chainId: 84532, escrow: '0xbbbb000000000000000000000000000000000009' } } };
-    const later = () => new Date('2026-09-20T00:00:00.000Z');
-    const s = await resolveIdentity(redis, 'staging-testnet', redeployed, true, later);
-    expect(s.role).toBe('owner');
-    expect(s.writersAllowed).toBe(true);
-    expect(record().chains.base.escrow).toBe('0xbbbb000000000000000000000000000000000009');
-    expect(record().claimedAt).toBe(NOW().toISOString());
-    expect(record().updatedAt).toBe(later().toISOString());
-  });
-
-  it('keeps running, but leaves the record alone, when its id comes with other chain ids', async () => {
-    await resolveIdentity(redis, 'production', PROD, false, NOW);
-    const before = store.get(IDENTITY_KEY);
-    const s = await resolveIdentity(redis, 'production', STAGING, true, NOW);
-    expect(s.role).toBe('owner');
-    expect(s.writersAllowed).toBe(true);
-    expect(s.reason).toMatch(/two deployments may share this DEPLOYMENT_ID/);
-    expect(store.get(IDENTITY_KEY)).toBe(before);
-  });
-
-  it('stops only its own writers when the Redis belongs to another deployment', async () => {
-    await resolveIdentity(redis, 'production', PROD, false, NOW);
-    const before = store.get(IDENTITY_KEY);
-    const s = await resolveIdentity(redis, 'staging-testnet', STAGING, true, NOW);
-    expect(s).toMatchObject({ role: 'not-owner', owner: 'production', writersAllowed: false });
-    expect(s.reason).toMatch(/belongs to deployment "production"/);
-    expect(store.get(IDENTITY_KEY)).toBe(before);
-    // The owner is unaffected by that.
-    expect((await resolveIdentity(redis, 'production', PROD, false, NOW)).writersAllowed).toBe(true);
-  });
-
-  it("does not claim a Redis carrying another escrow's fingerprint", async () => {
-    productionHistory({ fingerprints: true });
-    const s = await resolveIdentity(redis, 'staging-testnet', STAGING, false, NOW);
-    expect(s).toMatchObject({ role: 'not-owner', owner: null, writersAllowed: false });
-    expect(s.reason).toMatch(/a2a:events:escrow is 16661:0x3d03/);
-    expect(s.reason).toMatch(/delete a2a:events:escrow and restart/);
-    expect(store.has(IDENTITY_KEY)).toBe(false);
-  });
-
-  it('counts a fingerprint on a chain it does not settle on as foreign', async () => {
-    store.set('base:events:escrow', `84532:${PROD.chains.base.escrow}`);
-    const ogOnly: DeploymentFacts = { tier: 'testnet', chains: { '0g': STAGING.chains['0g'] } };
-    const s = await resolveIdentity(redis, 'staging-testnet', ogOnly, true, NOW);
-    expect(s.writersAllowed).toBe(false);
-    expect(s.reason).toMatch(/no base escrow here/);
-  });
-
-  it('claims a Redis whose fingerprints are its own (it ran this release before setting an id)', async () => {
-    productionHistory({ fingerprints: true });
-    const s = await resolveIdentity(redis, 'production', PROD, false, NOW);
-    expect(s.role).toBe('owner');
+  it('claims its Redis even with fingerprints another process planted there, and says so', async () => {
+    productionHistory({ fingerprints: false });
+    plantStagingFingerprints();
+    const s = await resolveIdentity(redis, production(), NOW);
+    expect(s).toMatchObject({ role: 'owner', writersAllowed: true });
+    expect(s.reason).toMatch(/a2a:events:escrow=16602/);
+    expect(s.reason).toMatch(/base:events:escrow=84532:0xbbbb/);
     expect(record().id).toBe('production');
   });
 
-  describe('indexer checkpoints with no fingerprint (a Redis from before this release)', () => {
-    it('are taken as its own history by a process that is not strict: production claims its Redis', async () => {
-      productionHistory({ fingerprints: false });
-      const s = await resolveIdentity(redis, 'production', PROD, false, NOW);
-      expect(s).toMatchObject({ role: 'owner', writersAllowed: true });
-      expect(record().id).toBe('production');
-    });
-
-    it('are not claimed by a strict (staging) process', async () => {
-      productionHistory({ fingerprints: false });
-      const s = await resolveIdentity(redis, 'staging-testnet', STAGING, true, NOW);
-      expect(s).toMatchObject({ role: 'not-owner', writersAllowed: false });
-      expect(s.reason).toMatch(/a2a:events:checkpoint is set with no escrow fingerprint/);
-      expect(store.has(IDENTITY_KEY)).toBe(false);
-    });
+  it('claims its own pre-fingerprint history on its first boot of this release', async () => {
+    productionHistory({ fingerprints: false });
+    expect(await resolveIdentity(redis, production(), NOW)).toMatchObject({ role: 'owner', writersAllowed: true });
   });
 
-  it('re-reads when another process claims between its read and its write', async () => {
+  it('keeps writing when another deployment has claimed its Redis, and says so', async () => {
+    await resolveIdentity(redis, staging(), NOW);
+    const s = await resolveIdentity(redis, production(), NOW);
+    expect(s).toMatchObject({ role: 'not-owner', owner: 'staging-testnet', writersAllowed: true });
+    expect(s.reason).toMatch(/production, which is never stopped/);
+    expect(record().id).toBe('staging-testnet');
+  });
+
+  it('keeps writing without a DEPLOYMENT_ID too', async () => {
+    await resolveIdentity(redis, staging(), NOW);
+    const s = await resolveIdentity(redis, production({ deploymentId: null }), NOW);
+    expect(s).toMatchObject({ role: 'not-owner', writersAllowed: true });
+  });
+
+  it('records moving Base Sepolia to Base mainnet, rather than calling it a second deployment', async () => {
+    await resolveIdentity(redis, production(), NOW);
+    const mainnet: DeploymentFacts = { tier: 'mainnet', chains: { ...PROD.chains, base: { chainId: 8453, escrow: '0x' + '8b'.repeat(20) } } };
+    const s = await resolveIdentity(redis, production({ facts: mainnet }), LATER);
+    expect(s).toMatchObject({ role: 'owner', writersAllowed: true });
+    expect(s.reason).toMatch(/base 84532→8453/);
+    expect(record()).toMatchObject({ tier: 'mainnet', chains: mainnet.chains, claimedAt: NOW().toISOString(), updatedAt: LATER().toISOString() });
+  });
+
+  it('does not rewrite an unchanged record on restart', async () => {
+    await resolveIdentity(redis, production(), NOW);
+    redis.set.mockClear();
+    expect((await resolveIdentity(redis, production(), LATER)).role).toBe('owner');
+    expect(redis.set).not.toHaveBeenCalled();
+  });
+
+  it('ignores DEPLOYMENT_CLAIM: it claims anyway, and never overwrites another deployment by accident', async () => {
+    await resolveIdentity(redis, staging(), NOW);
+    await resolveIdentity(redis, production({ forceClaim: true }), NOW);
+    expect(record().id).toBe('staging-testnet');
+  });
+});
+
+describe('a staging stack (stoppable, with a DEPLOYMENT_ID)', () => {
+  it('claims an empty Redis, and owns it on restart', async () => {
+    expect(await resolveIdentity(redis, staging(), NOW)).toMatchObject({ role: 'owner', writersAllowed: true });
+    expect(await resolveIdentity(redis, staging(), LATER)).toMatchObject({ role: 'owner', writersAllowed: true });
+  });
+
+  it("stops its writers on production's claimed Redis, and leaves the record alone", async () => {
+    await resolveIdentity(redis, production(), NOW);
+    const before = store.get(IDENTITY_KEY);
+    const s = await resolveIdentity(redis, staging(), NOW);
+    expect(s).toMatchObject({ role: 'not-owner', owner: 'production', writersAllowed: false });
+    expect(s.reason).toMatch(/belongs to deployment "production"/);
+    expect(store.get(IDENTITY_KEY)).toBe(before);
+  });
+
+  it("does not claim a Redis with another deployment's fingerprints, and names every one", async () => {
+    productionHistory({ fingerprints: true });
+    const s = await resolveIdentity(redis, staging(), NOW);
+    expect(s).toMatchObject({ role: 'not-owner', owner: null, writersAllowed: false });
+    expect(s.reason).toMatch(/a2a:events:escrow=16661/);
+    expect(s.reason).toMatch(/base:events:escrow=84532:0xcca5/);
+    expect(s.reason).toMatch(/DEPLOYMENT_CLAIM=true/);
+    expect(store.has(IDENTITY_KEY)).toBe(false);
+  });
+
+  it("does not claim production's pre-fingerprint history", async () => {
+    productionHistory({ fingerprints: false });
+    const s = await resolveIdentity(redis, staging(), NOW);
+    expect(s).toMatchObject({ role: 'not-owner', writersAllowed: false });
+    expect(s.reason).toMatch(/a2a:events:checkpoint with no a2a:events:escrow/);
+  });
+
+  it('counts a fingerprint on a chain it does not settle on', async () => {
+    store.set('base:events:escrow', `84532:${PROD.chains.base.escrow}`);
+    const s = await resolveIdentity(redis, staging({ facts: { tier: 'testnet', chains: { '0g': STAGING.chains['0g'] } } }), NOW);
+    expect(s.writersAllowed).toBe(false);
+    expect(s.reason).toMatch(/no base escrow/);
+  });
+
+  it('claims a Redis whose fingerprints are its own', async () => {
+    plantStagingFingerprints();
+    expect(await resolveIdentity(redis, staging(), NOW)).toMatchObject({ role: 'owner', writersAllowed: true });
+  });
+
+  it('stops when its id comes with other chain ids: another network under the same name', async () => {
+    await resolveIdentity(redis, production(), NOW);
+    const s = await resolveIdentity(redis, staging({ deploymentId: 'production' }), NOW);
+    expect(s).toMatchObject({ role: 'not-owner', owner: 'production', writersAllowed: false });
+    expect(s.reason).toMatch(/0g 16661→16602/);
+    expect(record().chains['0g'].chainId).toBe(16661);
+  });
+
+  it('records an added chain, a redeployed escrow and a tier change', async () => {
+    await resolveIdentity(redis, staging(), NOW);
+    const arc = { chainId: 5042002, escrow: '0x' + 'a7'.repeat(20) };
+    const grown: DeploymentFacts = { tier: 'mainnet', chains: { ...STAGING.chains, base: { chainId: 84532, escrow: '0x' + 'b9'.repeat(20) }, arc } };
+    expect(await resolveIdentity(redis, staging({ facts: grown }), LATER)).toMatchObject({ role: 'owner', writersAllowed: true, reason: null });
+    expect(record()).toMatchObject({ tier: 'mainnet', chains: grown.chains, updatedAt: LATER().toISOString() });
+    // The tier alone is recorded too.
+    await resolveIdentity(redis, staging({ facts: { ...grown, tier: 'testnet' } }), NOW);
+    expect(record().tier).toBe('testnet');
+  });
+
+  describe('DEPLOYMENT_CLAIM=true (one boot)', () => {
+    it('takes a Redis over from its record and its index keys', async () => {
+      await resolveIdentity(redis, production(), NOW);
+      productionHistory({ fingerprints: true });
+      const s = await resolveIdentity(redis, staging({ forceClaim: true }), LATER);
+      expect(s).toMatchObject({ role: 'owner', writersAllowed: true });
+      expect(s.reason).toMatch(/was "production"'s.*Remove DEPLOYMENT_CLAIM/);
+      expect(record()).toEqual({ id: 'staging-testnet', ...STAGING, claimedAt: LATER().toISOString(), updatedAt: LATER().toISOString() });
+    });
+
+    it('takes back its own record after its chains moved', async () => {
+      await resolveIdentity(redis, staging(), NOW);
+      const moved: DeploymentFacts = { ...STAGING, chains: { ...STAGING.chains, '0g': { chainId: 16661, escrow: STAGING.chains['0g'].escrow } } };
+      expect((await resolveIdentity(redis, staging({ facts: moved }), NOW)).writersAllowed).toBe(false);
+      expect((await resolveIdentity(redis, staging({ facts: moved, forceClaim: true }), NOW)).writersAllowed).toBe(true);
+      expect((await resolveIdentity(redis, staging({ facts: moved }), NOW)).writersAllowed).toBe(true);
+    });
+  });
+});
+
+describe('local development (stoppable, no DEPLOYMENT_ID)', () => {
+  it('never claims, and runs on a Redis with nothing against it', async () => {
+    expect(await resolveIdentity(redis, localDev(), NOW)).toEqual({ deploymentId: null, role: 'unset', owner: null, writersAllowed: true, reason: null });
+    expect(store.has(IDENTITY_KEY)).toBe(false);
+  });
+
+  it('keeps running on an old local Redis (checkpoints with no fingerprint), with a note', async () => {
+    productionHistory({ fingerprints: false });
+    const s = await resolveIdentity(redis, localDev(), NOW);
+    expect(s).toMatchObject({ role: 'unset', writersAllowed: true });
+    expect(s.reason).toMatch(/cannot vouch for/);
+  });
+
+  it("stops on another deployment's fingerprint", async () => {
+    productionHistory({ fingerprints: true });
+    expect(await resolveIdentity(redis, localDev(), NOW)).toMatchObject({ role: 'not-owner', writersAllowed: false });
+  });
+
+  it("stops on production's record (2026-05-25: a local testnet backend on production's Redis)", async () => {
+    await resolveIdentity(redis, production(), NOW);
+    const s = await resolveIdentity(redis, localDev(), NOW);
+    expect(s).toMatchObject({ role: 'not-owner', owner: 'production', writersAllowed: false });
+    expect(s.reason).toMatch(/0g 16661, base 84532/);
+  });
+
+  it("runs on a record whose chains are its own (a local stack's own claim)", async () => {
+    await resolveIdentity(redis, staging(), NOW);
+    expect(await resolveIdentity(redis, localDev(), NOW)).toMatchObject({ role: 'unset', owner: 'staging-testnet', writersAllowed: true });
+  });
+});
+
+describe('records', () => {
+  it('re-reads when another process claims between the read and the write', async () => {
     redis.set.mockImplementationOnce(async () => {
       store.set(IDENTITY_KEY, JSON.stringify({ id: 'production', ...PROD, claimedAt: 'x', updatedAt: 'x' }));
       return null;
     });
-    const s = await resolveIdentity(redis, 'staging-testnet', STAGING, true, NOW);
-    expect(s).toMatchObject({ role: 'not-owner', owner: 'production', writersAllowed: false });
+    expect(await resolveIdentity(redis, staging(), NOW)).toMatchObject({ role: 'not-owner', owner: 'production', writersAllowed: false });
   });
 
-  it('reports an unreadable record instead of looping on it, and leaves it in place', async () => {
-    store.set(IDENTITY_KEY, 'not json');
-    const s = await resolveIdentity(redis, 'staging-testnet', STAGING, true, NOW);
+  it.each([
+    ['not json', 'not json'],
+    ['no chains', JSON.stringify({ id: 'production' })],
+    ['a malformed chain', JSON.stringify({ id: 'production', chains: { base: { chainId: 'x' } } })],
+  ])('reports an unreadable record (%s) instead of looping or throwing, and leaves it', async (_label, raw) => {
+    store.set(IDENTITY_KEY, raw);
+    const s = await resolveIdentity(redis, staging(), NOW);
     expect(s).toMatchObject({ role: 'unknown', writersAllowed: true });
-    expect(s.reason).toMatch(/deployment:identity holds a value this release cannot read/);
-    expect(store.get(IDENTITY_KEY)).toBe('not json');
+    expect(s.reason).toMatch(/cannot read/);
+    expect(store.get(IDENTITY_KEY)).toBe(raw);
   });
 });
 
-describe('a process with no DEPLOYMENT_ID', () => {
-  it('never claims and is never stopped', async () => {
-    productionHistory({ fingerprints: true });
-    const s = await resolveIdentity(redis, null, STAGING, true, NOW);
-    expect(s).toEqual({ deploymentId: null, role: 'unset', owner: null, writersAllowed: true, reason: null });
-    expect(store.has(IDENTITY_KEY)).toBe(false);
+describe('checkDeploymentIdentity', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('keeps its answer for /health/bridge and the write gates', async () => {
+    expect(deploymentIdentityStatus()).toBeNull();
+    expect(backgroundWritesAllowed('test writer')).toBe(true);
+    await resolveIdentity(redis, production(), NOW);
+    const s = await checkDeploymentIdentity(CHECK_TIMEOUT_MS, redis, staging());
+    expect(deploymentIdentityStatus()).toEqual(s);
+    expect(backgroundWritesAllowed('test writer')).toBe(false);
   });
 
-  it('says so when the recorded owner runs on other chains', async () => {
-    await resolveIdentity(redis, 'production', PROD, false, NOW);
-    const s = await resolveIdentity(redis, null, STAGING, false, NOW);
-    expect(s).toMatchObject({ role: 'unset', owner: 'production', writersAllowed: true });
-    expect(s.reason).toMatch(/belongs to deployment "production", whose chains differ/);
-    const same = await resolveIdentity(redis, null, PROD, false, NOW);
-    expect(same.reason).toBeNull();
+  it('waits long enough for a slow Redis to answer', async () => {
+    const slow = { get: async (k: string) => { await new Promise((r) => setTimeout(r, 50)); return store.get(k) ?? null; }, set: redis.set };
+    expect(await checkDeploymentIdentity(undefined, slow, staging())).toMatchObject({ role: 'owner' });
   });
-});
 
-describe('checkDeploymentIdentity at boot', () => {
-  it('lets the writers run when Redis fails, rather than stop an owner on a blip', async () => {
-    redis.get.mockRejectedValueOnce(new Error('ECONNREFUSED'));
-    const s = await checkDeploymentIdentity();
+  it('gives up after CHECK_TIMEOUT_MS, lets writes run, and retries until Redis answers', async () => {
+    vi.useFakeTimers();
+    let up = false;
+    const flaky = {
+      get: (k: string) => (up ? Promise.resolve(store.get(k) ?? null) : new Promise<string | null>(() => {})),
+      set: redis.set,
+    };
+    const first = checkDeploymentIdentity(undefined, flaky, staging());
+    await vi.advanceTimersByTimeAsync(CHECK_TIMEOUT_MS);
+    expect(await first).toMatchObject({ role: 'unknown', writersAllowed: true });
+    expect(deploymentIdentityStatus()?.reason).toMatch(/no answer from Redis in 10s/);
+
+    // Redis comes back holding production's record: the retry stops this process.
+    store.set(IDENTITY_KEY, JSON.stringify({ id: 'production', ...PROD, claimedAt: 'x', updatedAt: 'x' }));
+    up = true;
+    await vi.advanceTimersByTimeAsync(RETRY_MS);
+    expect(deploymentIdentityStatus()).toMatchObject({ role: 'not-owner', writersAllowed: false });
+    expect(backgroundWritesAllowed('test writer')).toBe(false);
+  });
+
+  it('lets writes run when Redis errors', async () => {
+    const broken = { get: async () => { throw new Error('ECONNREFUSED'); }, set: redis.set };
+    const s = await checkDeploymentIdentity(CHECK_TIMEOUT_MS, broken, staging());
     expect(s).toMatchObject({ role: 'unknown', writersAllowed: true });
     expect(s.reason).toMatch(/ECONNREFUSED/);
-  });
-
-  it('gives up waiting on a Redis that never answers', async () => {
-    redis.get.mockImplementationOnce(() => new Promise(() => {}));
-    const s = await checkDeploymentIdentity(20);
-    expect(s).toMatchObject({ role: 'unknown', writersAllowed: true });
-    expect(s.reason).toMatch(/no answer from Redis/);
   });
 });
 

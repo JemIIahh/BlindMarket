@@ -1,3 +1,4 @@
+import { backgroundWritesAllowed, deploymentIdentityStatus } from './deploymentIdentity.js';
 import { fork, type ChildProcess } from 'child_process';
 import { randomUUID, createHash } from 'crypto';
 import { fileURLToPath } from 'url';
@@ -392,6 +393,11 @@ export async function deployAgent(params: {
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 
 export async function startAgent(id: string, opts?: { skipResume?: boolean }): Promise<void> {
+  // A worker polls this backend, which serves the Redis queue it sits on; on
+  // another deployment's Redis that is how tasks get poached.
+  if (!backgroundWritesAllowed('agent start')) {
+    throw new Error(`This backend is on another deployment's Redis (${deploymentIdentityStatus()?.reason}), so it starts no agents. Give it its own REDIS_URL.`);
+  }
   const agent = await loadAgent(id);
   if (!agent) throw new Error(`Agent ${id} not found`);
   if (processes.has(id)) return;
@@ -682,6 +688,7 @@ export async function getAgentStats(id: string): Promise<{ cpu: number; ramMb: n
  * map is per-process); honored by an env flag in index.ts for unusual topologies.
  */
 export async function reconcileAgents(): Promise<void> {
+  if (!backgroundWritesAllowed('agent reconcile')) return;
   let agents: DeployedAgent[];
   try {
     agents = await loadAllAgents();

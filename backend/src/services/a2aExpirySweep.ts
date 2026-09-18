@@ -1,3 +1,4 @@
+import { backgroundWritesAllowed } from './deploymentIdentity.js';
 import * as a2aStore from './a2aStore.js';
 import * as escrowService from './escrow.js';
 import { resolveCachedTaskByHash, resolveTaskByHash } from './taskChain.js';
@@ -77,6 +78,7 @@ export function stopExpirySweepLoop(): void {
 }
 
 export async function sweepExpiredTasks(): Promise<void> {
+  if (!backgroundWritesAllowed('expiry sweep')) return;
   if (inFlight) return;
   inFlight = true;
   try {
@@ -341,6 +343,7 @@ async function reconcileBroadcastAssignment(
 }
 
 export async function sweepGasLiveness(): Promise<void> {
+  if (!backgroundWritesAllowed('gas-liveness sweep')) return;
   if (gasLivenessInFlight) return;
   gasLivenessInFlight = true;
   try {

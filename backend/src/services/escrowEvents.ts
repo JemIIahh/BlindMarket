@@ -1,6 +1,7 @@
 import type { EventLog } from 'ethers';
 import { escrow, provider } from './chain.js';
 import { redis } from './redis.js';
+import { backgroundWritesAllowed } from './deploymentIdentity.js';
 import { handleDisputeResolved, retryParkedDisputes } from './disputeListener.js';
 import { checkEscrowFingerprint } from './escrowFingerprint.js';
 import { config } from '../config.js';
@@ -66,6 +67,9 @@ export async function forceTick(): Promise<void> {
 }
 
 async function tick(): Promise<void> {
+  // A process on another deployment's Redis must not write its index, from
+  // the loop or from a request path's forced pass (deploymentIdentity.ts).
+  if (!backgroundWritesAllowed('0G indexer')) return;
   // Skip re-entry: if a tick is already running, return its promise so
   // concurrent callers wait for the same result.
   if (inFlightPromise) return inFlightPromise;
@@ -195,6 +199,7 @@ async function tick(): Promise<void> {
  * here only, never from the request paths that force ticks).
  */
 export async function pollEscrowOnce(): Promise<void> {
+  if (!backgroundWritesAllowed('0G indexer')) return;
   await tick();
   await retryParkedDisputes('0g');
 }
@@ -271,6 +276,7 @@ export async function getTaskIdByHash(taskHash: string): Promise<string | null> 
  * scan only runs once even under request bursts.
  */
 async function backfillFromDeployment(): Promise<void> {
+  if (!backgroundWritesAllowed('0G indexer')) return;
   if (backfillInFlight) return backfillInFlight;
   backfillInFlight = (async () => {
     try {

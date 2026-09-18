@@ -47,6 +47,9 @@ const { chain, redisMock, listener } = vi.hoisted(() => {
 vi.mock('./chain.js', () => chain);
 vi.mock('./redis.js', () => ({ redis: redisMock }));
 vi.mock('./disputeListener.js', () => listener);
+// Open unless a test closes it: a process on another deployment's Redis.
+const gate = vi.hoisted(() => ({ allowed: true }));
+vi.mock('./deploymentIdentity.js', () => ({ backgroundWritesAllowed: () => gate.allowed }));
 
 const HEAD = 10_000;
 /** Rulings are scanned this far behind the head (DISPUTE_CONFIRMATIONS). */
@@ -68,6 +71,7 @@ function rangesFor(escrow: EscrowMock, filter: string) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  gate.allowed = true;
   redisMock.store.clear();
   chain.provider.getBlockNumber.mockResolvedValue(HEAD);
   chain.baseProvider.getBlockNumber.mockResolvedValue(HEAD);
@@ -284,5 +288,53 @@ describe('0G DisputeResolved scan', () => {
     const { pollEscrowOnce } = await load0G();
     await pollEscrowOnce();
     expect(listener.retryParkedDisputes).toHaveBeenCalledWith('0g');
+  });
+});
+
+// A process on another deployment's Redis must not write that deployment's
+// index — not from its loops, and not from the passes request paths force
+// (taskChain's slow path, /tasks/index), which is how such a process would
+// otherwise plant escrow fingerprints and move checkpoints.
+describe('on another deployment\'s Redis (deploymentIdentity)', () => {
+  it('the 0G indexer reads and writes nothing, forced or polled', async () => {
+    redisMock.store.set('a2a:events:checkpoint', '9800');
+    gate.allowed = false;
+    vi.resetModules();
+    const { forceTick, pollEscrowOnce } = await import('./escrowEvents.js');
+    await forceTick();
+    await pollEscrowOnce();
+    expect(chain.provider.getBlockNumber).not.toHaveBeenCalled();
+    expect(redisMock.set).not.toHaveBeenCalled();
+    expect(listener.retryParkedDisputes).not.toHaveBeenCalled();
+  });
+
+  it("the 0G request path's retries and full backfill write nothing either", async () => {
+    gate.allowed = false;
+    vi.resetModules();
+    const { getTaskIdByHash } = await import('./escrowEvents.js');
+    vi.useFakeTimers();
+    try {
+      const found = getTaskIdByHash('0x' + 'ab'.repeat(32));
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(await found).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(chain.provider.getBlockNumber).not.toHaveBeenCalled();
+    expect(chain.escrow.queryFilter).not.toHaveBeenCalled();
+    expect(redisMock.set).not.toHaveBeenCalled();
+    expect(redisMock.pipeline).not.toHaveBeenCalled();
+  });
+
+  it('neither does the Base indexer', async () => {
+    redisMock.store.set('base:events:checkpoint', '9800');
+    gate.allowed = false;
+    vi.resetModules();
+    const { forceBaseTick, pollBaseEscrowOnce } = await import('./baseEscrowEvents.js');
+    await forceBaseTick();
+    await pollBaseEscrowOnce();
+    expect(chain.baseProvider.getBlockNumber).not.toHaveBeenCalled();
+    expect(redisMock.set).not.toHaveBeenCalled();
+    expect(listener.retryParkedDisputes).not.toHaveBeenCalled();
   });
 });

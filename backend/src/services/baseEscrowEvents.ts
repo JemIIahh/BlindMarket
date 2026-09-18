@@ -26,6 +26,7 @@
 import type { EventLog } from 'ethers';
 import { baseEscrow, baseProvider } from './chain.js';
 import { redis } from './redis.js';
+import { backgroundWritesAllowed } from './deploymentIdentity.js';
 import { handleDisputeResolved, retryParkedDisputes } from './disputeListener.js';
 import { checkEscrowFingerprint } from './escrowFingerprint.js';
 import { config } from '../config.js';
@@ -126,6 +127,8 @@ export async function pollBaseEscrowOnce(): Promise<void> {
 /** One TaskCreated pass, shared by concurrent callers. Resolves to the
  *  TaskCreated checkpoint after the pass, or null when it failed. */
 function indexOnce(): Promise<number | null> {
+  // Also the path forceBaseTick takes from requests (deploymentIdentity.ts).
+  if (!backgroundWritesAllowed('Base indexer')) return Promise.resolve(null);
   if (inFlightPromise) return inFlightPromise;
   inFlightPromise = (async () => {
     try {

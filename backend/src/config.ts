@@ -271,6 +271,9 @@ export const config = {
   // right escrow — see contractsEnvPrefix in services/chainNetwork.ts.
   deploymentSet: parseDeploymentSet(process.env.DEPLOYMENT_SET),
   deploymentId: parseDeploymentId(process.env.DEPLOYMENT_ID),
+  // Set for ONE boot to claim this Redis for DEPLOYMENT_ID despite another
+  // deployment's record or index keys (services/deploymentIdentity.ts).
+  deploymentClaim: (process.env.DEPLOYMENT_CLAIM ?? '').trim().toLowerCase() === 'true',
 
   // Forensic verification
   forensicMaxPhotoAgeMs: parseInt(optional('FORENSIC_MAX_PHOTO_AGE_MS', '1800000'), 10),  // 30 min

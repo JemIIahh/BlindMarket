@@ -17,6 +17,7 @@
  * checkpoint, bounded chunks, single in-flight tick, and idempotent writes so
  * at-least-once delivery from the poll loop is safe across restarts.
  */
+import { backgroundWritesAllowed } from './deploymentIdentity.js';
 import type { EventLog } from 'ethers';
 import { ethers } from 'ethers';
 import { config } from '../config.js';
@@ -129,6 +130,7 @@ export function stopAgentFactoryListener(): void {
 // ── Core poll loop ──────────────────────────────────────────────────────────
 
 async function tick(): Promise<void> {
+  if (!backgroundWritesAllowed('AgentFactory listener')) return;
   if (inFlightPromise) return inFlightPromise;
 
   inFlightPromise = (async () => {

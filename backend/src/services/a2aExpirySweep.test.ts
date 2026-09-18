@@ -38,6 +38,11 @@ const loadAgentByWallet = vi.fn(async (_addr: string) => null as { smartAccountA
 vi.mock('./redis.js', () => ({
   redis: { get: async (k: string) => redisStore.get(k) ?? null },
 }));
+// Open unless a test closes it: a process on another deployment's Redis.
+const gate = { allowed: true };
+vi.mock('./deploymentIdentity.js', () => ({ backgroundWritesAllowed: () => gate.allowed }));
+const listOpenTasks = vi.fn(async () => [] as unknown[]);
+const resyncOpenIndex = vi.fn(async () => {});
 vi.mock('./a2aStore.js', () => ({
   listAcceptedTasks: (...a: unknown[]) => listAcceptedTasks(...(a as [])),
   getSettlementDeadlineTTL: (...a: unknown[]) => getSettlementDeadlineTTL(...(a as [string])),
@@ -47,7 +52,8 @@ vi.mock('./a2aStore.js', () => ({
   updateState: (...a: unknown[]) => updateState(...(a as [string, Record<string, unknown>])),
   markAssignReconciled: (...a: unknown[]) => markAssignReconciled(...(a as [string, string])),
   isAssignReconciled: (...a: unknown[]) => isAssignReconciled(...(a as [string, string])),
-  listOpenTasks: async () => [],
+  listOpenTasks: (...a: unknown[]) => listOpenTasks(...(a as [])),
+  resyncOpenIndex: (...a: unknown[]) => resyncOpenIndex(...(a as [])),
   getMeta: (...a: unknown[]) => getMeta(...(a as [string])),
 }));
 vi.mock('./socket.js', () => ({
@@ -72,7 +78,7 @@ vi.mock('./deployedAgentStore.js', () => ({
 }));
 vi.mock('../constants.js', () => ({ SWEEP_INTERVAL_MS: 60_000, EXPIRY_GRACE_SEC: 60 }));
 
-const { sweepGasLiveness } = await import('./a2aExpirySweep.js');
+const { sweepGasLiveness, sweepExpiredTasks } = await import('./a2aExpirySweep.js');
 
 const TASK = '0x' + 'ab'.repeat(32);
 const EXECUTOR = '0x3db43a971e4464346eba9233b485116713eb1b01';
@@ -310,5 +316,36 @@ describe('sweepGasLiveness reconciling a broadcast assign tx', () => {
     listAcceptedTasks.mockResolvedValue(ids.map((taskId) => ({ taskId, executorAddress: EXECUTOR })));
     await sweepGasLiveness();
     expect(getTaskOn).toHaveBeenCalledTimes(5);
+  });
+});
+
+describe("on another deployment's Redis (deploymentIdentity)", () => {
+  it('neither sweep reads or releases anything', async () => {
+    gate.allowed = false;
+    try {
+      listAcceptedTasks.mockClear();
+      listOpenTasks.mockClear();
+      resyncOpenIndex.mockClear();
+      await sweepGasLiveness();
+      await sweepExpiredTasks();
+      expect(listAcceptedTasks).not.toHaveBeenCalled();
+      // The expiry sweep rewrites the open index before anything else.
+      expect(resyncOpenIndex).not.toHaveBeenCalled();
+      expect(listOpenTasks).not.toHaveBeenCalled();
+      expect(tryReleaseAccepted).not.toHaveBeenCalled();
+      expect(releaseToOpen).not.toHaveBeenCalled();
+    } finally {
+      gate.allowed = true;
+    }
+  });
+});
+
+describe('sweepExpiredTasks (the gate test above leans on this)', () => {
+  it('repairs the open index and lists open tasks when writes are allowed', async () => {
+    resyncOpenIndex.mockClear();
+    listOpenTasks.mockClear();
+    await sweepExpiredTasks();
+    expect(resyncOpenIndex).toHaveBeenCalled();
+    expect(listOpenTasks).toHaveBeenCalled();
   });
 });

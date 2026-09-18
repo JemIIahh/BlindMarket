@@ -228,12 +228,11 @@ This is the hot key the backend uses to call `marketplaceAssign` and
       only warns. Set, it defaults every chain id to mainnet and refuses to
       boot on any testnet id; `GET /health/bridge` must then report
       `settlementTier: "mainnet"`, `tierSource: "SETTLEMENT_TIER"`.
-- [ ] **`DEPLOYMENT_ID=production` is set** on the production backend, and
-      `GET /health/bridge` reports `deploymentIdentity.role: "owner"` with
-      `owner: "production"`. Set it in the SAME deploy that first ships the
-      Arc settlement release (before any staging stack can reach production's
-      Redis): that boot claims production's Redis. A process on the same Redis
-      with another `DEPLOYMENT_ID` then runs none of its background writers.
+- [ ] **`GET /health/bridge` reports `deploymentIdentity.role: "owner"`,
+      `owner: "production"`** (`DEPLOYMENT_ID=production` has been set since
+      the Arc settlement release). Production is never stopped by the check,
+      but anything else on its Redis is: re-check after changing REDIS_URL or
+      the chains, and treat any other `role`, or a `reason`, as a finding.
       See `backend/src/services/deploymentIdentity.ts`.
 
 ### 3.5 Rotate readiness

@@ -15,6 +15,7 @@
  * on-chain, so there's nothing to advance. It's left for manual inspection;
  * the owner can retry with a fresh idempotencyKey.
  */
+import { backgroundWritesAllowed } from './deploymentIdentity.js';
 import { config } from '../config.js';
 import { isCctpConfigured, getCctpChain } from './cctpChains.js';
 import { pollIrisAttestation } from './cctp.js';
@@ -51,6 +52,7 @@ export function stopCctpAttestationPoller(): void {
 }
 
 async function tick(): Promise<void> {
+  if (!backgroundWritesAllowed('CCTP poller')) return;
   if (inFlightPromise) return inFlightPromise;
 
   inFlightPromise = (async () => {
