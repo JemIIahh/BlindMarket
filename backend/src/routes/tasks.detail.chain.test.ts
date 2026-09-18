@@ -130,7 +130,7 @@ describe('cancel and claim-timeout say which chain their transaction is for', ()
     }
     vi.mocked(taskChain.resolveTaskChainById).mockResolvedValueOnce('0g');
     const og = await post('7/cancel');
-    expect(og.body.data).toMatchObject({ chain: '0g' });
-    expect(og.body.data.chainId).toBe(og.body.data.chainId | 0);
+    // The 0G chain id of this test's config (16602 in the test env).
+    expect(og.body.data).toMatchObject({ chain: '0g', chainId: 16602 });
   });
 });

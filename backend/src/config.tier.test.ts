@@ -187,6 +187,12 @@ describe('assertBootConfig refuses Base mainnet with the Base Sepolia escrow', (
     expect(errored.join('\n')).toMatch(/BASE_CHAIN_ID=8453 \(Base mainnet\) but BASE_ESCROW_ADDRESS=0xCca5.*Base Sepolia escrow/);
   });
 
+  it('compares the escrow address case-insensitively', async () => {
+    const { assertBootConfig } = await load({ NODE_ENV: 'production', BASE_ESCROW_ADDRESS: SEPOLIA_ESCROW.toLowerCase(), JWT_SECRET: 'x', DATABASE_URL: 'postgres://x' });
+    expect(() => assertBootConfig()).toThrow(/1 fatal problem/);
+    expect(errored.join('\n')).toMatch(/Base Sepolia escrow/);
+  });
+
   it('boots when BASE_CHAIN_ID says Sepolia, or the escrow is not Sepolia’s', async () => {
     const ok = await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '84532', BASE_ESCROW_ADDRESS: SEPOLIA_ESCROW, JWT_SECRET: 'x', DATABASE_URL: 'postgres://x' });
     expect(() => ok.assertBootConfig()).not.toThrow();

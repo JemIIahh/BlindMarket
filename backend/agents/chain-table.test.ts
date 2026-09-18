@@ -322,6 +322,15 @@ describe('delegate_to_agent funds on the posting chain', () => {
     expect(sent).toEqual([]);
   });
 
+  it('still delegates from the EOA on a 0G-posting stack, smart account or not (0G has no account abstraction)', async () => {
+    const ogPosting = TABLE.map((c) => ({ ...c, posting: c.key === '0g' }));
+    const { out, sent } = await delegateAgainstStub(ogPosting, { native: 10n ** 18n, token: 0n }, {
+      env: { AGENT_SMART_ACCOUNT_ADDRESS: '0x3333333333333333333333333333333333333333', AA_ENTRY_POINT: '0x0000000071727De22E5E9d8BAf0edAc6f37da032' },
+    });
+    expect(out).not.toMatch(/runs as a smart account/);
+    expect(sent.length).toBeGreaterThan(0);
+  });
+
   it('refuses to sign a task the backend built for another chain', async () => {
     const { out, sent } = await delegateAgainstStub(TABLE, { native: 10n ** 16n, token: 5_000_000n }, { builtOn: '0g' });
     expect(out).toMatch(/built the task on 0g, but this agent posts on base/);

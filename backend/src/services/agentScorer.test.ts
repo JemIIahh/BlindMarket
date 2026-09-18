@@ -142,6 +142,8 @@ describe('meetsRewardFloor', () => {
     expect(meetsRewardFloor(withFloor('1000000'), { amount: 10n ** 18n, unit: NATIVE_0G })).toBe(false);
     expect(meetsRewardFloor(withFloor('0'), { amount: 1n, unit: NATIVE_0G })).toBe(true);
     expect(meetsRewardFloor({ minReward: undefined } as any, { amount: 1n, unit: NATIVE_0G })).toBe(true);
+    // A floor that is not a number keeps the agent, as in the same-unit branch.
+    expect(meetsRewardFloor(withFloor('nope'), { amount: 1n, unit: NATIVE_0G })).toBe(true);
   });
 
   it('applies the floor to 0G tasks on a deployment that prices in 0G', () => {
