@@ -17,7 +17,7 @@ import {
 import { get, authedGet, authedPost } from '../lib/api';
 import { useChainAddress } from '../hooks/useChainWallet';
 import { BASE_CCTP_CHAIN_KEY, isCctpUsable } from '../config/constants';
-import { getMarketplaceTokenAddress, getPaymentSymbol, getPaymentDecimals, isNativePayment, useSettlement } from '../config/settlement';
+import { getMarketplaceTokenAddress, getPaymentSymbol, getPaymentDecimals, getPostingChain, isNativePayment, useSettlement } from '../config/settlement';
 import {
   getAgentReviews,
   getAgentBadges,
@@ -368,7 +368,7 @@ export default function AgentDetail() {
       const usdc = new Contract(getMarketplaceTokenAddress(), USDC_ABI, signer);
       const tx = await usdc.transfer.populateTransaction(fundingAddress, raw);
       const { signAndSendTx } = await import('../lib/txSigner');
-      const sent = await signAndSendTx(signer, tx as any);
+      const sent = await signAndSendTx(signer, tx as any, undefined, { chain: getPostingChain().key });
       if (sent.receipt) {
         await refetchBalance();
       }
@@ -621,7 +621,9 @@ export default function AgentDetail() {
             />
           )}
           <OpsConsole
-            key={agent.id}
+            // The min-reward field is seeded once at mount in the unit of the
+            // moment; remount when the backend's answer changes it.
+            key={`${agent.id}-${settlement.postingChain}-${settlement.source}`}
             agentId={apiId}
             agent={agent}
             onAgentUpdated={setAgent}

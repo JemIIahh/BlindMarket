@@ -88,7 +88,9 @@ export default function TaskDetail() {
       if (!numericTaskId) throw new Error('Missing task id');
       if (!signer) throw new Error('Wallet not connected');
       const tx = await buildCancelTask(numericTaskId);
-      await signAndSendTx(signer, tx);
+      // The task's chain comes from the backend; the relay must not guess (a
+      // 0G task's cancel used to be relayed onto Base as a no-op).
+      await signAndSendTx(signer, tx, undefined, { chain: data?.onChain?.chain });
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['tasks', id] }),
   });
@@ -98,7 +100,9 @@ export default function TaskDetail() {
       if (!numericTaskId) throw new Error('Missing task id');
       if (!signer) throw new Error('Wallet not connected');
       const tx = await buildClaimTimeout(numericTaskId);
-      await signAndSendTx(signer, tx);
+      // The task's chain comes from the backend; the relay must not guess (a
+      // 0G task's cancel used to be relayed onto Base as a no-op).
+      await signAndSendTx(signer, tx, undefined, { chain: data?.onChain?.chain });
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['tasks', id] }),
   });

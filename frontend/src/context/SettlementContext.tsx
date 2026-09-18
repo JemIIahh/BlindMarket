@@ -21,7 +21,14 @@ export function SettlementProvider({ children }: { children: ReactNode }) {
     retry: 2,
   });
   useEffect(() => {
-    if (data) setSettlement(mergeSettlement(defaultSettlement(), data));
+    if (!data) return;
+    // This provider sits above the ErrorBoundary: a throw here would unmount
+    // the whole app. mergeSettlement ignores bad entries; this catches the rest.
+    try {
+      setSettlement(mergeSettlement(defaultSettlement(), data));
+    } catch (err) {
+      console.warn('[settlement] ignoring the backend settlement answer:', (err as Error).message);
+    }
   }, [data]);
   return <>{children}</>;
 }

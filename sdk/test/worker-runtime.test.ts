@@ -223,6 +223,53 @@ describe('WorkerRuntime.executeTask — settlement chain', () => {
     expect(fetchMock.mock.calls.some((call) => String(call[0]).includes('/submit'))).toBe(false);
   });
 
+  it('fails a Base task right after accept, before the handler, when no Base RPC is configured', async () => {
+    // The single rpcUrl (default: 0G testnet) used to stand in for Base and
+    // fail only at the send, after the handler had run.
+    const sendTxSpy = stubSend();
+    const handler = vi.fn(async () => ({ done: true }));
+    const fetchMock = stubFetch({
+      '/accept': { taskId: TASK_ID, status: 'accepted', rootHash: ROOT_HASH, privacy: 'public', chain: 'base' },
+    });
+    const runtime = mkRuntime(wallet, handler);
+
+    // biome-ignore lint/suspicious/noExplicitAny: private method under test
+    await (runtime as any).executeTask(TASK_ID, a2a);
+
+    // biome-ignore lint/suspicious/noExplicitAny: reaching into private fields to assert
+    const exec = (runtime as any).executions.get(TASK_ID) as TaskExecutionInfo;
+    expect(exec.status).toBe('failed');
+    expect(exec.error).toMatch(/escrowed on base but no RPC is configured for it — set rpcUrls\.base/);
+    expect(handler).not.toHaveBeenCalled();
+    expect(sendTxSpy).not.toHaveBeenCalled();
+    expect(fetchMock.mock.calls.some((call) => String(call[0]).includes('/storage/'))).toBe(false);
+  });
+
+  it('runs a Base task when rpcUrls.base is configured, and a 0G task on rpcUrl', async () => {
+    const providers: string[] = [];
+    vi.spyOn(ethers.Wallet.prototype, 'sendTransaction').mockImplementation(async function (this: ethers.Wallet) {
+      providers.push((this.provider as ethers.JsonRpcProvider)._getConnection().url);
+      return { hash: `0x${'11'.repeat(32)}`, wait: async () => ({ status: 1 }) } as unknown as ethers.TransactionResponse;
+    });
+    stubFetch({
+      '/accept': { taskId: TASK_ID, status: 'accepted', rootHash: ROOT_HASH, privacy: 'public', chain: 'base' },
+      '/storage/': { rootHash: ROOT_HASH, blob: Buffer.from('x').toString('base64') },
+      '/submit': {
+        taskId: TASK_ID, status: 'submitted', chain: 'base',
+        unsignedSubmitEvidence: { to: '0x00000000000000000000000000000000000000ab', data: '0x1234' },
+      },
+      '/finalize': { taskId: TASK_ID, status: 'submitted', awaitingPosterApproval: true },
+    });
+    const runtime = mkRuntime(wallet);
+    // biome-ignore lint/suspicious/noExplicitAny: private config under test
+    (runtime as any).config.rpcUrls = { base: 'https://base.example/rpc' };
+
+    // biome-ignore lint/suspicious/noExplicitAny: private method under test
+    await (runtime as any).executeTask(TASK_ID, a2a);
+
+    expect(providers).toEqual(['https://base.example/rpc']);
+  });
+
   it('refuses to sign when /submit names an unknown chain', async () => {
     const sendTxSpy = stubSend();
     stubFetch({
@@ -386,11 +433,8 @@ describe('WorkerRuntime.start — supportedChains', () => {
     expect(String(bodies[0].publicKey)).toMatch(/^04[0-9a-f]{128}$/);
   });
 
-  it.each([
-    ['null (never declared)', null],
-    ['a subset', ['0g']],
-    ['a superset', ['0g', 'base', 'arc']],
-  ])('re-registers a restored executor whose supportedChains is %s, keeping the stored profile', async (_label, chains) => {
+  it('re-registers a restored executor whose supportedChains is null (never declared), keeping the stored profile', async () => {
+    const chains = null;
     const fetchMock = stubFetch({
       '/a2a/profile': { agent: storedProfile(chains), reputation: {}, decayedReputation: {} },
       '/a2a/register': { agent: storedProfile(['0g', 'base']) },
@@ -463,6 +507,10 @@ describe('WorkerRuntime.start — supportedChains', () => {
 
   it.each([
     ['matches, in any order', ['base', '0g']],
+    // An operator who registered a subset (through the MCP or PATCH) meant
+    // it; re-registering on every start overwrote it.
+    ['is a deliberate subset', ['base']],
+    ['is a superset this runtime does not know', ['0g', 'base', 'arc']],
     // A backend that predates the field: it would drop supportedChains, and
     // some versions reset the executor's 0G earnings on every register.
     ['absent from the response', undefined],

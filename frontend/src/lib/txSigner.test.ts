@@ -16,21 +16,31 @@ describe('relayChainNameFor', () => {
     expect(relayChainNameFor(undefined)).toBe('base-sepolia');
   });
 
-  it("falls back to the build's Base name for a chain the relay does not serve", () => {
-    // 0G transactions are not relayed today; a caller that asks anyway gets
-    // what it always got.
-    expect(relayChainNameFor('0g')).toBe('base-sepolia');
-    expect(relayChainNameFor('arc')).toBe('base-sepolia');
+  it('refuses a named chain the relay does not serve, rather than relaying it onto Base', () => {
+    // A 0G task's cancel used to go to Base with the 0G escrow as `to`: a
+    // no-op there, gas paid by the platform, task left funded.
+    expect(() => relayChainNameFor('0g')).toThrow(/Transactions on 0g are not relayed here/);
+    expect(() => relayChainNameFor('arc')).toThrow(/not relayed here/);
+    expect(() => providerFor('0g')).toThrow(/not relayed here/);
   });
 
-  it("follows the backend's relay name for the posting chain", () => {
+  it("follows the backend's relay name for the posting chain (same network)", () => {
+    const d = defaultSettlement();
+    setSettlement(mergeSettlement(d, {
+      postingChain: 'base',
+      chains: [{ chain: 'base', chainId: d.chains.base.chainId, tier: 'testnet', escrowAddress: d.chains.base.escrow, token: { kind: 'erc20', address: d.chains.base.token.address, symbol: 'USDC', decimals: 6 }, relayChain: 'base-sepolia-2', gasSymbol: 'ETH', postable: true }],
+    }));
+    expect(relayChainNameFor()).toBe('base-sepolia-2');
+    expect(relayChainNameFor('base')).toBe('base-sepolia-2');
+  });
+
+  it("does not follow a backend on another network (a Base-mainnet backend on this testnet build)", () => {
     const d = defaultSettlement();
     setSettlement(mergeSettlement(d, {
       postingChain: 'base',
       chains: [{ chain: 'base', chainId: 8453, tier: 'mainnet', escrowAddress: d.chains.base.escrow, token: { kind: 'erc20', address: d.chains.base.token.address, symbol: 'USDC', decimals: 6 }, relayChain: 'base-mainnet', gasSymbol: 'ETH', postable: true }],
     }));
-    expect(relayChainNameFor()).toBe('base-mainnet');
-    expect(relayChainNameFor('base')).toBe('base-mainnet');
+    expect(relayChainNameFor()).toBe('base-sepolia');
   });
 });
 
@@ -38,16 +48,13 @@ describe('providerFor', () => {
   it('polls the chain the relay name points at, which is Base while only Base has a relay', () => {
     expect(providerFor()).toBe(baseProvider);
     expect(providerFor('base')).toBe(baseProvider);
-    // 0G has no relay, so a "0G" hint still relays (and polls) on Base.
-    expect(providerFor('0g')).toBe(baseProvider);
   });
 
-  it('never disagrees with the relay name on a backend that posts on 0G', () => {
+  it('never disagrees with the relay name on a backend that posts on 0G: unhinted callers go to Base', () => {
     setSettlement({ ...defaultSettlement(), postingChain: '0g' });
     expect(relayChainNameFor()).toBe('base-sepolia');
     expect(providerFor()).toBe(baseProvider);
-    expect(relayChainNameFor('0g')).toBe('base-sepolia');
-    expect(providerFor('0g')).toBe(baseProvider);
+    expect(() => relayChainNameFor('0g')).toThrow(/not relayed here/);
   });
 
   it('would poll 0G once the backend names a relay for it', () => {
@@ -73,15 +80,15 @@ describe('signAndSendTx wiring', () => {
       const d = defaultSettlement();
       setSettlement(mergeSettlement(d, {
         postingChain: 'base',
-        chains: [{ chain: 'base', chainId: 8453, tier: 'mainnet', escrowAddress: d.chains.base.escrow, token: { kind: 'erc20', address: d.chains.base.token.address, symbol: 'USDC', decimals: 6 }, relayChain: 'base-mainnet', gasSymbol: 'ETH', postable: true }],
+        chains: [{ chain: 'base', chainId: d.chains.base.chainId, tier: 'testnet', escrowAddress: d.chains.base.escrow, token: { kind: 'erc20', address: d.chains.base.token.address, symbol: 'USDC', decimals: 6 }, relayChain: 'base-sepolia-2', gasSymbol: 'ETH', postable: true }],
       }));
       await expect(signAndSendTx(signer, tx, undefined, { chain: 'base' })).rejects.toThrow('stop here');
       await expect(signAndSendTx(signer, tx)).rejects.toThrow('stop here');
-      await expect(signAndSendTx(signer, tx, undefined, { chain: '0g' })).rejects.toThrow('stop here');
-      expect(bodies.map((b) => b.chain)).toEqual(['base-mainnet', 'base-mainnet', 'base-mainnet']);
+      await expect(signAndSendTx(signer, tx, undefined, { chain: '0g' })).rejects.toThrow(/not relayed here/);
+      expect(bodies.map((b) => b.chain)).toEqual(['base-sepolia-2', 'base-sepolia-2']);
       resetSettlement();
       await expect(signAndSendTx(signer, tx)).rejects.toThrow('stop here');
-      expect(bodies[3].chain).toBe('base-sepolia');
+      expect(bodies[2].chain).toBe('base-sepolia');
     } finally {
       vi.unstubAllGlobals();
     }

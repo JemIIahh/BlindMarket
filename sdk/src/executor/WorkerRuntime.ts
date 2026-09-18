@@ -57,13 +57,14 @@ function settlementChain(taskId: string, reported: string | null | undefined): S
   return known;
 }
 
-/** Whether `declared` holds exactly the chains in `expected`, ignoring order
- *  and duplicates. A missing or null list matches nothing. */
-function sameChainSet(declared: readonly string[] | null | undefined, expected: readonly string[]): boolean {
-  if (!Array.isArray(declared)) return false;
-  const have = new Set(declared);
-  const want = new Set(expected);
-  return have.size === want.size && [...want].every((c) => have.has(c));
+/**
+ * The RPC this runtime signs on for `chain`. `rpcUrls` is per chain; the
+ * single `rpcUrl` is the 0G RPC (its default is 0G testnet) and never stands
+ * in for another chain: a Base submitEvidence sent through it is rejected by
+ * ethers' chainId pin — after the handler has already run.
+ */
+function rpcFor(config: { rpcUrl?: string; rpcUrls?: Partial<Record<SettlementChain, string>> }, chain: SettlementChain): string | undefined {
+  return config.rpcUrls?.[chain] ?? (chain === '0g' ? config.rpcUrl : undefined);
 }
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -208,8 +209,11 @@ export class WorkerRuntime {
   }
 
   /**
-   * Re-register a restored executor when its stored `supportedChains` is null
-   * or differs from SETTLEMENT_CHAINS. The backend only offers an executor
+   * Re-register a restored executor when its stored `supportedChains` is
+   * null: a row registered by code that predates the field. A stored list
+   * that DIFFERS from SETTLEMENT_CHAINS is left alone — an operator who
+   * registered ['base'] through the MCP or PATCH meant it, and re-registering
+   * on every restart would overwrite that. The backend only offers an executor
    * tasks on the chains it declared, and a restore never registers otherwise,
    * so an executor first registered by an older SDK would keep its old list.
    *
@@ -232,7 +236,7 @@ export class WorkerRuntime {
   private async declareSupportedChains(stored: ExecutorProfile): Promise<ExecutorProfile> {
     const raw = stored as unknown as Record<string, unknown>;
     if (!('supportedChains' in raw)) return stored;
-    if (sameChainSet(stored.supportedChains, SETTLEMENT_CHAINS)) return stored;
+    if (Array.isArray(stored.supportedChains)) return stored;
 
     const optionalString = (v: unknown): string | undefined =>
       typeof v === 'string' && v !== '' ? v : undefined;
@@ -373,8 +377,15 @@ export class WorkerRuntime {
       const acceptResult = await this.bb.acceptTask(taskId);
       exec.task = a2a;
       this.emit({ type: 'task_accepted', taskId });
-      // Fail before running the handler if this runtime can't settle the task.
-      settlementChain(taskId, acceptResult.chain);
+      // Fail before running the handler if this runtime can't settle the task:
+      // an unknown chain, or one it has no RPC for (the send would fail only
+      // after the handler had spent its run, leaving the task Assigned).
+      const acceptedChain = settlementChain(taskId, acceptResult.chain);
+      if (!rpcFor(this.config, acceptedChain)) {
+        throw new Error(
+          `task ${taskId} is escrowed on ${acceptedChain} but no RPC is configured for it — set rpcUrls.${acceptedChain} in the WorkerRuntime config`,
+        );
+      }
 
       // Decrypt the brief. 'public' tasks carry no wrappedKey by design — the
       // blob at rootHash is already plaintext, so skip ECIES/AES entirely.
@@ -426,13 +437,13 @@ export class WorkerRuntime {
         // broadcast onto 0G. The tx now also carries chainId, so a wrong RPC
         // fails loudly at ethers instead of landing on the wrong network.
         const chain = settlementChain(taskId, submitResult.chain);
-        // rpcUrls wins per chain; otherwise the single rpcUrl (documented as
-        // "whichever chain tasks settle on") still applies. The chainId pin
-        // rejects a genuine mismatch at ethers before anything is broadcast.
-        const rpc = this.config.rpcUrls?.[chain] ?? this.config.rpcUrl;
+        // rpcUrls per chain; rpcUrl is the 0G RPC only (rpcFor). The chainId
+        // pin still rejects a genuine mismatch at ethers before anything is
+        // broadcast.
+        const rpc = rpcFor(this.config, chain);
         if (!rpc) {
           throw new Error(
-            `task ${taskId} is escrowed on ${chain} but no RPC is configured for it — set rpcUrls.${chain} (or rpcUrl) in the WorkerRuntime config`,
+            `task ${taskId} is escrowed on ${chain} but no RPC is configured for it — set rpcUrls.${chain} in the WorkerRuntime config`,
           );
         }
         const provider = new ethers.JsonRpcProvider(rpc);

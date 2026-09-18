@@ -16,18 +16,24 @@ export const baseProvider = new JsonRpcProvider(BASE_RPC_URL, BASE_CHAIN_ID, { s
 let ogProvider: JsonRpcProvider | null = null;
 
 /**
- * The chain a relayed transaction actually goes to: the hinted chain when the
- * relay serves it, else the posting chain when the relay serves that, else
- * Base — the only chain the relay served before the backend named any. The
- * relay name and the receipt/allowance provider both derive from this, so
- * they cannot disagree.
+ * The chain a relayed transaction actually goes to. A caller that names the
+ * chain (the backend's `chain` for a task's tx) gets exactly that chain, or
+ * an error when the relay does not serve it: a 0G task's cancel used to be
+ * relayed onto Base with the 0G escrow's address as `to` — a no-op there,
+ * gas paid by the platform, task left funded. An unhinted caller gets the
+ * posting chain when the relay serves it, else Base, the only chain the
+ * relay served before the backend named any. The relay name and the
+ * receipt/allowance provider both derive from this, so they cannot disagree.
  */
 export function relayedChainKey(chain?: string | null): SettlementChainKey {
-  const posting = getSettlement().postingChain;
-  for (const key of [isSettlementChainKey(chain) ? chain : null, posting]) {
-    if (key && relayChainFor(key)) return key;
+  if (chain !== undefined && chain !== null) {
+    if (!isSettlementChainKey(chain) || !relayChainFor(chain)) {
+      throw new RelayError('NO_RELAY', `Transactions on ${chain} are not relayed here. Connect a wallet on that chain to send it directly.`);
+    }
+    return chain;
   }
-  return 'base';
+  const posting = getSettlement().postingChain;
+  return relayChainFor(posting) ? posting : 'base';
 }
 
 /** A read-only provider for the chain a transaction is relayed on (relayedChainKey). */

@@ -148,20 +148,51 @@ describe('mergeSettlement', () => {
     expect(unitFor('base')).toEqual({ symbol: 'USDC', decimals: 6 });
   });
 
-  it("takes the backend's token, escrow and relay name over the build's", () => {
+  it("takes the backend's token, escrow and relay name over the build's, on the same network", () => {
     const token = '0x3333333333333333333333333333333333333333';
     const escrow = '0x4444444444444444444444444444444444444444';
     const backend: BackendSettlement = {
       postingChain: 'base',
-      chains: [{ ...backendBasePosting.chains[1], escrowAddress: escrow, token: { kind: 'erc20', address: token, symbol: 'USDC', decimals: 6 }, relayChain: 'base-mainnet', chainId: 8453, tier: 'mainnet' }],
+      chains: [{ ...backendBasePosting.chains[1], escrowAddress: escrow, token: { kind: 'erc20', address: token, symbol: 'USDC', decimals: 6 }, relayChain: 'base-sepolia-2' }],
     };
     setSettlement(mergeSettlement(defaultSettlement(), backend));
     expect(getMarketplaceTokenAddress()).toBe(token);
     expect(getPostingEscrowAddress()).toBe(escrow);
-    expect(relayChainFor()).toBe('base-mainnet');
-    expect(getPostingChain()).toMatchObject({ chainId: 8453, tier: 'mainnet', explorer: 'https://basescan.org' });
+    expect(relayChainFor()).toBe('base-sepolia-2');
     // The chain the backend did not mention keeps its defaults.
     expect(unitFor('0g')).toEqual({ symbol: '0G', decimals: 18 });
+  });
+
+  it('never follows a chain onto another network: a Base-mainnet backend on this testnet build is ignored', () => {
+    const mainnetBase: BackendSettlement = {
+      postingChain: 'base',
+      chains: [{ ...backendBasePosting.chains[1], chainId: 8453, tier: 'mainnet', escrowAddress: '0x9999999999999999999999999999999999999999', token: { kind: 'erc20', address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', symbol: 'USDC', decimals: 6 }, relayChain: 'base-mainnet' }],
+    };
+    const merged = mergeSettlement(defaultSettlement(), mainnetBase);
+    const { source: _s, ...rest } = merged;
+    const { source: _d, ...defaults } = defaultSettlement();
+    expect(rest).toEqual(defaults);
+    setSettlement(merged);
+    expect(getMarketplaceTokenAddress()).toBe(BASE_USDC_ADDRESS);
+    expect(relayChainFor()).toBe('base-sepolia');
+  });
+
+  it('ignores malformed entries instead of throwing (a throw above the ErrorBoundary blanked the app)', () => {
+    const bad = {
+      postingChain: 'base',
+      chains: [
+        { ...backendBasePosting.chains[0], token: null },
+        { ...backendBasePosting.chains[1], token: { ...backendBasePosting.chains[1].token, decimals: 'six' } },
+        null,
+        'base',
+      ],
+    } as unknown as BackendSettlement;
+    expect(() => mergeSettlement(defaultSettlement(), bad)).not.toThrow();
+    const { source: _s, ...rest } = mergeSettlement(defaultSettlement(), bad);
+    const { source: _d, ...defaults } = defaultSettlement();
+    expect(rest).toEqual(defaults);
+    expect(() => mergeSettlement(defaultSettlement(), {} as BackendSettlement)).not.toThrow();
+    expect(() => mergeSettlement(defaultSettlement(), null as unknown as BackendSettlement)).not.toThrow();
   });
 
   it('keeps the default posting chain when the backend names one this build cannot pay on', () => {

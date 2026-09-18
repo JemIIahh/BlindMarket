@@ -3,7 +3,9 @@ import { Breadcrumb, PageHeader, SectionRule } from '../components/bb';
 import { getPaymentSymbol, useSettlement } from '../config/settlement';
 import { parsePaymentAmount } from '../lib/paymentUnits';
 
-const SNIPPETS = [
+// A function, not a module constant: the payment unit is known once the
+// backend has answered (config/settlement.ts), and the snippet quotes it.
+const snippets = () => [
   {
     num: '01',
     title: 'Install',
@@ -130,6 +132,7 @@ function CopyButton({ code }: { code: string }) {
 export default function DeployAgentSdk() {
   // Re-render when the backend's settlement answer arrives (config/settlement.ts).
   useSettlement();
+  const SNIPPETS = snippets();
   return (
     <div>
       <Breadcrumb items={['marketplace', 'agents', 'create', 'sdk']} />

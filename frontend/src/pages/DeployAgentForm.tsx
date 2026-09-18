@@ -294,7 +294,7 @@ export default function DeployAgentForm() {
       const currentAllowance = await usdc.allowance(address, AGENT_FACTORY_ADDRESS);
       if (currentAllowance < DEPLOY_FEE_USDC) {
         const approveTx = await usdc.approve.populateTransaction(AGENT_FACTORY_ADDRESS, DEPLOY_FEE_USDC);
-        const approveResult = await signAndSendTx(signer, approveTx as any);
+        const approveResult = await signAndSendTx(signer, approveTx as any, undefined, { chain: 'base' });
         console.log(`[deploy] USDC approve relay done hash=${approveResult.hash} userOp=${approveResult.userOp ?? false}`);
 
         // Poll allowance until on-chain — UserOps can take several blocks
@@ -316,7 +316,7 @@ export default function DeployAgentForm() {
       const factory = new Contract(AGENT_FACTORY_ADDRESS, AGENT_FACTORY_ABI, provider);
       console.log('[deploy] Calling deployAgent(0)...');
       const deployTx = await factory.deployAgent.populateTransaction(0);
-      const deployResult = await signAndSendTx(signer, deployTx as any);
+      const deployResult = await signAndSendTx(signer, deployTx as any, undefined, { chain: 'base' });
       console.log(`[deploy] AgentFactory relay done hash=${deployResult.hash} userOp=${deployResult.userOp ?? false}`);
       if (deployResult.userOp) {
         await new Promise(r => setTimeout(r, 15000));

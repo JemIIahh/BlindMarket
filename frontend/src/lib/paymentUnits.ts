@@ -51,12 +51,22 @@ export function formatEarnings(e: Earnings, maximumFractionDigits = 2): string {
     .join(' · ');
 }
 
-/** Per-currency totals across several agents. */
+/**
+ * Per-currency totals across several agents. A legacy row (only
+ * `totalEarned`, in the payment token) counts under the payment token's
+ * total; it used to be dropped whenever another row had the new fields.
+ */
 export function sumEarnings(list: Earnings[]): Earnings {
   const add = (pick: (e: Earnings) => string | undefined) =>
     String(list.reduce((sum, e) => sum + parseFloat(pick(e) || '0'), 0));
   if (list.some((e) => e.totalEarnedUsdc !== undefined || e.totalEarnedNative !== undefined)) {
-    return { totalEarnedUsdc: add((e) => e.totalEarnedUsdc), totalEarnedNative: add((e) => e.totalEarnedNative) };
+    const legacyIsUsdc = getPaymentSymbol() === 'USDC';
+    const legacy = (e: Earnings) =>
+      e.totalEarnedUsdc === undefined && e.totalEarnedNative === undefined ? e.totalEarned : undefined;
+    return {
+      totalEarnedUsdc: add((e) => e.totalEarnedUsdc ?? (legacyIsUsdc ? legacy(e) : undefined)),
+      totalEarnedNative: add((e) => e.totalEarnedNative ?? (legacyIsUsdc ? undefined : legacy(e))),
+    };
   }
   return { totalEarned: add((e) => e.totalEarned) };
 }

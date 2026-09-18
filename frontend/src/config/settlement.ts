@@ -38,7 +38,6 @@ import {
 
 /** The backend's settlement chain keys. */
 export type SettlementChainKey = '0g' | 'base';
-export const SETTLEMENT_CHAIN_KEYS: readonly SettlementChainKey[] = ['0g', 'base'];
 
 export interface SettlementUnit {
   symbol: string;
@@ -137,44 +136,70 @@ export function isSettlementChainKey(value: unknown): value is SettlementChainKe
   return value === '0g' || value === 'base';
 }
 
+const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+
 /**
- * The backend's answer laid over the table. A chain the table does not know
- * is ignored (this build cannot pay on it); a table chain the backend omits
+ * A backend `chains[]` entry this build can take: a chain it knows, ON THE
+ * SAME NETWORK (chain id) as the build, with a well-formed token. Anything
+ * else is ignored, never trusted:
+ * - a different chain id for the same key means another network tier — a
+ *   testnet build pointed at a Base-mainnet backend would otherwise approve
+ *   the mainnet escrow and relay createTask on base-mainnet from the user's
+ *   wallet with no wallet prompt (the same rule constants.ts isCctpUsable
+ *   states for bridging);
+ * - a malformed entry (null token, non-numeric decimals) used to throw inside
+ *   the SettlementProvider's effect, above the ErrorBoundary, and blank the
+ *   whole app.
+ */
+function usableEntry(entry: unknown, defaults: SettlementSnapshot): entry is BackendSettlementChain & { chain: SettlementChainKey } {
+  if (!entry || typeof entry !== 'object') return false;
+  const e = entry as Partial<BackendSettlementChain>;
+  if (!isSettlementChainKey(e.chain)) return false;
+  if (e.chainId !== defaults.chains[e.chain].chainId) return false;
+  if (e.tier !== 'mainnet' && e.tier !== 'testnet') return false;
+  if (e.escrowAddress !== null && e.escrowAddress !== undefined && !ADDRESS_RE.test(e.escrowAddress)) return false;
+  const t = e.token;
+  if (!t || typeof t !== 'object') return false;
+  if (t.kind !== 'native' && t.kind !== 'erc20') return false;
+  if (t.address !== null && t.address !== undefined && !ADDRESS_RE.test(t.address)) return false;
+  if (typeof t.symbol !== 'string' || t.symbol === '') return false;
+  if (t.decimals !== 6 && t.decimals !== 18) return false;
+  if (e.relayChain !== null && e.relayChain !== undefined && typeof e.relayChain !== 'string') return false;
+  return true;
+}
+
+/**
+ * The backend's answer laid over the table. Entries usableEntry() rejects are
+ * ignored (this build cannot pay on them); a table chain the backend omits
  * keeps its defaults. `postingChain` is taken only when it names a chain this
  * app has an escrow and token for after the merge — otherwise the table's
- * rule stands, as it did before.
+ * rule stands, as it did before. Never throws: a bad answer leaves the
+ * defaults in place.
  */
 export function mergeSettlement(defaults: SettlementSnapshot, backend: BackendSettlement): SettlementSnapshot {
   const chains = { ...defaults.chains };
-  for (const entry of backend.chains ?? []) {
-    if (!isSettlementChainKey(entry.chain)) continue;
+  const entries = Array.isArray(backend?.chains) ? backend.chains : [];
+  for (const entry of entries) {
+    if (!usableEntry(entry, defaults)) continue;
     const prev = chains[entry.chain];
     chains[entry.chain] = {
       ...prev,
-      chainId: entry.chainId,
       tier: entry.tier,
-      // The explorer follows the chain id, not the backend (it sends none).
-      explorer: prev.chainId === entry.chainId ? prev.explorer : explorerFor(entry.chain, entry.chainId),
       escrow: entry.escrowAddress ?? '',
       token: {
         kind: entry.token.kind,
         address: entry.token.address ?? '',
         unit: { symbol: entry.token.symbol, decimals: entry.token.decimals },
       },
-      relayChain: entry.relayChain,
+      relayChain: entry.relayChain ?? null,
     };
   }
-  const named = backend.postingChain;
+  const named = backend?.postingChain;
   const posting =
     isSettlementChainKey(named) && chains[named].escrow && chains[named].token.address
       ? named
       : defaults.postingChain;
   return { postingChain: posting, chains, source: 'backend' };
-}
-
-function explorerFor(key: SettlementChainKey, chainId: number): string {
-  if (key === 'base') return chainId === 8453 ? 'https://basescan.org' : 'https://sepolia.basescan.org';
-  return chainId === 16661 ? 'https://chainscan.0g.ai' : 'https://chainscan-galileo.0g.ai';
 }
 
 // ── The snapshot ────────────────────────────────────────────────────────────
