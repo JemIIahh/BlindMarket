@@ -20,7 +20,15 @@
 
 export const STAGING_MANIFEST_DIR = ".openzeppelin/staging";
 
-export const GUARD_VARS = ["DEPLOYMENT_SET", "EXPECTED_ESCROW", "ALLOW_ESCROW_REPLACE", "MANIFEST_DEFAULT_DIR"] as const;
+// I_HAVE_READ_MAINNET_CHECKLIST is here too: it gates real money (_guard.ts),
+// and a `yes` left in contracts/.env would satisfy it for every later run.
+export const GUARD_VARS = [
+  "DEPLOYMENT_SET",
+  "EXPECTED_ESCROW",
+  "ALLOW_ESCROW_REPLACE",
+  "MANIFEST_DEFAULT_DIR",
+  "I_HAVE_READ_MAINNET_CHECKLIST",
+] as const;
 
 if ((process.env.DEPLOYMENT_SET ?? "").trim() === "staging" && process.env.MANIFEST_DEFAULT_DIR === undefined) {
   process.env.MANIFEST_DEFAULT_DIR = STAGING_MANIFEST_DIR;

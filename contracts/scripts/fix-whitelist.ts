@@ -22,6 +22,7 @@
 
 import { ethers, network } from "hardhat";
 import { isLiveAddress, readRecord, recordPath, resolveDeploymentSet, assertExpectedEscrow, type DeploymentSet } from "./_deployments";
+import { assertSafeNetwork } from "./_guard";
 
 /** 0G chain ids. This script whitelists the NATIVE token (address(0)), which
  *  on 0G is 0G itself. On Base, address(0) is ETH — whitelisting it on a USDC
@@ -69,6 +70,8 @@ async function resolveEscrowAddress(chainId: number, set: DeploymentSet): Promis
 }
 
 async function main() {
+  // allowToken(address(0)) on a mainnet escrow is real money: same ack as a deploy.
+  await assertSafeNetwork();
   const chainId = Number((await ethers.provider.getNetwork()).chainId);
   if (!OG_CHAIN_IDS.has(chainId)) {
     throw new Error(

@@ -226,9 +226,9 @@ export async function resolveEscrowTarget(
 /**
  * Pre-flight for deploy scripts, run BEFORE any contract is deployed. Prints
  * the target and, when `deploysEscrow`, refuses to replace a live BlindEscrow
- * unless ALLOW_ESCROW_REPLACE=true (plus EXPECTED_ESCROW naming it on a shared
- * chain), and refuses a FIRST default escrow on a shared chain unless
- * DEPLOYMENT_SET=default is passed explicitly. Scripts that deploy companions (AgentFactory, AA) instead require
+ * unless ALLOW_ESCROW_REPLACE=true AND EXPECTED_ESCROW names it, and refuses
+ * a FIRST default escrow on a shared chain unless DEPLOYMENT_SET=default is
+ * passed explicitly. Scripts that deploy companions (AgentFactory, AA) instead require
  * EXPECTED_ESCROW on a shared chain: it names the stack they belong to.
  */
 export function preflightDeploy(
@@ -265,8 +265,14 @@ export function preflightDeploy(
       const hint = set === "default" ? "To stand up a separate stack use DEPLOYMENT_SET=staging; to" : "To";
       throw new Error(
         `${file} already holds BlindEscrow ${escrow} (set "${set}"). Refusing to deploy a replacement. ` +
-          `${hint} really replace it set ALLOW_ESCROW_REPLACE=true.`,
+          `${hint} really replace it set ALLOW_ESCROW_REPLACE=true and EXPECTED_ESCROW=${escrow}.`,
       );
+    }
+    // Replacing an escrow always names the one being replaced, shared chain
+    // or not: a lingering exported ALLOW_ESCROW_REPLACE=true must not be
+    // enough on its own.
+    if (!(env.EXPECTED_ESCROW ?? "").trim()) {
+      throw new Error(`ALLOW_ESCROW_REPLACE=true also needs EXPECTED_ESCROW=${escrow}, the escrow being replaced.`);
     }
     assertExpectedEscrow(t, env);
   }

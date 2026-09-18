@@ -13,7 +13,9 @@ import {
   settlementChainFor,
   settlementTokenFor,
 } from "../scripts/_settlement";
-import { ALLOWED_TESTNETS } from "../scripts/_guard";
+import { ALLOWED_TESTNETS, assertZeroGChain } from "../scripts/_guard";
+import { assertGuardVarsNotFromDotenv, GUARD_VARS } from "../scripts/_manifest-dir";
+import { execFileSync } from "child_process";
 import { DEPLOY_FILES, DEPLOYMENTS_ROOT, preflightDeploy, readRecord, writeDeployment } from "../scripts/_deployments";
 import {
   assertEscrowAllowlist,
@@ -372,17 +374,17 @@ describe("Arc settlement tooling", function () {
     describe("settlementRecord", function () {
       const escrow = { address: ESCROW_X, block: 1234 };
 
-      it("records Arc under its file's name, with the ERC-20 and the block", function () {
-        const rec = settlementRecord(settlementChainFor(ARC_TESTNET_CHAIN_ID), deployer.address, escrow, "t");
+      it("records Arc under the name it is given, with the ERC-20 and the block", function () {
+        const rec = settlementRecord(settlementChainFor(ARC_TESTNET_CHAIN_ID), deployer.address, escrow, "t", "arc-testnet");
         expect(rec).to.deep.include({ network: "arc-testnet", chainId: ARC_TESTNET_CHAIN_ID, deployer: deployer.address, timestamp: "t" });
         expect(rec.contracts).to.deep.equal({ BlindEscrow: ESCROW_X, USDC: ARC_USDC });
         expect(rec.blocks).to.deep.equal({ BlindEscrow: 1234 });
         expect(rec.note).to.match(/address\(0\).*never be allowlisted/);
-        expect(settlementRecord(settlementChainFor(ARC_MAINNET_CHAIN_ID), deployer.address, escrow, "t").network).to.equal("arc-mainnet");
+        expect(settlementRecord(settlementChainFor(ARC_MAINNET_CHAIN_ID), deployer.address, escrow, "t", "arc-mainnet").network).to.equal("arc-mainnet");
       });
 
       it("records Base exactly as deploy-base.ts did", function () {
-        const rec = settlementRecord(settlementChainFor(84532), deployer.address, escrow, "t");
+        const rec = settlementRecord(settlementChainFor(84532), deployer.address, escrow, "t", "base-sepolia");
         expect(rec).to.deep.equal({
           network: "base-sepolia",
           chainId: 84532,
@@ -392,7 +394,7 @@ describe("Arc settlement tooling", function () {
           contracts: { BlindEscrow: ESCROW_X, USDC: BASE_SEPOLIA_USDC },
           blocks: { BlindEscrow: 1234 },
         });
-        expect(settlementRecord(settlementChainFor(8453), deployer.address, escrow, "t").network).to.equal("base-mainnet");
+        expect(settlementRecord(settlementChainFor(8453), deployer.address, escrow, "t", "base-mainnet").network).to.equal("base-mainnet");
       });
 
       it("merges into an existing record instead of replacing it", function () {
@@ -403,7 +405,7 @@ describe("Arc settlement tooling", function () {
             p,
             JSON.stringify({ network: "arc-testnet", chainId: ARC_TESTNET_CHAIN_ID, note: "hand note", contracts: { Other: ESCROW_X }, blocks: { Other: 7 } }),
           );
-          writeDeployment(p, settlementRecord(settlementChainFor(ARC_TESTNET_CHAIN_ID), deployer.address, { address: deployer.address, block: 9 }, "t"), {});
+          writeDeployment(p, settlementRecord(settlementChainFor(ARC_TESTNET_CHAIN_ID), deployer.address, { address: deployer.address, block: 9 }, "t", "arc-testnet"), {});
           const rec = readRecord(p)!;
           expect(rec.contracts).to.deep.equal({ Other: ESCROW_X, BlindEscrow: deployer.address, USDC: ARC_USDC });
           expect(rec.blocks).to.deep.equal({ Other: 7, BlindEscrow: 9 });
@@ -536,5 +538,48 @@ describe("Arc settlement tooling", function () {
       fs.rmSync(path.join(dir, "base-sepolia.json"));
       expect(() => render(dir)).to.throw(/Deployment record not found/);
     });
+  });
+});
+
+describe("0G-only scripts (scripts/_guard assertZeroGChain)", function () {
+  it("refuses Base and Arc, allows 0G and local chains", function () {
+    for (const id of [8453, 84532, ARC_TESTNET_CHAIN_ID, ARC_MAINNET_CHAIN_ID]) {
+      expect(() => assertZeroGChain(id, "redeploy-inft.ts"), String(id)).to.throw(/redeploy-inft\.ts deploys to 0G only/);
+    }
+    for (const id of [16661, 16602, 31337, 1337]) expect(() => assertZeroGChain(id, "x")).to.not.throw();
+  });
+});
+
+describe("the mainnet acknowledgement is a guarded variable", function () {
+  it("is in GUARD_VARS, so contracts/.env cannot supply it", function () {
+    expect(GUARD_VARS).to.include("I_HAVE_READ_MAINNET_CHECKLIST");
+    expect(() => assertGuardVarsNotFromDotenv({ ...process.env, I_HAVE_READ_MAINNET_CHECKLIST: "yes" })).to.throw(
+      /I_HAVE_READ_MAINNET_CHECKLIST came from contracts\/\.env/,
+    );
+  });
+
+  it("is no longer in .env.example", function () {
+    const example = fs.readFileSync(path.resolve(__dirname, "../.env.example"), "utf-8");
+    expect(example).to.not.match(/^I_HAVE_READ_MAINNET_CHECKLIST=/m);
+  });
+});
+
+describe("DEPLOYMENT_SET=staging picks the staging manifest directory (scripts/_manifest-dir)", function () {
+  // The module only sets the directory when the variable is ABSENT.
+  const withoutManifestDir = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== "MANIFEST_DEFAULT_DIR"));
+  it("sets MANIFEST_DEFAULT_DIR before anything else loads", function () {
+    // A fresh process: the module sets process.env at import time.
+    const out = execFileSync(
+      process.execPath,
+      ["-r", "ts-node/register/transpile-only", "-e", "require('./scripts/_manifest-dir'); process.stdout.write(String(process.env.MANIFEST_DEFAULT_DIR))"],
+      { cwd: path.resolve(__dirname, ".."), env: { ...withoutManifestDir(), DEPLOYMENT_SET: "staging" }, encoding: "utf-8" },
+    );
+    expect(out).to.equal(STAGING_MANIFEST_DIR);
+    const unset = execFileSync(
+      process.execPath,
+      ["-r", "ts-node/register/transpile-only", "-e", "require('./scripts/_manifest-dir'); process.stdout.write(String(process.env.MANIFEST_DEFAULT_DIR))"],
+      { cwd: path.resolve(__dirname, ".."), env: { ...withoutManifestDir(), DEPLOYMENT_SET: "" }, encoding: "utf-8" },
+    );
+    expect(unset).to.equal("undefined");
   });
 });

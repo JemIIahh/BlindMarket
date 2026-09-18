@@ -4,7 +4,7 @@
  * Read-only. Reads the live BlindEscrow config (admin, verifier, treasury,
  * feeBps, paused) and the native-token allowlist, and — if the corresponding
  * EXPECTED_* env vars are provided — asserts each matches, exiting non-zero on
- * any mismatch so it can gate a release. Network-aware (0g-testnet / 0g-mainnet).
+ * any mismatch so it can gate a release. Runs on any network with a record.
  *
  * On a chain that settles in a USDC ERC-20 (Base, Arc; see _settlement.ts) it
  * also enforces, with no EXPECTED_* needed: the escrow allows that token, the

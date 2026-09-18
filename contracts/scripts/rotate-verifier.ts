@@ -15,9 +15,9 @@
  *
  * Pre-requisites:
  *   - PRIVATE_KEY in contracts/.env is the current admin (BlindEscrow.admin())
- *   - The new address has been funded with 0G so it can later send
- *     transactions; setVerifier itself is paid by the admin, not the new
- *     verifier.
+ *   - The new address has been funded with the chain's gas coin (0G, ETH on
+ *     Base, USDC on Arc) so it can later send transactions; setVerifier
+ *     itself is paid by the admin, not the new verifier.
  */
 
 import { ethers } from "hardhat";

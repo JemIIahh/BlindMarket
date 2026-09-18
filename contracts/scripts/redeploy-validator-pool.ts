@@ -30,13 +30,14 @@
 
 import { ethers } from "hardhat";
 import * as fs from "fs";
-import { assertSafeNetwork } from "./_guard";
+import { assertSafeNetwork, assertZeroGChain } from "./_guard";
 import { resolveEscrowTarget } from "./_deployments";
 
 const LOCAL_OR_TESTNET = new Set<number>([16602, 31337, 1337, 11155111]);
 
 async function main() {
   await assertSafeNetwork();
+  assertZeroGChain(Number((await ethers.provider.getNetwork()).chainId), "redeploy-validator-pool.ts");
 
   const { file: depPath, record: dep } = await resolveEscrowTarget({ sends: true });
   const contracts = dep.contracts;

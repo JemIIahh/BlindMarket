@@ -107,6 +107,11 @@ export function settlementTokenFor(chainId: number): string {
   return assertNotNative(settlementChainFor(chainId).token);
 }
 
+/** The native gas coin's symbol, for balance messages: ETH on Base, USDC on Arc, 0G elsewhere. */
+export function gasSymbolFor(chainId: number): string {
+  return SETTLEMENT_CHAINS[chainId]?.gasSymbol ?? "0G";
+}
+
 /** Throws on a chain that must not get ERC-4337 infrastructure (Arc). */
 export function assertAaChain(chainId: number): void {
   const chain = SETTLEMENT_CHAINS[chainId];

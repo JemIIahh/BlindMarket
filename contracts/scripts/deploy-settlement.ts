@@ -25,14 +25,9 @@
  */
 import { ethers, network, upgrades } from "hardhat";
 import { assertSafeNetwork } from "./_guard";
-import { deployBlock, deploymentFileFor, preflightDeploy, writeDeployment, type RecordUpdate } from "./_deployments";
-import {
-  assertNotNative,
-  SETTLEMENT_CHAINS,
-  settlementChainFor,
-  settlementTokenFor,
-  type SettlementChain,
-} from "./_settlement";
+import * as path from "path";
+import { deployBlock, preflightDeploy, writeDeployment, type RecordUpdate } from "./_deployments";
+import { assertNotNative, SETTLEMENT_CHAINS, type SettlementChain } from "./_settlement";
 
 const ERC20_ABI = ["function decimals() view returns (uint8)", "function symbol() view returns (string)"];
 
@@ -171,15 +166,16 @@ const NOTES = {
     "must never be allowlisted. No account-abstraction contracts on Arc. Verifier must be rotated to marketplace signer.",
 };
 
-/** The record update for a settlement deploy. The record's `network` is its file name. */
+/** The record update for a settlement deploy. `network` is the record's own file name (e.g. "arc-testnet"). */
 export function settlementRecord(
   chain: SettlementChain,
   deployer: string,
   escrow: DeployedEscrow,
   timestamp: string,
+  network: string,
 ): RecordUpdate {
   return {
-    network: deploymentFileFor(chain.chainId).replace(/\.json$/, ""),
+    network,
     chainId: chain.chainId,
     deployer,
     timestamp,
@@ -189,11 +185,33 @@ export function settlementRecord(
   };
 }
 
+/** The steps runSettlementDeploy wires together; tests inject a token table and record paths. */
+export interface SettlementDeploySteps {
+  table: Readonly<Record<number, SettlementChain>>;
+  preflight: typeof preflightDeploy;
+  checkToken: typeof checkSettlementToken;
+  deploy: typeof deployEscrow;
+  write: typeof writeDeployment;
+}
+
+const DEFAULT_STEPS: SettlementDeploySteps = {
+  table: SETTLEMENT_CHAINS,
+  preflight: preflightDeploy,
+  checkToken: checkSettlementToken,
+  deploy: deployEscrow,
+  write: writeDeployment,
+};
+
 /**
  * The whole deploy. `only` restricts it to some chain ids (deploy-base.ts
- * passes Base's).
+ * passes Base's). The order is the point: the token is checked and the
+ * record's guards run BEFORE the first transaction, and the record is
+ * written only after the allowlist check passed.
  */
-export async function runSettlementDeploy(opts: { only?: readonly number[]; script?: string } = {}): Promise<void> {
+export async function runSettlementDeploy(
+  opts: { only?: readonly number[]; script?: string; steps?: Partial<SettlementDeploySteps> } = {},
+): Promise<void> {
+  const steps: SettlementDeploySteps = { ...DEFAULT_STEPS, ...(opts.steps ?? {}) };
   await assertSafeNetwork();
   const chainId = Number((await ethers.provider.getNetwork()).chainId);
   if (opts.only && !opts.only.includes(chainId)) {
@@ -202,8 +220,14 @@ export async function runSettlementDeploy(opts: { only?: readonly number[]; scri
         "Use scripts/deploy-settlement.ts.",
     );
   }
-  const chain = settlementChainFor(chainId);
-  const token = settlementTokenFor(chainId);
+  const chain = steps.table[chainId];
+  if (!chain) {
+    throw new Error(
+      `chainId ${chainId} has no settlement token (known: ${Object.keys(steps.table).join(", ")}). ` +
+        "0G settles in its native coin through deploy-testnet.ts / deploy-mainnet.ts.",
+    );
+  }
+  const token = assertNotNative(chain.token);
 
   const [deployer] = await ethers.getSigners();
   console.log("Deployer:", deployer.address);
@@ -215,18 +239,18 @@ export async function runSettlementDeploy(opts: { only?: readonly number[]; scri
   }
   console.log("Chain:", chain.label, `(chainId: ${chainId}, hardhat network: ${network.name})`);
   console.log("Settlement token:", token);
-  await checkSettlementToken(token);
+  await steps.checkToken(token);
   console.log("Settlement token checked: 6 decimals, symbol USDC.");
 
-  const target = preflightDeploy({ chainId, deploysEscrow: true });
+  const target = steps.preflight({ chainId, deploysEscrow: true });
 
   console.log("\n--- Deploying BlindEscrow ---");
-  const escrow = await deployEscrow(token, deployer);
+  const escrow = await steps.deploy(token, deployer);
   console.log(`Allowlisted ${token}; address(0) is not allowlisted.`);
 
-  const deployment = writeDeployment(
+  const deployment = steps.write(
     target.file,
-    settlementRecord(chain, deployer.address, escrow, new Date().toISOString()),
+    settlementRecord(chain, deployer.address, escrow, new Date().toISOString(), path.basename(target.file, ".json")),
   );
   console.log("\nDeployment saved to:", target.file, `(set ${target.set})`);
 

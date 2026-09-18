@@ -282,9 +282,33 @@ describe("deployment sets (scripts/_deployments)", function () {
       expect(t.escrow).to.equal(PROD_BASE_ESCROW);
     });
 
-    it("only accepts the exact string 'true' for ALLOW_ESCROW_REPLACE", async function () {
+    it("only accepts the exact string 'true' for ALLOW_ESCROW_REPLACE, and always with EXPECTED_ESCROW", async function () {
       await rejects(() => preflightDeploy({ chainId: OG_MAINNET, deploysEscrow: true }, { ALLOW_ESCROW_REPLACE: "1" }), /already holds/);
-      await quiet(() => preflightDeploy({ chainId: OG_MAINNET, deploysEscrow: true }, { ALLOW_ESCROW_REPLACE: "true" }));
+      // Not a shared chain, but replacing still names the escrow replaced.
+      await rejects(() => preflightDeploy({ chainId: OG_MAINNET, deploysEscrow: true }, { ALLOW_ESCROW_REPLACE: "true" }), /also needs EXPECTED_ESCROW/);
+      await rejects(
+        () => preflightDeploy({ chainId: OG_MAINNET, deploysEscrow: true }, { ALLOW_ESCROW_REPLACE: "true", EXPECTED_ESCROW: OTHER }),
+        /Refusing/,
+      );
+      await quiet(() =>
+        preflightDeploy({ chainId: OG_MAINNET, deploysEscrow: true }, { ALLOW_ESCROW_REPLACE: "true", EXPECTED_ESCROW: PROD_OG_MAINNET_ESCROW }),
+      );
+    });
+
+    it("refuses a record whose chainId is not the connected chain", async function () {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bm-preflight-"));
+      // The default set's file for 16602 is 0g-testnet.json; a record naming
+      // another chain there is a copy-paste error preflight must catch.
+      const orig = readRecord(recordPath(OG_TESTNET, "default"))!;
+      const p = recordPath(OG_TESTNET, "default");
+      const backup = fs.readFileSync(p, "utf-8");
+      try {
+        fs.writeFileSync(p, JSON.stringify({ ...orig, chainId: OG_MAINNET }, null, 2));
+        await rejects(() => preflightDeploy({ chainId: OG_TESTNET, deploysEscrow: false }, { EXPECTED_ESCROW: orig.contracts.BlindEscrow }), /records chainId 16661, but the connected chain is 16602/);
+      } finally {
+        fs.writeFileSync(p, backup);
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
     });
 
     it("requires companion deploys on a shared chain to name their stack's escrow", async function () {

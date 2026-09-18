@@ -42,7 +42,7 @@ async function main() {
   console.log("ETH Balance:", ethers.formatEther(balance), "ETH");
 
   if (balance === 0n) {
-    throw new Error("Deployer has 0 ETH balance. Fund with Base Sepolia ETH.");
+    throw new Error("Deployer has 0 ETH balance. Fund it with ETH on this Base network.");
   }
 
   console.log("Chain:", network.name, `(chainId: ${chainId})`);

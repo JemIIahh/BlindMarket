@@ -28,6 +28,7 @@
  *   PRIVATE_KEY=<admin_pk> npx hardhat run scripts/upgrade-blind-escrow.ts --network 0g-mainnet
  */
 
+import { gasSymbolFor } from "./_settlement";
 import { ethers, upgrades } from "hardhat";
 import * as fs from "fs";
 import * as path from "path";
@@ -67,8 +68,9 @@ async function main() {
     );
   }
   const balance = await ethers.provider.getBalance(signer.address);
-  console.log("Balance:", ethers.formatEther(balance), "0G");
-  if (balance === 0n) throw new Error("Upgrader has 0 balance. Fund it at https://faucet.0g.ai/");
+  const gas = gasSymbolFor(Number((await ethers.provider.getNetwork()).chainId));
+  console.log("Balance:", ethers.formatEther(balance), gas);
+  if (balance === 0n) throw new Error(`Upgrader has 0 ${gas}. Fund it${gas === "0G" ? " at https://faucet.0g.ai/" : ""}.`);
 
   const Factory = await ethers.getContractFactory("BlindEscrow");
 
