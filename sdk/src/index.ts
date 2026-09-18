@@ -250,7 +250,8 @@ export class BlindMarket {
    * for the owner address. So pass `privateKey` (or set
    * `BlindMarketConfig.executor`) — the OWNER wallet's key: its uncompressed
    * public key is registered, the key never leaves this process, and this
-   * throws if the backend registered a different address.
+   * throws 409 OWNER_MISMATCH — BEFORE registering anything — when the key is
+   * not the API key's owner (checked through `whoami()`).
    *
    * Without a key a random secp256k1 wallet is generated and its private key
    * returned **once** (store it securely). That wallet can decrypt briefs, but
@@ -286,13 +287,20 @@ export class BlindMarket {
       preferredCapabilities: params.preferredCapabilities,
       supportedChains: params.supportedChains,
     };
-    const result = await this.registerExecutor(executor);
     // Only when the caller supplied the key: they are claiming to be the owner.
-    if (privateKey && result.agent.address.toLowerCase() !== wallet.address.toLowerCase()) {
+    // Checked BEFORE /register, which upserts `publicKey` over the owner's
+    // record — a mismatch found afterwards has already redirected every new
+    // brief to a key whose wallet cannot sign submitEvidence.
+    const ownerChecked = privateKey ? await this.assertOwnerKey(wallet.address) : false;
+    const result = await this.registerExecutor(executor);
+    // Backends without /api-keys/whoami could not be checked up front.
+    if (privateKey && !ownerChecked && result.agent.address.toLowerCase() !== wallet.address.toLowerCase()) {
       throw new ApiError(
         409,
         `Registered executor is ${result.agent.address} (the API key's owner) but privateKey belongs to ${wallet.address}. ` +
-        'Briefs are now wrapped to a key whose wallet cannot sign submitEvidence — re-run with the owner wallet\'s key, or mint an API key signed in as this wallet.',
+        'This backend has no /api-keys/whoami, so the mismatch could only be seen after registering: briefs are now wrapped to a key whose wallet cannot sign submitEvidence — re-run with the owner wallet\'s key, or mint an API key signed in as this wallet.',
+        undefined,
+        'OWNER_MISMATCH',
       );
     }
     return {
@@ -303,6 +311,40 @@ export class BlindMarket {
         privateKey: wallet.privateKey,
       },
     };
+  }
+
+  /**
+   * The wallet this API key authenticates as (`GET /api/v1/api-keys/whoami`).
+   * /a2a/register and /accept act for `address`. A legacy shared
+   * AGENT_API_KEY resolves to the non-wallet principal `"agent"`.
+   */
+  async whoami(): Promise<{ address: string; addresses?: string[] }> {
+    return this.req('GET', '/api/v1/api-keys/whoami');
+  }
+
+  /**
+   * Throws 409 OWNER_MISMATCH, without side effects, when `address` is not
+   * the API key's owner. Returns false only when the backend has no whoami
+   * route (404 / a non-JSON 404 page) and nothing could be checked.
+   */
+  private async assertOwnerKey(address: string): Promise<boolean> {
+    let owner: string;
+    try {
+      owner = (await this.whoami()).address;
+    } catch (err) {
+      if (err instanceof SyntaxError || (err instanceof ApiError && err.status === 404)) return false;
+      throw err;
+    }
+    if (typeof owner !== 'string' || owner.toLowerCase() !== address.toLowerCase()) {
+      throw new ApiError(
+        409,
+        `This API key belongs to ${owner} but privateKey belongs to ${address}. Nothing was registered. ` +
+        "The executor is always the API key's owner, and only that wallet can sign submitEvidence — use the owner wallet's key, or mint an API key signed in as this wallet.",
+        undefined,
+        'OWNER_MISMATCH',
+      );
+    }
+    return true;
   }
 
   /** List deployed agents, optionally filtered by owner address. */

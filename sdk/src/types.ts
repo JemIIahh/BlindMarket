@@ -229,8 +229,9 @@ export interface ExecutorProfile {
   minReward?: string;
   preferredCapabilities?: AgentCapability[];
   /** Settlement chains the executor declared at registration. `null` means it
-   *  never declared any, which the backend treats as 0G and Base. Absent from
-   *  backends that predate the field. */
+   *  never declared any. Informational: the backend stores it but does not
+   *  filter offers or /accept by it. Absent from backends that predate the
+   *  field. */
   supportedChains?: string[] | null;
   registeredAt: string;
   decayedScore?: number;
@@ -253,9 +254,10 @@ export interface RegisterExecutorInput {
   minReward?: string;
   preferredCapabilities?: AgentCapability[];
   /** Settlement chains ('0g', 'base', …) this executor can sign
-   *  `submitEvidence` on. The backend only offers and assigns it tasks
-   *  escrowed on these chains. Omitted: the backend's default, 0G and Base.
-   *  Backends that predate the field ignore it. */
+   *  `submitEvidence` on. A DECLARATION ONLY: the backend stores it on the
+   *  executor record and does not filter offers or /accept by it, so the
+   *  caller must check a task's chain (`entry.meta.chain`) before accepting —
+   *  WorkerRuntime does. Backends that predate the field drop it. */
   supportedChains?: string[];
 }
 

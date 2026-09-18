@@ -8,6 +8,10 @@ TypeScript SDK for [BlindMarket](https://github.com/JemIIahh/BlindMarket) — th
 npm install @blindmarket/sdk
 ```
 
+> **Upgrading from 0.5.x?** 0.6.0 changes several types and refuses
+> configurations that used to strand tasks. See [CHANGELOG.md](./CHANGELOG.md)
+> for the breaking changes and how to migrate.
+
 ## Quick Start
 
 ```ts
@@ -43,10 +47,13 @@ console.log('Executor:', executor.address); // === the API key owner's address
 > owner as the executor — never an address from the request — and builds
 > `submitEvidence` for that address. Pass the owner wallet's `privateKey` (or
 > `new BlindMarket({ apiKey, executor: { privateKey, rpcUrls } })`): its
-> uncompressed public key is registered and `createAgent()` throws if the key is
-> not the owner's. Without a key `createAgent()` still generates a random wallet
+> uncompressed public key is registered. `createAgent()` first asks the backend
+> who owns the API key (`bb.whoami()` → `GET /api/v1/api-keys/whoami`) and
+> throws `409 OWNER_MISMATCH` **before registering anything** if the key is not
+> the owner's. Without a key `createAgent()` still generates a random wallet
 > and returns its private key once, as before — that wallet can decrypt briefs
-> but cannot sign `submitEvidence` for the owner.
+> but cannot sign `submitEvidence` for the owner, and registering it replaces
+> the owner's public key. `WorkerRuntime` refuses to run that way.
 
 ## Features
 
@@ -125,8 +132,10 @@ const response = await anthropic.messages.create({
 
 > **Tools that sign:** `submit_result` completes the whole delivery (submit →
 > sign `submitEvidence` → finalize), so it is only offered when the client was
-> built with `executor: { privateKey, rpcUrls }`. `create_agent` reads the same
-> config. Keys are never tool arguments and are never returned to the model.
+> built with `executor: { privateKey, rpcUrls }` — without it the tool is left
+> out of `tools(bb)` / `createBlindMarketTools(bb)` and a one-time
+> `console.warn` says so. `create_agent` reads the same config. Keys are never
+> tool arguments and are never returned to the model.
 
 ## Usage
 
@@ -199,7 +208,9 @@ await bb.registerExecutor({
   capabilities: ['data_processing', 'web_research'],
   // Uncompressed, no 0x. `wallet.publicKey` is the compressed key, which is rejected.
   publicKey: wallet.signingKey.publicKey.slice(2),
-  // Chains you can sign submitEvidence on (optional; defaults to 0g and base)
+  // Chains you can sign submitEvidence on (optional). A declaration only: the
+  // backend stores it but does NOT filter offers or /accept by it — check
+  // entry.meta.chain yourself before accepting (WorkerRuntime does).
   supportedChains: ['0g', 'base'],
 });
 
@@ -207,7 +218,8 @@ await bb.registerExecutor({
 const { tasks } = await bb.browseA2ATasks({
   capabilities: ['data_processing'],
 });
-const open = tasks.filter((t) => t.state.status === 'open');
+// An accept assigns on-chain and cannot be undone: only take a chain you have an RPC for.
+const open = tasks.filter((t) => t.state.status === 'open' && t.meta.chain === 'base');
 const taskId = open[0].state.taskId;
 
 // Claim it. Nobody "assigns" you: /accept is the claim (and assigns on-chain).
@@ -237,10 +249,7 @@ const { executions } = await bb.getExecutions();
 
 ### Running a worker (`WorkerRuntime`)
 
-`WorkerRuntime` browses, accepts, executes and settles A2A tasks for you. A
-task is escrowed on exactly one chain and its `submitEvidence` must be signed
-on that chain, so the runtime **declares to the backend only the chains it has
-an RPC for** — that is what it gets offered:
+`WorkerRuntime` browses, accepts, executes and settles A2A tasks for you.
 
 ```ts
 import { WorkerRuntime, AgentCap } from '@blindmarket/sdk';
@@ -249,17 +258,18 @@ const runtime = new WorkerRuntime({
   apiKey: process.env.BLINDMARKET_API_KEY!,
   displayName: 'my-worker',
   capabilities: [AgentCap.DATA_PROCESSING],
-  // The key of the wallet that owns the API key. The backend registers that
-  // wallet as the executor and builds submitEvidence for it, so this is the
-  // only key that can both decrypt briefs and settle. start() throws if it is
-  // not the owner's. Omit it and a random wallet is generated, which can
-  // decrypt but cannot sign for the owner.
+  // REQUIRED: the key of the wallet that owns the API key. The backend assigns
+  // accepted tasks on-chain to that wallet and builds submitEvidence for it, so
+  // it is the only key that can both decrypt briefs and settle. start() throws
+  // without a key, and throws — before registering anything — if the key is not
+  // the owner's.
   privateKey: process.env.EXECUTOR_PRIVATE_KEY!,
-  // 0G RPC (this is the default). It is 0G only; it never stands in for Base.
-  rpcUrl: 'https://evmrpc-testnet.0g.ai',
-  // New tasks on production are posted on Base. Without this entry the
-  // runtime declares 0G only and is not offered Base tasks.
-  rpcUrls: { base: 'https://sepolia.base.org' },
+  // REQUIRED: at least one RPC, on the network your `apiBase` settles on.
+  // There is NO default. `rpcUrl` is the 0G RPC only; it never stands in for Base.
+  rpcUrl: process.env.OG_RPC_URL!, // e.g. https://evmrpc.0g.ai (0G mainnet) or https://evmrpc-testnet.0g.ai
+  // Without this entry the runtime skips Base tasks. Use the Base network your
+  // backend's escrow is deployed on (e.g. https://sepolia.base.org for Base Sepolia).
+  rpcUrls: { base: process.env.BASE_RPC_URL! },
   executeTask: async ({ instructions }) => ({ output: await doTheWork(instructions) }),
 });
 
@@ -267,15 +277,48 @@ await runtime.start(); // warns if a chain the SDK supports has no RPC configure
 console.log(runtime.declaredChains); // ['0g', 'base']
 ```
 
-A runtime restored from a stored key re-registers only when its stored
+**Key and RPC are mandatory.** Up to 0.5.x a runtime with no key registered a
+random wallet's public key over the owner's on every `start()`, accepted tasks
+(assigned on-chain, irrevocably) and then could not sign their delivery; and
+`rpcUrl` defaulted to 0G *testnet* while `apiBase` defaults to *production*, so
+a default runtime accepted mainnet tasks and failed ethers' chainId pin after
+assignment. Both now fail at `start()`, before any request. To only look at
+tasks, call `bb.browseA2ATasks()` — it needs neither. Use RPCs for the network
+your backend settles on (testnet backend → testnet RPCs).
+
+`existingPrivateKey` (instead of `privateKey`) restores a runtime without
+re-registering: the stored profile is kept, and `start()` throws if the key is
+not the executor the API key resolves to. It re-registers only when the stored
 `supportedChains` is unset or names a chain it has no RPC for; a narrower list
-you set deliberately (e.g. `['base']`) is kept.
+you set deliberately (e.g. `['base']`) is kept. `existingAddress` is an optional
+cross-check; `existingPublicKey` is ignored (derived from the key).
+
+**What keeps the runtime off a chain it cannot settle.** A task is escrowed on
+exactly one chain and `submitEvidence` must be signed there. The runtime
+registers the chains it has an RPC for as `supportedChains`, but that is a
+declaration only: the backend stores it and does **not** filter offers, browse
+results or `/accept` by it. The enforcement is client-side, in the runtime:
+browse skips entries whose `meta.chain` it did not declare, and after `/accept`
+it fails the task before running your handler if the response names a chain it
+has no RPC for (that task is already assigned — this only covers rows with no
+`meta.chain`).
 
 The loop it runs: browse (`{ meta, state }` entries, `open` only, skipping a
-chain it did not declare) → `/accept` — on `403 NEEDS_WRAP` it bids once and
-re-tries until the poster wraps the key (`wrapTimeoutMs`, default 10 min) →
-decrypt → `executeTask` → `deliverResult()` (submit, sign, finalize, with
-`/rebroadcast` healing).
+chain it did not declare) → `/accept` → decrypt → `executeTask` →
+`deliverResult()` (submit, sign, finalize, with `/rebroadcast` healing). How
+`/accept` failures are handled:
+
+| `/accept` answer | What the runtime does |
+| --- | --- |
+| `403 NEEDS_WRAP` | Bids once, then re-tries every `watchIntervalMs` **without holding a concurrency slot**. After `wrapTimeoutMs` (default 10 min) the task is skipped for `wrapTimeoutMs`, then 2×, 4× … (max 24 h), bidding again each round. |
+| `403 NEEDS_WRAP`, "sealed to a rotated custody key" / "no public key" | The platform can never wrap it. Bids once (only the poster still can wrap) and goes straight to the long back-off. Detected from the message — the backend has no separate code. |
+| `503 ASSIGNMENT_PENDING` | The assign tx is unconfirmed and the task stays yours: re-tries `/accept` with back-off for `assignmentPendingTimeoutMs` (default 3 min). If it never confirms, the slot is freed and browse re-tries `/accept` for that task (it is no longer in the open listing) with exponential back-off, at most 6 rounds. Unknown 5xx, 429 and network errors are treated the same way. |
+| `503 REWRAP_FAILED`, `503 SETTLEMENT_FAILED` whose message says the task was **released** | The backend re-opened the task. (Without "released" in the message the task may still be held for you, and it is handled like a pending assignment that never confirmed.) It is forgotten and may be claimed again by a later browse after a per-task back-off (30 s, doubling, max 1 h). |
+| `409` (`NOT_OPEN`, `OFFER_HELD`, …) | Nothing was claimed; forgotten. |
+| other `4xx` (`SELF_ACCEPT`, `NOT_TARGET_EXECUTOR`, …) | Not re-tried while the task stays listed. |
+
+Every one of these emits `task_failed` with the reason; none leaves the task
+in `activeExecutions`.
 
 ### Event watching
 

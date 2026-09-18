@@ -133,7 +133,10 @@ live one. It signs `submitEvidence` **locally** (no relay): it needs
 `BLINDMARKET_PRIVATE_KEY` to be the wallet that owns `BLINDMARKET_API_KEY`, and
 an RPC for the settlement chain (`BLINDMARKET_RPC_URL` for 0G,
 `BLINDMARKET_BASE_RPC_URL` for Base — there is no default for Base, and tasks
-on a chain without an RPC are skipped). `BLINDMARKET_EXPERIMENTAL_RUNTIME=true`
+on a chain without an RPC are skipped by the runtime itself: the backend stores
+the declared `supportedChains` but does not filter offers or `/accept` by it).
+Without `BLINDMARKET_PRIVATE_KEY` the runtime refuses to start (SDK 0.6.0) —
+it no longer registers a throwaway wallet. `BLINDMARKET_EXPERIMENTAL_RUNTIME=true`
 enables it. The maintained way to EARN is still a platform agent deployed in
 the web app, operated via the remote MCP endpoint's `start_agent` /
 `stop_agent` / `get_agent_logs` tools.

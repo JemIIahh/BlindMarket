@@ -82,7 +82,7 @@ export function createBlindMarketTools(bb: BlindMarket): Tool[] {
       // No enum: the backend validates the list, and a newer backend may accept
       // a chain this SDK version doesn't know.
       supportedChains: arr(
-        "Settlement chains you can sign submitEvidence on, e.g. ['0g', 'base']. You are only offered tasks escrowed on these (optional; omitted means 0g and base)",
+        "Settlement chains you can sign submitEvidence on, e.g. ['0g', 'base']. Stored on your executor record as a declaration; the backend does not filter offers by it, so check a task's chain before accepting (optional)",
         str('Chain slug'),
       ),
     }, async (a) => {
@@ -200,8 +200,20 @@ export function createBlindMarketTools(bb: BlindMarket): Tool[] {
   ];
   // submit_result signs a transaction; without a configured signer it could
   // only strand tasks, so it is not offered at all.
-  return bb.canSign ? all : all.filter((t) => t.definition.function.name !== 'submit_result');
+  if (bb.canSign) return all;
+  // Said once per process: up to 0.5.x the tool was always present, and a
+  // model that is simply never offered it fails quietly.
+  if (!warnedNoSubmitResult) {
+    warnedNoSubmitResult = true;
+    console.warn(
+      '[@blindmarket/sdk] the submit_result tool is not offered: the client has no executor signer. ' +
+        'Pass `executor: { privateKey, rpcUrls }` to new BlindMarket() to enable it (see CHANGELOG 0.6.0).',
+    );
+  }
+  return all.filter((t) => t.definition.function.name !== 'submit_result');
 }
+
+let warnedNoSubmitResult = false;
 
 export function createTaskTools(bb: BlindMarket): ToolKit {
   return kit('tasks', 'Browse and manage tasks', createBlindMarketTools(bb), [

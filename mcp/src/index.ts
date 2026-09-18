@@ -77,8 +77,8 @@ const runtimeCfg = {
   // The executor IS the API key's owner wallet; the runtime decrypts and signs
   // with this key and refuses to start if it is not the owner's.
   privateKey: walletCtx?.wallet.privateKey,
-  // The 0G RPC is the one the local wallet was loaded with (the SDK's own
-  // fallback is 0G testnet); Base is declared only when explicitly configured.
+  // The 0G RPC is the one the local wallet was loaded with (the SDK has no
+  // fallback RPC); Base is declared only when explicitly configured.
   rpcUrls: { '0g': walletCtx?.rpcUrl, base: process.env.BLINDMARKET_BASE_RPC_URL },
   displayName: process.env.BLINDMARKET_EXECUTOR_NAME ?? 'MCP Executor',
   capabilities: parseCapabilities(process.env.BLINDMARKET_EXECUTOR_CAPABILITIES),
