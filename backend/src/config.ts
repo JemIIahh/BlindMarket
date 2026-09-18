@@ -47,6 +47,22 @@ export function parseDeploymentSet(raw: string | undefined): '' | 'staging' {
   throw new Error(`DEPLOYMENT_SET="${value}" is not a deployment set. Use "default" (or leave it unset) or "staging".`);
 }
 
+/**
+ * DEPLOYMENT_ID names one running stack ("production", "staging-testnet") for
+ * the Redis ownership check in services/deploymentIdentity.ts. It is not
+ * DEPLOYMENT_SET, which picks contract address records. Unset, the check never
+ * claims a Redis and never stops this process. It is stored and logged
+ * verbatim, so anything but a short lowercase name fails at load.
+ */
+export function parseDeploymentId(raw: string | undefined): string | null {
+  const value = (raw ?? '').trim();
+  if (value === '') return null;
+  if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(value)) {
+    throw new Error(`DEPLOYMENT_ID="${value}" is not a deployment name: use lowercase letters, digits, ".", "_" or "-", at most 64 characters (e.g. "production", "staging-testnet").`);
+  }
+  return value;
+}
+
 /** Where a production backend says it lives, when PUBLIC_*_URL is unset. */
 export const PRODUCTION_PUBLIC_URLS = {
   PUBLIC_API_URL: 'https://api.blindmarket.xyz',
@@ -254,6 +270,7 @@ export const config = {
   // records, i.e. production). Only used to print ops commands that target the
   // right escrow — see contractsEnvPrefix in services/chainNetwork.ts.
   deploymentSet: parseDeploymentSet(process.env.DEPLOYMENT_SET),
+  deploymentId: parseDeploymentId(process.env.DEPLOYMENT_ID),
 
   // Forensic verification
   forensicMaxPhotoAgeMs: parseInt(optional('FORENSIC_MAX_PHOTO_AGE_MS', '1800000'), 10),  // 30 min

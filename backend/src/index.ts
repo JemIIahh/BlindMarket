@@ -47,6 +47,7 @@ import { startBaseEscrowEventLoop } from './services/baseEscrowEvents.js';
 import { startAgentFactoryListener } from './services/agentFactoryListener.js';
 import { startCctpAttestationPoller } from './services/cctpAttestationPoller.js';
 import { startExpirySweepLoop } from './services/a2aExpirySweep.js';
+import { checkDeploymentIdentity } from './services/deploymentIdentity.js';
 import { auditCustodySealedTasks } from './services/keyCustodyService.js';
 import { isBridgeReady } from './services/a2aSettlement.js';
 import { contractsEnvPrefix } from './services/chainNetwork.js';
@@ -161,20 +162,16 @@ const corsOptions = {
 const httpServer = createServer(app);
 initSocket(httpServer, corsOptions);
 
-httpServer.listen(config.port, () => {
-  console.log(`BlindMarket backend listening on port ${config.port} (${config.nodeEnv})`);
+/**
+ * The loops that write shared state (Redis indexes, task states, Postgres,
+ * on-chain mints) on their own schedule. A process whose DEPLOYMENT_ID says
+ * this Redis belongs to another deployment starts none of them; see
+ * services/deploymentIdentity.ts. HTTP routes are not affected.
+ */
+async function startBackgroundWriters(): Promise<void> {
+  const identity = await checkDeploymentIdentity();
+  if (!identity.writersAllowed) return;
 
-  // Semantic routing (Phase 2 flip) posture. Loud misconfig warning: flipping
-  // routing on while embeddings are mock/keyless would order cascade offers by
-  // deterministic hash vectors, not meaning (mechanically safe — tag/broadcast
-  // fallbacks still apply — but a nonsense canary).
-  if (config.semanticRoutingEnabled) {
-    if (!embeddingsConfigured()) {
-      console.warn('[semantic] SEMANTIC_ROUTING_ENABLED=true but embeddings are mock/keyless — offers would be ranked by hash vectors, NOT meaning. Set EMBEDDING_PROVIDER + EMBEDDING_API_KEY or turn the flag off.');
-    } else {
-      console.log(`[semantic] routing FLIPPED ON — cascade offers ranked by meaning (rerank=${config.rerankEnabled ? 'on' : 'off'}); capability tags are fallback-only`);
-    }
-  }
   // Start the BlindEscrow TaskCreated poller — populates the taskHash↔taskId
   // mapping that the A2A settlement bridge needs to call assignWorker /
   // completeVerification by on-chain id. Only where this stack has a 0G
@@ -199,10 +196,6 @@ httpServer.listen(config.port, () => {
   // of leaving them listed until some agent burns an /accept on them.
   startExpirySweepLoop();
 
-  // Tripwire for custody-key rotation/disable while custody-sealed tasks are
-  // still open (their late-joiner self-heal silently breaks). Loud log only.
-  void auditCustodySealedTasks();
-
   // Re-fork agents that were 'running' before this restart — the in-memory
   // process map doesn't survive a deploy/crash, so without this they show
   // 'running' in the UI but do no work and stop heartbeating. Off only if an
@@ -211,6 +204,29 @@ httpServer.listen(config.port, () => {
   if (process.env.AGENT_RECONCILE_ON_BOOT !== 'false') {
     void reconcileAgents();
   }
+}
+
+httpServer.listen(config.port, () => {
+  console.log(`BlindMarket backend listening on port ${config.port} (${config.nodeEnv})`);
+
+  // Semantic routing (Phase 2 flip) posture. Loud misconfig warning: flipping
+  // routing on while embeddings are mock/keyless would order cascade offers by
+  // deterministic hash vectors, not meaning (mechanically safe — tag/broadcast
+  // fallbacks still apply — but a nonsense canary).
+  if (config.semanticRoutingEnabled) {
+    if (!embeddingsConfigured()) {
+      console.warn('[semantic] SEMANTIC_ROUTING_ENABLED=true but embeddings are mock/keyless — offers would be ranked by hash vectors, NOT meaning. Set EMBEDDING_PROVIDER + EMBEDDING_API_KEY or turn the flag off.');
+    } else {
+      console.log(`[semantic] routing FLIPPED ON — cascade offers ranked by meaning (rerank=${config.rerankEnabled ? 'on' : 'off'}); capability tags are fallback-only`);
+    }
+  }
+  // Indexers, sweeps, the CCTP poller and agent reconcile write shared state,
+  // so they start only once this process knows the Redis is its deployment's.
+  void startBackgroundWriters();
+
+  // Tripwire for custody-key rotation/disable while custody-sealed tasks are
+  // still open (their late-joiner self-heal silently breaks). Loud log only.
+  void auditCustodySealedTasks();
   // Background reaper: every 60s, kill forked agents whose Redis heartbeat
   // expired (stale >90s). Catches SIGKILL'd workers the auto-restart handler
   // never saw. Always runs, even when reconcile is off.

@@ -222,6 +222,20 @@ This is the hot key the backend uses to call `marketplaceAssign` and
   key but talks to a testnet RPC (or vice versa) creates "wrong-chain"
   signed txs that leak the key's nonce sequence and waste gas.
 
+- [ ] **Flip to `SETTLEMENT_TIER=mainnet`** once every settlement chain the
+      backend uses (0G, Base, and Arc from Phase 2) is on mainnet. Production
+      runs mixed today (0G mainnet + Base Sepolia), so the tier is unset and
+      only warns. Set, it defaults every chain id to mainnet and refuses to
+      boot on any testnet id; `GET /health/bridge` must then report
+      `settlementTier: "mainnet"`, `tierSource: "SETTLEMENT_TIER"`.
+- [ ] **`DEPLOYMENT_ID=production` is set** on the production backend, and
+      `GET /health/bridge` reports `deploymentIdentity.role: "owner"` with
+      `owner: "production"`. Set it in the SAME deploy that first ships the
+      Arc settlement release (before any staging stack can reach production's
+      Redis): that boot claims production's Redis. A process on the same Redis
+      with another `DEPLOYMENT_ID` then runs none of its background writers.
+      See `backend/src/services/deploymentIdentity.ts`.
+
 ### 3.5 Rotate readiness
 
 - [ ] Document the rotation runbook: if the marketplace signer is suspected

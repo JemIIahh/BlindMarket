@@ -32,6 +32,8 @@ const { chain, cfg, ready, fingerprintErrors, parkedCounts } = vi.hoisted(() => 
 vi.mock('../services/chain.js', () => chain);
 vi.mock('../services/a2aSettlement.js', () => ({ isBridgeReady: (c: string) => ready[c] }));
 vi.mock('../services/redis.js', () => ({ redis: {}, redisSub: {} }));
+const identity = vi.hoisted(() => ({ current: null as Record<string, unknown> | null }));
+vi.mock('../services/deploymentIdentity.js', () => ({ deploymentIdentityStatus: () => identity.current }));
 vi.mock('../services/escrowFingerprint.js', () => ({
   escrowFingerprintError: (c: string) => fingerprintErrors[c] ?? null,
 }));
@@ -251,11 +253,30 @@ describe('GET /health/bridge rotate command per deployment set', () => {
 
 // The MCP reads the top-level 0G fields and `base`. These pin every one of
 // them, values and key order, so the per-chain additions can't move them.
+describe('GET /health/bridge deployment identity', () => {
+  it('is null where the boot check never ran (vercel.ts)', async () => {
+    identity.current = null;
+    expect((await bridge()).deploymentIdentity).toBeNull();
+  });
+
+  it('reports what the boot check found, including stopped writers', async () => {
+    identity.current = {
+      deploymentId: 'staging-testnet', role: 'not-owner', owner: 'production', writersAllowed: false,
+      reason: 'this Redis belongs to deployment "production"; this process is "staging-testnet"',
+    };
+    try {
+      expect((await bridge()).deploymentIdentity).toEqual(identity.current);
+    } finally {
+      identity.current = null;
+    }
+  });
+});
+
 describe('GET /health/bridge legacy keys', () => {
   const VERIFIER_BB = '0x00000000000000000000000000000000000000bb';
 
   /** Keys added after the MCP's contract; every other key is legacy. */
-  const ADDED_KEYS = ['chains', 'postingChain', 'postingChainError', 'settlementTier', 'tierSource'];
+  const ADDED_KEYS = ['chains', 'postingChain', 'postingChainError', 'settlementTier', 'tierSource', 'deploymentIdentity'];
 
   /** The body without those. */
   async function legacyBody() {

@@ -13,6 +13,7 @@ import {
 import { chainRuntime } from '../services/chainRuntime.js';
 import type { SettlementTier } from '../services/settlementTier.js';
 import { relayChainName } from '../services/relayChains.js';
+import { deploymentIdentityStatus } from '../services/deploymentIdentity.js';
 import { escrowFingerprintError } from '../services/escrowFingerprint.js';
 import { parkedDisputeCount } from '../services/disputeKeys.js';
 import { config } from '../config.js';
@@ -331,6 +332,10 @@ healthRouter.get('/bridge', async (_req, res, next) => {
         postingChain: posting,
         ...tierReport(entries, config.settlementTier),
         ...(postingChainError ? { postingChainError } : {}),
+        // Which deployment owns this Redis, as found at boot, and whether
+        // this process's background writers run; null where the boot check
+        // never ran (vercel.ts).
+        deploymentIdentity: deploymentIdentityStatus(),
       },
     };
     res.json(body);
