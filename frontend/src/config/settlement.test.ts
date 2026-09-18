@@ -210,6 +210,32 @@ describe('mergeSettlement', () => {
     expect(mergeSettlement(defaultSettlement(), { ...backendBasePosting, postingChain: null }).postingChain).toBe('base');
   });
 
+  it('never posts on a chain whose backend entry it rejected, even though the build has defaults for it', () => {
+    // A 0G-mainnet backend (16661) on this testnet build (16602), posting on 0G.
+    const otherNetwork: BackendSettlement = {
+      postingChain: '0g',
+      chains: [{ ...backendBasePosting.chains[0], chainId: 16661, tier: 'mainnet' }, backendBasePosting.chains[1]],
+    };
+    expect(mergeSettlement(defaultSettlement(), otherNetwork).postingChain).toBe('base');
+    const malformed = { postingChain: '0g', chains: [{ ...backendBasePosting.chains[0], token: null }, backendBasePosting.chains[1]] } as unknown as BackendSettlement;
+    expect(mergeSettlement(defaultSettlement(), malformed).postingChain).toBe('base');
+  });
+
+  it.each([
+    ['a tier that is not a tier', { tier: 'staging' }],
+    ['an escrow that is not an address', { escrowAddress: '0x1234' }],
+    ['a token address that is not an address', { token: { kind: 'erc20', address: 'usdc', symbol: 'USDC', decimals: 6 } }],
+    ['decimals other than 6 or 18', { token: { kind: 'erc20', address: BASE_USDC_ADDRESS, symbol: 'USDC', decimals: 8 } }],
+    ['a token kind it does not know', { token: { kind: 'nft', address: BASE_USDC_ADDRESS, symbol: 'USDC', decimals: 6 } }],
+    ['an empty symbol', { token: { kind: 'erc20', address: BASE_USDC_ADDRESS, symbol: '', decimals: 6 } }],
+    ['a relay name that is not a string', { relayChain: 5 }],
+  ])('rejects a base entry with %s, leaving the defaults', (_label, patch) => {
+    const backend = { postingChain: 'base', chains: [{ ...backendBasePosting.chains[1], escrowAddress: '0x4444444444444444444444444444444444444444', ...patch }] } as unknown as BackendSettlement;
+    const { source: _s, ...rest } = mergeSettlement(defaultSettlement(), backend);
+    const { source: _d, ...defaults } = defaultSettlement();
+    expect(rest).toEqual(defaults);
+  });
+
   it('ignores a chain this build does not know', () => {
     const withArc: BackendSettlement = {
       ...backendBasePosting,

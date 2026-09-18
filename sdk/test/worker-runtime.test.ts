@@ -379,8 +379,10 @@ describe('WorkerRuntime.start — supportedChains', () => {
   /** A runtime restored from a stored key. Its config differs from the stored
    *  profile on every field a restore must not overwrite, and its
    *  existingPublicKey doesn't match its private key. */
-  function restoredRuntime(): WorkerRuntime {
+  /** Both RPCs by default, so the runtime can settle (and declares) 0G and Base. */
+  function restoredRuntime(rpcUrls: Record<string, string> | undefined = { base: 'https://base.example/rpc' }): WorkerRuntime {
     return new WorkerRuntime({
+      rpcUrls,
       apiKey: 'test-key',
       displayName: 'config-name',
       capabilities: [AgentCap.DATA_PROCESSING],
@@ -412,7 +414,44 @@ describe('WorkerRuntime.start — supportedChains', () => {
     runtime = undefined;
   });
 
-  it('createAgent registers SETTLEMENT_CHAINS as supportedChains', async () => {
+  it('declares only the chains it has an RPC for: 0G by default, Base once rpcUrls.base is set', async () => {
+    const plain = new WorkerRuntime({ apiKey: 'k', displayName: 'a', capabilities: [AgentCap.DATA_PROCESSING], executeTask: async () => ({}) });
+    expect(plain.declaredChains).toEqual(['0g']);
+    const both = new WorkerRuntime({ apiKey: 'k', displayName: 'a', capabilities: [AgentCap.DATA_PROCESSING], executeTask: async () => ({}), rpcUrls: { base: 'https://base.example/rpc' } });
+    expect(both.declaredChains).toEqual(['0g', 'base']);
+    expect(both.declaredChains).toEqual([...SETTLEMENT_CHAINS]);
+  });
+
+  it('shrinks a stored declaration that names a chain it has no RPC for (it would accept and strand those tasks)', async () => {
+    const fetchMock = stubFetch({
+      '/a2a/profile': { agent: storedProfile(['0g', 'base']) },
+      '/a2a/register': { agent: storedProfile(['0g']) },
+      '/a2a/tasks': { tasks: [] },
+    });
+    runtime = restoredRuntime({});
+    const profile = await runtime.start();
+    const bodies = registerBodies(fetchMock);
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].supportedChains).toEqual(['0g']);
+    expect(profile.supportedChains).toEqual(['0g']);
+  });
+
+  it("keeps the operator's choice where it overlaps what the runtime can settle, instead of widening it", async () => {
+    // Stored ['base', 'arc']: 'arc' is unknown to this runtime, so it must
+    // re-register — as ['base'], not as everything it could settle.
+    const fetchMock = stubFetch({
+      '/a2a/profile': { agent: storedProfile(['base', 'arc']) },
+      '/a2a/register': { agent: storedProfile(['base']) },
+      '/a2a/tasks': { tasks: [] },
+    });
+    runtime = restoredRuntime();
+    await runtime.start();
+    const bodies = registerBodies(fetchMock);
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].supportedChains).toEqual(['base']);
+  });
+
+  it('createAgent registers the declared chains as supportedChains', async () => {
     const fetchMock = stubFetch({
       '/a2a/register': { agent: storedProfile(['0g', 'base']) },
       '/a2a/tasks': { tasks: [] },
@@ -422,6 +461,7 @@ describe('WorkerRuntime.start — supportedChains', () => {
       displayName: 'fresh-agent',
       capabilities: [AgentCap.DATA_PROCESSING],
       executeTask: async () => ({ done: true }),
+      rpcUrls: { base: 'https://base.example/rpc' },
     });
 
     await runtime.start();
@@ -510,7 +550,6 @@ describe('WorkerRuntime.start — supportedChains', () => {
     // An operator who registered a subset (through the MCP or PATCH) meant
     // it; re-registering on every start overwrote it.
     ['is a deliberate subset', ['base']],
-    ['is a superset this runtime does not know', ['0g', 'base', 'arc']],
     // A backend that predates the field: it would drop supportedChains, and
     // some versions reset the executor's 0G earnings on every register.
     ['absent from the response', undefined],

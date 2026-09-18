@@ -28,7 +28,7 @@ let ogProvider: JsonRpcProvider | null = null;
 export function relayedChainKey(chain?: string | null): SettlementChainKey {
   if (chain !== undefined && chain !== null) {
     if (!isSettlementChainKey(chain) || !relayChainFor(chain)) {
-      throw new RelayError('NO_RELAY', `Transactions on ${chain} are not relayed here. Connect a wallet on that chain to send it directly.`);
+      throw new RelayError('NO_RELAY', `Transactions on ${chain} are not relayed here, and this app cannot send them yet. Use the BlindMarket MCP (cancel_task / claim_timeout) with a wallet funded on ${chain}.`);
     }
     return chain;
   }

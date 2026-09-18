@@ -179,8 +179,16 @@ function usableEntry(entry: unknown, defaults: SettlementSnapshot): entry is Bac
 export function mergeSettlement(defaults: SettlementSnapshot, backend: BackendSettlement): SettlementSnapshot {
   const chains = { ...defaults.chains };
   const entries = Array.isArray(backend?.chains) ? backend.chains : [];
+  // Keys the backend described in a way this build rejected (another
+  // network, a malformed entry). Such a chain keeps the build's defaults in
+  // the table, but must not become the posting chain on the strength of them.
+  const rejected = new Set<string>();
   for (const entry of entries) {
-    if (!usableEntry(entry, defaults)) continue;
+    if (!usableEntry(entry, defaults)) {
+      const key = (entry as { chain?: unknown } | null)?.chain;
+      if (isSettlementChainKey(key)) rejected.add(key);
+      continue;
+    }
     const prev = chains[entry.chain];
     chains[entry.chain] = {
       ...prev,
@@ -196,7 +204,7 @@ export function mergeSettlement(defaults: SettlementSnapshot, backend: BackendSe
   }
   const named = backend?.postingChain;
   const posting =
-    isSettlementChainKey(named) && chains[named].escrow && chains[named].token.address
+    isSettlementChainKey(named) && !rejected.has(named) && chains[named].escrow && chains[named].token.address
       ? named
       : defaults.postingChain;
   return { postingChain: posting, chains, source: 'backend' };

@@ -22,21 +22,26 @@ export interface WorkerRuntimeConfig {
   watchIntervalMs?: number;
   maxConcurrentTasks?: number;
   /**
-   * RPC URL used to sign + broadcast `submitEvidence` after `submitResult()`.
+   * The 0G RPC used to sign + broadcast `submitEvidence` for a 0G task.
    * Defaults to the 0G testnet RPC (matches `backend/agents/worker.js`'s
-   * default). Point this at the RPC for whichever chain your tasks settle on.
+   * default). It is 0G ONLY: it never stands in for another chain. For Base
+   * set `rpcUrls.base`.
    */
   rpcUrl?: string;
-  /** Per-chain RPCs. A task is escrowed on exactly one chain and /submit names
-   *  it; submitEvidence must be signed on that chain. `rpcUrl` remains the 0G
-   *  default. Without a Base entry the runtime refuses a Base task at submit
-   *  rather than broadcasting it on 0G. */
+  /**
+   * Per-chain RPCs. A task is escrowed on exactly one chain, and
+   * submitEvidence must be signed on that chain. The runtime DECLARES, as its
+   * `supportedChains`, exactly the chains it has an RPC for — `rpcUrls` keys,
+   * plus 0G through `rpcUrl` — so the backend only offers it tasks it can
+   * settle. Without `rpcUrls.base` it is not offered Base tasks (production
+   * posts new tasks on Base).
+   */
   rpcUrls?: Partial<Record<SettlementChain, string>>;
 }
 
 /**
- * Chains this runtime can sign submitEvidence on. It registers them as its
- * `supportedChains`, so the backend only offers it tasks it can settle.
+ * Chains this runtime's CODE can sign submitEvidence on. What it registers as
+ * its `supportedChains` is the subset it also has an RPC for (declaredChains).
  */
 export const SETTLEMENT_CHAINS = ['0g', 'base'] as const;
 export type SettlementChain = (typeof SETTLEMENT_CHAINS)[number];
@@ -146,6 +151,16 @@ export class WorkerRuntime {
     return [...this.executions.values()];
   }
 
+  /**
+   * The chains this runtime declares to the backend: those its code can sign
+   * for AND it has an RPC for. Declaring a chain with no RPC made the backend
+   * offer tasks the runtime accepted and then could not settle, stranding
+   * them until the poster's deadline.
+   */
+  get declaredChains(): SettlementChain[] {
+    return SETTLEMENT_CHAINS.filter((chain) => !!rpcFor(this.config, chain));
+  }
+
   /** Get own executor profile (available after start). */
   get executorProfile(): ExecutorProfile | undefined {
     return this.profile;
@@ -188,7 +203,7 @@ export class WorkerRuntime {
         capabilities: this.config.capabilities,
         minReward: this.config.minReward,
         preferredCapabilities: this.config.preferredCapabilities,
-        supportedChains: [...SETTLEMENT_CHAINS],
+        supportedChains: this.declaredChains,
       });
       this.wallet = {
         address: result.wallet.address,
@@ -210,10 +225,11 @@ export class WorkerRuntime {
 
   /**
    * Re-register a restored executor when its stored `supportedChains` is
-   * null: a row registered by code that predates the field. A stored list
-   * that DIFFERS from SETTLEMENT_CHAINS is left alone — an operator who
-   * registered ['base'] through the MCP or PATCH meant it, and re-registering
-   * on every restart would overwrite that. The backend only offers an executor
+   * null (a row registered by code that predates the field), or names a
+   * chain this runtime has no RPC for — it would be offered, accept and
+   * strand those tasks. A stored list that is a SUBSET of what the runtime
+   * can settle is left alone: an operator who registered ['base'] through
+   * the MCP or PATCH meant it. The backend only offers an executor
    * tasks on the chains it declared, and a restore never registers otherwise,
    * so an executor first registered by an older SDK would keep its old list.
    *
@@ -236,7 +252,15 @@ export class WorkerRuntime {
   private async declareSupportedChains(stored: ExecutorProfile): Promise<ExecutorProfile> {
     const raw = stored as unknown as Record<string, unknown>;
     if (!('supportedChains' in raw)) return stored;
-    if (Array.isArray(stored.supportedChains)) return stored;
+    const can = this.declaredChains;
+    const storedChains = Array.isArray(stored.supportedChains) ? stored.supportedChains : null;
+    // A deliberate subset of what this runtime can settle stays as it is.
+    // (An empty list cannot come from the API: both schemas require one entry.)
+    if (storedChains && storedChains.every((c) => (can as string[]).includes(c))) return stored;
+    // Otherwise declare what it can settle, keeping the operator's choice
+    // where the two overlap.
+    const kept = storedChains ? can.filter((c) => storedChains.includes(c)) : [];
+    const declare = kept.length > 0 ? kept : can;
 
     const optionalString = (v: unknown): string | undefined =>
       typeof v === 'string' && v !== '' ? v : undefined;
@@ -255,12 +279,12 @@ export class WorkerRuntime {
         // The backend reads an unset list back as []; sending [] would store
         // an empty list where there was none.
         preferredCapabilities: stored.preferredCapabilities?.length ? stored.preferredCapabilities : undefined,
-        supportedChains: [...SETTLEMENT_CHAINS],
+        supportedChains: declare,
       };
       const { agent } = await this.bb.registerExecutor(body as RegisterExecutorInput);
       return agent ?? stored;
     } catch (err) {
-      const error = `Could not register supported chains (${SETTLEMENT_CHAINS.join(', ')}); continuing with the stored profile: ${err}`;
+      const error = `Could not register supported chains (${declare.join(', ')}); continuing with the stored profile: ${err}`;
       console.warn(`[WorkerRuntime] ${error}`);
       this.emit({ type: 'error', error });
       return stored;
