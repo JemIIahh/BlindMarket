@@ -486,6 +486,15 @@ if (!suiSigner && AGENT_PRIVATE_KEY) {
 
 /** Normalise the chain the backend reports; anything unknown is treated as 0G,
  *  which is what every task was before Base existed. Exported for tests. */
+// The UserOp path needs all three. The gas check and the submit path must agree
+// on this: with a smart account but no bundler, "the paymaster sponsors gas" is
+// false, and an unfunded agent would accept a task it can never submit.
+// backend/src/services/a2aSettlement.ts (smartAccountSubmitUsable) mirrors it
+// when choosing the on-chain assignee.
+export function canSubmitViaSmartAccount(chain, cfg = { account: AGENT_SMART_ACCOUNT_ADDRESS, entryPoint: AA_ENTRY_POINT, bundler: PIMLICO_BUNDLER_URL }) {
+  return pickChain(chain) === 'base' && !!cfg.account && !!cfg.entryPoint && !!cfg.bundler;
+}
+
 export function pickChain(reported) {
   return reported === 'base' ? 'base' : '0g';
 }
@@ -531,7 +540,7 @@ export async function pickAffordable(entries, problemFor) {
   return { affordable, skipped };
 }
 
-export async function preflightGas(chain, signer, viaAA = (pickChain(chain) === 'base' && !!AGENT_SMART_ACCOUNT_ADDRESS && !!AA_ENTRY_POINT)) {
+export async function preflightGas(chain, signer, viaAA = canSubmitViaSmartAccount(chain)) {
   // ERC-4337 AA path: gas is paid in USDC via the paymaster — skip the ETH
   // balance check entirely. Callers that already resolved the on-chain
   // submitter pass viaAA explicitly (false for legacy EOA-assigned tasks,
@@ -2482,7 +2491,7 @@ async function broadcastEvmSubmitEvidence(taskHash, unsignedSubmitEvidence, subm
   // on-chain worker. AA agents assigned after the rollout name the smart
   // account (UserOp path); legacy tasks assigned before it name the EOA
   // (raw-tx path, which still needs ETH).
-  let submitViaAA = submitChain === 'base' && !!AGENT_SMART_ACCOUNT_ADDRESS && !!AA_ENTRY_POINT && !!PIMLICO_BUNDLER_URL;
+  let submitViaAA = canSubmitViaSmartAccount(submitChain);
   if (submitViaAA && onChainTaskId != null && escrowIface) {
     try {
       const recorded = (await readOnChainWorker(onChainTaskId, submitChain)).toLowerCase();
@@ -2571,6 +2580,16 @@ async function broadcastEvmSubmitEvidence(taskHash, unsignedSubmitEvidence, subm
       return true;
     } catch (e) {
       const label = formatRevert(e);
+      // NotWorker is only worth retrying while the assignment is still landing.
+      // If the chain already names someone else (e.g. our smart account while
+      // we are signing as the EOA), no retry can succeed — say who it names.
+      if (decodeEscrowRevert(e)?.name === 'NotWorker' && onChainTaskId != null && escrowIface) {
+        const recorded = await readOnChainWorker(onChainTaskId, submitChain).catch(() => null);
+        if (recorded && !/^0x0+$/.test(recorded) && recorded.toLowerCase() !== submitSigner.address.toLowerCase()) {
+          log(`submitEvidence for ${short}… cannot succeed: the escrow names ${recorded} as worker, but this agent is signing as ${submitSigner.address}${recorded.toLowerCase() === AGENT_SMART_ACCOUNT_ADDRESS.toLowerCase() ? ' (that is its smart account, and no bundler is configured to submit through it)' : ''}`);
+          return false;
+        }
+      }
       if (isTransientAssignmentRevert(e) && attempt < MAX_SUBMIT_ATTEMPTS) {
         log(`submitEvidence attempt ${attempt}/${MAX_SUBMIT_ATTEMPTS} for ${short}…: ${label} — on-chain assignment not confirmed yet, retrying in ${RETRY_DELAY_MS / 1000}s`);
         await sleep(RETRY_DELAY_MS);

@@ -250,3 +250,15 @@ describe('lastNonEmptyStepText', () => {
     expect(lastNonEmptyStepText([])).toBe('');
   });
 });
+
+describe('canSubmitViaSmartAccount', () => {
+  const full = { account: '0xabc', entryPoint: '0xep', bundler: 'https://bundler.test' };
+  it('needs the account, the entry point AND a bundler, on Base only', async () => {
+    const { canSubmitViaSmartAccount } = await import('./worker.js');
+    expect(canSubmitViaSmartAccount('base', full)).toBe(true);
+    expect(canSubmitViaSmartAccount('0g', full)).toBe(false);
+    expect(canSubmitViaSmartAccount('base', { ...full, bundler: '' })).toBe(false);
+    expect(canSubmitViaSmartAccount('base', { ...full, entryPoint: '' })).toBe(false);
+    expect(canSubmitViaSmartAccount('base', { ...full, account: '' })).toBe(false);
+  });
+});

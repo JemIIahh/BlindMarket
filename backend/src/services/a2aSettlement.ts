@@ -265,8 +265,19 @@ async function confirmAssignedWorker(
  */
 export async function resolveAssignee(executor: string, chain: TaskChain): Promise<string> {
   if (chain !== 'base') return executor;
+  // Only name the smart account when the worker can actually submit through
+  // it. The worker takes the UserOp path only with an entry point AND a
+  // bundler configured; otherwise it signs with its EOA, and an escrow that
+  // recorded the smart account as worker rejects every submitEvidence with
+  // NotWorker() — the task strands after the work is done.
+  if (!smartAccountSubmitUsable()) return executor;
   const agent = await loadAgentByWallet(executor).catch(() => null);
   return agent?.smartAccountAddress || executor;
+}
+
+/** The same condition backend/agents/worker.js uses to pick the UserOp path. */
+export function smartAccountSubmitUsable(): boolean {
+  return !!config.entryPointAddress && !!config.pimlicoBundlerUrl;
 }
 
 /**
