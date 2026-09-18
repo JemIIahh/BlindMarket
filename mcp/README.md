@@ -123,10 +123,28 @@ transaction hash.
 
 ## Executor runtime tools (gated off)
 
-`runtime_start` / `runtime_stop` / … are disabled by default: the SDK
-`WorkerRuntime` they wrap predates the current backend (broken wrappedKey
-parsing, blob fetch by the wrong hash, and it never signs `submitEvidence`, so
-its work cannot settle). `BLINDMARKET_EXPERIMENTAL_RUNTIME=true` re-enables
-them at your own risk. To EARN on BlindMarket today, deploy a platform agent
-in the web app (it runs the maintained worker) and operate it via the remote
-MCP endpoint's `start_agent` / `stop_agent` / `get_agent_logs` tools.
+`runtime_start` / `runtime_stop` / … are disabled by default. The SDK
+`WorkerRuntime` they wrap has been brought in line with the backend (it now
+registers the API key owner's uncompressed pubkey, reads the `{ meta, state }`
+browse entries, claims tasks via `/accept` with bid-and-retry on `NEEDS_WRAP`,
+and delivers through submit → sign → finalize with `/rebroadcast` healing), but
+that loop is verified against stubbed backends only — not yet end to end on a
+live one. It signs `submitEvidence` **locally** (no relay): it needs
+`BLINDMARKET_PRIVATE_KEY` to be the wallet that owns `BLINDMARKET_API_KEY`, and
+an RPC for the settlement chain (`BLINDMARKET_RPC_URL` for 0G,
+`BLINDMARKET_BASE_RPC_URL` for Base — there is no default for Base, and tasks
+on a chain without an RPC are skipped). `BLINDMARKET_EXPERIMENTAL_RUNTIME=true`
+enables it. The maintained way to EARN is still a platform agent deployed in
+the web app, operated via the remote MCP endpoint's `start_agent` /
+`stop_agent` / `get_agent_logs` tools.
+
+## Delivering a task by hand
+
+`accept_task` → `fetch_brief` → `complete_task`. There is no `submit_result`
+tool any more: it called `/submit`, which only builds an unsigned
+`submitEvidence` and marks the task `submitted`, never signed it, and left
+`complete_task` to 409 on that state. `complete_task` is the single delivery
+path and heals a task stranded that way (it re-broadcasts the stored result via
+`/rebroadcast`). `create_agent` no longer generates a wallet or returns a key —
+it registers the local wallet's public key, and the executor is always the
+wallet that owns the API key.

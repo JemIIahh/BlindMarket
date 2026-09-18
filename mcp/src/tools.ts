@@ -1,8 +1,9 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { BlindMarket, AgentCapability } from '@blindmarket/sdk';
+import type { WalletCtx } from './wallet.js';
 
-export function registerMarketTools(server: McpServer, bb: BlindMarket): void {
+export function registerMarketTools(server: McpServer, bb: BlindMarket, walletCtx: WalletCtx | null = null): void {
   // ── Health & Stats ────────────────────────────────────────────────────
 
   server.registerTool(
@@ -88,7 +89,7 @@ export function registerMarketTools(server: McpServer, bb: BlindMarket): void {
     'create_agent',
     {
       title: 'Create Agent',
-      description: 'One-shot agent creation: generates a wallet and registers as A2A executor. Returns the wallet private key — store it securely!',
+      description: "Register as an A2A executor using the local wallet (BLINDMARKET_PRIVATE_KEY): derives its uncompressed public key and registers it. The executor is ALWAYS the wallet that owns BLINDMARKET_API_KEY, so on 0G the two must be the same wallet (checked — a mismatch is refused). No wallet is generated and no key is returned. On Base with a Privy owner wallet, use register_as_executor with wallet_status's executorPublicKey instead.",
       inputSchema: {
         displayName: z.string().describe('Display name for the agent'),
         capabilities: z.string().describe('Comma-separated capabilities (e.g. "data_processing,web_research")'),
@@ -97,7 +98,11 @@ export function registerMarketTools(server: McpServer, bb: BlindMarket): void {
       },
     },
     async ({ displayName, capabilities, minReward, preferredCapabilities }) => {
-      const result = await bb.createAgent({
+      if (!walletCtx) {
+        return { isError: true, content: [{ type: 'text', text: JSON.stringify({ success: false, error: { code: 'NO_WALLET', message: 'create_agent derives the executor public key from BLINDMARKET_PRIVATE_KEY — set it to the key of the wallet that owns BLINDMARKET_API_KEY.' } }) }] };
+      }
+      const { executor, wallet } = await bb.createAgent({
+        privateKey: walletCtx.wallet.privateKey,
         displayName,
         capabilities: capabilities.split(',').map(s => s.trim()) as AgentCapability[],
         minReward: minReward ?? undefined,
@@ -105,6 +110,8 @@ export function registerMarketTools(server: McpServer, bb: BlindMarket): void {
           ? preferredCapabilities.split(',').map(s => s.trim()) as AgentCapability[]
           : undefined,
       });
+      // Never echo the private key into the model's context.
+      const result = { executor, wallet: { address: wallet.address, publicKey: wallet.publicKey } };
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     },
   );
@@ -113,18 +120,17 @@ export function registerMarketTools(server: McpServer, bb: BlindMarket): void {
     'register_as_executor',
     {
       title: 'Register as Executor',
-      description: 'Register an existing wallet as an A2A executor to receive task offers',
+      description: "Register as an A2A executor. The executor address is ALWAYS the wallet that owns BLINDMARKET_API_KEY; publicKey is the key briefs get wrapped to (wallet_status reports the local one as executorPublicKey).",
       inputSchema: {
-        address: z.string().describe('Wallet address (0x...)'),
+        address: z.string().optional().describe("Ignored by the backend — the executor is the API key's owner wallet"),
         displayName: z.string().describe('Display name'),
         capabilities: z.string().describe('Comma-separated capabilities'),
-        publicKey: z.string().describe('Uncompressed secp256k1 public key (hex, no 0x prefix)'),
+        publicKey: z.string().regex(/^04[0-9a-fA-F]{128}$/).describe('Uncompressed secp256k1 public key: 130 hex chars, leading 04, no 0x prefix'),
         minReward: z.string().optional().describe("Minimum reward, as an integer in the payment token's smallest unit (USDC: 6 decimals)"),
       },
     },
-    async ({ address, displayName, capabilities, publicKey, minReward }) => {
+    async ({ displayName, capabilities, publicKey, minReward }) => {
       const result = await bb.registerExecutor({
-        address: address as `0x${string}`,
         displayName,
         capabilities: capabilities.split(',').map(s => s.trim()) as AgentCapability[],
         publicKey,
@@ -185,7 +191,7 @@ export function registerMarketTools(server: McpServer, bb: BlindMarket): void {
     'accept_task',
     {
       title: 'Accept Task',
-      description: 'Accept an assigned A2A task and get the wrapped AES key for decryption',
+      description: 'Claim an open A2A task — this assigns you on-chain — and get the rootHash + wrapped AES key (then fetch_brief, then complete_task). On NEEDS_WRAP the brief key is not wrapped to you yet: call bid_on_task and retry once the poster has wrapped it.',
       inputSchema: {
         taskId: z.string().describe('Task ID'),
       },
@@ -196,21 +202,11 @@ export function registerMarketTools(server: McpServer, bb: BlindMarket): void {
     },
   );
 
-  server.registerTool(
-    'submit_result',
-    {
-      title: 'Submit Task Result',
-      description: 'Submit the execution result for an accepted A2A task',
-      inputSchema: {
-        taskId: z.string().describe('Task ID'),
-        output: z.string().describe('Result output text'),
-      },
-    },
-    async ({ taskId, output }) => {
-      const result = await bb.submitResult(taskId, { output });
-      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-    },
-  );
+  // No submit_result tool: POST /submit only BUILDS an unsigned submitEvidence
+  // and flips the task to 'submitted'. A tool that stopped there never signed
+  // it, and a later complete_task then 409'd on the state it left behind.
+  // complete_task (rent.ts) is the one delivery path: submit → sign/relay →
+  // finalize, with /rebroadcast healing for a stranded 'submitted' task.
 
   server.registerTool(
     'verify_task',

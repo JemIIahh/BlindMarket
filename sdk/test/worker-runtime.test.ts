@@ -622,3 +622,64 @@ describe('WorkerRuntime.start — supportedChains', () => {
     expect(warn).toHaveBeenCalledOnce();
   });
 });
+
+describe('WorkerRuntime.browse — { meta, state } entries', () => {
+  it('reads taskId/status from entry.state (GET /a2a/tasks serves { meta, state }, not flat states) and skips tasks on a chain it did not declare (no RPC)', async () => {
+    stubFetch({
+      '/a2a/tasks': {
+        tasks: [
+          { meta: { taskId: TASK_ID, chain: '0g' }, state: { taskId: TASK_ID, status: 'open' } },
+          { meta: { taskId: `0x${'ef'.repeat(32)}`, chain: 'base' }, state: { taskId: `0x${'ef'.repeat(32)}`, status: 'open' } },
+          { meta: { taskId: `0x${'aa'.repeat(32)}`, chain: '0g' }, state: { taskId: `0x${'aa'.repeat(32)}`, status: 'accepted' } },
+        ],
+        total: 3,
+      },
+    });
+    const runtime = mkRuntime({ address: '0xworker', privateKey: `0x${'1'.repeat(64)}`, publicKey: `04${'1'.repeat(128)}` });
+    // biome-ignore lint/suspicious/noExplicitAny: private fields/methods under test
+    const r = runtime as any;
+    r.executions.clear();
+    const claimed: string[] = [];
+    r.executeTask = async (taskId: string) => { claimed.push(taskId); };
+    await r.browse();
+    expect(claimed).toEqual([TASK_ID]);
+  });
+});
+
+describe('WorkerRuntime.executeTask — NEEDS_WRAP', () => {
+  it('bids once on 403 NEEDS_WRAP, then re-tries /accept until the wrapped key lands', async () => {
+    vi.spyOn(ethers.Wallet.prototype, 'sendTransaction').mockResolvedValue(
+      { hash: `0x${'11'.repeat(32)}`, wait: async () => ({ status: 1 }) } as unknown as ethers.TransactionResponse,
+    );
+    let accepts = 0;
+    let bids = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL) => {
+      const u = String(url);
+      if (u.includes('/bid')) { bids++; return jsonResponse({}); }
+      if (u.includes('/accept')) {
+        accepts++;
+        if (accepts < 3) {
+          return { status: 403, json: async () => ({ success: false, error: { code: 'NEEDS_WRAP', message: 'not wrapped' } }) } as unknown as Response;
+        }
+        return jsonResponse({ taskId: TASK_ID, status: 'accepted', rootHash: ROOT_HASH, privacy: 'public' });
+      }
+      if (u.includes('/storage/')) return jsonResponse({ rootHash: ROOT_HASH, blob: Buffer.from('brief').toString('base64') });
+      if (u.includes('/submit')) return jsonResponse({ taskId: TASK_ID, status: 'submitted', unsignedSubmitEvidence: null });
+      if (u.includes('/finalize')) return jsonResponse({ taskId: TASK_ID, status: 'awaiting_verification' });
+      throw new Error(`unhandled fetch ${u}`);
+    }));
+
+    const runtime = mkRuntime({ address: '0xworker', privateKey: `0x${'1'.repeat(64)}`, publicKey: `04${'1'.repeat(128)}` });
+    // biome-ignore lint/suspicious/noExplicitAny: private fields under test
+    (runtime as any).running = true;
+    // biome-ignore lint/suspicious/noExplicitAny: don't wait the 5s default between /accept re-tries
+    (runtime as any).config.watchIntervalMs = 1;
+    // biome-ignore lint/suspicious/noExplicitAny: private method under test
+    await (runtime as any).executeTask(TASK_ID, { taskId: TASK_ID, status: 'open' });
+
+    expect(bids).toBe(1);
+    expect(accepts).toBe(3);
+    // biome-ignore lint/suspicious/noExplicitAny: reaching into private fields to assert
+    expect(((runtime as any).executions.get(TASK_ID) as TaskExecutionInfo).status).toBe('completed');
+  });
+});

@@ -1,8 +1,7 @@
-import { ethers } from 'ethers';
-import { BlindMarket } from '../index.js';
+import { BlindMarket, ApiError } from '../index.js';
 import { eciesDecrypt, aesDecrypt, derivePublicKey } from '../crypto/index.js';
 import type {
-  A2ATaskState, AgentCapability, ExecutorProfile, Message, RegisterExecutorInput,
+  A2APublicTaskMeta, A2ATaskEntry, A2ATaskState, AgentCapability, ExecutorProfile, Message, RegisterExecutorInput,
 } from '../types.js';
 
 // ── Config ──────────────────────────────────────────────────────────────────
@@ -13,6 +12,16 @@ export interface WorkerRuntimeConfig {
   displayName: string;
   capabilities: AgentCapability[];
   executeTask: ExecuteTaskHandler;
+  /**
+   * Private key of the wallet that OWNS `apiKey`. The backend registers the
+   * API key's owner as the executor and builds `submitEvidence` for that
+   * address, so only this key can both decrypt briefs and settle them. When
+   * set, start() registers its uncompressed public key and throws if the
+   * registered address is not this wallet's. Without it (and without the
+   * `existing*` trio) the runtime generates a random wallet, which can
+   * decrypt but cannot sign `submitEvidence` for the owner's address.
+   */
+  privateKey?: string;
   existingPrivateKey?: string;
   existingAddress?: string;
   existingPublicKey?: string;
@@ -21,6 +30,8 @@ export interface WorkerRuntimeConfig {
   browseIntervalMs?: number;
   watchIntervalMs?: number;
   maxConcurrentTasks?: number;
+  /** How long to keep re-trying /accept after a NEEDS_WRAP bid before giving up (default 10 min). */
+  wrapTimeoutMs?: number;
   /**
    * The 0G RPC used to sign + broadcast `submitEvidence` for a 0G task.
    * Defaults to the 0G testnet RPC (matches `backend/agents/worker.js`'s
@@ -79,6 +90,8 @@ export type ExecuteTaskHandler = (ctx: TaskContext) => Promise<Record<string, un
 export interface TaskContext {
   taskId: string;
   task: A2ATaskState;
+  /** Public metadata from the browse entry (chain, deadline, capabilities). */
+  meta?: A2APublicTaskMeta;
   instructions: string;
 }
 
@@ -115,6 +128,7 @@ const DEFAULTS = {
   browseIntervalMs: 15_000,
   watchIntervalMs: 5_000,
   maxConcurrentTasks: 3,
+  wrapTimeoutMs: 600_000,
   rpcUrl: 'https://evmrpc-testnet.0g.ai',
 };
 
@@ -128,7 +142,6 @@ export class WorkerRuntime {
   private running = false;
   private paused = false;
   private browseTimer?: ReturnType<typeof setInterval>;
-  private watchTimers = new Map<string, ReturnType<typeof setInterval>>();
   private executions = new Map<string, TaskExecutionInfo>();
   private listeners = new Set<(event: WorkerRuntimeEvent) => void>();
 
@@ -199,7 +212,23 @@ export class WorkerRuntime {
     }
 
     // 1. Register or restore executor
-    if (this.config.existingPrivateKey && this.config.existingAddress && this.config.existingPublicKey) {
+    if (this.config.privateKey) {
+      // The API key owner's own key: createAgent() registers its uncompressed
+      // public key and throws if the backend registered a different address —
+      // this runtime signs submitEvidence locally, so a mismatch could accept
+      // tasks it can never deliver. Registration is an upsert that keeps
+      // reputation, so this is safe on every start.
+      const result = await this.bb.createAgent({
+        privateKey: this.config.privateKey,
+        displayName: this.config.displayName,
+        capabilities: this.config.capabilities,
+        minReward: this.config.minReward,
+        preferredCapabilities: this.config.preferredCapabilities,
+        supportedChains: this.declaredChains,
+      });
+      this.wallet = result.wallet;
+      this.profile = result.executor;
+    } else if (this.config.existingPrivateKey && this.config.existingAddress && this.config.existingPublicKey) {
       this.wallet = {
         address: this.config.existingAddress,
         privateKey: this.config.existingPrivateKey,
@@ -308,8 +337,6 @@ export class WorkerRuntime {
       clearInterval(this.browseTimer);
       this.browseTimer = undefined;
     }
-    for (const t of this.watchTimers.values()) clearInterval(t);
-    this.watchTimers.clear();
     this.emit({ type: 'stopped' });
   }
 
@@ -339,7 +366,7 @@ export class WorkerRuntime {
     if (this.paused) return;
     try {
       const active = this.activeExecutions;
-      const inFlight = active.filter(e => e.status === 'bidding' || e.status === 'working').length;
+      let inFlight = active.filter(e => e.status === 'bidding' || e.status === 'assigned' || e.status === 'working').length;
       if (inFlight >= this.config.maxConcurrentTasks) return;
 
       const result = await this.bb.browseA2ATasks({
@@ -348,69 +375,84 @@ export class WorkerRuntime {
 
       this.emit({ type: 'browse_done', found: result.tasks.length });
 
-      for (const task of result.tasks) {
-        if (this.executions.has(task.taskId)) continue;
-        if (task.status !== 'open' && task.status !== 'bidding') continue;
-        if (task.executorAddress && task.executorAddress !== this.wallet?.address) continue;
+      // GET /a2a/tasks serves { meta, state } entries — id and status live on
+      // `state`. Nobody "assigns" a task: the executor claims it by calling
+      // /accept itself (which also assigns it on-chain), so there is no
+      // 'assigned' status to wait for.
+      for (const entry of result.tasks as A2ATaskEntry[]) {
+        if (inFlight >= this.config.maxConcurrentTasks) break;
+        const state = entry.state;
+        const taskId = state?.taskId ?? entry.meta?.taskId;
+        if (!taskId || this.executions.has(taskId)) continue;
+        if (state.status !== 'open') continue;
+        // An accept assigns on-chain and cannot be released, so never claim a
+        // task browse already says is on a chain this runtime did not declare.
+        // (The post-accept check in executeTask still covers rows with no chain.)
+        if (entry.meta?.chain && !(this.declaredChains as string[]).includes(entry.meta.chain)) continue;
 
-        this.executions.set(task.taskId, {
-          taskId: task.taskId,
-          status: 'bidding',
-          task,
-          startedAt: Date.now(),
-        });
-
-        this.emit({ type: 'task_found', taskId: task.taskId, task });
-
-        await this.bb.bidOnTask(task.taskId);
-        this.emit({ type: 'task_bidded', taskId: task.taskId });
-
-        this.watchForAssignment(task.taskId);
+        this.executions.set(taskId, { taskId, status: 'bidding', task: state, startedAt: Date.now() });
+        inFlight++;
+        this.emit({ type: 'task_found', taskId, task: state });
+        void this.executeTask(taskId, state, entry.meta);
       }
     } catch (err) {
       this.emit({ type: 'error', error: `Browse failed: ${err}` });
     }
   }
 
-  // ── Assignment watching ─────────────────────────────────────────────────
+  // ── Accept ──────────────────────────────────────────────────────────────
 
-  private watchForAssignment(taskId: string): void {
-    if (!this.running) return;
-    const ms = this.config.watchIntervalMs;
-    const timer = setInterval(async () => {
-      if (!this.running || this.paused) return;
+  /**
+   * Claim the task. 403 NEEDS_WRAP means the brief key is not yet wrapped to
+   * our pubkey: register a bid (the poster wraps to bidders on its next
+   * cycle) and re-try /accept until the slice lands or wrapTimeoutMs passes.
+   */
+  private async acceptWithWrap(taskId: string): Promise<Awaited<ReturnType<BlindMarket['acceptTask']>>> {
+    const giveUpAt = Date.now() + this.config.wrapTimeoutMs;
+    let bidded = false;
+    for (;;) {
       try {
-        const detail = await this.bb.getTask(taskId);
-        const a2a = detail.a2aState;
-        if (!a2a) return;
-
-        if (a2a.status === 'assigned') {
-          clearInterval(timer);
-          this.watchTimers.delete(taskId);
-          this.emit({ type: 'task_assigned', taskId });
-          await this.executeTask(taskId, a2a);
+        return await this.bb.acceptTask(taskId);
+      } catch (err) {
+        if (!(err instanceof ApiError && err.code === 'NEEDS_WRAP')) throw err;
+        if (!bidded) {
+          await this.bb.bidOnTask(taskId);
+          bidded = true;
+          this.emit({ type: 'task_bidded', taskId });
         }
-      } catch {
-        // Retry next tick
+        if (!this.running || Date.now() >= giveUpAt) throw err;
+        await new Promise((r) => setTimeout(r, this.config.watchIntervalMs));
       }
-    }, ms);
-    this.watchTimers.set(taskId, timer);
+    }
   }
 
   // ── Task execution ──────────────────────────────────────────────────────
 
-  private async executeTask(taskId: string, a2a: A2ATaskState): Promise<void> {
+  private async executeTask(taskId: string, a2a: A2ATaskState, meta?: A2APublicTaskMeta): Promise<void> {
     const exec = this.executions.get(taskId);
     if (!exec) return;
 
     try {
-      exec.status = 'assigned';
-
       // Accept task — get the rootHash + this executor's ECIES-wrapped AES
       // key. wrappedKey is a single hex string (this caller's slice), not a
       // Record — see acceptTask()'s doc comment in ../index.ts.
-      const acceptResult = await this.bb.acceptTask(taskId);
+      let acceptResult: Awaited<ReturnType<BlindMarket['acceptTask']>>;
+      try {
+        acceptResult = await this.acceptWithWrap(taskId);
+      } catch (err) {
+        // Lost the race / offer held by another agent / wrap never came:
+        // nothing was claimed, so forget the task and let a later browse
+        // re-try it if it is still open.
+        if (err instanceof ApiError && (err.status === 409 || err.code === 'NEEDS_WRAP')) {
+          this.executions.delete(taskId);
+          this.emit({ type: 'task_failed', taskId, error: `not accepted: ${err.code ?? err.message}` });
+          return;
+        }
+        throw err;
+      }
+      exec.status = 'assigned';
       exec.task = a2a;
+      this.emit({ type: 'task_assigned', taskId });
       this.emit({ type: 'task_accepted', taskId });
       // Fail before running the handler if this runtime can't settle the task:
       // an unknown chain, or one it has no RPC for (the send would fail only
@@ -450,45 +492,25 @@ export class WorkerRuntime {
       const result = await this.config.executeTask({
         taskId,
         task: a2a,
+        meta,
         instructions,
       });
 
       exec.status = 'submitted';
       this.emit({ type: 'task_executed', taskId });
 
-      // Submit result — the contract requires the assigned worker to sign
-      // submitEvidence personally (onlyWorker), so the backend hands back an
-      // unsigned tx instead of broadcasting it for us.
-      const submitResult = await this.bb.submitResult(taskId, result);
-
-      // Sign + broadcast submitEvidence with the runtime's own wallet, wait
-      // for confirmation, then tell the backend to proceed with
-      // verification. Without this the on-chain task never leaves
-      // 'Assigned' and completeVerification always reverts — the task only
-      // LOOKS complete.
-      if (submitResult.unsignedSubmitEvidence) {
-        // Pick the RPC for the chain the backend says holds this task. This
-        // used to be a single 0G provider, so a Base submitEvidence was
-        // broadcast onto 0G. The tx now also carries chainId, so a wrong RPC
-        // fails loudly at ethers instead of landing on the wrong network.
-        const chain = settlementChain(taskId, submitResult.chain);
-        // rpcUrls per chain; rpcUrl is the 0G RPC only (rpcFor). The chainId
-        // pin still rejects a genuine mismatch at ethers before anything is
-        // broadcast.
-        const rpc = rpcFor(this.config, chain);
-        if (!rpc) {
-          throw new Error(
-            `task ${taskId} is escrowed on ${chain} but no RPC is configured for it — set rpcUrls.${chain} in the WorkerRuntime config`,
-          );
-        }
-        const provider = new ethers.JsonRpcProvider(rpc);
-        const signer = new ethers.Wallet(this.wallet!.privateKey, provider);
-        const tx = await signer.sendTransaction(
-          submitResult.unsignedSubmitEvidence as ethers.TransactionRequest,
-        );
-        await tx.wait();
-      }
-      const finalizeResult = await this.bb.finalize(taskId);
+      // Submit → sign + broadcast submitEvidence on the chain /submit names
+      // (the contract's onlyWorker means the backend can only hand back an
+      // unsigned tx) → finalize, healing a stranded 'submitted' state via
+      // /rebroadcast. Without the broadcast the on-chain task never leaves
+      // 'Assigned' and the task only LOOKS complete. deliverResult() signs
+      // only on a chain named here: rpcUrls per chain, rpcUrl for 0G only, so
+      // an unknown chain refuses before anything is sent, and the chainId pin
+      // still rejects a genuine mismatch at ethers.
+      const { submitTxHash: _submitTxHash, ...finalizeResult } = await this.bb.deliverResult(taskId, result, {
+        privateKey: this.wallet!.privateKey,
+        rpcUrls: Object.fromEntries(SETTLEMENT_CHAINS.map((c) => [c, rpcFor(this.config, c)])),
+      });
 
       exec.status = 'completed';
       this.emit({ type: 'task_submitted', taskId, result });

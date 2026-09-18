@@ -43,7 +43,7 @@ export function kit(name: string, description: string, all: Tool[], names: strin
 }
 
 export function createBlindMarketTools(bb: BlindMarket): Tool[] {
-  return [
+  const all: Tool[] = [
     tool(bb, 'list_open_tasks', 'List open tasks available for assignment', {}, async () => {
       return bb.listTasks();
     }),
@@ -56,7 +56,7 @@ export function createBlindMarketTools(bb: BlindMarket): Tool[] {
     }, async (a) => {
       return bb.searchAgents(a as any);
     }),
-    tool(bb, 'create_agent', 'One-shot agent creation: generates wallet + registers as A2A executor', {
+    tool(bb, 'create_agent', "Register the API key's owner wallet as an A2A executor, using the executor key configured on the client (BlindMarketConfig.executor). With no key configured, a random wallet is generated and its private key returned once — that wallet can decrypt briefs but cannot sign submitEvidence for the owner.", {
       displayName: str('Display name for the agent'),
       capabilities: arr('List of capabilities', str('Capability', CAP_ENUM)),
       minReward: str("Minimum reward per task, as an integer in the payment token's smallest unit (USDC: 6 decimals) (optional)"),
@@ -64,14 +64,19 @@ export function createBlindMarketTools(bb: BlindMarket): Tool[] {
       agentCardUrl: str('Agent card URL for marketplace display (optional)'),
       mcpEndpointUrl: str('MCP endpoint URL (optional)'),
     }, async (a) => {
-      return bb.createAgent(a as any);
+      // A configured key comes from the client config, never from tool
+      // arguments, and is never echoed back into the model's context. A
+      // generated one has to be returned: this is the only place it exists.
+      const { executor, wallet } = await bb.createAgent(a as any);
+      if (!bb.canSign) return { executor, wallet };
+      return { executor, wallet: { address: wallet.address, publicKey: wallet.publicKey } };
     }, ['displayName', 'capabilities']),
 
     tool(bb, 'register_as_executor', 'Register as an A2A executor to receive task offers', {
-      address: str('Your wallet address (0x...)'),
+      address: str("Ignored — the executor is always the API key's owner wallet (optional)"),
       displayName: str('Human-readable display name'),
       capabilities: arr('List of capabilities', str('Capability', CAP_ENUM)),
-      publicKey: str('Your uncompressed secp256k1 public key'),
+      publicKey: str('Your uncompressed secp256k1 public key: 130 hex chars, leading 04, no 0x prefix'),
       minReward: str("Minimum reward, as an integer in the payment token's smallest unit (USDC: 6 decimals) (optional)"),
       preferredCapabilities: arr('Preferred subset of capabilities (optional)', str('Capability', CAP_ENUM)),
       // No enum: the backend validates the list, and a newer backend may accept
@@ -82,7 +87,7 @@ export function createBlindMarketTools(bb: BlindMarket): Tool[] {
       ),
     }, async (a) => {
       return bb.registerExecutor(a as any);
-    }, ['address', 'displayName', 'capabilities', 'publicKey']),
+    }, ['displayName', 'capabilities', 'publicKey']),
     tool(bb, 'browse_a2a_tasks', 'Browse tasks available for A2A execution', {
       capabilities: arr('Required capabilities filter'),
       minReputation: num('Minimum reputation filter'),
@@ -95,16 +100,19 @@ export function createBlindMarketTools(bb: BlindMarket): Tool[] {
       await bb.bidOnTask(a.taskId);
       return { success: true };
     }, ['taskId']),
-    tool(bb, 'accept_task', 'Accept a task and get the wrapped AES key', {
+    tool(bb, 'accept_task', 'Claim an open task (assigns you on-chain) and get the rootHash + wrapped AES key. On NEEDS_WRAP, call bid_on_task and retry once the poster has wrapped the key to you.', {
       taskId: str('Task ID'),
     }, async (a) => {
       return bb.acceptTask(a.taskId);
     }, ['taskId']),
-    tool(bb, 'submit_result', 'Submit execution result for an accepted task', {
-      taskId: str('Task ID'),
+    // Completes the WHOLE delivery: /submit only builds an unsigned
+    // submitEvidence and flips state to 'submitted', so a tool that stopped
+    // there stranded the task. Needs BlindMarketConfig.executor to sign.
+    tool(bb, 'submit_result', "Deliver the result for an accepted task: submits it, signs + broadcasts submitEvidence from the executor wallet, then finalizes so verification can release the escrow. Safe to re-call — a task stranded in 'submitted' is healed via rebroadcast.", {
+      taskId: str('Task ID (0x task hash)'),
       output: str('Result output text'),
     }, async (a) => {
-      return bb.submitResult(a.taskId, { output: a.output });
+      return bb.deliverResult(a.taskId, { output: a.output });
     }, ['taskId', 'output']),
 
     tool(bb, 'deploy_agent', 'Deploy a new AI agent on BlindMarket', {
@@ -190,6 +198,9 @@ export function createBlindMarketTools(bb: BlindMarket): Tool[] {
       return bb.getUnreadCount();
     }),
   ];
+  // submit_result signs a transaction; without a configured signer it could
+  // only strand tasks, so it is not offered at all.
+  return bb.canSign ? all : all.filter((t) => t.definition.function.name !== 'submit_result');
 }
 
 export function createTaskTools(bb: BlindMarket): ToolKit {

@@ -4,8 +4,8 @@ import type {
   CreateTaskTx, ExecutorProfile, RegisterExecutorInput,
   DeployedAgentInfo, AgentWalletInfo, ReputationInfo, LeaderboardEntry,
   StorageUploadResult, Message, AgentSearchResult, TaskTemplate,
-  VerifyTaskInput, A2ATaskState, AgentCapability,
-  CreateAgentParams, CreateAgentResult,
+  VerifyTaskInput, A2ATaskEntry, AgentCapability,
+  CreateAgentParams, CreateAgentResult, CreateTaskRequest,
 } from './types.js';
 
 // ── Public config ───────────────────────────────────────────────────────────
@@ -15,6 +15,13 @@ export interface BlindMarketConfig {
   apiBase?: string;
   /** API key — shared AGENT_API_KEY or device-flow token */
   apiKey: string;
+  /**
+   * Executor signer: the private key of the wallet that owns `apiKey`, plus
+   * the RPC(s) to broadcast `submitEvidence` on. Default for `createAgent()`
+   * and `deliverResult()`, and what enables the `submit_result` tool — tools
+   * never take a key as an argument. Stays in-process; never sent to the backend.
+   */
+  executor?: DeliverSigner;
 }
 
 // ── Agent deployment params ─────────────────────────────────────────────────
@@ -47,10 +54,20 @@ class ApiError extends Error {
     public status: number,
     message: string,
     public body?: unknown,
+    /** Backend error code (e.g. 'NEEDS_WRAP', 'NOT_SUBMITTED_ON_CHAIN'), when the envelope carried one. */
+    public code?: string,
   ) {
     super(message);
     this.name = 'ApiError';
   }
+}
+
+/** Per-chain RPC URLs for signing `submitEvidence` — a task is escrowed on exactly one chain. */
+export interface DeliverSigner {
+  /** Private key of the executor wallet (the API key's owner) — `submitEvidence` is `onlyWorker`. */
+  privateKey: string;
+  /** RPC per chain. No default: a missing entry refuses the task's chain rather than guessing a network. */
+  rpcUrls: Partial<Record<string, string | undefined>>;
 }
 
 // ── Main client ─────────────────────────────────────────────────────────────
@@ -78,10 +95,17 @@ class ApiError extends Error {
 export class BlindMarket {
   private apiBase: string;
   private apiKey: string;
+  private executor?: DeliverSigner;
 
   constructor(config: BlindMarketConfig) {
     this.apiBase = config.apiBase ?? 'https://api.blindmarket.xyz';
     this.apiKey = config.apiKey;
+    this.executor = config.executor;
+  }
+
+  /** True when an executor signer was configured (see BlindMarketConfig.executor). */
+  get canSign(): boolean {
+    return !!this.executor;
   }
 
   // ── Tools ─────────────────────────────────────────────────────────────────
@@ -122,9 +146,9 @@ export class BlindMarket {
       },
       body: body ? JSON.stringify(body) : undefined,
     });
-    const json = await res.json() as { success: boolean; data?: T; error?: { message: string } };
+    const json = await res.json() as { success: boolean; data?: T; error?: { code?: string; message: string } };
     if (!json.success) {
-      throw new ApiError(res.status, json.error?.message ?? `HTTP ${res.status}`, json);
+      throw new ApiError(res.status, json.error?.message ?? `HTTP ${res.status}`, json, json.error?.code);
     }
     return json.data as T;
   }
@@ -156,16 +180,11 @@ export class BlindMarket {
 
   /**
    * Build an unsigned `createTask` transaction.
-   * You must sign and broadcast it with your wallet.
+   * You must sign and broadcast it with your wallet (the API key's owner is
+   * the poster), then index it via `POST /api/v1/a2a/tasks/index` for A2A.
+   * The deadline is set on-chain as now + `duration` seconds.
    */
-  async createTask(params: {
-    agent: Address;
-    amount: string;
-    token: Address;
-    category: string;
-    locationZone: string;
-    deadline: number;
-  }): Promise<CreateTaskTx> {
+  async createTask(params: CreateTaskRequest): Promise<CreateTaskTx> {
     return this.req<CreateTaskTx>('POST', '/api/v1/tasks', params);
   }
 
@@ -223,28 +242,41 @@ export class BlindMarket {
   }
 
   /**
-   * One-shot agent creation: generates a secp256k1 wallet, then registers the
-   * agent as an executor in the A2A marketplace with the generated wallet
-   * address and public key. Replaces the manual two-step flow of generating a
-   * wallet, then calling registerExecutor().
+   * One-shot executor registration in the A2A marketplace.
    *
-   * The private key is returned **once** in the response — store it securely.
+   * The registered executor is ALWAYS the wallet that owns the API key — the
+   * backend takes the address from auth, never from the request. Briefs are
+   * wrapped to the public key registered here, and `submitEvidence` is built
+   * for the owner address. So pass `privateKey` (or set
+   * `BlindMarketConfig.executor`) — the OWNER wallet's key: its uncompressed
+   * public key is registered, the key never leaves this process, and this
+   * throws if the backend registered a different address.
+   *
+   * Without a key a random secp256k1 wallet is generated and its private key
+   * returned **once** (store it securely). That wallet can decrypt briefs, but
+   * it is not the registered executor address, so it cannot sign
+   * `submitEvidence` for tasks the owner accepts — use it only when delivery
+   * goes through another signer (e.g. the backend relay).
    *
    * @example
    * const { executor, wallet } = await bb.createAgent({
+   *   privateKey: process.env.EXECUTOR_PRIVATE_KEY!, // the API key owner's wallet (or set BlindMarketConfig.executor)
    *   displayName: 'DataBot',
    *   capabilities: [AgentCap.DATA_PROCESSING, AgentCap.WEB_RESEARCH],
    *   minReward: '1000000', // 1 USDC (the payment token's smallest unit; USDC has 6 decimals)
    * });
-   * console.log(`Agent ${wallet.address} registered as ${executor.address}`);
+   * console.log(`Registered executor ${executor.address}`);
    */
   async createAgent(params: CreateAgentParams): Promise<CreateAgentResult> {
-    const wallet = ethers.Wallet.createRandom();
+    // With a key (params.privateKey, or BlindMarketConfig.executor) the agent
+    // IS the API key owner's wallet, the only one that can settle. Without one
+    // a random wallet is generated, as before — see the JSDoc for its limits.
+    const privateKey = params.privateKey ?? this.executor?.privateKey;
+    const wallet = privateKey ? new ethers.Wallet(privateKey) : ethers.Wallet.createRandom();
     // The uncompressed key (0x04…): /register requires it, and posters wrap
     // brief keys to it. `wallet.publicKey` is the compressed form in ethers v6.
     const publicKey = wallet.signingKey.publicKey;
     const executor: RegisterExecutorInput = {
-      address: wallet.address as Address,
       displayName: params.displayName,
       capabilities: params.capabilities,
       publicKey: publicKey.slice(2), // strip 0x prefix — backend expects raw hex
@@ -255,6 +287,14 @@ export class BlindMarket {
       supportedChains: params.supportedChains,
     };
     const result = await this.registerExecutor(executor);
+    // Only when the caller supplied the key: they are claiming to be the owner.
+    if (privateKey && result.agent.address.toLowerCase() !== wallet.address.toLowerCase()) {
+      throw new ApiError(
+        409,
+        `Registered executor is ${result.agent.address} (the API key's owner) but privateKey belongs to ${wallet.address}. ` +
+        'Briefs are now wrapped to a key whose wallet cannot sign submitEvidence — re-run with the owner wallet\'s key, or mint an API key signed in as this wallet.',
+      );
+    }
     return {
       executor: result.agent,
       wallet: {
@@ -317,7 +357,12 @@ export class BlindMarket {
 
   // ── A2A executor registration ───────────────────────────────────────────
 
-  /** Register as an A2A agent executor (worker-side). */
+  /**
+   * Register as an A2A agent executor (worker-side). The executor address is
+   * the API key's owner wallet (any `address` sent is ignored). `publicKey`
+   * must be uncompressed secp256k1 hex, 130 chars, leading `04`, no 0x —
+   * `new ethers.Wallet(pk).signingKey.publicKey.slice(2)`, NOT `wallet.publicKey`.
+   */
   async registerExecutor(params: RegisterExecutorInput): Promise<{ agent: ExecutorProfile }> {
     return this.req('POST', '/api/v1/a2a/register', params);
   }
@@ -335,13 +380,17 @@ export class BlindMarket {
 
   // ── A2A task lifecycle ───────────────────────────────────────────────────
 
-  /** Browse A2A tasks available for execution. */
+  /**
+   * Browse A2A tasks available for execution. Each entry is `{ meta, state }`
+   * — the id and status live on `state` (`entry.state.taskId`), the chain and
+   * deadline on `meta`.
+   */
   async browseA2ATasks(params?: {
     capabilities?: string[];
     minReputation?: number;
-  }): Promise<{ tasks: A2ATaskState[] }> {
+  }): Promise<{ tasks: A2ATaskEntry[]; total?: number }> {
     const qs = new URLSearchParams();
-    if (params?.capabilities) qs.set('capabilities', params.capabilities.join(','));
+    if (params?.capabilities?.length) qs.set('capabilities', params.capabilities.join(','));
     if (params?.minReputation != null) qs.set('minReputation', String(params.minReputation));
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return this.req('GET', `/api/v1/a2a/tasks${suffix}`);
@@ -416,13 +465,90 @@ export class BlindMarket {
     return this.req('POST', `/api/v1/a2a/tasks/${taskId}/finalize`);
   }
 
+  /**
+   * Rebuild the unsigned `submitEvidence` for a task stranded in 'submitted'
+   * — `/submit` flips the state when the tx is BUILT, so a crash before the
+   * broadcast leaves `finalize()` failing with NOT_SUBMITTED_ON_CHAIN and
+   * `submitResult()` refusing with INVALID_STATE. Sign + broadcast the
+   * returned tx on `chain`, then call `finalize()`. 409 ALREADY_SUBMITTED
+   * means the evidence did land — just call `finalize()`.
+   */
+  async rebroadcast(taskId: string): Promise<{
+    taskId: string;
+    onChainTaskId?: string;
+    /** A string, not a union — see submitResult(). */
+    chain?: string;
+    evidenceHash?: Hex;
+    unsignedSubmitEvidence?: Record<string, unknown> | null;
+  }> {
+    return this.req('POST', `/api/v1/a2a/tasks/${taskId}/rebroadcast`);
+  }
+
+  /**
+   * Deliver a result end to end: `submitResult()` → sign + broadcast the
+   * unsigned `submitEvidence` on the chain the backend names → `finalize()`.
+   * Safe to re-call on a task stranded in 'submitted': INVALID_STATE at submit
+   * and NOT_SUBMITTED_ON_CHAIN at finalize both heal through `rebroadcast()`.
+   */
+  async deliverResult(
+    taskId: string,
+    resultData: Record<string, unknown>,
+    signerOverride?: DeliverSigner,
+  ): Promise<Awaited<ReturnType<BlindMarket['finalize']>> & { submitTxHash?: string }> {
+    const signer = signerOverride ?? this.executor;
+    if (!signer) {
+      throw new ApiError(400, 'deliverResult() needs a signer — pass one, or set BlindMarketConfig.executor. submitEvidence is onlyWorker, so the backend cannot broadcast it for you.');
+    }
+    const send = async (built: { chain?: string; unsignedSubmitEvidence?: Record<string, unknown> | null }) => {
+      if (!built.unsignedSubmitEvidence) return undefined;
+      // Absent `chain` = a backend older than the field, where every task is on 0G.
+      // Any other name must have its own RPC entry: signing an unknown chain's
+      // tx on the 0G RPC would target the wrong escrow.
+      const chain = built.chain ?? '0g';
+      const rpc = signer.rpcUrls[chain];
+      if (!rpc) {
+        throw new Error(`task ${taskId} is escrowed on ${chain} but no RPC is configured for it — set rpcUrls.${chain}`);
+      }
+      // The tx carries chainId, so a wrong RPC fails at ethers instead of
+      // landing on the wrong network.
+      const wallet = new ethers.Wallet(signer.privateKey, new ethers.JsonRpcProvider(rpc));
+      const tx = await wallet.sendTransaction(built.unsignedSubmitEvidence as ethers.TransactionRequest);
+      await tx.wait();
+      return tx.hash;
+    };
+    const healStranded = async () => {
+      try {
+        return await send(await this.rebroadcast(taskId));
+      } catch (err) {
+        // Evidence is already on-chain — nothing to broadcast, go finalize.
+        if (err instanceof ApiError && err.code === 'ALREADY_SUBMITTED') return undefined;
+        throw err;
+      }
+    };
+
+    let submitTxHash: string | undefined;
+    try {
+      submitTxHash = await send(await this.submitResult(taskId, resultData));
+    } catch (err) {
+      if (!(err instanceof ApiError && err.code === 'INVALID_STATE')) throw err;
+      submitTxHash = await healStranded();
+    }
+    try {
+      return { ...(await this.finalize(taskId)), submitTxHash };
+    } catch (err) {
+      if (!(err instanceof ApiError && err.code === 'NOT_SUBMITTED_ON_CHAIN')) throw err;
+      submitTxHash = (await healStranded()) ?? submitTxHash;
+      return { ...(await this.finalize(taskId)), submitTxHash };
+    }
+  }
+
   /** Get tasks posted by the authenticated user. */
-  async getPostedTasks(): Promise<{ tasks: A2ATaskState[] }> {
+  async getPostedTasks(): Promise<{ tasks: A2ATaskEntry[]; total?: number }> {
     return this.req('GET', '/api/v1/a2a/tasks/posted');
   }
 
   /** Get tasks executed by the authenticated user. */
-  async getExecutions(address?: string): Promise<{ tasks: A2ATaskState[] }> {
+  async getExecutions(address?: string): Promise<{ executions: A2ATaskEntry[]; total: number }> {
     const qs = address ? `?address=${address}` : '';
     return this.req('GET', `/api/v1/a2a/executions${qs}`);
   }

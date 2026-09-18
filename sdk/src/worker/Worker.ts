@@ -86,9 +86,11 @@ export class Worker {
   }
 
   /**
-   * Worker escape hatch: reclaim escrow after the deadline if completeVerification
-   * was never called. Payment released per contract logic (85% worker, 15% treasury
-   * or full refund depending on submission state — see BlindEscrow.claimTimeout).
+   * Reclaim escrow after the deadline if completeVerification was never called.
+   * BlindEscrow.claimTimeout is `onlyAgent`: only the POSTER can call it, and it
+   * refunds the poster the full escrowed amount — the worker is paid nothing on
+   * a timeout (the 90% worker / 10% platform split applies only to a passed
+   * verification). Called from a worker wallet this reverts.
    */
   async claimTimeout(taskId: TaskId): Promise<TxReceiptLike> {
     const receipt = await this.deps.escrow.claimTimeout(taskId);

@@ -35,6 +35,12 @@ const ESCROW_READ_ABI = [
 
 const ZERO_TOKEN = '0x0000000000000000000000000000000000000000';
 const GAS_LIMIT = 1000000n; // matches the canonical rent script
+// Auto-verify releases the payment, so the bar can't be "one character":
+// min_length is a hard floor in the backend's autoVerify. MUST match the web
+// app's RENTAL_VERIFICATION_CRITERIA (frontend/src/components/UseServiceModal.tsx)
+// so a rental is judged the same whichever client paid for it. The index route
+// also rejects 'auto' with no real criterion (400 AUTO_CRITERIA_REQUIRED).
+const RENTAL_VERIFICATION_CRITERIA = { min_length: 40 };
 
 function ok(data: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
@@ -490,7 +496,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
           wrappedKeys,
           publicBrief: isPublic ? prompt.slice(0, 4000) : undefined,
           verificationMode: 'auto',
-          verificationCriteria: { min_length: 1 },
+          verificationCriteria: RENTAL_VERIFICATION_CRITERIA,
           requiredCapabilities: [],
           amountWei: String(service.price_raw),
           settlement: s.mode,
@@ -1100,7 +1106,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     'complete_task',
     {
       title: 'Deliver a Task Result and Settle',
-      description: 'Executor side, after accept_task: submits your result, sends submitEvidence from YOUR wallet (Base: through the backend relay, gas in USDC; 0G: signed locally with BLINDMARKET_PRIVATE_KEY), then asks the backend to verify and release the escrow to you. If the last verification FAILED, calling this again resubmits — the contract allows up to 3 attempts before the deadline. Safe to re-call: it resumes from whatever stage the escrow shows.',
+      description: 'Executor side, after accept_task: submits your result, sends submitEvidence from YOUR wallet (Base: through the backend relay, gas in USDC; 0G: signed locally with BLINDMARKET_PRIVATE_KEY), then asks the backend to verify and release the escrow to you. This is the ONLY delivery tool — there is no separate submit step. If an earlier call died between submitting and broadcasting (task stuck "submitted" off-chain, Assigned on-chain), re-calling heals it via the /rebroadcast endpoint. If the last verification FAILED, calling this again resubmits — the contract allows up to 3 attempts before the deadline. Safe to re-call: it resumes from whatever stage the escrow shows.',
       inputSchema: {
         task: z.string().regex(/^0x[0-9a-fA-F]{64}$/).describe('The 0x task hash — A2A tasks are addressed by hash, not by numeric id'),
         output: z.string().min(1).max(200_000).describe('Your result. Verification judges this text (auto mode scores it against the poster\'s criteria).'),
@@ -1149,11 +1155,23 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
 
       let submitTxHash: string | undefined;
       let gas: GasMode | undefined;
+      let healed = false;
       try {
         if (status === 1 || isRetry) {
-          const sub = await api<{ onChainTaskId: number; evidenceHash: string; chain?: string; unsignedSubmitEvidence: { to: string; data: string; from?: string; chainId?: number } }>(
-            'POST', `/api/v1/a2a/tasks/${task}/submit`, { resultData: { output } },
-          );
+          type Built = { onChainTaskId: number; evidenceHash: string; chain?: string; unsignedSubmitEvidence: { to: string; data: string; from?: string; chainId?: number } };
+          let sub: Built;
+          try {
+            sub = await api<Built>('POST', `/api/v1/a2a/tasks/${task}/submit`, { resultData: { output } });
+          } catch (err) {
+            // Stranded 'submitted': /submit flips the off-chain state when the
+            // tx is BUILT, so an earlier call that died before broadcasting
+            // leaves the chain at Assigned(1) while /submit refuses a rebuild.
+            // /rebroadcast rebuilds the same tx from the stored result — the
+            // FIRST output is what gets delivered, not this call's.
+            if ((err as ApiError).code !== 'INVALID_STATE' || status !== 1) throw err;
+            sub = await api<Built>('POST', `/api/v1/a2a/tasks/${task}/rebroadcast`);
+            healed = true;
+          }
           const tx = sub.unsignedSubmitEvidence;
           await verifyTarget(s, tx.to, 'submitEvidence');
           if (s.mode === 'base') {
@@ -1196,6 +1214,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
           taskHash: detail.taskHash,
           submitTxHash,
           gas,
+          ...(healed ? { rebroadcast: true, note: 'An earlier submission for this task never reached the chain; its stored result was re-broadcast. The output passed to THIS call was not used.' } : {}),
           verification: fin.verificationResult ?? null,
           backendStatus: fin.status,
           onChainStatus: statusName(Number(after.status)),
