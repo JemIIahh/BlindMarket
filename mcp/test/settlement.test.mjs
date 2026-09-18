@@ -20,12 +20,12 @@ const SEPOLIA_ESCROW = '0xCca5ab873158b888158AD9Dc36fb4Ee683eFbEBf';
 const PRIVY_WALLET = '0x2afd3a7Dd4377097f5220d34fb4E577963FdB6a4';
 
 /** A fake /health/bridge + whoami backend. Counts calls so memoisation is testable. */
-function fakeBackend({ base, whoami = { address: PRIVY_WALLET } } = {}) {
+function fakeBackend({ base, posting, whoami = { address: PRIVY_WALLET } } = {}) {
   const calls = { bridge: 0, whoami: 0 };
   const fetchImpl = async (url) => {
     assert.match(String(url), /\/health\/bridge$/);
     calls.bridge++;
-    return { json: async () => ({ success: true, data: { base } }) };
+    return { json: async () => ({ success: true, data: { base, ...posting } }) };
   };
   const api = async (method, path) => {
     assert.equal(method, 'GET');
@@ -272,4 +272,62 @@ test('invalidate() forces the next call to re-discover immediately', async () =>
   assert.equal((await resolve()).mode, '0g', 'cached');
   resolve.invalidate();
   assert.equal((await resolve()).mode, 'base');
+});
+
+// ── R15: the backend's posting chain ─────────────────────────────────────────
+
+test('postingChain base is trusted even when the bridge has no Base signer', async () => {
+  // The exact gap postingChain closes: Base escrow set, no Base marketplace
+  // signer — legacy inference answers 0G while POST /tasks builds Base txs.
+  const be = fakeBackend({
+    base: null,
+    posting: { postingChain: 'base', postingEscrowAddress: SEPOLIA_ESCROW, postingChainId: 84532 },
+  });
+  const s = await discoverSettlement({ ...be, env: {} });
+  assert.equal(s.mode, 'base');
+  assert.equal(s.chainId, 84532);
+  assert.equal(s.escrowAddress, SEPOLIA_ESCROW);
+  assert.equal(s.payFrom, PRIVY_WALLET);
+  assert.equal(be.calls.whoami, 1);
+});
+
+test('postingChain 0g wins over a configured Base bridge', async () => {
+  // The backend's word about what it posts is authoritative, not the signer.
+  const be = fakeBackend({
+    base: { configured: true, chainId: 84532, escrowAddress: SEPOLIA_ESCROW },
+    posting: { postingChain: '0g', postingEscrowAddress: '0x3d0374963DaaD43e31d42373eb11156A8e8ce2Ff', postingChainId: 16602 },
+  });
+  const s = await discoverSettlement({ ...be, env: {} });
+  assert.equal(s.mode, '0g');
+  assert.equal(be.calls.whoami, 0, 'no relay wallet needed for 0G');
+});
+
+test('an explicit 0g force still beats a Base postingChain', async () => {
+  const be = fakeBackend({
+    base: null,
+    posting: { postingChain: 'base', postingEscrowAddress: SEPOLIA_ESCROW, postingChainId: 84532 },
+  });
+  const s = await discoverSettlement({ ...be, env: { BLINDMARKET_SETTLEMENT: '0g' } });
+  assert.equal(s.mode, '0g');
+  assert.equal(be.calls.bridge, 0, 'forced 0g never touches the network');
+});
+
+test('a Base postingChain with no escrow address fails loudly, never 0G', async () => {
+  const be = fakeBackend({
+    base: null,
+    posting: { postingChain: 'base', postingChainId: 84532 },
+  });
+  await assert.rejects(discoverSettlement({ ...be, env: {} }), (e) => e.code === 'SETTLEMENT_UNKNOWN');
+});
+
+test('an unknown postingChain fails loudly instead of funding the wrong chain', async () => {
+  const be = fakeBackend({ base: null, posting: { postingChain: 'sui' } });
+  await assert.rejects(discoverSettlement({ ...be, env: {} }), (e) => e.code === 'SETTLEMENT_UNKNOWN');
+});
+
+test('a backend older than postingChain falls back to the legacy inference', async () => {
+  // No postingChain key at all: Base signer present → base, as before.
+  const be = fakeBackend({ base: { configured: true, chainId: 84532, escrowAddress: SEPOLIA_ESCROW } });
+  const s = await discoverSettlement({ ...be, env: {} });
+  assert.equal(s.mode, 'base');
 });

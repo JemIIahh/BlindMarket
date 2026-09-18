@@ -8,18 +8,19 @@ import { JsonRpcProvider, getAddress } from 'ethers';
  * MCP has to agree with that decision or it funds the wrong thing — sending
  * native 0G value for a task the backend built as a USDC transferFrom, or
  * signing a Base tx on the 0G RPC. So instead of a parallel config here, ask
- * the backend which mode it is in (GET /health/bridge, public) and derive the
- * rest from the chain id.
+ * the backend which chain it posts on (GET /health/bridge, public) and
+ * derive the rest from the chain id.
  *
- * Discovery is a HINT, not a proof. /health/bridge reports Base only when the
- * backend can sign for Base (its escrow and marketplace signer), while task
- * creation routes on BASE_ESCROW_ADDRESS alone — so a backend with a Base
- * escrow but no Base signer answers "0G" here and builds Base transactions
- * there. The send paths in rent.ts
- * therefore verify the `to` of every unsigned tx against the escrow this
- * mode expects before broadcasting, and a mismatch invalidates the cache.
- * That check, not this lookup, is what stops native value going to a Base
- * address on the 0G RPC.
+ * Precedence: an explicit BLINDMARKET_SETTLEMENT override wins; otherwise the
+ * backend's reported `postingChain` wins; otherwise (backends older than the
+ * field) fall back to inferring from the Base signer capability below. That
+ * inference can answer "0G" while the backend posts Base tasks (Base escrow
+ * set, no Base marketplace signer) — which is exactly why postingChain
+ * exists. Either way, discovery is a HINT, not a proof. The send paths in
+ * rent.ts therefore verify the `to` of every unsigned tx against the escrow
+ * this mode expects before broadcasting, and a mismatch invalidates the
+ * cache. That check, not this lookup, is what stops native value going to a
+ * Base address on the 0G RPC.
  *
  * The two modes pay differently, and that is the whole reason this file
  * exists:
@@ -154,6 +155,14 @@ export async function discoverSettlement(deps: DiscoverDeps): Promise<Settlement
   const data = json?.data ?? json;
   const bridge = data?.base ?? null;
 
+  // R15: trust the backend's posting chain over signer-capability inference
+  // (an explicit BLINDMARKET_SETTLEMENT=base override is handled below and
+  // keeps its precedence — this branch only runs unforced).
+  if (!forced) {
+    const posted = await settlementFromPostingChain(data, deps, env);
+    if (posted) return posted;
+  }
+
   if (!bridge?.configured) {
     if (forced === 'base') {
       // /health/bridge reports Base only when the backend can sign for it
@@ -187,6 +196,36 @@ export async function discoverSettlement(deps: DiscoverDeps): Promise<Settlement
     throw err('SETTLEMENT_UNKNOWN', `Backend reports Base configured but no escrow address (${bridge.escrowAddress}).`);
   }
   return buildBaseSettlement(Number(bridge.chainId), bridge.escrowAddress, env, deps);
+}
+
+/** Settle from the backend's reported posting chain (R15). Returns null when
+ *  the backend predates the field so the caller falls back to the legacy
+ *  signer-capability inference. A present-but-unknown chain, or a Base claim
+ *  with no usable escrow/chain id, throws rather than guessing: falling back
+ *  to 0G there would fund the wrong escrow. */
+async function settlementFromPostingChain(
+  data: any,
+  deps: DiscoverDeps,
+  env: NodeJS.ProcessEnv,
+): Promise<Settlement | null> {
+  const postingChain = data?.postingChain;
+  if (postingChain == null) return null;
+  if (postingChain === '0g') {
+    return isEscrowAddress(data?.postingEscrowAddress)
+      ? { ...OG_SETTLEMENT, escrowAddress: getAddress(data.postingEscrowAddress) }
+      : OG_SETTLEMENT;
+  }
+  if (postingChain === 'base') {
+    if (!isEscrowAddress(data?.postingEscrowAddress)) {
+      throw err('SETTLEMENT_UNKNOWN', `Backend says it posts on Base but reports no escrow address (${data?.postingEscrowAddress}).`);
+    }
+    const chainId = Number(data?.postingChainId);
+    if (!Number.isInteger(chainId)) {
+      throw err('SETTLEMENT_UNKNOWN', `Backend says it posts on Base but reports no chain id (${data?.postingChainId}).`);
+    }
+    return buildBaseSettlement(chainId, data.postingEscrowAddress, env, deps);
+  }
+  throw err('SETTLEMENT_UNKNOWN', `Backend posts on "${postingChain}", which this MCP cannot settle — update @blindmarket/mcp-server.`);
 }
 
 /** Assemble a Base settlement from a chain id and escrow address, whichever

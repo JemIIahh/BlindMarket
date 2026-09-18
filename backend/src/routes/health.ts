@@ -30,6 +30,16 @@ healthRouter.get('/', (_req, res) => {
 // to run from contracts/.
 healthRouter.get('/bridge', async (_req, res, next) => {
   try {
+    // The chain POST /api/v1/tasks actually builds against: it routes on
+    // config.baseEscrowAddress alone (see tasks.ts). Independent of the
+    // signer-capability reporting below — a backend with a Base escrow but no
+    // Base marketplace signer posts Base tasks while `base` stays null.
+    // Consumers that fund the escrow (the MCP) must read postingChain, not
+    // `base.configured`.
+    const postingBase = !!config.baseEscrowAddress;
+    const posting = postingBase
+      ? { postingChain: 'base', postingEscrowAddress: config.baseEscrowAddress, postingChainId: config.baseChainId }
+      : { postingChain: '0g', postingEscrowAddress: config.blindEscrowAddress, postingChainId: config.ogChainId };
     const configured = isBridgeConfigured();
     if (!configured || !marketplaceSigner) {
       const body: ApiResponse = {
@@ -37,6 +47,7 @@ healthRouter.get('/bridge', async (_req, res, next) => {
         data: {
           configured: false,
           reason: 'MARKETPLACE_SIGNER_PRIVATE_KEY not set in backend env',
+          ...posting,
         },
       };
       res.json(body);
@@ -123,6 +134,7 @@ healthRouter.get('/bridge', async (_req, res, next) => {
       success: true,
       data: {
         configured: true,
+        ...posting,
         signerAddress: signerAddr,
         escrowAddress: config.blindEscrowAddress,
         chainId: config.ogChainId,
