@@ -1,8 +1,8 @@
 import { ethers } from 'ethers';
-import { BlindMarket } from '../index.js';
+import { BlindMarket, ApiError } from '../index.js';
 import { eciesDecrypt, aesDecrypt, derivePublicKey } from '../crypto/index.js';
 import type {
-  A2ATaskState, AgentCapability, ExecutorProfile, Message, RegisterExecutorInput,
+  A2APublicTaskMeta, A2ATaskEntry, A2ATaskState, AgentCapability, ExecutorProfile, Message, RegisterExecutorInput,
 } from '../types.js';
 
 // ── Config ──────────────────────────────────────────────────────────────────
@@ -13,8 +13,27 @@ export interface WorkerRuntimeConfig {
   displayName: string;
   capabilities: AgentCapability[];
   executeTask: ExecuteTaskHandler;
+  /**
+   * Private key of the wallet that OWNS `apiKey`. The backend registers the
+   * API key's owner as the executor and builds `submitEvidence` for that
+   * address, so only this key can both decrypt briefs and settle them.
+   * start() checks the key against the API key's owner BEFORE registering
+   * anything, then registers its uncompressed public key.
+   *
+   * REQUIRED (this or `existingPrivateKey`): start() throws without a key.
+   * Up to 0.5.x a keyless runtime registered a random wallet's public key
+   * over the owner's and accepted tasks it could never deliver.
+   */
+  privateKey?: string;
+  /**
+   * Restore mode: the owner wallet's key, WITHOUT re-registering on start
+   * (the stored profile is kept; see declareSupportedChains). start() throws
+   * if this key's address is not the executor the API key resolves to.
+   */
   existingPrivateKey?: string;
+  /** Optional cross-check: start() throws if it is not `existingPrivateKey`'s address. */
   existingAddress?: string;
+  /** @deprecated Ignored — the public key is derived from `existingPrivateKey`. */
   existingPublicKey?: string;
   minReward?: string;
   preferredCapabilities?: AgentCapability[];
@@ -22,19 +41,37 @@ export interface WorkerRuntimeConfig {
   watchIntervalMs?: number;
   maxConcurrentTasks?: number;
   /**
-   * The 0G RPC used to sign + broadcast `submitEvidence` for a 0G task.
-   * Defaults to the 0G testnet RPC (matches `backend/agents/worker.js`'s
-   * default). It is 0G ONLY: it never stands in for another chain. For Base
-   * set `rpcUrls.base`.
+   * How long a task may wait for the poster to wrap its brief key (403
+   * NEEDS_WRAP) before it is backed off (default 10 min). The wait holds no
+   * concurrency slot. Each timeout doubles the back-off: `wrapTimeoutMs`,
+   * then 2x, 4x … capped at 24 h.
+   */
+  wrapTimeoutMs?: number;
+  /**
+   * How long to keep re-trying /accept while the backend answers 503
+   * ASSIGNMENT_PENDING (the assign tx is broadcast, the task is held for this
+   * executor). Default 3 min — the backend's own settlement deadline is 120 s.
+   * After that the task is re-tried from the browse loop with back-off.
+   */
+  assignmentPendingTimeoutMs?: number;
+  /**
+   * The 0G RPC used to sign + broadcast `submitEvidence` for a 0G task. NO
+   * DEFAULT (0.5.x defaulted to 0G testnet while `apiBase` defaults to
+   * production, so a default runtime accepted mainnet tasks and failed the
+   * chainId pin after assignment). It is 0G ONLY: it never stands in for
+   * another chain. For Base set `rpcUrls.base`. Must be the same network the
+   * backend at `apiBase` settles on.
    */
   rpcUrl?: string;
   /**
    * Per-chain RPCs. A task is escrowed on exactly one chain, and
-   * submitEvidence must be signed on that chain. The runtime DECLARES, as its
+   * submitEvidence must be signed on that chain. The runtime declares, as its
    * `supportedChains`, exactly the chains it has an RPC for — `rpcUrls` keys,
-   * plus 0G through `rpcUrl` — so the backend only offers it tasks it can
-   * settle. Without `rpcUrls.base` it is not offered Base tasks (production
-   * posts new tasks on Base).
+   * plus 0G through `rpcUrl`. The backend only STORES that list; it does not
+   * filter offers or /accept by it. What keeps the runtime off a chain it
+   * cannot settle is client-side: browse skips entries whose `meta.chain` it
+   * did not declare, and executeTask fails before running the handler when
+   * /accept names such a chain. start() throws when no RPC is configured.
    */
   rpcUrls?: Partial<Record<SettlementChain, string>>;
 }
@@ -64,8 +101,7 @@ function settlementChain(taskId: string, reported: string | null | undefined): S
 
 /**
  * The RPC this runtime signs on for `chain`. `rpcUrls` is per chain; the
- * single `rpcUrl` is the 0G RPC (its default is 0G testnet) and never stands
- * in for another chain: a Base submitEvidence sent through it is rejected by
+ * single `rpcUrl` is the 0G RPC and never stands in for another chain: a Base submitEvidence sent through it is rejected by
  * ethers' chainId pin — after the handler has already run.
  */
 function rpcFor(config: { rpcUrl?: string; rpcUrls?: Partial<Record<SettlementChain, string>> }, chain: SettlementChain): string | undefined {
@@ -79,6 +115,8 @@ export type ExecuteTaskHandler = (ctx: TaskContext) => Promise<Record<string, un
 export interface TaskContext {
   taskId: string;
   task: A2ATaskState;
+  /** Public metadata from the browse entry (chain, deadline, capabilities). */
+  meta?: A2APublicTaskMeta;
   instructions: string;
 }
 
@@ -115,8 +153,58 @@ const DEFAULTS = {
   browseIntervalMs: 15_000,
   watchIntervalMs: 5_000,
   maxConcurrentTasks: 3,
-  rpcUrl: 'https://evmrpc-testnet.0g.ai',
+  wrapTimeoutMs: 600_000,
+  assignmentPendingTimeoutMs: 180_000,
 };
+
+/** First back-off after an /accept the backend released or that never confirmed; doubles per failure. */
+const RELEASED_BACKOFF_MS = 30_000;
+const MAX_BACKOFF_MS = 3_600_000;
+const MAX_WRAP_BACKOFF_MS = 86_400_000;
+/** Re-accept rounds for a task that may still be held for this executor before it is dropped. */
+const MAX_REACCEPT_ROUNDS = 6;
+
+/**
+ * NEEDS_WRAP messages after which waiting is pointless: the platform cannot
+ * re-wrap (custody key rotated — only the poster's own client still can), or
+ * this executor has no public key on record. Newer backends say so in
+ * `error.reason` (CUSTODY_ROTATED / NO_PUBLIC_KEY); the message match covers
+ * backends that send only the NEEDS_WRAP code.
+ */
+const WRAP_IMPOSSIBLE_REASONS = new Set(['CUSTODY_ROTATED', 'NO_PUBLIC_KEY']);
+const WRAP_IMPOSSIBLE = /rotated custody key|cannot re-wrap|no public key/i;
+
+/** Per-task retry bookkeeping. A task in here is NOT in `executions` and holds no slot. */
+interface RetryState {
+  /** Do not touch the task before this time. */
+  notBefore: number;
+  /** Consecutive released/unconfirmed accepts. */
+  failures: number;
+  /** When the current NEEDS_WRAP wait began. */
+  wrapSince?: number;
+  /** Completed NEEDS_WRAP waits that timed out. */
+  wrapTimeouts: number;
+  bidded: boolean;
+  /**
+   * Set when the task may still be `accepted` for this executor (it is then
+   * absent from the open listing): browse re-tries /accept itself.
+   */
+  reaccept?: { state: A2ATaskState; meta?: A2APublicTaskMeta; rounds: number };
+}
+
+/** /accept was abandoned; `held` = the backend may still hold the task for this executor. */
+class AcceptAbandoned extends Error {
+  constructor(readonly cause: unknown, readonly held: boolean) {
+    super(cause instanceof Error ? cause.message : String(cause));
+  }
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** base, 2·base, 4·base … capped. `n` is 1 for the first failure. */
+function backoff(base: number, n: number, cap: number): number {
+  return Math.min(base * 2 ** Math.max(0, n - 1), cap);
+}
 
 // ── WorkerRuntime ───────────────────────────────────────────────────────────
 
@@ -128,8 +216,9 @@ export class WorkerRuntime {
   private running = false;
   private paused = false;
   private browseTimer?: ReturnType<typeof setInterval>;
-  private watchTimers = new Map<string, ReturnType<typeof setInterval>>();
   private executions = new Map<string, TaskExecutionInfo>();
+  private retries = new Map<string, RetryState>();
+  private retryTimers = new Set<ReturnType<typeof setTimeout>>();
   private listeners = new Set<(event: WorkerRuntimeEvent) => void>();
 
   constructor(config: WorkerRuntimeConfig) {
@@ -152,10 +241,9 @@ export class WorkerRuntime {
   }
 
   /**
-   * The chains this runtime declares to the backend: those its code can sign
-   * for AND it has an RPC for. Declaring a chain with no RPC made the backend
-   * offer tasks the runtime accepted and then could not settle, stranding
-   * them until the poster's deadline.
+   * The chains this runtime declares to the backend and claims tasks on:
+   * those its code can sign for AND it has an RPC for. The backend stores the
+   * list but does not filter by it — browse() and executeTask() enforce it.
    */
   get declaredChains(): SettlementChain[] {
     return SETTLEMENT_CHAINS.filter((chain) => !!rpcFor(this.config, chain));
@@ -187,41 +275,72 @@ export class WorkerRuntime {
   async start(): Promise<ExecutorProfile> {
     if (this.running) return this.profile!;
 
+    // Refuse, before any request, a configuration that can only strand tasks.
+    const key = this.config.privateKey ?? this.config.existingPrivateKey;
+    if (!key) {
+      throw new Error(
+        '[WorkerRuntime] no executor key. Pass `privateKey`: the private key of the wallet that owns `apiKey` ' +
+          '(or `existingPrivateKey` to restore without re-registering). The backend assigns accepted tasks on-chain to ' +
+          "the API key's owner, and only that wallet can sign submitEvidence — a keyless runtime would overwrite the " +
+          "owner's registered public key and strand every task it accepted. To only look at tasks, call " +
+          'BlindMarket.browseA2ATasks() directly.',
+      );
+    }
+    if (this.declaredChains.length === 0) {
+      throw new Error(
+        '[WorkerRuntime] no RPC configured. Set `rpcUrl` (0G) and/or `rpcUrls.base` to the network the backend at ' +
+          '`apiBase` settles on. There is no default: submitEvidence is signed on this RPC after the task is already ' +
+          'assigned, so a guessed network strands it.',
+      );
+    }
+
     // "No tasks arrive" looks the same as "no work available", so say which
-    // chains this runtime will be offered tasks on, and what is missing.
+    // chains this runtime claims tasks on, and what is missing.
     const undeclared = SETTLEMENT_CHAINS.filter((c) => !this.declaredChains.includes(c));
     if (undeclared.length > 0) {
       console.warn(
         `[WorkerRuntime] declaring chains: ${this.declaredChains.join(', ') || 'none'}. ` +
-          `No RPC for ${undeclared.join(', ')} — set ${undeclared.map((c) => `rpcUrls.${c}`).join(', ')} to be offered those tasks ` +
+          `No RPC for ${undeclared.join(', ')} — tasks on ${undeclared.length > 1 ? 'those chains' : 'that chain'} are skipped; ` +
+          `set ${undeclared.map((c) => `rpcUrls.${c}`).join(', ')} to claim them ` +
           `(production posts new tasks on Base).`,
       );
     }
 
     // 1. Register or restore executor
-    if (this.config.existingPrivateKey && this.config.existingAddress && this.config.existingPublicKey) {
-      this.wallet = {
-        address: this.config.existingAddress,
-        privateKey: this.config.existingPrivateKey,
-        publicKey: this.config.existingPublicKey,
-      };
-      // Fetch existing profile — backend identifies by API key
-      const result = await this.bb.getExecutorProfile();
-      this.profile = await this.declareSupportedChains(result.agent);
-    } else {
+    if (this.config.privateKey) {
+      // The API key owner's own key: createAgent() checks it against the API
+      // key's owner BEFORE registering (no side effects on a mismatch), then
+      // registers its uncompressed public key. Registration is an upsert that
+      // keeps reputation, so this is safe on every start.
       const result = await this.bb.createAgent({
+        privateKey: this.config.privateKey,
         displayName: this.config.displayName,
         capabilities: this.config.capabilities,
         minReward: this.config.minReward,
         preferredCapabilities: this.config.preferredCapabilities,
         supportedChains: this.declaredChains,
       });
-      this.wallet = {
-        address: result.wallet.address,
-        privateKey: result.wallet.privateKey,
-        publicKey: result.wallet.publicKey,
-      };
+      this.wallet = result.wallet;
       this.profile = result.executor;
+    } else {
+      const signer = new ethers.Wallet(this.config.existingPrivateKey!);
+      if (this.config.existingAddress && this.config.existingAddress.toLowerCase() !== signer.address.toLowerCase()) {
+        throw new Error(
+          `[WorkerRuntime] existingAddress ${this.config.existingAddress} is not existingPrivateKey's address (${signer.address})`,
+        );
+      }
+      // Fetch existing profile — backend identifies by API key
+      const result = await this.bb.getExecutorProfile();
+      // Checked before declareSupportedChains() can register anything: tasks
+      // are assigned to the profile's address, which must be this signer.
+      if (result.agent.address.toLowerCase() !== signer.address.toLowerCase()) {
+        throw new Error(
+          `[WorkerRuntime] the API key resolves to executor ${result.agent.address} but existingPrivateKey belongs to ` +
+            `${signer.address}; it could accept tasks but never sign submitEvidence. Use the owner wallet's key, or an API key minted by this wallet.`,
+        );
+      }
+      this.wallet = { address: signer.address, privateKey: signer.privateKey, publicKey: signer.signingKey.publicKey };
+      this.profile = await this.declareSupportedChains(result.agent);
     }
 
     this.emit({ type: 'registered', profile: this.profile });
@@ -240,9 +359,11 @@ export class WorkerRuntime {
    * chain this runtime has no RPC for — it would be offered, accept and
    * strand those tasks. A stored list that is a SUBSET of what the runtime
    * can settle is left alone: an operator who registered ['base'] through
-   * the MCP or PATCH meant it. The backend only offers an executor
-   * tasks on the chains it declared, and a restore never registers otherwise,
-   * so an executor first registered by an older SDK would keep its old list.
+   * the MCP or PATCH meant it. The stored list is a declaration only — the
+   * backend does not filter offers by it; this runtime's own browse filter
+   * uses `declaredChains`, not the stored list — and a restore never
+   * registers otherwise, so an executor first registered by an older SDK
+   * would keep its old list.
    *
    * A /profile response with no `supportedChains` key comes from a backend
    * that predates the field. That backend would drop the field anyway, and
@@ -308,8 +429,8 @@ export class WorkerRuntime {
       clearInterval(this.browseTimer);
       this.browseTimer = undefined;
     }
-    for (const t of this.watchTimers.values()) clearInterval(t);
-    this.watchTimers.clear();
+    for (const t of this.retryTimers) clearTimeout(t);
+    this.retryTimers.clear();
     this.emit({ type: 'stopped' });
   }
 
@@ -338,9 +459,7 @@ export class WorkerRuntime {
   private async browse(): Promise<void> {
     if (this.paused) return;
     try {
-      const active = this.activeExecutions;
-      const inFlight = active.filter(e => e.status === 'bidding' || e.status === 'working').length;
-      if (inFlight >= this.config.maxConcurrentTasks) return;
+      if (this.inFlight() >= this.config.maxConcurrentTasks) return;
 
       const result = await this.bb.browseA2ATasks({
         capabilities: this.config.capabilities,
@@ -348,69 +467,232 @@ export class WorkerRuntime {
 
       this.emit({ type: 'browse_done', found: result.tasks.length });
 
-      for (const task of result.tasks) {
-        if (this.executions.has(task.taskId)) continue;
-        if (task.status !== 'open' && task.status !== 'bidding') continue;
-        if (task.executorAddress && task.executorAddress !== this.wallet?.address) continue;
+      // GET /a2a/tasks serves { meta, state } entries — id and status live on
+      // `state`. Nobody "assigns" a task: the executor claims it by calling
+      // /accept itself (which also assigns it on-chain), so there is no
+      // 'assigned' status to wait for.
+      const listed = new Set<string>();
+      for (const entry of result.tasks as A2ATaskEntry[]) {
+        const state = entry.state;
+        const taskId = state?.taskId ?? entry.meta?.taskId;
+        if (!taskId) continue;
+        listed.add(taskId);
+        if (state.status !== 'open') continue;
+        // An accept assigns on-chain and cannot be released, so never claim a
+        // task browse already says is on a chain this runtime did not declare.
+        // The backend does not filter by the registered supportedChains, so
+        // this filter (and the post-accept check in executeTask, which covers
+        // rows with no chain) is the only thing keeping such tasks out.
+        if (entry.meta?.chain && !(this.declaredChains as string[]).includes(entry.meta.chain)) continue;
+        this.claim(taskId, state, entry.meta);
+      }
 
-        this.executions.set(task.taskId, {
-          taskId: task.taskId,
-          status: 'bidding',
-          task,
-          startedAt: Date.now(),
-        });
-
-        this.emit({ type: 'task_found', taskId: task.taskId, task });
-
-        await this.bb.bidOnTask(task.taskId);
-        this.emit({ type: 'task_bidded', taskId: task.taskId });
-
-        this.watchForAssignment(task.taskId);
+      // Tasks that may still be held for this executor are not in the open
+      // listing: re-try their /accept here once their back-off has passed.
+      for (const [taskId, retry] of this.retries) {
+        if (retry.reaccept) this.claim(taskId, retry.reaccept.state, retry.reaccept.meta);
+        // Anything else that left the listing is gone (taken, cancelled,
+        // expired): drop its bookkeeping so the map stays bounded.
+        else if (!listed.has(taskId)) this.retries.delete(taskId);
       }
     } catch (err) {
       this.emit({ type: 'error', error: `Browse failed: ${err}` });
     }
   }
 
-  // ── Assignment watching ─────────────────────────────────────────────────
+  /** Executions holding a concurrency slot. A task waiting for a wrap or backing off holds none. */
+  private inFlight(): number {
+    let n = 0;
+    for (const e of this.executions.values()) {
+      if (e.status === 'bidding' || e.status === 'assigned' || e.status === 'working') n++;
+    }
+    return n;
+  }
 
-  private watchForAssignment(taskId: string): void {
-    if (!this.running) return;
-    const ms = this.config.watchIntervalMs;
-    const timer = setInterval(async () => {
-      if (!this.running || this.paused) return;
+  /** Start executing `taskId` if it is not running, not backing off, and a slot is free. */
+  private claim(taskId: string, state: A2ATaskState, meta?: A2APublicTaskMeta): boolean {
+    if (this.executions.has(taskId)) return false;
+    const retry = this.retries.get(taskId);
+    if (retry && retry.notBefore > Date.now()) return false;
+    if (this.inFlight() >= this.config.maxConcurrentTasks) return false;
+    this.executions.set(taskId, { taskId, status: 'bidding', task: state, startedAt: Date.now() });
+    // Announce a task once, not on every re-try.
+    if (!retry) this.emit({ type: 'task_found', taskId, task: state });
+    void this.executeTask(taskId, state, meta);
+    return true;
+  }
+
+  private retryState(taskId: string): RetryState {
+    let retry = this.retries.get(taskId);
+    if (!retry) {
+      retry = { notBefore: 0, failures: 0, wrapTimeouts: 0, bidded: false };
+      this.retries.set(taskId, retry);
+    }
+    return retry;
+  }
+
+  // ── Accept ──────────────────────────────────────────────────────────────
+
+  /**
+   * POST /accept, re-trying while the backend says the claim is still ours:
+   * 503 ASSIGNMENT_PENDING means the assign tx is broadcast but unconfirmed
+   * and the task stays `accepted` for this executor until a retry confirms it
+   * (or the backend's sweep releases it). A 503 SETTLEMENT_FAILED seen AFTER a
+   * pending answer is the idempotent re-check failing, not a release, so it is
+   * re-tried too. Bounded by assignmentPendingTimeoutMs, then AcceptAbandoned
+   * with `held: true`. Every other error is thrown as it came.
+   */
+  private async acceptUntilAssigned(taskId: string): Promise<Awaited<ReturnType<BlindMarket['acceptTask']>>> {
+    const giveUpAt = Date.now() + this.config.assignmentPendingTimeoutMs;
+    let delay = Math.min(2_000, this.config.watchIntervalMs);
+    let pending = false;
+    for (;;) {
       try {
-        const detail = await this.bb.getTask(taskId);
-        const a2a = detail.a2aState;
-        if (!a2a) return;
-
-        if (a2a.status === 'assigned') {
-          clearInterval(timer);
-          this.watchTimers.delete(taskId);
-          this.emit({ type: 'task_assigned', taskId });
-          await this.executeTask(taskId, a2a);
-        }
-      } catch {
-        // Retry next tick
+        return await this.bb.acceptTask(taskId);
+      } catch (err) {
+        const code = err instanceof ApiError ? err.code : undefined;
+        if (code === 'ASSIGNMENT_PENDING') pending = true;
+        else if (!(pending && code === 'SETTLEMENT_FAILED')) throw err;
+        if (!this.running || Date.now() + delay > giveUpAt) throw new AcceptAbandoned(err, true);
+        await sleep(delay);
+        delay = Math.min(delay * 2, 15_000);
       }
+    }
+  }
+
+  /**
+   * /accept did not hand over the task. Release the slot and decide when (if
+   * ever) the task is touched again. Returns the message for `task_failed`.
+   */
+  private async onAcceptFailed(taskId: string, a2a: A2ATaskState, meta: A2APublicTaskMeta | undefined, err: unknown): Promise<string> {
+    this.executions.delete(taskId);
+    const now = Date.now();
+    const cause = err instanceof AcceptAbandoned ? err.cause : err;
+    const api = cause instanceof ApiError ? cause : undefined;
+
+    // 403 NEEDS_WRAP: the brief key is not wrapped to our pubkey. Bid (the
+    // poster wraps to bidders) and wait WITHOUT a slot: the task is re-tried
+    // every watchIntervalMs until wrapTimeoutMs, then backed off.
+    if (api?.code === 'NEEDS_WRAP') {
+      const retry = this.retryState(taskId);
+      if (!retry.bidded) {
+        try {
+          await this.bb.bidOnTask(taskId);
+          retry.bidded = true;
+          this.emit({ type: 'task_bidded', taskId });
+        } catch (bidErr) {
+          retry.failures++;
+          retry.notBefore = now + backoff(RELEASED_BACKOFF_MS, retry.failures, MAX_BACKOFF_MS);
+          return `not accepted: NEEDS_WRAP, and the bid failed: ${bidErr}`;
+        }
+      }
+      const reason = (api.body as { error?: { reason?: unknown } } | undefined)?.error?.reason;
+      const impossible = typeof reason === 'string'
+        ? WRAP_IMPOSSIBLE_REASONS.has(reason)
+        : WRAP_IMPOSSIBLE.test(api.message);
+      retry.wrapSince ??= now;
+      if (!impossible && now - retry.wrapSince < this.config.wrapTimeoutMs) {
+        retry.notBefore = now + this.config.watchIntervalMs;
+        this.scheduleRetry(taskId, a2a, meta, this.config.watchIntervalMs);
+        return 'not accepted yet: NEEDS_WRAP — bid placed, waiting for the poster to wrap the brief key';
+      }
+      // Timed out, or the backend says the platform can never wrap it: only
+      // the poster's own client still can, so look again much later.
+      retry.wrapTimeouts++;
+      retry.wrapSince = undefined;
+      retry.bidded = false; // bid again when the back-off ends
+      const wait = backoff(this.config.wrapTimeoutMs, retry.wrapTimeouts, MAX_WRAP_BACKOFF_MS);
+      retry.notBefore = now + wait;
+      return impossible
+        ? `not accepted: ${api.message} Skipping for ${Math.round(wait / 60_000)} min.`
+        : `not accepted: no wrapped key after ${Math.round(this.config.wrapTimeoutMs / 1000)}s; skipping for ${Math.round(wait / 60_000)} min`;
+    }
+
+    // Lost the race / offer held by another agent / gone: nothing was claimed.
+    // A still-open task (OFFER_HELD, ACCEPT_LOCKED) is re-tried by a later browse.
+    if (api?.status === 409) {
+      this.retries.delete(taskId);
+      return `not accepted: ${api.code ?? api.message}`;
+    }
+
+    // Refused for a reason a retry cannot change (SELF_ACCEPT, IS_VERIFIER,
+    // NOT_REGISTERED, NOT_TARGET_EXECUTOR, 404 …): nothing was claimed. Keep
+    // the task out of the way for as long as it stays listed.
+    if (api && api.status < 500 && api.status !== 408 && api.status !== 429) {
+      const retry = this.retryState(taskId);
+      retry.reaccept = undefined;
+      retry.notBefore = now + MAX_WRAP_BACKOFF_MS;
+      return `not accepted: ${api.code ?? api.message}`;
+    }
+
+    // The backend released the task back to open (503 REWRAP_FAILED, or a 503
+    // SETTLEMENT_FAILED on a fresh accept): a later browse may claim it again,
+    // after a per-task back-off so a persistent failure does not hot-loop.
+    const retry = this.retryState(taskId);
+    retry.failures++;
+    // The backend says "released" in the message only when it did re-open the
+    // task (its release is compare-and-set and can fail; SETTLEMENT_FAILED from
+    // the idempotent re-check never releases). There is no separate code.
+    const released =
+      !(err instanceof AcceptAbandoned) &&
+      (api?.code === 'REWRAP_FAILED' || api?.code === 'SETTLEMENT_FAILED') &&
+      /released/i.test(api.message);
+    if (released) {
+      retry.reaccept = undefined;
+      retry.notBefore = now + backoff(RELEASED_BACKOFF_MS, retry.failures, MAX_BACKOFF_MS);
+      return `not accepted: ${api!.code} — the backend released the task; re-trying after a back-off`;
+    }
+
+    // ASSIGNMENT_PENDING that never confirmed, a REWRAP/SETTLEMENT failure the
+    // backend did not release, an unknown 5xx, a rate limit or a network error: the task MAY be held for (or already assigned to) this executor,
+    // and then it is not in the open listing. /accept is idempotent for the
+    // recorded executor, so browse re-tries it directly, with back-off, a
+    // bounded number of times.
+    const rounds = (retry.reaccept?.rounds ?? 0) + 1;
+    if (rounds > MAX_REACCEPT_ROUNDS) {
+      this.retries.delete(taskId);
+      return `accept never confirmed after ${MAX_REACCEPT_ROUNDS} rounds (${api?.code ?? cause}); giving up. If the assignment landed on-chain the task is in getExecutions().`;
+    }
+    retry.reaccept = { state: a2a, meta, rounds };
+    retry.notBefore = now + backoff(RELEASED_BACKOFF_MS, retry.failures, MAX_BACKOFF_MS);
+    return `accept not confirmed (${api?.code ?? cause}); the task may still be held for this executor — re-trying /accept after a back-off`;
+  }
+
+  /** Re-try one task sooner than the next browse tick (NEEDS_WRAP wait). */
+  private scheduleRetry(taskId: string, a2a: A2ATaskState, meta: A2APublicTaskMeta | undefined, ms: number): void {
+    if (!this.running) return;
+    const timer = setTimeout(() => {
+      this.retryTimers.delete(timer);
+      // No free slot / paused: the next browse picks it up instead.
+      if (this.running && !this.paused) this.claim(taskId, a2a, meta);
     }, ms);
-    this.watchTimers.set(taskId, timer);
+    this.retryTimers.add(timer);
   }
 
   // ── Task execution ──────────────────────────────────────────────────────
 
-  private async executeTask(taskId: string, a2a: A2ATaskState): Promise<void> {
+  private async executeTask(taskId: string, a2a: A2ATaskState, meta?: A2APublicTaskMeta): Promise<void> {
     const exec = this.executions.get(taskId);
     if (!exec) return;
 
     try {
-      exec.status = 'assigned';
-
       // Accept task — get the rootHash + this executor's ECIES-wrapped AES
       // key. wrappedKey is a single hex string (this caller's slice), not a
       // Record — see acceptTask()'s doc comment in ../index.ts.
-      const acceptResult = await this.bb.acceptTask(taskId);
+      let acceptResult: Awaited<ReturnType<BlindMarket['acceptTask']>>;
+      try {
+        acceptResult = await this.acceptUntilAssigned(taskId);
+      } catch (err) {
+        // Never leave a task that was not handed over in `executions`: it
+        // would be skipped by every later browse and never executed.
+        const error = await this.onAcceptFailed(taskId, a2a, meta, err);
+        this.emit({ type: 'task_failed', taskId, error });
+        return;
+      }
+      this.retries.delete(taskId);
+      exec.status = 'assigned';
       exec.task = a2a;
+      this.emit({ type: 'task_assigned', taskId });
       this.emit({ type: 'task_accepted', taskId });
       // Fail before running the handler if this runtime can't settle the task:
       // an unknown chain, or one it has no RPC for (the send would fail only
@@ -450,45 +732,25 @@ export class WorkerRuntime {
       const result = await this.config.executeTask({
         taskId,
         task: a2a,
+        meta,
         instructions,
       });
 
       exec.status = 'submitted';
       this.emit({ type: 'task_executed', taskId });
 
-      // Submit result — the contract requires the assigned worker to sign
-      // submitEvidence personally (onlyWorker), so the backend hands back an
-      // unsigned tx instead of broadcasting it for us.
-      const submitResult = await this.bb.submitResult(taskId, result);
-
-      // Sign + broadcast submitEvidence with the runtime's own wallet, wait
-      // for confirmation, then tell the backend to proceed with
-      // verification. Without this the on-chain task never leaves
-      // 'Assigned' and completeVerification always reverts — the task only
-      // LOOKS complete.
-      if (submitResult.unsignedSubmitEvidence) {
-        // Pick the RPC for the chain the backend says holds this task. This
-        // used to be a single 0G provider, so a Base submitEvidence was
-        // broadcast onto 0G. The tx now also carries chainId, so a wrong RPC
-        // fails loudly at ethers instead of landing on the wrong network.
-        const chain = settlementChain(taskId, submitResult.chain);
-        // rpcUrls per chain; rpcUrl is the 0G RPC only (rpcFor). The chainId
-        // pin still rejects a genuine mismatch at ethers before anything is
-        // broadcast.
-        const rpc = rpcFor(this.config, chain);
-        if (!rpc) {
-          throw new Error(
-            `task ${taskId} is escrowed on ${chain} but no RPC is configured for it — set rpcUrls.${chain} in the WorkerRuntime config`,
-          );
-        }
-        const provider = new ethers.JsonRpcProvider(rpc);
-        const signer = new ethers.Wallet(this.wallet!.privateKey, provider);
-        const tx = await signer.sendTransaction(
-          submitResult.unsignedSubmitEvidence as ethers.TransactionRequest,
-        );
-        await tx.wait();
-      }
-      const finalizeResult = await this.bb.finalize(taskId);
+      // Submit → sign + broadcast submitEvidence on the chain /submit names
+      // (the contract's onlyWorker means the backend can only hand back an
+      // unsigned tx) → finalize, healing a stranded 'submitted' state via
+      // /rebroadcast. Without the broadcast the on-chain task never leaves
+      // 'Assigned' and the task only LOOKS complete. deliverResult() signs
+      // only on a chain named here: rpcUrls per chain, rpcUrl for 0G only, so
+      // an unknown chain refuses before anything is sent, and the chainId pin
+      // still rejects a genuine mismatch at ethers.
+      const { submitTxHash: _submitTxHash, ...finalizeResult } = await this.bb.deliverResult(taskId, result, {
+        privateKey: this.wallet!.privateKey,
+        rpcUrls: Object.fromEntries(SETTLEMENT_CHAINS.map((c) => [c, rpcFor(this.config, c)])),
+      });
 
       exec.status = 'completed';
       this.emit({ type: 'task_submitted', taskId, result });

@@ -257,17 +257,19 @@ const migrations: Migration[] = [
       ALTER TABLE deployed_agents ADD COLUMN encrypted_tool_secrets TEXT DEFAULT '{}';`,
   },
   {
-    // Mirror of Postgres migration 32. SQLite has no ADD COLUMN IF NOT EXISTS;
-    // this runner applies each id once.
+    // SDK 0.6.0: workers tell the backend which chains they have an RPC for.
+    // Mirror of Postgres migration 32; its '[]' default reads back as null
+    // (agentStore.rowToAgent) and migration 18 clears the rows it stamped.
     id: 14,
-    name: 'agent_executors_usdc_earnings',
-    sql: `ALTER TABLE agent_executors ADD COLUMN total_earned_usdc_raw TEXT NOT NULL DEFAULT '0';`,
+    name: 'agent_executors_supported_chains',
+    sql: `ALTER TABLE agent_executors ADD COLUMN supported_chains TEXT DEFAULT '[]';`,
   },
   {
-    // Mirror of Postgres migration 33: a JSON array, NULL for legacy rows.
+    // Mirror of Postgres migration 33. SQLite has no ADD COLUMN IF NOT EXISTS;
+    // this runner applies each id once.
     id: 15,
-    name: 'agent_executors_supported_chains',
-    sql: `ALTER TABLE agent_executors ADD COLUMN supported_chains TEXT;`,
+    name: 'agent_executors_usdc_earnings',
+    sql: `ALTER TABLE agent_executors ADD COLUMN total_earned_usdc_raw TEXT NOT NULL DEFAULT '0';`,
   },
   {
     // Mirror of Postgres migration 34 (services/creditLedger.ts).
@@ -285,6 +287,14 @@ const migrations: Migration[] = [
     id: 17,
     name: 'transactions_unit',
     sql: `ALTER TABLE transactions ADD COLUMN unit TEXT;`,
+  },
+  {
+    // Mirror of Postgres migration 36: a JSON array, NULL for legacy rows.
+    // SQLite can't drop a column default without rebuilding the table, and
+    // registerAgent always writes the column, so only the stamped rows change.
+    id: 18,
+    name: 'agent_executors_supported_chains_nullable',
+    sql: `UPDATE agent_executors SET supported_chains = NULL WHERE supported_chains IN ('[]', '["0g"]');`,
   },
 ];
 

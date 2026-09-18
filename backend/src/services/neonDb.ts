@@ -720,20 +720,23 @@ const migrations: Array<{ id: number; name: string; sql: string; when?: () => bo
     `,
   },
   {
+    // SDK 0.6.0: workers tell the backend which chains they have an RPC for
+    // so they only get offered tasks they can actually settle.
+    // Recorded on production as-is: never edit this entry. Its NOT NULL
+    // DEFAULT '{0g}' is undone by migration 36.
     id: 32,
+    name: 'agent_executors_supported_chains',
+    sql: `
+      ALTER TABLE agent_executors ADD COLUMN IF NOT EXISTS supported_chains TEXT[] NOT NULL DEFAULT '{0g}';
+    `,
+  },
+  {
+    id: 33,
     name: 'agent_executors_usdc_earnings',
     // total_earned_raw holds native 0G (18 decimals); USDC payouts (6
     // decimals, Base now and Arc later) get their own total so the two are
     // never added together.
     sql: `ALTER TABLE agent_executors ADD COLUMN IF NOT EXISTS total_earned_usdc_raw TEXT NOT NULL DEFAULT '0';`,
-  },
-  {
-    id: 33,
-    name: 'agent_executors_supported_chains',
-    // Settlement chains the executor's code can sign for, as it declared at
-    // registration. NULL = registered by code that predates the field, which
-    // handles exactly 0G and Base (executorChains.LEGACY_SUPPORTED_CHAINS).
-    sql: `ALTER TABLE agent_executors ADD COLUMN IF NOT EXISTS supported_chains TEXT[];`,
   },
   {
     id: 34,
@@ -757,6 +760,26 @@ const migrations: Array<{ id: number; name: string; sql: string; when?: () => bo
     // from before this column are NULL: they are in whatever this deployment
     // paid in at the time. Summaries never add different units together.
     sql: `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS unit TEXT;`,
+  },
+  {
+    id: 36,
+    name: 'agent_executors_supported_chains_nullable',
+    // supported_chains is what the executor's code declared at registration;
+    // NULL = registered by code that predates the field, which handles
+    // exactly 0G and Base (executorChains.LEGACY_SUPPORTED_CHAINS). Migration
+    // 32 made the column NOT NULL DEFAULT '{0g}', stamping every existing
+    // executor 0G-only. Routing reads the column, so the stamp would stop
+    // those agents being offered Base tasks, and SDK 0.6 treats a stored
+    // subset as the operator's choice and never re-declares it. A stamp
+    // can't be told from a declared ['0g'], so every {0g} row goes back to
+    // NULL; worker.js and the SDK declare their real chains at their next
+    // registration.
+    sql: `
+      ALTER TABLE agent_executors ALTER COLUMN supported_chains DROP NOT NULL;
+      ALTER TABLE agent_executors ALTER COLUMN supported_chains DROP DEFAULT;
+      UPDATE agent_executors SET supported_chains = NULL
+       WHERE supported_chains = '{0g}' OR cardinality(supported_chains) = 0;
+    `,
   },
 ];
 

@@ -48,10 +48,12 @@ describe('isRerunSafe', () => {
     expect(isRerunSafe(sql)).toBe(expected);
   });
 
-  it('flags only the data migrations (#16, #31) among the current ones', () => {
+  it('flags only the data migrations (#16, #31, #36) among the current ones', () => {
     // A new migration that isn't safe to re-run fails this test on purpose:
     // write it with IF NOT EXISTS, or add its id here as a conscious decision.
-    expect(rerunUnsafeMigrationIds()).toEqual([16, 31]);
+    // #36 clears supported_chains = {0g}: re-run later, it would erase what
+    // agents declared since.
+    expect(rerunUnsafeMigrationIds()).toEqual([16, 31, 36]);
   });
 });
 

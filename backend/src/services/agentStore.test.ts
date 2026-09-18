@@ -88,7 +88,8 @@ describe('registerAgent', () => {
 
   it.each([
     [null, null],
-    [[], []],
+    // Nothing declared is the legacy set, as the '[]' column default reads.
+    [[], null],
     [['0g'], ['0g']],
     [['0g', 'base', 'arc'], ['0g', 'base', 'arc']],
   ])('stores declared chains %j and reads them back as %j', async (declared, expected) => {

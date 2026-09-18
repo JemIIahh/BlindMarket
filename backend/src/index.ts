@@ -7,7 +7,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import { config, assertBootConfig } from './config.js';
 import { embeddingsConfigured } from './services/embeddingService.js';
-import { globalErrorHandler } from './middleware/errorHandler.js';
+import { globalErrorHandler, initSentry } from './middleware/errorHandler.js';
 import { createRateLimiter } from './middleware/rateLimit.js';
 import { requestLogger } from './middleware/requestLogger.js';
 import { initSocket } from './services/socket.js';
@@ -61,6 +61,9 @@ import { chainRuntime } from './services/chainRuntime.js';
 import { clientPricingWarnings } from './services/settlementUnits.js';
 import { logChainConfig } from './services/chainService.js';
 import { reconcileAgents, startZombieReaper } from './services/agentRunner.js';
+
+// First, so a failed boot check below is reported too. No-op without SENTRY_DSN.
+initSentry(config.sentryDsn, config.sentryEnvironment);
 
 // Fail fast on a misconfigured (esp. production) deploy before binding the port.
 assertBootConfig();

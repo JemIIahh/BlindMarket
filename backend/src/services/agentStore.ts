@@ -26,9 +26,23 @@ function rowToAgent(row: Record<string, unknown>): AgentExecutor {
     tasksCompleted: (row.tasks_completed as number) ?? 0,
     totalEarnedRaw: (row.total_earned_raw as string) ?? '0',
     totalEarnedUsdcRaw: (row.total_earned_usdc_raw as string) ?? '0',
-    supportedChains: row.supported_chains == null ? null : safeJsonArray(row.supported_chains),
+    supportedChains: supportedChainsOf(row.supported_chains),
     registeredAt: (row.registered_at as string) ?? new Date().toISOString(),
   };
+}
+
+// null = registered by code that predates the field (the legacy set). The
+// API never stores an empty list (the schema requires one entry), so an empty
+// one is SQLite migration 14's '[]' default and means the same.
+function supportedChainsOf(v: unknown): string[] | null {
+  if (v == null) return null;
+  const chains = safeJsonArray(v);
+  return chains.length > 0 ? chains : null;
+}
+
+/** What registerAgent stores: an empty list declares nothing, so it is null too. */
+function declaredChains(agent: AgentExecutor): string[] | null {
+  return agent.supportedChains && agent.supportedChains.length > 0 ? agent.supportedChains : null;
 }
 
 function safeJsonArray(v: unknown): string[] {
@@ -46,7 +60,7 @@ function safeJsonArray(v: unknown): string[] {
  *
  * `supportedChains` is written on every registration: it describes the code
  * that registered last, so a registration without it (older code) resets it
- * to null, the legacy set.
+ * to null, the legacy set. An empty list is stored as null too.
  */
 export async function registerAgent(agent: AgentExecutor): Promise<void> {
   const addr = agent.address.toLowerCase();
@@ -85,7 +99,7 @@ export async function registerAgent(agent: AgentExecutor): Promise<void> {
         agent.agentCardUrl ?? null, agent.mcpEndpointUrl ?? null,
         agent.minReward ?? null, agent.preferredCapabilities ?? null,
         agent.reputation, agent.tasksCompleted, agent.totalEarnedRaw ?? '0', agent.totalEarnedUsdcRaw ?? '0',
-        agent.supportedChains ?? null,
+        declaredChains(agent),
       ],
     );
     return;
@@ -120,7 +134,7 @@ export async function registerAgent(agent: AgentExecutor): Promise<void> {
     agent.agentCardUrl ?? null, agent.mcpEndpointUrl ?? null,
     agent.minReward ?? null, agent.preferredCapabilities ? JSON.stringify(agent.preferredCapabilities) : null,
     agent.reputation, agent.tasksCompleted, agent.totalEarnedRaw ?? '0', agent.totalEarnedUsdcRaw ?? '0',
-    agent.supportedChains ? JSON.stringify(agent.supportedChains) : null, addr,
+    declaredChains(agent) ? JSON.stringify(declaredChains(agent)) : null, addr,
   );
 }
 

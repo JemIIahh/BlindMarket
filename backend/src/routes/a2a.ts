@@ -5,7 +5,7 @@ import { createUserRateLimiter } from '../middleware/rateLimit.js';
 import { AppError } from '../middleware/errorHandler.js';
 import * as agentStore from '../services/agentStore.js';
 import * as a2aStore from '../services/a2aStore.js';
-import { loadAgentBySmartAccount } from '../services/deployedAgentStore.js';
+import { loadAgentBySmartAccount, loadAgentByWallet } from '../services/deployedAgentStore.js';
 import * as bidsStore from '../services/bidsStore.js';
 import * as keyCustody from '../services/keyCustodyService.js';
 import { autoVerify } from '../services/autoVerify.js';
@@ -22,11 +22,12 @@ import { demandFeed, MAX_DEMAND_LIMIT } from '../services/demandFeed.js';
 import { chainRuntime } from '../services/chainRuntime.js';
 import { receiptSearchOrder, settlementChainConfig } from '../services/settlementChains.js';
 import { ethers } from 'ethers';
-import type { AuthRequest, ApiResponse, AgentCapability } from '../types.js';
+import type { AuthRequest, ApiResponse, AgentCapability, A2ATaskMeta } from '../types.js';
 import { AGENT_CAPABILITIES } from '../types.js';
 import { rankAgents, pickExplorationAgent } from '../services/agentScorer.js';
 import { supportsChain, supportsTaskChain } from '../services/executorChains.js';
-import { emitTaskOffer, emitTaskAvailable } from '../services/socket.js';
+import { emitTaskOffer, emitTaskAvailable, hasAgentSocket } from '../services/socket.js';
+import { isAlive } from '../services/redis.js';
 import { EXPIRY_GRACE_SEC } from '../constants.js';
 import { config } from '../config.js';
 import * as serviceStore from '../services/serviceStore.js';
@@ -34,6 +35,7 @@ import { consumePendingCost } from '../services/railwaySandbox.js';
 import * as accountingService from '../services/accountingService.js';
 import { normalizeSettlementAmount, payoutCurrency, pricingUnit, sameUnit, type TaskReward } from '../services/settlementUnits.js';
 import { getTokenDecimals } from '../services/chain.js';
+import { isSafeRegexSource } from '../services/rubricEngine.js';
 
 export const a2aRouter = Router();
 
@@ -389,6 +391,9 @@ a2aRouter.get('/tasks', async (req, res, next) => {
   }
 });
 
+const ASSIGNMENT_PENDING_MESSAGE =
+  'On-chain assignment is still confirming. The task stays assigned to you — retry /accept shortly to confirm it.';
+
 /**
  * POST /api/v1/a2a/tasks/:id/accept
  * Accept a task (capability match + reputation gate).
@@ -496,6 +501,7 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
         custodyRotated
           ? 'Task brief is sealed to a rotated custody key — the platform cannot re-wrap it. POST /a2a/tasks/:id/bid to register intent; only the poster can wrap a slice to your pubkey (or cancel and repost).'
           : 'Task brief is not yet wrapped to your pubkey — POST /a2a/tasks/:id/bid to register intent; the poster will wrap on their next polling cycle.',
+        custodyRotated ? 'CUSTODY_ROTATED' : 'AWAITING_POSTER_WRAP',
       );
     }
 
@@ -506,6 +512,7 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
         403,
         'NEEDS_WRAP',
         'Your executor record has no public key to re-wrap the brief to — re-register with a pubkey.',
+        'NO_PUBLIC_KEY',
       );
     }
 
@@ -536,6 +543,9 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
           throw new AppError(409, 'TASK_EXPIRED', 'Task is no longer available on-chain.');
         }
         await a2aStore.logAcceptAttempt(taskId, address, 'error');
+        if (reSettleResult.pending) {
+          throw new AppError(503, 'ASSIGNMENT_PENDING', ASSIGNMENT_PENDING_MESSAGE);
+        }
         throw new AppError(503, 'SETTLEMENT_FAILED', `On-chain assignment re-check failed: ${reSettleResult.error}.`);
       }
       const currentMeta = await a2aStore.getMeta(taskId);
@@ -599,12 +609,20 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
       } catch (err) {
         console.error(`[a2a] accept: key-custody rewrap failed for ${taskId}:`, (err as Error).message);
         // Un-assign so another (or the same) agent can retry; do NOT settle on chain.
+        // Compare-and-set: only the acceptance THIS request just won (this
+        // executor, no assign tx yet) is undone. Anything else means the state
+        // moved on, and re-opening would clobber it.
+        let released = false;
         try {
-          await a2aStore.releaseToOpen(taskId);
+          released = (await releaseAndAnnounce(taskId, meta, { executorAddress: address }, 'accept/rewrap')).ok;
         } catch (relErr) {
-          console.error(`[a2a] accept: releaseToOpen after rewrap failure also failed for ${taskId}:`, (relErr as Error).message);
+          console.error(`[a2a] accept: release after rewrap failure also failed for ${taskId}:`, (relErr as Error).message);
         }
-        throw new AppError(503, 'REWRAP_FAILED', 'Key-custody re-wrap failed; task released — retry shortly.');
+        throw new AppError(
+          503,
+          'REWRAP_FAILED',
+          released ? 'Key-custody re-wrap failed; task released — retry shortly.' : 'Key-custody re-wrap failed — retry shortly.',
+        );
       }
       // Persist for the record / idempotency: a later /accept by the same agent
       // takes the wrappedKeys[addr] fast-path instead of re-wrapping again.
@@ -702,10 +720,30 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
         }
         throw new AppError(409, 'ASSIGNED_ELSEWHERE', 'Task is already assigned on-chain to a different executor');
       }
+      // Assign tx broadcast but unconfirmed: it may still mine, so re-listing
+      // here could hand the task to a second agent. Stay 'accepted' — the
+      // caller's retry confirms via the idempotent branch above, and the expiry
+      // sweep releases it if the tx was dropped.
+      if (settleResult.pending) {
+        console.warn(`[a2a] accept: assignment for ${taskId} still confirming (tx=${settleResult.txHash}) — not releasing`);
+        await a2aStore.logAcceptAttempt(taskId, address, 'error');
+        throw new AppError(503, 'ASSIGNMENT_PENDING', ASSIGNMENT_PENDING_MESSAGE);
+      }
       console.error(`[a2a] accept: settlement failed for ${taskId}: ${settleResult.error}`);
-      // Release task back to open so another agent can retry.
-      try { await a2aStore.releaseToOpen(taskId); } catch { /* best-effort */ }
-      throw new AppError(503, 'SETTLEMENT_FAILED', `On-chain assignment failed: ${settleResult.error}. Task released — another agent may retry.`);
+      // Release task back to open so another agent can retry — compare-and-set
+      // against the acceptance this request made: same executor, and the assign
+      // tx this attempt broadcast (none when it failed before broadcasting).
+      let released = false;
+      try {
+        released = (await releaseAndAnnounce(
+          taskId, meta, { executorAddress: address, assignTxHash: settleResult.txHash }, 'accept/settlement',
+        )).ok;
+      } catch { /* best-effort */ }
+      throw new AppError(
+        503,
+        'SETTLEMENT_FAILED',
+        `On-chain assignment failed: ${settleResult.error}.${released ? ' Task released — another agent may retry.' : ''}`,
+      );
     }
 
     // Encrypted-brief slice: return the caller's wrappedKey + rootHash so the
@@ -980,6 +1018,34 @@ function broadcastMeta(requiredCaps: string[], chain?: TaskChain): Record<string
   };
 }
 
+/** A task that went back to `open` is announced like a fresh broadcast —
+ *  otherwise connected agents only rediscover it on their next reconnect. */
+function announceReopened(taskId: string, meta: A2ATaskMeta): void {
+  emitTaskAvailable(taskId, broadcastMeta(meta.requiredCapabilities ?? [], meta.chain));
+}
+
+/**
+ * Compare-and-set release (a2aStore.tryReleaseAccepted) + announce. The task is
+ * announced ONLY when this call re-opened it: on a lost compare-and-set the
+ * state belongs to someone else (a submit, a re-accept under a new assign tx,
+ * another release) and announcing would invite agents onto a task that is not
+ * open. Throws when the store write itself fails.
+ */
+async function releaseAndAnnounce(
+  taskId: string,
+  meta: A2ATaskMeta,
+  expected: Parameters<typeof a2aStore.tryReleaseAccepted>[1],
+  site: string,
+): Promise<{ ok: true } | { ok: false; currentStatus: string }> {
+  const released = await a2aStore.tryReleaseAccepted(taskId, expected);
+  if (!released.ok) {
+    console.warn(`[a2a] ${site}: task ${taskId} changed before it could be released (now ${released.currentStatus}) — not re-opening`);
+    return released;
+  }
+  announceReopened(taskId, meta);
+  return released;
+}
+
 /**
  * Advance the cascade to the next ranked agent after the per-position offer
  * window expires. If the task has already been accepted (status !== open) or
@@ -1065,7 +1131,34 @@ async function rankedEntries(
       console.warn(`[a2a] tag-remainder append failed for ${taskHash.slice(0, 10)}…:`, (err as Error).message);
     }
   }
-  return { entries, semantic: !!semantic };
+  return { entries: await liveCascadeEntries(entries), semantic: !!semantic };
+}
+
+const CASCADE_MAX_POSITIONS = Math.max(1, Number(process.env.CASCADE_MAX_POSITIONS) || 8);
+
+/** An exclusive offer only helps if someone is there to take it: the agent
+ *  holds a socket in its offer room, or its hosted worker is heartbeating
+ *  (heartbeats are keyed by deployed-agent id, not wallet). A failed check
+ *  counts as not live — the task still reaches everyone via broadcast. */
+async function isLiveAgent(address: string): Promise<boolean> {
+  if (hasAgentSocket(address)) return true;
+  try {
+    const deployed = await loadAgentByWallet(address);
+    return !!deployed && (await isAlive(deployed.id));
+  } catch {
+    return false;
+  }
+}
+
+/** Ranked order preserved; dead agents dropped; queue capped so a long
+ *  registry cannot hold a task behind minutes of back-to-back offer windows. */
+export async function liveCascadeEntries(entries: a2aStore.CascadeEntry[]): Promise<a2aStore.CascadeEntry[]> {
+  const live: a2aStore.CascadeEntry[] = [];
+  for (const entry of entries) {
+    if (live.length >= CASCADE_MAX_POSITIONS) break;
+    if (await isLiveAgent(entry.address)) live.push(entry);
+  }
+  return live;
 }
 
 async function startRankedCascade(
@@ -1113,11 +1206,85 @@ async function startRankedCascade(
   }
 }
 
+export const AUTO_CHECK_KEYS = [
+  'min_length',
+  'contains_keywords',
+  'required_fields',
+  'expected_schema',
+  'regex_pattern',
+  'rubric',
+  'expected_answer',
+] as const;
+
+// A criterion counts only if it can actually fail junk. forbidden_phrases
+// alone cannot (junk simply omits the phrases — so it is not in the list
+// above), nor can min_length: 0, blank strings, empty lists, a schema with
+// neither type:'object' nor required keys, or a rubric item with no keywords
+// (it scores a flat 0.5). An uncompilable regex_pattern is no check either;
+// autoVerify fails closed on one rather than paying.
+export function hasAutoCheck(criteria: z.infer<typeof indexTaskSchema>['verificationCriteria']): boolean {
+  if (!criteria) return false;
+  const anyText = (v?: string[]) => Array.isArray(v) && v.some((s) => typeof s === 'string' && s.trim().length > 0);
+  if (typeof criteria.min_length === 'number' && criteria.min_length > 0) return true;
+  if (anyText(criteria.contains_keywords) || anyText(criteria.required_fields)) return true;
+  if (typeof criteria.expected_answer === 'string' && criteria.expected_answer.trim().length > 0) return true;
+  if (criteria.expected_schema && (criteria.expected_schema.type === 'object' || anyText(criteria.expected_schema.required))) return true;
+  if (criteria.rubric?.some((item) => anyText(item.keywords))) return true;
+  if (typeof criteria.regex_pattern === 'string' && criteria.regex_pattern.trim().length > 0) {
+    try {
+      new RegExp(criteria.regex_pattern);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
 a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) => {
   try {
     const data = indexTaskSchema.parse(req.body);
     const address = req.user!.address;
     const taskHash = data.taskHash.toLowerCase();
+
+    // Refuse modes no route can settle. 'oracle' is reserved/unwired (/verify
+    // needs 'manual', /verdict needs 'agent'), and 'auto' without a positive
+    // check degrades to "any non-empty output passes".
+    if (data.verificationMode === 'oracle') {
+      throw new AppError(
+        400,
+        'VERIFICATION_MODE_UNSUPPORTED',
+        "verificationMode='oracle' is not supported — use 'manual', 'auto' or 'agent'",
+      );
+    }
+    if (data.verificationMode === 'auto' && !hasAutoCheck(data.verificationCriteria)) {
+      throw new AppError(
+        400,
+        'AUTO_CRITERIA_REQUIRED',
+        `verificationMode='auto' requires verificationCriteria with at least one of: ${AUTO_CHECK_KEYS.join(', ')}`,
+      );
+    }
+    // An auto task whose regex cannot run can never pass: autoVerify fails
+    // closed on a pattern that does not compile or is prone to catastrophic
+    // backtracking. Say so now, before the poster funds or lists it.
+    if (data.verificationMode === 'auto' && typeof data.verificationCriteria?.regex_pattern === 'string') {
+      const pattern = data.verificationCriteria.regex_pattern;
+      let usable = isSafeRegexSource(pattern);
+      if (usable) {
+        try {
+          new RegExp(pattern);
+        } catch {
+          usable = false;
+        }
+      }
+      if (!usable) {
+        throw new AppError(
+          400,
+          'REGEX_PATTERN_UNUSABLE',
+          'verificationCriteria.regex_pattern does not compile or can backtrack catastrophically (nested or stacked quantifiers) — simplify it',
+        );
+      }
+    }
 
     let onChainTaskId: string;
     let onChainTaskHash: string;
@@ -1640,8 +1807,8 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
         // Cold-start: try the exploration slot first. If a new agent is picked,
         // offer to them; if they pass or timeout, fall back to normal ranked flow.
         const agentMode = existingMeta?.agentSelectionMode ?? 'merit';
-        pickExplorationAgent(requiredCaps, agentMode, taskReward, undefined, taskChain).then((explorationPick) => {
-          if (explorationPick) {
+        pickExplorationAgent(requiredCaps, agentMode, taskReward, undefined, taskChain).then(async (explorationPick) => {
+          if (explorationPick && (await isLiveAgent(explorationPick.address))) {
             console.log(`[a2a] exploration slot: offering to new agent ${explorationPick.address} (score=${explorationPick.score})`);
             const deadline = Date.now() + a2aStore.CASCADE_OFFER_MS;
             a2aStore.setOffer(taskHash, {
@@ -2072,7 +2239,27 @@ a2aRouter.post('/tasks/:id/release', requireAuth, async (req: AuthRequest, res, 
       }
     }
 
-    await a2aStore.releaseToOpen(taskHash);
+    // Compare-and-set against the state read above: the on-chain check awaited
+    // RPC calls, and a submit/verify/re-accept that landed meanwhile must win.
+    const released = await releaseAndAnnounce(
+      taskHash,
+      meta,
+      { executorAddress: state.executorAddress, assignTxHash: state.assignTxHash, status: state.status },
+      'release',
+    );
+    if (!released.ok) {
+      if (released.currentStatus === 'open') {
+        // Someone else released it first — same answer as the early return above.
+        const body: ApiResponse = { success: true, data: { taskId: taskHash, status: 'open', noop: true } };
+        res.json(body);
+        return;
+      }
+      throw new AppError(
+        409,
+        'STATE_CHANGED',
+        `Task changed while the release was being checked (now ${released.currentStatus}) — not released`,
+      );
+    }
     console.log(`[a2a] release: ${taskHash} reverted to open by ${address}`);
 
     const body: ApiResponse = {
@@ -2232,6 +2419,19 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
       );
     }
 
+    // Retry round not on chain yet: the contract's attempt count is behind the
+    // round /submit recorded, so whatever status the chain shows belongs to a
+    // PREVIOUS round. Reconciling it here would fail the task (and dock the
+    // worker) a second time for round N-1, then wedge every route once round
+    // N mines.
+    if (state.submissionRound !== undefined && onChainTask.submissionAttempts < state.submissionRound) {
+      throw new AppError(
+        503,
+        'NOT_SUBMITTED_ON_CHAIN',
+        `SubmitEvidence for round ${state.submissionRound} not yet confirmed on-chain (status=${onChainTask.status}, attempts=${onChainTask.submissionAttempts}). Wait for the tx to confirm and retry.`,
+      );
+    }
+
     // Reconcile path: on-chain already settled (3=Verified/failed,
     // 4=Completed/passed) while a2a state is still 'submitted' — a previous
     // finalize crashed/deployed between the settle tx confirming and the state
@@ -2381,6 +2581,16 @@ a2aRouter.post('/tasks/:id/verify', requireAuth, async (req: AuthRequest, res, n
       );
     }
     const onChainTask = await escrowService.getTaskOn(ocIdChain, Number(ocId));
+
+    // Retry round not on chain yet — same gate as /finalize: a chain status
+    // from a previous round must not be reconciled as this round's outcome.
+    if (state.submissionRound !== undefined && onChainTask.submissionAttempts < state.submissionRound) {
+      throw new AppError(
+        503,
+        'NOT_SUBMITTED_ON_CHAIN',
+        `SubmitEvidence for round ${state.submissionRound} not yet confirmed on-chain (status=${onChainTask.status}, attempts=${onChainTask.submissionAttempts}). Wait for the tx to confirm and retry.`,
+      );
+    }
 
     // Reconcile path — same as /finalize: a previous verify crashed between
     // the settle confirming (status now 3/4) and the state write. Adopt the

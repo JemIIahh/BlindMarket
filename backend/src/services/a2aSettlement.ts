@@ -187,6 +187,9 @@ export interface SettleResult {
   cancelled?: boolean;
   /** Chain the assignment was settled (or confirmed) on. */
   chain?: TaskChain;
+  /** The assign tx was broadcast (txHash set) but did not confirm in time. It
+   *  may still mine; the gas-liveness sweep reconciles it against the chain. */
+  pending?: boolean;
 }
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
@@ -212,6 +215,7 @@ async function confirmAssignedWorker(
     const onChainWorker = String(t.worker);
     if (onChainWorker.toLowerCase() === assignee.toLowerCase()) {
       console.log(`[a2aSettlement] assignment skipped — task ${taskId} already assigned to this executor`);
+      await safeClearAssignError(taskHash);
       return { success: true, alreadySettled: true, onChainWorker, chain };
     }
     // Legacy: assigned to the executor EOA before the AA rollout recorded
@@ -220,6 +224,7 @@ async function confirmAssignedWorker(
     // not assigned and sends it down the release path).
     if (executor && onChainWorker.toLowerCase() === executor.toLowerCase()) {
       console.log(`[a2aSettlement] assignment skipped — task ${taskId} assigned to executor EOA (pre-AA assignment)`);
+      await safeClearAssignError(taskHash);
       return { success: true, alreadySettled: true, onChainWorker, chain };
     }
     // marketplaceAssign reverts InvalidStatus for ANY non-Funded status. The
@@ -262,8 +267,20 @@ async function confirmAssignedWorker(
  */
 export async function resolveAssignee(executor: string, chain: TaskChain): Promise<string> {
   if (!settlementChainConfig(chain).aa) return executor;
+  // Only name the smart account when the worker can actually submit through
+  // it. The worker takes the UserOp path only with an entry point AND a
+  // bundler configured; otherwise it signs with its EOA, and an escrow that
+  // recorded the smart account as worker rejects every submitEvidence with
+  // NotWorker() — the task strands after the work is done.
+  if (!smartAccountSubmitUsable()) return executor;
   const agent = await loadAgentByWallet(executor).catch(() => null);
   return agent?.smartAccountAddress || executor;
+}
+
+/** The same condition backend/agents/worker.js (canSubmitViaSmartAccount) uses
+ *  to pick the UserOp path, beyond the chain's `aa` flag checked above. */
+export function smartAccountSubmitUsable(): boolean {
+  return !!config.entryPointAddress && !!config.pimlicoBundlerUrl;
 }
 
 /**
@@ -327,7 +344,7 @@ export async function settleAssignment(taskHash: string, executor: string): Prom
     );
   } catch (err) {
     if (isAlreadySettled(err)) {
-      return confirmAssignedWorker(taskId, assignee, taskHash, chain);
+      return confirmAssignedWorker(taskId, assignee, taskHash, chain, executor);
     }
     if (isDeadlineReached(err)) {
       console.warn(`[a2aSettlement] assignment refused — task ${taskId} deadline has passed (terminal)`);
@@ -340,9 +357,19 @@ export async function settleAssignment(taskHash: string, executor: string): Prom
   }
 
   await a2aStore.updateState(taskHash, { assignTxHash: tx.hash, assignError: undefined });
+  // Broadcast time of THIS hash: the gas-liveness sweep ages the tx from here,
+  // not from acceptedAt (a re-accept re-broadcasts long after the accept).
+  await a2aStore.markAssignBroadcast(taskHash, tx.hash).catch((e: unknown) =>
+    console.warn(`[a2aSettlement] could not record broadcast time for tx=${tx.hash}:`, (e as Error).message),
+  );
   console.log(`[a2aSettlement] marketplaceAssign broadcast taskId=${taskId} tx=${tx.hash}`);
 
-  const receipt = await tx.wait(1, HOLD_TIMEOUT_MS);
+  let receipt: Awaited<ReturnType<typeof tx.wait>>;
+  try {
+    receipt = await tx.wait(1, HOLD_TIMEOUT_MS);
+  } catch (waitErr) {
+    return settleUnconfirmedAssignment(taskHash, taskId, assignee, executor, chain, tx.hash, waitErr);
+  }
   console.log(
     `[a2aSettlement] marketplaceAssign confirmed taskId=${taskId} block=${receipt?.blockNumber} status=${receipt?.status}`,
   );
@@ -353,6 +380,78 @@ export async function settleAssignment(taskHash: string, executor: string): Prom
   }
 
   return { success: true, txHash: tx.hash, chain };
+}
+
+/**
+ * tx.wait() rejected after the broadcast: either the tx reverted (ethers v6
+ * throws CALL_EXCEPTION rather than returning a status-0 receipt) or it did not
+ * mine within HOLD_TIMEOUT_MS. Neither is a verdict on the ASSIGNMENT, so the
+ * chain decides first:
+ *  - a timeout may have landed while the RPC was slow;
+ *  - a revert is what a second assign tx does when an earlier one (a previous
+ *    accept that timed out, then mined) already assigned this same worker.
+ * Both are success, and must leave no assignError behind — /submit
+ * short-circuits 503 BRIDGE_FAILED on it while release is refused
+ * ON_CHAIN_LOCKED, which loops the worker through LLM runs forever.
+ *
+ * Pending is not a failure either: no assignError is persisted for it. The tx
+ * may mine seconds later, and nothing on the retry's success path used to
+ * clear the error. The gas-liveness sweep owns a tx that never lands.
+ */
+async function settleUnconfirmedAssignment(
+  taskHash: string,
+  taskId: number | string,
+  assignee: string,
+  executor: string,
+  chain: TaskChain,
+  txHash: string,
+  waitErr: unknown,
+): Promise<SettleResult> {
+  const reason = (waitErr as Error).message || String(waitErr);
+  const reverted = (waitErr as { code?: string }).code === 'CALL_EXCEPTION';
+  try {
+    const t = await bridgeFor(chain).escrow!.getTask(BigInt(taskId));
+    const worker = String(t.worker).toLowerCase();
+    if (worker === assignee.toLowerCase() || worker === executor.toLowerCase()) {
+      console.log(
+        `[a2aSettlement] marketplaceAssign tx=${txHash} ${reverted ? 'reverted' : 'wait failed'} (${reason}) ` +
+          `but task ${taskId} is assigned on-chain to this executor`,
+      );
+      await safeClearAssignError(taskHash);
+      return reverted
+        ? { success: true, alreadySettled: true, onChainWorker: String(t.worker), chain }
+        : { success: true, txHash, chain };
+    }
+  } catch {
+    // Unreadable chain: a revert stays a failure, a timeout stays pending.
+  }
+  if (reverted) {
+    const msg = `marketplaceAssign tx ${txHash} reverted on chain`;
+    console.error(`[a2aSettlement] ${msg}: ${reason}`);
+    await safePersistAssignError(taskHash, msg);
+    return { success: false, error: msg, txHash };
+  }
+  const msg = `marketplaceAssign tx ${txHash} not confirmed after ${HOLD_TIMEOUT_MS / 1000}s: ${reason}`;
+  console.warn(`[a2aSettlement] ${msg} — reporting pending, no assignError persisted`);
+  return { success: false, pending: true, error: msg, txHash };
+}
+
+// Every path that proves this executor IS the on-chain worker must drop a
+// lingering assignError (left by an earlier attempt that failed or timed out):
+// /submit refuses on it and nothing else clears it. Read first so the common
+// no-error case costs no state write — updateState is a read-modify-write.
+async function safeClearAssignError(taskHash: string): Promise<void> {
+  try {
+    const state = await a2aStore.getState(taskHash);
+    if (!state?.assignError) return;
+    await a2aStore.updateState(taskHash, { assignError: undefined });
+    console.log(`[a2aSettlement] cleared stale assignError for ${taskHash.slice(0, 10)}… — assignment confirmed on-chain`);
+  } catch (e) {
+    console.error(
+      `[a2aSettlement] could not clear assignError for ${taskHash.slice(0, 10)}…:`,
+      (e as Error).message,
+    );
+  }
 }
 
 // Writing to Redis can itself fail (network blip, key missing if releaseToOpen

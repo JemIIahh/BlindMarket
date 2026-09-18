@@ -56,6 +56,7 @@ vi.mock('../services/a2aStore.js', () => {
     getMeta, tryAccept, getState,
     mergeWrappedKeys: vi.fn(async () => {}),
     releaseToOpen: vi.fn(async () => {}),
+    tryReleaseAccepted: vi.fn(async () => ({ ok: true })),
     setMeta: vi.fn(async () => {}),
     getPosterTasks: vi.fn(async () => []),
     getExecutorTasks: vi.fn(async () => []),

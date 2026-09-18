@@ -1,4 +1,16 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+
+// computeDemandGaps is pure, but demandFeed.ts imports the Redis store, the
+// chain providers and the Postgres pool. Unmocked, those connect and log on
+// their own schedule — after this file's few milliseconds of tests are over —
+// and vitest fails the whole run with "Closing rpc while onUserConsoleLog was
+// pending" whenever the log lands during teardown (seen in CI).
+vi.mock('./neonDb.js', () => ({ getPool: vi.fn() }));
+vi.mock('./a2aStore.js', () => ({}));
+vi.mock('./taskChain.js', () => ({ resolveCachedTaskByHash: vi.fn() }));
+vi.mock('./escrow.js', () => ({}));
+vi.mock('../config.js', () => ({ config: {} }));
+
 import { computeDemandGaps, type DemandShadowRow, type OpenTaskInfo } from './demandFeed.js';
 
 const NOW = 1_800_000_000_000; // fixed clock

@@ -81,13 +81,15 @@ jobs:
           cache-dependency-path: |
             sdk/package-lock.json
             mcp/package-lock.json
-      # `build` is `tsc` in both packages, so this type-checks them. Neither
-      # declares a test script yet (see DX-1); when they do, add `npm test`.
-      - name: sdk — install and type-check
+      # `build` is `tsc`, so this type-checks the sdk; `npm test` runs its unit
+      # tests, including the fixture that checks it still decrypts what the
+      # backend encrypts.
+      - name: sdk — install, type-check and test
         working-directory: sdk
         run: |
           npm ci
           npm run build
+          npm test
       # mcp depends on the PUBLISHED @blindmarket/sdk, so `npm ci` alone would
       # type-check it against the last release — which cannot catch drift
       # between the sdk source in this commit and its consumers, the whole

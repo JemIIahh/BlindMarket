@@ -24,6 +24,13 @@ import type { AgentService } from '../services/marketplace';
 type Phase = 'input' | 'encrypting' | 'signing' | 'running' | 'done' | 'error';
 
 const POLL_MS = 4000;
+// Auto-verify releases the payment, so the bar can't be "one character" — but
+// 40 made a correct 30-character URL unpayable. 20 is the platform floor
+// (DEFAULT_MIN_CONTENT_CHARS in backend autoVerify, which also wants a few
+// distinct words and fails refusals/excuses on its own). Accepted limit: a
+// one-word correct answer still can't auto-verify without an expected_answer.
+// Keep in sync with UseFromAgentModal's generated script and mcp/src/rent.ts.
+const RENTAL_VERIFICATION_CRITERIA = { min_length: 20 };
 const MAX_POLLS = 75; // ~5 min
 
 const toHex = (bytes: Uint8Array) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
@@ -159,7 +166,7 @@ export default function UseServiceModal({
         duration: '3600',
         targetExecutorType: 'agent',
         verificationMode: 'auto',
-        verificationCriteria: { min_length: 1 },
+        verificationCriteria: RENTAL_VERIFICATION_CRITERIA,
         requiredCapabilities: [],
         rootHash,
         wrappedKeys,
@@ -182,7 +189,7 @@ export default function UseServiceModal({
         txHash: sent.hash,
         taskHash,
         verificationMode: 'auto',
-        verificationCriteria: { min_length: 1 },
+        verificationCriteria: RENTAL_VERIFICATION_CRITERIA,
         requiredCapabilities: [],
         rootHash,
         wrappedKeys,

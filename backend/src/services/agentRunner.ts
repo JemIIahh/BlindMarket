@@ -60,7 +60,12 @@ const WORKER_PATH = join(__dirname, '../../agents/worker.js');
 // backend/agents/worker.js actually reads, so a worker-side escape cannot
 // reach the marketplace signer keys, JWT_SECRET, or the database.
 // Derived by enumerating every process.env read in worker.js.
-const WORKER_ENV_PASSTHROUGH = [
+// SENTRY_DSN is on the list deliberately: a DSN is a write-only ingest address
+// (it lets the holder SEND events, not read them or reach any platform
+// resource), so it is not a secret of the kind this boundary exists to keep
+// out. Without it worker crashes never reach Sentry. @sentry/node reads
+// SENTRY_ENVIRONMENT itself.
+export const WORKER_ENV_PASSTHROUGH = [
   'NODE_ENV',
   'BACKEND_URL',
   'OG_RPC_URL',
@@ -73,7 +78,14 @@ const WORKER_ENV_PASSTHROUGH = [
   'OPENAI_BASE_URL',
   'HEARTBEAT_INTERVAL_MS',
   'POLL_INTERVAL_MS',
+  'WS_RECONCILE_MS',
+  'GAS_RECHECK_MS',
+  'LLM_TIMEOUT_MS',
+  'RELEASE_COOLDOWN_MS',
+  'SENTRY_DSN',
+  'SENTRY_ENVIRONMENT',
   'DELEGATE_REWARD_OG',
+  'DELEGATE_REWARD_USDC',
   'DELEGATE_GAS_RESERVE_OG',
   // OS/runtime vars node + tsx need to start at all:
   'PATH', 'HOME', 'TMPDIR', 'LANG', 'TZ', 'NODE_OPTIONS',
@@ -150,6 +162,69 @@ export function startZombieReaper(): void {
   }, 60_000).unref();
 }
 
+// ── Crash memory across restarts ──────────────────────────────────────────────
+// The rolling restart cap above only trips on FAST loops. A task that reliably
+// kills the worker is slow: the restart skips the first resume pass, resumes
+// ~2 min later, pays for an LLM call, dies — one lap is longer than the cap's
+// window allows for, and the worker's own per-task attempt budget is in-memory,
+// so it resets on every lap. The count therefore has to live HERE, in the
+// parent. The worker reports which task it is running ({type:'task-started'} /
+// {type:'task-finished', completed} over IPC); when it crashes, the task in flight is
+// charged. Both counters go back to the worker via env on restart, and the
+// worker stops resuming a task once it has been in flight for
+// TASK_CRASH_LIMIT crashes (worker.js resumeSkipReason). In-memory: a backend
+// restart forgets it, which costs at most one more budget of laps.
+export interface CrashMemory {
+  /** Crash-restarts in a row, without a healthy stretch or a finished task in between. */
+  consecutive: number;
+  /** taskHash → crashes that happened while that task was in flight. */
+  byTask: Record<string, number>;
+}
+/** A worker that stayed up this long before crashing starts a new streak. Longer
+ *  than any one poison-task lap (resume delay + LLM_TIMEOUT_MS + a repair pass). */
+export const HEALTHY_UPTIME_MS = 30 * 60_000;
+const MAX_TRACKED_CRASH_TASKS = 20;
+
+/** Pure: the crash memory after one more crash. */
+export function recordCrash(
+  prev: CrashMemory | undefined,
+  crash: { inFlightTask: string | null; uptimeMs: number },
+  healthyUptimeMs = HEALTHY_UPTIME_MS,
+): CrashMemory {
+  const streak = crash.uptimeMs >= healthyUptimeMs ? 0 : (prev?.consecutive ?? 0);
+  const byTask = { ...(prev?.byTask ?? {}) };
+  if (crash.inFlightTask) {
+    // Re-insert so the most recently charged task is last, then keep the tail.
+    const n = (byTask[crash.inFlightTask] ?? 0) + 1;
+    delete byTask[crash.inFlightTask];
+    byTask[crash.inFlightTask] = n;
+  }
+  const keep = Object.entries(byTask).slice(-MAX_TRACKED_CRASH_TASKS);
+  return { consecutive: streak + 1, byTask: Object.fromEntries(keep) };
+}
+
+/**
+ * Pure: a task went all the way through (submitted + finalized, or a verdict
+ * recorded) — clear it and the streak. A run that merely RETURNED is not
+ * reported here: an LLM error or a gas hold says nothing about whether the
+ * task is poison, and clearing on it would let a task that crashes the worker
+ * shortly after its run returns reset its own count every lap.
+ */
+export function recordTaskCompleted(prev: CrashMemory | undefined, taskHash: string): CrashMemory | undefined {
+  if (!prev) return prev;
+  const byTask = { ...prev.byTask };
+  delete byTask[taskHash];
+  return { consecutive: 0, byTask };
+}
+
+const crashMemory = new Map<string, CrashMemory>();
+// id → task the live worker last reported as in flight (null between tasks).
+const inFlightTasks = new Map<string, string | null>();
+
+function isTaskHashLike(v: unknown): v is string {
+  return typeof v === 'string' && v.length > 0 && v.length <= 80;
+}
+
 // Record an auto-restart attempt and report whether it's within the rolling cap.
 // Returns false (and does NOT record) once the agent has crash-looped past the cap.
 function canAutoRestart(id: string): boolean {
@@ -165,7 +240,8 @@ function canAutoRestart(id: string): boolean {
 }
 
 // Re-fork a crashed worker after the restart delay, with skipResume=true so a
-// poison brief can't immediately re-crash the restart. Re-checks state first:
+// poison brief can't immediately re-crash the restart (the crash memory above
+// is what stops it re-crashing every later lap). Re-checks state first:
 // the operator may have stopped it during the delay, or it may already be back.
 async function autoRestart(id: string): Promise<void> {
   const a = await loadAgent(id);
@@ -407,6 +483,11 @@ export async function startAgent(id: string, opts?: { skipResume?: boolean }): P
       // in-flight (accepted-but-unsubmitted) task so a poison brief can't loop
       // the crash. Empty on fresh starts and graceful boot-reconciles.
       AGENT_SKIP_RESUME: opts?.skipResume ? '1' : '',
+      // Crash memory (see CrashMemory): how many crash-restarts in a row, and
+      // which tasks were in flight when the worker died. Zero/empty on a
+      // fresh start.
+      AGENT_CRASH_COUNT: String(crashMemory.get(id)?.consecutive ?? 0),
+      AGENT_CRASHED_TASKS: JSON.stringify(crashMemory.get(id)?.byTask ?? {}),
       // ERC-4337 AA — smart account on Base for gasless USDC paymaster.
       // Empty when the agent has no smart account (pre-AA agents or deployment failed).
       AGENT_SMART_ACCOUNT_ADDRESS: agent.smartAccountAddress ?? '',
@@ -426,8 +507,28 @@ export async function startAgent(id: string, opts?: { skipResume?: boolean }): P
     chunk.toString().split('\n').filter(Boolean).forEach(line => appendLog(id, `[err] ${line}`));
   });
 
+  const startedAt = Date.now();
+  inFlightTasks.set(id, null);
+
   child.on('message', async (msg: unknown) => {
-    if (typeof msg === 'object' && msg !== null && (msg as any).type === 'heartbeat') {
+    if (typeof msg !== 'object' || msg === null) return;
+    const m = msg as { type?: unknown; taskHash?: unknown; completed?: unknown };
+    // In-flight task reports — only from the child that currently owns the id.
+    if (m.type === 'task-started' && isTaskHashLike(m.taskHash)) {
+      if (processes.get(id) === child) inFlightTasks.set(id, m.taskHash);
+      return;
+    }
+    if (m.type === 'task-finished' && isTaskHashLike(m.taskHash)) {
+      if (processes.get(id) === child) {
+        if (inFlightTasks.get(id) === m.taskHash) inFlightTasks.set(id, null);
+        if (m.completed === true) {
+          const next = recordTaskCompleted(crashMemory.get(id), m.taskHash);
+          if (next) crashMemory.set(id, next);
+        }
+      }
+      return;
+    }
+    if (m.type === 'heartbeat') {
       await touchHeartbeat(id);
       const a = await loadAgent(id);
       if (a) {
@@ -473,9 +574,19 @@ export async function startAgent(id: string, opts?: { skipResume?: boolean }): P
       !wasIntentional &&
       ((code != null && code !== 0) || (signal != null && signal !== 'SIGTERM'));
 
+    const inFlightTask = inFlightTasks.get(id) ?? null;
+    inFlightTasks.delete(id);
+    if (crashed) {
+      crashMemory.set(id, recordCrash(crashMemory.get(id), { inFlightTask, uptimeMs: Date.now() - startedAt }));
+    }
+
     if (crashed && a && a.status === 'running') {
       if (canAutoRestart(id)) {
-        appendLog(id, `[agentRunner] worker crashed (${code != null ? `exit code=${code}` : `signal=${signal}`}) — auto-restarting in ${RESTART_DELAY_MS / 1000}s (skipping in-flight task resume)`);
+        const mem = crashMemory.get(id);
+        const blame = inFlightTask
+          ? ` while running task ${inFlightTask.slice(0, 10)}… (crash ${mem?.byTask[inFlightTask] ?? 1} on that task)`
+          : '';
+        appendLog(id, `[agentRunner] worker crashed (${code != null ? `exit code=${code}` : `signal=${signal}`})${blame} — auto-restarting in ${RESTART_DELAY_MS / 1000}s (crash ${mem?.consecutive ?? 1} in a row; first resume pass skipped)`);
         setTimeout(() => { void autoRestart(id); }, RESTART_DELAY_MS);
         return; // keep status 'running' across the restart
       }
@@ -515,6 +626,8 @@ export async function pauseAgent(id: string): Promise<void> {
 export async function stopAgent(id: string): Promise<void> {
   // Clear any crash-restart history; an explicit stop is a clean slate.
   restartTimes.delete(id);
+  crashMemory.delete(id);
+  inFlightTasks.delete(id);
   const child = processes.get(id);
   if (child) {
     // Mark THIS child's impending SIGTERM exit as operator-initiated so the exit

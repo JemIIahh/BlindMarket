@@ -5,7 +5,7 @@
  * Why: until Sep 2026 payouts were added into total_earned_raw whatever their
  * currency (18-decimal 0G and 6-decimal USDC together), and every worker
  * restart reset that column to 0 while the task count stayed. USDC now has its
- * own column (migration 32), but rows written before that are wrong. This
+ * own column (migration 33), but rows written before that are wrong. This
  * script sums TaskCompleted.workerPayout per worker on each escrow and writes:
  *
  *   total_earned_raw       = Σ payouts on the 0G escrow (native 0G, 18 dp)
@@ -60,7 +60,7 @@
  * run falls back to the 0G mainnet values and never reads REDIS_URL. Leave
  * BASE_ESCROW_ADDRESS empty to skip Base. BACKFILL_BLOCK_CHUNK sets the
  * getLogs range (default 10000; halved automatically when an RPC refuses).
- * Run migration 32 first (the backend applies it at boot).
+ * Run migration 33 first (the backend applies it at boot).
  */
 
 import { config as loadEnv } from 'dotenv';
@@ -393,7 +393,7 @@ async function main(): Promise<void> {
   const { rows: cols } = await pool.query(
     "SELECT 1 FROM information_schema.columns WHERE table_name = 'agent_executors' AND column_name = 'total_earned_usdc_raw'",
   );
-  if (cols.length === 0) throw new Error('agent_executors.total_earned_usdc_raw is missing: boot the backend once so migration 32 runs');
+  if (cols.length === 0) throw new Error('agent_executors.total_earned_usdc_raw is missing: boot the backend once so migration 33 runs');
 
   const { rows: accounts } = await pool.query<{ wallet_address: string; smart_account_address: string }>(
     'SELECT wallet_address, smart_account_address FROM deployed_agents WHERE smart_account_address IS NOT NULL',

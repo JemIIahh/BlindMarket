@@ -106,7 +106,11 @@ async function tick(): Promise<void> {
           const taskId = args.taskId as bigint | undefined;
           const taskHash = args.taskHash as string | undefined;
           if (taskId === undefined || !taskHash) continue;
-          pipe.set(KEY.hash2id(taskHash), String(taskId));
+          // First writer wins. The escrow does not enforce unique task hashes, so
+          // anyone can emit a later TaskCreated reusing a live task's hash; a plain
+          // SET let that repoint the hash at the attacker's escrow id. The index
+          // route's seed (caller verified as the on-chain creator) still overwrites.
+          pipe.set(KEY.hash2id(taskHash), String(taskId), 'NX');
           pipe.set(KEY.id2hash(taskId), taskHash.toLowerCase());
         }
         await pipe.exec();
@@ -290,7 +294,11 @@ async function backfillFromDeployment(): Promise<void> {
               const taskId = args.taskId as bigint | undefined;
               const taskHash = args.taskHash as string | undefined;
               if (taskId === undefined || !taskHash) continue;
-              pipe.set(KEY.hash2id(taskHash), String(taskId));
+              // First writer wins. The escrow does not enforce unique task hashes, so
+              // anyone can emit a later TaskCreated reusing a live task's hash; a plain
+              // SET let that repoint the hash at the attacker's escrow id. The index
+              // route's seed (caller verified as the on-chain creator) still overwrites.
+              pipe.set(KEY.hash2id(taskHash), String(taskId), 'NX');
               pipe.set(KEY.id2hash(taskId), taskHash.toLowerCase());
             }
             await pipe.exec();

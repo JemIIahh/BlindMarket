@@ -18,6 +18,7 @@ import {
   deleteService,
 } from '../../services/marketplace';
 import { formatPaymentAmount, parsePaymentAmount } from '../../lib/paymentUnits';
+import { EXAMPLE_SERVICES, SERVICE_TEMPLATES, type ServiceTemplate } from '../../config/serviceTemplates';
 import type { AgentService } from '../../services/marketplace';
 import UseServiceModal from '../UseServiceModal';
 import UseFromAgentModal from '../UseFromAgentModal';
@@ -102,6 +103,15 @@ export function ServicesSection({
     } finally {
       setLinking(false);
     }
+  }
+
+  function applyTemplate(t: ServiceTemplate) {
+    setName(t.name);
+    setDescription(t.description);
+    setShowDesc(true);
+    setPrice(t.suggestedPrice);
+    setServiceType(t.type);
+    setFormError('');
   }
 
   async function handleCreate() {
@@ -197,17 +207,45 @@ export function ServicesSection({
               ))}
             </div>
           ) : (
-            <div className="border border-dashed border-line bg-surface-2 px-5 py-6 text-center">
-              <div className="flex justify-center mb-2">
-                <Icon name="briefcase" size={20} className="text-ink-3" />
+            <div className="space-y-3">
+              <div className="border border-dashed border-line bg-surface-2 px-5 py-6 text-center">
+                <div className="flex justify-center mb-2">
+                  <Icon name="briefcase" size={20} className="text-ink-3" />
+                </div>
+                <div className="text-sm text-ink font-medium">
+                  {isOwner ? 'No services yet' : 'No rentable services'}
+                </div>
+                <div className="text-xs text-ink-3 mt-1">
+                  {isOwner
+                    ? 'Publish a service to let others call this agent.'
+                    : 'This agent has no rentable services yet.'}
+                </div>
               </div>
-              <div className="text-sm text-ink font-medium">
-                {isOwner ? 'No services yet' : 'No rentable services'}
+
+              {/* What a listing looks like once published — drawn like the real
+                  cards above, so nobody has to publish one to find out. */}
+              <div className="text-[11px] text-ink-3">
+                {isOwner ? 'A published service looks like this:' : 'Agents here can list services like these:'}
               </div>
-              <div className="text-xs text-ink-3 mt-1">
-                {isOwner
-                  ? 'Publish a service to let others call this agent.'
-                  : 'This agent has no rentable services yet.'}
+              <div className="grid gap-3 sm:grid-cols-2" aria-label="Example services">
+                {EXAMPLE_SERVICES.map(t => (
+                  <div key={t.slug} className="border border-dashed border-line bg-surface-2/50 p-4">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="text-ink-2 font-medium">{t.name}</div>
+                      <Tag>example</Tag>
+                    </div>
+                    <div className="text-xs text-ink-3 mt-1.5">{t.description}</div>
+                    <div className="flex flex-wrap items-center justify-between gap-3 mt-4 pt-3 border-t border-line">
+                      <span className="whitespace-nowrap">
+                        <span className="font-mono text-ink-3 text-sm">{t.suggestedPrice} {symbol}</span>
+                        <span className="font-mono text-ink-3 text-xs"> / call</span>
+                      </span>
+                      {isOwner && (
+                        <Button variant="ghost" size="sm" label="Use this" onClick={() => { applyTemplate(t); scrollToForm(); }} />
+                      )}
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
           )}
@@ -236,6 +274,24 @@ export function ServicesSection({
           )}
 
           <div className="border border-line bg-surface-2 p-4 space-y-3">
+            {/* Deciding what to sell is the hard part of a first listing —
+                these fill the form in, and everything stays editable. */}
+            <div className="space-y-1.5">
+              <div className="text-[11px] text-ink-3">Start from a template</div>
+              <div className="flex flex-wrap gap-1.5">
+                {SERVICE_TEMPLATES.map(t => (
+                  <button
+                    key={t.slug}
+                    type="button"
+                    onClick={() => applyTemplate(t)}
+                    className="px-2 py-1 text-xs border border-line bg-surface text-ink-2 hover:border-cream hover:text-ink transition-colors"
+                  >
+                    {t.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <div className="flex flex-col sm:flex-row gap-3">
               <FormField label="Service name" required className="flex-[2] min-w-0">
                 <FormInput placeholder="e.g. Market sentiment analysis" value={name} onChange={e => setName(e.target.value)} />
