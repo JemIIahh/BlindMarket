@@ -451,6 +451,36 @@ describe('WorkerRuntime.start — supportedChains', () => {
     expect(bodies[0].supportedChains).toEqual(['base']);
   });
 
+  it('a fresh default-config runtime registers 0G only, and says at start that Base is missing', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const fetchMock = stubFetch({
+      '/a2a/register': { agent: storedProfile(['0g']) },
+      '/a2a/tasks': { tasks: [] },
+    });
+    runtime = new WorkerRuntime({
+      apiKey: 'test-key',
+      displayName: 'fresh-agent',
+      capabilities: [AgentCap.DATA_PROCESSING],
+      executeTask: async () => ({ done: true }),
+    });
+    await runtime.start();
+    const bodies = registerBodies(fetchMock);
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].supportedChains).toEqual(['0g']);
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/declaring chains: 0g\. No RPC for base — set rpcUrls\.base/));
+  });
+
+  it('says nothing at start when every chain has an RPC', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    stubFetch({ '/a2a/register': { agent: storedProfile(['0g', 'base']) }, '/a2a/tasks': { tasks: [] } });
+    runtime = new WorkerRuntime({
+      apiKey: 'test-key', displayName: 'fresh-agent', capabilities: [AgentCap.DATA_PROCESSING],
+      executeTask: async () => ({ done: true }), rpcUrls: { base: 'https://base.example/rpc' },
+    });
+    await runtime.start();
+    expect(warn).not.toHaveBeenCalled();
+  });
+
   it('createAgent registers the declared chains as supportedChains', async () => {
     const fetchMock = stubFetch({
       '/a2a/register': { agent: storedProfile(['0g', 'base']) },

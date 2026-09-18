@@ -187,6 +187,17 @@ export class WorkerRuntime {
   async start(): Promise<ExecutorProfile> {
     if (this.running) return this.profile!;
 
+    // "No tasks arrive" looks the same as "no work available", so say which
+    // chains this runtime will be offered tasks on, and what is missing.
+    const undeclared = SETTLEMENT_CHAINS.filter((c) => !this.declaredChains.includes(c));
+    if (undeclared.length > 0) {
+      console.warn(
+        `[WorkerRuntime] declaring chains: ${this.declaredChains.join(', ') || 'none'}. ` +
+          `No RPC for ${undeclared.join(', ')} — set ${undeclared.map((c) => `rpcUrls.${c}`).join(', ')} to be offered those tasks ` +
+          `(production posts new tasks on Base).`,
+      );
+    }
+
     // 1. Register or restore executor
     if (this.config.existingPrivateKey && this.config.existingAddress && this.config.existingPublicKey) {
       this.wallet = {
