@@ -49,6 +49,9 @@ const BASE_ADDR = (BASE_MAINNET ? CONTRACT_ADDRESSES.base : CONTRACT_ADDRESSES.b
 export const config = {
   port: parseInt(optional('PORT', '3001'), 10),
   nodeEnv: optional('NODE_ENV', 'development'),
+  // Error monitoring — unset DSN disables Sentry entirely (see middleware/errorHandler.ts).
+  sentryDsn: optional('SENTRY_DSN', ''),
+  sentryEnvironment: optional('SENTRY_ENVIRONMENT', optional('NODE_ENV', 'development')),
   // Public base URLs for discovery surfaces (agent cards, OpenAPI, MCP docs).
   // The agent card previously advertised config.corsOrigin (the FRONTEND
   // origin list) as the API url — wrong on both counts.
