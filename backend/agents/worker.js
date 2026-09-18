@@ -812,12 +812,87 @@ process.on('disconnect', () => {
 // Sentry, tagged with the agent id. The specifier is a variable so a missing
 // package is a caught runtime miss, not a typecheck/boot failure. Breadcrumbs
 // are off — they would mirror console output and outbound URLs.
+// Privacy: an exception MESSAGE is free text — it can quote a decrypted brief
+// (JSON parse errors), an RPC URL with its API key, a bearer token, a key. The
+// worker cannot import backend/src, so scrubText carries a copy of the body in
+// backend/src/middleware/errorHandler.ts; errorHandler.sentry.test.ts fails when
+// the two drift. Default integrations are off for the same reason as the
+// backend: no http/console breadcrumbs, no request data, no tracing.
+/** @param {unknown} input @returns {string} */
+export function scrubText(input) {
+  let s = typeof input === 'string' ? input : String(input ?? '');
+  // >>> sentry-scrub shared body — byte-identical in backend/agents/worker.js and frontend/src/main.tsx
+  // A JSON parse error quotes the text it choked on — a request body, an LLM
+  // reply, a decrypted brief. Nothing in it is worth keeping.
+  if (/is not valid JSON|in JSON at position|Unexpected end of JSON|after JSON|JSON\.parse|Unexpected token .* JSON/i.test(s)) {
+    return '[json parse error — detail redacted]';
+  }
+  // ethers v6 appends `(request={…}, info={ requestUrl, responseBody, … },
+  // transaction={…}, code=X, version=…)`: RPC URLs, provider response bodies
+  // and calldata. Only the short message and the code are kept.
+  s = s.replace(/ \((?:[A-Za-z]+=[\s\S]*)?code=([A-Z_]+), version=[^)]*\)\s*$/, ' (code=$1)');
+  s = s.replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]');
+  s = s.replace(/\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*/g, '[jwt]');
+  s = s.replace(/\b(?:sk|pk|rk|gsk|xai)[-_][A-Za-z0-9_-]{16,}/gi, '[key]');
+  // URL → origin + first path segment. Userinfo, query, fragment and deeper
+  // path go; so does a first segment long enough to be a key (…quiknode.pro/<key>/).
+  s = s.replace(/\b([a-z][a-z0-9+.-]*:\/\/)([^\s/?#"'<>]*@)?([^\s/?#"'<>]+)([^\s"'<>]*)/gi, (_m, scheme, _userinfo, host, rest) => {
+    const first = (/^\/([^/?#]*)/.exec(rest) || [])[1] || '';
+    const keep = first && first.length < 16 ? `/${first}` : '';
+    return `${scheme}${host}${keep}${rest.length > keep.length ? '/[…]' : ''}`;
+  });
+  // 32+ hex: API keys (32), addresses (40), tx hashes and private keys (64),
+  // public keys (130), wrapped keys. A tx hash and a private key are
+  // indistinguishable, so all of it goes; the length says which it was.
+  s = s.replace(/(?:0x)?[0-9a-fA-F]{32,}/g, (m) => `[hex:${m.replace(/^0x/i, '').length}]`);
+  // Long base64/base64url runs: wrapped keys, ciphertext, opaque tokens.
+  s = s.replace(/[A-Za-z0-9+/_-]{64,}={0,2}/g, '[blob]');
+  // Shorter opaque tokens (provider/RPC API keys are typically 32 chars): a
+  // 32+ run with 4+ digits among mixed-case letters is not a word or identifier.
+  s = s.replace(/[A-Za-z0-9_-]{32,}/g, (m) =>
+    ((m.match(/[0-9]/g) || []).length >= 4 && /[a-z]/.test(m) && /[A-Z]/.test(m) ? '[token]' : m));
+  return s.length > 300 ? `${s.slice(0, 300)}…[truncated]` : s;
+  // <<< sentry-scrub shared body
+}
+/** @param {any} event */
+function scrubSentryEvent(event) {
+  delete event.request;
+  delete event.user;
+  delete event.server_name;
+  delete event.extra;
+  if (typeof event.message === 'string') event.message = scrubText(event.message);
+  for (const ex of event.exception?.values ?? []) {
+    if (ex.value !== undefined) ex.value = scrubText(ex.value);
+  }
+  for (const crumb of event.breadcrumbs ?? []) {
+    if (crumb.message !== undefined) crumb.message = scrubText(crumb.message);
+    delete crumb.data;
+  }
+  return event;
+}
+// AGENT_ID is a platform id, but never let an address through as a tag: same
+// salted 8-hex fingerprint the backend uses for its `agent` tag.
+const sentryAgentTag = /^0x[0-9a-fA-F]{40}$/.test(AGENT_ID)
+  ? createHash('sha256').update(`blindmarket:sentry:agent:v1:${AGENT_ID.toLowerCase()}`).digest('hex').slice(0, 8)
+  : AGENT_ID;
 /** @type {any} */
 let _sentry = null;
 if (process.env.SENTRY_DSN && process.env.NODE_ENV !== 'test') {
   const sentryModule = '@sentry/node';
   import(sentryModule).then((/** @type {any} */ mod) => {
-    mod.init({ dsn: process.env.SENTRY_DSN, sendDefaultPii: false, maxBreadcrumbs: 0, initialScope: { tags: { agentId: AGENT_ID } } });
+    mod.init({
+      dsn: process.env.SENTRY_DSN,
+      tracesSampleRate: 0,
+      sendDefaultPii: false,
+      maxBreadcrumbs: 0,
+      skipOpenTelemetrySetup: true,
+      defaultIntegrations: false,
+      // Capture is explicit (captureCrash from the process handlers below), so
+      // no onUncaughtException/onUnhandledRejection integration is needed.
+      integrations: [mod.inboundFiltersIntegration(), mod.dedupeIntegration(), mod.linkedErrorsIntegration()],
+      initialScope: { tags: { agentId: sentryAgentTag } },
+      beforeSend: scrubSentryEvent,
+    });
     _sentry = mod;
   }).catch((e) => {
     log(`sentry disabled: ${e.message}`);
@@ -1666,8 +1741,11 @@ async function releaseTask(taskHash) {
         log(`release refused for ${taskHash.slice(0, 10)}…: ON_CHAIN_LOCKED — ${describeOnChainLock(errText)}`);
         return;
       }
-      if (res.status === 503 && attempt < RELEASE_MAX_ATTEMPTS) {
-        log(`release attempt ${attempt}/${RELEASE_MAX_ATTEMPTS} for ${taskHash.slice(0, 10)}…: 503 — retrying in ${RELEASE_RETRY_DELAY_MS / 1000}s`);
+      // STATE_CHANGED: the task moved between the backend's read and its
+      // compare-and-set release. The retry re-reads the new state.
+      const stateChanged = res.status === 409 && errorCodeOf(errText) === 'STATE_CHANGED';
+      if ((res.status === 503 || stateChanged) && attempt < RELEASE_MAX_ATTEMPTS) {
+        log(`release attempt ${attempt}/${RELEASE_MAX_ATTEMPTS} for ${taskHash.slice(0, 10)}…: ${stateChanged ? 'STATE_CHANGED' : '503'} — retrying in ${RELEASE_RETRY_DELAY_MS / 1000}s`);
         await sleep(RELEASE_RETRY_DELAY_MS);
         continue;
       }

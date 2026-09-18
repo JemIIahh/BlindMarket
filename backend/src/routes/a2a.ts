@@ -478,6 +478,7 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
         custodyRotated
           ? 'Task brief is sealed to a rotated custody key — the platform cannot re-wrap it. POST /a2a/tasks/:id/bid to register intent; only the poster can wrap a slice to your pubkey (or cancel and repost).'
           : 'Task brief is not yet wrapped to your pubkey — POST /a2a/tasks/:id/bid to register intent; the poster will wrap on their next polling cycle.',
+        custodyRotated ? 'CUSTODY_ROTATED' : 'AWAITING_POSTER_WRAP',
       );
     }
 
@@ -488,6 +489,7 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
         403,
         'NEEDS_WRAP',
         'Your executor record has no public key to re-wrap the brief to — re-register with a pubkey.',
+        'NO_PUBLIC_KEY',
       );
     }
 
@@ -575,13 +577,20 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
       } catch (err) {
         console.error(`[a2a] accept: key-custody rewrap failed for ${taskId}:`, (err as Error).message);
         // Un-assign so another (or the same) agent can retry; do NOT settle on chain.
+        // Compare-and-set: only the acceptance THIS request just won (this
+        // executor, no assign tx yet) is undone. Anything else means the state
+        // moved on, and re-opening would clobber it.
+        let released = false;
         try {
-          await a2aStore.releaseToOpen(taskId);
-          announceReopened(taskId, meta);
+          released = (await releaseAndAnnounce(taskId, meta, { executorAddress: address }, 'accept/rewrap')).ok;
         } catch (relErr) {
-          console.error(`[a2a] accept: releaseToOpen after rewrap failure also failed for ${taskId}:`, (relErr as Error).message);
+          console.error(`[a2a] accept: release after rewrap failure also failed for ${taskId}:`, (relErr as Error).message);
         }
-        throw new AppError(503, 'REWRAP_FAILED', 'Key-custody re-wrap failed; task released — retry shortly.');
+        throw new AppError(
+          503,
+          'REWRAP_FAILED',
+          released ? 'Key-custody re-wrap failed; task released — retry shortly.' : 'Key-custody re-wrap failed — retry shortly.',
+        );
       }
       // Persist for the record / idempotency: a later /accept by the same agent
       // takes the wrappedKeys[addr] fast-path instead of re-wrapping again.
@@ -689,12 +698,20 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
         throw new AppError(503, 'ASSIGNMENT_PENDING', ASSIGNMENT_PENDING_MESSAGE);
       }
       console.error(`[a2a] accept: settlement failed for ${taskId}: ${settleResult.error}`);
-      // Release task back to open so another agent can retry.
+      // Release task back to open so another agent can retry — compare-and-set
+      // against the acceptance this request made: same executor, and the assign
+      // tx this attempt broadcast (none when it failed before broadcasting).
+      let released = false;
       try {
-        await a2aStore.releaseToOpen(taskId);
-        announceReopened(taskId, meta);
+        released = (await releaseAndAnnounce(
+          taskId, meta, { executorAddress: address, assignTxHash: settleResult.txHash }, 'accept/settlement',
+        )).ok;
       } catch { /* best-effort */ }
-      throw new AppError(503, 'SETTLEMENT_FAILED', `On-chain assignment failed: ${settleResult.error}. Task released — another agent may retry.`);
+      throw new AppError(
+        503,
+        'SETTLEMENT_FAILED',
+        `On-chain assignment failed: ${settleResult.error}.${released ? ' Task released — another agent may retry.' : ''}`,
+      );
     }
 
     // Encrypted-brief slice: return the caller's wrappedKey + rootHash so the
@@ -970,6 +987,28 @@ function broadcastMeta(requiredCaps: string[], chain?: TaskChain): Record<string
  *  otherwise connected agents only rediscover it on their next reconnect. */
 function announceReopened(taskId: string, meta: A2ATaskMeta): void {
   emitTaskAvailable(taskId, broadcastMeta(meta.requiredCapabilities ?? [], meta.chain));
+}
+
+/**
+ * Compare-and-set release (a2aStore.tryReleaseAccepted) + announce. The task is
+ * announced ONLY when this call re-opened it: on a lost compare-and-set the
+ * state belongs to someone else (a submit, a re-accept under a new assign tx,
+ * another release) and announcing would invite agents onto a task that is not
+ * open. Throws when the store write itself fails.
+ */
+async function releaseAndAnnounce(
+  taskId: string,
+  meta: A2ATaskMeta,
+  expected: Parameters<typeof a2aStore.tryReleaseAccepted>[1],
+  site: string,
+): Promise<{ ok: true } | { ok: false; currentStatus: string }> {
+  const released = await a2aStore.tryReleaseAccepted(taskId, expected);
+  if (!released.ok) {
+    console.warn(`[a2a] ${site}: task ${taskId} changed before it could be released (now ${released.currentStatus}) — not re-opening`);
+    return released;
+  }
+  announceReopened(taskId, meta);
+  return released;
 }
 
 /**
@@ -2064,8 +2103,27 @@ a2aRouter.post('/tasks/:id/release', requireAuth, async (req: AuthRequest, res, 
       }
     }
 
-    await a2aStore.releaseToOpen(taskHash);
-    announceReopened(taskHash, meta);
+    // Compare-and-set against the state read above: the on-chain check awaited
+    // RPC calls, and a submit/verify/re-accept that landed meanwhile must win.
+    const released = await releaseAndAnnounce(
+      taskHash,
+      meta,
+      { executorAddress: state.executorAddress, assignTxHash: state.assignTxHash, status: state.status },
+      'release',
+    );
+    if (!released.ok) {
+      if (released.currentStatus === 'open') {
+        // Someone else released it first — same answer as the early return above.
+        const body: ApiResponse = { success: true, data: { taskId: taskHash, status: 'open', noop: true } };
+        res.json(body);
+        return;
+      }
+      throw new AppError(
+        409,
+        'STATE_CHANGED',
+        `Task changed while the release was being checked (now ${released.currentStatus}) — not released`,
+      );
+    }
     console.log(`[a2a] release: ${taskHash} reverted to open by ${address}`);
 
     const body: ApiResponse = {

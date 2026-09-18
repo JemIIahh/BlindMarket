@@ -25,6 +25,7 @@ vi.mock('../services/a2aStore.js', () => ({
   getState: vi.fn(),
   updateState: vi.fn(() => Promise.resolve()),
   releaseToOpen: vi.fn(() => Promise.resolve()),
+  tryReleaseAccepted: vi.fn(() => Promise.resolve({ ok: true })),
   tryAccept: vi.fn(),
   getOffer: vi.fn(() => Promise.resolve(undefined)),
   clearOffer: vi.fn(() => Promise.resolve()),
@@ -239,8 +240,54 @@ describe('return-to-open is announced', () => {
     const res = await post(`/tasks/${TASK}/release`, EXEC);
 
     expect(res.status).toBe(200);
-    expect(a2aStore.releaseToOpen).toHaveBeenCalledWith(TASK);
+    // Compare-and-set against exactly what the route read; never the
+    // unconditional releaseToOpen.
+    expect(a2aStore.tryReleaseAccepted).toHaveBeenCalledWith(TASK, {
+      executorAddress: EXEC, assignTxHash: undefined, status: 'accepted',
+    });
+    expect(a2aStore.releaseToOpen).not.toHaveBeenCalled();
     expect(emitTaskAvailable).toHaveBeenCalledWith(TASK, { requiredCapabilities: ['coding'], chain: 'base' });
+  });
+
+  it('/release passes the status and assign tx it read (submitted task, broadcast tx)', async () => {
+    vi.mocked(a2aStore.getMeta).mockResolvedValue({ taskId: TASK, posterAddress: POSTER, requiredCapabilities: [] } as any);
+    vi.mocked(a2aStore.getState).mockResolvedValue({ status: 'submitted', executorAddress: EXEC, assignTxHash: '0xtx' } as any);
+    vi.mocked(escrowService.getTaskOn).mockResolvedValue(onChainTask({ status: 0 }) as any);
+
+    const res = await post(`/tasks/${TASK}/release`, POSTER);
+
+    expect(res.status).toBe(200);
+    expect(a2aStore.tryReleaseAccepted).toHaveBeenCalledWith(TASK, {
+      executorAddress: EXEC, assignTxHash: '0xtx', status: 'submitted',
+    });
+  });
+
+  it('/release that loses the compare-and-set → 409 STATE_CHANGED, not announced, not reported open', async () => {
+    vi.mocked(a2aStore.getMeta).mockResolvedValue({ taskId: TASK, posterAddress: POSTER, requiredCapabilities: [] } as any);
+    vi.mocked(a2aStore.getState).mockResolvedValue({ status: 'accepted', executorAddress: EXEC } as any);
+    vi.mocked(escrowService.getTaskOn).mockResolvedValue(onChainTask({ status: 0 }) as any);
+    vi.mocked(a2aStore.tryReleaseAccepted).mockResolvedValueOnce({ ok: false, currentStatus: 'submitted' });
+
+    const res = await post(`/tasks/${TASK}/release`, EXEC);
+
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('STATE_CHANGED');
+    expect(res.body.data).toBeUndefined();
+    expect(emitTaskAvailable).not.toHaveBeenCalled();
+    expect(a2aStore.releaseToOpen).not.toHaveBeenCalled();
+  });
+
+  it('/release beaten by another release → noop success, not announced a second time', async () => {
+    vi.mocked(a2aStore.getMeta).mockResolvedValue({ taskId: TASK, posterAddress: POSTER, requiredCapabilities: [] } as any);
+    vi.mocked(a2aStore.getState).mockResolvedValue({ status: 'accepted', executorAddress: EXEC } as any);
+    vi.mocked(escrowService.getTaskOn).mockResolvedValue(onChainTask({ status: 0 }) as any);
+    vi.mocked(a2aStore.tryReleaseAccepted).mockResolvedValueOnce({ ok: false, currentStatus: 'open' });
+
+    const res = await post(`/tasks/${TASK}/release`, EXEC);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({ taskId: TASK, status: 'open', noop: true });
+    expect(emitTaskAvailable).not.toHaveBeenCalled();
   });
 
   it('/accept SETTLEMENT_FAILED → released and announced', async () => {
@@ -254,8 +301,40 @@ describe('return-to-open is announced', () => {
 
     expect(res.status).toBe(503);
     expect(res.body.error.code).toBe('SETTLEMENT_FAILED');
-    expect(a2aStore.releaseToOpen).toHaveBeenCalledWith(TASK);
+    // No tx was broadcast, so the compare-and-set expects none on the state.
+    expect(a2aStore.tryReleaseAccepted).toHaveBeenCalledWith(TASK, { executorAddress: EXEC, assignTxHash: undefined });
+    expect(a2aStore.releaseToOpen).not.toHaveBeenCalled();
+    expect(res.body.error.message).toContain('Task released');
     expect(emitTaskAvailable).toHaveBeenCalledWith(TASK, {});
+  });
+
+  it('/accept SETTLEMENT_FAILED after a reverted assign tx → compare-and-set names that tx', async () => {
+    vi.mocked(a2aStore.getMeta).mockResolvedValue({ taskId: TASK, posterAddress: POSTER, requiredCapabilities: [] } as any);
+    vi.mocked(agentStore.getAgent).mockResolvedValue({ address: EXEC, capabilities: [], publicKey: '04' } as any);
+    vi.mocked(a2aStore.getState).mockResolvedValue(null as any);
+    vi.mocked(a2aStore.tryAccept).mockResolvedValue({ ok: true, state: {} } as any);
+    vi.mocked(settleAssignment).mockResolvedValue({ success: false, error: 'reverted', txHash: '0xtx' } as any);
+
+    await post(`/tasks/${TASK}/accept`, EXEC);
+
+    expect(a2aStore.tryReleaseAccepted).toHaveBeenCalledWith(TASK, { executorAddress: EXEC, assignTxHash: '0xtx' });
+  });
+
+  it('/accept SETTLEMENT_FAILED that loses the compare-and-set → not announced, not reported released', async () => {
+    vi.mocked(a2aStore.getMeta).mockResolvedValue({ taskId: TASK, posterAddress: POSTER, requiredCapabilities: [] } as any);
+    vi.mocked(agentStore.getAgent).mockResolvedValue({ address: EXEC, capabilities: [], publicKey: '04' } as any);
+    vi.mocked(a2aStore.getState).mockResolvedValue(null as any);
+    vi.mocked(a2aStore.tryAccept).mockResolvedValue({ ok: true, state: {} } as any);
+    vi.mocked(settleAssignment).mockResolvedValue({ success: false, error: 'rpc down' } as any);
+    vi.mocked(a2aStore.tryReleaseAccepted).mockResolvedValueOnce({ ok: false, currentStatus: 'accepted' });
+
+    const res = await post(`/tasks/${TASK}/accept`, EXEC);
+
+    expect(res.status).toBe(503);
+    expect(res.body.error.code).toBe('SETTLEMENT_FAILED');
+    expect(res.body.error.message).not.toContain('released');
+    expect(emitTaskAvailable).not.toHaveBeenCalled();
+    expect(a2aStore.releaseToOpen).not.toHaveBeenCalled();
   });
 
   it('/accept with a still-confirming assign tx → 503 ASSIGNMENT_PENDING, NOT released or announced', async () => {
@@ -293,7 +372,7 @@ describe('return-to-open is announced', () => {
     vi.mocked(a2aStore.getState).mockResolvedValue(null as any);
     vi.mocked(a2aStore.tryAccept).mockResolvedValue({ ok: true, state: {} } as any);
     vi.mocked(settleAssignment).mockResolvedValue({ success: false, error: 'rpc down' } as any);
-    vi.mocked(a2aStore.releaseToOpen).mockRejectedValueOnce(new Error('redis down'));
+    vi.mocked(a2aStore.tryReleaseAccepted).mockRejectedValueOnce(new Error('redis down'));
 
     const res = await post(`/tasks/${TASK}/accept`, EXEC);
 

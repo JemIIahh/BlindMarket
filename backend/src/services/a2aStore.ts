@@ -955,7 +955,13 @@ export async function getAssignBroadcastAt(taskId: string, assignTxHash: string)
  */
 export async function tryReleaseAccepted(
   taskId: string,
-  expected: { executorAddress?: string; assignTxHash?: string },
+  expected: {
+    executorAddress?: string;
+    assignTxHash?: string;
+    /** Status the caller read. Defaults to 'accepted'; POST /release also
+     *  rescues 'in_progress' and 'submitted' tasks and passes what it saw. */
+    status?: 'accepted' | 'in_progress' | 'submitted';
+  },
 ): Promise<{ ok: true } | { ok: false; currentStatus: string }> {
   const tid = taskId.toLowerCase();
   const meta = await getMeta(taskId);
@@ -969,6 +975,7 @@ export async function tryReleaseAccepted(
     local expectedTx = ARGV[4]
     local relist = ARGV[5]
     local executorSetKey = ARGV[6]
+    local expectedStatus = ARGV[7]
 
     local finalTid = tid
     local raw = redis.call('GET', stateKey)
@@ -984,12 +991,12 @@ export async function tryReleaseAccepted(
     if not raw then return {'missing'} end
 
     local s = cjson.decode(raw)
-    if s.status ~= 'accepted' then return {'lost', s.status} end
+    if s.status ~= expectedStatus then return {'lost', s.status} end
     local executor = ''
     if type(s.executorAddress) == 'string' then executor = string.lower(s.executorAddress) end
     local tx = ''
     if type(s.assignTxHash) == 'string' then tx = string.lower(s.assignTxHash) end
-    if executor ~= expectedExecutor or tx ~= expectedTx then return {'lost', 'accepted'} end
+    if executor ~= expectedExecutor or tx ~= expectedTx then return {'lost', s.status} end
 
     redis.call('SET', stateKey, cjson.encode({ taskId = finalTid, status = 'open' }))
     if relist == '1' then redis.call('SADD', openSetKey, finalTid) end
@@ -1008,6 +1015,7 @@ export async function tryReleaseAccepted(
     expected.assignTxHash?.toLowerCase() ?? '',
     meta.targetExecutorType === 'agent' ? '1' : '0',
     expected.executorAddress ? KEY.executor(expected.executorAddress) : '',
+    expected.status ?? 'accepted',
   )) as [string, string?];
 
   if (result[0] === 'ok') return { ok: true };
