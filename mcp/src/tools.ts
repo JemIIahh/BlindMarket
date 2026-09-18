@@ -8,10 +8,12 @@ type ToolResult = { isError?: boolean; content: Array<{ type: 'text'; text: stri
 
 /**
  * `settlement` is rent.ts's resolver. An executor registered from this process
- * delivers through complete_task, which settles on that one chain — the chain
- * the backend posts new tasks on — so that is the only chain it declares.
- * Declaring more would get it offered tasks it cannot deliver; declaring
- * nothing reads as the legacy 0G+Base set.
+ * delivers through complete_task, which settles on that one chain (the
+ * backend's posting chain, or the one BLINDMARKET_SETTLEMENT names), so that
+ * is the only chain it declares. Declaring more would get it offered tasks it
+ * cannot deliver on a backend that filters by the list; declaring nothing is
+ * read as 0G+Base there and stored as ['0g'] by older backends — wrong either
+ * way for a one-chain process.
  */
 export function registerMarketTools(
   server: McpServer,
@@ -19,10 +21,16 @@ export function registerMarketTools(
   walletCtx: WalletCtx | null = null,
   settlement?: () => Promise<Settlement>,
 ): void {
-  async function declaredChains(tool: string): Promise<{ supportedChains: string[] | undefined } | { error: ToolResult }> {
+  async function declaredChains(tool: string): Promise<{ supportedChains: string[] | undefined; warning?: string } | { error: ToolResult }> {
     if (!settlement) return { supportedChains: undefined };
     try {
-      return { supportedChains: [(await settlement()).mode] };
+      const s = await settlement();
+      return {
+        supportedChains: [s.mode],
+        ...(s.payment === 'local-native' && !walletCtx
+          ? { warning: `Declared ${s.mode}, but complete_task delivers on 0G from BLINDMARKET_PRIVATE_KEY, which is not set: tasks accepted there cannot be delivered from this process until it is.` }
+          : {}),
+      };
     } catch (err) {
       const code = (err as { code?: string }).code ?? 'SETTLEMENT_UNKNOWN';
       const message = `${tool} declares the chain this process can deliver on (the one the backend posts new tasks on), and could not learn it: ${(err as Error).message}`;
@@ -147,7 +155,7 @@ export function registerMarketTools(
           : undefined,
       });
       // Never echo the private key into the model's context.
-      const result = { executor, wallet: { address: wallet.address, publicKey: wallet.publicKey } };
+      const result = { executor, wallet: { address: wallet.address, publicKey: wallet.publicKey }, ...(chains.warning ? { warning: chains.warning } : {}) };
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     },
   );
@@ -156,7 +164,7 @@ export function registerMarketTools(
     'register_as_executor',
     {
       title: 'Register as Executor',
-      description: "Register as an A2A executor. The executor address is ALWAYS the wallet that owns BLINDMARKET_API_KEY; publicKey is the key briefs get wrapped to (wallet_status reports the local one as executorPublicKey). Declares the one chain this process delivers on (the chain the backend posts new tasks on — wallet_status shows it), so the backend offers it only tasks it can complete.",
+      description: "Register as an A2A executor. The executor address is ALWAYS the wallet that owns BLINDMARKET_API_KEY; publicKey is the key briefs get wrapped to (wallet_status reports the local one as executorPublicKey). Declares the one chain this process delivers on (the chain the backend posts new tasks on, or BLINDMARKET_SETTLEMENT's — wallet_status shows it); a backend that filters by it then offers only tasks it can complete.",
       inputSchema: {
         address: z.string().optional().describe("Ignored by the backend — the executor is the API key's owner wallet"),
         displayName: z.string().describe('Display name'),
@@ -175,7 +183,8 @@ export function registerMarketTools(
         publicKey,
         minReward: minReward ?? undefined,
       });
-      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      const body = chains.warning ? { ...result, warning: chains.warning } : result;
+      return { content: [{ type: 'text', text: JSON.stringify(body, null, 2) }] };
     },
   );
 

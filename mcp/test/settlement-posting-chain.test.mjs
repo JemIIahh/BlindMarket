@@ -104,6 +104,7 @@ test('posting on Base pays through the relay, even with no Base signer configure
     token: { kind: 'erc20', address: USDC_SEPOLIA, symbol: 'USDC', decimals: 6 },
     usdcAddress: USDC_SEPOLIA, decimals: 6, symbol: 'USDC', relayChain: 'base-sepolia',
     rpcUrl: 'https://sepolia.base.org', payFrom: PRIVY_WALLET,
+    postingChain: 'base', escrowChains: ['0g', 'base'],
   });
   assert.equal(be.calls.whoami, 1);
 });
@@ -129,6 +130,7 @@ test('posting on 0G pays natively from the local wallet, with the escrow the bac
     payment: 'local-native', mode: '0g', chain: '0g', chainId: 16602,
     token: { kind: 'native', address: '0x0000000000000000000000000000000000000000', symbol: '0G', decimals: 18 },
     decimals: 18, symbol: '0G', escrowAddress: '0x037529B296a89E6Dd1abAF84D413cb2dD70C5be5',
+    postingChain: '0g', escrowChains: ['0g', 'base'],
   });
   assert.equal(be.calls.whoami, 0, 'the local wallet pays; no relay wallet needed');
 });
@@ -200,18 +202,51 @@ test('a posting chain missing from chains[] is an error', async () => {
   );
 });
 
-test('BLINDMARKET_SETTLEMENT must name the posting chain', async () => {
-  const be = backend(newBridge());
-  const s = await discoverSettlement({ ...be, env: { BLINDMARKET_SETTLEMENT: 'base' } });
+test('BLINDMARKET_SETTLEMENT may name any chain with an escrow, and the posting chain stays known', async () => {
+  // The backend moved to posting on 0G; a task (or an executor's assignment)
+  // is still on Base. Forcing base reaches it; post_task refuses there.
+  const chains = chainsFixture().map((c) => ({ ...c, postable: c.chain === '0g' }));
+  const s = await discoverSettlement({ ...backend(newBridge({ postingChain: '0g', chains })), env: { BLINDMARKET_SETTLEMENT: 'base' } });
+  assert.equal(s.payment, 'relay-erc20');
   assert.equal(s.mode, 'base');
-  await assert.rejects(
-    discoverSettlement({ ...backend(newBridge({ postingChain: '0g', chains: chainsFixture().map((c) => ({ ...c, postable: c.chain === '0g' })) })), env: { BLINDMARKET_SETTLEMENT: 'base' } }),
-    (e) => e.code === 'SETTLEMENT_MISMATCH' && /posts new tasks on 0g/.test(e.message),
-  );
+  assert.equal(s.escrowAddress, '0xa1F75b5eC92f4485d4EeFa339DC2B8aF25Df0eC5');
+  assert.equal(s.postingChain, '0g');
+  assert.deepEqual(s.escrowChains, ['0g', 'base']);
+
+  const posting = await discoverSettlement({ ...backend(newBridge()), env: { BLINDMARKET_SETTLEMENT: 'base' } });
+  assert.equal(posting.postingChain, 'base');
+
   await assert.rejects(
     discoverSettlement({ ...backend(newBridge()), env: { BLINDMARKET_SETTLEMENT: 'polygon' } }),
-    (e) => e.code === 'BAD_SETTLEMENT' && /0g, base/.test(e.message),
+    (e) => e.code === 'BAD_SETTLEMENT' && /has an escrow on \(0g, base\)/.test(e.message),
   );
+  const noBaseEscrow = chainsFixture();
+  noBaseEscrow[1] = { ...noBaseEscrow[1], escrowAddress: null, postable: false };
+  await assert.rejects(
+    discoverSettlement({ ...backend(newBridge({ postingChain: '0g', chains: noBaseEscrow.map((c) => ({ ...c, postable: c.chain === '0g' })) })), env: { BLINDMARKET_SETTLEMENT: 'base' } }),
+    (e) => e.code === 'BAD_SETTLEMENT' && /\(0g\)/.test(e.message),
+  );
+});
+
+test('a zero ERC-20 token address is refused', async () => {
+  const chains = chainsFixture();
+  chains[1] = { ...chains[1], token: { ...chains[1].token, address: '0x0000000000000000000000000000000000000000' } };
+  await assert.rejects(discoverSettlement({ ...backend(newBridge({ chains })), env: {} }), (e) => e.code === 'SETTLEMENT_UNKNOWN');
+});
+
+test('an address served with a bad checksum is compared lowercased, as the backend does', async () => {
+  const chains = chainsFixture();
+  const badCase = (a) => '0x' + a.slice(2).split('').map((ch, i) => (i % 2 ? ch.toUpperCase() : ch.toLowerCase())).join('');
+  chains[1] = { ...chains[1], escrowAddress: badCase(chains[1].escrowAddress), token: { ...chains[1].token, address: badCase(USDC_SEPOLIA) } };
+  const s = await discoverSettlement({ ...backend(newBridge({ chains })), env: {} });
+  assert.equal(s.escrowAddress, '0xa1F75b5eC92f4485d4EeFa339DC2B8aF25Df0eC5');
+  assert.equal(s.token.address, USDC_SEPOLIA);
+});
+
+test('a chain listed with no chain id is refused', async () => {
+  const chains = chainsFixture();
+  delete chains[1].chainId;
+  await assert.rejects(discoverSettlement({ ...backend(newBridge({ chains })), env: {} }), (e) => e.code === 'SETTLEMENT_UNKNOWN' && /chain id/.test(e.message));
 });
 
 test('BLINDMARKET_SETTLEMENT=0g still skips discovery on any backend', async () => {

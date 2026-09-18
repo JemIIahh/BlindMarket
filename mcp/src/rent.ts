@@ -125,7 +125,30 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     if (!walletCtx) {
       return { error: fail('NO_WALLET', 'Spending on 0G needs a local funding wallet — set BLINDMARKET_PRIVATE_KEY (see wallet_status)') };
     }
+    // The escrow address is compared before every send, but not the chain:
+    // a testnet backend's escrow address, paid on the mainnet RPC, is some
+    // other account there. A backend that names its 0G chain id settles it.
+    if (s.chainId !== undefined && walletCtx.chainId !== s.chainId) {
+      return {
+        error: fail(
+          'CHAIN_MISMATCH',
+          `The backend settles 0G on chain ${s.chainId}, but BLINDMARKET_PRIVATE_KEY signs on chain ${walletCtx.chainId} (BLINDMARKET_RPC_URL / BLINDMARKET_CHAIN_ID). Native value sent there would not reach this backend's escrow. Point both at chain ${s.chainId}.`,
+        ),
+      };
+    }
     return { s, payFrom: walletCtx.wallet.address };
+  }
+
+  /** A new escrow is funded where POST /api/v1/tasks builds: the backend's
+   *  posting chain. A process forced onto another chain (to finish or refund
+   *  tasks already there) cannot post. Unknown on an older backend. */
+  function notPostingChain(s: Settlement): ApiError | null {
+    if (s.postingChain === undefined || s.mode === s.postingChain) return null;
+    const e: ApiError = new Error(
+      `This process settles on ${s.mode} (BLINDMARKET_SETTLEMENT), but the backend posts new tasks on ${s.postingChain}, so a new escrow can only be funded there. Unset BLINDMARKET_SETTLEMENT (or set it to ${s.postingChain}) to post; ${s.mode} stays usable for tasks already on it.`,
+    );
+    e.code = 'NOT_POSTING_CHAIN';
+    return e;
   }
 
   const ERC20 = new Interface([
@@ -164,9 +187,11 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       settlement.invalidate();
       const e: ApiError = new Error(
         `backend built ${what} for ${to} but this process is in ${s.mode} mode expecting escrow ${expected}. ` +
-        (s.payment === 'relay-erc20'
-          ? `This task is escrowed on another chain than ${s.chain} (0G, if it is an older task) — handle a 0G task with BLINDMARKET_SETTLEMENT=0g and a local key, or from the web app.`
-          : 'The backend is building transactions for another chain — re-run and discovery will re-check, or set BLINDMARKET_SETTLEMENT to the chain it posts on.'),
+        (s.escrowChains
+          ? `This task is escrowed on another chain — set BLINDMARKET_SETTLEMENT to the chain that holds it (this backend has escrows on ${s.escrowChains.join(', ')}; 0G needs a local key), or use the web app.`
+          : s.payment === 'relay-erc20'
+            ? 'This task is escrowed on 0G — handle it with BLINDMARKET_SETTLEMENT=0g and a local key, or from the web app.'
+            : 'The backend is building Base transactions — re-run and discovery will re-check, or set BLINDMARKET_SETTLEMENT=base.'),
       );
       e.code = 'ESCROW_MISMATCH';
       throw e;
@@ -305,9 +330,11 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     }
 
     if (record.stage === 'created' || record.stage === 'approved') {
+      const refused = notPostingChain(s);
+      if (refused) throw refused;
       if (s.payment === 'relay-erc20') await ensureAllowance(s, record);
 
-      const { unsignedTx } = await api('POST', '/api/v1/tasks', {
+      const { unsignedTx, chain: builtChain, chainId: builtChainId } = await api('POST', '/api/v1/tasks', {
         taskHash: record.taskHash,
         token: s.payment === 'relay-erc20' ? s.token.address : ZERO_TOKEN,
         amount: record.amountWei,
@@ -323,6 +350,17 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
 
       // Either branch: the tx must target the escrow this mode expects. On a
       // relay chain that is also the escrow the allowance above was granted to.
+      // A chain-aware backend also names the chain it built for (older ones
+      // return only the tx, and are checked by address alone, as before).
+      if (s.postingChain !== undefined && (
+        (builtChain !== undefined && builtChain !== s.mode) ||
+        (builtChainId !== undefined && s.chainId !== undefined && Number(builtChainId) !== s.chainId)
+      )) {
+        settlement.invalidate();
+        const e: ApiError = new Error(`backend built createTask for ${builtChain ?? '?'} (chain ${builtChainId ?? '?'}) but this process settles on ${s.mode} (chain ${s.chainId ?? '?'}) — re-run and discovery will re-check`);
+        e.code = 'ESCROW_MISMATCH';
+        throw e;
+      }
       await verifyTarget(s, unsignedTx.to, 'createTask');
 
       if (s.payment === 'relay-erc20') {
@@ -339,6 +377,8 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
           data: unsignedTx.data,
           value: BigInt(record.amountWei!),
           gasLimit: GAS_LIMIT,
+          // ethers refuses to send when its provider is on another chain.
+          ...(s.chainId !== undefined ? { chainId: s.chainId } : {}),
         });
         // Persist the tx hash BEFORE waiting: if we crash mid-confirmation the
         // resume path re-runs /tasks/index with this hash instead of re-funding.
@@ -429,6 +469,9 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
         }
       }
 
+      const offPosting = notPostingChain(s);
+      if (offPosting) return fail(offPosting.code!, offPosting.message);
+
       const service = await api<any>('GET', `/api/v1/marketplace/services/${serviceId}`);
       const isPublic = privacy === 'public';
       if (!isPublic && !service.agent_public_key) {
@@ -445,7 +488,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       // older backend may still serve one. 1,000,000 tokens per call is far
       // above any real listing — refuse.
       if (s.decimals < 18 && priceRaw > 1_000_000n * 10n ** BigInt(s.decimals)) {
-        return fail('PRICE_UNITS_SUSPECT', `service ${serviceId} lists price_raw=${priceRaw} which is ${formatUnits(priceRaw, s.decimals)} ${s.symbol} — this looks like an 18-decimal 0G price on a ${s.decimals}-decimal chain. Not sending. Re-list the service in ${s.symbol} base units.`);
+        return fail('PRICE_UNITS_SUSPECT', `service ${serviceId} lists price_raw=${priceRaw} which is ${formatUnits(priceRaw, s.decimals)} ${s.symbol} — this looks like an 18-decimal 0G price on a ${s.symbol} chain. Not sending. Re-list the service in ${s.symbol} base units.`);
       }
       const price = formatUnits(priceRaw, s.decimals);
 
@@ -562,6 +605,9 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
           return fail((err as ApiError).code ?? 'RESUME_FAILED', (err as Error).message);
         }
       }
+
+      const offPosting = notPostingChain(s);
+      if (offPosting) return fail(offPosting.code!, offPosting.message);
 
       const isPublic = privacy === 'public';
       const amountStr = amount ?? amount0G;
@@ -741,17 +787,25 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     // several Redis round trips and is the slowest thing in this path, so a
     // numeric id must not pay for it.
     let taskId: string;
+    let backendChain: string | undefined;
     if (/^\d+$/.test(task)) {
       taskId = task;
     } else {
-      const viaBackend = await api<TaskDetail>('GET', `/api/v1/tasks/${encodeURIComponent(task)}`);
+      const viaBackend = await api<TaskDetail & { chain?: string }>('GET', `/api/v1/tasks/${encodeURIComponent(task)}`);
       taskId = viaBackend.taskId;
+      backendChain = viaBackend.chain;
     }
 
     const escrow = new Contract(s.escrowAddress, ESCROW_READ_ABI, s.provider);
     const t = await escrow.getTask(BigInt(taskId));
     if (String(t.agent).toLowerCase() === ZERO_TOKEN) {
-      const e: ApiError = new Error(`task ${taskId} does not exist on the ${s.chain} escrow ${s.escrowAddress} — it is probably a 0G task; handle it with BLINDMARKET_SETTLEMENT=0g`);
+      const label = s.chain === 'base' ? 'Base' : s.chain;
+      const hint = backendChain && backendChain !== s.chain
+        ? `it is a ${backendChain} task; handle it with BLINDMARKET_SETTLEMENT=${backendChain}`
+        : s.escrowChains
+          ? `it is on another chain; set BLINDMARKET_SETTLEMENT to the one that holds it (this backend has escrows on ${s.escrowChains.join(', ')})`
+          : 'it is probably a 0G task; handle it with BLINDMARKET_SETTLEMENT=0g';
+      const e: ApiError = new Error(`task ${taskId} does not exist on the ${label} escrow ${s.escrowAddress} — ${hint}`);
       // The code names the chain; on Base it is the TASK_NOT_ON_BASE it always was.
       e.code = `TASK_NOT_ON_${s.chain.toUpperCase().replace(/-/g, '_')}`;
       throw e;
@@ -829,6 +883,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
           to: unsignedTx.to,
           data: unsignedTx.data,
           gasLimit: GAS_LIMIT,
+          ...(s.chainId !== undefined ? { chainId: s.chainId } : {}),
         });
         // Persist the hash BEFORE waiting, same reasoning as fundAndIndex: a
         // crash mid-confirmation must resume onto THIS tx, not broadcast another.

@@ -45,10 +45,13 @@ import { JsonRpcProvider, getAddress } from 'ethers';
  *
  * Discovery is memoised with a short TTL (MCP servers are long-lived; a
  * process must notice when prod flips). BLINDMARKET_SETTLEMENT names a chain
- * key: 0g skips discovery entirely; any other key fails loudly unless the
- * backend really posts there (on an older backend only "base" exists, and
+ * key: 0g skips discovery entirely; any other key must be a chain the backend
+ * has an escrow on, which is how an executor finishes (or a poster refunds) a
+ * task on a chain the backend no longer posts on. New tasks can only be
+ * funded on the posting chain, so post_task and rent_service refuse on any
+ * other (NOT_POSTING_CHAIN). On an older backend only "base" exists, and it
  * fails loudly if the backend is not in Base mode rather than silently
- * posting native tasks).
+ * posting native tasks.
  */
 
 /** The backend's chain key: '0g', 'base', and whatever it adds later. The
@@ -67,7 +70,16 @@ export interface SettlementToken {
   decimals: number;
 }
 
-export interface OgSettlement {
+/** What a chain-aware backend said besides the chain this process settles on.
+ *  Absent on an older backend, or when forced to 0g without asking. */
+interface BackendChains {
+  /** where POST /api/v1/tasks builds new tasks */
+  postingChain?: SettlementMode;
+  /** every chain the backend has an escrow on */
+  escrowChains?: SettlementMode[];
+}
+
+export interface OgSettlement extends BackendChains {
   payment: 'local-native';
   mode: '0g';
   chain: '0g';
@@ -82,7 +94,7 @@ export interface OgSettlement {
   escrowAddress?: string;
 }
 
-export interface RelaySettlement {
+export interface RelaySettlement extends BackendChains {
   payment: 'relay-erc20';
   mode: SettlementMode;
   chain: SettlementMode;
@@ -263,53 +275,62 @@ async function settlementFromPostingChain(
     );
   }
   const chains: any[] = Array.isArray(data.chains) ? data.chains : [];
-  if (forced) {
-    if (!chains.some((c) => c?.chain === forced)) {
-      const known = chains.map((c) => c?.chain).filter((k) => typeof k === 'string');
-      throw err('BAD_SETTLEMENT', `BLINDMARKET_SETTLEMENT="${forced}" is not a chain this backend knows (${known.join(', ') || 'none listed'}).`);
-    }
-    if (forced !== posting) {
-      throw err(
-        'SETTLEMENT_MISMATCH',
-        `BLINDMARKET_SETTLEMENT=${forced}, but the backend posts new tasks on ${posting}, so POST /api/v1/tasks would build them there. Unset it, or set it to "${posting}".`,
-      );
-    }
+  const escrowChains: string[] = chains
+    .filter((c) => typeof c?.chain === 'string' && isEscrowAddress(c.escrowAddress))
+    .map((c) => c.chain);
+  const backendChains = { postingChain: posting, escrowChains };
+
+  // Forced to another chain the backend has an escrow on: tasks already there
+  // can still be delivered, cancelled and reclaimed; post_task and
+  // rent_service refuse (they fund on the posting chain only).
+  const target = forced ?? posting;
+  if (forced && !escrowChains.includes(forced)) {
+    throw err(
+      'BAD_SETTLEMENT',
+      `BLINDMARKET_SETTLEMENT="${forced}" is not a chain this backend has an escrow on (${escrowChains.join(', ') || 'none'}).`,
+    );
   }
 
-  const entry = chains.find((c) => c?.chain === posting);
+  const entry = chains.find((c) => c?.chain === target);
   if (!entry) {
     throw err('SETTLEMENT_UNKNOWN', `The backend posts on ${posting} but lists no such chain in chains[] on /health/bridge.`);
   }
-  if (!entry.postable || !isEscrowAddress(entry.escrowAddress)) {
+  if (target === posting && (!entry.postable || !isEscrowAddress(entry.escrowAddress))) {
     throw err(
       'SETTLEMENT_NOT_POSTABLE',
       `The backend posts on ${posting} but has no escrow or settlement token configured there, so POST /api/v1/tasks refuses (CHAIN_NOT_CONFIGURED). Fix the backend's config for ${posting}.`,
     );
   }
   const chainId = Number(entry.chainId);
+  if (!Number.isInteger(chainId) || chainId <= 0) {
+    throw err('SETTLEMENT_UNKNOWN', `The backend lists ${target} with no usable chain id (${JSON.stringify(entry.chainId)}).`);
+  }
+  // The backend serves addresses as configured, so a mixed-case one may carry
+  // a bad checksum; it compares them lowercased, and so does this.
+  const escrow = String(entry.escrowAddress).toLowerCase();
   const token = entry.token;
 
   if (token?.kind === 'native') {
     // The local wallet signs over BLINDMARKET_RPC_URL, a 0G RPC, and native
     // 0G is all it has ever paid. A native coin anywhere else is not a guess
     // worth making with real value.
-    if (posting !== '0g' || token.decimals !== 18) {
+    if (target !== '0g' || token.decimals !== 18) {
       throw err(
         'UNSUPPORTED_SETTLEMENT',
-        `The backend posts on ${posting}, paid in native ${token.symbol} (${token.decimals} decimals). This MCP pays native escrow only on 0G, from BLINDMARKET_PRIVATE_KEY.`,
+        `The backend settles ${target} in native ${token.symbol} (${token.decimals} decimals). This MCP pays native escrow only on 0G, from BLINDMARKET_PRIVATE_KEY.`,
       );
     }
-    return { ...OG_SETTLEMENT, chainId, escrowAddress: getAddress(entry.escrowAddress) };
+    return { ...OG_SETTLEMENT, ...backendChains, chainId, escrowAddress: getAddress(escrow) };
   }
 
   if (token?.kind === 'erc20') {
     if (!isEscrowAddress(token.address) || !Number.isInteger(token.decimals) || token.decimals < 0 || token.decimals > 36 || typeof token.symbol !== 'string') {
-      throw err('SETTLEMENT_UNKNOWN', `The backend describes ${posting}'s settlement token incompletely (${JSON.stringify(token)}).`);
+      throw err('SETTLEMENT_UNKNOWN', `The backend describes ${target}'s settlement token incompletely (${JSON.stringify(token)}).`);
     }
     if (typeof entry.relayChain !== 'string' || !entry.relayChain) {
       throw err(
         'UNSUPPORTED_SETTLEMENT',
-        `The backend posts on ${posting}, paid in ${token.symbol} (ERC-20), but its relay does not serve ${posting}, and this MCP pays ERC-20 escrow only through the relay.`,
+        `The backend settles ${target} in ${token.symbol} (ERC-20), but its relay does not serve ${target}, and this MCP pays ERC-20 escrow only through the relay.`,
       );
     }
     // The env override predates backends that name the token. Here it can
@@ -318,17 +339,18 @@ async function settlementFromPostingChain(
     if (isAddress(override) && override.toLowerCase() !== token.address.toLowerCase()) {
       throw err(
         'TOKEN_MISMATCH',
-        `BLINDMARKET_USDC_ADDRESS=${override}, but the backend settles ${posting} in ${token.symbol} at ${token.address}; POST /api/v1/tasks refuses any other token. Unset it.`,
+        `BLINDMARKET_USDC_ADDRESS=${override}, but the backend settles ${target} in ${token.symbol} at ${token.address}; POST /api/v1/tasks refuses any other token. Unset it.`,
       );
     }
-    return buildRelaySettlement(
-      { chain: posting, chainId, escrow: entry.escrowAddress, token: { kind: 'erc20', address: token.address, symbol: token.symbol, decimals: token.decimals }, relayChain: entry.relayChain },
+    const relay = await buildRelaySettlement(
+      { chain: target, chainId, escrow, token: { kind: 'erc20', address: String(token.address).toLowerCase(), symbol: token.symbol, decimals: token.decimals }, relayChain: entry.relayChain },
       env,
       deps,
     );
+    return { ...relay, ...backendChains };
   }
 
-  throw err('UNSUPPORTED_SETTLEMENT', `The backend posts on ${posting}, paid in a token this MCP cannot pay (${JSON.stringify(token)}).`);
+  throw err('UNSUPPORTED_SETTLEMENT', `The backend settles ${target} in a token this MCP cannot pay (${JSON.stringify(token)}).`);
 }
 
 /** An RPC for a relay chain: its env override, else a public one this file knows. */
