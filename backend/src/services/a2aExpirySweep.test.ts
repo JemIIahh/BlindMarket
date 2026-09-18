@@ -260,6 +260,15 @@ describe('sweepGasLiveness reconciling a broadcast assign tx', () => {
     expect(tryReleaseAccepted).not.toHaveBeenCalled();
   });
 
+  it('never reads a receipt on another chain’s RPC for a chain it has no provider for', async () => {
+    old();
+    getAssignBroadcastAt.mockResolvedValue(minutesAgo(31));
+    resolveTaskByHash.mockResolvedValue({ taskId: '1', chain: 'arc' as never });
+    await sweepGasLiveness();
+    expect(getTransactionReceipt).not.toHaveBeenCalled();
+    expect(tryReleaseAccepted).not.toHaveBeenCalled();
+  });
+
   it('clears a stale assignError once the chain names this executor, and checks only once', async () => {
     old({ assignError: 'marketplaceAssign tx not confirmed after 60s' });
     getTaskOn.mockResolvedValue({ worker: EXECUTOR.toUpperCase(), status: 1 });
