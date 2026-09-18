@@ -2,7 +2,8 @@ import { expect } from "chai";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import hre, { ethers, upgrades } from "hardhat";
+import hre from "hardhat";
+import { ethers, upgrades } from "../lib/hh.js";
 import {
   ARC_MAINNET_CHAIN_ID,
   ARC_TESTNET_CHAIN_ID,
@@ -12,11 +13,11 @@ import {
   SETTLEMENT_CHAINS,
   settlementChainFor,
   settlementTokenFor,
-} from "../scripts/_settlement";
-import { ALLOWED_TESTNETS, assertZeroGChain } from "../scripts/_guard";
-import { assertGuardVarsNotFromDotenv, GUARD_VARS } from "../scripts/_manifest-dir";
+} from "../scripts/_settlement.js";
+import { ALLOWED_TESTNETS, assertZeroGChain } from "../scripts/_guard.js";
+import { assertGuardVarsNotFromDotenv, GUARD_VARS } from "../scripts/_manifest-dir.js";
 import { execFileSync } from "child_process";
-import { DEPLOY_FILES, DEPLOYMENTS_ROOT, preflightDeploy, readRecord, writeDeployment } from "../scripts/_deployments";
+import { DEPLOY_FILES, DEPLOYMENTS_ROOT, preflightDeploy, readRecord, writeDeployment } from "../scripts/_deployments.js";
 import {
   assertEscrowAllowlist,
   checkSettlementToken,
@@ -24,9 +25,9 @@ import {
   settlementInvariants,
   settlementRecord,
   waitForTokenAllowed,
-} from "../scripts/deploy-settlement";
-import { render } from "../scripts/sync-addresses";
-import { STAGING_MANIFEST_DIR } from "../scripts/_manifest-dir";
+} from "../scripts/_settlement-deploy.js";
+import { render } from "../scripts/_sync-addresses.js";
+import { STAGING_MANIFEST_DIR } from "../scripts/_manifest-dir.js";
 
 /**
  * Arc contracts tooling: the settlement token table, the guards around it,
@@ -145,16 +146,25 @@ describe("Arc settlement tooling", function () {
   });
 
   describe("hardhat networks", function () {
-    const net = (name: string) => hre.config.networks[name] as { chainId?: number; url?: string } | undefined;
+    // Hardhat 3 resolves a network url to a configuration variable: a fixed
+    // value, or one read from the environment only when the network is used.
+    type Url = { getUrl(): Promise<string>; name?: string };
+    const net = (name: string) => hre.config.networks[name] as unknown as { chainId?: number; url: Url } | undefined;
 
-    it("defines arc-testnet on 5042002 with a default RPC", function () {
+    it("defines arc-testnet on 5042002 with a default RPC", async function () {
       expect(net("arc-testnet")?.chainId).to.equal(ARC_TESTNET_CHAIN_ID);
-      expect(net("arc-testnet")?.url).to.equal(process.env.ARC_TESTNET_RPC_URL || "https://rpc.testnet.arc.io");
+      expect(await net("arc-testnet")!.url.getUrl()).to.equal(process.env.ARC_TESTNET_RPC_URL || "https://rpc.testnet.arc.io");
     });
 
-    it("defines arc-mainnet on 5042 with no default RPC", function () {
+    it("defines arc-mainnet on 5042 with no default RPC: the url is ARC_MAINNET_RPC_URL, read only when the network is used", async function () {
       expect(net("arc-mainnet")?.chainId).to.equal(ARC_MAINNET_CHAIN_ID);
-      expect(net("arc-mainnet")?.url).to.equal(process.env.ARC_MAINNET_RPC_URL ?? "");
+      const url = net("arc-mainnet")!.url;
+      expect(url.name).to.equal("ARC_MAINNET_RPC_URL");
+      if (!process.env.ARC_MAINNET_RPC_URL) {
+        let err: unknown;
+        try { await url.getUrl(); } catch (e) { err = e; }
+        expect(err, "an unset ARC_MAINNET_RPC_URL must not resolve to a default").to.be.instanceOf(Error);
+      }
     });
 
     it("names every record's network after its file, except Base mainnet's legacy 'base'", function () {
@@ -447,7 +457,7 @@ describe("Arc settlement tooling", function () {
   });
 
   describe("sync-addresses render()", function () {
-    const committed = fs.readFileSync(path.resolve(__dirname, "../../backend/src/contractAddresses.ts"), "utf-8");
+    const committed = fs.readFileSync(path.resolve(import.meta.dirname, "../../backend/src/contractAddresses.ts"), "utf-8");
     let dir: string;
 
     beforeEach(function () {
@@ -559,7 +569,7 @@ describe("the mainnet acknowledgement is a guarded variable", function () {
   });
 
   it("is no longer in .env.example", function () {
-    const example = fs.readFileSync(path.resolve(__dirname, "../.env.example"), "utf-8");
+    const example = fs.readFileSync(path.resolve(import.meta.dirname, "../.env.example"), "utf-8");
     expect(example).to.not.match(/^I_HAVE_READ_MAINNET_CHECKLIST=/m);
   });
 });
@@ -571,22 +581,25 @@ describe("DEPLOYMENT_SET=staging picks the staging manifest directory (scripts/_
     // A fresh process: the module sets process.env at import time.
     const out = execFileSync(
       process.execPath,
-      ["-r", "ts-node/register/transpile-only", "-e", "require('./scripts/_manifest-dir'); process.stdout.write(String(process.env.MANIFEST_DEFAULT_DIR))"],
-      { cwd: path.resolve(__dirname, ".."), env: { ...withoutManifestDir(), DEPLOYMENT_SET: "staging" }, encoding: "utf-8" },
+      // Node strips the types itself (22.18+); the module sets the variable at import.
+      ["--input-type=module", "-e", "await import('./scripts/_manifest-dir.ts'); process.stdout.write(String(process.env.MANIFEST_DEFAULT_DIR))"],
+      { cwd: path.resolve(import.meta.dirname, ".."), env: { ...withoutManifestDir(), DEPLOYMENT_SET: "staging" }, encoding: "utf-8" },
     );
     expect(out).to.equal(STAGING_MANIFEST_DIR);
     const unset = execFileSync(
       process.execPath,
-      ["-r", "ts-node/register/transpile-only", "-e", "require('./scripts/_manifest-dir'); process.stdout.write(String(process.env.MANIFEST_DEFAULT_DIR))"],
-      { cwd: path.resolve(__dirname, ".."), env: { ...withoutManifestDir(), DEPLOYMENT_SET: "" }, encoding: "utf-8" },
+      // Node strips the types itself (22.18+); the module sets the variable at import.
+      ["--input-type=module", "-e", "await import('./scripts/_manifest-dir.ts'); process.stdout.write(String(process.env.MANIFEST_DEFAULT_DIR))"],
+      { cwd: path.resolve(import.meta.dirname, ".."), env: { ...withoutManifestDir(), DEPLOYMENT_SET: "" }, encoding: "utf-8" },
     );
     expect(unset).to.equal("undefined");
     // DEPLOYMENT_SET=default (what a first default deploy on a shared chain
     // must pass) is the default set: production's manifests, not staging's.
     const explicitDefault = execFileSync(
       process.execPath,
-      ["-r", "ts-node/register/transpile-only", "-e", "require('./scripts/_manifest-dir'); process.stdout.write(String(process.env.MANIFEST_DEFAULT_DIR))"],
-      { cwd: path.resolve(__dirname, ".."), env: { ...withoutManifestDir(), DEPLOYMENT_SET: "default" }, encoding: "utf-8" },
+      // Node strips the types itself (22.18+); the module sets the variable at import.
+      ["--input-type=module", "-e", "await import('./scripts/_manifest-dir.ts'); process.stdout.write(String(process.env.MANIFEST_DEFAULT_DIR))"],
+      { cwd: path.resolve(import.meta.dirname, ".."), env: { ...withoutManifestDir(), DEPLOYMENT_SET: "default" }, encoding: "utf-8" },
     );
     expect(explicitDefault).to.equal("undefined");
   });

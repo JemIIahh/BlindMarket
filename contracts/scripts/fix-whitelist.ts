@@ -20,9 +20,9 @@
 // The script refuses to run if no address is resolvable, instead of falling
 // back to a hardcoded value that goes stale across redeploys.
 
-import { ethers, network } from "hardhat";
-import { isLiveAddress, readRecord, recordPath, resolveDeploymentSet, assertExpectedEscrow, type DeploymentSet } from "./_deployments";
-import { assertSafeNetwork } from "./_guard";
+import { ethers, network } from "../lib/hh.js";
+import { isLiveAddress, readRecord, recordPath, resolveDeploymentSet, assertExpectedEscrow, type DeploymentSet } from "./_deployments.js";
+import { assertSafeNetwork } from "./_guard.js";
 
 /** 0G chain ids. This script whitelists the NATIVE token (address(0)), which
  *  on 0G is 0G itself. On Base, address(0) is ETH — whitelisting it on a USDC

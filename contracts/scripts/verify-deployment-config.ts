@@ -19,10 +19,10 @@
  *   DEPLOYMENT_SET=staging EXPECTED_ESCROW=0x... \
  *     npx hardhat run scripts/verify-deployment-config.ts --network base-sepolia
  */
-import { ethers, network } from "hardhat";
-import { resolveEscrowTarget } from "./_deployments";
-import { settlementInvariants } from "./deploy-settlement";
-import { SETTLEMENT_CHAINS, settlementTokenFor } from "./_settlement";
+import { ethers, network } from "../lib/hh.js";
+import { resolveEscrowTarget } from "./_deployments.js";
+import { settlementInvariants } from "./_settlement-deploy.js";
+import { SETTLEMENT_CHAINS, settlementTokenFor } from "./_settlement.js";
 
 const NATIVE = "0x0000000000000000000000000000000000000000";
 

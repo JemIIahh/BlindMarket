@@ -1,6 +1,6 @@
 import { expect } from "chai";
-import { ethers } from "hardhat";
-import { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/signers";
+import { ethers } from "../lib/hh.js";
+import type { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/types";
 
 describe("AgentFactory", function () {
   let factory: any;
@@ -67,7 +67,7 @@ describe("AgentFactory", function () {
 
     it("reverts without a USDC approval", async function () {
       await usdc.connect(user).approve(await factory.getAddress(), 0);
-      await expect(factory.connect(user).deployAgent(0)).to.be.reverted;
+      await expect(factory.connect(user).deployAgent(0)).to.revert(ethers);
     });
   });
 

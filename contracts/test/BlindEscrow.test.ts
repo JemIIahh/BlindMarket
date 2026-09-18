@@ -1,8 +1,7 @@
 import { expect } from "chai";
-import { ethers, upgrades } from "hardhat";
-import { BlindEscrow, BlindReputation, TaskRegistry } from "../typechain-types";
-import { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/signers";
-import { time } from "@nomicfoundation/hardhat-network-helpers";
+import { ethers, upgrades, time } from "../lib/hh.js";
+import type { BlindEscrow, BlindReputation, TaskRegistry } from "../types/ethers-contracts/index.js";
+import type { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/types";
 
 describe("BlindEscrow", function () {
   let escrow: BlindEscrow;
@@ -565,7 +564,7 @@ describe("BlindEscrow", function () {
       await expect(escrow.connect(agent).raiseDispute(1))
         .to.be.revertedWithCustomError(escrow, "DeadlineReached");
       // The agent's guaranteed timeout refund still works.
-      await expect(escrow.connect(agent).claimTimeout(1)).to.not.be.reverted;
+      await expect(escrow.connect(agent).claimTimeout(1)).to.not.revert(ethers);
     });
 
     it("should allow worker to raise dispute after failed verification", async function () {
@@ -812,7 +811,7 @@ describe("BlindEscrow", function () {
 
       await expect(
         escrow.connect(agent).createTask(TASK_HASH, await token.getAddress(), AMOUNT, "test", "test", ONE_WEEK)
-      ).not.to.be.reverted;
+      ).to.not.revert(ethers);
     });
 
     it("should reject pause from non-admin", async function () {

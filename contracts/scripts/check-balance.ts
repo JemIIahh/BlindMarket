@@ -1,4 +1,4 @@
-import { ethers } from "hardhat";
+import { ethers } from "../lib/hh.js";
 
 async function main() {
   const [deployer] = await ethers.getSigners();

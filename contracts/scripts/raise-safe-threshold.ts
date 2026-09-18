@@ -27,8 +27,8 @@
  *   DRY_RUN=yes NEW_OWNERS=0xSecond TARGET_THRESHOLD=2 \
  *     npx hardhat run scripts/raise-safe-threshold.ts --network base-sepolia
  */
-import { ethers, network } from "hardhat";
-import { assertSafeNetwork } from "./_guard";
+import { ethers, network } from "../lib/hh.js";
+import { assertSafeNetwork } from "./_guard.js";
 
 const SAFE_ABI = [
   "function getOwners() view returns (address[])",

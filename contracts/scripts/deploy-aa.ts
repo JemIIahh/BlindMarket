@@ -15,10 +15,10 @@
  *   DEPLOYMENT_SET=staging EXPECTED_ESCROW=0x... PRIVATE_KEY=0x... \
  *     npx hardhat run scripts/deploy-aa.ts --network base-sepolia
  */
-import { ethers } from "hardhat";
-import { assertSafeNetwork } from "./_guard";
-import { preflightDeploy, recordPath, writeDeployment } from "./_deployments";
-import { assertAaChain } from "./_settlement";
+import { ethers } from "../lib/hh.js";
+import { assertSafeNetwork } from "./_guard.js";
+import { preflightDeploy, recordPath, writeDeployment } from "./_deployments.js";
+import { assertAaChain } from "./_settlement.js";
 
 const BASE_USDC: Record<number, string> = {
   8453:  "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",

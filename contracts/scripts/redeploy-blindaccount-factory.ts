@@ -17,11 +17,11 @@
  * add DEPLOYMENT_SET=staging for the staging stack):
  *   EXPECTED_ESCROW=0x... npx hardhat run scripts/redeploy-blindaccount-factory.ts --network base-sepolia
  */
-import { ethers } from "hardhat";
+import { ethers } from "../lib/hh.js";
 import * as fs from "fs";
-import { assertSafeNetwork } from "./_guard";
-import { preflightDeploy, recordPath } from "./_deployments";
-import { assertAaChain } from "./_settlement";
+import { assertSafeNetwork } from "./_guard.js";
+import { preflightDeploy, recordPath } from "./_deployments.js";
+import { assertAaChain } from "./_settlement.js";
 
 const ENTRYPOINT_V07 = "0x0000000071727De22E5E9d8BAf0edAc6f37da032";
 

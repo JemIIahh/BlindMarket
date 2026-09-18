@@ -28,12 +28,12 @@
  *   PRIVATE_KEY=<admin_pk> npx hardhat run scripts/upgrade-blind-escrow.ts --network 0g-mainnet
  */
 
-import { gasSymbolFor } from "./_settlement";
-import { ethers, upgrades } from "hardhat";
+import { gasSymbolFor } from "./_settlement.js";
+import { ethers, upgrades } from "../lib/hh.js";
 import * as fs from "fs";
 import * as path from "path";
-import { assertSafeNetwork } from "./_guard";
-import { resolveEscrowTarget } from "./_deployments";
+import { assertSafeNetwork } from "./_guard.js";
+import { resolveEscrowTarget } from "./_deployments.js";
 
 const IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
 
@@ -99,7 +99,7 @@ async function main() {
   // stale address read — turning the old ambiguous "no-op" into a real verdict.
   const liveCode = await ethers.provider.getCode(postImpl);
   const artifact = JSON.parse(
-    fs.readFileSync(path.resolve(__dirname, "../artifacts/contracts/BlindEscrow.sol/BlindEscrow.json"), "utf-8"),
+    fs.readFileSync(path.resolve(import.meta.dirname, "../artifacts/contracts/BlindEscrow.sol/BlindEscrow.json"), "utf-8"),
   );
   const compiled: string =
     typeof artifact.deployedBytecode === "string" ? artifact.deployedBytecode : artifact.deployedBytecode.object;

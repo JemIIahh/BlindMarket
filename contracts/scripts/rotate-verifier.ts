@@ -20,9 +20,9 @@
  *     itself is paid by the admin, not the new verifier.
  */
 
-import { ethers } from "hardhat";
-import { assertSafeNetwork } from "./_guard";
-import { resolveEscrowTarget } from "./_deployments";
+import { ethers } from "../lib/hh.js";
+import { assertSafeNetwork } from "./_guard.js";
+import { resolveEscrowTarget } from "./_deployments.js";
 
 async function main() {
   await assertSafeNetwork();

@@ -1,6 +1,6 @@
 import { expect } from "chai";
-import { ethers, network } from "hardhat";
-import { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/signers";
+import { ethers, network } from "../lib/hh.js";
+import type { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/types";
 
 /**
  * Off-chain CREATE2 address computation.
@@ -134,7 +134,7 @@ describe("BlindAccount", function () {
       ]);
       await expect(
         account.execute(await usdc.getAddress(), 0, calldata),
-      ).to.be.reverted;
+      ).to.revert(ethers);
     });
   });
 

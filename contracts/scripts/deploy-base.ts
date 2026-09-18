@@ -15,7 +15,7 @@
  *   DEPLOYMENT_SET=staging npx hardhat run scripts/deploy-base.ts --network base-sepolia
  *   I_HAVE_READ_MAINNET_CHECKLIST=yes npx hardhat run scripts/deploy-base.ts --network base
  */
-import { runSettlementDeploy } from "./deploy-settlement";
+import { runSettlementDeploy } from "./_settlement-deploy.js";
 
 runSettlementDeploy({ only: [8453, 84532], script: "deploy-base.ts" }).catch((err) => {
   console.error(err);

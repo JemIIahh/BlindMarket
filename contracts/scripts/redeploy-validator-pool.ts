@@ -28,10 +28,10 @@
  *   STAKE_TOKEN=0x… npx hardhat run scripts/redeploy-validator-pool.ts --network 0g-mainnet
  */
 
-import { ethers } from "hardhat";
+import { ethers } from "../lib/hh.js";
 import * as fs from "fs";
-import { assertSafeNetwork, assertZeroGChain } from "./_guard";
-import { resolveEscrowTarget } from "./_deployments";
+import { assertSafeNetwork, assertZeroGChain } from "./_guard.js";
+import { resolveEscrowTarget } from "./_deployments.js";
 
 const LOCAL_OR_TESTNET = new Set<number>([16602, 31337, 1337, 11155111]);
 

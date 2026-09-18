@@ -26,8 +26,8 @@
  */
 import * as fs from "fs";
 import * as path from "path";
-import { ethers } from "hardhat";
-import { STAGING_MANIFEST_DIR } from "./_manifest-dir";
+import { ethers } from "../lib/hh.js";
+import { STAGING_MANIFEST_DIR } from "./_manifest-dir.js";
 
 export const DEPLOY_FILES: Record<number, string> = {
   16661: "0g-mainnet.json",
@@ -55,7 +55,7 @@ export const SHARED_CHAIN_IDS: ReadonlySet<number> = new Set(
     .filter((id) => Object.values(SET_CHAINS).filter((chains) => chains.has(id)).length > 1),
 );
 
-const CONTRACTS_ROOT = path.resolve(__dirname, "..");
+const CONTRACTS_ROOT = path.resolve(import.meta.dirname, "..");
 export const DEPLOYMENTS_ROOT = path.join(CONTRACTS_ROOT, "deployments");
 const SET_DIRS: Record<DeploymentSet, string> = {
   default: DEPLOYMENTS_ROOT,

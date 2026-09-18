@@ -33,9 +33,9 @@
  * BlindReputation / TaskRegistry, and acceptOwnership() on AgentFactory.
  * Verify with verify-deployment-config.ts.
  */
-import { ethers, network } from "hardhat";
-import { assertSafeNetwork } from "./_guard";
-import { resolveEscrowTarget } from "./_deployments";
+import { ethers, network } from "../lib/hh.js";
+import { assertSafeNetwork } from "./_guard.js";
+import { resolveEscrowTarget } from "./_deployments.js";
 
 async function main() {
   await assertSafeNetwork();

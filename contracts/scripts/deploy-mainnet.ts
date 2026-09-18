@@ -23,9 +23,9 @@
  *   I_HAVE_READ_MAINNET_CHECKLIST=yes npx hardhat run scripts/deploy-mainnet.ts --network 0g-mainnet
  */
 
-import { ethers, upgrades } from "hardhat";
-import { assertSafeNetwork } from "./_guard";
-import { deployBlock, preflightDeploy, writeDeployment } from "./_deployments";
+import { ethers, upgrades } from "../lib/hh.js";
+import { assertSafeNetwork } from "./_guard.js";
+import { deployBlock, preflightDeploy, writeDeployment } from "./_deployments.js";
 
 const OG_MAINNET_CHAIN_ID = 16661;
 

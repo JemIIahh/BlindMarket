@@ -19,8 +19,8 @@ import {
   SHARED_CHAIN_IDS,
   writeDeployment,
   type DeploymentRecord,
-} from "../scripts/_deployments";
-import { assertGuardVarsNotFromDotenv, GUARD_VARS, STAGING_MANIFEST_DIR } from "../scripts/_manifest-dir";
+} from "../scripts/_deployments.js";
+import { assertGuardVarsNotFromDotenv, GUARD_VARS, STAGING_MANIFEST_DIR } from "../scripts/_manifest-dir.js";
 
 /**
  * Deployment-set selector and the guards that keep staging ops off the
@@ -35,7 +35,7 @@ const OG_MAINNET = 16661;
 const BASE_MAINNET = 8453;
 const ARC_TESTNET = 5042002;
 const ARC_MAINNET = 5042;
-const CONTRACTS_ROOT = path.resolve(__dirname, "..");
+const CONTRACTS_ROOT = path.resolve(import.meta.dirname, "..");
 /** The env hardhat.config.ts produces for a staging run. */
 const STAGING = { DEPLOYMENT_SET: "staging", MANIFEST_DEFAULT_DIR: STAGING_MANIFEST_DIR };
 const OTHER = "0x1111111111111111111111111111111111111111";
@@ -146,7 +146,7 @@ describe("deployment sets (scripts/_deployments)", function () {
       expect(fs.existsSync(path.join(dir, ".gitkeep"))).to.equal(true);
       const cfg = fs.readFileSync(path.join(CONTRACTS_ROOT, "hardhat.config.ts"), "utf-8");
       const firstImport = cfg.split("\n").find((l) => l.startsWith("import "));
-      expect(firstImport).to.match(/from "\.\/scripts\/_manifest-dir"/);
+      expect(firstImport).to.match(/from "\.\/scripts\/_manifest-dir\.js"/);
     });
   });
 
@@ -472,11 +472,15 @@ describe("deployment sets (scripts/_deployments)", function () {
 
   describe("sync-addresses", function () {
     it("reads only the default records", function () {
-      const src = fs.readFileSync(path.resolve(__dirname, "../scripts/sync-addresses.ts"), "utf-8");
-      const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
-      expect(code).to.not.match(/_deployments/);
-      expect(code).to.not.match(/staging/);
-      expect(code).to.match(/path\.resolve\(__dirname, "\.\.\/deployments"\)/);
+      // The generator lives in _sync-addresses.ts; sync-addresses.ts only runs it.
+      for (const file of ["_sync-addresses.ts", "sync-addresses.ts"]) {
+        const src = fs.readFileSync(path.resolve(import.meta.dirname, "../scripts", file), "utf-8");
+        const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+        expect(code, file).to.not.match(/_deployments/);
+        expect(code, file).to.not.match(/staging/);
+      }
+      const lib = fs.readFileSync(path.resolve(import.meta.dirname, "../scripts/_sync-addresses.ts"), "utf-8");
+      expect(lib).to.match(/path\.resolve\(import\.meta\.dirname, "\.\.\/deployments"\)/);
     });
   });
 });

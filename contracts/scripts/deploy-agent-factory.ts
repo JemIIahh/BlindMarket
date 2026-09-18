@@ -15,9 +15,9 @@
  *     npx hardhat run scripts/deploy-agent-factory.ts --network base-sepolia
  *   I_HAVE_READ_MAINNET_CHECKLIST=yes npx hardhat run scripts/deploy-agent-factory.ts --network base
  */
-import { ethers } from "hardhat";
-import { assertSafeNetwork } from "./_guard";
-import { deployBlock, preflightDeploy, recordPath, writeDeployment } from "./_deployments";
+import { ethers } from "../lib/hh.js";
+import { assertSafeNetwork } from "./_guard.js";
+import { deployBlock, preflightDeploy, recordPath, writeDeployment } from "./_deployments.js";
 
 // Base USDC addresses
 const BASE_USDC: Record<number, string> = {

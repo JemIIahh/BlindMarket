@@ -2,10 +2,10 @@ import { expect } from "chai";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { ethers } from "hardhat";
-import { runSettlementDeploy, type SettlementDeploySteps } from "../scripts/deploy-settlement";
-import { preflightDeploy, readRecord, writeDeployment } from "../scripts/_deployments";
-import type { SettlementChain } from "../scripts/_settlement";
+import { ethers } from "../lib/hh.js";
+import { runSettlementDeploy, type SettlementDeploySteps } from "../scripts/_settlement-deploy.js";
+import { preflightDeploy, readRecord, writeDeployment } from "../scripts/_deployments.js";
+import type { SettlementChain } from "../scripts/_settlement.js";
 
 /**
  * runSettlementDeploy end to end on the in-process hardhat chain (31337),

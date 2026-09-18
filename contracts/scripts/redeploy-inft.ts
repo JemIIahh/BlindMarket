@@ -21,10 +21,10 @@
  *   INFT_ORACLE=0x… npx hardhat run scripts/redeploy-inft.ts --network 0g-mainnet
  */
 
-import { ethers } from "hardhat";
+import { ethers } from "../lib/hh.js";
 import * as fs from "fs";
-import { assertSafeNetwork, assertZeroGChain } from "./_guard";
-import { resolveEscrowTarget } from "./_deployments";
+import { assertSafeNetwork, assertZeroGChain } from "./_guard.js";
+import { resolveEscrowTarget } from "./_deployments.js";
 
 async function main() {
   await assertSafeNetwork();

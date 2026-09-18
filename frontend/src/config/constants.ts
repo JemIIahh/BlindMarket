@@ -98,10 +98,7 @@ export const PRIVY_RELAY_SIGNER_ID: string =
 
 // ── Payment token ───────────────────────────────────────────────────────────
 
-// Marketplace payment token as this BUILD assumes it: Base USDC when Base is
-// configured, else native 0G. Anything that pays or prices reads
-// config/settlement.ts (getMarketplaceTokenAddress & co.), which starts from
-// this and then follows the backend's posting chain.
+// Marketplace payment token — Base USDC when Base is configured, else native 0G.
 export const MARKETPLACE_TOKEN_ADDRESS =
   BASE_ESCROW_ADDRESS
     ? BASE_USDC_ADDRESS
@@ -119,8 +116,6 @@ export const OG_CHAIN_CONFIG = {
   chainName: OG_CHAIN_ID === 16661 ? '0G Mainnet' : '0G Testnet',
   nativeCurrency: { name: '0G', symbol: '0G', decimals: 18 },
   rpcUrls: [OG_RPC_URL],
-  // chainscan-newton was the old testnet's explorer and no longer resolves;
-  // Galileo (16602) lives at chainscan-galileo, as config/chains.ts already said.
   blockExplorerUrls: [OG_CHAIN_ID === 16661 ? 'https://chainscan.0g.ai' : 'https://chainscan-galileo.0g.ai'],
 } as const;
 
@@ -170,5 +165,15 @@ export function getNativeCurrency(chain: SupportedChain) {
   return getChainConfig(chain).nativeCurrency;
 }
 
-// getPaymentDecimals / getPaymentSymbol live in config/settlement.ts: they
-// follow the backend's posting chain, not "is a Base escrow configured?".
+/**
+ * Payment decimals and symbol for the settlement chain. Task rewards are
+ * denominated in the settlement chain's payment token (USDC on Base = 6
+ * decimals; native 0G when Base is not configured = 18 decimals).
+ */
+export function getPaymentDecimals(): number {
+  return BASE_ESCROW_ADDRESS ? 6 : 18;
+}
+
+export function getPaymentSymbol(): string {
+  return BASE_ESCROW_ADDRESS ? 'USDC' : getNativeCurrency('og').symbol;
+}

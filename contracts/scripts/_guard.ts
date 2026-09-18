@@ -22,7 +22,7 @@
  * Anything else is treated as mainnet and gated.
  */
 
-import { ethers } from "hardhat";
+import { ethers } from "../lib/hh.js";
 
 export const ALLOWED_TESTNETS: ReadonlySet<number> = new Set<number>([16602, 31337, 1337, 11155111, 84532, 5042002]);
 

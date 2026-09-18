@@ -1,15 +1,16 @@
 // Must stay the first import: it picks the OpenZeppelin manifest directory for
 // DEPLOYMENT_SET before upgrades-core reads it, and snapshots the guard
 // variables before dotenv loads contracts/.env.
-import { assertGuardVarsNotFromDotenv } from "./scripts/_manifest-dir";
-import { HardhatUserConfig } from "hardhat/config";
-import "@nomicfoundation/hardhat-toolbox";
-import "@openzeppelin/hardhat-upgrades";
+import { assertGuardVarsNotFromDotenv } from "./scripts/_manifest-dir.js";
+import { configVariable, defineConfig } from "hardhat/config";
+import hardhatToolboxMochaEthers from "@nomicfoundation/hardhat-toolbox-mocha-ethers";
+import openzeppelinUpgrades from "@openzeppelin/hardhat-upgrades";
 import "dotenv/config";
 
 assertGuardVarsNotFromDotenv();
 
-const config: HardhatUserConfig = {
+export default defineConfig({
+  plugins: [hardhatToolboxMochaEthers, openzeppelinUpgrades],
   solidity: {
     version: "0.8.24",
     settings: {
@@ -22,22 +23,39 @@ const config: HardhatUserConfig = {
     },
   },
   networks: {
+    // The in-process chain the tests run on. A fixed gas limit, as Hardhat 2
+    // sent by default: BlindEscrow makes its registry and reputation calls
+    // inside try/catch, so a tightly estimated limit lets the inner call run
+    // out of gas and the catch hides it. Live networks keep estimating.
+    default: {
+      type: "edr-simulated",
+      chainType: "l1",
+      gas: 12_000_000,
+    },
     "0g-testnet": {
+      type: "http",
+      chainType: "l1",
       url: "https://evmrpc-testnet.0g.ai",
       chainId: 16602,
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
     },
     "0g-mainnet": {
+      type: "http",
+      chainType: "l1",
       url: "https://evmrpc.0g.ai",
       chainId: 16661,
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
     },
     "base-sepolia": {
+      type: "http",
+      chainType: "l1",
       url: process.env.BASE_RPC_URL || "https://sepolia.base.org",
       chainId: 84532,
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
     },
     "base": {
+      type: "http",
+      chainType: "l1",
       url: process.env.BASE_RPC_URL || "https://mainnet.base.org",
       chainId: 8453,
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
@@ -45,19 +63,22 @@ const config: HardhatUserConfig = {
     // Arc (Circle's L1). Each network name equals its deployment file name
     // (deployments/arc-testnet.json, arc-mainnet.json); see _deployments.ts.
     "arc-testnet": {
+      type: "http",
+      chainType: "l1",
       url: process.env.ARC_TESTNET_RPC_URL || "https://rpc.testnet.arc.io",
       chainId: 5042002,
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
     },
-    // No default RPC for Arc Mainnet: set ARC_MAINNET_RPC_URL. Unset, the
-    // empty URL still loads the config, and any run on this network stops at
-    // its first request (HH117) before sending anything.
+    // No default RPC for Arc Mainnet. A configuration variable is resolved
+    // only when this network is actually used, so the config loads for every
+    // other command, and a run on arc-mainnet without ARC_MAINNET_RPC_URL
+    // stops before it sends anything.
     "arc-mainnet": {
-      url: process.env.ARC_MAINNET_RPC_URL ?? "",
+      type: "http",
+      chainType: "l1",
+      url: configVariable("ARC_MAINNET_RPC_URL"),
       chainId: 5042,
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
     },
   },
-};
-
-export default config;
+});

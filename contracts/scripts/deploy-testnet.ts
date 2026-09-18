@@ -23,9 +23,9 @@
  *   DEPLOYMENT_SET=staging npx hardhat run scripts/deploy-testnet.ts --network 0g-testnet
  */
 
-import { ethers, upgrades } from "hardhat";
-import { assertSafeNetwork } from "./_guard";
-import { deployBlock, preflightDeploy, writeDeployment } from "./_deployments";
+import { ethers, upgrades } from "../lib/hh.js";
+import { assertSafeNetwork } from "./_guard.js";
+import { deployBlock, preflightDeploy, writeDeployment } from "./_deployments.js";
 
 const OG_TESTNET_CHAIN_ID = 16602;
 
