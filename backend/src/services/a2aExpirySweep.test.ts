@@ -12,7 +12,19 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
  */
 
 const redisStore = new Map<string, string>();
+// The sweep releases through the compare-and-set only; a bare releaseToOpen
+// would overwrite whatever happened while the chain was being read.
 const releaseToOpen = vi.fn(async (_taskId: string) => {});
+const tryReleaseAccepted = vi.fn(
+  async (_taskId: string, _expected: { executorAddress?: string; assignTxHash?: string }) =>
+    ({ ok: true }) as { ok: true } | { ok: false; currentStatus: string },
+);
+const getAssignBroadcastAt = vi.fn(async (_taskId: string, _txHash: string) => null as number | null);
+const getTransaction = vi.fn(async (_hash: string) => null as { nonce: number } | null);
+const getMeta = vi.fn(async (_taskId: string) => ({
+  taskId: '', targetExecutorType: 'agent', requiredCapabilities: ['research'], chain: 'base',
+}) as Record<string, unknown> | undefined);
+const emitTaskAvailable = vi.fn((_taskId: string, _meta: Record<string, unknown>) => {});
 const listAcceptedTasks = vi.fn(async () => [] as Array<{ taskId: string; executorAddress: string }>);
 const getSettlementDeadlineTTL = vi.fn(async (_taskId: string) => -2);
 const resolveTaskByHash = vi.fn(async (_hash: string) => ({ taskId: '1', chain: 'base' as const }));
@@ -30,11 +42,16 @@ vi.mock('./a2aStore.js', () => ({
   listAcceptedTasks: (...a: unknown[]) => listAcceptedTasks(...(a as [])),
   getSettlementDeadlineTTL: (...a: unknown[]) => getSettlementDeadlineTTL(...(a as [string])),
   releaseToOpen: (...a: unknown[]) => releaseToOpen(...(a as [string])),
+  tryReleaseAccepted: (...a: unknown[]) => tryReleaseAccepted(...(a as [string, Record<string, string>])),
+  getAssignBroadcastAt: (...a: unknown[]) => getAssignBroadcastAt(...(a as [string, string])),
   updateState: (...a: unknown[]) => updateState(...(a as [string, Record<string, unknown>])),
   markAssignReconciled: (...a: unknown[]) => markAssignReconciled(...(a as [string, string])),
   isAssignReconciled: (...a: unknown[]) => isAssignReconciled(...(a as [string, string])),
   listOpenTasks: async () => [],
-  getMeta: async () => null,
+  getMeta: (...a: unknown[]) => getMeta(...(a as [string])),
+}));
+vi.mock('./socket.js', () => ({
+  emitTaskAvailable: (...a: unknown[]) => emitTaskAvailable(...(a as [string, Record<string, unknown>])),
 }));
 vi.mock('./taskChain.js', () => ({
   resolveTaskByHash: (...a: unknown[]) => resolveTaskByHash(...(a as [string])),
@@ -43,10 +60,13 @@ vi.mock('./taskChain.js', () => ({
 vi.mock('./escrow.js', () => ({
   getTaskOn: (...a: unknown[]) => getTaskOn(...(a as [string, number])),
 }));
-vi.mock('./chain.js', () => ({
-  provider: { getTransactionReceipt: (...a: unknown[]) => getTransactionReceipt(...(a as [string])) },
-  baseProvider: { getTransactionReceipt: (...a: unknown[]) => getTransactionReceipt(...(a as [string])) },
-}));
+vi.mock('./chain.js', () => {
+  const rpc = {
+    getTransactionReceipt: (...a: unknown[]) => getTransactionReceipt(...(a as [string])),
+    getTransaction: (...a: unknown[]) => getTransaction(...(a as [string])),
+  };
+  return { provider: rpc, baseProvider: rpc };
+});
 vi.mock('./deployedAgentStore.js', () => ({
   loadAgentByWallet: (...a: unknown[]) => loadAgentByWallet(...(a as [string])),
 }));
@@ -71,6 +91,12 @@ function accepted(extra: Record<string, unknown> = {}) {
 beforeEach(() => {
   redisStore.clear();
   releaseToOpen.mockClear();
+  tryReleaseAccepted.mockClear();
+  tryReleaseAccepted.mockResolvedValue({ ok: true });
+  getAssignBroadcastAt.mockResolvedValue(null);
+  getTransaction.mockReset();
+  getTransaction.mockResolvedValue(null);
+  emitTaskAvailable.mockClear();
   updateState.mockClear();
   markAssignReconciled.mockClear();
   isAssignReconciled.mockResolvedValue(false);
@@ -87,7 +113,7 @@ describe('sweepGasLiveness with the deadline key gone', () => {
   it('leaves a task alone when the backend recorded the assign tx', async () => {
     accepted({ assignTxHash: '0x' + '11'.repeat(32) });
     await sweepGasLiveness();
-    expect(releaseToOpen).not.toHaveBeenCalled();
+    expect(tryReleaseAccepted).not.toHaveBeenCalled();
     expect(getTaskOn).not.toHaveBeenCalled(); // no chain read needed
   });
 
@@ -95,33 +121,49 @@ describe('sweepGasLiveness with the deadline key gone', () => {
     accepted();
     getTaskOn.mockResolvedValue({ worker: EXECUTOR.toUpperCase(), status: 1 });
     await sweepGasLiveness();
-    expect(releaseToOpen).not.toHaveBeenCalled();
+    expect(tryReleaseAccepted).not.toHaveBeenCalled();
   });
 
   it('leaves a task alone when the chain has moved past Funded for someone else', async () => {
     accepted();
     getTaskOn.mockResolvedValue({ worker: '0x' + '99'.repeat(20), status: 1 });
     await sweepGasLiveness();
-    expect(releaseToOpen).not.toHaveBeenCalled();
+    expect(tryReleaseAccepted).not.toHaveBeenCalled();
   });
 
   it('does nothing when the chain cannot be read this tick', async () => {
     accepted();
     getTaskOn.mockRejectedValue(new Error('rpc down'));
     await sweepGasLiveness();
-    expect(releaseToOpen).not.toHaveBeenCalled();
+    expect(tryReleaseAccepted).not.toHaveBeenCalled();
   });
 
   it('still reverts a young task that is genuinely unsettled (Funded on-chain, no tx hash)', async () => {
     accepted();
     await sweepGasLiveness();
-    expect(releaseToOpen).toHaveBeenCalledWith(TASK);
+    // CAS on "same executor, still no assign tx" — an accept that broadcast
+    // while the chain was being read must not be overwritten.
+    expect(tryReleaseAccepted).toHaveBeenCalledWith(TASK, { executorAddress: EXECUTOR });
+    expect(releaseToOpen).not.toHaveBeenCalled();
+  });
+
+  it('announces a re-opened task to connected agents', async () => {
+    accepted();
+    await sweepGasLiveness();
+    expect(emitTaskAvailable).toHaveBeenCalledWith(TASK, { requiredCapabilities: ['research'], chain: 'base' });
+  });
+
+  it('does not announce when the compare-and-set lost', async () => {
+    accepted();
+    tryReleaseAccepted.mockResolvedValue({ ok: false, currentStatus: 'submitted' });
+    await sweepGasLiveness();
+    expect(emitTaskAvailable).not.toHaveBeenCalled();
   });
 
   it('never touches a task accepted more than 5 minutes ago', async () => {
     accepted({ acceptedAt: new Date(Date.now() - 6 * 60_000).toISOString() });
     await sweepGasLiveness();
-    expect(releaseToOpen).not.toHaveBeenCalled();
+    expect(tryReleaseAccepted).not.toHaveBeenCalled();
   });
 });
 
@@ -131,25 +173,83 @@ describe('sweepGasLiveness reconciling a broadcast assign tx', () => {
   const old = (extra: Record<string, unknown> = {}) =>
     accepted({ assignTxHash: TX, acceptedAt: new Date(Date.now() - 11 * 60_000).toISOString(), ...extra });
 
-  it('re-opens a task still Funded whose assign tx never mined', async () => {
-    old({ assignError: 'marketplaceAssign tx not confirmed after 60s' });
+  const minutesAgo = (m: number) => Date.now() - m * 60_000;
+
+  it('re-opens a task still Funded whose old assign tx has no receipt and is unknown to the node', async () => {
+    old();
+    getAssignBroadcastAt.mockResolvedValue(minutesAgo(31));
     await sweepGasLiveness();
     expect(getTransactionReceipt).toHaveBeenCalledWith(TX);
-    expect(releaseToOpen).toHaveBeenCalledWith(TASK);
+    expect(getTransaction).toHaveBeenCalledWith(TX);
+    expect(tryReleaseAccepted).toHaveBeenCalledWith(TASK, { executorAddress: EXECUTOR, assignTxHash: TX });
+    expect(emitTaskAvailable).toHaveBeenCalledWith(TASK, expect.any(Object));
   });
 
-  it('re-opens when the assign tx reverted', async () => {
+  it('gives no verdict on a missing receipt until the tx is comfortably old', async () => {
+    old();
+    getAssignBroadcastAt.mockResolvedValue(minutesAgo(11));
+    await sweepGasLiveness();
+    expect(getTransactionReceipt).toHaveBeenCalledWith(TX);
+    expect(tryReleaseAccepted).not.toHaveBeenCalled();
+    expect(markAssignReconciled).not.toHaveBeenCalled(); // checked again next tick
+  });
+
+  it('never re-opens while the node still knows the tx (stuck nonce, may yet mine)', async () => {
+    old();
+    getAssignBroadcastAt.mockResolvedValue(minutesAgo(45));
+    getTransaction.mockResolvedValue({ nonce: 12 });
+    await sweepGasLiveness();
+    expect(tryReleaseAccepted).not.toHaveBeenCalled();
+  });
+
+  it('does nothing when the mempool lookup fails', async () => {
+    old();
+    getAssignBroadcastAt.mockResolvedValue(minutesAgo(45));
+    getTransaction.mockRejectedValue(new Error('rpc down'));
+    await sweepGasLiveness();
+    expect(tryReleaseAccepted).not.toHaveBeenCalled();
+  });
+
+  it('ages the tx from ITS broadcast, not from the accept: a fresh re-broadcast is left alone', async () => {
+    old(); // accepted 11 minutes ago…
+    getAssignBroadcastAt.mockResolvedValue(Date.now() - 5_000); // …but this hash went out 5s ago
+    getTransactionReceipt.mockResolvedValue({ status: 0 });
+    await sweepGasLiveness();
+    expect(getAssignBroadcastAt).toHaveBeenCalledWith(TASK, TX);
+    expect(getTaskOn).not.toHaveBeenCalled();
+    expect(tryReleaseAccepted).not.toHaveBeenCalled();
+  });
+
+  it('falls back to acceptedAt for a tx broadcast before timestamps were recorded', async () => {
+    accepted({ assignTxHash: TX, acceptedAt: new Date(minutesAgo(31)).toISOString() });
+    await sweepGasLiveness();
+    expect(tryReleaseAccepted).toHaveBeenCalledWith(TASK, { executorAddress: EXECUTOR, assignTxHash: TX });
+  });
+
+  it('re-opens when the assign tx reverted, without waiting for the dropped-tx age', async () => {
     old();
     getTransactionReceipt.mockResolvedValue({ status: 0 });
     await sweepGasLiveness();
-    expect(releaseToOpen).toHaveBeenCalledWith(TASK);
+    expect(tryReleaseAccepted).toHaveBeenCalledWith(TASK, { executorAddress: EXECUTOR, assignTxHash: TX });
+    expect(getTransaction).not.toHaveBeenCalled();
+  });
+
+  it('releases against the hash it CHECKED — a re-broadcast during the RPC reads wins the CAS', async () => {
+    old();
+    getTransactionReceipt.mockResolvedValue({ status: 0 });
+    // The store (Lua) sees a different assignTxHash by the time the release lands.
+    tryReleaseAccepted.mockResolvedValue({ ok: false, currentStatus: 'accepted' });
+    await sweepGasLiveness();
+    expect(tryReleaseAccepted).toHaveBeenCalledWith(TASK, { executorAddress: EXECUTOR, assignTxHash: TX });
+    expect(releaseToOpen).not.toHaveBeenCalled();
+    expect(emitTaskAvailable).not.toHaveBeenCalled();
   });
 
   it('waits when the tx has a successful receipt but the status read is stale', async () => {
     old();
     getTransactionReceipt.mockResolvedValue({ status: 1 });
     await sweepGasLiveness();
-    expect(releaseToOpen).not.toHaveBeenCalled();
+    expect(tryReleaseAccepted).not.toHaveBeenCalled();
     expect(markAssignReconciled).not.toHaveBeenCalled();
   });
 
@@ -157,7 +257,7 @@ describe('sweepGasLiveness reconciling a broadcast assign tx', () => {
     old();
     getTransactionReceipt.mockRejectedValue(new Error('rpc down'));
     await sweepGasLiveness();
-    expect(releaseToOpen).not.toHaveBeenCalled();
+    expect(tryReleaseAccepted).not.toHaveBeenCalled();
   });
 
   it('clears a stale assignError once the chain names this executor, and checks only once', async () => {
@@ -166,7 +266,7 @@ describe('sweepGasLiveness reconciling a broadcast assign tx', () => {
     await sweepGasLiveness();
     expect(updateState).toHaveBeenCalledWith(TASK, { assignError: undefined });
     expect(markAssignReconciled).toHaveBeenCalledWith(TASK, TX);
-    expect(releaseToOpen).not.toHaveBeenCalled();
+    expect(tryReleaseAccepted).not.toHaveBeenCalled();
 
     isAssignReconciled.mockResolvedValue(true);
     getTaskOn.mockClear();
@@ -187,7 +287,7 @@ describe('sweepGasLiveness reconciling a broadcast assign tx', () => {
     getTaskOn.mockResolvedValue({ worker: SMART_ACCOUNT, status: 1 });
     await sweepGasLiveness();
     expect(updateState).not.toHaveBeenCalled();
-    expect(releaseToOpen).not.toHaveBeenCalled();
+    expect(tryReleaseAccepted).not.toHaveBeenCalled();
   });
 
   it('caps chain reconciles per tick', async () => {

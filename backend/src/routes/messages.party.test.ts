@@ -105,8 +105,47 @@ describe('POST /messages/send task-party check', () => {
     expect((await send(STRANGER, { to: EXECUTOR, taskId: TASK })).status).toBe(403);
   });
 
-  it('leaves direct messages without a taskId alone', async () => {
-    expect((await send(STRANGER, { to: EXECUTOR })).status).toBe(200);
+  it('lets an owner reply to their own agent on a task it no longer holds (released → no executor)', async () => {
+    getState.mockResolvedValue({ taskId: TASK, status: 'open' });
+    loadAgentByWallet.mockResolvedValue({ walletAddress: EXECUTOR, ownerAddress: OWNER });
+    expect((await send(OWNER, { to: EXECUTOR, taskId: TASK })).status).toBe(200);
+    expect((await send(EXECUTOR, { to: OWNER, taskId: TASK })).status).toBe(200);
+    expect((await send(STRANGER, { to: EXECUTOR, taskId: TASK })).status).toBe(403);
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('POST /messages/send without a taskId', () => {
+  const agentOf = (owner: string) => (wallet: string) =>
+    wallet.toLowerCase() === EXECUTOR ? { walletAddress: EXECUTOR, ownerAddress: owner } : null;
+
+  it('leaves direct messages between non-agent addresses alone', async () => {
+    expect((await send(STRANGER, { to: POSTER })).status).toBe(200);
     expect(getMeta).not.toHaveBeenCalled();
+  });
+
+  it("403s anyone but the owner writing straight into an agent's inbox", async () => {
+    loadAgentByWallet.mockImplementation(async (w: string) => agentOf(OWNER)(w));
+    const res = await send(STRANGER, { to: EXECUTOR });
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe('NOT_AGENT_OWNER');
+    // Another agent is no different from any other stranger.
+    expect((await send(POSTER, { to: EXECUTOR.toUpperCase().replace('0X', '0x') })).status).toBe(403);
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('lets the owner message their own agent, and the agent message its owner', async () => {
+    loadAgentByWallet.mockImplementation(async (w: string) => agentOf(OWNER)(w));
+    expect((await send(OWNER.toUpperCase().replace('0X', '0x'), { to: EXECUTOR })).status).toBe(200);
+    expect((await send(EXECUTOR, { to: OWNER })).status).toBe(200);
+    expect((await send(EXECUTOR, { to: 'owner' }, OWNER)).status).toBe(200);
+    expect(sendMessage).toHaveBeenCalledTimes(3);
+  });
+
+  it('fails closed when the agent lookup is down', async () => {
+    loadAgentByWallet.mockRejectedValue(new Error('db down'));
+    const res = await send(STRANGER, { to: EXECUTOR });
+    expect(res.status).toBe(503);
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 });

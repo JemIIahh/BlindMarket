@@ -24,7 +24,11 @@ vi.mock('../middleware/auth.js', () => {
 });
 
 const resolveTaskChainById = vi.fn();
-vi.mock('../services/taskChain.js', () => ({ resolveTaskChainById: (...a: unknown[]) => resolveTaskChainById(...a) }));
+const resolveCachedTaskByHash = vi.fn();
+vi.mock('../services/taskChain.js', () => ({
+  resolveTaskChainById: (...a: unknown[]) => resolveTaskChainById(...a),
+  resolveCachedTaskByHash: (...a: unknown[]) => resolveCachedTaskByHash(...a),
+}));
 
 vi.mock('../services/escrow.js', () => ({
   getTaskOn: vi.fn(async () => ({ token: '0x0000000000000000000000000000000000000000', amount: 100n, taskHash: TASK_HASH })),
@@ -56,9 +60,11 @@ vi.mock('../services/socket.js', () => ({
 }));
 
 const getState = vi.fn();
+const getMeta = vi.fn();
 const tryCloseOnChainTerminal = vi.fn();
 vi.mock('../services/a2aStore.js', () => ({
   getState: (...a: unknown[]) => getState(...a),
+  getMeta: (...a: unknown[]) => getMeta(...a),
   tryCloseOnChainTerminal: (...a: unknown[]) => tryCloseOnChainTerminal(...a),
   clearOffer: vi.fn(async () => {}),
   clearCascade: vi.fn(async () => {}),
@@ -82,6 +88,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   resolveTaskChainById.mockResolvedValue('0g');
   getState.mockResolvedValue(undefined);
+  // The A2A task under TASK_HASH is AGENT's, backed by 0G escrow task 7.
+  getMeta.mockResolvedValue({ taskId: TASK_HASH, posterAddress: AGENT.toUpperCase().replace('0X', '0x') });
+  resolveCachedTaskByHash.mockResolvedValue({ taskId: '7', chain: '0g' });
   tryCloseOnChainTerminal.mockResolvedValue({ ok: true, previousStatus: 'open' });
 });
 
@@ -186,5 +195,64 @@ describe('H-04/H-07: a confirmed reclaim closes the A2A state', () => {
     const res = await confirm('66');
     expect(res.status).toBe(200);
     expect(accountingService.confirmPendingTransactions).toHaveBeenCalledWith('7', ['refund']);
+  });
+
+  // The escrow does not enforce unique taskHashes and A2A state is keyed by
+  // hash alone: an attacker creates escrow task 9 reusing the victim's hash,
+  // cancels it (instant refund) and confirms. Everything about that receipt is
+  // genuine — only the A2A task is not theirs.
+  describe('duplicate taskHash on another escrow task', () => {
+    // AGENT (the real poster) confirming a genuine cancel of escrow task 7.
+    const posterConfirm = (hash: string) => {
+      getReceipt.mockResolvedValue({ status: 1, logs: [{ address: ESCROW }] });
+      parseLog.mockReturnValue({ name: 'TaskCancelled', args: { taskId: 7n } });
+      return confirm(hash);
+    };
+    const attackerConfirm = () => {
+      getReceipt.mockResolvedValue({ status: 1, logs: [{ address: ESCROW }] });
+      parseLog.mockReturnValue({ name: 'TaskCancelled', args: { taskId: 9n } });
+      return request(app()).post('/api/v1/tasks/9/confirm-tx')
+        .set(as(OTHER)).send({ txHash: '0x' + '71'.repeat(32) });
+    };
+
+    it("does not close the victim's live A2A task, and still confirms the attacker's own refund", async () => {
+      getState.mockResolvedValue({ taskId: TASK_HASH, status: 'submitted' });
+      const res = await attackerConfirm();
+      expect(res.status).toBe(200);
+      expect(tryCloseOnChainTerminal).not.toHaveBeenCalled();
+      expect(accountingService.confirmPendingTransactions).toHaveBeenCalledWith('9', ['refund']);
+    });
+
+    it('holds even after the attacker’s TaskCreated overwrote the last-writer-wins hash index', async () => {
+      getState.mockResolvedValue({ taskId: TASK_HASH, status: 'submitted' });
+      resolveCachedTaskByHash.mockResolvedValue({ taskId: '9', chain: '0g' });
+      expect((await attackerConfirm()).status).toBe(200);
+      expect(tryCloseOnChainTerminal).not.toHaveBeenCalled();
+    });
+
+    it('does not close when the A2A task has no recorded poster', async () => {
+      getState.mockResolvedValue({ taskId: TASK_HASH, status: 'open' });
+      getMeta.mockResolvedValue({ taskId: TASK_HASH });
+      expect((await posterConfirm('72')).status).toBe(200);
+      expect(tryCloseOnChainTerminal).not.toHaveBeenCalled();
+    });
+
+    it("does not close the poster's own A2A task from a different escrow task of theirs", async () => {
+      getState.mockResolvedValue({ taskId: TASK_HASH, status: 'accepted' });
+      resolveCachedTaskByHash.mockResolvedValue({ taskId: '3', chain: 'base' });
+      expect((await posterConfirm('73')).status).toBe(200);
+      expect(tryCloseOnChainTerminal).not.toHaveBeenCalled();
+    });
+
+    it('the legitimate poster still closes, including when the hash index is cold', async () => {
+      getState.mockResolvedValue({ taskId: TASK_HASH, status: 'submitted' });
+      expect((await posterConfirm('74')).status).toBe(200);
+      expect(tryCloseOnChainTerminal).toHaveBeenCalledWith(TASK_HASH, 'cancelled');
+
+      tryCloseOnChainTerminal.mockClear();
+      resolveCachedTaskByHash.mockResolvedValue(null);
+      expect((await posterConfirm('75')).status).toBe(200);
+      expect(tryCloseOnChainTerminal).toHaveBeenCalledWith(TASK_HASH, 'cancelled');
+    });
   });
 });

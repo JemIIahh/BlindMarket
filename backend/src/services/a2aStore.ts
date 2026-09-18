@@ -925,6 +925,96 @@ export async function isAssignReconciled(taskId: string, assignTxHash: string): 
   return (await redis.get(assignReconciledKey(taskId))) === assignTxHash.toLowerCase();
 }
 
+// When the CURRENT assign tx was broadcast, tied to its hash. Age must be
+// measured from here, not from acceptedAt: an idempotent re-accept re-broadcasts
+// under a new hash long after the accept, and the sweep would otherwise judge a
+// seconds-old tx "dropped". Side key for the same reason as above.
+const assignBroadcastKey = (taskId: string) => `a2a:assign_broadcast:${taskId.toLowerCase()}`;
+
+export async function markAssignBroadcast(taskId: string, assignTxHash: string, atMs: number = Date.now()): Promise<void> {
+  await redis.setex(assignBroadcastKey(taskId), ASSIGN_RECONCILED_TTL_S, `${assignTxHash.toLowerCase()}:${atMs}`);
+}
+
+/** Broadcast time (ms) of this exact tx hash, or null when unknown / recorded for another hash. */
+export async function getAssignBroadcastAt(taskId: string, assignTxHash: string): Promise<number | null> {
+  const raw = await redis.get(assignBroadcastKey(taskId));
+  if (!raw) return null;
+  const [hash, at] = raw.split(':');
+  const ms = Number(at);
+  return hash === assignTxHash.toLowerCase() && Number.isFinite(ms) && ms > 0 ? ms : null;
+}
+
+/**
+ * Compare-and-set variant of releaseToOpen for callers that decide from a
+ * stale read (the gas-liveness sweep reads state, then awaits several RPC
+ * calls). Releases only if the task is STILL `accepted` by the same executor
+ * with the same assignTxHash the caller checked (pass undefined for "no tx
+ * recorded"). Anything else — a re-accept that broadcast a new tx, a submit, a
+ * release by the accept route — means the verdict is about a state that no
+ * longer exists, and the write is skipped. One Lua step, like tryAccept.
+ */
+export async function tryReleaseAccepted(
+  taskId: string,
+  expected: { executorAddress?: string; assignTxHash?: string },
+): Promise<{ ok: true } | { ok: false; currentStatus: string }> {
+  const tid = taskId.toLowerCase();
+  const meta = await getMeta(taskId);
+  if (!meta) throw new Error(`No A2A meta for task ${taskId}`);
+  const lua = `
+    local stateKey = KEYS[1]
+    local openSetKey = KEYS[2]
+    local tid = ARGV[1]
+    local originalTaskId = ARGV[2]
+    local expectedExecutor = ARGV[3]
+    local expectedTx = ARGV[4]
+    local relist = ARGV[5]
+    local executorSetKey = ARGV[6]
+
+    local finalTid = tid
+    local raw = redis.call('GET', stateKey)
+    if not raw and originalTaskId ~= tid then
+        -- Fallback for legacy mixed-case keys
+        raw = redis.call('GET', 'a2a:state:' .. originalTaskId)
+        if raw then
+            stateKey = 'a2a:state:' .. originalTaskId
+            finalTid = originalTaskId
+        end
+    end
+
+    if not raw then return {'missing'} end
+
+    local s = cjson.decode(raw)
+    if s.status ~= 'accepted' then return {'lost', s.status} end
+    local executor = ''
+    if type(s.executorAddress) == 'string' then executor = string.lower(s.executorAddress) end
+    local tx = ''
+    if type(s.assignTxHash) == 'string' then tx = string.lower(s.assignTxHash) end
+    if executor ~= expectedExecutor or tx ~= expectedTx then return {'lost', 'accepted'} end
+
+    redis.call('SET', stateKey, cjson.encode({ taskId = finalTid, status = 'open' }))
+    if relist == '1' then redis.call('SADD', openSetKey, finalTid) end
+    if executorSetKey ~= '' then redis.call('SREM', executorSetKey, finalTid) end
+    return {'ok'}
+  `;
+
+  const result = (await redis.eval(
+    lua,
+    2,
+    KEY.state(tid),
+    KEY.open,
+    tid,
+    taskId, // original taskId for fallback
+    expected.executorAddress?.toLowerCase() ?? '',
+    expected.assignTxHash?.toLowerCase() ?? '',
+    meta.targetExecutorType === 'agent' ? '1' : '0',
+    expected.executorAddress ? KEY.executor(expected.executorAddress) : '',
+  )) as [string, string?];
+
+  if (result[0] === 'ok') return { ok: true };
+  if (result[0] === 'missing') return { ok: false, currentStatus: 'missing' };
+  return { ok: false, currentStatus: result[1] ?? 'unknown' };
+}
+
 /**
  * List tasks stuck in a non-terminal, non-open state (for the admin
  * stuck-tasks diagnostic). Covers 'accepted', 'in_progress' and 'submitted':

@@ -3,6 +3,7 @@ import * as escrowService from './escrow.js';
 import { resolveCachedTaskByHash, resolveTaskByHash } from './taskChain.js';
 import { provider, baseProvider } from './chain.js';
 import { loadAgentByWallet } from './deployedAgentStore.js';
+import { emitTaskAvailable } from './socket.js';
 import { SWEEP_INTERVAL_MS, EXPIRY_GRACE_SEC } from '../constants.js';
 
 // Re-export for any callers that import from here (backward compat)
@@ -201,13 +202,62 @@ export async function sweepExpiredTasks(): Promise<void> {
 // dropped from the pool, leaving the task `accepted` off-chain and Funded
 // on-chain with nothing left to reconcile it. Once such a task is older than
 // ASSIGN_RECONCILE_AFTER_MS the chain is read once: Assigned → healthy (clear
-// any stale assignError); still Funded with no successful receipt → re-open.
+// any stale assignError); still Funded with a reverted receipt → re-open.
+//
+// Age is the age of the CURRENT tx hash (a2a:assign_broadcast, written at
+// broadcast), not of the accept: an idempotent re-accept re-broadcasts under a
+// new hash long after acceptedAt. And a missing receipt is weak evidence — the
+// tx may be sitting in the mempool behind a stuck nonce — so it only counts
+// once the tx is older than ASSIGN_DROPPED_AFTER_MS AND the node no longer
+// knows the tx at all. Nonce replacement is deliberately not attempted here.
+//
+// Every release is a compare-and-set (a2aStore.tryReleaseAccepted): the
+// verdict was reached over several awaited RPC calls, and is only applied if
+// the task is still accepted by the same executor under the same tx hash.
 
 let gasLivenessInFlight = false;
 
 const ASSIGN_RECONCILE_AFTER_MS = (Number(process.env.A2A_ASSIGN_RECONCILE_MIN) || 10) * 60_000;
-// Each reconcile costs a hash resolution plus up to two RPC reads.
+const ASSIGN_DROPPED_AFTER_MS = Math.max(
+  (Number(process.env.A2A_ASSIGN_DROPPED_MIN) || 30) * 60_000,
+  ASSIGN_RECONCILE_AFTER_MS,
+);
+// Each reconcile costs a hash resolution plus up to three RPC reads.
 const MAX_ASSIGN_RECONCILES_PER_TICK = 5;
+
+/** A task that went back to `open` is announced like a fresh broadcast —
+ *  otherwise connected agents only rediscover it on their next reconnect.
+ *  Same payload as routes/a2a.ts announceReopened. Best-effort. */
+async function announceReopened(taskId: string): Promise<void> {
+  try {
+    const meta = await a2aStore.getMeta(taskId);
+    if (!meta || meta.targetExecutorType !== 'agent') return;
+    const caps = meta.requiredCapabilities ?? [];
+    emitTaskAvailable(taskId, {
+      ...(caps.length > 0 ? { requiredCapabilities: caps } : {}),
+      ...(meta.chain ? { chain: meta.chain } : {}),
+    });
+  } catch (err) {
+    console.warn(`[a2aExpirySweep] could not announce re-opened task ${taskId.slice(0, 10)}…:`, (err as Error).message);
+  }
+}
+
+/** CAS release + announce. Returns true only when this call re-opened the task. */
+async function releaseIfUnchanged(
+  taskId: string,
+  expected: { executorAddress?: string; assignTxHash?: string },
+): Promise<boolean> {
+  const released = await a2aStore.tryReleaseAccepted(taskId, expected);
+  if (!released.ok) {
+    console.warn(
+      `[a2aExpirySweep] gas-liveness: task ${taskId.slice(0, 10)}… changed while it was being checked ` +
+        `(now ${released.currentStatus}) — not re-opening`,
+    );
+    return false;
+  }
+  await announceReopened(taskId);
+  return true;
+}
 
 /** Returns true when the task was released back to open. */
 async function reconcileBroadcastAssignment(
@@ -215,6 +265,7 @@ async function reconcileBroadcastAssignment(
   executorAddress: string | undefined,
   assignTxHash: string,
   hasAssignError: boolean,
+  txAgeMs: number,
 ): Promise<boolean> {
   const resolved = await resolveTaskByHash(taskId).catch(() => null);
   const onChain = resolved
@@ -240,6 +291,7 @@ async function reconcileBroadcastAssignment(
   // Still Funded. A successful receipt means the status read is stale — wait.
   // An RPC failure is not a verdict either.
   const rpc = resolved.chain === 'base' ? baseProvider : provider;
+  const short = `assign tx ${assignTxHash.slice(0, 10)}… for task ${taskId.slice(0, 10)}…`;
   let receipt;
   try {
     receipt = await rpc.getTransactionReceipt(assignTxHash);
@@ -248,12 +300,38 @@ async function reconcileBroadcastAssignment(
   }
   if (receipt?.status === 1) return false;
 
+  if (!receipt) {
+    // No receipt: dropped, or still pending. Only a comfortably old tx the
+    // node has forgotten is treated as dropped.
+    if (txAgeMs < ASSIGN_DROPPED_AFTER_MS) {
+      console.log(
+        `[a2aExpirySweep] gas-liveness: ${short} has no receipt ${Math.round(txAgeMs / 1000)}s after broadcast — ` +
+          `no verdict before ${ASSIGN_DROPPED_AFTER_MS / 60_000} min`,
+      );
+      return false;
+    }
+    let known;
+    try {
+      known = await rpc.getTransaction(assignTxHash);
+    } catch {
+      return false;
+    }
+    if (known) {
+      console.error(
+        `[a2aExpirySweep] gas-liveness: ${short} is STILL PENDING ${Math.round(txAgeMs / 60_000)} min after broadcast ` +
+          `(nonce ${known.nonce} on ${resolved.chain}) — likely a stuck marketplace-signer nonce. NOT re-opening: the tx can ` +
+          `still mine and assign this executor. Needs operator attention.`,
+      );
+      return false;
+    }
+  }
+
   console.warn(
-    `[a2aExpirySweep] gas-liveness: assign tx ${assignTxHash.slice(0, 10)}… for task ${taskId.slice(0, 10)}… ` +
-      `${receipt ? 'reverted' : 'never mined'} and the task is still Funded — re-opening`,
+    `[a2aExpirySweep] gas-liveness: ${short} ` +
+      `${receipt ? 'reverted' : `was dropped (no receipt, unknown to the node ${Math.round(txAgeMs / 60_000)} min after broadcast)`} ` +
+      `and the task is still Funded — re-opening`,
   );
-  await a2aStore.releaseToOpen(taskId);
-  return true;
+  return releaseIfUnchanged(taskId, { executorAddress, assignTxHash });
 }
 
 export async function sweepGasLiveness(): Promise<void> {
@@ -292,10 +370,14 @@ export async function sweepGasLiveness(): Promise<void> {
           // settlement: young ones are still confirming, old ones get one
           // chain check (see reconcileBroadcastAssignment).
           if (state.assignTxHash) {
-            if (ageMs < ASSIGN_RECONCILE_AFTER_MS || reconciles >= MAX_ASSIGN_RECONCILES_PER_TICK) continue;
+            // Age of THIS hash. acceptedAt is only the fallback for a tx
+            // broadcast before the timestamp was recorded.
+            const broadcastAt = await a2aStore.getAssignBroadcastAt(taskId, state.assignTxHash).catch(() => null);
+            const txAgeMs = broadcastAt ? Date.now() - broadcastAt : ageMs;
+            if (txAgeMs < ASSIGN_RECONCILE_AFTER_MS || reconciles >= MAX_ASSIGN_RECONCILES_PER_TICK) continue;
             if (await a2aStore.isAssignReconciled(taskId, state.assignTxHash)) continue;
             reconciles++;
-            if (await reconcileBroadcastAssignment(taskId, executorAddress, state.assignTxHash, !!state.assignError)) reverted++;
+            if (await reconcileBroadcastAssignment(taskId, state.executorAddress ?? executorAddress, state.assignTxHash, !!state.assignError, txAgeMs)) reverted++;
             continue;
           }
 
@@ -324,8 +406,9 @@ export async function sweepGasLiveness(): Promise<void> {
             `[a2aExpirySweep] gas-liveness: reverting task ${taskId.slice(0, 10)}… ` +
               `(accepted ${Math.round(ageMs / 1000)}s ago by ${executorAddress?.slice(0, 10)}… — settlement deadline expired)`,
           );
-          await a2aStore.releaseToOpen(taskId);
-          reverted++;
+          // CAS: the chain reads above were awaited — an accept that has since
+          // broadcast (assignTxHash now set) or a changed executor must win.
+          if (await releaseIfUnchanged(taskId, { executorAddress: state.executorAddress ?? executorAddress })) reverted++;
         } catch {
           // Skip malformed state
         }

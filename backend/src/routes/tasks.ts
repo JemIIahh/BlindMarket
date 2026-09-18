@@ -16,6 +16,7 @@ import { getDb } from '../services/database.js';
 import { getPool } from '../services/neonDb.js';
 import { config } from '../config.js';
 import { rooms } from '../services/socket.js';
+import { isSafeRegexSource } from '../services/rubricEngine.js';
 
 export const tasksRouter = Router();
 
@@ -284,18 +285,32 @@ const AUTO_CHECK_KEYS = [
   'expected_schema',
   'regex_pattern',
   'rubric',
-  'forbidden_phrases',
   'expected_answer',
 ] as const;
 
+// A criterion counts only if it can actually fail junk. forbidden_phrases
+// alone cannot (junk simply omits the phrases — so it is not in the list
+// above), nor can min_length: 0, blank strings, empty lists, a schema with
+// neither type:'object' nor required keys, or a rubric item with no keywords
+// (it scores a flat 0.5). An uncompilable regex_pattern is no check either;
+// autoVerify fails closed on one rather than paying.
 function hasAutoCheck(criteria: z.infer<typeof createTaskSchema>['verificationCriteria']): boolean {
   if (!criteria) return false;
-  return AUTO_CHECK_KEYS.some((k) => {
-    const v = criteria[k];
-    if (v === undefined || v === null) return false;
-    if (Array.isArray(v) || typeof v === 'string') return v.length > 0;
-    return true;
-  });
+  const anyText = (v?: string[]) => Array.isArray(v) && v.some((s) => typeof s === 'string' && s.trim().length > 0);
+  if (typeof criteria.min_length === 'number' && criteria.min_length > 0) return true;
+  if (anyText(criteria.contains_keywords) || anyText(criteria.required_fields)) return true;
+  if (typeof criteria.expected_answer === 'string' && criteria.expected_answer.trim().length > 0) return true;
+  if (criteria.expected_schema && (criteria.expected_schema.type === 'object' || anyText(criteria.expected_schema.required))) return true;
+  if (criteria.rubric?.some((item) => anyText(item.keywords))) return true;
+  if (typeof criteria.regex_pattern === 'string' && criteria.regex_pattern.trim().length > 0) {
+    try {
+      new RegExp(criteria.regex_pattern);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 tasksRouter.post('/', requireAuth, async (req: AuthRequest, res, next) => {
@@ -316,6 +331,27 @@ tasksRouter.post('/', requireAuth, async (req: AuthRequest, res, next) => {
         'AUTO_CRITERIA_REQUIRED',
         `verificationMode='auto' requires verificationCriteria with at least one of: ${AUTO_CHECK_KEYS.join(', ')}`,
       );
+    }
+    // An auto task whose regex cannot run can never pass: autoVerify fails
+    // closed on a pattern that does not compile or is prone to catastrophic
+    // backtracking. Say so now, before the poster funds or lists it.
+    if (data.verificationMode === 'auto' && typeof data.verificationCriteria?.regex_pattern === 'string') {
+      const pattern = data.verificationCriteria.regex_pattern;
+      let usable = isSafeRegexSource(pattern);
+      if (usable) {
+        try {
+          new RegExp(pattern);
+        } catch {
+          usable = false;
+        }
+      }
+      if (!usable) {
+        throw new AppError(
+          400,
+          'REGEX_PATTERN_UNUSABLE',
+          'verificationCriteria.regex_pattern does not compile or can backtrack catastrophically (nested or stacked quantifiers) — simplify it',
+        );
+      }
     }
 
     const amountBigInt = BigInt(data.amount);
@@ -695,17 +731,42 @@ tasksRouter.post('/:id/confirm-tx', requireAuth, async (req: AuthRequest, res, n
     // loops and the verifier queue. CAS, so a terminal state is never
     // rewritten. Best-effort: the refund confirmation below must not depend on
     // Redis, and a repeat confirm-tx retries the close.
+    //
+    // A2A state is keyed by taskHash alone and the escrow does not enforce
+    // unique hashes, so owning SOME escrow task with this hash proves nothing
+    // about the A2A task: anyone can createTask with a victim's hash, cancel it
+    // for an instant refund and land here. Close only when the A2A task is this
+    // caller's (meta.posterAddress, set from the authenticated poster at index
+    // time — the check that matters) and the hash index does not name a
+    // different escrow task. The index is last-writer-wins, so it is a
+    // secondary guard only; no recorded poster means no close.
     try {
       const onChain = await escrowService.getTaskOn(chain, taskId);
       const taskHash = onChain.taskHash;
       if (taskHash && (await a2aStore.getState(taskHash))) {
-        const closed = await a2aStore.tryCloseOnChainTerminal(taskHash, settled);
-        if (closed.ok) {
-          await Promise.all([
-            a2aStore.clearOffer(taskHash).catch(() => {}),
-            a2aStore.clearCascade(taskHash).catch(() => {}),
-          ]);
-          console.log(`[tasks] confirm-tx: closed A2A state for task ${taskId} (${closed.previousStatus} → failed/${settled})`);
+        const [a2aMeta, mapped] = await Promise.all([
+          a2aStore.getMeta(taskHash),
+          resolveCachedTaskByHash(taskHash).catch(() => null),
+        ]);
+        const posterMatches = a2aMeta?.posterAddress?.toLowerCase() === from.toLowerCase();
+        const sameEscrowTask = !mapped || (mapped.chain === chain && mapped.taskId === String(taskId));
+        if (!posterMatches || !sameEscrowTask) {
+          console.warn(
+            `[tasks] confirm-tx: NOT closing A2A state ${taskHash.slice(0, 10)}… for ${chain} task ${taskId} — ` +
+              (posterMatches
+                ? `the hash index names ${mapped!.chain} task ${mapped!.taskId}`
+                : `caller ${from} is not the A2A task's poster`) +
+              ' (duplicate taskHash on another escrow task)',
+          );
+        } else {
+          const closed = await a2aStore.tryCloseOnChainTerminal(taskHash, settled);
+          if (closed.ok) {
+            await Promise.all([
+              a2aStore.clearOffer(taskHash).catch(() => {}),
+              a2aStore.clearCascade(taskHash).catch(() => {}),
+            ]);
+            console.log(`[tasks] confirm-tx: closed A2A state for task ${taskId} (${closed.previousStatus} → failed/${settled})`);
+          }
         }
       }
     } catch (closeErr) {
