@@ -3,10 +3,10 @@
  * Use this if the initial deploy-mainnet.ts failed halfway.
  */
 
-import { ethers, upgrades } from "hardhat";
+import { ethers, upgrades } from "../lib/hh.js";
 import * as fs from "fs";
 import * as path from "path";
-import { assertSafeNetwork } from "./_guard";
+import { assertSafeNetwork } from "./_guard.js";
 
 async function main() {
   await assertSafeNetwork();
@@ -56,7 +56,7 @@ async function main() {
     },
   };
 
-  const outDir = path.join(__dirname, "..", "deployments");
+  const outDir = path.join(import.meta.dirname, "..", "deployments");
   if (!fs.existsSync(outDir)) {
     fs.mkdirSync(outDir, { recursive: true });
   }

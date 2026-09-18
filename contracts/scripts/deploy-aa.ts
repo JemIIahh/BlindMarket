@@ -8,7 +8,7 @@
  * Usage:
  *   PRIVATE_KEY=0x... npx hardhat run scripts/deploy-aa.ts --network base-sepolia
  */
-import { ethers } from "hardhat";
+import { ethers } from "../lib/hh.js";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -109,7 +109,7 @@ async function main() {
     },
   };
 
-  const outDir = path.join(__dirname, "..", "deployments");
+  const outDir = path.join(import.meta.dirname, "..", "deployments");
   if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
   const outPath = path.join(outDir, `aa-${networkName}.json`);
   fs.writeFileSync(outPath, JSON.stringify(deployment, null, 2));

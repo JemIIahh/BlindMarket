@@ -15,9 +15,9 @@
  *   I_HAVE_READ_MAINNET_CHECKLIST=yes NEW_FEE_BPS=1000 \
  *     npx hardhat run scripts/set-fee.ts --network 0g-mainnet
  */
-import { ethers, network } from "hardhat";
-import { assertSafeNetwork } from "./_guard";
-import { loadDeployment } from "./_deployments";
+import { ethers, network } from "../lib/hh.js";
+import { assertSafeNetwork } from "./_guard.js";
+import { loadDeployment } from "./_deployments.js";
 
 async function main() {
   await assertSafeNetwork();

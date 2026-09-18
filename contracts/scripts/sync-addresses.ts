@@ -48,7 +48,7 @@ const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
  *  truncated module — after which generated and committed agree and the drift
  *  guard goes quiet. */
 function readContracts(file: string, optional = false): Record<string, string> {
-  const p = path.resolve(__dirname, `../deployments/${file}`);
+  const p = path.resolve(import.meta.dirname, `../deployments/${file}`);
   if (!fs.existsSync(p)) {
     if (optional) return {};
     throw new Error(`Deployment record not found: ${p}`);
@@ -100,8 +100,8 @@ function render(): string {
 }
 
 const TARGETS = [
-  path.resolve(__dirname, "../../backend/src/contractAddresses.ts"),
-  path.resolve(__dirname, "../../frontend/src/config/contractAddresses.ts"),
+  path.resolve(import.meta.dirname, "../../backend/src/contractAddresses.ts"),
+  path.resolve(import.meta.dirname, "../../frontend/src/config/contractAddresses.ts"),
 ];
 
 async function main() {

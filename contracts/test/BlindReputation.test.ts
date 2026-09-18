@@ -1,7 +1,7 @@
 import { expect } from "chai";
-import { ethers, upgrades } from "hardhat";
-import { BlindReputation } from "../typechain-types";
-import { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/signers";
+import { ethers, upgrades } from "../lib/hh.js";
+import type { BlindReputation } from "../types/ethers-contracts/index.js";
+import type { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/types";
 
 describe("BlindReputation", function () {
   let reputation: BlindReputation;
@@ -161,7 +161,7 @@ describe("BlindReputation", function () {
       await reputation.connect(admin).unpause();
       await expect(
         reputation.connect(escrow).rate(worker.address, 5, 1)
-      ).not.to.be.reverted;
+      ).to.not.revert(ethers);
     });
   });
 });

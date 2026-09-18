@@ -10,8 +10,8 @@
  *   npx hardhat run scripts/validate-escrow-upgrade.ts --network 0g-testnet
  *   npx hardhat run scripts/validate-escrow-upgrade.ts --network base
  */
-import { ethers, upgrades, network } from "hardhat";
-import { loadDeployment } from "./_deployments";
+import { ethers, upgrades, network } from "../lib/hh.js";
+import { loadDeployment } from "./_deployments.js";
 
 async function main() {
   // Resolve by chainId, never by network.name. The old
@@ -35,10 +35,7 @@ async function main() {
   console.log(`Proxy:   ${proxy}`);
   console.log("Validating new BlindEscrow implementation against the deployed proxy…");
 
-  await upgrades.validateUpgrade(proxy, Factory, {
-    kind: "uups",
-    redeployImplementation: "always",
-  });
+  await upgrades.validateUpgrade(proxy, Factory, { kind: "uups" });
 
   console.log(
     "\n✓ SAFE: storage layout is compatible. Upgrading is a same-address UUPS\n" +

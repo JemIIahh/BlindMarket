@@ -16,9 +16,9 @@
  *     verifier.
  */
 
-import { ethers } from "hardhat";
-import { assertSafeNetwork } from "./_guard";
-import { loadDeployment } from "./_deployments";
+import { ethers } from "../lib/hh.js";
+import { assertSafeNetwork } from "./_guard.js";
+import { loadDeployment } from "./_deployments.js";
 
 async function main() {
   await assertSafeNetwork();

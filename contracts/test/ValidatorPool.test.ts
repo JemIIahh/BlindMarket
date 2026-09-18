@@ -1,8 +1,7 @@
 import { expect } from "chai";
-import { ethers } from "hardhat";
-import { ValidatorPool } from "../typechain-types";
-import { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/signers";
-import { time } from "@nomicfoundation/hardhat-network-helpers";
+import { ethers, time } from "../lib/hh.js";
+import type { ValidatorPool } from "../types/ethers-contracts/index.js";
+import type { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/types";
 
 describe("ValidatorPool", function () {
   let pool: ValidatorPool;
@@ -141,13 +140,13 @@ describe("ValidatorPool", function () {
       await expect(pool.connect(v1).unstake())
         .to.be.revertedWithCustomError(pool, "StakeLocked");
       // A validator who did not vote is unaffected.
-      await expect(pool.connect(v2).unstake()).to.not.be.reverted;
+      await expect(pool.connect(v2).unstake()).to.not.revert(ethers);
 
       await time.increase(VOTE_WINDOW + 1);
       await pool.finalizeDispute(dId);
 
       // Lock released on finalize — v1 can now unstake its remaining stake.
-      await expect(pool.connect(v1).unstake()).to.not.be.reverted;
+      await expect(pool.connect(v1).unstake()).to.not.revert(ethers);
     });
 
     it("finalize still releases locks when the escrow resolveDispute callback reverts", async () => {
@@ -181,8 +180,8 @@ describe("ValidatorPool", function () {
       expect((await pool.getDispute(dId)).finalized).to.equal(true);
 
       // Locks released for every voter despite the callback failure.
-      await expect(pool.connect(v1).unstake()).to.not.be.reverted;
-      await expect(pool.connect(v3).unstake()).to.not.be.reverted;
+      await expect(pool.connect(v1).unstake()).to.not.revert(ethers);
+      await expect(pool.connect(v3).unstake()).to.not.revert(ethers);
     });
   });
 

@@ -7,7 +7,7 @@
  *   npx hardhat run scripts/upgrade-tee-settlement.ts --network base
  *   TEE_SIGNER_ADDRESS=0x... npx hardhat run scripts/upgrade-tee-settlement.ts --network base
  */
-import { ethers, upgrades } from "hardhat";
+import { ethers, upgrades } from "../lib/hh.js";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -22,7 +22,7 @@ async function main() {
   const network = await ethers.provider.getNetwork();
   const chainId = Number(network.chainId);
   const networkName = chainId === 8453 ? "base-mainnet" : chainId === 84532 ? "base-sepolia" : `chain-${chainId}`;
-  const deploymentPath = path.join(__dirname, "..", "deployments", `${networkName}.json`);
+  const deploymentPath = path.join(import.meta.dirname, "..", "deployments", `${networkName}.json`);
 
   if (!fs.existsSync(deploymentPath)) {
     throw new Error(`No deployment found at ${deploymentPath}. Deploy first with deploy-base.ts.`);

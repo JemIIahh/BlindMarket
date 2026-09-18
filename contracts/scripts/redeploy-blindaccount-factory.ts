@@ -16,7 +16,7 @@
  * Usage:
  *   npx hardhat run scripts/redeploy-blindaccount-factory.ts --network base-sepolia
  */
-import { ethers } from "hardhat";
+import { ethers } from "../lib/hh.js";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -30,7 +30,7 @@ async function main() {
   const chainId = Number(network.chainId);
   const networkName = chainId === 8453 ? "base-mainnet" : "base-sepolia";
 
-  const outPath = path.join(__dirname, "..", "deployments", `aa-${networkName}.json`);
+  const outPath = path.join(import.meta.dirname, "..", "deployments", `aa-${networkName}.json`);
   if (!fs.existsSync(outPath)) throw new Error(`No existing deployment file at ${outPath}`);
   const prev = JSON.parse(fs.readFileSync(outPath, "utf-8"));
 

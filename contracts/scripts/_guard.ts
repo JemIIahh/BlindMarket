@@ -20,7 +20,7 @@
  * Anything else is treated as mainnet and gated.
  */
 
-import { ethers } from "hardhat";
+import { ethers } from "../lib/hh.js";
 
 const ALLOWED_TESTNETS = new Set<number>([16602, 31337, 1337, 11155111, 84532]);
 const ACK_ENV = "I_HAVE_READ_MAINNET_CHECKLIST";

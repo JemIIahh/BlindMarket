@@ -1,5 +1,5 @@
 import { expect } from "chai";
-import { ethers } from "hardhat";
+import { ethers } from "../lib/hh.js";
 
 // Focused coverage for #27: a usage authorization granted by an owner must NOT
 // survive a change of ownership — including via the inherited ERC-721
