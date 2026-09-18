@@ -222,3 +222,45 @@ healthRouter.get('/redis', (_req, res) => {
   };
   res.json({ success: true, data: { client: describe(redis), sub: describe(redisSub) } });
 });
+
+/**
+ * GET /health/db — production health check for durable persistence.
+ * Returns whether DATABASE_URL is set, whether Postgres is reachable, and
+ * whether the schema is current enough to trust (deployed_agents exists).
+ */
+healthRouter.get('/db', async (_req, res) => {
+  if (!config.databaseUrl) {
+    res.json({
+      success: true,
+      data: { configured: false, reachable: false, upToDate: false, nameMismatch: null },
+    });
+    return;
+  }
+
+  try {
+    const pool = await getPool();
+    await pool.query('SELECT 1');
+
+    let upToDate = false;
+    let nameMismatch: string | null = null;
+    try {
+      const { rows } = await pool.query<{ tablename: string }>(
+        "SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename='deployed_agents'",
+      );
+      upToDate = rows.length > 0;
+    } catch (e) {
+      nameMismatch = (e as Error).message;
+    }
+
+    res.json({
+      success: true,
+      data: { configured: true, reachable: true, upToDate, nameMismatch },
+    });
+  } catch (err) {
+    res.status(503).json({
+      success: false,
+      error: { code: 'DB_UNREACHABLE', message: (err as Error).message },
+      data: { configured: true, reachable: false, upToDate: false, nameMismatch: null },
+    });
+  }
+});
