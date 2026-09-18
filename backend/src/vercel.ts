@@ -6,7 +6,7 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import { config } from './config.js';
-import { globalErrorHandler } from './middleware/errorHandler.js';
+import { serverlessErrorHandler, initSentry } from './middleware/errorHandler.js';
 import { createRateLimiter } from './middleware/rateLimit.js';
 import { requestLogger } from './middleware/requestLogger.js';
 import { healthRouter } from './routes/health.js';
@@ -28,6 +28,9 @@ import { statsRouter } from './routes/stats.js';
 import { analyticsRouter } from './routes/analytics.js';
 import { txRouter } from './routes/tx.js';
 import { getDb } from './services/database.js';
+
+// No-op without SENTRY_DSN.
+initSentry(config.sentryDsn, config.sentryEnvironment);
 
 const app = express();
 app.set('trust proxy', 1);
@@ -60,7 +63,9 @@ app.use('/api/v1/analytics', analyticsRouter);
 app.use('/api/v1/tx', txRouter);
 app.use('/a2a/v1', a2aProtocolRouter);
 
-app.use(globalErrorHandler);
+// Flushes Sentry before responding — a serverless instance can freeze the
+// moment the response is out, losing the queued event.
+app.use(serverlessErrorHandler);
 
 // Initialize database: SQLite when no DATABASE_URL (dev), PostgreSQL otherwise (prod)
 if (!config.databaseUrl) {

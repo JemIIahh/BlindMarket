@@ -68,6 +68,8 @@ function mkRuntime(
     displayName: 'test-agent',
     capabilities: [AgentCap.DATA_PROCESSING],
     executeTask,
+    // No default RPC since 0.6.0: the 0G RPC is explicit.
+    rpcUrl: 'http://og.invalid',
   });
   // Tests call the private executeTask() directly instead of start(), which
   // normally sets `wallet` (via createAgent()/existingPrivateKey) and seeds
@@ -224,7 +226,7 @@ describe('WorkerRuntime.executeTask — settlement chain', () => {
   });
 
   it('fails a Base task right after accept, before the handler, when no Base RPC is configured', async () => {
-    // The single rpcUrl (default: 0G testnet) used to stand in for Base and
+    // The single rpcUrl (the 0G RPC) used to stand in for Base and
     // fail only at the send, after the handler had run.
     const sendTxSpy = stubSend();
     const handler = vi.fn(async () => ({ done: true }));
@@ -350,7 +352,10 @@ describe('WorkerRuntime.executeTask — settle step', () => {
 
 describe('WorkerRuntime.start — supportedChains', () => {
   const STORED_PUBKEY = `04${'a'.repeat(128)}`;
-  const ADDRESS = '0x00000000000000000000000000000000000000e1';
+  const PRIVATE_KEY = `0x${'1'.repeat(64)}`;
+  /** The API key's owner: the wallet PRIVATE_KEY belongs to. */
+  const ADDRESS = new ethers.Wallet(PRIVATE_KEY).address;
+  const WHOAMI = { address: ADDRESS, addresses: [ADDRESS] };
 
   /** The executor row as GET /a2a/profile returns it: the whole stored row,
    *  including agentCardUrl/mcpEndpointUrl, which ExecutorProfile doesn't type. */
@@ -372,7 +377,6 @@ describe('WorkerRuntime.start — supportedChains', () => {
     };
   }
 
-  const PRIVATE_KEY = `0x${'1'.repeat(64)}`;
   /** Uncompressed, no 0x: what a restore must register. */
   const DERIVED_PUBKEY = derivePublicKey(PRIVATE_KEY);
 
@@ -382,6 +386,7 @@ describe('WorkerRuntime.start — supportedChains', () => {
   /** Both RPCs by default, so the runtime can settle (and declares) 0G and Base. */
   function restoredRuntime(rpcUrls: Record<string, string> | undefined = { base: 'https://base.example/rpc' }): WorkerRuntime {
     return new WorkerRuntime({
+      rpcUrl: 'http://og.invalid',
       rpcUrls,
       apiKey: 'test-key',
       displayName: 'config-name',
@@ -414,10 +419,12 @@ describe('WorkerRuntime.start — supportedChains', () => {
     runtime = undefined;
   });
 
-  it('declares only the chains it has an RPC for: 0G by default, Base once rpcUrls.base is set', async () => {
-    const plain = new WorkerRuntime({ apiKey: 'k', displayName: 'a', capabilities: [AgentCap.DATA_PROCESSING], executeTask: async () => ({}) });
+  it('declares only the chains it has an RPC for: none by default, 0G through rpcUrl, Base once rpcUrls.base is set', async () => {
+    const none = new WorkerRuntime({ apiKey: 'k', displayName: 'a', capabilities: [AgentCap.DATA_PROCESSING], executeTask: async () => ({}) });
+    expect(none.declaredChains).toEqual([]);
+    const plain = new WorkerRuntime({ apiKey: 'k', displayName: 'a', capabilities: [AgentCap.DATA_PROCESSING], executeTask: async () => ({}), rpcUrl: 'http://og.invalid' });
     expect(plain.declaredChains).toEqual(['0g']);
-    const both = new WorkerRuntime({ apiKey: 'k', displayName: 'a', capabilities: [AgentCap.DATA_PROCESSING], executeTask: async () => ({}), rpcUrls: { base: 'https://base.example/rpc' } });
+    const both = new WorkerRuntime({ apiKey: 'k', displayName: 'a', capabilities: [AgentCap.DATA_PROCESSING], executeTask: async () => ({}), rpcUrl: 'http://og.invalid', rpcUrls: { base: 'https://base.example/rpc' } });
     expect(both.declaredChains).toEqual(['0g', 'base']);
     expect(both.declaredChains).toEqual([...SETTLEMENT_CHAINS]);
   });
@@ -451,9 +458,10 @@ describe('WorkerRuntime.start — supportedChains', () => {
     expect(bodies[0].supportedChains).toEqual(['base']);
   });
 
-  it('a fresh default-config runtime registers 0G only, and says at start that Base is missing', async () => {
+  it('a fresh 0G-only runtime registers 0G only, and says at start that Base tasks are skipped', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const fetchMock = stubFetch({
+      '/api-keys/whoami': WHOAMI,
       '/a2a/register': { agent: storedProfile(['0g']) },
       '/a2a/tasks': { tasks: [] },
     });
@@ -462,20 +470,23 @@ describe('WorkerRuntime.start — supportedChains', () => {
       displayName: 'fresh-agent',
       capabilities: [AgentCap.DATA_PROCESSING],
       executeTask: async () => ({ done: true }),
+      privateKey: PRIVATE_KEY,
+      rpcUrl: 'http://og.invalid',
     });
     await runtime.start();
     const bodies = registerBodies(fetchMock);
     expect(bodies).toHaveLength(1);
     expect(bodies[0].supportedChains).toEqual(['0g']);
-    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/declaring chains: 0g\. No RPC for base — set rpcUrls\.base/));
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/declaring chains: 0g\. No RPC for base — tasks on that chain are skipped; set rpcUrls\.base/));
   });
 
   it('says nothing at start when every chain has an RPC', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    stubFetch({ '/a2a/register': { agent: storedProfile(['0g', 'base']) }, '/a2a/tasks': { tasks: [] } });
+    stubFetch({ '/api-keys/whoami': WHOAMI, '/a2a/register': { agent: storedProfile(['0g', 'base']) }, '/a2a/tasks': { tasks: [] } });
     runtime = new WorkerRuntime({
       apiKey: 'test-key', displayName: 'fresh-agent', capabilities: [AgentCap.DATA_PROCESSING],
-      executeTask: async () => ({ done: true }), rpcUrls: { base: 'https://base.example/rpc' },
+      executeTask: async () => ({ done: true }), privateKey: PRIVATE_KEY,
+      rpcUrl: 'http://og.invalid', rpcUrls: { base: 'https://base.example/rpc' },
     });
     await runtime.start();
     expect(warn).not.toHaveBeenCalled();
@@ -483,6 +494,7 @@ describe('WorkerRuntime.start — supportedChains', () => {
 
   it('createAgent registers the declared chains as supportedChains', async () => {
     const fetchMock = stubFetch({
+      '/api-keys/whoami': WHOAMI,
       '/a2a/register': { agent: storedProfile(['0g', 'base']) },
       '/a2a/tasks': { tasks: [] },
     });
@@ -491,6 +503,8 @@ describe('WorkerRuntime.start — supportedChains', () => {
       displayName: 'fresh-agent',
       capabilities: [AgentCap.DATA_PROCESSING],
       executeTask: async () => ({ done: true }),
+      privateKey: PRIVATE_KEY,
+      rpcUrl: 'http://og.invalid',
       rpcUrls: { base: 'https://base.example/rpc' },
     });
 
@@ -622,3 +636,27 @@ describe('WorkerRuntime.start — supportedChains', () => {
     expect(warn).toHaveBeenCalledOnce();
   });
 });
+
+describe('WorkerRuntime.browse — { meta, state } entries', () => {
+  it('reads taskId/status from entry.state (GET /a2a/tasks serves { meta, state }, not flat states) and skips tasks on a chain it did not declare (no RPC)', async () => {
+    stubFetch({
+      '/a2a/tasks': {
+        tasks: [
+          { meta: { taskId: TASK_ID, chain: '0g' }, state: { taskId: TASK_ID, status: 'open' } },
+          { meta: { taskId: `0x${'ef'.repeat(32)}`, chain: 'base' }, state: { taskId: `0x${'ef'.repeat(32)}`, status: 'open' } },
+          { meta: { taskId: `0x${'aa'.repeat(32)}`, chain: '0g' }, state: { taskId: `0x${'aa'.repeat(32)}`, status: 'accepted' } },
+        ],
+        total: 3,
+      },
+    });
+    const runtime = mkRuntime({ address: '0xworker', privateKey: `0x${'1'.repeat(64)}`, publicKey: `04${'1'.repeat(128)}` });
+    // biome-ignore lint/suspicious/noExplicitAny: private fields/methods under test
+    const r = runtime as any;
+    r.executions.clear();
+    const claimed: string[] = [];
+    r.executeTask = async (taskId: string) => { claimed.push(taskId); };
+    await r.browse();
+    expect(claimed).toEqual([TASK_ID]);
+  });
+});
+

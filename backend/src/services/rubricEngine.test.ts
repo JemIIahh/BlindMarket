@@ -3,11 +3,15 @@ import {
   ContainsKeywords,
   LengthBetween,
   JsonSchema,
+  HasFields,
+  extractJsonObject,
   MatchesRegex,
   NoForbiddenPhrases,
   WeightedRubric,
   AllRubric,
   isSafeRegexSource,
+  testRegexBounded,
+  RegexTimeoutError,
 } from './rubricEngine.js';
 
 describe('isSafeRegexSource (ReDoS guard)', () => {
@@ -107,6 +111,102 @@ describe('JsonSchema', () => {
   it('scores 0 when type mismatch', () => {
     const rubric = JsonSchema({ type: 'object' });
     expect(rubric(JSON.stringify([1, 2, 3]))).toBe(0);
+  });
+});
+
+describe('extractJsonObject', () => {
+  it('parses bare JSON', () => {
+    expect(extractJsonObject('{"a":1}')).toEqual({ a: 1 });
+  });
+
+  it('pulls JSON out of a fenced block', () => {
+    expect(extractJsonObject('Result:\n```json\n{"a": 1}\n```\nDone.')).toEqual({ a: 1 });
+  });
+
+  it('pulls the first balanced object out of prose, ignoring braces in strings', () => {
+    expect(extractJsonObject('Here you go: {"a": "x}y", "b": {"c": 2}} — enjoy')).toEqual({ a: 'x}y', b: { c: 2 } });
+  });
+
+  it('skips a non-JSON brace group and finds the next object', () => {
+    expect(extractJsonObject('use {placeholder} then {"a":1}')).toEqual({ a: 1 });
+  });
+
+  it('returns undefined for prose, arrays and unbalanced braces', () => {
+    expect(extractJsonObject('no json here')).toBeUndefined();
+    expect(extractJsonObject('[1,2,3]')).toBeUndefined();
+    expect(extractJsonObject('{"a": 1')).toBeUndefined();
+    expect(extractJsonObject('{'.repeat(5000))).toBeUndefined();
+  });
+});
+
+describe('HasFields', () => {
+  it('scores by JSON keys, treating null as absent', () => {
+    expect(HasFields(['a', 'b'])(JSON.stringify({ a: 1, b: null }))).toBe(0.5);
+  });
+
+  it('reads fields from fenced JSON', () => {
+    expect(HasFields(['summary'])('```json\n{"summary":"ok"}\n```')).toBe(1);
+  });
+
+  it('falls back to headings and labels in prose', () => {
+    const rubric = HasFields(['summary', 'next_steps']);
+    expect(rubric('Summary: all good.\n\n## Next steps\nShip it.')).toBe(1);
+    expect(rubric('**Summary:** all good. NEXT-STEPS: ship it.')).toBe(1);
+    expect(rubric('Summary: all good.')).toBe(0.5);
+  });
+
+  it('needs a value, not just the key — but 0 and false are values', () => {
+    expect(HasFields(['a', 'b'])('{"a":"","b":"  "}')).toBe(0);
+    expect(HasFields(['a', 'b'])('{"a":{},"b":[]}')).toBe(0);
+    expect(HasFields(['a', 'b'])('{"a":0,"b":false}')).toBe(1);
+  });
+
+  it('does not count a bare prose label', () => {
+    const rubric = HasFields(['summary', 'score']);
+    expect(rubric('Summary:\nScore:')).toBe(0);
+    expect(rubric('Summary: Score:')).toBe(0);
+    expect(rubric('Summary:\nScore: 5')).toBe(0.5); // the 5 is the score's, not the summary's
+    expect(rubric('## Summary\n\n## Score\n7 out of 10')).toBe(0.5);
+    expect(rubric('## Summary\n- Revenue: up 12%\n\n## Score\n7 out of 10')).toBe(1);
+  });
+
+  it('does not count a field name used mid-sentence', () => {
+    expect(HasFields(['summary'])('In summary the work is done and nothing else is needed.')).toBe(0);
+  });
+});
+
+describe('JsonSchema — embedded JSON', () => {
+  it('accepts a schema match inside a fence or prose', () => {
+    const rubric = JsonSchema({ type: 'object', required: ['status'] });
+    expect(rubric('```json\n{"status":"ok"}\n```')).toBe(1);
+    expect(rubric('Done — {"status":"ok"}')).toBe(1);
+  });
+});
+
+describe('JsonSchema — required keys need values', () => {
+  it('scores an empty required value as missing', () => {
+    const rubric = JsonSchema({ type: 'object', required: ['status', 'count'] });
+    expect(rubric('{"status":"","count":0}')).toBe(0.5);
+  });
+});
+
+describe('testRegexBounded', () => {
+  // Both pass isSafeRegexSource (it cannot see alternation overlap) and
+  // backtrack exponentially; unbounded they hang the process.
+  it.each([
+    ['(a|a)+$', 'a'.repeat(41) + 'b'],
+    ['^(a|b|ab)*c', 'ab'.repeat(30) + 'd'],
+  ])('interrupts %s instead of hanging', (source, input) => {
+    expect(isSafeRegexSource(source)).toBe(true);
+    const started = performance.now();
+    expect(() => testRegexBounded(new RegExp(source), input)).toThrow(RegexTimeoutError);
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
+
+  it('still answers after a timeout, and honours flags', () => {
+    expect(() => testRegexBounded(/(a|a)+$/, 'a'.repeat(41) + 'b')).toThrow(RegexTimeoutError);
+    expect(testRegexBounded(/^paris$/i, 'Paris')).toBe(true);
+    expect(testRegexBounded(/^paris$/, 'Paris')).toBe(false);
   });
 });
 

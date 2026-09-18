@@ -6,6 +6,8 @@
  * If a rubric throws, it scores 0.0 and the pipeline continues.
  */
 
+import vm from 'node:vm';
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export type RubricFn = (output: string) => number;
@@ -58,25 +60,138 @@ export function LengthBetween(min: number, max: number = Infinity): RubricFn {
   };
 }
 
-/** Output must be valid JSON matching the given schema (basic structural check). */
+const JSON_SCAN_CAP = 200_000;
+const JSON_SCAN_MAX_STARTS = 50; // bounds the balanced-brace scan on brace-heavy non-JSON
+
+/**
+ * Pull a JSON object out of agent output. Agents rarely return bare JSON — they
+ * wrap it in a ```json fence or lead in with a sentence — so parsing the whole
+ * string rejects correct work. Tries, in order: the whole output, each fenced
+ * block, then the first balanced {...} that parses. Returns undefined when the
+ * output holds no JSON object.
+ */
+export function extractJsonObject(output: string): Record<string, unknown> | undefined {
+  const asObject = (text: string): Record<string, unknown> | undefined => {
+    try {
+      const parsed: unknown = JSON.parse(text);
+      return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
+  const src = output.length > JSON_SCAN_CAP ? output.slice(0, JSON_SCAN_CAP) : output;
+  const whole = asObject(src.trim());
+  if (whole) return whole;
+
+  for (const m of src.matchAll(/```(?:json)?\s*\n([\s\S]*?)```/gi)) {
+    const fenced = asObject(m[1].trim());
+    if (fenced) return fenced;
+  }
+
+  // First balanced {...}, string-aware so braces inside values don't end it early.
+  let starts = 0;
+  for (let start = src.indexOf('{'); start !== -1 && starts < JSON_SCAN_MAX_STARTS; start = src.indexOf('{', start + 1), starts++) {
+    let depth = 0;
+    let inString = false;
+    for (let i = start; i < src.length; i++) {
+      const ch = src[i];
+      if (inString) {
+        if (ch === '\\') i++;
+        else if (ch === '"') inString = false;
+        continue;
+      }
+      if (ch === '"') inString = true;
+      else if (ch === '{') depth++;
+      else if (ch === '}' && --depth === 0) {
+        const candidate = asObject(src.slice(start, i + 1));
+        if (candidate) return candidate;
+        break;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * A field counts only when it holds something. `{"summary":""}` and
+ * `{"summary":{}}` carry the key and no work; 0 and false are real values.
+ */
+export function hasContent(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  if (typeof value === 'string') return value.trim().length > 0;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === 'object') return Object.keys(value).length > 0;
+  return true;
+}
+
+const LABEL_BODY_CHARS = 400; // how far past a prose label to look for its content
+
+/**
+ * Output must carry every named field WITH a value: as a non-empty key of the
+ * JSON object it contains, or — for prose deliverables — as a heading/label
+ * ("Summary:", "## Summary", "**Summary**") followed by content before the next
+ * heading. Bare labels ("Summary:\nScore:") are a template, not a deliverable.
+ * Score = fraction of fields present.
+ */
+export function HasFields(fields: string[]): RubricFn {
+  const labelSource = (f: string) => f.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/[\s_-]+/g, '[\\s_-]+');
+  const named = fields.filter(f => f.trim().length > 0);
+  // A field's content ends where the next field's label starts ("Summary: Score: 5").
+  const anyLabel = new RegExp(`(?:${named.map(labelSource).join('|') || '(?!)'})(?:\\*\\*|__)?[ \\t]*:`, 'i');
+  return (output: string) => {
+    if (!fields.length) return 1;
+    const parsed = extractJsonObject(output);
+    const src = output.length > JSON_SCAN_CAP ? output.slice(0, JSON_SCAN_CAP) : output;
+    const present = fields.filter(f => {
+      if (parsed) return f in parsed && hasContent(parsed[f]);
+      if (!f.trim()) return false;
+      const label = new RegExp(
+        `(?:^|[.!?]\\s)[ \\t]*(?:#{1,6}[ \\t]*|[-*][ \\t]+)?(?:\\*\\*|__)?${labelSource(f)}(?:\\*\\*|__)?[ \\t]*(?::|$)`,
+        'gim',
+      );
+      let tries = 0;
+      for (let m = label.exec(src); m && tries < 20; m = label.exec(src), tries++) {
+        const after = src.slice(m.index + m[0].length, m.index + m[0].length + LABEL_BODY_CHARS);
+        const nextHeading = after.search(/\n[ \t]*#{1,6}[ \t]/);
+        const section = nextHeading === -1 ? after : after.slice(0, nextHeading);
+        const nextLabel = section.search(anyLabel);
+        if (/[\p{L}\p{N}]/u.test(nextLabel === -1 ? section : section.slice(0, nextLabel))) return true;
+      }
+      return false;
+    });
+    return present.length / fields.length;
+  };
+}
+
+/**
+ * Output must contain a JSON object matching the given schema (basic structural
+ * check). The object may be fenced or embedded in prose — see extractJsonObject.
+ */
 export function JsonSchema(schema: {
   type?: string;
   required?: string[];
   properties?: Record<string, { type?: string }>;
 }): RubricFn {
   return (output: string) => {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(output);
-    } catch {
-      return 0;
+    let parsed: unknown = extractJsonObject(output);
+    if (parsed === undefined) {
+      try {
+        parsed = JSON.parse(output);
+      } catch {
+        return 0;
+      }
     }
     if (schema.type === 'object' && (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed))) {
       return 0;
     }
     if (schema.required && typeof parsed === 'object' && parsed !== null) {
       const obj = parsed as Record<string, unknown>;
-      const present = schema.required.filter(k => k in obj);
+      if (!schema.required.length) return 1;
+      // Same bar as HasFields: a required key holding "" or {} is not delivered.
+      const present = schema.required.filter(k => k in obj && hasContent(obj[k]));
       return present.length / schema.required.length;
     }
     return 1;
@@ -91,7 +206,7 @@ export function JsonSchema(schema: {
  *
  * This is a heuristic, not an RE2-grade guarantee — it does not model
  * alternation-overlap (e.g. (a|a)+), so MatchesRegex ALSO bounds the input it
- * tests. For full coverage, swap in the `re2` engine.
+ * tests and the time it may take (testRegexBounded).
  */
 export function isSafeRegexSource(src: string): boolean {
   if (src.length > 200) return false;
@@ -128,13 +243,46 @@ export function isSafeRegexSource(src: string): boolean {
 }
 
 const REGEX_INPUT_CAP = 20_000;
+const REGEX_TIMEOUT_MS = 100;
 
-/** Output must match a regex pattern. Score 1.0 if matched, 0.0 otherwise. */
+export class RegexTimeoutError extends Error {
+  constructor(source: string) {
+    super(`regex timed out after ${REGEX_TIMEOUT_MS}ms: ${source.slice(0, 80)}`);
+    this.name = 'RegexTimeoutError';
+  }
+}
+
+// One reusable context; the script only reads the two slots set per call.
+const regexSandbox = vm.createContext(Object.create(null) as { re?: RegExp; input?: string });
+const regexScript = new vm.Script('re.test(input)');
+
+/**
+ * pattern.test(input) with a wall-clock bound. isSafeRegexSource cannot see
+ * alternation overlap — (a|a)+$ and ^(a|b|ab)*c pass it and backtrack
+ * exponentially on ~40 characters, and a regex running on the main thread
+ * freezes every request. V8 honours the vm timeout inside regex backtracking
+ * (executed: both patterns interrupt at ~100ms and the process carries on).
+ * Throws RegexTimeoutError; callers deciding payment must fail closed on it.
+ */
+export function testRegexBounded(pattern: RegExp, input: string, timeoutMs: number = REGEX_TIMEOUT_MS): boolean {
+  regexSandbox.re = pattern;
+  regexSandbox.input = input.length > REGEX_INPUT_CAP ? input.slice(0, REGEX_INPUT_CAP) : input;
+  try {
+    return regexScript.runInContext(regexSandbox, { timeout: timeoutMs }) === true;
+  } catch (e) {
+    if ((e as { code?: string }).code === 'ERR_SCRIPT_EXECUTION_TIMEOUT') throw new RegexTimeoutError(pattern.source);
+    throw e;
+  } finally {
+    regexSandbox.re = undefined;
+    regexSandbox.input = undefined;
+  }
+}
+
+/** Output must match a regex pattern. Score 1.0 if matched, 0.0 otherwise; throws on timeout. */
 export function MatchesRegex(pattern: RegExp): RubricFn {
-  // Bound the input the pattern runs against as defence-in-depth against
-  // polynomial backtracking on top of isSafeRegexSource's star-height guard.
-  return (output: string) =>
-    pattern.test(output.length > REGEX_INPUT_CAP ? output.slice(0, REGEX_INPUT_CAP) : output) ? 1 : 0;
+  // Bounded in input (REGEX_INPUT_CAP) and in time, on top of
+  // isSafeRegexSource's star-height guard.
+  return (output: string) => (testRegexBounded(pattern, output) ? 1 : 0);
 }
 
 /** Output must NOT contain any of the forbidden phrases. Score 1.0 if clean, 0.0 if any found. */

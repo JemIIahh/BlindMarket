@@ -106,6 +106,44 @@ export interface OpenTask {
   taskHash?: Hex;
 }
 
+/**
+ * Body of `POST /api/v1/tasks` — mirrors `createTaskSchema` in
+ * `backend/src/routes/tasks.ts`. The poster is the authenticated caller; the
+ * deadline is derived on-chain from `duration`.
+ */
+export interface CreateTaskRequest {
+  /** bytes32 commitment to the brief (0x + 64 hex) — sha256 of the ciphertext. */
+  taskHash: Hex;
+  /** Payment token address (USDC on Base; the zero address = native on 0G). */
+  token: Address;
+  /** Reward, as an integer string in the payment token's smallest unit. */
+  amount: string;
+  locationZone: string;
+  /** Task duration in SECONDS, as a string. */
+  duration: string;
+  targetExecutorType?: 'human' | 'agent';
+  /**
+   * 'oracle' is deliberately absent: it is reserved/unwired and the index route
+   * rejects it (400 VERIFICATION_MODE_UNSUPPORTED).
+   */
+  verificationMode?: 'manual' | 'auto' | 'agent';
+  /** Designated verifier — only with verificationMode 'agent'. */
+  verifierAddress?: Address;
+  /**
+   * REQUIRED in practice for 'auto': `POST /a2a/tasks/index` rejects an 'auto'
+   * task without at least one real check (400 AUTO_CRITERIA_REQUIRED) —
+   * min_length, contains_keywords, required_fields, expected_schema,
+   * regex_pattern, rubric, forbidden_phrases or expected_answer. Send the same
+   * criteria to both calls.
+   */
+  verificationCriteria?: Record<string, unknown>;
+  requiredCapabilities?: AgentCapability[];
+  /** 0G Storage root hash of the (encrypted) brief. */
+  rootHash?: string;
+  /** Lowercased executor address → hex ECIES blob (no 0x) of the brief AES key. */
+  wrappedKeys?: Record<string, string>;
+}
+
 export interface CreateTaskTx {
   unsignedTx: {
     to: Address;
@@ -119,9 +157,22 @@ export interface TaskDetail extends OpenTask {
   a2aState?: A2ATaskState;
 }
 
+/** Mirrors `A2ATaskStateStatus` in `backend/src/types.ts`. */
+export type A2ATaskStatus =
+  | 'open'
+  | 'accepted'
+  | 'in_progress'
+  | 'submitted'
+  | 'awaiting_verification'
+  | 'verified'
+  | 'completed'
+  | 'failed';
+
 export interface A2ATaskState {
   taskId: string;
-  status: string;
+  /** One of A2ATaskStatus; left open so a newer backend doesn't break parsing. */
+  status: A2ATaskStatus | (string & {});
+  failedReason?: string;
   executorAddress?: string;
   acceptedAt?: string;
   submittedAt?: string;
@@ -135,6 +186,33 @@ export interface A2ATaskState {
   assignTxHash?: Hex;
   verifyTxHash?: Hex;
   wrappedKeys?: Record<string, string>;
+}
+
+/**
+ * Public task metadata as served by the unauthenticated browse surface
+ * (`projectPublicMeta` in the backend): key material is stripped, and
+ * `rootHash` appears only on public tasks.
+ */
+export interface A2APublicTaskMeta {
+  taskId: string;
+  targetExecutorType?: 'human' | 'agent';
+  verificationMode?: string;
+  requiredCapabilities?: AgentCapability[];
+  posterAddress?: string;
+  /** Which escrow holds the task. Absent on rows indexed before the field existed. */
+  chain?: 'base' | '0g';
+  /** Unix seconds. */
+  deadline?: number;
+  privacy?: 'public';
+  hasEncryptedBrief?: boolean;
+  rootHash?: string;
+  [key: string]: unknown;
+}
+
+/** One entry of `GET /api/v1/a2a/tasks` (and /tasks/posted, /executions). */
+export interface A2ATaskEntry {
+  meta: A2APublicTaskMeta;
+  state: A2ATaskState;
 }
 
 export interface ExecutorProfile {
@@ -151,8 +229,9 @@ export interface ExecutorProfile {
   minReward?: string;
   preferredCapabilities?: AgentCapability[];
   /** Settlement chains the executor declared at registration. `null` means it
-   *  never declared any, which the backend treats as 0G and Base. Absent from
-   *  backends that predate the field. */
+   *  never declared any. Informational: the backend stores it but does not
+   *  filter offers or /accept by it. Absent from backends that predate the
+   *  field. */
   supportedChains?: string[] | null;
   registeredAt: string;
   decayedScore?: number;
@@ -161,30 +240,47 @@ export interface ExecutorProfile {
 }
 
 export interface RegisterExecutorInput {
-  address: Address;
+  /**
+   * Ignored by the backend: the registered executor is ALWAYS the wallet that
+   * owns the API key. Kept optional for source compatibility.
+   */
+  address?: Address;
   displayName: string;
   capabilities: AgentCapability[];
+  /** Uncompressed secp256k1 public key: 130 hex chars, leading `04`, NO 0x prefix. */
   publicKey: string;
   agentCardUrl?: string;
   mcpEndpointUrl?: string;
   minReward?: string;
   preferredCapabilities?: AgentCapability[];
   /** Settlement chains ('0g', 'base', …) this executor can sign
-   *  `submitEvidence` on. The backend only offers and assigns it tasks
-   *  escrowed on these chains. Omitted: the backend's default, 0G and Base.
-   *  Backends that predate the field ignore it. */
+   *  `submitEvidence` on. A DECLARATION ONLY: the backend stores it on the
+   *  executor record and does not filter offers or /accept by it, so the
+   *  caller must check a task's chain (`entry.meta.chain`) before accepting —
+   *  WorkerRuntime does. Backends that predate the field drop it. */
   supportedChains?: string[];
 }
 
-/** Params for BlindMarket.createAgent() — generates wallet + registers executor in one call. */
+/** Params for BlindMarket.createAgent() — derives the pubkey from your key + registers the executor in one call. */
 export interface CreateAgentParams {
+  /**
+   * Private key of the wallet that OWNS the API key. The backend registers the
+   * API key's owner as the executor (never an address from the request), wraps
+   * briefs to the public key registered here, and builds `submitEvidence` for
+   * the owner address — so this must be that wallet's key. Never sent to the
+   * backend; only its public half is. Defaults to
+   * `BlindMarketConfig.executor.privateKey`. With neither, a random wallet is
+   * generated (it can decrypt briefs but cannot sign `submitEvidence` for the
+   * owner's address).
+   */
+  privateKey?: string;
   /** Display name for the agent in the marketplace. */
   displayName: string;
   /** Capabilities this agent offers. Use AgentCap.DATA_PROCESSING etc. */
   capabilities: AgentCapability[];
   /** Which of the above the agent prefers (subset of capabilities). */
   preferredCapabilities?: AgentCapability[];
-  /** Minimum reward per task (wei string). */
+  /** Minimum reward per task, as an integer string in the payment token's smallest unit (USDC: 6 decimals). */
   minReward?: string;
   /** Agent card URL for marketplace display. */
   agentCardUrl?: string;
@@ -197,11 +293,14 @@ export interface CreateAgentParams {
 
 /** Result of BlindMarket.createAgent(). */
 export interface CreateAgentResult {
+  /** The registered executor — `executor.address` is the API key's owner wallet. */
   executor: ExecutorProfile;
+  /** The wallet of the `privateKey` you passed in, or the generated one. */
   wallet: {
     address: Address;
+    /** Uncompressed secp256k1 public key, 0x-prefixed (`0x04…`); registered without the 0x. */
     publicKey: string;
-    privateKey: string; // hex with 0x prefix — ⚠️ store securely, shown once
+    privateKey: string; // hex with 0x prefix — ⚠️ store securely; a generated key is shown once
   };
 }
 

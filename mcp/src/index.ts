@@ -39,33 +39,47 @@ const server = new McpServer({
   version: pkgVersion,
 });
 
-// Register all marketplace tools
-registerMarketTools(server, bb);
-
 // Tier-2 spending tools: local wallet + local encryption — trust-preserving
 // rent/post through the CURRENT encrypted flow (see rent.ts). Registered even
 // without a wallet so tools/list is stable; spends fail cleanly with NO_WALLET.
 const walletCtx = loadWallet();
+
+// Register all marketplace tools
+registerMarketTools(server, bb, walletCtx);
+
 // rent.ts owns settlement discovery (which chain escrow settles on, and so
 // whether the local wallet or the Privy relay pays); wallet_status reports it.
 const { settlement } = registerRentTools(server, cfg, walletCtx);
 registerWalletTools(server, walletCtx, settlement);
 
-// Executor runtime tools (runtime_start/stop/…) are GATED OFF by default:
-// the SDK WorkerRuntime they wrap predates the current backend shapes — it
-// mis-parses the accept response's wrappedKey (string, not record), fetches
-// the blob by taskHash instead of rootHash, and never signs submitEvidence
-// (onlyWorker on-chain), so its work could never settle. Set
-// BLINDMARKET_EXPERIMENTAL_RUNTIME=true to register them anyway. To EARN on
-// BlindMarket today, deploy a platform agent (it runs the maintained
-// backend/agents/worker.js) and operate it via the remote MCP endpoint's
-// start_agent/stop_agent tools.
+// Executor runtime tools (runtime_start/stop/…) are GATED OFF by default.
+// The three bugs this gate used to cite (wrappedKey parsed as a record, blob
+// fetched by taskHash, submitEvidence never signed) were fixed long ago; what
+// actually kept the SDK WorkerRuntime from ever completing a task was that it
+// registered a compressed pubkey from a random wallet (rejected — and the
+// executor is the API key's owner anyway), read GET /a2a/tasks entries as flat
+// states instead of { meta, state } so it skipped every task, and waited for
+// an 'assigned' status that does not exist instead of calling /accept. Those
+// are fixed too, but only against stubbed backends — the loop has NOT been run
+// end to end against a live one, and it signs locally (no Privy relay), so on
+// Base the owner wallet needs its own key here plus ETH for gas. Hence still
+// opt-in: BLINDMARKET_EXPERIMENTAL_RUNTIME=true, with BLINDMARKET_PRIVATE_KEY
+// (the API key owner's) and an RPC for the settlement chain. The maintained
+// path to EARN is a platform agent (backend/agents/worker.js) operated via the
+// remote MCP endpoint's start_agent/stop_agent tools; one-off tasks go through
+// accept_task → fetch_brief → complete_task.
 const RUNTIME_TOOLS_ENABLED = process.env.BLINDMARKET_EXPERIMENTAL_RUNTIME === 'true';
 
 // Register executor runtime tools (reads env config for the runtime)
 const runtimeCfg = {
   apiKey: cfg.apiKey,
   apiBase: cfg.apiBase,
+  // The executor IS the API key's owner wallet; the runtime decrypts and signs
+  // with this key and refuses to start if it is not the owner's.
+  privateKey: walletCtx?.wallet.privateKey,
+  // The 0G RPC is the one the local wallet was loaded with (the SDK has no
+  // fallback RPC); Base is declared only when explicitly configured.
+  rpcUrls: { '0g': walletCtx?.rpcUrl, base: process.env.BLINDMARKET_BASE_RPC_URL },
   displayName: process.env.BLINDMARKET_EXECUTOR_NAME ?? 'MCP Executor',
   capabilities: parseCapabilities(process.env.BLINDMARKET_EXECUTOR_CAPABILITIES),
   minReward: process.env.BLINDMARKET_EXECUTOR_MIN_REWARD,
@@ -86,7 +100,7 @@ const runtimeCfg = {
 
 const runtime = RUNTIME_TOOLS_ENABLED ? registerRuntimeTools(server, runtimeCfg).runtime : null;
 if (RUNTIME_TOOLS_ENABLED) {
-  console.error('[blindmarket-mcp] ⚠️  experimental runtime tools ENABLED — the underlying WorkerRuntime is stale vs the current backend (broken wrappedKey parse, blob fetch by taskHash, unsigned submitEvidence). Expect tasks to fail to settle.');
+  console.error('[blindmarket-mcp] ⚠️  experimental runtime tools ENABLED — the WorkerRuntime accept/deliver loop is verified against stubbed backends only, signs submitEvidence locally with BLINDMARKET_PRIVATE_KEY (must be the API key owner), and an accept assigns on-chain irrevocably. Watch runtime_status.');
 }
 
 // ── Transport ────────────────────────────────────────────────────────────────
