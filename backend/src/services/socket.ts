@@ -151,6 +151,13 @@ export const rooms = {
   task:     (id: string | number, event: string, data: unknown) => emit(`task:${id}`, event, data),
 };
 
+/** Whether any socket on this process sits in the agent's offer room — i.e.
+ *  whether a `task:offer` emitted now would reach anyone. */
+export function hasAgentSocket(agentAddress: string): boolean {
+  const room = io?.sockets.adapter.rooms.get(`agent:${agentAddress.toLowerCase()}`);
+  return !!room && room.size > 0;
+}
+
 /**
  * Emit a scored offer to a specific agent.
  * The agent's WS client should join room `agent:<address>` at connect time.

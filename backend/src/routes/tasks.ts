@@ -273,10 +273,50 @@ tasksRouter.get('/:id', optionalAuth, async (req: AuthRequest, res, next) => {
  * POST /api/v1/tasks
  * Build unsigned createTask transaction for frontend to sign.
  */
+// Mirror of AUTO_CHECK_KEYS / hasAutoCheck in routes/a2a.ts (POST
+// /a2a/tasks/index) — keep the two identical. The index route refuses these
+// modes too, but by then the escrow is already funded; refusing here stops
+// the poster before they sign.
+const AUTO_CHECK_KEYS = [
+  'min_length',
+  'contains_keywords',
+  'required_fields',
+  'expected_schema',
+  'regex_pattern',
+  'rubric',
+  'forbidden_phrases',
+  'expected_answer',
+] as const;
+
+function hasAutoCheck(criteria: z.infer<typeof createTaskSchema>['verificationCriteria']): boolean {
+  if (!criteria) return false;
+  return AUTO_CHECK_KEYS.some((k) => {
+    const v = criteria[k];
+    if (v === undefined || v === null) return false;
+    if (Array.isArray(v) || typeof v === 'string') return v.length > 0;
+    return true;
+  });
+}
+
 tasksRouter.post('/', requireAuth, async (req: AuthRequest, res, next) => {
   try {
     const data = createTaskSchema.parse(req.body);
     const from = req.user!.address;
+
+    if (data.verificationMode === 'oracle') {
+      throw new AppError(
+        400,
+        'VERIFICATION_MODE_UNSUPPORTED',
+        "verificationMode='oracle' is not supported — use 'manual', 'auto' or 'agent'",
+      );
+    }
+    if (data.verificationMode === 'auto' && !hasAutoCheck(data.verificationCriteria)) {
+      throw new AppError(
+        400,
+        'AUTO_CRITERIA_REQUIRED',
+        `verificationMode='auto' requires verificationCriteria with at least one of: ${AUTO_CHECK_KEYS.join(', ')}`,
+      );
+    }
 
     const amountBigInt = BigInt(data.amount);
     const isNative = data.token === '0x0000000000000000000000000000000000000000';
@@ -624,7 +664,7 @@ tasksRouter.post('/:id/confirm-tx', requireAuth, async (req: AuthRequest, res, n
     }
 
     const escAddr = (await esc.getAddress()).toLowerCase();
-    let settled = false;
+    let settled: 'cancelled' | 'expired' | null = null;
     for (const log of receipt.logs) {
       if (log.address.toLowerCase() !== escAddr) continue;
       let parsed: { name: string; args: unknown } | null = null;
@@ -637,7 +677,7 @@ tasksRouter.post('/:id/confirm-tx', requireAuth, async (req: AuthRequest, res, n
       const args = parsed.args as Record<string, unknown>;
       if (args.taskId !== BigInt(taskId)) continue;
       if (parsed.name === 'TaskCancelled' || parsed.name === 'DeadlineExpired') {
-        settled = true;
+        settled = parsed.name === 'TaskCancelled' ? 'cancelled' : 'expired';
         break;
       }
     }
@@ -647,6 +687,29 @@ tasksRouter.post('/:id/confirm-tx', requireAuth, async (req: AuthRequest, res, n
         'NO_SETTLEMENT_EVENT',
         'Receipt carries no TaskCancelled / DeadlineExpired for this task from the escrow — nothing to confirm',
       );
+    }
+
+    // The escrow is gone — close the off-chain A2A state too, whatever live
+    // status it is in. Left open it keeps listing in a2a:open; left
+    // accepted/submitted/awaiting_verification it keeps feeding worker resume
+    // loops and the verifier queue. CAS, so a terminal state is never
+    // rewritten. Best-effort: the refund confirmation below must not depend on
+    // Redis, and a repeat confirm-tx retries the close.
+    try {
+      const onChain = await escrowService.getTaskOn(chain, taskId);
+      const taskHash = onChain.taskHash;
+      if (taskHash && (await a2aStore.getState(taskHash))) {
+        const closed = await a2aStore.tryCloseOnChainTerminal(taskHash, settled);
+        if (closed.ok) {
+          await Promise.all([
+            a2aStore.clearOffer(taskHash).catch(() => {}),
+            a2aStore.clearCascade(taskHash).catch(() => {}),
+          ]);
+          console.log(`[tasks] confirm-tx: closed A2A state for task ${taskId} (${closed.previousStatus} → failed/${settled})`);
+        }
+      }
+    } catch (closeErr) {
+      console.warn(`[tasks] confirm-tx: could not close A2A state for task ${taskId}:`, (closeErr as Error).message);
     }
 
     const { confirmed } = await accountingService.confirmPendingTransactions(String(taskId), ['refund']);

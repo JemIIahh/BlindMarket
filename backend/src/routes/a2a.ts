@@ -5,7 +5,7 @@ import { createUserRateLimiter } from '../middleware/rateLimit.js';
 import { AppError } from '../middleware/errorHandler.js';
 import * as agentStore from '../services/agentStore.js';
 import * as a2aStore from '../services/a2aStore.js';
-import { loadAgentBySmartAccount } from '../services/deployedAgentStore.js';
+import { loadAgentBySmartAccount, loadAgentByWallet } from '../services/deployedAgentStore.js';
 import * as bidsStore from '../services/bidsStore.js';
 import * as keyCustody from '../services/keyCustodyService.js';
 import { autoVerify } from '../services/autoVerify.js';
@@ -21,10 +21,11 @@ import * as semanticMatch from '../services/semanticMatch.js';
 import { demandFeed, MAX_DEMAND_LIMIT } from '../services/demandFeed.js';
 import { provider, escrow, baseProvider, baseEscrow } from '../services/chain.js';
 import { ethers } from 'ethers';
-import type { AuthRequest, ApiResponse, AgentCapability } from '../types.js';
+import type { AuthRequest, ApiResponse, AgentCapability, A2ATaskMeta } from '../types.js';
 import { AGENT_CAPABILITIES } from '../types.js';
 import { rankAgents, pickExplorationAgent } from '../services/agentScorer.js';
-import { emitTaskOffer, emitTaskAvailable } from '../services/socket.js';
+import { emitTaskOffer, emitTaskAvailable, hasAgentSocket } from '../services/socket.js';
+import { isAlive } from '../services/redis.js';
 import { EXPIRY_GRACE_SEC } from '../constants.js';
 import { config } from '../config.js';
 import * as serviceStore from '../services/serviceStore.js';
@@ -366,6 +367,9 @@ a2aRouter.get('/tasks', async (req, res, next) => {
   }
 });
 
+const ASSIGNMENT_PENDING_MESSAGE =
+  'On-chain assignment is still confirming. The task stays assigned to you — retry /accept shortly to confirm it.';
+
 /**
  * POST /api/v1/a2a/tasks/:id/accept
  * Accept a task (capability match + reputation gate).
@@ -513,6 +517,9 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
           throw new AppError(409, 'TASK_EXPIRED', 'Task is no longer available on-chain.');
         }
         await a2aStore.logAcceptAttempt(taskId, address, 'error');
+        if (reSettleResult.pending) {
+          throw new AppError(503, 'ASSIGNMENT_PENDING', ASSIGNMENT_PENDING_MESSAGE);
+        }
         throw new AppError(503, 'SETTLEMENT_FAILED', `On-chain assignment re-check failed: ${reSettleResult.error}.`);
       }
       const currentMeta = await a2aStore.getMeta(taskId);
@@ -569,6 +576,7 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
         // Un-assign so another (or the same) agent can retry; do NOT settle on chain.
         try {
           await a2aStore.releaseToOpen(taskId);
+          announceReopened(taskId, meta);
         } catch (relErr) {
           console.error(`[a2a] accept: releaseToOpen after rewrap failure also failed for ${taskId}:`, (relErr as Error).message);
         }
@@ -670,9 +678,21 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
         }
         throw new AppError(409, 'ASSIGNED_ELSEWHERE', 'Task is already assigned on-chain to a different executor');
       }
+      // Assign tx broadcast but unconfirmed: it may still mine, so re-listing
+      // here could hand the task to a second agent. Stay 'accepted' — the
+      // caller's retry confirms via the idempotent branch above, and the expiry
+      // sweep releases it if the tx was dropped.
+      if (settleResult.pending) {
+        console.warn(`[a2a] accept: assignment for ${taskId} still confirming (tx=${settleResult.txHash}) — not releasing`);
+        await a2aStore.logAcceptAttempt(taskId, address, 'error');
+        throw new AppError(503, 'ASSIGNMENT_PENDING', ASSIGNMENT_PENDING_MESSAGE);
+      }
       console.error(`[a2a] accept: settlement failed for ${taskId}: ${settleResult.error}`);
       // Release task back to open so another agent can retry.
-      try { await a2aStore.releaseToOpen(taskId); } catch { /* best-effort */ }
+      try {
+        await a2aStore.releaseToOpen(taskId);
+        announceReopened(taskId, meta);
+      } catch { /* best-effort */ }
       throw new AppError(503, 'SETTLEMENT_FAILED', `On-chain assignment failed: ${settleResult.error}. Task released — another agent may retry.`);
     }
 
@@ -945,6 +965,12 @@ function broadcastMeta(requiredCaps: string[], chain?: TaskChain): Record<string
   };
 }
 
+/** A task that went back to `open` is announced like a fresh broadcast —
+ *  otherwise connected agents only rediscover it on their next reconnect. */
+function announceReopened(taskId: string, meta: A2ATaskMeta): void {
+  emitTaskAvailable(taskId, broadcastMeta(meta.requiredCapabilities ?? [], meta.chain));
+}
+
 /**
  * Advance the cascade to the next ranked agent after the per-position offer
  * window expires. If the task has already been accepted (status !== open) or
@@ -1030,7 +1056,34 @@ async function rankedEntries(
       console.warn(`[a2a] tag-remainder append failed for ${taskHash.slice(0, 10)}…:`, (err as Error).message);
     }
   }
-  return { entries, semantic: !!semantic };
+  return { entries: await liveCascadeEntries(entries), semantic: !!semantic };
+}
+
+const CASCADE_MAX_POSITIONS = Math.max(1, Number(process.env.CASCADE_MAX_POSITIONS) || 8);
+
+/** An exclusive offer only helps if someone is there to take it: the agent
+ *  holds a socket in its offer room, or its hosted worker is heartbeating
+ *  (heartbeats are keyed by deployed-agent id, not wallet). A failed check
+ *  counts as not live — the task still reaches everyone via broadcast. */
+async function isLiveAgent(address: string): Promise<boolean> {
+  if (hasAgentSocket(address)) return true;
+  try {
+    const deployed = await loadAgentByWallet(address);
+    return !!deployed && (await isAlive(deployed.id));
+  } catch {
+    return false;
+  }
+}
+
+/** Ranked order preserved; dead agents dropped; queue capped so a long
+ *  registry cannot hold a task behind minutes of back-to-back offer windows. */
+export async function liveCascadeEntries(entries: a2aStore.CascadeEntry[]): Promise<a2aStore.CascadeEntry[]> {
+  const live: a2aStore.CascadeEntry[] = [];
+  for (const entry of entries) {
+    if (live.length >= CASCADE_MAX_POSITIONS) break;
+    if (await isLiveAgent(entry.address)) live.push(entry);
+  }
+  return live;
 }
 
 async function startRankedCascade(
@@ -1078,11 +1131,50 @@ async function startRankedCascade(
   }
 }
 
+export const AUTO_CHECK_KEYS = [
+  'min_length',
+  'contains_keywords',
+  'required_fields',
+  'expected_schema',
+  'regex_pattern',
+  'rubric',
+  'forbidden_phrases',
+  'expected_answer',
+] as const;
+
+export function hasAutoCheck(criteria: z.infer<typeof indexTaskSchema>['verificationCriteria']): boolean {
+  if (!criteria) return false;
+  return AUTO_CHECK_KEYS.some((k) => {
+    const v = criteria[k];
+    if (v === undefined || v === null) return false;
+    if (Array.isArray(v) || typeof v === 'string') return v.length > 0;
+    return true;
+  });
+}
+
 a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) => {
   try {
     const data = indexTaskSchema.parse(req.body);
     const address = req.user!.address;
     const taskHash = data.taskHash.toLowerCase();
+
+    // Refuse modes no route can settle. 'oracle' is reserved/unwired (/verify
+    // needs 'manual', /verdict needs 'agent'), and 'auto' without a positive
+    // check degrades to "any non-empty output passes".
+    if (data.verificationMode === 'oracle') {
+      throw new AppError(
+        400,
+        'VERIFICATION_MODE_UNSUPPORTED',
+        "verificationMode='oracle' is not supported — use 'manual', 'auto' or 'agent'",
+      );
+    }
+    if (data.verificationMode === 'auto' && !hasAutoCheck(data.verificationCriteria)) {
+      throw new AppError(
+        400,
+        'AUTO_CRITERIA_REQUIRED',
+        `verificationMode='auto' requires verificationCriteria with at least one of: ${AUTO_CHECK_KEYS.join(', ')}`,
+      );
+    }
 
     let onChainTaskId: string;
     let onChainTaskHash: string;
@@ -1504,8 +1596,8 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
         // Cold-start: try the exploration slot first. If a new agent is picked,
         // offer to them; if they pass or timeout, fall back to normal ranked flow.
         const agentMode = existingMeta?.agentSelectionMode ?? 'merit';
-        pickExplorationAgent(requiredCaps, agentMode, taskRewardWei).then((explorationPick) => {
-          if (explorationPick) {
+        pickExplorationAgent(requiredCaps, agentMode, taskRewardWei).then(async (explorationPick) => {
+          if (explorationPick && (await isLiveAgent(explorationPick.address))) {
             console.log(`[a2a] exploration slot: offering to new agent ${explorationPick.address} (score=${explorationPick.score})`);
             const deadline = Date.now() + a2aStore.CASCADE_OFFER_MS;
             a2aStore.setOffer(taskHash, {
@@ -1937,6 +2029,7 @@ a2aRouter.post('/tasks/:id/release', requireAuth, async (req: AuthRequest, res, 
     }
 
     await a2aStore.releaseToOpen(taskHash);
+    announceReopened(taskHash, meta);
     console.log(`[a2a] release: ${taskHash} reverted to open by ${address}`);
 
     const body: ApiResponse = {
@@ -2093,6 +2186,19 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
         503,
         'ON_CHAIN_CHECK_FAILED',
         `Could not read on-chain task before finalize: ${(err as Error).message}`,
+      );
+    }
+
+    // Retry round not on chain yet: the contract's attempt count is behind the
+    // round /submit recorded, so whatever status the chain shows belongs to a
+    // PREVIOUS round. Reconciling it here would fail the task (and dock the
+    // worker) a second time for round N-1, then wedge every route once round
+    // N mines.
+    if (state.submissionRound !== undefined && onChainTask.submissionAttempts < state.submissionRound) {
+      throw new AppError(
+        503,
+        'NOT_SUBMITTED_ON_CHAIN',
+        `SubmitEvidence for round ${state.submissionRound} not yet confirmed on-chain (status=${onChainTask.status}, attempts=${onChainTask.submissionAttempts}). Wait for the tx to confirm and retry.`,
       );
     }
 
@@ -2253,6 +2359,16 @@ a2aRouter.post('/tasks/:id/verify', requireAuth, async (req: AuthRequest, res, n
       );
     }
     const onChainTask = await escrowService.getTaskOn(ocIdChain, Number(ocId));
+
+    // Retry round not on chain yet — same gate as /finalize: a chain status
+    // from a previous round must not be reconciled as this round's outcome.
+    if (state.submissionRound !== undefined && onChainTask.submissionAttempts < state.submissionRound) {
+      throw new AppError(
+        503,
+        'NOT_SUBMITTED_ON_CHAIN',
+        `SubmitEvidence for round ${state.submissionRound} not yet confirmed on-chain (status=${onChainTask.status}, attempts=${onChainTask.submissionAttempts}). Wait for the tx to confirm and retry.`,
+      );
+    }
 
     // Reconcile path — same as /finalize: a previous verify crashed between
     // the settle confirming (status now 3/4) and the state write. Adopt the

@@ -13,6 +13,7 @@ import request from 'supertest';
 const AGENT = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const OTHER = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 const ESCROW = '0xcccccccccccccccccccccccccccccccccccccccc';
+const TASK_HASH = '0x' + 'ab'.repeat(32);
 
 vi.mock('../middleware/auth.js', () => {
   const gate = (req: any, _res: any, next: any) => {
@@ -26,7 +27,7 @@ const resolveTaskChainById = vi.fn();
 vi.mock('../services/taskChain.js', () => ({ resolveTaskChainById: (...a: unknown[]) => resolveTaskChainById(...a) }));
 
 vi.mock('../services/escrow.js', () => ({
-  getTaskOn: vi.fn(async () => ({ token: '0x0000000000000000000000000000000000000000', amount: 100n })),
+  getTaskOn: vi.fn(async () => ({ token: '0x0000000000000000000000000000000000000000', amount: 100n, taskHash: TASK_HASH })),
   buildCancelTaskOn: vi.fn(async () => ({ to: ESCROW, data: '0xcancel' })),
   buildClaimTimeoutOn: vi.fn(async () => ({ to: ESCROW, data: '0xtimeout' })),
 }));
@@ -54,7 +55,14 @@ vi.mock('../services/socket.js', () => ({
   rooms: { tasks: vi.fn(), platform: vi.fn() },
 }));
 
-vi.mock('../services/a2aStore.js', () => ({}));
+const getState = vi.fn();
+const tryCloseOnChainTerminal = vi.fn();
+vi.mock('../services/a2aStore.js', () => ({
+  getState: (...a: unknown[]) => getState(...a),
+  tryCloseOnChainTerminal: (...a: unknown[]) => tryCloseOnChainTerminal(...a),
+  clearOffer: vi.fn(async () => {}),
+  clearCascade: vi.fn(async () => {}),
+}));
 
 import { tasksRouter } from './tasks.js';
 import { globalErrorHandler } from '../middleware/errorHandler.js';
@@ -73,6 +81,8 @@ const as = (addr: string) => ({ 'x-test-address': addr });
 beforeEach(() => {
   vi.clearAllMocks();
   resolveTaskChainById.mockResolvedValue('0g');
+  getState.mockResolvedValue(undefined);
+  tryCloseOnChainTerminal.mockResolvedValue({ ok: true, previousStatus: 'open' });
 });
 
 describe('M5: build-time rows are pending, confirm flips on proof', () => {
@@ -126,5 +136,55 @@ describe('M5: build-time rows are pending, confirm flips on proof', () => {
     const res = await request(app()).post('/api/v1/tasks/7/confirm-tx')
       .set(as(OTHER)).send({ txHash: '0x' + '55'.repeat(32) });
     expect(res.status).toBe(403);
+  });
+});
+
+describe('H-04/H-07: a confirmed reclaim closes the A2A state', () => {
+  const confirm = (hash: string) =>
+    request(app()).post('/api/v1/tasks/7/confirm-tx').set(as(AGENT)).send({ txHash: '0x' + hash.repeat(32) });
+
+  it('closes as cancelled on TaskCancelled', async () => {
+    getState.mockResolvedValue({ taskId: TASK_HASH, status: 'open' });
+    getReceipt.mockResolvedValue({ status: 1, logs: [{ address: ESCROW }] });
+    parseLog.mockReturnValue({ name: 'TaskCancelled', args: { taskId: 7n } });
+    const res = await confirm('61');
+    expect(res.status).toBe(200);
+    expect(tryCloseOnChainTerminal).toHaveBeenCalledWith(TASK_HASH, 'cancelled');
+  });
+
+  it('closes an in-flight task as expired on DeadlineExpired', async () => {
+    getState.mockResolvedValue({ taskId: TASK_HASH, status: 'awaiting_verification' });
+    getReceipt.mockResolvedValue({ status: 1, logs: [{ address: ESCROW }] });
+    parseLog.mockReturnValue({ name: 'DeadlineExpired', args: { taskId: 7n } });
+    const res = await confirm('62');
+    expect(res.status).toBe(200);
+    expect(tryCloseOnChainTerminal).toHaveBeenCalledWith(TASK_HASH, 'expired');
+  });
+
+  it('never closes on an unproven tx', async () => {
+    getState.mockResolvedValue({ taskId: TASK_HASH, status: 'open' });
+    getReceipt.mockResolvedValue(null);
+    expect((await confirm('63')).status).toBe(409);
+    getReceipt.mockResolvedValue({ status: 1, logs: [{ address: OTHER }] });
+    expect((await confirm('64')).status).toBe(409);
+    expect(tryCloseOnChainTerminal).not.toHaveBeenCalled();
+  });
+
+  it('skips tasks with no A2A state and still confirms the refund', async () => {
+    getReceipt.mockResolvedValue({ status: 1, logs: [{ address: ESCROW }] });
+    parseLog.mockReturnValue({ name: 'TaskCancelled', args: { taskId: 7n } });
+    const res = await confirm('65');
+    expect(res.status).toBe(200);
+    expect(tryCloseOnChainTerminal).not.toHaveBeenCalled();
+  });
+
+  it('a failing close does not block the refund confirmation', async () => {
+    getState.mockResolvedValue({ taskId: TASK_HASH, status: 'accepted' });
+    tryCloseOnChainTerminal.mockRejectedValue(new Error('redis down'));
+    getReceipt.mockResolvedValue({ status: 1, logs: [{ address: ESCROW }] });
+    parseLog.mockReturnValue({ name: 'TaskCancelled', args: { taskId: 7n } });
+    const res = await confirm('66');
+    expect(res.status).toBe(200);
+    expect(accountingService.confirmPendingTransactions).toHaveBeenCalledWith('7', ['refund']);
   });
 });
