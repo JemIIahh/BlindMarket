@@ -35,12 +35,16 @@ const ESCROW_READ_ABI = [
 
 const ZERO_TOKEN = '0x0000000000000000000000000000000000000000';
 const GAS_LIMIT = 1000000n; // matches the canonical rent script
-// Auto-verify releases the payment, so the bar can't be "one character":
-// min_length is a hard floor in the backend's autoVerify. MUST match the web
-// app's RENTAL_VERIFICATION_CRITERIA (frontend/src/components/UseServiceModal.tsx)
-// so a rental is judged the same whichever client paid for it. The index route
-// also rejects 'auto' with no real criterion (400 AUTO_CRITERIA_REQUIRED).
-const RENTAL_VERIFICATION_CRITERIA = { min_length: 40 };
+// Auto-verify releases the payment, so the bar can't be "one character" — but
+// 40 made a correct 30-character URL unpayable. 20 is the platform floor
+// (DEFAULT_MIN_CONTENT_CHARS in the backend's autoVerify, where min_length is a
+// hard floor). Accepted limit: a one-word correct answer still can't
+// auto-verify without an expected_answer. MUST match the web app's
+// RENTAL_VERIFICATION_CRITERIA (frontend/src/components/UseServiceModal.tsx and
+// UseFromAgentModal.tsx) so a rental is judged the same whichever client paid
+// for it. The index route also rejects 'auto' with no real criterion (400
+// AUTO_CRITERIA_REQUIRED).
+const RENTAL_VERIFICATION_CRITERIA = { min_length: 20 };
 
 function ok(data: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };

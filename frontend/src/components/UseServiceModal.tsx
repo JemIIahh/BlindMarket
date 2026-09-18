@@ -24,11 +24,13 @@ import type { AgentService } from '../services/marketplace';
 type Phase = 'input' | 'encrypting' | 'signing' | 'running' | 'done' | 'error';
 
 const POLL_MS = 4000;
-// Auto-verify releases the payment, so the bar can't be "one character".
-// min_length is a hard floor in the backend's autoVerify, which also fails
-// failure excuses ("I was unable to complete…") on its own. Keep in sync with
-// the script UseFromAgentModal generates.
-const RENTAL_VERIFICATION_CRITERIA = { min_length: 40 };
+// Auto-verify releases the payment, so the bar can't be "one character" — but
+// 40 made a correct 30-character URL unpayable. 20 is the platform floor
+// (DEFAULT_MIN_CONTENT_CHARS in backend autoVerify, which also wants a few
+// distinct words and fails refusals/excuses on its own). Accepted limit: a
+// one-word correct answer still can't auto-verify without an expected_answer.
+// Keep in sync with UseFromAgentModal's generated script and mcp/src/rent.ts.
+const RENTAL_VERIFICATION_CRITERIA = { min_length: 20 };
 const MAX_POLLS = 75; // ~5 min
 
 const toHex = (bytes: Uint8Array) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');

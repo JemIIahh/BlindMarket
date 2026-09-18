@@ -32,6 +32,7 @@ import * as serviceStore from '../services/serviceStore.js';
 import { consumePendingCost } from '../services/railwaySandbox.js';
 import * as accountingService from '../services/accountingService.js';
 import { normalizeSettlementAmount } from '../services/settlementUnits.js';
+import { isSafeRegexSource } from '../services/rubricEngine.js';
 
 export const a2aRouter = Router();
 
@@ -1138,18 +1139,32 @@ export const AUTO_CHECK_KEYS = [
   'expected_schema',
   'regex_pattern',
   'rubric',
-  'forbidden_phrases',
   'expected_answer',
 ] as const;
 
+// A criterion counts only if it can actually fail junk. forbidden_phrases
+// alone cannot (junk simply omits the phrases — so it is not in the list
+// above), nor can min_length: 0, blank strings, empty lists, a schema with
+// neither type:'object' nor required keys, or a rubric item with no keywords
+// (it scores a flat 0.5). An uncompilable regex_pattern is no check either;
+// autoVerify fails closed on one rather than paying.
 export function hasAutoCheck(criteria: z.infer<typeof indexTaskSchema>['verificationCriteria']): boolean {
   if (!criteria) return false;
-  return AUTO_CHECK_KEYS.some((k) => {
-    const v = criteria[k];
-    if (v === undefined || v === null) return false;
-    if (Array.isArray(v) || typeof v === 'string') return v.length > 0;
-    return true;
-  });
+  const anyText = (v?: string[]) => Array.isArray(v) && v.some((s) => typeof s === 'string' && s.trim().length > 0);
+  if (typeof criteria.min_length === 'number' && criteria.min_length > 0) return true;
+  if (anyText(criteria.contains_keywords) || anyText(criteria.required_fields)) return true;
+  if (typeof criteria.expected_answer === 'string' && criteria.expected_answer.trim().length > 0) return true;
+  if (criteria.expected_schema && (criteria.expected_schema.type === 'object' || anyText(criteria.expected_schema.required))) return true;
+  if (criteria.rubric?.some((item) => anyText(item.keywords))) return true;
+  if (typeof criteria.regex_pattern === 'string' && criteria.regex_pattern.trim().length > 0) {
+    try {
+      new RegExp(criteria.regex_pattern);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) => {
@@ -1174,6 +1189,27 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
         'AUTO_CRITERIA_REQUIRED',
         `verificationMode='auto' requires verificationCriteria with at least one of: ${AUTO_CHECK_KEYS.join(', ')}`,
       );
+    }
+    // An auto task whose regex cannot run can never pass: autoVerify fails
+    // closed on a pattern that does not compile or is prone to catastrophic
+    // backtracking. Say so now, before the poster funds or lists it.
+    if (data.verificationMode === 'auto' && typeof data.verificationCriteria?.regex_pattern === 'string') {
+      const pattern = data.verificationCriteria.regex_pattern;
+      let usable = isSafeRegexSource(pattern);
+      if (usable) {
+        try {
+          new RegExp(pattern);
+        } catch {
+          usable = false;
+        }
+      }
+      if (!usable) {
+        throw new AppError(
+          400,
+          'REGEX_PATTERN_UNUSABLE',
+          'verificationCriteria.regex_pattern does not compile or can backtrack catastrophically (nested or stacked quantifiers) — simplify it',
+        );
+      }
     }
 
     let onChainTaskId: string;

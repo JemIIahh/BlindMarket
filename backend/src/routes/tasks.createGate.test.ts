@@ -90,6 +90,21 @@ describe('POST /tasks verification-mode gate', () => {
     expect(buildCreateTask).toHaveBeenCalled();
   });
 
+  it.each([
+    ['nested quantifier', '(a+)+$'],
+    ['does not compile', '(['],
+  ])("refuses 'auto' with a regex_pattern that cannot run (%s)", async (_label, regex_pattern) => {
+    const res = await create({ verificationMode: 'auto', verificationCriteria: { min_length: 40, regex_pattern } });
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('REGEX_PATTERN_UNUSABLE');
+    expect(buildCreateTask).not.toHaveBeenCalled();
+  });
+
+  it("lets 'auto' through with a plain regex_pattern", async () => {
+    const res = await create({ verificationMode: 'auto', verificationCriteria: { regex_pattern: '^\\d{4}-\\d{2}$' } });
+    expect(res.status).toBe(200);
+  });
+
   it('does not gate manual or unspecified modes', async () => {
     expect((await create({ verificationMode: 'manual' })).status).toBe(200);
     expect((await create({})).status).toBe(200);

@@ -36,10 +36,13 @@ import type { AgentService } from '../services/marketplace';
 
 type CopyTab = 'prompt' | 'script';
 
-// Same bar UseServiceModal sends for an in-app "Use now": min_length is a hard
-// floor in the backend's autoVerify, which also fails failure excuses on its
-// own. Interpolated into the generated script so the two can't drift.
-const RENTAL_VERIFICATION_CRITERIA = { min_length: 40 };
+// Same bar UseServiceModal sends for an in-app "Use now" (and mcp/src/rent.ts):
+// the platform floor of 20 — 40 made a correct 30-character URL unpayable. The
+// backend's autoVerify also wants a few distinct words and fails
+// refusals/excuses on its own. Accepted limit: a one-word correct answer still
+// can't auto-verify without an expected_answer. Interpolated into the generated
+// script so the two can't drift.
+const RENTAL_VERIFICATION_CRITERIA = { min_length: 20 };
 
 /**
  * The chain the escrow is funded on: Base (USDC) whenever a Base escrow is

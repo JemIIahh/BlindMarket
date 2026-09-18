@@ -167,7 +167,8 @@ describe('autoVerify — hard gates', () => {
   });
 
   it('scores keyword echo 0 and says why', () => {
-    const result = autoVerify({ output: 'revenue churn revenue churn' }, { contains_keywords: ['revenue', 'churn'] });
+    // Four distinct words: a two-word echo now dies earlier, on the variety floor.
+    const result = autoVerify({ output: 'revenue churn and revenue churn again' }, { contains_keywords: ['revenue', 'churn'] });
     expect(result.passed).toBe(false);
     expect(result.reasons.join(' ')).toMatch(/besides the keywords/);
   });
