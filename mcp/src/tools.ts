@@ -101,6 +101,13 @@ export function registerMarketTools(server: McpServer, bb: BlindMarket, walletCt
       if (!walletCtx) {
         return { isError: true, content: [{ type: 'text', text: JSON.stringify({ success: false, error: { code: 'NO_WALLET', message: 'create_agent derives the executor public key from BLINDMARKET_PRIVATE_KEY — set it to the key of the wallet that owns BLINDMARKET_API_KEY.' } }) }] };
       }
+      // SDKs before the release that added deliverResult() ignore `privateKey`
+      // and register a freshly generated wallet instead — a key nobody holds,
+      // so every brief wrapped to it is lost. package.json cannot require that
+      // release until it is on npm, so refuse here, before anything is registered.
+      if (typeof (bb as { deliverResult?: unknown }).deliverResult !== 'function') {
+        return { isError: true, content: [{ type: 'text', text: JSON.stringify({ success: false, error: { code: 'SDK_TOO_OLD', message: 'The installed @blindmarket/sdk ignores the wallet key passed to createAgent. Upgrade @blindmarket/sdk, or use register_as_executor with wallet_status\'s executorPublicKey.' } }) }] };
+      }
       const { executor, wallet } = await bb.createAgent({
         privateKey: walletCtx.wallet.privateKey,
         displayName,
