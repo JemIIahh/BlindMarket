@@ -1,4 +1,5 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react';
+import * as Sentry from '@sentry/react';
 
 interface Props { children: ReactNode }
 interface State { error: Error | null }
@@ -10,8 +11,9 @@ interface State { error: Error | null }
  * WebGL. This catches the throw, keeps the shell alive, and shows a recoverable
  * fallback instead of a white screen.
  *
- * componentDidCatch logs to the console with the component stack — first-line
- * frontend telemetry; a backend capture endpoint can be wired here later.
+ * componentDidCatch logs to the console with the component stack and reports
+ * to Sentry: React only console.errors an error a boundary catches, so it never
+ * reaches Sentry's global handlers. A no-op until main.tsx inits Sentry.
  */
 export class ErrorBoundary extends Component<Props, State> {
   state: State = { error: null };
@@ -22,6 +24,7 @@ export class ErrorBoundary extends Component<Props, State> {
 
   componentDidCatch(error: Error, info: ErrorInfo) {
     console.error('[ErrorBoundary] uncaught render error:', error, info.componentStack);
+    Sentry.captureException(error, { contexts: { react: { componentStack: info.componentStack } } });
   }
 
   private handleReload = () => {

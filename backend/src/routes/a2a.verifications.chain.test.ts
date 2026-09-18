@@ -26,6 +26,7 @@ vi.mock('../services/a2aStore.js', () => ({
   tryAccept: vi.fn(),
   mergeWrappedKeys: vi.fn(),
   releaseToOpen: vi.fn(),
+  tryReleaseAccepted: vi.fn(() => Promise.resolve({ ok: true })),
   setMeta: vi.fn(),
   getState: vi.fn(),
   updateState: vi.fn(),

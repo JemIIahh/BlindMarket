@@ -4,7 +4,7 @@ import { networks, resolveNetwork, type Network } from '../src/network/index.js'
 
 describe('networks', () => {
   it('testnet preset matches 0G Galileo', () => {
-    expect(networks.testnet.chainId).toBe(16602n);
+    expect(networks.testnet.chainId).toBe(16602);
     expect(networks.testnet.contracts.escrow).toMatch(/^0x[a-fA-F0-9]{40}$/);
     expect(networks.testnet.contracts.registry).toMatch(/^0x[a-fA-F0-9]{40}$/);
     expect(networks.testnet.contracts.reputation).toMatch(/^0x[a-fA-F0-9]{40}$/);
@@ -23,7 +23,7 @@ describe('networks', () => {
 
   it('resolveNetwork accepts a preset name', () => {
     const n = resolveNetwork('testnet');
-    expect(n.chainId).toBe(16602n);
+    expect(n.chainId).toBe(16602);
     expect(n.name).toBe('0g-galileo-testnet');
   });
 

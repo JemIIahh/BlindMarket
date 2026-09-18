@@ -38,6 +38,7 @@ vi.mock('../services/a2aStore.js', () => ({
   tryAccept: vi.fn(),
   mergeWrappedKeys: vi.fn(),
   releaseToOpen: vi.fn(),
+  tryReleaseAccepted: vi.fn(() => Promise.resolve({ ok: true })),
   setMeta: vi.fn(),
   getState: vi.fn(),
   updateState: vi.fn(),
@@ -101,6 +102,13 @@ vi.mock('../services/accountingService.js', () => ({}));
 vi.mock('../services/reputation.js', () => ({}));
 vi.mock('../services/reputationDecay.js', () => ({}));
 vi.mock('../services/bidsStore.js', () => ({}));
+// Observed, not just silenced: a re-opened task is announced on the tasks room,
+// and a lost compare-and-set release must NOT be.
+vi.mock('../services/socket.js', () => ({
+  emitTaskOffer: vi.fn(),
+  emitTaskAvailable: vi.fn(),
+  hasAgentSocket: vi.fn(() => false),
+}));
 
 import { a2aRouter } from './a2a.js';
 import { globalErrorHandler } from '../middleware/errorHandler.js';
@@ -108,6 +116,7 @@ import * as a2aStore from '../services/a2aStore.js';
 import * as agentStore from '../services/agentStore.js';
 import * as keyCustody from '../services/keyCustodyService.js';
 import { settleAssignment } from '../services/a2aSettlement.js';
+import { emitTaskAvailable } from '../services/socket.js';
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -235,8 +244,32 @@ describe('POST /accept — key custody', () => {
 
     expect(res.status).toBe(503);
     expect(res.body.error.code).toBe('REWRAP_FAILED');
-    expect(a2aStore.releaseToOpen).toHaveBeenCalledWith(TASK);
+    // Compare-and-set against the acceptance this request just won: this
+    // executor, no assign tx yet. Never the unconditional releaseToOpen.
+    expect(a2aStore.tryReleaseAccepted).toHaveBeenCalledWith(TASK, { executorAddress: AGENT });
+    expect(a2aStore.releaseToOpen).not.toHaveBeenCalled();
+    expect(emitTaskAvailable).toHaveBeenCalledTimes(1);
+    expect(res.body.error.message).toContain('released');
     expect(settleAssignment).not.toHaveBeenCalled(); // no undecryptable worker on chain
+  });
+
+  it('5b) re-wrap failure, compare-and-set lost: not announced, not reported as released', async () => {
+    const svc = custody('reslice', /* fail */ true);
+    vi.mocked(keyCustody.getKeyCustodyService).mockReturnValue(svc as any);
+    vi.mocked(a2aStore.getMeta).mockResolvedValue(
+      meta({ rootHash: ROOT, wrappedKeys: {}, keyCustodyBlob: { keyId: 'kid', blob: 'abcd' } }) as any,
+    );
+    vi.mocked(a2aStore.tryAccept).mockResolvedValue({ ok: true, state: {} } as any);
+    vi.mocked(a2aStore.tryReleaseAccepted).mockResolvedValueOnce({ ok: false, currentStatus: 'submitted' });
+
+    const res = await accept();
+
+    expect(res.status).toBe(503);
+    expect(res.body.error.code).toBe('REWRAP_FAILED');
+    expect(res.body.error.message).not.toContain('released');
+    expect(emitTaskAvailable).not.toHaveBeenCalled();
+    expect(a2aStore.releaseToOpen).not.toHaveBeenCalled();
+    expect(settleAssignment).not.toHaveBeenCalled();
   });
 
   it('keyless agent cannot self-heal: 403 NEEDS_WRAP before the CAS', async () => {

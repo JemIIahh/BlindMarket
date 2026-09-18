@@ -377,6 +377,74 @@ export async function tryExpire(
 }
 
 /**
+ * Atomic close for a task whose escrow the chain reports as gone (poster ran
+ * cancelTask / claimTimeout). Unlike tryExpire this closes ANY live status —
+ * an accepted/submitted/awaiting_verification task left as-is keeps feeding
+ * resume loops and the verifier queue for escrow that no longer exists. Still
+ * a Lua CAS: already-terminal states (verified/completed/failed) are left
+ * alone, and the status read + write are one step so a concurrent /accept or
+ * /verdict can't interleave. Caller must have confirmed the on-chain status
+ * first. The executor index is kept so the worker sees the task as failed.
+ */
+export async function tryCloseOnChainTerminal(
+  taskId: string,
+  reason: 'cancelled' | 'expired',
+): Promise<{ ok: true; previousStatus: string } | { ok: false; currentStatus: string }> {
+  const tid = taskId.toLowerCase();
+  const meta = await getMeta(taskId);
+  const lua = `
+    local stateKey = KEYS[1]
+    local openSetKey = KEYS[2]
+    local tid = ARGV[1]
+    local originalTaskId = ARGV[2]
+    local reason = ARGV[3]
+    local verifierSetKey = ARGV[4]
+
+    local raw = redis.call('GET', stateKey)
+    if not raw and originalTaskId ~= tid then
+        -- Fallback for legacy mixed-case keys
+        raw = redis.call('GET', 'a2a:state:' .. originalTaskId)
+        if raw then stateKey = 'a2a:state:' .. originalTaskId end
+    end
+
+    if not raw then return {'missing'} end
+
+    local s = cjson.decode(raw)
+    local previous = s.status
+    if previous == 'verified' or previous == 'completed' or previous == 'failed' then
+        return {'lost', previous}
+    end
+
+    s.status = 'failed'
+    s.failedReason = reason
+    redis.call('SET', stateKey, cjson.encode(s))
+    redis.call('SREM', openSetKey, tid)
+    if tid ~= originalTaskId then
+        redis.call('SREM', openSetKey, originalTaskId)
+    end
+    if verifierSetKey ~= '' then
+        redis.call('SREM', verifierSetKey, tid)
+    end
+    return {'ok', previous}
+  `;
+
+  const result = (await redis.eval(
+    lua,
+    2,
+    KEY.state(tid),
+    KEY.open,
+    tid,
+    taskId, // original taskId for fallback
+    reason,
+    meta?.verifierAddress ? KEY.verifier(meta.verifierAddress) : '',
+  )) as [string, string?];
+
+  if (result[0] === 'ok') return { ok: true, previousStatus: result[1] ?? 'unknown' };
+  if (result[0] === 'missing') return { ok: false, currentStatus: 'missing' };
+  return { ok: false, currentStatus: result[1] ?? 'unknown' };
+}
+
+/**
  * Load every task in the open index with its meta+state, unfiltered beyond the
  * defensive invariant checks. Agent-facing callers should use browseAgentTasks
  * (which additionally hides expired tasks); the expiry sweep uses this
@@ -838,6 +906,121 @@ export async function clearSettlementDeadline(taskId: string): Promise<void> {
 
 export async function getSettlementDeadlineTTL(taskId: string): Promise<number> {
   return redis.ttl(settlementDeadlineKey(taskId));
+}
+
+// Marks an accepted task whose broadcast assign tx the sweep has already
+// checked against the chain, so a long-running healthy task costs one chain
+// read, not one per tick. Side key (not the state blob) for the same reason as
+// a2a:deadline — no read-modify-write against concurrent state writers.
+const assignReconciledKey = (taskId: string) => `a2a:assign_reconciled:${taskId.toLowerCase()}`;
+const ASSIGN_RECONCILED_TTL_S = 7 * 24 * 60 * 60;
+
+export async function markAssignReconciled(taskId: string, assignTxHash: string): Promise<void> {
+  await redis.setex(assignReconciledKey(taskId), ASSIGN_RECONCILED_TTL_S, assignTxHash.toLowerCase());
+}
+
+// Keyed to the tx hash: a task released and re-accepted gets a new assign tx,
+// which must be checked afresh.
+export async function isAssignReconciled(taskId: string, assignTxHash: string): Promise<boolean> {
+  return (await redis.get(assignReconciledKey(taskId))) === assignTxHash.toLowerCase();
+}
+
+// When the CURRENT assign tx was broadcast, tied to its hash. Age must be
+// measured from here, not from acceptedAt: an idempotent re-accept re-broadcasts
+// under a new hash long after the accept, and the sweep would otherwise judge a
+// seconds-old tx "dropped". Side key for the same reason as above.
+const assignBroadcastKey = (taskId: string) => `a2a:assign_broadcast:${taskId.toLowerCase()}`;
+
+export async function markAssignBroadcast(taskId: string, assignTxHash: string, atMs: number = Date.now()): Promise<void> {
+  await redis.setex(assignBroadcastKey(taskId), ASSIGN_RECONCILED_TTL_S, `${assignTxHash.toLowerCase()}:${atMs}`);
+}
+
+/** Broadcast time (ms) of this exact tx hash, or null when unknown / recorded for another hash. */
+export async function getAssignBroadcastAt(taskId: string, assignTxHash: string): Promise<number | null> {
+  const raw = await redis.get(assignBroadcastKey(taskId));
+  if (!raw) return null;
+  const [hash, at] = raw.split(':');
+  const ms = Number(at);
+  return hash === assignTxHash.toLowerCase() && Number.isFinite(ms) && ms > 0 ? ms : null;
+}
+
+/**
+ * Compare-and-set variant of releaseToOpen for callers that decide from a
+ * stale read (the gas-liveness sweep reads state, then awaits several RPC
+ * calls). Releases only if the task is STILL `accepted` by the same executor
+ * with the same assignTxHash the caller checked (pass undefined for "no tx
+ * recorded"). Anything else — a re-accept that broadcast a new tx, a submit, a
+ * release by the accept route — means the verdict is about a state that no
+ * longer exists, and the write is skipped. One Lua step, like tryAccept.
+ */
+export async function tryReleaseAccepted(
+  taskId: string,
+  expected: {
+    executorAddress?: string;
+    assignTxHash?: string;
+    /** Status the caller read. Defaults to 'accepted'; POST /release also
+     *  rescues 'in_progress' and 'submitted' tasks and passes what it saw. */
+    status?: 'accepted' | 'in_progress' | 'submitted';
+  },
+): Promise<{ ok: true } | { ok: false; currentStatus: string }> {
+  const tid = taskId.toLowerCase();
+  const meta = await getMeta(taskId);
+  if (!meta) throw new Error(`No A2A meta for task ${taskId}`);
+  const lua = `
+    local stateKey = KEYS[1]
+    local openSetKey = KEYS[2]
+    local tid = ARGV[1]
+    local originalTaskId = ARGV[2]
+    local expectedExecutor = ARGV[3]
+    local expectedTx = ARGV[4]
+    local relist = ARGV[5]
+    local executorSetKey = ARGV[6]
+    local expectedStatus = ARGV[7]
+
+    local finalTid = tid
+    local raw = redis.call('GET', stateKey)
+    if not raw and originalTaskId ~= tid then
+        -- Fallback for legacy mixed-case keys
+        raw = redis.call('GET', 'a2a:state:' .. originalTaskId)
+        if raw then
+            stateKey = 'a2a:state:' .. originalTaskId
+            finalTid = originalTaskId
+        end
+    end
+
+    if not raw then return {'missing'} end
+
+    local s = cjson.decode(raw)
+    if s.status ~= expectedStatus then return {'lost', s.status} end
+    local executor = ''
+    if type(s.executorAddress) == 'string' then executor = string.lower(s.executorAddress) end
+    local tx = ''
+    if type(s.assignTxHash) == 'string' then tx = string.lower(s.assignTxHash) end
+    if executor ~= expectedExecutor or tx ~= expectedTx then return {'lost', s.status} end
+
+    redis.call('SET', stateKey, cjson.encode({ taskId = finalTid, status = 'open' }))
+    if relist == '1' then redis.call('SADD', openSetKey, finalTid) end
+    if executorSetKey ~= '' then redis.call('SREM', executorSetKey, finalTid) end
+    return {'ok'}
+  `;
+
+  const result = (await redis.eval(
+    lua,
+    2,
+    KEY.state(tid),
+    KEY.open,
+    tid,
+    taskId, // original taskId for fallback
+    expected.executorAddress?.toLowerCase() ?? '',
+    expected.assignTxHash?.toLowerCase() ?? '',
+    meta.targetExecutorType === 'agent' ? '1' : '0',
+    expected.executorAddress ? KEY.executor(expected.executorAddress) : '',
+    expected.status ?? 'accepted',
+  )) as [string, string?];
+
+  if (result[0] === 'ok') return { ok: true };
+  if (result[0] === 'missing') return { ok: false, currentStatus: 'missing' };
+  return { ok: false, currentStatus: result[1] ?? 'unknown' };
 }
 
 /**

@@ -17,7 +17,7 @@ const HASH = '0x' + 'ab'.repeat(32);
 const FUTURE = String(Math.floor(Date.now() / 1000) + 3600);
 const PAST = String(Math.floor(Date.now() / 1000) - 60);
 
-function harness({ status, attempts = 0, deadline = FUTURE, afterStatus = 4, verify = { passed: true, reasons: [] }, submitFrom, storageBlob, noWallet = false } = {}) {
+function harness({ status, attempts = 0, deadline = FUTURE, afterStatus = 4, verify = { passed: true, reasons: [] }, submitFrom, storageBlob, noWallet = false, stranded = false } = {}) {
   const calls = [];
   const sentTxs = [];
   // on-chain status advances: loadTask reads it before submit, waitStatus after
@@ -29,6 +29,9 @@ function harness({ status, attempts = 0, deadline = FUTURE, afterStatus = 4, ver
     calls.push({ method: init.method ?? 'GET', path });
     const json = (data) => ({ ok: true, status: 200, json: async () => ({ success: true, data }) });
     if (path.startsWith('/api/v1/tasks/')) return json(task());
+    // stranded: an earlier /submit already flipped off-chain state to 'submitted'
+    if (path.endsWith('/submit') && stranded) return { ok: false, status: 409, json: async () => ({ success: false, error: { code: 'INVALID_STATE', message: 'Cannot submit in state: submitted' } }) };
+    if (path.endsWith('/rebroadcast')) return json({ onChainTaskId: 7, evidenceHash: '0x01', chain: '0g', unsignedSubmitEvidence: { to: ESCROW, data: '0xdead', chainId: 16602 } });
     if (path.endsWith('/submit')) { return json({ onChainTaskId: 7, evidenceHash: '0x01', chain: '0g', unsignedSubmitEvidence: { to: ESCROW, data: '0xdead', chainId: 16602, ...(submitFrom ? { from: submitFrom } : {}) } }); }
     if (path.startsWith('/api/v1/storage/')) return json({ blob: (storageBlob ?? Buffer.from('plain brief')).toString('base64') });
     if (path.endsWith('/finalize')) { onChain = afterStatus; attempts += 1; return json({ status: verify.passed ? 'verified' : 'failed', verificationResult: verify }); }
@@ -73,6 +76,18 @@ describe('complete_task on 0G', () => {
     parse(await h.tools.complete_task({ task: HASH, output: 'done' }));
     assert.equal(h.sentTxs.length, 0);
     assert.ok(h.calls.some((c) => c.path.endsWith('/finalize')));
+  });
+});
+
+describe('complete_task heals a task stranded in submitted', () => {
+  test('/submit 409 INVALID_STATE while on-chain is still Assigned → /rebroadcast, sign, finalize', async () => {
+    const h = harness({ status: 1, stranded: true });
+    const out = parse(await h.tools.complete_task({ task: HASH, output: 'second try' }));
+    assert.ok(h.calls.some((c) => c.path.endsWith('/rebroadcast')), 'rebuilt the tx via /rebroadcast');
+    assert.equal(h.sentTxs.length, 1, 'broadcast the rebuilt submitEvidence');
+    assert.equal(h.sentTxs[0].to, ESCROW);
+    assert.equal(out.rebroadcast, true);
+    assert.equal(out.onChainStatus, 'Completed');
   });
 });
 
