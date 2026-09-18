@@ -5,6 +5,8 @@
  *   3. Fund paymaster with ETH from deployer
  *   4. Test: deploy a BlindAccount, send it USDC, submit a UserOp via bundler
  *
+ * Refuses Arc (5042, 5042002): it pays gas in USDC natively.
+ *
  * Writes (merges into) aa-<chain record>.json in the DEPLOYMENT_SET. On Base
  * Sepolia EXPECTED_ESCROW must name the escrow of the stack this belongs to
  * (so deploy-base.ts runs first for a new set).
@@ -16,6 +18,7 @@
 import { ethers } from "hardhat";
 import { assertSafeNetwork } from "./_guard";
 import { preflightDeploy, recordPath, writeDeployment } from "./_deployments";
+import { assertAaChain } from "./_settlement";
 
 const BASE_USDC: Record<number, string> = {
   8453:  "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
@@ -26,6 +29,12 @@ const ENTRYPOINT_V07 = "0x0000000071727De22E5E9d8BAf0edAc6f37da032";
 
 async function main() {
   await assertSafeNetwork();
+  const network = await ethers.provider.getNetwork();
+  const chainId = Number(network.chainId);
+  // Arc pays gas in USDC natively: no USDCPaymaster there, whatever
+  // BASE_USDC above ever lists. Checked before anything else is read.
+  assertAaChain(chainId);
+
   const [deployer] = await ethers.getSigners();
   console.log("Deployer:", deployer.address);
 
@@ -36,8 +45,6 @@ async function main() {
     throw new Error("Deployer has 0 ETH balance. Fund with Base Sepolia ETH.");
   }
 
-  const network = await ethers.provider.getNetwork();
-  const chainId = Number(network.chainId);
   console.log("Chain:", network.name, `(chainId: ${chainId})`);
 
   const usdcAddress = BASE_USDC[chainId];

@@ -42,6 +42,21 @@ const config: HardhatUserConfig = {
       chainId: 8453,
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
     },
+    // Arc (Circle's L1). Each network name equals its deployment file name
+    // (deployments/arc-testnet.json, arc-mainnet.json); see _deployments.ts.
+    "arc-testnet": {
+      url: process.env.ARC_TESTNET_RPC_URL || "https://rpc.testnet.arc.io",
+      chainId: 5042002,
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+    },
+    // No default RPC for Arc Mainnet: set ARC_MAINNET_RPC_URL. Unset, the
+    // empty URL still loads the config, and any run on this network stops at
+    // its first request (HH117) before sending anything.
+    "arc-mainnet": {
+      url: process.env.ARC_MAINNET_RPC_URL ?? "",
+      chainId: 5042,
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+    },
   },
 };
 

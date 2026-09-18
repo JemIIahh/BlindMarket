@@ -17,8 +17,13 @@
  * Only the DEFAULT records feed the generated modules. DEPLOYMENT_SET is
  * deliberately ignored and deployments/staging/ is never read: a staging
  * stack is configured through the backend/frontend env, never through the
- * committed defaults that production and local dev fall back to. Record
- * fields other than `contracts` (e.g. `blocks`) are ignored too.
+ * committed defaults that production and local dev fall back to.
+ *
+ * Arc (`arc`, `arcTestnet`) is emitted only once its default record exists,
+ * and `DEPLOYMENT_BLOCKS` (each emitted contract's `blocks` entry) only once a
+ * record has one. Until then the generated modules are byte-identical to the
+ * pre-Arc output. Record fields other than `contracts` and `blocks` are
+ * ignored.
  */
 import * as fs from "fs";
 import * as path from "path";
@@ -44,11 +49,17 @@ const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 /** The default records only — see the header. Not _deployments.recordPath. */
 const DEFAULT_RECORDS_DIR = path.resolve(__dirname, "../deployments");
 
-/** A record's `contracts` map with placeholders stripped. Dropping zeros HERE
- *  rather than after the merge matters: base-mainnet.json carries
- *  `AgentFactory: 0x000…0` as its not-deployed-yet placeholder, and a zero left
- *  in place would shadow a real address from the companion record and then be
- *  filtered out — losing the deployment entirely.
+interface RecordFile {
+  /** `contracts` with zero placeholders stripped. */
+  contracts: Record<string, string>;
+  blocks: Record<string, number>;
+}
+
+/** A record's `contracts` map with placeholders stripped, plus its `blocks`.
+ *  Dropping zeros HERE rather than after the merge matters: base-mainnet.json
+ *  carries `AgentFactory: 0x000…0` as its not-deployed-yet placeholder, and a
+ *  zero left in place would shadow a real address from the companion record
+ *  and then be filtered out — losing the deployment entirely.
  *
  *  `optional` is for the companion record ONLY. A missing MAIN record must stay
  *  fatal: it used to throw ENOENT, and making it lenient would let a plain
@@ -56,19 +67,30 @@ const DEFAULT_RECORDS_DIR = path.resolve(__dirname, "../deployments");
  *  silently absent. CHECK=1 catches that only until someone commits the
  *  truncated module — after which generated and committed agree and the drift
  *  guard goes quiet. */
-function readContracts(file: string, optional = false): Record<string, string> {
-  const p = path.join(DEFAULT_RECORDS_DIR, file);
+function readRecordFile(dir: string, file: string, optional = false): RecordFile {
+  const p = path.join(dir, file);
   if (!fs.existsSync(p)) {
-    if (optional) return {};
+    if (optional) return { contracts: {}, blocks: {} };
     throw new Error(`Deployment record not found: ${p}`);
   }
-  const raw: Record<string, string> = JSON.parse(fs.readFileSync(p, "utf-8")).contracts ?? {};
-  return Object.fromEntries(
-    Object.entries(raw).filter(([, v]) => v && v.toLowerCase() !== ZERO_ADDRESS),
-  );
+  const rec = JSON.parse(fs.readFileSync(p, "utf-8"));
+  const raw: Record<string, string> = rec.contracts ?? {};
+  const blocks: Record<string, unknown> = rec.blocks ?? {};
+  for (const [k, b] of Object.entries(blocks)) {
+    if (!Number.isSafeInteger(b) || (b as number) < 0) throw new Error(`${p}: blocks.${k} is not a block number (${JSON.stringify(b)}).`);
+  }
+  return {
+    contracts: Object.fromEntries(Object.entries(raw).filter(([, v]) => v && v.toLowerCase() !== ZERO_ADDRESS)),
+    blocks: blocks as Record<string, number>,
+  };
 }
 
-function load(file: string): Record<string, string> {
+interface Loaded {
+  addresses: Record<string, string>;
+  blocks: Record<string, number>;
+}
+
+function load(dir: string, file: string): Loaded {
   // deploy-agent-factory.ts writes its own record to `agent-factory-<net>.json`
   // and never touches `<net>.json`, but AgentFactory is read from `<net>.json`
   // here — so the address reached the generated modules only if a human
@@ -78,34 +100,61 @@ function load(file: string): Record<string, string> {
   // AgentFactory. Reading the companion record makes the mirror unnecessary:
   // the main record still wins where both carry a key, so an existing mirrored
   // value keeps working.
-  const c = {
-    ...readContracts(`agent-factory-${file}`, true),
-    ...readContracts(`aa-${file}`, true),
-    ...readContracts(file),
-  };
-  const out: Record<string, string> = {};
+  const records = [
+    readRecordFile(dir, file),
+    readRecordFile(dir, `aa-${file}`, true),
+    readRecordFile(dir, `agent-factory-${file}`, true),
+  ];
+  const c = { ...records[2].contracts, ...records[1].contracts, ...records[0].contracts };
+  const addresses: Record<string, string> = {};
+  const blocks: Record<string, number> = {};
   for (const [recKey, genKey] of Object.entries(KEYS)) {
     // An all-zero address is the deliberate "not deployed yet" placeholder
     // (see contracts/deployments/base-mainnet.json and CLAUDE.md). Emitting it
     // makes consumers that test truthiness believe the contract is live.
-    if (c[recKey] && c[recKey].toLowerCase() !== ZERO_ADDRESS) out[genKey] = c[recKey];
+    if (!c[recKey] || c[recKey].toLowerCase() === ZERO_ADDRESS) continue;
+    addresses[genKey] = c[recKey];
+    // The block comes from a record that holds this same address, so a
+    // mirrored AgentFactory gets its companion record's block and a stale
+    // block never lands next to a newer address.
+    const source = records.find(
+      (r) => r.contracts[recKey]?.toLowerCase() === c[recKey].toLowerCase() && r.blocks[recKey] !== undefined,
+    );
+    if (source) blocks[genKey] = source.blocks[recKey];
   }
-  return out;
+  return { addresses, blocks };
 }
 
-function render(): string {
-  const body = JSON.stringify({
-    mainnet: load("0g-mainnet.json"),
-    testnet: load("0g-testnet.json"),
-    base: load("base-mainnet.json"),
-    baseTestnet: load("base-sepolia.json"),
-  }, null, 2);
-  return (
+/** Generated key -> main record, in output order. Arc is emitted only when
+ *  its main record exists. */
+const NETWORKS: ReadonlyArray<{ key: string; file: string; ifPresent?: true }> = [
+  { key: "mainnet", file: "0g-mainnet.json" },
+  { key: "testnet", file: "0g-testnet.json" },
+  { key: "base", file: "base-mainnet.json" },
+  { key: "baseTestnet", file: "base-sepolia.json" },
+  { key: "arc", file: "arc-mainnet.json", ifPresent: true },
+  { key: "arcTestnet", file: "arc-testnet.json", ifPresent: true },
+];
+
+/** The generated module for the records in `dir`. */
+export function render(dir: string = DEFAULT_RECORDS_DIR): string {
+  const addresses: Record<string, Record<string, string>> = {};
+  const blocks: Record<string, Record<string, number>> = {};
+  for (const n of NETWORKS) {
+    if (n.ifPresent && !fs.existsSync(path.join(dir, n.file))) continue;
+    const loaded = load(dir, n.file);
+    addresses[n.key] = loaded.addresses;
+    if (Object.keys(loaded.blocks).length > 0) blocks[n.key] = loaded.blocks;
+  }
+  let out =
     "// GENERATED FILE — do not edit by hand.\n" +
     "// Source of truth: contracts/deployments/*.json\n" +
     "// Regenerate: cd contracts && npx hardhat run scripts/sync-addresses.ts\n" +
-    `export const CONTRACT_ADDRESSES = ${body} as const;\n`
-  );
+    `export const CONTRACT_ADDRESSES = ${JSON.stringify(addresses, null, 2)} as const;\n`;
+  if (Object.keys(blocks).length > 0) {
+    out += `export const DEPLOYMENT_BLOCKS = ${JSON.stringify(blocks, null, 2)} as const;\n`;
+  }
+  return out;
 }
 
 const TARGETS = [
@@ -136,4 +185,6 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error(e); process.exit(1); });
+if (require.main === module) {
+  main().catch((e) => { console.error(e); process.exit(1); });
+}

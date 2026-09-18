@@ -33,6 +33,8 @@ const BASE_SEPOLIA = 84532;
 const OG_TESTNET = 16602;
 const OG_MAINNET = 16661;
 const BASE_MAINNET = 8453;
+const ARC_TESTNET = 5042002;
+const ARC_MAINNET = 5042;
 const CONTRACTS_ROOT = path.resolve(__dirname, "..");
 /** The env hardhat.config.ts produces for a staging run. */
 const STAGING = { DEPLOYMENT_SET: "staging", MANIFEST_DEFAULT_DIR: STAGING_MANIFEST_DIR };
@@ -40,6 +42,9 @@ const OTHER = "0x1111111111111111111111111111111111111111";
 const ZERO = "0x0000000000000000000000000000000000000000";
 
 const defaultEscrow = (chainId: number): string => readRecord(recordPath(chainId, "default"))!.contracts.BlindEscrow;
+/** The default record's escrow, or undefined while there is no default record (Arc). */
+const defaultEscrowIfAny = (chainId: number): string | undefined =>
+  readRecord(recordPath(chainId, "default"))?.contracts.BlindEscrow;
 const PROD_BASE_ESCROW = defaultEscrow(BASE_SEPOLIA);
 const PROD_OG_MAINNET_ESCROW = defaultEscrow(OG_MAINNET);
 
@@ -90,6 +95,13 @@ describe("deployment sets (scripts/_deployments)", function () {
       expect(recordPath(BASE_SEPOLIA, "staging")).to.equal(path.join(DEPLOYMENTS_ROOT, "staging", "base-sepolia.json"));
       expect(recordPath(BASE_SEPOLIA, "staging", "aa-")).to.equal(path.join(DEPLOYMENTS_ROOT, "staging", "aa-base-sepolia.json"));
       expect(recordPath(OG_TESTNET, "staging")).to.equal(path.join(DEPLOYMENTS_ROOT, "staging", "0g-testnet.json"));
+      expect(recordPath(ARC_TESTNET, "staging")).to.equal(path.join(DEPLOYMENTS_ROOT, "staging", "arc-testnet.json"));
+    });
+
+    it("names Arc's records after its hardhat networks", function () {
+      expect(deploymentFileFor(ARC_TESTNET)).to.equal("arc-testnet.json");
+      expect(deploymentFileFor(ARC_MAINNET)).to.equal("arc-mainnet.json");
+      expect(recordPath(ARC_MAINNET, "default")).to.equal(path.join(DEPLOYMENTS_ROOT, "arc-mainnet.json"));
     });
 
     it("throws for a chain with no record mapping", function () {
@@ -97,15 +109,18 @@ describe("deployment sets (scripts/_deployments)", function () {
       expect(() => recordPath(1, "default")).to.throw(/Unknown chainId 1/);
     });
 
-    it("allows staging only on Base Sepolia and 0G testnet", function () {
-      expect([...SET_CHAINS.staging].sort()).to.deep.equal([OG_TESTNET, BASE_SEPOLIA]);
+    it("allows staging only on Base Sepolia, 0G testnet and Arc testnet", function () {
+      expect([...SET_CHAINS.staging].sort((a, b) => a - b)).to.deep.equal([OG_TESTNET, BASE_SEPOLIA, ARC_TESTNET]);
       expect(() => recordPath(OG_MAINNET, "staging")).to.throw(/no records on chainId 16661/);
       expect(() => recordPath(BASE_MAINNET, "staging", "aa-")).to.throw(/no records on chainId 8453/);
-      for (const id of [OG_MAINNET, OG_TESTNET, BASE_MAINNET, BASE_SEPOLIA]) expect(() => recordPath(id, "default")).to.not.throw();
+      expect(() => recordPath(ARC_MAINNET, "staging")).to.throw(/no records on chainId 5042 /);
+      for (const id of [OG_MAINNET, OG_TESTNET, BASE_MAINNET, BASE_SEPOLIA, ARC_MAINNET, ARC_TESTNET]) {
+        expect(() => recordPath(id, "default")).to.not.throw();
+      }
     });
 
     it("treats as shared exactly the chains more than one set allows", function () {
-      expect([...SHARED_CHAIN_IDS].sort()).to.deep.equal([OG_TESTNET, BASE_SEPOLIA]);
+      expect([...SHARED_CHAIN_IDS].sort((a, b) => a - b)).to.deep.equal([OG_TESTNET, BASE_SEPOLIA, ARC_TESTNET]);
     });
   });
 
@@ -149,7 +164,7 @@ describe("deployment sets (scripts/_deployments)", function () {
   });
 
   describe("staging records", function () {
-    for (const chainId of [BASE_SEPOLIA, OG_TESTNET]) {
+    for (const chainId of SET_CHAINS.staging) {
       it(`never reuse the default escrow on chain ${chainId}`, async function () {
         const staging = readRecord(recordPath(chainId, "staging"));
         if (!staging) {
@@ -157,7 +172,8 @@ describe("deployment sets (scripts/_deployments)", function () {
           return;
         }
         expect(staging.chainId).to.equal(chainId);
-        expect(staging.contracts.BlindEscrow?.toLowerCase()).to.not.equal(defaultEscrow(chainId).toLowerCase());
+        const prod = defaultEscrowIfAny(chainId);
+        if (prod) expect(staging.contracts.BlindEscrow?.toLowerCase()).to.not.equal(prod.toLowerCase());
       });
     }
   });
@@ -184,6 +200,11 @@ describe("deployment sets (scripts/_deployments)", function () {
 
     it("refuses when the set resolves no escrow", function () {
       expect(() => assertExpectedEscrow({ ...shared, escrow: undefined }, { EXPECTED_ESCROW: OTHER })).to.throw(/resolves BlindEscrow=\(none\)/);
+    });
+
+    it("is required on Arc testnet too, which both sets can deploy to", function () {
+      expect(() => assertExpectedEscrow({ set: "staging", chainId: ARC_TESTNET, escrow: OTHER }, {})).to.throw(/needs EXPECTED_ESCROW/);
+      expect(() => assertExpectedEscrow({ set: "default", chainId: ARC_MAINNET, escrow: OTHER }, {})).to.not.throw();
     });
 
     it("is optional on a chain only one set uses, but enforced when given", function () {

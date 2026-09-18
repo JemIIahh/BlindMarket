@@ -12,14 +12,15 @@ npm run check-addresses  # generated address modules match deployments/*.json
 ## Deployment sets and staging
 
 Production uses 0G mainnet plus **Base Sepolia**. The staging stack uses 0G
-testnet plus Base Sepolia, with its **own** escrows. Two stacks share chain
-84532 (and 16602), so a script cannot tell them apart by chain id.
+testnet plus Base Sepolia, with its **own** escrows, and Arc testnet next. Two
+stacks can share chains 84532, 16602 and 5042002, so a script cannot tell them
+apart by chain id.
 `DEPLOYMENT_SET` picks the records it reads and writes:
 
 | `DEPLOYMENT_SET` | records                           | OpenZeppelin manifests    | chains                     |
 | ---------------- | --------------------------------- | ------------------------- | -------------------------- |
 | unset            | `deployments/<file>.json`         | `.openzeppelin/`          | all (production, local dev) |
-| `staging`        | `deployments/staging/<file>.json` | `.openzeppelin/staging/`  | 84532, 16602 (Arc later)   |
+| `staging`        | `deployments/staging/<file>.json` | `.openzeppelin/staging/`  | 84532, 16602, 5042002      |
 
 Generated address modules always come from the unset (default) records.
 
@@ -28,7 +29,7 @@ The guards (in `scripts/_deployments.ts` and `scripts/_manifest-dir.ts`):
 - Every script that reads or writes a record prints the set, the record and
   the escrow it resolved before it acts.
 - A set refuses chains it does not list. A chain that more than one set
-  lists (today 84532 and 16602) is shared: there, a script that sends
+  lists (today 84532, 16602 and 5042002) is shared: there, a script that sends
   transactions refuses to run unless `EXPECTED_ESCROW` equals the escrow it
   resolved. This applies to both sets, including production's Base Sepolia
   escrow. Read-only scripts only print it.
@@ -72,6 +73,43 @@ export STAGING_OG_ESCROW=0x...
 If step 1 or 3 says the record `already holds BlindEscrow`, you forgot
 `DEPLOYMENT_SET=staging` or staging is already deployed. Stop and check. Don't
 reach for `ALLOW_ESCROW_REPLACE`.
+
+### Arc
+
+Arc (Circle's L1) settles in USDC, which is also its gas coin: 18 decimals
+natively, 6 through the ERC-20 at `0x3600000000000000000000000000000000000000`.
+They are one balance. The escrow must only ever allowlist the ERC-20.
+
+| hardhat network | chain id | RPC                                                     | record             |
+| --------------- | -------- | ------------------------------------------------------- | ------------------ |
+| `arc-testnet`   | 5042002  | `ARC_TESTNET_RPC_URL`, default `https://rpc.testnet.arc.io` | `arc-testnet.json` |
+| `arc-mainnet`   | 5042     | `ARC_MAINNET_RPC_URL`, **no default**                    | `arc-mainnet.json` |
+
+`scripts/deploy-settlement.ts` deploys a USDC settlement escrow on Base or Arc
+(`deploy-base.ts` is now a wrapper for it that only runs on Base). Its token
+table is `scripts/_settlement.ts`. It:
+
+- refuses `address(0)` as the settlement token on every chain;
+- before any transaction, checks that the token has code and reports 6
+  decimals and symbol `USDC`;
+- calls `allowToken(token)`, then checks that the escrow allows the token and
+  does **not** allow `address(0)`, and writes the record only if both hold;
+- records `blocks.BlindEscrow` and merges into an existing record;
+- deploys no account-abstraction contracts. `deploy-aa.ts` refuses both Arc
+  chain ids: Arc needs no USDCPaymaster.
+
+`verify-deployment-config.ts` enforces the same allowlist and token checks on
+Base and Arc, with no `EXPECTED_*` needed. `_guard.ts` treats Arc testnet as a
+testnet; Arc mainnet needs `I_HAVE_READ_MAINNET_CHECKLIST=yes`.
+
+```bash
+DEPLOYMENT_SET=staging npx hardhat run scripts/deploy-settlement.ts --network arc-testnet
+```
+
+`sync-addresses` emits `arc` / `arcTestnet` only once `arc-mainnet.json` /
+`arc-testnet.json` exist in the default records, and `DEPLOYMENT_BLOCKS` only
+once a default record has a `blocks` entry for a contract it emits. Arc is not
+a backend settlement chain yet, so nothing reads either.
 
 ### Operate staging
 

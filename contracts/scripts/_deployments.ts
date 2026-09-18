@@ -34,15 +34,18 @@ export const DEPLOY_FILES: Record<number, string> = {
   16602: "0g-testnet.json",
   8453: "base-mainnet.json",
   84532: "base-sepolia.json",
+  // Arc's hardhat networks carry these same names (arc-mainnet, arc-testnet).
+  5042: "arc-mainnet.json",
+  5042002: "arc-testnet.json",
 };
 
 export type DeploymentSet = "default" | "staging";
 
-/** Chains each set may have records on. Staging: Base Sepolia and 0G testnet
- *  (Arc testnet to follow). */
+/** Chains each set may have records on. Staging: Base Sepolia, 0G testnet
+ *  and Arc testnet. */
 export const SET_CHAINS: Record<DeploymentSet, ReadonlySet<number>> = {
   default: new Set(Object.keys(DEPLOY_FILES).map(Number)),
-  staging: new Set([84532, 16602]),
+  staging: new Set([84532, 16602, 5042002]),
 };
 
 /** Chains that can have a record in more than one set. */

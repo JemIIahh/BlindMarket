@@ -16,13 +16,15 @@
  *   - 31337   (Hardhat local)
  *   - 1337    (Ganache local)
  *   - 11155111 (Sepolia, in case used for staging)
+ *   - 84532   (Base Sepolia)
+ *   - 5042002 (Arc Testnet). Arc Mainnet (5042) is gated like any mainnet.
  *
  * Anything else is treated as mainnet and gated.
  */
 
 import { ethers } from "hardhat";
 
-const ALLOWED_TESTNETS = new Set<number>([16602, 31337, 1337, 11155111, 84532]);
+export const ALLOWED_TESTNETS: ReadonlySet<number> = new Set<number>([16602, 31337, 1337, 11155111, 84532, 5042002]);
 const ACK_ENV = "I_HAVE_READ_MAINNET_CHECKLIST";
 const CHECKLIST_PATH = "docs/MAINNET-CHECKLIST.md";
 
