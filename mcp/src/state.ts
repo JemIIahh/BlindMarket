@@ -33,8 +33,9 @@ export interface SpendRecord {
   taskId?: number;
   txHash?: string;
   /** which chain this spend settles on — decides local-sign vs relay on resume */
-  settlement?: 'base' | '0g';
-  /** escrow token: zero address for native 0G, the USDC address on Base */
+  /** the backend chain key the spend started on ('0g', 'base', …) */
+  settlement?: string;
+  /** escrow token: zero address for native 0G, the ERC-20 (USDC) address on a relay chain */
   token?: string;
   /** Base only: the USDC approve tx, persisted so a resume never re-approves */
   approveTxHash?: string;

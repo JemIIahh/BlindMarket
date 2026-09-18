@@ -32,16 +32,48 @@ import { JsonRpcProvider, getAddress } from 'ethers';
  *          (GET /api/v1/api-keys/whoami) — it must be a Privy embedded wallet,
  *          which is what the web app creates on login. No private key here.
  *
+ * Backends that name their posting chain (`postingChain` plus a `chains[]`
+ * entry per settlement chain on /health/bridge) are read directly: the
+ * posting chain is where POST /api/v1/tasks builds, and its entry says what
+ * the escrow is paid in, which picks the payment path (`payment`):
+ *
+ *   relay-erc20  — an ERC-20 settlement token on a chain the relay serves.
+ *   local-native — the native coin, which this process pays only on 0G.
+ *
+ * Anything else is UNSUPPORTED_SETTLEMENT rather than a guess. An older
+ * backend (no `postingChain`) keeps the `base`-block discovery above.
+ *
  * Discovery is memoised with a short TTL (MCP servers are long-lived; a
- * process must notice when prod flips). BLINDMARKET_SETTLEMENT=0g|base forces
- * a mode (0g skips discovery entirely; base fails loudly if the backend is not
- * actually in Base mode rather than silently posting native tasks).
+ * process must notice when prod flips). BLINDMARKET_SETTLEMENT names a chain
+ * key: 0g skips discovery entirely; any other key fails loudly unless the
+ * backend really posts there (on an older backend only "base" exists, and
+ * fails loudly if the backend is not in Base mode rather than silently
+ * posting native tasks).
  */
 
-export type SettlementMode = '0g' | 'base';
+/** The backend's chain key: '0g', 'base', and whatever it adds later. The
+ *  spend ledger records it, so it is never re-derived from the payment path. */
+export type SettlementMode = string;
+
+/** How a spend is paid; the send paths branch on this, never on the key. */
+export type PaymentKind = 'local-native' | 'relay-erc20';
+
+/** The escrow's settlement token, as the backend describes it. */
+export interface SettlementToken {
+  kind: 'native' | 'erc20';
+  /** the zero address for a native coin */
+  address: string;
+  symbol: string;
+  decimals: number;
+}
 
 export interface OgSettlement {
+  payment: 'local-native';
   mode: '0g';
+  chain: '0g';
+  /** from the backend; undefined when forced to 0g */
+  chainId?: number;
+  token: SettlementToken;
   decimals: 18;
   symbol: '0G';
   /** the 0G escrow as /health/bridge reports it (current backends report it
@@ -50,15 +82,20 @@ export interface OgSettlement {
   escrowAddress?: string;
 }
 
-export interface BaseSettlement {
-  mode: 'base';
+export interface RelaySettlement {
+  payment: 'relay-erc20';
+  mode: SettlementMode;
+  chain: SettlementMode;
   chainId: number;
   escrowAddress: string;
+  token: SettlementToken;
+  /** the settlement token's address (`token.address`; USDC on every relay
+   *  chain so far), kept under its old name for existing readers */
   usdcAddress: string;
-  decimals: 6;
-  symbol: 'USDC';
-  /** the `chain` value relay-tx expects — see backend CHAIN_CAIP2 */
-  relayChain: 'base-mainnet' | 'base-sepolia';
+  decimals: number;
+  symbol: string;
+  /** the `chain` value relay-tx expects — see backend relayChains.ts */
+  relayChain: string;
   rpcUrl: string;
   /** read-only: allowance/balance/task-state checks and receipt polling. Never signs. */
   provider: JsonRpcProvider;
@@ -69,9 +106,18 @@ export interface BaseSettlement {
   payFrom: string;
 }
 
-export type Settlement = OgSettlement | BaseSettlement;
+/** Every relay settlement. The name predates chains other than Base. */
+export type BaseSettlement = RelaySettlement;
 
-export const OG_SETTLEMENT: OgSettlement = { mode: '0g', decimals: 18, symbol: '0G' };
+export type Settlement = OgSettlement | RelaySettlement;
+
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
+
+export const OG_TOKEN: SettlementToken = { kind: 'native', address: ZERO_ADDRESS, symbol: '0G', decimals: 18 };
+
+export const OG_SETTLEMENT: OgSettlement = { payment: 'local-native', mode: '0g', chain: '0g', token: OG_TOKEN, decimals: 18, symbol: '0G' };
+
+const USDC_ON_BASE = { symbol: 'USDC', decimals: 6 } as const;
 
 // Mirrors frontend/src/config/constants.ts BASE_USDC_ADDRESS. Overridable via
 // BLINDMARKET_USDC_ADDRESS for a chain not listed here.
@@ -90,7 +136,7 @@ export const BASE_RPC: Readonly<Record<number, string>> = {
  *  that a quote→confirm pair never straddles two lookups. */
 export const DISCOVERY_TTL_MS = 5 * 60 * 1000;
 
-export function relayChainFor(chainId: number): BaseSettlement['relayChain'] | null {
+export function relayChainFor(chainId: number): 'base-mainnet' | 'base-sepolia' | null {
   if (chainId === 8453) return 'base-mainnet';
   if (chainId === 84532) return 'base-sepolia';
   return null;
@@ -110,6 +156,8 @@ function err(code: string, message: string): SettlementError {
 }
 
 const isAddress = (a: unknown): a is string => typeof a === 'string' && /^0x[0-9a-fA-F]{40}$/.test(a);
+/** The shape of a backend chain key (backend a2a.ts registerSchema). */
+const CHAIN_KEY = /^[a-z0-9][a-z0-9-]{0,31}$/;
 // An escrow is never address(0); treating it as one would send value there.
 const isEscrowAddress = (a: unknown): a is string => isAddress(a) && !/^0x0{40}$/.test(a);
 
@@ -125,8 +173,8 @@ export interface DiscoverDeps {
 export async function discoverSettlement(deps: DiscoverDeps): Promise<Settlement> {
   const env = deps.env ?? process.env;
   const forced = env.BLINDMARKET_SETTLEMENT;
-  if (forced && forced !== '0g' && forced !== 'base') {
-    throw err('BAD_SETTLEMENT', `BLINDMARKET_SETTLEMENT must be "0g" or "base", got "${forced}"`);
+  if (forced && !CHAIN_KEY.test(forced)) {
+    throw err('BAD_SETTLEMENT', `BLINDMARKET_SETTLEMENT must be a chain key such as "0g" or "base", got "${forced}"`);
   }
   if (forced === '0g') return OG_SETTLEMENT;
 
@@ -152,6 +200,12 @@ export async function discoverSettlement(deps: DiscoverDeps): Promise<Settlement
     );
   }
   const data = json?.data ?? json;
+  if (data && typeof data === 'object' && 'postingChain' in data) return settlementFromPostingChain(data, forced, env, deps);
+
+  // An older backend: only 0G and Base exist, and Base is read from `base`.
+  if (forced && forced !== 'base') {
+    throw err('BAD_SETTLEMENT', `BLINDMARKET_SETTLEMENT="${forced}", but this backend predates chain keys and settles only on "0g" or "base".`);
+  }
   const bridge = data?.base ?? null;
 
   if (!bridge?.configured) {
@@ -189,16 +243,109 @@ export async function discoverSettlement(deps: DiscoverDeps): Promise<Settlement
   return buildBaseSettlement(Number(bridge.chainId), bridge.escrowAddress, env, deps);
 }
 
+/**
+ * A backend that names its posting chain: POST /api/v1/tasks builds there, so
+ * that chain's `chains[]` entry decides the payment path. Its escrow, token and
+ * relay label come from the backend, not from tables here.
+ */
+async function settlementFromPostingChain(
+  data: any,
+  forced: string | undefined,
+  env: NodeJS.ProcessEnv,
+  deps: DiscoverDeps,
+): Promise<Settlement> {
+  const posting = data.postingChain;
+  if (typeof posting !== 'string' || !CHAIN_KEY.test(posting)) {
+    throw err(
+      'SETTLEMENT_UNKNOWN',
+      `${deps.apiBase}/health/bridge names no usable posting chain (${data.postingChainError ?? JSON.stringify(posting)}). ` +
+      'Refusing to guess where new tasks are escrowed. Set BLINDMARKET_SETTLEMENT=0g to force the legacy local-wallet path.',
+    );
+  }
+  const chains: any[] = Array.isArray(data.chains) ? data.chains : [];
+  if (forced) {
+    if (!chains.some((c) => c?.chain === forced)) {
+      const known = chains.map((c) => c?.chain).filter((k) => typeof k === 'string');
+      throw err('BAD_SETTLEMENT', `BLINDMARKET_SETTLEMENT="${forced}" is not a chain this backend knows (${known.join(', ') || 'none listed'}).`);
+    }
+    if (forced !== posting) {
+      throw err(
+        'SETTLEMENT_MISMATCH',
+        `BLINDMARKET_SETTLEMENT=${forced}, but the backend posts new tasks on ${posting}, so POST /api/v1/tasks would build them there. Unset it, or set it to "${posting}".`,
+      );
+    }
+  }
+
+  const entry = chains.find((c) => c?.chain === posting);
+  if (!entry) {
+    throw err('SETTLEMENT_UNKNOWN', `The backend posts on ${posting} but lists no such chain in chains[] on /health/bridge.`);
+  }
+  if (!entry.postable || !isEscrowAddress(entry.escrowAddress)) {
+    throw err(
+      'SETTLEMENT_NOT_POSTABLE',
+      `The backend posts on ${posting} but has no escrow or settlement token configured there, so POST /api/v1/tasks refuses (CHAIN_NOT_CONFIGURED). Fix the backend's config for ${posting}.`,
+    );
+  }
+  const chainId = Number(entry.chainId);
+  const token = entry.token;
+
+  if (token?.kind === 'native') {
+    // The local wallet signs over BLINDMARKET_RPC_URL, a 0G RPC, and native
+    // 0G is all it has ever paid. A native coin anywhere else is not a guess
+    // worth making with real value.
+    if (posting !== '0g' || token.decimals !== 18) {
+      throw err(
+        'UNSUPPORTED_SETTLEMENT',
+        `The backend posts on ${posting}, paid in native ${token.symbol} (${token.decimals} decimals). This MCP pays native escrow only on 0G, from BLINDMARKET_PRIVATE_KEY.`,
+      );
+    }
+    return { ...OG_SETTLEMENT, chainId, escrowAddress: getAddress(entry.escrowAddress) };
+  }
+
+  if (token?.kind === 'erc20') {
+    if (!isEscrowAddress(token.address) || !Number.isInteger(token.decimals) || token.decimals < 0 || token.decimals > 36 || typeof token.symbol !== 'string') {
+      throw err('SETTLEMENT_UNKNOWN', `The backend describes ${posting}'s settlement token incompletely (${JSON.stringify(token)}).`);
+    }
+    if (typeof entry.relayChain !== 'string' || !entry.relayChain) {
+      throw err(
+        'UNSUPPORTED_SETTLEMENT',
+        `The backend posts on ${posting}, paid in ${token.symbol} (ERC-20), but its relay does not serve ${posting}, and this MCP pays ERC-20 escrow only through the relay.`,
+      );
+    }
+    // The env override predates backends that name the token. Here it can
+    // only disagree with the one token POST /api/v1/tasks accepts.
+    const override = env.BLINDMARKET_USDC_ADDRESS;
+    if (isAddress(override) && override.toLowerCase() !== token.address.toLowerCase()) {
+      throw err(
+        'TOKEN_MISMATCH',
+        `BLINDMARKET_USDC_ADDRESS=${override}, but the backend settles ${posting} in ${token.symbol} at ${token.address}; POST /api/v1/tasks refuses any other token. Unset it.`,
+      );
+    }
+    return buildRelaySettlement(
+      { chain: posting, chainId, escrow: entry.escrowAddress, token: { kind: 'erc20', address: token.address, symbol: token.symbol, decimals: token.decimals }, relayChain: entry.relayChain },
+      env,
+      deps,
+    );
+  }
+
+  throw err('UNSUPPORTED_SETTLEMENT', `The backend posts on ${posting}, paid in a token this MCP cannot pay (${JSON.stringify(token)}).`);
+}
+
+/** An RPC for a relay chain: its env override, else a public one this file knows. */
+function rpcFor(chain: string, chainId: number, env: NodeJS.ProcessEnv): string | null {
+  const envName = chain === 'base' ? 'BLINDMARKET_BASE_RPC_URL' : `BLINDMARKET_${chain.toUpperCase().replace(/-/g, '_')}_RPC_URL`;
+  return env[envName] ?? (chain === 'base' ? BASE_RPC[chainId] : undefined) ?? null;
+}
+
 /** Assemble a Base settlement from a chain id and escrow address, whichever
- *  way they were learned (health, or an explicit override). Everything else —
- *  USDC, RPC, relay label, the paying wallet — is derived here so both routes
- *  agree. */
+ *  way an older backend let them be learned (health, or an explicit
+ *  override). USDC and the relay label come from the tables here. */
 async function buildBaseSettlement(
   chainId: number,
   escrow: string,
   env: NodeJS.ProcessEnv,
   deps: DiscoverDeps,
-): Promise<BaseSettlement> {
+): Promise<RelaySettlement> {
   const relayChain = relayChainFor(chainId);
   if (!relayChain) {
     throw err('UNSUPPORTED_BASE_CHAIN', `Base chainId ${chainId} is not one relay-tx supports (8453 or 84532).`);
@@ -207,9 +354,25 @@ async function buildBaseSettlement(
   if (!usdcAddress) {
     throw err('USDC_UNKNOWN', `No USDC address known for chainId ${chainId} — set BLINDMARKET_USDC_ADDRESS.`);
   }
-  const rpcUrl = env.BLINDMARKET_BASE_RPC_URL ?? BASE_RPC[chainId];
+  return buildRelaySettlement(
+    { chain: 'base', chainId, escrow, token: { kind: 'erc20', address: usdcAddress, ...USDC_ON_BASE }, relayChain },
+    env,
+    deps,
+  );
+}
+
+/** A relay settlement from its chain facts, however they were learned. The
+ *  RPC and the paying wallet are resolved here so every route agrees. */
+async function buildRelaySettlement(
+  p: { chain: string; chainId: number; escrow: string; token: SettlementToken; relayChain: string },
+  env: NodeJS.ProcessEnv,
+  deps: DiscoverDeps,
+): Promise<RelaySettlement> {
+  const { chain, chainId } = p;
+  const rpcUrl = rpcFor(chain, chainId, env);
   if (!rpcUrl) {
-    throw err('RPC_UNKNOWN', `No RPC known for chainId ${chainId} — set BLINDMARKET_BASE_RPC_URL.`);
+    const envName = chain === 'base' ? 'BLINDMARKET_BASE_RPC_URL' : `BLINDMARKET_${chain.toUpperCase().replace(/-/g, '_')}_RPC_URL`;
+    throw err('RPC_UNKNOWN', `No RPC known for ${chain} (chainId ${chainId}) — set ${envName}.`);
   }
 
   // The relay refuses any wallet not linked to the caller — and the caller of
@@ -223,14 +386,18 @@ async function buildBaseSettlement(
     );
   }
 
+  const tokenAddress = getAddress(p.token.address);
   return {
-    mode: 'base',
+    payment: 'relay-erc20',
+    mode: chain,
+    chain,
     chainId,
-    escrowAddress: getAddress(escrow),
-    usdcAddress: getAddress(usdcAddress),
-    decimals: 6,
-    symbol: 'USDC',
-    relayChain,
+    escrowAddress: getAddress(p.escrow),
+    token: { ...p.token, address: tokenAddress },
+    usdcAddress: tokenAddress,
+    decimals: p.token.decimals,
+    symbol: p.token.symbol,
+    relayChain: p.relayChain,
     rpcUrl,
     provider: new JsonRpcProvider(rpcUrl, chainId),
     payFrom: getAddress(who.address),

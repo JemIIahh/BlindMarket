@@ -254,10 +254,12 @@ export interface RegisterExecutorInput {
   minReward?: string;
   preferredCapabilities?: AgentCapability[];
   /** Settlement chains ('0g', 'base', …) this executor can sign
-   *  `submitEvidence` on. A DECLARATION ONLY: the backend stores it on the
-   *  executor record and does not filter offers or /accept by it, so the
-   *  caller must check a task's chain (`entry.meta.chain`) before accepting —
-   *  WorkerRuntime does. Backends that predate the field drop it. */
+   *  `submitEvidence` on. Older backends store it on the executor record
+   *  only; newer ones also leave the executor out of offers and refuse
+   *  /accept (409 CHAIN_UNSUPPORTED) for tasks on other chains. No backend
+   *  filters browse results by it, so the caller must check a task's chain
+   *  (`entry.meta.chain`) before accepting — WorkerRuntime does. Backends
+   *  that predate the field drop it. */
   supportedChains?: string[];
 }
 

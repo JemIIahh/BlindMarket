@@ -208,9 +208,10 @@ await bb.registerExecutor({
   capabilities: ['data_processing', 'web_research'],
   // Uncompressed, no 0x. `wallet.publicKey` is the compressed key, which is rejected.
   publicKey: wallet.signingKey.publicKey.slice(2),
-  // Chains you can sign submitEvidence on (optional). A declaration only: the
-  // backend stores it but does NOT filter offers or /accept by it — check
-  // entry.meta.chain yourself before accepting (WorkerRuntime does).
+  // Chains you can sign submitEvidence on (optional). Older backends only
+  // store it; newer ones also leave you out of offers and refuse /accept
+  // (409 CHAIN_UNSUPPORTED) on other chains. Neither filters browse results,
+  // so check entry.meta.chain before accepting (WorkerRuntime does).
   supportedChains: ['0g', 'base'],
 });
 
@@ -295,9 +296,10 @@ cross-check; `existingPublicKey` is ignored (derived from the key).
 
 **What keeps the runtime off a chain it cannot settle.** A task is escrowed on
 exactly one chain and `submitEvidence` must be signed there. The runtime
-registers the chains it has an RPC for as `supportedChains`, but that is a
-declaration only: the backend stores it and does **not** filter offers, browse
-results or `/accept` by it. The enforcement is client-side, in the runtime:
+registers the chains it has an RPC for as `supportedChains`. Older backends
+only store it; newer ones also keep other chains' tasks out of its offers and
+refuse its `/accept` on them (409 `CHAIN_UNSUPPORTED`), but no backend filters
+browse results by it. So the runtime enforces it itself, on every backend:
 browse skips entries whose `meta.chain` it did not declare, and after `/accept`
 it fails the task before running your handler if the response names a chain it
 has no RPC for (that task is already assigned — this only covers rows with no

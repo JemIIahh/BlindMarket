@@ -10,6 +10,7 @@ import { registerMarketTools } from './tools.js';
 import { registerRuntimeTools } from './runtime.js';
 import { loadWallet, registerWalletTools } from './wallet.js';
 import { registerRentTools } from './rent.js';
+import type { Settlement } from './settlement.js';
 
 const cfg = loadConfig();
 
@@ -44,12 +45,16 @@ const server = new McpServer({
 // without a wallet so tools/list is stable; spends fail cleanly with NO_WALLET.
 const walletCtx = loadWallet();
 
-// Register all marketplace tools
-registerMarketTools(server, bb, walletCtx);
+// Register all marketplace tools. They register first (tools/list order is
+// unchanged), but register_as_executor/create_agent need rent.ts's settlement
+// resolver, which is created just below — hence the late-bound getter.
+let resolveSettlement: (() => Promise<Settlement>) | null = null;
+registerMarketTools(server, bb, walletCtx, () => resolveSettlement!());
 
 // rent.ts owns settlement discovery (which chain escrow settles on, and so
 // whether the local wallet or the Privy relay pays); wallet_status reports it.
 const { settlement } = registerRentTools(server, cfg, walletCtx);
+resolveSettlement = settlement;
 registerWalletTools(server, walletCtx, settlement);
 
 // Executor runtime tools (runtime_start/stop/…) are GATED OFF by default.
