@@ -15,10 +15,26 @@ export const baseProvider = new JsonRpcProvider(BASE_RPC_URL, BASE_CHAIN_ID, { s
 
 let ogProvider: JsonRpcProvider | null = null;
 
-/** A read-only provider for a settlement chain, for receipts and allowances; the posting chain's when unhinted. */
+/**
+ * The chain a relayed transaction actually goes to: the hinted chain when the
+ * relay serves it, else the posting chain when the relay serves that, else
+ * Base — the only chain the relay served before the backend named any. The
+ * relay name and the receipt/allowance provider both derive from this, so
+ * they cannot disagree.
+ */
+export function relayedChainKey(chain?: string | null): SettlementChainKey {
+  const posting = getSettlement().postingChain;
+  for (const key of [isSettlementChainKey(chain) ? chain : null, posting]) {
+    if (key && relayChainFor(key)) return key;
+  }
+  return 'base';
+}
+
+/** A read-only provider for the chain a transaction is relayed on (relayedChainKey). */
 export function providerFor(chain?: string | null): JsonRpcProvider {
-  const key = isSettlementChainKey(chain) ? chain : getSettlement().postingChain;
-  if (key === '0g') return (ogProvider ??= new JsonRpcProvider(OG_RPC_URL, OG_CHAIN_ID, { staticNetwork: true }));
+  if (relayedChainKey(chain) === '0g') {
+    return (ogProvider ??= new JsonRpcProvider(OG_RPC_URL, OG_CHAIN_ID, { staticNetwork: true }));
+  }
   return baseProvider;
 }
 
@@ -43,8 +59,7 @@ function legacyRelayChain(): string {
  * to the build's Base name for a backend that reports no relay chain.
  */
 export function relayChainNameFor(chain?: string | null): string {
-  const key: SettlementChainKey | undefined = isSettlementChainKey(chain) ? chain : undefined;
-  return relayChainFor(key) ?? legacyRelayChain();
+  return relayChainFor(relayedChainKey(chain)) ?? legacyRelayChain();
 }
 
 /**

@@ -17,7 +17,7 @@ import {
 import { get, authedGet, authedPost } from '../lib/api';
 import { useChainAddress } from '../hooks/useChainWallet';
 import { BASE_CCTP_CHAIN_KEY, isCctpUsable } from '../config/constants';
-import { getMarketplaceTokenAddress, getPaymentSymbol, getPaymentDecimals } from '../config/settlement';
+import { getMarketplaceTokenAddress, getPaymentSymbol, getPaymentDecimals, isNativePayment, useSettlement } from '../config/settlement';
 import {
   getAgentReviews,
   getAgentBadges,
@@ -58,6 +58,9 @@ const ACTION_LABELS: Record<'start' | 'pause' | 'stop' | 'restart', string> = {
 };
 
 export default function AgentDetail() {
+  // Re-render, and re-read the balance below, when the backend's settlement
+  // answer arrives (config/settlement.ts).
+  const settlement = useSettlement();
   const { id } = useParams<{ id: string }>();
   const address = useChainAddress();
   const { data: walletClient } = useWalletClient();
@@ -129,11 +132,14 @@ export default function AgentDetail() {
     if (!fundingAddress || !walletClient) return;
     try {
       const provider = new BrowserProvider(walletClient.transport);
-      const usdc = new Contract(getMarketplaceTokenAddress(), USDC_ABI, provider);
-      const bal = await usdc.balanceOf(fundingAddress);
+      // The payment token's balance: the native coin when tasks are paid in
+      // it (address(0) is no ERC-20), else the ERC-20.
+      const bal = isNativePayment()
+        ? await provider.getBalance(fundingAddress)
+        : await new Contract(getMarketplaceTokenAddress(), USDC_ABI, provider).balanceOf(fundingAddress);
       setUsdcBalance(bal as bigint);
     } catch { /* non-blocking */ }
-  }, [fundingAddress, walletClient]);
+  }, [fundingAddress, walletClient, settlement]);
 
   const loadAgent = useCallback(() => {
     if (!id) return;
@@ -344,6 +350,13 @@ export default function AgentDetail() {
     }
     if (raw <= 0n) {
       setTopUpError('Amount must be greater than 0');
+      setTopUpStatus('error');
+      return;
+    }
+    if (isNativePayment()) {
+      // A transfer() against address(0) would relay a value-0 call that
+      // succeeds and funds nothing. Native top-ups are not relayed here.
+      setTopUpError(`Top-up here only works for an ERC-20 payment token. Send ${getPaymentSymbol()} to ${fundingAddress} from your wallet instead.`);
       setTopUpStatus('error');
       return;
     }

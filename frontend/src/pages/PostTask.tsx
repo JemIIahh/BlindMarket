@@ -24,7 +24,7 @@ import { signAndSendTx } from '../lib/txSigner';
 import { authedGet, authedPost } from '../lib/api';
 import { trackEvent } from '../hooks/useAnalytics';
 import { WORKER_SHARE_PCT, PLATFORM_FEE_PCT } from '../config/constants';
-import { getMarketplaceTokenAddress, getPaymentDecimals, getPaymentSymbol, getPostingEscrowAddress } from '../config/settlement';
+import { getMarketplaceTokenAddress, getPaymentDecimals, getPaymentSymbol, getPostingEscrowAddress, useSettlement } from '../config/settlement';
 import { useChain } from '../context/ChainContext';
 import { useChainAddress } from '../hooks/useChainWallet';
 import { useAuth } from '../context/AuthContext';
@@ -54,16 +54,14 @@ function durationHint(secs: number): string {
   return `${Math.round(secs / 86400)} days from now`;
 }
 
-  // Pulled from the shared constants module so the address lives in exactly
-  // one place. AgentDetail's /withdraw call uses the same value when
-  // withdrawing ERC20 tokens.
+export default function PostTask() {
+  // The posting chain's token and unit, read per render: these used to be
+  // module-level constants, evaluated when the chunk loaded and never again,
+  // so the page never saw the backend's answer.
+  useSettlement();
   const TOKEN = getMarketplaceTokenAddress();
-  // USDC on Base has 6 decimals; native 0G has 18. Use the token's decimals
-  // for amount parsing when Base escrow is configured.
   const PAYMENT_DECIMALS = getPaymentDecimals();
   const PAYMENT_SYMBOL = getPaymentSymbol();
-
-export default function PostTask() {
   const { activeChain } = useChain();
   const address = useChainAddress();
   const { data: walletClient } = useWalletClient();

@@ -21,7 +21,7 @@ import { authedGet } from '../lib/api';
 import { getAesKey } from '../lib/keyStash';
 import { useChainAddress } from '../hooks/useChainWallet';
 
-import { unitFor } from '../config/settlement';
+import { unitFor, useSettlement } from '../config/settlement';
 
 // ── Shapes returned by GET /api/v1/a2a/tasks/posted ──────────────────────
 
@@ -120,6 +120,8 @@ function workerAddress(t: PostedTask): string | null {
 const PAGE_SIZE = 15;
 
 export default function MyTasks() {
+  // Re-render when the backend's settlement answer arrives (config/settlement.ts).
+  useSettlement();
   const address = useChainAddress();
   const qc = useQueryClient();
   const [filter, setFilter] = useState<'all' | 'open' | 'active' | 'completed'>('all');

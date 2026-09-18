@@ -18,7 +18,7 @@ import {
 } from '../components/bb';
 import { truncateAddress } from '../lib/utils';
 import { API_BASE_URL } from '../config/constants';
-import { getMarketplaceTokenAddress, getPaymentSymbol, getPaymentDecimals } from '../config/settlement';
+import { getMarketplaceTokenAddress, getPaymentSymbol, getPaymentDecimals, isNativePayment, useSettlement } from '../config/settlement';
 import { formatEarnings, sumEarnings } from '../lib/paymentUnits';
 import { authedPost } from '../lib/api';
 import { useChainAddress } from '../hooks/useChainWallet';
@@ -31,6 +31,7 @@ const USDC_ABI = ['function balanceOf(address owner) view returns (uint256)'];
 // loading, a warning chip when below the threshold.
 function GasChip({ fundingAddress }: { fundingAddress: string }) {
   const { data: walletClient } = useWalletClient();
+  const settlement = useSettlement();
   const [balance, setBalance] = useState<number | null>(null);
 
   useEffect(() => {
@@ -39,13 +40,15 @@ function GasChip({ fundingAddress }: { fundingAddress: string }) {
     (async () => {
       try {
         const provider = new (await import('ethers')).BrowserProvider(walletClient.transport);
-        const usdc = new Contract(getMarketplaceTokenAddress(), USDC_ABI, provider);
-        const bal: bigint = await usdc.balanceOf(fundingAddress);
+        // Native coin when tasks are paid in it (address(0) is no ERC-20).
+        const bal: bigint = isNativePayment()
+          ? await provider.getBalance(fundingAddress)
+          : await new Contract(getMarketplaceTokenAddress(), USDC_ABI, provider).balanceOf(fundingAddress);
         if (!cancelled) setBalance(Number(formatUnits(bal, getPaymentDecimals())));
       } catch { /* non-blocking */ }
     })();
     return () => { cancelled = true; };
-  }, [fundingAddress, walletClient]);
+  }, [fundingAddress, walletClient, settlement]);
 
   if (balance === null) return null;
   if (balance >= LOW_BALANCE_THRESHOLD) return null;
@@ -84,6 +87,8 @@ const AGENTS_PAGE_SIZE = 20;
 type Act = 'start' | 'pause' | 'stop' | 'restart';
 
 export default function MyAgents() {
+  // Re-render when the backend's settlement answer arrives (config/settlement.ts).
+  useSettlement();
   const address = useChainAddress();
   const { isAuthenticated } = useAuth();
   const qc = useQueryClient();

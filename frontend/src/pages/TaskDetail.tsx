@@ -16,7 +16,7 @@ import { truncateAddress, formatDate } from '../lib/utils';
 import { buildCancelTask, buildClaimTimeout } from '../services/tasks';
 import { signAndSendTx } from '../lib/txSigner';
 import { WORKER_SHARE_PCT, PLATFORM_FEE_PCT } from '../config/constants';
-import { unitFor } from '../config/settlement';
+import { unitFor, useSettlement } from '../config/settlement';
 import { useChainExplorerUrl } from '../hooks/useChainWallet';
 import { TaskStatus, TaskStatusLabels } from '../types/api';
 
@@ -61,6 +61,8 @@ function Field({
 }
 
 export default function TaskDetail() {
+  // Re-render when the backend's settlement answer arrives (config/settlement.ts).
+  useSettlement();
   const { id } = useParams();
   const { data, isLoading, isError, refetch } = useTask(id || '');
   const { address, signer } = useWallet();

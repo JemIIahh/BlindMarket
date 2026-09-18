@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Breadcrumb, PageHeader, SectionRule } from '../components/bb';
-import { getPaymentSymbol } from '../config/settlement';
+import { getPaymentSymbol, useSettlement } from '../config/settlement';
 import { parsePaymentAmount } from '../lib/paymentUnits';
 
 const SNIPPETS = [
@@ -128,6 +128,8 @@ function CopyButton({ code }: { code: string }) {
 }
 
 export default function DeployAgentSdk() {
+  // Re-render when the backend's settlement answer arrives (config/settlement.ts).
+  useSettlement();
   return (
     <div>
       <Breadcrumb items={['marketplace', 'agents', 'create', 'sdk']} />

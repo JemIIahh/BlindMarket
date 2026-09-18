@@ -20,7 +20,7 @@ import { authedGet } from '../lib/api';
 import { useChainAddress } from '../hooks/useChainWallet';
 import type { Transaction } from '../services/accounting';
 import { API_BASE_URL } from '../config/constants';
-import { getPaymentSymbol } from '../config/settlement';
+import { getPaymentSymbol, useSettlement } from '../config/settlement';
 
 type Tab = 'transactions' | 'my_agents';
 
@@ -103,6 +103,8 @@ function amountClass(n: number): string {
 const PAGE_SIZE = 20;
 
 export default function Earnings() {
+  // Re-render when the backend's settlement answer arrives (config/settlement.ts).
+  useSettlement();
   const [tab, setTab] = useTabParam<Tab>('transactions', TABS.map((t) => t.id));
   const [txPage, setTxPage] = useState(1);
   const { isAuthenticated } = useAuth();

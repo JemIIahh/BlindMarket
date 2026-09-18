@@ -62,7 +62,8 @@ vi.mock('../services/redis.js', () => ({
 vi.mock('../services/chain.js', () => ({
   provider: {},
   escrow: { interface: {}, getAddress: vi.fn() },
-  getTokenDecimals: vi.fn(async () => 18),
+  // A value no chain defaults to, so a fallback that guesses by chain fails.
+  getTokenDecimals: vi.fn(async () => 7),
 }));
 vi.mock('../services/escrow.js', () => ({ getTask: vi.fn(), getTaskOn: vi.fn(), feeBps: vi.fn(), getTaskVerifier: vi.fn() }));
 vi.mock('../services/escrowEvents.js', () => ({
@@ -176,8 +177,8 @@ describe('GET /a2a/tasks/posted on-chain rows', () => {
 
   it('claims no symbol for a token that is not the chain’s settlement token, but still gives its decimals', async () => {
     const rows = await listPosted();
-    // getTokenDecimals is mocked to read 18 for the unknown token.
-    expect(rows[HASH_ODD].onChain).toMatchObject({ chain: '0g', token: OTHER_TOKEN, symbol: null, decimals: 18 });
+    // getTokenDecimals is mocked to read 7 for the unknown token.
+    expect(rows[HASH_ODD].onChain).toMatchObject({ chain: '0g', token: OTHER_TOKEN, symbol: null, decimals: 7 });
   });
 
   it('follows the configured token, not the chain name', async () => {

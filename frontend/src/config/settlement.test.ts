@@ -170,6 +170,11 @@ describe('mergeSettlement', () => {
       chains: [{ ...backendBasePosting.chains[0], escrowAddress: null }, backendBasePosting.chains[1]],
     };
     expect(mergeSettlement(defaultSettlement(), noEscrow).postingChain).toBe('base');
+    const noToken: BackendSettlement = {
+      postingChain: '0g',
+      chains: [{ ...backendBasePosting.chains[0], token: { kind: 'native', address: null, symbol: '0G', decimals: 18 } }, backendBasePosting.chains[1]],
+    };
+    expect(mergeSettlement(defaultSettlement(), noToken).postingChain).toBe('base');
     expect(mergeSettlement(defaultSettlement(), { ...backendBasePosting, postingChain: 'arc' }).postingChain).toBe('base');
     expect(mergeSettlement(defaultSettlement(), { ...backendBasePosting, postingChain: null }).postingChain).toBe('base');
   });
