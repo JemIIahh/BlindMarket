@@ -24,6 +24,11 @@ import type { AgentService } from '../services/marketplace';
 type Phase = 'input' | 'encrypting' | 'signing' | 'running' | 'done' | 'error';
 
 const POLL_MS = 4000;
+// Auto-verify releases the payment, so the bar can't be "one character".
+// min_length is a hard floor in the backend's autoVerify, which also fails
+// failure excuses ("I was unable to complete…") on its own. Keep in sync with
+// the script UseFromAgentModal generates.
+const RENTAL_VERIFICATION_CRITERIA = { min_length: 40 };
 const MAX_POLLS = 75; // ~5 min
 
 const toHex = (bytes: Uint8Array) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
@@ -158,7 +163,7 @@ export default function UseServiceModal({
         duration: '3600',
         targetExecutorType: 'agent',
         verificationMode: 'auto',
-        verificationCriteria: { min_length: 1 },
+        verificationCriteria: RENTAL_VERIFICATION_CRITERIA,
         requiredCapabilities: [],
         rootHash,
         wrappedKeys,
@@ -181,7 +186,7 @@ export default function UseServiceModal({
         txHash: sent.hash,
         taskHash,
         verificationMode: 'auto',
-        verificationCriteria: { min_length: 1 },
+        verificationCriteria: RENTAL_VERIFICATION_CRITERIA,
         requiredCapabilities: [],
         rootHash,
         wrappedKeys,

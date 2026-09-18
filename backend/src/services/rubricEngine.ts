@@ -58,18 +58,99 @@ export function LengthBetween(min: number, max: number = Infinity): RubricFn {
   };
 }
 
-/** Output must be valid JSON matching the given schema (basic structural check). */
+const JSON_SCAN_CAP = 200_000;
+const JSON_SCAN_MAX_STARTS = 50; // bounds the balanced-brace scan on brace-heavy non-JSON
+
+/**
+ * Pull a JSON object out of agent output. Agents rarely return bare JSON — they
+ * wrap it in a ```json fence or lead in with a sentence — so parsing the whole
+ * string rejects correct work. Tries, in order: the whole output, each fenced
+ * block, then the first balanced {...} that parses. Returns undefined when the
+ * output holds no JSON object.
+ */
+export function extractJsonObject(output: string): Record<string, unknown> | undefined {
+  const asObject = (text: string): Record<string, unknown> | undefined => {
+    try {
+      const parsed: unknown = JSON.parse(text);
+      return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
+  const src = output.length > JSON_SCAN_CAP ? output.slice(0, JSON_SCAN_CAP) : output;
+  const whole = asObject(src.trim());
+  if (whole) return whole;
+
+  for (const m of src.matchAll(/```(?:json)?\s*\n([\s\S]*?)```/gi)) {
+    const fenced = asObject(m[1].trim());
+    if (fenced) return fenced;
+  }
+
+  // First balanced {...}, string-aware so braces inside values don't end it early.
+  let starts = 0;
+  for (let start = src.indexOf('{'); start !== -1 && starts < JSON_SCAN_MAX_STARTS; start = src.indexOf('{', start + 1), starts++) {
+    let depth = 0;
+    let inString = false;
+    for (let i = start; i < src.length; i++) {
+      const ch = src[i];
+      if (inString) {
+        if (ch === '\\') i++;
+        else if (ch === '"') inString = false;
+        continue;
+      }
+      if (ch === '"') inString = true;
+      else if (ch === '{') depth++;
+      else if (ch === '}' && --depth === 0) {
+        const candidate = asObject(src.slice(start, i + 1));
+        if (candidate) return candidate;
+        break;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Output must carry every named field: as a key of the JSON object it contains,
+ * or — for prose deliverables — as a heading/label ("Summary:", "## Summary",
+ * "**Summary**"). Score = fraction of fields present.
+ */
+export function HasFields(fields: string[]): RubricFn {
+  return (output: string) => {
+    if (!fields.length) return 1;
+    const parsed = extractJsonObject(output);
+    const present = fields.filter(f => {
+      if (parsed) return f in parsed && parsed[f] != null;
+      const label = f.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/[\s_-]+/g, '[\\s_-]+');
+      return new RegExp(
+        `(?:^|[.!?]\\s)[ \\t]*(?:#{1,6}[ \\t]*|[-*][ \\t]+)?(?:\\*\\*|__)?${label}(?:\\*\\*|__)?[ \\t]*(?::|$)`,
+        'im',
+      ).test(output);
+    });
+    return present.length / fields.length;
+  };
+}
+
+/**
+ * Output must contain a JSON object matching the given schema (basic structural
+ * check). The object may be fenced or embedded in prose — see extractJsonObject.
+ */
 export function JsonSchema(schema: {
   type?: string;
   required?: string[];
   properties?: Record<string, { type?: string }>;
 }): RubricFn {
   return (output: string) => {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(output);
-    } catch {
-      return 0;
+    let parsed: unknown = extractJsonObject(output);
+    if (parsed === undefined) {
+      try {
+        parsed = JSON.parse(output);
+      } catch {
+        return 0;
+      }
     }
     if (schema.type === 'object' && (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed))) {
       return 0;

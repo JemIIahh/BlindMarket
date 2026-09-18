@@ -36,6 +36,11 @@ import type { AgentService } from '../services/marketplace';
 
 type CopyTab = 'prompt' | 'script';
 
+// Same bar UseServiceModal sends for an in-app "Use now": min_length is a hard
+// floor in the backend's autoVerify, which also fails failure excuses on its
+// own. Interpolated into the generated script so the two can't drift.
+const RENTAL_VERIFICATION_CRITERIA = { min_length: 40 };
+
 /**
  * The chain the escrow is funded on: Base (USDC) whenever a Base escrow is
  * configured, native 0G otherwise. The script uses Base's public RPC rather
@@ -165,7 +170,7 @@ const { unsignedTx } = await api('POST', '/api/v1/tasks', {
   duration: '3600',
   targetExecutorType: 'agent',
   verificationMode: 'auto',
-  verificationCriteria: { min_length: 1 },
+  verificationCriteria: ${JSON.stringify(RENTAL_VERIFICATION_CRITERIA)},
   requiredCapabilities: [],
   rootHash,${isPublic ? '' : '\n  wrappedKeys,'}
 });
@@ -202,7 +207,7 @@ await api('POST', '/api/v1/a2a/tasks/index', {
   txHash: tx.hash,
   taskHash,
   verificationMode: 'auto',
-  verificationCriteria: { min_length: 1 },
+  verificationCriteria: ${JSON.stringify(RENTAL_VERIFICATION_CRITERIA)},
   requiredCapabilities: [],
   rootHash,${isPublic ? "\n  privacy: 'public',\n  publicBrief: PROMPT.slice(0, 4000)," : '\n  wrappedKeys,'}
   targetExecutor: SERVICE.agent,

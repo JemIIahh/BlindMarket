@@ -3,6 +3,8 @@ import {
   ContainsKeywords,
   LengthBetween,
   JsonSchema,
+  HasFields,
+  extractJsonObject,
   MatchesRegex,
   NoForbiddenPhrases,
   WeightedRubric,
@@ -107,6 +109,60 @@ describe('JsonSchema', () => {
   it('scores 0 when type mismatch', () => {
     const rubric = JsonSchema({ type: 'object' });
     expect(rubric(JSON.stringify([1, 2, 3]))).toBe(0);
+  });
+});
+
+describe('extractJsonObject', () => {
+  it('parses bare JSON', () => {
+    expect(extractJsonObject('{"a":1}')).toEqual({ a: 1 });
+  });
+
+  it('pulls JSON out of a fenced block', () => {
+    expect(extractJsonObject('Result:\n```json\n{"a": 1}\n```\nDone.')).toEqual({ a: 1 });
+  });
+
+  it('pulls the first balanced object out of prose, ignoring braces in strings', () => {
+    expect(extractJsonObject('Here you go: {"a": "x}y", "b": {"c": 2}} — enjoy')).toEqual({ a: 'x}y', b: { c: 2 } });
+  });
+
+  it('skips a non-JSON brace group and finds the next object', () => {
+    expect(extractJsonObject('use {placeholder} then {"a":1}')).toEqual({ a: 1 });
+  });
+
+  it('returns undefined for prose, arrays and unbalanced braces', () => {
+    expect(extractJsonObject('no json here')).toBeUndefined();
+    expect(extractJsonObject('[1,2,3]')).toBeUndefined();
+    expect(extractJsonObject('{"a": 1')).toBeUndefined();
+    expect(extractJsonObject('{'.repeat(5000))).toBeUndefined();
+  });
+});
+
+describe('HasFields', () => {
+  it('scores by JSON keys, treating null as absent', () => {
+    expect(HasFields(['a', 'b'])(JSON.stringify({ a: 1, b: null }))).toBe(0.5);
+  });
+
+  it('reads fields from fenced JSON', () => {
+    expect(HasFields(['summary'])('```json\n{"summary":"ok"}\n```')).toBe(1);
+  });
+
+  it('falls back to headings and labels in prose', () => {
+    const rubric = HasFields(['summary', 'next_steps']);
+    expect(rubric('Summary: all good.\n\n## Next steps\nShip it.')).toBe(1);
+    expect(rubric('**Summary:** all good. NEXT-STEPS: ship it.')).toBe(1);
+    expect(rubric('Summary: all good.')).toBe(0.5);
+  });
+
+  it('does not count a field name used mid-sentence', () => {
+    expect(HasFields(['summary'])('In summary the work is done and nothing else is needed.')).toBe(0);
+  });
+});
+
+describe('JsonSchema — embedded JSON', () => {
+  it('accepts a schema match inside a fence or prose', () => {
+    const rubric = JsonSchema({ type: 'object', required: ['status'] });
+    expect(rubric('```json\n{"status":"ok"}\n```')).toBe(1);
+    expect(rubric('Done — {"status":"ok"}')).toBe(1);
   });
 });
 
