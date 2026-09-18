@@ -301,6 +301,14 @@ describe("deployment sets (scripts/_deployments)", function () {
       );
     });
 
+    it("needs DEPLOYMENT_SET=default only for a FIRST default escrow on a shared chain", async function () {
+      // Base Sepolia's default record already has an escrow: the existing
+      // "already holds" refusal applies, not this one.
+      await rejects(() => preflightDeploy({ chainId: BASE_SEPOLIA, deploysEscrow: true }, {}), /already holds BlindEscrow/);
+      // Not shared: a fresh chain in the default set needs no explicit set.
+      await quiet(() => preflightDeploy({ chainId: ARC_MAINNET, deploysEscrow: true }, {}));
+    });
+
     it("targets the staging record when DEPLOYMENT_SET=staging", async function () {
       const env = { ...STAGING, ALLOW_ESCROW_REPLACE: "false" };
       const file = path.join(DEPLOYMENTS_ROOT, "staging", "base-sepolia.json");

@@ -78,7 +78,11 @@ export const DEPLOYMENT_SET_REQUIRED_ENV = [
   'PUBLIC_APP_URL',
 ] as const;
 
-/** Chains each non-default set runs on (contracts/scripts/_deployments.ts SET_CHAINS). */
+/**
+ * The 0G and Base chains each non-default set runs on. contracts/scripts/
+ * _deployments.ts SET_CHAINS also lists Arc testnet (5042002) for staging;
+ * the backend does not settle on Arc yet, so it is not checked here.
+ */
 const DEPLOYMENT_SET_CHAINS: Record<'staging', { og: number; base: number }> = {
   staging: { og: 16602, base: 84532 },
 };

@@ -21,6 +21,7 @@ import { ethers } from "hardhat";
 import * as fs from "fs";
 import { assertSafeNetwork } from "./_guard";
 import { preflightDeploy, recordPath } from "./_deployments";
+import { assertAaChain } from "./_settlement";
 
 const ENTRYPOINT_V07 = "0x0000000071727De22E5E9d8BAf0edAc6f37da032";
 
@@ -31,6 +32,7 @@ async function main() {
 
   const network = await ethers.provider.getNetwork();
   const chainId = Number(network.chainId);
+  assertAaChain(chainId);
   const target = preflightDeploy({ chainId, deploysEscrow: false });
   const outPath = recordPath(chainId, target.set, "aa-");
   if (!fs.existsSync(outPath)) throw new Error(`No existing deployment file at ${outPath}`);

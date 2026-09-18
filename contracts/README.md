@@ -95,8 +95,16 @@ table is `scripts/_settlement.ts`. It:
 - calls `allowToken(token)`, then checks that the escrow allows the token and
   does **not** allow `address(0)`, and writes the record only if both hold;
 - records `blocks.BlindEscrow` and merges into an existing record;
-- deploys no account-abstraction contracts. `deploy-aa.ts` refuses both Arc
-  chain ids: Arc needs no USDCPaymaster.
+- deploys no account-abstraction contracts. `deploy-aa.ts` and
+  `redeploy-blindaccount-factory.ts` refuse both Arc chain ids: Arc needs no
+  USDCPaymaster.
+
+Arc testnet has no default escrow yet, so the `already holds BlindEscrow`
+refusal cannot catch a forgotten `DEPLOYMENT_SET=staging` there. A first
+default escrow on a shared chain therefore needs `DEPLOYMENT_SET=default`
+spelled out; without any `DEPLOYMENT_SET` the deploy refuses. This matters
+because `sync-addresses` publishes the default record to the generated
+modules.
 
 `verify-deployment-config.ts` enforces the same allowlist and token checks on
 Base and Arc, with no `EXPECTED_*` needed. `_guard.ts` treats Arc testnet as a

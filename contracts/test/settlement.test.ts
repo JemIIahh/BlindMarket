@@ -15,7 +15,14 @@ import {
 } from "../scripts/_settlement";
 import { ALLOWED_TESTNETS } from "../scripts/_guard";
 import { DEPLOY_FILES, DEPLOYMENTS_ROOT, preflightDeploy, readRecord, writeDeployment } from "../scripts/_deployments";
-import { assertEscrowAllowlist, checkSettlementToken, deployEscrow, settlementRecord } from "../scripts/deploy-settlement";
+import {
+  assertEscrowAllowlist,
+  checkSettlementToken,
+  deployEscrow,
+  settlementInvariants,
+  settlementRecord,
+  waitForTokenAllowed,
+} from "../scripts/deploy-settlement";
 import { render } from "../scripts/sync-addresses";
 import { STAGING_MANIFEST_DIR } from "../scripts/_manifest-dir";
 
@@ -175,6 +182,8 @@ describe("Arc settlement tooling", function () {
         const Token = await ethers.getContractFactory("MockERC20");
         const t18 = await (await Token.deploy("USD Coin", "USDC", 18)).getAddress();
         await rejects(() => checkSettlementToken(t18), /reports 18 decimals/);
+        const t2 = await (await Token.deploy("USD Coin", "USDC", 2)).getAddress();
+        await rejects(() => checkSettlementToken(t2), /reports 2 decimals/);
       });
 
       it("refuses another 6-decimal token", async function () {
@@ -220,6 +229,38 @@ describe("Arc settlement tooling", function () {
         }
       });
 
+      it("waits out a stale 'token not allowed' read after allowToken", async function () {
+        // Stands in for an RPC that answers from before the allowToken
+        // receipt: the first two reads of the token's allowance say false.
+        const original = upgrades.deployProxy;
+        let staleReads = 2;
+        (upgrades as any).deployProxy = async (...args: Parameters<typeof original>) => {
+          const proxy: any = await original(...args);
+          return new Proxy(proxy, {
+            get(target, prop) {
+              if (prop === "allowedTokens") {
+                return async (t: string) => {
+                  if (t.toLowerCase() === usdc.toLowerCase() && staleReads > 0) {
+                    staleReads--;
+                    return false;
+                  }
+                  return target.allowedTokens(t);
+                };
+              }
+              const v = Reflect.get(target, prop);
+              return typeof v === "function" ? v.bind(target) : v;
+            },
+          });
+        };
+        try {
+          const deployed = await quiet(() => deployEscrow(usdc, deployer, { delayMs: 1 }));
+          expect(staleReads).to.equal(0);
+          expect(await (await ethers.getContractAt("BlindEscrow", deployed.address)).allowedTokens(usdc)).to.equal(true);
+        } finally {
+          (upgrades as any).deployProxy = original;
+        }
+      });
+
       it("refuses address(0) before sending anything", async function () {
         const nonce = await ethers.provider.getTransactionCount(deployer.address);
         await rejects(() => deployEscrow(ZERO, deployer), /Refusing address\(0\)/);
@@ -245,6 +286,86 @@ describe("Arc settlement tooling", function () {
         const escrow = await ethers.getContractAt("BlindEscrow", deployed.address);
         await (await escrow.disallowToken(usdc)).wait();
         await rejects(() => assertEscrowAllowlist(escrow, usdc), /does not allow the settlement token/);
+      });
+    });
+
+    describe("waitForTokenAllowed", function () {
+      const fake = (answers: boolean[]) => {
+        let calls = 0;
+        return {
+          get calls() {
+            return calls;
+          },
+          allowedTokens: async () => answers[Math.min(calls++, answers.length - 1)],
+        };
+      };
+
+      it("returns once the read turns true", async function () {
+        const escrow = fake([false, false, true]);
+        expect(await waitForTokenAllowed(escrow, usdc, { tries: 5, delayMs: 1 })).to.equal(true);
+        expect(escrow.calls).to.equal(3);
+      });
+
+      it("gives up after `tries` reads", async function () {
+        const escrow = fake([false]);
+        expect(await waitForTokenAllowed(escrow, usdc, { tries: 3, delayMs: 1 })).to.equal(false);
+        expect(escrow.calls).to.equal(3);
+      });
+    });
+
+    describe("settlementInvariants (verify-deployment-config.ts)", function () {
+      const tableFor = (token: string) => ({ 31337: { token } });
+      const deployed = async () =>
+        ethers.getContractAt("BlindEscrow", (await quiet(() => deployEscrow(usdc, deployer))).address);
+      const failing = (checks: { label: string; ok: boolean }[]) => checks.filter((c) => !c.ok).map((c) => c.label);
+
+      it("passes a correctly configured escrow", async function () {
+        const checks = await settlementInvariants(await deployed(), 31337, { table: tableFor(usdc) });
+        expect(checks).to.have.length(3);
+        expect(failing(checks)).to.deep.equal([]);
+      });
+
+      it("fails an escrow that allows address(0), and only that check", async function () {
+        const escrow = await deployed();
+        await (await escrow.allowToken(ZERO)).wait();
+        expect(failing(await settlementInvariants(escrow, 31337, { table: tableFor(usdc) }))).to.deep.equal([
+          "escrow does not allow address(0)",
+        ]);
+      });
+
+      it("fails an escrow that does not allow the settlement token", async function () {
+        const escrow = await deployed();
+        await (await escrow.disallowToken(usdc)).wait();
+        expect(failing(await settlementInvariants(escrow, 31337, { table: tableFor(usdc) }))).to.deep.equal([
+          "escrow allows the settlement token",
+        ]);
+      });
+
+      it("fails a token that is not 6-decimal USDC, saying why", async function () {
+        const Token = await ethers.getContractFactory("MockERC20");
+        const t18 = await (await Token.deploy("USD Coin", "USDC", 18)).getAddress();
+        const escrow = await deployed();
+        await (await escrow.allowToken(t18)).wait();
+        const failed = failing(await settlementInvariants(escrow, 31337, { table: tableFor(t18) }));
+        expect(failed).to.have.length(1);
+        expect(failed[0]).to.match(/token reports 6 decimals and symbol USDC \(.*reports 18 decimals/);
+      });
+
+      it("checks nothing on a chain with no settlement token (0G)", async function () {
+        const escrow = await deployed();
+        expect(await settlementInvariants(escrow, 16602)).to.deep.equal([]);
+        expect(await settlementInvariants(escrow, 16661)).to.deep.equal([]);
+        expect(await settlementInvariants(escrow, 1, { table: tableFor(usdc) })).to.deep.equal([]);
+      });
+
+      it("checks Base and Arc from the real table", async function () {
+        // On this chain their tokens have no code, so only the token check fails.
+        const escrow = await deployed();
+        for (const id of [8453, 84532, ARC_TESTNET_CHAIN_ID, ARC_MAINNET_CHAIN_ID]) {
+          const checks = await settlementInvariants(escrow, id);
+          expect(checks, String(id)).to.have.length(3);
+          expect(failing(checks)).to.deep.equal(["escrow allows the settlement token", `token reports 6 decimals and symbol USDC (Settlement token ${settlementTokenFor(id)} has no code on this chain.)`]);
+        }
       });
     });
 
@@ -296,9 +417,17 @@ describe("Arc settlement tooling", function () {
     });
 
     describe("preflightDeploy on Arc", function () {
-      it("lets a first Arc testnet escrow deploy in either set", async function () {
+      it("lets a first Arc testnet escrow deploy in either set, naming the default set explicitly", async function () {
         if (!readRecord(path.join(DEPLOYMENTS_ROOT, "arc-testnet.json"))) {
-          const t = await quiet(async () => preflightDeploy({ chainId: ARC_TESTNET_CHAIN_ID, deploysEscrow: true }, {}));
+          // A forgotten DEPLOYMENT_SET=staging would otherwise create the
+          // default record that sync-addresses publishes.
+          await rejects(
+            async () => preflightDeploy({ chainId: ARC_TESTNET_CHAIN_ID, deploysEscrow: true }, {}),
+            /default set has no escrow there yet.*DEPLOYMENT_SET=staging.*DEPLOYMENT_SET=default/,
+          );
+          const t = await quiet(async () =>
+            preflightDeploy({ chainId: ARC_TESTNET_CHAIN_ID, deploysEscrow: true }, { DEPLOYMENT_SET: "default" }),
+          );
           expect(t).to.deep.include({ set: "default", record: null, escrow: undefined });
         }
         if (!readRecord(path.join(DEPLOYMENTS_ROOT, "staging", "arc-testnet.json"))) {
@@ -397,6 +526,10 @@ describe("Arc settlement tooling", function () {
     it("refuses a block that is not a block number", function () {
       edit("base-sepolia.json", (r) => (r.blocks = { BlindEscrow: "46211199" }));
       expect(() => render(dir)).to.throw(/blocks\.BlindEscrow is not a block number/);
+      for (const bad of [-1, 1.5]) {
+        edit("base-sepolia.json", (r) => (r.blocks = { BlindEscrow: bad }));
+        expect(() => render(dir), String(bad)).to.throw(/blocks\.BlindEscrow is not a block number/);
+      }
     });
 
     it("still refuses a missing main record for the non-Arc networks", function () {

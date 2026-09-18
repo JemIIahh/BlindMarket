@@ -26,7 +26,13 @@
 import { ethers, network, upgrades } from "hardhat";
 import { assertSafeNetwork } from "./_guard";
 import { deployBlock, deploymentFileFor, preflightDeploy, writeDeployment, type RecordUpdate } from "./_deployments";
-import { assertNotNative, settlementChainFor, settlementTokenFor, type SettlementChain } from "./_settlement";
+import {
+  assertNotNative,
+  SETTLEMENT_CHAINS,
+  settlementChainFor,
+  settlementTokenFor,
+  type SettlementChain,
+} from "./_settlement";
 
 const ERC20_ABI = ["function decimals() view returns (uint8)", "function symbol() view returns (string)"];
 
@@ -67,6 +73,60 @@ export async function assertEscrowAllowlist(escrow: Allowlist, token: string): P
   }
 }
 
+export interface InvariantCheck {
+  label: string;
+  ok: boolean;
+}
+
+/**
+ * The settlement invariants verify-deployment-config.ts enforces: the escrow
+ * allows the chain's USDC ERC-20, does not allow address(0), and the token
+ * passes checkSettlementToken. Empty on a chain `table` has no entry for (0G).
+ */
+export async function settlementInvariants(
+  escrow: Allowlist,
+  chainId: number,
+  opts: { provider?: Provider; table?: Readonly<Record<number, Pick<SettlementChain, "token">>> } = {},
+): Promise<InvariantCheck[]> {
+  const chain = (opts.table ?? SETTLEMENT_CHAINS)[chainId];
+  if (!chain) return [];
+  const token = assertNotNative(chain.token);
+  const [tokenAllowed, nativeAllowed] = await Promise.all([
+    escrow.allowedTokens(token),
+    escrow.allowedTokens(ethers.ZeroAddress),
+  ]);
+  let tokenError: string | undefined;
+  try {
+    await checkSettlementToken(token, opts.provider);
+  } catch (e) {
+    tokenError = (e as Error).message;
+  }
+  return [
+    { label: "escrow allows the settlement token", ok: tokenAllowed === true },
+    { label: "escrow does not allow address(0)", ok: nativeAllowed === false },
+    { label: `token reports 6 decimals and symbol USDC${tokenError ? ` (${tokenError})` : ""}`, ok: tokenError === undefined },
+  ];
+}
+
+/**
+ * Poll until the escrow reports `token` allowed. A public RPC can answer a
+ * read from before the allowToken receipt (Base Sepolia does), and a stale
+ * `false` would abort a correct deploy. Only this read is retried: a stale
+ * node cannot make address(0) look allowed.
+ */
+export async function waitForTokenAllowed(
+  escrow: Allowlist,
+  token: string,
+  opts: { tries?: number; delayMs?: number } = {},
+): Promise<boolean> {
+  const tries = opts.tries ?? 10;
+  for (let i = 0; i < tries; i++) {
+    if (await escrow.allowedTokens(token)) return true;
+    if (i < tries - 1) await new Promise((r) => setTimeout(r, opts.delayMs ?? 2_000));
+  }
+  return false;
+}
+
 export interface DeployedEscrow {
   address: string;
   block: number;
@@ -75,9 +135,14 @@ export interface DeployedEscrow {
 /**
  * Deploy the BlindEscrow proxy (treasury and verifier are the deployer until
  * rotated), allowlist `token`, and check the allowlist. On a failed check the
- * error names the deployed escrow, which is then NOT recorded.
+ * error names the deployed escrow, which is then NOT recorded. `wait` tunes
+ * the poll for the allowToken write to show (waitForTokenAllowed).
  */
-export async function deployEscrow(token: string, deployer: { address: string }): Promise<DeployedEscrow> {
+export async function deployEscrow(
+  token: string,
+  deployer: { address: string },
+  wait: { tries?: number; delayMs?: number } = {},
+): Promise<DeployedEscrow> {
   assertNotNative(token);
   const startBlock = await ethers.provider.getBlockNumber();
   const BlindEscrow = await ethers.getContractFactory("BlindEscrow");
@@ -89,6 +154,7 @@ export async function deployEscrow(token: string, deployer: { address: string })
 
   await (await (escrow as any).allowToken(token)).wait();
   try {
+    await waitForTokenAllowed(escrow as unknown as Allowlist, token, wait);
     await assertEscrowAllowlist(escrow as unknown as Allowlist, token);
   } catch (err) {
     throw new Error(

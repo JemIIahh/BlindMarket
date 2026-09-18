@@ -227,7 +227,8 @@ export async function resolveEscrowTarget(
  * Pre-flight for deploy scripts, run BEFORE any contract is deployed. Prints
  * the target and, when `deploysEscrow`, refuses to replace a live BlindEscrow
  * unless ALLOW_ESCROW_REPLACE=true (plus EXPECTED_ESCROW naming it on a shared
- * chain). Scripts that deploy companions (AgentFactory, AA) instead require
+ * chain), and refuses a FIRST default escrow on a shared chain unless
+ * DEPLOYMENT_SET=default is passed explicitly. Scripts that deploy companions (AgentFactory, AA) instead require
  * EXPECTED_ESCROW on a shared chain: it names the stack they belong to.
  */
 export function preflightDeploy(
@@ -247,6 +248,17 @@ export function preflightDeploy(
   if (!opts.deploysEscrow) {
     assertExpectedEscrow(t, env);
     return t;
+  }
+  // A first default escrow on a shared chain (Arc testnet today) is what
+  // sync-addresses publishes to production's generated modules, and the
+  // "already holds" refusal below cannot catch a forgotten
+  // DEPLOYMENT_SET=staging when there is nothing to replace yet.
+  if (!escrow && set === "default" && SHARED_CHAIN_IDS.has(opts.chainId) && (env.DEPLOYMENT_SET ?? "").trim() !== "default") {
+    throw new Error(
+      `chainId ${opts.chainId} is shared by more than one deployment set, and the default set has no escrow there yet. ` +
+        `sync-addresses would publish a new default escrow to the generated address modules. For the staging stack pass ` +
+        `DEPLOYMENT_SET=staging; to create the default record pass DEPLOYMENT_SET=default.`,
+    );
   }
   if (escrow) {
     if (env.ALLOW_ESCROW_REPLACE !== "true") {

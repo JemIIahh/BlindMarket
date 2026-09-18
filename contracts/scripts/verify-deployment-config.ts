@@ -21,7 +21,7 @@
  */
 import { ethers, network } from "hardhat";
 import { resolveEscrowTarget } from "./_deployments";
-import { checkSettlementToken } from "./deploy-settlement";
+import { settlementInvariants } from "./deploy-settlement";
 import { SETTLEMENT_CHAINS, settlementTokenFor } from "./_settlement";
 
 const NATIVE = "0x0000000000000000000000000000000000000000";
@@ -66,25 +66,12 @@ async function main() {
   if (admin === verifier) { console.log("  ⚠ admin == verifier — these roles should be SEPARATE (checklist §3)."); }
   if (!/^0x[0-9a-fA-F]{40}$/.test(admin) || admin === NATIVE) { console.log("  ⚠ admin looks unset."); }
 
-  // Settlement invariants (header). Enforced without EXPECTED_*.
-  let invariantFails = 0;
-  const invariant = (label: string, ok: boolean) => {
-    if (!ok) invariantFails++;
-    console.log(`  ${ok ? "✓" : "✗"} ${label}`);
-  };
-  if (settlement) {
-    const token = settlementTokenFor(chainId);
-    console.log(`\n  ${settlement.label} settles in ${token}:`);
-    invariant("escrow allows the settlement token", (await (escrow as any).allowedTokens(token)) === true);
-    invariant("escrow does not allow address(0)", nativeAllowed === false);
-    let tokenError: string | undefined;
-    try {
-      await checkSettlementToken(token);
-    } catch (e) {
-      tokenError = (e as Error).message;
-    }
-    invariant(`token reports 6 decimals and symbol USDC${tokenError ? ` (${tokenError})` : ""}`, tokenError === undefined);
-  }
+  // Settlement invariants (header), tested in test/settlement.test.ts.
+  // Enforced without EXPECTED_*.
+  const checks = await settlementInvariants(escrow as any, chainId);
+  if (settlement) console.log(`\n  ${settlement.label} settles in ${settlementTokenFor(chainId)}:`);
+  for (const c of checks) console.log(`  ${c.ok ? "✓" : "✗"} ${c.label}`);
+  const invariantFails = checks.filter((c) => !c.ok).length;
 
   if (fail === 0 && invariantFails === 0) console.log("\n✓ config checks passed");
   if (fail > 0) console.log(`\n✗ ${fail} EXPECTED_* mismatch(es)`);
