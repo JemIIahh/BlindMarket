@@ -6,6 +6,7 @@ import * as escrowService from '../services/escrow.js';
 import type { AuthRequest, ApiResponse } from '../types.js';
 import * as accountingService from '../services/accountingService.js';
 import { recordWorkerPayout, recordWorkerDispute } from '../services/workerPayout.js';
+import { payoutCurrency } from '../services/settlementUnits.js';
 import { provider, escrow } from '../services/chain.js';
 import { redis } from '../services/redis.js';
 
@@ -197,6 +198,7 @@ submissionsRouter.post('/confirm', requireAuth, async (req: AuthRequest, res, ne
         taskId: String(taskId),
         type: 'slash',
         amount: 0,
+        unit: payoutCurrency('0g', task.token)?.symbol,
       });
     } catch (hookErr) {
       await redis.del(marker).catch(() => {});

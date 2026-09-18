@@ -303,6 +303,13 @@ tasksRouter.post('/', requireAuth, async (req: AuthRequest, res, next) => {
     if (!escrowAddress) {
       throw new AppError(503, 'CHAIN_NOT_CONFIGURED', `This backend has no ${label} escrow to post tasks on (${escrowEnv})`);
     }
+    // Claim the hash for this poster before the tx exists, so nobody who
+    // sees it on-chain can index it first (a2aStore.claimTaskHash). Refused
+    // here, before any gas is spent, when another poster already holds it.
+    const claim = await a2aStore.claimTaskHash(data.taskHash, from);
+    if (!claim.mine) {
+      throw new AppError(409, 'TASK_HASH_TAKEN', 'Another poster is already posting a task with this hash — post with a new brief');
+    }
     if (!token.address || !payoutCurrency(chain, data.token)) {
       throw new AppError(
         400,
@@ -349,6 +356,7 @@ tasksRouter.post('/', requireAuth, async (req: AuthRequest, res, next) => {
         taskId: data.taskHash,
         type: 'escrow_lock',
         amount: Number(data.amount) / (10 ** decimals),
+        unit: token.unit.symbol,
         status: 'pending',
       });
     } catch (accErr) {
@@ -528,6 +536,7 @@ tasksRouter.post('/:id/cancel', requireAuth, async (req: AuthRequest, res, next)
         taskId: String(taskId),
         type: 'refund',
         amount,
+        unit: payoutCurrency(chain, task.token)?.symbol,
         status: 'pending',
       });
     } catch (accErr) {
@@ -594,6 +603,7 @@ tasksRouter.post('/:id/timeout', requireAuth, async (req: AuthRequest, res, next
         taskId: String(taskId),
         type: 'refund',
         amount,
+        unit: payoutCurrency(chain, task.token)?.symbol,
         status: 'pending',
       });
     } catch (accErr) {

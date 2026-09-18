@@ -269,6 +269,23 @@ const migrations: Migration[] = [
     name: 'agent_executors_supported_chains',
     sql: `ALTER TABLE agent_executors ADD COLUMN supported_chains TEXT;`,
   },
+  {
+    // Mirror of Postgres migration 34 (services/creditLedger.ts).
+    id: 16,
+    name: 'credited_payouts',
+    sql: `CREATE TABLE IF NOT EXISTS credited_payouts (
+        task_hash TEXT PRIMARY KEY,
+        chain TEXT NOT NULL,
+        executor TEXT NOT NULL,
+        credited_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );`,
+  },
+  {
+    // Mirror of Postgres migration 35.
+    id: 17,
+    name: 'transactions_unit',
+    sql: `ALTER TABLE transactions ADD COLUMN unit TEXT;`,
+  },
 ];
 
 function runMigrations(database: Database.Database): void {

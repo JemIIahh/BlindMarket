@@ -174,8 +174,13 @@ httpServer.listen(config.port, () => {
   }
   // Start the BlindEscrow TaskCreated poller — populates the taskHash↔taskId
   // mapping that the A2A settlement bridge needs to call assignWorker /
-  // completeVerification by on-chain id.
-  startEscrowEventLoop();
+  // completeVerification by on-chain id. Only where this stack has a 0G
+  // escrow: the loop would otherwise poll address(0) forever.
+  if (settlementChainConfig('0g').escrowAddress !== null) {
+    startEscrowEventLoop();
+  } else {
+    console.log('[chain] no 0G escrow configured; 0G event indexing off');
+  }
   // Base escrow event loop — populates base: prefixed taskHash↔taskId
   // mapping needed for USDC settlement on Base chain.
   startBaseEscrowEventLoop();

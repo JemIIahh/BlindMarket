@@ -18,6 +18,7 @@ import * as semanticMatch from './semanticMatch.js';
 import * as semanticProof from './semanticProof.js';
 import { redis } from './redis.js';
 import { payoutCurrency } from './settlementUnits.js';
+import { claimCredit, releaseCredit } from './creditLedger.js';
 import type { TaskChain } from './taskChain.js';
 
 // Earned-badge threshold: N settled completions per (agent, capability) with a
@@ -27,19 +28,25 @@ import type { TaskChain } from './taskChain.js';
 const EARNED_BADGE_MIN_COMPLETED = 5;
 const EARNED_BADGE_MAX_FAILURE_RATIO = 0.2;
 
-// Cached fee basis points. Read from 0G escrow at startup; Base escrow
-// should mirror the same value (admin sets both via set-fee.ts). Falls back
-// to 1000 (10%) if the RPC is unreachable.
-let cachedFeeBps: number | null = null;
-export async function getFeeBps(): Promise<number> {
-  if (cachedFeeBps !== null) return cachedFeeBps;
+// Fee basis points per chain, read once per process from THAT chain's
+// escrow: each escrow has its own feeBps (set-fee.ts sets them one at a
+// time), and the split credited here must be the split the escrow paid.
+// Reading the 0G escrow for a Base payout mis-credited every USDC task the
+// moment the two fees differed. Falls back to 1000 (10%) if the RPC is
+// unreachable, and says which chain.
+const cachedFeeBps = new Map<TaskChain, number>();
+export async function getFeeBps(chain: TaskChain): Promise<number> {
+  const cached = cachedFeeBps.get(chain);
+  if (cached !== undefined) return cached;
+  let bps: number;
   try {
-    cachedFeeBps = await escrowService.feeBps();
+    bps = await escrowService.feeBpsOn(chain);
   } catch (err) {
-    console.warn('[a2a] feeBps RPC read failed, falling back to 1000:', (err as Error).message);
-    cachedFeeBps = 1000;
+    console.warn(`[a2a] feeBps RPC read on ${chain} failed, falling back to 1000:`, (err as Error).message);
+    bps = 1000;
   }
-  return cachedFeeBps;
+  cachedFeeBps.set(chain, bps);
+  return bps;
 }
 
 /**
@@ -114,8 +121,18 @@ export async function recordWorkerPayout(
       console.log(`[a2a] payout for ${taskHash.slice(0, 10)}… already credited — skipping duplicate`);
       return;
     }
+    // Durable gate behind the marker: the credits live in the database, so
+    // the record of which tasks were credited lives there too
+    // (creditLedger.ts). A Redis snapshot restore deletes the markers written
+    // since the snapshot while the credits stay; this row does not go away.
+    // A database failure here throws into the catch below, which releases
+    // both, so the credit stays retryable.
+    if (!(await claimCredit(taskHash, settlement.chain, executorAddr))) {
+      console.log(`[a2a] payout for ${taskHash.slice(0, 10)}… already credited (database) — skipping duplicate`);
+      return;
+    }
 
-    const feeBps = await getFeeBps();
+    const feeBps = await getFeeBps(settlement.chain);
     const decimalsDivisor = 10 ** unit.decimals;
 
     // Convert micro-units (1e-6 USDC) to chain units.
@@ -136,6 +153,7 @@ export async function recordWorkerPayout(
       // Executor not registered (yet) — release the marker so a later
       // observation can credit once the registration exists.
       console.warn(`[a2a] payout for ${taskHash.slice(0, 10)}… not credited: executor ${executorAddr} is not registered`);
+      await releaseCredit(taskHash).catch(() => {});
       await redis.del(creditedKey).catch(() => {});
       return;
     }
@@ -171,6 +189,7 @@ export async function recordWorkerPayout(
         amount: Number(grossAmount) / decimalsDivisor,
         fee: Number(platformFee) / decimalsDivisor,
         net: Number(workerShare) / decimalsDivisor,
+        unit: unit.symbol,
         status: 'confirmed',
       });
     } catch (acctErr) {
@@ -228,6 +247,9 @@ export async function recordWorkerPayout(
     // Release the at-most-once marker so the credit stays retryable — without
     // this a single agentStore blip would make the payout permanently
     // uncreditable from EVERY path while the marker blocks all retries.
+    // Both gates go: the database row was claimed before the credit was
+    // attempted (or its claim is what failed).
+    await releaseCredit(taskHash).catch(() => {});
     await redis.del(creditedKey).catch(() => {});
     // Callers with no re-observation path (the DisputeResolved listener) pass
     // rethrow:true so the failure aborts the tick BEFORE its checkpoint advances

@@ -11,9 +11,14 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 const USDC = '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
 const NATIVE = '0x0000000000000000000000000000000000000000';
 
-const { store, redisMock, sideEffects } = vi.hoisted(() => ({
+const { store, redisMock, sideEffects, escrowMock, ledger } = vi.hoisted(() => ({
   store: { creditPayout: vi.fn(), adjustReputation: vi.fn(), registerAgent: vi.fn(), hasEarningsTotal: vi.fn() },
   redisMock: { set: vi.fn(), del: vi.fn(), sadd: vi.fn() },
+  // Each chain's escrow has its own fee; the tests below pin that the split
+  // follows the task's chain.
+  escrowMock: { feeBps: vi.fn(async () => 1000), feeBpsOn: vi.fn(async (_chain: string) => 1000) },
+  // The durable credit row (creditLedger.ts) behind the Redis marker.
+  ledger: { claimCredit: vi.fn(async () => true), releaseCredit: vi.fn(async () => undefined) },
   sideEffects: {
     recordTransaction: vi.fn(),
     incrementSoldCount: vi.fn(async () => undefined),
@@ -25,7 +30,8 @@ const { store, redisMock, sideEffects } = vi.hoisted(() => ({
 vi.mock('../config.js', () => ({ config: { baseEscrowAddress: '0xescrow', baseUsdcAddress: '0x036CbD53842c5426634e7929541eC2318f3dCF7e' } }));
 vi.mock('./agentStore.js', () => store);
 vi.mock('./redis.js', () => ({ redis: redisMock }));
-vi.mock('./escrow.js', () => ({ feeBps: vi.fn(async () => 1000) }));
+vi.mock('./escrow.js', () => escrowMock);
+vi.mock('./creditLedger.js', () => ledger);
 vi.mock('./accountingService.js', () => ({ recordTransaction: sideEffects.recordTransaction }));
 vi.mock('./serviceStore.js', () => ({ incrementSoldCount: sideEffects.incrementSoldCount }));
 vi.mock('./reputationDecay.js', () => ({
@@ -52,6 +58,8 @@ beforeEach(() => {
   store.creditPayout.mockResolvedValue(true);
   store.adjustReputation.mockResolvedValue(true);
   store.hasEarningsTotal.mockReturnValue(true);
+  escrowMock.feeBpsOn.mockImplementation(async () => 1000);
+  ledger.claimCredit.mockResolvedValue(true);
 });
 
 describe('recordWorkerPayout', () => {
@@ -62,14 +70,57 @@ describe('recordWorkerPayout', () => {
     expect(store.creditPayout).toHaveBeenCalledWith(EXEC, { symbol: 'USDC', decimals: 6 }, 4_500_000n);
     expect(store.registerAgent).not.toHaveBeenCalled();
     expect(sideEffects.incrementSoldCount).toHaveBeenCalledWith(3);
-    expect(sideEffects.recordTransaction).toHaveBeenCalledWith(expect.objectContaining({ amount: 5, fee: 0.5, net: 4.5 }));
+    expect(sideEffects.recordTransaction).toHaveBeenCalledWith(expect.objectContaining({ amount: 5, fee: 0.5, net: 4.5, unit: 'USDC' }));
     expect(redisMock.del).not.toHaveBeenCalled();
+    expect(ledger.claimCredit).toHaveBeenCalledWith(TASK, 'base', EXEC);
   });
 
   it('credits a native 0G payout to the 0G total', async () => {
     await recordWorkerPayout(TASK, EXEC, '7', 10n ** 18n, onZeroG);
     expect(store.creditPayout).toHaveBeenCalledWith(EXEC, { symbol: '0G', decimals: 18 }, 9n * 10n ** 17n);
-    expect(sideEffects.recordTransaction).toHaveBeenCalledWith(expect.objectContaining({ amount: 1, net: 0.9 }));
+    expect(sideEffects.recordTransaction).toHaveBeenCalledWith(expect.objectContaining({ amount: 1, net: 0.9, unit: '0G' }));
+  });
+
+  it("splits with the fee of the task's OWN chain's escrow, cached per chain", async () => {
+    // A fresh module: the fee cache is per process.
+    vi.resetModules();
+    const fresh = await import('./workerPayout.js');
+    escrowMock.feeBpsOn.mockImplementation(async (chain: string) => (chain === 'base' ? 800 : 1000));
+    await fresh.recordWorkerPayout(TASK, EXEC, '7', 1_000_000n, onBase);
+    await fresh.recordWorkerPayout('0x' + 'ac'.repeat(32), EXEC, '8', 10n ** 18n, onZeroG);
+    await fresh.recordWorkerPayout('0x' + 'ad'.repeat(32), EXEC, '9', 1_000_000n, onBase);
+    // 800 bps on Base → 92%; 1000 bps on 0G → 90%.
+    expect(store.creditPayout).toHaveBeenNthCalledWith(1, EXEC, { symbol: 'USDC', decimals: 6 }, 920_000n);
+    expect(store.creditPayout).toHaveBeenNthCalledWith(2, EXEC, { symbol: '0G', decimals: 18 }, 9n * 10n ** 17n);
+    expect(store.creditPayout).toHaveBeenNthCalledWith(3, EXEC, { symbol: 'USDC', decimals: 6 }, 920_000n);
+    expect(escrowMock.feeBpsOn.mock.calls.map(([c]) => c)).toEqual(['base', '0g']);
+    expect(sideEffects.recordTransaction).toHaveBeenNthCalledWith(1, expect.objectContaining({ fee: 0.08, net: 0.92 }));
+  });
+
+  it('stops at the database credit row when the Redis marker is gone (a snapshot restore)', async () => {
+    ledger.claimCredit.mockResolvedValueOnce(false);
+    await recordWorkerPayout(TASK, EXEC, '7', 5_000_000n, onBase);
+    expect(store.creditPayout).not.toHaveBeenCalled();
+    expect(sideEffects.recordTransaction).not.toHaveBeenCalled();
+    // Both gates agree the task is credited: the marker stays.
+    expect(redisMock.del).not.toHaveBeenCalled();
+  });
+
+  it('treats a database failure while claiming the row as a failed credit', async () => {
+    ledger.claimCredit.mockRejectedValueOnce(new Error('connection refused'));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    await recordWorkerPayout(TASK, EXEC, '7', 5_000_000n, onBase);
+    expect(store.creditPayout).not.toHaveBeenCalled();
+    expect(redisMock.del).toHaveBeenCalledWith(`a2a:credited:${TASK}`);
+    expect(ledger.releaseCredit).toHaveBeenCalledWith(TASK);
+  });
+
+  it('releases the row and the marker when the credit throws, and rethrows for the listener', async () => {
+    store.creditPayout.mockRejectedValueOnce(new Error('db down'));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(recordWorkerPayout(TASK, EXEC, '7', 5_000_000n, onBase, { rethrow: true })).rejects.toThrow('db down');
+    expect(ledger.releaseCredit).toHaveBeenCalledWith(TASK);
+    expect(redisMock.del).toHaveBeenCalledWith(`a2a:credited:${TASK}`);
   });
 
   it('still pays a USDC worker when there is a compute cost (it used to be scaled as 0G and zero the share)', async () => {
@@ -89,6 +140,7 @@ describe('recordWorkerPayout', () => {
     await recordWorkerPayout(TASK, EXEC, '7', 5_000_000n, onBase, { serviceId: 3 });
 
     expect(redisMock.del).toHaveBeenCalledWith(`a2a:credited:${TASK}`);
+    expect(ledger.releaseCredit).toHaveBeenCalledWith(TASK);
     expect(sideEffects.incrementSoldCount).not.toHaveBeenCalled();
     expect(sideEffects.recordTransaction).not.toHaveBeenCalled();
     expect(sideEffects.recordTaskCompletion).not.toHaveBeenCalled();
@@ -113,6 +165,7 @@ describe('recordWorkerPayout', () => {
     expect(redisMock.set).not.toHaveBeenCalledWith(`a2a:credited:${TASK}`, expect.anything(), 'NX');
     expect(redisMock.set).toHaveBeenCalledWith(`a2a:uncredited:${TASK}`, expect.stringContaining('"grossAmount":"5000000"'));
     expect(redisMock.sadd).toHaveBeenCalledWith('a2a:uncredited:all', TASK);
+    expect(ledger.claimCredit).not.toHaveBeenCalled();
   });
 
   it('parks a unit that no earnings total holds as-is, instead of throwing inside a listener', async () => {

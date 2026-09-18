@@ -18,7 +18,7 @@ import { baseEscrow } from './chain.js';
 import { getCachedTaskIdByHash, getTaskIdByHash, seedTaskIdMapping } from './escrowEvents.js';
 import { getBaseTaskIdByHash, forceBaseTick, seedBaseTaskIdMapping } from './baseEscrowEvents.js';
 import { getMeta } from './a2aStore.js';
-import { isSettlementChainKey, type SettlementChainKey } from './settlementChains.js';
+import { isSettlementChainKey, settlementChainConfig, type SettlementChainKey } from './settlementChains.js';
 
 /** A settlement chain, as a task's escrow names it (services/settlementChains.ts). */
 export type TaskChain = SettlementChainKey;
@@ -56,7 +56,9 @@ const TASK_INDEX: { readonly [K in TaskChain]: TaskIndex } = {
     seed: (taskHash, taskId) => seedBaseTaskIdMapping(taskHash, taskId),
   },
   '0g': {
-    enabled: () => true,
+    // No 0G escrow (a Base-only stack): nothing to index, and the slow
+    // path's forced ticks and backfill would run against address(0).
+    enabled: () => settlementChainConfig('0g').escrowAddress !== null,
     cached: (taskHash) => getCachedTaskIdByHash(taskHash),
     // Retries, and can trigger a backfill.
     resolve: (taskHash) => getTaskIdByHash(taskHash),

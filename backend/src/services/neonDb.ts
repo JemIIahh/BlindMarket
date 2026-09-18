@@ -735,6 +735,29 @@ const migrations: Array<{ id: number; name: string; sql: string; when?: () => bo
     // handles exactly 0G and Base (executorChains.LEGACY_SUPPORTED_CHAINS).
     sql: `ALTER TABLE agent_executors ADD COLUMN IF NOT EXISTS supported_chains TEXT[];`,
   },
+  {
+    id: 34,
+    name: 'credited_payouts',
+    // Durable at-most-once gate for earnings credits (services/creditLedger.ts).
+    // The Redis marker alone is lost on a snapshot restore while the credits
+    // in agent_executors stay, so the next ruling scan credited them again.
+    sql: `
+      CREATE TABLE IF NOT EXISTS credited_payouts (
+        task_hash TEXT PRIMARY KEY,
+        chain TEXT NOT NULL,
+        executor TEXT NOT NULL,
+        credited_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `,
+  },
+  {
+    id: 35,
+    name: 'transactions_unit',
+    // The currency a ledger row's amount/fee/net are in ('USDC', '0G'). Rows
+    // from before this column are NULL: they are in whatever this deployment
+    // paid in at the time. Summaries never add different units together.
+    sql: `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS unit TEXT;`,
+  },
 ];
 
 /**
@@ -842,9 +865,36 @@ export async function runMigrations(p: pg.Pool): Promise<void> {
       );
       console.log(`[neonDb] Applied migration ${m.id}: ${m.name}`);
     }
+    assertPricingUnitUnchanged(appliedNames);
   } finally {
     client.release();
   }
+}
+
+/**
+ * Migration 31 converted every stored price and reward floor to USDC base
+ * units and is recorded only where it ran. A deployment that recorded it and
+ * later switches to pricing in 0G (POSTING_CHAIN=0g) would read those
+ * 6-decimal amounts as wei: a 5 USDC listing becomes 5·10⁻¹² 0G and every
+ * reward floor passes. Nothing re-keys them, so refuse to run, unless the
+ * operator has re-keyed the rows by hand and says so.
+ */
+export function assertPricingUnitUnchanged(
+  applied: ReadonlyMap<number, string>,
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  if (!applied.has(31)) return;
+  const unit = pricingUnit();
+  if (unit.decimals === USDC_UNIT.decimals) return;
+  if (env.ALLOW_PRICING_UNIT_CHANGE === 'true') {
+    console.warn(`[neonDb] ⚠ this database was priced in USDC (migration 31) but the posting chain prices in ${unit.symbol}; ALLOW_PRICING_UNIT_CHANGE=true, so stored prices are taken as ${unit.symbol}`);
+    return;
+  }
+  throw new Error(
+    `This database was priced in USDC (migration 31 is recorded), but the posting chain prices in ${unit.symbol} ` +
+      `(${unit.decimals} decimals). Stored service prices and reward floors would be read as ${unit.symbol} wei. ` +
+      `Unset POSTING_CHAIN, or re-key agent_services.price_raw and *.min_reward by hand and set ALLOW_PRICING_UNIT_CHANGE=true.`,
+  );
 }
 
 // ── Redis → PG data migration ──────────────────────────────────────────────────

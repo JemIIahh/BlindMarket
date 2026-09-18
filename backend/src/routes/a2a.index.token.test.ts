@@ -55,6 +55,7 @@ vi.mock('../services/a2aStore.js', () => ({
   setMeta: vi.fn(async () => undefined),
   getState: vi.fn(),
   updateState: vi.fn(),
+  getTaskHashClaim: vi.fn(async () => null),
 }));
 
 vi.mock('../services/taskChain.js', () => ({
@@ -243,6 +244,26 @@ describe('POST /tasks/index keeps a task on its first chain', () => {
     expect(res.body.error.code).toBe('TASK_HASH_TAKEN');
     expect(taskChain.seedTaskId).not.toHaveBeenCalled();
     expect(a2aStore.setMeta).not.toHaveBeenCalled();
+  });
+
+  it('refuses a first index by anyone but the poster who claimed the hash at POST /tasks', async () => {
+    // The escrow accepts duplicate hashes, so a front-runner who escrowed the
+    // real poster's hash and reached this route first used to own the task.
+    vi.mocked(a2aStore.getTaskHashClaim).mockResolvedValueOnce('0x9999999999999999999999999999999999999999');
+    onBase(USDC, 5_000_000n);
+    const res = await index();
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('TASK_HASH_TAKEN');
+    expect(taskChain.seedTaskId).not.toHaveBeenCalled();
+    expect(a2aStore.setMeta).not.toHaveBeenCalled();
+  });
+
+  it('indexes for the poster who holds the claim', async () => {
+    vi.mocked(a2aStore.getTaskHashClaim).mockResolvedValueOnce(POSTER.toLowerCase());
+    onBase(USDC, 5_000_000n);
+    const res = await index();
+    expect(res.status).toBe(200);
+    expect(a2aStore.setMeta).toHaveBeenCalled();
   });
 });
 

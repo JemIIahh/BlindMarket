@@ -22,6 +22,19 @@ const getMeta = vi.fn();
 const chainMod = vi.hoisted(() => ({ baseEscrow: {} as unknown }));
 
 vi.mock('./chain.js', () => chainMod);
+// The 0G index is enabled by the registry's 0G escrow; a test can unset it.
+const OG_ESCROW = '0x037529B296a89E6Dd1abAF84D413cb2dD70C5be5';
+const ogEscrow = vi.hoisted(() => ({ current: '0x037529B296a89E6Dd1abAF84D413cb2dD70C5be5' as string | null }));
+vi.mock('./settlementChains.js', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('./settlementChains.js')>();
+  return {
+    ...mod,
+    settlementChainConfig: (key: '0g' | 'base') => {
+      const entry = mod.settlementChainConfig(key);
+      return key === '0g' ? { ...entry, escrowAddress: ogEscrow.current } : entry;
+    },
+  };
+});
 vi.mock('./a2aStore.js', () => ({ getMeta }));
 vi.mock('./escrowEvents.js', () => ({ getCachedTaskIdByHash, getTaskIdByHash }));
 vi.mock('./baseEscrowEvents.js', () => ({ getBaseTaskIdByHash, forceBaseTick }));
@@ -185,5 +198,25 @@ describe('resolveTaskChainById', () => {
     });
 
     expect(await resolveTaskChainById(7, OWNER)).toBe('0g');
+  });
+});
+
+describe('the 0G index is only consulted where this stack has a 0G escrow', () => {
+  it('skips the 0G slow path for an unindexed hash on a Base-only stack', async () => {
+    ogEscrow.current = null;
+    try {
+      const resolved = await resolveTaskByHash(HASH);
+      expect(resolved).toBeNull();
+      expect(forceBaseTick).toHaveBeenCalled();
+      expect(getTaskIdByHash).not.toHaveBeenCalled();
+      expect(getCachedTaskIdByHash).not.toHaveBeenCalled();
+    } finally {
+      ogEscrow.current = OG_ESCROW;
+    }
+  });
+
+  it('consults it where the escrow is configured', async () => {
+    getTaskIdByHash.mockResolvedValueOnce('7');
+    expect(await resolveTaskByHash(HASH)).toEqual({ taskId: '7', chain: '0g' });
   });
 });

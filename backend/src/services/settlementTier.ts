@@ -82,10 +82,16 @@ export function tierMismatches(env: NodeJS.ProcessEnv, tier: SettlementTier): st
   const check = (name: string, ids: { readonly mainnet: number; readonly testnet: number }) => {
     const raw = (env[name] ?? '').trim();
     if (raw === '') return;
-    const chainId = Number(raw);
+    // Parsed as config.ts parses it (parseInt, base 10), but only a plain
+    // decimal passes: Number() accepted "0x14a34" and "84532.0" here while
+    // config read them as 0 and 84532, so the check missed exactly the
+    // mistyped ids it exists to catch.
+    const chainId = /^\d+$/.test(raw) ? parseInt(raw, 10) : Number.NaN;
     if (chainId === ids[tier]) return;
     const other = tier === 'mainnet' ? 'testnet' : 'mainnet';
-    const what = chainId === ids[other] ? `is ${other}` : 'is not a chain this tier knows';
+    const what = Number.isNaN(chainId)
+      ? 'is not a decimal chain id'
+      : chainId === ids[other] ? `is ${other}` : 'is not a chain this tier knows';
     problems.push(`${name}=${raw} ${what}, but SETTLEMENT_TIER=${tier} expects ${ids[tier]}`);
   };
   for (const { env: name, ...ids } of Object.values(TIER_CHAIN_IDS)) check(name, ids);

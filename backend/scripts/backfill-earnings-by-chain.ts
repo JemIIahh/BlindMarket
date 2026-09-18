@@ -209,6 +209,23 @@ async function fingerprintProblem(redis: Redis, { src, chainId }: ScannedChain):
 }
 
 /** Claim the credit marker of each task. Returns how many were not yet set. */
+/** The durable twin of claimCredits: one credited_payouts row per counted task (migration 34). */
+async function claimCreditRows(pool: pg.Pool, credits: Map<string, { chain: string; executor: string }>): Promise<number> {
+  let inserted = 0;
+  const entries = [...credits.entries()];
+  for (let i = 0; i < entries.length; i += 500) {
+    const chunk = entries.slice(i, i + 500);
+    const { rowCount } = await pool.query(
+      `INSERT INTO credited_payouts (task_hash, chain, executor)
+       SELECT * FROM UNNEST($1::text[], $2::text[], $3::text[])
+       ON CONFLICT (task_hash) DO NOTHING`,
+      [chunk.map(([h]) => h), chunk.map(([, c]) => c.chain), chunk.map(([, c]) => c.executor.toLowerCase())],
+    );
+    inserted += rowCount ?? 0;
+  }
+  return inserted;
+}
+
 async function claimCredits(redis: Redis, taskHashes: Set<string>): Promise<number> {
   let claimed = 0;
   const hashes = [...taskHashes];
@@ -319,7 +336,12 @@ async function waitForListeners(redis: Redis, scanned: ScannedChain[]): Promise<
 }
 
 /** Steps 1–4 of --apply (see the header). Throws when nothing may be written. */
-async function prepareApply(scanned: ScannedChain[], taskHashes: Set<string>): Promise<void> {
+async function prepareApply(
+  scanned: ScannedChain[],
+  taskHashes: Set<string>,
+  credits: Map<string, { chain: string; executor: string }>,
+  pool: pg.Pool,
+): Promise<void> {
   const redis = new Redis(required('REDIS_URL'), { lazyConnect: true, maxRetriesPerRequest: 3 });
   try {
     const wrongRedis = await problems(scanned, (c) => fingerprintProblem(redis, c));
@@ -346,8 +368,10 @@ async function prepareApply(scanned: ScannedChain[], taskHashes: Set<string>): P
     }
 
     const claimed = await claimCredits(redis, taskHashes);
+    const rows = await claimCreditRows(pool, credits);
     console.log(
-      `  claimed ${claimed} credit marker(s); ${taskHashes.size - claimed} task(s) were already credited. ` +
+      `  claimed ${claimed} credit marker(s) and ${rows} database credit row(s); ` +
+        `${taskHashes.size - claimed} task(s) were already credited. ` +
         `Waiting ${CLAIM_SETTLE_MS / 1000}s for credits under way.`,
     );
     await sleep(CLAIM_SETTLE_MS);
@@ -385,6 +409,9 @@ async function main(): Promise<void> {
   const totals = new Map<string, ChainEarnings>();
   const scanned: ScannedChain[] = [];
   const countedTaskHashes = new Set<string>();
+  // Durable credit rows (services/creditLedger.ts) for the same tasks, so a
+  // Redis snapshot restore cannot re-credit what this run counted.
+  const countedCredits = new Map<string, { chain: string; executor: string }>();
   for (const src of sources()) {
     const provider = new JsonRpcProvider(src.rpcUrl);
     const escrow = new Contract(src.escrow, ESCROW_ABI, provider);
@@ -400,9 +427,13 @@ async function main(): Promise<void> {
         console.log(`  ${src.label}: task ${taskId} paid in ${t.token}, not ${src.token}; not counted`);
         continue;
       }
-      addPayout(totals, executorFor(t.worker, walletBySmartAccount), src.unit, payout);
+      const executor = executorFor(t.worker, walletBySmartAccount);
+      addPayout(totals, executor, src.unit, payout);
       const taskHash = String(t.taskHash).toLowerCase();
-      if (taskHash !== ZERO_HASH) countedTaskHashes.add(taskHash);
+      if (taskHash !== ZERO_HASH) {
+        countedTaskHashes.add(taskHash);
+        countedCredits.set(taskHash, { chain: src.label === 'Base' ? 'base' : '0g', executor });
+      }
       counted++;
     }
     console.log(`  ${src.label.padEnd(9)} ${payouts.size} TaskCompleted, ${counted} counted`);
@@ -433,7 +464,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  await prepareApply(scanned, countedTaskHashes);
+  await prepareApply(scanned, countedTaskHashes, countedCredits, pool);
 
   let applied = 0;
   const moved: string[] = [];

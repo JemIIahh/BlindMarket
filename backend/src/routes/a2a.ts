@@ -1345,6 +1345,18 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
         'Another poster already indexed a task with this hash — cancel your escrow to get it back, and post with a new brief',
       );
     }
+    // The poster who built the funding tx through POST /tasks claimed the
+    // hash then, before it was public. The escrow accepts duplicate hashes,
+    // so a front-runner can escrow the same hash and race the real poster's
+    // client to this route; the claim decides, not the race.
+    const claimedBy = await a2aStore.getTaskHashClaim(taskHash);
+    if (claimedBy && !callerAddresses.has(claimedBy)) {
+      throw new AppError(
+        409,
+        'TASK_HASH_TAKEN',
+        'Another poster claimed this hash when they built its funding transaction — cancel your escrow to get it back, and post with a new brief',
+      );
+    }
 
     // A task stays on the chain it was first indexed on. The poster picks the
     // hash, so the same one can be escrowed on both chains; re-indexing it from

@@ -57,6 +57,17 @@ describe('tierMismatches', () => {
     ]);
   });
 
+  it('reads ids the way config.ts does: only a plain decimal is a chain id', () => {
+    // Number() accepted these while config's parseInt read 0 / 84532.
+    expect(tierMismatches(env({ BASE_CHAIN_ID: '0x14a34' }), 'testnet')).toEqual([
+      'BASE_CHAIN_ID=0x14a34 is not a decimal chain id, but SETTLEMENT_TIER=testnet expects 84532',
+    ]);
+    expect(tierMismatches(env({ BASE_CHAIN_ID: '84532.0' }), 'testnet')).toEqual([
+      'BASE_CHAIN_ID=84532.0 is not a decimal chain id, but SETTLEMENT_TIER=testnet expects 84532',
+    ]);
+    expect(tierMismatches(env({ BASE_CHAIN_ID: ' 84532 ' }), 'testnet')).toEqual([]);
+  });
+
   it('reports a chain id belonging to no tier', () => {
     expect(tierMismatches(env({ BASE_CHAIN_ID: '31337' }), 'testnet')).toEqual([
       'BASE_CHAIN_ID=31337 is not a chain this tier knows, but SETTLEMENT_TIER=testnet expects 84532',

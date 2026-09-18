@@ -27,8 +27,14 @@ export async function nextTaskId(): Promise<number> {
 }
 
 /** Get fee basis points */
+/** The 0G escrow's fee. Prefer feeBpsOn: each chain's escrow has its own. */
 export async function feeBps(): Promise<number> {
-  return Number(await escrowFor('0g').feeBps());
+  return feeBpsOn('0g');
+}
+
+/** The platform fee, in basis points, the escrow on `chain` applies at settlement. */
+export async function feeBpsOn(chain: TaskChain): Promise<number> {
+  return Number(await escrowFor(chain).feeBps());
 }
 
 /**
