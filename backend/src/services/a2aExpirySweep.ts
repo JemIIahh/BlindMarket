@@ -1,6 +1,8 @@
 import * as a2aStore from './a2aStore.js';
 import * as escrowService from './escrow.js';
 import { resolveCachedTaskByHash, resolveTaskByHash } from './taskChain.js';
+import { provider, baseProvider } from './chain.js';
+import { loadAgentByWallet } from './deployedAgentStore.js';
 import { SWEEP_INTERVAL_MS, EXPIRY_GRACE_SEC } from '../constants.js';
 
 // Re-export for any callers that import from here (backward compat)
@@ -193,8 +195,66 @@ export async function sweepExpiredTasks(): Promise<void> {
 // After CAS wins, a settlement deadline key is set (TTL 120s). If the on-chain
 // tx confirms within that window, the key is cleared. If it expires, this sweep
 // detects the task and reverts it to 'open' so another agent can pick it up.
+//
+// A task whose assign tx WAS broadcast (assignTxHash set) is normally settled,
+// but not always: tx.wait() can time out on a slow chain and the tx can then be
+// dropped from the pool, leaving the task `accepted` off-chain and Funded
+// on-chain with nothing left to reconcile it. Once such a task is older than
+// ASSIGN_RECONCILE_AFTER_MS the chain is read once: Assigned → healthy (clear
+// any stale assignError); still Funded with no successful receipt → re-open.
 
 let gasLivenessInFlight = false;
+
+const ASSIGN_RECONCILE_AFTER_MS = (Number(process.env.A2A_ASSIGN_RECONCILE_MIN) || 10) * 60_000;
+// Each reconcile costs a hash resolution plus up to two RPC reads.
+const MAX_ASSIGN_RECONCILES_PER_TICK = 5;
+
+/** Returns true when the task was released back to open. */
+async function reconcileBroadcastAssignment(
+  taskId: string,
+  executorAddress: string | undefined,
+  assignTxHash: string,
+  hasAssignError: boolean,
+): Promise<boolean> {
+  const resolved = await resolveTaskByHash(taskId).catch(() => null);
+  const onChain = resolved
+    ? await escrowService.getTaskOn(resolved.chain, Number(resolved.taskId)).catch(() => null)
+    : null;
+  if (!resolved || !onChain) return false;
+
+  if (Number(onChain.status) !== 0) {
+    // Past Funded: the assignment landed. Clear the error only when it landed
+    // for THIS executor (EOA, or its smart account on Base) — anything else is
+    // the accept route's ASSIGNED_ELSEWHERE / cancel handling to own.
+    const worker = onChain.worker?.toLowerCase();
+    let ours = !!worker && worker === executorAddress?.toLowerCase();
+    if (!ours && worker && executorAddress) {
+      const agent = await loadAgentByWallet(executorAddress).catch(() => null);
+      ours = agent?.smartAccountAddress?.toLowerCase() === worker;
+    }
+    if (ours && hasAssignError) await a2aStore.updateState(taskId, { assignError: undefined });
+    await a2aStore.markAssignReconciled(taskId, assignTxHash);
+    return false;
+  }
+
+  // Still Funded. A successful receipt means the status read is stale — wait.
+  // An RPC failure is not a verdict either.
+  const rpc = resolved.chain === 'base' ? baseProvider : provider;
+  let receipt;
+  try {
+    receipt = await rpc.getTransactionReceipt(assignTxHash);
+  } catch {
+    return false;
+  }
+  if (receipt?.status === 1) return false;
+
+  console.warn(
+    `[a2aExpirySweep] gas-liveness: assign tx ${assignTxHash.slice(0, 10)}… for task ${taskId.slice(0, 10)}… ` +
+      `${receipt ? 'reverted' : 'never mined'} and the task is still Funded — re-opening`,
+  );
+  await a2aStore.releaseToOpen(taskId);
+  return true;
+}
 
 export async function sweepGasLiveness(): Promise<void> {
   if (gasLivenessInFlight) return;
@@ -204,6 +264,7 @@ export async function sweepGasLiveness(): Promise<void> {
     if (accepted.length === 0) return;
 
     let reverted = 0;
+    let reconciles = 0;
     for (const { taskId, executorAddress } of accepted) {
       // Check if the settlement deadline key still exists.
       // TTL returns -2 if key doesn't exist (expired/never set), -1 if no expiry.
@@ -227,10 +288,18 @@ export async function sweepGasLiveness(): Promise<void> {
           const ageMs = Date.now() - acceptedAt;
           // Only revert if accepted within the last 5 minutes (settlement deadline is 120s,
           // so anything older likely settled or was handled differently)
-          if (ageMs > 5 * 60_000) continue;
+          // The tx hash is written at BROADCAST, so it proves a send, not a
+          // settlement: young ones are still confirming, old ones get one
+          // chain check (see reconcileBroadcastAssignment).
+          if (state.assignTxHash) {
+            if (ageMs < ASSIGN_RECONCILE_AFTER_MS || reconciles >= MAX_ASSIGN_RECONCILES_PER_TICK) continue;
+            if (await a2aStore.isAssignReconciled(taskId, state.assignTxHash)) continue;
+            reconciles++;
+            if (await reconcileBroadcastAssignment(taskId, executorAddress, state.assignTxHash, !!state.assignError)) reverted++;
+            continue;
+          }
 
-          // Settled by this backend: the tx hash is written on confirmation.
-          if (state.assignTxHash) continue;
+          if (ageMs > 5 * 60_000) continue;
 
           // No tx hash (the idempotent "already assigned to us" path writes
           // none, or the write was lost to a restart): the chain decides. An
@@ -264,7 +333,7 @@ export async function sweepGasLiveness(): Promise<void> {
     }
 
     if (reverted > 0) {
-      console.log(`[a2aExpirySweep] gas-liveness: reverted ${reverted} task(s) with expired settlement deadlines`);
+      console.log(`[a2aExpirySweep] gas-liveness: reverted ${reverted} unsettled task(s)`);
     }
   } catch (err) {
     console.error('[a2aExpirySweep] gas-liveness sweep failed (non-fatal):', (err as Error).message);

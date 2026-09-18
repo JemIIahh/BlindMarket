@@ -188,6 +188,9 @@ export interface SettleResult {
   cancelled?: boolean;
   /** Chain the assignment was settled (or confirmed) on. */
   chain?: TaskChain;
+  /** The assign tx was broadcast (txHash set) but did not confirm in time. It
+   *  may still mine; the gas-liveness sweep reconciles it against the chain. */
+  pending?: boolean;
 }
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
@@ -342,7 +345,12 @@ export async function settleAssignment(taskHash: string, executor: string): Prom
   await a2aStore.updateState(taskHash, { assignTxHash: tx.hash, assignError: undefined });
   console.log(`[a2aSettlement] marketplaceAssign broadcast taskId=${taskId} tx=${tx.hash}`);
 
-  const receipt = await tx.wait(1, HOLD_TIMEOUT_MS);
+  let receipt: Awaited<ReturnType<typeof tx.wait>>;
+  try {
+    receipt = await tx.wait(1, HOLD_TIMEOUT_MS);
+  } catch (waitErr) {
+    return settleUnconfirmedAssignment(taskHash, taskId, assignee, chain, tx.hash, waitErr);
+  }
   console.log(
     `[a2aSettlement] marketplaceAssign confirmed taskId=${taskId} block=${receipt?.blockNumber} status=${receipt?.status}`,
   );
@@ -353,6 +361,43 @@ export async function settleAssignment(taskHash: string, executor: string): Prom
   }
 
   return { success: true, txHash: tx.hash, chain };
+}
+
+/**
+ * tx.wait() rejected after the broadcast: either the tx reverted (ethers v6
+ * throws CALL_EXCEPTION rather than returning a status-0 receipt) or it did not
+ * mine within HOLD_TIMEOUT_MS. A timeout is not a verdict — the tx may have
+ * landed while the RPC was slow — so the chain decides before this is reported
+ * as a failure.
+ */
+async function settleUnconfirmedAssignment(
+  taskHash: string,
+  taskId: number | string,
+  assignee: string,
+  chain: TaskChain,
+  txHash: string,
+  waitErr: unknown,
+): Promise<SettleResult> {
+  const reason = (waitErr as Error).message || String(waitErr);
+  if ((waitErr as { code?: string }).code === 'CALL_EXCEPTION') {
+    const msg = `marketplaceAssign tx ${txHash} reverted on chain`;
+    console.error(`[a2aSettlement] ${msg}: ${reason}`);
+    await safePersistAssignError(taskHash, msg);
+    return { success: false, error: msg, txHash };
+  }
+  try {
+    const t = await bridgeFor(chain).escrow!.getTask(BigInt(taskId));
+    if (String(t.worker).toLowerCase() === assignee.toLowerCase()) {
+      console.log(`[a2aSettlement] marketplaceAssign tx=${txHash} wait failed (${reason}) but task ${taskId} is assigned on-chain`);
+      return { success: true, txHash, chain };
+    }
+  } catch {
+    // Unreadable chain: fall through to pending.
+  }
+  const msg = `marketplaceAssign tx ${txHash} not confirmed after ${HOLD_TIMEOUT_MS / 1000}s: ${reason}`;
+  console.error(`[a2aSettlement] ${msg}`);
+  await safePersistAssignError(taskHash, msg);
+  return { success: false, pending: true, error: msg, txHash };
 }
 
 // Writing to Redis can itself fail (network blip, key missing if releaseToOpen

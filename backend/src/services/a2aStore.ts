@@ -377,6 +377,74 @@ export async function tryExpire(
 }
 
 /**
+ * Atomic close for a task whose escrow the chain reports as gone (poster ran
+ * cancelTask / claimTimeout). Unlike tryExpire this closes ANY live status —
+ * an accepted/submitted/awaiting_verification task left as-is keeps feeding
+ * resume loops and the verifier queue for escrow that no longer exists. Still
+ * a Lua CAS: already-terminal states (verified/completed/failed) are left
+ * alone, and the status read + write are one step so a concurrent /accept or
+ * /verdict can't interleave. Caller must have confirmed the on-chain status
+ * first. The executor index is kept so the worker sees the task as failed.
+ */
+export async function tryCloseOnChainTerminal(
+  taskId: string,
+  reason: 'cancelled' | 'expired',
+): Promise<{ ok: true; previousStatus: string } | { ok: false; currentStatus: string }> {
+  const tid = taskId.toLowerCase();
+  const meta = await getMeta(taskId);
+  const lua = `
+    local stateKey = KEYS[1]
+    local openSetKey = KEYS[2]
+    local tid = ARGV[1]
+    local originalTaskId = ARGV[2]
+    local reason = ARGV[3]
+    local verifierSetKey = ARGV[4]
+
+    local raw = redis.call('GET', stateKey)
+    if not raw and originalTaskId ~= tid then
+        -- Fallback for legacy mixed-case keys
+        raw = redis.call('GET', 'a2a:state:' .. originalTaskId)
+        if raw then stateKey = 'a2a:state:' .. originalTaskId end
+    end
+
+    if not raw then return {'missing'} end
+
+    local s = cjson.decode(raw)
+    local previous = s.status
+    if previous == 'verified' or previous == 'completed' or previous == 'failed' then
+        return {'lost', previous}
+    end
+
+    s.status = 'failed'
+    s.failedReason = reason
+    redis.call('SET', stateKey, cjson.encode(s))
+    redis.call('SREM', openSetKey, tid)
+    if tid ~= originalTaskId then
+        redis.call('SREM', openSetKey, originalTaskId)
+    end
+    if verifierSetKey ~= '' then
+        redis.call('SREM', verifierSetKey, tid)
+    end
+    return {'ok', previous}
+  `;
+
+  const result = (await redis.eval(
+    lua,
+    2,
+    KEY.state(tid),
+    KEY.open,
+    tid,
+    taskId, // original taskId for fallback
+    reason,
+    meta?.verifierAddress ? KEY.verifier(meta.verifierAddress) : '',
+  )) as [string, string?];
+
+  if (result[0] === 'ok') return { ok: true, previousStatus: result[1] ?? 'unknown' };
+  if (result[0] === 'missing') return { ok: false, currentStatus: 'missing' };
+  return { ok: false, currentStatus: result[1] ?? 'unknown' };
+}
+
+/**
  * Load every task in the open index with its meta+state, unfiltered beyond the
  * defensive invariant checks. Agent-facing callers should use browseAgentTasks
  * (which additionally hides expired tasks); the expiry sweep uses this
@@ -838,6 +906,23 @@ export async function clearSettlementDeadline(taskId: string): Promise<void> {
 
 export async function getSettlementDeadlineTTL(taskId: string): Promise<number> {
   return redis.ttl(settlementDeadlineKey(taskId));
+}
+
+// Marks an accepted task whose broadcast assign tx the sweep has already
+// checked against the chain, so a long-running healthy task costs one chain
+// read, not one per tick. Side key (not the state blob) for the same reason as
+// a2a:deadline — no read-modify-write against concurrent state writers.
+const assignReconciledKey = (taskId: string) => `a2a:assign_reconciled:${taskId.toLowerCase()}`;
+const ASSIGN_RECONCILED_TTL_S = 7 * 24 * 60 * 60;
+
+export async function markAssignReconciled(taskId: string, assignTxHash: string): Promise<void> {
+  await redis.setex(assignReconciledKey(taskId), ASSIGN_RECONCILED_TTL_S, assignTxHash.toLowerCase());
+}
+
+// Keyed to the tx hash: a task released and re-accepted gets a new assign tx,
+// which must be checked afresh.
+export async function isAssignReconciled(taskId: string, assignTxHash: string): Promise<boolean> {
+  return (await redis.get(assignReconciledKey(taskId))) === assignTxHash.toLowerCase();
 }
 
 /**

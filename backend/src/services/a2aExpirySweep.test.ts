@@ -17,6 +17,11 @@ const listAcceptedTasks = vi.fn(async () => [] as Array<{ taskId: string; execut
 const getSettlementDeadlineTTL = vi.fn(async (_taskId: string) => -2);
 const resolveTaskByHash = vi.fn(async (_hash: string) => ({ taskId: '1', chain: 'base' as const }));
 const getTaskOn = vi.fn(async (_chain: string, _id: number) => ({ worker: '0x0000000000000000000000000000000000000000', status: 0 }));
+const updateState = vi.fn(async (_taskId: string, _patch: Record<string, unknown>) => ({}));
+const markAssignReconciled = vi.fn(async (_taskId: string, _txHash: string) => {});
+const isAssignReconciled = vi.fn(async (_taskId: string, _txHash: string) => false);
+const getTransactionReceipt = vi.fn(async (_hash: string) => null as { status: number } | null);
+const loadAgentByWallet = vi.fn(async (_addr: string) => null as { smartAccountAddress?: string } | null);
 
 vi.mock('./redis.js', () => ({
   redis: { get: async (k: string) => redisStore.get(k) ?? null },
@@ -25,6 +30,9 @@ vi.mock('./a2aStore.js', () => ({
   listAcceptedTasks: (...a: unknown[]) => listAcceptedTasks(...(a as [])),
   getSettlementDeadlineTTL: (...a: unknown[]) => getSettlementDeadlineTTL(...(a as [string])),
   releaseToOpen: (...a: unknown[]) => releaseToOpen(...(a as [string])),
+  updateState: (...a: unknown[]) => updateState(...(a as [string, Record<string, unknown>])),
+  markAssignReconciled: (...a: unknown[]) => markAssignReconciled(...(a as [string, string])),
+  isAssignReconciled: (...a: unknown[]) => isAssignReconciled(...(a as [string, string])),
   listOpenTasks: async () => [],
   getMeta: async () => null,
 }));
@@ -34,6 +42,13 @@ vi.mock('./taskChain.js', () => ({
 }));
 vi.mock('./escrow.js', () => ({
   getTaskOn: (...a: unknown[]) => getTaskOn(...(a as [string, number])),
+}));
+vi.mock('./chain.js', () => ({
+  provider: { getTransactionReceipt: (...a: unknown[]) => getTransactionReceipt(...(a as [string])) },
+  baseProvider: { getTransactionReceipt: (...a: unknown[]) => getTransactionReceipt(...(a as [string])) },
+}));
+vi.mock('./deployedAgentStore.js', () => ({
+  loadAgentByWallet: (...a: unknown[]) => loadAgentByWallet(...(a as [string])),
 }));
 vi.mock('../constants.js', () => ({ SWEEP_INTERVAL_MS: 60_000, EXPIRY_GRACE_SEC: 60 }));
 
@@ -56,6 +71,13 @@ function accepted(extra: Record<string, unknown> = {}) {
 beforeEach(() => {
   redisStore.clear();
   releaseToOpen.mockClear();
+  updateState.mockClear();
+  markAssignReconciled.mockClear();
+  isAssignReconciled.mockResolvedValue(false);
+  getTransactionReceipt.mockReset();
+  getTransactionReceipt.mockResolvedValue(null);
+  loadAgentByWallet.mockResolvedValue(null);
+  getTaskOn.mockClear();
   getSettlementDeadlineTTL.mockResolvedValue(-2); // key gone in every case below
   resolveTaskByHash.mockResolvedValue({ taskId: '1', chain: 'base' });
   getTaskOn.mockResolvedValue({ worker: '0x0000000000000000000000000000000000000000', status: 0 });
@@ -100,5 +122,84 @@ describe('sweepGasLiveness with the deadline key gone', () => {
     accepted({ acceptedAt: new Date(Date.now() - 6 * 60_000).toISOString() });
     await sweepGasLiveness();
     expect(releaseToOpen).not.toHaveBeenCalled();
+  });
+});
+
+describe('sweepGasLiveness reconciling a broadcast assign tx', () => {
+  const TX = '0x' + '11'.repeat(32);
+  const SMART_ACCOUNT = '0x' + 'cd'.repeat(20);
+  const old = (extra: Record<string, unknown> = {}) =>
+    accepted({ assignTxHash: TX, acceptedAt: new Date(Date.now() - 11 * 60_000).toISOString(), ...extra });
+
+  it('re-opens a task still Funded whose assign tx never mined', async () => {
+    old({ assignError: 'marketplaceAssign tx not confirmed after 60s' });
+    await sweepGasLiveness();
+    expect(getTransactionReceipt).toHaveBeenCalledWith(TX);
+    expect(releaseToOpen).toHaveBeenCalledWith(TASK);
+  });
+
+  it('re-opens when the assign tx reverted', async () => {
+    old();
+    getTransactionReceipt.mockResolvedValue({ status: 0 });
+    await sweepGasLiveness();
+    expect(releaseToOpen).toHaveBeenCalledWith(TASK);
+  });
+
+  it('waits when the tx has a successful receipt but the status read is stale', async () => {
+    old();
+    getTransactionReceipt.mockResolvedValue({ status: 1 });
+    await sweepGasLiveness();
+    expect(releaseToOpen).not.toHaveBeenCalled();
+    expect(markAssignReconciled).not.toHaveBeenCalled();
+  });
+
+  it('does nothing when the receipt lookup fails', async () => {
+    old();
+    getTransactionReceipt.mockRejectedValue(new Error('rpc down'));
+    await sweepGasLiveness();
+    expect(releaseToOpen).not.toHaveBeenCalled();
+  });
+
+  it('clears a stale assignError once the chain names this executor, and checks only once', async () => {
+    old({ assignError: 'marketplaceAssign tx not confirmed after 60s' });
+    getTaskOn.mockResolvedValue({ worker: EXECUTOR.toUpperCase(), status: 1 });
+    await sweepGasLiveness();
+    expect(updateState).toHaveBeenCalledWith(TASK, { assignError: undefined });
+    expect(markAssignReconciled).toHaveBeenCalledWith(TASK, TX);
+    expect(releaseToOpen).not.toHaveBeenCalled();
+
+    isAssignReconciled.mockResolvedValue(true);
+    getTaskOn.mockClear();
+    await sweepGasLiveness();
+    expect(getTaskOn).not.toHaveBeenCalled();
+  });
+
+  it("treats the executor's smart account as the same worker", async () => {
+    old({ assignError: 'x' });
+    getTaskOn.mockResolvedValue({ worker: SMART_ACCOUNT, status: 1 });
+    loadAgentByWallet.mockResolvedValue({ smartAccountAddress: SMART_ACCOUNT });
+    await sweepGasLiveness();
+    expect(updateState).toHaveBeenCalledWith(TASK, { assignError: undefined });
+  });
+
+  it("leaves another worker's assignment untouched", async () => {
+    old({ assignError: 'x' });
+    getTaskOn.mockResolvedValue({ worker: SMART_ACCOUNT, status: 1 });
+    await sweepGasLiveness();
+    expect(updateState).not.toHaveBeenCalled();
+    expect(releaseToOpen).not.toHaveBeenCalled();
+  });
+
+  it('caps chain reconciles per tick', async () => {
+    const ids = Array.from({ length: 8 }, (_, i) => '0x' + i.toString(16).padStart(64, '0'));
+    for (const id of ids) {
+      redisStore.set(`a2a:state:${id}`, JSON.stringify({
+        taskId: id, status: 'accepted', executorAddress: EXECUTOR, assignTxHash: TX,
+        acceptedAt: new Date(Date.now() - 11 * 60_000).toISOString(),
+      }));
+    }
+    listAcceptedTasks.mockResolvedValue(ids.map((taskId) => ({ taskId, executorAddress: EXECUTOR })));
+    await sweepGasLiveness();
+    expect(getTaskOn).toHaveBeenCalledTimes(5);
   });
 });

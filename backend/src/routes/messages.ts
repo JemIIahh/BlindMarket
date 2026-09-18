@@ -4,6 +4,7 @@ import { requireAuth } from '../middleware/auth.js';
 import type { AuthRequest } from '../types.js';
 import * as messageStore from '../services/messageStore.js';
 import * as a2aStore from '../services/a2aStore.js';
+import { loadAgentByWallet } from '../services/deployedAgentStore.js';
 import { emit } from '../services/socket.js';
 import type { ApiResponse } from '../types.js';
 
@@ -16,6 +17,28 @@ const sendSchema = z.object({
   body: z.string().min(1).max(5000),
 });
 
+async function ownsAgent(owner: string, agentWallet: string): Promise<boolean> {
+  const agent = await loadAgentByWallet(agentWallet).catch(() => null);
+  return agent?.ownerAddress?.toLowerCase() === owner;
+}
+
+/**
+ * A task-scoped message must stay between the task's two parties. Without
+ * this, any authenticated caller could drop text into any agent's inbox under
+ * a real taskId — and a working agent reads its task thread as instructions.
+ * Allowed: poster ↔ executor, or a party agent ↔ its own deployer (owners
+ * follow up on their agent's task threads).
+ */
+async function isTaskPartyPair(from: string, to: string, poster?: string, executor?: string): Promise<boolean> {
+  const parties = [poster?.toLowerCase(), executor?.toLowerCase()].filter((a): a is string => !!a);
+  const fromIsParty = parties.includes(from);
+  const toIsParty = parties.includes(to);
+  if (fromIsParty && toIsParty) return from !== to;
+  if (fromIsParty) return ownsAgent(to, from);
+  if (toIsParty) return ownsAgent(from, to);
+  return false;
+}
+
 /**
  * POST /api/v1/messages/send
  * Send a message from the authenticated user to another address.
@@ -26,6 +49,7 @@ messagesRouter.post('/send', requireAuth, async (req: AuthRequest, res, next) =>
     const { to, taskId, subject, body } = sendSchema.parse(req.body);
 
     let resolvedTo = to.toLowerCase();
+    const viaOwnerShortcut = resolvedTo === 'creator' || resolvedTo === 'owner';
 
     // Auto-resolve shortcuts
     if (resolvedTo === 'poster' || resolvedTo === 'agent') {
@@ -52,7 +76,7 @@ messagesRouter.post('/send', requireAuth, async (req: AuthRequest, res, next) =>
           return;
         }
       }
-    } else if (resolvedTo === 'creator' || resolvedTo === 'owner') {
+    } else if (viaOwnerShortcut) {
       // Resolve from agent's platform token JWT (ownerAddress claim)
       resolvedTo = req.user?.ownerAddress?.toLowerCase() ?? '';
       if (!resolvedTo) {
@@ -64,6 +88,20 @@ messagesRouter.post('/send', requireAuth, async (req: AuthRequest, res, next) =>
     if (!resolvedTo || resolvedTo.length < 42) {
       res.status(400).json({ success: false, error: { code: 'BAD_ADDRESS', message: 'Invalid recipient address' } });
       return;
+    }
+
+    // The creator/owner shortcut is exempt: its recipient comes from the
+    // caller's own token, not from the request.
+    if (taskId && !viaOwnerShortcut) {
+      const [meta, state] = await Promise.all([a2aStore.getMeta(taskId), a2aStore.getState(taskId)]);
+      if (!meta && !state) {
+        res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Task not found' } });
+        return;
+      }
+      if (!(await isTaskPartyPair(from.toLowerCase(), resolvedTo, meta?.posterAddress, state?.executorAddress))) {
+        res.status(403).json({ success: false, error: { code: 'NOT_TASK_PARTY', message: 'Task messages can only be exchanged between the task poster and its assigned executor' } });
+        return;
+      }
     }
 
     const msg = await messageStore.sendMessage({ from, to: resolvedTo, taskId, subject, body });
