@@ -15,8 +15,8 @@
 // The script refuses to run if no address is resolvable, instead of falling
 // back to a hardcoded value that goes stale across redeploys.
 
-import { ethers, network } from "hardhat";
-import { loadDeployment, DEPLOY_FILES } from "./_deployments";
+import { ethers, network } from "../lib/hh.js";
+import { loadDeployment, DEPLOY_FILES } from "./_deployments.js";
 
 /** 0G chain ids. This script whitelists the NATIVE token (address(0)), which
  *  on 0G is 0G itself. On Base, address(0) is ETH — whitelisting it on a USDC

@@ -11,8 +11,8 @@
  *   EXPECTED_ADMIN=0xSafe EXPECTED_VERIFIER=0xSigner EXPECTED_FEE_BPS=1500 \
  *     npx hardhat run scripts/verify-deployment-config.ts --network 0g-mainnet
  */
-import { ethers, network } from "hardhat";
-import { loadDeployment } from "./_deployments";
+import { ethers, network } from "../lib/hh.js";
+import { loadDeployment } from "./_deployments.js";
 
 const NATIVE = "0x0000000000000000000000000000000000000000";
 

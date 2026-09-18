@@ -11,9 +11,9 @@
  *   I_HAVE_READ_MAINNET_CHECKLIST=yes NEW_TREASURY=0xSafe \
  *     npx hardhat run scripts/set-treasury.ts --network 0g-mainnet
  */
-import { ethers, network } from "hardhat";
-import { assertSafeNetwork } from "./_guard";
-import { loadDeployment } from "./_deployments";
+import { ethers, network } from "../lib/hh.js";
+import { assertSafeNetwork } from "./_guard.js";
+import { loadDeployment } from "./_deployments.js";
 
 async function main() {
   await assertSafeNetwork();

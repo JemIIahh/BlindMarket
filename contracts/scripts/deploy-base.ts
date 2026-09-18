@@ -8,10 +8,10 @@
  *   npx hardhat run scripts/deploy-base.ts --network base-sepolia
  *   I_HAVE_READ_MAINNET_CHECKLIST=yes npx hardhat run scripts/deploy-base.ts --network base
  */
-import { ethers, upgrades } from "hardhat";
+import { ethers, upgrades } from "../lib/hh.js";
 import * as fs from "fs";
 import * as path from "path";
-import { assertSafeNetwork } from "./_guard";
+import { assertSafeNetwork } from "./_guard.js";
 
 // Base USDC addresses
 const BASE_USDC: Record<number, string> = {
@@ -73,7 +73,7 @@ async function main() {
     },
   };
 
-  const outDir = path.join(__dirname, "..", "deployments");
+  const outDir = path.join(import.meta.dirname, "..", "deployments");
   if (!fs.existsSync(outDir)) {
     fs.mkdirSync(outDir, { recursive: true });
   }

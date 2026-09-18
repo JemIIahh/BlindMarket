@@ -17,6 +17,15 @@ export default defineConfig({
     },
   },
   networks: {
+    // The in-process chain the tests run on. A fixed gas limit, as Hardhat 2
+    // sent by default: BlindEscrow makes its registry and reputation calls
+    // inside try/catch, so a tightly estimated limit lets the inner call run
+    // out of gas and the catch hides it. Live networks keep estimating.
+    default: {
+      type: "edr-simulated",
+      chainType: "l1",
+      gas: 12_000_000,
+    },
     "0g-testnet": {
       type: "http",
       chainType: "l1",

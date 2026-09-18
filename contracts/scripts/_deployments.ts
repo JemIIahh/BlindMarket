@@ -11,7 +11,7 @@
  */
 import * as fs from "fs";
 import * as path from "path";
-import { ethers } from "hardhat";
+import { ethers } from "../lib/hh.js";
 
 export const DEPLOY_FILES: Record<number, string> = {
   16661: "0g-mainnet.json",
@@ -42,7 +42,7 @@ export async function loadDeployment(chainId?: number): Promise<DeploymentRecord
   if (!file) {
     throw new Error(`Unknown chainId ${cid} — no deployment file mapping. Add it to _deployments.ts DEPLOY_FILES.`);
   }
-  const p = path.resolve(__dirname, `../deployments/${file}`);
+  const p = path.resolve(import.meta.dirname, `../deployments/${file}`);
   if (!fs.existsSync(p)) {
     throw new Error(`Deployment file not found: ${p}`);
   }

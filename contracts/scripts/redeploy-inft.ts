@@ -20,15 +20,15 @@
  *   INFT_ORACLE=0x… npx hardhat run scripts/redeploy-inft.ts --network 0g-mainnet
  */
 
-import { ethers, network } from "hardhat";
+import { ethers, network } from "../lib/hh.js";
 import * as fs from "fs";
 import * as path from "path";
-import { assertSafeNetwork } from "./_guard";
+import { assertSafeNetwork } from "./_guard.js";
 
 async function main() {
   await assertSafeNetwork();
 
-  const depPath = path.resolve(__dirname, `../deployments/${network.name}.json`);
+  const depPath = path.resolve(import.meta.dirname, `../deployments/${network.name}.json`);
   if (!fs.existsSync(depPath)) throw new Error(`deployments file not found: ${depPath}`);
   const dep = JSON.parse(fs.readFileSync(depPath, "utf-8"));
   const contracts = dep.contracts ?? dep;

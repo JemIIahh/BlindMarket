@@ -17,7 +17,7 @@ import { Wallet } from "ethers";
 import * as fs from "fs";
 import * as path from "path";
 
-const BACKEND_ENV_PATH = path.resolve(__dirname, "../../backend/.env");
+const BACKEND_ENV_PATH = path.resolve(import.meta.dirname, "../../backend/.env");
 const KEY_NAME = "MARKETPLACE_SIGNER_PRIVATE_KEY";
 
 function readEnv(p: string): string {

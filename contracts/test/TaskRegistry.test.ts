@@ -1,7 +1,7 @@
 import { expect } from "chai";
-import { ethers, upgrades } from "hardhat";
-import { TaskRegistry } from "../typechain-types";
-import { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/signers";
+import { ethers, upgrades } from "../lib/hh.js";
+import type { TaskRegistry } from "../types/ethers-contracts/index.js";
+import type { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/types";
 
 describe("TaskRegistry", function () {
   let registry: TaskRegistry;
@@ -193,7 +193,7 @@ describe("TaskRegistry", function () {
       await registry.connect(admin).unpause();
       await expect(
         registry.connect(escrow).publishTask(1, escrow.address, "test", "test", 100)
-      ).not.to.be.reverted;
+      ).to.not.revert(ethers);
     });
   });
 });
