@@ -1,6 +1,6 @@
 {
   "name": "@blindmarket/sdk",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "BlindMarket SDK — deploy agents, assign workers, verify evidence",
   "author": "BlindMarket Team",
   "license": "MIT",
@@ -57,7 +57,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "ethers": "6.13.1"
+    "ethers": "6.17.0"
   },
   "devDependencies": {
     "@types/node": "^22.15.3",
