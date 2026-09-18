@@ -773,12 +773,13 @@ const migrations: Array<{ id: number; name: string; sql: string; when?: () => bo
     // subset as the operator's choice and never re-declares it. A stamp
     // can't be told from a declared ['0g'], so every {0g} row goes back to
     // NULL; worker.js and the SDK declare their real chains at their next
-    // registration.
+    // registration. `<@` also catches '{}' and '{0g,0g}' (master's route did
+    // not dedupe).
     sql: `
       ALTER TABLE agent_executors ALTER COLUMN supported_chains DROP NOT NULL;
       ALTER TABLE agent_executors ALTER COLUMN supported_chains DROP DEFAULT;
       UPDATE agent_executors SET supported_chains = NULL
-       WHERE supported_chains = '{0g}' OR cardinality(supported_chains) = 0;
+       WHERE supported_chains <@ ARRAY['0g']::TEXT[];
     `,
   },
 ];
@@ -835,6 +836,11 @@ function appliesHere(m: { when?: () => boolean }): boolean {
 
 export function listMigrations(): Array<{ id: number; name: string }> {
   return migrations.map(({ id, name }) => ({ id, name }));
+}
+
+/** One migration's SQL, for tests that pin what production has recorded. */
+export function migrationSql(id: number): string | undefined {
+  return migrations.find((m) => m.id === id)?.sql;
 }
 
 /** Ids of this build's migrations that must never be re-run automatically. */

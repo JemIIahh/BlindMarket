@@ -1228,12 +1228,14 @@ export function buildTools(currentTaskHash = null, { posterAddress = null, owner
       if (!delegateSigner) {
         return `ERROR: cannot delegate — this agent has no signer for ${posting?.key ?? 'the posting chain'} (AGENT_PRIVATE_KEY unset, or the backend injected no chain table), so it cannot fund a sub-task escrow. Complete the task yourself.`;
       }
-      // An ERC-4337 agent's USDC and gas live in its smart account; the
-      // escrow below is funded from the signer wallet, which such an agent
-      // does not keep funded. Say so here, before the model spends its turn
-      // (and the storage upload) on a delegation that ends "0 USDC".
+      // An ERC-4337 agent's USDC and gas are meant to live in its smart
+      // account; the escrow below is funded from the signer wallet, which
+      // such an agent is not expected to keep funded (without a bundler its
+      // payouts do land there, so don't claim it is empty). Say so here,
+      // before the model spends its turn (and the storage upload) on a
+      // delegation that ends "0 USDC".
       if (usesSmartAccount(posting.key)) {
-        return `ERROR: cannot delegate — this agent runs as a smart account on ${posting.key}, and sub-tasks are funded from the signer wallet, which holds no funds. Complete the task yourself.`;
+        return `ERROR: cannot delegate — this agent runs as a smart account on ${posting.key}, and sub-tasks can only be funded from its signer wallet, not from the smart account. Complete the task yourself.`;
       }
 
       // A delegated sub-task is a real, encrypted, escrow-funded marketplace

@@ -64,6 +64,29 @@ beforeEach(() => {
 
 const rpcOf = (signer: { provider: { _getConnection: () => { url: string } } }) => signer.provider._getConnection().url;
 
+describe('preflightGas takes the paymaster path only when a UserOp can be sent', () => {
+  const aaEnv = {
+    SETTLEMENT_CHAINS_JSON: JSON.stringify(TABLE),
+    AGENT_SMART_ACCOUNT_ADDRESS: '0x' + '5a'.repeat(20),
+    AA_ENTRY_POINT: '0x' + 'e7'.repeat(20),
+  };
+
+  it('skips the gas check with account, entry point and bundler on an AA chain', async () => {
+    const w = await loadWorker({ ...aaEnv, PIMLICO_BUNDLER_URL: 'https://bundler.example' });
+    expect(await w.preflightGas('base', null)).toBeNull();
+  });
+
+  it('checks gas like any EOA when no bundler is configured', async () => {
+    const w = await loadWorker({ ...aaEnv, PIMLICO_BUNDLER_URL: '' });
+    expect(await w.preflightGas('base', null)).toMatch(/no base signer/);
+  });
+
+  it('checks gas on a chain whose escrow does not record smart accounts', async () => {
+    const w = await loadWorker({ ...aaEnv, PIMLICO_BUNDLER_URL: 'https://bundler.example' });
+    expect(await w.preflightGas('0g', null)).toMatch(/no 0g signer/);
+  });
+});
+
 describe('the backend table and the legacy env agree', () => {
   const legacyEnv = {
     OG_RPC_URL: 'https://og.example/rpc', OG_CHAIN_ID: '16661', AGENT_ESCROW_ADDRESS: OG_ESCROW,

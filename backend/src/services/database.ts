@@ -291,12 +291,26 @@ const migrations: Migration[] = [
   {
     // Mirror of Postgres migration 36: a JSON array, NULL for legacy rows.
     // SQLite can't drop a column default without rebuilding the table, and
-    // registerAgent always writes the column, so only the stamped rows change.
+    // registerAgent always writes the column, so only the stamped rows change:
+    // every array holding nothing but '0g' ('[]', '["0g"]', '["0g","0g"]').
+    // The nested CASEs keep json_type and json_each away from a malformed
+    // value (either would throw and abort the migration, and boot with it)
+    // without relying on AND evaluation order, which SQLite does not promise.
     id: 18,
     name: 'agent_executors_supported_chains_nullable',
-    sql: `UPDATE agent_executors SET supported_chains = NULL WHERE supported_chains IN ('[]', '["0g"]');`,
+    sql: `UPDATE agent_executors SET supported_chains = NULL
+      WHERE CASE WHEN json_valid(supported_chains)
+        THEN CASE WHEN json_type(supported_chains) = 'array'
+          THEN NOT EXISTS (SELECT 1 FROM json_each(agent_executors.supported_chains) WHERE value <> '0g')
+          ELSE 0 END
+        ELSE 0 END;`,
   },
 ];
+
+/** One migration's SQL, for tests of what a migration does to existing rows. */
+export function sqliteMigrationSql(id: number): string | undefined {
+  return migrations.find((m) => m.id === id)?.sql;
+}
 
 function runMigrations(database: Database.Database): void {
   database.exec(`

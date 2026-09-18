@@ -46,7 +46,8 @@ vi.mock('better-sqlite3', async (importOriginal) => {
 });
 
 import * as agentStore from './agentStore.js';
-import { getDb } from './database.js';
+import { getDb, sqliteMigrationSql } from './database.js';
+import Database from 'better-sqlite3';
 
 /** Distinct `$n` placeholders in a statement, ascending. */
 function placeholders(sql: string): number[] {
@@ -202,5 +203,31 @@ describe('agentStore on SQLite — real migrations, in memory', () => {
     expect(got?.reputation).toBe(51);
     expect(got?.tasksCompleted).toBe(1);
     expect(got?.totalEarnedUsdcRaw).toBe('4500000');
+  });
+});
+
+describe('SQLite migration 18 on rows written before it', () => {
+  it('clears every 0G-only list and leaves the rest alone, malformed values included', () => {
+    const db = new (Database as unknown as new () => InstanceType<typeof Database>)();
+    db.exec('CREATE TABLE agent_executors (address TEXT PRIMARY KEY, supported_chains TEXT)');
+    const rows: Array<[string, string | null, string | null]> = [
+      ['stamped', '["0g"]', null],
+      ['default', '[]', null],
+      ['duplicate', '["0g","0g"]', null],
+      ['both', '["0g","base"]', '["0g","base"]'],
+      ['base', '["base"]', '["base"]'],
+      ['legacy', null, null],
+      ['malformed', 'not json', 'not json'],
+      ['not-an-array', '"0g"', '"0g"'],
+    ];
+    const insert = db.prepare('INSERT INTO agent_executors VALUES (?, ?)');
+    for (const [address, before] of rows) insert.run(address, before);
+
+    db.exec(sqliteMigrationSql(18)!);
+
+    const after = db.prepare('SELECT supported_chains AS c FROM agent_executors WHERE address = ?');
+    for (const [address, , expected] of rows) {
+      expect((after.get(address) as { c: string | null }).c, address).toBe(expected);
+    }
   });
 });

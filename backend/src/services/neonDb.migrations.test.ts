@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { assertPricingUnitUnchanged, getSchemaStatus, isRerunSafe, listMigrations, rerunUnsafeMigrationIds, runMigrations } from './neonDb.js';
+import { assertPricingUnitUnchanged, getSchemaStatus, isRerunSafe, listMigrations, migrationSql, rerunUnsafeMigrationIds, runMigrations } from './neonDb.js';
 
 // Migration 31 (USDC units) only applies where the deployment PRICES in USDC,
 // which is the settlement token of the chain it posts tasks on.
@@ -54,6 +54,34 @@ describe('isRerunSafe', () => {
     // #36 clears supported_chains = {0g}: re-run later, it would erase what
     // agents declared since.
     expect(rerunUnsafeMigrationIds()).toEqual([16, 31, 36]);
+  });
+});
+
+describe('migrations production has recorded', () => {
+  const squash = (sql: string | undefined) => sql?.replace(/\s+/g, ' ').trim();
+
+  it('keeps #32 exactly as master shipped it (production applied it)', () => {
+    expect(listMigrations().find((m) => m.id === 32)).toEqual({ id: 32, name: 'agent_executors_supported_chains' });
+    expect(squash(migrationSql(32))).toBe(
+      "ALTER TABLE agent_executors ADD COLUMN IF NOT EXISTS supported_chains TEXT[] NOT NULL DEFAULT '{0g}';",
+    );
+  });
+
+  it('numbers this branch after it, ending with the nullable follow-up', () => {
+    expect(listMigrations().filter((m) => m.id >= 32)).toEqual([
+      { id: 32, name: 'agent_executors_supported_chains' },
+      { id: 33, name: 'agent_executors_usdc_earnings' },
+      { id: 34, name: 'credited_payouts' },
+      { id: 35, name: 'transactions_unit' },
+      { id: 36, name: 'agent_executors_supported_chains_nullable' },
+    ]);
+  });
+
+  it('#36 drops the constraint and default, and clears every 0G-only list', () => {
+    const sql = squash(migrationSql(36))!;
+    expect(sql).toContain('ALTER COLUMN supported_chains DROP NOT NULL');
+    expect(sql).toContain('ALTER COLUMN supported_chains DROP DEFAULT');
+    expect(sql).toMatch(/SET supported_chains = NULL WHERE supported_chains <@ ARRAY\['0g'\]/);
   });
 });
 
