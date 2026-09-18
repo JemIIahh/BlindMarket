@@ -158,18 +158,21 @@ export function hasAllCapabilities(
  * (never exclude on bad data). Used by rankAgents, pickExplorationAgent, and
  * the semantic cascade ranking so the three paths can't drift.
  *
- * A floor is written in the deployment's pricing unit, so it only applies to a
- * task escrowed in that unit. Comparing across units is meaningless in the
- * wrong direction: 1,000,000 wei of native 0G (0.000000000001 0G) would clear
- * a 1 USDC floor, which used to drop every agent with a floor from a native-0G
- * task's cascade.
+ * A floor is written in the deployment's pricing unit. A task escrowed in
+ * another unit cannot be compared with it, and an incomparable reward does
+ * NOT clear the floor: waiving it let a poster escrow 1 wei of native 0G on a
+ * USDC-pricing stack and have the cascade offer it to every agent whatever
+ * their floor, each burning a model run for nothing. An agent with no floor
+ * still takes such tasks; one with a floor takes only tasks it can price.
  */
 export function meetsRewardFloor(
   agent: Pick<AgentExecutor, 'minReward'>,
   taskReward: TaskReward | null,
 ): boolean {
   if (taskReward === null || !agent.minReward) return true;
-  if (!sameUnit(taskReward.unit, pricingUnit())) return true;
+  if (!sameUnit(taskReward.unit, pricingUnit())) {
+    try { return BigInt(agent.minReward) === 0n; } catch { return true; }
+  }
   try { return BigInt(agent.minReward) <= taskReward.amount; } catch { return true; }
 }
 

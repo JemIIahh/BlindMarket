@@ -12,17 +12,23 @@ const BASE_HASH = '0x' + 'ba'.repeat(32);
 const OG_HASH = '0x' + '0a'.repeat(32);
 
 vi.mock('../middleware/auth.js', () => {
-  const pass = (_req: any, _res: any, next: any) => next();
+  const pass = (req: any, _res: any, next: any) => {
+    req.user = { address: '0x1111111111111111111111111111111111111111' };
+    next();
+  };
   return { requireAuth: pass, optionalAuth: pass };
 });
+vi.mock('../services/accountingService.js', () => ({ recordTransaction: vi.fn(async () => ({})) }));
 
 vi.mock('../services/taskChain.js', () => ({
   resolveCachedTaskByHash: vi.fn(async (hash: string) =>
     hash === BASE_HASH ? { taskId: '7', chain: 'base' } : hash === OG_HASH ? { taskId: '7', chain: '0g' } : null),
-  resolveTaskChainById: vi.fn(),
+  resolveTaskChainById: vi.fn(async () => 'base'),
 }));
 
 vi.mock('../services/escrow.js', () => ({
+  buildCancelTaskOn: vi.fn(async () => ({ to: '0xCca5ab873158b888158AD9Dc36fb4Ee683eFbEBf', data: '0xcancel' })),
+  buildClaimTimeoutOn: vi.fn(async () => ({ to: '0xCca5ab873158b888158AD9Dc36fb4Ee683eFbEBf', data: '0xtimeout' })),
   getTaskOn: vi.fn(async (_chain: string, taskId: number) => ({
     taskId: String(taskId),
     agent: '0x1111111111111111111111111111111111111111',
@@ -58,6 +64,7 @@ const { tasksRouter } = await import('./tasks.js');
 const { globalErrorHandler } = await import('../middleware/errorHandler.js');
 const registryService = await import('../services/registry.js');
 const escrowService = await import('../services/escrow.js');
+const taskChain = await import('../services/taskChain.js');
 
 function get(id: string) {
   const a = express();
@@ -100,5 +107,30 @@ describe('GET /tasks/:id and the TaskRegistry', () => {
     expect(res.body.data.chain).toBe('0g');
     expect(escrowService.getTaskOn).toHaveBeenCalledWith('0g', 7);
     expect(registryService.getTaskMeta).toHaveBeenCalledWith(7);
+  });
+});
+
+
+describe('cancel and claim-timeout say which chain their transaction is for', () => {
+  const post = (p: string) => {
+    const a = express();
+    a.use(express.json());
+    a.use('/api/v1/tasks', tasksRouter);
+    a.use(globalErrorHandler);
+    return request(a).post(`/api/v1/tasks/${p}`);
+  };
+
+  it('returns chain and chainId with the unsigned tx, like POST /tasks', async () => {
+    for (const route of ['7/cancel', '7/timeout']) {
+      vi.mocked(taskChain.resolveTaskChainById).mockResolvedValueOnce('base');
+      const res = await post(route);
+      expect(res.status, route).toBe(200);
+      expect(res.body.data).toMatchObject({ chain: 'base', chainId: 84532 });
+      expect(res.body.data.unsignedTx.to).toBe('0xCca5ab873158b888158AD9Dc36fb4Ee683eFbEBf');
+    }
+    vi.mocked(taskChain.resolveTaskChainById).mockResolvedValueOnce('0g');
+    const og = await post('7/cancel');
+    expect(og.body.data).toMatchObject({ chain: '0g' });
+    expect(og.body.data.chainId).toBe(og.body.data.chainId | 0);
   });
 });

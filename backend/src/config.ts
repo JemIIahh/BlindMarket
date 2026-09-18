@@ -458,6 +458,19 @@ export function assertBootConfig(): void {
     ...deploymentSetProblems(config.deploymentSet, process.env, { og: config.ogChainId, base: config.baseChainId }),
   );
 
+  // NODE_ENV=production defaults BASE_CHAIN_ID to Base mainnet. A production
+  // env that sets BASE_ESCROW_ADDRESS to the Base Sepolia escrow but forgets
+  // BASE_CHAIN_ID would boot as "Base mainnet" with mainnet USDC and the
+  // Sepolia escrow address, and every tier check would read it as mainnet.
+  const sepoliaEscrow = (CONTRACT_ADDRESSES.baseTestnet as { blindEscrow?: string }).blindEscrow;
+  if (BASE_MAINNET && sepoliaEscrow && (config.baseEscrowAddress || '').toLowerCase() === sepoliaEscrow.toLowerCase()) {
+    fatals.push(
+      `BASE_CHAIN_ID=${config.baseChainId} (Base mainnet) but BASE_ESCROW_ADDRESS=${config.baseEscrowAddress} is the Base Sepolia ` +
+        `escrow from contracts/deployments/base-sepolia.json. Set BASE_CHAIN_ID=84532 (production posts on Base Sepolia today), ` +
+        `or a Base mainnet escrow address.`,
+    );
+  }
+
   if (config.settlementTier) {
     // An explicit tier is a promise about every chain. A chain id that breaks
     // it would settle real money on the wrong network, so this is fatal even

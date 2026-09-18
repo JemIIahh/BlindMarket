@@ -55,7 +55,7 @@ vi.mock('ethers', async (importOriginal) => {
   return { ...mod, ethers: { ...mod.ethers, Contract: FakeContract } };
 });
 
-const { healthRouter } = await import('./health.js');
+const { healthRouter, safeErrorMessage } = await import('./health.js');
 
 const SIGNER = '0x00000000000000000000000000000000000000aa';
 const OG_ESCROW = '0x3d0374963DaaD43e31d42373eb11156A8e8ce2Ff';
@@ -335,6 +335,37 @@ describe('GET /health/bridge legacy keys', () => {
       rotateCommand: null,
       base: null,
     });
+  });
+});
+
+describe('GET /health/bridge error text', () => {
+  const keyed = (short: string) => {
+    const e = new Error(`${short} (request={ "method": "eth_call" }, response={ "status": 401 }, info={ "requestUrl": "https://rpc.example/v2/SUPERSECRETKEY456" }, code=SERVER_ERROR, version=6.13.1)`) as Error & { code: string; shortMessage: string };
+    e.code = 'SERVER_ERROR';
+    e.shortMessage = short;
+    return e;
+  };
+
+  it('never repeats the RPC URL an ethers error embeds (it can carry the provider key)', async () => {
+    chain.escrow.verifier = async () => { throw keyed('server response 401 Unauthorized'); };
+    chain.provider.getBalance = async () => { throw new Error('getaddrinfo ENOTFOUND https://rpc.example/v2/SUPERSECRETKEY456 more'); };
+    chain.baseEscrow = { verifier: async () => { throw keyed('missing revert data'); } };
+    const res = await request(app).get('/health/bridge');
+    expect(res.status).toBe(200);
+    expect(res.text).not.toContain('SUPERSECRETKEY456');
+    expect(res.text).not.toContain('rpc.example');
+    expect(res.body.data.escrowReadError).toBe('server response 401 Unauthorized [SERVER_ERROR]');
+    expect(res.body.data.signerBalanceError).toBe('getaddrinfo ENOTFOUND <rpc> more');
+    expect(res.body.data.base.escrowReadError ?? res.body.data.base.baseEscrowError).toMatch(/^missing revert data \[SERVER_ERROR\]$/);
+    chain.escrow.verifier = async () => '0x00000000000000000000000000000000000000aa';
+    chain.provider.getBalance = async () => 10n ** 18n;
+  });
+
+  it('keeps a plain message as it is, and drops an ethers request dump even without a shortMessage', () => {
+    expect(safeErrorMessage(new Error('timeout'))).toBe('timeout');
+    expect(safeErrorMessage(new Error('missing revert data (request={ "to": "0x1" }, info={ "requestUrl": "https://rpc.example/v2/KEY" }, code=CALL_EXCEPTION)'))).toBe('missing revert data');
+    expect(safeErrorMessage('boom')).toBe('boom');
+    expect(safeErrorMessage(null)).toBe('null');
   });
 });
 

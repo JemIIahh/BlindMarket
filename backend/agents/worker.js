@@ -954,6 +954,13 @@ export function buildTools(currentTaskHash = null) {
       if (!delegateSigner) {
         return `ERROR: cannot delegate — this agent has no signer for ${posting?.key ?? 'the posting chain'} (AGENT_PRIVATE_KEY unset, or the backend injected no chain table), so it cannot fund a sub-task escrow. Complete the task yourself.`;
       }
+      // An ERC-4337 agent's USDC and gas live in its smart account; the
+      // escrow below is funded from the signer wallet, which such an agent
+      // does not keep funded. Say so here, before the model spends its turn
+      // (and the storage upload) on a delegation that ends "0 USDC".
+      if (usesSmartAccount(posting.key)) {
+        return `ERROR: cannot delegate — this agent runs as a smart account on ${posting.key}, and sub-tasks are funded from the signer wallet, which holds no funds. Complete the task yourself.`;
+      }
 
       // A delegated sub-task is a real, encrypted, escrow-funded marketplace
       // task (the executor receives work only via an encrypted brief, and the
@@ -1068,8 +1075,15 @@ export function buildTools(currentTaskHash = null) {
           }),
         });
         if (!buildRes.ok) return `Delegation failed: createTask build ${buildRes.status} ${(await buildRes.text()).slice(0, 120)}`;
-        const unsignedTx = (await buildRes.json()).data?.unsignedTx;
+        const built = (await buildRes.json()).data ?? {};
+        const unsignedTx = built.unsignedTx;
         if (!unsignedTx) return 'Delegation failed: createTask returned no unsignedTx';
+        // The backend names the chain it built for. A stale chain table here
+        // would sign that tx on the wrong chain; today only the token address
+        // check stands in the way, and only because the addresses differ.
+        if (built.chain && built.chain !== posting.key) {
+          return `Delegation failed: the backend built the task on ${built.chain}, but this agent posts on ${posting.key}; its chain table is stale — restart the agent.`;
+        }
 
         if (approveEscrow) {
           const approveProblem = await approveEscrow();

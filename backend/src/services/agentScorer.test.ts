@@ -134,20 +134,22 @@ describe('meetsRewardFloor', () => {
     expect(meetsRewardFloor(withFloor('1000000'), { amount: 999_999n, unit: USDC })).toBe(false);
   });
 
-  // BEHAVIOUR CHANGE: before, the raw amounts were compared whatever the
-  // units, so 10^6 wei of 0G (a millionth of a millionth of a 0G) cleared a
-  // 1 USDC floor and, below that, dropped every agent that had one.
-  it("ignores a floor when the task pays in another unit", () => {
-    expect(meetsRewardFloor(withFloor('1000000'), { amount: 1n, unit: NATIVE_0G })).toBe(true);
-    expect(meetsRewardFloor(withFloor('1000000'), { amount: 10n ** 18n, unit: NATIVE_0G })).toBe(true);
+  // A floor in USDC says nothing about a 0G amount, and an incomparable
+  // reward does not clear it: waiving it let 1 wei of 0G reach every agent
+  // with a floor. An agent with no floor (or a zero one) still takes it.
+  it("fails a floor when the task pays in another unit, unless the floor is zero", () => {
+    expect(meetsRewardFloor(withFloor('1000000'), { amount: 1n, unit: NATIVE_0G })).toBe(false);
+    expect(meetsRewardFloor(withFloor('1000000'), { amount: 10n ** 18n, unit: NATIVE_0G })).toBe(false);
+    expect(meetsRewardFloor(withFloor('0'), { amount: 1n, unit: NATIVE_0G })).toBe(true);
+    expect(meetsRewardFloor({ minReward: undefined } as any, { amount: 1n, unit: NATIVE_0G })).toBe(true);
   });
 
   it('applies the floor to 0G tasks on a deployment that prices in 0G', () => {
     pricing.unit = NATIVE_0G;
     expect(meetsRewardFloor(withFloor('1000000000000000000'), { amount: 10n ** 18n, unit: NATIVE_0G })).toBe(true);
     expect(meetsRewardFloor(withFloor('1000000000000000000'), { amount: 10n ** 17n, unit: NATIVE_0G })).toBe(false);
-    // ...and not to USDC tasks there.
-    expect(meetsRewardFloor(withFloor('1000000000000000000'), { amount: 1n, unit: USDC })).toBe(true);
+    // ...and a USDC task there cannot clear a 0G floor.
+    expect(meetsRewardFloor(withFloor('1000000000000000000'), { amount: 1n, unit: USDC })).toBe(false);
   });
 
   it('keeps an agent whose floor is malformed, rather than excluding on bad data', () => {
@@ -163,13 +165,15 @@ describe('rankAgents with a reward floor', () => {
 
   const withMin = (address: string, minReward: string): AgentExecutor => ({ ...agent(address, ['data_processing'], []), minReward });
 
-  it('drops agents priced above a USDC task, and keeps them for a 0G one', async () => {
+  it('drops agents priced above a USDC task, and agents with any floor from a task in another unit', async () => {
     vi.mocked(agentStore.listAgents).mockResolvedValue([withMin('0xpricey', '5000000'), agent('0xcheap', ['data_processing'], [])]);
     const usdcRanked = await rankAgents(['data_processing'] as never, { amount: 1_000_000n, unit: USDC });
     expect(usdcRanked.map((r) => r.address)).toEqual(['0xcheap']);
 
+    // A 0G reward cannot clear a USDC floor, so only the floorless agent is
+    // offered it (1 wei of 0G used to reach every agent).
     vi.mocked(agentStore.listAgents).mockResolvedValue([withMin('0xpricey', '5000000'), agent('0xcheap', ['data_processing'], [])]);
     const nativeRanked = await rankAgents(['data_processing'] as never, { amount: 1_000_000n, unit: NATIVE_0G });
-    expect(nativeRanked.map((r) => r.address).sort()).toEqual(['0xcheap', '0xpricey']);
+    expect(nativeRanked.map((r) => r.address)).toEqual(['0xcheap']);
   });
 });

@@ -41,6 +41,21 @@ function escrowOrNull(address: string): string | null {
   return address && address.toLowerCase() !== ZeroAddress ? address : null;
 }
 
+/**
+ * An error as an unauthenticated route may repeat it. ethers puts the whole
+ * request into a failed call's message (`info={ "requestUrl": … }`), and the
+ * RPC URL can carry a provider key. Keep the short message and the code.
+ */
+export function safeErrorMessage(e: unknown): string {
+  const err = (e ?? {}) as { message?: string; code?: string; shortMessage?: string };
+  const base = String(err.shortMessage || err.message || e).split('\n')[0];
+  const stripped = base
+    .replace(/\s*\((?:request|response|info|transaction)=[\s\S]*$/, '')
+    .replace(/https?:\/\/\S+/g, '<rpc>')
+    .replace(/wss?:\/\/\S+/g, '<rpc>');
+  return err.code && !stripped.includes(err.code) ? `${stripped} [${err.code}]` : stripped;
+}
+
 function rotateCommand(signerAddr: string, network: string, escrowAddress: string | null): string {
   return `cd contracts && ${contractsEnvPrefix(escrowAddress)}MARKETPLACE_SIGNER_ADDRESS=${signerAddr} npx hardhat run scripts/rotate-verifier.ts --network ${network}`;
 }
@@ -53,7 +68,7 @@ async function zeroGBridge(): Promise<Record<string, unknown>> {
   try {
     onChainVerifier = (await escrow.verifier()) as string;
   } catch (e) {
-    escrowReadError = (e as Error).message;
+    escrowReadError = safeErrorMessage(e);
   }
   const verifierMatches =
     onChainVerifier !== null &&
@@ -68,7 +83,7 @@ async function zeroGBridge(): Promise<Record<string, unknown>> {
     signerBalanceOg = formatEther(balanceWei);
     signerGasLow = og < SIGNER_GAS_LOW_OG;
   } catch (e) {
-    signerBalanceError = (e as Error).message;
+    signerBalanceError = safeErrorMessage(e);
   }
 
   return {
@@ -95,7 +110,7 @@ async function baseBridge(): Promise<Record<string, unknown>> {
   try {
     baseVerifier = (await baseEscrow!.verifier()) as string;
   } catch (e) {
-    baseEscrowError = (e as Error).message;
+    baseEscrowError = safeErrorMessage(e);
   }
   const baseVerifierMatches =
     baseVerifier !== null &&
@@ -108,7 +123,7 @@ async function baseBridge(): Promise<Record<string, unknown>> {
     const usdc = new (await import('ethers')).ethers.Contract(config.baseUsdcAddress!, USDC_ABI, baseProvider);
     baseSignerBalanceUsdc = (await usdc.balanceOf(baseSignerAddr)).toString();
   } catch (e) {
-    baseSignerBalanceError = (e as Error).message;
+    baseSignerBalanceError = safeErrorMessage(e);
   }
   let baseSignerEthBalance: string | null = null;
   let baseSignerEthLow: boolean | null = null;

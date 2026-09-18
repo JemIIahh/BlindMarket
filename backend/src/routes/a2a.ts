@@ -1375,7 +1375,8 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
     // written: an unindexed task is never offered, and the poster can still
     // cancel it for a refund. (A native-0G task on a deployment that prices in
     // USDC passes here; the "Use now" check below refuses it, and reward
-    // floors — written in the pricing unit — no longer apply to it.)
+    // floors — written in the pricing unit — cannot be met by it, so only
+    // agents with no floor are offered it.)
     const taskUnit = payoutCurrency(taskChain, onChainToken);
     if (!taskUnit) {
       throw new AppError(

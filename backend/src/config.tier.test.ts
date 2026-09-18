@@ -176,3 +176,21 @@ describe('a production backend on the testnet tier', () => {
     expect(errored.join('\n')).toMatch(/OG_CHAIN_ID=16602 in production/);
   });
 });
+
+
+describe('assertBootConfig refuses Base mainnet with the Base Sepolia escrow', () => {
+  const SEPOLIA_ESCROW = '0xCca5ab873158b888158AD9Dc36fb4Ee683eFbEBf';
+
+  it('names the mistake when NODE_ENV=production defaults BASE_CHAIN_ID to 8453', async () => {
+    const { assertBootConfig } = await load({ NODE_ENV: 'production', BASE_ESCROW_ADDRESS: SEPOLIA_ESCROW, JWT_SECRET: 'x', DATABASE_URL: 'postgres://x' });
+    expect(() => assertBootConfig()).toThrow(/1 fatal problem/);
+    expect(errored.join('\n')).toMatch(/BASE_CHAIN_ID=8453 \(Base mainnet\) but BASE_ESCROW_ADDRESS=0xCca5.*Base Sepolia escrow/);
+  });
+
+  it('boots when BASE_CHAIN_ID says Sepolia, or the escrow is not Sepolia’s', async () => {
+    const ok = await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '84532', BASE_ESCROW_ADDRESS: SEPOLIA_ESCROW, JWT_SECRET: 'x', DATABASE_URL: 'postgres://x' });
+    expect(() => ok.assertBootConfig()).not.toThrow();
+    const other = await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '8453', BASE_ESCROW_ADDRESS: '0x1111111111111111111111111111111111111111', JWT_SECRET: 'x', DATABASE_URL: 'postgres://x' });
+    expect(() => other.assertBootConfig()).not.toThrow();
+  });
+});

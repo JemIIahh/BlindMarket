@@ -208,14 +208,14 @@ describe('delegate_to_agent funds on the posting chain', () => {
   }
 
   /** The backend endpoints delegation calls, stopping at the index step. */
-  function stubBackend(seen: { createTask?: Record<string, string> }) {
+  function stubBackend(seen: { createTask?: Record<string, string> }, opts: { builtOn?: string } = {}) {
     return vi.fn(async (url: string, init?: { body?: string }) => {
       const json = (data: unknown) => new Response(JSON.stringify({ data }), { status: 200, headers: { 'content-type': 'application/json' } });
       if (url.includes('/storage/upload')) return json({ rootHash: '0xroot' });
       if (url.includes('/a2a/executors')) return json({ executors: [] });
       if (url.endsWith('/api/v1/tasks')) {
         seen.createTask = JSON.parse(init?.body ?? '{}');
-        return json({ unsignedTx: { to: BASE_ESCROW, data: '0xabcdef', value: '0x0' } });
+        return json({ unsignedTx: { to: BASE_ESCROW, data: '0xabcdef', value: '0x0' }, ...(opts.builtOn ? { chain: opts.builtOn } : {}) });
       }
       // Stop before the 2-minute result poll; the funding path is what matters.
       if (url.includes('/a2a/tasks/index')) return new Response('nope', { status: 500 });
@@ -223,19 +223,24 @@ describe('delegate_to_agent funds on the posting chain', () => {
     });
   }
 
-  async function delegateAgainstStub(table: typeof TABLE, balances: { native: bigint; token: bigint }) {
+  async function delegateAgainstStub(
+    table: typeof TABLE,
+    balances: { native: bigint; token: bigint },
+    opts: { builtOn?: string; env?: Record<string, string> } = {},
+  ) {
     const posting = table.find((c) => c.posting)!;
     const node = stubNode(posting.chainId, balances);
     await new Promise<void>((resolve) => node.server.listen(0, '127.0.0.1', resolve));
     const { port } = node.server.address() as { port: number };
     const url = `http://127.0.0.1:${port}`;
     const seen: { createTask?: Record<string, string> } = {};
-    const fetchStub = stubBackend(seen);
+    const fetchStub = stubBackend(seen, { builtOn: opts.builtOn });
     vi.stubGlobal('fetch', fetchStub);
     try {
       const worker = await loadWorker({
         SETTLEMENT_CHAINS_JSON: JSON.stringify(table.map((c) => (c.posting ? { ...c, rpcUrl: url } : c))),
         BACKEND_URL: url,
+        ...(opts.env ?? {}),
       });
       const out = (await worker.buildTools().delegate_to_agent.execute(delegateArgs)) as string;
       return { out, calls: node.calls, sent: node.sent, seen };
@@ -305,6 +310,22 @@ describe('delegate_to_agent funds on the posting chain', () => {
       const { sent } = await delegateAgainstStub(gasCoinTable, { native: 10n ** 16n, token: reward + reserve });
       expect(sent).toHaveLength(2);
     });
+  });
+
+  it("refuses up front for a smart-account agent on a Base-posting stack (the EOA holds nothing)", async () => {
+    const { out, calls, sent } = await delegateAgainstStub(TABLE, { native: 10n ** 16n, token: 5_000_000n }, {
+      env: { AGENT_SMART_ACCOUNT_ADDRESS: '0x3333333333333333333333333333333333333333', AA_ENTRY_POINT: '0x0000000071727De22E5E9d8BAf0edAc6f37da032' },
+    });
+    expect(out).toMatch(/cannot delegate — this agent runs as a smart account on base/);
+    // Nothing asked of the chain, nothing uploaded, nothing sent.
+    expect(calls).toEqual([]);
+    expect(sent).toEqual([]);
+  });
+
+  it('refuses to sign a task the backend built for another chain', async () => {
+    const { out, sent } = await delegateAgainstStub(TABLE, { native: 10n ** 16n, token: 5_000_000n }, { builtOn: '0g' });
+    expect(out).toMatch(/built the task on 0g, but this agent posts on base/);
+    expect(sent).toEqual([]);
   });
 
   it('refuses when the posting chain has no signer', async () => {

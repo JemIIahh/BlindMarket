@@ -545,7 +545,8 @@ tasksRouter.post('/:id/cancel', requireAuth, async (req: AuthRequest, res, next)
 
     const body: ApiResponse = {
       success: true,
-      data: { unsignedTx: tx },
+      // chain and chainId name where the tx must be sent (a task lives on one chain).
+      data: { unsignedTx: tx, chain, chainId: settlementChainConfig(chain).chainId },
     };
     const replacer = (key: string, value: any) => typeof value === 'bigint' ? value.toString() : value;
     res.json(JSON.parse(JSON.stringify(body, replacer)));
@@ -612,7 +613,8 @@ tasksRouter.post('/:id/timeout', requireAuth, async (req: AuthRequest, res, next
 
     const body: ApiResponse = {
       success: true,
-      data: { unsignedTx: tx },
+      // chain and chainId name where the tx must be sent (a task lives on one chain).
+      data: { unsignedTx: tx, chain, chainId: settlementChainConfig(chain).chainId },
     };
     const replacer = (key: string, value: any) => typeof value === 'bigint' ? value.toString() : value;
     res.json(JSON.parse(JSON.stringify(body, replacer)));
