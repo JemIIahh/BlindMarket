@@ -215,6 +215,10 @@ a2aRouter.post('/register', requireAuth, async (req: AuthRequest, res, next) => 
       supportedChains: data.supportedChains,
       reputation: existing?.reputation ?? 50, // start at 50
       tasksCompleted: existing?.tasksCompleted ?? 0,
+      // Carried like the two counters above. registerAgent writes whatever it is
+      // handed, so leaving this out reset an agent's earnings to '0' every time
+      // it re-registered.
+      totalEarnedRaw: existing?.totalEarnedRaw,
       registeredAt: existing?.registeredAt ?? new Date().toISOString(),
     });
 
