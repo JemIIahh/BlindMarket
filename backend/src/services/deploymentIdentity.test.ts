@@ -19,8 +19,11 @@ const { store, redis } = vi.hoisted(() => {
     store,
     redis: {
       get: vi.fn(async (k: string) => store.get(k) ?? null),
-      set: vi.fn(async (k: string, v: string, mode?: string) => {
-        if (mode === 'NX' && store.has(k)) return null;
+      // Like ioredis: an explicit undefined mode goes to Redis as an extra
+      // argument, and a plain SET answers "ERR syntax error".
+      set: vi.fn(async (k: string, v: string, ...rest: Array<string | undefined>) => {
+        if (rest.length > 0 && rest[0] === undefined) throw new Error('ERR syntax error');
+        if (rest[0] === 'NX' && store.has(k)) return null;
         store.set(k, v);
         return 'OK' as const;
       }),
@@ -32,7 +35,7 @@ const sentry = vi.hoisted(() => ({ captureMessage: vi.fn() }));
 vi.mock('@sentry/node', () => sentry);
 
 import {
-  resolveIdentity, checkDeploymentIdentity, deploymentIdentityStatus, backgroundWritesAllowed, onBackgroundWritesStopped,
+  resolveIdentity, checkDeploymentIdentity, deploymentIdentityStatus, backgroundWritesAllowed, onBackgroundWritesStopped, onBackgroundWritesResumed,
   _resetIdentityForTests, IDENTITY_KEY, CHECK_TIMEOUT_MS, RETRY_MS, type DeploymentFacts, type Self,
 } from './deploymentIdentity.js';
 import { parseDeploymentId } from '../config.js';
@@ -196,12 +199,22 @@ describe('a staging stack (stoppable, with a DEPLOYMENT_ID)', () => {
     expect(await resolveIdentity(redis, staging(), NOW)).toMatchObject({ role: 'owner', writersAllowed: true });
   });
 
-  it('stops when its id comes with other chain ids: another network under the same name', async () => {
+  it("may not run under production's DEPLOYMENT_ID, even on the same chains", async () => {
     await resolveIdentity(redis, production(), NOW);
-    const s = await resolveIdentity(redis, staging({ deploymentId: 'production' }), NOW);
+    const before = store.get(IDENTITY_KEY);
+    const s = await resolveIdentity(redis, staging({ deploymentId: 'production', facts: { tier: null, chains: { base: PROD.chains.base } } }), NOW);
     expect(s).toMatchObject({ role: 'not-owner', owner: 'production', writersAllowed: false });
-    expect(s.reason).toMatch(/0g 16661→16602/);
-    expect(record().chains['0g'].chainId).toBe(16661);
+    expect(s.reason).toMatch(/is production.*may not run under its DEPLOYMENT_ID/);
+    expect(store.get(IDENTITY_KEY)).toBe(before);
+  });
+
+  it('stops when its id comes with other chain ids: another network under the same name', async () => {
+    await resolveIdentity(redis, staging(), NOW);
+    const moved: DeploymentFacts = { ...STAGING, chains: { ...STAGING.chains, '0g': { chainId: 16661, escrow: STAGING.chains['0g'].escrow } } };
+    const s = await resolveIdentity(redis, staging({ facts: moved }), NOW);
+    expect(s).toMatchObject({ role: 'not-owner', owner: 'staging-testnet', writersAllowed: false });
+    expect(s.reason).toMatch(/0g 16602→16661/);
+    expect(record().chains['0g'].chainId).toBe(16602);
   });
 
   it('records an added chain, a redeployed escrow and a tier change', async () => {
@@ -235,11 +248,20 @@ describe('a staging stack (stoppable, with a DEPLOYMENT_ID)', () => {
     });
 
     it('"unclaimed" takes a Redis with no record despite its index keys, and nothing else', async () => {
-      productionHistory({ fingerprints: false });
+      plantStagingFingerprints();
+      store.set('a2a:events:escrow', '16602:0x' + '0c'.repeat(20)); // an escrow this stack redeployed
       expect(await resolveIdentity(redis, staging({ claim: 'unclaimed' }), NOW)).toMatchObject({ role: 'owner', writersAllowed: true });
       store.clear();
       await resolveIdentity(redis, production(), NOW);
       expect(await resolveIdentity(redis, staging({ claim: 'unclaimed' }), NOW)).toMatchObject({ role: 'not-owner', writersAllowed: false });
+    });
+
+    it('"unclaimed" does not take production\'s Redis from before identity checks', async () => {
+      productionHistory({ fingerprints: false });
+      const s = await resolveIdentity(redis, staging({ claim: 'unclaimed' }), NOW);
+      expect(s).toMatchObject({ role: 'not-owner', writersAllowed: false });
+      expect(s.reason).toMatch(/DEPLOYMENT_CLAIM=unclaimed ignored: this looks like production's Redis/);
+      expect(store.has(IDENTITY_KEY)).toBe(false);
     });
 
     it('never takes production\'s Redis, even when it names production', async () => {
@@ -472,6 +494,54 @@ describe('checkDeploymentIdentity', () => {
     // Still off at the next check; the listeners run once per transition.
     await vi.advanceTimersByTimeAsync(RETRY_MS);
     expect(stopped).toHaveBeenCalledTimes(1);
+  });
+
+  describe('through the real check (its guarded store passes Redis exactly what a plain SET takes)', () => {
+    it('production takes its Redis back', async () => {
+      await resolveIdentity(redis, staging(), NOW);
+      expect(await checkDeploymentIdentity(CHECK_TIMEOUT_MS, redis, production())).toMatchObject({ role: 'owner', owner: 'production', writersAllowed: true });
+      expect(record().id).toBe('production');
+    });
+
+    it('an owner records its moved chains (production) and its redeployed escrow (staging)', async () => {
+      await resolveIdentity(redis, production(), NOW);
+      const mainnet: DeploymentFacts = { tier: 'mainnet', chains: { ...PROD.chains, base: { chainId: 8453, escrow: '0x' + '8b'.repeat(20) } } };
+      expect(await checkDeploymentIdentity(CHECK_TIMEOUT_MS, redis, production({ facts: mainnet }))).toMatchObject({ role: 'owner' });
+      expect(record().chains.base.chainId).toBe(8453);
+
+      store.clear();
+      _resetIdentityForTests();
+      await resolveIdentity(redis, staging(), NOW);
+      const redeployed: DeploymentFacts = { ...STAGING, chains: { ...STAGING.chains, base: { chainId: 84532, escrow: '0x' + 'b9'.repeat(20) } } };
+      expect(await checkDeploymentIdentity(CHECK_TIMEOUT_MS, redis, staging({ facts: redeployed }))).toMatchObject({ role: 'owner', writersAllowed: true });
+      expect(record().chains.base.escrow).toBe('0x' + 'b9'.repeat(20));
+    });
+
+    it('a named DEPLOYMENT_CLAIM applies', async () => {
+      await resolveIdentity(redis, localDevStackClaim(), NOW);
+      expect(await checkDeploymentIdentity(CHECK_TIMEOUT_MS, redis, staging({ claim: 'old-staging' }))).toMatchObject({ role: 'owner', owner: 'staging-testnet' });
+      expect(record().id).toBe('staging-testnet');
+    });
+  });
+
+  it('a Redis blip does not stop a stack\'s workers; the answer after it resumes writes', async () => {
+    vi.useFakeTimers();
+    const stopped = vi.fn();
+    const resumed = vi.fn();
+    onBackgroundWritesStopped(stopped);
+    onBackgroundWritesResumed(resumed);
+    let blip = false;
+    const flaky = { get: (k: string) => (blip ? Promise.reject(new Error('Connection is closed.')) : redis.get(k)), set: redis.set };
+    expect(await checkDeploymentIdentity(CHECK_TIMEOUT_MS, flaky, staging())).toMatchObject({ role: 'owner' });
+    blip = true;
+    await vi.advanceTimersByTimeAsync(RETRY_MS);
+    expect(deploymentIdentityStatus()).toMatchObject({ role: 'unknown', writersAllowed: false });
+    expect(stopped).not.toHaveBeenCalled();
+    blip = false;
+    await vi.advanceTimersByTimeAsync(RETRY_MS);
+    expect(deploymentIdentityStatus()).toMatchObject({ role: 'owner', writersAllowed: true });
+    expect(resumed).toHaveBeenCalledTimes(1);
+    expect(stopped).not.toHaveBeenCalled();
   });
 
   it('on a Redis error, production writes and a stoppable process waits', async () => {

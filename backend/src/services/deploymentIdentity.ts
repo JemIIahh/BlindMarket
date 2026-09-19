@@ -256,12 +256,18 @@ export async function resolveIdentity(
   } else if (stoppable && self.claim && first && record?.stoppable === false) {
     claimNote = `DEPLOYMENT_CLAIM=${self.claim} ignored: "${record.id}" is production, whose Redis is never taken over (it takes it back)`;
   } else if (stoppable && self.claim && first) {
+    // "unclaimed" is for a Redis whose record was lost, not for production's
+    // Redis from before identity checks (bare checkpoints, no fingerprints).
+    const bareHistory = self.claim === 'unclaimed' && record === null
+      && await (async () => { const f = await foreignIndexState(store, facts); return f.fingerprints.length === 0 && f.unvouched.length > 0; })();
     const named = self.claim === 'unclaimed' ? record === null : record?.id === self.claim;
-    if (named) {
+    if (bareHistory) {
+      claimNote = `DEPLOYMENT_CLAIM=unclaimed ignored: this looks like production's Redis from before identity checks`;
+    } else if (named) {
       await store.set(IDENTITY_KEY, JSON.stringify(recordFor(deploymentId)));
       return allowed('owner', deploymentId, `DEPLOYMENT_CLAIM=${self.claim}: claimed this Redis for "${deploymentId}"${record && record.id !== deploymentId ? ` (it was "${record.id}"'s)` : ''}. Remove DEPLOYMENT_CLAIM before the next restart`);
     }
-    claimNote = `DEPLOYMENT_CLAIM=${self.claim} ignored: this Redis is ${record ? `"${record.id}"'s` : 'unclaimed'}, not what it names`;
+    claimNote ??= `DEPLOYMENT_CLAIM=${self.claim} ignored: this Redis is ${record ? `"${record.id}"'s` : 'unclaimed'}, not what it names`;
   }
   const withNote = (s: IdentityStatus): IdentityStatus => (claimNote ? { ...s, reason: s.reason ? `${s.reason}. ${claimNote}` : claimNote } : s);
 
@@ -273,6 +279,9 @@ export async function resolveIdentity(
         return allowed('owner', deploymentId, `took this Redis back from deployment "${record.id}"; that deployment's processes stop at their next check`);
       }
       return withNote(disagree(record.id, `this Redis belongs to deployment "${record.id}"; this process is "${deploymentId}"`));
+    }
+    if (stoppable && record.stoppable === false) {
+      return withNote(disagree(record.id, `"${record.id}" is production (its record says it cannot be stopped); a stoppable process may not run under its DEPLOYMENT_ID`));
     }
     const moved = movedChains(record, facts);
     if (moved.length > 0 && stoppable) {
@@ -315,6 +324,7 @@ let answeredOnce = false;
 let recheckTimer: NodeJS.Timeout | null = null;
 const skipLogged = new Set<string>();
 const stopListeners: Array<(status: IdentityStatus) => void> = [];
+const resumeListeners: Array<(status: IdentityStatus) => void> = [];
 
 /** The latest result, for /health/bridge; null before the first check has answered. */
 export function deploymentIdentityStatus(): IdentityStatus | null {
@@ -335,9 +345,18 @@ export function backgroundWritesAllowed(writer: string): boolean {
   return false;
 }
 
-/** Called once each time this process's writes turn off (agentRunner stops its workers). */
+/**
+ * Called once each time a check finds this process on another deployment's
+ * Redis (agentRunner stops its workers). Not on a check that got no answer:
+ * a Redis blip must not kill a stack's own workers.
+ */
 export function onBackgroundWritesStopped(listener: (status: IdentityStatus) => void): void {
   stopListeners.push(listener);
+}
+
+/** Called each time writes turn back on after a check had turned them off (agent reconcile re-forks). */
+export function onBackgroundWritesResumed(listener: (status: IdentityStatus) => void): void {
+  resumeListeners.push(listener);
 }
 
 function report(next: IdentityStatus, previous: IdentityStatus | null): void {
@@ -371,7 +390,11 @@ export async function checkDeploymentIdentity(
   let abandoned = false;
   const guarded: IdentityRedis = {
     get: (key) => store.get(key),
-    set: (key, value, mode) => (abandoned ? Promise.reject(new Error('identity check abandoned')) : store.set(key, value, mode)),
+    // Never pass an undefined mode: ioredis sends it as an extra argument and
+    // Redis answers "ERR syntax error" to a plain SET.
+    set: (key, value, mode) => (abandoned
+      ? Promise.reject(new Error('identity check abandoned'))
+      : mode ? store.set(key, value, mode) : store.set(key, value)),
   };
   let timer: NodeJS.Timeout | undefined;
   const attempt = resolveIdentity(guarded, self, undefined, { first });
@@ -396,11 +419,13 @@ export async function checkDeploymentIdentity(
     firstCheckPending = false;
   }
   report(status, previous);
-  if ((previous ? previous.writersAllowed : true) && !status.writersAllowed) {
-    for (const listener of stopListeners) {
-      try { listener(status); } catch (err) { console.error('[identity] stop listener failed:', (err as Error).message); }
+  const notify = (listeners: typeof stopListeners, kind: string) => {
+    for (const listener of listeners) {
+      try { listener(status!); } catch (err) { console.error(`[identity] ${kind} listener failed:`, (err as Error).message); }
     }
-  }
+  };
+  if (status.role === 'not-owner' && !status.writersAllowed && previous?.role !== 'not-owner') notify(stopListeners, 'stop');
+  if (status.writersAllowed && previous && !previous.writersAllowed) notify(resumeListeners, 'resume');
   if (!recheckTimer) {
     recheckTimer = setTimeout(() => {
       recheckTimer = null;
@@ -420,4 +445,5 @@ export function _resetIdentityForTests(): void {
   recheckTimer = null;
   skipLogged.clear();
   stopListeners.length = 0;
+  resumeListeners.length = 0;
 }

@@ -1,12 +1,14 @@
 /**
  * The loops that write shared state on their own schedule (Redis indexes,
- * task states, Postgres, on-chain mints), started once this process knows
- * the Redis is its deployment's. Each writer also checks
- * backgroundWritesAllowed() when it runs, so a verdict reached after boot
- * still stops it; see deploymentIdentity.ts. HTTP routes are not affected.
+ * task states, Postgres, on-chain mints). They start once the first identity
+ * check has answered, whatever it said: every tick checks
+ * backgroundWritesAllowed() itself, so a process on another deployment's
+ * Redis runs them as no-ops, and one whose check had no answer at boot picks
+ * up as soon as a later check allows it. Agent reconcile runs at boot and
+ * again each time writes turn back on. See deploymentIdentity.ts.
  */
 
-import { checkDeploymentIdentity, type IdentityStatus } from './deploymentIdentity.js';
+import { checkDeploymentIdentity, onBackgroundWritesResumed, type IdentityStatus } from './deploymentIdentity.js';
 import { settlementChainConfig } from './settlementChains.js';
 import { startEscrowEventLoop } from './escrowEvents.js';
 import { startBaseEscrowEventLoop } from './baseEscrowEvents.js';
@@ -50,20 +52,21 @@ export function backgroundWriters(env: NodeJS.ProcessEnv = process.env): Backgro
   // process map doesn't survive a deploy/crash, so without this they show
   // 'running' in the UI but do no work and stop heartbeating. Off only if an
   // operator running an unusual (multi-instance) topology opts out, since each
-  // instance would otherwise re-fork the same agents.
+  // instance would otherwise re-fork the same agents. Gated inside, and run
+  // again when writes resume (workers killed on a not-owner verdict).
   if (env.AGENT_RECONCILE_ON_BOOT !== 'false') {
     writers.push({ name: 'agent reconcile', start: () => void reconcileAgents() });
+    onBackgroundWritesResumed(() => void reconcileAgents());
   }
   return writers;
 }
 
-/** Check who owns this Redis, then start `writers` only if this process may write. */
+/** Wait for the first identity check, then start every writer; each tick decides for itself. */
 export async function startBackgroundWriters(
   writers: readonly BackgroundWriter[] = backgroundWriters(),
   check: () => Promise<IdentityStatus> = () => checkDeploymentIdentity(),
 ): Promise<{ identity: IdentityStatus; started: string[] }> {
   const identity = await check();
-  if (!identity.writersAllowed) return { identity, started: [] };
   for (const writer of writers) writer.start();
   return { identity, started: writers.map((w) => w.name) };
 }

@@ -6,15 +6,17 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { started, gate, identity } = vi.hoisted(() => ({
+const { started, gate, identity, resumed } = vi.hoisted(() => ({
   started: [] as string[],
   gate: { allowed: true },
   identity: { status: null as null | { role: string; writersAllowed: boolean } },
+  resumed: [] as Array<() => void>,
 }));
 
 vi.mock('./deploymentIdentity.js', () => ({
   checkDeploymentIdentity: async () => identity.status,
   backgroundWritesAllowed: () => gate.allowed,
+  onBackgroundWritesResumed: (listener: () => void) => { resumed.push(listener); },
 }));
 vi.mock('./settlementChains.js', () => ({ settlementChainConfig: () => ({ escrowAddress: '0x' + '11'.repeat(20) }) }));
 vi.mock('./escrowEvents.js', () => ({ startEscrowEventLoop: () => started.push('startEscrowEventLoop') }));
@@ -33,6 +35,7 @@ const EVERY_WRITER = [
 
 beforeEach(() => {
   started.length = 0;
+  resumed.length = 0;
 });
 
 describe('startBackgroundWriters', () => {
@@ -43,17 +46,32 @@ describe('startBackgroundWriters', () => {
     expect(names).toEqual(['0G indexer', 'Base indexer', 'AgentFactory listener', 'CCTP poller', 'expiry sweep', 'agent reconcile']);
   });
 
-  it('starts none of them on another deployment\'s Redis — reconcile and the sweep included', async () => {
-    identity.status = { role: 'not-owner', writersAllowed: false };
-    const { started: names } = await startBackgroundWriters(backgroundWriters({}));
-    expect(started).toEqual([]);
-    expect(names).toEqual([]);
+  it('starts them after the first check whatever it said: each tick is gated, so a later "allowed" takes effect', async () => {
+    for (const status of [{ role: 'not-owner', writersAllowed: false }, { role: 'unknown', writersAllowed: false }, { role: 'unknown', writersAllowed: true }]) {
+      started.length = 0;
+      identity.status = status;
+      await startBackgroundWriters(backgroundWriters({}));
+      expect(started).toEqual(EVERY_WRITER);
+    }
   });
 
-  it('starts them all when the check could not reach Redis', async () => {
-    identity.status = { role: 'unknown', writersAllowed: true };
-    await startBackgroundWriters(backgroundWriters({}));
+  it('waits for the first check before starting anything', async () => {
+    let answer: (s: { role: string; writersAllowed: boolean }) => void = () => {};
+    const pending = startBackgroundWriters(backgroundWriters({}), () => new Promise((r) => { answer = r; }) as never);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(started).toEqual([]);
+    answer({ role: 'owner', writersAllowed: true });
+    await pending;
     expect(started).toEqual(EVERY_WRITER);
+  });
+
+  it('reconciles agents again each time writes resume', async () => {
+    identity.status = { role: 'unknown', writersAllowed: false };
+    await startBackgroundWriters(backgroundWriters({}));
+    started.length = 0;
+    expect(resumed).toHaveLength(1);
+    resumed[0]();
+    expect(started).toEqual(['reconcileAgents']);
   });
 
   it('leaves reconcile out when AGENT_RECONCILE_ON_BOOT=false, as before', async () => {
