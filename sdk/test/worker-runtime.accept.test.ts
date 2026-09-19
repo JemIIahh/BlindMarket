@@ -227,6 +227,27 @@ describe('WorkerRuntime /accept — 403 NEEDS_WRAP', () => {
     expect(events.filter((e) => e.type === 'task_bidded')).toHaveLength(1);
   });
 
+  it('the scheduled re-try runs even when its timer fires before Date.now() reaches the back-off', async () => {
+    // Timers fire by the monotonic clock; Date.now() can read behind it (CI
+    // saw the re-try refused by its own back-off, and the task never re-tried).
+    const c = stubBackend((_id, n) => (n < 2 ? fail(403, 'NEEDS_WRAP', NOT_WRAPPED_MESSAGE) : ok(ACCEPTED)));
+    const { r } = mkRuntime({ watchIntervalMs: 20 });
+    await run(r);
+    const realNow = Date.now.bind(Date);
+    vi.spyOn(Date, 'now').mockImplementation(() => realNow() - 1_000);
+    await vi.waitFor(() => expect(r.executions.get(TASK_ID)?.status).toBe('completed'));
+    expect(c.accepts[TASK_ID]).toBe(2);
+  });
+
+  it('a back-off set after the re-try was scheduled still holds', async () => {
+    const c = stubBackend(() => fail(403, 'NEEDS_WRAP', NOT_WRAPPED_MESSAGE));
+    const { r } = mkRuntime({ watchIntervalMs: 20 });
+    await run(r);
+    r.retries.get(TASK_ID).notBefore = Date.now() + 60_000; // e.g. a failure elsewhere backed it off
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(c.accepts[TASK_ID]).toBe(1);
+  });
+
   it('tasks waiting for a wrap do not starve a runnable task (maxConcurrentTasks = 3)', async () => {
     const stuck = [1, 2, 3].map((n) => `0x${String(n).repeat(64)}`);
     const READY = `0x${'9'.repeat(64)}`;
