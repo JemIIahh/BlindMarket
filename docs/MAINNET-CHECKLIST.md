@@ -235,7 +235,11 @@ This is the hot key the backend uses to call `marketplaceAssign` and
       (NODE_ENV=production on 0G mainnet, default DEPLOYMENT_SET, no testnet
       tier); anything else on its Redis is stopped. Re-check after changing
       REDIS_URL, NODE_ENV or the chains, and treat any other `role`, or a
-      `reason`, as a finding.
+      `reason`, as a finding — except two that are expected once, each also
+      sent to Sentry as a single warning: the first boot of the release
+      ("claimed this Redis, taking its unfingerprinted index state as this
+      deployment's own history") and the mainnet flip ("recorded base
+      84532→8453 …"). Both clear to `reason: null` at the next check or restart.
       See `backend/src/services/deploymentIdentity.ts`.
 
 ### 3.5 Rotate readiness
