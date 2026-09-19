@@ -23,7 +23,11 @@
  * or anything not running as NODE_ENV=production (local development, where
  * the 2026-05-25 backend ran). Production claims whatever it finds, takes the
  * record back from any other deployment, and only logs index keys that
- * disagree with it: nothing another process writes can turn it off.
+ * disagree with it: nothing another process writes can turn it off. Its
+ * record says so (stoppable:false), and a stoppable process may not run under
+ * its DEPLOYMENT_ID — unless it also has production's escrows, chain for
+ * chain: that is production whose environment drifted (NODE_ENV lost), which
+ * keeps writing and is told to fix it.
  *
  * A stoppable process:
  * - with a DEPLOYMENT_ID, claims only a Redis with no other deployment's
@@ -44,6 +48,11 @@
  * process wrote meanwhile (its own fingerprints) would later vouch for a
  * claim on a Redis that is not its own. A check that timed out writes
  * nothing afterwards.
+ *
+ * One window stays open: after a FLUSHALL of production's Redis, a staging
+ * check that lands before production's indexers write their checkpoints
+ * again (seconds) finds an empty Redis and claims it. Production takes it back
+ * at its next check (≤ RETRY_MS), and staging stops at the check after.
  */
 
 import * as Sentry from '@sentry/node';
@@ -166,6 +175,13 @@ function movedChains(record: DeploymentFacts, facts: DeploymentFacts): string[] 
     .map(([key, c]) => `${key} ${c.chainId}→${facts.chains[key].chainId}`);
 }
 
+/** The same escrows on the same chain ids, chain for chain. */
+function sameChains(record: DeploymentFacts, facts: DeploymentFacts): boolean {
+  const keys = Object.keys(facts.chains);
+  return keys.length === Object.keys(record.chains).length
+    && keys.every((key) => record.chains[key]?.chainId === facts.chains[key].chainId && record.chains[key]?.escrow === facts.chains[key].escrow);
+}
+
 interface Foreign {
   key: string;
   text: string;
@@ -281,7 +297,13 @@ export async function resolveIdentity(
       return withNote(disagree(record.id, `this Redis belongs to deployment "${record.id}"; this process is "${deploymentId}"`));
     }
     if (stoppable && record.stoppable === false) {
-      return withNote(disagree(record.id, `"${record.id}" is production (its record says it cannot be stopped); a stoppable process may not run under its DEPLOYMENT_ID`));
+      if (!sameChains(record, facts)) {
+        return withNote(disagree(record.id, `"${record.id}" is production (its record says it cannot be stopped); a stoppable process may not run under its DEPLOYMENT_ID`));
+      }
+      // Production's id AND production's escrows: production itself with an
+      // environment that has drifted (NODE_ENV lost, say). Stopping it would
+      // stop production; keep writing, keep the record production's, and say so.
+      return withNote(allowed('owner', record.id, `this process has "${record.id}"'s DEPLOYMENT_ID and escrows but is not configured as production (NODE_ENV=production, 0G mainnet, no DEPLOYMENT_SET, SETTLEMENT_TIER not testnet), so a Redis outage would turn its background writes off. It keeps writing and the record stays production's; fix its environment`));
     }
     const moved = movedChains(record, facts);
     if (moved.length > 0 && stoppable) {
@@ -368,7 +390,7 @@ function report(next: IdentityStatus, previous: IdentityStatus | null): void {
     Sentry.captureMessage(`deployment identity: ${line}`, 'error');
   } else if (next.reason) {
     console.warn(`[identity] ⚠ ${who}: ${next.reason}`);
-    if (next.role === 'not-owner') Sentry.captureMessage(`deployment identity: ${who}: ${next.reason}`, 'warning');
+    if (next.role === 'not-owner' || next.role === 'owner') Sentry.captureMessage(`deployment identity: ${who}: ${next.reason}`, 'warning');
   } else if (next.role === 'owner') {
     console.log(`[identity] ${who} owns this Redis`);
   }

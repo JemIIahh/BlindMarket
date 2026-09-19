@@ -199,12 +199,32 @@ describe('a staging stack (stoppable, with a DEPLOYMENT_ID)', () => {
     expect(await resolveIdentity(redis, staging(), NOW)).toMatchObject({ role: 'owner', writersAllowed: true });
   });
 
-  it("may not run under production's DEPLOYMENT_ID, even on the same chains", async () => {
+  it("may not run under production's DEPLOYMENT_ID with anything but production's escrows (the review's P2)", async () => {
     await resolveIdentity(redis, production(), NOW);
     const before = store.get(IDENTITY_KEY);
-    const s = await resolveIdentity(redis, staging({ deploymentId: 'production', facts: { tier: null, chains: { base: PROD.chains.base } } }), NOW);
-    expect(s).toMatchObject({ role: 'not-owner', owner: 'production', writersAllowed: false });
-    expect(s.reason).toMatch(/is production.*may not run under its DEPLOYMENT_ID/);
+    const others: DeploymentFacts[] = [
+      // A Base-only staging stack sharing production's Base escrow.
+      { tier: null, chains: { base: PROD.chains.base } },
+      // Production's chains, with its own Base escrow.
+      { tier: null, chains: { ...PROD.chains, base: STAGING.chains.base } },
+      // Production's escrows plus one more chain.
+      { tier: null, chains: { ...PROD.chains, arc: { chainId: 5042002, escrow: '0xa4c0000000000000000000000000000000000001' } } },
+    ];
+    for (const facts of others) {
+      const s = await resolveIdentity(redis, staging({ deploymentId: 'production', facts }), NOW, { first: false });
+      expect(s).toMatchObject({ role: 'not-owner', owner: 'production', writersAllowed: false });
+      expect(s.reason).toMatch(/is production.*may not run under its DEPLOYMENT_ID/);
+    }
+    expect(store.get(IDENTITY_KEY)).toBe(before);
+  });
+
+  it("keeps production writing when its environment drifts (NODE_ENV lost): same id, same escrows (the review's P1)", async () => {
+    await resolveIdentity(redis, production(), NOW);
+    const before = store.get(IDENTITY_KEY);
+    const s = await resolveIdentity(redis, production({ stoppable: true }), LATER, { first: false });
+    expect(s).toMatchObject({ role: 'owner', owner: 'production', writersAllowed: true, stoppable: true });
+    expect(s.reason).toMatch(/not configured as production.*fix its environment/);
+    // The record stays production's: it must not start saying stoppable.
     expect(store.get(IDENTITY_KEY)).toBe(before);
   });
 
@@ -521,6 +541,15 @@ describe('checkDeploymentIdentity', () => {
       await resolveIdentity(redis, localDevStackClaim(), NOW);
       expect(await checkDeploymentIdentity(CHECK_TIMEOUT_MS, redis, staging({ claim: 'old-staging' }))).toMatchObject({ role: 'owner', owner: 'staging-testnet' });
       expect(record().id).toBe('staging-testnet');
+    });
+
+    it('production with a drifted environment keeps writing, and it is reported', async () => {
+      await resolveIdentity(redis, production(), NOW);
+      const before = store.get(IDENTITY_KEY);
+      expect(await checkDeploymentIdentity(CHECK_TIMEOUT_MS, redis, production({ stoppable: true }))).toMatchObject({ role: 'owner', writersAllowed: true });
+      expect(backgroundWritesAllowed('0G indexer')).toBe(true);
+      expect(sentry.captureMessage).toHaveBeenCalledWith(expect.stringMatching(/not configured as production/), 'warning');
+      expect(store.get(IDENTITY_KEY)).toBe(before);
     });
   });
 

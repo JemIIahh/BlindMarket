@@ -55,6 +55,18 @@ describe('startBackgroundWriters', () => {
     }
   });
 
+  it('says the loops started idle, so their "polling" lines do not read as writing', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    identity.status = { role: 'not-owner', writersAllowed: false };
+    await startBackgroundWriters(backgroundWriters({}));
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/started IDLE/));
+    warn.mockClear();
+    identity.status = { role: 'owner', writersAllowed: true };
+    await startBackgroundWriters(backgroundWriters({}));
+    expect(warn).not.toHaveBeenCalledWith(expect.stringMatching(/started IDLE/));
+    warn.mockRestore();
+  });
+
   it('waits for the first check before starting anything', async () => {
     let answer: (s: { role: string; writersAllowed: boolean }) => void = () => {};
     const pending = startBackgroundWriters(backgroundWriters({}), () => new Promise((r) => { answer = r; }) as never);

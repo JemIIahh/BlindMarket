@@ -68,5 +68,9 @@ export async function startBackgroundWriters(
 ): Promise<{ identity: IdentityStatus; started: string[] }> {
   const identity = await check();
   for (const writer of writers) writer.start();
+  if (!identity.writersAllowed) {
+    // Their own "polling every Ns" lines would read as if they were writing.
+    console.warn(`[identity] background loops started IDLE: each tick skips until a check allows writes (${identity.reason})`);
+  }
   return { identity, started: writers.map((w) => w.name) };
 }
