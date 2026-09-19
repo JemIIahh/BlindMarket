@@ -778,8 +778,19 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
    *  the struct from that chain's escrow ourselves over the read-only
    *  provider. */
   async function loadTask(s: Settlement, task: string): Promise<TaskDetail> {
+    /** The backend said the task is on another chain: its id means a different task here. */
+    const onOtherChain = (taskId: string, chain: string): ApiError => {
+      const label = s.chain === 'base' ? 'Base' : s.chain;
+      const e: ApiError = new Error(`task ${taskId} is a ${chain} task, and this process settles on ${label} — handle it with BLINDMARKET_SETTLEMENT=${chain}`);
+      // The code names the chain; on Base it is the TASK_NOT_ON_BASE it always was.
+      e.code = `TASK_NOT_ON_${s.chain.toUpperCase().replace(/-/g, '_')}`;
+      return e;
+    };
+
     if (s.payment !== 'relay-erc20') {
-      return api<TaskDetail>('GET', `/api/v1/tasks/${encodeURIComponent(task)}`);
+      const detail = await api<TaskDetail & { chain?: string }>('GET', `/api/v1/tasks/${encodeURIComponent(task)}`);
+      if (detail.chain && detail.chain !== s.chain) throw onOtherChain(detail.taskId, detail.chain);
+      return detail;
     }
 
     // Relay chain: the escrow is the authority, and we can read it directly. Only ask
@@ -794,15 +805,16 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       const viaBackend = await api<TaskDetail & { chain?: string }>('GET', `/api/v1/tasks/${encodeURIComponent(task)}`);
       taskId = viaBackend.taskId;
       backendChain = viaBackend.chain;
+      // The same id can exist on this chain's escrow too (another task of the
+      // same poster): reading it would act on the wrong task.
+      if (backendChain && backendChain !== s.chain) throw onOtherChain(taskId, backendChain);
     }
 
     const escrow = new Contract(s.escrowAddress, ESCROW_READ_ABI, s.provider);
     const t = await escrow.getTask(BigInt(taskId));
     if (String(t.agent).toLowerCase() === ZERO_TOKEN) {
       const label = s.chain === 'base' ? 'Base' : s.chain;
-      const hint = backendChain && backendChain !== s.chain
-        ? `it is a ${backendChain} task; handle it with BLINDMARKET_SETTLEMENT=${backendChain}`
-        : s.escrowChains
+      const hint = s.escrowChains
           ? `it is on another chain; set BLINDMARKET_SETTLEMENT to the one that holds it (this backend has escrows on ${s.escrowChains.join(', ')})`
           : 'it is probably a 0G task; handle it with BLINDMARKET_SETTLEMENT=0g';
       const e: ApiError = new Error(`task ${taskId} does not exist on the ${label} escrow ${s.escrowAddress} — ${hint}`);

@@ -36,6 +36,8 @@ globalThis.fetch = async (url) => {
   }
   if (path === '/api/v1/storage/upload') return json({ rootHash: '0x' + 'cd'.repeat(32) });
   if (path === '/api/v1/tasks') return json({ unsignedTx: { to: OG_ESCROW, data: '0xc0ffee' }, chain: '0g', chainId: builtChainId });
+  // A hash the backend resolves to a Base task.
+  if (path === `/api/v1/tasks/${'0x' + 'ba'.repeat(32)}`) return json({ taskId: '5', taskHash: '0x' + 'ba'.repeat(32), status: 0, amount: '1000000', deadline: '9999999999', token: '0x' + '36'.repeat(20), decimals: 6, chain: 'base' });
   throw new Error('unexpected backend call ' + path);
 };
 
@@ -86,5 +88,15 @@ test('a createTask the backend built for another chain id is refused before it i
   const res = await t.post_task({ ...args, idempotencyKey: 'local-native-built-1', confirm: true, quoteId: quote.quoteId });
   assert.equal(res.isError, true);
   assert.equal(JSON.parse(res.content[0].text).error.code, 'ESCROW_MISMATCH');
+  assert.equal(sent.length, 0);
+});
+
+test('on 0G, a hash the backend resolves to another chain\'s task is refused', async () => {
+  const t = tools(16602);
+  const res = await t.cancel_task({ task: '0x' + 'ba'.repeat(32), idempotencyKey: 'local-native-other-chain-1' });
+  assert.equal(res.isError, true);
+  const { error } = JSON.parse(res.content[0].text);
+  assert.equal(error.code, 'TASK_NOT_ON_0G');
+  assert.match(error.message, /is a base task.*BLINDMARKET_SETTLEMENT=base/);
   assert.equal(sent.length, 0);
 });

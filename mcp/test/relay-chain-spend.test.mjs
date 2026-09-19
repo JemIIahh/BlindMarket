@@ -28,6 +28,7 @@ const TOKEN = '0x3600000000000000000000000000000000000000';
 const BASE_ESCROW = getAddress('0x' + 'b5'.repeat(20));
 const BASE_USDC = '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
 const HASH = '0x' + 'ee'.repeat(32);
+const OG_HASH = '0x' + '0e'.repeat(32);
 const ERC20 = new Interface([
   'function allowance(address,address) view returns (uint256)',
   'function balanceOf(address) view returns (uint256)',
@@ -44,7 +45,8 @@ function resetChain() {
   chain = {
     allowance: 0n,
     // Task 8: Funded, to be cancelled. Task 9: Assigned to the relay wallet.
-    tasks: { 8: 0, 9: 1 },
+    // Task 18: Funded on Base, left there when the backend moved to posting on Arc.
+    tasks: { 8: 0, 9: 1, 18: 0 },
   };
 }
 
@@ -64,7 +66,7 @@ before(async () => {
         else if (method === 'eth_blockNumber') result = '0x10';
         else if (method === 'eth_call') {
           const { to, data } = params[0];
-          if (to.toLowerCase() === ESCROW.toLowerCase()) {
+          if (to.toLowerCase() === ESCROW.toLowerCase() || to.toLowerCase() === BASE_ESCROW.toLowerCase()) {
             const taskId = Number(ESCROW_READ.decodeFunctionData('getTask', data)[0]);
             result = ESCROW_READ.encodeFunctionResult('getTask', [[
               PRIVY_WALLET, PRIVY_WALLET, TOKEN, 2_500_000n, HASH, '0x' + '00'.repeat(32),
@@ -126,6 +128,9 @@ globalThis.fetch = async (url, init = {}) => {
   if (path === '/api/v1/storage/upload') return json({ rootHash: '0x' + 'cd'.repeat(32) });
   if (path === '/api/v1/tasks') return json({ unsignedTx: { to: ESCROW, data: '0xc0ffee' }, chain: 'arc', chainId: 5042002 });
   if (path === `/api/v1/tasks/${HASH}`) return json({ taskId: '9', chain: 'arc' });
+  // The same poster's 0G task #8: its id also exists on Arc (task 8 above).
+  if (path === `/api/v1/tasks/${OG_HASH}`) return json({ taskId: '8', chain: '0g' });
+  if (path === '/api/v1/tasks/18/cancel') return json({ unsignedTx: { to: BASE_ESCROW, data: '0xba5e' } });
   if (path === '/api/v1/tasks/8/cancel') return json({ unsignedTx: { to: ESCROW, data: '0xca0ce1' } });
   if (path === `/api/v1/a2a/tasks/${HASH}/submit`) return json({ onChainTaskId: 9, evidenceHash: '0x01', chain: 'arc', unsignedSubmitEvidence: { to: ESCROW, data: '0x5b5b' } });
   if (path === `/api/v1/a2a/tasks/${HASH}/finalize`) { chain.tasks[9] = 4; return json({ status: 'verified', verificationResult: { passed: true } }); }
@@ -134,6 +139,7 @@ globalThis.fetch = async (url, init = {}) => {
     if (to === TOKEN.toLowerCase()) chain.allowance = ERC20.decodeFunctionData('approve', body.data)[1];
     if (to === ESCROW.toLowerCase() && body.data === '0xca0ce1') chain.tasks[8] = 5;
     if (to === ESCROW.toLowerCase() && body.data === '0x5b5b') chain.tasks[9] = 2;
+    if (to === BASE_ESCROW.toLowerCase() && body.data === '0xba5e') chain.tasks[18] = 5;
     return json({ hash: '0x' + String(backendCalls.length).padStart(64, '0'), isUserOp: false, gas: 'user-pays' });
   }
   if (path === '/api/v1/a2a/tasks/index') return json({ indexed: true });
@@ -221,4 +227,24 @@ test('forced onto a chain the backend no longer posts on: refunds work, new post
   assert.equal(error.code, 'NOT_POSTING_CHAIN');
   assert.match(error.message, /posts new tasks on arc/);
   assert.equal(relayed().length, 0, 'nothing sent');
+
+  // The task left on Base is refunded through the relay, on Base.
+  const { quote } = parse(await t.cancel_task({ task: '18', idempotencyKey: 'relay-chain-offposting-cancel' }));
+  assert.equal(quote.settlement, 'base');
+  parse(await t.cancel_task({ task: '18', idempotencyKey: 'relay-chain-offposting-cancel', confirm: true, quoteId: quote.quoteId }));
+  assert.deepEqual(relayed().map((b) => [b.to.toLowerCase(), b.chain]), [[BASE_ESCROW.toLowerCase(), 'base-sepolia']]);
+  assert.equal(chain.tasks[18], 5);
+});
+
+test('a hash for a task on another chain is refused, never read by its id here', async () => {
+  const t = tools();
+  // 0G task #8's id is also this chain's task 8 (Funded): cancelling it would
+  // refund the wrong task.
+  const res = await t.cancel_task({ task: OG_HASH, idempotencyKey: 'relay-chain-other-chain-1' });
+  assert.equal(res.isError, true);
+  const { error } = JSON.parse(res.content[0].text);
+  assert.equal(error.code, 'TASK_NOT_ON_ARC');
+  assert.match(error.message, /is a 0g task.*BLINDMARKET_SETTLEMENT=0g/);
+  assert.equal(relayed().length, 0);
+  assert.equal(chain.tasks[8], 0, 'this chain\'s task 8 untouched');
 });

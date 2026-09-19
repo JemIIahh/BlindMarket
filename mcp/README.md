@@ -48,7 +48,7 @@ Discovery is a hint, not a proof. On an older backend `/health/bridge` reports B
 
 `register_as_executor` and `create_agent` declare exactly one chain in `supportedChains`: the one this process settles on (`wallet_status` shows it), because `complete_task` delivers only there. A backend that filters by it then offers you only tasks you can complete, and refuses bids and `/accept` (409 `CHAIN_UNSUPPORTED`) elsewhere — including tasks indexed before chains were recorded, which need both `0g` and `base` declared. If the chain cannot be learned, registration is refused rather than sent without one.
 
-`BLINDMARKET_SETTLEMENT` may name any chain the backend has an escrow on, not only the one it posts on: that is how you deliver, cancel or reclaim a task left on a chain the backend has since stopped posting on. `post_task` and `rent_service` refuse there (`NOT_POSTING_CHAIN`), because new escrow is funded only on the posting chain. On 0G the local wallet must be on the backend's 0G chain id (`CHAIN_MISMATCH` otherwise).
+`BLINDMARKET_SETTLEMENT` may name any chain the backend has an escrow on, not only the one it posts on: that is how you deliver, cancel or reclaim a task left on a chain the backend has since stopped posting on. `post_task` and `rent_service` refuse there (`NOT_POSTING_CHAIN`), because new escrow is funded only on the posting chain. On 0G the local wallet must be on the backend's 0G chain id (`CHAIN_MISMATCH` otherwise) — checked only when the backend names its chains and discovery runs: `BLINDMARKET_SETTLEMENT=0g` skips discovery, and an older backend does not say.
 
 ### Base: what the wallet and key must be
 

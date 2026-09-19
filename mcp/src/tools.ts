@@ -33,7 +33,7 @@ export function registerMarketTools(
       };
     } catch (err) {
       const code = (err as { code?: string }).code ?? 'SETTLEMENT_UNKNOWN';
-      const message = `${tool} declares the chain this process can deliver on (the one the backend posts new tasks on), and could not learn it: ${(err as Error).message}`;
+      const message = `${tool} declares the chain this process can deliver on (the backend's posting chain, or the one BLINDMARKET_SETTLEMENT names), and could not learn it: ${(err as Error).message}`;
       return { error: { isError: true, content: [{ type: 'text', text: JSON.stringify({ success: false, error: { code, message } }) }] } };
     }
   }
