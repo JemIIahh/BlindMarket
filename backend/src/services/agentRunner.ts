@@ -149,7 +149,8 @@ export function startZombieReaper(): void {
     // Scan ALL running agents (not just the processes map) so we catch
     // workers where the child process died but the PG status wasn't flipped.
     try {
-      const all = await loadAllAgents();
+      // Its log lines go to the shared Redis too.
+      const all = backgroundWritesAllowed('heartbeat watchdog') ? await loadAllAgents() : [];
       for (const a of all.filter(a => a.status === 'running')) {
         const lastBeat = await getHeartbeat(a.id);
         if (lastBeat === 0 || Date.now() - lastBeat > 120_000) {
@@ -266,6 +267,8 @@ function canAutoRestart(id: string): boolean {
 // is what stops it re-crashing every later lap). Re-checks state first:
 // the operator may have stopped it during the delay, or it may already be back.
 async function autoRestart(id: string): Promise<void> {
+  // On another deployment's Redis: leave the saved status for reconcile.
+  if (!backgroundWritesAllowed('agent auto-restart')) return;
   const a = await loadAgent(id);
   // Bail if the operator stopped it during the delay (status flipped to
   // 'stopped') or it's already been re-forked. The status check is the
@@ -637,6 +640,13 @@ export async function startAgent(id: string, opts?: { skipResume?: boolean }): P
     }
   });
 
+  // Writes may have turned off while this start was forking: stopLocalWorkers
+  // has already run and would not see this child.
+  if (!backgroundWritesAllowed('agent start')) {
+    intentionalStops.add(child);
+    child.kill('SIGTERM');
+    throw new Error(`This backend is on another deployment's Redis (${deploymentIdentityStatus()?.reason}), so it starts no agents. Give it its own REDIS_URL.`);
+  }
   processes.set(id, child);
   agent.status = 'running';
   await saveAgent(agent);

@@ -38,8 +38,12 @@
  *   on the same chain (an earlier local run) and a checkpoint with no
  *   fingerprint are only logged, with the keys to delete.
  *
- * A Redis error leaves writes on (failing closed would stop the owner on a
- * blip); the next check retries.
+ * A check that gets no answer (Redis down or slow) leaves production
+ * writing — failing closed there would stop the owner on a blip — and keeps
+ * a stoppable process's writes off until a check answers: whatever such a
+ * process wrote meanwhile (its own fingerprints) would later vouch for a
+ * claim on a Redis that is not its own. A check that timed out writes
+ * nothing afterwards.
  */
 
 import * as Sentry from '@sentry/node';
@@ -70,6 +74,8 @@ export interface DeploymentFacts {
 
 export interface IdentityRecord extends DeploymentFacts {
   id: string;
+  /** false for production: its Redis is never taken over (it takes it back). */
+  stoppable?: boolean;
   claimedAt: string;
   updatedAt: string;
 }
@@ -79,7 +85,9 @@ export interface IdentityRecord extends DeploymentFacts {
  * not-owner — this Redis belongs to another deployment (a production process
  *             is told so but keeps writing).
  * unset     — no DEPLOYMENT_ID and nothing against it.
- * unknown   — no answer from Redis; writes run, the next check retries.
+ * unknown   — no answer from Redis (or an unreadable record): production
+ *             keeps writing, a stoppable process does not; the next check
+ *             retries.
  */
 export type IdentityRole = 'owner' | 'not-owner' | 'unset' | 'unknown';
 
@@ -105,8 +113,13 @@ export interface Self {
   facts: DeploymentFacts;
   /** The only kind of process that can be stopped. */
   stoppable: boolean;
-  /** DEPLOYMENT_CLAIM: the owner id to take over from, or "unclaimed". */
+  /** DEPLOYMENT_CLAIM as set: the owner id to take over from, or "unclaimed". */
   claim: string | null;
+}
+
+/** A DEPLOYMENT_CLAIM that names something: an owner id, or "unclaimed". */
+export function isValidClaim(claim: string): boolean {
+  return !['true', 'false', 'yes', 'no', '1', '0'].includes(claim.toLowerCase()) && /^[a-z0-9][a-z0-9._-]{0,63}$/.test(claim);
 }
 
 /** This process's facts, from the settlement registry. */
@@ -208,17 +221,20 @@ export async function resolveIdentity(
   const at = now().toISOString();
   const allowed = (role: IdentityRole, owner: string | null, reason: string | null): IdentityStatus =>
     ({ deploymentId, role, owner, writersAllowed: true, stoppable, reason });
+  const unknown = (reason: string): IdentityStatus => ({ deploymentId, role: 'unknown', owner: null, writersAllowed: !stoppable, stoppable, reason });
   /** Stop a stoppable process; production is told and keeps writing. */
   const disagree = (owner: string | null, reason: string): IdentityStatus => stoppable
     ? { deploymentId, role: 'not-owner', owner, writersAllowed: false, stoppable, reason }
     : { deploymentId, role: 'not-owner', owner, writersAllowed: true, stoppable, reason: `${reason}. This is production, which is never stopped; if this Redis is not production's, fix REDIS_URL` };
-  const recordFor = (id: string): IdentityRecord => ({ id, ...facts, claimedAt: at, updatedAt: at });
+  const recordFor = (id: string): IdentityRecord => ({ id, ...facts, stoppable, claimedAt: at, updatedAt: at });
 
   const record = parseRecord(await store.get(IDENTITY_KEY));
 
   if (!deploymentId) {
     if (record) {
-      const differs = movedChains(record, facts).length > 0 || Object.keys(facts.chains).some((key) => !record.chains[key]);
+      // A record names a deployment: another escrow on a shared chain is not this process's.
+      const differs = movedChains(record, facts).length > 0
+        || Object.entries(facts.chains).some(([key, c]) => !record.chains[key] || record.chains[key].escrow !== c.escrow);
       return differs
         ? disagree(record.id, `this Redis belongs to deployment "${record.id}" (${Object.entries(record.chains).map(([k, c]) => `${k} ${c.chainId}`).join(', ')}), whose chains are not this process's; give this process its own REDIS_URL`)
         : allowed('unset', record.id, null);
@@ -235,7 +251,11 @@ export async function resolveIdentity(
 
   // DEPLOYMENT_CLAIM: on purpose, once, and only from the owner it names.
   let claimNote: string | null = null;
-  if (stoppable && self.claim && first) {
+  if (stoppable && self.claim && !isValidClaim(self.claim)) {
+    claimNote = `DEPLOYMENT_CLAIM=${self.claim} ignored: it must name the owner it replaces (/health/bridge deploymentIdentity.owner) or "unclaimed"`;
+  } else if (stoppable && self.claim && first && record?.stoppable === false) {
+    claimNote = `DEPLOYMENT_CLAIM=${self.claim} ignored: "${record.id}" is production, whose Redis is never taken over (it takes it back)`;
+  } else if (stoppable && self.claim && first) {
     const named = self.claim === 'unclaimed' ? record === null : record?.id === self.claim;
     if (named) {
       await store.set(IDENTITY_KEY, JSON.stringify(recordFor(deploymentId)));
@@ -258,15 +278,20 @@ export async function resolveIdentity(
     if (moved.length > 0 && stoppable) {
       return withNote(disagree(record.id, `the record for "${record.id}" is on other chain ids (${moved.join(', ')}): another network under the same DEPLOYMENT_ID. If this stack really moved, restart once with DEPLOYMENT_CLAIM=${record.id}`));
     }
-    if (JSON.stringify([record.tier, record.chains]) !== JSON.stringify([facts.tier, facts.chains])) {
-      await store.set(IDENTITY_KEY, JSON.stringify({ ...record, ...facts, updatedAt: at }));
+    if (JSON.stringify([record.tier, record.chains, record.stoppable]) !== JSON.stringify([facts.tier, facts.chains, stoppable])) {
+      await store.set(IDENTITY_KEY, JSON.stringify({ ...record, ...facts, stoppable, updatedAt: at }));
     }
     return withNote(allowed('owner', record.id, moved.length > 0 ? `recorded ${moved.join(', ')} for "${record.id}"` : null));
   }
 
   const { fingerprints, unvouched } = await foreignIndexState(store, facts);
-  if (stoppable && (fingerprints.length > 0 || unvouched.length > 0)) {
-    return withNote(disagree(null, `this Redis holds another deployment's data (${list([...fingerprints, ...unvouched])}); not claiming it. If it really is this stack's own, restart once with DEPLOYMENT_CLAIM=unclaimed`));
+  if (stoppable && fingerprints.length > 0) {
+    return withNote(disagree(null, `this Redis holds another deployment's index (${list([...fingerprints, ...unvouched])}); not claiming it. If it really is this stack's own (an escrow it redeployed, say), restart once with DEPLOYMENT_CLAIM=unclaimed`));
+  }
+  if (stoppable && unvouched.length > 0) {
+    // A stack on this release fingerprints before it checkpoints, so bare
+    // checkpoints come from a backend that predates identity checks.
+    return withNote(disagree(null, `this looks like production's Redis from before identity checks (${list(unvouched)}): check REDIS_URL, and do not claim it`));
   }
   if ((await store.set(IDENTITY_KEY, JSON.stringify(recordFor(deploymentId)), 'NX')) === null) {
     // The key is taken: another process claimed it between the read and the
@@ -274,7 +299,7 @@ export async function resolveIdentity(
     // readable record ends in the record branch above; anything else must not
     // be retried, which would loop for ever.
     if (parseRecord(await store.get(IDENTITY_KEY))) return resolveIdentity(store, self, now, { first });
-    return allowed('unknown', null, `${IDENTITY_KEY} holds a value this release cannot read, so no deployment could claim this Redis; delete it and restart`);
+    return unknown(`${IDENTITY_KEY} holds a value this release cannot read, so no deployment could claim this Redis; delete it and restart`);
   }
   const reason = fingerprints.length > 0
     ? `claimed this Redis although it holds index state from elsewhere (${list(fingerprints)})`
@@ -285,7 +310,8 @@ export async function resolveIdentity(
 let status: IdentityStatus | null = null;
 /** Set while a stoppable process's FIRST check is in flight: it writes nothing until it answers. */
 let firstCheckPending = false;
-let checkedOnce = false;
+/** Whether any check has read Redis: DEPLOYMENT_CLAIM counts until one has. */
+let answeredOnce = false;
 let recheckTimer: NodeJS.Timeout | null = null;
 const skipLogged = new Set<string>();
 const stopListeners: Array<(status: IdentityStatus) => void> = [];
@@ -339,22 +365,31 @@ export async function checkDeploymentIdentity(
   self: Self = currentSelf(),
 ): Promise<IdentityStatus> {
   const previous = status;
-  const first = !checkedOnce;
-  checkedOnce = true;
-  if (first && self.stoppable) firstCheckPending = true;
+  const first = !answeredOnce;
+  if (status === null && self.stoppable) firstCheckPending = true;
+  // A check that gave up must not claim or rewrite anything when Redis answers later.
+  let abandoned = false;
+  const guarded: IdentityRedis = {
+    get: (key) => store.get(key),
+    set: (key, value, mode) => (abandoned ? Promise.reject(new Error('identity check abandoned')) : store.set(key, value, mode)),
+  };
   let timer: NodeJS.Timeout | undefined;
+  const attempt = resolveIdentity(guarded, self, undefined, { first });
+  attempt.catch(() => {}); // settled late after a timeout: nothing to report
   try {
     status = await Promise.race([
-      resolveIdentity(store, self, undefined, { first }),
+      attempt,
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`no answer from Redis in ${timeoutMs / 1000}s`)), timeoutMs);
+        timer = setTimeout(() => { abandoned = true; reject(new Error(`no answer from Redis in ${timeoutMs / 1000}s`)); }, timeoutMs);
         timer.unref();
       }),
     ]);
+    answeredOnce = true;
   } catch (err) {
+    abandoned = true;
     status = {
-      deploymentId: self.deploymentId, role: 'unknown', owner: null, writersAllowed: true, stoppable: self.stoppable,
-      reason: `could not check which deployment owns this Redis (${(err as Error).message}); background writes run meanwhile and the check retries every ${RETRY_MS / 1000}s`,
+      deploymentId: self.deploymentId, role: 'unknown', owner: null, writersAllowed: !self.stoppable, stoppable: self.stoppable,
+      reason: `could not check which deployment owns this Redis (${(err as Error).message}); ${self.stoppable ? 'background writes stay off until a check answers' : 'background writes run meanwhile'}, and the check retries every ${RETRY_MS / 1000}s`,
     };
   } finally {
     clearTimeout(timer);
@@ -380,7 +415,7 @@ export async function checkDeploymentIdentity(
 export function _resetIdentityForTests(): void {
   status = null;
   firstCheckPending = false;
-  checkedOnce = false;
+  answeredOnce = false;
   if (recheckTimer) clearTimeout(recheckTimer);
   recheckTimer = null;
   skipLogged.clear();

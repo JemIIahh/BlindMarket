@@ -377,18 +377,98 @@ describe('when writes turn off after boot (deploymentIdentity)', () => {
     const { startAgent, stopLocalWorkers } = await import('./agentRunner.js');
     const store = await import('./deployedAgentStore.js');
     const kill = vi.fn();
+    const handlers: Record<string, (...a: unknown[]) => unknown> = {};
     forkMock.mockReset();
-    forkMock.mockReturnValue({ stdout: { on: vi.fn() }, stderr: { on: vi.fn() }, on: vi.fn(), pid: 99, kill });
+    forkMock.mockReturnValue({
+      stdout: { on: vi.fn() }, stderr: { on: vi.fn() }, pid: 99, kill,
+      on: vi.fn((ev: string, cb: (...a: unknown[]) => unknown) => { handlers[ev] = cb; }),
+    });
     stopLocalWorkers(); // slots earlier tests left
-    agentHolder.current = makeAgent('agent-killed-on-stop');
+    agentHolder.current = { ...makeAgent('agent-killed-on-stop'), status: 'running' };
     await startAgent('agent-killed-on-stop', { skipResume: true });
     vi.mocked(store.saveAgent).mockClear();
 
     expect(gate.onStopped.length).toBeGreaterThan(0);
     for (const listener of gate.onStopped) listener();
-
     expect(kill).toHaveBeenCalledWith('SIGTERM');
+    // The worker's exit arrives after the kill: it must not mark the agent stopped.
+    await handlers.exit(null, 'SIGTERM');
+
     expect(stopLocalWorkers()).toBe(0);
     expect(store.saveAgent).not.toHaveBeenCalled();
+  });
+
+  it('a crash restart due after writes turned off does not restart, and keeps the saved status', async () => {
+    const { startAgent, stopLocalWorkers } = await import('./agentRunner.js');
+    const store = await import('./deployedAgentStore.js');
+    const handlers: Record<string, (...a: unknown[]) => unknown> = {};
+    forkMock.mockReset();
+    forkMock.mockReturnValue({
+      stdout: { on: vi.fn() }, stderr: { on: vi.fn() }, pid: 97, kill: vi.fn(),
+      on: vi.fn((ev: string, cb: (...a: unknown[]) => unknown) => { handlers[ev] = cb; }),
+    });
+    stopLocalWorkers();
+    agentHolder.current = { ...makeAgent('agent-crash-then-stop'), status: 'running' };
+    await startAgent('agent-crash-then-stop', { skipResume: true });
+    vi.useFakeTimers();
+    try {
+      await handlers.exit(1, null); // a crash: an auto-restart is scheduled
+      gate.allowed = false; // then this process learns it is on another deployment's Redis
+      forkMock.mockClear();
+      vi.mocked(store.saveAgent).mockClear();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(forkMock).not.toHaveBeenCalled();
+      expect(store.saveAgent).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      gate.allowed = true;
+    }
+  });
+
+  it('the heartbeat watchdog writes no log lines to another deployment\'s Redis', async () => {
+    const { startZombieReaper } = await import('./agentRunner.js');
+    const store = await import('./deployedAgentStore.js');
+    const redisMod = await import('./redis.js');
+    vi.useFakeTimers();
+    gate.allowed = false;
+    try {
+      agentHolder.current = { ...makeAgent('agent-watchdog'), status: 'running' };
+      vi.mocked(store.loadAllAgents).mockClear();
+      vi.mocked(redisMod.appendLog).mockClear();
+      startZombieReaper();
+      await vi.advanceTimersByTimeAsync(61_000);
+      expect(store.loadAllAgents).not.toHaveBeenCalled();
+      expect(redisMod.appendLog).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      gate.allowed = true;
+    }
+  });
+
+  it('kills a worker whose start was forking when writes turned off', async () => {
+    const { startAgent, stopLocalWorkers } = await import('./agentRunner.js');
+    const store = await import('./deployedAgentStore.js');
+    const kill = vi.fn();
+    const handlers: Record<string, (...a: unknown[]) => unknown> = {};
+    forkMock.mockReset();
+    forkMock.mockImplementation(() => {
+      gate.allowed = false; // the check turned writes off while this start was forking
+      return {
+        stdout: { on: vi.fn() }, stderr: { on: vi.fn() }, pid: 98, kill,
+        on: vi.fn((ev: string, cb: (...a: unknown[]) => unknown) => { handlers[ev] = cb; }),
+      };
+    });
+    stopLocalWorkers();
+    agentHolder.current = { ...makeAgent('agent-forking-at-stop'), status: 'running' };
+    vi.mocked(store.saveAgent).mockClear();
+    try {
+      await expect(startAgent('agent-forking-at-stop', { skipResume: true })).rejects.toThrow(/another deployment's Redis/);
+      expect(kill).toHaveBeenCalledWith('SIGTERM');
+      await handlers.exit(null, 'SIGTERM');
+      expect(stopLocalWorkers()).toBe(0);
+      expect(store.saveAgent).not.toHaveBeenCalled();
+    } finally {
+      gate.allowed = true;
+    }
   });
 });
