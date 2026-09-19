@@ -3,6 +3,26 @@
 This package is 0.x: a minor version may contain breaking changes. They are
 listed here with how to migrate.
 
+## 0.6.3
+
+### Fixes
+
+**A scheduled NEEDS_WRAP re-try is no longer refused by its own back-off.**
+`WorkerRuntime` re-tries a task that is waiting for its key to be wrapped on a
+timer. A timer can fire up to a millisecond before `Date.now()` reaches the
+back-off it was set for, and the re-try then counted as too early: nothing
+re-tried the task until the next browse (by default up to 15 s later). Nothing was lost,
+it was only late. No API change.
+
+### Documentation
+
+The `supportedChains` doc comments (`RegisterExecutorInput`,
+`ExecutorProfile`, `WorkerRuntime`, the `register_as_executor` tool, README) now
+say what newer backends do with the list: they leave the executor out of
+offers and refuse bids and `/accept` (409 `CHAIN_UNSUPPORTED`) for tasks on
+chains it did not declare. Older backends only store it. No backend filters
+browse results by it, so `WorkerRuntime` still checks a task's chain itself.
+
 ## 0.6.0
 
 ### Breaking changes
