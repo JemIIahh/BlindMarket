@@ -1,3 +1,4 @@
+import { backgroundWritesAllowed, deploymentIdentityStatus, onBackgroundWritesStopped } from './deploymentIdentity.js';
 import { fork, type ChildProcess } from 'child_process';
 import { randomUUID, createHash } from 'crypto';
 import { fileURLToPath } from 'url';
@@ -7,6 +8,8 @@ import jwt from 'jsonwebtoken';
 import { deploySmartAccount } from './aa.js';
 import pidusage from 'pidusage';
 import { config } from '../config.js';
+import { configuredChainKeys, postingChain, settlementChainConfig } from './settlementChains.js';
+
 import { eciesEncrypt, generateKeyPair } from './crypto.js';
 import { inft } from './chain.js';
 import {
@@ -16,6 +19,39 @@ import {
 import { saveAgent, loadAgent, loadAllAgents } from './deployedAgentStore.js';
 import { composeAgentRuntime } from './skillComposer.js';
 import type { DeployedAgent, AgentCapability, LLMProvider, AgentTool, InstalledSkill } from '../types.js';
+
+/**
+ * The settlement chains a worker signs on, as JSON for its env.
+ *
+ * Only chains this deployment has an escrow on: a worker cannot settle
+ * anywhere else, and an entry with no escrow would make it offer to sign for
+ * a chain the backend never names. `posting` marks the chain new tasks are
+ * funded on, which is the one a worker delegating a sub-task must use.
+ *
+ * What the worker can sign for at all is its own code's business
+ * (SETTLEMENT_CHAINS in worker.js) and is NOT this list — a worker declares
+ * its capability at registration, and a backend with a narrower config must
+ * not overwrite that declaration.
+ */
+export function settlementChainsJson(): string {
+  const posting = postingChain();
+  return JSON.stringify(
+    configuredChainKeys().map((key) => {
+      const { chainId, rpcUrl, escrowAddress, token, gas, aa } = settlementChainConfig(key);
+      return {
+        key,
+        chainId,
+        rpcUrl,
+        escrow: escrowAddress,
+        token: { address: token.address, kind: token.kind, symbol: token.unit.symbol, decimals: token.unit.decimals },
+        gasSymbol: gas.symbol,
+        nativeIsSettlementToken: gas.nativeIsSettlementToken,
+        aa,
+        posting: key === posting,
+      };
+    }),
+  );
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const WORKER_PATH = join(__dirname, '../../agents/worker.js');
@@ -50,6 +86,7 @@ export const WORKER_ENV_PASSTHROUGH = [
   'SENTRY_DSN',
   'SENTRY_ENVIRONMENT',
   'DELEGATE_REWARD_OG',
+  'DELEGATE_REWARD_USDC',
   'DELEGATE_GAS_RESERVE_OG',
   // OS/runtime vars node + tsx need to start at all:
   'PATH', 'HOME', 'TMPDIR', 'LANG', 'TZ', 'NODE_OPTIONS',
@@ -57,6 +94,27 @@ export const WORKER_ENV_PASSTHROUGH = [
 
 // Running child processes (in-memory only — processes don't survive restarts)
 const processes = new Map<string, ChildProcess>();
+
+/**
+ * Kill every worker this process runs, without touching their saved status:
+ * they come back through reconcile when a backend that may write boots. Used
+ * when this process learns it is on another deployment's Redis, where its
+ * workers would poll a queue that is not theirs. Returns how many it stopped.
+ */
+export function stopLocalWorkers(): number {
+  let stopped = 0;
+  for (const [id, child] of processes) {
+    intentionalStops.add(child);
+    child.kill('SIGTERM');
+    processes.delete(id);
+    stopped++;
+  }
+  return stopped;
+}
+onBackgroundWritesStopped(() => {
+  const stopped = stopLocalWorkers();
+  if (stopped > 0) console.error(`[agentRunner] stopped ${stopped} running worker(s): this backend may not write to this Redis (deploymentIdentity)`);
+});
 
 // ── Crash auto-restart ────────────────────────────────────────────────────────
 // When a worker crashes (non-zero exit / kill signal we didn't send), re-fork it
@@ -91,7 +149,8 @@ export function startZombieReaper(): void {
     // Scan ALL running agents (not just the processes map) so we catch
     // workers where the child process died but the PG status wasn't flipped.
     try {
-      const all = await loadAllAgents();
+      // Its log lines go to the shared Redis too.
+      const all = backgroundWritesAllowed('heartbeat watchdog') ? await loadAllAgents() : [];
       for (const a of all.filter(a => a.status === 'running')) {
         const lastBeat = await getHeartbeat(a.id);
         if (lastBeat === 0 || Date.now() - lastBeat > 120_000) {
@@ -208,6 +267,8 @@ function canAutoRestart(id: string): boolean {
 // is what stops it re-crashing every later lap). Re-checks state first:
 // the operator may have stopped it during the delay, or it may already be back.
 async function autoRestart(id: string): Promise<void> {
+  // On another deployment's Redis: leave the saved status for reconcile.
+  if (!backgroundWritesAllowed('agent auto-restart')) return;
   const a = await loadAgent(id);
   // Bail if the operator stopped it during the delay (status flipped to
   // 'stopped') or it's already been re-forked. The status check is the
@@ -356,6 +417,11 @@ export async function deployAgent(params: {
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 
 export async function startAgent(id: string, opts?: { skipResume?: boolean }): Promise<void> {
+  // A worker polls this backend, which serves the Redis queue it sits on; on
+  // another deployment's Redis that is how tasks get poached.
+  if (!backgroundWritesAllowed('agent start')) {
+    throw new Error(`This backend is on another deployment's Redis (${deploymentIdentityStatus()?.reason}), so it starts no agents. Give it its own REDIS_URL.`);
+  }
   const agent = await loadAgent(id);
   if (!agent) throw new Error(`Agent ${id} not found`);
   if (processes.has(id)) return;
@@ -422,12 +488,17 @@ export async function startAgent(id: string, opts?: { skipResume?: boolean }): P
       // Escrow proxy address — the verifier role (verificationMode='agent')
       // signs completeVerification directly against this contract.
       AGENT_ESCROW_ADDRESS: config.blindEscrowAddress,
-      // Base settlement. The worker builds one signer per chain and picks by
-      // the `chain` the backend reports on /submit and /verifications; without
-      // these it had a single 0G signer and broadcast every Base submitEvidence
-      // onto 0G, so a deployed agent could accept a Base task and never deliver
-      // it. Empty when Base is unconfigured, and the worker treats empty as
-      // "no Base signer" rather than guessing an RPC.
+      // Every settlement chain this deployment is configured for, as data:
+      // the worker builds one signer per entry and picks by the `chain` the
+      // backend reports on /submit and /verifications. Before it existed the
+      // worker had a single 0G signer and broadcast every Base submitEvidence
+      // onto 0G, so a deployed agent could accept a Base task and never
+      // deliver it; before THIS table, each new chain meant another pair of
+      // env vars in both processes. An older worker ignores it and reads the
+      // legacy vars below, which stay for one more release.
+      SETTLEMENT_CHAINS_JSON: settlementChainsJson(),
+      // Base settlement (legacy). Empty when Base is unconfigured, and the
+      // worker treats empty as "no Base signer" rather than guessing an RPC.
       BASE_RPC_URL: config.baseEscrowAddress ? config.baseRpcUrl : '',
       BASE_CHAIN_ID: config.baseEscrowAddress ? String(config.baseChainId) : '',
       AGENT_BASE_ESCROW_ADDRESS: config.baseEscrowAddress ?? '',
@@ -569,6 +640,13 @@ export async function startAgent(id: string, opts?: { skipResume?: boolean }): P
     }
   });
 
+  // Writes may have turned off while this start was forking: stopLocalWorkers
+  // has already run and would not see this child.
+  if (!backgroundWritesAllowed('agent start')) {
+    intentionalStops.add(child);
+    child.kill('SIGTERM');
+    throw new Error(`This backend is on another deployment's Redis (${deploymentIdentityStatus()?.reason}), so it starts no agents. Give it its own REDIS_URL.`);
+  }
   processes.set(id, child);
   agent.status = 'running';
   await saveAgent(agent);
@@ -641,6 +719,7 @@ export async function getAgentStats(id: string): Promise<{ cpu: number; ramMb: n
  * map is per-process); honored by an env flag in index.ts for unusual topologies.
  */
 export async function reconcileAgents(): Promise<void> {
+  if (!backgroundWritesAllowed('agent reconcile')) return;
   let agents: DeployedAgent[];
   try {
     agents = await loadAllAgents();

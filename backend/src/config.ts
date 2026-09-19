@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { CONTRACT_ADDRESSES } from './contractAddresses.js';
+import { chainTier, readSettlementTier, tierMismatches, TIER_CHAIN_IDS } from './services/settlementTier.js';
 
 function required(key: string): string {
   const value = process.env[key];
@@ -22,19 +23,139 @@ function unsetIfZero(address: string): string {
 
 const IS_PROD = process.env.NODE_ENV === 'production';
 
+/**
+ * The network tier every chain follows, or null when each keeps its own
+ * default (see services/settlementTier.ts). Read here, at import, so a typo
+ * fails before anything is configured from it.
+ */
+const SETTLEMENT_TIER = readSettlementTier(process.env);
+
+/** The tier's chain id for `key`, or `fallback` when no tier is set. */
+function tierChainId(key: keyof typeof TIER_CHAIN_IDS, fallback: number): string {
+  return String(SETTLEMENT_TIER ? TIER_CHAIN_IDS[key][SETTLEMENT_TIER] : fallback);
+}
+
+/**
+ * contracts/ deployment set this backend's contracts are recorded in
+ * (contracts/scripts/_deployments.ts). '' is the default set (production and
+ * local dev); anything but default/staging is a typo and fails at load.
+ */
+export function parseDeploymentSet(raw: string | undefined): '' | 'staging' {
+  const value = (raw ?? '').trim();
+  if (value === '' || value === 'default') return '';
+  if (value === 'staging') return 'staging';
+  throw new Error(`DEPLOYMENT_SET="${value}" is not a deployment set. Use "default" (or leave it unset) or "staging".`);
+}
+
+/**
+ * DEPLOYMENT_ID names one running stack ("production", "staging-testnet") for
+ * the Redis ownership check in services/deploymentIdentity.ts. It is not
+ * DEPLOYMENT_SET, which picks contract address records. Unset, the check never
+ * claims a Redis and never stops this process. It is stored and logged
+ * verbatim, so anything but a short lowercase name fails at load.
+ */
+export function parseDeploymentId(raw: string | undefined): string | null {
+  const value = (raw ?? '').trim();
+  if (value === '') return null;
+  if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(value)) {
+    throw new Error(`DEPLOYMENT_ID="${value}" is not a deployment name: use lowercase letters, digits, ".", "_" or "-", at most 64 characters (e.g. "production", "staging-testnet").`);
+  }
+  return value;
+}
+
+/** Where a production backend says it lives, when PUBLIC_*_URL is unset. */
+export const PRODUCTION_PUBLIC_URLS = {
+  PUBLIC_API_URL: 'https://api.blindmarket.xyz',
+  PUBLIC_APP_URL: 'https://blindmarket.xyz',
+} as const;
+
+/**
+ * Env vars a non-default deployment set must set explicitly. optional() treats
+ * an unset or empty value as missing and falls back to the generated
+ * (production) addresses, production's RPC, or production's public URLs, so a
+ * staging stack that forgot one would talk to production's contracts, or
+ * send the agents that discover it to production's API. A zero address
+ * counts as set ("not deployed on this stack"). VALIDATOR_POOL_ADDRESS has no
+ * fallback but is listed so staging can't silently omit its pool.
+ */
+export const DEPLOYMENT_SET_REQUIRED_ENV = [
+  'OG_RPC_URL',
+  'BLIND_ESCROW_ADDRESS',
+  'TASK_REGISTRY_ADDRESS',
+  'BLIND_REPUTATION_ADDRESS',
+  'INFT_ADDRESS',
+  'VALIDATOR_POOL_ADDRESS',
+  'BASE_ESCROW_ADDRESS',
+  'AGENT_FACTORY_ADDRESS',
+  'USDC_PAYMASTER_ADDRESS',
+  'BLIND_ACCOUNT_FACTORY_ADDRESS',
+  'ENTRY_POINT_ADDRESS',
+  'PUBLIC_API_URL',
+  'PUBLIC_APP_URL',
+] as const;
+
+/**
+ * The 0G and Base chains each non-default set runs on. contracts/scripts/
+ * _deployments.ts SET_CHAINS also lists Arc testnet (5042002) for staging;
+ * the backend does not settle on Arc yet, so it is not checked here.
+ */
+const DEPLOYMENT_SET_CHAINS: Record<'staging', { og: number; base: number }> = {
+  staging: { og: 16602, base: 84532 },
+};
+
+/** Why a backend in `set` must not boot; empty for the default set. */
+export function deploymentSetProblems(
+  set: '' | 'staging',
+  env: Record<string, string | undefined>,
+  chainIds: { og: number; base: number },
+): string[] {
+  if (!set) return [];
+  const problems: string[] = [];
+  const missing = DEPLOYMENT_SET_REQUIRED_ENV.filter((k) => !(env[k] ?? '').trim());
+  if (missing.length > 0) {
+    problems.push(
+      `DEPLOYMENT_SET=${set} but ${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} not set. ` +
+        `Unset or empty values fall back to production's; set each explicitly ` +
+        `(0x0000000000000000000000000000000000000000 for a contract this stack does not deploy).`,
+    );
+  }
+  for (const [key, url] of Object.entries(PRODUCTION_PUBLIC_URLS)) {
+    if ((env[key] ?? '').trim().replace(/\/+$/, '') === url) {
+      problems.push(`DEPLOYMENT_SET=${set} but ${key} is production's ${url}; point it at this stack.`);
+    }
+  }
+  const want = DEPLOYMENT_SET_CHAINS[set];
+  if (chainIds.og !== want.og || chainIds.base !== want.base) {
+    problems.push(
+      `DEPLOYMENT_SET=${set} runs on OG_CHAIN_ID=${want.og} and BASE_CHAIN_ID=${want.base}; ` +
+        `this backend has ${chainIds.og} and ${chainIds.base}. Set both explicitly.`,
+    );
+  }
+  return problems;
+}
+
 // Base network this deployment settles on, and whether that network is Base
 // MAINNET. Every Base default (RPC, USDC, contract table) and the CCTP tier
 // key off this — NOT off NODE_ENV. The deployed app runs NODE_ENV=production
 // on Base Sepolia: NODE_ENV-keyed defaults gave it Base MAINNET's USDC address
 // (no contract on Sepolia → balances read 0, burns revert) and would have put
 // CCTP on mainnet contracts/chains/Iris.
-const BASE_CHAIN_ID = parseInt(optional('BASE_CHAIN_ID', IS_PROD ? '8453' : '84532'), 10);
-const BASE_MAINNET = BASE_CHAIN_ID === 8453;
+const BASE_CHAIN_ID = parseInt(optional('BASE_CHAIN_ID', tierChainId('base', IS_PROD ? 8453 : 84532)), 10);
+const BASE_MAINNET = BASE_CHAIN_ID === TIER_CHAIN_IDS.base.mainnet;
+
+const OG_CHAIN_ID = parseInt(optional('OG_CHAIN_ID', tierChainId('0g', IS_PROD ? 16661 : 16602)), 10);
+const OG_MAINNET = OG_CHAIN_ID === TIER_CHAIN_IDS['0g'].mainnet;
 
 // Contract-address fallbacks are single-sourced from contracts/deployments/*.json
 // via contracts/scripts/sync-addresses.ts (do not hand-edit contractAddresses.ts).
 // Env vars still win at runtime; these are the no-env defaults.
-const ADDR = IS_PROD ? CONTRACT_ADDRESSES.mainnet : CONTRACT_ADDRESSES.testnet;
+// Keyed on the 0G chain this backend talks to, NOT NODE_ENV — the same rule
+// Base has followed since BASE_CHAIN_ID. NODE_ENV=production with
+// OG_CHAIN_ID=16602 used to load MAINNET addresses onto a testnet chain (and
+// a script with OG_CHAIN_ID=16661 and no NODE_ENV got testnet ones). The two
+// combinations that run — production on 16661, development on 16602 — resolve
+// exactly as before; config.legacy.test.ts pins them.
+const ADDR = OG_MAINNET ? CONTRACT_ADDRESSES.mainnet : CONTRACT_ADDRESSES.testnet;
 // Cast to a shape with optional keys: the generator now omits `blindEscrow`/
 // `agentFactory` entirely for a network that hasn't been deployed yet (e.g.
 // `base` today), so the two branches of this union no longer share the same
@@ -55,8 +176,8 @@ export const config = {
   // Public base URLs for discovery surfaces (agent cards, OpenAPI, MCP docs).
   // The agent card previously advertised config.corsOrigin (the FRONTEND
   // origin list) as the API url — wrong on both counts.
-  publicApiUrl: optional('PUBLIC_API_URL', IS_PROD ? 'https://api.blindmarket.xyz' : 'http://localhost:3001'),
-  publicAppUrl: optional('PUBLIC_APP_URL', IS_PROD ? 'https://blindmarket.xyz' : 'http://localhost:5173'),
+  publicApiUrl: optional('PUBLIC_API_URL', IS_PROD ? PRODUCTION_PUBLIC_URLS.PUBLIC_API_URL : 'http://localhost:3001'),
+  publicAppUrl: optional('PUBLIC_APP_URL', IS_PROD ? PRODUCTION_PUBLIC_URLS.PUBLIC_APP_URL : 'http://localhost:5173'),
   // Verification fails CLOSED: with 0G Compute unconfigured the sealed
   // verifier refuses to verify instead of auto-passing. Only an explicit
   // opt-in (or the vitest 'test' env) re-enables the local auto-pass stub,
@@ -64,12 +185,18 @@ export const config = {
   allowInsecureLocalVerify: optional('ALLOW_INSECURE_LOCAL_VERIFY', 'false').toLowerCase() === 'true',
 
   // 0G Chain (agent infra — TaskRegistry, Reputation, INFT)
-  ogRpcUrl: optional('OG_RPC_URL', IS_PROD ? 'https://evmrpc.0g.ai' : 'https://evmrpc-testnet.0g.ai'),
-  ogChainId: parseInt(optional('OG_CHAIN_ID', IS_PROD ? '16661' : '16602'), 10),
+  ogRpcUrl: optional('OG_RPC_URL', OG_MAINNET ? 'https://evmrpc.0g.ai' : 'https://evmrpc-testnet.0g.ai'),
+  ogChainId: OG_CHAIN_ID,
 
   // Base Chain (settlement — BlindEscrow, USDC payouts)
   baseRpcUrl: optional('BASE_RPC_URL', BASE_MAINNET ? 'https://mainnet.base.org' : 'https://sepolia.base.org'),
   baseChainId: BASE_CHAIN_ID,
+  /**
+   * The tier SETTLEMENT_TIER names, or null when each chain follows its own
+   * default. Null does NOT mean the chains disagree: /health/bridge derives
+   * the tier the stack is actually on from the chain ids.
+   */
+  settlementTier: SETTLEMENT_TIER,
 
   // Contracts — 0G (agent infra)
   blindEscrowAddress: optional('BLIND_ESCROW_ADDRESS', ADDR.blindEscrow),
@@ -133,6 +260,22 @@ export const config = {
   // (completeVerification on Base releases USDC). Same pattern as above but
   // targets the Base BlindEscrow.
   baseMarketplaceSignerPrivateKey: process.env.BASE_MARKETPLACE_SIGNER_PRIVATE_KEY || '',
+
+  // Settlement chain POST /tasks funds new tasks on ('0g', 'base'). '' keeps
+  // the rule from before the setting: Base when it has an escrow, else 0G.
+  // Checked at boot (services/settlementChains.ts assertPostingChain).
+  postingChain: (process.env.POSTING_CHAIN ?? '').trim().toLowerCase(),
+
+  // contracts/ deployment set holding this stack's records ('' = the default
+  // records, i.e. production). Only used to print ops commands that target the
+  // right escrow — see contractsEnvPrefix in services/chainNetwork.ts.
+  deploymentSet: parseDeploymentSet(process.env.DEPLOYMENT_SET),
+  deploymentId: parseDeploymentId(process.env.DEPLOYMENT_ID),
+  // Set for ONE boot to take this Redis over for DEPLOYMENT_ID from the
+  // owner it names, or "unclaimed". Read as set and checked where it is used
+  // (services/deploymentIdentity.ts): production ignores it, so a value left
+  // there must not stop production booting.
+  deploymentClaim: (process.env.DEPLOYMENT_CLAIM ?? '').trim() || null,
 
   // Forensic verification
   forensicMaxPhotoAgeMs: parseInt(optional('FORENSIC_MAX_PHOTO_AGE_MS', '1800000'), 10),  // 30 min
@@ -283,12 +426,14 @@ export const config = {
     optimismUsdcAddress: optional('CCTP_OPTIMISM_USDC_ADDRESS', BASE_MAINNET
       ? '0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85'
       : '0x5fd84259d66Cd46123540766Be93DFE6D43130D7'),
-    // Arc — Circle's own L1 (docs.arc.io). TESTNET ONLY: Arc's docs say
-    // "Mainnet addresses are not yet available" (Sept 2026), so there is no
-    // mainnet default and no mainnet chain entry. CCTP domain 26. Fast
-    // Transfer is N/A on Arc (its finality is already instant); Forwarding
-    // Service is supported, so transfers still auto-complete. USDC is Arc's
-    // native gas token (18-dec native view, 6-dec ERC-20 view of ONE balance).
+    // Arc — Circle's own L1 (docs.arc.io). These defaults are Arc TESTNET
+    // (5042002) and do not follow the Base tier, so no mainnet chain entry
+    // exists here. Arc Mainnet itself is live (its RPC answered chain id 5042
+    // on 2026-09-17); adding it as a CCTP chain needs its contract addresses
+    // checked first. CCTP domain 26. Fast Transfer is N/A on Arc (its finality
+    // is already instant); Forwarding Service is supported, so transfers still
+    // auto-complete. USDC is Arc's native gas token (18-dec native view, 6-dec
+    // ERC-20 view of ONE balance).
     arcRpcUrl: optional('CCTP_ARC_RPC_URL', 'https://rpc.testnet.arc.io'),
     arcChainId: parseInt(optional('CCTP_ARC_CHAIN_ID', '5042002'), 10),
     arcUsdcAddress: optional('CCTP_ARC_USDC_ADDRESS', '0x3600000000000000000000000000000000000000'),
@@ -315,8 +460,8 @@ export const config = {
   },
 } as const;
 
-// Mainnet chain id — kept in sync with the production default above.
-const MAINNET_CHAIN_ID = 16661;
+// Mainnet chain id, from the tier table that owns it.
+const MAINNET_CHAIN_ID = TIER_CHAIN_IDS['0g'].mainnet;
 
 /**
  * Fail-fast boot assertions. Call once at startup (before the server binds) so a
@@ -333,6 +478,58 @@ export function assertBootConfig(): void {
   const isProd = config.nodeEnv === 'production';
   const fatals: string[] = [];
   const warnings: string[] = [];
+
+  fatals.push(
+    ...deploymentSetProblems(config.deploymentSet, process.env, { og: config.ogChainId, base: config.baseChainId }),
+  );
+
+  // NODE_ENV=production defaults BASE_CHAIN_ID to Base mainnet. A production
+  // env that sets BASE_ESCROW_ADDRESS to the Base Sepolia escrow but forgets
+  // BASE_CHAIN_ID would boot as "Base mainnet" with mainnet USDC and the
+  // Sepolia escrow address, and every tier check would read it as mainnet.
+  const sepoliaEscrow = (CONTRACT_ADDRESSES.baseTestnet as { blindEscrow?: string }).blindEscrow;
+  if (BASE_MAINNET && sepoliaEscrow && (config.baseEscrowAddress || '').toLowerCase() === sepoliaEscrow.toLowerCase()) {
+    fatals.push(
+      `BASE_CHAIN_ID=${config.baseChainId} (Base mainnet) but BASE_ESCROW_ADDRESS=${config.baseEscrowAddress} is the Base Sepolia ` +
+        `escrow from contracts/deployments/base-sepolia.json. Set BASE_CHAIN_ID=84532 (production posts on Base Sepolia today), ` +
+        `or a Base mainnet escrow address.`,
+    );
+  }
+
+  if (config.settlementTier) {
+    // An explicit tier is a promise about every chain. A chain id that breaks
+    // it would settle real money on the wrong network, so this is fatal even
+    // outside production.
+    for (const mismatch of tierMismatches(process.env, config.settlementTier)) {
+      fatals.push(`${mismatch}. Remove the override, or set SETTLEMENT_TIER to the tier you meant.`);
+    }
+    if (isProd && config.settlementTier === 'testnet') {
+      const unset = ([
+        ['PUBLIC_API_URL', config.publicApiUrl],
+        ['PUBLIC_APP_URL', config.publicAppUrl],
+      ] as const).filter(([name]) => !process.env[name]);
+      if (unset.length > 0) {
+        const plural = unset.length > 1;
+        warnings.push(
+          `NODE_ENV=production with SETTLEMENT_TIER=testnet, but ${unset.map(([name]) => name).join(' and ')} ` +
+            `${plural ? 'are' : 'is'} unset — this stack falls back to production's own ` +
+            `${plural ? 'addresses' : 'address'} (${unset.map(([, url]) => url).join(', ')}) and advertises ` +
+            `${plural ? 'them' : 'it'} to the agents that discover it.`,
+        );
+      }
+    }
+  } else {
+    // No tier named: report it when the chains disagree. Production is mixed
+    // today (0G mainnet + Base Sepolia), so this cannot be fatal yet.
+    const ogTier = chainTier('0g', config.ogChainId);
+    const baseTier = chainTier('base', config.baseChainId);
+    if (ogTier && baseTier && ogTier !== baseTier) {
+      warnings.push(
+        `0G is on ${ogTier} (${config.ogChainId}) and Base is on ${baseTier} (${config.baseChainId}) — ` +
+          `this stack is half mainnet, half testnet. Set SETTLEMENT_TIER once both are on the same tier.`,
+      );
+    }
+  }
 
   if (isProd) {
     // JWT_SECRET signs the 365d agent platform tokens (agentRunner). Empty in

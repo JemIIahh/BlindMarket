@@ -16,17 +16,26 @@
  *   - TaskRegistry.authorizePublisher(BlindEscrow)
  *   - BlindEscrow.allowToken(MockERC20)
  *
+ * Writes (merges into) 0g-mainnet.json in the DEPLOYMENT_SET and refuses to
+ * replace a live BlindEscrow unless ALLOW_ESCROW_REPLACE=true.
+ *
  * Usage:
- *   npx hardhat run scripts/deploy-testnet.ts --network 0g-testnet
+ *   I_HAVE_READ_MAINNET_CHECKLIST=yes npx hardhat run scripts/deploy-mainnet.ts --network 0g-mainnet
  */
 
 import { ethers, upgrades } from "../lib/hh.js";
-import * as fs from "fs";
-import * as path from "path";
 import { assertSafeNetwork } from "./_guard.js";
+import { deployBlock, preflightDeploy, writeDeployment } from "./_deployments.js";
+
+const OG_MAINNET_CHAIN_ID = 16661;
 
 async function main() {
   await assertSafeNetwork();
+  const chainId = Number((await ethers.provider.getNetwork()).chainId);
+  if (chainId !== OG_MAINNET_CHAIN_ID) {
+    throw new Error(`deploy-mainnet.ts deploys the 0G mainnet stack; connected chainId is ${chainId}. Use --network 0g-mainnet.`);
+  }
+  const target = preflightDeploy({ chainId, deploysEscrow: true });
   const [deployer] = await ethers.getSigners();
   console.log("Deployer:", deployer.address);
 
@@ -36,6 +45,8 @@ async function main() {
   if (balance === 0n) {
     throw new Error("Deployer has 0 balance. Fund it at https://faucet.0g.ai/");
   }
+
+  const startBlock = await ethers.provider.getBlockNumber();
 
   // 1. Skip MockERC20 on mainnet, use address(0) for native 0G
   const nativeAddr = "0x0000000000000000000000000000000000000000";
@@ -63,7 +74,8 @@ async function main() {
   const escrow = await upgrades.deployProxy(BlindEscrow, [deployer.address, deployer.address], { kind: "uups" });
   await escrow.waitForDeployment();
   const escrowAddr = await escrow.getAddress();
-  console.log("BlindEscrow:", escrowAddr);
+  const escrowBlock = await deployBlock(escrow, startBlock);
+  console.log("BlindEscrow:", escrowAddr, `(block ${escrowBlock})`);
 
   // 5. Wire contracts together
   console.log("\n--- Wiring contracts ---");
@@ -106,9 +118,9 @@ async function main() {
   console.log("ValidatorPool:", validatorPoolAddr);
 
   // 8. Save deployment addresses
-  const deployment = {
+  const deployment = writeDeployment(target.file, {
     network: "0g-mainnet",
-    chainId: 16661,
+    chainId,
     deployer: deployer.address,
     timestamp: new Date().toISOString(),
     contracts: {
@@ -119,15 +131,9 @@ async function main() {
       INFT: inftAddr,
       ValidatorPool: validatorPoolAddr,
     },
-  };
-
-  const outDir = path.join(import.meta.dirname, "..", "deployments");
-  if (!fs.existsSync(outDir)) {
-    fs.mkdirSync(outDir, { recursive: true });
-  }
-  const outPath = path.join(outDir, "0g-mainnet.json");
-  fs.writeFileSync(outPath, JSON.stringify(deployment, null, 2));
-  console.log("\nDeployment saved to:", outPath);
+    blocks: { BlindEscrow: escrowBlock },
+  });
+  console.log("\nDeployment saved to:", target.file, `(set ${target.set})`);
 
   console.log("\n=== DEPLOYMENT SUMMARY ===");
   console.log(JSON.stringify(deployment.contracts, null, 2));

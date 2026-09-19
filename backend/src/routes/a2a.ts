@@ -19,11 +19,13 @@ import * as reputationDecay from '../services/reputationDecay.js';
 import * as agentEmbedding from '../services/agentEmbedding.js';
 import * as semanticMatch from '../services/semanticMatch.js';
 import { demandFeed, MAX_DEMAND_LIMIT } from '../services/demandFeed.js';
-import { provider, escrow, baseProvider, baseEscrow } from '../services/chain.js';
+import { chainRuntime } from '../services/chainRuntime.js';
+import { receiptSearchOrder, settlementChainConfig } from '../services/settlementChains.js';
 import { ethers } from 'ethers';
 import type { AuthRequest, ApiResponse, AgentCapability, A2ATaskMeta } from '../types.js';
 import { AGENT_CAPABILITIES } from '../types.js';
 import { rankAgents, pickExplorationAgent } from '../services/agentScorer.js';
+import { supportsChain, supportsTaskChain } from '../services/executorChains.js';
 import { emitTaskOffer, emitTaskAvailable, hasAgentSocket } from '../services/socket.js';
 import { isAlive } from '../services/redis.js';
 import { EXPIRY_GRACE_SEC } from '../constants.js';
@@ -31,7 +33,8 @@ import { config } from '../config.js';
 import * as serviceStore from '../services/serviceStore.js';
 import { consumePendingCost } from '../services/railwaySandbox.js';
 import * as accountingService from '../services/accountingService.js';
-import { normalizeSettlementAmount } from '../services/settlementUnits.js';
+import { normalizeSettlementAmount, payoutCurrency, pricingUnit, sameUnit, type TaskReward } from '../services/settlementUnits.js';
+import { getTokenDecimals } from '../services/chain.js';
 import { isSafeRegexSource } from '../services/rubricEngine.js';
 
 export const a2aRouter = Router();
@@ -64,11 +67,22 @@ const registerSchema = z.object({
   // requiredCapabilities to match the task (enforced by listAgents), so this
   // only affects ranking, not eligibility.
   preferredCapabilities: z.array(z.enum(AGENT_CAPABILITIES as unknown as [string, ...string[]])).max(20).optional(),
-  // Chains this executor can settle on. Workers tell the backend which chains
-  // they have an RPC for so they only get offered tasks they can actually settle.
-  // Default is ['0g']; include 'base' when the worker has rpcUrls.base configured.
-  supportedChains: z.array(z.enum(['0g', 'base'] as [string, string])).max(2).default(['0g']),
+  // Settlement chains this executor's code can sign for. Omitted by code that
+  // predates the field, which is stored as null and treated as the legacy
+  // set. Keys this backend doesn't know yet are kept, so a newer worker can
+  // register against an older backend.
+  supportedChains: z.array(z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/i, 'supportedChains entries are chain keys such as "0g" or "base"'))
+    .min(1, 'supportedChains must name at least one chain (omit it to keep the default)')
+    .max(16)
+    .transform((keys) => [...new Set(keys.map((k) => k.toLowerCase()))])
+    .optional(),
 });
+
+function chainUnsupportedMessage(chain: string | undefined): string {
+  return chain
+    ? `This task settles on ${chain}, which your registration doesn't list — update the agent and register again with supportedChains`
+    : "This task predates recorded chains and may settle on 0G or Base; your registration doesn't list both";
+}
 
 const submitSchema = z.object({
   resultData: z.record(z.unknown()),
@@ -214,13 +228,11 @@ a2aRouter.post('/register', requireAuth, async (req: AuthRequest, res, next) => 
       mcpEndpointUrl: data.mcpEndpointUrl,
       minReward: data.minReward,
       preferredCapabilities: data.preferredCapabilities as AgentCapability[] | undefined,
-      supportedChains: data.supportedChains,
-      reputation: existing?.reputation ?? 50, // start at 50
-      tasksCompleted: existing?.tasksCompleted ?? 0,
-      // Carried like the two counters above. registerAgent writes whatever it is
-      // handed, so leaving this out reset an agent's earnings to '0' every time
-      // it re-registered.
-      totalEarnedRaw: existing?.totalEarnedRaw,
+      supportedChains: data.supportedChains ?? null,
+      // Counters apply to a new executor only; registerAgent never overwrites
+      // an existing one's (see its doc comment).
+      reputation: 50,
+      tasksCompleted: 0,
       registeredAt: existing?.registeredAt ?? new Date().toISOString(),
     });
 
@@ -258,7 +270,8 @@ a2aRouter.get('/executors', async (req, res, next) => {
       ? (req.query.capabilities as string).split(',').map((s) => s.trim()).filter(Boolean)
       : undefined;
 
-    const executors = await agentStore.listAgents(caps);
+    const chain = typeof req.query.chain === 'string' ? req.query.chain.toLowerCase() : undefined;
+    const executors = (await agentStore.listAgents(caps)).filter((e) => supportsChain(e, chain));
 
     const body: ApiResponse = {
       success: true,
@@ -273,6 +286,7 @@ a2aRouter.get('/executors', async (req, res, next) => {
             publicKey: e.publicKey,
             capabilities: e.capabilities,
             reputation: e.reputation,
+            supportedChains: e.supportedChains ?? null,
           })),
       },
     };
@@ -558,6 +572,15 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
       return;
     }
 
+    // Chain gate — before the CAS, so a worker that can't sign on this task's
+    // chain never takes it (assignment is on-chain and can't be undone). After
+    // the idempotent branch above, so an executor already assigned can still
+    // re-confirm and finish.
+    if (!supportsTaskChain(agent, meta.chain)) {
+      await a2aStore.logAcceptAttempt(taskId, address, 'rejected_precheck');
+      throw new AppError(409, 'CHAIN_UNSUPPORTED', chainUnsupportedMessage(meta.chain));
+    }
+
     const accept = await a2aStore.tryAccept(taskId, address, new Date().toISOString());
     if (!accept.ok) {
       console.warn(`[a2a] accept: CAS lost for ${taskId}, currentStatus=${accept.currentStatus}`);
@@ -815,6 +838,9 @@ a2aRouter.post('/tasks/:id/bid', requireAuth, async (req: AuthRequest, res, next
         'NO_PUBKEY',
         'Your executor registration has no publicKey — re-register so posters can wrap to you',
       );
+    }
+    if (!supportsTaskChain(agent, meta.chain)) {
+      throw new AppError(409, 'CHAIN_UNSUPPORTED', chainUnsupportedMessage(meta.chain));
     }
 
     // If we already have a wrap for this address, the bid is moot — let the
@@ -1079,11 +1105,11 @@ async function rankedEntries(
   taskHash: string,
   requiredCaps: AgentCapability[],
   routingMeta: semanticMatch.RoutingMeta,
-  taskRewardWei: string,
+  taskReward: TaskReward,
 ): Promise<{ entries: a2aStore.CascadeEntry[]; semantic: boolean }> {
-  const semantic = await semanticMatch.semanticCascadeRanking(routingMeta, taskRewardWei);
+  const semantic = await semanticMatch.semanticCascadeRanking(routingMeta, taskReward);
   const tagEntries = async () =>
-    (await rankAgents(requiredCaps, taskRewardWei)).map((r) => ({
+    (await rankAgents(requiredCaps, taskReward, routingMeta.chain)).map((r) => ({
       address: r.address,
       score: r.score,
       displayName: r.displayName,
@@ -1139,10 +1165,10 @@ async function startRankedCascade(
   taskHash: string,
   requiredCaps: AgentCapability[],
   routingMeta: semanticMatch.RoutingMeta,
-  taskRewardWei: string,
+  taskReward: TaskReward,
   chain?: TaskChain,
 ): Promise<void> {
-  const { entries, semantic } = await rankedEntries(taskHash, requiredCaps, routingMeta, taskRewardWei);
+  const { entries, semantic } = await rankedEntries(taskHash, requiredCaps, routingMeta, taskReward);
   if (entries.length === 0) {
     emitTaskAvailable(taskHash, broadcastMeta(requiredCaps, chain));
     return;
@@ -1265,6 +1291,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
     let onChainAgent: string;
     let onChainDeadline: number;
     let onChainAmount: string;
+    let onChainToken: string;
 
     // Poll for the receipt rather than taking a single shot. The createTask tx
     // is already confirmed by the time the frontend calls us (its signer waited
@@ -1274,23 +1301,25 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
     // then 404 a tx that is genuinely on-chain — funding the escrow but leaving
     // the task un-indexed (no rootHash/wrappedKeys meta → invisible to
     // executors). Retry across ~24s to ride out that replica lag.
-    // Poll for the receipt from both chains — the tx may target 0G or Base escrow.
-    // Try Base first (if configured) since new tasks are funded on Base, then 0G.
+    // Poll for the receipt on every chain this deployment has an escrow on,
+    // the posting chain first since new tasks are funded there.
     // For ERC-4337 user-ops the relay returns a userOperationHash, not a tx hash.
     // getTransactionReceipt(userOpHash) always returns null, so when the first
     // attempt fails we fall back to scanning recent blocks for TaskCreated events
     // matching the taskHash via eth_getLogs.
     let receipt = null;
-    let activeEscrow = escrow;
     const taskCreatedTopic = ethers.id(
       'TaskCreated(uint256,address,address,uint256,bytes32,string,string,uint256)',
     );
-    const providers = baseProvider && baseEscrow
-      ? [
-          { prov: baseProvider, esc: baseEscrow, label: 'Base' },
-          { prov: provider, esc: escrow, label: '0G' },
-        ]
-      : [{ prov: provider, esc: escrow, label: '0G' }];
+    const providers = receiptSearchOrder().flatMap((chain) => {
+      const { provider: prov, escrow: esc } = chainRuntime(chain);
+      return esc ? [{ chain, prov, esc, label: settlementChainConfig(chain).label }] : [];
+    });
+    if (providers.length === 0) {
+      throw new AppError(503, 'CHAIN_NOT_CONFIGURED', 'This backend has no settlement escrow to index tasks from');
+    }
+    // The chain whose escrow the receipt came from.
+    let active: (typeof providers)[number] | null = null;
 
     // If no receipt found, this is likely a user-op hash. Accept an
     // isUserOp flag from the frontend to skip the (always-failing)
@@ -1299,14 +1328,15 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
     if (isUserOp) {
       console.log(`[tasks/index] isUserOp=true, skipping receipt poll — scanning logs`);
     } else {
-      for (const { prov, esc } of providers) {
+      for (const source of providers) {
+        const { prov } = source;
         receipt = await prov.getTransactionReceipt(data.txHash);
         for (let i = 0; i < 3 && !receipt; i++) {
           await new Promise((r) => setTimeout(r, 3000));
           receipt = await prov.getTransactionReceipt(data.txHash);
         }
         if (receipt) {
-          activeEscrow = esc;
+          active = source;
           break;
         }
       }
@@ -1358,7 +1388,8 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
           await new Promise((r) => setTimeout(r, 5000));
         }
         const maxPages = attempt === DEEP_ATTEMPT ? DEEP_PAGES : 1;
-        for (const { prov, esc, label } of providers) {
+        for (const source of providers) {
+          const { prov, esc, label } = source;
           try {
             // Each provider is scanned against ITS OWN escrow. Previously the
             // Base escrow address was used on the 0G provider too, which could
@@ -1386,7 +1417,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
               console.log(`[tasks/index] Match found! txHash=${match.transactionHash} block=${match.blockNumber}`);
               receipt = await prov.getTransactionReceipt(match.transactionHash);
               if (receipt) {
-                activeEscrow = esc;
+                active = source;
                 console.log(`[tasks/index] Receipt confirmed at block ${receipt.blockNumber}`);
                 break;
               }
@@ -1398,7 +1429,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       }
     }
 
-    if (!receipt) {
+    if (!receipt || !active) {
       throw new AppError(
         404,
         'RECEIPT_NOT_FOUND',
@@ -1417,6 +1448,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
     // receipt that originated from some other contract — a malicious poster
     // could otherwise pass a tx hash from a different escrow with a colliding
     // taskHash.
+    const { esc: activeEscrow, chain: taskChain } = active;
     const escrowAddress = (await activeEscrow.getAddress()).toLowerCase();
     const matching = receipt.logs.filter(
       (l) => l.address.toLowerCase() === escrowAddress && l.topics[0] === taskCreatedTopic,
@@ -1447,6 +1479,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
     onChainAgent = (parsed.args.agent as string).toLowerCase();
     onChainDeadline = Number(parsed.args.deadline);
     onChainAmount = (parsed.args.amount as bigint).toString();
+    onChainToken = (parsed.args.token as string).toLowerCase();
 
     if (onChainTaskHash !== taskHash) {
       throw new AppError(
@@ -1466,13 +1499,67 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       );
     }
 
+    // Anyone can escrow any hash, so only the poster who indexed a task first
+    // may index it again. Without this a stranger who funded the same hash
+    // could re-index the task as theirs, or, with the chain lock below, lock
+    // the real poster out. Checked before anything is written.
+    const existingMeta = await a2aStore.getMeta(taskHash);
+    const callerAddresses = new Set([...userAddresses, address.toLowerCase()]);
+    if (existingMeta?.posterAddress && !callerAddresses.has(existingMeta.posterAddress.toLowerCase())) {
+      throw new AppError(
+        409,
+        'TASK_HASH_TAKEN',
+        'Another poster already indexed a task with this hash — cancel your escrow to get it back, and post with a new brief',
+      );
+    }
+    // The poster who built the funding tx through POST /tasks claimed the
+    // hash then, before it was public. The escrow accepts duplicate hashes,
+    // so a front-runner can escrow the same hash and race the real poster's
+    // client to this route; the claim decides, not the race.
+    const claimedBy = await a2aStore.getTaskHashClaim(taskHash);
+    if (claimedBy && !callerAddresses.has(claimedBy)) {
+      throw new AppError(
+        409,
+        'TASK_HASH_TAKEN',
+        'Another poster claimed this hash when they built its funding transaction — cancel your escrow to get it back, and post with a new brief',
+      );
+    }
+
+    // A task stays on the chain it was first indexed on. The poster picks the
+    // hash, so the same one can be escrowed on both chains; re-indexing it from
+    // the other chain's receipt would move the task (and its settlement) there.
+    // Checked before seedTaskId, so a refused re-index writes nothing.
+    if (existingMeta?.chain && existingMeta.chain !== taskChain) {
+      throw new AppError(
+        409,
+        'CHAIN_IMMUTABLE',
+        `This task was indexed on ${existingMeta.chain}; a receipt from ${taskChain} can't re-index it — cancel the ${taskChain} escrow to get it back`,
+      );
+    }
+
+    // Only index tasks escrowed in the token this chain settles in, so every
+    // payout can be booked in a known unit. Refused before anything is
+    // written: an unindexed task is never offered, and the poster can still
+    // cancel it for a refund. (A native-0G task on a deployment that prices in
+    // USDC passes here; the "Use now" check below refuses it, and reward
+    // floors — written in the pricing unit — cannot be met by it, so only
+    // agents with no floor are offered it.)
+    const taskUnit = payoutCurrency(taskChain, onChainToken);
+    if (!taskUnit) {
+      throw new AppError(
+        409,
+        'TOKEN_NOT_SETTLEMENT',
+        `Task is escrowed in ${onChainToken}, which is not the settlement token on ${taskChain} — cancel it to get the escrow back`,
+      );
+    }
+
     // All checks passed — eagerly seed the indexer mapping so /submit and
     // /accept resolve the hash immediately without waiting for the
     // forward-only event poller to catch up. Seeded in the namespace of the
-    // chain that actually holds the task: resolveTaskByHash reads the Base
-    // namespace first, so seeding a Base task under the 0G keys made it
-    // resolve as 0G until the Base poller caught up (see taskChain.seedTaskId).
-    await seedTaskId(activeEscrow === baseEscrow ? 'base' : '0g', taskHash, onChainTaskId);
+    // chain that actually holds the task, which is the only namespace
+    // resolveTaskByHash searches once meta.chain is written below (see
+    // taskChain.seedTaskId).
+    await seedTaskId(taskChain, taskHash, onChainTaskId);
 
     const wrappedKeysNormalized = data.wrappedKeys
       ? Object.fromEntries(
@@ -1505,9 +1592,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       // different verifier, the designated agent's settlement tx reverts
       // NotVerifier and the task sticks in awaiting_verification until
       // claimTimeout. Refuse the index up front instead.
-      const onChainVerifier = activeEscrow === baseEscrow
-        ? await escrowService.getTaskVerifierBase(Number(onChainTaskId))
-        : await escrowService.getTaskVerifier(Number(onChainTaskId));
+      const onChainVerifier = await escrowService.getTaskVerifierOn(taskChain, Number(onChainTaskId));
       if (onChainVerifier.toLowerCase() !== data.verifierAddress.toLowerCase()) {
         throw new AppError(
           409,
@@ -1520,12 +1605,6 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
     }
 
     const requiredCaps = (data.requiredCapabilities ?? []) as AgentCapability[];
-
-    // Idempotent re-index: preserve wrappedKeys slices added since the first
-    // index (via /wrap-to or /accept self-heal) instead of overwriting them with
-    // only the original post-time set — otherwise a re-index strands late joiners
-    // back on NEEDS_WRAP. Existing meta (a superset) wins on key collisions.
-    const existingMeta = await a2aStore.getMeta(taskHash);
 
     // ── Per-task privacy ────────────────────────────────────────────────────
     // A PUBLIC task must carry ZERO key material: its blob is plaintext, so a
@@ -1549,6 +1628,12 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
     if (existingMeta && (existingMeta.privacy === 'public') !== isPublic) {
       throw new AppError(409, 'PRIVACY_IMMUTABLE', 'A task\'s privacy mode cannot be changed after it is first indexed');
     }
+    // Idempotent re-index: preserve wrappedKeys slices added since the first
+    // index (via /wrap-to or /accept self-heal) instead of overwriting them with
+    // only the original post-time set — otherwise a re-index strands late joiners
+    // back on NEEDS_WRAP. Existing meta (a superset) wins on key collisions.
+    // The meta is read again just before it is written (below), so slices
+    // merged while this request ran are kept too.
     const mergedWrappedKeys = (existingMeta?.wrappedKeys || wrappedKeysNormalized)
       ? { ...(wrappedKeysNormalized ?? {}), ...(existingMeta?.wrappedKeys ?? {}) }
       : undefined;
@@ -1569,12 +1654,50 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       if (svc.agent_address.toLowerCase() !== targetExecutor) {
         throw new AppError(409, 'SERVICE_AGENT_MISMATCH', "targetExecutor does not match the service's agent");
       }
+      // price_raw is in the deployment's pricing token. An amount in another
+      // token is not comparable: 1,000,000 wei of 0G would pass a 1 USDC price.
+      const pricing = pricingUnit();
+      if (!sameUnit(taskUnit, pricing)) {
+        throw new AppError(
+          409,
+          'SERVICE_TOKEN_MISMATCH',
+          `Services are priced in ${pricing.symbol}; this task is escrowed in ${taskUnit.symbol} on ${taskChain}`,
+        );
+      }
       if (BigInt(onChainAmount) < BigInt(svc.price_raw)) {
         throw new AppError(409, 'UNDERPAID', 'Escrow amount is below the service price');
       }
     }
 
-    const taskChain: TaskChain = activeEscrow === baseEscrow ? 'base' : '0g';
+    // A pinned executor or a designated verifier that is registered but can't
+    // sign on this chain could never finish the task. Refused before the meta
+    // is written; the poster can cancel for a refund. An unregistered address
+    // is left alone, as before (it may register later).
+    if (targetExecutor) {
+      const target = await agentStore.getAgent(targetExecutor);
+      if (target && !supportsChain(target, taskChain)) {
+        throw new AppError(
+          409,
+          'TARGET_CHAIN_UNSUPPORTED',
+          `The pinned agent doesn't settle on ${taskChain} — cancel the task to get the escrow back`,
+        );
+      }
+    }
+    if (data.verificationMode === 'agent' && data.verifierAddress) {
+      const verifier = await agentStore.getAgent(data.verifierAddress);
+      if (verifier && !supportsChain(verifier, taskChain)) {
+        throw new AppError(
+          409,
+          'VERIFIER_CHAIN_UNSUPPORTED',
+          `The designated verifier doesn't settle on ${taskChain} — cancel the task to get the escrow back`,
+        );
+      }
+    }
+
+    const latestWrappedKeys = existingMeta ? (await a2aStore.getMeta(taskHash))?.wrappedKeys : undefined;
+    const finalWrappedKeys = latestWrappedKeys
+      ? { ...(mergedWrappedKeys ?? {}), ...latestWrappedKeys }
+      : mergedWrappedKeys;
     await a2aStore.setMeta({
       taskId: taskHash,
       targetExecutorType: 'agent',
@@ -1585,7 +1708,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       chain: taskChain,
       verifierAddress: data.verifierAddress?.toLowerCase(),
       rootHash: data.rootHash,
-      wrappedKeys: mergedWrappedKeys,
+      wrappedKeys: finalWrappedKeys,
       keyCustodyBlob: data.keyCustodyBlob,
       // Absolute on-chain deadline (epoch seconds) from the verified
       // TaskCreated event — lets browse hide expired tasks, /accept refuse
@@ -1620,11 +1743,12 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       // on a sealed no-custody task) instead of burning offer windows on them.
       posterAddress: address,
       verifierAddress: data.verifierAddress?.toLowerCase(),
-      wrappedKeys: mergedWrappedKeys,
+      wrappedKeys: finalWrappedKeys,
       privacy: isPublic ? 'public' : undefined,
       rootHash: data.rootHash,
       skipKeyWrap: existingMeta?.skipKeyWrap,
       keyCustodyBlob: data.keyCustodyBlob,
+      chain: taskChain,
     };
 
     // Semantic matching (Phase 1 SHADOW): embed the task's public routing text
@@ -1663,7 +1787,10 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
     if (!config.cascadeEnabled || targetExecutor || (requiredCaps.length === 0 && !semanticEligible)) {
       emitTaskAvailable(taskHash, broadcastMeta(requiredCaps, taskChain));
     } else {
-      const taskRewardWei = onChainAmount;
+      // The reward carries its unit: an agent's floor is written in this
+      // deployment's pricing unit and cannot be compared with an amount in
+      // another one.
+      const taskReward: TaskReward = { amount: BigInt(onChainAmount), unit: taskUnit };
       const broadcastAfter = (err: Error, stage: string) => {
         console.error(`[a2a] ${stage} failed for ${taskHash.slice(0, 10)}…:`, err.message);
         emitTaskAvailable(taskHash, broadcastMeta(requiredCaps, taskChain));
@@ -1674,13 +1801,13 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
         // filter it would draw a random cold-start agent from the ENTIRE
         // registry, and its pass/timeout path (advanceCascade with no cascade
         // stored) broadcasts without semantic ranking ever running.
-        startRankedCascade(taskHash, requiredCaps, routingMeta, taskRewardWei, taskChain)
+        startRankedCascade(taskHash, requiredCaps, routingMeta, taskReward, taskChain)
           .catch((err) => broadcastAfter(err as Error, 'semantic scoring/offer'));
       } else {
         // Cold-start: try the exploration slot first. If a new agent is picked,
         // offer to them; if they pass or timeout, fall back to normal ranked flow.
         const agentMode = existingMeta?.agentSelectionMode ?? 'merit';
-        pickExplorationAgent(requiredCaps, agentMode, taskRewardWei).then(async (explorationPick) => {
+        pickExplorationAgent(requiredCaps, agentMode, taskReward, undefined, taskChain).then(async (explorationPick) => {
           if (explorationPick && (await isLiveAgent(explorationPick.address))) {
             console.log(`[a2a] exploration slot: offering to new agent ${explorationPick.address} (score=${explorationPick.score})`);
             const deadline = Date.now() + a2aStore.CASCADE_OFFER_MS;
@@ -1694,7 +1821,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
             // into the ranking (see a2aStore.withExplorationHead). Best-effort:
             // if ranking fails the advance falls back to broadcast as before.
             const pickEntry = { address: explorationPick.address, score: explorationPick.score, displayName: explorationPick.displayName };
-            return rankedEntries(taskHash, requiredCaps, routingMeta, taskRewardWei)
+            return rankedEntries(taskHash, requiredCaps, routingMeta, taskReward)
               .then(({ entries, semantic }) => {
                 if (config.semanticRoutingEnabled && semanticMatch.buildTaskRoutingText(routingMeta)) {
                   void semanticMatch.markShadowRoutedBy(taskHash, semantic ? 'semantic' : 'tag');
@@ -1708,12 +1835,12 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
           }
 
           // Normal ranked flow (semantic when flipped, tag fallback inside).
-          return startRankedCascade(taskHash, requiredCaps, routingMeta, taskRewardWei, taskChain)
+          return startRankedCascade(taskHash, requiredCaps, routingMeta, taskReward, taskChain)
             .catch((err) => broadcastAfter(err as Error, 'scoring/offer'));
         }).catch((err) => {
           console.error(`[a2a] exploration slot failed for ${taskHash.slice(0, 10)}…:`, (err as Error).message);
           // Fallback: normal ranked flow
-          startRankedCascade(taskHash, requiredCaps, routingMeta, taskRewardWei, taskChain)
+          startRankedCascade(taskHash, requiredCaps, routingMeta, taskReward, taskChain)
             .catch((fallbackErr) => broadcastAfter(fallbackErr as Error, 'fallback scoring/offer'));
         });
       }
@@ -2194,7 +2321,7 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
       // 503 keeps the worker's finalize retry/resume loop driving instead.
       // Chain reads are guarded: an RPC blip must 503 (retryable), never 500.
       let ocIdA: string | null;
-      let ocIdAChain: '0g' | 'base';
+      let ocIdAChain: TaskChain;
       try {
         const ocIdAResolved = await resolveTaskByHash(taskHash);
         ocIdA = ocIdAResolved?.taskId ?? null;
@@ -2262,7 +2389,7 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
     // the task would stick permanently. Chain reads are guarded: an RPC blip
     // must 503 (retryable), never 500.
     let ocId: string | null;
-    let ocIdChain: '0g' | 'base';
+    let ocIdChain: TaskChain;
     try {
       const ocIdResolved = await resolveTaskByHash(taskHash);
       ocId = ocIdResolved?.taskId ?? null;
@@ -2322,13 +2449,9 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
       await a2aStore.updateState(taskHash, { status: reconciledStatus, verificationResult: reconciled });
       if (settledPass) {
         const computeCostMicroUnits = consumePendingCost(taskHash);
-        await recordWorkerPayout(taskHash, address, ocId, onChainTask.amount, {
+        await recordWorkerPayout(taskHash, address, ocId, onChainTask.amount, { chain: ocIdChain, token: onChainTask.token }, {
           serviceId: meta.serviceId,
           computeCostMicroUnits,
-          // Base settles in USDC (6 decimals); 0G in native (18). Without
-          // this the accounting ledger divides a USDC amount by 1e18 and the
-          // Earnings page never moves off zero.
-          decimals: ocIdChain === 'base' ? 6 : 18,
           meta,
         });
       } else {
@@ -2376,13 +2499,9 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
     if (verificationResult.passed) {
       // Deduct sandbox compute costs from worker's payout
       const computeCostMicroUnits = consumePendingCost(taskHash);
-      await recordWorkerPayout(taskHash, address, ocId, onChainTask.amount, {
+      await recordWorkerPayout(taskHash, address, ocId, onChainTask.amount, { chain: ocIdChain, token: onChainTask.token }, {
         serviceId: meta.serviceId,
         computeCostMicroUnits,
-        // Base settles in USDC (6 decimals); 0G in native (18). Without
-        // this the accounting ledger divides a USDC amount by 1e18 and the
-        // Earnings page never moves off zero.
-        decimals: ocIdChain === 'base' ? 6 : 18,
         meta,
       });
     } else {
@@ -2516,12 +2635,8 @@ a2aRouter.post('/tasks/:id/verify', requireAuth, async (req: AuthRequest, res, n
 
     if (passed && state.executorAddress) {
       const computeCostMicroUnits = consumePendingCost(taskHash);
-      await recordWorkerPayout(taskHash, state.executorAddress, ocId, onChainTask.amount, {
+      await recordWorkerPayout(taskHash, state.executorAddress, ocId, onChainTask.amount, { chain: ocIdChain, token: onChainTask.token }, {
         computeCostMicroUnits,
-        // Base settles in USDC (6 decimals); 0G in native (18). Without
-        // this the accounting ledger divides a USDC amount by 1e18 and the
-        // Earnings page never moves off zero.
-        decimals: ocIdChain === 'base' ? 6 : 18,
         meta,
       });
     } else if (!passed && state.executorAddress) {
@@ -2680,12 +2795,8 @@ a2aRouter.post('/tasks/:id/verdict', requireAuth, async (req: AuthRequest, res, 
       // ocId + onChainTask were already resolved + gated above (status must be
       // Completed=4 here), so the payout credit can't be lost to an indexing race.
       const computeCostMicroUnits = consumePendingCost(taskHash);
-      await recordWorkerPayout(taskHash, state.executorAddress, ocId, onChainTask.amount, {
+      await recordWorkerPayout(taskHash, state.executorAddress, ocId, onChainTask.amount, { chain: ocIdChain, token: onChainTask.token }, {
         computeCostMicroUnits,
-        // Base settles in USDC (6 decimals); 0G in native (18). Without
-        // this the accounting ledger divides a USDC amount by 1e18 and the
-        // Earnings page never moves off zero.
-        decimals: ocIdChain === 'base' ? 6 : 18,
         meta,
       });
     } else if (!passed && state.executorAddress) {
@@ -2718,7 +2829,10 @@ a2aRouter.post('/tasks/:id/verdict', requireAuth, async (req: AuthRequest, res, 
 a2aRouter.get('/verifications', requireAuth, async (req: AuthRequest, res, next) => {
   try {
     const address = req.user!.address;
-    const tasks = await a2aStore.getVerifierTasks(address);
+    const [tasks, verifier] = await Promise.all([
+      a2aStore.getVerifierTasks(address),
+      agentStore.getAgent(address).catch(() => undefined),
+    ]);
     const pending = tasks.filter((t) => t.state.status === 'awaiting_verification');
     // Resolve each task's on-chain numeric id so the verifier can call
     // completeVerification(id, passed) itself. Null when not yet indexed — the
@@ -2731,7 +2845,11 @@ a2aRouter.get('/verifications', requireAuth, async (req: AuthRequest, res, next)
     const verifications = await Promise.all(
       pending.map(async (t) => {
         const r = await resolveTaskByHash(t.meta.taskId).catch(() => null);
-        return { ...t, onChainId: r?.taskId ?? null, chain: r?.chain ?? null };
+        const chain = r?.chain ?? null;
+        // Kept in the list even when false: the designated verifier is the only
+        // party that can settle the task, so hiding it would strand it.
+        const chainSupported = !verifier || supportsTaskChain(verifier, chain ?? t.meta.chain);
+        return { ...t, onChainId: r?.taskId ?? null, chain, chainSupported };
       }),
     );
     const body: ApiResponse = {
@@ -2806,6 +2924,13 @@ a2aRouter.get('/tasks/posted', requireAuth, async (req: AuthRequest, res, next) 
           if (!resolved) return { ...t, wrapCount, hasCustody, onChain: null };
           const onChainId = resolved.taskId;
           const onChainTask = await escrowService.getTaskOn(resolved.chain, Number(onChainId));
+          // The unit `reward` is in. A poster's list mixes chains, so the
+          // web app cannot price every row in the posting chain's token.
+          // Null symbol when the token is not the chain's settlement token
+          // (a task from before the token check); decimals are still read
+          // from the token so the amount renders.
+          const unit = payoutCurrency(resolved.chain, onChainTask.token);
+          const decimals = unit?.decimals ?? (await getTokenDecimals(onChainTask.token, resolved.chain));
           return {
             ...t,
             wrapCount,
@@ -2816,6 +2941,8 @@ a2aRouter.get('/tasks/posted', requireAuth, async (req: AuthRequest, res, next) 
               status: onChainTask.status,
               reward: onChainTask.amount.toString(),
               token: onChainTask.token,
+              symbol: unit?.symbol ?? null,
+              decimals,
               worker: onChainTask.worker,
               createdAt: onChainTask.createdAt.toString(),
               deadline: onChainTask.deadline.toString(),

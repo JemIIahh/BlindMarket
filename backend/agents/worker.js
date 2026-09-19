@@ -143,6 +143,88 @@ const AA_ENTRY_POINT = process.env.AA_ENTRY_POINT ?? '';
 const AA_PAYMASTER = process.env.AA_PAYMASTER ?? '';
 const AA_USDC = process.env.AA_USDC ?? '';
 const PIMLICO_BUNDLER_URL = process.env.PIMLICO_BUNDLER_URL ?? '';
+
+const NATIVE_TOKEN_ADDRESS = '0x0000000000000000000000000000000000000000';
+
+/** Just enough ERC-20 to fund a delegated sub-task on a chain that settles in one. */
+const ERC20_DELEGATE_ABI = [
+  'function balanceOf(address) view returns (uint256)',
+  'function approve(address spender, uint256 amount) returns (bool)',
+];
+
+/**
+ * The settlement chains this deployment runs, as data: chain id, RPC, escrow,
+ * settlement token, gas symbol, whether the escrow records a smart account,
+ * and which one new tasks are posted on. The backend sends it as
+ * SETTLEMENT_CHAINS_JSON (services/agentRunner.ts); a worker running against
+ * an older backend builds the same shape from the legacy OG_ and BASE_ vars,
+ * which is why those are still read above.
+ *
+ * It says what this DEPLOYMENT settles on. What this worker can sign for at
+ * all is SETTLEMENT_CHAINS below, a property of this file's code, and that is
+ * what registration declares.
+ */
+function legacyChainTable() {
+  const table = [{
+    key: '0g',
+    chainId: OG_CHAIN_ID,
+    rpcUrl: OG_RPC_URL,
+    escrow: AGENT_ESCROW_ADDRESS,
+    token: { address: NATIVE_TOKEN_ADDRESS, kind: 'native', symbol: '0G', decimals: 18 },
+    gasSymbol: '0G',
+    nativeIsSettlementToken: false,
+    aa: false,
+    posting: !(BASE_RPC_URL && BASE_CHAIN_ID),
+  }];
+  if (BASE_RPC_URL && BASE_CHAIN_ID) {
+    table.push({
+      key: 'base',
+      chainId: BASE_CHAIN_ID,
+      rpcUrl: BASE_RPC_URL,
+      escrow: AGENT_BASE_ESCROW_ADDRESS,
+      token: { address: AA_USDC, kind: 'erc20', symbol: 'USDC', decimals: 6 },
+      gasSymbol: 'ETH',
+      nativeIsSettlementToken: false,
+      aa: true,
+      // Before POSTING_CHAIN existed, a configured Base escrow WAS the
+      // posting chain.
+      posting: true,
+    });
+  }
+  return table;
+}
+
+function parseChainTable(raw) {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return null;
+    const usable = parsed.filter((c) => c && typeof c.key === 'string' && c.chainId && c.rpcUrl);
+    // An empty or wholly unusable table is not a deployment with no chains —
+    // it is a table this worker could not read. Fall back to the legacy vars
+    // rather than starting with no signer at all.
+    if (usable.length === 0) {
+      console.error('[agent] SETTLEMENT_CHAINS_JSON had no usable chain entries, falling back to the legacy chain vars');
+      return null;
+    }
+    return usable;
+  } catch (e) {
+    console.error(`[agent] SETTLEMENT_CHAINS_JSON is not valid JSON, falling back to the legacy chain vars: ${e.message}`);
+    return null;
+  }
+}
+
+const CHAIN_TABLE = parseChainTable(process.env.SETTLEMENT_CHAINS_JSON) ?? legacyChainTable();
+
+/** This deployment's entry for `chain`, or null when it does not settle there. Exported for tests. */
+export function chainInfo(chain, table = CHAIN_TABLE) {
+  return table.find((c) => c.key === chain) ?? null;
+}
+
+/** The chain new tasks are funded on — where a delegated sub-task is posted. */
+export function postingChainInfo(table = CHAIN_TABLE) {
+  return table.find((c) => c.posting) ?? table[0] ?? null;
+}
 const PIMLICO_API_KEY = process.env.PIMLICO_API_KEY ?? '';
 const AGENT_TOOLS_RAW = process.env.AGENT_TOOLS ?? '[]';
 const AGENT_TOOL_SECRETS_RAW = process.env.AGENT_TOOL_SECRETS ?? '{}';
@@ -280,12 +362,16 @@ const LLM_TIMEOUT_MS = envNumber(process.env.LLM_TIMEOUT_MS, 600_000, { min: 10_
 // Ceiling on waiting for one of our own txs to confirm. ethers' wait() has no
 // default timeout, so a dropped tx or a stalled RPC would hold _working forever.
 const TX_WAIT_TIMEOUT_MS = 300_000;
-// Escrow reward (in 0G) for a sub-task posted via delegate_to_agent, funded
-// from THIS agent's own wallet. Fixed default; ops can tune via env. The model
-// cannot set it (keeps a weak LLM from over-paying out of the agent's balance).
+// Escrow reward for a sub-task posted via delegate_to_agent, funded from THIS
+// agent's own wallet, in the posting chain's settlement token. Fixed default;
+// ops can tune via env. The model cannot set it (keeps a weak LLM from
+// over-paying out of the agent's balance). DELEGATE_REWARD_OG is the older
+// name and still applies when the sub-task is paid in native 0G.
 const DELEGATE_REWARD_OG = process.env.DELEGATE_REWARD_OG ?? '0.0001';
-// Native-0G headroom the agent insists on keeping after funding a sub-task, so
-// it can still pay gas for its own submitEvidence on the task it's working.
+const DELEGATE_REWARD_USDC = process.env.DELEGATE_REWARD_USDC ?? '0.01';
+// Native headroom the agent insists on keeping after funding a sub-task in
+// the native coin, so it can still pay gas for its own submitEvidence on the
+// task it's working.
 const DELEGATE_GAS_RESERVE_OG = process.env.DELEGATE_GAS_RESERVE_OG ?? '0.005';
 
 // 0G Compute Router — when no AGENT_API_KEY is set, the agent uses its own
@@ -544,39 +630,69 @@ if (!IS_EVM_AGENT) {
 // worker must sign on THAT chain's RPC. Until this existed there was a single
 // 0G signer, so a Base submitEvidence — which carried no chainId — was quietly
 // broadcast onto 0G, and a deployed agent could accept a Base task and never
-// deliver it. `signerWallet` stays the 0G signer: delegation funds native 0G
-// and the legacy 0G-only paths read it directly.
+// deliver it. Built from CHAIN_TABLE, so a chain is added by configuring it,
+// not by editing this file.
 const signers = { '0g': null, base: null };
 if (!suiSigner && AGENT_PRIVATE_KEY) {
   const pk = AGENT_PRIVATE_KEY.startsWith('0x') ? AGENT_PRIVATE_KEY : `0x${AGENT_PRIVATE_KEY}`;
-  try {
-    signers['0g'] = new ethers.Wallet(pk, new ethers.JsonRpcProvider(OG_RPC_URL, OG_CHAIN_ID));
-    signerWallet = signers['0g'];
-  } catch (e) {
-    console.error(`[agent:${(process.env.AGENT_ID ?? '').slice(0, 8)}] failed to init 0G signer: ${e.message}`);
-  }
-  if (BASE_RPC_URL && BASE_CHAIN_ID) {
+  for (const { key, rpcUrl, chainId } of CHAIN_TABLE) {
     try {
-      signers.base = new ethers.Wallet(pk, new ethers.JsonRpcProvider(BASE_RPC_URL, BASE_CHAIN_ID));
+      signers[key] = new ethers.Wallet(pk, new ethers.JsonRpcProvider(rpcUrl, chainId));
     } catch (e) {
-      console.error(`[agent:${(process.env.AGENT_ID ?? '').slice(0, 8)}] failed to init Base signer: ${e.message}`);
+      console.error(`[agent:${(process.env.AGENT_ID ?? '').slice(0, 8)}] failed to init ${key} signer: ${e.message}`);
     }
   }
+  signerWallet = pickSignerWallet();
 }
 
-/** Normalise the chain the backend reports; anything unknown is treated as 0G,
- *  which is what every task was before Base existed. Exported for tests. */
-// The UserOp path needs all three. The gas check and the submit path must agree
-// on this: with a smart account but no bundler, "the paymaster sponsors gas" is
-// false, and an unfunded agent would accept a task it can never submit.
-// backend/src/services/a2aSettlement.ts (smartAccountSubmitUsable) mirrors it
-// when choosing the on-chain assignee.
-export function canSubmitViaSmartAccount(chain, cfg = { account: AGENT_SMART_ACCOUNT_ADDRESS, entryPoint: AA_ENTRY_POINT, bundler: PIMLICO_BUNDLER_URL }) {
-  return pickChain(chain) === 'base' && !!cfg.account && !!cfg.entryPoint && !!cfg.bundler;
+/**
+ * The signer the legacy 0G-only paths read directly (submitEvidence's fallback,
+ * resume, verification polling). The wallet is one EOA and its address is the
+ * same everywhere, so any chain's signer serves them; 0G first because that is
+ * what those paths assumed, then the posting chain, then whatever exists. A
+ * null here used to be impossible (0G had a default RPC) and now would let an
+ * agent accept a task on-chain and then refuse every submit until the poster's
+ * claimTimeout — so it falls back rather than staying null. Delegation does
+ * NOT use it: it picks the posting chain's signer itself.
+ */
+export function pickSignerWallet(table = CHAIN_TABLE, bySigner = signers) {
+  return bySigner['0g'] ?? bySigner[postingChainInfo(table)?.key] ?? Object.values(bySigner).find(Boolean) ?? null;
 }
 
+/**
+ * The chains this worker's CODE can sign for — not the chains this deployment
+ * is configured with (CHAIN_TABLE). Registration declares this: a backend with
+ * a narrower config must not overwrite an agent's declared capability, and a
+ * configured chain with no signer here is acceptBlocker's problem, not a
+ * capability question.
+ */
+const SETTLEMENT_CHAINS = ['0g', 'base'];
+
+function isSettlementChain(reported) {
+  return SETTLEMENT_CHAINS.includes(reported);
+}
+
+/** True when the backend named a chain this worker cannot sign for. A missing
+ *  chain is not unsupported: tasks indexed before the field existed are 0G.
+ *  Callers check this BEFORE accepting, because accepting assigns the task
+ *  on-chain and cannot be undone. Exported for tests. */
+export function isUnsupportedChain(reported) {
+  return reported != null && !isSettlementChain(reported);
+}
+
+/** The log/skip reason for a chain `isUnsupportedChain` flags. */
+export function unsupportedChainReason(reported) {
+  return `settlement chain "${reported}" is not supported by this worker (it signs on ${SETTLEMENT_CHAINS.join(' and ')}) — update the agent`;
+}
+
+/** Normalise the chain the backend reports. Missing means 0G, which is what
+ *  every task was before Base existed. Any other unknown value throws: signing
+ *  it with the 0G key would read and settle the 0G escrow using another
+ *  chain's task id. Exported for tests. */
 export function pickChain(reported) {
-  return reported === 'base' ? 'base' : '0g';
+  if (reported == null) return '0g';
+  if (isUnsupportedChain(reported)) throw new Error(unsupportedChainReason(reported));
+  return reported;
 }
 
 /** The signer bound to `chain`'s RPC, or null when that chain is not
@@ -586,10 +702,87 @@ export function signerFor(chain, table = signers) {
 }
 
 export function escrowAddressFor(chain) {
-  return pickChain(chain) === 'base' ? AGENT_BASE_ESCROW_ADDRESS : AGENT_ESCROW_ADDRESS;
+  return chainInfo(pickChain(chain))?.escrow ?? '';
 }
 
-const NATIVE_SYMBOL = { '0g': '0G', base: 'ETH' };
+/**
+ * The native coin of the chains this worker knows, for gas messages about a
+ * chain this deployment has not configured (so it is not in CHAIN_TABLE). The
+ * table's own gasSymbol wins whenever there is an entry.
+ */
+const KNOWN_GAS_SYMBOL = { '0g': '0G', base: 'ETH' };
+
+/** How a pre-table backend injected a chain, named in the message when it did not. */
+const LEGACY_CHAIN_ENV = { '0g': 'OG_RPC_URL/OG_CHAIN_ID', base: 'BASE_RPC_URL/BASE_CHAIN_ID' };
+
+/** How this worker names a chain in messages. */
+const CHAIN_LABEL = { '0g': '0G', base: 'Base' };
+
+/** The native coin of `chain`, for gas messages. */
+function nativeSymbolFor(chain) {
+  const key = pickChain(chain);
+  return chainInfo(key)?.gasSymbol ?? KNOWN_GAS_SYMBOL[key] ?? key;
+}
+
+/**
+ * True when this chain's escrow records a smart account and the agent has one,
+ * i.e. its funds live in the smart account. Whether it can SUBMIT through it
+ * also needs a bundler: that is canSubmitViaSmartAccount.
+ */
+function usesSmartAccount(chain) {
+  return !!chainInfo(pickChain(chain))?.aa && !!AGENT_SMART_ACCOUNT_ADDRESS && !!AA_ENTRY_POINT;
+}
+
+/**
+ * True when this worker takes the UserOp path on `chain`: the chain's escrow
+ * records a smart account (`aa` in the chain table) and the agent has the
+ * account, the entry point AND a bundler. The gas check and the submit path
+ * must agree on this: with a smart account but no bundler, "the paymaster
+ * sponsors gas" is false, and an unfunded agent would accept a task it can
+ * never submit. backend/src/services/a2aSettlement.ts (resolveAssignee +
+ * smartAccountSubmitUsable) mirrors it when choosing the on-chain assignee.
+ * Exported for tests.
+ */
+export function canSubmitViaSmartAccount(
+  chain,
+  cfg = { account: AGENT_SMART_ACCOUNT_ADDRESS, entryPoint: AA_ENTRY_POINT, bundler: PIMLICO_BUNDLER_URL },
+  table = CHAIN_TABLE,
+) {
+  return !!chainInfo(pickChain(chain), table)?.aa && !!cfg.account && !!cfg.entryPoint && !!cfg.bundler;
+}
+
+/**
+ * Why a task must not be accepted yet, or null. Accepting assigns the task
+ * on-chain, so this runs first. A chain this worker cannot sign for is refused
+ * without calling `problemFor` (preflightGas throws on it, and callers that
+ * swallow that throw would read it as "no problem"). A known chain is refused
+ * when `problemFor(chain)` names a gas problem. A missing chain (indexed
+ * before the field existed) passes and is checked after accept instead.
+ * `unsupported` lets callers keep chain skips apart from gas skips, which
+ * speed up the feed scan until the wallet is funded.
+ */
+export async function acceptBlocker(chain, problemFor) {
+  if (isUnsupportedChain(chain)) return { reason: unsupportedChainReason(chain), unsupported: true };
+  if (!isSettlementChain(chain)) return null;
+  const reason = await problemFor(chain);
+  return reason ? { reason, unsupported: false } : null;
+}
+
+/**
+ * Partition open tasks by `acceptBlocker`. `problemFor` is memoised per poll
+ * so a page of N Base tasks costs one balance read.
+ */
+export async function pickAffordable(entries, problemFor) {
+  const affordable = [];
+  const skipped = [];
+  for (const e of entries) {
+    const chain = e?.meta?.chain;
+    const blocker = await acceptBlocker(chain, problemFor);
+    if (blocker) skipped.push({ taskHash: e.meta.taskId, chain, ...blocker });
+    else affordable.push(e);
+  }
+  return { affordable, skipped };
+}
 
 /**
  * Gas preflight. The worker's wallet pays its own gas — the Privy relay the
@@ -601,25 +794,6 @@ const NATIVE_SYMBOL = { '0g': '0G', base: 'ETH' };
  * missing, on which chain, for which address, before spending the attempt.
  * Returns null when fine, else the reason.
  */
-/**
- * Partition open tasks by whether this wallet can pay gas on the task's chain.
- * `meta.chain` is recorded at /tasks/index; tasks without it (indexed before
- * the field existed) are kept and checked after accept instead. `problemFor`
- * is memoised per poll so a page of N Base tasks costs one balance read.
- */
-export async function pickAffordable(entries, problemFor) {
-  const affordable = [];
-  const skipped = [];
-  for (const e of entries) {
-    const chain = e?.meta?.chain;
-    if (chain !== 'base' && chain !== '0g') { affordable.push(e); continue; }
-    const reason = await problemFor(chain);
-    if (reason) skipped.push({ taskHash: e.meta.taskId, chain, reason });
-    else affordable.push(e);
-  }
-  return { affordable, skipped };
-}
-
 export async function preflightGas(chain, signer, viaAA = canSubmitViaSmartAccount(chain)) {
   // ERC-4337 AA path: gas is paid in USDC via the paymaster — skip the ETH
   // balance check entirely. Callers that already resolved the on-chain
@@ -629,7 +803,14 @@ export async function preflightGas(chain, signer, viaAA = canSubmitViaSmartAccou
     return null; // AA path — paymaster sponsors gas in USDC
   }
 
-  if (!signer) return `no ${pickChain(chain)} signer — ${pickChain(chain) === 'base' ? 'BASE_RPC_URL/BASE_CHAIN_ID not injected (backend has no Base escrow configured?)' : 'AGENT_PRIVATE_KEY missing'}`;
+  if (!signer) {
+    const key = pickChain(chain);
+    // Two different faults: the chain is configured but this worker has no
+    // key, or the backend never injected the chain at all.
+    return chainInfo(key)
+      ? `no ${key} signer — AGENT_PRIVATE_KEY missing`
+      : `no ${key} signer — ${LEGACY_CHAIN_ENV[key] ?? 'SETTLEMENT_CHAINS_JSON'} not injected (backend has no ${CHAIN_LABEL[key] ?? key} escrow configured?)`;
+  }
   let balance;
   try {
     balance = await signer.provider.getBalance(signer.address);
@@ -637,7 +818,7 @@ export async function preflightGas(chain, signer, viaAA = canSubmitViaSmartAccou
     return null; // RPC blip — let the broadcast attempt report the real error
   }
   if (balance === 0n) {
-    return `wallet ${signer.address} holds 0 ${NATIVE_SYMBOL[pickChain(chain)]} on ${pickChain(chain)} — it pays its own gas there and cannot broadcast. Fund it (any amount covers many txs at current gas).`;
+    return `wallet ${signer.address} holds 0 ${nativeSymbolFor(chain)} on ${pickChain(chain)} — it pays its own gas there and cannot broadcast. Fund it (any amount covers many txs at current gas).`;
   }
   return null;
 }
@@ -779,8 +960,14 @@ let _working = false;
 const resumingTasks = new Set();
 const resumeFailures = new Map();
 // taskHash → last gas-skip reason logged, so a wallet that stays unfunded
-// logs each skipped task once per reason instead of once per poll.
+// logs each skipped task once per reason instead of once per poll. A non-empty
+// map speeds up the feed scan, since funding the wallet makes the tasks
+// acceptable.
 const gasSkipLogged = new Map();
+// Same, for tasks on a chain this worker cannot sign for. Kept apart because
+// nothing the operator does short of updating the agent changes the answer,
+// so these must not speed up the feed scan.
+const chainSkipLogged = new Map();
 // Same idea for tasks resume is holding for gas: they are assigned to us, so
 // they never appear on the open board and must not share the board's prune.
 const resumeHoldLogged = new Map();
@@ -794,6 +981,8 @@ const RESUME_TRANSIENT_WINDOW_MS = 10 * 60 * 1000;
 const verifyingTasks = new Set();
 const verifyFailures = new Map();
 const MAX_VERIFY_ATTEMPTS = 5;
+// taskHash → last skip reason logged for a verification this worker cannot settle.
+const verifySkipLogged = new Map();
 
 process.on('disconnect', () => {
   log('parent disconnected, exiting');
@@ -984,6 +1173,12 @@ export const JS_TOOL_SENTINEL = '###BM_JS_TOOL_RESULT###:';
 
 export const _signers = signers;
 
+/** The signer the legacy 0G-only paths read. Exported so a test can check the
+ *  wiring, not just pickSignerWallet's own logic. */
+export function _signerWallet() {
+  return signerWallet;
+}
+
 export function buildTools(currentTaskHash = null, { posterAddress = null, ownerAddress = AGENT_OWNER_ADDRESS } = {}) {
   /** @type {import('ai').ToolSet} */
   const tools = {};
@@ -1023,8 +1218,24 @@ export function buildTools(currentTaskHash = null, { posterAddress = null, owner
       if (!Array.isArray(requiredCapabilities) || requiredCapabilities.length === 0) {
         return 'ERROR: delegate_to_agent requires `requiredCapabilities` (non-empty string array). Either supply at least one capability tag or complete the task yourself.';
       }
-      if (!signerWallet) {
-        return 'ERROR: cannot delegate — this agent has no signer (AGENT_PRIVATE_KEY unset), so it cannot fund a sub-task escrow. Complete the task yourself.';
+      // A sub-task is funded on the chain THIS backend posts new tasks on —
+      // POST /api/v1/tasks builds createTask there and refuses any other
+      // token — so delegation uses that chain's signer, token and escrow.
+      // Before this it always signed on 0G and sent native value, which a
+      // Base-posting backend refused outright (400 TOKEN_NOT_SETTLEMENT).
+      const posting = postingChainInfo();
+      const delegateSigner = posting ? signers[posting.key] : null;
+      if (!delegateSigner) {
+        return `ERROR: cannot delegate — this agent has no signer for ${posting?.key ?? 'the posting chain'} (AGENT_PRIVATE_KEY unset, or the backend injected no chain table), so it cannot fund a sub-task escrow. Complete the task yourself.`;
+      }
+      // An ERC-4337 agent's USDC and gas are meant to live in its smart
+      // account; the escrow below is funded from the signer wallet, which
+      // such an agent is not expected to keep funded (without a bundler its
+      // payouts do land there, so don't claim it is empty). Say so here,
+      // before the model spends its turn (and the storage upload) on a
+      // delegation that ends "0 USDC".
+      if (usesSmartAccount(posting.key)) {
+        return `ERROR: cannot delegate — this agent runs as a smart account on ${posting.key}, and sub-tasks can only be funded from its signer wallet, not from the smart account. Complete the task yourself.`;
       }
 
       // A delegated sub-task is a real, encrypted, escrow-funded marketplace
@@ -1035,15 +1246,65 @@ export function buildTools(currentTaskHash = null, { posterAddress = null, owner
       const auth = { 'Authorization': `Bearer ${AGENT_PLATFORM_TOKEN}` };
       const jsonAuth = { 'Content-Type': 'application/json', ...auth };
       try {
-        const NATIVE = '0x0000000000000000000000000000000000000000';
-        const rewardWei = ethers.parseEther(String(DELEGATE_REWARD_OG));
-        const reserveWei = ethers.parseEther(String(DELEGATE_GAS_RESERVE_OG));
+        const payToken = posting.token;
+        /** Set on an ERC-20 chain: the escrow pulls the reward with transferFrom. */
+        let approveEscrow = null;
+        const isNativeReward = payToken.kind === 'native';
+        const rewardSetting = payToken.symbol === '0G' ? DELEGATE_REWARD_OG : DELEGATE_REWARD_USDC;
+        const rewardRaw = ethers.parseUnits(String(rewardSetting), payToken.decimals);
 
         // Balance guard — don't post a sub-task we can't fund without starving
         // our own gas. Skip cleanly so the model just completes the task itself.
-        const balance = await signerWallet.provider.getBalance(signerWallet.address);
-        if (balance < rewardWei + reserveWei) {
-          return `Delegation skipped: wallet balance ${ethers.formatEther(balance)} 0G is below reward ${DELEGATE_REWARD_OG} + gas reserve ${DELEGATE_GAS_RESERVE_OG} 0G. Complete the task yourself.`;
+        if (isNativeReward) {
+          const reserveWei = ethers.parseEther(String(DELEGATE_GAS_RESERVE_OG));
+          let balance;
+          try {
+            balance = await delegateSigner.provider.getBalance(delegateSigner.address);
+          } catch (e) {
+            return `Delegation skipped: could not read the ${payToken.symbol} balance of ${delegateSigner.address} on ${posting.key} (${e.message}). Complete the task yourself.`;
+          }
+          if (balance < rewardRaw + reserveWei) {
+            return `Delegation skipped: wallet balance ${ethers.formatUnits(balance, payToken.decimals)} ${payToken.symbol} on ${posting.key} is below reward ${rewardSetting} + gas reserve ${DELEGATE_GAS_RESERVE_OG}. Complete the task yourself.`;
+          }
+        } else {
+          // The reward is an ERC-20 and gas is a different coin, so both are
+          // checked: the token balance against the reward, and the gas balance
+          // through the same preflight an accept uses.
+          const gasProblem = await preflightGas(posting.key, delegateSigner, false);
+          if (gasProblem) {
+            return `Delegation skipped: ${gasProblem} Complete the task yourself.`;
+          }
+          const erc20 = new ethers.Contract(payToken.address, ERC20_DELEGATE_ABI, delegateSigner);
+          let tokenBalance;
+          try {
+            tokenBalance = await erc20.balanceOf(delegateSigner.address);
+          } catch (e) {
+            return `Delegation skipped: could not read the ${payToken.symbol} balance of ${delegateSigner.address} on ${posting.key} (${e.message}). Complete the task yourself.`;
+          }
+          // Where the settlement token IS the gas coin (Arc's USDC), funding a
+          // sub-task spends the same balance that pays for this agent's own
+          // submitEvidence — so keep the reserve back, as the native branch
+          // does. Elsewhere gas is a different asset and preflightGas covered it.
+          const keepRaw = posting.nativeIsSettlementToken
+            ? ethers.parseUnits(String(DELEGATE_GAS_RESERVE_OG), payToken.decimals)
+            : 0n;
+          if (tokenBalance < rewardRaw + keepRaw) {
+            return `Delegation skipped: wallet holds ${ethers.formatUnits(tokenBalance, payToken.decimals)} ${payToken.symbol} on ${posting.key}, below the ${rewardSetting} ${payToken.symbol} reward${keepRaw > 0n ? ` plus the ${DELEGATE_GAS_RESERVE_OG} ${payToken.symbol} gas reserve` : ''}. Complete the task yourself.`;
+          }
+          // The approve itself waits until there is a createTask to fund:
+          // the storage upload alone takes 20-40s and any failure before then
+          // would have spent gas for nothing.
+          approveEscrow = async () => {
+            try {
+              const approval = await erc20.approve(posting.escrow, rewardRaw);
+              const approved = await approval.wait(1, TX_WAIT_TIMEOUT_MS);
+              return !approved || approved.status !== 1
+                ? `Delegation failed: ${payToken.symbol} approve tx reverted (${approval.hash}).`
+                : null;
+            } catch (e) {
+              return `Delegation failed: could not approve the escrow to pull ${rewardSetting} ${payToken.symbol} (${e.message}).`;
+            }
+          };
         }
 
         if (abandoned()) return abandoned();
@@ -1081,22 +1342,37 @@ export function buildTools(currentTaskHash = null, { posterAddress = null, owner
         }
 
         // 4. Build the createTask tx server-side, then sign + broadcast it from
-        //    this agent's wallet (funds the escrow with native 0G).
+        //    this agent's wallet, funding the escrow in the posting chain's
+        //    settlement token.
         const buildRes = await fetchWithTimeout(`${BACKEND_URL}/api/v1/tasks`, {
           method: 'POST', headers: jsonAuth,
           body: JSON.stringify({
-            taskHash, token: NATIVE, amount: rewardWei.toString(),
+            taskHash, token: payToken.address, amount: rewardRaw.toString(),
             category: 'delegated', locationZone: 'global', duration: '3600',
           }),
         });
         if (!buildRes.ok) return `Delegation failed: createTask build ${buildRes.status} ${(await buildRes.text()).slice(0, 120)}`;
-        const unsignedTx = (await buildRes.json()).data?.unsignedTx;
+        const built = (await buildRes.json()).data ?? {};
+        const unsignedTx = built.unsignedTx;
         if (!unsignedTx) return 'Delegation failed: createTask returned no unsignedTx';
+        // The backend names the chain it built for. A stale chain table here
+        // would sign that tx on the wrong chain; today only the token address
+        // check stands in the way, and only because the addresses differ.
+        if (built.chain && built.chain !== posting.key) {
+          return `Delegation failed: the backend built the task on ${built.chain}, but this agent posts on ${posting.key}; its chain table is stale — restart the agent.`;
+        }
 
         // Last point before funds move — an abandoned run must not fund a
-        // sub-task nobody will read the result of.
+        // sub-task nobody will read the result of. Checked again after the
+        // approval, which waits for its own confirmation.
         if (abandoned()) return abandoned();
-        const sent = await signerWallet.sendTransaction(unsignedTx);
+        if (approveEscrow) {
+          const approveProblem = await approveEscrow();
+          if (approveProblem) return approveProblem;
+          if (abandoned()) return abandoned();
+        }
+
+        const sent = await delegateSigner.sendTransaction(unsignedTx);
         log(`delegate: createTask broadcast ${sent.hash} for sub-task ${taskHash.slice(0, 10)}…`);
         let receipt;
         try {
@@ -1116,7 +1392,7 @@ export function buildTools(currentTaskHash = null, { posterAddress = null, owner
           }),
         });
         if (!idxRes.ok) return `Delegation failed: index ${idxRes.status} ${(await idxRes.text()).slice(0, 120)}`;
-        log(`delegate: sub-task ${taskHash.slice(0, 10)}… posted (reward ${DELEGATE_REWARD_OG} 0G, wrapped to ${Object.keys(wrappedKeys).length} executor(s))`);
+        log(`delegate: sub-task ${taskHash.slice(0, 10)}… posted on ${posting.key} (reward ${rewardSetting} ${payToken.symbol}, wrapped to ${Object.keys(wrappedKeys).length} executor(s))`);
 
         // 6. Poll our own posted-tasks inbox for the outcome. We're the poster,
         //    so /tasks/posted carries this sub-task's state + resultData.
@@ -1832,6 +2108,7 @@ async function pollAndWork() {
     // the fast gas re-check; drop them so the cadence and the map both relax.
     const onBoard = new Set(entries.map(e => e.meta.taskId));
     for (const k of [...gasSkipLogged.keys()]) if (!onBoard.has(k)) gasSkipLogged.delete(k);
+    for (const k of [...chainSkipLogged.keys()]) if (!onBoard.has(k)) chainSkipLogged.delete(k);
     for (const k of [...transientRefusalLogged.keys()]) if (!onBoard.has(k)) transientRefusalLogged.delete(k);
 
     const available = entries.filter(e => {
@@ -1859,8 +2136,9 @@ async function pollAndWork() {
     };
     const { affordable, skipped } = await pickAffordable(available, problemFor);
     for (const sk of skipped) {
-      if (gasSkipLogged.get(sk.taskHash) === sk.reason) continue;
-      gasSkipLogged.set(sk.taskHash, sk.reason);
+      const logged = sk.unsupported ? chainSkipLogged : gasSkipLogged;
+      if (logged.get(sk.taskHash) === sk.reason) continue;
+      logged.set(sk.taskHash, sk.reason);
       log(`skipping task ${sk.taskHash.slice(0, 10)}… on ${sk.chain}: ${sk.reason}`);
     }
     for (const e of affordable) gasSkipLogged.delete(e.meta.taskId);
@@ -1977,6 +2255,7 @@ async function pollAndWork() {
             acceptedRootHash = acceptJson.data?.rootHash ?? null;
             acceptedWrappedKey = acceptJson.data?.wrappedKey ?? null;
             acceptedPrivacy = acceptJson.data?.privacy ?? null;
+            acceptedChain = acceptJson.data?.chain ?? entry.meta?.chain ?? null;
           } catch { /* non-JSON body */ }
           break;
         }
@@ -2426,13 +2705,23 @@ async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrapp
   try {
     const taskStartedAt = Date.now();
 
+    // Accept should have been refused for this chain already (pickAffordable,
+    // gasGateBroadcast). If one slipped through, hand it back rather than
+    // sign on the wrong chain: release re-opens it if the assignment never
+    // landed, else the backend answers ON_CHAIN_LOCKED and releaseTask logs it.
+    if (isUnsupportedChain(acceptedChain)) {
+      log(`not working on ${acceptedTaskHash.slice(0, 10)}…: ${unsupportedChainReason(acceptedChain)}; releasing`);
+      await releaseTask(acceptedTaskHash);
+      return;
+    }
+
     // The task is now assigned to this wallet on-chain. Before spending an
     // LLM call, make sure we can pay for the submitEvidence tx that follows —
     // if not, leave the off-chain state at 'accepted' (NOT 'submitted': that
     // is set by /submit and cannot be re-driven) so resumeAssignedTasks
     // re-runs this task once the wallet is funded. Chain unknown (older
     // backend / legacy task) → checked at submit time instead.
-    if (acceptedChain === 'base' || acceptedChain === '0g') {
+    if (isSettlementChain(acceptedChain)) {
       const gasProblem = await preflightGas(acceptedChain, signerFor(acceptedChain));
       if (gasProblem) {
         log(`not working on ${acceptedTaskHash.slice(0, 10)}… yet: ${gasProblem} — it is assigned to this wallet on-chain; fund the wallet and the worker resumes it on a later poll`);
@@ -2876,7 +3165,13 @@ async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrapp
     } else {
       // The backend names the chain the unsigned tx targets. Pick that chain's
       // signer — the tx also carries chainId, so a wrong pick fails loudly at
-      // ethers rather than landing on the wrong network.
+      // ethers rather than landing on the wrong network. /accept named no
+      // chain if we got here with one we can't sign for; hand the task back.
+      if (isUnsupportedChain(submitJson.data?.chain)) {
+        log(`cannot submit ${acceptedTaskHash.slice(0, 10)}…: ${unsupportedChainReason(submitJson.data.chain)}; releasing`);
+        await releaseTask(acceptedTaskHash);
+        return;
+      }
       const submitChain = pickChain(submitJson.data?.chain);
       broadcastOk = await broadcastEvmSubmitEvidence(
         acceptedTaskHash, unsignedSubmitEvidence, submitChain, onChainTaskId,
@@ -2953,7 +3248,7 @@ async function broadcastEvmSubmitEvidence(taskHash, unsignedSubmitEvidence, subm
       const data = unsigned.data ?? '0x';
       if (!target) throw new Error('unsigned tx missing target address');
       const callData = encodeExecuteCallData(target, value, data);
-      const nonce = await getSmartAccountNonce(AA_ENTRY_POINT, AGENT_SMART_ACCOUNT_ADDRESS, BASE_RPC_URL);
+      const nonce = await getSmartAccountNonce(AA_ENTRY_POINT, AGENT_SMART_ACCOUNT_ADDRESS, chainInfo(submitChain).rpcUrl);
       const paymaster = AA_PAYMASTER
         ? { address: AA_PAYMASTER, verificationGasLimit: 100_000, postOpGasLimit: 50_000, data: '0x' }
         : undefined;
@@ -2986,7 +3281,7 @@ async function broadcastEvmSubmitEvidence(taskHash, unsignedSubmitEvidence, subm
       } catch (e) {
         log(`submitEvidence UserOp estimate failed, using defaults: ${e.message}`);
       }
-      signedUserOp = signUserOp(userOp, AA_ENTRY_POINT, BASE_CHAIN_ID, AGENT_PRIVATE_KEY);
+      signedUserOp = signUserOp(userOp, AA_ENTRY_POINT, chainInfo(submitChain).chainId, AGENT_PRIVATE_KEY);
     } catch (e) {
       log(`submitEvidence failed to build UserOp for ${short}…: ${e.message}`);
       return false;
@@ -3150,7 +3445,14 @@ async function resumeAssignedTasks() {
     log(`resume: failed to list executions: ${e.message}`);
     return;
   }
-  if (!Array.isArray(executions) || executions.length === 0) return;
+  if (!Array.isArray(executions)) return;
+  // /executions is this executor's whole history; only tasks still owed can
+  // be held or skipped below.
+  const owed = new Set(executions
+    .filter((i) => ['accepted', 'in_progress', 'submitted'].includes(i?.state?.status))
+    .map((i) => i?.meta?.taskId));
+  for (const k of [...resumeHoldLogged.keys()]) if (!owed.has(k)) resumeHoldLogged.delete(k);
+  if (executions.length === 0) return;
 
   for (const item of executions) {
     const meta = item?.meta;
@@ -3183,7 +3485,15 @@ async function resumeAssignedTasks() {
     // on tasks that can actually be driven. (Chain from meta; rows without it
     // fall through to the check inside runAcceptedTask.)
     const metaChain = meta.chain;
-    if (!finalizeOnly && (metaChain === 'base' || metaChain === '0g')) {
+    if (isUnsupportedChain(metaChain)) {
+      const why = unsupportedChainReason(metaChain);
+      if (resumeHoldLogged.get(taskHash) !== why) {
+        resumeHoldLogged.set(taskHash, why);
+        log(`resume: skipping ${taskHash.slice(0, 10)}…: ${why}`);
+      }
+      continue;
+    }
+    if (!finalizeOnly && isSettlementChain(metaChain)) {
       const gasProblem = await preflightGas(metaChain, signerFor(metaChain)).catch(() => null);
       if (gasProblem) {
         if (resumeHoldLogged.get(taskHash) !== gasProblem) {
@@ -3377,7 +3687,10 @@ async function pollAndVerify() {
     log(`verify: failed to list verifications: ${e.message}`);
     return;
   }
-  if (!Array.isArray(queue) || queue.length === 0) return;
+  if (!Array.isArray(queue)) return;
+  const queued = new Set(queue.map((i) => i?.meta?.taskId));
+  for (const k of [...verifySkipLogged.keys()]) if (!queued.has(k)) verifySkipLogged.delete(k);
+  if (queue.length === 0) return;
 
   for (const item of queue) {
     const meta = item?.meta;
@@ -3385,6 +3698,18 @@ async function pollAndVerify() {
     if (!meta || !state) continue;
     const taskHash = meta.taskId;
     if (!taskHash || verifyingTasks.has(taskHash)) continue;
+
+    // Skip before the LLM judge: a chain we cannot sign for can't be settled,
+    // and pickChain below would throw out of the loop and drop the rest of
+    // the queue.
+    if (isUnsupportedChain(item.chain)) {
+      const why = unsupportedChainReason(item.chain);
+      if (verifySkipLogged.get(taskHash) !== why) {
+        verifySkipLogged.set(taskHash, why);
+        log(`verify: skipping ${taskHash.slice(0, 10)}…: ${why}`);
+      }
+      continue;
+    }
 
     // Never grade our own work (the backend enforces this too).
     if (state.executorAddress && state.executorAddress.toLowerCase() === myAddr) continue;
@@ -3517,7 +3842,7 @@ async function pollAndVerify() {
           // recorded verifier on Base.
           if (settleViaAA) {
             const callData = encodeExecuteCallData(settleEscrow, 0n, data);
-            const nonce = await getSmartAccountNonce(AA_ENTRY_POINT, AGENT_SMART_ACCOUNT_ADDRESS, BASE_RPC_URL);
+            const nonce = await getSmartAccountNonce(AA_ENTRY_POINT, AGENT_SMART_ACCOUNT_ADDRESS, chainInfo(settleChain).rpcUrl);
             const paymaster = AA_PAYMASTER
               ? { address: AA_PAYMASTER, verificationGasLimit: 100_000, postOpGasLimit: 50_000, data: '0x' }
               : undefined;
@@ -3527,12 +3852,12 @@ async function pollAndVerify() {
               callData,
               paymaster,
             });
-            const signed = signUserOp(userOp, AA_ENTRY_POINT, BASE_CHAIN_ID, AGENT_PRIVATE_KEY);
+            const signed = signUserOp(userOp, AA_ENTRY_POINT, chainInfo(settleChain).chainId, AGENT_PRIVATE_KEY);
             const opHash = await submitUserOp(signed, PIMLICO_BUNDLER_URL, PIMLICO_API_KEY, AA_ENTRY_POINT);
             log(`verify: completeVerification UserOp submitted for ${taskHash.slice(0, 10)}… via bundler: ${opHash}`);
             recordPass = verdict.passed;
           } else {
-            const sent = await settleSigner.sendTransaction({ to: settleEscrow, data, chainId: settleChain === 'base' ? BASE_CHAIN_ID : OG_CHAIN_ID });
+            const sent = await settleSigner.sendTransaction({ to: settleEscrow, data, chainId: chainInfo(settleChain).chainId });
             log(`verify: completeVerification broadcast for ${taskHash.slice(0, 10)}… (passed=${verdict.passed}): ${sent.hash}`);
             const receipt = await sent.wait(1, TX_WAIT_TIMEOUT_MS);
             if (receipt?.status !== 1) { bumpVerifyFailure(taskHash); continue; }
@@ -3604,6 +3929,26 @@ function sendHeartbeat() {
   }
 }
 
+/**
+ * The POST /a2a/register body. `supportedChains` is what this code can sign
+ * for, not which chains this deployment configures: the declaration is
+ * stored per address and the last registration wins, so a backend with a
+ * different configuration must not narrow it. A chain the wallet can't pay
+ * gas on is refused before accept by acceptBlocker instead. A Sui-keyed
+ * worker has no EVM signer, so it declares only 'sui', which no settlement
+ * chain matches: the backend then refuses it tasks it could never finish.
+ * Exported for tests.
+ */
+export function registrationBody({ displayName, capabilities, publicKey, minReward, sui = false }) {
+  return {
+    displayName,
+    capabilities,
+    publicKey,
+    minReward: (minReward || '').trim() || undefined,
+    supportedChains: sui ? ['sui'] : [...SETTLEMENT_CHAINS],
+  };
+}
+
 async function ensureRegisteredAsA2AExecutor() {
   // The backend requires a pubkey at registration. We derive it from the
   // private key when the env var is missing, so this should only ever be empty
@@ -3620,12 +3965,13 @@ async function ensureRegisteredAsA2AExecutor() {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${AGENT_PLATFORM_TOKEN}`,
       },
-      body: JSON.stringify({
+      body: JSON.stringify(registrationBody({
         displayName: AGENT_NAME,
         capabilities: agentCapabilities,
         publicKey: AGENT_PUBLIC_KEY,
-        minReward: (process.env.AGENT_MIN_REWARD || '').trim() || undefined,
-      }),
+        minReward: process.env.AGENT_MIN_REWARD,
+        sui: !!suiSigner,
+      })),
     });
     if (res.ok) {
       log(`registered as A2A executor (caps=${agentCapabilities.join(',')})`);
@@ -3670,15 +4016,16 @@ function connectWebSocket() {
   // the task on-chain, so refuse up front when the event names a chain this
   // wallet cannot pay on. An exclusive offer declined this way lets the
   // cascade move to the next agent after its window instead of locking the
-  // task to an unfunded one. Events without a chain (older backend) fall
-  // through to the post-accept check in runAcceptedTask.
+  // task to an unfunded one. A chain this worker cannot sign for is declined
+  // the same way. Events without a chain (older backend) fall through to the
+  // post-accept check in runAcceptedTask.
   const gasGateBroadcast = async (taskId, chain) => {
-    if (chain !== 'base' && chain !== '0g') return false;
-    const reason = await preflightGas(chain, signerFor(chain)).catch(() => null);
-    if (!reason) return false;
-    if (gasSkipLogged.get(taskId) !== reason) {
-      gasSkipLogged.set(taskId, reason);
-      log(`skipping task ${taskId.slice(0, 10)}… on ${chain}: ${reason}`);
+    const blocker = await acceptBlocker(chain, (c) => preflightGas(c, signerFor(c)).catch(() => null));
+    if (!blocker) return false;
+    const logged = blocker.unsupported ? chainSkipLogged : gasSkipLogged;
+    if (logged.get(taskId) !== blocker.reason) {
+      logged.set(taskId, blocker.reason);
+      log(`skipping task ${taskId.slice(0, 10)}… on ${chain}: ${blocker.reason}`);
     }
     return true;
   };

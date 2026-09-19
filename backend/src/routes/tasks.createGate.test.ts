@@ -10,20 +10,28 @@ import request from 'supertest';
  * Run: npx vitest run src/routes/tasks.createGate.test.ts
  */
 
-const AGENT = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
-const ESCROW = '0xcccccccccccccccccccccccccccccccccccccccc';
+const { AGENT, ESCROW } = vi.hoisted(() => ({
+  AGENT: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  ESCROW: '0xcccccccccccccccccccccccccccccccccccccccc',
+}));
 
 vi.mock('../middleware/auth.js', () => {
   const gate = (req: any, _res: any, next: any) => { req.user = { address: AGENT }; next(); };
   return { requireAuth: gate, optionalAuth: gate };
 });
-vi.mock('../config.js', () => ({ config: { baseEscrowAddress: '' } }));
+// A 0G-only stack: the posting chain is 0G and its settlement token native.
+vi.mock('../config.js', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('../config.js')>();
+  return {
+    ...mod,
+    config: { ...mod.config, postingChain: '', blindEscrowAddress: ESCROW, baseEscrowAddress: '' },
+  };
+});
 vi.mock('../services/taskChain.js', () => ({ resolveTaskChainById: vi.fn() }));
 
 const buildCreateTask = vi.fn(async () => ({ to: ESCROW, data: '0xcreate' }));
 vi.mock('../services/escrow.js', () => ({
-  buildCreateTask: (...a: unknown[]) => buildCreateTask(...(a as [])),
-  buildCreateTaskBase: vi.fn(),
+  buildCreateTaskOn: (...a: unknown[]) => buildCreateTask(...(a as [])),
 }));
 vi.mock('../services/chain.js', () => ({
   getTokenDecimals: vi.fn(async () => 18),
@@ -31,7 +39,9 @@ vi.mock('../services/chain.js', () => ({
 }));
 vi.mock('../services/accountingService.js', () => ({ recordTransaction: vi.fn(async () => ({})) }));
 vi.mock('../services/socket.js', () => ({ rooms: { tasks: vi.fn(), platform: vi.fn() } }));
-vi.mock('../services/a2aStore.js', () => ({}));
+vi.mock('../services/a2aStore.js', () => ({
+  claimTaskHash: vi.fn(async (_hash: string, poster: string) => ({ poster: poster.toLowerCase(), mine: true })),
+}));
 vi.mock('../services/database.js', () => ({ getDb: vi.fn() }));
 vi.mock('../services/neonDb.js', () => ({ getPool: vi.fn() }));
 

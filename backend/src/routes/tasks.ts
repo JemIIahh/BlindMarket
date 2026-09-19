@@ -1,11 +1,15 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import { ethers } from 'ethers';
 import { requireAuth, optionalAuth } from '../middleware/auth.js';
 import { canViewerSeeResult } from '../services/resultVisibility.js';
 import { AppError } from '../middleware/errorHandler.js';
 import * as escrowService from '../services/escrow.js';
 import * as registryService from '../services/registry.js';
-import { getTokenDecimals, provider, baseProvider, escrow, baseEscrow } from '../services/chain.js';
+import { getTokenDecimals } from '../services/chain.js';
+import { chainRuntime } from '../services/chainRuntime.js';
+import { postingChain, settlementChainConfig } from '../services/settlementChains.js';
+import { payoutCurrency } from '../services/settlementUnits.js';
 import { resolveTaskChainById, resolveCachedTaskByHash, type TaskChain } from '../services/taskChain.js';
 import type { AuthRequest, ApiResponse } from '../types.js';
 import { AGENT_CAPABILITIES } from '../types.js';
@@ -98,6 +102,9 @@ function serializeBigInts(obj: Record<string, unknown>): Record<string, unknown>
 /**
  * GET /api/v1/tasks
  * List open tasks from TaskRegistry (paginated).
+ *
+ * 0G only, by design: the TaskRegistry and the numeric ids it lists belong to
+ * the 0G escrow. Tasks on other settlement chains are listed by /a2a/tasks.
  */
 // Public list — handler is unauthenticated, but the typed request lets us
 // optionally log the caller's address if an Authorization header happens to be
@@ -207,13 +214,19 @@ tasksRouter.get('/:id', optionalAuth, async (req: AuthRequest, res, next) => {
         }
         throw err;
       }),
-      // The TaskRegistry lives on 0G; reading it with a Base id would return
-      // the meta of an unrelated 0G task that happens to share the number.
-      chain === 'base' ? Promise.resolve(null) : registryService.getTaskMeta(taskId).catch(() => null),
+      // The TaskRegistry lives on 0G; reading it with another chain's id would
+      // return the meta of an unrelated 0G task that happens to share the number.
+      settlementChainConfig(chain).hasTaskRegistry
+        ? registryService.getTaskMeta(taskId).catch(() => null)
+        : Promise.resolve(null),
     ]);
 
     const taskHash = task.taskHash;
     const decimals = await getTokenDecimals(task.token, chain);
+    // The token's symbol when it is the chain's settlement token, else null:
+    // together with `decimals` this is the unit the reward is in, so the
+    // detail page no longer assumes every task is priced like a new one.
+    const symbol = payoutCurrency(chain, task.token)?.symbol ?? null;
     // Same flag as the list endpoint — lets the detail page surface the
     // stranded notice when a Funded task can never be picked up by an agent.
     const indexedSet = await a2aStore.getIndexedHashes([taskHash]);
@@ -244,6 +257,7 @@ tasksRouter.get('/:id', optionalAuth, async (req: AuthRequest, res, next) => {
         // Which escrow holds the task — the frontend picks the matching
         // chain explorer (Base vs 0G) for its hash/address links.
         chain,
+        symbol,
         a2aIndexed,
         // Public projection — this route has no auth, and full A2A meta
         // carries the brief's key material (wrappedKeys/keyCustodyBlob) plus
@@ -355,16 +369,41 @@ tasksRouter.post('/', requireAuth, async (req: AuthRequest, res, next) => {
     }
 
     const amountBigInt = BigInt(data.amount);
-    const isNative = data.token === '0x0000000000000000000000000000000000000000';
 
-    // Base escrow for settlement (USDC) when configured, else 0G escrow (legacy)
-    const useBase = !!config.baseEscrowAddress;
-    const buildTask = useBase ? escrowService.buildCreateTaskBase : escrowService.buildCreateTask;
+    // New tasks are funded on this deployment's posting chain (POSTING_CHAIN,
+    // else Base when it has an escrow, else 0G), in that chain's settlement
+    // token. Any other token would revert TokenNotAllowed, or be refused
+    // later by /a2a/tasks/index, with the poster's gas spent.
+    const chain = postingChain();
+    const { label, escrowAddress, escrowEnv, chainId, token } = settlementChainConfig(chain);
+    if (!escrowAddress) {
+      throw new AppError(503, 'CHAIN_NOT_CONFIGURED', `This backend has no ${label} escrow to post tasks on (${escrowEnv})`);
+    }
+    // Claim the hash for this poster before the tx exists, so nobody who
+    // sees it on-chain can index it first (a2aStore.claimTaskHash). Refused
+    // here, before any gas is spent, when another poster already holds it.
+    const claim = await a2aStore.claimTaskHash(data.taskHash, from);
+    if (!claim.mine) {
+      throw new AppError(409, 'TASK_HASH_TAKEN', 'Another poster is already posting a task with this hash — post with a new brief');
+    }
+    if (!token.address || !payoutCurrency(chain, data.token)) {
+      throw new AppError(
+        400,
+        'TOKEN_NOT_SETTLEMENT',
+        `New tasks are escrowed in ${token.unit.symbol} on ${label} (token ${token.address ?? 'unset'}), not ${data.token}`,
+      );
+    }
+    // The match above ignores letter case. Build with the registry's address,
+    // checksummed afresh: a mixed-case spelling with a bad checksum, in the
+    // request or in BASE_USDC_ADDRESS, would make ethers throw.
+    const tokenAddress = ethers.getAddress(token.address.toLowerCase());
+    const isNative = token.kind === 'native';
 
-    const tx = await buildTask(
+    const tx = await escrowService.buildCreateTaskOn(
+      chain,
       from,
       data.taskHash,
-      data.token,
+      tokenAddress,
       amountBigInt,
       'general',
       data.locationZone,
@@ -386,13 +425,14 @@ tasksRouter.post('/', requireAuth, async (req: AuthRequest, res, next) => {
     // receipt-verified POST /a2a/tasks/index flips it to confirmed; an
     // abandoned build stays visibly pending instead of masquerading as funded.
     try {
-      const decimals = await getTokenDecimals(data.token, useBase ? 'base' : '0g');
+      const decimals = await getTokenDecimals(tokenAddress, chain);
       accountingService.recordTransaction({
         address: from,
         role: 'agent',
         taskId: data.taskHash,
         type: 'escrow_lock',
         amount: Number(data.amount) / (10 ** decimals),
+        unit: token.unit.symbol,
         status: 'pending',
       });
     } catch (accErr) {
@@ -401,7 +441,8 @@ tasksRouter.post('/', requireAuth, async (req: AuthRequest, res, next) => {
 
     const body: ApiResponse = {
       success: true,
-      data: { unsignedTx: tx },
+      // chain and chainId name where the tx must be sent.
+      data: { unsignedTx: tx, chain, chainId },
     };
     rooms.tasks('task:created', { locationZone: data.locationZone, amount: data.amount });
     rooms.platform('stats:update', {});
@@ -571,6 +612,7 @@ tasksRouter.post('/:id/cancel', requireAuth, async (req: AuthRequest, res, next)
         taskId: String(taskId),
         type: 'refund',
         amount,
+        unit: payoutCurrency(chain, task.token)?.symbol,
         status: 'pending',
       });
     } catch (accErr) {
@@ -579,7 +621,8 @@ tasksRouter.post('/:id/cancel', requireAuth, async (req: AuthRequest, res, next)
 
     const body: ApiResponse = {
       success: true,
-      data: { unsignedTx: tx },
+      // chain and chainId name where the tx must be sent (a task lives on one chain).
+      data: { unsignedTx: tx, chain, chainId: settlementChainConfig(chain).chainId },
     };
     const replacer = (key: string, value: any) => typeof value === 'bigint' ? value.toString() : value;
     res.json(JSON.parse(JSON.stringify(body, replacer)));
@@ -637,6 +680,7 @@ tasksRouter.post('/:id/timeout', requireAuth, async (req: AuthRequest, res, next
         taskId: String(taskId),
         type: 'refund',
         amount,
+        unit: payoutCurrency(chain, task.token)?.symbol,
         status: 'pending',
       });
     } catch (accErr) {
@@ -645,7 +689,8 @@ tasksRouter.post('/:id/timeout', requireAuth, async (req: AuthRequest, res, next
 
     const body: ApiResponse = {
       success: true,
-      data: { unsignedTx: tx },
+      // chain and chainId name where the tx must be sent (a task lives on one chain).
+      data: { unsignedTx: tx, chain, chainId: settlementChainConfig(chain).chainId },
     };
     const replacer = (key: string, value: any) => typeof value === 'bigint' ? value.toString() : value;
     res.json(JSON.parse(JSON.stringify(body, replacer)));
@@ -688,9 +733,8 @@ tasksRouter.post('/:id/confirm-tx', requireAuth, async (req: AuthRequest, res, n
     if (!chain) {
       throw new AppError(403, 'FORBIDDEN', 'Only the task agent can confirm refunds');
     }
-    const prov = chain === 'base' ? baseProvider : provider;
-    const esc = chain === 'base' ? baseEscrow : escrow;
-    if (!prov || !esc) {
+    const { provider: prov, escrow: esc } = chainRuntime(chain);
+    if (!esc) {
       throw new AppError(503, 'CHAIN_NOT_CONFIGURED', `Settlement chain ${chain} is not configured on this backend`);
     }
 

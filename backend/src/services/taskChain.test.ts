@@ -16,14 +16,31 @@ const getTaskIdByHash = vi.fn();
 const getBaseTaskIdByHash = vi.fn();
 const forceBaseTick = vi.fn(async () => {});
 const getTaskOn = vi.fn();
+const getMeta = vi.fn();
+// baseEscrow just needs to be non-null for the Base branch to be considered;
+// the module reads it per call, so a test can switch Base off.
+const chainMod = vi.hoisted(() => ({ baseEscrow: {} as unknown }));
 
-// baseEscrow just needs to be non-null for the Base branch to be considered.
-vi.mock('./chain.js', () => ({ baseEscrow: {} }));
+vi.mock('./chain.js', () => chainMod);
+// The 0G index is enabled by the registry's 0G escrow; a test can unset it.
+const OG_ESCROW = '0x037529B296a89E6Dd1abAF84D413cb2dD70C5be5';
+const ogEscrow = vi.hoisted(() => ({ current: '0x037529B296a89E6Dd1abAF84D413cb2dD70C5be5' as string | null }));
+vi.mock('./settlementChains.js', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('./settlementChains.js')>();
+  return {
+    ...mod,
+    settlementChainConfig: (key: '0g' | 'base') => {
+      const entry = mod.settlementChainConfig(key);
+      return key === '0g' ? { ...entry, escrowAddress: ogEscrow.current } : entry;
+    },
+  };
+});
+vi.mock('./a2aStore.js', () => ({ getMeta }));
 vi.mock('./escrowEvents.js', () => ({ getCachedTaskIdByHash, getTaskIdByHash }));
 vi.mock('./baseEscrowEvents.js', () => ({ getBaseTaskIdByHash, forceBaseTick }));
 vi.mock('./escrow.js', () => ({ getTaskOn }));
 
-const { resolveTaskByHash, resolveTaskChainById } = await import('./taskChain.js');
+const { resolveTaskByHash, resolveCachedTaskByHash, resolveTaskChainById } = await import('./taskChain.js');
 
 const HASH = '0xabc';
 
@@ -32,6 +49,63 @@ beforeEach(() => {
   getCachedTaskIdByHash.mockResolvedValue(null);
   getTaskIdByHash.mockResolvedValue(null);
   getBaseTaskIdByHash.mockResolvedValue(null);
+  // Rows indexed before the chain was recorded: every chain is searched.
+  getMeta.mockResolvedValue(null);
+  chainMod.baseEscrow = {};
+});
+
+describe('a task stays on the chain it was indexed on', () => {
+  it('resolves a hash escrowed on both chains to the recorded one', async () => {
+    getBaseTaskIdByHash.mockResolvedValue('42');
+    getCachedTaskIdByHash.mockResolvedValue('7');
+
+    getMeta.mockResolvedValue({ chain: '0g' });
+    expect(await resolveTaskByHash(HASH)).toEqual({ taskId: '7', chain: '0g' });
+    expect(await resolveCachedTaskByHash(HASH)).toEqual({ taskId: '7', chain: '0g' });
+    expect(getBaseTaskIdByHash).not.toHaveBeenCalled();
+
+    getMeta.mockResolvedValue({ chain: 'base' });
+    expect(await resolveTaskByHash(HASH)).toEqual({ taskId: '42', chain: 'base' });
+    expect(await resolveCachedTaskByHash(HASH)).toEqual({ taskId: '42', chain: 'base' });
+  });
+
+  it('never falls back to 0G for a task recorded on Base, even when Base has not indexed it yet', async () => {
+    getMeta.mockResolvedValue({ chain: 'base' });
+    getTaskIdByHash.mockResolvedValue('7');
+
+    expect(await resolveTaskByHash(HASH)).toBeNull();
+    expect(forceBaseTick).toHaveBeenCalled();
+    expect(getCachedTaskIdByHash).not.toHaveBeenCalled();
+    expect(getTaskIdByHash).not.toHaveBeenCalled();
+  });
+
+  it('resolves nothing for a task recorded on Base when this backend has no Base escrow', async () => {
+    chainMod.baseEscrow = null;
+    getMeta.mockResolvedValue({ chain: 'base' });
+    getCachedTaskIdByHash.mockResolvedValue('7');
+    getTaskIdByHash.mockResolvedValue('7');
+
+    expect(await resolveTaskByHash(HASH)).toBeNull();
+    expect(getBaseTaskIdByHash).not.toHaveBeenCalled();
+    expect(getTaskIdByHash).not.toHaveBeenCalled();
+  });
+
+  it('searches nothing for a chain this code does not know', async () => {
+    getMeta.mockResolvedValue({ chain: 'arc' });
+    getBaseTaskIdByHash.mockResolvedValue('42');
+    getCachedTaskIdByHash.mockResolvedValue('7');
+
+    expect(await resolveTaskByHash(HASH)).toBeNull();
+    expect(await resolveCachedTaskByHash(HASH)).toBeNull();
+    expect(forceBaseTick).not.toHaveBeenCalled();
+    expect(getTaskIdByHash).not.toHaveBeenCalled();
+  });
+
+  it('searches every chain when the meta cannot be read', async () => {
+    getMeta.mockRejectedValue(new Error('redis down'));
+    getBaseTaskIdByHash.mockResolvedValue('42');
+    expect(await resolveTaskByHash(HASH)).toEqual({ taskId: '42', chain: 'base' });
+  });
 });
 
 describe('resolveTaskByHash', () => {
@@ -124,5 +198,25 @@ describe('resolveTaskChainById', () => {
     });
 
     expect(await resolveTaskChainById(7, OWNER)).toBe('0g');
+  });
+});
+
+describe('the 0G index is only consulted where this stack has a 0G escrow', () => {
+  it('skips the 0G slow path for an unindexed hash on a Base-only stack', async () => {
+    ogEscrow.current = null;
+    try {
+      const resolved = await resolveTaskByHash(HASH);
+      expect(resolved).toBeNull();
+      expect(forceBaseTick).toHaveBeenCalled();
+      expect(getTaskIdByHash).not.toHaveBeenCalled();
+      expect(getCachedTaskIdByHash).not.toHaveBeenCalled();
+    } finally {
+      ogEscrow.current = OG_ESCROW;
+    }
+  });
+
+  it('consults it where the escrow is configured', async () => {
+    getTaskIdByHash.mockResolvedValueOnce('7');
+    expect(await resolveTaskByHash(HASH)).toEqual({ taskId: '7', chain: '0g' });
   });
 });

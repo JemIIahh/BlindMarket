@@ -1,7 +1,8 @@
 /**
  * Service prices, task rewards and agent minimum rewards are integers in the
- * settlement token's smallest unit: USDC (6 decimals) when a Base escrow is
- * configured, native 0G (18 decimals) otherwise.
+ * smallest unit of the token new tasks are posted in: USDC (6 decimals) on a
+ * stack that posts on Base, native 0G (18 decimals) on one that posts on 0G.
+ * See pricingUnit().
  *
  * Until Sep 2026 the web app wrote service prices and minimum rewards with
  * 18 decimals even on Base, and the SDK samples used 1 0G = 10^18. The
@@ -9,10 +10,90 @@
  * listed service asked for ~10^12 times its price and an agent with a
  * minimum reward was never offered a Base task.
  */
-import { config } from '../config.js';
+import {
+  isSettlementChainKey,
+  postingChain,
+  settlementChainConfig,
+  USDC_UNIT,
+  type SettlementUnit,
+} from './settlementChains.js';
+import type { TaskChain } from './taskChain.js';
 
-export function settlementToken(): { symbol: 'USDC' | '0G'; decimals: 6 | 18 } {
-  return config.baseEscrowAddress ? { symbol: 'USDC', decimals: 6 } : { symbol: '0G', decimals: 18 };
+export type { SettlementUnit };
+
+/**
+ * The unit every price on this deployment is written in: service prices,
+ * reward floors, and the earnings figure the UI shows. It is the settlement
+ * token of the chain new tasks are posted on, because that is what a poster
+ * actually escrows.
+ *
+ * Until R12 this asked a narrower question — "is a Base escrow configured?" —
+ * which gave the same answer while the posting chain was implied by that same
+ * setting, and needed a boot check (assertPostingUnitMatchesPricing, now
+ * removed) to refuse the one configuration where the two disagreed:
+ * POSTING_CHAIN=0g on a stack with a Base escrow. That stack now simply
+ * prices in 0G.
+ */
+export function pricingUnit(): SettlementUnit {
+  return settlementChainConfig(postingChain()).token.unit;
+}
+
+/**
+ * What clients will still get wrong about prices here, for the boot log.
+ *
+ * The web app and the MCP pick their payment token by "is a Base escrow
+ * configured?" (frontend/src/config/constants.ts), the rule the backend used
+ * before R12. On a stack that has a Base escrow but posts somewhere else they
+ * send Base's USDC address, which POST /tasks refuses, and — when the posting
+ * chain prices in another unit — show every amount out by a factor of 10^12.
+ * Loud, not silent, but worth saying at boot: until R12 this configuration
+ * refused to start at all. R16 makes clients read the posting chain from the
+ * backend.
+ */
+export function clientPricingWarnings(): string[] {
+  const posting = settlementChainConfig(postingChain());
+  if (posting.key === 'base' || settlementChainConfig('base').escrowAddress === null) return [];
+  const unit = posting.token.unit;
+  // What a configured Base escrow makes a client assume it should pay in.
+  const assumed = USDC_UNIT;
+  return [
+    `new tasks post on ${posting.label} in ${unit.symbol}, but a Base escrow is configured, so the web app ` +
+      `and the MCP will send Base's USDC address, which POST /tasks refuses (TOKEN_NOT_SETTLEMENT)` +
+      `${sameUnit(unit, assumed) ? '' : `, and will show and accept prices in ${assumed.symbol} rather than ${unit.symbol}`}. ` +
+      `Amounts already stored — service prices and reward floors — were written in whichever unit was in ` +
+      `force then, and nothing re-keys them. Unset POSTING_CHAIN, or set BASE_ESCROW_ADDRESS to the zero ` +
+      `address, unless this stack is used only through the API and its stored amounts are already in ` +
+      `${unit.symbol}.`,
+  ];
+}
+
+/** A task's reward, with the unit it is escrowed in — amounts are not comparable across units. */
+export interface TaskReward {
+  amount: bigint;
+  unit: SettlementUnit;
+}
+
+/**
+ * Whether two amounts are in the same unit, and so comparable. Symbol alone is
+ * not enough: Arc's USDC is 18 decimals natively and 6 through its ERC-20, so
+ * two "USDC" amounts there can differ by 10^12.
+ */
+export function sameUnit(a: SettlementUnit, b: SettlementUnit): boolean {
+  return a.symbol === b.symbol && a.decimals === b.decimals;
+}
+
+/**
+ * The unit of a task escrowed in `token` on `chain`, or null when that is not
+ * the token BlindMarket settles in on that chain (settlementChains.ts), or the
+ * chain is one this code does not know. Keyed by chain as well as token
+ * because address(0) means a different asset on each chain: native 0G on 0G,
+ * but native 18-decimal USDC on Arc, where only the ERC-20 is the settlement
+ * token. A chain whose ERC-20 is not configured books nothing.
+ */
+export function payoutCurrency(chain: TaskChain, token: string): SettlementUnit | null {
+  if (!isSettlementChainKey(chain)) return null;
+  const { address, unit } = settlementChainConfig(chain).token;
+  return address && token.toLowerCase() === address.toLowerCase() ? unit : null;
 }
 
 // 10^12 base units is 1,000,000 USDC, which is no plausible per-call price or
@@ -27,8 +108,20 @@ const LEGACY_SCALE = 10n ** 12n;
  * a non-negative integer string.
  */
 export function normalizeSettlementAmount(raw: string): string {
-  if (!config.baseEscrowAddress) return raw;
+  if (pricingUnit().decimals !== USDC_UNIT.decimals) return raw;
   const value = BigInt(raw);
   if (value < LEGACY_SCALE) return raw;
   return ((value + LEGACY_SCALE - 1n) / LEGACY_SCALE).toString();
+}
+
+/**
+ * A native-coin amount in a token's own units, rounded up. The native coin has
+ * 18 decimals. Used where the gas coin and the settlement token are one asset
+ * (Arc's USDC: 18 decimals natively, 6 through its ERC-20), so a withdraw can
+ * keep the gas reserve back while sweeping the ERC-20.
+ */
+export function nativeWeiToTokenUnits(wei: bigint, decimals: number): bigint {
+  if (decimals >= 18) return wei * 10n ** BigInt(decimals - 18);
+  const scale = 10n ** BigInt(18 - decimals);
+  return (wei + scale - 1n) / scale;
 }

@@ -1,8 +1,10 @@
 import * as agentStore from './agentStore.js';
+import { supportsChain } from './executorChains.js';
 import * as badgeStore from './badgeStore.js';
 import * as reviewStore from './reviewStore.js';
 import * as a2aStore from './a2aStore.js';
 import { getDecayedReputation } from './reputationDecay.js';
+import { pricingUnit, sameUnit, type TaskReward } from './settlementUnits.js';
 import type { AgentExecutor, AgentCapability } from '../types.js';
 
 // ── Cold-start constants (Part 2) ────────────────────────────────────────────
@@ -155,13 +157,23 @@ export function hasAllCapabilities(
  * at or above the agent's declared floor". A malformed floor keeps the agent
  * (never exclude on bad data). Used by rankAgents, pickExplorationAgent, and
  * the semantic cascade ranking so the three paths can't drift.
+ *
+ * A floor is written in the deployment's pricing unit. A task escrowed in
+ * another unit cannot be compared with it, and an incomparable reward does
+ * NOT clear the floor: waiving it let a poster escrow 1 wei of native 0G on a
+ * USDC-pricing stack and have the cascade offer it to every agent whatever
+ * their floor, each burning a model run for nothing. An agent with no floor
+ * still takes such tasks; one with a floor takes only tasks it can price.
  */
 export function meetsRewardFloor(
   agent: Pick<AgentExecutor, 'minReward'>,
-  taskReward: bigint | null,
+  taskReward: TaskReward | null,
 ): boolean {
   if (taskReward === null || !agent.minReward) return true;
-  try { return BigInt(agent.minReward) <= taskReward; } catch { return true; }
+  if (!sameUnit(taskReward.unit, pricingUnit())) {
+    try { return BigInt(agent.minReward) === 0n; } catch { return true; }
+  }
+  try { return BigInt(agent.minReward) <= taskReward.amount; } catch { return true; }
 }
 
 /**
@@ -197,8 +209,9 @@ function randomPick<T>(arr: T[]): T {
 export async function pickExplorationAgent(
   requiredCapabilities: AgentCapability[],
   mode: 'merit' | 'balanced' = 'merit',
-  taskRewardWei?: string,
+  taskReward?: TaskReward | null,
   rng: () => number = Math.random,
+  chain?: string,
 ): Promise<ScoredAgent | null> {
   const rate = mode === 'balanced' ? EXPLORATION_RATE_BALANCED : EXPLORATION_RATE;
   if (rng() >= rate) return null;
@@ -212,9 +225,10 @@ export async function pickExplorationAgent(
   // job, not to hand a task's first exclusive offer to an agent that cannot
   // do it. (The ranked flow that follows scores overlap but does not filter
   // on it — capability tags are soft there; see semanticMatch.ts.)
-  const taskReward = taskRewardWei ? BigInt(taskRewardWei) : null;
   const eligible = agents.filter((a) =>
-    meetsRewardFloor(a, taskReward) && hasAllCapabilities(a, requiredCapabilities),
+    meetsRewardFloor(a, taskReward ?? null)
+    && hasAllCapabilities(a, requiredCapabilities)
+    && supportsChain(a, chain),
   );
 
   // Filter to "new" agents: fewer than EXPERIENCE_THRESHOLD completed tasks
@@ -237,15 +251,15 @@ export async function pickExplorationAgent(
  */
 export async function rankAgents(
   requiredCapabilities: AgentCapability[],
-  taskRewardWei?: string,
+  taskReward?: TaskReward | null,
+  chain?: string,
 ): Promise<ScoredAgent[]> {
   // Semantic matching is the primary router — list ALL agents, KNN ranks them.
   const agents = await agentStore.listAgents();
   if (agents.length === 0) return [];
 
   // Filter by minReward
-  const taskReward = taskRewardWei ? BigInt(taskRewardWei) : null;
-  const eligible = agents.filter((a) => meetsRewardFloor(a, taskReward));
+  const eligible = agents.filter((a) => meetsRewardFloor(a, taskReward ?? null) && supportsChain(a, chain));
   if (eligible.length === 0) return [];
 
   const scored = await Promise.all(

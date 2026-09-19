@@ -19,7 +19,9 @@ import { get, authedPost } from '../lib/api';
 import { signAndSendTx } from '../lib/txSigner';
 import { useChainAddress } from '../hooks/useChainWallet';
 import { getOrCreateExecutorIdentity } from '../lib/executorIdentity';
-import { BASE_CHAIN_ID, MARKETPLACE_TOKEN_ADDRESS, unsetIfZero } from '../config/constants';
+// The deploy fee is Base USDC (AgentFactory lives on Base), whatever token
+// new tasks are priced in — so not the marketplace token.
+import { BASE_CHAIN_ID, BASE_USDC_ADDRESS, unsetIfZero } from '../config/constants';
 import { CONTRACT_ADDRESSES } from '../config/contractAddresses';
 import { isMainnet } from '../config/constants';
 
@@ -197,7 +199,7 @@ export default function DeployAgentForm() {
   useEffect(() => {
     if (!address || !walletClient) return;
     const provider = new BrowserProvider(walletClient.transport);
-    const usdc = new Contract(MARKETPLACE_TOKEN_ADDRESS, USDC_ABI, provider);
+    const usdc = new Contract(BASE_USDC_ADDRESS, USDC_ABI, provider);
     usdc.balanceOf(address).then((b: bigint) => setUsdcBalance(b)).catch(() => {});
   }, [address, walletClient, status]);
 
@@ -288,18 +290,18 @@ export default function DeployAgentForm() {
 
       // Step 1: Approve USDC spend (relayed — gas paid in USDC)
       setStatus('approving');
-      const usdc = new Contract(MARKETPLACE_TOKEN_ADDRESS, USDC_ABI, provider);
+      const usdc = new Contract(BASE_USDC_ADDRESS, USDC_ABI, provider);
       const currentAllowance = await usdc.allowance(address, AGENT_FACTORY_ADDRESS);
       if (currentAllowance < DEPLOY_FEE_USDC) {
         const approveTx = await usdc.approve.populateTransaction(AGENT_FACTORY_ADDRESS, DEPLOY_FEE_USDC);
-        const approveResult = await signAndSendTx(signer, approveTx as any);
+        const approveResult = await signAndSendTx(signer, approveTx as any, undefined, { chain: 'base' });
         console.log(`[deploy] USDC approve relay done hash=${approveResult.hash} userOp=${approveResult.userOp ?? false}`);
 
         // Poll allowance until on-chain — UserOps can take several blocks
         console.log(`[deploy] Waiting for USDC allowance to be confirmed on-chain...`);
         for (let i = 0; i < 20; i++) {
           await new Promise(r => setTimeout(r, 3000));
-          const fresh = new Contract(MARKETPLACE_TOKEN_ADDRESS, USDC_ABI, provider);
+          const fresh = new Contract(BASE_USDC_ADDRESS, USDC_ABI, provider);
           const allowance = await fresh.allowance(address, AGENT_FACTORY_ADDRESS);
           if (allowance >= DEPLOY_FEE_USDC) {
             console.log(`[deploy] USDC allowance confirmed: ${allowance}`);
@@ -314,7 +316,7 @@ export default function DeployAgentForm() {
       const factory = new Contract(AGENT_FACTORY_ADDRESS, AGENT_FACTORY_ABI, provider);
       console.log('[deploy] Calling deployAgent(0)...');
       const deployTx = await factory.deployAgent.populateTransaction(0);
-      const deployResult = await signAndSendTx(signer, deployTx as any);
+      const deployResult = await signAndSendTx(signer, deployTx as any, undefined, { chain: 'base' });
       console.log(`[deploy] AgentFactory relay done hash=${deployResult.hash} userOp=${deployResult.userOp ?? false}`);
       if (deployResult.userOp) {
         await new Promise(r => setTimeout(r, 15000));

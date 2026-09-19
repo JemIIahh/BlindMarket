@@ -17,14 +17,24 @@ vi.hoisted(() => {
 // semanticMatch imports neonDb/agentScorer at module load; the functions under
 // test here are pure, so leaf stubs are enough (same pattern as the
 // projection tests).
+/** What this deployment prices in; reward floors are written in it. */
+const PRICING = vi.hoisted(() => ({ symbol: 'USDC', decimals: 6 }));
+
 vi.mock('./neonDb.js', () => ({ getPool: vi.fn() }));
 vi.mock('./agentScorer.js', () => ({
   rankAgents: vi.fn(),
   dominanceMultiplier: vi.fn(async () => 1),
   // Real logic mirrored (importActual would drag in redis via a2aStore).
-  meetsRewardFloor: (a: { minReward?: string }, t: bigint | null) => {
+  // Real logic mirrored (importActual would drag in redis via a2aStore),
+  // including the unit rule: a floor is written in the deployment's pricing
+  // unit and says nothing about a task escrowed in another one.
+  meetsRewardFloor: (
+    a: { minReward?: string },
+    t: { amount: bigint; unit: { symbol: string; decimals: number } } | null,
+  ) => {
     if (t === null || !a.minReward) return true;
-    try { return BigInt(a.minReward) <= t; } catch { return true; }
+    if (t.unit.symbol !== PRICING.symbol || t.unit.decimals !== PRICING.decimals) return true;
+    try { return BigInt(a.minReward) <= t.amount; } catch { return true; }
   },
   hasAllCapabilities: (a: { capabilities: string[] }, req: string[]) =>
     req.every((c) => a.capabilities.includes(c)),
@@ -234,8 +244,28 @@ describe('semanticCascadeRanking (Phase 2 flip — cascade offer queue)', () => 
     arm();
     vi.mocked(getAgent).mockImplementation(async (addr: string) =>
       agentRow(addr, addr === '0xaaa' ? '2000' : undefined));
-    const out = await semanticCascadeRanking(meta, '1000');
+    const usdc = { symbol: 'USDC' as const, decimals: 6 as const };
+    const out = await semanticCascadeRanking(meta, { amount: 1000n, unit: usdc });
     expect(out?.map((e) => e.address)).toEqual(['0xbbb']);
+  });
+
+  it("keeps a candidate whose floor is in another unit than the task's reward", async () => {
+    arm();
+    vi.mocked(getAgent).mockImplementation(async (addr: string) =>
+      agentRow(addr, addr === '0xaaa' ? '2000' : undefined));
+    // A native-0G task: 1000 wei is not 1000 USDC base units, so the USDC
+    // floor says nothing about it and 0xaaa stays in the cascade.
+    const native = { symbol: '0G' as const, decimals: 18 as const };
+    const out = await semanticCascadeRanking(meta, { amount: 1000n, unit: native });
+    expect(out?.map((e) => e.address)).toEqual(['0xaaa', '0xbbb']);
+  });
+
+  it('drops candidates that did not declare the task\'s chain (their /accept would 409)', async () => {
+    arm();
+    vi.mocked(getAgent).mockImplementation(async (addr: string) =>
+      ({ ...(agentRow(addr) as object), supportedChains: addr === '0xaaa' ? ['0g'] : null }) as never);
+    expect((await semanticCascadeRanking({ ...meta, chain: 'base' }))?.map((e) => e.address)).toEqual(['0xbbb']);
+    expect((await semanticCascadeRanking({ ...meta, chain: '0g' }))?.map((e) => e.address)).toEqual(['0xaaa', '0xbbb']);
   });
 
   it('drops the poster and the designated verifier (their /accept would 403)', async () => {

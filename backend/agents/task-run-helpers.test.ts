@@ -543,13 +543,25 @@ describe('describeOnChainLock', () => {
 
 describe('canSubmitViaSmartAccount', () => {
   const full = { account: '0xabc', entryPoint: '0xep', bundler: 'https://bundler.test' };
-  it('needs the account, the entry point AND a bundler, on Base only', async () => {
+  // Only a chain whose escrow records a smart account (`aa` in the chain
+  // table the backend sends) has a UserOp path at all.
+  const table = [
+    { key: '0g', aa: false },
+    { key: 'base', aa: true },
+  ];
+  it('needs an AA chain, the account, the entry point AND a bundler', async () => {
     const { canSubmitViaSmartAccount } = await import('./worker.js');
-    expect(canSubmitViaSmartAccount('base', full)).toBe(true);
-    expect(canSubmitViaSmartAccount('0g', full)).toBe(false);
-    expect(canSubmitViaSmartAccount('base', { ...full, bundler: '' })).toBe(false);
-    expect(canSubmitViaSmartAccount('base', { ...full, entryPoint: '' })).toBe(false);
-    expect(canSubmitViaSmartAccount('base', { ...full, account: '' })).toBe(false);
+    expect(canSubmitViaSmartAccount('base', full, table)).toBe(true);
+    expect(canSubmitViaSmartAccount('0g', full, table)).toBe(false);
+    expect(canSubmitViaSmartAccount('base', { ...full, bundler: '' }, table)).toBe(false);
+    expect(canSubmitViaSmartAccount('base', { ...full, entryPoint: '' }, table)).toBe(false);
+    expect(canSubmitViaSmartAccount('base', { ...full, account: '' }, table)).toBe(false);
+  });
+  it('follows the table, not the chain name', async () => {
+    const { canSubmitViaSmartAccount } = await import('./worker.js');
+    expect(canSubmitViaSmartAccount('base', full, [{ key: 'base', aa: false }])).toBe(false);
+    // A chain this deployment does not settle on has no UserOp path.
+    expect(canSubmitViaSmartAccount('base', full, [{ key: '0g', aa: true }])).toBe(false);
   });
 });
 

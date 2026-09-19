@@ -1,0 +1,94 @@
+/**
+ * The background writers start only once this process knows the Redis is its
+ * deployment's, and each also checks again when it runs (deploymentIdentity.ts).
+ *
+ * Run: npx vitest run src/services/backgroundWriters.test.ts
+ */
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+const { started, gate, identity, resumed } = vi.hoisted(() => ({
+  started: [] as string[],
+  gate: { allowed: true },
+  identity: { status: null as null | { role: string; writersAllowed: boolean } },
+  resumed: [] as Array<() => void>,
+}));
+
+vi.mock('./deploymentIdentity.js', () => ({
+  checkDeploymentIdentity: async () => identity.status,
+  backgroundWritesAllowed: () => gate.allowed,
+  onBackgroundWritesResumed: (listener: () => void) => { resumed.push(listener); },
+}));
+vi.mock('./settlementChains.js', () => ({ settlementChainConfig: () => ({ escrowAddress: '0x' + '11'.repeat(20) }) }));
+vi.mock('./escrowEvents.js', () => ({ startEscrowEventLoop: () => started.push('startEscrowEventLoop') }));
+vi.mock('./baseEscrowEvents.js', () => ({ startBaseEscrowEventLoop: () => started.push('startBaseEscrowEventLoop') }));
+vi.mock('./agentFactoryListener.js', () => ({ startAgentFactoryListener: () => started.push('startAgentFactoryListener') }));
+vi.mock('./cctpAttestationPoller.js', () => ({ startCctpAttestationPoller: () => started.push('startCctpAttestationPoller') }));
+vi.mock('./a2aExpirySweep.js', () => ({ startExpirySweepLoop: () => started.push('startExpirySweepLoop') }));
+vi.mock('./agentRunner.js', () => ({ reconcileAgents: async () => { started.push('reconcileAgents'); } }));
+
+import { backgroundWriters, startBackgroundWriters } from './backgroundWriters.js';
+
+const EVERY_WRITER = [
+  'startEscrowEventLoop', 'startBaseEscrowEventLoop', 'startAgentFactoryListener',
+  'startCctpAttestationPoller', 'startExpirySweepLoop', 'reconcileAgents',
+];
+
+beforeEach(() => {
+  started.length = 0;
+  resumed.length = 0;
+});
+
+describe('startBackgroundWriters', () => {
+  it('starts every writer for the owner', async () => {
+    identity.status = { role: 'owner', writersAllowed: true };
+    const { started: names } = await startBackgroundWriters(backgroundWriters({}));
+    expect(started).toEqual(EVERY_WRITER);
+    expect(names).toEqual(['0G indexer', 'Base indexer', 'AgentFactory listener', 'CCTP poller', 'expiry sweep', 'agent reconcile']);
+  });
+
+  it('starts them after the first check whatever it said: each tick is gated, so a later "allowed" takes effect', async () => {
+    for (const status of [{ role: 'not-owner', writersAllowed: false }, { role: 'unknown', writersAllowed: false }, { role: 'unknown', writersAllowed: true }]) {
+      started.length = 0;
+      identity.status = status;
+      await startBackgroundWriters(backgroundWriters({}));
+      expect(started).toEqual(EVERY_WRITER);
+    }
+  });
+
+  it('says the loops started idle, so their "polling" lines do not read as writing', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    identity.status = { role: 'not-owner', writersAllowed: false };
+    await startBackgroundWriters(backgroundWriters({}));
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/started IDLE/));
+    warn.mockClear();
+    identity.status = { role: 'owner', writersAllowed: true };
+    await startBackgroundWriters(backgroundWriters({}));
+    expect(warn).not.toHaveBeenCalledWith(expect.stringMatching(/started IDLE/));
+    warn.mockRestore();
+  });
+
+  it('waits for the first check before starting anything', async () => {
+    let answer: (s: { role: string; writersAllowed: boolean }) => void = () => {};
+    const pending = startBackgroundWriters(backgroundWriters({}), () => new Promise((r) => { answer = r; }) as never);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(started).toEqual([]);
+    answer({ role: 'owner', writersAllowed: true });
+    await pending;
+    expect(started).toEqual(EVERY_WRITER);
+  });
+
+  it('reconciles agents again each time writes resume', async () => {
+    identity.status = { role: 'unknown', writersAllowed: false };
+    await startBackgroundWriters(backgroundWriters({}));
+    started.length = 0;
+    expect(resumed).toHaveLength(1);
+    resumed[0]();
+    expect(started).toEqual(['reconcileAgents']);
+  });
+
+  it('leaves reconcile out when AGENT_RECONCILE_ON_BOOT=false, as before', async () => {
+    identity.status = { role: 'owner', writersAllowed: true };
+    await startBackgroundWriters(backgroundWriters({ AGENT_RECONCILE_ON_BOOT: 'false' }));
+    expect(started).not.toContain('reconcileAgents');
+  });
+});

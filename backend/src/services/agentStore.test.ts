@@ -1,203 +1,225 @@
-/**
- * agentStore — the SQL has to agree with the values bound to it.
- *
- * Regression: adding supported_chains to registerAgent's Postgres INSERT took
- * the placeholders to $12 while the params array dropped to 9 values, so every
- * registration (and every payout credit, which also writes through
- * registerAgent) failed at bind time with
- *   bind message supplies 9 parameters, but prepared statement "" requires 12
- * Nothing in CI runs against Postgres and TypeScript cannot see inside a SQL
- * string, so it shipped green. These tests need no database: the Postgres half
- * records every query the store issues and checks placeholders against params;
- * the SQLite half runs the real migrations against an in-memory database.
- */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import Database from 'better-sqlite3';
 import type { AgentExecutor } from '../types.js';
 
-const h = vi.hoisted(() => ({
-  databaseUrl: '' as string,
-  calls: [] as Array<{ sql: string; params: unknown[] | undefined }>,
-  rowsFor: (_sql: string): unknown[] => [],
+/**
+ * Every worker calls POST /a2a/register when it boots, and that route builds
+ * the record without earnings. registerAgent's upsert used to write the
+ * counters on conflict too, so each restart reset an agent's earnings to 0
+ * while its task count stayed ("3 tasks · 0"). Counters now change only
+ * through creditPayout / adjustReputation, which also keep native 0G and
+ * USDC earnings in separate totals. Runs against a real in-memory SQLite
+ * table with the production schema.
+ */
+
+const { db, cfg, pool } = vi.hoisted(() => ({
+  db: { current: null as unknown as Database.Database },
+  cfg: { databaseUrl: '' },
+  pool: { query: vi.fn() },
 }));
 
-vi.mock('../config.js', () => ({
-  config: {
-    get databaseUrl() { return h.databaseUrl; },
-  },
-}));
+vi.mock('../config.js', () => ({ config: cfg }));
+vi.mock('./database.js', () => ({ getDb: () => db.current }));
+vi.mock('./neonDb.js', () => ({ getPool: async () => pool }));
 
-vi.mock('./neonDb.js', () => ({
-  getPool: async () => ({
-    query: async (sql: string, params?: unknown[]) => {
-      h.calls.push({ sql, params });
-      return { rows: h.rowsFor(sql) };
-    },
-  }),
-}));
+const { registerAgent, creditPayout, adjustReputation, getAgent } = await import('./agentStore.js');
 
-// The real SQLite layer and its real migrations, but never the on-disk file.
-vi.mock('better-sqlite3', async (importOriginal) => {
-  const Real = (await importOriginal<{ default: new (path: string) => object }>()).default;
-  return { default: class extends Real { constructor() { super(':memory:'); } } };
-});
+const ADDR = '0xAbCd000000000000000000000000000000000001';
+const ONE_0G = 10n ** 18n;
+const USDC = { symbol: 'USDC', decimals: 6 } as const;
+const NATIVE_0G = { symbol: '0G', decimals: 18 } as const;
 
-import * as agentStore from './agentStore.js';
-import { getDb } from './database.js';
-
-/** Distinct `$n` placeholders in a statement, ascending. */
-function placeholders(sql: string): number[] {
-  const seen = new Set<number>();
-  for (const m of sql.matchAll(/\$(\d+)/g)) seen.add(Number(m[1]));
-  return [...seen].sort((a, b) => a - b);
-}
-
-/** Every recorded query binds exactly the values its SQL asks for: $1..$n, n params. */
-function expectEveryQueryBindsWhatItAsksFor(): void {
-  expect(h.calls.length).toBeGreaterThan(0);
-  for (const { sql, params } of h.calls) {
-    const wanted = placeholders(sql);
-    const n = params?.length ?? 0;
-    expect(wanted, `placeholders vs ${n} params in:\n${sql}`).toEqual(
-      Array.from({ length: n }, (_, i) => i + 1),
-    );
-  }
-}
-
-function agent(extra: Partial<AgentExecutor> = {}): AgentExecutor {
+// The fields POST /a2a/register sends on every boot: no earnings.
+function bootRegistration(overrides: Partial<AgentExecutor> = {}): AgentExecutor {
   return {
-    address: '0xAAAAaaaaAAAAaaaaAAAAaaaaAAAAaaaaAAAAaaaa',
-    displayName: 'Test agent',
-    capabilities: ['code_review'] as AgentExecutor['capabilities'],
-    publicKey: '0x04abcdef',
+    address: ADDR,
+    displayName: 'worker',
+    capabilities: ['data_processing'],
+    publicKey: '04aa',
     reputation: 50,
     tasksCompleted: 0,
     registeredAt: new Date().toISOString(),
-    ...extra,
+    ...overrides,
   };
 }
 
-function insertCall() {
-  const call = h.calls.find((c) => /INSERT INTO agent_executors/.test(c.sql));
-  if (!call) throw new Error('registerAgent issued no INSERT');
-  return call;
-}
+beforeEach(() => {
+  db.current = new Database(':memory:');
+  // database.ts migrations 10, 14 and 15.
+  db.current.exec(`
+    CREATE TABLE agent_executors (
+      address TEXT PRIMARY KEY,
+      display_name TEXT NOT NULL,
+      capabilities TEXT DEFAULT '[]',
+      public_key TEXT NOT NULL DEFAULT '',
+      agent_card_url TEXT,
+      mcp_endpoint_url TEXT,
+      min_reward TEXT,
+      preferred_capabilities TEXT,
+      reputation INTEGER NOT NULL DEFAULT 50,
+      tasks_completed INTEGER NOT NULL DEFAULT 0,
+      total_earned_raw TEXT NOT NULL DEFAULT '0',
+      registered_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    ALTER TABLE agent_executors ADD COLUMN total_earned_usdc_raw TEXT NOT NULL DEFAULT '0';
+    ALTER TABLE agent_executors ADD COLUMN supported_chains TEXT;
+  `);
+});
 
-/** Split on commas that are not inside parentheses. */
-function splitTopLevel(list: string): string[] {
-  const out: string[] = [];
-  let depth = 0, cur = '';
-  for (const ch of list) {
-    if (ch === '(') depth++;
-    if (ch === ')') depth--;
-    if (ch === ',' && depth === 0) { out.push(cur.trim()); cur = ''; } else cur += ch;
-  }
-  out.push(cur.trim());
-  return out;
-}
+describe('registerAgent', () => {
+  it('keeps earnings, task count and reputation when a worker re-registers', async () => {
+    await registerAgent(bootRegistration());
+    await creditPayout(ADDR, NATIVE_0G, 2n * ONE_0G);
+    await creditPayout(ADDR, USDC, 900_000n);
 
-/** The value bound to a column of the INSERT whose VALUES entry is a plain `$n`. */
-function boundTo(column: string): unknown {
-  const { sql, params } = insertCall();
-  const cols = splitTopLevel(sql.slice(sql.indexOf('(') + 1, sql.indexOf(')')));
-  const afterValues = sql.slice(sql.indexOf('VALUES') + 'VALUES'.length);
-  const open = afterValues.indexOf('(');
-  let depth = 0, end = -1;
-  for (let i = open; i < afterValues.length; i++) {
-    if (afterValues[i] === '(') depth++;
-    if (afterValues[i] === ')' && --depth === 0) { end = i; break; }
-  }
-  const values = splitTopLevel(afterValues.slice(open + 1, end));
-  expect(values.length, 'one VALUES entry per column').toBe(cols.length);
-  const expr = values[cols.indexOf(column)];
-  expect(expr, `VALUES entry for ${column}`).toMatch(/^\$\d+$/);
-  return params![Number(expr.slice(1)) - 1];
-}
+    await registerAgent(bootRegistration());
 
-describe('agentStore on Postgres — SQL and params agree', () => {
-  beforeEach(() => {
-    h.databaseUrl = 'postgres://unit-test';
-    h.calls.length = 0;
-    h.rowsFor = () => [];
+    expect(await getAgent(ADDR)).toMatchObject({
+      reputation: 52, tasksCompleted: 2, totalEarnedRaw: (2n * ONE_0G).toString(), totalEarnedUsdcRaw: '900000',
+    });
   });
 
-  it('registerAgent binds one value per placeholder (chains declared)', async () => {
-    await agentStore.registerAgent(agent({ supportedChains: ['0g', 'base'] }));
-    expectEveryQueryBindsWhatItAsksFor();
+  it('still updates the profile on re-register', async () => {
+    await registerAgent(bootRegistration());
+    await registerAgent(bootRegistration({ displayName: 'renamed', publicKey: '04bb', minReward: '5' }));
+    expect(await getAgent(ADDR)).toMatchObject({ displayName: 'renamed', publicKey: '04bb', minReward: '5' });
   });
 
-  it('registerAgent binds one value per placeholder (no chains declared)', async () => {
-    await agentStore.registerAgent(agent());
-    await agentStore.registerAgent(agent({ supportedChains: null }));
-    await agentStore.registerAgent(agent({ supportedChains: [] }));
-    expectEveryQueryBindsWhatItAsksFor();
+  it.each([
+    [null, null],
+    // Nothing declared is the legacy set, as the '[]' column default reads.
+    [[], null],
+    [['0g'], ['0g']],
+    [['0g', 'base', 'arc'], ['0g', 'base', 'arc']],
+  ])('stores declared chains %j and reads them back as %j', async (declared, expected) => {
+    await registerAgent(bootRegistration({ supportedChains: declared }));
+    expect((await getAgent(ADDR))?.supportedChains).toEqual(expected);
   });
 
-  it('getAgent and listAgents bind one value per placeholder', async () => {
-    await agentStore.getAgent('0xabc');
-    await agentStore.listAgents();
-    await agentStore.listAgents(['code_review']);
-    expectEveryQueryBindsWhatItAsksFor();
+  it('resets declared chains to null when older code re-registers without them', async () => {
+    await registerAgent(bootRegistration({ supportedChains: ['0g', 'base', 'arc'] }));
+    await registerAgent(bootRegistration());
+    expect((await getAgent(ADDR))?.supportedChains).toBeNull();
   });
 
-  it('never lets supported_chains resolve to NULL (the column is NOT NULL)', async () => {
-    await agentStore.registerAgent(agent());
-    const { sql, params } = insertCall();
-    // Undeclared chains go in as NULL, so the SQL must coalesce that parameter
-    // down to a non-null fallback that is itself bound and non-empty.
-    const m = sql.match(/COALESCE\(\s*\$(\d+)::TEXT\[\][\s\S]*?\$(\d+)::TEXT\[\]\s*\)/);
-    expect(m, 'supported_chains must be COALESCEd to a bound default').not.toBeNull();
-    const fallback = params![Number(m![2]) - 1];
-    expect(fallback).toEqual([...agentStore.DEFAULT_SUPPORTED_CHAINS]);
-    expect(agentStore.DEFAULT_SUPPORTED_CHAINS.length).toBeGreaterThan(0);
-  });
-
-  it('binds declared chains as given', async () => {
-    await agentStore.registerAgent(agent({ supportedChains: ['0g', 'base'] }));
-    const { sql, params } = insertCall();
-    const m = sql.match(/COALESCE\(\s*\$(\d+)::TEXT\[\]/)!;
-    expect(params![Number(m[1]) - 1]).toEqual(['0g', 'base']);
-  });
-
-  it('writes the counters the caller carries, so a credit is not lost', async () => {
-    await agentStore.registerAgent(agent({ reputation: 61, tasksCompleted: 3, totalEarnedRaw: '900000' }));
-    expect(boundTo('reputation')).toBe(61);
-    expect(boundTo('tasks_completed')).toBe(3);
-    expect(boundTo('total_earned_raw')).toBe('900000');
-  });
-
-  it('reads supported_chains back, defaulting a row that has none', async () => {
-    h.rowsFor = () => [{ address: '0xabc', display_name: 'x', capabilities: [], public_key: 'k', supported_chains: ['0g', 'base'] }];
-    expect((await agentStore.getAgent('0xabc'))?.supportedChains).toEqual(['0g', 'base']);
-    h.rowsFor = () => [{ address: '0xabc', display_name: 'x', capabilities: [], public_key: 'k' }];
-    expect((await agentStore.getAgent('0xabc'))?.supportedChains).toEqual(['0g']);
+  it('starts a new executor at 50 reputation with nothing earned', async () => {
+    await registerAgent(bootRegistration());
+    expect(await getAgent(ADDR)).toMatchObject({
+      address: ADDR.toLowerCase(), reputation: 50, tasksCompleted: 0, totalEarnedRaw: '0', totalEarnedUsdcRaw: '0',
+    });
   });
 });
 
-describe('agentStore on SQLite — real migrations, in memory', () => {
+describe('creditPayout', () => {
+  it('adds each currency to its own total and never mixes them', async () => {
+    await registerAgent(bootRegistration({ displayName: 'keep-me' }));
+    expect(await creditPayout(ADDR.toLowerCase(), USDC, 4_500_000n)).toBe(true);
+    expect(await creditPayout(ADDR, USDC, 900_000n)).toBe(true);
+    expect(await creditPayout(ADDR, NATIVE_0G, 3n * ONE_0G)).toBe(true);
+    expect(await getAgent(ADDR)).toMatchObject({
+      displayName: 'keep-me',
+      tasksCompleted: 3,
+      reputation: 53,
+      totalEarnedUsdcRaw: '5400000',
+      totalEarnedRaw: (3n * ONE_0G).toString(),
+    });
+  });
+
+  it('keeps 18-decimal totals exact beyond 64-bit integers', async () => {
+    await registerAgent(bootRegistration());
+    await creditPayout(ADDR, NATIVE_0G, 9n * ONE_0G);
+    await creditPayout(ADDR, NATIVE_0G, 9n * ONE_0G);
+    expect((await getAgent(ADDR))?.totalEarnedRaw).toBe((18n * ONE_0G).toString());
+  });
+
+  it('caps reputation at 100', async () => {
+    await registerAgent(bootRegistration({ reputation: 100 }));
+    await creditPayout(ADDR, USDC, 1n);
+    expect((await getAgent(ADDR))?.reputation).toBe(100);
+  });
+
+  it('reports false for an executor that does not exist, and creates nothing', async () => {
+    expect(await creditPayout(ADDR, USDC, 1n)).toBe(false);
+    expect(await getAgent(ADDR)).toBeUndefined();
+  });
+
+  it('refuses a unit whose scale does not match its total (native 18-decimal USDC)', async () => {
+    await registerAgent(bootRegistration());
+    await expect(creditPayout(ADDR, { symbol: 'USDC', decimals: 18 }, 1n)).rejects.toThrow(/USDC with 18 decimals/);
+    expect(await getAgent(ADDR)).toMatchObject({ tasksCompleted: 0, totalEarnedUsdcRaw: '0' });
+  });
+});
+
+describe('Postgres statements', () => {
   beforeEach(() => {
-    h.databaseUrl = '';
-    getDb().prepare('DELETE FROM agent_executors').run();
+    cfg.databaseUrl = 'postgres://test';
+    pool.query.mockReset();
+    pool.query.mockResolvedValue({ rowCount: 1, rows: [] });
+  });
+  afterEach(() => { cfg.databaseUrl = ''; });
+
+  it('credits in one statement, adding to the USDC column in SQL', async () => {
+    expect(await creditPayout(ADDR, USDC, 4_500_000n)).toBe(true);
+    const [sql, params] = pool.query.mock.calls[0];
+    expect(sql).toMatch(/tasks_completed = tasks_completed \+ 1/);
+    expect(sql).toMatch(/reputation = LEAST\(100, reputation \+ 1\)/);
+    expect(sql).toMatch(/total_earned_usdc_raw = \(COALESCE\(NULLIF\(total_earned_usdc_raw, ''\), '0'\)::numeric \+ \$2::numeric\)::text/);
+    expect(sql).not.toMatch(/total_earned_raw\b/);
+    expect(params).toEqual([ADDR.toLowerCase(), '4500000']);
   });
 
-  it('registers and reads back declared chains', async () => {
-    await agentStore.registerAgent(agent({ supportedChains: ['0g', 'base'] }));
-    const got = await agentStore.getAgent(agent().address);
-    expect(got?.supportedChains).toEqual(['0g', 'base']);
-    expect(got?.reputation).toBe(50);
+  it('sends 0G payouts to the native column', async () => {
+    await creditPayout(ADDR, NATIVE_0G, ONE_0G);
+    const [sql, params] = pool.query.mock.calls[0];
+    expect(sql).toMatch(/total_earned_raw = \(COALESCE\(NULLIF\(total_earned_raw, ''\)/);
+    expect(params).toEqual([ADDR.toLowerCase(), ONE_0G.toString()]);
   });
 
-  it('defaults undeclared chains to 0g', async () => {
-    await agentStore.registerAgent(agent());
-    expect((await agentStore.getAgent(agent().address))?.supportedChains).toEqual(['0g']);
+  it('reports false when no row matched', async () => {
+    pool.query.mockResolvedValue({ rowCount: 0, rows: [] });
+    expect(await creditPayout(ADDR, USDC, 1n)).toBe(false);
+    expect(await adjustReputation(ADDR, -10)).toBe(false);
   });
 
-  it('re-registering without chains keeps the declared ones and the carried counters', async () => {
-    await agentStore.registerAgent(agent({ supportedChains: ['0g', 'base'] }));
-    await agentStore.registerAgent(agent({ reputation: 61, tasksCompleted: 3, totalEarnedRaw: '900000' }));
-    const got = await agentStore.getAgent(agent().address);
-    expect(got?.supportedChains).toEqual(['0g', 'base']);
-    expect(got?.reputation).toBe(61);
-    expect(got?.tasksCompleted).toBe(3);
-    expect(got?.totalEarnedRaw).toBe('900000');
+  it('clamps reputation in SQL', async () => {
+    await adjustReputation(ADDR, -10);
+    const [sql, params] = pool.query.mock.calls[0];
+    expect(sql).toMatch(/reputation = LEAST\(100, GREATEST\(0, reputation \+ \$2\)\)/);
+    expect(params).toEqual([ADDR.toLowerCase(), -10]);
+  });
+
+  it('leaves the counters out of the re-registration update', async () => {
+    pool.query.mockResolvedValueOnce({ rows: [{ c: ADDR.toLowerCase() }] });
+    await registerAgent(bootRegistration());
+    const upsert = pool.query.mock.calls.map(([sql]) => sql as string).find((sql) => sql.includes('ON CONFLICT'))!;
+    const onConflict = upsert.slice(upsert.indexOf('ON CONFLICT'));
+    expect(onConflict).not.toMatch(/reputation|tasks_completed|total_earned/);
+    expect(onConflict).toMatch(/supported_chains = EXCLUDED\.supported_chains/);
+  });
+
+  it('passes declared chains as a Postgres array, and null when absent', async () => {
+    pool.query.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [{ n: 0 }] });
+    await registerAgent(bootRegistration({ supportedChains: ['0g', 'arc'] }));
+    const upsertCall = pool.query.mock.calls.find(([sql]) => String(sql).includes('ON CONFLICT'))!;
+    expect(upsertCall[1]).toContainEqual(['0g', 'arc']);
+
+    pool.query.mockClear();
+    await registerAgent(bootRegistration());
+    const legacyCall = pool.query.mock.calls.find(([sql]) => String(sql).includes('ON CONFLICT'))!;
+    expect((legacyCall[1] as unknown[]).at(-1)).toBeNull();
+  });
+});
+
+describe('adjustReputation', () => {
+  it('moves only reputation, within 0 to 100', async () => {
+    await registerAgent(bootRegistration({ reputation: 5 }));
+    await creditPayout(ADDR, USDC, 7n);
+    expect(await adjustReputation(ADDR, -10)).toBe(true);
+    expect(await getAgent(ADDR)).toMatchObject({ reputation: 0, tasksCompleted: 1, totalEarnedUsdcRaw: '7' });
+  });
+
+  it('reports false for an executor that does not exist', async () => {
+    expect(await adjustReputation(ADDR, -10)).toBe(false);
   });
 });

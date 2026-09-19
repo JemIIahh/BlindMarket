@@ -5,12 +5,20 @@
  *   3. Fund paymaster with ETH from deployer
  *   4. Test: deploy a BlindAccount, send it USDC, submit a UserOp via bundler
  *
+ * Refuses Arc (5042, 5042002): it pays gas in USDC natively.
+ *
+ * Writes (merges into) aa-<chain record>.json in the DEPLOYMENT_SET. On Base
+ * Sepolia EXPECTED_ESCROW must name the escrow of the stack this belongs to
+ * (so deploy-base.ts runs first for a new set).
+ *
  * Usage:
- *   PRIVATE_KEY=0x... npx hardhat run scripts/deploy-aa.ts --network base-sepolia
+ *   DEPLOYMENT_SET=staging EXPECTED_ESCROW=0x... PRIVATE_KEY=0x... \
+ *     npx hardhat run scripts/deploy-aa.ts --network base-sepolia
  */
 import { ethers } from "../lib/hh.js";
-import * as fs from "fs";
-import * as path from "path";
+import { assertSafeNetwork } from "./_guard.js";
+import { preflightDeploy, recordPath, writeDeployment } from "./_deployments.js";
+import { assertAaChain } from "./_settlement.js";
 
 const BASE_USDC: Record<number, string> = {
   8453:  "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
@@ -20,6 +28,13 @@ const BASE_USDC: Record<number, string> = {
 const ENTRYPOINT_V07 = "0x0000000071727De22E5E9d8BAf0edAc6f37da032";
 
 async function main() {
+  await assertSafeNetwork();
+  const network = await ethers.provider.getNetwork();
+  const chainId = Number(network.chainId);
+  // Arc pays gas in USDC natively: no USDCPaymaster there, whatever
+  // BASE_USDC above ever lists. Checked before anything else is read.
+  assertAaChain(chainId);
+
   const [deployer] = await ethers.getSigners();
   console.log("Deployer:", deployer.address);
 
@@ -27,11 +42,9 @@ async function main() {
   console.log("ETH Balance:", ethers.formatEther(balance), "ETH");
 
   if (balance === 0n) {
-    throw new Error("Deployer has 0 ETH balance. Fund with Base Sepolia ETH.");
+    throw new Error("Deployer has 0 ETH balance. Fund it with ETH on this Base network.");
   }
 
-  const network = await ethers.provider.getNetwork();
-  const chainId = Number(network.chainId);
   console.log("Chain:", network.name, `(chainId: ${chainId})`);
 
   const usdcAddress = BASE_USDC[chainId];
@@ -40,6 +53,8 @@ async function main() {
   }
   console.log("USDC:", usdcAddress);
   console.log("EntryPoint:", ENTRYPOINT_V07);
+  const target = preflightDeploy({ chainId, deploysEscrow: false });
+  const outPath = recordPath(chainId, target.set, "aa-");
 
   // ── 1. Deploy USDCPaymaster FIRST (factory needs its address) ──
   const INITIAL_ETH_PRICE_USDC = 3_000_000_000n; // 3000.00 USDC/ETH
@@ -90,7 +105,7 @@ async function main() {
 
   // ── 5. Save deployment ──
   const networkName = chainId === 8453 ? "base-mainnet" : "base-sepolia";
-  const deployment = {
+  const deployment = writeDeployment(outPath, {
     network: networkName,
     chainId,
     deployer: deployer.address,
@@ -107,12 +122,7 @@ async function main() {
       ethPriceInUsdc: INITIAL_ETH_PRICE_USDC.toString(),
       maxGasLimit: "1000000",
     },
-  };
-
-  const outDir = path.join(import.meta.dirname, "..", "deployments");
-  if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
-  const outPath = path.join(outDir, `aa-${networkName}.json`);
-  fs.writeFileSync(outPath, JSON.stringify(deployment, null, 2));
+  });
   console.log("\nDeployment saved to:", outPath);
 
   console.log("\n=== DEPLOYMENT SUMMARY ===");

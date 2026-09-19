@@ -242,8 +242,9 @@ export class WorkerRuntime {
 
   /**
    * The chains this runtime declares to the backend and claims tasks on:
-   * those its code can sign for AND it has an RPC for. The backend stores the
-   * list but does not filter by it — browse() and executeTask() enforce it.
+   * those its code can sign for AND it has an RPC for. Older backends only
+   * store the list and none filters browse results by it, so browse() and
+   * executeTask() enforce it.
    */
   get declaredChains(): SettlementChain[] {
     return SETTLEMENT_CHAINS.filter((chain) => !!rpcFor(this.config, chain));
@@ -359,8 +360,8 @@ export class WorkerRuntime {
    * chain this runtime has no RPC for — it would be offered, accept and
    * strand those tasks. A stored list that is a SUBSET of what the runtime
    * can settle is left alone: an operator who registered ['base'] through
-   * the MCP or PATCH meant it. The stored list is a declaration only — the
-   * backend does not filter offers by it; this runtime's own browse filter
+   * the MCP or PATCH meant it. Older backends only store the list (newer ones
+   * also filter offers and /accept by it); this runtime's own browse filter
    * uses `declaredChains`, not the stored list — and a restore never
    * registers otherwise, so an executor first registered by an older SDK
    * would keep its old list.
@@ -480,9 +481,10 @@ export class WorkerRuntime {
         if (state.status !== 'open') continue;
         // An accept assigns on-chain and cannot be released, so never claim a
         // task browse already says is on a chain this runtime did not declare.
-        // The backend does not filter by the registered supportedChains, so
-        // this filter (and the post-accept check in executeTask, which covers
-        // rows with no chain) is the only thing keeping such tasks out.
+        // No backend filters browse results by the registered
+        // supportedChains (older ones filter nothing by it), so this filter
+        // (and the post-accept check in executeTask, which covers rows with
+        // no chain) is what keeps such tasks out.
         if (entry.meta?.chain && !(this.declaredChains as string[]).includes(entry.meta.chain)) continue;
         this.claim(taskId, state, entry.meta);
       }

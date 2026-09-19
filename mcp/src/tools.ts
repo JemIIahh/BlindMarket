@@ -2,8 +2,42 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { BlindMarket, AgentCapability } from '@blindmarket/sdk';
 import type { WalletCtx } from './wallet.js';
+import type { Settlement } from './settlement.js';
 
-export function registerMarketTools(server: McpServer, bb: BlindMarket, walletCtx: WalletCtx | null = null): void {
+type ToolResult = { isError?: boolean; content: Array<{ type: 'text'; text: string }> };
+
+/**
+ * `settlement` is rent.ts's resolver. An executor registered from this process
+ * delivers through complete_task, which settles on that one chain (the
+ * backend's posting chain, or the one BLINDMARKET_SETTLEMENT names), so that
+ * is the only chain it declares. Declaring more would get it offered tasks it
+ * cannot deliver on a backend that filters by the list; declaring nothing is
+ * read as 0G+Base there and stored as ['0g'] by older backends — wrong either
+ * way for a one-chain process.
+ */
+export function registerMarketTools(
+  server: McpServer,
+  bb: BlindMarket,
+  walletCtx: WalletCtx | null = null,
+  settlement?: () => Promise<Settlement>,
+): void {
+  async function declaredChains(tool: string): Promise<{ supportedChains: string[] | undefined; warning?: string } | { error: ToolResult }> {
+    if (!settlement) return { supportedChains: undefined };
+    try {
+      const s = await settlement();
+      return {
+        supportedChains: [s.mode],
+        ...(s.payment === 'local-native' && !walletCtx
+          ? { warning: `Declared ${s.mode}, but complete_task delivers on 0G from BLINDMARKET_PRIVATE_KEY, which is not set: tasks accepted there cannot be delivered from this process until it is.` }
+          : {}),
+      };
+    } catch (err) {
+      const code = (err as { code?: string }).code ?? 'SETTLEMENT_UNKNOWN';
+      const message = `${tool} declares the chain this process can deliver on (the backend's posting chain, or the one BLINDMARKET_SETTLEMENT names), and could not learn it: ${(err as Error).message}`;
+      return { error: { isError: true, content: [{ type: 'text', text: JSON.stringify({ success: false, error: { code, message } }) }] } };
+    }
+  }
+
   // ── Health & Stats ────────────────────────────────────────────────────
 
   server.registerTool(
@@ -108,7 +142,10 @@ export function registerMarketTools(server: McpServer, bb: BlindMarket, walletCt
       if (typeof (bb as { deliverResult?: unknown }).deliverResult !== 'function') {
         return { isError: true, content: [{ type: 'text', text: JSON.stringify({ success: false, error: { code: 'SDK_TOO_OLD', message: 'The installed @blindmarket/sdk ignores the wallet key passed to createAgent. Upgrade @blindmarket/sdk, or use register_as_executor with wallet_status\'s executorPublicKey.' } }) }] };
       }
+      const chains = await declaredChains('create_agent');
+      if ('error' in chains) return chains.error;
       const { executor, wallet } = await bb.createAgent({
+        supportedChains: chains.supportedChains,
         privateKey: walletCtx.wallet.privateKey,
         displayName,
         capabilities: capabilities.split(',').map(s => s.trim()) as AgentCapability[],
@@ -118,7 +155,7 @@ export function registerMarketTools(server: McpServer, bb: BlindMarket, walletCt
           : undefined,
       });
       // Never echo the private key into the model's context.
-      const result = { executor, wallet: { address: wallet.address, publicKey: wallet.publicKey } };
+      const result = { executor, wallet: { address: wallet.address, publicKey: wallet.publicKey }, ...(chains.warning ? { warning: chains.warning } : {}) };
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     },
   );
@@ -127,7 +164,7 @@ export function registerMarketTools(server: McpServer, bb: BlindMarket, walletCt
     'register_as_executor',
     {
       title: 'Register as Executor',
-      description: "Register as an A2A executor. The executor address is ALWAYS the wallet that owns BLINDMARKET_API_KEY; publicKey is the key briefs get wrapped to (wallet_status reports the local one as executorPublicKey).",
+      description: "Register as an A2A executor. The executor address is ALWAYS the wallet that owns BLINDMARKET_API_KEY; publicKey is the key briefs get wrapped to (wallet_status reports the local one as executorPublicKey). Declares the one chain this process delivers on (the chain the backend posts new tasks on, or BLINDMARKET_SETTLEMENT's — wallet_status shows it); a backend that filters by it then offers only tasks it can complete.",
       inputSchema: {
         address: z.string().optional().describe("Ignored by the backend — the executor is the API key's owner wallet"),
         displayName: z.string().describe('Display name'),
@@ -137,13 +174,17 @@ export function registerMarketTools(server: McpServer, bb: BlindMarket, walletCt
       },
     },
     async ({ displayName, capabilities, publicKey, minReward }) => {
+      const chains = await declaredChains('register_as_executor');
+      if ('error' in chains) return chains.error;
       const result = await bb.registerExecutor({
+        supportedChains: chains.supportedChains,
         displayName,
         capabilities: capabilities.split(',').map(s => s.trim()) as AgentCapability[],
         publicKey,
         minReward: minReward ?? undefined,
       });
-      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      const body = chains.warning ? { ...result, warning: chains.warning } : result;
+      return { content: [{ type: 'text', text: JSON.stringify(body, null, 2) }] };
     },
   );
 

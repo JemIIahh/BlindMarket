@@ -13,24 +13,28 @@
  * sync-addresses.ts), re-run the smart-account migration, rewind any
  * submitted-but-unbroadcast tasks, fund the NEW smart accounts, restart workers.
  *
- * Usage:
- *   npx hardhat run scripts/redeploy-blindaccount-factory.ts --network base-sepolia
+ * Usage (EXPECTED_ESCROW = the escrow of the stack whose aa- record you mean;
+ * add DEPLOYMENT_SET=staging for the staging stack):
+ *   EXPECTED_ESCROW=0x... npx hardhat run scripts/redeploy-blindaccount-factory.ts --network base-sepolia
  */
 import { ethers } from "../lib/hh.js";
 import * as fs from "fs";
-import * as path from "path";
+import { assertSafeNetwork } from "./_guard.js";
+import { preflightDeploy, recordPath } from "./_deployments.js";
+import { assertAaChain } from "./_settlement.js";
 
 const ENTRYPOINT_V07 = "0x0000000071727De22E5E9d8BAf0edAc6f37da032";
 
 async function main() {
+  await assertSafeNetwork();
   const [deployer] = await ethers.getSigners();
   console.log("Deployer:", deployer.address);
 
   const network = await ethers.provider.getNetwork();
   const chainId = Number(network.chainId);
-  const networkName = chainId === 8453 ? "base-mainnet" : "base-sepolia";
-
-  const outPath = path.join(import.meta.dirname, "..", "deployments", `aa-${networkName}.json`);
+  assertAaChain(chainId);
+  const target = preflightDeploy({ chainId, deploysEscrow: false });
+  const outPath = recordPath(chainId, target.set, "aa-");
   if (!fs.existsSync(outPath)) throw new Error(`No existing deployment file at ${outPath}`);
   const prev = JSON.parse(fs.readFileSync(outPath, "utf-8"));
 

@@ -42,24 +42,44 @@ import { txRouter } from './routes/tx.js';
 import { mcpRouter } from './routes/mcp.js';
 import { wellKnownRouter, openapiRouter } from './routes/discovery.js';
 import { getDb } from './services/database.js';
-import { startEscrowEventLoop } from './services/escrowEvents.js';
-import { startBaseEscrowEventLoop } from './services/baseEscrowEvents.js';
-import { startAgentFactoryListener } from './services/agentFactoryListener.js';
-import { startCctpAttestationPoller } from './services/cctpAttestationPoller.js';
-import { startExpirySweepLoop } from './services/a2aExpirySweep.js';
 import { auditCustodySealedTasks } from './services/keyCustodyService.js';
-import { isBridgeConfigured } from './services/a2aSettlement.js';
-import { marketplaceSigner, escrow } from './services/chain.js';
+import { isBridgeReady } from './services/a2aSettlement.js';
+import { contractsEnvPrefix } from './services/chainNetwork.js';
+import {
+  assertPostingChain,
+  assertRegistryInvariants,
+  postingChain,
+  settlementChainConfig,
+  settlementChainConfigs,
+} from './services/settlementChains.js';
+import { chainRuntime } from './services/chainRuntime.js';
+import { clientPricingWarnings } from './services/settlementUnits.js';
 import { logChainConfig } from './services/chainService.js';
-import { reconcileAgents, startZombieReaper } from './services/agentRunner.js';
+import { startZombieReaper } from './services/agentRunner.js';
+import { startBackgroundWriters } from './services/backgroundWriters.js';
+import { checkDeploymentIdentity } from './services/deploymentIdentity.js';
 
 // First, so a failed boot check below is reported too. No-op without SENTRY_DSN.
 initSentry(config.sentryDsn, config.sentryEnvironment);
 
 // Fail fast on a misconfigured (esp. production) deploy before binding the port.
 assertBootConfig();
+for (const warning of assertRegistryInvariants(settlementChainConfigs())) {
+  console.warn(`[boot] settlement chain registry: ${warning}`);
+}
+for (const warning of assertPostingChain({
+  production: config.nodeEnv === 'production',
+  allowNonMainnet: process.env.ALLOW_NONMAINNET_PROD === 'true',
+  tier: config.settlementTier,
+})) {
+  console.warn(`[boot] posting chain: ${warning}`);
+}
+for (const warning of clientPricingWarnings()) {
+  console.warn(`[boot] pricing: ${warning}`);
+}
 
 logChainConfig();
+console.log(`[chain] New tasks post on ${settlementChainConfig(postingChain()).label}${config.postingChain ? '' : ' (default)'}`);
 
 const app = express();
 app.set('trust proxy', 1);
@@ -138,6 +158,10 @@ const corsOptions = {
 const httpServer = createServer(app);
 initSocket(httpServer, corsOptions);
 
+// Who owns this Redis, asked before the first request can force an indexer
+// pass; the background writers start once it answers (deploymentIdentity.ts).
+const identityCheck = checkDeploymentIdentity();
+
 httpServer.listen(config.port, () => {
   console.log(`BlindMarket backend listening on port ${config.port} (${config.nodeEnv})`);
 
@@ -152,48 +176,55 @@ httpServer.listen(config.port, () => {
       console.log(`[semantic] routing FLIPPED ON — cascade offers ranked by meaning (rerank=${config.rerankEnabled ? 'on' : 'off'}); capability tags are fallback-only`);
     }
   }
-  // Start the BlindEscrow TaskCreated poller — populates the taskHash↔taskId
-  // mapping that the A2A settlement bridge needs to call assignWorker /
-  // completeVerification by on-chain id.
-  startEscrowEventLoop();
-  // Base escrow event loop — populates base: prefixed taskHash↔taskId
-  // mapping needed for USDC settlement on Base chain.
-  startBaseEscrowEventLoop();
-  // AgentFactory listener — creates agents from on-chain AgentDeployed events.
-  // Backend never signs for agents (decentralized).
-  startAgentFactoryListener();
-
-  // CCTP attestation poller — advances in-flight burn->attest->mint transfers
-  // (Base <-> another EVM chain). No-ops when CCTP_ENABLED is unset.
-  startCctpAttestationPoller();
-
-  // Proactively close open tasks whose on-chain deadline has passed, instead
-  // of leaving them listed until some agent burns an /accept on them.
-  startExpirySweepLoop();
+  // Indexers, sweeps, the CCTP poller and agent reconcile write shared state,
+  // so they start only once this process knows the Redis is its deployment's.
+  void startBackgroundWriters(undefined, () => identityCheck);
 
   // Tripwire for custody-key rotation/disable while custody-sealed tasks are
   // still open (their late-joiner self-heal silently breaks). Loud log only.
   void auditCustodySealedTasks();
-
-  // Re-fork agents that were 'running' before this restart — the in-memory
-  // process map doesn't survive a deploy/crash, so without this they show
-  // 'running' in the UI but do no work and stop heartbeating. Off only if an
-  // operator running an unusual (multi-instance) topology opts out, since each
-  // instance would otherwise re-fork the same agents.
-  if (process.env.AGENT_RECONCILE_ON_BOOT !== 'false') {
-    void reconcileAgents();
-  }
   // Background reaper: every 60s, kill forked agents whose Redis heartbeat
   // expired (stale >90s). Catches SIGKILL'd workers the auto-restart handler
   // never saw. Always runs, even when reconcile is off.
   startZombieReaper();
   // Visibility into whether the A2A settlement bridge will actually fire
-  // when an agent accepts/submits. Off-by-default if MARKETPLACE_SIGNER_PRIVATE_KEY
-  // is unset; when on, log the signer address so it's clear which key is signing.
-  if (isBridgeConfigured() && marketplaceSigner) {
+  // when an agent accepts/submits, per settlement chain: a chain with no
+  // marketplace signer is off; when on, log the signer address so it's clear
+  // which key is signing. Every chain the registry knows is checked, so a
+  // signer set without its escrow is reported too.
+  const bridgeChains = settlementChainConfigs().map(({ key, label, escrowEnv, signerEnv, hardhatNetwork }) => {
+    const { escrow: chainEscrow, marketplaceSigner: signer } = chainRuntime(key);
+    return {
+      chain: key,
+      escrow: chainEscrow,
+      signer,
+      // The address the escrow contract was built with, zero address
+      // included (0G builds one whatever its setting), as these messages
+      // have always printed it. Empty when there is no contract.
+      escrowAddress: chainEscrow ? String(chainEscrow.target) : '',
+      label,
+      escrowEnv,
+      signerEnv,
+      network: hardhatNetwork,
+    };
+  });
+  for (const bridge of bridgeChains) {
+    const { label, signer, escrow: chainEscrow } = bridge;
+    if (!isBridgeReady(bridge.chain) || !signer || !chainEscrow) {
+      // Same rule as /health/bridge: silent only when neither is set, i.e.
+      // this chain is not part of the deployment.
+      const unset = bridge.escrowAddress ? bridge.signerEnv : signer ? bridge.escrowEnv : null;
+      if (unset) {
+        console.warn(
+          `[a2aSettlement] ${label} bridge DISABLED — ${unset} not set. ` +
+            `${label} tasks will accept/submit off-chain but will not settle on-chain.`,
+        );
+      }
+      continue;
+    }
     void (async () => {
-      const signerAddr = await marketplaceSigner.getAddress();
-      console.log(`[a2aSettlement] bridge active — marketplace signer = ${signerAddr}`);
+      const signerAddr = await signer.getAddress();
+      console.log(`[a2aSettlement] ${label} bridge active — marketplace signer = ${signerAddr}`);
       // Verify the signer actually holds the on-chain verifier role. Without
       // this, marketplaceAssign/completeVerification revert with NotVerifier()
       // on every call and the fire-and-forget bridge swallows the error,
@@ -202,19 +233,20 @@ httpServer.listen(config.port, () => {
       // never rotated. Print the exact rotation command so the operator
       // has zero ambiguity about the fix.
       try {
-        const onChainVerifier = (await escrow.verifier()) as string;
+        const onChainVerifier = (await chainEscrow.verifier()) as string;
         if (onChainVerifier.toLowerCase() !== signerAddr.toLowerCase()) {
           console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-          console.error('[a2aSettlement] ⛔ VERIFIER ROLE MISMATCH — bridge will silently fail every call');
+          console.error(`[a2aSettlement] ⛔ ${label} VERIFIER ROLE MISMATCH — bridge will silently fail every call`);
           console.error(`    escrow.verifier()        = ${onChainVerifier}`);
-          console.error(`    marketplaceSigner.addr   = ${signerAddr}`);
-          console.error(`    escrow contract address  = ${config.blindEscrowAddress}`);
-          console.error('    Fix from contracts/ with the current admin key:');
-          console.error(`    MARKETPLACE_SIGNER_ADDRESS=${signerAddr} \\`);
-          console.error(`      npx hardhat run scripts/rotate-verifier.ts --network 0g-${config.ogChainId === 16661 ? 'mainnet' : 'testnet'}`);
+          console.error(`    ${label} signer address = ${signerAddr}`);
+          console.error(`    escrow contract address  = ${bridge.escrowAddress}`);
+          console.error('    Fix from contracts/ with the current admin key. rotate-verifier.ts acts on');
+          console.error('    the escrow its deployment record names and refuses unless that is EXPECTED_ESCROW:');
+          console.error(`    ${contractsEnvPrefix(bridge.escrowAddress)}MARKETPLACE_SIGNER_ADDRESS=${signerAddr} \\`);
+          console.error(`      npx hardhat run scripts/rotate-verifier.ts --network ${bridge.network}`);
           console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         } else {
-          console.log(`[a2aSettlement] ✓ verifier role confirmed (escrow.verifier() == signer)`);
+          console.log(`[a2aSettlement] ✓ ${label} verifier role confirmed (escrow.verifier() == signer)`);
         }
       } catch (e) {
         const err = e as Error & { errors?: Error[] };
@@ -222,15 +254,10 @@ httpServer.listen(config.port, () => {
           ? err.errors.map((ee: Error) => ee.message || String(ee)).join('; ')
           : err.message || String(e);
         console.error(
-          `[a2aSettlement] ⛔ could not read escrow.verifier() — escrow contract at ${config.blindEscrowAddress} may be wrong or unreachable: ${msg}`,
+          `[a2aSettlement] ⛔ could not read ${label} escrow.verifier() — escrow contract at ${bridge.escrowAddress} may be wrong or unreachable: ${msg}`,
         );
       }
     })();
-  } else {
-    console.warn(
-      '[a2aSettlement] bridge DISABLED — MARKETPLACE_SIGNER_PRIVATE_KEY not set. ' +
-        'A2A tasks will accept/submit off-chain but will not settle on-chain.',
-    );
   }
 });
 

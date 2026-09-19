@@ -266,6 +266,8 @@ marketplaceRouter.get('/agents/search', async (req, res, next) => {
           capabilities: a.capabilities,
           reputation: a.reputation,
           tasksCompleted: a.tasksCompleted,
+          // null = registered before the field existed (0G and Base).
+          supportedChains: a.supportedChains ?? null,
           avgRating: stats.avgRating,
           totalReviews: stats.totalReviews,
           badges: badges.map(b => ({ capability: b.capability, type: b.badge_type })),

@@ -21,6 +21,8 @@ import { authedGet } from '../lib/api';
 import { getAesKey } from '../lib/keyStash';
 import { useChainAddress } from '../hooks/useChainWallet';
 
+import { unitFor, useSettlement } from '../config/settlement';
+
 // ── Shapes returned by GET /api/v1/a2a/tasks/posted ──────────────────────
 
 interface PostedTask {
@@ -51,6 +53,10 @@ interface PostedTask {
     status: number;
     reward: string;
     token: string;
+    // The unit `reward` is in, read from the escrow by the backend. Absent
+    // from older backends; null symbol for a non-settlement token.
+    symbol?: string | null;
+    decimals?: number;
     worker: string;
     createdAt: string;
     deadline: string;
@@ -61,11 +67,9 @@ const STATUS_LABELS: Record<number, string> = {
   0: 'open', 1: 'assigned', 2: 'submitted', 3: 'verification failed', 4: 'completed', 5: 'cancelled', 6: 'disputed',
 };
 
-function chainDecimals(chain?: 'base' | '0g'): number {
-  return chain === 'base' ? 6 : 18;
-}
-function chainSymbol(chain?: 'base' | '0g'): string {
-  return chain === 'base' ? 'USDC' : '0G';
+/** The unit a row's reward is in: what the backend read, else the chain's settlement token. */
+function rowUnit(onChain: PostedTask['onChain']) {
+  return unitFor(onChain?.chain, onChain);
 }
 
 function rewardToNumber(raw: string | undefined, decimals: number): number {
@@ -96,8 +100,9 @@ function formatReward(raw: string | undefined, decimals: number, symbol: string)
   }
 }
 
-function formatRewardForChain(raw: string | undefined, chain?: 'base' | '0g') {
-  return formatReward(raw, chainDecimals(chain), chainSymbol(chain));
+function formatRewardForRow(onChain: PostedTask['onChain']) {
+  const unit = rowUnit(onChain);
+  return formatReward(onChain?.reward, unit.decimals, unit.symbol);
 }
 
 function shortId(t: PostedTask): string {
@@ -115,6 +120,8 @@ function workerAddress(t: PostedTask): string | null {
 const PAGE_SIZE = 15;
 
 export default function MyTasks() {
+  // Re-render when the backend's settlement answer arrives (config/settlement.ts).
+  useSettlement();
   const address = useChainAddress();
   const qc = useQueryClient();
   const [filter, setFilter] = useState<'all' | 'open' | 'active' | 'completed'>('all');
@@ -183,7 +190,7 @@ export default function MyTasks() {
   const completedCount = tasks.filter(t => effectiveStatus(t) === 4).length;
   const completedTasks = tasks.filter(t => effectiveStatus(t) === 4);
   const totalSpent = completedTasks.reduce(
-    (s, t) => s + rewardToNumber(t.onChain?.reward, chainDecimals(t.onChain?.chain)),
+    (s, t) => s + rewardToNumber(t.onChain?.reward, rowUnit(t.onChain).decimals),
     0,
   );
 
@@ -381,7 +388,7 @@ export default function MyTasks() {
                   <div className="pt-3 border-t border-line flex items-end justify-between">
                     <div>
                       <div className="text-lg font-mono font-semibold text-cream leading-none">
-                        {formatRewardForChain(t.onChain?.reward, t.onChain?.chain)}
+                        {formatRewardForRow(t.onChain)}
                       </div>
                       <div className="text-[11px] text-ink-3 mt-1.5">
                         {worker ? (

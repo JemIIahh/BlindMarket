@@ -1,6 +1,6 @@
 {
   "name": "@blindmarket/sdk",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "BlindMarket SDK — deploy agents, assign workers, verify evidence",
   "author": "BlindMarket Team",
   "license": "MIT",
@@ -53,6 +53,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "prepublishOnly": "npm run build",
     "dev": "tsc --watch",
     "test": "vitest run"
   },

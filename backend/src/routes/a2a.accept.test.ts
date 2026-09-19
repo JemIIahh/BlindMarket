@@ -101,7 +101,7 @@ vi.mock('../services/autoVerify.js', () => ({ autoVerify: vi.fn() }));
 vi.mock('../services/accountingService.js', () => ({}));
 vi.mock('../services/reputation.js', () => ({}));
 vi.mock('../services/reputationDecay.js', () => ({}));
-vi.mock('../services/bidsStore.js', () => ({}));
+vi.mock('../services/bidsStore.js', () => ({ clearBids: vi.fn(async () => undefined) }));
 // Observed, not just silenced: a re-opened task is announced on the tasks room,
 // and a lost compare-and-set release must NOT be.
 vi.mock('../services/socket.js', () => ({

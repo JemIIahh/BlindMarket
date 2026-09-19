@@ -60,7 +60,7 @@ verification, bug bounty) are listed at the bottom for completeness.
 
 ### 1.2 Storage-layout dry run
 
-- [ ] Run `npx hardhat run scripts/upgrade-blind-escrow.ts --network 0g-testnet`
+- [ ] Run `EXPECTED_ESCROW=<0g-testnet.json BlindEscrow> npx hardhat run scripts/upgrade-blind-escrow.ts --network 0g-testnet`
       one final time on testnet against the *exact* bytecode you intend to
       deploy to mainnet. The OZ plugin's storage-layout check catches
       incompatible upgrades. Verify the layout file
@@ -158,9 +158,9 @@ locked in escrow.
       in the deployed bytecode) — there is no accept step guarding against a
       mistyped address on that specific contract today.
       Redeploy Base Sepolia's `AgentFactory` from current source
-      (`npx hardhat run scripts/deploy-agent-factory.ts --network base-sepolia`,
-      then update `deployments/base-sepolia.json`'s `AgentFactory` address
-      and rerun `sync-addresses.ts`) so the testnet contract actually
+      (`EXPECTED_ESCROW=<base-sepolia.json BlindEscrow> npx hardhat run scripts/deploy-agent-factory.ts --network base-sepolia`,
+      which also updates `deployments/base-sepolia.json`'s `AgentFactory`
+      address, then rerun `sync-addresses.ts`) so the testnet contract actually
       matches what mainnet will run.
 
   **Why this matters:** Base mainnet's own `AgentFactory` deploy pulls from
@@ -221,6 +221,26 @@ This is the hot key the backend uses to call `marketplaceAssign` and
   **Why this matters:** a misconfig where the backend signs with a mainnet
   key but talks to a testnet RPC (or vice versa) creates "wrong-chain"
   signed txs that leak the key's nonce sequence and waste gas.
+
+- [ ] **Flip to `SETTLEMENT_TIER=mainnet`** once every settlement chain the
+      backend uses (0G, Base, and Arc from Phase 2) is on mainnet. Production
+      runs mixed today (0G mainnet + Base Sepolia), so the tier is unset and
+      only warns. Set, it defaults every chain id to mainnet and refuses to
+      boot on any testnet id; `GET /health/bridge` must then report
+      `settlementTier: "mainnet"`, `tierSource: "SETTLEMENT_TIER"`.
+- [ ] **`GET /health/bridge` reports `deploymentIdentity.role: "owner"`,
+      `owner: "production"` and `stoppable: false`** (`DEPLOYMENT_ID=production`
+      has been set since the Arc settlement release). `stoppable: false` is
+      what guarantees the check can never switch production's writers off
+      (NODE_ENV=production on 0G mainnet, default DEPLOYMENT_SET, no testnet
+      tier); anything else on its Redis is stopped. Re-check after changing
+      REDIS_URL, NODE_ENV or the chains, and treat any other `role`, or a
+      `reason`, as a finding — except two that are expected once, each also
+      sent to Sentry as a single warning: the first boot of the release
+      ("claimed this Redis, taking its unfingerprinted index state as this
+      deployment's own history") and the mainnet flip ("recorded base
+      84532→8453 …"). Both clear to `reason: null` at the next check or restart.
+      See `backend/src/services/deploymentIdentity.ts`.
 
 ### 3.5 Rotate readiness
 
@@ -293,8 +313,10 @@ should walk this back to a non-custodial model.
 ### 5b.1 Endpoint authorization (DONE — re-verified in source 2026-09-07)
 
 - [x] `POST /agents/:id/withdraw` — JWT-gated, verifies `req.user.address`
-      matches `agent.ownerAddress`. Refuses while agent is running. Now sweeps
-      0G and Base in one call (see `WITHDRAW_CHAINS` in `routes/agents.ts`).
+      matches `agent.ownerAddress`. Refuses while agent is running. Sweeps
+      every settlement chain in one call (the withdraw loop in
+      `routes/agents.ts`; its gas numbers come from
+      `services/settlementChains.ts`).
 - [x] `POST /agents/:id/export-key` — JWT-gated.
 - [x] `POST /agents/:id/start | pause | stop` — all three call
       `authorizeOwner` (`routes/agents.ts` ~:875/:890/:905). The body's
@@ -373,12 +395,14 @@ when you have budget:
 
 ## Acknowledgment
 
-Before deploying to mainnet, set the env var that unlocks the deploy
-script's mainnet path:
+Before deploying to mainnet, pass the env var that unlocks the deploy
+script's mainnet path on the command line of that ONE run:
 
 ```bash
-export I_HAVE_READ_MAINNET_CHECKLIST=yes
+I_HAVE_READ_MAINNET_CHECKLIST=yes npx hardhat run scripts/<script>.ts --network <mainnet network>
 ```
 
-Setting this is your acknowledgment that every box above is checked.
-The script will refuse otherwise. Don't lie to it.
+Don't `export` it (it would silently unlock every later run in that shell)
+and don't put it in `contracts/.env` (hardhat refuses to start if that file
+sets it). Passing it is your acknowledgment that every box above is
+checked. The script will refuse otherwise. Don't lie to it.

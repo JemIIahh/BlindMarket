@@ -1,7 +1,8 @@
+import { backgroundWritesAllowed } from './deploymentIdentity.js';
 import * as a2aStore from './a2aStore.js';
 import * as escrowService from './escrow.js';
 import { resolveCachedTaskByHash, resolveTaskByHash } from './taskChain.js';
-import { provider, baseProvider } from './chain.js';
+import { chainRuntime } from './chainRuntime.js';
 import { loadAgentByWallet } from './deployedAgentStore.js';
 import { emitTaskAvailable } from './socket.js';
 import { SWEEP_INTERVAL_MS, EXPIRY_GRACE_SEC } from '../constants.js';
@@ -77,6 +78,7 @@ export function stopExpirySweepLoop(): void {
 }
 
 export async function sweepExpiredTasks(): Promise<void> {
+  if (!backgroundWritesAllowed('expiry sweep')) return;
   if (inFlight) return;
   inFlight = true;
   try {
@@ -289,8 +291,14 @@ async function reconcileBroadcastAssignment(
   }
 
   // Still Funded. A successful receipt means the status read is stale — wait.
-  // An RPC failure is not a verdict either.
-  const rpc = resolved.chain === 'base' ? baseProvider : provider;
+  // An RPC failure is not a verdict either, and neither is a chain this build
+  // has no provider for: another chain's RPC would never find the receipt.
+  let rpc;
+  try {
+    rpc = chainRuntime(resolved.chain).provider;
+  } catch {
+    return false;
+  }
   const short = `assign tx ${assignTxHash.slice(0, 10)}… for task ${taskId.slice(0, 10)}…`;
   let receipt;
   try {
@@ -335,6 +343,7 @@ async function reconcileBroadcastAssignment(
 }
 
 export async function sweepGasLiveness(): Promise<void> {
+  if (!backgroundWritesAllowed('gas-liveness sweep')) return;
   if (gasLivenessInFlight) return;
   gasLivenessInFlight = true;
   try {

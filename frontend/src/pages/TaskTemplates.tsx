@@ -22,7 +22,7 @@ import {
   createTemplate,
   getMyTemplates,
 } from '../services/marketplace';
-import { getPaymentSymbol } from '../config/constants';
+import { getPaymentSymbol, useSettlement } from '../config/settlement';
 import { truncateAddress } from '../lib/utils';
 
 type Tab = 'browse' | 'mine' | 'create';
@@ -37,6 +37,8 @@ const TABS: { id: Tab; label: string }[] = [
 ];
 
 export default function TaskTemplates() {
+  // Re-render when the backend's settlement answer arrives (config/settlement.ts).
+  useSettlement();
   const [tab, setTab] = useTabParam<Tab>('browse', TABS.map((t) => t.id));
   const [page, setPage] = useState(1);
   const { address } = useAccount();

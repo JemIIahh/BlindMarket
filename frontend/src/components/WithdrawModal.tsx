@@ -111,7 +111,8 @@ export function WithdrawModal({ onClose, onWithdrawn }: { onClose: () => void; o
         return;
       }
       const data = new Interface(ERC20_TRANSFER_ABI).encodeFunctionData('transfer', [dest, amountRaw]);
-      sent = await signAndSendTx(signer, { to: BASE_USDC_ADDRESS, data, from });
+      // A Base USDC transfer, whatever chain new tasks post on.
+      sent = await signAndSendTx(signer, { to: BASE_USDC_ADDRESS, data, from }, undefined, { chain: 'base' });
     } catch (err) {
       if (err instanceof RelayError && err.code === 'PRIVY_AUTH_FAILED') {
         // The backend uses this code for any Privy 401/403 — only offer the grant once.

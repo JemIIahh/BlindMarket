@@ -26,11 +26,11 @@ Environment:
 | `BLINDMARKET_PRIVATE_KEY` | 0G: yes · Base: for private briefs | On **0G** this wallet funds escrow in native 0G, pays gas, and signs `submitEvidence` for `complete_task`. On **Base** nothing is *signed* locally — the relay does that — but this key is still the executor's **decryption identity**: `fetch_brief` unwraps a private brief with it, so the pubkey you pass to `register_as_executor` must be the one `wallet_status` reports as `executorPublicKey`. Omit for read-only use or Base tasks that are all public. |
 | `BLINDMARKET_API_BASE` | no | Default `https://api.blindmarket.xyz` |
 | `BLINDMARKET_RPC_URL` | no | 0G RPC for the local wallet. Default `https://evmrpc.0g.ai` |
-| `BLINDMARKET_SETTLEMENT` | no | Force `0g` or `base`. Default: ask the backend (`GET /health/bridge`) which chain escrow settles on — `base` whenever it has a Base escrow and a Base marketplace signer configured. `base` fails loudly if the backend is not actually in Base mode. |
-| `BLINDMARKET_BASE_ESCROW_ADDRESS` | with forced `base` | The escrow the backend builds against, when `/health/bridge` cannot confirm it. Needed because that endpoint reports Base only when the backend can sign for it (Base escrow **and** Base marketplace signer), while task creation needs only the Base escrow address — and that falls back to the generated `contractAddresses.ts`, so a backend with an empty Base `.env` still builds Base transactions. Only read when `BLINDMARKET_SETTLEMENT=base`. |
+| `BLINDMARKET_SETTLEMENT` | no | A chain key to require (`0g`, `base`, …). Default: ask the backend (`GET /health/bridge`). A backend that names its posting chain (`postingChain`) is followed: new tasks are escrowed there, and that chain's settlement token picks how you pay — an ERC-20 the relay serves (USDC on Base) through the relay, native 0G from the local wallet, anything else refused with `UNSUPPORTED_SETTLEMENT`. An older backend is read as before: `base` whenever it has a Base escrow and a Base marketplace signer configured. `0g` skips discovery; any other value fails loudly unless the backend really posts there. |
+| `BLINDMARKET_BASE_ESCROW_ADDRESS` | with forced `base`, older backends | The escrow the backend builds against, when an older backend's `/health/bridge` cannot confirm it. Needed because that endpoint reports Base only when the backend can sign for it (Base escrow **and** Base marketplace signer), while task creation needs only the Base escrow address — and that falls back to the generated `contractAddresses.ts`, so a backend with an empty Base `.env` still builds Base transactions. Only read when `BLINDMARKET_SETTLEMENT=base` and the backend does not name its posting chain. |
 | `BLINDMARKET_BASE_CHAIN_ID` | no | Chain for that override. Default `84532` (Base Sepolia). |
-| `BLINDMARKET_BASE_RPC_URL` | no | Read-only Base RPC for allowance/balance checks and receipt polling. Default by chain: `https://sepolia.base.org` (84532) / `https://mainnet.base.org` (8453). |
-| `BLINDMARKET_USDC_ADDRESS` | no | Override the USDC address if the backend reports a Base chain not listed in `settlement.ts`. |
+| `BLINDMARKET_BASE_RPC_URL` | no | Read-only Base RPC for allowance/balance checks and receipt polling. Default by chain: `https://sepolia.base.org` (84532) / `https://mainnet.base.org` (8453). Another relay chain `<key>` reads `BLINDMARKET_<KEY>_RPC_URL` and has no default. |
+| `BLINDMARKET_USDC_ADDRESS` | no | Older backends: override the USDC address if the backend reports a Base chain not listed in `settlement.ts`. A backend that names its settlement token is the authority; a value that disagrees with it is refused (`TOKEN_MISMATCH`). |
 
 How a spend is paid, by settlement mode (`wallet_status` shows which you are in):
 
@@ -44,7 +44,11 @@ How a spend is paid, by settlement mode (`wallet_status` shows which you are in)
 
 **What an `sk_` key can do on Base — read this before putting one in a config file.** The relay signs any transaction from the key owner's Privy wallet with gas sponsored, and it does not consult the key's `capabilities`. So on Base an API key is unrestricted authority to move USDC (or any token) out of that wallet. Treat it like a private key: a dedicated wallet, funded with only what you intend to spend through the MCP.
 
-Discovery is a hint, not a proof: `/health/bridge` reports Base only when the backend has a Base marketplace signer, while task creation routes on `BASE_ESCROW_ADDRESS` alone. Every send therefore checks the unsigned tx targets the escrow the current mode expects and refuses with `ESCROW_MISMATCH` otherwise — that check is what prevents native 0G value being sent to a Base address.
+Discovery is a hint, not a proof. On an older backend `/health/bridge` reports Base only when the backend has a Base marketplace signer, while task creation routes on `BASE_ESCROW_ADDRESS` alone; a backend that names its posting chain removes that gap, but not every way a task can live on another chain. Every send therefore checks the unsigned tx targets the escrow the current mode expects and refuses with `ESCROW_MISMATCH` otherwise — that check is what prevents native 0G value being sent to a Base address.
+
+`register_as_executor` and `create_agent` declare exactly one chain in `supportedChains`: the one this process settles on (`wallet_status` shows it), because `complete_task` delivers only there. A backend that filters by it then offers you only tasks you can complete, and refuses bids and `/accept` (409 `CHAIN_UNSUPPORTED`) elsewhere — including tasks indexed before chains were recorded, which need both `0g` and `base` declared. If the chain cannot be learned, registration is refused rather than sent without one.
+
+`BLINDMARKET_SETTLEMENT` may name any chain the backend has an escrow on, not only the one it posts on: that is how you deliver, cancel or reclaim a task left on a chain the backend has since stopped posting on. `post_task` and `rent_service` refuse there (`NOT_POSTING_CHAIN`), because new escrow is funded only on the posting chain. On 0G the local wallet must be on the backend's 0G chain id (`CHAIN_MISMATCH` otherwise) — checked only when the backend names its chains and discovery runs: `BLINDMARKET_SETTLEMENT=0g` skips discovery, and an older backend does not say.
 
 ### Base: what the wallet and key must be
 
@@ -69,7 +73,7 @@ claude mcp add blindmarket \
   -- node /path/to/BlindBounty/mcp/dist/index.js
 ```
 
-(`BLINDMARKET_BASE_ESCROW_ADDRESS` is only needed while `/health/bridge` cannot confirm Base — see the env table. Use the mainnet escrow once deployed.)
+(`BLINDMARKET_SETTLEMENT` and `BLINDMARKET_BASE_ESCROW_ADDRESS` are only needed while an older backend's `/health/bridge` cannot confirm Base — see the env table. Use the mainnet escrow once deployed.)
 
 **Claude Code — 0G (legacy, local wallet)**
 
@@ -133,8 +137,9 @@ live one. It signs `submitEvidence` **locally** (no relay): it needs
 `BLINDMARKET_PRIVATE_KEY` to be the wallet that owns `BLINDMARKET_API_KEY`, and
 an RPC for the settlement chain (`BLINDMARKET_RPC_URL` for 0G,
 `BLINDMARKET_BASE_RPC_URL` for Base — there is no default for Base, and tasks
-on a chain without an RPC are skipped by the runtime itself: the backend stores
-the declared `supportedChains` but does not filter offers or `/accept` by it).
+on a chain without an RPC are skipped by the runtime itself: older backends
+store the declared `supportedChains` without filtering offers or `/accept` by
+it).
 Without `BLINDMARKET_PRIVATE_KEY` the runtime refuses to start (SDK 0.6.0) —
 it no longer registers a throwaway wallet. `BLINDMARKET_EXPERIMENTAL_RUNTIME=true`
 enables it. The maintained way to EARN is still a platform agent deployed in

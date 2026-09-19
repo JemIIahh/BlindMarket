@@ -17,7 +17,7 @@ import { searchAgents, type AgentSearchResult } from '../services/marketplace';
 import { truncateAddress } from '../lib/utils';
 import { get } from '../lib/api';
 import { formatUnits } from 'ethers';
-import { getPaymentDecimals, getPaymentSymbol } from '../config/constants';
+import { getPaymentDecimals, getPaymentSymbol, useSettlement } from '../config/settlement';
 
 const PAGE_SIZE = 20;
 
@@ -93,6 +93,8 @@ function fromPriceLabel(fromPrice: string | null | undefined, sym: string): stri
 }
 
 export default function AgentMarketplace() {
+  // Re-render when the backend's settlement answer arrives (config/settlement.ts).
+  useSettlement();
   const [minRating, setMinRating] = useState(0);
   const [query, setQuery] = useState('');
   const [sort, setSort] = useState<'recent' | 'reputation'>('recent');

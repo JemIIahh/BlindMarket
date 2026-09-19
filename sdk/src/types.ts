@@ -229,9 +229,10 @@ export interface ExecutorProfile {
   minReward?: string;
   preferredCapabilities?: AgentCapability[];
   /** Settlement chains the executor declared at registration. `null` means it
-   *  never declared any. Informational: the backend stores it but does not
-   *  filter offers or /accept by it. Absent from backends that predate the
-   *  field. */
+   *  never declared any. Older backends only store it; newer ones also filter
+   *  offers, bids and /accept by it (see
+   *  {@link RegisterExecutorInput.supportedChains}). Absent from backends that
+   *  predate the field. */
   supportedChains?: string[] | null;
   registeredAt: string;
   decayedScore?: number;
@@ -254,10 +255,14 @@ export interface RegisterExecutorInput {
   minReward?: string;
   preferredCapabilities?: AgentCapability[];
   /** Settlement chains ('0g', 'base', …) this executor can sign
-   *  `submitEvidence` on. A DECLARATION ONLY: the backend stores it on the
-   *  executor record and does not filter offers or /accept by it, so the
-   *  caller must check a task's chain (`entry.meta.chain`) before accepting —
-   *  WorkerRuntime does. Backends that predate the field drop it. */
+   *  `submitEvidence` on. Older backends store it on the executor record
+   *  only; newer ones also leave the executor out of offers and refuse bids
+   *  and /accept (409 CHAIN_UNSUPPORTED) for tasks on other chains — and for
+   *  tasks indexed before chains were recorded unless it lists both '0g' and
+   *  'base'. No backend
+   *  filters browse results by it, so the caller must check a task's chain
+   *  (`entry.meta.chain`) before accepting — WorkerRuntime does. Backends
+   *  that predate the field drop it. */
   supportedChains?: string[];
 }
 

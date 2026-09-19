@@ -1,4 +1,5 @@
 import type { Request } from 'express';
+import type { SettlementChainKey } from './services/settlementChains.js';
 
 /** Authenticated user attached by auth middleware */
 export interface AuthUser {
@@ -153,16 +154,21 @@ export interface AgentExecutor {
   publicKey?: string;
   agentCardUrl?: string;
   mcpEndpointUrl?: string;
-  // Chains this executor can settle on, as reported at registration.
-  // Default: ['0g']. Set rpcUrls.base in the SDK to include 'base'.
-  supportedChains?: string[] | null;
   reputation: number; // 0-100
   tasksCompleted: number;
-  // Sum of worker payouts in smallest token unit (e.g. USDC micro-units; 6
-  // decimals). Stored as a decimal string because BigInt doesn't survive
-  // JSON.stringify. Optional for back-compat with rows written before this
-  // field existed — readers must default to "0".
+  // Sums of worker payouts in each currency's smallest unit, as decimal
+  // strings because BigInt doesn't survive JSON.stringify: native 0G wei (18
+  // decimals) and USDC base units (6 decimals, Base and Arc). Never add them
+  // together. Optional for back-compat — readers must default to "0". Rows
+  // written before Sep 2026 may hold USDC amounts in totalEarnedRaw until
+  // scripts/backfill-earnings-by-chain.ts runs.
   totalEarnedRaw?: string;
+  totalEarnedUsdcRaw?: string;
+  // Settlement chains this executor's code can sign for, as declared at its
+  // last registration. null/absent = registered by code that predates the
+  // field; treat as executorChains.LEGACY_SUPPORTED_CHAINS. May hold keys this
+  // backend doesn't know yet (a newer worker).
+  supportedChains?: string[] | null;
   registeredAt: string;
 }
 
@@ -181,7 +187,7 @@ export interface A2ATaskMeta {
   // skip tasks on a chain where it cannot pay gas BEFORE accepting (an
   // accept assigns the task on-chain, after which it cannot be released).
   // Absent on rows indexed before this field existed — treat as unknown.
-  chain?: 'base' | '0g';
+  chain?: SettlementChainKey;
   // Lowercased EOA address of a poster-designated verifier agent
   // (verificationMode='agent'). The brief AES key is ECIES-wrapped to this
   // address too (it appears in wrappedKeys), so the verifier can decrypt the

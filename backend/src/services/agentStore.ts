@@ -2,6 +2,7 @@ import { getPool } from './neonDb.js';
 import { getDb } from './database.js';
 import { config } from '../config.js';
 import type { AgentExecutor, AgentCapability } from '../types.js';
+import type { SettlementUnit } from './settlementUnits.js';
 
 const MAX_AGENTS = 1_000;
 
@@ -9,12 +10,7 @@ function usePg(): boolean {
   return Boolean(config.databaseUrl);
 }
 
-// What an executor can settle on when it has never said. Matches the column
-// default in Postgres migration 32; SQLite's default is '[]', which reads back
-// as this too (see rowToAgent).
-export const DEFAULT_SUPPORTED_CHAINS: readonly string[] = ['0g'];
-
-const PG_COLS = 'address, display_name, capabilities, public_key, agent_card_url, mcp_endpoint_url, min_reward, preferred_capabilities, supported_chains, reputation, tasks_completed, total_earned_raw, registered_at';
+const PG_COLS = 'address, display_name, capabilities, public_key, agent_card_url, mcp_endpoint_url, min_reward, preferred_capabilities, reputation, tasks_completed, total_earned_raw, total_earned_usdc_raw, supported_chains, registered_at';
 
 function rowToAgent(row: Record<string, unknown>): AgentExecutor {
   return {
@@ -26,25 +22,25 @@ function rowToAgent(row: Record<string, unknown>): AgentExecutor {
     mcpEndpointUrl: (row.mcp_endpoint_url as string) ?? undefined,
     minReward: (row.min_reward as string) ?? undefined,
     preferredCapabilities: safeJsonArray(row.preferred_capabilities) as AgentCapability[] | undefined,
-    supportedChains: supportedChainsOf(row.supported_chains),
     reputation: (row.reputation as number) ?? 50,
     tasksCompleted: (row.tasks_completed as number) ?? 0,
     totalEarnedRaw: (row.total_earned_raw as string) ?? '0',
+    totalEarnedUsdcRaw: (row.total_earned_usdc_raw as string) ?? '0',
+    supportedChains: supportedChainsOf(row.supported_chains),
     registeredAt: (row.registered_at as string) ?? new Date().toISOString(),
   };
 }
 
-function supportedChainsOf(v: unknown): string[] {
+// null = registered by code that predates the field (the legacy set). The
+// API never stores an empty list (the schema requires one entry), so an empty
+// one is SQLite migration 14's '[]' default and means the same.
+function supportedChainsOf(v: unknown): string[] | null {
+  if (v == null) return null;
   const chains = safeJsonArray(v);
-  return chains.length > 0 ? chains : [...DEFAULT_SUPPORTED_CHAINS];
+  return chains.length > 0 ? chains : null;
 }
 
-/**
- * supported_chains is NOT NULL in Postgres, and an explicit NULL parameter does
- * not fall back to the column DEFAULT (that only applies when the column is
- * omitted). So a caller that declares no chains sends NULL here and the SQL
- * resolves it: keep what the row already has, else DEFAULT_SUPPORTED_CHAINS.
- */
+/** What registerAgent stores: an empty list declares nothing, so it is null too. */
 function declaredChains(agent: AgentExecutor): string[] | null {
   return agent.supportedChains && agent.supportedChains.length > 0 ? agent.supportedChains : null;
 }
@@ -55,6 +51,17 @@ function safeJsonArray(v: unknown): string[] {
   return [];
 }
 
+/**
+ * Insert an executor, or update its profile if it already exists. The
+ * counters (reputation, tasksCompleted, totalEarnedRaw, totalEarnedUsdcRaw)
+ * are only written on insert: every worker re-registers at boot without them,
+ * and overwriting here reset each agent's earnings to 0 on restart while its
+ * task count stayed. Change counters with `creditPayout` / `adjustReputation`.
+ *
+ * `supportedChains` is written on every registration: it describes the code
+ * that registered last, so a registration without it (older code) resets it
+ * to null, the legacy set. An empty list is stored as null too.
+ */
 export async function registerAgent(agent: AgentExecutor): Promise<void> {
   const addr = agent.address.toLowerCase();
 
@@ -72,11 +79,10 @@ export async function registerAgent(agent: AgentExecutor): Promise<void> {
     await db.query(
       `INSERT INTO agent_executors
          (address, display_name, capabilities, public_key, agent_card_url,
-          mcp_endpoint_url, min_reward, preferred_capabilities, supported_chains,
-          reputation, tasks_completed, total_earned_raw, registered_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
-         COALESCE($9::TEXT[], (SELECT supported_chains FROM agent_executors WHERE address = $1), $13::TEXT[]),
-         $10, $11, $12,
+          mcp_endpoint_url, min_reward, preferred_capabilities,
+          reputation, tasks_completed, total_earned_raw, total_earned_usdc_raw, supported_chains,
+          registered_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
          COALESCE((SELECT registered_at FROM agent_executors WHERE address = $1), NOW()), NOW())
        ON CONFLICT (address) DO UPDATE SET
          display_name = EXCLUDED.display_name,
@@ -87,17 +93,13 @@ export async function registerAgent(agent: AgentExecutor): Promise<void> {
          min_reward = EXCLUDED.min_reward,
          preferred_capabilities = EXCLUDED.preferred_capabilities,
          supported_chains = EXCLUDED.supported_chains,
-         reputation = EXCLUDED.reputation,
-         tasks_completed = EXCLUDED.tasks_completed,
-         total_earned_raw = EXCLUDED.total_earned_raw,
          updated_at = NOW()`,
       [
         addr, agent.displayName, agent.capabilities, agent.publicKey,
         agent.agentCardUrl ?? null, agent.mcpEndpointUrl ?? null,
         agent.minReward ?? null, agent.preferredCapabilities ?? null,
+        agent.reputation, agent.tasksCompleted, agent.totalEarnedRaw ?? '0', agent.totalEarnedUsdcRaw ?? '0',
         declaredChains(agent),
-        agent.reputation, agent.tasksCompleted, agent.totalEarnedRaw ?? '0',
-        [...DEFAULT_SUPPORTED_CHAINS],
       ],
     );
     return;
@@ -113,11 +115,10 @@ export async function registerAgent(agent: AgentExecutor): Promise<void> {
   db.prepare(
     `INSERT INTO agent_executors
        (address, display_name, capabilities, public_key, agent_card_url,
-        mcp_endpoint_url, min_reward, preferred_capabilities, supported_chains,
-        reputation, tasks_completed, total_earned_raw, registered_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?,
-       COALESCE(?, (SELECT supported_chains FROM agent_executors WHERE address = ?), ?),
-       ?, ?, ?, COALESCE((SELECT registered_at FROM agent_executors WHERE address = ?), datetime('now')), datetime('now'))
+        mcp_endpoint_url, min_reward, preferred_capabilities,
+        reputation, tasks_completed, total_earned_raw, total_earned_usdc_raw, supported_chains,
+        registered_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT registered_at FROM agent_executors WHERE address = ?), datetime('now')), datetime('now'))
      ON CONFLICT(address) DO UPDATE SET
        display_name = excluded.display_name,
        capabilities = excluded.capabilities,
@@ -127,17 +128,101 @@ export async function registerAgent(agent: AgentExecutor): Promise<void> {
        min_reward = excluded.min_reward,
        preferred_capabilities = excluded.preferred_capabilities,
        supported_chains = excluded.supported_chains,
-       reputation = excluded.reputation,
-       tasks_completed = excluded.tasks_completed,
-       total_earned_raw = excluded.total_earned_raw,
        updated_at = datetime('now')`,
   ).run(
     addr, agent.displayName, JSON.stringify(agent.capabilities), agent.publicKey,
     agent.agentCardUrl ?? null, agent.mcpEndpointUrl ?? null,
     agent.minReward ?? null, agent.preferredCapabilities ? JSON.stringify(agent.preferredCapabilities) : null,
-    declaredChains(agent) ? JSON.stringify(declaredChains(agent)) : null, addr, JSON.stringify(DEFAULT_SUPPORTED_CHAINS),
-    agent.reputation, agent.tasksCompleted, agent.totalEarnedRaw ?? '0', addr,
+    agent.reputation, agent.tasksCompleted, agent.totalEarnedRaw ?? '0', agent.totalEarnedUsdcRaw ?? '0',
+    declaredChains(agent) ? JSON.stringify(declaredChains(agent)) : null, addr,
   );
+}
+
+// Each earnings total holds one currency at one scale.
+const EARNINGS_COLUMN = {
+  '0G': { column: 'total_earned_raw', decimals: 18 },
+  USDC: { column: 'total_earned_usdc_raw', decimals: 6 },
+} as const;
+
+/** Whether `unit` has an earnings total it can be added to as-is. */
+export function hasEarningsTotal(unit: SettlementUnit): boolean {
+  const target = EARNINGS_COLUMN[unit.symbol];
+  return !!target && target.decimals === unit.decimals;
+}
+
+/**
+ * Credit one completed task to an executor: task count +1, reputation +1
+ * (capped at 100), and `amountRaw` added to the earnings total for `unit`.
+ * The three move together, and the increments happen in the database, so
+ * two payouts for the same executor can't overwrite each other. Returns
+ * false when no such executor exists.
+ */
+export async function creditPayout(
+  address: string,
+  unit: SettlementUnit,
+  amountRaw: bigint,
+): Promise<boolean> {
+  const target = EARNINGS_COLUMN[unit.symbol];
+  if (!hasEarningsTotal(unit)) {
+    // e.g. native 18-decimal USDC on Arc: it must be scaled to 6 decimals
+    // before it can join the USDC total.
+    throw new Error(`no earnings total for ${unit.symbol} with ${unit.decimals} decimals`);
+  }
+  const addr = address.toLowerCase();
+  const col = target.column;
+  if (usePg()) {
+    const db = await getPool();
+    const { rowCount } = await db.query(
+      `UPDATE agent_executors
+         SET tasks_completed = tasks_completed + 1,
+             reputation = LEAST(100, reputation + 1),
+             ${col} = (COALESCE(NULLIF(${col}, ''), '0')::numeric + $2::numeric)::text,
+             updated_at = NOW()
+       WHERE address = $1`,
+      [addr, amountRaw.toString()],
+    );
+    return (rowCount ?? 0) > 0;
+  }
+  // SQLite integers are 64-bit, too small for 18-decimal totals, so the sum
+  // is done in JS inside a transaction (better-sqlite3 is synchronous).
+  const db = getDb();
+  return db.transaction(() => {
+    const row = db.prepare(`SELECT ${col} AS earned FROM agent_executors WHERE address = ?`).get(addr) as
+      { earned: string | null } | undefined;
+    if (!row) return false;
+    const total = (BigInt(row.earned || '0') + amountRaw).toString();
+    db.prepare(
+      `UPDATE agent_executors
+         SET tasks_completed = tasks_completed + 1,
+             reputation = MIN(100, reputation + 1),
+             ${col} = ?,
+             updated_at = datetime('now')
+       WHERE address = ?`,
+    ).run(total, addr);
+    return true;
+  })();
+}
+
+/** Move an executor's reputation by `delta`, kept within 0–100. Returns
+ *  false when no such executor exists. */
+export async function adjustReputation(address: string, delta: number): Promise<boolean> {
+  const addr = address.toLowerCase();
+  if (usePg()) {
+    const db = await getPool();
+    const { rowCount } = await db.query(
+      `UPDATE agent_executors
+         SET reputation = LEAST(100, GREATEST(0, reputation + $2)), updated_at = NOW()
+       WHERE address = $1`,
+      [addr, delta],
+    );
+    return (rowCount ?? 0) > 0;
+  }
+  const { changes } = getDb().prepare(
+    `UPDATE agent_executors
+       SET reputation = MIN(100, MAX(0, reputation + ?)), updated_at = datetime('now')
+     WHERE address = ?`,
+  ).run(delta, addr);
+  return changes > 0;
 }
 
 export async function getAgent(address: string): Promise<AgentExecutor | undefined> {

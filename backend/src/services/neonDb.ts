@@ -1,5 +1,7 @@
 import pg from 'pg';
 import { config } from '../config.js';
+import { pricingUnit } from './settlementUnits.js';
+import { USDC_UNIT } from './settlementChains.js';
 import { Redis } from 'ioredis';
 
 const { Pool } = pg;
@@ -690,9 +692,14 @@ const migrations: Array<{ id: number; name: string; sql: string; when?: () => bo
   {
     id: 31,
     name: 'settlement_amounts_to_usdc_units',
-    // Only where Base settles in USDC: a 0G-only deployment's amounts really
-    // are 18-decimal and must stay as they are.
-    when: () => !!config.baseEscrowAddress,
+    // Only where this deployment PRICES in USDC: amounts on a stack that
+    // prices in 0G really are 18-decimal and must stay as they are. Keyed on
+    // the pricing unit, not on "a Base escrow exists", because a stack can
+    // have a Base escrow (withdrawals, CCTP) while posting — and pricing — on
+    // 0G. A skipped `when` is not recorded, so this would otherwise fire the
+    // first boot after such a stack added a Base escrow and divide every 0G
+    // price by 10^12, irreversibly.
+    when: () => pricingUnit().decimals === USDC_UNIT.decimals,
     sql: `
       -- Service prices and agent minimum rewards were written with 18
       -- decimals (the web app used parseEther, SDK samples used 1 0G = 10^18)
@@ -715,10 +722,64 @@ const migrations: Array<{ id: number; name: string; sql: string; when?: () => bo
   {
     // SDK 0.6.0: workers tell the backend which chains they have an RPC for
     // so they only get offered tasks they can actually settle.
+    // Recorded on production as-is: never edit this entry. Its NOT NULL
+    // DEFAULT '{0g}' is undone by migration 36.
     id: 32,
     name: 'agent_executors_supported_chains',
     sql: `
       ALTER TABLE agent_executors ADD COLUMN IF NOT EXISTS supported_chains TEXT[] NOT NULL DEFAULT '{0g}';
+    `,
+  },
+  {
+    id: 33,
+    name: 'agent_executors_usdc_earnings',
+    // total_earned_raw holds native 0G (18 decimals); USDC payouts (6
+    // decimals, Base now and Arc later) get their own total so the two are
+    // never added together.
+    sql: `ALTER TABLE agent_executors ADD COLUMN IF NOT EXISTS total_earned_usdc_raw TEXT NOT NULL DEFAULT '0';`,
+  },
+  {
+    id: 34,
+    name: 'credited_payouts',
+    // Durable at-most-once gate for earnings credits (services/creditLedger.ts).
+    // The Redis marker alone is lost on a snapshot restore while the credits
+    // in agent_executors stay, so the next ruling scan credited them again.
+    sql: `
+      CREATE TABLE IF NOT EXISTS credited_payouts (
+        task_hash TEXT PRIMARY KEY,
+        chain TEXT NOT NULL,
+        executor TEXT NOT NULL,
+        credited_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `,
+  },
+  {
+    id: 35,
+    name: 'transactions_unit',
+    // The currency a ledger row's amount/fee/net are in ('USDC', '0G'). Rows
+    // from before this column are NULL: they are in whatever this deployment
+    // paid in at the time. Summaries never add different units together.
+    sql: `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS unit TEXT;`,
+  },
+  {
+    id: 36,
+    name: 'agent_executors_supported_chains_nullable',
+    // supported_chains is what the executor's code declared at registration;
+    // NULL = registered by code that predates the field, which handles
+    // exactly 0G and Base (executorChains.LEGACY_SUPPORTED_CHAINS). Migration
+    // 32 made the column NOT NULL DEFAULT '{0g}', stamping every existing
+    // executor 0G-only. Routing reads the column, so the stamp would stop
+    // those agents being offered Base tasks, and SDK 0.6 treats a stored
+    // subset as the operator's choice and never re-declares it. A stamp
+    // can't be told from a declared ['0g'], so every {0g} row goes back to
+    // NULL; worker.js and the SDK declare their real chains at their next
+    // registration. `<@` also catches '{}' and '{0g,0g}' (master's route did
+    // not dedupe).
+    sql: `
+      ALTER TABLE agent_executors ALTER COLUMN supported_chains DROP NOT NULL;
+      ALTER TABLE agent_executors ALTER COLUMN supported_chains DROP DEFAULT;
+      UPDATE agent_executors SET supported_chains = NULL
+       WHERE supported_chains <@ ARRAY['0g']::TEXT[];
     `,
   },
 ];
@@ -777,6 +838,11 @@ export function listMigrations(): Array<{ id: number; name: string }> {
   return migrations.map(({ id, name }) => ({ id, name }));
 }
 
+/** One migration's SQL, for tests that pin what production has recorded. */
+export function migrationSql(id: number): string | undefined {
+  return migrations.find((m) => m.id === id)?.sql;
+}
+
 /** Ids of this build's migrations that must never be re-run automatically. */
 export function rerunUnsafeMigrationIds(): number[] {
   return migrations.filter((m) => !isRerunSafe(m.sql)).map((m) => m.id);
@@ -828,9 +894,36 @@ export async function runMigrations(p: pg.Pool): Promise<void> {
       );
       console.log(`[neonDb] Applied migration ${m.id}: ${m.name}`);
     }
+    assertPricingUnitUnchanged(appliedNames);
   } finally {
     client.release();
   }
+}
+
+/**
+ * Migration 31 converted every stored price and reward floor to USDC base
+ * units and is recorded only where it ran. A deployment that recorded it and
+ * later switches to pricing in 0G (POSTING_CHAIN=0g) would read those
+ * 6-decimal amounts as wei: a 5 USDC listing becomes 5·10⁻¹² 0G and every
+ * reward floor passes. Nothing re-keys them, so refuse to run, unless the
+ * operator has re-keyed the rows by hand and says so.
+ */
+export function assertPricingUnitUnchanged(
+  applied: ReadonlyMap<number, string>,
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  if (!applied.has(31)) return;
+  const unit = pricingUnit();
+  if (unit.decimals === USDC_UNIT.decimals) return;
+  if (env.ALLOW_PRICING_UNIT_CHANGE === 'true') {
+    console.warn(`[neonDb] ⚠ this database was priced in USDC (migration 31) but the posting chain prices in ${unit.symbol}; ALLOW_PRICING_UNIT_CHANGE=true, so stored prices are taken as ${unit.symbol}`);
+    return;
+  }
+  throw new Error(
+    `This database was priced in USDC (migration 31 is recorded), but the posting chain prices in ${unit.symbol} ` +
+      `(${unit.decimals} decimals). Stored service prices and reward floors would be read as ${unit.symbol} wei. ` +
+      `Unset POSTING_CHAIN, or re-key agent_services.price_raw and *.min_reward by hand and set ALLOW_PRICING_UNIT_CHANGE=true.`,
+  );
 }
 
 // ── Redis → PG data migration ──────────────────────────────────────────────────

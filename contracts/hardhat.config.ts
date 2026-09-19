@@ -1,7 +1,13 @@
-import { defineConfig } from "hardhat/config";
+// Must stay the first import: it picks the OpenZeppelin manifest directory for
+// DEPLOYMENT_SET before upgrades-core reads it, and snapshots the guard
+// variables before dotenv loads contracts/.env.
+import { assertGuardVarsNotFromDotenv } from "./scripts/_manifest-dir.js";
+import { configVariable, defineConfig } from "hardhat/config";
 import hardhatToolboxMochaEthers from "@nomicfoundation/hardhat-toolbox-mocha-ethers";
 import openzeppelinUpgrades from "@openzeppelin/hardhat-upgrades";
 import "dotenv/config";
+
+assertGuardVarsNotFromDotenv();
 
 export default defineConfig({
   plugins: [hardhatToolboxMochaEthers, openzeppelinUpgrades],
@@ -52,6 +58,26 @@ export default defineConfig({
       chainType: "l1",
       url: process.env.BASE_RPC_URL || "https://mainnet.base.org",
       chainId: 8453,
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+    },
+    // Arc (Circle's L1). Each network name equals its deployment file name
+    // (deployments/arc-testnet.json, arc-mainnet.json); see _deployments.ts.
+    "arc-testnet": {
+      type: "http",
+      chainType: "l1",
+      url: process.env.ARC_TESTNET_RPC_URL || "https://rpc.testnet.arc.io",
+      chainId: 5042002,
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+    },
+    // No default RPC for Arc Mainnet. A configuration variable is resolved
+    // only when this network is actually used, so the config loads for every
+    // other command, and a run on arc-mainnet without ARC_MAINNET_RPC_URL
+    // stops before it sends anything.
+    "arc-mainnet": {
+      type: "http",
+      chainType: "l1",
+      url: configVariable("ARC_MAINNET_RPC_URL"),
+      chainId: 5042,
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
     },
   },

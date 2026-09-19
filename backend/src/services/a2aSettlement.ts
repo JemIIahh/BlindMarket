@@ -25,9 +25,10 @@
  * triggers a second time during a flaky run.
  */
 
-import type { ContractTransactionResponse } from 'ethers';
+import type { Contract, ContractTransactionResponse } from 'ethers';
 import { isAddress, verifyMessage, toUtf8Bytes, isHexString, hexlify, getBytes } from 'ethers';
-import { escrowAsMarketplace, marketplaceSigner, baseEscrowAsMarketplace, baseMarketplaceSigner } from './chain.js';
+import { chainRuntime } from './chainRuntime.js';
+import { SETTLEMENT_CHAIN_KEYS, settlementChainConfig } from './settlementChains.js';
 import { config } from '../config.js';
 import { resolveTaskByHash, type TaskChain, type ResolvedTask } from './taskChain.js';
 import * as a2aStore from './a2aStore.js';
@@ -105,8 +106,12 @@ export function createSerialTxQueue(opts: { retryDelayMs?: number } = {}): <T>(f
   };
 }
 
-const enqueueOgSignerTx = createSerialTxQueue();
-const enqueueBaseSignerTx = createSerialTxQueue();
+type TxQueue = <T>(fn: () => Promise<T>) => Promise<T>;
+
+/** One queue per chain's signer, created once. */
+const signerQueues = new Map<TaskChain, TxQueue>(
+  SETTLEMENT_CHAIN_KEYS.map((chain) => [chain, createSerialTxQueue()]),
+);
 
 /**
  * The escrow a task actually lives on, plus the signer that can act on it.
@@ -118,24 +123,18 @@ const enqueueBaseSignerTx = createSerialTxQueue();
  * could never be settled and a Base task could never be assigned.
  */
 function bridgeFor(chain: TaskChain): {
-  escrow: typeof escrowAsMarketplace;
+  escrow: Contract | null;
   ready: boolean;
-  enqueue: <T>(fn: () => Promise<T>) => Promise<T>;
+  enqueue: TxQueue;
   label: string;
 } {
-  if (chain === 'base') {
-    return {
-      escrow: baseEscrowAsMarketplace,
-      ready: !!(baseEscrowAsMarketplace && baseMarketplaceSigner),
-      enqueue: enqueueBaseSignerTx,
-      label: 'Base (BASE_MARKETPLACE_SIGNER_PRIVATE_KEY)',
-    };
-  }
+  const { label, signerEnv } = settlementChainConfig(chain);
+  const { escrowAsMarketplace, marketplaceSigner } = chainRuntime(chain);
   return {
     escrow: escrowAsMarketplace,
     ready: !!(escrowAsMarketplace && marketplaceSigner),
-    enqueue: enqueueOgSignerTx,
-    label: '0G (MARKETPLACE_SIGNER_PRIVATE_KEY)',
+    enqueue: signerQueues.get(chain)!,
+    label: `${label} (${signerEnv})`,
   };
 }
 
@@ -258,15 +257,16 @@ async function confirmAssignedWorker(
 /**
  * Resolve the address the escrow should record as worker for an executor.
  * ERC-4337 agents submit from their BlindAccount — the EOA holds no ETH and
- * the paymaster charges the smart account — so on Base the contract must name
- * the smart account, otherwise its onlyWorker gate rejects every UserOp with
- * an empty revert. Off-chain identity stays the EOA everywhere; only the
- * on-chain worker field carries the smart account. 0G has no AA infra, so
- * the assignee there is always the EOA. Unknown executors (never deployed
- * here) fall back to the EOA they presented.
+ * the paymaster charges the smart account — so on an AA chain (Base; see
+ * `aa` in settlementChains.ts) the contract must name the smart account,
+ * otherwise its onlyWorker gate rejects every UserOp with an empty revert.
+ * Off-chain identity stays the EOA everywhere; only the on-chain worker field
+ * carries the smart account. 0G has no AA infra, so the assignee there is
+ * always the EOA. Unknown executors (never deployed here) fall back to the
+ * EOA they presented.
  */
 export async function resolveAssignee(executor: string, chain: TaskChain): Promise<string> {
-  if (chain !== 'base') return executor;
+  if (!settlementChainConfig(chain).aa) return executor;
   // Only name the smart account when the worker can actually submit through
   // it. The worker takes the UserOp path only with an entry point AND a
   // bundler configured; otherwise it signs with its EOA, and an escrow that
@@ -277,7 +277,8 @@ export async function resolveAssignee(executor: string, chain: TaskChain): Promi
   return agent?.smartAccountAddress || executor;
 }
 
-/** The same condition backend/agents/worker.js uses to pick the UserOp path. */
+/** The same condition backend/agents/worker.js (canSubmitViaSmartAccount) uses
+ *  to pick the UserOp path, beyond the chain's `aa` flag checked above. */
 export function smartAccountSubmitUsable(): boolean {
   return !!config.entryPointAddress && !!config.pimlicoBundlerUrl;
 }
@@ -488,9 +489,9 @@ function truncate(s: string): string {
 
 /**
  * Translate an A2A `verified` or `failed` transition into an on-chain
- * completeVerification(taskId, passed) on the BASE escrow. On Base, passed=true
- * releases USDC to the worker (90/10 split); passed=false only moves the task
- * to Verified. After a terminal failure the only exits are the poster's
+ * completeVerification(taskId, passed) on the escrow that holds the task. On
+ * Base, passed=true releases USDC to the worker (90/10 split); passed=false
+ * only moves the task to Verified. After a terminal failure the only exits are the poster's
  * claimTimeout (post-deadline refund) or an admin resolveDispute.
  *
  * When a valid 0G TEE attestation is provided, uses completeVerificationWithTEE
@@ -561,7 +562,7 @@ const teeReadyCache = new Map<TaskChain, { signer: string | null; at: number }>(
  */
 export async function teeSettlementReady(
   chain: TaskChain,
-  escrow: NonNullable<typeof escrowAsMarketplace>,
+  escrow: Contract,
 ): Promise<boolean> {
   const expected = config.teeSignerAddress?.toLowerCase();
   if (!expected) return false;
@@ -704,7 +705,9 @@ export async function settleVerification(
   }
 }
 
-/** True if both assignment (0G) and verification (Base) bridges are configured. */
-export function isBridgeConfigured(): boolean {
-  return !!(escrowAsMarketplace && marketplaceSigner && baseEscrowAsMarketplace && baseMarketplaceSigner);
+/** True when the backend can sign assignment and settlement for tasks on
+ *  `chain`: its escrow and its marketplace signer are both configured. Each
+ *  chain is independent — a task lives on exactly one. */
+export function isBridgeReady(chain: TaskChain): boolean {
+  return bridgeFor(chain).ready;
 }

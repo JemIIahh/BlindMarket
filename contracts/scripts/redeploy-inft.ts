@@ -13,25 +13,25 @@
  * needs NO on-chain wiring — the backend (agentRunner.deployAgent) is the minter,
  * so update the backend's INFT address after redeploy.
  *
- * Updates deployments/<network>.json in place.
+ * Updates the connected chain's record in the DEPLOYMENT_SET in place
+ * (EXPECTED_ESCROW=<that record's escrow> required on 0G testnet).
  *
  * Usage:
- *   npx hardhat run scripts/redeploy-inft.ts --network 0g-testnet
+ *   EXPECTED_ESCROW=0x… npx hardhat run scripts/redeploy-inft.ts --network 0g-testnet
  *   INFT_ORACLE=0x… npx hardhat run scripts/redeploy-inft.ts --network 0g-mainnet
  */
 
-import { ethers, network } from "../lib/hh.js";
+import { ethers } from "../lib/hh.js";
 import * as fs from "fs";
-import * as path from "path";
-import { assertSafeNetwork } from "./_guard.js";
+import { assertSafeNetwork, assertZeroGChain } from "./_guard.js";
+import { resolveEscrowTarget } from "./_deployments.js";
 
 async function main() {
   await assertSafeNetwork();
+  assertZeroGChain(Number((await ethers.provider.getNetwork()).chainId), "redeploy-inft.ts");
 
-  const depPath = path.resolve(import.meta.dirname, `../deployments/${network.name}.json`);
-  if (!fs.existsSync(depPath)) throw new Error(`deployments file not found: ${depPath}`);
-  const dep = JSON.parse(fs.readFileSync(depPath, "utf-8"));
-  const contracts = dep.contracts ?? dep;
+  const { file: depPath, record: dep } = await resolveEscrowTarget({ sends: true });
+  const contracts = dep.contracts;
 
   const [deployer] = await ethers.getSigners();
   console.log("Deployer:", deployer.address);
@@ -58,7 +58,6 @@ async function main() {
 
   // ── Persist ────────────────────────────────────────────────────────────────
   contracts.INFT = inftAddr;
-  if (!dep.contracts) Object.assign(dep, contracts);
   dep.inftRedeployedAt = new Date().toISOString();
   fs.writeFileSync(depPath, JSON.stringify(dep, null, 2));
   console.log("\nUpdated:", depPath);

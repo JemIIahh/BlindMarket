@@ -1,6 +1,7 @@
 import { getDb } from './database.js';
 import { getPool } from './neonDb.js';
 import { config } from '../config.js';
+import { pricingUnit } from './settlementUnits.js';
 
 export type TransactionType = 'escrow_lock' | 'payment' | 'fee' | 'refund' | 'stake' | 'slash' | 'stake_return';
 
@@ -13,16 +14,83 @@ export interface Transaction {
   amount: number;
   fee: number;
   net: number;
+  /** The currency amount/fee/net are in ('USDC', '0G'); NULL for rows from before the column. */
+  unit: string | null;
   status: string;
   tx_hash: string | null;
   created_at: string;
 }
 
-export interface TransactionSummary {
+export interface UnitTotals {
   totalEarned: number;
   totalFees: number;
   netRevenue: number;
   taskCount: number;
+}
+
+/**
+ * The headline totals are in ONE unit — this deployment's pricing unit — and
+ * count rows in that unit plus rows written before the unit column existed
+ * (`unitlessRows`; they are in whatever the deployment paid in then). Rows in
+ * any other unit are only in `byUnit`, never added to the headline: a 5 USDC
+ * and a 5 0G task are not 10 of anything.
+ */
+export interface TransactionSummary extends UnitTotals {
+  unit: string;
+  byUnit: Record<string, UnitTotals>;
+  unitlessRows: number;
+}
+
+interface IncomeRow {
+  type: string;
+  unit: string | null;
+  total_amount: number | string | null;
+  total_fee: number | string | null;
+  cnt: number | string | null;
+}
+
+const INCOME_TYPES = new Set(['payment', 'stake_return']);
+const round = (n: number) => Math.round(n * 1_000_000) / 1_000_000;
+
+function foldIncome(rows: IncomeRow[], opts: { platformFeeRows?: boolean } = {}): TransactionSummary {
+  const unit = pricingUnit().symbol;
+  const empty = (): UnitTotals => ({ totalEarned: 0, totalFees: 0, netRevenue: 0, taskCount: 0 });
+  const byUnit: Record<string, UnitTotals> = {};
+  const headline = empty();
+  let unitlessRows = 0;
+  for (const row of rows) {
+    const income = INCOME_TYPES.has(row.type);
+    const feeRow = opts.platformFeeRows === true && row.type === 'fee';
+    if (!income && !feeRow) continue;
+    const amount = Number(row.total_amount ?? 0);
+    const fee = Number(row.total_fee ?? 0);
+    const cnt = Number(row.cnt ?? 0);
+    const rowUnit = row.unit ?? unit;
+    const bucket = (byUnit[rowUnit] ??= empty());
+    const targets = row.unit === null || row.unit === unit ? [bucket, headline] : [bucket];
+    if (row.unit === null) unitlessRows += cnt;
+    for (const t of targets) {
+      if (income) {
+        t.totalEarned += amount;
+        t.totalFees += fee;
+        t.taskCount += cnt;
+      } else {
+        t.totalFees += fee;
+      }
+    }
+  }
+  const finish = (t: UnitTotals): UnitTotals => ({
+    totalEarned: round(t.totalEarned),
+    totalFees: round(t.totalFees),
+    netRevenue: round(t.totalEarned - t.totalFees),
+    taskCount: t.taskCount,
+  });
+  return {
+    ...finish(headline),
+    unit,
+    byUnit: Object.fromEntries(Object.entries(byUnit).map(([k, v]) => [k, finish(v)])),
+    unitlessRows,
+  };
 }
 
 function usePg(): boolean {
@@ -37,6 +105,8 @@ export async function recordTransaction(tx: {
   amount: number;
   fee?: number;
   net?: number;
+  /** The currency the amounts are in ('USDC', '0G'). Omit only when unknown. */
+  unit?: string;
   status?: string;
   txHash?: string;
 }): Promise<Transaction> {
@@ -50,6 +120,7 @@ export async function recordTransaction(tx: {
     amount: tx.amount,
     fee,
     net,
+    unit: tx.unit ?? null,
     status: tx.status ?? 'confirmed',
     tx_hash: tx.txHash ?? null,
   };
@@ -57,18 +128,18 @@ export async function recordTransaction(tx: {
   if (usePg()) {
     const pool = await getPool();
     const res = await pool.query(
-      `INSERT INTO transactions (address, role, task_id, type, amount, fee, net, status, tx_hash)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `INSERT INTO transactions (address, role, task_id, type, amount, fee, net, unit, status, tx_hash)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        RETURNING *`,
-      [row.address, row.role, row.task_id, row.type, row.amount, row.fee, row.net, row.status, row.tx_hash],
+      [row.address, row.role, row.task_id, row.type, row.amount, row.fee, row.net, row.unit, row.status, row.tx_hash],
     );
     return res.rows[0] as Transaction;
   }
 
   const db = getDb();
   db.prepare(
-    'INSERT INTO transactions (address, role, task_id, type, amount, fee, net, status, tx_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-  ).run(row.address, row.role, row.task_id, row.type, row.amount, row.fee, row.net, row.status, row.tx_hash);
+    'INSERT INTO transactions (address, role, task_id, type, amount, fee, net, unit, status, tx_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+  ).run(row.address, row.role, row.task_id, row.type, row.amount, row.fee, row.net, row.unit, row.status, row.tx_hash);
 
   return db.prepare('SELECT * FROM transactions ORDER BY id DESC LIMIT 1').get() as Transaction;
 }
@@ -122,7 +193,7 @@ export async function getTransactions(
 }
 
 export async function getSummary(addresses: string[], from?: string, to?: string): Promise<TransactionSummary> {
-  if (addresses.length === 0) return { totalEarned: 0, totalFees: 0, netRevenue: 0, taskCount: 0 };
+  if (addresses.length === 0) return foldIncome([]);
   const lowerAddrs = addresses.map(a => a.toLowerCase());
 
   if (usePg()) {
@@ -133,108 +204,51 @@ export async function getSummary(addresses: string[], from?: string, to?: string
     if (from) { conditions.push(`created_at >= $${idx++}`); params.push(from); }
     if (to) { conditions.push(`created_at <= $${idx++}`); params.push(to); }
     const where = conditions.join(' AND ');
-    const rows = await pool.query(
-      `SELECT type, SUM(amount) as total_amount, SUM(fee) as total_fee, SUM(net) as total_net, COUNT(*)::int as cnt FROM transactions WHERE ${where} GROUP BY type`,
+    const rows = await pool.query<IncomeRow>(
+      `SELECT type, unit, SUM(amount) as total_amount, SUM(fee) as total_fee, COUNT(*)::int as cnt FROM transactions WHERE ${where} GROUP BY type, unit`,
       params,
     );
-
-    let totalEarned = 0;
-    let totalFees = 0;
-    let taskCount = 0;
-    const INCOME_TYPES = new Set(['payment', 'stake_return']);
-    for (const row of rows.rows) {
-      if (!INCOME_TYPES.has(row.type)) continue;
-      totalEarned += Number(row.total_amount ?? 0);
-      totalFees += Number(row.total_fee ?? 0);
-      taskCount += row.cnt ?? 0;
-    }
-    const netRevenue = totalEarned - totalFees;
-    return {
-      totalEarned: Math.round(totalEarned * 1_000_000) / 1_000_000,
-      totalFees: Math.round(totalFees * 1_000_000) / 1_000_000,
-      netRevenue: Math.round(netRevenue * 1_000_000) / 1_000_000,
-      taskCount,
-    };
+    return foldIncome(rows.rows);
   }
 
   const db = getDb();
   const placeholders = lowerAddrs.map(() => '?').join(',');
-  let query = `SELECT type, SUM(amount) as total_amount, SUM(fee) as total_fee, SUM(net) as total_net, COUNT(*) as cnt FROM transactions WHERE address IN (${placeholders})`;
+  let query = `SELECT type, unit, SUM(amount) as total_amount, SUM(fee) as total_fee, COUNT(*) as cnt FROM transactions WHERE address IN (${placeholders})`;
   const queryParams: (string | number)[] = [...lowerAddrs];
   if (from) { query += ' AND created_at >= ?'; queryParams.push(from); }
   if (to) { query += ' AND created_at <= ?'; queryParams.push(to); }
-  query += ' GROUP BY type';
-  const rows = db.prepare(query).all(...queryParams) as { type: string; total_amount: number; total_fee: number; total_net: number; cnt: number }[];
-  let totalEarned = 0;
-  let totalFees = 0;
-  let taskCount = 0;
-  const INCOME_TYPES = new Set(['payment', 'stake_return']);
-  for (const row of rows) {
-    if (!INCOME_TYPES.has(row.type)) continue;
-    totalEarned += row.total_amount ?? 0;
-    totalFees += row.total_fee ?? 0;
-    taskCount += row.cnt;
-  }
-  const netRevenue = totalEarned - totalFees;
-  return {
-    totalEarned: Math.round(totalEarned * 1_000_000) / 1_000_000,
-    totalFees: Math.round(totalFees * 1_000_000) / 1_000_000,
-    netRevenue: Math.round(netRevenue * 1_000_000) / 1_000_000,
-    taskCount,
-  };
+  query += ' GROUP BY type, unit';
+  return foldIncome(db.prepare(query).all(...queryParams) as IncomeRow[]);
 }
 
-export async function getGlobalStats(): Promise<{ totalEarned: number; totalFees: number; totalVolume: number; taskCount: number }> {
+export interface GlobalStats extends UnitTotals {
+  totalVolume: number;
+  unit: string;
+  byUnit: Record<string, UnitTotals & { totalVolume: number }>;
+  unitlessRows: number;
+}
+
+/** Platform-wide totals, per unit like getSummary; 'fee' rows add to the fees. */
+export async function getGlobalStats(): Promise<GlobalStats> {
+  let rows: IncomeRow[];
   if (usePg()) {
     const pool = await getPool();
-    const rows = await pool.query(
-      `SELECT type, SUM(amount) as total_amount, SUM(fee) as total_fee, COUNT(*)::int as cnt FROM transactions GROUP BY type`,
-    );
-    let totalEarned = 0;
-    let totalFees = 0;
-    let taskCount = 0;
-    const INCOME_TYPES = new Set(['payment', 'stake_return']);
-    for (const row of rows.rows) {
-      if (INCOME_TYPES.has(row.type)) {
-        totalEarned += Number(row.total_amount ?? 0);
-        totalFees += Number(row.total_fee ?? 0);
-        taskCount += row.cnt ?? 0;
-      }
-      if (row.type === 'fee') {
-        totalFees += Number(row.total_fee ?? 0);
-      }
-    }
-    return {
-      totalEarned: Math.round(totalEarned * 1_000_000) / 1_000_000,
-      totalFees: Math.round(totalFees * 1_000_000) / 1_000_000,
-      totalVolume: Math.round((totalEarned + totalFees) * 1_000_000) / 1_000_000,
-      taskCount,
-    };
+    rows = (await pool.query<IncomeRow>(
+      `SELECT type, unit, SUM(amount) as total_amount, SUM(fee) as total_fee, COUNT(*)::int as cnt FROM transactions GROUP BY type, unit`,
+    )).rows;
+  } else {
+    rows = getDb().prepare(
+      `SELECT type, unit, SUM(amount) as total_amount, SUM(fee) as total_fee, COUNT(*) as cnt FROM transactions GROUP BY type, unit`,
+    ).all() as IncomeRow[];
   }
-
-  const db = getDb();
-  const rows = db.prepare(
-    `SELECT type, SUM(amount) as total_amount, SUM(fee) as total_fee, COUNT(*) as cnt FROM transactions GROUP BY type`,
-  ).all() as { type: string; total_amount: number; total_fee: number; cnt: number }[];
-  let totalEarned = 0;
-  let totalFees = 0;
-  let taskCount = 0;
-  const INCOME_TYPES = new Set(['payment', 'stake_return']);
-  for (const row of rows) {
-    if (INCOME_TYPES.has(row.type)) {
-      totalEarned += row.total_amount ?? 0;
-      totalFees += row.total_fee ?? 0;
-      taskCount += row.cnt;
-    }
-    if (row.type === 'fee') {
-      totalFees += row.total_fee ?? 0;
-    }
-  }
+  const s = foldIncome(rows, { platformFeeRows: true });
+  const withVolume = (t: UnitTotals) => ({ ...t, totalVolume: round(t.totalEarned + t.totalFees) });
+  const { byUnit, ...rest } = s;
   return {
-    totalEarned: Math.round(totalEarned * 1_000_000) / 1_000_000,
-    totalFees: Math.round(totalFees * 1_000_000) / 1_000_000,
-    totalVolume: Math.round((totalEarned + totalFees) * 1_000_000) / 1_000_000,
-    taskCount,
+    ...withVolume(rest),
+    unit: s.unit,
+    unitlessRows: s.unitlessRows,
+    byUnit: Object.fromEntries(Object.entries(byUnit).map(([k, v]) => [k, withVolume(v)])),
   };
 }
 
@@ -267,7 +281,7 @@ export async function confirmPendingTransactions(taskId: string, types: string[]
 export async function exportCsv(addresses: string[], from?: string, to?: string): Promise<string> {
   const { transactions } = await getTransactions(addresses, from, to);
 
-  const header = 'Date,Task ID,Type,Role,Amount,Fee,Net,Status,Tx Hash';
+  const header = 'Date,Task ID,Type,Role,Amount,Fee,Net,Status,Tx Hash,Unit';
   const rows = transactions.map((tx: Transaction) =>
     [
       tx.created_at,
@@ -279,6 +293,7 @@ export async function exportCsv(addresses: string[], from?: string, to?: string)
       tx.net,
       tx.status,
       tx.tx_hash ?? '',
+      tx.unit ?? '',
     ].join(','),
   );
 

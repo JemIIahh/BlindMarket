@@ -16,7 +16,8 @@ import {
 } from '../components/bb';
 import { get, authedGet, authedPost } from '../lib/api';
 import { useChainAddress } from '../hooks/useChainWallet';
-import { MARKETPLACE_TOKEN_ADDRESS, getPaymentSymbol, getPaymentDecimals, BASE_CCTP_CHAIN_KEY, isCctpUsable } from '../config/constants';
+import { BASE_CCTP_CHAIN_KEY, isCctpUsable } from '../config/constants';
+import { getMarketplaceTokenAddress, getPaymentSymbol, getPaymentDecimals, getPostingChain, isNativePayment, useSettlement } from '../config/settlement';
 import {
   getAgentReviews,
   getAgentBadges,
@@ -40,8 +41,9 @@ import { formatPaymentAmount } from '../lib/paymentUnits';
 const DEFAULT_TOP_UP_AMOUNT = '1';
 
 // Below this the agent can't reliably pay for operations. UI surfaces a
-// "Fund wallet" call to action when balance is under this.
-const LOW_BALANCE_THRESHOLD = parseUnits('1', getPaymentDecimals());
+// "Fund wallet" call to action when balance is under this. A function, not a
+// module constant: the payment unit is known once the backend has answered.
+const lowBalanceThreshold = () => parseUnits('1', getPaymentDecimals());
 
 const USDC_ABI = [
   'function balanceOf(address owner) view returns (uint256)',
@@ -56,6 +58,9 @@ const ACTION_LABELS: Record<'start' | 'pause' | 'stop' | 'restart', string> = {
 };
 
 export default function AgentDetail() {
+  // Re-render, and re-read the balance below, when the backend's settlement
+  // answer arrives (config/settlement.ts).
+  const settlement = useSettlement();
   const { id } = useParams<{ id: string }>();
   const address = useChainAddress();
   const { data: walletClient } = useWalletClient();
@@ -116,7 +121,7 @@ export default function AgentDetail() {
 
   const balanceEther = usdcBalance !== null ? Number(formatUnits(usdcBalance, getPaymentDecimals())) : 0;
   const balanceSymbol = getPaymentSymbol();
-  const isLowGas = usdcBalance !== null && usdcBalance < LOW_BALANCE_THRESHOLD;
+  const isLowGas = usdcBalance !== null && usdcBalance < lowBalanceThreshold();
 
   // ERC-4337 AA: gas is paid in USDC via paymaster from the smart account.
   // Fallback to the EOA wallet for pre-AA agents.
@@ -127,11 +132,14 @@ export default function AgentDetail() {
     if (!fundingAddress || !walletClient) return;
     try {
       const provider = new BrowserProvider(walletClient.transport);
-      const usdc = new Contract(MARKETPLACE_TOKEN_ADDRESS, USDC_ABI, provider);
-      const bal = await usdc.balanceOf(fundingAddress);
+      // The payment token's balance: the native coin when tasks are paid in
+      // it (address(0) is no ERC-20), else the ERC-20.
+      const bal = isNativePayment()
+        ? await provider.getBalance(fundingAddress)
+        : await new Contract(getMarketplaceTokenAddress(), USDC_ABI, provider).balanceOf(fundingAddress);
       setUsdcBalance(bal as bigint);
     } catch { /* non-blocking */ }
-  }, [fundingAddress, walletClient]);
+  }, [fundingAddress, walletClient, settlement]);
 
   const loadAgent = useCallback(() => {
     if (!id) return;
@@ -164,7 +172,7 @@ export default function AgentDetail() {
     (async () => {
       try {
         const provider = new BrowserProvider(walletClient.transport);
-        const usdc = new Contract(MARKETPLACE_TOKEN_ADDRESS, USDC_ABI, provider);
+        const usdc = new Contract(getMarketplaceTokenAddress(), USDC_ABI, provider);
         const bal = await usdc.balanceOf(fundingAddress);
         if (!cancelled) setUsdcBalance(bal as bigint);
       } catch { /* non-blocking */ }
@@ -345,15 +353,22 @@ export default function AgentDetail() {
       setTopUpStatus('error');
       return;
     }
+    if (isNativePayment()) {
+      // A transfer() against address(0) would relay a value-0 call that
+      // succeeds and funds nothing. Native top-ups are not relayed here.
+      setTopUpError(`Top-up here only works for an ERC-20 payment token. Send ${getPaymentSymbol()} to ${fundingAddress} from your wallet instead.`);
+      setTopUpStatus('error');
+      return;
+    }
     setTopUpConfirm(false);
     setTopUpStatus('sending');
     try {
       const provider = new BrowserProvider(walletClient!.transport);
       const signer = await provider.getSigner();
-      const usdc = new Contract(MARKETPLACE_TOKEN_ADDRESS, USDC_ABI, signer);
+      const usdc = new Contract(getMarketplaceTokenAddress(), USDC_ABI, signer);
       const tx = await usdc.transfer.populateTransaction(fundingAddress, raw);
       const { signAndSendTx } = await import('../lib/txSigner');
-      const sent = await signAndSendTx(signer, tx as any);
+      const sent = await signAndSendTx(signer, tx as any, undefined, { chain: getPostingChain().key });
       if (sent.receipt) {
         await refetchBalance();
       }
@@ -385,7 +400,7 @@ export default function AgentDetail() {
         skipped?: Array<{ chain: string; reason: string }>;
       }>(`/api/v1/agents/${apiId}/withdraw`, {});
       if (!data.swept.length) {
-        throw new Error('Nothing to withdraw on either chain.');
+        throw new Error('Nothing to withdraw on any chain.');
       }
       setWithdrawInfo(
         data.swept.map((s) => ({
@@ -524,7 +539,7 @@ export default function AgentDetail() {
         tasksCompleted={agent.tasksCompleted ?? 0}
         reputationScore={agent.decayedReputation?.decayedScore ?? agent.reputation?.score ?? 0}
         disputes={agent.reputation?.disputes ?? 0}
-        totalEarned={agent.totalEarned ?? '0'}
+        earnings={agent}
         symbol={balanceSymbol}
         balanceEther={balanceEther}
         isLowGas={isLowGas}
@@ -606,7 +621,9 @@ export default function AgentDetail() {
             />
           )}
           <OpsConsole
-            key={agent.id}
+            // The min-reward field is seeded once at mount in the unit of the
+            // moment; remount when the backend's answer changes it.
+            key={`${agent.id}-${settlement.postingChain}-${settlement.source}`}
             agentId={apiId}
             agent={agent}
             onAgentUpdated={setAgent}

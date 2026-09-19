@@ -1,7 +1,7 @@
 import { Icon } from '../bb/Icon';
 import { Button } from '../bb/Button';
 import { truncateAddress } from '../../lib/utils';
-import { getPaymentSymbol } from '../../config/constants';
+import { formatEarnings, type Earnings } from '../../lib/paymentUnits';
 import { ExplorerAddressLinks } from '../ExplorerLinks';
 import type { AgentReviewStats } from '../../services/marketplace';
 
@@ -20,7 +20,7 @@ export function AgentStats({
   tasksCompleted,
   reputationScore,
   disputes,
-  totalEarned,
+  earnings,
   symbol,
   balanceEther,
   isLowGas,
@@ -35,7 +35,7 @@ export function AgentStats({
   tasksCompleted: number;
   reputationScore: number;
   disputes: number;
-  totalEarned: string;
+  earnings: Earnings;
   symbol: string;
   balanceEther: number;
   isLowGas: boolean;
@@ -45,7 +45,7 @@ export function AgentStats({
   onFund?: () => void;
 }) {
   const hasReviews = !!reviewStats && reviewStats.totalReviews > 0;
-  const earnedValue = `${parseFloat(totalEarned || '0').toLocaleString(undefined, { maximumFractionDigits: 4 })} ${getPaymentSymbol()}`;
+  const earnedValue = formatEarnings(earnings, 4);
 
   return (
     <div className={`grid grid-cols-2 xl:grid-cols-4 gap-3 ${className}`}>

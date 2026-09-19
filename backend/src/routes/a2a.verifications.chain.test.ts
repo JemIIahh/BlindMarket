@@ -58,7 +58,7 @@ vi.mock('../services/a2aStore.js', () => ({
   getSettlementDeadlineTTL: vi.fn(() => Promise.resolve(-2)),
 }));
 
-vi.mock('../services/agentStore.js', () => ({ getAgent: vi.fn() }));
+vi.mock('../services/agentStore.js', () => ({ getAgent: vi.fn(async () => undefined) }));
 
 vi.mock('../services/keyCustodyService.js', () => ({
   getKeyCustodyService: vi.fn(() => null),

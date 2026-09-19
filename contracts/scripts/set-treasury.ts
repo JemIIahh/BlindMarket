@@ -7,13 +7,15 @@
  * `setTreasury(addr)` through the Safe UI instead (this script will refuse).
  *
  * Usage:
- *   NEW_TREASURY=0xSafe npx hardhat run scripts/set-treasury.ts --network 0g-testnet
+ *   EXPECTED_ESCROW=0x... NEW_TREASURY=0xSafe npx hardhat run scripts/set-treasury.ts --network 0g-testnet
+ *   (DEPLOYMENT_SET=staging selects the staging records; EXPECTED_ESCROW is
+ *   required on Base Sepolia / 0G testnet, which more than one set uses.)
  *   I_HAVE_READ_MAINNET_CHECKLIST=yes NEW_TREASURY=0xSafe \
  *     npx hardhat run scripts/set-treasury.ts --network 0g-mainnet
  */
 import { ethers, network } from "../lib/hh.js";
 import { assertSafeNetwork } from "./_guard.js";
-import { loadDeployment } from "./_deployments.js";
+import { resolveEscrowTarget } from "./_deployments.js";
 
 async function main() {
   await assertSafeNetwork();
@@ -23,9 +25,7 @@ async function main() {
     throw new Error(`NEW_TREASURY must be a valid non-zero address. Got: ${next}`);
   }
 
-  const dep = await loadDeployment();
-  const proxy: string = dep.contracts?.BlindEscrow;
-  if (!proxy) throw new Error(`No BlindEscrow in deployments for network ${network.name} (chainId ${dep.chainId})`);
+  const { escrow: proxy } = await resolveEscrowTarget({ sends: true });
 
   const [signer] = await ethers.getSigners();
   const escrow = await ethers.getContractAt("BlindEscrow", proxy);

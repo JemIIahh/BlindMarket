@@ -59,6 +59,13 @@ vi.mock('./redis.js', () => ({
   redis: { set: vi.fn(), get: vi.fn(), del: vi.fn() },
 }));
 vi.mock('./chain.js', () => ({ inft: null }));
+// Open unless a test closes it: a process on another deployment's Redis.
+const gate = vi.hoisted(() => ({ allowed: true, onStopped: [] as Array<() => void> }));
+vi.mock('./deploymentIdentity.js', () => ({
+  backgroundWritesAllowed: () => gate.allowed,
+  deploymentIdentityStatus: () => (gate.allowed ? null : { reason: 'this Redis belongs to deployment "production"' }),
+  onBackgroundWritesStopped: (listener: () => void) => { gate.onStopped.push(listener); },
+}));
 vi.mock('./crypto.js', () => ({ eciesEncrypt: () => Buffer.from(''), generateKeyPair: () => ({ privateKey: 'x', publicKey: 'y' }) }));
 
 // The WORKER_ENV_PASSTHROUGH list, mirrored here so this test asserts on the
@@ -71,7 +78,7 @@ vi.mock('./crypto.js', () => ({ eciesEncrypt: () => Buffer.from(''), generateKey
 const PASSTHROUGH_KEYS = [
   'NODE_ENV',
   'HEARTBEAT_INTERVAL_MS', 'POLL_INTERVAL_MS', 'WS_RECONCILE_MS', 'GAS_RECHECK_MS',
-  'LLM_TIMEOUT_MS', 'RELEASE_COOLDOWN_MS', 'SENTRY_DSN', 'SENTRY_ENVIRONMENT', 'DELEGATE_REWARD_OG',
+  'LLM_TIMEOUT_MS', 'RELEASE_COOLDOWN_MS', 'SENTRY_DSN', 'SENTRY_ENVIRONMENT', 'DELEGATE_REWARD_OG', 'DELEGATE_REWARD_USDC',
   'DELEGATE_GAS_RESERVE_OG', 'PATH', 'HOME', 'TMPDIR', 'LANG', 'TZ', 'NODE_OPTIONS',
 ];
 
@@ -113,8 +120,12 @@ describe('startAgent forks workers with an allowlisted env, not the full process
     delete process.env.HEARTBEAT_INTERVAL_MS;
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     process.env = { ...originalEnv };
+    // `processes` is a module singleton capped at MAX_CONCURRENT_AGENTS: free
+    // this test's slot so later starts in the file are not refused.
+    const { stopAgent } = await import('./agentRunner.js');
+    await stopAgent(agentHolder.current.id);
   });
 
   it('never hands the forked worker any of the backend secrets', async () => {
@@ -169,6 +180,44 @@ describe('startAgent forks workers with an allowlisted env, not the full process
     expect(env.AGENT_ID).toBe(agent.id);
     expect(env.AGENT_PRIVATE_KEY).toBe(agent.rawPrivateKey);
     expect(env.AGENT_PLATFORM_TOKEN).toBe(agent.platformToken);
+  });
+
+  it('hands the worker every configured settlement chain as data', async () => {
+    const agent = makeAgent('agent-env-chains');
+    agentHolder.current = agent;
+    const { startAgent } = await import('./agentRunner.js');
+    await startAgent(agent.id, { skipResume: true });
+
+    const env = forkMock.mock.calls[0][2].env as Record<string, string>;
+    const table = JSON.parse(env.SETTLEMENT_CHAINS_JSON) as Array<Record<string, unknown>>;
+
+    // The test env has both escrows, and posts on Base by the default rule.
+    expect(table.map((c) => c.key)).toEqual(['0g', 'base']);
+    expect(table.find((c) => c.key === '0g')).toMatchObject({
+      chainId: expect.any(Number),
+      token: { kind: 'native', address: '0x0000000000000000000000000000000000000000', symbol: '0G', decimals: 18 },
+      gasSymbol: '0G',
+      nativeIsSettlementToken: false,
+      aa: false,
+      posting: false,
+    });
+    expect(table.find((c) => c.key === 'base')).toMatchObject({
+      token: { kind: 'erc20', symbol: 'USDC', decimals: 6 },
+      gasSymbol: 'ETH',
+      aa: true,
+      posting: true,
+    });
+    // Exactly one chain is the posting chain.
+    expect(table.filter((c) => c.posting)).toHaveLength(1);
+    // Each entry carries what a signer needs, and nothing secret.
+    for (const entry of table) {
+      expect(entry.rpcUrl).toBeTruthy();
+      expect(entry.escrow).toBeTruthy();
+      expect(JSON.stringify(entry)).not.toMatch(/PRIVATE_KEY|secret/i);
+    }
+    // The legacy vars stay for one more release, and still agree.
+    expect(env.OG_CHAIN_ID).toBe(String(table.find((c) => c.key === '0g')!.chainId));
+    expect(env.AGENT_BASE_ESCROW_ADDRESS).toBe(table.find((c) => c.key === 'base')!.escrow);
   });
 
   it('leaves an unset passthrough var absent rather than the string "undefined"', async () => {
@@ -300,6 +349,126 @@ describe('crash memory survives the restart', () => {
       expect(fourth.AGENT_CRASH_COUNT).toBe('0');
     } finally {
       vi.useRealTimers();
+    }
+  });
+});
+
+describe("on another deployment's Redis (deploymentIdentity)", () => {
+  it('starts no agent and reconciles nothing: workers are what poach a shared queue', async () => {
+    const { startAgent, reconcileAgents } = await import('./agentRunner.js');
+    const store = await import('./deployedAgentStore.js');
+    agentHolder.current = makeAgent('agent-other-redis');
+    forkMock.mockClear();
+    vi.mocked(store.loadAllAgents).mockClear();
+    gate.allowed = false;
+    try {
+      await expect(startAgent('agent-other-redis')).rejects.toThrow(/another deployment's Redis .*belongs to deployment "production"/);
+      await reconcileAgents();
+      expect(forkMock).not.toHaveBeenCalled();
+      expect(store.loadAllAgents).not.toHaveBeenCalled();
+    } finally {
+      gate.allowed = true;
+    }
+  });
+});
+
+describe('when writes turn off after boot (deploymentIdentity)', () => {
+  it('kills every running worker, leaving its saved status for reconcile', async () => {
+    const { startAgent, stopLocalWorkers } = await import('./agentRunner.js');
+    const store = await import('./deployedAgentStore.js');
+    const kill = vi.fn();
+    const handlers: Record<string, (...a: unknown[]) => unknown> = {};
+    forkMock.mockReset();
+    forkMock.mockReturnValue({
+      stdout: { on: vi.fn() }, stderr: { on: vi.fn() }, pid: 99, kill,
+      on: vi.fn((ev: string, cb: (...a: unknown[]) => unknown) => { handlers[ev] = cb; }),
+    });
+    stopLocalWorkers(); // slots earlier tests left
+    agentHolder.current = { ...makeAgent('agent-killed-on-stop'), status: 'running' };
+    await startAgent('agent-killed-on-stop', { skipResume: true });
+    vi.mocked(store.saveAgent).mockClear();
+
+    expect(gate.onStopped.length).toBeGreaterThan(0);
+    for (const listener of gate.onStopped) listener();
+    expect(kill).toHaveBeenCalledWith('SIGTERM');
+    // The worker's exit arrives after the kill: it must not mark the agent stopped.
+    await handlers.exit(null, 'SIGTERM');
+
+    expect(stopLocalWorkers()).toBe(0);
+    expect(store.saveAgent).not.toHaveBeenCalled();
+  });
+
+  it('a crash restart due after writes turned off does not restart, and keeps the saved status', async () => {
+    const { startAgent, stopLocalWorkers } = await import('./agentRunner.js');
+    const store = await import('./deployedAgentStore.js');
+    const handlers: Record<string, (...a: unknown[]) => unknown> = {};
+    forkMock.mockReset();
+    forkMock.mockReturnValue({
+      stdout: { on: vi.fn() }, stderr: { on: vi.fn() }, pid: 97, kill: vi.fn(),
+      on: vi.fn((ev: string, cb: (...a: unknown[]) => unknown) => { handlers[ev] = cb; }),
+    });
+    stopLocalWorkers();
+    agentHolder.current = { ...makeAgent('agent-crash-then-stop'), status: 'running' };
+    await startAgent('agent-crash-then-stop', { skipResume: true });
+    vi.useFakeTimers();
+    try {
+      await handlers.exit(1, null); // a crash: an auto-restart is scheduled
+      gate.allowed = false; // then this process learns it is on another deployment's Redis
+      forkMock.mockClear();
+      vi.mocked(store.saveAgent).mockClear();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(forkMock).not.toHaveBeenCalled();
+      expect(store.saveAgent).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      gate.allowed = true;
+    }
+  });
+
+  it('the heartbeat watchdog writes no log lines to another deployment\'s Redis', async () => {
+    const { startZombieReaper } = await import('./agentRunner.js');
+    const store = await import('./deployedAgentStore.js');
+    const redisMod = await import('./redis.js');
+    vi.useFakeTimers();
+    gate.allowed = false;
+    try {
+      agentHolder.current = { ...makeAgent('agent-watchdog'), status: 'running' };
+      vi.mocked(store.loadAllAgents).mockClear();
+      vi.mocked(redisMod.appendLog).mockClear();
+      startZombieReaper();
+      await vi.advanceTimersByTimeAsync(61_000);
+      expect(store.loadAllAgents).not.toHaveBeenCalled();
+      expect(redisMod.appendLog).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      gate.allowed = true;
+    }
+  });
+
+  it('kills a worker whose start was forking when writes turned off', async () => {
+    const { startAgent, stopLocalWorkers } = await import('./agentRunner.js');
+    const store = await import('./deployedAgentStore.js');
+    const kill = vi.fn();
+    const handlers: Record<string, (...a: unknown[]) => unknown> = {};
+    forkMock.mockReset();
+    forkMock.mockImplementation(() => {
+      gate.allowed = false; // the check turned writes off while this start was forking
+      return {
+        stdout: { on: vi.fn() }, stderr: { on: vi.fn() }, pid: 98, kill,
+        on: vi.fn((ev: string, cb: (...a: unknown[]) => unknown) => { handlers[ev] = cb; }),
+      };
+    });
+    stopLocalWorkers();
+    agentHolder.current = { ...makeAgent('agent-forking-at-stop'), status: 'running' };
+    vi.mocked(store.saveAgent).mockClear();
+    try {
+      await expect(startAgent('agent-forking-at-stop', { skipResume: true })).rejects.toThrow(/another deployment's Redis/);
+      expect(kill).toHaveBeenCalledWith('SIGTERM');
+      await handlers.exit(null, 'SIGTERM');
+      expect(stopLocalWorkers()).toBe(0);
+      expect(store.saveAgent).not.toHaveBeenCalled();
+    } finally {
+      gate.allowed = true;
     }
   });
 });

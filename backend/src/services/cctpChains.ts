@@ -3,8 +3,9 @@ import { config } from '../config.js';
 import { baseProvider } from './chain.js';
 
 /**
- * Circle CCTP V2 chain identifiers. Deliberately separate from the existing
- * `'0g' | 'base'` TaskChain union (services/a2aSettlement.ts) — that type
+ * Circle CCTP V2 chain identifiers. Deliberately separate from the
+ * settlement chain keys (SettlementChainKey, services/settlementChains.ts;
+ * TaskChain in services/taskChain.ts) — that type
  * belongs to the unrelated internal 0G<->Base marketplace-signer relay
  * ("bridge"). CCTP never touches 0G (no native USDC, no CCTP domain there —
  * see CLAUDE.md) and covers a broader, growable set of EVM chains.
@@ -195,9 +196,10 @@ function buildChains(): Record<CctpChainKey, CctpChainConfig> {
       supportsFastTransfer: true,
       usdcGasReserveRaw: 0n,
     },
-    // Testnet only — no Arc mainnet entry until Circle publishes Arc mainnet
-    // CCTP addresses (see config.ts). Same shared messenger/transmitter pair:
-    // verified deployed at those addresses on Arc testnet (localDomain() = 26).
+    // Testnet only — there is no Arc mainnet entry until its CCTP addresses
+    // are checked on-chain (see config.ts). Same shared messenger/transmitter
+    // pair: verified deployed at those addresses on Arc testnet
+    // (localDomain() = 26).
     'arc-testnet': {
       chainKey: 'arc-testnet',
       chainId: config.cctp.arcChainId,

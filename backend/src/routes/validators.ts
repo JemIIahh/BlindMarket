@@ -12,7 +12,10 @@ import type { AuthRequest, ApiResponse } from '../types.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const abi = JSON.parse(readFileSync(join(__dirname, '../abi/ValidatorPool.json'), 'utf-8')).abi;
 
-const VALIDATOR_POOL_ADDRESS = process.env.VALIDATOR_POOL_ADDRESS || '';
+// A zero address means "not deployed on this stack" (see DEPLOYMENT_SET_REQUIRED_ENV).
+const VALIDATOR_POOL_ADDRESS = /^0x0{40}$/i.test(process.env.VALIDATOR_POOL_ADDRESS ?? '')
+  ? ''
+  : process.env.VALIDATOR_POOL_ADDRESS || '';
 
 function getContract() {
   if (!VALIDATOR_POOL_ADDRESS) throw new AppError(503, 'NOT_CONFIGURED', 'ValidatorPool not deployed');

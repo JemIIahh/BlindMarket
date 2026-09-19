@@ -1,14 +1,16 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { getSchemaStatus, isRerunSafe, listMigrations, rerunUnsafeMigrationIds, runMigrations } from './neonDb.js';
+import { assertPricingUnitUnchanged, getSchemaStatus, isRerunSafe, listMigrations, migrationSql, rerunUnsafeMigrationIds, runMigrations } from './neonDb.js';
 
-// Migration 31 (USDC units) only applies where a Base escrow is configured.
-const cfg = vi.hoisted(() => ({ baseEscrowAddress: '0xescrow' }));
+// Migration 31 (USDC units) only applies where the deployment PRICES in USDC,
+// which is the settlement token of the chain it posts tasks on.
+const cfg = vi.hoisted(() => ({ baseEscrowAddress: '0xescrow', postingChain: '' }));
 vi.mock('../config.js', async (importOriginal) => {
   const mod = await importOriginal<typeof import('../config.js')>();
   return {
     ...mod,
     config: new Proxy(mod.config, {
-      get: (target, key) => (key === 'baseEscrowAddress' ? cfg.baseEscrowAddress : Reflect.get(target, key)),
+      get: (target, key) =>
+        key in cfg ? cfg[key as keyof typeof cfg] : Reflect.get(target, key),
     }),
   };
 });
@@ -25,6 +27,7 @@ vi.mock('../config.js', async (importOriginal) => {
 afterEach(() => {
   vi.restoreAllMocks();
   cfg.baseEscrowAddress = '0xescrow';
+  cfg.postingChain = '';
 });
 
 describe('isRerunSafe', () => {
@@ -45,10 +48,40 @@ describe('isRerunSafe', () => {
     expect(isRerunSafe(sql)).toBe(expected);
   });
 
-  it('flags only the data migrations (#16, #31) among the current ones', () => {
+  it('flags only the data migrations (#16, #31, #36) among the current ones', () => {
     // A new migration that isn't safe to re-run fails this test on purpose:
     // write it with IF NOT EXISTS, or add its id here as a conscious decision.
-    expect(rerunUnsafeMigrationIds()).toEqual([16, 31]);
+    // #36 clears supported_chains = {0g}: re-run later, it would erase what
+    // agents declared since.
+    expect(rerunUnsafeMigrationIds()).toEqual([16, 31, 36]);
+  });
+});
+
+describe('migrations production has recorded', () => {
+  const squash = (sql: string | undefined) => sql?.replace(/\s+/g, ' ').trim();
+
+  it('keeps #32 exactly as master shipped it (production applied it)', () => {
+    expect(listMigrations().find((m) => m.id === 32)).toEqual({ id: 32, name: 'agent_executors_supported_chains' });
+    expect(squash(migrationSql(32))).toBe(
+      "ALTER TABLE agent_executors ADD COLUMN IF NOT EXISTS supported_chains TEXT[] NOT NULL DEFAULT '{0g}';",
+    );
+  });
+
+  it('numbers this branch after it, ending with the nullable follow-up', () => {
+    expect(listMigrations().filter((m) => m.id >= 32)).toEqual([
+      { id: 32, name: 'agent_executors_supported_chains' },
+      { id: 33, name: 'agent_executors_usdc_earnings' },
+      { id: 34, name: 'credited_payouts' },
+      { id: 35, name: 'transactions_unit' },
+      { id: 36, name: 'agent_executors_supported_chains_nullable' },
+    ]);
+  });
+
+  it('#36 drops the constraint and default, and clears every 0G-only list', () => {
+    const sql = squash(migrationSql(36))!;
+    expect(sql).toContain('ALTER COLUMN supported_chains DROP NOT NULL');
+    expect(sql).toContain('ALTER COLUMN supported_chains DROP DEFAULT');
+    expect(sql).toMatch(/SET supported_chains = NULL WHERE supported_chains <@ ARRAY\['0g'\]/);
   });
 });
 
@@ -129,6 +162,26 @@ describe('conditional migration 31 (USDC units)', () => {
     expect(inserts(queries)).not.toContain(31);
   });
 
+  // A stack can have a Base escrow (withdrawals, CCTP) while posting — and
+  // pricing — on 0G. Its amounts are 18-decimal and dividing them by 10^12 is
+  // irreversible. A skipped `when` is not recorded, so this migration would
+  // otherwise fire on the first boot after such a stack added its Base escrow.
+  it('is skipped on a stack with a Base escrow that posts on 0G', async () => {
+    cfg.postingChain = '0g';
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { pool, queries } = fakePool([]);
+    await runMigrations(pool);
+    expect(queries.some((q) => convertsAmounts(q.sql))).toBe(false);
+    expect(inserts(queries)).not.toContain(31);
+  });
+
+  it('applies on a stack that posts on Base', async () => {
+    cfg.postingChain = 'base';
+    const { pool, queries } = fakePool([]);
+    await runMigrations(pool);
+    expect(queries.some((q) => convertsAmounts(q.sql))).toBe(true);
+  });
+
   it('is not reported missing where it does not apply', async () => {
     cfg.baseEscrowAddress = '';
     const recorded = listMigrations().filter((m) => m.id !== 31);
@@ -137,5 +190,34 @@ describe('conditional migration 31 (USDC units)', () => {
     cfg.baseEscrowAddress = '0xescrow';
     const withBase = await getSchemaStatus({ query: async () => ({ rows: recorded }) } as never);
     expect(withBase.missing).toEqual([31]);
+  });
+});
+
+describe('pricing unit guard (assertPricingUnitUnchanged)', () => {
+  // Migration 31 converted every stored price to USDC base units and is
+  // recorded only where it ran. Once recorded, pricing in 0G would read
+  // those 6-decimal amounts as wei.
+  it('refuses to run migrations when a USDC-priced database now prices in 0G', async () => {
+    cfg.postingChain = '0g';
+    const { pool } = fakePool(allRecorded());
+    await expect(runMigrations(pool)).rejects.toThrow(/priced in USDC \(migration 31 is recorded\).*prices in 0G/);
+  });
+
+  it('runs when the pricing unit is still USDC, or 31 was never recorded', async () => {
+    const { pool } = fakePool(allRecorded());
+    await expect(runMigrations(pool)).resolves.toBeUndefined();
+    cfg.postingChain = '0g';
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { pool: fresh } = fakePool(allRecorded().filter((m) => m.id !== 31));
+    await expect(runMigrations(fresh)).resolves.toBeUndefined();
+  });
+
+  it('runs with a warning when the operator says the rows were re-keyed', async () => {
+    cfg.postingChain = '0g';
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const applied = new Map(allRecorded().map((m) => [m.id, m.name]));
+    expect(() => assertPricingUnitUnchanged(applied, { ALLOW_PRICING_UNIT_CHANGE: 'true' } as NodeJS.ProcessEnv)).not.toThrow();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('ALLOW_PRICING_UNIT_CHANGE=true'));
+    expect(() => assertPricingUnitUnchanged(applied, {} as NodeJS.ProcessEnv)).toThrow(/ALLOW_PRICING_UNIT_CHANGE=true/);
   });
 });

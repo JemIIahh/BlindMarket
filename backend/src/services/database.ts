@@ -258,11 +258,59 @@ const migrations: Migration[] = [
   },
   {
     // SDK 0.6.0: workers tell the backend which chains they have an RPC for.
+    // Mirror of Postgres migration 32; its '[]' default reads back as null
+    // (agentStore.rowToAgent) and migration 18 clears the rows it stamped.
     id: 14,
     name: 'agent_executors_supported_chains',
     sql: `ALTER TABLE agent_executors ADD COLUMN supported_chains TEXT DEFAULT '[]';`,
   },
+  {
+    // Mirror of Postgres migration 33. SQLite has no ADD COLUMN IF NOT EXISTS;
+    // this runner applies each id once.
+    id: 15,
+    name: 'agent_executors_usdc_earnings',
+    sql: `ALTER TABLE agent_executors ADD COLUMN total_earned_usdc_raw TEXT NOT NULL DEFAULT '0';`,
+  },
+  {
+    // Mirror of Postgres migration 34 (services/creditLedger.ts).
+    id: 16,
+    name: 'credited_payouts',
+    sql: `CREATE TABLE IF NOT EXISTS credited_payouts (
+        task_hash TEXT PRIMARY KEY,
+        chain TEXT NOT NULL,
+        executor TEXT NOT NULL,
+        credited_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );`,
+  },
+  {
+    // Mirror of Postgres migration 35.
+    id: 17,
+    name: 'transactions_unit',
+    sql: `ALTER TABLE transactions ADD COLUMN unit TEXT;`,
+  },
+  {
+    // Mirror of Postgres migration 36: a JSON array, NULL for legacy rows.
+    // SQLite can't drop a column default without rebuilding the table, and
+    // registerAgent always writes the column, so only the stamped rows change:
+    // every array holding nothing but '0g' ('[]', '["0g"]', '["0g","0g"]').
+    // The nested CASEs keep json_type and json_each away from a malformed
+    // value (either would throw and abort the migration, and boot with it)
+    // without relying on AND evaluation order, which SQLite does not promise.
+    id: 18,
+    name: 'agent_executors_supported_chains_nullable',
+    sql: `UPDATE agent_executors SET supported_chains = NULL
+      WHERE CASE WHEN json_valid(supported_chains)
+        THEN CASE WHEN json_type(supported_chains) = 'array'
+          THEN NOT EXISTS (SELECT 1 FROM json_each(agent_executors.supported_chains) WHERE value <> '0g')
+          ELSE 0 END
+        ELSE 0 END;`,
+  },
 ];
+
+/** One migration's SQL, for tests of what a migration does to existing rows. */
+export function sqliteMigrationSql(id: number): string | undefined {
+  return migrations.find((m) => m.id === id)?.sql;
+}
 
 function runMigrations(database: Database.Database): void {
   database.exec(`

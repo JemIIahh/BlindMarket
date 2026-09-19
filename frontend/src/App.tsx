@@ -8,6 +8,7 @@ import { ogTestnet, baseChain, cctpSourceChains } from './config/chains';
 import { WalletProvider } from './context/WalletContext';
 import { AuthProvider } from './context/AuthContext';
 import { ChainProvider } from './context/ChainContext';
+import { SettlementProvider } from './context/SettlementContext';
 import { DashboardLayout } from './components/bb/DashboardLayout';
 import { MarketingLayout } from './components/landing/MarketingLayout';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -72,6 +73,7 @@ export default function App() {
   if (!privyAppId) return <MissingEnv />;
   return (
     <ChainProvider>
+      <SettlementProvider>
       <PrivyProvider
         appId={privyAppId}
         config={{
@@ -162,6 +164,7 @@ export default function App() {
           </WalletProvider>
         </WagmiProvider>
       </PrivyProvider>
+      </SettlementProvider>
     </ChainProvider>
   );
 }

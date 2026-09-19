@@ -13,7 +13,8 @@ import {
   useTabParam,
 } from '../bb';
 import { authedDelete, authedGet, authedPatch, authedPost, getAuthHeaders } from '../../lib/api';
-import { API_BASE_URL, getPaymentSymbol } from '../../config/constants';
+import { API_BASE_URL } from '../../config/constants';
+import { getPaymentSymbol } from '../../config/settlement';
 import { formatPaymentAmount, parsePaymentAmount } from '../../lib/paymentUnits';
 import { ToolManager, type AnyTool } from '../bb/ToolManager';
 import AgentMetricsPanel from '../AgentMetricsPanel';

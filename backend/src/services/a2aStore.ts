@@ -33,6 +33,7 @@ export interface TaskOffer {
 
 const KEY = {
   meta: (taskId: string) => `a2a:meta:${taskId.toLowerCase()}`,
+  hashClaim: (taskHash: string) => `a2a:hash-claim:${taskHash.toLowerCase()}`,
   state: (taskId: string) => `a2a:state:${taskId.toLowerCase()}`,
   open: 'a2a:open',
   executor: (addr: string) => `a2a:executor:${addr.toLowerCase()}`,
@@ -42,6 +43,31 @@ const KEY = {
   cascade: (taskId: string) => `a2a:cascade:${taskId.toLowerCase()}`,
   deadline: (taskId: string) => `a2a:deadline:${taskId.toLowerCase()}`,
 };
+
+/** How long a poster's claim on a task hash outlives POST /tasks (upload, sign, confirm, index). */
+export const HASH_CLAIM_TTL_SECONDS = 24 * 60 * 60;
+
+/**
+ * Claim `taskHash` for `poster` when POST /tasks builds its funding tx.
+ * Anyone can escrow any hash once it is public (the escrow does not require
+ * hashes to be unique), so without a claim the first receipt to reach
+ * /tasks/index — a front-runner's — would own the task and lock the real
+ * poster out with TASK_HASH_TAKEN. The claim is taken before the poster's
+ * tx exists, so it cannot be front-run. Returns who holds it.
+ */
+export async function claimTaskHash(taskHash: string, poster: string): Promise<{ poster: string; mine: boolean }> {
+  const addr = poster.toLowerCase();
+  const key = KEY.hashClaim(taskHash);
+  const set = await redis.set(key, addr, 'EX', HASH_CLAIM_TTL_SECONDS, 'NX');
+  if (set !== null) return { poster: addr, mine: true };
+  const holder = (await redis.get(key)) ?? addr;
+  return { poster: holder, mine: holder === addr };
+}
+
+/** The poster who claimed `taskHash` through POST /tasks, or null. */
+export async function getTaskHashClaim(taskHash: string): Promise<string | null> {
+  return redis.get(KEY.hashClaim(taskHash));
+}
 
 export async function setMeta(meta: A2ATaskMeta): Promise<void> {
   const tid = meta.taskId.toLowerCase();

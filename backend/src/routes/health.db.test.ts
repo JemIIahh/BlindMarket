@@ -11,7 +11,7 @@ import request from 'supertest';
 vi.mock('../services/chain.js', () => ({
   escrow: {}, marketplaceSigner: null, provider: {}, baseEscrow: {}, baseMarketplaceSigner: null, baseProvider: {},
 }));
-vi.mock('../services/a2aSettlement.js', () => ({ isBridgeConfigured: vi.fn(() => false) }));
+vi.mock('../services/a2aSettlement.js', () => ({ isBridgeReady: vi.fn(() => false) }));
 vi.mock('../services/redis.js', () => ({ redis: {}, redisSub: {} }));
 vi.mock('../services/neonDb.js', () => ({
   getPool: vi.fn(),
