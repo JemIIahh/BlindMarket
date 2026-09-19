@@ -511,11 +511,14 @@ export class WorkerRuntime {
     return n;
   }
 
-  /** Start executing `taskId` if it is not running, not backing off, and a slot is free. */
-  private claim(taskId: string, state: A2ATaskState, meta?: A2APublicTaskMeta): boolean {
+  /**
+   * Start executing `taskId` if it is not running, not backing off, and a slot
+   * is free. `dueAt`: the time a scheduled re-try counts as running at.
+   */
+  private claim(taskId: string, state: A2ATaskState, meta?: A2APublicTaskMeta, dueAt = Date.now()): boolean {
     if (this.executions.has(taskId)) return false;
     const retry = this.retries.get(taskId);
-    if (retry && retry.notBefore > Date.now()) return false;
+    if (retry && retry.notBefore > dueAt) return false;
     if (this.inFlight() >= this.config.maxConcurrentTasks) return false;
     this.executions.set(taskId, { taskId, status: 'bidding', task: state, startedAt: Date.now() });
     // Announce a task once, not on every re-try.
@@ -663,10 +666,15 @@ export class WorkerRuntime {
   /** Re-try one task sooner than the next browse tick (NEEDS_WRAP wait). */
   private scheduleRetry(taskId: string, a2a: A2ATaskState, meta: A2APublicTaskMeta | undefined, ms: number): void {
     if (!this.running) return;
+    // The back-off this timer ends. A timer can fire before Date.now() reaches
+    // it (they run on different clocks), and the re-try must not then be
+    // refused by its own back-off: nothing would re-try it before the next
+    // browse. A back-off set after this one still holds.
+    const due = this.retries.get(taskId)?.notBefore ?? 0;
     const timer = setTimeout(() => {
       this.retryTimers.delete(timer);
       // No free slot / paused: the next browse picks it up instead.
-      if (this.running && !this.paused) this.claim(taskId, a2a, meta);
+      if (this.running && !this.paused) this.claim(taskId, a2a, meta, Math.max(due, Date.now()));
     }, ms);
     this.retryTimers.add(timer);
   }
