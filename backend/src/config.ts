@@ -63,6 +63,21 @@ export function parseDeploymentId(raw: string | undefined): string | null {
   return value;
 }
 
+/**
+ * DEPLOYMENT_CLAIM takes a Redis over for DEPLOYMENT_ID on purpose: it names
+ * the deployment it takes over from, or "unclaimed" for a Redis with no
+ * record, so a value left in a stack's environment cannot take a different
+ * Redis. A bare true/false is refused rather than guessed at.
+ */
+export function parseDeploymentClaim(raw: string | undefined): string | null {
+  const value = (raw ?? '').trim();
+  if (value === '') return null;
+  if (['true', 'false', 'yes', 'no', '1', '0'].includes(value.toLowerCase()) || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(value)) {
+    throw new Error(`DEPLOYMENT_CLAIM="${value}" must name the deployment whose Redis this process takes over (its /health/bridge deploymentIdentity.owner), or "unclaimed" for a Redis with no owner.`);
+  }
+  return value;
+}
+
 /** Where a production backend says it lives, when PUBLIC_*_URL is unset. */
 export const PRODUCTION_PUBLIC_URLS = {
   PUBLIC_API_URL: 'https://api.blindmarket.xyz',
@@ -271,9 +286,9 @@ export const config = {
   // right escrow — see contractsEnvPrefix in services/chainNetwork.ts.
   deploymentSet: parseDeploymentSet(process.env.DEPLOYMENT_SET),
   deploymentId: parseDeploymentId(process.env.DEPLOYMENT_ID),
-  // Set for ONE boot to claim this Redis for DEPLOYMENT_ID despite another
-  // deployment's record or index keys (services/deploymentIdentity.ts).
-  deploymentClaim: (process.env.DEPLOYMENT_CLAIM ?? '').trim().toLowerCase() === 'true',
+  // Set for ONE boot to take this Redis over for DEPLOYMENT_ID from the
+  // owner it names, or "unclaimed" (services/deploymentIdentity.ts).
+  deploymentClaim: parseDeploymentClaim(process.env.DEPLOYMENT_CLAIM),
 
   // Forensic verification
   forensicMaxPhotoAgeMs: parseInt(optional('FORENSIC_MAX_PHOTO_AGE_MS', '1800000'), 10),  // 30 min

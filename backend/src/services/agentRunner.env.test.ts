@@ -60,10 +60,11 @@ vi.mock('./redis.js', () => ({
 }));
 vi.mock('./chain.js', () => ({ inft: null }));
 // Open unless a test closes it: a process on another deployment's Redis.
-const gate = vi.hoisted(() => ({ allowed: true }));
+const gate = vi.hoisted(() => ({ allowed: true, onStopped: [] as Array<() => void> }));
 vi.mock('./deploymentIdentity.js', () => ({
   backgroundWritesAllowed: () => gate.allowed,
   deploymentIdentityStatus: () => (gate.allowed ? null : { reason: 'this Redis belongs to deployment "production"' }),
+  onBackgroundWritesStopped: (listener: () => void) => { gate.onStopped.push(listener); },
 }));
 vi.mock('./crypto.js', () => ({ eciesEncrypt: () => Buffer.from(''), generateKeyPair: () => ({ privateKey: 'x', publicKey: 'y' }) }));
 
@@ -368,5 +369,26 @@ describe("on another deployment's Redis (deploymentIdentity)", () => {
     } finally {
       gate.allowed = true;
     }
+  });
+});
+
+describe('when writes turn off after boot (deploymentIdentity)', () => {
+  it('kills every running worker, leaving its saved status for reconcile', async () => {
+    const { startAgent, stopLocalWorkers } = await import('./agentRunner.js');
+    const store = await import('./deployedAgentStore.js');
+    const kill = vi.fn();
+    forkMock.mockReset();
+    forkMock.mockReturnValue({ stdout: { on: vi.fn() }, stderr: { on: vi.fn() }, on: vi.fn(), pid: 99, kill });
+    stopLocalWorkers(); // slots earlier tests left
+    agentHolder.current = makeAgent('agent-killed-on-stop');
+    await startAgent('agent-killed-on-stop', { skipResume: true });
+    vi.mocked(store.saveAgent).mockClear();
+
+    expect(gate.onStopped.length).toBeGreaterThan(0);
+    for (const listener of gate.onStopped) listener();
+
+    expect(kill).toHaveBeenCalledWith('SIGTERM');
+    expect(stopLocalWorkers()).toBe(0);
+    expect(store.saveAgent).not.toHaveBeenCalled();
   });
 });

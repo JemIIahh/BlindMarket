@@ -1,4 +1,4 @@
-import { backgroundWritesAllowed, deploymentIdentityStatus } from './deploymentIdentity.js';
+import { backgroundWritesAllowed, deploymentIdentityStatus, onBackgroundWritesStopped } from './deploymentIdentity.js';
 import { fork, type ChildProcess } from 'child_process';
 import { randomUUID, createHash } from 'crypto';
 import { fileURLToPath } from 'url';
@@ -94,6 +94,27 @@ export const WORKER_ENV_PASSTHROUGH = [
 
 // Running child processes (in-memory only — processes don't survive restarts)
 const processes = new Map<string, ChildProcess>();
+
+/**
+ * Kill every worker this process runs, without touching their saved status:
+ * they come back through reconcile when a backend that may write boots. Used
+ * when this process learns it is on another deployment's Redis, where its
+ * workers would poll a queue that is not theirs. Returns how many it stopped.
+ */
+export function stopLocalWorkers(): number {
+  let stopped = 0;
+  for (const [id, child] of processes) {
+    intentionalStops.add(child);
+    child.kill('SIGTERM');
+    processes.delete(id);
+    stopped++;
+  }
+  return stopped;
+}
+onBackgroundWritesStopped(() => {
+  const stopped = stopLocalWorkers();
+  if (stopped > 0) console.error(`[agentRunner] stopped ${stopped} running worker(s): this backend may not write to this Redis (deploymentIdentity)`);
+});
 
 // ── Crash auto-restart ────────────────────────────────────────────────────────
 // When a worker crashes (non-zero exit / kill signal we didn't send), re-fork it

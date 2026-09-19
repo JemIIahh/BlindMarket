@@ -245,6 +245,8 @@ export async function getTaskIdByHash(taskHash: string): Promise<string | null> 
   // Try immediate lookup first
   let id = await redis.get(KEY.hash2id(taskHash));
   if (id) return id;
+  // A process that may not index has nothing to wait for.
+  if (!backgroundWritesAllowed('0G indexer')) return null;
 
   // If not found, it might be due to indexing lag. Try triggering a tick and retrying.
   // We'll retry up to 3 times with a short delay.

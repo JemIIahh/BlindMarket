@@ -312,14 +312,10 @@ describe('on another deployment\'s Redis (deploymentIdentity)', () => {
     gate.allowed = false;
     vi.resetModules();
     const { getTaskIdByHash } = await import('./escrowEvents.js');
-    vi.useFakeTimers();
-    try {
-      const found = getTaskIdByHash('0x' + 'ab'.repeat(32));
-      await vi.advanceTimersByTimeAsync(10_000);
-      expect(await found).toBeNull();
-    } finally {
-      vi.useRealTimers();
-    }
+    const started = Date.now();
+    // It has nothing to wait for: no 3 × 2s retries.
+    expect(await getTaskIdByHash('0x' + 'ab'.repeat(32))).toBeNull();
+    expect(Date.now() - started).toBeLessThan(1_000);
     expect(chain.provider.getBlockNumber).not.toHaveBeenCalled();
     expect(chain.escrow.queryFilter).not.toHaveBeenCalled();
     expect(redisMock.set).not.toHaveBeenCalled();

@@ -229,10 +229,13 @@ This is the hot key the backend uses to call `marketplaceAssign` and
       boot on any testnet id; `GET /health/bridge` must then report
       `settlementTier: "mainnet"`, `tierSource: "SETTLEMENT_TIER"`.
 - [ ] **`GET /health/bridge` reports `deploymentIdentity.role: "owner"`,
-      `owner: "production"`** (`DEPLOYMENT_ID=production` has been set since
-      the Arc settlement release). Production is never stopped by the check,
-      but anything else on its Redis is: re-check after changing REDIS_URL or
-      the chains, and treat any other `role`, or a `reason`, as a finding.
+      `owner: "production"` and `stoppable: false`** (`DEPLOYMENT_ID=production`
+      has been set since the Arc settlement release). `stoppable: false` is
+      what guarantees the check can never switch production's writers off
+      (NODE_ENV=production on 0G mainnet, default DEPLOYMENT_SET, no testnet
+      tier); anything else on its Redis is stopped. Re-check after changing
+      REDIS_URL, NODE_ENV or the chains, and treat any other `role`, or a
+      `reason`, as a finding.
       See `backend/src/services/deploymentIdentity.ts`.
 
 ### 3.5 Rotate readiness
