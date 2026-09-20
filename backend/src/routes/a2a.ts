@@ -20,7 +20,7 @@ import * as agentEmbedding from '../services/agentEmbedding.js';
 import * as semanticMatch from '../services/semanticMatch.js';
 import { demandFeed, MAX_DEMAND_LIMIT } from '../services/demandFeed.js';
 import { chainRuntime } from '../services/chainRuntime.js';
-import { receiptSearchOrder, settlementChainConfig } from '../services/settlementChains.js';
+import { postingChain, receiptSearchOrder, settlementChainConfig } from '../services/settlementChains.js';
 import { ethers } from 'ethers';
 import type { AuthRequest, ApiResponse, AgentCapability, A2ATaskMeta } from '../types.js';
 import { AGENT_CAPABILITIES } from '../types.js';
@@ -1907,7 +1907,7 @@ a2aRouter.post('/tasks/:id/submit', requireAuth, async (req: AuthRequest, res, n
     // services/escrowEvents.ts within ~30s of createTask confirming on chain.
     const onChainIdResolved = await resolveTaskByHash(taskHash);
     const onChainId = onChainIdResolved?.taskId ?? null;
-    const onChainIdChain = onChainIdResolved?.chain ?? '0g';
+    const onChainIdChain = onChainIdResolved?.chain ?? postingChain();
     if (!onChainId) {
       console.warn(`[a2a] submit: hash2id not indexed yet for ${taskHash}`);
       throw new AppError(
@@ -2106,7 +2106,7 @@ a2aRouter.post('/tasks/:id/rebroadcast', requireAuth, async (req: AuthRequest, r
 
     const onChainIdResolved = await resolveTaskByHash(taskHash);
     const onChainId = onChainIdResolved?.taskId ?? null;
-    const onChainIdChain = onChainIdResolved?.chain ?? '0g';
+    const onChainIdChain = onChainIdResolved?.chain ?? postingChain();
     if (!onChainId) {
       throw new AppError(503, 'NOT_INDEXED', 'On-chain taskId not yet indexed — retry shortly');
     }
@@ -2217,7 +2217,7 @@ a2aRouter.post('/tasks/:id/release', requireAuth, async (req: AuthRequest, res, 
     // also retry. Better stranded for an extra minute than desynced.
     const onChainIdResolved = await resolveTaskByHash(taskHash);
     const onChainId = onChainIdResolved?.taskId ?? null;
-    const onChainIdChain = onChainIdResolved?.chain ?? '0g';
+    const onChainIdChain = onChainIdResolved?.chain ?? postingChain();
     if (onChainId) {
       let onChainStatus: number;
       try {
@@ -2325,7 +2325,7 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
       try {
         const ocIdAResolved = await resolveTaskByHash(taskHash);
         ocIdA = ocIdAResolved?.taskId ?? null;
-        ocIdAChain = ocIdAResolved?.chain ?? '0g';
+        ocIdAChain = ocIdAResolved?.chain ?? postingChain();
       } catch (err) {
         throw new AppError(
           503,
@@ -2393,7 +2393,7 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
     try {
       const ocIdResolved = await resolveTaskByHash(taskHash);
       ocId = ocIdResolved?.taskId ?? null;
-      ocIdChain = ocIdResolved?.chain ?? '0g';
+      ocIdChain = ocIdResolved?.chain ?? postingChain();
     } catch (err) {
       throw new AppError(
         503,
@@ -2572,7 +2572,7 @@ a2aRouter.post('/tasks/:id/verify', requireAuth, async (req: AuthRequest, res, n
     // submitEvidence tx mined, so confirm status=Submitted here too.
     const ocIdResolved = await resolveTaskByHash(taskHash);
     const ocId = ocIdResolved?.taskId ?? null;
-    const ocIdChain = ocIdResolved?.chain ?? '0g';
+    const ocIdChain = ocIdResolved?.chain ?? postingChain();
     if (!ocId) {
       throw new AppError(
         503,
@@ -2732,7 +2732,7 @@ a2aRouter.post('/tasks/:id/verdict', requireAuth, async (req: AuthRequest, res, 
     // handed a verdict the verifier never committed on-chain.
     const ocIdResolved = await resolveTaskByHash(taskHash);
     const ocId = ocIdResolved?.taskId ?? null;
-    const ocIdChain = ocIdResolved?.chain ?? '0g';
+    const ocIdChain = ocIdResolved?.chain ?? postingChain();
     if (!ocId) {
       throw new AppError(503, 'NOT_INDEXED', 'On-chain taskId not yet indexed — retry shortly');
     }

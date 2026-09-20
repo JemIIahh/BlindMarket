@@ -16,12 +16,12 @@ describe('relayChainNameFor', () => {
     expect(relayChainNameFor(undefined)).toBe('base-sepolia');
   });
 
-  it('refuses a named chain the relay does not serve, rather than relaying it onto Base', () => {
-    // A 0G task's cancel used to go to Base with the 0G escrow as `to`: a
-    // no-op there, gas paid by the platform, task left funded.
-    expect(() => relayChainNameFor('0g')).toThrow(/Transactions on 0g are not relayed here/);
+  it('refuses a chain the relay does not serve, rather than relaying it onto Base', () => {
+    // A task's cancel on an unrelayed chain used to go to Base with that
+    // chain's escrow as `to`: a no-op there, gas paid by the platform, task
+    // left funded. Arc has no relay yet.
     expect(() => relayChainNameFor('arc')).toThrow(/not relayed here/);
-    expect(() => providerFor('0g')).toThrow(/not relayed here/);
+    expect(() => relayChainNameFor('0g')).toThrow(/not relayed here/);
   });
 
   it("follows the backend's relay name for the posting chain (same network)", () => {
@@ -50,19 +50,9 @@ describe('providerFor', () => {
     expect(providerFor('base')).toBe(baseProvider);
   });
 
-  it('never disagrees with the relay name on a backend that posts on 0G: unhinted callers go to Base', () => {
-    setSettlement({ ...defaultSettlement(), postingChain: '0g' });
-    expect(relayChainNameFor()).toBe('base-sepolia');
+  it('unhinted callers still go to Base', () => {
     expect(providerFor()).toBe(baseProvider);
-    expect(() => relayChainNameFor('0g')).toThrow(/not relayed here/);
-  });
-
-  it('would poll 0G once the backend names a relay for it', () => {
-    const d = defaultSettlement();
-    setSettlement({ ...d, postingChain: '0g', chains: { ...d.chains, '0g': { ...d.chains['0g'], relayChain: '0g' } } });
-    expect(relayChainNameFor()).toBe('0g');
-    expect(providerFor()).not.toBe(baseProvider);
-    expect(providerFor()).toBe(providerFor('0g'));
+    expect(relayChainNameFor()).toBe('base-sepolia');
   });
 });
 
@@ -84,7 +74,7 @@ describe('signAndSendTx wiring', () => {
       }));
       await expect(signAndSendTx(signer, tx, undefined, { chain: 'base' })).rejects.toThrow('stop here');
       await expect(signAndSendTx(signer, tx)).rejects.toThrow('stop here');
-      await expect(signAndSendTx(signer, tx, undefined, { chain: '0g' })).rejects.toThrow(/not relayed here/);
+      await expect(signAndSendTx(signer, tx, undefined, { chain: 'arc' })).rejects.toThrow(/not relayed here/);
       expect(bodies.map((b) => b.chain)).toEqual(['base-sepolia-2', 'base-sepolia-2']);
       resetSettlement();
       await expect(signAndSendTx(signer, tx)).rejects.toThrow('stop here');

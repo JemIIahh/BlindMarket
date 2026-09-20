@@ -1,3 +1,4 @@
+import { postingChain } from './settlementChains.js';
 import * as a2aStore from './a2aStore.js';
 import { resolveCachedTaskByHash, resolveTaskByHash } from './taskChain.js';
 import * as escrowService from './escrow.js';
@@ -122,7 +123,7 @@ export async function forceReleaseTask(
 
   const onChainIdResolved = await resolveTaskByHash(taskHash);
   const onChainId = onChainIdResolved?.taskId ?? null;
-  const onChainIdChain = onChainIdResolved?.chain ?? '0g';
+  const onChainIdChain = onChainIdResolved?.chain ?? postingChain();
   if (onChainId) {
     let onChainStatus: number;
     try {
@@ -198,7 +199,7 @@ export async function rewindSubmittedTask(
 
   const onChainIdResolved = await resolveTaskByHash(taskHash);
   const onChainId = onChainIdResolved?.taskId ?? null;
-  const onChainIdChain = onChainIdResolved?.chain ?? '0g';
+  const onChainIdChain = onChainIdResolved?.chain ?? postingChain();
   if (!onChainId) {
     throw new AppError(409, 'UNMAPPED', 'No on-chain mapping for this task — re-index before rewinding');
   }

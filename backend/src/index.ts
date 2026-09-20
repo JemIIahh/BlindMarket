@@ -79,7 +79,7 @@ for (const warning of clientPricingWarnings()) {
 }
 
 logChainConfig();
-console.log(`[chain] New tasks post on ${settlementChainConfig(postingChain()).label}${config.postingChain ? '' : ' (default)'}`);
+console.log(`[chain] New tasks post on ${settlementChainConfig(postingChain()).label}`);
 
 const app = express();
 app.set('trust proxy', 1);

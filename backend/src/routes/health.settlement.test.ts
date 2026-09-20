@@ -19,10 +19,13 @@ const { chain, cfg } = vi.hoisted(() => {
     chain: {
       marketplaceSigner: { getAddress: boom('signer') },
       baseMarketplaceSigner: { getAddress: boom('signer') },
+      arcMarketplaceSigner: { getAddress: boom('signer') },
       escrow: { verifier: boom('escrow.verifier') },
       baseEscrow: { verifier: boom('baseEscrow.verifier') },
+      arcEscrow: { verifier: boom('arcEscrow.verifier') },
       provider: { getBalance: boom('provider.getBalance') },
       baseProvider: { getBalance: boom('baseProvider.getBalance') },
+      arcProvider: { getBalance: boom('arcProvider.getBalance') },
     },
   };
 });
@@ -53,10 +56,10 @@ vi.mock('../config.js', async (importOriginal) => {
 
 const { healthRouter } = await import('./health.js');
 
-const OG_ESCROW = '0x3d0374963DaaD43e31d42373eb11156A8e8ce2Ff';
+const ARC_ESCROW = '0x3600000000000000000000000000000000000000';
 const BASE_ESCROW = '0xCca5ab873158b888158AD9Dc36fb4Ee683eFbEBf';
 const USDC = '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
-const ZERO = '0x0000000000000000000000000000000000000000';
+const ARC_USDC = '0x3600000000000000000000000000000000000000';
 
 const app = express();
 app.use('/health', healthRouter);
@@ -72,12 +75,15 @@ beforeEach(() => {
   Object.assign(cfg, {
     ogChainId: 16661,
     ogRpcUrl: 'https://rpc.example/secret-key',
-    blindEscrowAddress: OG_ESCROW,
+    blindEscrowAddress: '0x3d0374963DaaD43e31d42373eb11156A8e8ce2Ff',
     baseChainId: 84532,
     baseRpcUrl: 'https://base.example/secret-key',
     baseEscrowAddress: BASE_ESCROW,
     baseUsdcAddress: USDC,
-    postingChain: '',
+    arcChainId: 5042002,
+    arcRpcUrl: 'https://arc.example/secret-key',
+    arcEscrowAddress: '',
+    arcUsdcAddress: ARC_USDC,
     settlementTier: null,
   });
 });
@@ -88,16 +94,6 @@ describe('GET /health/settlement', () => {
     expect(data.postingChain).toBe('base');
     expect(data.chains).toEqual([
       {
-        chain: '0g',
-        chainId: 16661,
-        tier: 'mainnet',
-        escrowAddress: OG_ESCROW,
-        token: { kind: 'native', address: ZERO, symbol: '0G', decimals: 18 },
-        relayChain: null,
-        gasSymbol: '0G',
-        postable: false,
-      },
-      {
         chain: 'base',
         chainId: 84532,
         tier: 'testnet',
@@ -107,8 +103,18 @@ describe('GET /health/settlement', () => {
         gasSymbol: 'ETH',
         postable: true,
       },
+      {
+        chain: 'arc',
+        chainId: 5042002,
+        tier: 'testnet',
+        escrowAddress: null,
+        token: { kind: 'erc20', address: ARC_USDC, symbol: 'USDC', decimals: 6 },
+        relayChain: null,
+        gasSymbol: 'USDC',
+        postable: false,
+      },
     ]);
-    expect(data).toMatchObject({ settlementTier: 'mixed', tierSource: 'chains' });
+    expect(data).toMatchObject({ settlementTier: 'testnet', tierSource: 'chains' });
     expect(data).not.toHaveProperty('postingChainError');
   });
 
@@ -122,27 +128,13 @@ describe('GET /health/settlement', () => {
     expect(body).not.toContain('rpcUrl');
   });
 
-  it('follows POSTING_CHAIN', async () => {
-    cfg.postingChain = '0g';
-    const data = await settlement();
-    expect(data.postingChain).toBe('0g');
-    expect(data.chains.map((c: any) => [c.chain, c.postable])).toEqual([['0g', true], ['base', false]]);
-  });
-
-  it('posts on 0G when there is no Base escrow', async () => {
+  it('posts on Arc when there is no Base escrow', async () => {
     cfg.baseEscrowAddress = '';
+    cfg.arcEscrowAddress = ARC_ESCROW;
     const data = await settlement();
-    expect(data.postingChain).toBe('0g');
+    expect(data.postingChain).toBe('arc');
     const base = data.chains.find((c: any) => c.chain === 'base');
     expect(base).toMatchObject({ escrowAddress: null, postable: false, relayChain: 'base-sepolia' });
-  });
-
-  it('reports an unknown POSTING_CHAIN instead of failing', async () => {
-    cfg.postingChain = 'arc';
-    const data = await settlement();
-    expect(data.postingChain).toBeNull();
-    expect(data.postingChainError).toMatch(/POSTING_CHAIN="arc"/);
-    expect(data.chains.every((c: any) => c.postable === false)).toBe(true);
   });
 
   it("names Base mainnet's relay chain and tier on a Base mainnet stack", async () => {

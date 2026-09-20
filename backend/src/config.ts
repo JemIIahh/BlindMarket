@@ -207,13 +207,22 @@ export const config = {
   // Contracts — Base (settlement)
   // Zero here means Base isn't deployed on this network yet. Left as-is it is a
   // truthy string, which switches POST /tasks onto the Base escrow and points
-  // createTask at address(0) — so collapse it to '' and stay on the 0G path.
+  // createTask at address(0) — so collapse it to ''.
   baseEscrowAddress: unsetIfZero(optional('BASE_ESCROW_ADDRESS', BASE_ADDR?.blindEscrow ?? '')),
   baseUsdcAddress: optional('BASE_USDC_ADDRESS', BASE_MAINNET ? '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' : '0x036CbD53842c5426634e7929541eC2318f3dCF7e'),
   // The generated module carries a zero-address placeholder for networks the
   // factory hasn't been deployed to yet. Treat that as "not configured" so the
   // listener stays disabled instead of polling address(0) forever.
   agentFactoryAddress: unsetIfZero(optional('AGENT_FACTORY_ADDRESS', BASE_ADDR?.agentFactory || '')),
+
+  // Arc Chain (settlement — USDC payouts, gas in USDC)
+  // No generated defaults yet; Arc settlement is deployed per environment.
+  arcRpcUrl: optional('ARC_RPC_URL', 'https://rpc.testnet.arc.io'),
+  arcChainId: parseInt(optional('ARC_CHAIN_ID', '5042002'), 10),
+  arcEscrowAddress: unsetIfZero(optional('ARC_ESCROW_ADDRESS', '')),
+  arcUsdcAddress: optional('ARC_USDC_ADDRESS', '0x3600000000000000000000000000000000000000'),
+  arcMarketplaceSignerPrivateKey: process.env.ARC_MARKETPLACE_SIGNER_PRIVATE_KEY || '',
+  arcEscrowDeploymentBlock: parseInt(optional('ARC_ESCROW_DEPLOYMENT_BLOCK', '0'), 10),
 
   // ERC-4337 AA infrastructure (Base) — agents pay gas in USDC instead of ETH.
   usdcPaymasterAddress: unsetIfZero(optional('USDC_PAYMASTER_ADDRESS', (BASE_ADDR as any)?.USDCPaymaster ?? '')),
@@ -260,11 +269,6 @@ export const config = {
   // (completeVerification on Base releases USDC). Same pattern as above but
   // targets the Base BlindEscrow.
   baseMarketplaceSignerPrivateKey: process.env.BASE_MARKETPLACE_SIGNER_PRIVATE_KEY || '',
-
-  // Settlement chain POST /tasks funds new tasks on ('0g', 'base'). '' keeps
-  // the rule from before the setting: Base when it has an escrow, else 0G.
-  // Checked at boot (services/settlementChains.ts assertPostingChain).
-  postingChain: (process.env.POSTING_CHAIN ?? '').trim().toLowerCase(),
 
   // contracts/ deployment set holding this stack's records ('' = the default
   // records, i.e. production). Only used to print ops commands that target the

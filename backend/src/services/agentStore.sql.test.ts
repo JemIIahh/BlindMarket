@@ -126,7 +126,7 @@ describe('agentStore on Postgres — SQL and params agree', () => {
   });
 
   it('registerAgent binds one value per placeholder (chains declared)', async () => {
-    await agentStore.registerAgent(agent({ supportedChains: ['0g', 'base'] }));
+    await agentStore.registerAgent(agent({ supportedChains: ['arc', 'base'] }));
     expectEveryQueryBindsWhatItAsksFor();
   });
 
@@ -145,8 +145,8 @@ describe('agentStore on Postgres — SQL and params agree', () => {
   });
 
   it('binds declared chains as given, and null when none are declared', async () => {
-    await agentStore.registerAgent(agent({ supportedChains: ['0g', 'base'] }));
-    expect(boundTo('supported_chains')).toEqual(['0g', 'base']);
+    await agentStore.registerAgent(agent({ supportedChains: ['arc', 'base'] }));
+    expect(boundTo('supported_chains')).toEqual(['arc', 'base']);
     h.calls.length = 0;
     await agentStore.registerAgent(agent());
     expect(boundTo('supported_chains')).toBeNull();
@@ -161,8 +161,8 @@ describe('agentStore on Postgres — SQL and params agree', () => {
   });
 
   it('reads supported_chains back, and a row with none as null (the legacy set)', async () => {
-    h.rowsFor = () => [{ address: '0xabc', display_name: 'x', capabilities: [], public_key: 'k', supported_chains: ['0g', 'base'] }];
-    expect((await agentStore.getAgent('0xabc'))?.supportedChains).toEqual(['0g', 'base']);
+    h.rowsFor = () => [{ address: '0xabc', display_name: 'x', capabilities: [], public_key: 'k', supported_chains: ['arc', 'base'] }];
+    expect((await agentStore.getAgent('0xabc'))?.supportedChains).toEqual(['arc', 'base']);
     for (const none of [undefined, null, []]) {
       h.rowsFor = () => [{ address: '0xabc', display_name: 'x', capabilities: [], public_key: 'k', supported_chains: none }];
       expect((await agentStore.getAgent('0xabc'))?.supportedChains, JSON.stringify(none)).toBeNull();
@@ -177,9 +177,9 @@ describe('agentStore on SQLite — real migrations, in memory', () => {
   });
 
   it('registers and reads back declared chains', async () => {
-    await agentStore.registerAgent(agent({ supportedChains: ['0g', 'base'] }));
+    await agentStore.registerAgent(agent({ supportedChains: ['arc', 'base'] }));
     const got = await agentStore.getAgent(agent().address);
-    expect(got?.supportedChains).toEqual(['0g', 'base']);
+    expect(got?.supportedChains).toEqual(['arc', 'base']);
     expect(got?.reputation).toBe(50);
   });
 
@@ -195,7 +195,7 @@ describe('agentStore on SQLite — real migrations, in memory', () => {
   });
 
   it('re-registering without chains resets them to null and keeps the stored counters', async () => {
-    await agentStore.registerAgent(agent({ supportedChains: ['0g', 'base'] }));
+    await agentStore.registerAgent(agent({ supportedChains: ['arc', 'base'] }));
     expect(await agentStore.creditPayout(agent().address, { symbol: 'USDC', decimals: 6 }, 4_500_000n)).toBe(true);
     await agentStore.registerAgent(agent());
     const got = await agentStore.getAgent(agent().address);

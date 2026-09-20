@@ -34,8 +34,14 @@ vi.mock('./chain.js', () => ({
   marketplaceSigner: {},
   baseEscrowAsMarketplace: null,
   baseMarketplaceSigner: null,
+  baseProvider: {},
+  baseEscrow: null,
+  arcEscrowAsMarketplace: { marketplaceAssign, getTask },
+  arcMarketplaceSigner: {},
+  arcProvider: {},
+  arcEscrow: { marketplaceAssign, getTask },
 }));
-vi.mock('./taskChain.js', () => ({ resolveTaskByHash: vi.fn(async () => ({ taskId: '7', chain: '0g' })) }));
+vi.mock('./taskChain.js', () => ({ resolveTaskByHash: vi.fn(async () => ({ taskId: '7', chain: 'arc' })) }));
 vi.mock('./a2aStore.js', () => ({
   updateState: (...a: unknown[]) => updateState(...(a as [string, Record<string, unknown>])),
   getState: (...a: unknown[]) => getState(...(a as [string])),
@@ -80,7 +86,7 @@ describe('settleAssignment when tx.wait() rejects', () => {
 
     const result = await settleAssignment(TASK, EXECUTOR);
 
-    expect(result).toEqual({ success: true, txHash: TX_HASH, chain: '0g' });
+    expect(result).toEqual({ success: true, txHash: TX_HASH, chain: 'arc' });
   });
 
   it('stays pending when the follow-up chain read fails too', async () => {
@@ -160,7 +166,7 @@ describe('assignError never outlives a confirmed assignment', () => {
 
     const result = await settleAssignment(TASK, EXECUTOR);
 
-    expect(result).toMatchObject({ success: true, alreadySettled: true, chain: '0g' });
+    expect(result).toMatchObject({ success: true, alreadySettled: true, chain: 'arc' });
     expect(state.assignError).toBeUndefined();
   });
 
@@ -169,7 +175,7 @@ describe('assignError never outlives a confirmed assignment', () => {
     wait.mockRejectedValue(timeoutErr());
     getTask.mockResolvedValue({ worker: EXECUTOR });
 
-    expect(await settleAssignment(TASK, EXECUTOR)).toEqual({ success: true, txHash: TX_HASH, chain: '0g' });
+    expect(await settleAssignment(TASK, EXECUTOR)).toEqual({ success: true, txHash: TX_HASH, chain: 'arc' });
     expect(state.assignError).toBeUndefined();
   });
 

@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { formatEther, ZeroAddress } from 'ethers';
 import type { ApiResponse } from '../types.js';
-import { escrow, marketplaceSigner, provider, baseEscrow, baseMarketplaceSigner, baseProvider } from '../services/chain.js';
+import { baseEscrow, baseMarketplaceSigner, baseProvider } from '../services/chain.js';
 import { isBridgeReady } from '../services/a2aSettlement.js';
 import { chainNetwork, contractsEnvPrefix } from '../services/chainNetwork.js';
 import {
@@ -22,10 +22,7 @@ import { getPool, getSchemaStatus, latestMigrationId } from '../services/neonDb.
 
 export const healthRouter = Router();
 
-// Below this native-0G balance the marketplace signer is at risk of failing to
-// broadcast marketplaceAssign / completeVerification (out of gas), which surfaces
-// as BRIDGE_FAILED even though the verifier role is correct.
-const SIGNER_GAS_LOW_OG = 0.02;
+
 
 healthRouter.get('/', (_req, res) => {
   const body: ApiResponse<{ status: string; timestamp: string }> = {
@@ -59,48 +56,6 @@ export function safeErrorMessage(e: unknown): string {
 
 function rotateCommand(signerAddr: string, network: string, escrowAddress: string | null): string {
   return `cd contracts && ${contractsEnvPrefix(escrowAddress)}MARKETPLACE_SIGNER_ADDRESS=${signerAddr} npx hardhat run scripts/rotate-verifier.ts --network ${network}`;
-}
-
-/** The 0G half of the bridge: verifier role and native-0G gas of its signer. */
-async function zeroGBridge(): Promise<Record<string, unknown>> {
-  const signerAddr = await marketplaceSigner!.getAddress();
-  let onChainVerifier: string | null = null;
-  let escrowReadError: string | null = null;
-  try {
-    onChainVerifier = (await escrow.verifier()) as string;
-  } catch (e) {
-    escrowReadError = safeErrorMessage(e);
-  }
-  const verifierMatches =
-    onChainVerifier !== null &&
-    onChainVerifier.toLowerCase() === signerAddr.toLowerCase();
-
-  let signerBalanceOg: string | null = null;
-  let signerGasLow: boolean | null = null;
-  let signerBalanceError: string | null = null;
-  try {
-    const balanceWei = await provider.getBalance(signerAddr);
-    const og = Number(formatEther(balanceWei));
-    signerBalanceOg = formatEther(balanceWei);
-    signerGasLow = og < SIGNER_GAS_LOW_OG;
-  } catch (e) {
-    signerBalanceError = safeErrorMessage(e);
-  }
-
-  return {
-    signerAddress: signerAddr,
-    escrowAddress: escrowOrNull(config.blindEscrowAddress),
-    chainId: config.ogChainId,
-    onChainVerifier,
-    verifierMatches,
-    escrowReadError,
-    signerBalanceOg,
-    signerGasLow,
-    signerBalanceError,
-    rotateCommand: verifierMatches
-      ? null
-      : rotateCommand(signerAddr, chainNetwork('0g').hardhatNetwork, escrowOrNull(config.blindEscrowAddress)),
-  };
 }
 
 /** The Base half: verifier role, USDC and ETH balances of its signer. */
@@ -305,8 +260,7 @@ healthRouter.get('/bridge', async (_req, res, next) => {
     });
     const isReady = (key: SettlementChainKey) => readiness.some((r) => r.entry.key === key && r.configured);
 
-    const [og, base, chains] = await Promise.all([
-      isReady('0g') ? zeroGBridge() : null,
+    const [base, chains] = await Promise.all([
       isReady('base') ? baseBridge() : null,
       Promise.all(readiness.map(({ entry, configured, reason }) => chainReport(entry, configured, reason, posting))),
     ]);
@@ -322,11 +276,10 @@ healthRouter.get('/bridge', async (_req, res, next) => {
       data: {
         configured,
         ...(reasons.length > 0 ? { reason: reasons.join('; ') } : {}),
-        // Reported even when 0G can't settle, so a client can still check
-        // that a 0G transaction targets this escrow.
+        // 0G agent infra is still configured here for diagnostics; settlement
+        // chains are listed under `chains`.
         escrowAddress: escrowOrNull(config.blindEscrowAddress),
         chainId: config.ogChainId,
-        ...(og ?? {}),
         base,
         chains,
         postingChain: posting,

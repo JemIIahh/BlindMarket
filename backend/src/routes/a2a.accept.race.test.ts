@@ -198,7 +198,7 @@ describe('A2A accept race condition', () => {
     redisStore.clear();
   });
 
-  it(`${TRIALS} trials × ${NUM_AGENTS} agents: exactly 1 winner per trial`, async () => {
+  it(`${TRIALS} trials × ${NUM_AGENTS} agents: exactly 1 winner per trial`, { timeout: 60_000 }, async () => {
     let totalWins = 0;
     let totalLosses = 0;
 

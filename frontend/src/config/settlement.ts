@@ -11,33 +11,33 @@
  *
  * Two layers:
  * - a build-time TABLE from the env/generated addresses, keyed by the
- *   backend's chain key ('0g' | 'base'), with the same default posting rule
+ *   backend's chain key ('base' | 'arc'), with the same default posting rule
  *   as before — so nothing moves until the backend says otherwise, and the
  *   app still renders when the request fails;
  * - a SNAPSHOT the SettlementProvider overwrites from the backend at boot.
  *   Sync getters (getPaymentDecimals & co.) read it, and `useSettlement()`
  *   re-renders components when it changes.
  *
- * Wallet-side chain choice (the 'og' | 'base' selector) stays in
+ * Wallet-side chain choice (the 'og' | 'base' | 'arc' selector) stays in
  * ChainContext; this is about where money is escrowed, not which chain the
  * wallet shows.
  */
 import { useSyncExternalStore } from 'react';
 import {
+  ARC_CHAIN_CONFIG,
+  ARC_CHAIN_ID,
+  ARC_ESCROW_ADDRESS,
+  ARC_USDC_ADDRESS,
   BASE_CHAIN_CONFIG,
   BASE_CHAIN_ID,
   BASE_ESCROW_ADDRESS,
   BASE_USDC_ADDRESS,
-  BLIND_ESCROW_ADDRESS,
   MARKETPLACE_TOKEN_ADDRESS,
-  OG_CHAIN_CONFIG,
-  OG_CHAIN_ID,
-  getNativeCurrency,
   type SupportedChain,
 } from './constants';
 
 /** The backend's settlement chain keys. */
-export type SettlementChainKey = '0g' | 'base';
+export type SettlementChainKey = 'base' | 'arc';
 
 export interface SettlementUnit {
   symbol: string;
@@ -73,8 +73,6 @@ export interface SettlementSnapshot {
   source: 'defaults' | 'backend';
 }
 
-const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
-
 /** The relay name for a Base chain id; the backend's relayChains.ts uses these same fixed names. */
 function baseRelayChain(chainId: number): string {
   return chainId === 8453 ? 'base-mainnet' : 'base-sepolia';
@@ -82,22 +80,11 @@ function baseRelayChain(chainId: number): string {
 
 /** The build-time table. Exported for tests; callers read the snapshot. */
 export function defaultSettlement(): SettlementSnapshot {
-  const og = getNativeCurrency('og');
   return {
-    // The pre-R12 rule, still the backend's default when POSTING_CHAIN is unset.
-    postingChain: BASE_ESCROW_ADDRESS ? 'base' : '0g',
+    // The pre-R12 rule, still the backend's default: Base when it has an
+    // escrow, else Arc.
+    postingChain: BASE_ESCROW_ADDRESS ? 'base' : 'arc',
     chains: {
-      '0g': {
-        key: '0g',
-        label: OG_CHAIN_CONFIG.chainName,
-        chainId: OG_CHAIN_ID,
-        tier: OG_CHAIN_ID === 16661 ? 'mainnet' : 'testnet',
-        explorer: OG_CHAIN_CONFIG.blockExplorerUrls[0],
-        escrow: BLIND_ESCROW_ADDRESS || '',
-        token: { kind: 'native', address: ZERO_ADDRESS, unit: { symbol: og.symbol, decimals: og.decimals } },
-        relayChain: null,
-        walletChain: 'og',
-      },
       base: {
         key: 'base',
         label: BASE_CHAIN_CONFIG.chainName,
@@ -108,6 +95,17 @@ export function defaultSettlement(): SettlementSnapshot {
         token: { kind: 'erc20', address: BASE_USDC_ADDRESS, unit: { symbol: 'USDC', decimals: 6 } },
         relayChain: baseRelayChain(BASE_CHAIN_ID),
         walletChain: 'base',
+      },
+      arc: {
+        key: 'arc',
+        label: ARC_CHAIN_CONFIG.chainName,
+        chainId: ARC_CHAIN_ID,
+        tier: ARC_CHAIN_ID === 5042 ? 'mainnet' : 'testnet',
+        explorer: ARC_CHAIN_CONFIG.blockExplorerUrls[0],
+        escrow: ARC_ESCROW_ADDRESS,
+        token: { kind: 'erc20', address: ARC_USDC_ADDRESS, unit: { symbol: 'USDC', decimals: 6 } },
+        relayChain: null,
+        walletChain: 'arc',
       },
     },
     source: 'defaults',
@@ -133,7 +131,7 @@ export interface BackendSettlement {
 }
 
 export function isSettlementChainKey(value: unknown): value is SettlementChainKey {
-  return value === '0g' || value === 'base';
+  return value === 'base' || value === 'arc';
 }
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;

@@ -192,7 +192,7 @@ tasksRouter.get('/:id', optionalAuth, async (req: AuthRequest, res, next) => {
     let taskId: number;
     // Numeric ids are 0G-only here (ids collide across chains); a hash names
     // exactly one task, so it resolves to whichever chain holds it.
-    let chain: TaskChain = '0g';
+    let chain: TaskChain = 'base';
     if (isHexHash) {
       const resolved = await resolveCachedTaskByHash(rawId.toLowerCase());
       if (!resolved || !/^\d+$/.test(resolved.taskId)) {

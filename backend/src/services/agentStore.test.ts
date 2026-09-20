@@ -90,15 +90,15 @@ describe('registerAgent', () => {
     [null, null],
     // Nothing declared is the legacy set, as the '[]' column default reads.
     [[], null],
-    [['0g'], ['0g']],
-    [['0g', 'base', 'arc'], ['0g', 'base', 'arc']],
+    [['arc'], ['arc']],
+    [['arc', 'base', 'arc'], ['arc', 'base', 'arc']],
   ])('stores declared chains %j and reads them back as %j', async (declared, expected) => {
     await registerAgent(bootRegistration({ supportedChains: declared }));
     expect((await getAgent(ADDR))?.supportedChains).toEqual(expected);
   });
 
   it('resets declared chains to null when older code re-registers without them', async () => {
-    await registerAgent(bootRegistration({ supportedChains: ['0g', 'base', 'arc'] }));
+    await registerAgent(bootRegistration({ supportedChains: ['arc', 'base', 'arc'] }));
     await registerAgent(bootRegistration());
     expect((await getAgent(ADDR))?.supportedChains).toBeNull();
   });
@@ -200,9 +200,9 @@ describe('Postgres statements', () => {
 
   it('passes declared chains as a Postgres array, and null when absent', async () => {
     pool.query.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [{ n: 0 }] });
-    await registerAgent(bootRegistration({ supportedChains: ['0g', 'arc'] }));
+    await registerAgent(bootRegistration({ supportedChains: ['arc', 'arc'] }));
     const upsertCall = pool.query.mock.calls.find(([sql]) => String(sql).includes('ON CONFLICT'))!;
-    expect(upsertCall[1]).toContainEqual(['0g', 'arc']);
+    expect(upsertCall[1]).toContainEqual(['arc', 'arc']);
 
     pool.query.mockClear();
     await registerAgent(bootRegistration());

@@ -10,21 +10,22 @@ import request from 'supertest';
  * Run: npx vitest run src/routes/tasks.createGate.test.ts
  */
 
-const { AGENT, ESCROW } = vi.hoisted(() => ({
+const { AGENT, ESCROW, USDC } = vi.hoisted(() => ({
   AGENT: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
   ESCROW: '0xcccccccccccccccccccccccccccccccccccccccc',
+  USDC: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
 }));
 
 vi.mock('../middleware/auth.js', () => {
   const gate = (req: any, _res: any, next: any) => { req.user = { address: AGENT }; next(); };
   return { requireAuth: gate, optionalAuth: gate };
 });
-// A 0G-only stack: the posting chain is 0G and its settlement token native.
+// A Base stack: the posting chain is Base and its settlement token USDC.
 vi.mock('../config.js', async (importOriginal) => {
   const mod = await importOriginal<typeof import('../config.js')>();
   return {
     ...mod,
-    config: { ...mod.config, postingChain: '', blindEscrowAddress: ESCROW, baseEscrowAddress: '' },
+    config: { ...mod.config, baseEscrowAddress: ESCROW, baseUsdcAddress: USDC, arcEscrowAddress: '' },
   };
 });
 vi.mock('../services/taskChain.js', () => ({ resolveTaskChainById: vi.fn() }));
@@ -34,7 +35,7 @@ vi.mock('../services/escrow.js', () => ({
   buildCreateTaskOn: (...a: unknown[]) => buildCreateTask(...(a as [])),
 }));
 vi.mock('../services/chain.js', () => ({
-  getTokenDecimals: vi.fn(async () => 18),
+  getTokenDecimals: vi.fn(async () => 6),
   provider: null, baseProvider: null, escrow: null, baseEscrow: null,
 }));
 vi.mock('../services/accountingService.js', () => ({ recordTransaction: vi.fn(async () => ({})) }));
@@ -59,7 +60,7 @@ function app() {
 const create = (extra: Record<string, unknown>) =>
   request(app()).post('/api/v1/tasks').send({
     taskHash: '0x' + 'ab'.repeat(32),
-    token: '0x0000000000000000000000000000000000000000',
+    token: USDC,
     amount: '1000',
     locationZone: 'global',
     duration: '3600',

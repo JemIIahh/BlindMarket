@@ -10,8 +10,8 @@
 
 import { checkDeploymentIdentity, onBackgroundWritesResumed, type IdentityStatus } from './deploymentIdentity.js';
 import { settlementChainConfig } from './settlementChains.js';
-import { startEscrowEventLoop } from './escrowEvents.js';
 import { startBaseEscrowEventLoop } from './baseEscrowEvents.js';
+import { startArcEscrowEventLoop } from './arcEscrowEvents.js';
 import { startAgentFactoryListener } from './agentFactoryListener.js';
 import { startCctpAttestationPoller } from './cctpAttestationPoller.js';
 import { startExpirySweepLoop } from './a2aExpirySweep.js';
@@ -25,19 +25,21 @@ export interface BackgroundWriter {
 /** Every background writer this backend starts at boot, in start order. */
 export function backgroundWriters(env: NodeJS.ProcessEnv = process.env): BackgroundWriter[] {
   const writers: BackgroundWriter[] = [];
-  // The BlindEscrow TaskCreated poller — populates the taskHash↔taskId
-  // mapping that the A2A settlement bridge needs to call assignWorker /
-  // completeVerification by on-chain id. Only where this stack has a 0G
-  // escrow: the loop would otherwise poll address(0) forever.
-  if (settlementChainConfig('0g').escrowAddress !== null) {
-    writers.push({ name: '0G indexer', start: startEscrowEventLoop });
+  // Settlement chain indexers — populates the taskHash↔taskId mapping that
+  // the A2A settlement bridge needs to call assignWorker / completeVerification
+  // by on-chain id. Only start a loop when this stack has an escrow for the
+  // chain, otherwise it would poll address(0) forever.
+  if (settlementChainConfig('base').escrowAddress !== null) {
+    writers.push({ name: 'Base indexer', start: startBaseEscrowEventLoop });
   } else {
-    console.log('[chain] no 0G escrow configured; 0G event indexing off');
+    console.log('[chain] no Base escrow configured; Base event indexing off');
+  }
+  if (settlementChainConfig('arc').escrowAddress !== null) {
+    writers.push({ name: 'Arc indexer', start: startArcEscrowEventLoop });
+  } else {
+    console.log('[chain] no Arc escrow configured; Arc event indexing off');
   }
   writers.push(
-    // Base escrow event loop — populates base: prefixed taskHash↔taskId
-    // mapping needed for USDC settlement on Base chain.
-    { name: 'Base indexer', start: startBaseEscrowEventLoop },
     // AgentFactory listener — creates agents from on-chain AgentDeployed
     // events. Backend never signs for agents (decentralized).
     { name: 'AgentFactory listener', start: startAgentFactoryListener },

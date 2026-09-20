@@ -17,7 +17,7 @@
 import { config } from '../config.js';
 import { chainTier, type SettlementTier } from './settlementTier.js';
 
-export const SETTLEMENT_CHAIN_KEYS = ['0g', 'base'] as const;
+export const SETTLEMENT_CHAIN_KEYS = ['base', 'arc'] as const;
 export type SettlementChainKey = (typeof SETTLEMENT_CHAIN_KEYS)[number];
 
 export interface SettlementUnit {
@@ -41,7 +41,7 @@ export interface SettlementChainConfig {
    * URL can carry an API key: it may be logged, but no route returns it.
    */
   rpcUrl: string;
-  /** Each chain has its own tier: production pairs 0G mainnet with Base Sepolia. */
+  /** Each chain has its own tier. */
   tier: 'mainnet' | 'testnet';
   /** The contracts/ hardhat network that operates on this chain. */
   hardhatNetwork: string;
@@ -104,33 +104,6 @@ function addressOrNull(address: string | undefined): string | null {
 }
 
 const BUILDERS: { readonly [K in SettlementChainKey]: () => SettlementChainConfig } = {
-  '0g': () => {
-    // Anything that is not the mainnet chain id is treated as a testnet, so a
-    // local or forked chain is never mistaken for mainnet.
-    const mainnet = chainTier('0g', config.ogChainId) === 'mainnet';
-    return {
-      key: '0g',
-      label: '0G',
-      chainId: config.ogChainId,
-      rpcUrl: config.ogRpcUrl,
-      tier: mainnet ? 'mainnet' : 'testnet',
-      hardhatNetwork: mainnet ? '0g-mainnet' : '0g-testnet',
-      escrowAddress: addressOrNull(config.blindEscrowAddress),
-      escrowEnv: 'BLIND_ESCROW_ADDRESS',
-      signerEnv: 'MARKETPLACE_SIGNER_PRIVATE_KEY',
-      deploymentBlockEnv: 'ESCROW_DEPLOYMENT_BLOCK',
-      token: { kind: 'native', address: NATIVE_TOKEN_ADDRESS, unit: NATIVE_0G_UNIT },
-      gas: {
-        symbol: '0G',
-        nativeIsSettlementToken: false,
-        withdrawReserveWei: 1_000_000_000_000_000n, // 0.001 0G
-        withdrawMinWei: 200_000_000_000_000n, // 0.0002 0G
-      },
-      relayCaip2: null,
-      aa: false,
-      hasTaskRegistry: true,
-    };
-  },
   base: () => {
     const mainnet = chainTier('base', config.baseChainId) === 'mainnet';
     return {
@@ -155,6 +128,33 @@ const BUILDERS: { readonly [K in SettlementChainKey]: () => SettlementChainConfi
       },
       relayCaip2: `eip155:${config.baseChainId}`,
       aa: true,
+      hasTaskRegistry: false,
+    };
+  },
+  arc: () => {
+    // Arc mainnet = 5042, Arc testnet = 5042002.
+    const mainnet = config.arcChainId === 5042;
+    return {
+      key: 'arc',
+      label: 'Arc',
+      chainId: config.arcChainId,
+      rpcUrl: config.arcRpcUrl,
+      tier: mainnet ? 'mainnet' : 'testnet',
+      hardhatNetwork: mainnet ? 'arc-mainnet' : 'arc-testnet',
+      escrowAddress: addressOrNull(config.arcEscrowAddress),
+      escrowEnv: 'ARC_ESCROW_ADDRESS',
+      signerEnv: 'ARC_MARKETPLACE_SIGNER_PRIVATE_KEY',
+      deploymentBlockEnv: 'ARC_ESCROW_DEPLOYMENT_BLOCK',
+      token: { kind: 'erc20', address: config.arcUsdcAddress || null, unit: USDC_UNIT },
+      gas: {
+        symbol: 'USDC',
+        nativeIsSettlementToken: true,
+        // Arc gas is USDC (18-dec native). Leave enough for a few settle txs.
+        withdrawReserveWei: 10_000_000_000_000_000n, // 0.01 USDC (18 decimals)
+        withdrawMinWei: 2_000_000_000_000_000n, // 0.002 USDC
+      },
+      relayCaip2: null,
+      aa: false,
       hasTaskRegistry: false,
     };
   },
@@ -183,18 +183,18 @@ export function configuredChainKeys(): SettlementChainKey[] {
 }
 
 /**
- * The chain POST /tasks funds new tasks on. POSTING_CHAIN names it; unset, it
- * is Base when this deployment has a Base escrow and 0G otherwise, the rule
- * from before the setting. Throws when POSTING_CHAIN names no chain this code
- * knows, which boot refuses first (assertPostingChain).
+ * The chain POST /tasks funds new tasks on. Base is preferred; Arc is the
+ * fallback. Returns Base even if neither is configured so tests and local
+ * dev do not crash; production boot should already have failed in
+ * assertPostingChain if no settlement chain is configured.
  */
 export function postingChain(): SettlementChainKey {
-  const named = config.postingChain;
-  if (!named) return settlementChainConfig('base').escrowAddress !== null ? 'base' : '0g';
-  if (!isSettlementChainKey(named)) {
-    throw new Error(`POSTING_CHAIN="${named}" is not a settlement chain; use one of: ${SETTLEMENT_CHAIN_KEYS.join(', ')}`);
-  }
-  return named;
+  const base = settlementChainConfig('base');
+  if (base.escrowAddress !== null) return 'base';
+  const arc = settlementChainConfig('arc');
+  if (arc.escrowAddress !== null) return 'arc';
+  console.warn('[settlementChains] No settlement chain is configured (BASE_ESCROW_ADDRESS or ARC_ESCROW_ADDRESS); defaulting to base');
+  return 'base';
 }
 
 /**
@@ -210,18 +210,7 @@ export function receiptSearchOrder(): SettlementChainKey[] {
 }
 
 /**
- * Throws when POSTING_CHAIN can't be used: it names no known chain, or a
- * chain with no escrow here, or a chain on the wrong network tier. An unset
- * POSTING_CHAIN keeps the default and is never fatal (production posts on
- * Base Sepolia today); if the default chain has no escrow, a warning is
- * returned for the caller to log. Called at boot.
- *
- * The tier rule has two forms. With SETTLEMENT_TIER set, the posting chain
- * must be on that tier — the stack said what it is, and posting elsewhere
- * would escrow real money on the other network. With no tier set, the older
- * stand-in applies: a testnet posting chain on a production backend needs
- * ALLOW_NONMAINNET_PROD, which is how production (0G mainnet + Base Sepolia)
- * runs until every chain shares a tier.
+ * Throws when the posting chain can't be used. Called at boot.
  */
 export function assertPostingChain(opts: {
   production: boolean;
@@ -229,32 +218,23 @@ export function assertPostingChain(opts: {
   tier?: SettlementTier | null;
 }): string[] {
   const entry = settlementChainConfig(postingChain());
-  if (!config.postingChain) {
-    return entry.escrowAddress === null
-      ? [`POSTING_CHAIN is unset and the default, ${entry.label}, has no escrow (${entry.escrowEnv}), so POST /tasks refuses new tasks`]
-      : [];
+  if (entry.escrowAddress === null) {
+    return [`Default posting chain ${entry.label} has no escrow (${entry.escrowEnv}), so POST /tasks refuses new tasks`];
   }
   const problems: string[] = [];
-  if (entry.escrowAddress === null) {
-    problems.push(`POSTING_CHAIN=${entry.key} but ${entry.escrowEnv} is unset or the zero address`);
-  }
   if (opts.tier) {
-    // Unreachable through config today, which already refuses a contradicting
-    // chain id at boot and defaults an unset one to the tier. Kept because it
-    // is this function's own precondition, and a chain added later (Arc) is
-    // one forgotten tier entry away from needing it.
     if (entry.tier !== opts.tier) {
       problems.push(
-        `POSTING_CHAIN=${entry.key} is on ${entry.tier} (chain ${entry.chainId}) but SETTLEMENT_TIER=${opts.tier}`,
+        `Posting chain ${entry.key} is on ${entry.tier} (chain ${entry.chainId}) but SETTLEMENT_TIER=${opts.tier}`,
       );
     }
   } else if (opts.production && entry.tier !== 'mainnet' && !opts.allowNonMainnet) {
     problems.push(
-      `POSTING_CHAIN=${entry.key} is a testnet (chain ${entry.chainId}) on a production backend; ` +
+      `Posting chain ${entry.key} is a testnet (chain ${entry.chainId}) on a production backend; ` +
         `set ALLOW_NONMAINNET_PROD=true if this is a staging stack`,
     );
   }
-  if (problems.length > 0) throw new Error(`Invalid POSTING_CHAIN: ${problems.join('; ')}`);
+  if (problems.length > 0) throw new Error(`Invalid posting chain: ${problems.join('; ')}`);
   return [];
 }
 
@@ -292,7 +272,7 @@ export function registryProblems(entries: readonly SettlementChainConfig[]): { f
 
 /**
  * Throws when the entries are inconsistent for a chain this deployment
- * settles on. Returns the problems on chains it doesn't, for the caller to
+ * settles on. Returns the problem on chains it doesn't, for the caller to
  * log. Called at boot.
  */
 export function assertRegistryInvariants(entries: readonly SettlementChainConfig[]): string[] {

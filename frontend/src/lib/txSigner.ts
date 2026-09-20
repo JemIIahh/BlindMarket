@@ -1,7 +1,7 @@
 import { Interface, JsonRpcProvider, type ethers } from 'ethers';
 import type { UnsignedTx } from '../types/api';
 import { getAuthHeaders } from './api';
-import { API_BASE_URL, BASE_CHAIN_ID, BASE_RPC_URL, OG_CHAIN_ID, OG_RPC_URL } from '../config/constants';
+import { API_BASE_URL, BASE_CHAIN_ID, BASE_RPC_URL } from '../config/constants';
 import { getSettlement, isSettlementChainKey, relayChainFor, type SettlementChainKey } from '../config/settlement';
 
 export interface SentTx {
@@ -12,8 +12,6 @@ export interface SentTx {
 
 /** Read-only Base provider — where the relay sends today. */
 export const baseProvider = new JsonRpcProvider(BASE_RPC_URL, BASE_CHAIN_ID, { staticNetwork: true });
-
-let ogProvider: JsonRpcProvider | null = null;
 
 /**
  * The chain a relayed transaction actually goes to. A caller that names the
@@ -37,10 +35,9 @@ export function relayedChainKey(chain?: string | null): SettlementChainKey {
 }
 
 /** A read-only provider for the chain a transaction is relayed on (relayedChainKey). */
-export function providerFor(chain?: string | null): JsonRpcProvider {
-  if (relayedChainKey(chain) === '0g') {
-    return (ogProvider ??= new JsonRpcProvider(OG_RPC_URL, OG_CHAIN_ID, { staticNetwork: true }));
-  }
+export function providerFor(_chain?: string | null): JsonRpcProvider {
+  // The relay only serves Base today (Arc's relayCaip2 is null), so every
+  // relayed transaction reads back on Base.
   return baseProvider;
 }
 

@@ -5,7 +5,7 @@ import type { AgentExecutor } from '../types.js';
  * sign for. A literal on purpose: it describes that old code, so it must not
  * grow when this backend learns a new chain.
  */
-export const LEGACY_SUPPORTED_CHAINS: readonly string[] = Object.freeze(['0g', 'base']);
+export const LEGACY_SUPPORTED_CHAINS: readonly string[] = Object.freeze(['base']);
 
 /**
  * Does this executor's declaration include `chain`? No chain means no filter,

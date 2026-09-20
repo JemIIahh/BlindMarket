@@ -83,14 +83,15 @@ const F = vi.hoisted(() => {
 
 vi.mock('../services/redis.js', () => ({
   redis: {
-    get: vi.fn(async (k: string) => (k.startsWith('a2a:hash2id:') ? '7' : null)),
+    get: vi.fn(async (k: string) => (k.startsWith('base:hash2id:') ? '7' : null)),
     set: vi.fn(), pipeline: vi.fn(), smembers: vi.fn(async () => []), eval: vi.fn(),
   },
 }));
 
 vi.mock('../services/chain.js', () => ({
-  // No Base escrow in this harness: resolveCachedTaskByHash consults only the 0G index.
-  baseEscrow: null,
+  // A Base escrow in this harness: resolveCachedTaskByHash consults the Base index.
+  baseEscrow: {},
+  arcEscrow: null,
   getTokenDecimals: vi.fn(async () => 18),
 }));
 
@@ -106,7 +107,7 @@ vi.mock('../services/escrow.js', () => {
   });
   // get_task_status resolves a hash to its chain and reads that escrow via
   // getTaskOn; a numeric id stays on 0G, so it lands on the same fixture.
-  const getTaskOn = vi.fn(async (_chain: 'base' | '0g', id: number) => getTask(id));
+  const getTaskOn = vi.fn(async (_chain: 'base' | 'arc', id: number) => getTask(id));
   return { getTask, getTaskOn };
 });
 

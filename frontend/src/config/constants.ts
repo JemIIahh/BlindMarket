@@ -27,9 +27,16 @@ const OG_CHAIN_ID = Number(
 const BASE_CHAIN_ID = Number(
   import.meta.env.VITE_BASE_CHAIN_ID || (networkIsMainnet ? '8453' : '84532'),
 );
+// Arc (Circle's L1, USDC is the gas token) is testnet-only here, matching the
+// backend's own Arc default. Mainnet (5042) has no default RPC, so it must be
+// set explicitly via VITE_ARC_CHAIN_ID / VITE_ARC_RPC_URL.
+const ARC_CHAIN_ID = Number(
+  import.meta.env.VITE_ARC_CHAIN_ID || '5042002',
+);
 
 const isMainnet = OG_CHAIN_ID === 16661;
 const isBaseMainnet = BASE_CHAIN_ID === 8453;
+const isArcMainnet = ARC_CHAIN_ID === 5042;
 
 const ADDR = isMainnet ? CONTRACT_ADDRESSES.mainnet : CONTRACT_ADDRESSES.testnet;
 const BASE_ADDR = isBaseMainnet
@@ -92,6 +99,24 @@ export const BASE_USDC_ADDRESS =
     ? '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
     : '0x036CbD53842c5426634e7929541eC2318f3dCF7e');
 
+// ── Arc Chain (settlement — USDC payouts, gas in USDC) ───────────────────────
+
+export { ARC_CHAIN_ID };
+
+export const ARC_RPC_URL =
+  import.meta.env.VITE_ARC_RPC_URL ||
+  (isArcMainnet ? 'https://rpc.mainnet.arc.io' : 'https://rpc.testnet.arc.io');
+
+// Arc settlement is not deployed yet, so the escrow has no generated fallback;
+// it is set per environment once Arc's escrow deploys.
+export const ARC_ESCROW_ADDRESS = unsetIfZero(import.meta.env.VITE_ARC_ESCROW_ADDRESS || '');
+
+// USDC on Arc is one balance with two views: 18-dec native (the gas coin) and
+// 6-dec ERC-20 at the precompile above any normal address. The escrow only ever
+// allowlists the ERC-20.
+export const ARC_USDC_ADDRESS =
+  import.meta.env.VITE_ARC_USDC_ADDRESS || '0x3600000000000000000000000000000000000000';
+
 // Privy signer ID for the backend's PRIVY_AUTHORIZATION_KEY (Privy-app-specific).
 export const PRIVY_RELAY_SIGNER_ID: string =
   import.meta.env.VITE_PRIVY_RELAY_SIGNER_ID || 'ed0tw7ng40gyfd6zu77cf0ol';
@@ -132,8 +157,16 @@ export const BASE_CHAIN_CONFIG = {
   blockExplorerUrls: [BASE_CHAIN_ID === 8453 ? 'https://basescan.org' : 'https://sepolia.basescan.org'],
 } as const;
 
-// Supported chains: 'base' for settlement, 'og' for agent infra
-export const SUPPORTED_CHAINS = ['base', 'og'] as const;
+export const ARC_CHAIN_CONFIG = {
+  chainId: `0x${ARC_CHAIN_ID.toString(16)}`,
+  chainName: isArcMainnet ? 'Arc' : 'Arc Testnet',
+  nativeCurrency: { name: 'USDC', symbol: 'USDC', decimals: 18 },
+  rpcUrls: [ARC_RPC_URL],
+  blockExplorerUrls: [isArcMainnet ? 'https://arcscan.app' : 'https://testnet.arcscan.app'],
+} as const;
+
+// Supported chains: 'base' and 'arc' for settlement, 'og' for agent infra.
+export const SUPPORTED_CHAINS = ['base', 'og', 'arc'] as const;
 export type SupportedChain = typeof SUPPORTED_CHAINS[number];
 
 /**
@@ -160,6 +193,7 @@ export function getActiveChain(): SupportedChain {
 export const CHAIN_CONFIGS = {
   base: BASE_CHAIN_CONFIG,
   og: OG_CHAIN_CONFIG,
+  arc: ARC_CHAIN_CONFIG,
 } as const;
 
 export function getChainConfig(chain: SupportedChain) {

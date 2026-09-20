@@ -1,22 +1,14 @@
 /**
  * Which chain is a task's escrow on?
  *
- * Task creation moved to Base (POST /api/v1/tasks routes there whenever
- * BASE_ESCROW_ADDRESS is set), but every task funded before that switch — and
- * every task funded while Base is unconfigured — lives on the 0G escrow. The
- * two indexers write to separate Redis namespaces (`a2a:hash2id:` for 0G,
- * `base:hash2id:` for Base), so a caller that consults only one of them sees
- * half the marketplace.
- *
- * That is not hypothetical: the a2a finalize routes resolved ids through the
- * 0G index alone, so a Base-funded task returned a permanent 503 NOT_INDEXED
- * ("wait a few seconds and retry" never succeeded) and could never be settled
- * or paid out. Everything that needs an escrow for a taskHash should go
- * through resolveTaskByHash and use the chain it reports.
+ * Tasks are funded on Base or Arc. Each chain has its own Redis namespace
+ * (`base:hash2id:` or `arc:hash2id:`), so a caller that consults only one of
+ * them sees half the marketplace. Everything that needs an escrow for a
+ * taskHash should go through resolveTaskByHash and use the chain it reports.
  */
 import { baseEscrow } from './chain.js';
-import { getCachedTaskIdByHash, getTaskIdByHash, seedTaskIdMapping } from './escrowEvents.js';
 import { getBaseTaskIdByHash, forceBaseTick, seedBaseTaskIdMapping } from './baseEscrowEvents.js';
+import { getArcTaskIdByHash, forceArcTick, seedArcTaskIdMapping } from './arcEscrowEvents.js';
 import { getMeta } from './a2aStore.js';
 import { isSettlementChainKey, settlementChainConfig, type SettlementChainKey } from './settlementChains.js';
 
@@ -41,28 +33,24 @@ interface TaskIndex {
 
 // Each index is read through a wrapper, when called: tests replace these
 // modules with mocks that define only what the test uses.
-//
-// Declaration order is the search order for a task with no recorded chain.
-// Base comes first, since that is where new tasks are funded.
 const TASK_INDEX: { readonly [K in TaskChain]: TaskIndex } = {
   base: {
     enabled: () => !!baseEscrow,
     cached: (taskHash) => getBaseTaskIdByHash(taskHash),
-    // The create tx may just not be indexed yet.
     resolve: async (taskHash) => {
       await forceBaseTick();
       return getBaseTaskIdByHash(taskHash);
     },
     seed: (taskHash, taskId) => seedBaseTaskIdMapping(taskHash, taskId),
   },
-  '0g': {
-    // No 0G escrow (a Base-only stack): nothing to index, and the slow
-    // path's forced ticks and backfill would run against address(0).
-    enabled: () => settlementChainConfig('0g').escrowAddress !== null,
-    cached: (taskHash) => getCachedTaskIdByHash(taskHash),
-    // Retries, and can trigger a backfill.
-    resolve: (taskHash) => getTaskIdByHash(taskHash),
-    seed: (taskHash, taskId) => seedTaskIdMapping(taskHash, taskId),
+  arc: {
+    enabled: () => settlementChainConfig('arc').escrowAddress !== null,
+    cached: (taskHash) => getArcTaskIdByHash(taskHash),
+    resolve: async (taskHash) => {
+      await forceArcTick();
+      return getArcTaskIdByHash(taskHash);
+    },
+    seed: (taskHash, taskId) => seedArcTaskIdMapping(taskHash, taskId),
   },
 };
 
@@ -102,13 +90,6 @@ async function cachedLookup(taskHash: string, chains: TaskChain[]): Promise<Reso
  * only that chain is searched. The poster picks the hash, so the same hash can
  * be escrowed on both chains, and searching both would settle whichever
  * answered first.
- *
- * For older tasks with no recorded chain the ordering is deliberate. Both
- * cheap cache reads happen first, because the 0G resolver's slow path costs
- * ~6s of retries and can trigger an 850k-block backfill — paying that for a
- * task that turns out to be on Base would be pure waste. Only when neither
- * index knows the hash do we escalate, and Base goes first there since that is
- * where new tasks are funded.
  */
 export async function resolveTaskByHash(taskHash: string): Promise<ResolvedTask | null> {
   const chains = indexesFor(await recordedChain(taskHash));
@@ -125,15 +106,6 @@ export async function resolveTaskByHash(taskHash: string): Promise<ResolvedTask 
 
 /**
  * Seed the hash<->id mapping in the namespace of the chain that holds the task.
- *
- * The a2a index route used to write every task into the 0G namespace, Base
- * tasks included. resolveTaskByHash then consulted the Base namespace first
- * (it still does for tasks with no recorded chain), so a Base task was
- * resolved as 0G for the window between indexing and the next
- * Base poller tick (~5 s). An agent accepting inside that window had its
- * assignment sent to the 0G escrow with the Base task's id, which reverted
- * NotVerifier — seen live on Base Sepolia (task 3 on 0xa1F7…): accept 1 s
- * after index → 503 SETTLEMENT_FAILED; the same accept 3 min later succeeded.
  */
 export async function seedTaskId(chain: TaskChain, taskHash: string, taskId: bigint | string): Promise<void> {
   if (!isSettlementChainKey(chain)) throw new Error(`unknown settlement chain ${String(chain)}`);
@@ -149,9 +121,6 @@ export async function seedTaskId(chain: TaskChain, taskHash: string, taskId: big
  * read id 7 from each escrow and keep the one whose `agent` is the caller.
  * Reading an id that was never created returns a zero-filled struct rather than
  * reverting, so a wrong guess resolves to the zero address and is rejected.
- *
- * Returns null when neither chain has a task with that id owned by `caller` —
- * the routes turn that into the same 403 they already returned.
  */
 export async function resolveTaskChainById(
   taskId: number,
@@ -172,9 +141,6 @@ export async function resolveTaskChainById(
   const chains = indexesFor(null);
   const agents = await Promise.all(chains.map(readAgent));
 
-  // In search order, so Base first: it is where new tasks are funded, so on
-  // the vanishingly rare id collision where one address owns the same id on
-  // both chains, the newer task is the one being acted on.
   const i = agents.findIndex((agent) => agent === wanted);
   return i === -1 ? null : chains[i];
 }

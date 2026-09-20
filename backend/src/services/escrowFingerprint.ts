@@ -17,8 +17,8 @@ import type { TaskChain } from './taskChain.js';
  *  should put its chain id in its key prefix, so a testnet and a mainnet
  *  backend never share keys in the first place. */
 export const FINGERPRINT_KEY: Record<TaskChain, string> = {
-  '0g': 'a2a:events:escrow',
   base: 'base:events:escrow',
+  arc: 'arc:events:escrow',
 };
 
 const RECHECK_MS = 60_000;

@@ -1,26 +1,26 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const cfg = vi.hoisted(() => ({ ogChainId: 16661, baseChainId: 84532, deploymentSet: '' }));
+const cfg = vi.hoisted(() => ({ arcChainId: 5042002, baseChainId: 84532, deploymentSet: '' }));
 vi.mock('../config.js', () => ({ config: cfg }));
 
 const { chainNetwork, contractsEnvPrefix } = await import('./chainNetwork.js');
 
-beforeEach(() => Object.assign(cfg, { ogChainId: 16661, baseChainId: 84532, deploymentSet: '' }));
+beforeEach(() => Object.assign(cfg, { arcChainId: 5042002, baseChainId: 84532, deploymentSet: '' }));
 
 describe('chainNetwork', () => {
-  it("takes each chain's tier from its own chain id (production: 0G mainnet with Base Sepolia)", () => {
-    expect(chainNetwork('0g')).toEqual({ tier: 'mainnet', hardhatNetwork: '0g-mainnet' });
+  it('takes each chain tier from its own chain id', () => {
+    expect(chainNetwork('arc')).toEqual({ tier: 'testnet', hardhatNetwork: 'arc-testnet' });
     expect(chainNetwork('base')).toEqual({ tier: 'testnet', hardhatNetwork: 'base-sepolia' });
   });
 
-  it('names the other networks', () => {
-    Object.assign(cfg, { ogChainId: 16602, baseChainId: 8453 });
-    expect(chainNetwork('0g')).toEqual({ tier: 'testnet', hardhatNetwork: '0g-testnet' });
+  it('names the mainnet networks', () => {
+    Object.assign(cfg, { arcChainId: 5042, baseChainId: 8453 });
+    expect(chainNetwork('arc')).toEqual({ tier: 'mainnet', hardhatNetwork: 'arc-mainnet' });
     expect(chainNetwork('base')).toEqual({ tier: 'mainnet', hardhatNetwork: 'base' });
   });
 
   it('throws on a chain it does not know', () => {
-    expect(() => chainNetwork('arc' as never)).toThrow(/unknown settlement chain arc/);
+    expect(() => chainNetwork('0g' as never)).toThrow(/unknown settlement chain 0g/);
   });
 });
 

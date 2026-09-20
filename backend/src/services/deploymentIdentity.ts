@@ -64,10 +64,10 @@ import { TIER_CHAIN_IDS, type SettlementTier } from './settlementTier.js';
 
 export const IDENTITY_KEY = 'deployment:identity';
 
-/** The TaskCreated checkpoint each indexer keeps (escrowEvents.ts and baseEscrowEvents.ts KEY.checkpoint). */
+/** The TaskCreated checkpoint each indexer keeps (baseEscrowEvents.ts and arcEscrowEvents.ts KEY.checkpoint). */
 export const INDEX_CHECKPOINT_KEY: Readonly<Record<keyof typeof FINGERPRINT_KEY, string>> = {
-  '0g': 'a2a:events:checkpoint',
   base: 'base:events:checkpoint',
+  arc: 'arc:events:checkpoint',
 };
 
 /** How long a check waits for Redis before letting writes run anyway. */

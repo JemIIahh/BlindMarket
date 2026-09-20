@@ -3,13 +3,13 @@ import express from 'express';
 import request from 'supertest';
 
 /**
- * GET /api/v1/tasks/:id reads the 0G TaskRegistry only for a task on a chain
- * whose registry entry has one. The registry is keyed by 0G escrow ids, so
- * reading it with a Base task's id would attach an unrelated 0G task's meta.
+ * GET /api/v1/tasks/:id resolves a task's chain and reports the unit its
+ * reward is escrowed in. The 0G TaskRegistry is no longer coupled to a
+ * settlement chain, so task `meta` is null for every settlement chain.
  */
 
 const BASE_HASH = '0x' + 'ba'.repeat(32);
-const OG_HASH = '0x' + '0a'.repeat(32);
+const ARC_HASH = '0x' + '0a'.repeat(32);
 
 vi.mock('../middleware/auth.js', () => {
   const pass = (req: any, _res: any, next: any) => {
@@ -22,7 +22,7 @@ vi.mock('../services/accountingService.js', () => ({ recordTransaction: vi.fn(as
 
 vi.mock('../services/taskChain.js', () => ({
   resolveCachedTaskByHash: vi.fn(async (hash: string) =>
-    hash === BASE_HASH ? { taskId: '7', chain: 'base' } : hash === OG_HASH ? { taskId: '7', chain: '0g' } : null),
+    hash === BASE_HASH ? { taskId: '7', chain: 'base' } : hash === ARC_HASH ? { taskId: '7', chain: 'arc' } : null),
   resolveTaskChainById: vi.fn(async () => 'base'),
 }));
 
@@ -35,7 +35,7 @@ vi.mock('../services/escrow.js', () => ({
     worker: '0x0000000000000000000000000000000000000000',
     token: '0x0000000000000000000000000000000000000000',
     amount: 5n,
-    taskHash: OG_HASH,
+    taskHash: ARC_HASH,
     evidenceHash: '0x' + '00'.repeat(32),
     status: 0,
     createdAt: 1n,
@@ -75,8 +75,8 @@ function get(id: string) {
 
 beforeEach(() => vi.clearAllMocks());
 
-describe('GET /tasks/:id and the TaskRegistry', () => {
-  it('does not read the 0G TaskRegistry for a Base task', async () => {
+describe('GET /tasks/:id', () => {
+  it('resolves a Base task and does not read the 0G TaskRegistry', async () => {
     const res = await get(BASE_HASH);
     expect(res.status).toBe(200);
     expect(res.body.data).toMatchObject({ chain: 'base', taskId: '7', meta: null });
@@ -84,29 +84,25 @@ describe('GET /tasks/:id and the TaskRegistry', () => {
     expect(registryService.getTaskMeta).not.toHaveBeenCalled();
   });
 
-  it('reads it for a 0G task found by hash', async () => {
-    const res = await get(OG_HASH);
+  it('resolves an Arc task, meta stays null (no settlement chain has a TaskRegistry)', async () => {
+    const res = await get(ARC_HASH);
     expect(res.status).toBe(200);
-    expect(res.body.data).toMatchObject({ chain: '0g', meta: { category: 'general' } });
-    expect(registryService.getTaskMeta).toHaveBeenCalledWith(7);
+    expect(res.body.data).toMatchObject({ chain: 'arc', meta: null });
+    expect(registryService.getTaskMeta).not.toHaveBeenCalled();
   });
 
-  it('names the unit each task is escrowed in, next to its decimals', async () => {
-    // Native 0G on 0G; the mocked escrow returns address(0) as the token.
-    const og = await get(OG_HASH);
-    expect(og.body.data).toMatchObject({ chain: '0g', symbol: '0G', decimals: 18 });
-    // The Base escrow record also says address(0), which is NOT Base's
-    // settlement token (USDC): the unit is unknown, so no symbol is claimed.
+  it('claims no symbol for address(0), which is not a settlement token on Base or Arc', async () => {
     const base = await get(BASE_HASH);
     expect(base.body.data).toMatchObject({ chain: 'base', symbol: null });
+    const arc = await get(ARC_HASH);
+    expect(arc.body.data).toMatchObject({ chain: 'arc', symbol: null });
   });
 
-  it('reads it for a numeric id, which names a 0G task', async () => {
+  it('reads a numeric id for the resolved chain', async () => {
     const res = await get('7');
     expect(res.status).toBe(200);
-    expect(res.body.data.chain).toBe('0g');
-    expect(escrowService.getTaskOn).toHaveBeenCalledWith('0g', 7);
-    expect(registryService.getTaskMeta).toHaveBeenCalledWith(7);
+    expect(res.body.data.chain).toBe('base');
+    expect(escrowService.getTaskOn).toHaveBeenCalledWith('base', 7);
   });
 });
 
@@ -121,16 +117,10 @@ describe('cancel and claim-timeout say which chain their transaction is for', ()
   };
 
   it('returns chain and chainId with the unsigned tx, like POST /tasks', async () => {
-    for (const route of ['7/cancel', '7/timeout']) {
-      vi.mocked(taskChain.resolveTaskChainById).mockResolvedValueOnce('base');
-      const res = await post(route);
-      expect(res.status, route).toBe(200);
-      expect(res.body.data).toMatchObject({ chain: 'base', chainId: 84532 });
-      expect(res.body.data.unsignedTx.to).toBe('0xCca5ab873158b888158AD9Dc36fb4Ee683eFbEBf');
-    }
-    vi.mocked(taskChain.resolveTaskChainById).mockResolvedValueOnce('0g');
-    const og = await post('7/cancel');
-    // The 0G chain id of this test's config (16602 in the test env).
-    expect(og.body.data).toMatchObject({ chain: '0g', chainId: 16602 });
+    vi.mocked(taskChain.resolveTaskChainById).mockResolvedValueOnce('base');
+    const res = await post('7/cancel');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toMatchObject({ chain: 'base', chainId: 84532 });
+    expect(res.body.data.unsignedTx.to).toBe('0xCca5ab873158b888158AD9Dc36fb4Ee683eFbEBf');
   });
 });

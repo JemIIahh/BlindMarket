@@ -73,6 +73,33 @@ export const baseEscrowAsMarketplace: ethers.Contract | null = config.baseEscrow
   ? new ethers.Contract(config.baseEscrowAddress, loadAbi('BlindEscrow'), baseMarketplaceSigner)
   : null;
 
+// ══════════════════════════════════════════════════════════════════════════
+// Arc Chain (settlement — BlindEscrow, USDC payouts, gas in USDC)
+// ═══════════════════════════════════════════════════════════════════════════
+
+const arcFetchRequest = new ethers.FetchRequest(config.arcRpcUrl);
+arcFetchRequest.timeout = 120_000;
+
+export const arcProvider: ethers.JsonRpcProvider = new ethers.JsonRpcProvider(arcFetchRequest, config.arcChainId, {
+  batchMaxCount: 1,
+  staticNetwork: true,
+});
+
+/** Marketplace signer for Arc escrow (holds verifier role on Arc BlindEscrow). */
+export const arcMarketplaceSigner: ethers.Wallet | null = config.arcMarketplaceSignerPrivateKey
+  ? new ethers.Wallet(config.arcMarketplaceSignerPrivateKey, arcProvider)
+  : null;
+
+/** Read-only BlindEscrow on Arc. Null when ARC_ESCROW_ADDRESS is unset. */
+export const arcEscrow: ethers.Contract | null = config.arcEscrowAddress
+  ? new ethers.Contract(config.arcEscrowAddress, loadAbi('BlindEscrow'), arcProvider)
+  : null;
+
+/** Write-capable BlindEscrow on Arc bound to the Arc marketplace signer. */
+export const arcEscrowAsMarketplace: ethers.Contract | null = config.arcEscrowAddress && arcMarketplaceSigner
+  ? new ethers.Contract(config.arcEscrowAddress, loadAbi('BlindEscrow'), arcMarketplaceSigner)
+  : null;
+
 /** Encode an unsigned transaction for a contract call (frontend signs) */
 export async function buildUnsignedTx(
   contract: ethers.Contract,
@@ -103,7 +130,7 @@ export async function buildUnsignedTx(
  */
 export async function getTokenDecimals(
   tokenAddress: string,
-  chain: SettlementChainKey = '0g',
+  chain: SettlementChainKey = 'base',
 ): Promise<number> {
   if (tokenAddress === '0x0000000000000000000000000000000000000000') return 18;
 
@@ -113,7 +140,7 @@ export async function getTokenDecimals(
   }
 
   // Not chainRuntime: that module imports this one.
-  const rpc = chain === 'base' ? baseProvider : provider;
+  const rpc = chain === 'base' ? baseProvider : chain === 'arc' ? arcProvider : provider;
   if (!rpc) return 18;
 
   try {

@@ -19,7 +19,7 @@ vi.mock('./deploymentIdentity.js', () => ({
   onBackgroundWritesResumed: (listener: () => void) => { resumed.push(listener); },
 }));
 vi.mock('./settlementChains.js', () => ({ settlementChainConfig: () => ({ escrowAddress: '0x' + '11'.repeat(20) }) }));
-vi.mock('./escrowEvents.js', () => ({ startEscrowEventLoop: () => started.push('startEscrowEventLoop') }));
+vi.mock('./arcEscrowEvents.js', () => ({ startArcEscrowEventLoop: () => started.push('startArcEscrowEventLoop') }));
 vi.mock('./baseEscrowEvents.js', () => ({ startBaseEscrowEventLoop: () => started.push('startBaseEscrowEventLoop') }));
 vi.mock('./agentFactoryListener.js', () => ({ startAgentFactoryListener: () => started.push('startAgentFactoryListener') }));
 vi.mock('./cctpAttestationPoller.js', () => ({ startCctpAttestationPoller: () => started.push('startCctpAttestationPoller') }));
@@ -29,7 +29,7 @@ vi.mock('./agentRunner.js', () => ({ reconcileAgents: async () => { started.push
 import { backgroundWriters, startBackgroundWriters } from './backgroundWriters.js';
 
 const EVERY_WRITER = [
-  'startEscrowEventLoop', 'startBaseEscrowEventLoop', 'startAgentFactoryListener',
+  'startBaseEscrowEventLoop', 'startArcEscrowEventLoop', 'startAgentFactoryListener',
   'startCctpAttestationPoller', 'startExpirySweepLoop', 'reconcileAgents',
 ];
 
@@ -43,7 +43,7 @@ describe('startBackgroundWriters', () => {
     identity.status = { role: 'owner', writersAllowed: true };
     const { started: names } = await startBackgroundWriters(backgroundWriters({}));
     expect(started).toEqual(EVERY_WRITER);
-    expect(names).toEqual(['0G indexer', 'Base indexer', 'AgentFactory listener', 'CCTP poller', 'expiry sweep', 'agent reconcile']);
+    expect(names).toEqual(['Base indexer', 'Arc indexer', 'AgentFactory listener', 'CCTP poller', 'expiry sweep', 'agent reconcile']);
   });
 
   it('starts them after the first check whatever it said: each tick is gated, so a later "allowed" takes effect', async () => {
