@@ -2,7 +2,9 @@ import { API_BASE_URL, getActiveChain } from '../config/constants';
 import type { ApiResponse, ApiErrorResponse } from '../types/api';
 
 class ApiError extends Error {
-  constructor(public code: string, message: string, public status?: number) {
+  /** The server's whole `error` object, for routes that attach more than
+   *  code + message (e.g. /agents/:id/withdraw's `skipped` reasons). */
+  constructor(public code: string, message: string, public status?: number, public payload?: Record<string, unknown>) {
     super(message);
     this.name = 'ApiError';
   }
@@ -59,6 +61,7 @@ async function handleResponse<T>(res: Response): Promise<T> {
       err.error?.code || 'UNKNOWN',
       err.error?.message || `HTTP ${res.status}`,
       res.status,
+      err.error as Record<string, unknown> | undefined,
     );
   }
 

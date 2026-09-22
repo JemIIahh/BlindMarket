@@ -1,5 +1,4 @@
 import { useState, useEffect } from 'react';
-import { useWalletClient } from 'wagmi';
 import { Contract, formatUnits } from 'ethers';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
@@ -21,6 +20,7 @@ import { API_BASE_URL } from '../config/constants';
 import { agentFundingAddress, getMarketplaceTokenAddress, getPaymentSymbol, getPaymentDecimals, isNativePayment, useSettlement } from '../config/settlement';
 import { formatEarnings, sumEarnings } from '../lib/paymentUnits';
 import { authedPost } from '../lib/api';
+import { providerFor } from '../lib/txSigner';
 import { useChainAddress } from '../hooks/useChainWallet';
 import { useAuth } from '../context/AuthContext';
 
@@ -30,18 +30,19 @@ const USDC_ABI = ['function balanceOf(address owner) view returns (uint256)'];
 // Per-row USDC balance probe. Returns null when balance is healthy or still
 // loading, a warning chip when below the threshold.
 function GasChip({ agent }: { agent: { walletAddress?: string; smartAccountAddress?: string } }) {
-  const { data: walletClient } = useWalletClient();
   const settlement = useSettlement();
   // The address the worker pays gas from on the posting chain.
   const fundingAddress = agentFundingAddress(agent, settlement.chains[settlement.postingChain]);
   const [balance, setBalance] = useState<number | null>(null);
 
   useEffect(() => {
-    if (!fundingAddress || !walletClient) return;
+    if (!fundingAddress) return;
     let cancelled = false;
     (async () => {
       try {
-        const provider = new (await import('ethers')).BrowserProvider(walletClient.transport);
+        // The posting chain's own RPC, not the viewer's wallet — which may be
+        // on another chain, where the read would silently come back wrong.
+        const provider = providerFor(settlement.postingChain);
         // Native coin when tasks are paid in it (address(0) is no ERC-20).
         const bal: bigint = isNativePayment()
           ? await provider.getBalance(fundingAddress)
@@ -50,7 +51,7 @@ function GasChip({ agent }: { agent: { walletAddress?: string; smartAccountAddre
       } catch { /* non-blocking */ }
     })();
     return () => { cancelled = true; };
-  }, [fundingAddress, walletClient, settlement]);
+  }, [fundingAddress, settlement]);
 
   if (balance === null) return null;
   if (balance >= LOW_BALANCE_THRESHOLD) return null;
@@ -100,8 +101,12 @@ export default function MyAgents() {
     queryKey: ['my-agents', address, page],
     queryFn: async () => {
       const res = await fetch(`${API_BASE_URL}/api/v1/agents?owner=${address}&page=${page}&pageSize=${AGENTS_PAGE_SIZE}`);
+      // Throw rather than return [] on failure, so an API outage shows the
+      // error state instead of masquerading as "no agents yet".
+      if (!res.ok) throw new Error(`Agents request failed (${res.status})`);
       const json = await res.json();
-      return { agents: json.success ? json.data : [], total: json.total ?? 0 };
+      if (!json.success) throw new Error(json.error?.message || 'Agents request failed');
+      return { agents: json.data, total: json.total ?? 0 };
     },
     enabled: !!address,
   });
