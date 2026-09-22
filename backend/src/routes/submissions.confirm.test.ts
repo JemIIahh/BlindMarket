@@ -61,9 +61,13 @@ vi.mock('../services/accountingService.js', () => ({
   recordTransaction: vi.fn(async () => ({})),
 }));
 
-// Task 7 is the task its hash is indexed to unless a test says otherwise.
+// Task 7 is the task its hash is listed for unless a test says otherwise.
 vi.mock('../services/taskChain.js', () => ({
-  isIndexedTask: vi.fn(async () => true),
+  isListedTask: vi.fn(async () => true),
+}));
+
+vi.mock('../services/a2aStore.js', () => ({
+  getMeta: vi.fn(async () => ({ taskId: '0xhash', posterAddress: POSTER })),
 }));
 
 import { submissionsRouter } from './submissions.js';
@@ -119,12 +123,12 @@ describe('POST /submissions/confirm', () => {
   it("credits nothing for a duplicate funded under another task's hash (it would set that hash's once-only marker)", async () => {
     getReceipt.mockResolvedValue(okReceipt([{ address: ESCROW }]));
     parseLog.mockReturnValue({ name: 'TaskCompleted', args: { taskId: 7n, workerPayout: 90n, platformFee: 10n } });
-    vi.mocked(taskChain.isIndexedTask).mockResolvedValueOnce(false);
+    vi.mocked(taskChain.isListedTask).mockResolvedValueOnce(false);
     const res = await request(app()).post('/api/v1/submissions/confirm')
       .set(as(POSTER)).send({ taskId: 7, txHash: '0x' + '44'.repeat(32) });
     expect(res.status).toBe(409);
     expect(res.body.error.code).toBe('HASH_NOT_THIS_TASK');
-    expect(taskChain.isIndexedTask).toHaveBeenCalledWith('base', 7, '0xhash');
+    expect(taskChain.isListedTask).toHaveBeenCalledWith('base', 7, '0xhash', POSTER, POSTER);
     expect(workerPayout.recordWorkerPayout).not.toHaveBeenCalled();
     expect(workerPayout.recordWorkerDispute).not.toHaveBeenCalled();
   });

@@ -204,10 +204,10 @@ async function processDisputeResolved(chain: TaskChain, taskId: bigint, workerFa
   // the ones whose off-chain state and credit a duplicate could take over.
   // (Imported at call time: taskChain loads the indexers, which load this.)
   if (meta) {
-    const { isIndexedTask } = await import('./taskChain.js');
-    if (!(await isIndexedTask(chain, taskId.toString(), taskHash))) {
+    const { isListedTask } = await import('./taskChain.js');
+    if (!(await isListedTask(chain, taskId.toString(), taskHash, String(t.agent ?? ''), meta.posterAddress))) {
       console.warn(
-        `[disputes] DisputeResolved ${chain} taskId=${taskId}: hash ${taskHash.slice(0, 10)}… is indexed to another task — skipping`,
+        `[disputes] DisputeResolved ${chain} taskId=${taskId}: hash ${taskHash.slice(0, 10)}… belongs to another task — skipping`,
       );
       return;
     }

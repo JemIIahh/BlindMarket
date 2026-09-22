@@ -801,8 +801,9 @@ tasksRouter.post('/:id/confirm-tx', requireAuth, async (req: AuthRequest, res, n
     // for an instant refund and land here. Close only when the A2A task is this
     // caller's (meta.posterAddress, set from the authenticated poster at index
     // time — the check that matters) and the hash index does not name a
-    // different escrow task. The index is last-writer-wins, so it is a
-    // secondary guard only; no recorded poster means no close.
+    // different escrow task. The indexers keep the first writer (SET NX), but
+    // an entry can be missing, so the index is the secondary guard; no
+    // recorded poster means no close.
     try {
       const onChain = await escrowService.getTaskOn(chain, taskId);
       const taskHash = onChain.taskHash;

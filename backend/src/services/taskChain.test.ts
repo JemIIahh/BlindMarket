@@ -38,7 +38,7 @@ vi.mock('./baseEscrowEvents.js', () => ({ getBaseTaskIdByHash, forceBaseTick }))
 vi.mock('./arcEscrowEvents.js', () => ({ getArcTaskIdByHash, forceArcTick }));
 vi.mock('./escrow.js', () => ({ getTaskOn }));
 
-const { resolveTaskByHash, resolveCachedTaskByHash, resolveTaskChainById } = await import('./taskChain.js');
+const { resolveTaskByHash, resolveCachedTaskByHash, resolveTaskChainById, isIndexedTask, isListedTask } = await import('./taskChain.js');
 
 const HASH = '0xabc';
 
@@ -203,5 +203,39 @@ describe('the Arc index is only consulted where this stack has an Arc escrow', (
   it('consults it where the escrow is configured', async () => {
     getArcTaskIdByHash.mockResolvedValueOnce('7');
     expect(await resolveTaskByHash(HASH)).toEqual({ taskId: '7', chain: 'arc' });
+  });
+});
+
+describe('a second task funded under the same hash', () => {
+  const POSTER = '0x1111111111111111111111111111111111111111';
+  const STRANGER = '0x2222222222222222222222222222222222222222';
+
+  beforeEach(() => getMeta.mockResolvedValue({ chain: 'arc', posterAddress: POSTER }));
+
+  it('is not the indexed task: only the id the hash is indexed to is', async () => {
+    getArcTaskIdByHash.mockResolvedValue('7');
+    expect(await isIndexedTask('arc', 7, HASH)).toBe(true);
+    expect(await isIndexedTask('arc', '8', HASH)).toBe(false);
+    expect(await isIndexedTask('base', 7, HASH)).toBe(false);
+  });
+
+  it('is never read as indexed when the hash has no index entry (a read fails closed)', async () => {
+    expect(await isIndexedTask('arc', 7, HASH)).toBe(false);
+  });
+
+  it('is skipped by a settlement observer when the index names another task, whoever funded it', async () => {
+    getArcTaskIdByHash.mockResolvedValue('7');
+    expect(await isListedTask('arc', 7, HASH, POSTER, POSTER)).toBe(true);
+    expect(await isListedTask('arc', 8, HASH, POSTER, POSTER)).toBe(false);
+  });
+
+  it('with no index entry (evicted), is still the listed task when its on-chain poster listed it', async () => {
+    // Case-insensitive: the escrow returns checksummed addresses.
+    expect(await isListedTask('arc', 7, HASH, POSTER.toUpperCase().replace('0X', '0x'), POSTER)).toBe(true);
+    expect(await isListedTask('arc', 7, HASH, STRANGER, POSTER)).toBe(false);
+  });
+
+  it('with no index entry and no listing (no poster on record), has nothing to take over', async () => {
+    expect(await isListedTask('arc', 7, HASH, STRANGER, undefined)).toBe(true);
   });
 });

@@ -57,7 +57,7 @@ const { store, hashes, redis, getTaskOn, a2aStore, loadAgentBySmartAccount, noti
     loadAgentBySmartAccount: vi.fn(),
     notifyLifecycle: vi.fn(async () => {}),
     payout: { recordWorkerPayout: vi.fn(), recordWorkerDispute: vi.fn() },
-    taskChain: { isIndexedTask: vi.fn() },
+    taskChain: { isListedTask: vi.fn() },
   };
 });
 
@@ -108,8 +108,8 @@ beforeEach(async () => {
   hashes.clear();
   a2aStore.getMeta.mockResolvedValue({ taskId: HASH, chain: 'base' });
   a2aStore.updateState.mockResolvedValue(undefined);
-  // Task 7 is the task its hash is indexed to unless a test says otherwise.
-  taskChain.isIndexedTask.mockResolvedValue(true);
+  // Task 7 is the task its hash is listed for unless a test says otherwise.
+  taskChain.isListedTask.mockResolvedValue(true);
   loadAgentBySmartAccount.mockResolvedValue(null);
   payout.recordWorkerPayout.mockReset().mockResolvedValue(undefined);
   payout.recordWorkerDispute.mockReset().mockResolvedValue(undefined);
@@ -120,9 +120,12 @@ beforeEach(async () => {
 describe('a ruling on a second task funded under the same hash', () => {
   it.each([true, false])('touches nothing keyed by the hash (workerFavored=%s)', async (favored) => {
     onChain(WORKER_EOA, { status: favored ? COMPLETED : CANCELLED });
-    taskChain.isIndexedTask.mockResolvedValue(false);
+    taskChain.isListedTask.mockResolvedValue(false);
+    a2aStore.getMeta.mockResolvedValue({ taskId: HASH, chain: 'base', posterAddress: OWNER });
     await listener.handleDisputeResolved('base', 7n, favored);
-    expect(taskChain.isIndexedTask).toHaveBeenCalledWith('base', '7', HASH);
+    // The task's on-chain agent and the listing's poster decide when the index
+    // entry is missing (taskChain.isListedTask).
+    expect(taskChain.isListedTask).toHaveBeenCalledWith('base', '7', HASH, '', OWNER);
     expect(payout.recordWorkerPayout).not.toHaveBeenCalled();
     expect(payout.recordWorkerDispute).not.toHaveBeenCalled();
     expect(a2aStore.updateState).not.toHaveBeenCalled();

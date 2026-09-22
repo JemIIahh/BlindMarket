@@ -9,7 +9,8 @@ import { recordWorkerPayout, recordWorkerDispute } from '../services/workerPayou
 import { payoutCurrency } from '../services/settlementUnits.js';
 import { chainRuntime } from '../services/chainRuntime.js';
 import { postingChain } from '../services/settlementChains.js';
-import { isIndexedTask } from '../services/taskChain.js';
+import { isListedTask } from '../services/taskChain.js';
+import { getMeta } from '../services/a2aStore.js';
 import { redis } from '../services/redis.js';
 
 export const submissionsRouter = Router();
@@ -184,12 +185,13 @@ submissionsRouter.post('/confirm', requireAuth, async (req: AuthRequest, res, ne
     // escrowed twice. Settling a duplicate funded under a live task's hash
     // must not set that hash's once-only credit marker (the real executor's
     // credit would then be skipped as "already credited"): only the task the
-    // hash is indexed to is credited here.
-    if (!(await isIndexedTask(postingChain(), taskId, taskHash))) {
+    // hash is listed for is credited here (isListedTask).
+    const meta = await getMeta(taskHash);
+    if (!(await isListedTask(postingChain(), taskId, taskHash, String(task.agent), meta?.posterAddress))) {
       throw new AppError(
         409,
         'HASH_NOT_THIS_TASK',
-        "This task's hash is indexed to a different task, so it can't be credited here",
+        "This task's hash belongs to a different listed task, so it can't be credited here",
       );
     }
 

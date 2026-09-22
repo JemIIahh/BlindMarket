@@ -175,3 +175,25 @@ export async function isIndexedTask(chain: TaskChain, taskId: number | string, t
   const resolved = await resolveCachedTaskByHash(taskHash.toLowerCase());
   return !!resolved && resolved.chain === chain && resolved.taskId === String(taskId);
 }
+
+/**
+ * isIndexedTask for the settlement observers (/submissions/confirm, the
+ * DisputeResolved listener), which must not drop a real credit or ruling
+ * just because the index entry is missing (never written, or evicted from
+ * Redis) — unlike a read, a skipped credit is lost. An entry that names
+ * another task still means "a duplicate: skip". With no entry, the task is
+ * taken as the listed one when its on-chain poster is the poster it was
+ * listed by (`posterAddress`, A2A meta): a duplicate funded by anyone else
+ * has a different agent. A task with no listing has nothing to take over.
+ */
+export async function isListedTask(
+  chain: TaskChain,
+  taskId: number | string,
+  taskHash: string,
+  onChainAgent: string,
+  posterAddress: string | null | undefined,
+): Promise<boolean> {
+  const resolved = await resolveCachedTaskByHash(taskHash.toLowerCase());
+  if (resolved) return resolved.chain === chain && resolved.taskId === String(taskId);
+  return !posterAddress || onChainAgent.toLowerCase() === posterAddress.toLowerCase();
+}
