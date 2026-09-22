@@ -63,6 +63,12 @@ export interface SettlementChainInfo {
   relayChain: string | null;
   /** The wallet chain (ChainContext) that pays on this chain. Base is legacy and has no wallet. */
   walletChain: SupportedChain | 'base';
+  /**
+   * Whether this chain's escrow records an agent's ERC-4337 smart account as
+   * the worker (backend settlementChains.ts `aa`). Where it does not, a hosted
+   * agent pays gas and receives payouts in its EOA, so that is what to fund.
+   */
+  aa: boolean;
 }
 
 export interface SettlementSnapshot {
@@ -95,6 +101,7 @@ export function defaultSettlement(): SettlementSnapshot {
         token: { kind: 'erc20', address: BASE_USDC_ADDRESS, unit: { symbol: 'USDC', decimals: 6 } },
         relayChain: baseRelayChain(BASE_CHAIN_ID),
         walletChain: 'base',
+        aa: true,
       },
       arc: {
         key: 'arc',
@@ -106,6 +113,7 @@ export function defaultSettlement(): SettlementSnapshot {
         token: { kind: 'erc20', address: ARC_USDC_ADDRESS, unit: { symbol: 'USDC', decimals: 6 } },
         relayChain: null,
         walletChain: 'arc',
+        aa: false,
       },
     },
     source: 'defaults',
@@ -242,6 +250,21 @@ export function useSettlement(): SettlementSnapshot {
 
 export function getPostingChain(): SettlementChainInfo {
   return snapshot.chains[snapshot.postingChain];
+}
+
+/**
+ * The address a hosted agent needs funded on `chain` (default: the posting
+ * chain): its smart account where that chain's escrow records one, else its
+ * EOA. Funding the smart account on a chain without `aa` (Arc) leaves the EOA
+ * that signs every accept and submit empty, and the worker skips every task
+ * for lack of gas.
+ */
+export function agentFundingAddress(
+  agent: { walletAddress?: string; smartAccountAddress?: string } | null | undefined,
+  chain: SettlementChainInfo = getPostingChain(),
+): string | undefined {
+  if (!agent) return undefined;
+  return (chain.aa && agent.smartAccountAddress) || agent.walletAddress;
 }
 
 /** The unit every price on this deployment is written in: the posting chain's token. */

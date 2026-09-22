@@ -50,9 +50,10 @@ export interface OnChainTask {
   createdAt: string;
   deadline: string;
   submissionAttempts: number;
-  // Which escrow holds the task ('base' = USDC settlement, '0g' = agent
-  // infra). Sent by GET /api/v1/tasks/:id; picks the chain explorer.
-  chain?: '0g' | 'base';
+  // Which escrow holds the task ('arc' = where new tasks post, 'base' =
+  // legacy USDC settlement, '0g' = agent infra). Sent by
+  // GET /api/v1/tasks/:id; picks the chain explorer.
+  chain?: '0g' | 'base' | 'arc';
   // The escrow token's symbol when it is that chain's settlement token
   // (GET /api/v1/tasks/:id), null otherwise. With `decimals`, the reward's unit.
   symbol?: string | null;

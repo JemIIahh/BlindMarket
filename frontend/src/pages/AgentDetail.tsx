@@ -17,7 +17,7 @@ import {
 import { get, authedGet, authedPost } from '../lib/api';
 import { useChainAddress } from '../hooks/useChainWallet';
 import { SETTLEMENT_CCTP_CHAIN_KEY, isCctpUsable } from '../config/constants';
-import { getMarketplaceTokenAddress, getPaymentSymbol, getPaymentDecimals, getPostingChain, isNativePayment, useSettlement } from '../config/settlement';
+import { agentFundingAddress, getMarketplaceTokenAddress, getPaymentSymbol, getPaymentDecimals, getPostingChain, isNativePayment, useSettlement } from '../config/settlement';
 import {
   getAgentReviews,
   getAgentBadges,
@@ -123,9 +123,10 @@ export default function AgentDetail() {
   const balanceSymbol = getPaymentSymbol();
   const isLowGas = usdcBalance !== null && usdcBalance < lowBalanceThreshold();
 
-  // ERC-4337 AA: gas is paid in USDC via paymaster from the smart account.
-  // Fallback to the EOA wallet for pre-AA agents.
-  const fundingAddress = agent?.smartAccountAddress || agent?.walletAddress;
+  // The smart account only where the posting chain's escrow records one
+  // (ERC-4337, gas paid in USDC via the paymaster); elsewhere (Arc) the EOA,
+  // which signs and pays gas itself.
+  const fundingAddress = agentFundingAddress(agent, settlement.chains[settlement.postingChain]);
   const agentWallet = agent?.walletAddress;
 
   const refetchBalance = useCallback(async () => {

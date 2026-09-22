@@ -6,6 +6,7 @@ import {
   MARKETPLACE_TOKEN_ADDRESS,
 } from './constants';
 import {
+  agentFundingAddress,
   defaultSettlement,
   explorerUrlFor,
   getMarketplaceTokenAddress,
@@ -76,6 +77,27 @@ describe('build-time defaults', () => {
       walletChain: 'base',
       explorer: 'https://sepolia.basescan.org',
     });
+  });
+});
+
+describe('agentFundingAddress', () => {
+  const agent = { walletAddress: '0xE0A', smartAccountAddress: '0x5A' };
+
+  it("funds the EOA on Arc, whose escrow records no smart account: the worker signs and pays gas there", () => {
+    expect(agentFundingAddress(agent, defaultSettlement().chains.arc)).toBe('0xE0A');
+  });
+
+  it('funds the smart account on Base, and the EOA for an agent without one', () => {
+    const { base } = defaultSettlement().chains;
+    expect(agentFundingAddress(agent, base)).toBe('0x5A');
+    expect(agentFundingAddress({ walletAddress: '0xE0A' }, base)).toBe('0xE0A');
+    expect(agentFundingAddress(null, base)).toBeUndefined();
+  });
+
+  it('keeps the flag through a backend merge, which does not send it', () => {
+    const merged = mergeSettlement(defaultSettlement(), { postingChain: 'arc', chains: [] });
+    expect(merged.chains.arc.aa).toBe(false);
+    expect(merged.chains.base.aa).toBe(true);
   });
 });
 

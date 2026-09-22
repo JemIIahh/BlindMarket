@@ -49,7 +49,7 @@ interface PostedTask {
   hasCustody?: boolean;
   onChain: null | {
     taskId: string;
-    chain: 'base' | '0g';
+    chain: 'base' | '0g' | 'arc';
     status: number;
     reward: string;
     token: string;

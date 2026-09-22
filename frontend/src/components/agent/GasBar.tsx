@@ -1,6 +1,9 @@
 import { formatUnits } from 'ethers';
 import { Button, Icon, ConfirmDialog } from '../bb';
 
+/** How a withdraw receipt names the chain it swept (backend chain keys). */
+const CHAIN_LABEL: Record<string, string> = { arc: 'Arc', base: 'Base', '0g': '0G' };
+
 /**
  * Gas management strip — presentational. Every piece of state and every
  * transaction lives in the page (the balance also feeds the stats row); this
@@ -178,7 +181,7 @@ export function GasBar({
               {withdrawInfo.map((w) => (
                 <div key={`${w.chain}-${w.txHash}`}>
                   Withdrew <span className="font-mono">{parseFloat(w.amount).toFixed(4)} {w.asset}</span> from{' '}
-                  <span className="font-mono">{w.chain === 'base' ? 'Base' : '0G'}</span> ·
+                  <span className="font-mono">{CHAIN_LABEL[w.chain] ?? w.chain}</span> ·
                   tx <span className="font-mono">{w.txHash.slice(0, 10)}…</span>
                 </div>
               ))}
