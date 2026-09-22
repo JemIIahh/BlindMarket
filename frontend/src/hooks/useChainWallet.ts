@@ -2,7 +2,7 @@ import { useCallback } from 'react';
 import { formatUnits } from 'viem';
 import { useAccount, useBalance as useWagmiBalance, useReadContract } from 'wagmi';
 import { usePrivy } from '@privy-io/react-auth';
-import { BASE_CHAIN_ID, ARC_CHAIN_ID, getNativeCurrency, getChainConfig, type SupportedChain } from '../config/constants';
+import { ARC_CHAIN_ID, getNativeCurrency, getChainConfig, type SupportedChain } from '../config/constants';
 import { useSettlement } from '../config/settlement';
 import { useWallet } from '../context/WalletContext';
 
@@ -32,7 +32,7 @@ export function useChainDisconnect() {
 
 export function useChainBalance(chain: SupportedChain = 'arc') {
   const { address: evmAddress } = useAccount();
-  const chainId = chain === 'base' ? BASE_CHAIN_ID : ARC_CHAIN_ID;
+  const chainId = ARC_CHAIN_ID;
   const { data: wagmiBal, refetch, isRefetching } = useWagmiBalance({ address: evmAddress, chainId });
   const native = getNativeCurrency(chain);
 
@@ -52,7 +52,7 @@ export function useChainBalance(chain: SupportedChain = 'arc') {
 
 export function useChainIsCorrectChain(): boolean {
   const { chainId } = useWallet();
-  return chainId === BASE_CHAIN_ID || chainId === ARC_CHAIN_ID;
+  return chainId === ARC_CHAIN_ID;
 }
 
 export function useChainExplorerUrl(chain: SupportedChain = 'arc'): string {

@@ -1,13 +1,12 @@
 import { createContext, useContext, useState, useCallback, useEffect, useRef, type ReactNode } from 'react';
 import { ethers } from 'ethers';
 import { usePrivy, useWallets, type ConnectedWallet, type LinkedAccountWithMetadata } from '@privy-io/react-auth';
-import { BASE_CHAIN_ID, BASE_CHAIN_CONFIG, ARC_CHAIN_ID, ARC_CHAIN_CONFIG } from '../config/constants';
+import { ARC_CHAIN_ID, ARC_CHAIN_CONFIG } from '../config/constants';
 
 const HAS_PRIVY = !!import.meta.env.VITE_PRIVY_APP_ID;
 
-/** The wallet chain config for a chain id, or Arc's settlement default. */
-function chainConfigFor(targetChainId: number) {
-  if (targetChainId === BASE_CHAIN_ID) return BASE_CHAIN_CONFIG;
+/** The wallet chain config — Arc is the only user-facing wallet chain. */
+function chainConfigFor(_targetChainId: number) {
   return ARC_CHAIN_CONFIG;
 }
 
@@ -96,7 +95,7 @@ function PrivyWalletProvider({ children }: { children: ReactNode }) {
   const rawWallet = wallets.find(w => w.walletClientType === 'privy') ?? wallets[0] ?? null;
   const wallet = authenticated ? rawWallet : null;
   const address = wallet?.address ?? null;
-  const isCorrectChain = chainId === BASE_CHAIN_ID || chainId === ARC_CHAIN_ID;
+  const isCorrectChain = chainId === ARC_CHAIN_ID;
   // Read from linked accounts so they're known before the embedded wallet's iframe connects.
   const walletAccounts = authenticated ? (user?.linkedAccounts ?? []).filter(isEthWalletAccount) : [];
   const embeddedAddress = walletAccounts.find(isEmbeddedAccount)?.address ?? null;
@@ -225,7 +224,7 @@ function DirectWalletProvider({ children }: { children: ReactNode }) {
   const [chainId, setChainId] = useState<number | null>(null);
   const [connecting, setConnecting] = useState(false);
 
-  const isCorrectChain = chainId === BASE_CHAIN_ID || chainId === ARC_CHAIN_ID;
+  const isCorrectChain = chainId === ARC_CHAIN_ID;
 
   const switchChain = useCallback(async (targetChainId: number = ARC_CHAIN_ID) => {
     const eth = window.ethereum;

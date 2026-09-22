@@ -165,9 +165,9 @@ export const ARC_CHAIN_CONFIG = {
   blockExplorerUrls: [isArcMainnet ? 'https://arcscan.app' : 'https://testnet.arcscan.app'],
 } as const;
 
-// User-facing wallet chains: Arc (settlement) and Base (legacy). 0G is agent
-// infra and is intentionally not connectable from the wallet.
-export const SUPPORTED_CHAINS = ['arc', 'base'] as const;
+// Single user-facing wallet chain: Arc (settlement). Base is legacy read-only
+// and 0G is agent infra — neither is connectable from the wallet.
+export const SUPPORTED_CHAINS = ['arc'] as const;
 export type SupportedChain = typeof SUPPORTED_CHAINS[number];
 
 /**
@@ -193,7 +193,6 @@ export function getActiveChain(): SupportedChain {
 
 export const CHAIN_CONFIGS = {
   arc: ARC_CHAIN_CONFIG,
-  base: BASE_CHAIN_CONFIG,
 } as const;
 
 export function getChainConfig(chain: SupportedChain) {

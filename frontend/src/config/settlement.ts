@@ -61,8 +61,8 @@ export interface SettlementChainInfo {
   };
   /** The `chain` name POST /tx/relay-tx takes for this chain, or null when the relay does not serve it. */
   relayChain: string | null;
-  /** The wallet chain (ChainContext) that pays on this chain. */
-  walletChain: SupportedChain;
+  /** The wallet chain (ChainContext) that pays on this chain. Base is legacy and has no wallet. */
+  walletChain: SupportedChain | 'base';
 }
 
 export interface SettlementSnapshot {
