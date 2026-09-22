@@ -179,6 +179,46 @@ function chainFacts(entry: SettlementChainConfig, posting: SettlementChainKey | 
   };
 }
 
+/**
+ * Whether this chain's marketplace signer holds the escrow's verifier role and
+ * can pay gas for marketplaceAssign. Every chain gets it, not only Base: Arc's
+ * escrow was deployed with its own verifier, and a signer that is not it makes
+ * every accept on Arc revert with NotVerifier while `configured` reads true.
+ */
+async function verifierReport(entry: SettlementChainConfig): Promise<Record<string, unknown>> {
+  const { escrow, marketplaceSigner, provider } = chainRuntime(entry.key);
+  const signerAddress = await marketplaceSigner!.getAddress();
+  let onChainVerifier: string | null = null;
+  let escrowReadError: string | null = null;
+  try {
+    onChainVerifier = (await withTimeout(escrow!.verifier() as Promise<string>, 5_000));
+  } catch (e) {
+    escrowReadError = safeErrorMessage(e);
+  }
+  const matches = onChainVerifier !== null && onChainVerifier.toLowerCase() === signerAddress.toLowerCase();
+  let signerGasBalance: string | null = null;
+  let signerGasLow: boolean | null = null;
+  try {
+    const balance = await withTimeout(provider.getBalance(signerAddress), 5_000);
+    signerGasBalance = formatEther(balance);
+    signerGasLow = balance < entry.gas.withdrawMinWei;
+  } catch {
+    // non-critical
+  }
+  return {
+    signerAddress,
+    onChainVerifier,
+    // null when the escrow could not be read: unknown, not a mismatch.
+    verifierMatches: onChainVerifier === null ? null : matches,
+    escrowReadError,
+    signerGasBalance,
+    signerGasLow,
+    rotateCommand: onChainVerifier === null || matches
+      ? null
+      : rotateCommand(signerAddress, chainNetwork(entry.key).hardhatNetwork, entry.escrowAddress),
+  };
+}
+
 /** A chain as /health/bridge reports it: its facts plus readiness. Key order is pinned by health.bridge.test.ts. */
 async function chainReport(
   entry: SettlementChainConfig,
@@ -191,6 +231,7 @@ async function chainReport(
     chain,
     configured,
     ...facts,
+    ...(configured ? { verifier: await verifierReport(entry) } : {}),
     ...(reason ? { reason } : {}),
     ...indexerError(entry.key),
     ...(await parkedDisputes(entry.key)),

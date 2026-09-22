@@ -114,12 +114,55 @@ describe('GET /health/bridge', () => {
       {
         chain: 'base', configured: true, chainId: 84532, tier: 'testnet', escrowAddress: BASE_ESCROW,
         token: BASE_TOKEN, relayChain: 'base-sepolia', gasSymbol: 'ETH', postable: true,
+        verifier: {
+          signerAddress: SIGNER,
+          onChainVerifier: '0x00000000000000000000000000000000000000bb',
+          verifierMatches: false,
+          escrowReadError: null,
+          signerGasBalance: '0.01',
+          signerGasLow: false,
+          rotateCommand: expect.stringContaining(`MARKETPLACE_SIGNER_ADDRESS=${SIGNER} npx hardhat run scripts/rotate-verifier.ts --network base-sepolia`),
+        },
       },
       {
         chain: 'arc', configured: false, chainId: 5042002, tier: 'testnet', escrowAddress: null,
         token: ARC_TOKEN, relayChain: null, gasSymbol: 'USDC', postable: false,
       },
     ]);
+  });
+
+  it("reports Arc's verifier role on its own, so a signer that is not the Arc escrow's verifier is visible", async () => {
+    const ARC_ESCROW = '0xaBf70843E0380F1e749d2b85C30dD6820Ff5C731';
+    ready.arc = true;
+    cfg.arcEscrowAddress = ARC_ESCROW;
+    chain.arcMarketplaceSigner = chain.signer(SIGNER);
+    chain.arcEscrow = { verifier: async () => '0x2f8b1177c83623a560B26B38dE984e154b123D75' };
+    chain.arcProvider = { getBalance: async () => 0n };
+    try {
+      const arc = (await bridge()).chains.find((c: { chain: string }) => c.chain === 'arc');
+      expect(arc).toMatchObject({
+        configured: true,
+        verifier: {
+          signerAddress: SIGNER,
+          onChainVerifier: '0x2f8b1177c83623a560B26B38dE984e154b123D75',
+          verifierMatches: false,
+          signerGasBalance: '0.0',
+          signerGasLow: true,
+          rotateCommand: expect.stringContaining('--network arc-testnet'),
+        },
+      });
+
+      chain.arcEscrow = { verifier: async () => SIGNER };
+      const matched = (await bridge()).chains.find((c: { chain: string }) => c.chain === 'arc');
+      expect(matched.verifier).toMatchObject({ verifierMatches: true, rotateCommand: null });
+
+      chain.arcEscrow = { verifier: async () => { throw new Error('missing revert data'); } };
+      const unread = (await bridge()).chains.find((c: { chain: string }) => c.chain === 'arc');
+      expect(unread.verifier).toMatchObject({ verifierMatches: null, escrowReadError: 'missing revert data', rotateCommand: null });
+    } finally {
+      ready.arc = false;
+      chain.arcProvider = { getBalance: async () => 10n ** 16n };
+    }
   });
 
   it("reports an indexer's escrow mismatch on that chain only, without changing readiness", async () => {
@@ -240,6 +283,7 @@ describe('GET /health/bridge per-chain settlement facts', () => {
     for (const entry of data.chains) {
       expect(Object.keys(entry)).toEqual([
         'chain', 'configured', 'chainId', 'tier', 'escrowAddress', 'token', 'relayChain', 'gasSymbol', 'postable',
+        ...(entry.configured ? ['verifier'] : []),
       ]);
       expect(Object.keys(entry.token)).toEqual(['kind', 'address', 'symbol', 'decimals']);
     }
