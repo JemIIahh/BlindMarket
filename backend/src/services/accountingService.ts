@@ -242,13 +242,29 @@ export async function getGlobalStats(): Promise<GlobalStats> {
     ).all() as IncomeRow[];
   }
   const s = foldIncome(rows, { platformFeeRows: true });
-  const withVolume = (t: UnitTotals) => ({ ...t, totalVolume: round(t.totalEarned + t.totalFees) });
+  // Volume processed: a payment row's amount is already GROSS (worker share +
+  // platform fee — see workerPayout.ts), so its fee is not added again; a
+  // standalone 'fee' row is platform income outside any payment and adds its
+  // fee. It used to be totalEarned + totalFees, counting every payment's fee
+  // twice. Headline vs byUnit follows foldIncome: other units never mix in.
+  const volumeByUnit: Record<string, number> = {};
+  let headlineVolume = 0;
+  for (const row of rows) {
+    const v = INCOME_TYPES.has(row.type) ? Number(row.total_amount ?? 0)
+      : row.type === 'fee' ? Number(row.total_fee ?? 0)
+      : 0;
+    if (!v) continue;
+    const rowUnit = row.unit ?? s.unit;
+    volumeByUnit[rowUnit] = (volumeByUnit[rowUnit] ?? 0) + v;
+    if (row.unit === null || row.unit === s.unit) headlineVolume += v;
+  }
   const { byUnit, ...rest } = s;
   return {
-    ...withVolume(rest),
+    ...rest,
+    totalVolume: round(headlineVolume),
     unit: s.unit,
     unitlessRows: s.unitlessRows,
-    byUnit: Object.fromEntries(Object.entries(byUnit).map(([k, v]) => [k, withVolume(v)])),
+    byUnit: Object.fromEntries(Object.entries(byUnit).map(([k, v]) => [k, { ...v, totalVolume: round(volumeByUnit[k] ?? 0) }])),
   };
 }
 

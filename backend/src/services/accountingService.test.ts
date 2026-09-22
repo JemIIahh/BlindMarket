@@ -86,8 +86,11 @@ describe('per-unit summaries', () => {
     await recordTransaction({ address: A, role: 'platform', type: 'fee', amount: 0, fee: 0.25, unit: 'USDC' });
     await recordTransaction({ address: A, role: 'platform', type: 'fee', amount: 0, fee: 0.1, unit: '0G' });
     const g = await getGlobalStats();
-    expect(g).toMatchObject({ unit: 'USDC', totalEarned: 10, totalFees: 1.25, totalVolume: 11.25, taskCount: 1 });
-    expect(g.byUnit['0G']).toMatchObject({ totalEarned: 0, totalFees: 0.1 });
+    // Volume = the payment's gross (10, which already includes its 1 fee) +
+    // the standalone fee row (0.25). Not 11.25: the payment's fee is not
+    // counted twice.
+    expect(g).toMatchObject({ unit: 'USDC', totalEarned: 10, totalFees: 1.25, totalVolume: 10.25, taskCount: 1 });
+    expect(g.byUnit['0G']).toMatchObject({ totalEarned: 0, totalFees: 0.1, totalVolume: 0.1 });
   });
 
   it('stores and exports the unit', async () => {
