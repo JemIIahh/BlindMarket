@@ -69,6 +69,12 @@ describe('POST /messages/send task-party check', () => {
     expect(sendMessage).toHaveBeenCalledTimes(2);
   });
 
+  it('accepts `content` for the message text, as @blindmarket/sdk (and the MCP send_message tool) sends it', async () => {
+    const res = await send(POSTER, { to: EXECUTOR, taskId: TASK, body: undefined, content: 'hello from the sdk' });
+    expect(res.status).toBe(200);
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ body: 'hello from the sdk' }));
+  });
+
   it('403s a stranger writing into a task thread', async () => {
     const res = await send(STRANGER, { to: EXECUTOR, taskId: TASK });
     expect(res.status).toBe(403);

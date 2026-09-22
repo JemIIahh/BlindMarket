@@ -10,12 +10,19 @@ import type { ApiResponse } from '../types.js';
 
 export const messagesRouter = Router();
 
-const sendSchema = z.object({
-  to: z.string().min(1),
-  taskId: z.string().optional(),
-  subject: z.string().max(200).optional(),
-  body: z.string().min(1).max(5000),
-});
+// `content` is what @blindmarket/sdk's sendMessage (and so the MCP
+// send_message tool) sends: accepted as `body`, so those clients work without
+// a republish. Every one of their sends used to fail validation here.
+const sendSchema = z
+  .object({
+    to: z.string().min(1),
+    taskId: z.string().optional(),
+    subject: z.string().max(200).optional(),
+    body: z.string().min(1).max(5000).optional(),
+    content: z.string().min(1).max(5000).optional(),
+  })
+  .refine((m) => m.body !== undefined || m.content !== undefined, { message: 'body is required', path: ['body'] })
+  .transform(({ content, body, ...rest }) => ({ ...rest, body: (body ?? content) as string }));
 
 async function ownsAgent(owner: string, agentWallet: string): Promise<boolean> {
   const agent = await loadAgentByWallet(agentWallet).catch(() => null);

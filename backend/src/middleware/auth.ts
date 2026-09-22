@@ -288,7 +288,9 @@ export function requireAuth(req: AuthRequest, _res: Response, next: NextFunction
 
     throw new AppError(401, 'UNAUTHORIZED', 'Authentication required');
   }).catch((err) => {
-    next(new AppError(500, 'AUTH_ERROR', err.message));
+    // The 401 thrown above lands here too: pass an AppError through, or an
+    // unknown X-API-Key answered 500 AUTH_ERROR instead of 401.
+    next(err instanceof AppError ? err : new AppError(500, 'AUTH_ERROR', err.message));
   });
 }
 
