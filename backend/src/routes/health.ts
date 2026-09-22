@@ -188,23 +188,18 @@ function chainFacts(entry: SettlementChainConfig, posting: SettlementChainKey | 
 async function verifierReport(entry: SettlementChainConfig): Promise<Record<string, unknown>> {
   const { escrow, marketplaceSigner, provider } = chainRuntime(entry.key);
   const signerAddress = await marketplaceSigner!.getAddress();
-  let onChainVerifier: string | null = null;
-  let escrowReadError: string | null = null;
-  try {
-    onChainVerifier = (await withTimeout(escrow!.verifier() as Promise<string>, 5_000));
-  } catch (e) {
-    escrowReadError = safeErrorMessage(e);
-  }
+  // In parallel: a slow RPC should cost this endpoint one timeout, not two.
+  const [verifierRead, balanceRead] = await Promise.allSettled([
+    withTimeout(escrow!.verifier() as Promise<string>, 5_000),
+    withTimeout(provider.getBalance(signerAddress), 5_000),
+  ]);
+  const onChainVerifier = verifierRead.status === 'fulfilled' ? verifierRead.value : null;
+  const escrowReadError = verifierRead.status === 'rejected' ? safeErrorMessage(verifierRead.reason) : null;
   const matches = onChainVerifier !== null && onChainVerifier.toLowerCase() === signerAddress.toLowerCase();
-  let signerGasBalance: string | null = null;
-  let signerGasLow: boolean | null = null;
-  try {
-    const balance = await withTimeout(provider.getBalance(signerAddress), 5_000);
-    signerGasBalance = formatEther(balance);
-    signerGasLow = balance < entry.gas.withdrawMinWei;
-  } catch {
-    // non-critical
-  }
+  // The balance read is non-critical: null when it fails.
+  const balance = balanceRead.status === 'fulfilled' ? balanceRead.value : null;
+  const signerGasBalance = balance === null ? null : formatEther(balance);
+  const signerGasLow = balance === null ? null : balance < entry.gas.withdrawMinWei;
   return {
     signerAddress,
     onChainVerifier,
