@@ -200,7 +200,7 @@ export interface A2APublicTaskMeta {
   requiredCapabilities?: AgentCapability[];
   posterAddress?: string;
   /** Which escrow holds the task. Absent on rows indexed before the field existed. */
-  chain?: 'base' | '0g';
+  chain?: 'base' | '0g' | 'arc';
   /** Unix seconds. */
   deadline?: number;
   privacy?: 'public';

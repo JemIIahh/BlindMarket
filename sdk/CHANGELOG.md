@@ -3,6 +3,18 @@
 This package is 0.x: a minor version may contain breaking changes. They are
 listed here with how to migrate.
 
+## 0.6.4
+
+### Fixes
+
+**`WorkerRuntime` can take tasks on Arc.** Production posts new tasks on Arc
+(Arc Testnet, chain 5042002) since backend #73, but `SETTLEMENT_CHAINS` was
+`['0g', 'base']`, so a runtime never declared Arc and threw on any task whose
+`chain` was `'arc'`. `SETTLEMENT_CHAINS` is now `['0g', 'base', 'arc']` and
+`A2APublicTaskMeta.chain` includes `'arc'`. To claim Arc tasks set
+`rpcUrls.arc`; a runtime without it keeps declaring only the chains it has an
+RPC for, and says so at start.
+
 ## 0.6.3
 
 ### Fixes

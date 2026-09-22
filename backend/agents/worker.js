@@ -632,7 +632,7 @@ if (!IS_EVM_AGENT) {
 // broadcast onto 0G, and a deployed agent could accept a Base task and never
 // deliver it. Built from CHAIN_TABLE, so a chain is added by configuring it,
 // not by editing this file.
-const signers = { '0g': null, base: null };
+const signers = { '0g': null, base: null, arc: null };
 if (!suiSigner && AGENT_PRIVATE_KEY) {
   const pk = AGENT_PRIVATE_KEY.startsWith('0x') ? AGENT_PRIVATE_KEY : `0x${AGENT_PRIVATE_KEY}`;
   for (const { key, rpcUrl, chainId } of CHAIN_TABLE) {
@@ -666,7 +666,7 @@ export function pickSignerWallet(table = CHAIN_TABLE, bySigner = signers) {
  * configured chain with no signer here is acceptBlocker's problem, not a
  * capability question.
  */
-const SETTLEMENT_CHAINS = ['0g', 'base'];
+const SETTLEMENT_CHAINS = ['0g', 'base', 'arc'];
 
 function isSettlementChain(reported) {
   return SETTLEMENT_CHAINS.includes(reported);
@@ -682,7 +682,7 @@ export function isUnsupportedChain(reported) {
 
 /** The log/skip reason for a chain `isUnsupportedChain` flags. */
 export function unsupportedChainReason(reported) {
-  return `settlement chain "${reported}" is not supported by this worker (it signs on ${SETTLEMENT_CHAINS.join(' and ')}) — update the agent`;
+  return `settlement chain "${reported}" is not supported by this worker (it signs on ${SETTLEMENT_CHAINS.join(', ')}) — update the agent`;
 }
 
 /** Normalise the chain the backend reports. Missing means 0G, which is what
@@ -710,13 +710,13 @@ export function escrowAddressFor(chain) {
  * chain this deployment has not configured (so it is not in CHAIN_TABLE). The
  * table's own gasSymbol wins whenever there is an entry.
  */
-const KNOWN_GAS_SYMBOL = { '0g': '0G', base: 'ETH' };
+const KNOWN_GAS_SYMBOL = { '0g': '0G', base: 'ETH', arc: 'USDC' };
 
 /** How a pre-table backend injected a chain, named in the message when it did not. */
 const LEGACY_CHAIN_ENV = { '0g': 'OG_RPC_URL/OG_CHAIN_ID', base: 'BASE_RPC_URL/BASE_CHAIN_ID' };
 
 /** How this worker names a chain in messages. */
-const CHAIN_LABEL = { '0g': '0G', base: 'Base' };
+const CHAIN_LABEL = { '0g': '0G', base: 'Base', arc: 'Arc' };
 
 /** The native coin of `chain`, for gas messages. */
 function nativeSymbolFor(chain) {
