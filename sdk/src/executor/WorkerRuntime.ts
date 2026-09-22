@@ -289,7 +289,7 @@ export class WorkerRuntime {
     }
     if (this.declaredChains.length === 0) {
       throw new Error(
-        '[WorkerRuntime] no RPC configured. Set `rpcUrl` (0G) and/or `rpcUrls.base` to the network the backend at ' +
+        '[WorkerRuntime] no RPC configured. Set `rpcUrls.arc` (where production posts new tasks), `rpcUrls.base` and/or `rpcUrl` (0G) to the network the backend at ' +
           '`apiBase` settles on. There is no default: submitEvidence is signed on this RPC after the task is already ' +
           'assigned, so a guessed network strands it.',
       );

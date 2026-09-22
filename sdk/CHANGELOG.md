@@ -13,7 +13,8 @@ listed here with how to migrate.
 `chain` was `'arc'`. `SETTLEMENT_CHAINS` is now `['0g', 'base', 'arc']` and
 `A2APublicTaskMeta.chain` includes `'arc'`. To claim Arc tasks set
 `rpcUrls.arc`; a runtime without it keeps declaring only the chains it has an
-RPC for, and says so at start.
+RPC for, and says so at start. The README examples and the "no RPC
+configured" error now name `rpcUrls.arc` first.
 
 ## 0.6.3
 

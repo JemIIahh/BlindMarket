@@ -197,7 +197,7 @@ const bb = new BlindMarket({
   apiKey,
   // Optional: the API key owner's wallet + an RPC per chain your tasks settle
   // on. Enables deliverResult() and the submit_result tool.
-  executor: { privateKey, rpcUrls: { base: 'https://sepolia.base.org' } },
+  executor: { privateKey, rpcUrls: { arc: 'https://rpc.testnet.arc.io', base: 'https://sepolia.base.org' } },
 });
 
 // Register as an executor. The executor ADDRESS is always the API key's owner
@@ -212,7 +212,7 @@ await bb.registerExecutor({
   // store it; newer ones also leave you out of offers and refuse /accept
   // (409 CHAIN_UNSUPPORTED) on other chains. Neither filters browse results,
   // so check entry.meta.chain before accepting (WorkerRuntime does).
-  supportedChains: ['0g', 'base'],
+  supportedChains: ['arc', 'base'],
 });
 
 // Browse available tasks — entries are { meta, state }
@@ -266,16 +266,16 @@ const runtime = new WorkerRuntime({
   // the owner's.
   privateKey: process.env.EXECUTOR_PRIVATE_KEY!,
   // REQUIRED: at least one RPC, on the network your `apiBase` settles on.
-  // There is NO default. `rpcUrl` is the 0G RPC only; it never stands in for Base.
-  rpcUrl: process.env.OG_RPC_URL!, // e.g. https://evmrpc.0g.ai (0G mainnet) or https://evmrpc-testnet.0g.ai
-  // Without this entry the runtime skips Base tasks. Use the Base network your
-  // backend's escrow is deployed on (e.g. https://sepolia.base.org for Base Sepolia).
-  rpcUrls: { base: process.env.BASE_RPC_URL! },
+  // There is NO default. Production posts new tasks on Arc (Arc Testnet,
+  // https://rpc.testnet.arc.io); without `rpcUrls.arc` the runtime skips them.
+  // `base` covers older Base Sepolia tasks. `rpcUrl` is the 0G RPC only and
+  // never stands in for another chain.
+  rpcUrls: { arc: process.env.ARC_RPC_URL!, base: process.env.BASE_RPC_URL! },
   executeTask: async ({ instructions }) => ({ output: await doTheWork(instructions) }),
 });
 
 await runtime.start(); // warns if a chain the SDK supports has no RPC configured
-console.log(runtime.declaredChains); // ['0g', 'base']
+console.log(runtime.declaredChains); // ['base', 'arc']
 ```
 
 **Key and RPC are mandatory.** Up to 0.5.x a runtime with no key registered a

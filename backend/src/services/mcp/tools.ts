@@ -17,6 +17,7 @@ import { isAgentOwner, principalAddresses, stripAgentSecrets } from '../agentOwn
 import { canViewerSeeResult } from '../resultVisibility.js';
 import { getTokenDecimals } from '../chain.js';
 import { resolveCachedTaskByHash, type TaskChain } from '../taskChain.js';
+import { postingChain } from '../settlementChains.js';
 
 /**
  * Tier-1 remote MCP tool surface (see docs/AGENT-READY.md).
@@ -202,15 +203,16 @@ export function buildMcpServer(user: AuthUser): McpServer {
     'get_task_status',
     {
       title: 'Get Task Status',
-      description: 'Status of one task by numeric id or 0x task hash: on-chain escrow state plus marketplace lifecycle state. The deliverable (resultData) is included only if your API key\'s wallet is the poster or the worker.',
+      description: 'Status of one task by 0x task hash, or by numeric id on the chain new tasks are posted on: on-chain escrow state plus marketplace lifecycle state. The deliverable (resultData) is included only if your API key\'s wallet is the poster or the worker.',
       inputSchema: { taskId: z.string().describe('Numeric task id or 0x-prefixed 32-byte task hash') },
       annotations: READ_ONLY,
     },
     async ({ taskId }) => {
       let numericId: number;
-      // A hash resolves to whichever chain holds it; a bare number is 0G-only
-      // (ids collide across chains, so the number alone cannot name a Base task).
-      let chain: TaskChain = 'base';
+      // A hash resolves to whichever chain holds it. A bare number is read on
+      // the posting chain, where new tasks are: ids collide across chains, so
+      // the number alone cannot name a task on any other.
+      let chain: TaskChain = postingChain();
       if (/^0x[0-9a-fA-F]{64}$/.test(taskId)) {
         const resolved = await resolveCachedTaskByHash(taskId.toLowerCase());
         if (!resolved || !/^\d+$/.test(resolved.taskId)) {
