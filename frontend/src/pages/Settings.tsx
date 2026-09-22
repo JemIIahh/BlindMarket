@@ -19,6 +19,7 @@ import { useWallet } from '../context/WalletContext';
 import {
   isMainnet, OG_CHAIN_ID, OG_RPC_URL, BASE_CHAIN_ID, BASE_RPC_URL, PRIVY_RELAY_SIGNER_ID,
 } from '../config/constants';
+import { useSettlement } from '../config/settlement';
 import { authedGet, authedPost, authedDelete } from '../lib/api';
 import { copyToClipboard } from '../lib/utils';
 
@@ -94,6 +95,9 @@ export default function Settings() {
     }
   };
   const chainLabel = `0G ${isMainnet ? 'Mainnet' : 'Testnet'}`;
+  // Where new tasks are escrowed and paid, as the backend reports it.
+  const settlement = useSettlement();
+  const postingInfo = settlement.chains[settlement.postingChain];
   const baseChainLabel = `Base ${BASE_CHAIN_ID === 8453 ? 'Mainnet' : 'Sepolia'}`;
   const ogRpcDisplay = OG_RPC_URL.replace(/^https?:\/\//, '');
   const baseRpcDisplay = BASE_RPC_URL.replace(/^https?:\/\//, '');
@@ -298,20 +302,34 @@ export default function Settings() {
             <SectionRule num="03" title="Network" />
 
             <FormField
-              label="Settlement chain (Base)"
-              hint="Tasks are settled in USDC on Base."
+              label="Settlement chain"
+              hint={`New tasks are escrowed and paid in ${postingInfo.token.unit.symbol} on ${postingInfo.label}.`}
             >
               <div className="px-3 py-2.5 bg-surface-2 border border-line text-sm flex items-center gap-2 flex-wrap">
                 <Tag tone="ok">
-                  Base · <span className="font-mono">{BASE_CHAIN_ID}</span>
+                  {postingInfo.label} · <span className="font-mono">{postingInfo.chainId}</span>
                 </Tag>
-                <span className="ml-auto text-xs text-ok">{baseChainLabel}</span>
+                <span className="ml-auto text-xs text-ok">{postingInfo.tier === 'mainnet' ? 'Mainnet' : 'Testnet'}</span>
               </div>
             </FormField>
 
+            {settlement.postingChain !== 'base' && (
+              <FormField
+                label="Earlier settlement chain (Base)"
+                hint="Tasks posted before the move to the current settlement chain stay on Base."
+              >
+                <div className="px-3 py-2.5 bg-surface-2 border border-line text-sm flex items-center gap-2 flex-wrap">
+                  <Tag tone="neutral">
+                    Base · <span className="font-mono">{BASE_CHAIN_ID}</span>
+                  </Tag>
+                  <span className="ml-auto text-xs text-ink-2">{baseChainLabel}</span>
+                </div>
+              </FormField>
+            )}
+
             <FormField
               label="Agent infra chain (0G)"
-              hint="Agents run on 0G. Change via the header dropdown."
+              hint="Agent identity and reputation live on 0G."
             >
               <div className="px-3 py-2.5 bg-surface-2 border border-line text-sm flex items-center gap-2 flex-wrap">
                 <Tag tone="neutral">
@@ -429,11 +447,14 @@ export default function Settings() {
                   color: isConnected ? 'text-ok' : 'text-ink-3',
                 },
                 {
-                  label: 'Base Chain ID',
-                  value: String(BASE_CHAIN_ID),
+                  label: `${postingInfo.label} Chain ID`,
+                  value: String(postingInfo.chainId),
                   mono: true,
                   color: 'text-ok',
                 },
+                ...(settlement.postingChain !== 'base'
+                  ? [{ label: 'Base Chain ID', value: String(BASE_CHAIN_ID), mono: true, color: 'text-ink-2' }]
+                  : []),
                 {
                   label: 'Base RPC',
                   value: baseRpcDisplay,
