@@ -3,9 +3,9 @@ import { useWallets, usePrivy } from '@privy-io/react-auth';
 import { parseUnits, formatUnits, JsonRpcProvider, Contract } from 'ethers';
 import { Button, FormField, FormInput, FormSelect, Modal, Spinner } from './bb';
 import { get, authedPost, authedGet } from '../lib/api';
-import { useWallet, switchWalletToChain, type AddEthereumChainParameter } from '../context/WalletContext';
+import { useWallet, switchWalletToChain, pauseWalletAutoSwitch, type AddEthereumChainParameter } from '../context/WalletContext';
 import { signAndSendDirect } from '../lib/directSigner';
-import { SETTLEMENT_CCTP_CHAIN_KEY, isCctpUsable } from '../config/constants';
+import { ARC_CHAIN_CONFIG, ARC_CHAIN_ID, SETTLEMENT_CCTP_CHAIN_KEY, isCctpUsable } from '../config/constants';
 
 /**
  * CCTP Phase B (inbound) — fund the user's Arc wallet from USDC held on
@@ -296,6 +296,21 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
     if (!chainConfig) { setError(`${chain.label} isn't supported by this version of the app — reload the page.`); return; }
     const sendChain = { chainId: chain.chainId, rpcUrl: chainConfig.rpcUrls[0], label: chain.label };
 
+    // Hold the wallet on the source chain until the burn is sent: the Arc
+    // auto-switch (WalletContext) would otherwise pull the embedded wallet
+    // back and fail the first signature. Afterwards an embedded wallet goes
+    // back to Arc, where posting signs; a linked external wallet stays put.
+    const releaseAutoSwitch = pauseWalletAutoSwitch();
+    let restored = false;
+    const restoreWallet = () => {
+      if (restored) return;
+      restored = true;
+      releaseAutoSwitch();
+      if (signerWallet.walletClientType === 'privy') {
+        switchWalletToChain(signerWallet, ARC_CHAIN_ID, ARC_CHAIN_CONFIG).catch(() => { /* the chain banner offers a switch */ });
+      }
+    };
+
     try {
       setPhase('switching');
       await switchWalletToChain(signerWallet, chain.chainId, chainConfig);
@@ -328,6 +343,7 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
 
       setPhase('burning');
       const burnSent = await signAndSendDirect(signerWallet, intent.burnTx, sendChain);
+      restoreWallet();
 
       setPhase('confirming');
       // The tx may not be mined yet by the time we ask — retry a few times
@@ -360,6 +376,8 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
     } catch (err) {
       setError((err as Error).message || 'Bridge failed');
       setPhase('error');
+    } finally {
+      restoreWallet();
     }
   }
 
