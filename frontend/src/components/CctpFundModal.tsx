@@ -8,12 +8,12 @@ import { signAndSendDirect } from '../lib/directSigner';
 import { SETTLEMENT_CCTP_CHAIN_KEY, isCctpUsable } from '../config/constants';
 
 /**
- * CCTP Phase B (inbound) — fund the user's Base wallet from USDC held on
+ * CCTP Phase B (inbound) — fund the user's Arc wallet from USDC held on
  * another chain, via Circle's CCTP V2 burn-and-mint. The backend only ever
  * builds unsigned calldata for this direction (routes/cctp.ts); the actual
- * burn is signed here, directly, by the user's own EXTERNAL wallet — the
- * Privy EMBEDDED (Base) wallet is the mint recipient, never the signer, since
- * it isn't set up to hold/sign on arbitrary other chains.
+ * burn is signed here, directly, by the wallet that holds the source USDC — an
+ * external wallet (MetaMask) or the Privy embedded wallet itself (for legacy
+ * Base USDC). The mint recipient is the user's Arc wallet.
  */
 
 // EIP-3085 configs for the non-Base CCTP source chains this UI offers. (Only
@@ -174,9 +174,13 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
       .catch(() => setError('Could not load supported chains.'));
   }, []);
 
-  // The embedded (Privy-managed) wallet funds tasks on Base — it's never the
-  // signer here. Any OTHER linked wallet is a candidate to sign the burn.
-  const externalWallet = wallets.find((w) => w.walletClientType !== 'privy') ?? null;
+  // The embedded (Privy) wallet is the mint recipient on Arc. The burn is
+  // signed by whichever wallet holds the source-chain USDC: a linked external
+  // wallet (MetaMask), or the embedded wallet itself when the user's USDC
+  // lives there (e.g. legacy Base USDC in their Privy wallet).
+  const embeddedWallet = wallets.find((w) => w.walletClientType === 'privy') ?? null;
+  const externalSigner = wallets.find((w) => w.walletClientType !== 'privy') ?? null;
+  const signerWallet = externalSigner ?? embeddedWallet;
 
   const busy = phase === 'switching' || phase === 'approving' || phase === 'burning' || phase === 'confirming' || phase === 'polling';
 
@@ -187,7 +191,7 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
   useEffect(() => {
     const chain = chains.find((c) => c.chainKey === sourceChain);
     const rpcUrl = SOURCE_CHAIN_WALLET_CONFIG[sourceChain]?.rpcUrls[0];
-    if (!chain || !rpcUrl || !externalWallet) { setSourceBalance(null); setSourceGas(null); return; }
+    if (!chain || !rpcUrl || !signerWallet) { setSourceBalance(null); setSourceGas(null); return; }
     let cancelled = false;
     setSourceBalance(null);
     setSourceGas(null);
@@ -199,7 +203,7 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
       const gasRead = usdcGasChain ? Promise.resolve(null) : (async () => {
         try {
           const [balance, gasPriceHex] = await Promise.all([
-            provider.getBalance(externalWallet.address),
+            provider.getBalance(signerWallet.address),
             provider.send('eth_gasPrice', []).catch(() => null) as Promise<string | null>,
           ]);
           return { balance, gasPrice: gasPriceHex ? BigInt(gasPriceHex) : null };
@@ -209,7 +213,7 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
       })();
       try {
         const usdc = new Contract(chain.usdcAddress, ['function balanceOf(address) view returns (uint256)'], provider);
-        const bal: bigint = await usdc.balanceOf(externalWallet.address);
+        const bal: bigint = await usdc.balanceOf(signerWallet.address);
         if (!cancelled) setSourceBalance(bal);
       } catch {
         if (!cancelled) setSourceBalance(null);
@@ -218,7 +222,7 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
       if (!cancelled) setSourceGas(gas);
     })();
     return () => { cancelled = true; };
-  }, [sourceChain, externalWallet?.address, chains]);
+  }, [sourceChain, signerWallet?.address, chains]);
 
   // Fee preview — GET /api/v1/cctp/quote, debounced (400ms) since it fires
   // on every keystroke in the amount field.
@@ -295,7 +299,7 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
   async function handleFund() {
     setError('');
     if (!baseAddress) { setError('Connect your wallet first.'); return; }
-    if (!externalWallet) { setError('Link an external wallet (e.g. MetaMask) to sign the source-chain transaction.'); return; }
+    if (!signerWallet) { setError('Connect a wallet to sign the source-chain transaction.'); return; }
     const chain = chains.find((c) => c.chainKey === sourceChain);
     if (!chain) { setError('Pick a source chain.'); return; }
     let amountRaw: bigint;
@@ -315,7 +319,7 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
 
     try {
       setPhase('switching');
-      await switchWalletToChain(externalWallet, chain.chainId, chainConfig);
+      await switchWalletToChain(signerWallet, chain.chainId, chainConfig);
 
       const idempotencyKey = crypto.randomUUID();
       const intent = await authedPost<{
@@ -326,14 +330,14 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
         sourceChain: chain.chainKey,
         amountRaw: amountRaw.toString(),
         mintRecipient: baseAddress,
-        fromAddress: externalWallet.address,
+        fromAddress: signerWallet.address,
         idempotencyKey,
       });
       setTransferId(intent.transferId);
 
       if (intent.approveTx) {
         setPhase('approving');
-        const approved = await signAndSendDirect(externalWallet, intent.approveTx, sendChain);
+        const approved = await signAndSendDirect(signerWallet, intent.approveTx, sendChain);
         // The burn pulls USDC via transferFrom — without a mined approve it
         // can only revert, so stop here rather than ask for a doomed signature.
         if (approved.receipt?.status !== 1) {
@@ -344,7 +348,7 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
       }
 
       setPhase('burning');
-      const burnSent = await signAndSendDirect(externalWallet, intent.burnTx, sendChain);
+      const burnSent = await signAndSendDirect(signerWallet, intent.burnTx, sendChain);
 
       setPhase('confirming');
       // The tx may not be mined yet by the time we ask — retry a few times
@@ -393,10 +397,26 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
       <>
         {(phase === 'input' || phase === 'error') && (
           <div className="space-y-4">
-            {!externalWallet && (
+            {signerWallet && (
+              <div className="text-xs text-ink-3 border border-line bg-surface-2 p-3 flex flex-wrap items-center gap-x-2 gap-y-1">
+                <span>
+                  Signing from your <span className="text-ink">{externalSigner ? 'linked' : 'BlindMarket'} wallet</span>{' '}
+                  <span className="font-mono">{signerWallet.address.slice(0, 6)}…{signerWallet.address.slice(-4)}</span>.
+                </span>
+                {!externalSigner && (
+                  <>
+                    <span>USDC in another wallet?</span>
+                    <button type="button" className="underline text-ink hover:text-cream transition-colors" onClick={() => connectWallet()}>
+                      Link it
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+            {!signerWallet && (
               <div className="text-xs text-warn border border-line bg-surface-2 p-3">
-                No external wallet linked. You need one (e.g. MetaMask) to sign on the source chain — your Arc
-                wallet only holds/signs on Arc.
+                Your wallet isn't ready yet. Sign in to bridge your USDC, or link an external wallet (e.g. MetaMask)
+                if your USDC is held there.
                 <div className="mt-2">
                   <Button variant="outline" size="sm" label="Link a wallet" onClick={() => connectWallet()} />
                 </div>
@@ -405,7 +425,7 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
             <FormField
               label="From chain"
               hint={
-                !externalWallet ? undefined
+                !signerWallet ? undefined
                 : sourceBalance === null ? 'Checking balance…'
                 : `Balance: ${parseFloat(formatUnits(sourceBalance, 6)).toFixed(4)} USDC${gasReserveRaw > 0n ? ` (${formatUnits(gasReserveRaw, 6)} USDC kept for network fees)` : ''}${nativeShown !== null ? ` · ${nativeShown} ${nativeSymbol} for gas` : ''}`
               }
@@ -430,7 +450,7 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
             >
               <div className="flex gap-2">
                 <FormInput type="number" min="0" step="0.01" placeholder="10.00" value={amount} onChange={(e) => setAmount(e.target.value)} />
-                {externalWallet && spendableRaw !== null && (
+                {signerWallet && spendableRaw !== null && (
                   <Button
                     variant="ghost"
                     size="sm"
@@ -457,7 +477,7 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
             {error && <div className="text-xs text-err break-words">{error}</div>}
             <div className="flex justify-end gap-2">
               <Button variant="ghost" size="sm" label="Cancel" onClick={onClose} />
-              <Button variant="primary" size="sm" label="Bridge USDC" onClick={handleFund} disabled={!externalWallet || chains.length === 0 || exceedsBalance || insufficientGas} />
+              <Button variant="primary" size="sm" label="Bridge USDC" onClick={handleFund} disabled={!signerWallet || chains.length === 0 || exceedsBalance || insufficientGas} />
             </div>
           </div>
         )}
