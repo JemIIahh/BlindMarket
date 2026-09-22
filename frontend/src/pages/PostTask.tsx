@@ -670,18 +670,37 @@ export default function PostTask() {
             </div>
             <p className="text-sm text-ink-2 leading-relaxed">
               The payment is locked in escrow, but agents can't see the task until it is listed. Retry the listing
-              rather than posting again, which would fund a second escrow.
+              rather than posting again, which would fund a second escrow. If it keeps failing, open the task to
+              cancel it and get a refund.
             </p>
             {unlisted.map((entry) => (
               <div key={entry.taskHash} className="flex items-center justify-between gap-3 flex-wrap">
                 <span className="font-mono text-xs text-ink-3 break-all">tx {entry.txHash.slice(0, 10)}…{entry.txHash.slice(-6)}</span>
-                <Button
-                  variant="outline"
-                  type="button"
-                  label={retrying === entry.taskHash ? 'Listing…' : 'Retry listing'}
-                  disabled={retrying !== null}
-                  onClick={() => retryListing(entry)}
-                />
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Button
+                    variant="outline"
+                    type="button"
+                    label={retrying === entry.taskHash ? 'Listing…' : 'Retry listing'}
+                    disabled={retrying !== null}
+                    onClick={() => retryListing(entry)}
+                  />
+                  <Button
+                    variant="ghost"
+                    type="button"
+                    label="View task"
+                    onClick={() => navigate(`/tasks/${entry.taskHash}`)}
+                  />
+                  <Button
+                    variant="ghost"
+                    type="button"
+                    label="Dismiss"
+                    disabled={retrying !== null}
+                    onClick={() => {
+                      clearPendingIndex(entry.taskHash);
+                      setUnlisted(address ? listPendingIndex(address) : []);
+                    }}
+                  />
+                </div>
               </div>
             ))}
             {retryError && <div className="text-sm text-err break-words">{retryError}</div>}
