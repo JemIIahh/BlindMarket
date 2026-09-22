@@ -153,7 +153,9 @@ vi.mock('../services/cctp.js', async () => {
 
 vi.mock('../services/cctpTransferStore.js', () => ({
   createTransfer: vi.fn(async (opts: any) => {
-    const row = { id: nextIdRef.current++, stage: 'created', ...opts, idempotency_key: opts.idempotencyKey, burn_tx_hash: null, mint_tx_hash: null, error_message: null, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+    // Snake-case columns like the real cctpTransferStore row (the route reads
+    // agent_id / owner_address / direction when it replays a key).
+    const row = { id: nextIdRef.current++, stage: 'created', ...opts, idempotency_key: opts.idempotencyKey, agent_id: opts.agentId ?? null, owner_address: String(opts.ownerAddress).toLowerCase(), burn_tx_hash: null, mint_tx_hash: null, error_message: null, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
     rows.set(opts.idempotencyKey, row);
     return row;
   }),
@@ -259,6 +261,25 @@ describe('POST /api/v1/agents/:id/cctp/withdraw', () => {
     // The critical assertion: still only ever called once.
     expect(executeApproveAndDepositForBurn).toHaveBeenCalledTimes(1);
     expect(second.body.data.transferId).toBe(first.body.data.transferId);
+  });
+
+  it("refuses a reused idempotencyKey that belongs to another agent's transfer, and does not return it", async () => {
+    const first = await request(app())
+      .post(`/api/v1/agents/${AGENT_ID}/cctp/withdraw`)
+      .set('X-API-Key', 'sk_owner')
+      .send({ destinationChain: 'ethereum-sepolia', idempotencyKey: 'k-shared' });
+    expect(first.status).toBe(200);
+
+    vi.mocked(agentRunner.getAgent).mockResolvedValue(agentRecord({ id: 'agent-2' }) as any);
+    const other = await request(app())
+      .post('/api/v1/agents/agent-2/cctp/withdraw')
+      .set('X-API-Key', 'sk_owner')
+      .send({ destinationChain: 'ethereum-sepolia', idempotencyKey: 'k-shared' });
+
+    expect(other.status).toBe(409);
+    expect(other.body.error.code).toBe('IDEMPOTENCY_KEY_CONFLICT');
+    expect(other.body).not.toHaveProperty('data');
+    expect(executeApproveAndDepositForBurn).toHaveBeenCalledTimes(1);
   });
 
   it('rejects an agent with no rawPrivateKey on record', async () => {

@@ -169,6 +169,14 @@ cctpRouter.post('/deposit-intent', requireAuth, async (req: AuthRequest, res) =>
 
     const existing = await getByIdempotencyKey(idempotencyKey);
     if (existing) {
+      // Keys are unique across ALL transfers, so a replay is honoured only for
+      // the caller's own row: anyone else's key must neither return their
+      // transfer nor stand in for this caller's.
+      const mine = new Set([authed, ...(req.user?.addresses ?? [])].map((a) => a.toLowerCase()));
+      if (existing.direction !== 'inbound' || !mine.has(existing.owner_address.toLowerCase())) {
+        res.status(409).json({ success: false, error: { code: 'IDEMPOTENCY_KEY_CONFLICT', message: 'This idempotencyKey is already in use — send a fresh one' } });
+        return;
+      }
       res.status(200).json({ success: true, data: { existing: true, transfer: serializeTransfer(existing) } });
       return;
     }

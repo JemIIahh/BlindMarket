@@ -212,7 +212,7 @@ describe('POST /api/v1/cctp/deposit-intent', () => {
   });
 
   it('replays an existing transfer for a reused idempotencyKey without creating a second row', async () => {
-    existingRef.current = { id: 7, stage: 'burn_confirmed' };
+    existingRef.current = { id: 7, stage: 'burn_confirmed', direction: 'inbound', owner_address: OWNER.toLowerCase() };
     const res = await request(app())
       .post('/api/v1/cctp/deposit-intent')
       .set('X-API-Key', 'sk_owner')
@@ -222,6 +222,30 @@ describe('POST /api/v1/cctp/deposit-intent', () => {
     expect(res.body.data.existing).toBe(true);
     expect(res.body.data.transfer.transferId).toBe(7);
     expect(createTransfer).not.toHaveBeenCalled();
+  });
+
+  it("refuses a reused idempotencyKey that belongs to someone else's transfer, without returning it", async () => {
+    existingRef.current = { id: 8, stage: 'burn_confirmed', direction: 'inbound', owner_address: '0x9999999999999999999999999999999999999999' };
+    const res = await request(app())
+      .post('/api/v1/cctp/deposit-intent')
+      .set('X-API-Key', 'sk_owner')
+      .send({ sourceChain: 'ethereum-sepolia', amountRaw: '5000000', idempotencyKey: 'k-theirs' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('IDEMPOTENCY_KEY_CONFLICT');
+    expect(res.body).not.toHaveProperty('data');
+    expect(createTransfer).not.toHaveBeenCalled();
+  });
+
+  it("refuses a reused idempotencyKey that names an agent's outbound transfer, even the caller's own agent", async () => {
+    existingRef.current = { id: 9, stage: 'created', direction: 'outbound', owner_address: OWNER.toLowerCase(), agent_id: 'agent-1' };
+    const res = await request(app())
+      .post('/api/v1/cctp/deposit-intent')
+      .set('X-API-Key', 'sk_owner')
+      .send({ sourceChain: 'ethereum-sepolia', amountRaw: '5000000', idempotencyKey: 'k-agent' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('IDEMPOTENCY_KEY_CONFLICT');
   });
 
   it('never reads the native balance for an ETH-gas source chain', async () => {

@@ -83,6 +83,12 @@ agentsCctpRouter.post('/:id/cctp/withdraw', requireAuth, async (req: AuthRequest
     // rather than re-attempting (and never re-broadcasting) the burn.
     const existing = await getByIdempotencyKey(idempotencyKey);
     if (existing) {
+      // Keys are unique across ALL transfers: replay only this agent's own
+      // outbound row, never another agent's or a user's.
+      if (existing.direction !== 'outbound' || existing.agent_id !== agent.id) {
+        res.status(409).json({ success: false, error: { code: 'IDEMPOTENCY_KEY_CONFLICT', message: 'This idempotencyKey is already in use — send a fresh one' } });
+        return;
+      }
       res.status(200).json({ success: true, data: serializeTransfer(existing) });
       return;
     }
