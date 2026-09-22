@@ -26,6 +26,12 @@ vi.mock('../services/taskChain.js', () => ({
   resolveTaskChainById: vi.fn(async () => 'base'),
 }));
 
+// Arc is the posting chain whatever this machine's env says.
+vi.mock('../services/settlementChains.js', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('../services/settlementChains.js')>();
+  return { ...mod, postingChain: () => 'arc' };
+});
+
 vi.mock('../services/escrow.js', () => ({
   buildCancelTaskOn: vi.fn(async () => ({ to: '0xCca5ab873158b888158AD9Dc36fb4Ee683eFbEBf', data: '0xcancel' })),
   buildClaimTimeoutOn: vi.fn(async () => ({ to: '0xCca5ab873158b888158AD9Dc36fb4Ee683eFbEBf', data: '0xtimeout' })),
@@ -98,11 +104,11 @@ describe('GET /tasks/:id', () => {
     expect(arc.body.data).toMatchObject({ chain: 'arc', symbol: null });
   });
 
-  it('reads a numeric id for the resolved chain', async () => {
+  it('reads a numeric id on the posting chain, where new tasks live', async () => {
     const res = await get('7');
     expect(res.status).toBe(200);
-    expect(res.body.data.chain).toBe('base');
-    expect(escrowService.getTaskOn).toHaveBeenCalledWith('base', 7);
+    expect(res.body.data.chain).toBe('arc');
+    expect(escrowService.getTaskOn).toHaveBeenCalledWith('arc', 7);
   });
 });
 
@@ -122,5 +128,30 @@ describe('cancel and claim-timeout say which chain their transaction is for', ()
     expect(res.status).toBe(200);
     expect(res.body.data).toMatchObject({ chain: 'base', chainId: 84532 });
     expect(res.body.data.unsignedTx.to).toBe('0xCca5ab873158b888158AD9Dc36fb4Ee683eFbEBf');
+  });
+
+  it.each(['cancel', 'timeout', 'confirm-tx'])('%s resolves only on the chain the client names', async (route) => {
+    vi.mocked(taskChain.resolveTaskChainById).mockResolvedValueOnce('arc');
+    await post(`7/${route}`).send({ chain: 'arc', txHash: '0x' + '11'.repeat(32) });
+    expect(taskChain.resolveTaskChainById).toHaveBeenCalledWith(7, '0x1111111111111111111111111111111111111111', 'arc');
+  });
+
+  it('searches every chain when the client names none', async () => {
+    await post('7/cancel').send({});
+    expect(taskChain.resolveTaskChainById).toHaveBeenCalledWith(7, '0x1111111111111111111111111111111111111111', undefined);
+  });
+
+  it('rejects a chain this backend does not know', async () => {
+    const res = await post('7/cancel').send({ chain: '0g' });
+    expect(res.status).toBe(400);
+    expect(res.body.error?.code ?? res.body.code).toBe('INVALID_CHAIN');
+    expect(taskChain.resolveTaskChainById).not.toHaveBeenCalled();
+  });
+
+  it('refuses when the caller does not own the id on the named chain', async () => {
+    vi.mocked(taskChain.resolveTaskChainById).mockResolvedValueOnce(null);
+    const res = await post('7/cancel').send({ chain: 'arc' });
+    expect(res.status).toBe(403);
+    expect(escrowService.buildCancelTaskOn).not.toHaveBeenCalled();
   });
 });

@@ -1,4 +1,4 @@
-import { Interface, JsonRpcProvider, type ethers } from 'ethers';
+import { Interface, JsonRpcProvider, isError, type ethers } from 'ethers';
 import type { UnsignedTx } from '../types/api';
 import { getAuthHeaders } from './api';
 import { API_BASE_URL, BASE_CHAIN_ID, BASE_RPC_URL, ARC_CHAIN_ID, ARC_RPC_URL } from '../config/constants';
@@ -55,6 +55,29 @@ export class RelayError extends Error {
   }
 }
 
+function revertedError(hash: string): RelayError {
+  return new RelayError('TX_REVERTED', `Transaction ${hash} reverted on-chain, so it had no effect (only its gas was spent).`);
+}
+
+/**
+ * Wait for a directly-signed transaction. ethers v6's wait() throws
+ * CALL_EXCEPTION on a reverted receipt; swallowing that made a revert look
+ * like "not mined yet" and cancel/timeout reported success. A revert throws
+ * TX_REVERTED; any other wait failure (replaced, RPC hiccup) stays a null
+ * receipt, which callers treat as unconfirmed.
+ */
+async function waitDirect(res: ethers.TransactionResponse): Promise<ethers.TransactionReceipt | null> {
+  let receipt: ethers.TransactionReceipt | null;
+  try {
+    receipt = await res.wait();
+  } catch (err) {
+    if (isError(err, 'CALL_EXCEPTION')) throw revertedError(res.hash);
+    return null;
+  }
+  if (receipt && receipt.status === 0) throw revertedError(res.hash);
+  return receipt;
+}
+
 /** What this file sent before it asked the backend: Base, by the build's chain id. */
 function legacyRelayChain(): string {
   if (BASE_CHAIN_ID === 8453) return 'base-mainnet';
@@ -68,6 +91,27 @@ function legacyRelayChain(): string {
  */
 export function relayChainNameFor(chain?: string | null): string {
   return relayChainFor(relayedChainKey(chain)) ?? legacyRelayChain();
+}
+
+/** Whether a tx on `chain` is signed and sent from the wallet (no relay serves it). */
+function isDirectSigned(chain: string | null | undefined): chain is SettlementChainKey {
+  return !!chain && isSettlementChainKey(chain) && !relayChainFor(chain);
+}
+
+/**
+ * Refuse when a tx on `chain` would be signed by the wallet itself (Arc) but
+ * the wallet sits on another network: the escrow's address has no code there
+ * (a no-op send, or worse). No-op for relayed chains, where the wallet's
+ * network does not matter. Callers run it before their own reads so a
+ * wrong-chain wallet gets this message, not a decode error.
+ */
+export async function assertWalletOnChain(signer: ethers.JsonRpcSigner, chain: string | null | undefined): Promise<void> {
+  if (!isDirectSigned(chain)) return;
+  const targetChainId = getSettlement().chains[chain].chainId;
+  const network = await signer.provider.getNetwork();
+  if (Number(network.chainId) !== targetChainId) {
+    throw new RelayError('WRONG_CHAIN', `Your wallet is on chain ${Number(network.chainId)}, not ${chain} (${targetChainId}). Switch to ${chain} and try again.`);
+  }
 }
 
 /**
@@ -84,14 +128,8 @@ export async function signAndSendTx(
   // own balance instead. USDC is the native gas coin on Arc, so the wallet
   // pays its own gas and nothing goes through the backend relay.
   const named = opts.chain ?? null;
-  if (named && isSettlementChainKey(named) && !relayChainFor(named)) {
-    // A wrong-chain send would broadcast the Arc escrow's address on the wrong
-    // network (no code there → revert, or worse). Refuse loudly first.
-    const targetChainId = getSettlement().chains[named].chainId;
-    const network = await signer.provider.getNetwork();
-    if (Number(network.chainId) !== targetChainId) {
-      throw new RelayError('WRONG_CHAIN', `Your wallet is on chain ${Number(network.chainId)}, not ${named} (${targetChainId}). Switch to ${named} and try again.`);
-    }
+  if (isDirectSigned(named)) {
+    await assertWalletOnChain(signer, named);
     const from = await signer.getAddress();
     const res = await signer.sendTransaction({
       from,
@@ -99,8 +137,7 @@ export async function signAndSendTx(
       data: unsignedTx.data,
       ...(value !== undefined && value !== 0n ? { value } : {}),
     });
-    const receipt = await res.wait().catch(() => null);
-    return { hash: res.hash, receipt };
+    return { hash: res.hash, receipt: await waitDirect(res) };
   }
 
   const from = await signer.getAddress();
@@ -154,8 +191,14 @@ export async function signAndSendTx(
     await new Promise(r => setTimeout(r, 3000));
     try {
       const receipt = await provider.getTransactionReceipt(txHash);
-      if (receipt) return { hash: txHash, receipt };
-    } catch { /* keep retrying */ }
+      if (receipt) {
+        if (receipt.status === 0) throw revertedError(txHash);
+        return { hash: txHash, receipt };
+      }
+    } catch (err) {
+      if (err instanceof RelayError) throw err;
+      /* keep retrying */
+    }
   }
   return { hash: txHash, receipt: null };
 }
