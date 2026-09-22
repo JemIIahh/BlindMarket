@@ -20,11 +20,11 @@ import {
 } from '../components/bb';
 import { aesEncrypt, eciesEncrypt, generateAesKey, sha256, toBase64, toBytes } from '../lib/crypto';
 import { stashAesKey } from '../lib/keyStash';
-import { signAndSendTx } from '../lib/txSigner';
+import { assertWalletOnChain, providerFor, signAndSendTx } from '../lib/txSigner';
 import { authedGet, authedPost } from '../lib/api';
 import { trackEvent } from '../hooks/useAnalytics';
 import { WORKER_SHARE_PCT, PLATFORM_FEE_PCT } from '../config/constants';
-import { getMarketplaceTokenAddress, getPaymentDecimals, getPaymentSymbol, getPostingEscrowAddress, useSettlement } from '../config/settlement';
+import { gasIsSettlementToken, getMarketplaceTokenAddress, getPaymentDecimals, getPaymentSymbol, getPostingEscrowAddress, getSettlement, isSettlementChainKey, useSettlement } from '../config/settlement';
 import { useChain } from '../context/ChainContext';
 import { useChainAddress } from '../hooks/useChainWallet';
 import { useAuth } from '../context/AuthContext';
@@ -357,20 +357,35 @@ export default function PostTask() {
         wrappedKeys: isPublicTask ? undefined : wrappedKeys,
       }, token);
 
+      // The chain POST /tasks built the tx for. A wallet on another network
+      // (a CCTP flow can leave it on the source chain) is refused here, before
+      // any read, so the poster sees "switch chain", not a decode error.
+      const txChain: string = taskJson.chain ?? getSettlement().postingChain;
+      const chainKey = isSettlementChainKey(txChain) ? txChain : getSettlement().postingChain;
+      await assertWalletOnChain(await (new BrowserProvider(walletClient!.transport)).getSigner(), txChain);
+      // Reads go to the tx's chain, whatever network the wallet reports.
+      const chainProvider = providerFor(chainKey);
+
       // 7. Show confirmation — estimate gas cost using EIP-1559 fees
       const isNativeToken = TOKEN === '0x0000000000000000000000000000000000000000';
       const displaySymbol = getPaymentSymbol();
       let gasInfo: { units: bigint; gwei: number; usdc: number } | null = null;
       try {
-        const gp = new BrowserProvider(walletClient!.transport);
-        const fd = await gp.getFeeData();
+        const fd = await chainProvider.getFeeData();
         const feePerUnit = fd.maxFeePerGas ?? fd.gasPrice ?? 0n;
-        const units = await gp.estimateGas({ ...taskJson.unsignedTx, from: address });
+        const units = await chainProvider.estimateGas({ ...taskJson.unsignedTx, from: address });
         const totalWei = units * feePerUnit;
-        const ethPerWei = parseFloat(formatUnits(totalWei, 18));
-        const ethPriceResp = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd');
-        const ethPrice = (await ethPriceResp.json())?.ethereum?.usd ?? 3500;
-        gasInfo = { units, gwei: parseFloat(formatUnits(feePerUnit, 9)), usdc: ethPerWei * ethPrice };
+        let usdc: number;
+        if (gasIsSettlementToken(chainKey)) {
+          // Arc: gas is native USDC (18 decimals), already the fee's unit.
+          usdc = parseFloat(formatUnits(totalWei, 18));
+        } else {
+          const ethPerWei = parseFloat(formatUnits(totalWei, 18));
+          const ethPriceResp = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd');
+          const ethPrice = (await ethPriceResp.json())?.ethereum?.usd ?? 3500;
+          usdc = ethPerWei * ethPrice;
+        }
+        gasInfo = { units, gwei: parseFloat(formatUnits(feePerUnit, 9)), usdc };
         console.log(`[PostTask] Gas: ${formatUnits(units, 0)} units × ${gasInfo.gwei.toFixed(1)} gwei ≈ $${gasInfo.usdc.toFixed(4)} USDC`);
       } catch (e) {
         console.warn('[PostTask] Gas estimate failed:', (e as Error).message);
@@ -395,7 +410,8 @@ export default function PostTask() {
 
       // 8. Sign and send — relayed through backend for Privy gas sponsorship
       setStatus('signing');
-      console.log(`[PostTask] Signing registration TX (Base escrow, gas-sponsored via relay)...`);
+      const chainInfo = getSettlement().chains[chainKey];
+      console.log(`[PostTask] Signing registration TX (${chainInfo.label} escrow, ${chainInfo.relayChain ? 'gas-sponsored via relay' : 'signed by the wallet'})...`);
       const signer = await (new BrowserProvider(walletClient!.transport)).getSigner();
 
       // 8a. Approve USDC spend if needed (createTask calls transferFrom)
@@ -404,8 +420,9 @@ export default function PostTask() {
       const escrowAddress = taskJson.unsignedTx.to || getPostingEscrowAddress();
       if (!isNativeToken && address && escrowAddress) {
         const ERC20_ABI = ['function approve(address spender, uint256 amount) returns (bool)', 'function allowance(address owner, address spender) view returns (uint256)'];
-        const provider = new BrowserProvider(walletClient!.transport);
-        const readContract = new Contract(TOKEN, ERC20_ABI, provider);
+        // The posting chain's provider, not the wallet's: the wallet may be
+        // on another network, where this read fails to decode.
+        const readContract = new Contract(TOKEN, ERC20_ABI, chainProvider);
         const currentAllowance = await readContract.allowance(address, escrowAddress);
         if (currentAllowance < BigInt(amountBase)) {
           console.log(`[PostTask] Approving USDC spend: ${amountBase} for ${escrowAddress}`);

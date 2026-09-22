@@ -24,6 +24,7 @@ import {
 } from '../services/marketplace';
 import { getPaymentSymbol, useSettlement } from '../config/settlement';
 import { truncateAddress } from '../lib/utils';
+import { useAuth } from '../context/AuthContext';
 
 type Tab = 'browse' | 'mine' | 'create';
 
@@ -42,6 +43,8 @@ export default function TaskTemplates() {
   const [tab, setTab] = useTabParam<Tab>('browse', TABS.map((t) => t.id));
   const [page, setPage] = useState(1);
   const { address } = useAccount();
+  // Auth, not the address, gates the authed read (the address arrives first).
+  const { isAuthenticated } = useAuth();
   const paymentSymbol = getPaymentSymbol();
   const qc = useQueryClient();
 
@@ -59,7 +62,7 @@ export default function TaskTemplates() {
   const { data: myTemplates, isLoading: myLoading, isError: myError, refetch: refetchMine } = useQuery({
     queryKey: ['my-templates', address],
     queryFn: () => getMyTemplates(),
-    enabled: tab === 'mine' && !!address,
+    enabled: tab === 'mine' && isAuthenticated && !!address,
   });
 
   const createMut = useMutation({

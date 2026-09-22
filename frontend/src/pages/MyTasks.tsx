@@ -20,6 +20,7 @@ import { useSocket } from '../hooks/useSocket';
 import { authedGet } from '../lib/api';
 import { getAesKey } from '../lib/keyStash';
 import { useChainAddress } from '../hooks/useChainWallet';
+import { useAuth } from '../context/AuthContext';
 
 import { unitFor, useSettlement } from '../config/settlement';
 
@@ -123,6 +124,9 @@ export default function MyTasks() {
   // Re-render when the backend's settlement answer arrives (config/settlement.ts).
   useSettlement();
   const address = useChainAddress();
+  // Gate the authed read on auth, not the address: the address arrives before
+  // the token getter, and the first request would 401.
+  const { isAuthenticated } = useAuth();
   const qc = useQueryClient();
   const [filter, setFilter] = useState<'all' | 'open' | 'active' | 'completed'>('all');
   const [sort, setSort] = useState<'newest' | 'oldest' | 'highest-reward' | 'lowest-reward'>('newest');
@@ -161,7 +165,7 @@ export default function MyTasks() {
       return loaded < lastPage.total ? loaded : undefined;
     },
     initialPageParam: 0,
-    enabled: !!address,
+    enabled: isAuthenticated && !!address,
   });
 
   const tasks = data?.pages.flatMap(p => p.tasks) ?? [];
