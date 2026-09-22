@@ -6,7 +6,7 @@
  * started following POSTING_CHAIN. A backend that has a Base escrow but posts
  * on 0G refused every task this app built (TOKEN_NOT_SETTLEMENT) and showed
  * each amount out by 10^12. The backend now serves its posting chain and each
- * chain's token, escrow and relay name at GET /api/v1/health/settlement, and
+ * chain's token, escrow and relay name at GET /health/settlement, and
  * this module holds the answer.
  *
  * Two layers:
@@ -120,7 +120,7 @@ export function defaultSettlement(): SettlementSnapshot {
   };
 }
 
-/** One entry of GET /api/v1/health/settlement `chains[]`. */
+/** One entry of GET /health/settlement `chains[]`. */
 export interface BackendSettlementChain {
   chain: string;
   chainId: number;
