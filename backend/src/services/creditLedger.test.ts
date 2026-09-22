@@ -42,7 +42,7 @@ describe('creditLedger (SQLite)', () => {
   it('claims a hash once; a second claim by any executor is refused', async () => {
     expect(await claimCredit(HASH, 'base', '0xAAAA')).toBe(true);
     expect(await claimCredit(HASH, 'base', '0xAAAA')).toBe(false);
-    expect(await claimCredit(HASH.toUpperCase().replace('0X', '0x'), '0g', '0xBBBB')).toBe(false);
+    expect(await claimCredit(HASH.toUpperCase().replace('0X', '0x'), 'arc', '0xBBBB')).toBe(false);
     expect(await isCredited(HASH)).toBe(true);
   });
 
@@ -54,9 +54,9 @@ describe('creditLedger (SQLite)', () => {
   });
 
   it('records the chain and executor, lowercased', async () => {
-    await claimCredit(HASH, '0g', '0xAbCd');
+    await claimCredit(HASH, 'arc', '0xAbCd');
     const row = db.current.prepare('SELECT chain, executor FROM credited_payouts WHERE task_hash = ?').get(HASH) as any;
-    expect(row).toEqual({ chain: '0g', executor: '0xabcd' });
+    expect(row).toEqual({ chain: 'arc', executor: '0xabcd' });
   });
 });
 

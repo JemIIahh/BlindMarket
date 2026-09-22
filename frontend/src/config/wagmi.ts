@@ -1,14 +1,12 @@
 import { createConfig } from '@privy-io/wagmi';
 import { http } from 'wagmi';
-import { ogTestnet, baseChain } from './chains';
+import { arcChain } from './chains';
 
 // wagmi config — Privy provides the connector at runtime via PrivyProvider +
-// WagmiProvider from @privy-io/wagmi. We declare both chains (0G for agent
-// infra, Base for settlement) so wagmi can switch between them.
+// WagmiProvider from @privy-io/wagmi. Arc is the only user-facing wallet chain.
 export const wagmiConfig = createConfig({
-  chains: [baseChain, ogTestnet],
+  chains: [arcChain],
   transports: {
-    [baseChain.id]: http(),
-    [ogTestnet.id]: http(),
+    [arcChain.id]: http(),
   },
 });

@@ -207,13 +207,22 @@ export const config = {
   // Contracts — Base (settlement)
   // Zero here means Base isn't deployed on this network yet. Left as-is it is a
   // truthy string, which switches POST /tasks onto the Base escrow and points
-  // createTask at address(0) — so collapse it to '' and stay on the 0G path.
+  // createTask at address(0) — so collapse it to ''.
   baseEscrowAddress: unsetIfZero(optional('BASE_ESCROW_ADDRESS', BASE_ADDR?.blindEscrow ?? '')),
   baseUsdcAddress: optional('BASE_USDC_ADDRESS', BASE_MAINNET ? '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' : '0x036CbD53842c5426634e7929541eC2318f3dCF7e'),
   // The generated module carries a zero-address placeholder for networks the
   // factory hasn't been deployed to yet. Treat that as "not configured" so the
   // listener stays disabled instead of polling address(0) forever.
   agentFactoryAddress: unsetIfZero(optional('AGENT_FACTORY_ADDRESS', BASE_ADDR?.agentFactory || '')),
+
+  // Arc Chain (settlement — USDC payouts, gas in USDC)
+  // No generated defaults yet; Arc settlement is deployed per environment.
+  arcRpcUrl: optional('ARC_RPC_URL', 'https://rpc.testnet.arc.io'),
+  arcChainId: parseInt(optional('ARC_CHAIN_ID', '5042002'), 10),
+  arcEscrowAddress: unsetIfZero(optional('ARC_ESCROW_ADDRESS', '')),
+  arcUsdcAddress: optional('ARC_USDC_ADDRESS', '0x3600000000000000000000000000000000000000'),
+  arcMarketplaceSignerPrivateKey: process.env.ARC_MARKETPLACE_SIGNER_PRIVATE_KEY || '',
+  arcEscrowDeploymentBlock: parseInt(optional('ARC_ESCROW_DEPLOYMENT_BLOCK', '0'), 10),
 
   // ERC-4337 AA infrastructure (Base) — agents pay gas in USDC instead of ETH.
   usdcPaymasterAddress: unsetIfZero(optional('USDC_PAYMASTER_ADDRESS', (BASE_ADDR as any)?.USDCPaymaster ?? '')),
@@ -260,11 +269,6 @@ export const config = {
   // (completeVerification on Base releases USDC). Same pattern as above but
   // targets the Base BlindEscrow.
   baseMarketplaceSignerPrivateKey: process.env.BASE_MARKETPLACE_SIGNER_PRIVATE_KEY || '',
-
-  // Settlement chain POST /tasks funds new tasks on ('0g', 'base'). '' keeps
-  // the rule from before the setting: Base when it has an escrow, else 0G.
-  // Checked at boot (services/settlementChains.ts assertPostingChain).
-  postingChain: (process.env.POSTING_CHAIN ?? '').trim().toLowerCase(),
 
   // contracts/ deployment set holding this stack's records ('' = the default
   // records, i.e. production). Only used to print ops commands that target the
@@ -426,6 +430,19 @@ export const config = {
     optimismUsdcAddress: optional('CCTP_OPTIMISM_USDC_ADDRESS', BASE_MAINNET
       ? '0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85'
       : '0x5fd84259d66Cd46123540766Be93DFE6D43130D7'),
+    // Polygon PoS (domain 7) — CCTP works on it, but Circle offers no Fast
+    // Transfer / Forwarding Service there, so a burn to/from it does not
+    // auto-complete the destination mint (operator self-relays). Marked
+    // supportsFastTransfer:false in cctpChains.ts, same as Arc. Avalanche is
+    // deliberately NOT added: Privy has no USDC gas sponsorship there, so a
+    // burn from it can't be gasless-in-USDC.
+    polygonRpcUrl: optional('CCTP_POLYGON_RPC_URL', BASE_MAINNET
+      ? 'https://polygon-rpc.com'
+      : 'https://rpc-amoy.polygon.technology'),
+    polygonChainId: parseInt(optional('CCTP_POLYGON_CHAIN_ID', BASE_MAINNET ? '137' : '80002'), 10),
+    polygonUsdcAddress: optional('CCTP_POLYGON_USDC_ADDRESS', BASE_MAINNET
+      ? '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359'
+      : '0x41E94Eb019C0762f9Bfcf9Fb1E58725BfB0e7582'),
     // Arc — Circle's own L1 (docs.arc.io). These defaults are Arc TESTNET
     // (5042002) and do not follow the Base tier, so no mainnet chain entry
     // exists here. Arc Mainnet itself is live (its RPC answered chain id 5042

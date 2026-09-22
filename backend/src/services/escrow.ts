@@ -2,9 +2,50 @@ import { buildUnsignedTx } from './chain.js';
 import { chainRuntime } from './chainRuntime.js';
 // The key type comes from the registry, not taskChain.ts, which imports this
 // module back.
-import { settlementChainConfig, type SettlementChainKey as TaskChain } from './settlementChains.js';
+import { postingChain, settlementChainConfig, type SettlementChainKey as TaskChain } from './settlementChains.js';
 import type { OnChainTask } from '../types.js';
 import { ethers } from 'ethers';
+
+// Convenience helpers that default to the posting chain for legacy callers that
+// only have a numeric task id. New code should prefer the *On variants and pass
+// the chain explicitly.
+
+/** Read a single task from the posting chain's escrow. */
+export async function getTask(taskId: number): Promise<OnChainTask & { taskId: string }> {
+  return getTaskOn(postingChain(), taskId);
+}
+
+/** Read the per-task verifier from the posting chain's escrow. */
+export async function getTaskVerifier(taskId: number): Promise<string> {
+  return getTaskVerifierOn(postingChain(), taskId);
+}
+
+/** Build unsigned assignWorker transaction on the posting chain. */
+export async function buildAssignWorker(
+  from: string,
+  taskId: number,
+  worker: string,
+): Promise<ethers.TransactionRequest> {
+  return buildUnsignedTx(escrowFor(postingChain()), 'assignWorker', [taskId, worker], from);
+}
+
+/** Build unsigned submitEvidence transaction on the posting chain. */
+export async function buildSubmitEvidence(
+  from: string,
+  taskId: number,
+  evidenceHash: string,
+): Promise<ethers.TransactionRequest> {
+  return buildSubmitEvidenceOn(postingChain(), from, taskId, evidenceHash);
+}
+
+/** Build unsigned completeVerification transaction on the posting chain. */
+export async function buildCompleteVerification(
+  from: string,
+  taskId: number,
+  passed: boolean,
+): Promise<ethers.TransactionRequest> {
+  return buildUnsignedTx(escrowFor(postingChain()), 'completeVerification', [taskId, passed], from);
+}
 
 /** The read-only BlindEscrow on `chain`. Throws when this deployment has none there. */
 export function escrowFor(chain: TaskChain): ethers.Contract {
@@ -16,115 +57,9 @@ export function escrowFor(chain: TaskChain): ethers.Contract {
   return contract;
 }
 
-/** Read a single task from BlindEscrow */
-export async function getTask(taskId: number): Promise<OnChainTask & { taskId: string }> {
-  return getTaskOn('0g', taskId);
-}
-
-/** Get the next task ID (tells us how many tasks exist) */
-export async function nextTaskId(): Promise<number> {
-  return Number(await escrowFor('0g').nextTaskId());
-}
-
-/** Get fee basis points */
-/** The 0G escrow's fee. Prefer feeBpsOn: each chain's escrow has its own. */
-export async function feeBps(): Promise<number> {
-  return feeBpsOn('0g');
-}
-
 /** The platform fee, in basis points, the escrow on `chain` applies at settlement. */
 export async function feeBpsOn(chain: TaskChain): Promise<number> {
   return Number(await escrowFor(chain).feeBps());
-}
-
-/**
- * Read the per-task verifier (taskVerifier mapping). ZeroAddress means the
- * task was funded via plain createTask — completeVerification is then gated
- * on the GLOBAL marketplace verifier, and a poster-designated verifier agent
- * can never settle it (its tx reverts NotVerifier).
- */
-export async function getTaskVerifier(taskId: number): Promise<string> {
-  return getTaskVerifierOn('0g', taskId);
-}
-
-/** Read per-task verifier from Base escrow */
-export async function getTaskVerifierBase(taskId: number): Promise<string> {
-  return getTaskVerifierOn('base', taskId);
-}
-
-/** Build unsigned assignWorker transaction */
-export async function buildAssignWorker(
-  from: string,
-  taskId: number,
-  worker: string,
-): Promise<ethers.TransactionRequest> {
-  return buildUnsignedTx(escrowFor('0g'), 'assignWorker', [taskId, worker], from);
-}
-
-/** Build unsigned cancelTask transaction */
-export async function buildCancelTask(
-  from: string,
-  taskId: number,
-): Promise<ethers.TransactionRequest> {
-  return buildCancelTaskOn('0g', from, taskId);
-}
-
-/** Build unsigned claimTimeout transaction */
-export async function buildClaimTimeout(
-  from: string,
-  taskId: number,
-): Promise<ethers.TransactionRequest> {
-  return buildClaimTimeoutOn('0g', from, taskId);
-}
-
-/** Build unsigned submitEvidence transaction */
-export async function buildSubmitEvidence(
-  from: string,
-  taskId: number,
-  evidenceHash: string,
-): Promise<ethers.TransactionRequest> {
-  return buildUnsignedTx(escrowFor('0g'), 'submitEvidence', [taskId, evidenceHash], from);
-}
-
-/** Build unsigned completeVerification transaction */
-export async function buildCompleteVerification(
-  from: string,
-  taskId: number,
-  passed: boolean,
-): Promise<ethers.TransactionRequest> {
-  return buildUnsignedTx(escrowFor('0g'), 'completeVerification', [taskId, passed], from);
-}
-
-// ── Base escrow (settlement — USDC payouts) ────────────────────────────────
-
-/** Read a single task from the Base escrow. */
-export async function getTaskBase(taskId: number): Promise<OnChainTask & { taskId: string }> {
-  return getTaskOn('base', taskId);
-}
-
-/** Build unsigned cancelTask transaction against the Base escrow. */
-export async function buildCancelTaskBase(
-  from: string,
-  taskId: number,
-): Promise<ethers.TransactionRequest> {
-  return buildCancelTaskOn('base', from, taskId);
-}
-
-/** Build unsigned claimTimeout transaction against the Base escrow. */
-export async function buildClaimTimeoutBase(
-  from: string,
-  taskId: number,
-): Promise<ethers.TransactionRequest> {
-  return buildClaimTimeoutOn('base', from, taskId);
-}
-
-/** Build unsigned submitEvidence transaction against the Base escrow. */
-export async function buildSubmitEvidenceBase(
-  from: string,
-  taskId: number,
-  evidenceHash: string,
-): Promise<ethers.TransactionRequest> {
-  return buildUnsignedTx(escrowFor('base'), 'submitEvidence', [taskId, evidenceHash], from);
 }
 
 // ── Chain-aware functions ──────────────────────────────────────────────────
@@ -203,6 +138,13 @@ export async function buildClaimTimeoutOn(
   return buildUnsignedTx(escrowFor(chain), 'claimTimeout', [taskId], from);
 }
 
+/** Read the per-task verifier from whichever chain holds the task. */
+export async function getTaskVerifierOn(chain: TaskChain, taskId: number): Promise<string> {
+  const contract = chainRuntime(chain).escrow;
+  if (!contract) throw new Error(`${settlementChainConfig(chain).label} escrow not configured`);
+  return await contract.taskVerifier(taskId);
+}
+
 /**
  * Worker evidence submission, on whichever chain holds the task.
  *
@@ -228,10 +170,4 @@ export async function buildSubmitEvidenceOn(
   return { ...tx, chainId: settlementChainConfig(chain).chainId };
 }
 
-/** Read the per-task verifier from whichever chain holds the task. */
-export async function getTaskVerifierOn(chain: TaskChain, taskId: number): Promise<string> {
-  const contract = chainRuntime(chain).escrow;
-  // This read has always named the missing escrow without its env var.
-  if (!contract) throw new Error(`${settlementChainConfig(chain).label} escrow not configured`);
-  return await contract.taskVerifier(taskId);
-}
+

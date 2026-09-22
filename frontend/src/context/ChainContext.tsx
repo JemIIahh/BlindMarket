@@ -17,7 +17,7 @@ function loadChain(): SupportedChain {
       return saved as SupportedChain;
     }
   } catch {}
-  return (import.meta.env.VITE_ACTIVE_CHAIN as SupportedChain | undefined) ?? 'base';
+  return (import.meta.env.VITE_ACTIVE_CHAIN as SupportedChain | undefined) ?? 'arc';
 }
 
 export function ChainProvider({ children }: { children: ReactNode }) {

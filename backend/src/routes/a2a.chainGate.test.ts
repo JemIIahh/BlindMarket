@@ -98,24 +98,24 @@ beforeEach(() => {
 });
 
 describe('supportsChain', () => {
-  it('treats an executor with no declaration as 0G and Base only', () => {
-    expect(LEGACY_SUPPORTED_CHAINS).toEqual(['0g', 'base']);
+  it('treats an executor with no declaration as Base only', () => {
+    expect(LEGACY_SUPPORTED_CHAINS).toEqual(['base']);
     expect(supportsChain({ supportedChains: null }, 'base')).toBe(true);
-    expect(supportsChain({}, '0g')).toBe(true);
+    expect(supportsChain({}, 'arc')).toBe(false);
     expect(supportsChain({ supportedChains: undefined }, 'arc')).toBe(false);
   });
 
   it('follows a declaration, and does not filter when no chain is given (listings, ranking)', () => {
-    expect(supportsChain({ supportedChains: ['0g'] }, 'base')).toBe(false);
-    expect(supportsChain({ supportedChains: ['0g', 'base', 'arc'] }, 'arc')).toBe(true);
+    expect(supportsChain({ supportedChains: ['arc'] }, 'base')).toBe(false);
+    expect(supportsChain({ supportedChains: ['arc', 'base', 'arc'] }, 'arc')).toBe(true);
     expect(supportsChain({ supportedChains: [] }, undefined)).toBe(true);
     expect(supportsChain({ supportedChains: [] }, null)).toBe(true);
   });
 
   it('requires both legacy chains to hand over a task with no recorded chain', () => {
     expect(supportsTaskChain({ supportedChains: null }, undefined)).toBe(true);
-    expect(supportsTaskChain({ supportedChains: ['base', '0g'] }, null)).toBe(true);
-    expect(supportsTaskChain({ supportedChains: ['0g'] }, undefined)).toBe(false);
+    expect(supportsTaskChain({ supportedChains: ['base', 'arc'] }, null)).toBe(true);
+    expect(supportsTaskChain({ supportedChains: ['arc'] }, undefined)).toBe(false);
     expect(supportsTaskChain({ supportedChains: ['arc'] }, undefined)).toBe(false);
     expect(supportsTaskChain({ supportedChains: ['arc'] }, 'arc')).toBe(true);
   });
@@ -126,7 +126,7 @@ describe('POST /accept', () => {
 
   it('refuses a task on a chain the executor did not declare, before the CAS and any on-chain step', async () => {
     vi.mocked(a2aStore.getMeta).mockResolvedValue({ taskId: TASK, requiredCapabilities: [], chain: 'base' } as any);
-    vi.mocked(agentStore.getAgent).mockResolvedValue(executor(['0g']) as any);
+    vi.mocked(agentStore.getAgent).mockResolvedValue(executor(['arc']) as any);
 
     const res = await accept();
     expect(res.status).toBe(409);
@@ -142,22 +142,21 @@ describe('POST /accept', () => {
     expect((await accept()).body.error.code).toBe('CHAIN_UNSUPPORTED');
   });
 
-  it('refuses a task indexed before chains were recorded to an executor that lacks either legacy chain', async () => {
-    // Such a task may be on 0G or on Base.
+  it('refuses a task indexed before chains were recorded to an executor that lacks the legacy chain', async () => {
+    // Such a task may be on Base.
     vi.mocked(a2aStore.getMeta).mockResolvedValue({ taskId: TASK, requiredCapabilities: [] } as any);
-    vi.mocked(agentStore.getAgent).mockResolvedValue(executor(['0g']) as any);
+    vi.mocked(agentStore.getAgent).mockResolvedValue(executor(['arc']) as any);
     const res = await accept();
     expect(res.status).toBe(409);
     expect(res.body.error.code).toBe('CHAIN_UNSUPPORTED');
-    expect(res.body.error.message).toMatch(/0G or Base/);
+    expect(res.body.error.message).toMatch(/Base/);
   });
 
   it.each([
     ['a legacy executor on Base', null, 'base'],
-    ['a legacy executor on 0G', null, '0g'],
     ['a declared executor on its chain', ['base'], 'base'],
     ['a legacy executor on a task indexed before chains were recorded', null, undefined],
-    ['an executor declaring both legacy chains on such a task', ['0g', 'base', 'arc'], undefined],
+    ['an executor declaring both chains on such a task', ['arc', 'base', 'arc'], undefined],
   ])('accepts %s', async (_label, declared, chain) => {
     vi.mocked(a2aStore.getMeta).mockResolvedValue({ taskId: TASK, requiredCapabilities: [], chain } as any);
     vi.mocked(agentStore.getAgent).mockResolvedValue(executor(declared as string[] | null) as any);
@@ -168,7 +167,7 @@ describe('POST /accept', () => {
 
   it('still lets an executor already assigned re-confirm, even on a chain it no longer declares', async () => {
     vi.mocked(a2aStore.getMeta).mockResolvedValue({ taskId: TASK, requiredCapabilities: [], chain: 'base' } as any);
-    vi.mocked(agentStore.getAgent).mockResolvedValue(executor(['0g']) as any);
+    vi.mocked(agentStore.getAgent).mockResolvedValue(executor(['arc']) as any);
     vi.mocked(a2aStore.getState).mockResolvedValue({ status: 'accepted', executorAddress: AGENT } as any);
     const res = await accept();
     expect(res.status).toBe(200);
@@ -182,7 +181,7 @@ describe('POST /bid', () => {
 
   it('refuses a bid on a chain the executor did not declare', async () => {
     vi.mocked(a2aStore.getMeta).mockResolvedValue({ taskId: TASK, requiredCapabilities: [], chain: 'base' } as any);
-    vi.mocked(agentStore.getAgent).mockResolvedValue(executor(['0g']) as any);
+    vi.mocked(agentStore.getAgent).mockResolvedValue(executor(['arc']) as any);
     const res = await bid();
     expect(res.status).toBe(409);
     expect(res.body.error.code).toBe('CHAIN_UNSUPPORTED');
@@ -203,13 +202,13 @@ describe('POST /register', () => {
       .send({ displayName: 'a', capabilities: [], publicKey: PUBKEY, ...body });
 
   it('stores declared chains lowercased and deduplicated, including keys this backend does not know', async () => {
-    const res = await register({ supportedChains: ['0G', 'base', 'arc', 'base'] });
+    const res = await register({ supportedChains: ['Base', 'base', 'arc', 'Arc'] });
     expect(res.status).toBe(201);
-    expect(agentStore.registerAgent).toHaveBeenCalledWith(expect.objectContaining({ supportedChains: ['0g', 'base', 'arc'] }));
+    expect(agentStore.registerAgent).toHaveBeenCalledWith(expect.objectContaining({ supportedChains: ['base', 'arc'] }));
   });
 
   it('stores null when the field is omitted (older code)', async () => {
-    vi.mocked(agentStore.getAgent).mockResolvedValue(executor(['0g', 'base', 'arc']) as any);
+    vi.mocked(agentStore.getAgent).mockResolvedValue(executor(['arc', 'base', 'arc']) as any);
     const res = await register({});
     expect(res.status).toBe(200);
     expect(agentStore.registerAgent).toHaveBeenCalledWith(expect.objectContaining({ supportedChains: null }));
@@ -227,31 +226,31 @@ describe('POST /register', () => {
 
 describe('GET /verifications and GET /executors', () => {
   it('lists a task the verifier cannot settle, flagged, instead of hiding it', async () => {
-    vi.mocked(agentStore.getAgent).mockResolvedValue(executor(['0g'], VERIFIER) as any);
+    vi.mocked(agentStore.getAgent).mockResolvedValue(executor(['arc'], VERIFIER) as any);
     vi.mocked(a2aStore.getVerifierTasks).mockResolvedValue([
       { meta: { taskId: '0xa' }, state: { status: 'awaiting_verification' } },
       { meta: { taskId: '0xb' }, state: { status: 'awaiting_verification' } },
     ] as any);
     vi.mocked(taskChain.resolveTaskByHash).mockImplementation(async (hash: string) =>
-      (hash === '0xa' ? { taskId: '1', chain: 'base' } : { taskId: '2', chain: '0g' }) as any);
+      (hash === '0xa' ? { taskId: '1', chain: 'base' } : { taskId: '2', chain: 'arc' }) as any);
 
     const res = await request(app()).get('/api/v1/a2a/verifications').set('x-test-address', VERIFIER);
     expect(res.status).toBe(200);
     expect(res.body.data.verifications.map((v: any) => [v.meta.taskId, v.chain, v.chainSupported])).toEqual([
       ['0xa', 'base', false],
-      ['0xb', '0g', true],
+      ['0xb', 'arc', true],
     ]);
   });
 
   it('shows each executor\'s declared chains and can filter by chain', async () => {
     vi.mocked(agentStore.listAgents).mockResolvedValue([
       executor(null, '0x1111111111111111111111111111111111111111'),
-      executor(['0g'], '0x2222222222222222222222222222222222222222'),
-      executor(['0g', 'base', 'arc'], '0x3333333333333333333333333333333333333333'),
+      executor(['arc'], '0x2222222222222222222222222222222222222222'),
+      executor(['arc', 'base', 'arc'], '0x3333333333333333333333333333333333333333'),
     ] as any);
 
     const all = await request(app()).get('/api/v1/a2a/executors');
-    expect(all.body.data.executors.map((e: any) => e.supportedChains)).toEqual([null, ['0g'], ['0g', 'base', 'arc']]);
+    expect(all.body.data.executors.map((e: any) => e.supportedChains)).toEqual([null, ['arc'], ['arc', 'base', 'arc']]);
 
     const onBase = await request(app()).get('/api/v1/a2a/executors?chain=base');
     expect(onBase.body.data.executors.map((e: any) => e.address)).toEqual([

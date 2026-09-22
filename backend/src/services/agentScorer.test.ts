@@ -91,31 +91,30 @@ describe('pickExplorationAgent', () => {
 
   it('only offers the slot to agents that support the task\'s chain', async () => {
     vi.mocked(agentStore.listAgents).mockResolvedValue([
-      { ...agent('0xzerog', []), supportedChains: ['0g'] },
-      { ...agent('0xall', []), supportedChains: ['0g', 'base', 'arc'] },
+      { ...agent('0xbase', []), supportedChains: ['base'] },
+      { ...agent('0xall', []), supportedChains: ['base', 'arc'] },
     ]);
     for (let i = 0; i < 10; i++) {
       expect((await pickExplorationAgent([] as never, 'merit', undefined, fire, 'arc'))?.address).toBe('0xall');
     }
-    vi.mocked(agentStore.listAgents).mockResolvedValue([{ ...agent('0xzerog', []), supportedChains: ['0g'] }]);
-    expect(await pickExplorationAgent([] as never, 'merit', undefined, fire, 'base')).toBeNull();
+    vi.mocked(agentStore.listAgents).mockResolvedValue([{ ...agent('0xbase', []), supportedChains: ['base'] }]);
+    expect(await pickExplorationAgent([] as never, 'merit', undefined, fire, 'arc')).toBeNull();
   });
 });
 
 describe('rankAgents — settlement chain', () => {
   beforeEach(() => vi.mocked(agentStore.listAgents).mockReset());
 
-  it('leaves out agents that did not declare the chain, and treats undeclared agents as 0G and Base', async () => {
+  it('leaves out agents that did not declare the chain, and treats undeclared agents as Base only', async () => {
     vi.mocked(agentStore.listAgents).mockResolvedValue([
       agent('0xlegacy', []),
-      { ...agent('0xzerog', []), supportedChains: ['0g'] },
+      { ...agent('0xbase', []), supportedChains: ['base'] },
       { ...agent('0xarc', []), supportedChains: ['arc'] },
     ]);
     const addresses = async (chain?: string) => (await rankAgents([] as never, undefined, chain)).map((r) => r.address).sort();
-    expect(await addresses('base')).toEqual(['0xlegacy']);
-    expect(await addresses('0g')).toEqual(['0xlegacy', '0xzerog']);
+    expect(await addresses('base')).toEqual(['0xbase', '0xlegacy']);
     expect(await addresses('arc')).toEqual(['0xarc']);
-    expect(await addresses(undefined)).toEqual(['0xarc', '0xlegacy', '0xzerog']);
+    expect(await addresses(undefined)).toEqual(['0xarc', '0xbase', '0xlegacy']);
   });
 });
 

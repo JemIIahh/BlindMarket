@@ -70,11 +70,11 @@ describe('POST /tx/relay-tx chain names', () => {
   });
 
   it('refuses a chain it does not serve, listing the names it does', async () => {
-    const res = await relay('0g');
+    const res = await relay('arc');
     expect(res.status).toBe(400);
     expect(res.body.error).toMatchObject({
       code: 'INVALID_CHAIN',
-      message: 'Unsupported chain "0g". Supported: base, base-mainnet, base-sepolia',
+      message: 'Unsupported chain "arc". Supported: base, base-mainnet, base-sepolia',
     });
     expect(sendTx).not.toHaveBeenCalled();
   });

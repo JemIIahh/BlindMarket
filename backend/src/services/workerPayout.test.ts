@@ -9,6 +9,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
  */
 
 const USDC = '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
+const ARC_USDC = '0x3600000000000000000000000000000000000000';
 const NATIVE = '0x0000000000000000000000000000000000000000';
 
 const { store, redisMock, sideEffects, escrowMock, ledger } = vi.hoisted(() => ({
@@ -27,7 +28,7 @@ const { store, redisMock, sideEffects, escrowMock, ledger } = vi.hoisted(() => (
   },
 }));
 
-vi.mock('../config.js', () => ({ config: { baseEscrowAddress: '0xescrow', baseUsdcAddress: '0x036CbD53842c5426634e7929541eC2318f3dCF7e' } }));
+vi.mock('../config.js', () => ({ config: { baseEscrowAddress: '0xescrow', baseUsdcAddress: '0x036CbD53842c5426634e7929541eC2318f3dCF7e', arcEscrowAddress: '0xarcEscrow', arcUsdcAddress: '0x3600000000000000000000000000000000000000' } }));
 vi.mock('./agentStore.js', () => store);
 vi.mock('./redis.js', () => ({ redis: redisMock }));
 vi.mock('./escrow.js', () => escrowMock);
@@ -49,7 +50,7 @@ const { recordWorkerPayout, recordWorkerDispute } = await import('./workerPayout
 const EXEC = '0xecec000000000000000000000000000000000001';
 const TASK = '0x' + 'ab'.repeat(32);
 const onBase = { chain: 'base' as const, token: USDC };
-const onZeroG = { chain: '0g' as const, token: NATIVE };
+const onArc = { chain: 'arc' as const, token: ARC_USDC };
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -75,10 +76,10 @@ describe('recordWorkerPayout', () => {
     expect(ledger.claimCredit).toHaveBeenCalledWith(TASK, 'base', EXEC);
   });
 
-  it('credits a native 0G payout to the 0G total', async () => {
-    await recordWorkerPayout(TASK, EXEC, '7', 10n ** 18n, onZeroG);
-    expect(store.creditPayout).toHaveBeenCalledWith(EXEC, { symbol: '0G', decimals: 18 }, 9n * 10n ** 17n);
-    expect(sideEffects.recordTransaction).toHaveBeenCalledWith(expect.objectContaining({ amount: 1, net: 0.9, unit: '0G' }));
+  it('credits an Arc USDC payout to the USDC total', async () => {
+    await recordWorkerPayout(TASK, EXEC, '7', 5_000_000n, onArc);
+    expect(store.creditPayout).toHaveBeenCalledWith(EXEC, { symbol: 'USDC', decimals: 6 }, 4_500_000n);
+    expect(sideEffects.recordTransaction).toHaveBeenCalledWith(expect.objectContaining({ amount: 5, net: 4.5, unit: 'USDC' }));
   });
 
   it("splits with the fee of the task's OWN chain's escrow, cached per chain", async () => {
@@ -87,13 +88,13 @@ describe('recordWorkerPayout', () => {
     const fresh = await import('./workerPayout.js');
     escrowMock.feeBpsOn.mockImplementation(async (chain: string) => (chain === 'base' ? 800 : 1000));
     await fresh.recordWorkerPayout(TASK, EXEC, '7', 1_000_000n, onBase);
-    await fresh.recordWorkerPayout('0x' + 'ac'.repeat(32), EXEC, '8', 10n ** 18n, onZeroG);
+    await fresh.recordWorkerPayout('0x' + 'ac'.repeat(32), EXEC, '8', 5_000_000n, onArc);
     await fresh.recordWorkerPayout('0x' + 'ad'.repeat(32), EXEC, '9', 1_000_000n, onBase);
-    // 800 bps on Base → 92%; 1000 bps on 0G → 90%.
+    // 800 bps on Base → 92%; 1000 bps on Arc → 90%.
     expect(store.creditPayout).toHaveBeenNthCalledWith(1, EXEC, { symbol: 'USDC', decimals: 6 }, 920_000n);
-    expect(store.creditPayout).toHaveBeenNthCalledWith(2, EXEC, { symbol: '0G', decimals: 18 }, 9n * 10n ** 17n);
+    expect(store.creditPayout).toHaveBeenNthCalledWith(2, EXEC, { symbol: 'USDC', decimals: 6 }, 4_500_000n);
     expect(store.creditPayout).toHaveBeenNthCalledWith(3, EXEC, { symbol: 'USDC', decimals: 6 }, 920_000n);
-    expect(escrowMock.feeBpsOn.mock.calls.map(([c]) => c)).toEqual(['base', '0g']);
+    expect(escrowMock.feeBpsOn.mock.calls.map(([c]) => c)).toEqual(['base', 'arc']);
     expect(sideEffects.recordTransaction).toHaveBeenNthCalledWith(1, expect.objectContaining({ fee: 0.08, net: 0.92 }));
   });
 
@@ -130,9 +131,9 @@ describe('recordWorkerPayout', () => {
     expect(share > 0n).toBe(true);
   });
 
-  it('scales a compute cost to 0G units on 0G', async () => {
-    await recordWorkerPayout(TASK, EXEC, '7', 10n ** 18n, onZeroG, { computeCostMicroUnits: 1000 });
-    expect(store.creditPayout).toHaveBeenCalledWith(EXEC, { symbol: '0G', decimals: 18 }, ((10n ** 18n - 1000n * 10n ** 12n) * 9000n) / 10000n);
+  it('scales a compute cost to Arc USDC units on Arc', async () => {
+    await recordWorkerPayout(TASK, EXEC, '7', 5_000_000n, onArc, { computeCostMicroUnits: 1000 });
+    expect(store.creditPayout).toHaveBeenCalledWith(EXEC, { symbol: 'USDC', decimals: 6 }, ((5_000_000n - 1000n) * 9000n) / 10000n);
   });
 
   it('does nothing else and releases the marker when the executor is not registered', async () => {
@@ -153,7 +154,7 @@ describe('recordWorkerPayout', () => {
   });
 
   it.each([
-    ['an ERC-20 on 0G', { chain: '0g' as const, token: USDC }],
+    ['native value on Arc', { chain: 'arc' as const, token: NATIVE }],
     ['native value on Base', { chain: 'base' as const, token: NATIVE }],
   ])('parks %s instead of crediting it, and does not throw even with rethrow', async (_label, settlement) => {
     await expect(recordWorkerPayout(TASK, EXEC, '7', 5_000_000n, settlement, { rethrow: true, serviceId: 3 })).resolves.toBeUndefined();

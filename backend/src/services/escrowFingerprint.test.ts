@@ -62,14 +62,14 @@ describe('escrow fingerprint', () => {
     expect(fp.escrowFingerprintError('base')).toContain(OTHER.toLowerCase());
     expect(fp.escrowFingerprintError('base')).toContain(ESCROW.toLowerCase());
     expect(store.get('base:events:escrow')).toBe(`84532:${OTHER.toLowerCase()}`);
-    expect(fp.escrowFingerprintError('0g')).toBeNull();
+    expect(fp.escrowFingerprintError('arc')).toBeNull();
   });
 
   it('reports the same escrow address on another chain', async () => {
-    store.set('a2a:events:escrow', `16602:${ESCROW.toLowerCase()}`);
+    store.set('arc:events:escrow', `5042002:${ESCROW.toLowerCase()}`);
     const fp = await load();
-    await fp.checkEscrowFingerprint('0g', 16661, ESCROW, 0);
-    expect(fp.escrowFingerprintError('0g')).toMatch(/16602:.*16661:/);
+    await fp.checkEscrowFingerprint('arc', 5042, ESCROW, 0);
+    expect(fp.escrowFingerprintError('arc')).toMatch(/5042002:.*5042:/);
   });
 
   it('rechecks at most once a minute and clears once the keys match again', async () => {

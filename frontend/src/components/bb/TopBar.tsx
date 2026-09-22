@@ -7,8 +7,8 @@ import { LogoMark } from './LogoMark';
 import { NotificationBell } from './NotificationBell';
 import { getStoredTheme } from '../ThemeSync';
 import { useUsdcBalance } from '../../hooks/useChainWallet';
-import { baseChain, ogTestnet } from '../../config/chains';
-import { isMainnet, isCctpUsable } from '../../config/constants';
+import { arcChain } from '../../config/chains';
+import { isCctpUsable } from '../../config/constants';
 import { copyToClipboard } from '../../lib/utils';
 import { get } from '../../lib/api';
 import { CctpFundModal } from '../CctpFundModal';
@@ -74,13 +74,11 @@ export function TopBar({ onMenuClick }: TopBarProps = {}) {
     setCurrentTheme(next);
   };
 
-  const supportedChainIds = [baseChain.id, ogTestnet.id];
+  const supportedChainIds: number[] = [arcChain.id];
   const offSupported = !!authenticated && !!chainId && !supportedChainIds.includes(chainId);
-  const networkName = chainId === baseChain.id
-    ? (isMainnet ? 'Base' : 'Base Sepolia')
-    : (isMainnet ? '0G Mainnet' : ogTestnet.name);
+  const networkName = arcChain.name;
 
-  const shownAsset = { dot: 'bg-blue-500', symbol: 'USDC', sub: 'Base', amount: usdc.formatted };
+  const shownAsset = { dot: 'bg-blue-500', symbol: 'USDC', sub: 'Arc', amount: usdc.formatted };
   const refreshing = usdc.refreshing;
   const refreshBalances = () => usdc.refresh();
 
@@ -155,7 +153,7 @@ export function TopBar({ onMenuClick }: TopBarProps = {}) {
         ) : offSupported ? (
           <div className="flex items-center h-8 rounded-md border border-line text-[11px] font-mono">
             <button
-              onClick={() => switchChain({ chainId: baseChain.id })}
+              onClick={() => switchChain({ chainId: arcChain.id })}
               className="flex items-center px-2.5 h-full rounded-md text-err hover:bg-surface-2 transition-colors"
             >
               wrong_network

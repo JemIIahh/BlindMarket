@@ -1,9 +1,14 @@
 import { createContext, useContext, useState, useCallback, useEffect, useRef, type ReactNode } from 'react';
 import { ethers } from 'ethers';
 import { usePrivy, useWallets, type ConnectedWallet, type LinkedAccountWithMetadata } from '@privy-io/react-auth';
-import { OG_CHAIN_CONFIG, OG_CHAIN_ID, BASE_CHAIN_ID, BASE_CHAIN_CONFIG } from '../config/constants';
+import { ARC_CHAIN_ID, ARC_CHAIN_CONFIG } from '../config/constants';
 
 const HAS_PRIVY = !!import.meta.env.VITE_PRIVY_APP_ID;
+
+/** The wallet chain config — Arc is the only user-facing wallet chain. */
+function chainConfigFor(_targetChainId: number) {
+  return ARC_CHAIN_CONFIG;
+}
 
 /** EIP-3085 `wallet_addEthereumChain` parameter shape — same fields OG_CHAIN_CONFIG/BASE_CHAIN_CONFIG use. */
 export interface AddEthereumChainParameter {
@@ -90,7 +95,7 @@ function PrivyWalletProvider({ children }: { children: ReactNode }) {
   const rawWallet = wallets.find(w => w.walletClientType === 'privy') ?? wallets[0] ?? null;
   const wallet = authenticated ? rawWallet : null;
   const address = wallet?.address ?? null;
-  const isCorrectChain = chainId === OG_CHAIN_ID || chainId === BASE_CHAIN_ID;
+  const isCorrectChain = chainId === ARC_CHAIN_ID;
   // Read from linked accounts so they're known before the embedded wallet's iframe connects.
   const walletAccounts = authenticated ? (user?.linkedAccounts ?? []).filter(isEthWalletAccount) : [];
   const embeddedAddress = walletAccounts.find(isEmbeddedAccount)?.address ?? null;
@@ -109,18 +114,17 @@ function PrivyWalletProvider({ children }: { children: ReactNode }) {
         const network = await bp.getNetwork();
         if (!cancelled) {
           setProvider(bp); setSigner(s); setChainId(Number(network.chainId));
-          // Auto-switch to Base (settlement chain) if on an unsupported chain.
-          // Already on 0G or Base? Leave it — both are valid.
+          // Auto-switch to Arc (settlement chain) on any chain that is not Arc.
           const cid = Number(network.chainId);
-          if (cid !== OG_CHAIN_ID && cid !== BASE_CHAIN_ID && !switchedRef.current) {
+          if (cid !== ARC_CHAIN_ID && !switchedRef.current) {
             switchedRef.current = true;
             try {
-              await wallet.switchChain(BASE_CHAIN_ID);
+              await wallet.switchChain(ARC_CHAIN_ID);
             } catch {
               try {
                 const eth = await wallet.getEthereumProvider();
-                await eth.request({ method: 'wallet_addEthereumChain', params: [BASE_CHAIN_CONFIG] });
-                await wallet.switchChain(BASE_CHAIN_ID);
+                await eth.request({ method: 'wallet_addEthereumChain', params: [ARC_CHAIN_CONFIG] });
+                await wallet.switchChain(ARC_CHAIN_ID);
               } catch { /* chain add also failed — user will see the banner */ }
               switchedRef.current = false;
             }
@@ -132,9 +136,9 @@ function PrivyWalletProvider({ children }: { children: ReactNode }) {
     return () => { cancelled = true; };
   }, [wallet, wallet?.chainId]);
 
-  const switchChain = useCallback(async (targetChainId: number = BASE_CHAIN_ID) => {
+  const switchChain = useCallback(async (targetChainId: number = ARC_CHAIN_ID) => {
     if (!wallet) return;
-    const chainConfig = targetChainId === OG_CHAIN_ID ? OG_CHAIN_CONFIG : BASE_CHAIN_CONFIG;
+    const chainConfig = chainConfigFor(targetChainId);
     try {
       await switchWalletToChain(wallet, targetChainId, chainConfig);
     } catch (err) {
@@ -220,12 +224,12 @@ function DirectWalletProvider({ children }: { children: ReactNode }) {
   const [chainId, setChainId] = useState<number | null>(null);
   const [connecting, setConnecting] = useState(false);
 
-  const isCorrectChain = chainId === OG_CHAIN_ID || chainId === BASE_CHAIN_ID;
+  const isCorrectChain = chainId === ARC_CHAIN_ID;
 
-  const switchChain = useCallback(async (targetChainId: number = BASE_CHAIN_ID) => {
+  const switchChain = useCallback(async (targetChainId: number = ARC_CHAIN_ID) => {
     const eth = window.ethereum;
     if (!eth) return;
-    const chainConfig = targetChainId === OG_CHAIN_ID ? OG_CHAIN_CONFIG : BASE_CHAIN_CONFIG;
+    const chainConfig = chainConfigFor(targetChainId);
     try {
       await eth.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: chainConfig.chainId }] });
       const cid = await eth.request({ method: 'eth_chainId' });
@@ -250,7 +254,7 @@ function DirectWalletProvider({ children }: { children: ReactNode }) {
       const addr = await s.getAddress();
       const network = await bp.getNetwork();
       setProvider(bp); setSigner(s); setAddress(addr); setChainId(Number(network.chainId));
-      if (Number(network.chainId) !== OG_CHAIN_ID) await switchChain();
+      if (Number(network.chainId) !== ARC_CHAIN_ID) await switchChain();
     } catch (err: unknown) {
       const code = (err as { code?: string | number }).code;
       if (code !== 4001 && code !== 'ACTION_REJECTED') {

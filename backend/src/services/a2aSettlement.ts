@@ -207,7 +207,7 @@ async function confirmAssignedWorker(
   taskId: number | string,
   assignee: string,
   taskHash: string,
-  chain: TaskChain = '0g',
+  chain: TaskChain,
   executor?: string,
 ): Promise<SettleResult> {
   try {

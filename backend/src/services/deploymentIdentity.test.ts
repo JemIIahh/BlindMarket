@@ -43,14 +43,14 @@ import { parseDeploymentId } from '../config.js';
 const PROD: DeploymentFacts = {
   tier: null,
   chains: {
-    '0g': { chainId: 16661, escrow: '0x3d0374963daad43e31d42373eb11156a8e8ce2ff' },
+    'arc': { chainId: 16661, escrow: '0x3d0374963daad43e31d42373eb11156a8e8ce2ff' },
     base: { chainId: 84532, escrow: '0xcca5ab873158b888158ad9dc36fb4ee683efbebf' },
   },
 };
 const STAGING: DeploymentFacts = {
   tier: 'testnet',
   chains: {
-    '0g': { chainId: 16602, escrow: '0x0a0a000000000000000000000000000000000002' },
+    'arc': { chainId: 16602, escrow: '0x0a0a000000000000000000000000000000000002' },
     base: { chainId: 84532, escrow: '0xbbbb000000000000000000000000000000000001' },
   },
 };
@@ -64,10 +64,10 @@ const record = () => JSON.parse(store.get(IDENTITY_KEY) ?? 'null');
 
 /** A Redis production has been writing to: indexer checkpoints, and fingerprints from this release on. */
 function productionHistory({ fingerprints }: { fingerprints: boolean }) {
-  store.set('a2a:events:checkpoint', '33500000');
+  store.set('arc:events:checkpoint', '33500000');
   store.set('base:events:checkpoint', '46300000');
   if (fingerprints) {
-    store.set('a2a:events:escrow', `16661:${PROD.chains['0g'].escrow}`);
+    store.set('arc:events:escrow', `16661:${PROD.chains['arc'].escrow}`);
     store.set('base:events:escrow', `84532:${PROD.chains.base.escrow}`);
   }
 }
@@ -77,7 +77,7 @@ const localDevStackClaim = () => staging({ deploymentId: 'old-staging' });
 
 /** What a staging process on production's Redis could write (the review's B1). */
 function plantStagingFingerprints() {
-  store.set('a2a:events:escrow', `16602:${STAGING.chains['0g'].escrow}`);
+  store.set('arc:events:escrow', `16602:${STAGING.chains['arc'].escrow}`);
   store.set('base:events:escrow', `84532:${STAGING.chains.base.escrow}`);
 }
 
@@ -99,7 +99,7 @@ describe('production (never stopped)', () => {
     plantStagingFingerprints();
     const s = await resolveIdentity(redis, production(), NOW);
     expect(s).toMatchObject({ role: 'owner', writersAllowed: true });
-    expect(s.reason).toMatch(/a2a:events:escrow=16602/);
+    expect(s.reason).toMatch(/arc:events:escrow=16602/);
     expect(s.reason).toMatch(/base:events:escrow=84532:0xbbbb/);
     expect(record().id).toBe('production');
   });
@@ -172,7 +172,7 @@ describe('a staging stack (stoppable, with a DEPLOYMENT_ID)', () => {
     productionHistory({ fingerprints: true });
     const s = await resolveIdentity(redis, staging(), NOW);
     expect(s).toMatchObject({ role: 'not-owner', owner: null, writersAllowed: false });
-    expect(s.reason).toMatch(/a2a:events:escrow=16661/);
+    expect(s.reason).toMatch(/arc:events:escrow=16661/);
     expect(s.reason).toMatch(/base:events:escrow=84532:0xcca5/);
     expect(s.reason).toMatch(/DEPLOYMENT_CLAIM=unclaimed/);
     expect(store.has(IDENTITY_KEY)).toBe(false);
@@ -182,14 +182,14 @@ describe('a staging stack (stoppable, with a DEPLOYMENT_ID)', () => {
     productionHistory({ fingerprints: false });
     const s = await resolveIdentity(redis, staging(), NOW);
     expect(s).toMatchObject({ role: 'not-owner', writersAllowed: false });
-    expect(s.reason).toMatch(/looks like production's Redis from before identity checks \(a2a:events:checkpoint with no a2a:events:escrow/);
+    expect(s.reason).toMatch(/looks like production's Redis from before identity checks \(base:events:checkpoint with no base:events:escrow/);
     expect(s.reason).toMatch(/do not claim it/);
     expect(s.reason).not.toMatch(/DEPLOYMENT_CLAIM=/);
   });
 
   it('counts a fingerprint on a chain it does not settle on', async () => {
     store.set('base:events:escrow', `84532:${PROD.chains.base.escrow}`);
-    const s = await resolveIdentity(redis, staging({ facts: { tier: 'testnet', chains: { '0g': STAGING.chains['0g'] } } }), NOW);
+    const s = await resolveIdentity(redis, staging({ facts: { tier: 'testnet', chains: { 'arc': STAGING.chains['arc'] } } }), NOW);
     expect(s.writersAllowed).toBe(false);
     expect(s.reason).toMatch(/no base escrow/);
   });
@@ -230,17 +230,16 @@ describe('a staging stack (stoppable, with a DEPLOYMENT_ID)', () => {
 
   it('stops when its id comes with other chain ids: another network under the same name', async () => {
     await resolveIdentity(redis, staging(), NOW);
-    const moved: DeploymentFacts = { ...STAGING, chains: { ...STAGING.chains, '0g': { chainId: 16661, escrow: STAGING.chains['0g'].escrow } } };
+    const moved: DeploymentFacts = { ...STAGING, chains: { ...STAGING.chains, 'arc': { chainId: 16661, escrow: STAGING.chains['arc'].escrow } } };
     const s = await resolveIdentity(redis, staging({ facts: moved }), NOW);
     expect(s).toMatchObject({ role: 'not-owner', owner: 'staging-testnet', writersAllowed: false });
-    expect(s.reason).toMatch(/0g 16602→16661/);
-    expect(record().chains['0g'].chainId).toBe(16602);
+    expect(s.reason).toMatch(/arc 16602→16661/);
+    expect(record().chains['arc'].chainId).toBe(16602);
   });
 
-  it('records an added chain, a redeployed escrow and a tier change', async () => {
+  it('records a redeployed escrow and a tier change', async () => {
     await resolveIdentity(redis, staging(), NOW);
-    const arc = { chainId: 5042002, escrow: '0x' + 'a7'.repeat(20) };
-    const grown: DeploymentFacts = { tier: 'mainnet', chains: { ...STAGING.chains, base: { chainId: 84532, escrow: '0x' + 'b9'.repeat(20) }, arc } };
+    const grown: DeploymentFacts = { tier: 'mainnet', chains: { ...STAGING.chains, base: { chainId: 84532, escrow: '0x' + 'b9'.repeat(20) } } };
     expect(await resolveIdentity(redis, staging({ facts: grown }), LATER)).toMatchObject({ role: 'owner', writersAllowed: true, reason: null });
     expect(record()).toMatchObject({ tier: 'mainnet', chains: grown.chains, updatedAt: LATER().toISOString() });
     // The tier alone is recorded too.
@@ -269,7 +268,7 @@ describe('a staging stack (stoppable, with a DEPLOYMENT_ID)', () => {
 
     it('"unclaimed" takes a Redis with no record despite its index keys, and nothing else', async () => {
       plantStagingFingerprints();
-      store.set('a2a:events:escrow', '16602:0x' + '0c'.repeat(20)); // an escrow this stack redeployed
+      store.set('arc:events:escrow', '16602:0x' + '0c'.repeat(20)); // an escrow this stack redeployed
       expect(await resolveIdentity(redis, staging({ claim: 'unclaimed' }), NOW)).toMatchObject({ role: 'owner', writersAllowed: true });
       store.clear();
       await resolveIdentity(redis, production(), NOW);
@@ -316,7 +315,7 @@ describe('a staging stack (stoppable, with a DEPLOYMENT_ID)', () => {
 
     it('takes back its own record after its chains moved', async () => {
       await resolveIdentity(redis, staging(), NOW);
-      const moved: DeploymentFacts = { ...STAGING, chains: { ...STAGING.chains, '0g': { chainId: 16661, escrow: STAGING.chains['0g'].escrow } } };
+      const moved: DeploymentFacts = { ...STAGING, chains: { ...STAGING.chains, 'arc': { chainId: 16661, escrow: STAGING.chains['arc'].escrow } } };
       expect((await resolveIdentity(redis, staging({ facts: moved }), NOW)).writersAllowed).toBe(false);
       expect((await resolveIdentity(redis, staging({ facts: moved, claim: 'staging-testnet' }), NOW)).writersAllowed).toBe(true);
       expect((await resolveIdentity(redis, staging({ facts: moved }), NOW)).writersAllowed).toBe(true);
@@ -341,8 +340,8 @@ describe('local development (stoppable, no DEPLOYMENT_ID)', () => {
     productionHistory({ fingerprints: true });
     const s = await resolveIdentity(redis, localDev(), NOW);
     expect(s).toMatchObject({ role: 'not-owner', writersAllowed: false });
-    expect(s.reason).toMatch(/a2a:events:escrow=16661/);
-    expect(s.reason).toMatch(/delete a2a:events:escrow, base:events:escrow and restart/);
+    expect(s.reason).toMatch(/arc:events:escrow=16661/);
+    expect(s.reason).toMatch(/delete base:events:escrow, arc:events:escrow and restart/);
   });
 
   it('only notes a fingerprint for another escrow on its own chain (an earlier local run)', async () => {
@@ -356,7 +355,7 @@ describe('local development (stoppable, no DEPLOYMENT_ID)', () => {
     await resolveIdentity(redis, production(), NOW);
     const s = await resolveIdentity(redis, localDev(), NOW);
     expect(s).toMatchObject({ role: 'not-owner', owner: 'production', writersAllowed: false });
-    expect(s.reason).toMatch(/0g 16661, base 84532/);
+    expect(s.reason).toMatch(/arc 16661, base 84532/);
   });
 
   it("stops on production's record when only its escrow differs, on a chain they share", async () => {

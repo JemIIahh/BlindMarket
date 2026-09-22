@@ -67,11 +67,7 @@ assertBootConfig();
 for (const warning of assertRegistryInvariants(settlementChainConfigs())) {
   console.warn(`[boot] settlement chain registry: ${warning}`);
 }
-for (const warning of assertPostingChain({
-  production: config.nodeEnv === 'production',
-  allowNonMainnet: process.env.ALLOW_NONMAINNET_PROD === 'true',
-  tier: config.settlementTier,
-})) {
+for (const warning of assertPostingChain({ tier: config.settlementTier })) {
   console.warn(`[boot] posting chain: ${warning}`);
 }
 for (const warning of clientPricingWarnings()) {
@@ -79,7 +75,7 @@ for (const warning of clientPricingWarnings()) {
 }
 
 logChainConfig();
-console.log(`[chain] New tasks post on ${settlementChainConfig(postingChain()).label}${config.postingChain ? '' : ' (default)'}`);
+console.log(`[chain] New tasks post on ${settlementChainConfig(postingChain()).label}`);
 
 const app = express();
 app.set('trust proxy', 1);

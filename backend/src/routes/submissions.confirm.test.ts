@@ -14,8 +14,12 @@ const POSTER = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const WORKER = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 const ESCROW = '0xcccccccccccccccccccccccccccccccccccccccc';
 const ZERO = '0x0000000000000000000000000000000000000000';
-// /confirm reads the 0G escrow, whose only token is native 0G.
-const TOKEN = '0x0000000000000000000000000000000000000000';
+// /confirm reads the posting chain (Base), whose settlement token is USDC.
+const TOKEN = '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
+
+vi.mock('../config.js', () => ({
+  config: { baseEscrowAddress: '0xcccccccccccccccccccccccccccccccccccccccc', baseChainId: 84532, arcEscrowAddress: '' },
+}));
 
 vi.mock('../middleware/auth.js', () => ({
   requireAuth: (req: any, _res: any, next: any) => {
@@ -37,8 +41,8 @@ const getReceipt = vi.fn();
 const parseLog = vi.fn();
 
 vi.mock('../services/chain.js', () => ({
-  provider: { getTransactionReceipt: (...a: unknown[]) => getReceipt(...a) },
-  escrow: {
+  baseProvider: { getTransactionReceipt: (...a: unknown[]) => getReceipt(...a) },
+  baseEscrow: {
     getAddress: async () => ESCROW,
     interface: { parseLog: (...a: unknown[]) => parseLog(...a) },
   },
@@ -103,7 +107,7 @@ describe('POST /submissions/confirm', () => {
     expect(res.status).toBe(200);
     expect(res.body.data).toMatchObject({ confirmed: true, passed: true });
     expect(workerPayout.recordWorkerPayout).toHaveBeenCalledTimes(1);
-    expect(workerPayout.recordWorkerPayout).toHaveBeenCalledWith('0xhash', WORKER, '7', 100n, { chain: '0g', token: TOKEN });
+    expect(workerPayout.recordWorkerPayout).toHaveBeenCalledWith('0xhash', WORKER, '7', 100n, { chain: 'base', token: TOKEN });
   });
 
   it('refuses a reverted receipt with no writes', async () => {

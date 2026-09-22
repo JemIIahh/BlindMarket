@@ -1,7 +1,7 @@
 import { Interface, JsonRpcProvider, type ethers } from 'ethers';
 import type { UnsignedTx } from '../types/api';
 import { getAuthHeaders } from './api';
-import { API_BASE_URL, BASE_CHAIN_ID, BASE_RPC_URL, OG_CHAIN_ID, OG_RPC_URL } from '../config/constants';
+import { API_BASE_URL, BASE_CHAIN_ID, BASE_RPC_URL, ARC_CHAIN_ID, ARC_RPC_URL } from '../config/constants';
 import { getSettlement, isSettlementChainKey, relayChainFor, type SettlementChainKey } from '../config/settlement';
 
 export interface SentTx {
@@ -13,7 +13,11 @@ export interface SentTx {
 /** Read-only Base provider — where the relay sends today. */
 export const baseProvider = new JsonRpcProvider(BASE_RPC_URL, BASE_CHAIN_ID, { staticNetwork: true });
 
-let ogProvider: JsonRpcProvider | null = null;
+let arcProvider: JsonRpcProvider | null = null;
+/** Read-only Arc provider — for direct-signed sends and receipt/allowance reads. */
+function getArcProvider(): JsonRpcProvider {
+  return (arcProvider ??= new JsonRpcProvider(ARC_RPC_URL, ARC_CHAIN_ID, { staticNetwork: true }));
+}
 
 /**
  * The chain a relayed transaction actually goes to. A caller that names the
@@ -36,11 +40,9 @@ export function relayedChainKey(chain?: string | null): SettlementChainKey {
   return relayChainFor(posting) ? posting : 'base';
 }
 
-/** A read-only provider for the chain a transaction is relayed on (relayedChainKey). */
+/** A read-only provider for the chain a transaction targets: Arc or Base. */
 export function providerFor(chain?: string | null): JsonRpcProvider {
-  if (relayedChainKey(chain) === '0g') {
-    return (ogProvider ??= new JsonRpcProvider(OG_RPC_URL, OG_CHAIN_ID, { staticNetwork: true }));
-  }
+  if (chain === 'arc') return getArcProvider();
   return baseProvider;
 }
 
@@ -78,6 +80,29 @@ export async function signAndSendTx(
   value?: bigint,
   opts: { chain?: string | null } = {},
 ): Promise<SentTx> {
+  // Arc has no relay (relayCaip2 null): sign and broadcast from the wallet's
+  // own balance instead. USDC is the native gas coin on Arc, so the wallet
+  // pays its own gas and nothing goes through the backend relay.
+  const named = opts.chain ?? null;
+  if (named && isSettlementChainKey(named) && !relayChainFor(named)) {
+    // A wrong-chain send would broadcast the Arc escrow's address on the wrong
+    // network (no code there → revert, or worse). Refuse loudly first.
+    const targetChainId = getSettlement().chains[named].chainId;
+    const network = await signer.provider.getNetwork();
+    if (Number(network.chainId) !== targetChainId) {
+      throw new RelayError('WRONG_CHAIN', `Your wallet is on chain ${Number(network.chainId)}, not ${named} (${targetChainId}). Switch to ${named} and try again.`);
+    }
+    const from = await signer.getAddress();
+    const res = await signer.sendTransaction({
+      from,
+      to: unsignedTx.to,
+      data: unsignedTx.data,
+      ...(value !== undefined && value !== 0n ? { value } : {}),
+    });
+    const receipt = await res.wait().catch(() => null);
+    return { hash: res.hash, receipt };
+  }
+
   const from = await signer.getAddress();
   const body = {
     walletAddress: from,

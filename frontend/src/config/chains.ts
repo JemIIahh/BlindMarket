@@ -1,5 +1,5 @@
 import { defineChain } from 'viem';
-import { mainnet, sepolia, arbitrum, arbitrumSepolia, optimism, optimismSepolia, arcTestnet } from 'viem/chains';
+import { mainnet, sepolia, arbitrum, arbitrumSepolia, optimism, optimismSepolia, polygon, polygonAmoy, arcTestnet } from 'viem/chains';
 import { OG_CHAIN_ID, OG_RPC_URL, BASE_CHAIN_ID, BASE_RPC_URL } from './constants';
 
 // 0G chain (agent infra)
@@ -36,18 +36,17 @@ export const baseChain = defineChain({
   },
 });
 
-// CCTP source chains (Ethereum, Arbitrum, Optimism) — needed in Privy's
+// CCTP source chains (Ethereum, Arbitrum, Optimism, Base) — needed in Privy's
 // PrivyProvider `supportedChains` so `wallet.switchChain()` will actually
 // switch an external wallet to them (Privy validates the target chain
 // against this app-level list before ever touching the wallet; omitting a
 // chain here surfaces as "Unsupported chainId: <id>", not a wallet error).
-// Uses viem's canonical pre-built definitions rather than hand-rolling RPC
-// URLs, following the same mainnet-tier-follows-Base convention as
-// baseChain/ogTestnet above (this app has no separate "IS_PROD" flag at
-// this layer).
+// Arc is NOT here: it is the settlement chain this app's wallet already sits
+// on, not a bridge source. Base is here so legacy Base USDC can be bridged in.
 export const ethereumChain = isBaseMainnet ? mainnet : sepolia;
 export const arbitrumChain = isBaseMainnet ? arbitrum : arbitrumSepolia;
 export const optimismChain = isBaseMainnet ? optimism : optimismSepolia;
+export const polygonChain = isBaseMainnet ? polygon : polygonAmoy;
 
 // Arc (Circle's L1, USDC is the gas token) — testnet only; the app doesn't
 // offer Arc mainnet as a CCTP chain (see backend config.ts). viem's canonical
@@ -58,7 +57,7 @@ export const arcChain = defineChain({
   rpcUrls: { default: { http: ['https://rpc.testnet.arc.io'] } },
 });
 
-// Every CCTP source chain for this tier, for Privy's `supportedChains`.
+// Every CCTP chain for this tier, for Privy's `supportedChains`.
 export const cctpSourceChains = isBaseMainnet
-  ? [ethereumChain, arbitrumChain, optimismChain]
-  : [ethereumChain, arbitrumChain, optimismChain, arcChain];
+  ? [ethereumChain, arbitrumChain, polygonChain, baseChain]
+  : [ethereumChain, arbitrumChain, optimismChain, polygonChain, baseChain];

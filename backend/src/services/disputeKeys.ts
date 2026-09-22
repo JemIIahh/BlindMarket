@@ -5,10 +5,9 @@
  * importing the settlement code.
  */
 
-import { redis } from './redis.js';
 import type { TaskChain } from './taskChain.js';
 
-const PREFIX: Record<TaskChain, string> = { '0g': 'a2a', base: 'base' };
+const PREFIX: Record<TaskChain, string> = { base: 'base', arc: 'arc' };
 
 export function disputeKeys(chain: TaskChain) {
   const p = PREFIX[chain];
@@ -24,5 +23,6 @@ export function disputeKeys(chain: TaskChain) {
 
 /** How many of a chain's rulings are parked. */
 export async function parkedDisputeCount(chain: TaskChain): Promise<number> {
+  const { redis } = await import('./redis.js');
   return redis.hlen(disputeKeys(chain).parked);
 }

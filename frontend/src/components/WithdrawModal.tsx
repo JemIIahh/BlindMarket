@@ -1,25 +1,26 @@
 import { useEffect, useRef, useState } from 'react';
 import { useSigners } from '@privy-io/react-auth';
-import { parseUnits, formatUnits, Interface, isAddress, getAddress, ZeroAddress, Contract, EventLog } from 'ethers';
+import { parseUnits, formatUnits, Interface, isAddress, getAddress, ZeroAddress, Contract, EventLog, type JsonRpcProvider } from 'ethers';
 import { Button, FormField, FormInput, Modal, Spinner } from './bb';
 import { useWallet } from '../context/WalletContext';
 import { useUsdcBalance } from '../hooks/useChainWallet';
-import { signAndSendTx, RelayError, baseProvider, type SentTx } from '../lib/txSigner';
-import { BASE_USDC_ADDRESS, BASE_ESCROW_ADDRESS, BASE_CHAIN_CONFIG, PRIVY_RELAY_SIGNER_ID } from '../config/constants';
+import { signAndSendTx, RelayError, providerFor, type SentTx } from '../lib/txSigner';
+import { PRIVY_RELAY_SIGNER_ID } from '../config/constants';
+import { useSettlement } from '../config/settlement';
 
 const ERC20_TRANSFER_ABI = ['function transfer(address to, uint256 amount) returns (bool)'];
 const TRANSFER_EVENT_ABI = ['event Transfer(address indexed from, address indexed to, uint256 value)'];
 // Kept back because user-pays gas is charged in USDC from this same wallet.
 const USDC_GAS_RESERVE_RAW = 50_000n;
-const NETWORK = BASE_CHAIN_CONFIG.chainName;
 
 type Phase = 'input' | 'confirm' | 'enabling-relay' | 'sending' | 'confirming' | 'done' | 'pending' | 'error';
 
-/** Polls Base (~2 min) for the USDC Transfer this withdrawal emits; returns its tx hash. */
+/** Polls the settlement chain (~2 min) for the USDC Transfer this withdrawal emits; returns its tx hash. */
 async function waitForTransfer(
   from: string, to: string, value: bigint, fromBlock: number, cancelled: () => boolean,
+  usdcAddress: string, provider: JsonRpcProvider,
 ): Promise<string | null> {
-  const usdc = new Contract(BASE_USDC_ADDRESS, TRANSFER_EVENT_ABI, baseProvider);
+  const usdc = new Contract(usdcAddress, TRANSFER_EVENT_ABI, provider);
   for (let i = 0; i < 40; i++) {
     await new Promise((r) => setTimeout(r, 3000));
     if (cancelled()) return null;
@@ -32,12 +33,12 @@ async function waitForTransfer(
   return null;
 }
 
-function destinationError(value: string, self: string | null): string | null {
+function destinationError(value: string, self: string | null, usdcAddress: string, escrowAddress: string): string | null {
   if (!isAddress(value)) return 'Not a valid address — check it for typos.';
   const a = getAddress(value);
   if (a === ZeroAddress) return "Can't send to the zero address.";
-  if (a === getAddress(BASE_USDC_ADDRESS)) return "That's the USDC token contract — funds sent there are lost.";
-  if (BASE_ESCROW_ADDRESS && a === getAddress(BASE_ESCROW_ADDRESS)) return "That's the BlindMarket escrow contract — send to a wallet instead.";
+  if (a === getAddress(usdcAddress)) return "That's the USDC token contract — funds sent there are lost.";
+  if (escrowAddress && a === getAddress(escrowAddress)) return "That's the BlindMarket escrow contract — send to a wallet instead.";
   if (self && a === getAddress(self)) return "That's your BlindMarket wallet itself.";
   return null;
 }
@@ -48,6 +49,14 @@ export function WithdrawModal({ onClose, onWithdrawn }: { onClose: () => void; o
   const { addSigners } = useSigners();
   const usdc = useUsdcBalance(embeddedAddress);
   const balance = (usdc.raw as bigint | undefined) ?? null;
+
+  // The settlement chain (Arc now): withdraw its USDC, not Base's.
+  const settlement = useSettlement();
+  const posting = settlement.chains[settlement.postingChain];
+  const usdcAddress = posting.token.address;
+  const escrowAddress = posting.escrow;
+  const networkName = posting.label;
+  const postingKey = settlement.postingChain;
 
   const [to, setTo] = useState('');
   const [amount, setAmount] = useState('');
@@ -64,7 +73,7 @@ export function WithdrawModal({ onClose, onWithdrawn }: { onClose: () => void; o
   }, []);
 
   const destination = to.trim();
-  const destError = destination ? destinationError(destination, embeddedAddress) : null;
+  const destError = destination ? destinationError(destination, embeddedAddress, usdcAddress, escrowAddress) : null;
 
   let amountRaw: bigint | null = null;
   try {
@@ -101,7 +110,8 @@ export function WithdrawModal({ onClose, onWithdrawn }: { onClose: () => void; o
     }
     setPhase('sending');
     const dest = getAddress(destination);
-    const startBlock = await baseProvider.getBlockNumber().catch(() => null);
+    const provider = providerFor(postingKey);
+    const startBlock = await provider.getBlockNumber().catch(() => null);
     let sent: SentTx;
     try {
       const from = await signer.getAddress();
@@ -111,8 +121,8 @@ export function WithdrawModal({ onClose, onWithdrawn }: { onClose: () => void; o
         return;
       }
       const data = new Interface(ERC20_TRANSFER_ABI).encodeFunctionData('transfer', [dest, amountRaw]);
-      // A Base USDC transfer, whatever chain new tasks post on.
-      sent = await signAndSendTx(signer, { to: BASE_USDC_ADDRESS, data, from }, undefined, { chain: 'base' });
+      // The settlement chain's USDC transfer (Arc signs directly; Base relays).
+      sent = await signAndSendTx(signer, { to: usdcAddress, data, from }, undefined, { chain: postingKey });
     } catch (err) {
       if (err instanceof RelayError && err.code === 'PRIVY_AUTH_FAILED') {
         // The backend uses this code for any Privy 401/403 — only offer the grant once.
@@ -148,7 +158,7 @@ export function WithdrawModal({ onClose, onWithdrawn }: { onClose: () => void; o
     setPhase('confirming');
     const landedTx = startBlock === null
       ? null
-      : await waitForTransfer(embeddedAddress, dest, amountRaw, Math.max(0, startBlock - 2), () => closedRef.current);
+      : await waitForTransfer(embeddedAddress, dest, amountRaw, Math.max(0, startBlock - 2), () => closedRef.current, usdcAddress, provider);
     if (closedRef.current) return;
     if (landedTx) setTxHash(landedTx);
     setPhase(landedTx ? 'done' : 'pending');
@@ -158,7 +168,7 @@ export function WithdrawModal({ onClose, onWithdrawn }: { onClose: () => void; o
   const busy = phase === 'enabling-relay' || phase === 'sending';
 
   return (
-    <Modal open onClose={onClose} dismissable={!busy} title="Withdraw" subtitle={`USDC on ${NETWORK}`} size="md">
+    <Modal open onClose={onClose} dismissable={!busy} title="Withdraw" subtitle={`USDC on ${networkName}`} size="md">
       <>
         {phase === 'input' && (
           <div className="space-y-4">
@@ -170,7 +180,7 @@ export function WithdrawModal({ onClose, onWithdrawn }: { onClose: () => void; o
                 {!embeddedAddress ? '—' : balance === null ? 'Checking…' : `${parseFloat(formatUnits(balance, 6)).toFixed(4)} USDC`}
               </div>
             </FormField>
-            <FormField label={`Destination address (${NETWORK})`} hint={destError ?? undefined}>
+            <FormField label={`Destination address (${networkName})`} hint={destError ?? undefined}>
               <FormInput type="text" placeholder="0x…" className="font-mono" value={to} onChange={(e) => setTo(e.target.value)} />
               {externalAddresses.length > 0 && (
                 <div className="flex flex-wrap gap-2 mt-2">
@@ -213,11 +223,11 @@ export function WithdrawModal({ onClose, onWithdrawn }: { onClose: () => void; o
             <div className="text-sm text-ink-2 border border-line bg-surface-2 p-4 space-y-1.5">
               <div>
                 Send <span className="font-mono text-ink">{amountRaw !== null ? formatUnits(amountRaw, 6) : amount} USDC</span> on{' '}
-                <span className="text-ink">{NETWORK}</span> to
+                <span className="text-ink">{networkName}</span> to
               </div>
               <div className="font-mono text-xs text-ink break-all">{destError ? destination : getAddress(destination)}</div>
               <div className="text-xs text-ink-3 pt-1">
-                Only send to an address that accepts USDC on {NETWORK} — many exchange deposit addresses work on a
+                Only send to an address that accepts USDC on {networkName} — many exchange deposit addresses work on a
                 single network only. This can't be undone.
               </div>
             </div>
@@ -253,7 +263,7 @@ export function WithdrawModal({ onClose, onWithdrawn }: { onClose: () => void; o
         {phase === 'confirming' && (
           <div className="py-8 text-center space-y-3">
             <div className="flex justify-center"><Spinner size={22} /></div>
-            <div className="text-sm text-ink">Sent — waiting for it to land on {NETWORK}…</div>
+            <div className="text-sm text-ink">Sent — waiting for it to land on {networkName}…</div>
             <div className="text-xs text-ink-3">Usually a few seconds. It's already submitted, so closing this won't cancel it.</div>
           </div>
         )}
@@ -270,7 +280,7 @@ export function WithdrawModal({ onClose, onWithdrawn }: { onClose: () => void; o
 
         {phase === 'done' && (
           <div className="py-6 text-center space-y-3">
-            <div className="text-sm text-ok">Withdrawal confirmed on {NETWORK}.</div>
+            <div className="text-sm text-ok">Withdrawal confirmed on {networkName}.</div>
             {txHash && <div className="font-mono text-xs text-ink-3">tx {txHash.slice(0, 10)}…</div>}
             <div className="flex justify-center pt-2">
               <Button variant="primary" size="sm" label="Done" onClick={onClose} />

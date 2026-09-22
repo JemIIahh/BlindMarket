@@ -27,9 +27,16 @@ const OG_CHAIN_ID = Number(
 const BASE_CHAIN_ID = Number(
   import.meta.env.VITE_BASE_CHAIN_ID || (networkIsMainnet ? '8453' : '84532'),
 );
+// Arc (Circle's L1, USDC is the gas token) is testnet-only here, matching the
+// backend's own Arc default. Mainnet (5042) has no default RPC, so it must be
+// set explicitly via VITE_ARC_CHAIN_ID / VITE_ARC_RPC_URL.
+const ARC_CHAIN_ID = Number(
+  import.meta.env.VITE_ARC_CHAIN_ID || '5042002',
+);
 
 const isMainnet = OG_CHAIN_ID === 16661;
 const isBaseMainnet = BASE_CHAIN_ID === 8453;
+const isArcMainnet = ARC_CHAIN_ID === 5042;
 
 const ADDR = isMainnet ? CONTRACT_ADDRESSES.mainnet : CONTRACT_ADDRESSES.testnet;
 const BASE_ADDR = isBaseMainnet
@@ -58,18 +65,17 @@ export const BLIND_REPUTATION_ADDRESS =
 
 export { BASE_CHAIN_ID };
 
-// The Base leg's CCTP chainKey — used as the fixed source/dest of a CCTP
-// quote, since neither Phase A (Base -> elsewhere) nor Phase B (elsewhere ->
-// Base) ever varies this side of the route. The backend derives its CCTP tier
-// from its own BASE_CHAIN_ID the same way (backend/src/config.ts).
-export const BASE_CCTP_CHAIN_KEY = isBaseMainnet ? 'base' : 'base-sepolia';
+// The settlement leg's CCTP chainKey — the fixed source/dest of a CCTP quote.
+// Phase A burns FROM here, Phase B mints INTO here (the user's Arc wallet).
+// Arc testnet only: Arc mainnet is not a CCTP chain yet.
+export const SETTLEMENT_CCTP_CHAIN_KEY = 'arc-testnet';
 
-/** CCTP is usable only when the backend's CCTP Base leg is the Base chain
- *  this app settles on. A mismatched deployment (e.g. backend on Base mainnet,
- *  app on Base Sepolia) hides bridging entirely instead of listing the other
- *  network tier's chains — a real mainnet burn from a testnet app. */
+/** CCTP is usable only when the backend's CCTP settlement leg is the chain
+ *  this app settles on. A mismatched deployment hides bridging entirely
+ *  instead of bridging onto the wrong network — a real burn/mint on the
+ *  wrong tier. */
 export function isCctpUsable(cfg: { enabled: boolean; baseChainId?: number | null }): boolean {
-  return cfg.enabled && cfg.baseChainId === BASE_CHAIN_ID;
+  return cfg.enabled && cfg.baseChainId === ARC_CHAIN_ID;
 }
 
 export const BASE_RPC_URL =
@@ -91,6 +97,24 @@ export const BASE_USDC_ADDRESS =
   (isBaseMainnet
     ? '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
     : '0x036CbD53842c5426634e7929541eC2318f3dCF7e');
+
+// ── Arc Chain (settlement — USDC payouts, gas in USDC) ───────────────────────
+
+export { ARC_CHAIN_ID };
+
+export const ARC_RPC_URL =
+  import.meta.env.VITE_ARC_RPC_URL ||
+  (isArcMainnet ? 'https://rpc.mainnet.arc.io' : 'https://rpc.testnet.arc.io');
+
+// Arc settlement is not deployed yet, so the escrow has no generated fallback;
+// it is set per environment once Arc's escrow deploys.
+export const ARC_ESCROW_ADDRESS = unsetIfZero(import.meta.env.VITE_ARC_ESCROW_ADDRESS || '');
+
+// USDC on Arc is one balance with two views: 18-dec native (the gas coin) and
+// 6-dec ERC-20 at the precompile above any normal address. The escrow only ever
+// allowlists the ERC-20.
+export const ARC_USDC_ADDRESS =
+  import.meta.env.VITE_ARC_USDC_ADDRESS || '0x3600000000000000000000000000000000000000';
 
 // Privy signer ID for the backend's PRIVY_AUTHORIZATION_KEY (Privy-app-specific).
 export const PRIVY_RELAY_SIGNER_ID: string =
@@ -132,8 +156,17 @@ export const BASE_CHAIN_CONFIG = {
   blockExplorerUrls: [BASE_CHAIN_ID === 8453 ? 'https://basescan.org' : 'https://sepolia.basescan.org'],
 } as const;
 
-// Supported chains: 'base' for settlement, 'og' for agent infra
-export const SUPPORTED_CHAINS = ['base', 'og'] as const;
+export const ARC_CHAIN_CONFIG = {
+  chainId: `0x${ARC_CHAIN_ID.toString(16)}`,
+  chainName: isArcMainnet ? 'Arc' : 'Arc Testnet',
+  nativeCurrency: { name: 'USDC', symbol: 'USDC', decimals: 18 },
+  rpcUrls: [ARC_RPC_URL],
+  blockExplorerUrls: [isArcMainnet ? 'https://arcscan.app' : 'https://testnet.arcscan.app'],
+} as const;
+
+// Single user-facing wallet chain: Arc (settlement). Base is legacy read-only
+// and 0G is agent infra — neither is connectable from the wallet.
+export const SUPPORTED_CHAINS = ['arc'] as const;
 export type SupportedChain = typeof SUPPORTED_CHAINS[number];
 
 /**
@@ -153,13 +186,12 @@ export function getActiveChain(): SupportedChain {
       return saved as SupportedChain;
     }
   } catch {}
-  // Default to 'base' for settlement — users interact with Base
-  return (import.meta.env.VITE_ACTIVE_CHAIN as SupportedChain | undefined) ?? 'base';
+  // Default to 'arc' — the settlement chain.
+  return (import.meta.env.VITE_ACTIVE_CHAIN as SupportedChain | undefined) ?? 'arc';
 }
 
 export const CHAIN_CONFIGS = {
-  base: BASE_CHAIN_CONFIG,
-  og: OG_CHAIN_CONFIG,
+  arc: ARC_CHAIN_CONFIG,
 } as const;
 
 export function getChainConfig(chain: SupportedChain) {

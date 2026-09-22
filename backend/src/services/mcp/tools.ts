@@ -210,7 +210,7 @@ export function buildMcpServer(user: AuthUser): McpServer {
       let numericId: number;
       // A hash resolves to whichever chain holds it; a bare number is 0G-only
       // (ids collide across chains, so the number alone cannot name a Base task).
-      let chain: TaskChain = '0g';
+      let chain: TaskChain = 'base';
       if (/^0x[0-9a-fA-F]{64}$/.test(taskId)) {
         const resolved = await resolveCachedTaskByHash(taskId.toLowerCase());
         if (!resolved || !/^\d+$/.test(resolved.taskId)) {

@@ -1,43 +1,40 @@
 /**
  * Chain resolution for tasks.
  *
- * Task creation moved to Base while the finalize and refund paths still
- * resolved ids through the 0G index alone, so a Base-funded task 503'd
- * forever and could never be settled or refunded. These tests pin the
- * routing: each task resolves to the chain that actually holds it, and the
- * expensive 0G slow path is not paid for a task that lives on Base.
+ * Each task resolves to the chain that actually holds it: Base or Arc. The
+ * poster picks the hash, so the same hash can be escrowed on both chains;
+ * the recorded chain in the meta decides which index is consulted.
  *
  * Run: npx vitest run src/services/taskChain.test.ts
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const getCachedTaskIdByHash = vi.fn();
-const getTaskIdByHash = vi.fn();
 const getBaseTaskIdByHash = vi.fn();
+const getArcTaskIdByHash = vi.fn();
 const forceBaseTick = vi.fn(async () => {});
+const forceArcTick = vi.fn(async () => {});
 const getTaskOn = vi.fn();
 const getMeta = vi.fn();
-// baseEscrow just needs to be non-null for the Base branch to be considered;
-// the module reads it per call, so a test can switch Base off.
-const chainMod = vi.hoisted(() => ({ baseEscrow: {} as unknown }));
+// The escrows just need to be non-null for a branch to be considered; the
+// module reads them per call, so a test can switch one off.
+const chainMod = vi.hoisted(() => ({ baseEscrow: {} as unknown, arcEscrow: {} as unknown }));
 
 vi.mock('./chain.js', () => chainMod);
-// The 0G index is enabled by the registry's 0G escrow; a test can unset it.
-const OG_ESCROW = '0x037529B296a89E6Dd1abAF84D413cb2dD70C5be5';
-const ogEscrow = vi.hoisted(() => ({ current: '0x037529B296a89E6Dd1abAF84D413cb2dD70C5be5' as string | null }));
+// The Arc index is enabled by the registry's Arc escrow; a test can unset it.
+const arcEscrow = vi.hoisted(() => ({ current: '0x3600000000000000000000000000000000000000' as string | null }));
 vi.mock('./settlementChains.js', async (importOriginal) => {
   const mod = await importOriginal<typeof import('./settlementChains.js')>();
   return {
     ...mod,
-    settlementChainConfig: (key: '0g' | 'base') => {
+    settlementChainConfig: (key: 'arc' | 'base') => {
       const entry = mod.settlementChainConfig(key);
-      return key === '0g' ? { ...entry, escrowAddress: ogEscrow.current } : entry;
+      return key === 'arc' ? { ...entry, escrowAddress: arcEscrow.current } : entry;
     },
   };
 });
 vi.mock('./a2aStore.js', () => ({ getMeta }));
-vi.mock('./escrowEvents.js', () => ({ getCachedTaskIdByHash, getTaskIdByHash }));
 vi.mock('./baseEscrowEvents.js', () => ({ getBaseTaskIdByHash, forceBaseTick }));
+vi.mock('./arcEscrowEvents.js', () => ({ getArcTaskIdByHash, forceArcTick }));
 vi.mock('./escrow.js', () => ({ getTaskOn }));
 
 const { resolveTaskByHash, resolveCachedTaskByHash, resolveTaskChainById } = await import('./taskChain.js');
@@ -46,22 +43,23 @@ const HASH = '0xabc';
 
 beforeEach(() => {
   vi.clearAllMocks();
-  getCachedTaskIdByHash.mockResolvedValue(null);
-  getTaskIdByHash.mockResolvedValue(null);
   getBaseTaskIdByHash.mockResolvedValue(null);
+  getArcTaskIdByHash.mockResolvedValue(null);
   // Rows indexed before the chain was recorded: every chain is searched.
   getMeta.mockResolvedValue(null);
   chainMod.baseEscrow = {};
+  chainMod.arcEscrow = {};
+  arcEscrow.current = '0x3600000000000000000000000000000000000000';
 });
 
 describe('a task stays on the chain it was indexed on', () => {
   it('resolves a hash escrowed on both chains to the recorded one', async () => {
     getBaseTaskIdByHash.mockResolvedValue('42');
-    getCachedTaskIdByHash.mockResolvedValue('7');
+    getArcTaskIdByHash.mockResolvedValue('7');
 
-    getMeta.mockResolvedValue({ chain: '0g' });
-    expect(await resolveTaskByHash(HASH)).toEqual({ taskId: '7', chain: '0g' });
-    expect(await resolveCachedTaskByHash(HASH)).toEqual({ taskId: '7', chain: '0g' });
+    getMeta.mockResolvedValue({ chain: 'arc' });
+    expect(await resolveTaskByHash(HASH)).toEqual({ taskId: '7', chain: 'arc' });
+    expect(await resolveCachedTaskByHash(HASH)).toEqual({ taskId: '7', chain: 'arc' });
     expect(getBaseTaskIdByHash).not.toHaveBeenCalled();
 
     getMeta.mockResolvedValue({ chain: 'base' });
@@ -69,36 +67,23 @@ describe('a task stays on the chain it was indexed on', () => {
     expect(await resolveCachedTaskByHash(HASH)).toEqual({ taskId: '42', chain: 'base' });
   });
 
-  it('never falls back to 0G for a task recorded on Base, even when Base has not indexed it yet', async () => {
+  it('never falls back to Arc for a task recorded on Base, even when Base has not indexed it yet', async () => {
     getMeta.mockResolvedValue({ chain: 'base' });
-    getTaskIdByHash.mockResolvedValue('7');
+    getArcTaskIdByHash.mockResolvedValue('7');
 
     expect(await resolveTaskByHash(HASH)).toBeNull();
     expect(forceBaseTick).toHaveBeenCalled();
-    expect(getCachedTaskIdByHash).not.toHaveBeenCalled();
-    expect(getTaskIdByHash).not.toHaveBeenCalled();
+    expect(getArcTaskIdByHash).not.toHaveBeenCalled();
   });
 
   it('resolves nothing for a task recorded on Base when this backend has no Base escrow', async () => {
     chainMod.baseEscrow = null;
     getMeta.mockResolvedValue({ chain: 'base' });
-    getCachedTaskIdByHash.mockResolvedValue('7');
-    getTaskIdByHash.mockResolvedValue('7');
+    getArcTaskIdByHash.mockResolvedValue('7');
 
     expect(await resolveTaskByHash(HASH)).toBeNull();
     expect(getBaseTaskIdByHash).not.toHaveBeenCalled();
-    expect(getTaskIdByHash).not.toHaveBeenCalled();
-  });
-
-  it('searches nothing for a chain this code does not know', async () => {
-    getMeta.mockResolvedValue({ chain: 'arc' });
-    getBaseTaskIdByHash.mockResolvedValue('42');
-    getCachedTaskIdByHash.mockResolvedValue('7');
-
-    expect(await resolveTaskByHash(HASH)).toBeNull();
-    expect(await resolveCachedTaskByHash(HASH)).toBeNull();
-    expect(forceBaseTick).not.toHaveBeenCalled();
-    expect(getTaskIdByHash).not.toHaveBeenCalled();
+    expect(getArcTaskIdByHash).not.toHaveBeenCalled();
   });
 
   it('searches every chain when the meta cannot be read', async () => {
@@ -111,39 +96,25 @@ describe('a task stays on the chain it was indexed on', () => {
 describe('resolveTaskByHash', () => {
   it('resolves a Base-funded task to the Base chain', async () => {
     getBaseTaskIdByHash.mockResolvedValue('42');
-
     expect(await resolveTaskByHash(HASH)).toEqual({ taskId: '42', chain: 'base' });
   });
 
-  it('resolves a 0G-funded task to the 0G chain', async () => {
-    getCachedTaskIdByHash.mockResolvedValue('7');
-
-    expect(await resolveTaskByHash(HASH)).toEqual({ taskId: '7', chain: '0g' });
+  it('resolves an Arc-funded task to the Arc chain', async () => {
+    getArcTaskIdByHash.mockResolvedValue('7');
+    expect(await resolveTaskByHash(HASH)).toEqual({ taskId: '7', chain: 'arc' });
   });
 
-  it('never pays the 0G slow path for a task that is on Base', async () => {
-    // getTaskIdByHash retries for ~6s and can trigger an 850k-block backfill.
-    getBaseTaskIdByHash.mockResolvedValue('42');
-
-    await resolveTaskByHash(HASH);
-
-    expect(getTaskIdByHash).not.toHaveBeenCalled();
-  });
-
-  it('forces a Base tick before falling back to the 0G resolver', async () => {
-    // Nothing cached yet — a create tx that just confirmed.
+  it('forces a Base tick before falling back to the Arc resolver', async () => {
     getBaseTaskIdByHash.mockResolvedValueOnce(null).mockResolvedValueOnce('99');
-
     expect(await resolveTaskByHash(HASH)).toEqual({ taskId: '99', chain: 'base' });
     expect(forceBaseTick).toHaveBeenCalledOnce();
-    expect(getTaskIdByHash).not.toHaveBeenCalled();
+    expect(forceArcTick).not.toHaveBeenCalled();
   });
 
-  it('falls back to the 0G resolver when Base has nothing', async () => {
-    getTaskIdByHash.mockResolvedValue('5');
-
-    expect(await resolveTaskByHash(HASH)).toEqual({ taskId: '5', chain: '0g' });
-    expect(getTaskIdByHash).toHaveBeenCalledOnce();
+  it('falls back to the Arc resolver when Base has nothing', async () => {
+    getArcTaskIdByHash.mockResolvedValue('5');
+    expect(await resolveTaskByHash(HASH)).toEqual({ taskId: '5', chain: 'arc' });
+    expect(getArcTaskIdByHash).toHaveBeenCalledOnce();
   });
 
   it('returns null when neither chain knows the hash', async () => {
@@ -155,20 +126,18 @@ describe('resolveTaskChainById', () => {
   const OWNER = '0xX1';
   const OTHER = '0xotherowner';
 
-  // Reading an id that was never created returns a zero-filled struct rather
-  // than reverting, so the zero address stands in for "not on this chain".
   const ZERO = '0x0000000000000000000000000000000000000000';
   const on = (chain: string, agent: string) => ({ chain, agent });
 
-  function stubChains(baseAgent: string, ogAgent: string) {
+  function stubChains(baseAgent: string, arcAgent: string) {
     getTaskOn.mockImplementation(async (chain: string) =>
-      on(chain, chain === 'base' ? baseAgent : ogAgent),
+      on(chain, chain === 'base' ? baseAgent : arcAgent),
     );
   }
 
   it('picks the chain where the caller is the task agent', async () => {
     stubChains(ZERO, OWNER);
-    expect(await resolveTaskChainById(7, OWNER)).toBe('0g');
+    expect(await resolveTaskChainById(7, OWNER)).toBe('arc');
 
     stubChains(OWNER, ZERO);
     expect(await resolveTaskChainById(7, OWNER)).toBe('base');
@@ -180,8 +149,6 @@ describe('resolveTaskChainById', () => {
   });
 
   it('prefers Base when the same id is owned on both chains', async () => {
-    // Ids are per-contract counters, so a collision is possible; the newer
-    // task is the one on the settlement chain.
     stubChains(OWNER, OWNER);
     expect(await resolveTaskChainById(7, OWNER)).toBe('base');
   });
@@ -196,27 +163,21 @@ describe('resolveTaskChainById', () => {
       if (chain === 'base') throw new Error('RPC down');
       return on(chain, OWNER);
     });
-
-    expect(await resolveTaskChainById(7, OWNER)).toBe('0g');
+    expect(await resolveTaskChainById(7, OWNER)).toBe('arc');
   });
 });
 
-describe('the 0G index is only consulted where this stack has a 0G escrow', () => {
-  it('skips the 0G slow path for an unindexed hash on a Base-only stack', async () => {
-    ogEscrow.current = null;
-    try {
-      const resolved = await resolveTaskByHash(HASH);
-      expect(resolved).toBeNull();
-      expect(forceBaseTick).toHaveBeenCalled();
-      expect(getTaskIdByHash).not.toHaveBeenCalled();
-      expect(getCachedTaskIdByHash).not.toHaveBeenCalled();
-    } finally {
-      ogEscrow.current = OG_ESCROW;
-    }
+describe('the Arc index is only consulted where this stack has an Arc escrow', () => {
+  it('skips the Arc resolver for an unindexed hash on a Base-only stack', async () => {
+    arcEscrow.current = null;
+    const resolved = await resolveTaskByHash(HASH);
+    expect(resolved).toBeNull();
+    expect(forceBaseTick).toHaveBeenCalled();
+    expect(getArcTaskIdByHash).not.toHaveBeenCalled();
   });
 
   it('consults it where the escrow is configured', async () => {
-    getTaskIdByHash.mockResolvedValueOnce('7');
-    expect(await resolveTaskByHash(HASH)).toEqual({ taskId: '7', chain: '0g' });
+    getArcTaskIdByHash.mockResolvedValueOnce('7');
+    expect(await resolveTaskByHash(HASH)).toEqual({ taskId: '7', chain: 'arc' });
   });
 });

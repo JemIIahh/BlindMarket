@@ -21,17 +21,17 @@ export interface SettlementChainRuntime {
 // Getters, so each chain.js export is read when it is used. Tests replace
 // chain.js with mocks that define only the exports the code under test reads.
 const RUNTIME: { readonly [K in SettlementChainKey]: SettlementChainRuntime } = {
-  '0g': {
-    get provider() { return chain.provider; },
-    get escrow() { return chain.escrow; },
-    get escrowAsMarketplace() { return chain.escrowAsMarketplace; },
-    get marketplaceSigner() { return chain.marketplaceSigner; },
-  },
   base: {
     get provider() { return chain.baseProvider; },
     get escrow() { return chain.baseEscrow; },
     get escrowAsMarketplace() { return chain.baseEscrowAsMarketplace; },
     get marketplaceSigner() { return chain.baseMarketplaceSigner; },
+  },
+  arc: {
+    get provider() { return chain.arcProvider; },
+    get escrow() { return chain.arcEscrow; },
+    get escrowAsMarketplace() { return chain.arcEscrowAsMarketplace; },
+    get marketplaceSigner() { return chain.arcMarketplaceSigner; },
   },
 };
 

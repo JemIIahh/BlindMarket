@@ -191,16 +191,8 @@ describe('startAgent forks workers with an allowlisted env, not the full process
     const env = forkMock.mock.calls[0][2].env as Record<string, string>;
     const table = JSON.parse(env.SETTLEMENT_CHAINS_JSON) as Array<Record<string, unknown>>;
 
-    // The test env has both escrows, and posts on Base by the default rule.
-    expect(table.map((c) => c.key)).toEqual(['0g', 'base']);
-    expect(table.find((c) => c.key === '0g')).toMatchObject({
-      chainId: expect.any(Number),
-      token: { kind: 'native', address: '0x0000000000000000000000000000000000000000', symbol: '0G', decimals: 18 },
-      gasSymbol: '0G',
-      nativeIsSettlementToken: false,
-      aa: false,
-      posting: false,
-    });
+    // Base has an escrow; Arc is not deployed yet, so it is absent.
+    expect(table.map((c) => c.key)).toEqual(['base']);
     expect(table.find((c) => c.key === 'base')).toMatchObject({
       token: { kind: 'erc20', symbol: 'USDC', decimals: 6 },
       gasSymbol: 'ETH',
@@ -216,7 +208,7 @@ describe('startAgent forks workers with an allowlisted env, not the full process
       expect(JSON.stringify(entry)).not.toMatch(/PRIVATE_KEY|secret/i);
     }
     // The legacy vars stay for one more release, and still agree.
-    expect(env.OG_CHAIN_ID).toBe(String(table.find((c) => c.key === '0g')!.chainId));
+    expect(env.OG_CHAIN_ID).toBeTruthy();
     expect(env.AGENT_BASE_ESCROW_ADDRESS).toBe(table.find((c) => c.key === 'base')!.escrow);
   });
 

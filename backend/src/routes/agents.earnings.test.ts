@@ -62,12 +62,6 @@ describe('GET /agents/:id earnings', () => {
     });
   });
 
-  it('uses the 0G total for totalEarned on a deployment without a Base escrow', async () => {
-    cfg.baseEscrowAddress = '';
-    const res = await request(app).get('/api/v1/agents/agent-1');
-    expect(res.body.data.totalEarned).toBe('3.000000');
-  });
-
   it('reports zeros for an agent that has never registered as an executor', async () => {
     executor.current = undefined;
     const res = await request(app).get('/api/v1/agents/agent-1');

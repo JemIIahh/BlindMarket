@@ -98,7 +98,7 @@ function onChain(worker: string, extra: Record<string, unknown> = {}) {
   });
 }
 
-const parkedOn = (chain: 'base' | '0g') => hashes.get(chain === 'base' ? 'base:dispute-parked' : 'a2a:dispute-parked');
+const parkedOn = (chain: 'base' | 'arc') => hashes.get(chain === 'base' ? 'base:dispute-parked' : 'arc:dispute-parked');
 
 beforeEach(async () => {
   vi.clearAllMocks();
@@ -132,15 +132,15 @@ describe('a ruling for the worker', () => {
   });
 
   it('credits a worker that is not a smart account as itself, on 0G', async () => {
-    a2aStore.getMeta.mockResolvedValue({ taskId: HASH, chain: '0g' });
+    a2aStore.getMeta.mockResolvedValue({ taskId: HASH, chain: 'arc' });
     onChain(WORKER_EOA, { token: NATIVE, amount: 10n ** 18n });
 
-    await listener.handleDisputeResolved('0g', 7n, true);
+    await listener.handleDisputeResolved('arc', 7n, true);
 
-    expect(getTaskOn).toHaveBeenCalledWith('0g', 7);
+    expect(getTaskOn).toHaveBeenCalledWith('arc', 7);
     const [hash, executor, , amount, settlement] = payout.recordWorkerPayout.mock.calls[0];
     expect({ hash, executor, amount, settlement }).toEqual({
-      hash: HASH, executor: WORKER_EOA, amount: 10n ** 18n, settlement: { chain: '0g', token: NATIVE },
+      hash: HASH, executor: WORKER_EOA, amount: 10n ** 18n, settlement: { chain: 'arc', token: NATIVE },
     });
   });
 
@@ -199,14 +199,14 @@ describe('an event seen again', () => {
     a2aStore.getMeta.mockResolvedValue(undefined);
     onChain(WORKER_EOA);
     await listener.handleDisputeResolved('base', 7n, true);
-    await listener.handleDisputeResolved('0g', 7n, true);
+    await listener.handleDisputeResolved('arc', 7n, true);
     expect(getTaskOn).toHaveBeenCalledTimes(2);
   });
 });
 
 describe('events that change nothing off-chain', () => {
   it('ignores a ruling on the other chain\'s copy of the hash', async () => {
-    a2aStore.getMeta.mockResolvedValue({ taskId: HASH, chain: '0g' });
+    a2aStore.getMeta.mockResolvedValue({ taskId: HASH, chain: 'arc' });
     onChain(WORKER_EOA);
 
     await listener.handleDisputeResolved('base', 7n, true);
@@ -362,8 +362,8 @@ describe('an event that keeps failing', () => {
 });
 
 describe('retrying parked rulings', () => {
-  function park(chain: 'base' | '0g', id: string, workerFavored = true, retries = 0) {
-    const key = chain === 'base' ? 'base:dispute-parked' : 'a2a:dispute-parked';
+  function park(chain: 'base' | 'arc', id: string, workerFavored = true, retries = 0) {
+    const key = chain === 'base' ? 'base:dispute-parked' : 'arc:dispute-parked';
     if (!hashes.has(key)) hashes.set(key, new Map());
     hashes.get(key)!.set(id, JSON.stringify({ workerFavored, attempts: 10, firstFailedAt: 'x', parkedAt: 'y', error: 'old', retries }));
   }
@@ -394,11 +394,11 @@ describe('retrying parked rulings', () => {
     payout.recordWorkerPayout.mockRejectedValue(new Error('still down'));
     park('base', '7');
     a2aStore.getMeta.mockResolvedValue(undefined);
-    park('0g', '7');
+    park('arc', '7');
 
     await listener.retryParkedDisputes('base', 0);
     await listener.retryParkedDisputes('base', listener.PARKED_RETRY_MS - 1);
-    await listener.retryParkedDisputes('0g', 1);
+    await listener.retryParkedDisputes('arc', 1);
     expect(getTaskOn).toHaveBeenCalledTimes(2);
 
     await listener.retryParkedDisputes('base', listener.PARKED_RETRY_MS);

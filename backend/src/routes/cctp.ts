@@ -21,7 +21,7 @@ import {
   isCctpConfigured,
   isSupportedCctpChain,
   getCctpChain,
-  getBaseCctpChain,
+  getSettlementCctpChain,
   supportedCctpChains,
 } from '../services/cctpChains.js';
 import {
@@ -54,12 +54,12 @@ cctpRouter.get('/config', (_req, res) => {
     success: true,
     data: {
       enabled: config.cctp.enabled && isCctpConfigured(),
-      // The Base chain this backend's CCTP mints into / burns from. The
-      // frontend hides CCTP unless this equals its own BASE_CHAIN_ID — a
+      // The settlement chain this backend's CCTP mints into / burns from. The
+      // frontend hides CCTP unless this equals its own settlement chain id — a
       // mismatched deployment must fail closed, not offer mainnet chains to a
       // testnet app (or the reverse).
       network: config.cctp.mainnet ? 'mainnet' : 'testnet',
-      baseChainId: getBaseCctpChain()?.chainId ?? null,
+      baseChainId: getSettlementCctpChain()?.chainId ?? null,
       chains: supportedCctpChains().map((c) => ({
         chainKey: c.chainKey,
         chainId: c.chainId,
@@ -178,13 +178,13 @@ cctpRouter.post('/deposit-intent', requireAuth, async (req: AuthRequest, res) =>
       return;
     }
     const source = getCctpChain(sourceChain);
-    const dest = getBaseCctpChain();
+    const dest = getSettlementCctpChain();
     if (!source || !dest) {
       res.status(400).json({ success: false, error: { code: 'CCTP_DISABLED', message: 'CCTP chain configuration is incomplete' } });
       return;
     }
     if (source.chainKey === dest.chainKey) {
-      res.status(400).json({ success: false, error: { code: 'CCTP_SAME_CHAIN', message: 'sourceChain must not be the Base leg' } });
+      res.status(400).json({ success: false, error: { code: 'CCTP_SAME_CHAIN', message: 'sourceChain must not be the settlement leg' } });
       return;
     }
 

@@ -1,7 +1,7 @@
 import { useWallet } from '../context/WalletContext';
 import { useAuth } from '../context/AuthContext';
 import { useChain } from '../context/ChainContext';
-import { OG_CHAIN_ID, BASE_CHAIN_ID, getChainConfig } from '../config/constants';
+import { ARC_CHAIN_ID, getChainConfig } from '../config/constants';
 import { SupportedChain } from '../config/constants';
 
 /**
@@ -16,7 +16,7 @@ export function ChainBanner() {
   const { activeChain } = useChain();
   const config = getChainConfig(activeChain as SupportedChain);
   const netName = config.chainName;
-  const targetChainId = activeChain === 'base' ? BASE_CHAIN_ID : OG_CHAIN_ID;
+  const targetChainId = ARC_CHAIN_ID;
 
   if (!isAuthenticated) return null;
   if (chainId == null) return null;

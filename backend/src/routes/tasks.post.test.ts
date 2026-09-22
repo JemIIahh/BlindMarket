@@ -6,16 +6,15 @@ import { readFileSync } from 'node:fs';
 
 /**
  * POST /api/v1/tasks builds the createTask tx on the posting chain: Base when
- * it has an escrow and 0G otherwise, or the chain POSTING_CHAIN names. The
- * token must be that chain's settlement token; anything else would revert
- * on-chain or be refused by /a2a/tasks/index after the poster paid gas.
+ * it has an escrow, Arc otherwise. The token must be that chain's settlement
+ * token; anything else would revert on-chain or be refused by
+ * /a2a/tasks/index after the poster paid gas.
  */
 
-const { POSTER, USDC, BASE_ESCROW, OG_ESCROW, cfg, chain } = vi.hoisted(() => ({
+const { POSTER, USDC, BASE_ESCROW, cfg, chain } = vi.hoisted(() => ({
   POSTER: '0x1111111111111111111111111111111111111111',
   USDC: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
   BASE_ESCROW: '0xbbbb000000000000000000000000000000000001',
-  OG_ESCROW: '0x0a0a000000000000000000000000000000000002',
   cfg: {} as Record<string, unknown>,
   chain: {} as Record<string, unknown>,
 }));
@@ -82,18 +81,18 @@ function methodOf(tx: { data: string; value?: string }) {
 beforeEach(() => {
   vi.clearAllMocks();
   Object.assign(cfg, {
-    postingChain: '',
-    ogChainId: 16602,
-    blindEscrowAddress: OG_ESCROW,
     baseChainId: 84532,
     baseEscrowAddress: BASE_ESCROW,
     baseUsdcAddress: USDC,
+    arcEscrowAddress: '',
   });
   Object.assign(chain, {
     provider: {},
-    escrow: new ethers.Contract(OG_ESCROW, iface),
+    escrow: null,
     baseProvider: {},
     baseEscrow: new ethers.Contract(BASE_ESCROW, iface),
+    arcProvider: {},
+    arcEscrow: null,
     getTokenDecimals: vi.fn(async (token: string) => (token === NATIVE ? 18 : 6)),
     buildUnsignedTx: vi.fn(async (contract: ethers.Contract, method: string, args: unknown[], from: string, value?: bigint) => ({
       to: await contract.getAddress(),
@@ -122,7 +121,6 @@ describe('POST /tasks on a deployment with a Base escrow', () => {
 
   it('accepts the USDC address in any case, and builds with the configured spelling', async () => {
     expect((await post({ token: USDC.toLowerCase() })).status).toBe(200);
-    // Mixed case with a bad checksum: ethers would refuse to encode it.
     const badChecksum = USDC.replace('036Cb', '036cb');
     expect(badChecksum).not.toBe(USDC);
     const res = await post({ token: badChecksum });
@@ -147,22 +145,13 @@ describe('POST /tasks on a deployment with a Base escrow', () => {
     expect(methodOf(res.body.data.unsignedTx)).toBe('createTaskWithVerifier');
   });
 
-  it('refuses native 0G with 400, before building or booking anything', async () => {
+  it('refuses native value with 400, before building or booking anything', async () => {
     const res = await post({ token: NATIVE });
     expect(res.status).toBe(400);
     expect(res.body.error.code).toBe('TOKEN_NOT_SETTLEMENT');
     expect(res.body.error.message).toContain('USDC on Base');
     expect(chain.buildUnsignedTx).not.toHaveBeenCalled();
     expect(accountingService.recordTransaction).not.toHaveBeenCalled();
-  });
-
-  it('posts on 0G when POSTING_CHAIN says so', async () => {
-    cfg.postingChain = '0g';
-    const res = await post({ token: NATIVE });
-    expect(res.status).toBe(200);
-    expect(res.body.data.unsignedTx.to).toBe(OG_ESCROW);
-    expect(res.body.data).toMatchObject({ chain: '0g', chainId: 16602 });
-    expect((await post({ token: USDC })).body.error.code).toBe('TOKEN_NOT_SETTLEMENT');
   });
 });
 
@@ -185,41 +174,13 @@ describe('POST /tasks claims the task hash for its poster', () => {
   });
 });
 
-describe('POST /tasks on a deployment without a Base escrow', () => {
+describe('POST /tasks with no settlement chain configured', () => {
   beforeEach(() => {
     cfg.baseEscrowAddress = '';
     chain.baseEscrow = null;
   });
 
-  it('builds createTask against the 0G escrow, sending the amount as value', async () => {
-    const res = await post({ token: NATIVE });
-    expect(res.status).toBe(200);
-    const { unsignedTx } = res.body.data;
-    expect(unsignedTx.to).toBe(OG_ESCROW);
-    expect(unsignedTx.value).toBe('5000000');
-    expect(methodOf(unsignedTx)).toBe('createTask');
-    expect(res.body.data).toMatchObject({ chain: '0g', chainId: 16602 });
-    expect(chain.getTokenDecimals).toHaveBeenCalledWith(NATIVE, '0g');
-  });
-
-  it('refuses USDC with 400', async () => {
-    const res = await post({ token: USDC });
-    expect(res.status).toBe(400);
-    expect(res.body.error.code).toBe('TOKEN_NOT_SETTLEMENT');
-    expect(res.body.error.message).toContain('0G on 0G');
-  });
-
-  it('refuses with 503 when POSTING_CHAIN names Base, which has no escrow here', async () => {
-    cfg.postingChain = 'base';
-    const res = await post({ token: USDC });
-    expect(res.status).toBe(503);
-    expect(res.body.error.code).toBe('CHAIN_NOT_CONFIGURED');
-    expect(chain.buildUnsignedTx).not.toHaveBeenCalled();
-  });
-
   it('refuses with 503 rather than build a tx to the zero address', async () => {
-    cfg.blindEscrowAddress = NATIVE;
-    chain.escrow = new ethers.Contract(NATIVE, iface);
     const res = await post({ token: NATIVE });
     expect(res.status).toBe(503);
     expect(res.body.error.code).toBe('CHAIN_NOT_CONFIGURED');

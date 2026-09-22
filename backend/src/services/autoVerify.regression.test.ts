@@ -223,7 +223,11 @@ describe('autoVerify — regression table', () => {
         expected_answer: 'forty two',
         regex_pattern: 'zzz$',
       });
-      expect(performance.now() - started).toBeLessThan(1000);
+      // 2 MB of worker-controlled output must verify in well under a second
+      // alone; the budget here is generous (3s) because CI and parallel test
+      // workers contend for CPU, but it still catches the O(n²) blowup this
+      // guard exists for (that would be 10x+ slower).
+      expect(performance.now() - started).toBeLessThan(3000);
       expect(result.passed).toBe(false);
     },
   );

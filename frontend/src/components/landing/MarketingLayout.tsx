@@ -34,7 +34,7 @@ export function useLaunchApp(section: string) {
 
   return () => {
     track('cta_click', { label: 'launch_app', target: '/a2a', section });
-    setActiveChain('og');
+    setActiveChain('arc');
     navigate('/a2a');
   };
 }

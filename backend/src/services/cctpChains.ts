@@ -14,7 +14,8 @@ export type CctpChainKey =
   | 'base' | 'base-sepolia'
   | 'ethereum' | 'ethereum-sepolia'
   | 'arbitrum' | 'arbitrum-sepolia'
-  | 'optimism' | 'optimism-sepolia'
+  | 'optimism-sepolia'
+  | 'polygon' | 'polygon-amoy'
   | 'arc-testnet';
 
 export interface CctpChainConfig {
@@ -82,6 +83,17 @@ function getArcProvider(): ethers.JsonRpcProvider {
     });
   }
   return arcProvider;
+}
+
+let polygonProvider: ethers.JsonRpcProvider | null = null;
+function getPolygonProvider(): ethers.JsonRpcProvider {
+  if (!polygonProvider) {
+    polygonProvider = new ethers.JsonRpcProvider(config.cctp.polygonRpcUrl, config.cctp.polygonChainId, {
+      batchMaxCount: 1,
+      staticNetwork: true,
+    });
+  }
+  return polygonProvider;
 }
 
 /**
@@ -170,19 +182,6 @@ function buildChains(): Record<CctpChainKey, CctpChainConfig> {
       supportsFastTransfer: true,
       usdcGasReserveRaw: 0n,
     },
-    optimism: {
-      chainKey: 'optimism',
-      chainId: 10,
-      domain: 2,
-      rpc: getOptimismProvider(),
-      tokenMessengerAddress,
-      messageTransmitterAddress,
-      usdcAddress: config.cctp.optimismUsdcAddress,
-      isTestnet: false,
-      label: 'Optimism',
-      supportsFastTransfer: true,
-      usdcGasReserveRaw: 0n,
-    },
     'optimism-sepolia': {
       chainKey: 'optimism-sepolia',
       chainId: 11155420,
@@ -194,6 +193,36 @@ function buildChains(): Record<CctpChainKey, CctpChainConfig> {
       isTestnet: true,
       label: 'Optimism Sepolia',
       supportsFastTransfer: true,
+      usdcGasReserveRaw: 0n,
+    },
+    // Polygon PoS (domain 7) — CCTP works on it but Circle offers no Fast
+    // Transfer / Forwarding Service there, so a burn to/from it does not
+    // auto-complete the destination mint (operator self-relays). Standard
+    // Transfer only, hence supportsFastTransfer: false.
+    polygon: {
+      chainKey: 'polygon',
+      chainId: 137,
+      domain: 7,
+      rpc: getPolygonProvider(),
+      tokenMessengerAddress,
+      messageTransmitterAddress,
+      usdcAddress: config.cctp.polygonUsdcAddress,
+      isTestnet: false,
+      label: 'Polygon PoS',
+      supportsFastTransfer: false,
+      usdcGasReserveRaw: 0n,
+    },
+    'polygon-amoy': {
+      chainKey: 'polygon-amoy',
+      chainId: 80002,
+      domain: 7,
+      rpc: getPolygonProvider(),
+      tokenMessengerAddress,
+      messageTransmitterAddress,
+      usdcAddress: config.cctp.polygonUsdcAddress,
+      isTestnet: true,
+      label: 'Polygon Amoy',
+      supportsFastTransfer: false,
       usdcGasReserveRaw: 0n,
     },
     // Testnet only — there is no Arc mainnet entry until its CCTP addresses
@@ -252,8 +281,9 @@ export function isSupportedCctpChain(chainKey: string): chainKey is CctpChainKey
   return supportedCctpChains().some((c) => c.chainKey === chainKey);
 }
 
-/** Base leg for the running network tier — Phase A's source chain and the
- *  chain Phase B ultimately mints into (the user's Base Privy wallet). */
-export function getBaseCctpChain(): CctpChainConfig | null {
-  return getCctpChain(MAINNET_TIER ? 'base' : 'base-sepolia');
+/** The settlement leg of the bridge — the chain Phase A burns from and the
+ *  chain Phase B mints into (the user's Arc wallet). Arc testnet only: Arc
+ *  mainnet has no CCTP entry yet (see config.ts). */
+export function getSettlementCctpChain(): CctpChainConfig | null {
+  return getCctpChain('arc-testnet');
 }

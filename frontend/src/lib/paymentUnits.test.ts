@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { defaultSettlement, resetSettlement, setSettlement } from '../config/settlement';
+import { resetSettlement } from '../config/settlement';
 import { formatEarnings, formatPaymentAmount, parsePaymentAmount, sumEarnings } from './paymentUnits';
 
 afterEach(() => resetSettlement());
@@ -18,11 +18,6 @@ describe('sumEarnings', () => {
       totalEarnedUsdc: '6',
       totalEarnedNative: '0',
     });
-    setSettlement({ ...defaultSettlement(), postingChain: '0g' });
-    expect(sumEarnings([{ totalEarned: '5' }, { totalEarnedUsdc: '1', totalEarnedNative: '0' }])).toEqual({
-      totalEarnedUsdc: '1',
-      totalEarnedNative: '5',
-    });
   });
 
   it('stays legacy-shaped when every row is legacy', () => {
@@ -40,7 +35,5 @@ describe('formatEarnings and amounts follow the payment unit', () => {
   it('parses and formats in the posting chain’s decimals', () => {
     expect(parsePaymentAmount('1')).toBe(1_000_000n);
     expect(formatPaymentAmount('1500000')).toBe('1.5');
-    setSettlement({ ...defaultSettlement(), postingChain: '0g' });
-    expect(parsePaymentAmount('1')).toBe(10n ** 18n);
   });
 });

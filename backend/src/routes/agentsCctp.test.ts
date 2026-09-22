@@ -133,7 +133,7 @@ vi.mock('../services/cctpChains.js', () => ({
   isCctpConfigured: vi.fn(() => true),
   isSupportedCctpChain: vi.fn((k: string) => k === 'ethereum-sepolia' || k === 'arc-testnet'),
   getCctpChain: vi.fn((k: string) => (k === 'ethereum-sepolia' ? FAKE_DEST : k === 'arc-testnet' ? FAKE_ARC : k === 'base-sepolia' ? FAKE_SOURCE : null)),
-  getBaseCctpChain: vi.fn(() => FAKE_SOURCE),
+  getSettlementCctpChain: vi.fn(() => FAKE_SOURCE),
   supportedCctpChains: vi.fn(() => [FAKE_SOURCE, FAKE_DEST, FAKE_ARC]),
 }));
 

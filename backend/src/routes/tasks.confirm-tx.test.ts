@@ -41,13 +41,16 @@ const parseLog = vi.fn();
 
 vi.mock('../services/chain.js', () => ({
   getTokenDecimals: vi.fn(async () => 18),
-  provider: { getTransactionReceipt: (...a: unknown[]) => getReceipt(...a) },
-  baseProvider: null,
-  escrow: {
+  arcProvider: { getTransactionReceipt: (...a: unknown[]) => getReceipt(...a) },
+  baseProvider: { getTransactionReceipt: (...a: unknown[]) => getReceipt(...a) },
+  arcEscrow: {
     getAddress: async () => ESCROW,
     interface: { parseLog: (...a: unknown[]) => parseLog(...a) },
   },
-  baseEscrow: null,
+  baseEscrow: {
+    getAddress: async () => ESCROW,
+    interface: { parseLog: (...a: unknown[]) => parseLog(...a) },
+  },
 }));
 
 vi.mock('../services/accountingService.js', () => ({
@@ -86,11 +89,11 @@ const as = (addr: string) => ({ 'x-test-address': addr });
 
 beforeEach(() => {
   vi.clearAllMocks();
-  resolveTaskChainById.mockResolvedValue('0g');
+  resolveTaskChainById.mockResolvedValue('arc');
   getState.mockResolvedValue(undefined);
   // The A2A task under TASK_HASH is AGENT's, backed by 0G escrow task 7.
   getMeta.mockResolvedValue({ taskId: TASK_HASH, posterAddress: AGENT.toUpperCase().replace('0X', '0x') });
-  resolveCachedTaskByHash.mockResolvedValue({ taskId: '7', chain: '0g' });
+  resolveCachedTaskByHash.mockResolvedValue({ taskId: '7', chain: 'arc' });
   tryCloseOnChainTerminal.mockResolvedValue({ ok: true, previousStatus: 'open' });
 });
 
@@ -225,7 +228,7 @@ describe('H-04/H-07: a confirmed reclaim closes the A2A state', () => {
 
     it('holds even after the attacker’s TaskCreated overwrote the last-writer-wins hash index', async () => {
       getState.mockResolvedValue({ taskId: TASK_HASH, status: 'submitted' });
-      resolveCachedTaskByHash.mockResolvedValue({ taskId: '9', chain: '0g' });
+      resolveCachedTaskByHash.mockResolvedValue({ taskId: '9', chain: 'arc' });
       expect((await attackerConfirm()).status).toBe(200);
       expect(tryCloseOnChainTerminal).not.toHaveBeenCalled();
     });

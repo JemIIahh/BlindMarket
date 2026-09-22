@@ -33,8 +33,8 @@ afterEach(() => {
   process.env = { ...ORIGINAL };
 });
 
-const TESTNET_KEYS = ['arbitrum-sepolia', 'arc-testnet', 'base-sepolia', 'ethereum-sepolia', 'optimism-sepolia'];
-const MAINNET_KEYS = ['arbitrum', 'base', 'ethereum', 'optimism'];
+const TESTNET_KEYS = ['arbitrum-sepolia', 'arc-testnet', 'base-sepolia', 'ethereum-sepolia', 'optimism-sepolia', 'polygon-amoy'];
+const MAINNET_KEYS = ['arbitrum', 'base', 'ethereum', 'polygon'];
 const keys = (list: { chainKey: string }[]) => list.map((c) => c.chainKey).sort();
 
 describe('CCTP network tier follows the Base chain, not NODE_ENV', () => {
@@ -42,7 +42,7 @@ describe('CCTP network tier follows the Base chain, not NODE_ENV', () => {
     const { config, chains } = await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '84532' });
     expect(config.cctp.mainnet).toBe(false);
     expect(keys(chains.supportedCctpChains())).toEqual(TESTNET_KEYS);
-    expect(chains.getBaseCctpChain()?.chainKey).toBe('base-sepolia');
+    expect(chains.getSettlementCctpChain()?.chainKey).toBe('arc-testnet');
     expect(config.cctp.tokenMessengerAddress).toBe('0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA');
     expect(config.cctp.irisApiBase).toBe('https://iris-api-sandbox.circle.com');
     expect(config.cctp.ethereumChainId).toBe(11155111);
@@ -59,7 +59,7 @@ describe('CCTP network tier follows the Base chain, not NODE_ENV', () => {
     const { config, chains } = await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '8453' });
     expect(config.cctp.mainnet).toBe(true);
     expect(keys(chains.supportedCctpChains())).toEqual(MAINNET_KEYS);
-    expect(chains.getBaseCctpChain()?.chainKey).toBe('base');
+    expect(chains.getSettlementCctpChain()?.chainKey).toBe('arc-testnet');
     expect(config.cctp.tokenMessengerAddress).toBe('0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d');
     expect(config.cctp.irisApiBase).toBe('https://iris-api.circle.com');
   });
@@ -99,7 +99,7 @@ describe('without a database, CCTP is unavailable instead of failing mid-transfe
     const { chains } = await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '84532', DATABASE_URL: '' });
     expect(chains.isCctpConfigured()).toBe(false);
     expect(chains.supportedCctpChains()).toEqual([]);
-    expect(chains.getBaseCctpChain()).toBeNull();
+    expect(chains.getSettlementCctpChain()).toBeNull();
   });
 
   it('createTransfer fails with a clear reason instead of returning undefined', async () => {

@@ -65,20 +65,19 @@ vi.mock('../services/socket.js', () => ({
 
 vi.mock('../services/chain.js', () => ({
   provider: { getTransactionReceipt: vi.fn() },
-  baseProvider: null,
-  baseEscrow: null,
-  escrow: { interface: {}, getAddress: vi.fn() },
+  baseProvider: { getTransactionReceipt: vi.fn() },
+  baseEscrow: { interface: {}, getAddress: vi.fn() },
 }));
 
 vi.mock('../services/escrow.js', () => ({ getTaskOn: vi.fn(), getTask: vi.fn() }));
 
-vi.mock('../services/escrowEvents.js', () => ({
-  getCachedTaskIdByHash: vi.fn(() => Promise.resolve('7')),
-  getTaskIdByHash: vi.fn(() => Promise.resolve('7')),
+vi.mock('../services/arcEscrowEvents.js', () => ({
+  getArcTaskIdByHash: vi.fn(() => Promise.resolve('7')),
+  forceArcTick: vi.fn(() => Promise.resolve()),
 }));
 
 vi.mock('../services/baseEscrowEvents.js', () => ({
-  getBaseTaskIdByHash: vi.fn(() => Promise.resolve(null)),
+  getBaseTaskIdByHash: vi.fn(() => Promise.resolve('7')),
   forceBaseTick: vi.fn(() => Promise.resolve()),
 }));
 
@@ -107,7 +106,7 @@ import { globalErrorHandler } from '../middleware/errorHandler.js';
 import * as a2aStore from '../services/a2aStore.js';
 import * as agentStore from '../services/agentStore.js';
 import * as escrowService from '../services/escrow.js';
-import { provider } from '../services/chain.js';
+import { baseProvider } from '../services/chain.js';
 import { settleAssignment, settleVerification } from '../services/a2aSettlement.js';
 import { recordWorkerDispute } from '../services/workerPayout.js';
 import { emitTaskAvailable, hasAgentSocket } from '../services/socket.js';
@@ -149,7 +148,7 @@ describe('POST /tasks/index — unsettleable verification modes', () => {
     const res = await index({ verificationMode: 'oracle' });
     expect(res.status).toBe(400);
     expect(res.body.error.code).toBe('VERIFICATION_MODE_UNSUPPORTED');
-    expect(provider.getTransactionReceipt).not.toHaveBeenCalled();
+    expect(baseProvider.getTransactionReceipt).not.toHaveBeenCalled();
   });
 
   it("'auto' with no criteria → 400 AUTO_CRITERIA_REQUIRED naming the checks", async () => {
@@ -169,10 +168,10 @@ describe('POST /tasks/index — unsettleable verification modes', () => {
   });
 
   it("'auto' with a real check passes the gate", async () => {
-    vi.mocked(provider.getTransactionReceipt).mockRejectedValue(new Error('past the gate'));
+    vi.mocked(baseProvider.getTransactionReceipt).mockRejectedValue(new Error('past the gate'));
     const res = await index({ verificationMode: 'auto', verificationCriteria: { min_length: 20 } });
     expect(res.body.error?.code).not.toBe('AUTO_CRITERIA_REQUIRED');
-    expect(provider.getTransactionReceipt).toHaveBeenCalled();
+    expect(baseProvider.getTransactionReceipt).toHaveBeenCalled();
   });
 });
 

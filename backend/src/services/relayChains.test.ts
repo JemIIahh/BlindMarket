@@ -45,9 +45,9 @@ describe('relayChainTable', () => {
   });
 
   it('adds a registry chain the relay serves under its own key, after the fixed names', () => {
-    relayOverride['0g'] = 'eip155:16661';
-    expect([...relayChainTable().keys()]).toEqual(['base', 'base-mainnet', 'base-sepolia', '0g']);
-    expect(relayChainTable().get('0g')).toBe('eip155:16661');
+    relayOverride['arc'] = 'eip155:16661';
+    expect([...relayChainTable().keys()]).toEqual(['base', 'base-mainnet', 'base-sepolia', 'arc']);
+    expect(relayChainTable().get('arc')).toBe('eip155:16661');
   });
 
   it('has no entry for inherited object keys', () => {
@@ -64,14 +64,14 @@ describe('relayChainName', () => {
   });
 
   it('is null for a chain the relay does not serve', () => {
-    expect(relayChainName(settlementChainConfig('0g'))).toBeNull();
+    expect(relayChainName(settlementChainConfig('arc'))).toBeNull();
     cfg.baseChainId = 31337;
     expect(relayChainName(settlementChainConfig('base'))).toBeNull();
   });
 
   it("is a registry chain's own key when only that key reaches it", () => {
-    relayOverride['0g'] = 'eip155:16661';
-    expect(relayChainName(settlementChainConfig('0g'))).toBe('0g');
+    relayOverride['arc'] = 'eip155:16661';
+    expect(relayChainName(settlementChainConfig('arc'))).toBe('arc');
   });
 
   it("never names a chain by a key the fixed names point elsewhere", () => {

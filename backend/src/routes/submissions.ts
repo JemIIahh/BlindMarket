@@ -7,15 +7,15 @@ import type { AuthRequest, ApiResponse } from '../types.js';
 import * as accountingService from '../services/accountingService.js';
 import { recordWorkerPayout, recordWorkerDispute } from '../services/workerPayout.js';
 import { payoutCurrency } from '../services/settlementUnits.js';
-import { provider, escrow } from '../services/chain.js';
+import { chainRuntime } from '../services/chainRuntime.js';
+import { postingChain } from '../services/settlementChains.js';
 import { redis } from '../services/redis.js';
 
 export const submissionsRouter = Router();
 
-// The human submission flow runs on the 0G escrow only, by design: it names
-// tasks by numeric id, and ids collide across chains. Agent tasks on every
-// settlement chain go through routes/a2a.ts, which resolves each task's chain
-// from its hash.
+// The human submission flow runs on the posting chain. It names tasks by
+// numeric id, and ids collide across chains, so agent tasks on every settlement
+// chain go through routes/a2a.ts, which resolves each task's chain from its hash.
 
 // --- Schemas ---
 const submitSchema = z.object({
@@ -135,19 +135,24 @@ submissionsRouter.post('/confirm', requireAuth, async (req: AuthRequest, res, ne
 
     const task = await authorizeVerifier(taskId, from);
 
-    const receipt = await provider.getTransactionReceipt(txHash).catch(() => null);
+    const runtime = chainRuntime(postingChain());
+    const receipt = await runtime.provider.getTransactionReceipt(txHash).catch(() => null);
     if (!receipt || receipt.status !== 1) {
       throw new AppError(409, 'NOT_CONFIRMED', 'Transaction receipt not found or reverted — broadcast the completeVerification tx first');
     }
 
-    const escrowAddr = (await escrow.getAddress()).toLowerCase();
+    const escrowContract = runtime.escrow;
+    if (!escrowContract) {
+      throw new AppError(503, 'ESCROW_NOT_CONFIGURED', 'Posting chain escrow is not configured');
+    }
+    const escrowAddr = (await escrowContract.getAddress()).toLowerCase();
     let completed: { workerPayout: bigint; platformFee: bigint } | null = null;
     let failed = false;
     for (const log of receipt.logs) {
       if (log.address.toLowerCase() !== escrowAddr) continue;
       let parsed: { name: string; args: unknown } | null = null;
       try {
-        parsed = escrow.interface.parseLog(log) as unknown as { name: string; args: unknown };
+        parsed = escrowContract.interface.parseLog(log) as unknown as { name: string; args: unknown };
       } catch {
         continue;
       }
@@ -178,7 +183,7 @@ submissionsRouter.post('/confirm', requireAuth, async (req: AuthRequest, res, ne
       // Gross from the event; recordWorkerPayout splits it with the cached fee.
       // recordWorkerPayout's marker makes this idempotent with /finalize.
       const gross = completed.workerPayout + completed.platformFee;
-      await recordWorkerPayout(taskHash, workerAddr, String(taskId), gross, { chain: '0g', token: task.token });
+      await recordWorkerPayout(taskHash, workerAddr, String(taskId), gross, { chain: postingChain(), token: task.token });
       res.json({ success: true, data: { confirmed: true, passed: true } } as ApiResponse);
       return;
     }
@@ -198,7 +203,7 @@ submissionsRouter.post('/confirm', requireAuth, async (req: AuthRequest, res, ne
         taskId: String(taskId),
         type: 'slash',
         amount: 0,
-        unit: payoutCurrency('0g', task.token)?.symbol,
+        unit: payoutCurrency(postingChain(), task.token)?.symbol,
       });
     } catch (hookErr) {
       await redis.del(marker).catch(() => {});
