@@ -15,6 +15,8 @@ export type CctpChainKey =
   | 'ethereum' | 'ethereum-sepolia'
   | 'arbitrum' | 'arbitrum-sepolia'
   | 'optimism' | 'optimism-sepolia'
+  | 'polygon' | 'polygon-amoy'
+  | 'avalanche' | 'avalanche-fuji'
   | 'arc-testnet';
 
 export interface CctpChainConfig {
@@ -82,6 +84,28 @@ function getArcProvider(): ethers.JsonRpcProvider {
     });
   }
   return arcProvider;
+}
+
+let polygonProvider: ethers.JsonRpcProvider | null = null;
+function getPolygonProvider(): ethers.JsonRpcProvider {
+  if (!polygonProvider) {
+    polygonProvider = new ethers.JsonRpcProvider(config.cctp.polygonRpcUrl, config.cctp.polygonChainId, {
+      batchMaxCount: 1,
+      staticNetwork: true,
+    });
+  }
+  return polygonProvider;
+}
+
+let avalancheProvider: ethers.JsonRpcProvider | null = null;
+function getAvalancheProvider(): ethers.JsonRpcProvider {
+  if (!avalancheProvider) {
+    avalancheProvider = new ethers.JsonRpcProvider(config.cctp.avalancheRpcUrl, config.cctp.avalancheChainId, {
+      batchMaxCount: 1,
+      staticNetwork: true,
+    });
+  }
+  return avalancheProvider;
 }
 
 /**
@@ -194,6 +218,62 @@ function buildChains(): Record<CctpChainKey, CctpChainConfig> {
       isTestnet: true,
       label: 'Optimism Sepolia',
       supportsFastTransfer: true,
+      usdcGasReserveRaw: 0n,
+    },
+    // Polygon PoS (domain 7) and Avalanche C-Chain (domain 1) — CCTP works on
+    // both but Circle offers no Fast Transfer / Forwarding Service there, so a
+    // burn to/from them does not auto-complete the destination mint (operator
+    // self-relays). Standard Transfer only, hence supportsFastTransfer: false.
+    polygon: {
+      chainKey: 'polygon',
+      chainId: 137,
+      domain: 7,
+      rpc: getPolygonProvider(),
+      tokenMessengerAddress,
+      messageTransmitterAddress,
+      usdcAddress: config.cctp.polygonUsdcAddress,
+      isTestnet: false,
+      label: 'Polygon PoS',
+      supportsFastTransfer: false,
+      usdcGasReserveRaw: 0n,
+    },
+    'polygon-amoy': {
+      chainKey: 'polygon-amoy',
+      chainId: 80002,
+      domain: 7,
+      rpc: getPolygonProvider(),
+      tokenMessengerAddress,
+      messageTransmitterAddress,
+      usdcAddress: config.cctp.polygonUsdcAddress,
+      isTestnet: true,
+      label: 'Polygon Amoy',
+      supportsFastTransfer: false,
+      usdcGasReserveRaw: 0n,
+    },
+    avalanche: {
+      chainKey: 'avalanche',
+      chainId: 43114,
+      domain: 1,
+      rpc: getAvalancheProvider(),
+      tokenMessengerAddress,
+      messageTransmitterAddress,
+      usdcAddress: config.cctp.avalancheUsdcAddress,
+      isTestnet: false,
+      label: 'Avalanche C-Chain',
+      supportsFastTransfer: false,
+      usdcGasReserveRaw: 0n,
+    },
+    'avalanche-fuji': {
+      chainKey: 'avalanche-fuji',
+      chainId: 43113,
+      domain: 1,
+      rpc: getAvalancheProvider(),
+      tokenMessengerAddress,
+      messageTransmitterAddress,
+      usdcAddress: config.cctp.avalancheUsdcAddress,
+      isTestnet: true,
+      label: 'Avalanche Fuji',
+      supportsFastTransfer: false,
       usdcGasReserveRaw: 0n,
     },
     // Testnet only — there is no Arc mainnet entry until its CCTP addresses

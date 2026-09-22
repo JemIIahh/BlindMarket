@@ -430,6 +430,26 @@ export const config = {
     optimismUsdcAddress: optional('CCTP_OPTIMISM_USDC_ADDRESS', BASE_MAINNET
       ? '0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85'
       : '0x5fd84259d66Cd46123540766Be93DFE6D43130D7'),
+    // Polygon PoS (domain 7) and Avalanche C-Chain (domain 1) — CCTP works on
+    // both, but Circle does NOT offer Fast Transfer / Forwarding Service on
+    // either (Standard Transfer only). A burn to/from them therefore does not
+    // auto-complete the destination mint; the operator exercises the self-relay
+    // fallback (scripts/recover-stuck-cctp-transfer.ts). Marked
+    // supportsFastTransfer:false in cctpChains.ts, same as Arc.
+    polygonRpcUrl: optional('CCTP_POLYGON_RPC_URL', BASE_MAINNET
+      ? 'https://polygon-rpc.com'
+      : 'https://rpc-amoy.polygon.technology'),
+    polygonChainId: parseInt(optional('CCTP_POLYGON_CHAIN_ID', BASE_MAINNET ? '137' : '80002'), 10),
+    polygonUsdcAddress: optional('CCTP_POLYGON_USDC_ADDRESS', BASE_MAINNET
+      ? '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359'
+      : '0x41E94Eb019C0762f9Bfcf9Fb1E58725BfB0e7582'),
+    avalancheRpcUrl: optional('CCTP_AVALANCHE_RPC_URL', BASE_MAINNET
+      ? 'https://api.avax.network/ext/bc/C/rpc'
+      : 'https://api.avax-test.network/ext/bc/C/rpc'),
+    avalancheChainId: parseInt(optional('CCTP_AVALANCHE_CHAIN_ID', BASE_MAINNET ? '43114' : '43113'), 10),
+    avalancheUsdcAddress: optional('CCTP_AVALANCHE_USDC_ADDRESS', BASE_MAINNET
+      ? '0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E'
+      : '0x5425890298aed601595a70AB815c96711a31Bc65'),
     // Arc — Circle's own L1 (docs.arc.io). These defaults are Arc TESTNET
     // (5042002) and do not follow the Base tier, so no mainnet chain entry
     // exists here. Arc Mainnet itself is live (its RPC answered chain id 5042

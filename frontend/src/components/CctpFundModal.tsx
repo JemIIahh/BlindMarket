@@ -65,6 +65,48 @@ const SOURCE_CHAIN_WALLET_CONFIG: Record<string, AddEthereumChainParameter> = {
     rpcUrls: ['https://sepolia.optimism.io'],
     blockExplorerUrls: ['https://sepolia-optimism.etherscan.io'],
   },
+  base: {
+    chainId: '0x2105',
+    chainName: 'Base',
+    nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+    rpcUrls: ['https://mainnet.base.org'],
+    blockExplorerUrls: ['https://basescan.org'],
+  },
+  'base-sepolia': {
+    chainId: '0x14a34',
+    chainName: 'Base Sepolia',
+    nativeCurrency: { name: 'Sepolia Ether', symbol: 'ETH', decimals: 18 },
+    rpcUrls: ['https://sepolia.base.org'],
+    blockExplorerUrls: ['https://sepolia.basescan.org'],
+  },
+  polygon: {
+    chainId: '0x89',
+    chainName: 'Polygon PoS',
+    nativeCurrency: { name: 'POL', symbol: 'POL', decimals: 18 },
+    rpcUrls: ['https://polygon-rpc.com'],
+    blockExplorerUrls: ['https://polygonscan.com'],
+  },
+  'polygon-amoy': {
+    chainId: '0x13882',
+    chainName: 'Polygon Amoy',
+    nativeCurrency: { name: 'POL', symbol: 'POL', decimals: 18 },
+    rpcUrls: ['https://rpc-amoy.polygon.technology'],
+    blockExplorerUrls: ['https://amoy.polygonscan.com'],
+  },
+  avalanche: {
+    chainId: '0xa86a',
+    chainName: 'Avalanche C-Chain',
+    nativeCurrency: { name: 'AVAX', symbol: 'AVAX', decimals: 18 },
+    rpcUrls: ['https://api.avax.network/ext/bc/C/rpc'],
+    blockExplorerUrls: ['https://snowtrace.io'],
+  },
+  'avalanche-fuji': {
+    chainId: '0xa869',
+    chainName: 'Avalanche Fuji',
+    nativeCurrency: { name: 'AVAX', symbol: 'AVAX', decimals: 18 },
+    rpcUrls: ['https://api.avax-test.network/ext/bc/C/rpc'],
+    blockExplorerUrls: ['https://testnet.snowtrace.io'],
+  },
 };
 
 // Source-chain gas check — a FLOOR, not an estimate: the burn alone uses
@@ -125,7 +167,7 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
         // Only chains this build can actually switch a wallet to — the
         // backend can list a chain before this bundle knows it (a deploy
         // skew, or a tab left open across one).
-        const sources = data.chains.filter((c) => !c.chainKey.startsWith('base') && SOURCE_CHAIN_WALLET_CONFIG[c.chainKey]);
+        const sources = data.chains.filter((c) => c.chainKey !== SETTLEMENT_CCTP_CHAIN_KEY && SOURCE_CHAIN_WALLET_CONFIG[c.chainKey]);
         setChains(sources);
         if (sources.length > 0) setSourceChain((prev) => prev || sources[0].chainKey);
       })

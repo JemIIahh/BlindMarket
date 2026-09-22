@@ -1,5 +1,5 @@
 import { defineChain } from 'viem';
-import { mainnet, sepolia, arbitrum, arbitrumSepolia, optimism, optimismSepolia, arcTestnet } from 'viem/chains';
+import { mainnet, sepolia, arbitrum, arbitrumSepolia, optimism, optimismSepolia, polygon, polygonAmoy, avalanche, avalancheFuji, arcTestnet } from 'viem/chains';
 import { OG_CHAIN_ID, OG_RPC_URL, BASE_CHAIN_ID, BASE_RPC_URL } from './constants';
 
 // 0G chain (agent infra)
@@ -46,6 +46,8 @@ export const baseChain = defineChain({
 export const ethereumChain = isBaseMainnet ? mainnet : sepolia;
 export const arbitrumChain = isBaseMainnet ? arbitrum : arbitrumSepolia;
 export const optimismChain = isBaseMainnet ? optimism : optimismSepolia;
+export const polygonChain = isBaseMainnet ? polygon : polygonAmoy;
+export const avalancheChain = isBaseMainnet ? avalanche : avalancheFuji;
 
 // Arc (Circle's L1, USDC is the gas token) — testnet only; the app doesn't
 // offer Arc mainnet as a CCTP chain (see backend config.ts). viem's canonical
@@ -58,5 +60,5 @@ export const arcChain = defineChain({
 
 // Every CCTP chain for this tier, for Privy's `supportedChains`.
 export const cctpSourceChains = isBaseMainnet
-  ? [ethereumChain, arbitrumChain, optimismChain]
-  : [ethereumChain, arbitrumChain, optimismChain, baseChain];
+  ? [ethereumChain, arbitrumChain, optimismChain, polygonChain, avalancheChain]
+  : [ethereumChain, arbitrumChain, optimismChain, polygonChain, avalancheChain, baseChain];
