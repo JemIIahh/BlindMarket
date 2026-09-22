@@ -13,7 +13,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { store, hashes, redis, getTaskOn, a2aStore, loadAgentBySmartAccount, notifyLifecycle, payout } = vi.hoisted(() => {
+const { store, hashes, redis, getTaskOn, a2aStore, loadAgentBySmartAccount, notifyLifecycle, payout, taskChain } = vi.hoisted(() => {
   const store = new Map<string, string>();
   const hashes = new Map<string, Map<string, string>>();
   const hash = (k: string) => {
@@ -57,6 +57,7 @@ const { store, hashes, redis, getTaskOn, a2aStore, loadAgentBySmartAccount, noti
     loadAgentBySmartAccount: vi.fn(),
     notifyLifecycle: vi.fn(async () => {}),
     payout: { recordWorkerPayout: vi.fn(), recordWorkerDispute: vi.fn() },
+    taskChain: { isIndexedTask: vi.fn() },
   };
 });
 
@@ -66,6 +67,7 @@ vi.mock('./a2aStore.js', () => a2aStore);
 vi.mock('./deployedAgentStore.js', () => ({ loadAgentBySmartAccount }));
 vi.mock('./notificationStore.js', () => ({ notifyLifecycle }));
 vi.mock('./workerPayout.js', () => payout);
+vi.mock('./taskChain.js', () => taskChain);
 
 const HASH = '0x' + 'ab'.repeat(32);
 const SMART_ACCOUNT = '0x5555555555555555555555555555555555555555';
@@ -106,11 +108,26 @@ beforeEach(async () => {
   hashes.clear();
   a2aStore.getMeta.mockResolvedValue({ taskId: HASH, chain: 'base' });
   a2aStore.updateState.mockResolvedValue(undefined);
+  // Task 7 is the task its hash is indexed to unless a test says otherwise.
+  taskChain.isIndexedTask.mockResolvedValue(true);
   loadAgentBySmartAccount.mockResolvedValue(null);
   payout.recordWorkerPayout.mockReset().mockResolvedValue(undefined);
   payout.recordWorkerDispute.mockReset().mockResolvedValue(undefined);
   vi.resetModules();
   listener = await import('./disputeListener.js');
+});
+
+describe('a ruling on a second task funded under the same hash', () => {
+  it.each([true, false])('touches nothing keyed by the hash (workerFavored=%s)', async (favored) => {
+    onChain(WORKER_EOA, { status: favored ? COMPLETED : CANCELLED });
+    taskChain.isIndexedTask.mockResolvedValue(false);
+    await listener.handleDisputeResolved('base', 7n, favored);
+    expect(taskChain.isIndexedTask).toHaveBeenCalledWith('base', '7', HASH);
+    expect(payout.recordWorkerPayout).not.toHaveBeenCalled();
+    expect(payout.recordWorkerDispute).not.toHaveBeenCalled();
+    expect(a2aStore.updateState).not.toHaveBeenCalled();
+    expect(notifyLifecycle).not.toHaveBeenCalled();
+  });
 });
 
 describe('a ruling for the worker', () => {

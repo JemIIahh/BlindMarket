@@ -61,10 +61,16 @@ vi.mock('../services/accountingService.js', () => ({
   recordTransaction: vi.fn(async () => ({})),
 }));
 
+// Task 7 is the task its hash is indexed to unless a test says otherwise.
+vi.mock('../services/taskChain.js', () => ({
+  isIndexedTask: vi.fn(async () => true),
+}));
+
 import { submissionsRouter } from './submissions.js';
 import { globalErrorHandler } from '../middleware/errorHandler.js';
 import * as workerPayout from '../services/workerPayout.js';
 import * as accountingService from '../services/accountingService.js';
+import * as taskChain from '../services/taskChain.js';
 
 function app() {
   const a = express();
@@ -108,6 +114,19 @@ describe('POST /submissions/confirm', () => {
     expect(res.body.data).toMatchObject({ confirmed: true, passed: true });
     expect(workerPayout.recordWorkerPayout).toHaveBeenCalledTimes(1);
     expect(workerPayout.recordWorkerPayout).toHaveBeenCalledWith('0xhash', WORKER, '7', 100n, { chain: 'base', token: TOKEN });
+  });
+
+  it("credits nothing for a duplicate funded under another task's hash (it would set that hash's once-only marker)", async () => {
+    getReceipt.mockResolvedValue(okReceipt([{ address: ESCROW }]));
+    parseLog.mockReturnValue({ name: 'TaskCompleted', args: { taskId: 7n, workerPayout: 90n, platformFee: 10n } });
+    vi.mocked(taskChain.isIndexedTask).mockResolvedValueOnce(false);
+    const res = await request(app()).post('/api/v1/submissions/confirm')
+      .set(as(POSTER)).send({ taskId: 7, txHash: '0x' + '44'.repeat(32) });
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('HASH_NOT_THIS_TASK');
+    expect(taskChain.isIndexedTask).toHaveBeenCalledWith('base', 7, '0xhash');
+    expect(workerPayout.recordWorkerPayout).not.toHaveBeenCalled();
+    expect(workerPayout.recordWorkerDispute).not.toHaveBeenCalled();
   });
 
   it('refuses a reverted receipt with no writes', async () => {

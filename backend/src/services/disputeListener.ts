@@ -198,6 +198,20 @@ async function processDisputeResolved(chain: TaskChain, taskId: bigint, workerFa
     );
     return;
   }
+  // Nor is a ruling on a second task funded under the same hash on the SAME
+  // chain: crediting, recording a dispute or closing state by hash would act
+  // on the task the hash is indexed to. Checked for A2A tasks (with meta),
+  // the ones whose off-chain state and credit a duplicate could take over.
+  // (Imported at call time: taskChain loads the indexers, which load this.)
+  if (meta) {
+    const { isIndexedTask } = await import('./taskChain.js');
+    if (!(await isIndexedTask(chain, taskId.toString(), taskHash))) {
+      console.warn(
+        `[disputes] DisputeResolved ${chain} taskId=${taskId}: hash ${taskHash.slice(0, 10)}… is indexed to another task — skipping`,
+      );
+      return;
+    }
+  }
 
   const onChainWorker = String(t.worker ?? '');
   const hasWorker = !!onChainWorker && onChainWorker.toLowerCase() !== ZERO_ADDRESS;

@@ -9,6 +9,7 @@ import { recordWorkerPayout, recordWorkerDispute } from '../services/workerPayou
 import { payoutCurrency } from '../services/settlementUnits.js';
 import { chainRuntime } from '../services/chainRuntime.js';
 import { postingChain } from '../services/settlementChains.js';
+import { isIndexedTask } from '../services/taskChain.js';
 import { redis } from '../services/redis.js';
 
 export const submissionsRouter = Router();
@@ -178,6 +179,19 @@ submissionsRouter.post('/confirm', requireAuth, async (req: AuthRequest, res, ne
 
     const workerAddr = task.worker;
     const taskHash = task.taskHash as string;
+
+    // Credits and dispute records are keyed by hash, and a hash can be
+    // escrowed twice. Settling a duplicate funded under a live task's hash
+    // must not set that hash's once-only credit marker (the real executor's
+    // credit would then be skipped as "already credited"): only the task the
+    // hash is indexed to is credited here.
+    if (!(await isIndexedTask(postingChain(), taskId, taskHash))) {
+      throw new AppError(
+        409,
+        'HASH_NOT_THIS_TASK',
+        "This task's hash is indexed to a different task, so it can't be credited here",
+      );
+    }
 
     if (completed) {
       // Gross from the event; recordWorkerPayout splits it with the cached fee.
