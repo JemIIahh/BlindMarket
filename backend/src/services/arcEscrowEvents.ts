@@ -10,8 +10,9 @@
  *   arc:events:escrow              → <chainId>:<escrow> these keys belong to
  *                                     (see escrowFingerprint)
  *
- * All writes are idempotent (SET overwrite with identical value), so
- * at-least-once delivery from the poll loop is safe.
+ * All writes are idempotent, so at-least-once delivery from the poll loop is
+ * safe. hash2id is first-writer-wins (SET NX): a later TaskCreated reusing a
+ * live task's hash must not repoint it (see indexTaskCreated).
  *
  * It also mirrors DisputeResolved rulings into the off-chain accounting
  * (see disputeListener), behind its own checkpoint:
@@ -159,7 +160,14 @@ async function indexTaskCreated(): Promise<number | null> {
         const taskId = args.taskId as bigint | undefined;
         const taskHash = args.taskHash as string | undefined;
         if (taskId === undefined || !taskHash) continue;
-        pipe.set(KEY.hash2id(taskHash), String(taskId));
+        // First writer wins, as on Base (baseEscrowEvents.ts). The escrow does
+        // not enforce unique task hashes, so anyone can emit a later
+        // TaskCreated reusing a live task's hash; a plain SET let that repoint
+        // the hash at the attacker's escrow id — assignment, settlement and
+        // result visibility would then follow the attacker's task. The index
+        // route's seed (caller verified as the hash's claimed poster) still
+        // overwrites.
+        pipe.set(KEY.hash2id(taskHash), String(taskId), 'NX');
         pipe.set(KEY.id2hash(taskId), taskHash.toLowerCase());
       }
       await pipe.exec();

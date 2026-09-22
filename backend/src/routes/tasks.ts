@@ -10,7 +10,7 @@ import { getTokenDecimals } from '../services/chain.js';
 import { chainRuntime } from '../services/chainRuntime.js';
 import { isSettlementChainKey, postingChain, settlementChainConfig } from '../services/settlementChains.js';
 import { payoutCurrency } from '../services/settlementUnits.js';
-import { resolveTaskChainById, resolveCachedTaskByHash, type TaskChain } from '../services/taskChain.js';
+import { isIndexedTask, resolveTaskChainById, resolveCachedTaskByHash, type TaskChain } from '../services/taskChain.js';
 import type { AuthRequest, ApiResponse } from '../types.js';
 import { AGENT_CAPABILITIES } from '../types.js';
 import * as a2aStore from '../services/a2aStore.js';
@@ -245,14 +245,17 @@ tasksRouter.get('/:id', optionalAuth, async (req: AuthRequest, res, next) => {
     const symbol = payoutCurrency(chain, task.token)?.symbol ?? null;
     // Same flag as the list endpoint — lets the detail page surface the
     // stranded notice when a Funded task can never be picked up by an agent.
-    const indexedSet = await a2aStore.getIndexedHashes([taskHash]);
+    // A2A state is keyed by hash, and a hash can be escrowed twice: serve it
+    // only for the task the hash is indexed to (a hash lookup always is). A
+    // duplicate's id otherwise reads the original's brief meta and result.
+    const ownsA2a = isHexHash || await isIndexedTask(chain, taskId, taskHash);
+    const indexedSet = ownsA2a ? await a2aStore.getIndexedHashes([taskHash]) : new Set<string>();
     const a2aIndexed = indexedSet.has(taskHash.toLowerCase());
 
     // Fetch A2A off-chain state so TaskDetail can show agent output / verification result
-    const [a2aMeta, a2aState] = await Promise.all([
-      a2aStore.getMeta(taskHash),
-      a2aStore.getState(taskHash),
-    ]);
+    const [a2aMeta, a2aState] = ownsA2a
+      ? await Promise.all([a2aStore.getMeta(taskHash), a2aStore.getState(taskHash)])
+      : [null, null];
 
     // The deliverable (resultData) is poster/worker-only — except on PUBLIC
     // tasks, where the poster opted out of blindness and the result is part

@@ -16,7 +16,7 @@ import { getAgent as getDeployedAgent, startAgent, stopAgent, getAgentLogs } fro
 import { isAgentOwner, principalAddresses, stripAgentSecrets } from '../agentOwnership.js';
 import { canViewerSeeResult } from '../resultVisibility.js';
 import { getTokenDecimals } from '../chain.js';
-import { resolveCachedTaskByHash, type TaskChain } from '../taskChain.js';
+import { isIndexedTask, resolveCachedTaskByHash, type TaskChain } from '../taskChain.js';
 import { postingChain } from '../settlementChains.js';
 
 /**
@@ -236,9 +236,12 @@ export function buildMcpServer(user: AuthUser): McpServer {
         throw err;
       }
 
+      // A2A state is keyed by hash, and a hash can be escrowed twice: serve it
+      // only for the task the hash is indexed to (see isIndexedTask).
+      const ownsA2a = /^0x/.test(taskId) || await isIndexedTask(chain, numericId, task.taskHash);
       const [meta, state, decimals] = await Promise.all([
-        a2aStore.getMeta(task.taskHash),
-        a2aStore.getState(task.taskHash),
+        ownsA2a ? a2aStore.getMeta(task.taskHash) : null,
+        ownsA2a ? a2aStore.getState(task.taskHash) : null,
         getTokenDecimals(task.token, chain).catch(() => 18),
       ]);
 

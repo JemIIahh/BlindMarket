@@ -161,3 +161,17 @@ export async function resolveTaskChainById(
 export async function resolveCachedTaskByHash(taskHash: string): Promise<ResolvedTask | null> {
   return cachedLookup(taskHash, indexesFor(await recordedChain(taskHash)));
 }
+
+/**
+ * Is escrow task `taskId` on `chain` the task its hash is indexed to? The
+ * escrow does not enforce unique hashes, so anyone can fund a second task
+ * under a live task's hash. Off-chain A2A state (brief meta, result) is keyed
+ * by hash alone: a lookup by the duplicate's id must not serve it, or its
+ * funder passes the poster check with their own on-chain task and reads the
+ * original's result. The index keeps the first writer (the indexers write
+ * with NX; the index route seeds only for the poster who claimed the hash).
+ */
+export async function isIndexedTask(chain: TaskChain, taskId: number | string, taskHash: string): Promise<boolean> {
+  const resolved = await resolveCachedTaskByHash(taskHash.toLowerCase());
+  return !!resolved && resolved.chain === chain && resolved.taskId === String(taskId);
+}
