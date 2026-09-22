@@ -109,6 +109,7 @@ vi.mock('../services/workerPayout.js', () => ({
 }));
 vi.mock('../services/railwaySandbox.js', () => ({
   consumePendingCost: vi.fn(() => 0),
+  getPendingCost: vi.fn(() => 0),
 }));
 vi.mock('../services/webhookStore.js', () => ({
   fireWebhooks: vi.fn(() => Promise.resolve()),
