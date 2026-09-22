@@ -227,39 +227,31 @@ describe('assertRegistryInvariants', () => {
 });
 
 describe('posting chain', () => {
-  const prod = { production: true, allowNonMainnet: false };
-
-  it('is Base when it has an escrow, else Arc', () => {
+  it('is Arc when it has an escrow, else Base', () => {
+    // Arc unset but Base set → Base.
     expect(postingChain()).toBe('base');
-    cfg.baseEscrowAddress = '';
     cfg.arcEscrowAddress = ARC_ESCROW;
+    expect(postingChain()).toBe('arc');
+    cfg.baseEscrowAddress = '';
     expect(postingChain()).toBe('arc');
   });
 
   it('looks for a receipt on the posting chain first, then the other chains with an escrow', () => {
+    expect(receiptSearchOrder()).toEqual(['base']);
     cfg.arcEscrowAddress = ARC_ESCROW;
-    expect(receiptSearchOrder()).toEqual(['base', 'arc']);
-    cfg.baseEscrowAddress = '';
-    expect(receiptSearchOrder()).toEqual(['arc']);
-  });
-
-  it('boots production as it is today: posting on Base Sepolia', () => {
-    // Production runs 0G mainnet + Base Sepolia, so a testnet posting chain
-    // needs ALLOW_NONMAINNET_PROD.
-    expect(assertPostingChain({ production: true, allowNonMainnet: true })).toEqual([]);
+    expect(receiptSearchOrder()).toEqual(['arc', 'base']);
   });
 
   it('refuses a posting chain that is not on the deployment tier', () => {
-    // Base Sepolia (testnet) against a mainnet tier is refused.
-    expect(() => assertPostingChain({ production: false, allowNonMainnet: false, tier: 'mainnet' })).toThrow(
-      /is on testnet \(chain 84532\) but SETTLEMENT_TIER=mainnet/,
-    );
-    expect(assertPostingChain({ production: false, allowNonMainnet: false, tier: 'testnet' })).toEqual([]);
+    cfg.arcEscrowAddress = ARC_ESCROW; // Arc testnet
+    expect(() => assertPostingChain({ tier: 'mainnet' })).toThrow(/but SETTLEMENT_TIER=mainnet/);
+    expect(assertPostingChain({ tier: 'testnet' })).toEqual([]);
   });
 
-  it('refuses a testnet posting chain on a production backend unless ALLOW_NONMAINNET_PROD is set', () => {
-    expect(() => assertPostingChain(prod)).toThrow(/is a testnet \(chain 84532\) on a production backend/);
-    expect(assertPostingChain({ production: true, allowNonMainnet: true })).toEqual([]);
+  it('reports (does not throw) when the default posting chain has no escrow', () => {
+    cfg.baseEscrowAddress = '';
+    cfg.arcEscrowAddress = '';
+    expect(assertPostingChain({})).toEqual([expect.stringMatching(/has no escrow/)]);
   });
 });
 

@@ -65,7 +65,11 @@ describe('signAndSendTx wiring', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
     try {
-      const signer = { getAddress: async () => '0x1111111111111111111111111111111111111111' } as any;
+      const signer = {
+        getAddress: async () => '0x1111111111111111111111111111111111111111',
+        provider: { getNetwork: async () => ({ chainId: 5042002n }) },
+        sendTransaction: vi.fn(async () => ({ hash: '0x' + 'ab'.repeat(32), wait: async () => null })),
+      } as any;
       const tx = { to: '0x2222222222222222222222222222222222222222', data: '0x', from: '0x1111111111111111111111111111111111111111' };
       const d = defaultSettlement();
       setSettlement(mergeSettlement(d, {
@@ -74,7 +78,9 @@ describe('signAndSendTx wiring', () => {
       }));
       await expect(signAndSendTx(signer, tx, undefined, { chain: 'base' })).rejects.toThrow('stop here');
       await expect(signAndSendTx(signer, tx)).rejects.toThrow('stop here');
-      await expect(signAndSendTx(signer, tx, undefined, { chain: 'arc' })).rejects.toThrow(/not relayed here/);
+      // Arc has no relay, so it signs directly from the wallet, no relay body.
+      await expect(signAndSendTx(signer, tx, undefined, { chain: 'arc' })).resolves.toMatchObject({ hash: '0x' + 'ab'.repeat(32) });
+      expect(signer.sendTransaction).toHaveBeenCalledTimes(1);
       expect(bodies.map((b) => b.chain)).toEqual(['base-sepolia-2', 'base-sepolia-2']);
       resetSettlement();
       await expect(signAndSendTx(signer, tx)).rejects.toThrow('stop here');

@@ -183,18 +183,19 @@ export function configuredChainKeys(): SettlementChainKey[] {
 }
 
 /**
- * The chain POST /tasks funds new tasks on. Base is preferred; Arc is the
- * fallback. Returns Base even if neither is configured so tests and local
- * dev do not crash; production boot should already have failed in
- * assertPostingChain if no settlement chain is configured.
+ * The chain POST /tasks funds new tasks on. Arc is preferred; Base is the
+ * fallback for a stack that still settles there only. Returns Arc even if
+ * neither is configured so tests and local dev do not crash; production boot
+ * should already have failed in assertPostingChain if no settlement chain is
+ * configured.
  */
 export function postingChain(): SettlementChainKey {
-  const base = settlementChainConfig('base');
-  if (base.escrowAddress !== null) return 'base';
   const arc = settlementChainConfig('arc');
   if (arc.escrowAddress !== null) return 'arc';
-  console.warn('[settlementChains] No settlement chain is configured (BASE_ESCROW_ADDRESS or ARC_ESCROW_ADDRESS); defaulting to base');
-  return 'base';
+  const base = settlementChainConfig('base');
+  if (base.escrowAddress !== null) return 'base';
+  console.warn('[settlementChains] No settlement chain is configured (ARC_ESCROW_ADDRESS or BASE_ESCROW_ADDRESS); defaulting to arc');
+  return 'arc';
 }
 
 /**
@@ -213,28 +214,15 @@ export function receiptSearchOrder(): SettlementChainKey[] {
  * Throws when the posting chain can't be used. Called at boot.
  */
 export function assertPostingChain(opts: {
-  production: boolean;
-  allowNonMainnet: boolean;
   tier?: SettlementTier | null;
 }): string[] {
   const entry = settlementChainConfig(postingChain());
   if (entry.escrowAddress === null) {
     return [`Default posting chain ${entry.label} has no escrow (${entry.escrowEnv}), so POST /tasks refuses new tasks`];
   }
-  const problems: string[] = [];
-  if (opts.tier) {
-    if (entry.tier !== opts.tier) {
-      problems.push(
-        `Posting chain ${entry.key} is on ${entry.tier} (chain ${entry.chainId}) but SETTLEMENT_TIER=${opts.tier}`,
-      );
-    }
-  } else if (opts.production && entry.tier !== 'mainnet' && !opts.allowNonMainnet) {
-    problems.push(
-      `Posting chain ${entry.key} is a testnet (chain ${entry.chainId}) on a production backend; ` +
-        `set ALLOW_NONMAINNET_PROD=true if this is a staging stack`,
-    );
+  if (opts.tier && entry.tier !== opts.tier) {
+    throw new Error(`Invalid posting chain: Posting chain ${entry.key} is on ${entry.tier} (chain ${entry.chainId}) but SETTLEMENT_TIER=${opts.tier}`);
   }
-  if (problems.length > 0) throw new Error(`Invalid posting chain: ${problems.join('; ')}`);
   return [];
 }
 

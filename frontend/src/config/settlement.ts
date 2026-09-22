@@ -81,9 +81,9 @@ function baseRelayChain(chainId: number): string {
 /** The build-time table. Exported for tests; callers read the snapshot. */
 export function defaultSettlement(): SettlementSnapshot {
   return {
-    // The pre-R12 rule, still the backend's default: Base when it has an
-    // escrow, else Arc.
-    postingChain: BASE_ESCROW_ADDRESS ? 'base' : 'arc',
+    // The posting rule the backend follows: Arc when it has an escrow, else
+    // Base (the legacy settlement chain).
+    postingChain: ARC_ESCROW_ADDRESS ? 'arc' : BASE_ESCROW_ADDRESS ? 'base' : 'arc',
     chains: {
       base: {
         key: 'base',

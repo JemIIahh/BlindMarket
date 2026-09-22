@@ -2,7 +2,8 @@ import { useCallback } from 'react';
 import { formatUnits } from 'viem';
 import { useAccount, useBalance as useWagmiBalance, useReadContract } from 'wagmi';
 import { usePrivy } from '@privy-io/react-auth';
-import { OG_CHAIN_ID, BASE_CHAIN_ID, BASE_USDC_ADDRESS, getNativeCurrency, getChainConfig } from '../config/constants';
+import { BASE_CHAIN_ID, ARC_CHAIN_ID, getNativeCurrency, getChainConfig, type SupportedChain } from '../config/constants';
+import { useSettlement } from '../config/settlement';
 import { useWallet } from '../context/WalletContext';
 
 export function useChainAddress(): string | undefined {
@@ -29,9 +30,9 @@ export function useChainDisconnect() {
   }, [evmLogout]);
 }
 
-export function useChainBalance(chain: 'og' | 'base' = 'og') {
+export function useChainBalance(chain: SupportedChain = 'arc') {
   const { address: evmAddress } = useAccount();
-  const chainId = chain === 'base' ? BASE_CHAIN_ID : OG_CHAIN_ID;
+  const chainId = chain === 'base' ? BASE_CHAIN_ID : ARC_CHAIN_ID;
   const { data: wagmiBal, refetch, isRefetching } = useWagmiBalance({ address: evmAddress, chainId });
   const native = getNativeCurrency(chain);
 
@@ -51,10 +52,10 @@ export function useChainBalance(chain: 'og' | 'base' = 'og') {
 
 export function useChainIsCorrectChain(): boolean {
   const { chainId } = useWallet();
-  return chainId === OG_CHAIN_ID || chainId === BASE_CHAIN_ID;
+  return chainId === BASE_CHAIN_ID || chainId === ARC_CHAIN_ID;
 }
 
-export function useChainExplorerUrl(chain: 'og' | 'base' = 'og'): string {
+export function useChainExplorerUrl(chain: SupportedChain = 'arc'): string {
   const config = getChainConfig(chain);
   return config.blockExplorerUrls[0];
 }
@@ -73,15 +74,21 @@ const ERC20_ABI = [
 export function useUsdcBalance(forAddress?: string | null) {
   const { address: wagmiAddress } = useAccount();
   const { address: privyAddress } = useWallet();
+  const settlement = useSettlement();
+  const posting = settlement.chains[settlement.postingChain];
+  // The posting chain's settlement token (USDC on Arc and Base) and its chain
+  // id — the balance is read there, not hardcoded to Base.
+  const usdcAddress = posting.token.address;
+  const usdcChainId = posting.chainId;
   // Privy embedded wallet may not sync with wagmi's useAccount immediately
   const address = forAddress !== undefined ? forAddress : (wagmiAddress || privyAddress);
   const { data: rawBalance, refetch, isRefetching } = useReadContract({
-    address: BASE_USDC_ADDRESS as `0x${string}`,
+    address: usdcAddress as `0x${string}`,
     abi: ERC20_ABI,
     functionName: 'balanceOf',
     args: address ? [address as `0x${string}`] : undefined,
-    chainId: BASE_CHAIN_ID,
-    query: { enabled: !!address, refetchInterval: 10_000 },
+    chainId: usdcChainId,
+    query: { enabled: !!address && !!usdcAddress, refetchInterval: 10_000 },
   });
 
   const balance = rawBalance != null ? Number(rawBalance) / 1e6 : 0;

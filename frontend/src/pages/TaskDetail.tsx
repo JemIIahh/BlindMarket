@@ -66,10 +66,10 @@ export default function TaskDetail() {
   const { id } = useParams();
   const { data, isLoading, isError, refetch } = useTask(id || '');
   const { address, signer } = useWallet();
-  // The backend names the escrow's chain on the detail response — Base tasks
-  // explore on Basescan, 0G tasks on the 0G chainscan. Defaults to 0G while
-  // loading or for legacy responses without the field.
-  const explorerUrl = useChainExplorerUrl(data?.onChain?.chain === 'base' ? 'base' : 'og');
+  // The backend names the escrow's chain on the detail response — Arc tasks
+  // explore on ArcScan, Base tasks on Basescan. Defaults to Arc while loading
+  // or for legacy responses without the field.
+  const explorerUrl = useChainExplorerUrl(data?.onChain?.chain === 'base' ? 'base' : 'arc');
   // Auth context kept for any future reads; not used in the A2A view path.
   void useAuth();
   const qc = useQueryClient();
