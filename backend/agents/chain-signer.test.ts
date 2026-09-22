@@ -7,7 +7,7 @@ vi.mock('@ai-sdk/groq', () => ({ createGroq: () => () => 'm' }));
 vi.mock('socket.io-client', () => ({ io: () => ({ on: vi.fn(), emit: vi.fn() }) }));
 
 // @ts-expect-error — plain-JS worker, no d.ts
-import { pickChain, isUnsupportedChain, signerFor, escrowAddressFor, preflightGas, pickAffordable, acceptBlocker, registrationBody } from './worker.js';
+import { pickChain, isUnsupportedChain, signerFor, escrowAddressFor, preflightGas, minGasBalance, PREFLIGHT_GAS_LIMIT, pickAffordable, acceptBlocker, registrationBody } from './worker.js';
 
 /**
  * A deployed agent could accept a Base task and never deliver it: the worker
@@ -113,6 +113,39 @@ describe('preflightGas — refuse before spending an attempt', () => {
   });
   it('does not block on an RPC blip — the broadcast reports the real error', async () => {
     expect(await preflightGas('base', fakeSigner(new Error('ECONNRESET')))).toBeNull();
+  });
+});
+
+describe('preflightGas — dust is not gas', () => {
+  // A wallet holding a few wei passed the old zero check and then failed at
+  // broadcast with "insufficient funds". The floor is one tx at current fees.
+  const feeSigner = (balance: bigint, fee: Record<string, bigint | null> | Error, address = '0xabc') => ({
+    address,
+    provider: {
+      getBalance: async () => balance,
+      getFeeData: async () => { if (fee instanceof Error) throw fee; return fee; },
+    },
+  });
+  const gwei = 10n ** 9n;
+  const oneTx = PREFLIGHT_GAS_LIMIT * 2n * gwei;
+
+  it('refuses a balance below gasLimit × maxFeePerGas, naming both amounts', async () => {
+    const why = await preflightGas('base', feeSigner(oneTx - 1n, { maxFeePerGas: 2n * gwei, gasPrice: gwei }, '0xdead'), false);
+    expect(why).toMatch(/^wallet 0xdead holds 0\.0005999\d* ETH on base — below the ~0\.0006 ETH one tx needs/);
+  });
+  it('passes a balance that covers one tx', async () => {
+    expect(await preflightGas('base', feeSigner(oneTx, { maxFeePerGas: 2n * gwei }), false)).toBeNull();
+  });
+  it('falls back to gasPrice when the chain has no EIP-1559 fee', async () => {
+    expect(await minGasBalance({ getFeeData: async () => ({ maxFeePerGas: null, gasPrice: gwei }) })).toBe(PREFLIGHT_GAS_LIMIT * gwei);
+  });
+  it('keeps only the zero check when fee data is unavailable', async () => {
+    expect(await preflightGas('base', feeSigner(1n, new Error('ECONNRESET')), false)).toBeNull();
+    expect(await preflightGas('base', feeSigner(1n, { maxFeePerGas: null, gasPrice: null }), false)).toBeNull();
+    expect(await preflightGas('base', feeSigner(0n, new Error('ECONNRESET')), false)).toMatch(/holds 0 ETH on base/);
+  });
+  it('still skips the balance check on the paymaster path', async () => {
+    expect(await preflightGas('base', feeSigner(0n, { maxFeePerGas: gwei }), true)).toBeNull();
   });
 });
 

@@ -810,9 +810,10 @@ export async function getCascade(taskId: string): Promise<TaskCascade | undefine
 /**
  * Advance the cascade to the next position. Reads the current cascade,
  * increments the position, and writes back. Returns the next agent entry
- * or null if the cascade is exhausted / gone.
+ * (with its position, which the advance timer keys on) or null if the cascade
+ * is exhausted / gone.
  */
-export async function advanceCascade(taskId: string): Promise<CascadeEntry | null> {
+export async function advanceCascade(taskId: string): Promise<(CascadeEntry & { position: number }) | null> {
   const tid = taskId.toLowerCase();
   const raw = await redis.get(KEY.cascade(tid));
   if (!raw) return null;
@@ -826,7 +827,7 @@ export async function advanceCascade(taskId: string): Promise<CascadeEntry | nul
 
   cascade.position = nextPos;
   await redis.setex(KEY.cascade(tid), Math.ceil(CASCADE_TTL_MS / 1000), JSON.stringify(cascade));
-  return cascade.ranked[nextPos];
+  return { ...cascade.ranked[nextPos], position: nextPos };
 }
 
 /** Remove the cascade for a task (used on accept, release, or full exhaustion). */

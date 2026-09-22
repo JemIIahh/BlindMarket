@@ -820,7 +820,33 @@ export async function preflightGas(chain, signer, viaAA = canSubmitViaSmartAccou
   if (balance === 0n) {
     return `wallet ${signer.address} holds 0 ${nativeSymbolFor(chain)} on ${pickChain(chain)} — it pays its own gas there and cannot broadcast. Fund it (any amount covers many txs at current gas).`;
   }
+  // Dust passes a zero check and then fails at broadcast with an opaque
+  // "insufficient funds". Refuse below one tx's worth at current fees.
+  const min = await minGasBalance(signer.provider);
+  if (min !== null && balance < min) {
+    return `wallet ${signer.address} holds ${ethers.formatEther(balance)} ${nativeSymbolFor(chain)} on ${pickChain(chain)} — below the ~${ethers.formatEther(min)} ${nativeSymbolFor(chain)} one tx needs at current gas, so it cannot broadcast. Fund it (a small top-up covers many txs).`;
+  }
   return null;
+}
+
+// Gas budget for one worker tx (submitEvidence, completeVerification, accept
+// paths all sit well under this). Exported for tests.
+export const PREFLIGHT_GAS_LIMIT = 300_000n;
+
+/**
+ * The balance one tx needs at the chain's current fees (gasLimit ×
+ * maxFeePerGas, else gasPrice), or null when the provider can't say — the
+ * caller then keeps only the zero check. Exported for tests.
+ */
+export async function minGasBalance(provider, gasLimit = PREFLIGHT_GAS_LIMIT) {
+  try {
+    if (typeof provider?.getFeeData !== 'function') return null;
+    const fee = await provider.getFeeData();
+    const perGas = fee?.maxFeePerGas ?? fee?.gasPrice ?? null;
+    return typeof perGas === 'bigint' && perGas > 0n ? gasLimit * perGas : null;
+  } catch {
+    return null;
+  }
 }
 
 let escrowIface = null;
@@ -971,6 +997,11 @@ const chainSkipLogged = new Map();
 // Same idea for tasks resume is holding for gas: they are assigned to us, so
 // they never appear on the open board and must not share the board's prune.
 const resumeHoldLogged = new Map();
+// taskHash → gas problem that last stopped a submitEvidence broadcast. Set by
+// broadcastEvmSubmitEvidence, cleared once the wallet can pay. Resume reads it
+// so a pass that only lacked gas is a hold, not a spent attempt: funding the
+// wallet later must still let the task finish.
+const submitGasShortfall = new Map();
 const MAX_RESUME_ATTEMPTS = 3;
 // taskHash → when a TRANSIENT re-accept refusal last cost a resume attempt.
 const resumeTransientChargedAt = new Map();
@@ -1990,6 +2021,22 @@ export function describeOnChainLock(bodyText) {
   if (status === 2) return 'evidence is already Submitted on-chain — only finalize is owed, and a later poll retries it';
   if (name) return `the escrow is already ${name} on-chain — nothing left to release or resume`;
   return 'the escrow is past Funded, so the task cannot be reopened; a later poll resumes it only if it is still assigned to this wallet';
+}
+
+// Hand an exclusive offer back so the backend offers the task to the next
+// ranked agent now. Best-effort: on any failure the offer just lapses at the
+// end of its window, as it did before /decline existed.
+async function declineOffer(taskHash) {
+  try {
+    const res = await fetchWithTimeout(`${BACKEND_URL}/api/v1/a2a/tasks/${taskHash}/decline`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${AGENT_PLATFORM_TOKEN}` },
+    });
+    if (res.ok) log(`declined offer for ${taskHash.slice(0, 10)}… — passed to the next agent`);
+    else log(`decline for ${taskHash.slice(0, 10)}… refused: ${res.status} ${errorCodeOf(await res.text().catch(() => ''))}`);
+  } catch (e) {
+    log(`decline for ${taskHash.slice(0, 10)}… failed: ${e.message || e}`);
+  }
 }
 
 async function releaseTask(taskHash) {
@@ -3228,9 +3275,13 @@ async function broadcastEvmSubmitEvidence(taskHash, unsignedSubmitEvidence, subm
   }
   const gasProblem = await preflightGas(submitChain, submitSigner, submitViaAA);
   if (gasProblem) {
-    log(`cannot broadcast submitEvidence for ${short}… on ${submitChain}: ${gasProblem}`);
+    if (submitGasShortfall.get(taskHash)?.reason !== gasProblem) {
+      log(`cannot broadcast submitEvidence for ${short}… on ${submitChain}: ${gasProblem}`);
+    }
+    submitGasShortfall.set(taskHash, { chain: submitChain, viaAA: submitViaAA, reason: gasProblem });
     return false;
   }
+  submitGasShortfall.delete(taskHash);
   // EVM broadcast loop — AA path wraps in UserOp when smart account is available
   const MAX_SUBMIT_ATTEMPTS = 3;
   const RETRY_DELAY_MS = 6_000;
@@ -3398,10 +3449,13 @@ async function finalizeAcceptedTask(taskHash) {
       // SETTLEMENT_FAILED is retryable too: /finalize leaves state 'submitted'
       // when the completeVerification bridge fails, exactly so a retry re-runs
       // the settle (and resume re-drives it later if we exhaust attempts here).
-      const isTransient = finalizeRes.status === 503 && /NOT_INDEXED|NOT_SUBMITTED_ON_CHAIN|SETTLEMENT_FAILED|ON_CHAIN_CHECK_FAILED/.test(errText);
+      // CREDIT_FAILED: settled on-chain but the earnings credit failed; state
+      // stays 'submitted' and the retry reconciles and credits again.
+      const isTransient = finalizeRes.status === 503 && /NOT_INDEXED|NOT_SUBMITTED_ON_CHAIN|SETTLEMENT_FAILED|ON_CHAIN_CHECK_FAILED|CREDIT_FAILED/.test(errText);
       if (isTransient && attempt < FINALIZE_API_MAX_ATTEMPTS) {
         const code = /NOT_SUBMITTED_ON_CHAIN/.test(errText) ? 'NOT_SUBMITTED_ON_CHAIN'
-          : /SETTLEMENT_FAILED/.test(errText) ? 'SETTLEMENT_FAILED' : 'NOT_INDEXED';
+          : /SETTLEMENT_FAILED/.test(errText) ? 'SETTLEMENT_FAILED'
+          : /CREDIT_FAILED/.test(errText) ? 'CREDIT_FAILED' : 'NOT_INDEXED';
         log(`finalize attempt ${attempt}/${FINALIZE_API_MAX_ATTEMPTS} for ${taskHash.slice(0, 10)}…: 503 ${code} — retrying in ${FINALIZE_API_RETRY_DELAY_MS / 1000}s`);
         if (code === 'NOT_SUBMITTED_ON_CHAIN') {
           // The evidence tx never landed (submit-then-crash gap) — rebuild
@@ -3409,6 +3463,9 @@ async function finalizeAcceptedTask(taskHash) {
           // retry. The backend refuses once on-chain status moves off
           // Assigned, so a stale call here is safe, not a double-submit.
           await rebroadcastSubmitEvidence(taskHash);
+          // No gas to rebroadcast with: more finalize retries can't land it.
+          // Stop here; resume holds the task until the wallet is funded.
+          if (submitGasShortfall.has(taskHash)) return false;
         }
         await sleep(FINALIZE_API_RETRY_DELAY_MS);
         continue;
@@ -3452,6 +3509,7 @@ async function resumeAssignedTasks() {
     .filter((i) => ['accepted', 'in_progress', 'submitted'].includes(i?.state?.status))
     .map((i) => i?.meta?.taskId));
   for (const k of [...resumeHoldLogged.keys()]) if (!owed.has(k)) resumeHoldLogged.delete(k);
+  for (const k of [...submitGasShortfall.keys()]) if (!owed.has(k)) submitGasShortfall.delete(k);
   if (executions.length === 0) return;
 
   for (const item of executions) {
@@ -3493,16 +3551,23 @@ async function resumeAssignedTasks() {
       }
       continue;
     }
-    if (!finalizeOnly && isSettlementChain(metaChain)) {
-      const gasProblem = await preflightGas(metaChain, signerFor(metaChain)).catch(() => null);
+    // Finalize-only needs gas only when its evidence never landed, which is
+    // known once a broadcast has hit the shortfall (submitGasShortfall) —
+    // re-check that exact chain and path until the wallet is funded.
+    const shortfall = submitGasShortfall.get(taskHash);
+    if (shortfall || (!finalizeOnly && isSettlementChain(metaChain))) {
+      const gasProblem = shortfall
+        ? await preflightGas(shortfall.chain, signerFor(shortfall.chain), shortfall.viaAA).catch(() => null)
+        : await preflightGas(metaChain, signerFor(metaChain)).catch(() => null);
       if (gasProblem) {
         if (resumeHoldLogged.get(taskHash) !== gasProblem) {
           resumeHoldLogged.set(taskHash, gasProblem);
-          log(`resume: holding ${taskHash.slice(0, 10)}… (assigned to this wallet on ${metaChain}): ${gasProblem}`);
+          log(`resume: holding ${taskHash.slice(0, 10)}… (assigned to this wallet on ${shortfall?.chain ?? metaChain}): ${gasProblem}`);
         }
         continue;
       }
       resumeHoldLogged.delete(taskHash);
+      submitGasShortfall.delete(taskHash);
     }
 
     const attempts = resumeFailures.get(taskHash) ?? 0;
@@ -3525,7 +3590,12 @@ async function resumeAssignedTasks() {
         // then 409 INVALID_STATE at /submit ('submitted' is past that gate).
         log(`resuming submitted task ${taskHash.slice(0, 10)}… (finalize only, attempt ${attempts + 1}/${MAX_RESUME_ATTEMPTS})`);
         const result = await finalizeAcceptedTask(taskHash);
-        if (result && result.awaitingPosterApproval) {
+        if (!result && submitGasShortfall.has(taskHash)) {
+          // Evidence never landed and the wallet can't pay to rebroadcast it:
+          // a hold, not a failed attempt. The check above re-tests gas.
+          resumeFailures.set(taskHash, attempts);
+          log(`resume: holding ${taskHash.slice(0, 10)}… until the wallet can pay gas (attempt not counted)`);
+        } else if (result && result.awaitingPosterApproval) {
           // Manual-verification task: /finalize 200-noops and state stays
           // 'submitted' until the POSTER approves via /verify — the worker
           // owes nothing more. Park it past the cap (silently — skipping the
@@ -3567,7 +3637,13 @@ async function resumeAssignedTasks() {
           continue;
         }
         // tryAcceptTask already ran runAcceptedTask on success, so nothing
-        // more to do here — skip the direct runAcceptedTask call below.
+        // more to do here — skip the direct runAcceptedTask call below. A run
+        // that stopped only for gas (chain unknown up front, so the check
+        // above couldn't catch it) is a hold, not a spent attempt.
+        if (submitGasShortfall.has(taskHash)) {
+          resumeFailures.set(taskHash, attempts);
+          log(`resume: holding ${taskHash.slice(0, 10)}… until the wallet can pay gas (attempt not counted)`);
+        }
         continue;
       }
     } finally {
@@ -3779,6 +3855,38 @@ async function pollAndVerify() {
         continue; // transient — don't burn the cap
       }
 
+      // Settling needs gas. Check before the judge: a verdict we can't post is
+      // a wasted model call, and a wallet waiting for funds is not a failed
+      // attempt — counting it would give up and leave the executor unpaid.
+      // Logged once per reason; retried every poll until funded.
+      let settleViaAA = false;
+      if (status === 2) {
+        // The contract only accepts completeVerification from the recorded
+        // verifier (per-task taskVerifier, else the global one). Agent-verify
+        // tasks designate the agent EOA at post time → raw EOA path.
+        settleViaAA = canSubmitViaSmartAccount(settleChain);
+        if (settleViaAA && escrowIface) {
+          try {
+            const v = (await readOnChainVerifier(onChainId, settleChain)).toLowerCase();
+            settleViaAA = v === AGENT_SMART_ACCOUNT_ADDRESS.toLowerCase();
+            if (!settleViaAA) {
+              log(`verify: ${taskHash.slice(0, 10)}… on-chain verifier ${v} is not the smart account — using raw EOA tx`);
+            }
+          } catch (e) {
+            log(`verify: on-chain verifier read failed, staying on AA path: ${e.message}`);
+          }
+        }
+        const gasProblem = await preflightGas(settleChain, settleSigner, settleViaAA).catch(() => null);
+        if (gasProblem) {
+          if (verifySkipLogged.get(taskHash) !== gasProblem) {
+            verifySkipLogged.set(taskHash, gasProblem);
+            log(`verify: holding ${taskHash.slice(0, 10)}… until the wallet can pay gas: ${gasProblem}`);
+          }
+          continue;
+        }
+        verifySkipLogged.delete(taskHash);
+      }
+
       let verdict;
       if (status === 2) {
         // The untrusted brief + output are handled from here on: name the task
@@ -3820,23 +3928,7 @@ async function pollAndVerify() {
       } else if (status === 2) {
         // Submitted on-chain → settle now with our verdict.
         try {
-          // The contract only accepts completeVerification from the recorded
-          // verifier (per-task taskVerifier, else the global one). Agent-verify
-          // tasks designate the agent EOA at post time → raw EOA path.
-          let settleViaAA = canSubmitViaSmartAccount(settleChain);
-          if (settleViaAA && escrowIface) {
-            try {
-              const v = (await readOnChainVerifier(onChainId, settleChain)).toLowerCase();
-              settleViaAA = v === AGENT_SMART_ACCOUNT_ADDRESS.toLowerCase();
-              if (!settleViaAA) {
-                log(`verify: ${taskHash.slice(0, 10)}… on-chain verifier ${v} is not the smart account — using raw EOA tx`);
-              }
-            } catch (e) {
-              log(`verify: on-chain verifier read failed, staying on AA path: ${e.message}`);
-            }
-          }
-          const gasProblem = await preflightGas(settleChain, settleSigner, settleViaAA);
-          if (gasProblem) { log(`verify: ${taskHash.slice(0, 10)}… ${gasProblem}`); bumpVerifyFailure(taskHash); continue; }
+          // settleViaAA and the gas preflight were resolved above, before judging.
           const data = escrowIface.encodeFunctionData('completeVerification', [BigInt(onChainId), verdict.passed]);
           // ERC-4337 AA path: wrap in UserOp when the smart account is the
           // recorded verifier on Base.
@@ -4018,8 +4110,9 @@ function connectWebSocket() {
   // cascade move to the next agent after its window instead of locking the
   // task to an unfunded one. A chain this worker cannot sign for is declined
   // the same way. Events without a chain (older backend) fall through to the
-  // post-accept check in runAcceptedTask.
-  const gasGateBroadcast = async (taskId, chain) => {
+  // post-accept check in runAcceptedTask. An exclusive offer is handed back
+  // via /decline so the cascade moves on now, not after the whole window.
+  const gasGateBroadcast = async (taskId, chain, exclusive = false) => {
     const blocker = await acceptBlocker(chain, (c) => preflightGas(c, signerFor(c)).catch(() => null));
     if (!blocker) return false;
     const logged = blocker.unsupported ? chainSkipLogged : gasSkipLogged;
@@ -4027,13 +4120,14 @@ function connectWebSocket() {
       logged.set(taskId, blocker.reason);
       log(`skipping task ${taskId.slice(0, 10)}… on ${chain}: ${blocker.reason}`);
     }
+    if (exclusive) await declineOffer(taskId);
     return true;
   };
 
   wsClient.on('task:offer', async (data) => {
     log(`WS received task:offer for ${data.taskId?.slice(0, 10) || 'unknown'}… (score=${data.score})`);
     if (!data.taskId) return;
-    if (await gasGateBroadcast(data.taskId, data.meta?.chain)) return;
+    if (await gasGateBroadcast(data.taskId, data.meta?.chain, true)) return;
     acceptFromWs(data.taskId);
   });
 
