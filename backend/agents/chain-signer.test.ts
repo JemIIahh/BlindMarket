@@ -31,7 +31,7 @@ describe('pickChain — the backend names the chain; a missing one is 0G', () =>
     expect(pickChain(undefined)).toBe('0g');
     expect(pickChain(null)).toBe('0g');
   });
-  it.each(['arc', 'solana', '', 'og', 'BASE', 84532])(
+  it.each(['solana', '', 'og', 'BASE', 84532])(
     'throws on %j instead of signing it with the 0G key',
     (chain) => {
       expect(() => pickChain(chain)).toThrow(/not supported by this worker/);
@@ -42,7 +42,7 @@ describe('pickChain — the backend names the chain; a missing one is 0G', () =>
 describe('registrationBody', () => {
   it('declares every chain this code can sign for, whatever the deployment configures', () => {
     const body = registrationBody({ displayName: 'w', capabilities: [], publicKey: '04ab', minReward: ' 5 ' });
-    expect(body).toEqual({ displayName: 'w', capabilities: [], publicKey: '04ab', minReward: '5', supportedChains: ['0g', 'base'] });
+    expect(body).toEqual({ displayName: 'w', capabilities: [], publicKey: '04ab', minReward: '5', supportedChains: ['0g', 'base', 'arc'] });
     // The chains it declares are exactly the ones pickChain accepts.
     for (const chain of body.supportedChains) expect(isUnsupportedChain(chain)).toBe(false);
   });
@@ -59,7 +59,7 @@ describe('registrationBody', () => {
 
 describe('isUnsupportedChain', () => {
   it('flags only a present, unknown chain', () => {
-    expect(isUnsupportedChain('arc')).toBe(true);
+    expect(isUnsupportedChain('solana')).toBe(true);
     expect(isUnsupportedChain('')).toBe(true);
     expect(isUnsupportedChain('base')).toBe(false);
     expect(isUnsupportedChain('0g')).toBe(false);
@@ -79,7 +79,7 @@ describe('signerFor — one signer per chain', () => {
     expect(signerFor('base', { '0g': fakeSigner(1n), base: null })).toBeNull();
   });
   it('never hands out the 0G signer for an unknown chain', () => {
-    expect(() => signerFor('arc', { '0g': fakeSigner(1n), base: fakeSigner(1n) })).toThrow();
+    expect(() => signerFor('solana', { '0g': fakeSigner(1n), base: fakeSigner(1n) })).toThrow();
   });
 });
 
@@ -91,7 +91,7 @@ describe('escrowAddressFor', () => {
     expect(escrowAddressFor('0g')).toBe(process.env.AGENT_ESCROW_ADDRESS ?? '');
   });
   it('never returns the 0G escrow for an unknown chain', () => {
-    expect(() => escrowAddressFor('arc')).toThrow();
+    expect(() => escrowAddressFor('solana')).toThrow();
   });
 });
 
@@ -142,10 +142,10 @@ describe('pickAffordable', () => {
   it('skips a chain this worker cannot sign for, without asking about gas', async () => {
     // Accepting assigns the task on-chain, so this has to happen before accept.
     const problemFor = vi.fn(async (_chain: string) => null);
-    const { affordable, skipped } = await pickAffordable([entry('0xa1', 'arc'), entry('0xo1', '0g')], problemFor);
+    const { affordable, skipped } = await pickAffordable([entry('0xa1', 'solana'), entry('0xo1', '0g')], problemFor);
     expect(affordable.map((e: any) => e.meta.taskId)).toEqual(['0xo1']);
     expect(skipped).toEqual([
-      { taskHash: '0xa1', chain: 'arc', reason: expect.stringMatching(/"arc" is not supported/), unsupported: true },
+      { taskHash: '0xa1', chain: 'solana', reason: expect.stringMatching(/"solana" is not supported/), unsupported: true },
     ]);
     expect(problemFor).toHaveBeenCalledTimes(1);
     expect(problemFor).toHaveBeenCalledWith('0g');
@@ -155,8 +155,8 @@ describe('pickAffordable', () => {
 describe('acceptBlocker — the gate every accept path runs first', () => {
   it('refuses an unsupported chain without asking about gas, and marks it so it cannot speed up the feed scan', async () => {
     const problemFor = vi.fn(async (_chain: string) => null);
-    expect(await acceptBlocker('arc', problemFor)).toEqual({
-      reason: expect.stringMatching(/"arc" is not supported/),
+    expect(await acceptBlocker('solana', problemFor)).toEqual({
+      reason: expect.stringMatching(/"solana" is not supported/),
       unsupported: true,
     });
     expect(problemFor).not.toHaveBeenCalled();
@@ -178,6 +178,6 @@ describe('acceptBlocker — the gate every accept path runs first', () => {
   it('must run before preflightGas, which rejects an unsupported chain', async () => {
     // gasGateBroadcast and resume wrap preflightGas in .catch(() => null), so
     // without the gate this rejection would read as "no gas problem".
-    await expect(preflightGas('arc', null)).rejects.toThrow(/not supported/);
+    await expect(preflightGas('solana', null)).rejects.toThrow(/not supported/);
   });
 });

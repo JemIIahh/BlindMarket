@@ -179,6 +179,41 @@ function chainFacts(entry: SettlementChainConfig, posting: SettlementChainKey | 
   };
 }
 
+/**
+ * Whether this chain's marketplace signer holds the escrow's verifier role and
+ * can pay gas for marketplaceAssign. Every chain gets it, not only Base: Arc's
+ * escrow was deployed with its own verifier, and a signer that is not it makes
+ * every accept on Arc revert with NotVerifier while `configured` reads true.
+ */
+async function verifierReport(entry: SettlementChainConfig): Promise<Record<string, unknown>> {
+  const { escrow, marketplaceSigner, provider } = chainRuntime(entry.key);
+  const signerAddress = await marketplaceSigner!.getAddress();
+  // In parallel: a slow RPC should cost this endpoint one timeout, not two.
+  const [verifierRead, balanceRead] = await Promise.allSettled([
+    withTimeout(escrow!.verifier() as Promise<string>, 5_000),
+    withTimeout(provider.getBalance(signerAddress), 5_000),
+  ]);
+  const onChainVerifier = verifierRead.status === 'fulfilled' ? verifierRead.value : null;
+  const escrowReadError = verifierRead.status === 'rejected' ? safeErrorMessage(verifierRead.reason) : null;
+  const matches = onChainVerifier !== null && onChainVerifier.toLowerCase() === signerAddress.toLowerCase();
+  // The balance read is non-critical: null when it fails.
+  const balance = balanceRead.status === 'fulfilled' ? balanceRead.value : null;
+  const signerGasBalance = balance === null ? null : formatEther(balance);
+  const signerGasLow = balance === null ? null : balance < entry.gas.withdrawMinWei;
+  return {
+    signerAddress,
+    onChainVerifier,
+    // null when the escrow could not be read: unknown, not a mismatch.
+    verifierMatches: onChainVerifier === null ? null : matches,
+    escrowReadError,
+    signerGasBalance,
+    signerGasLow,
+    rotateCommand: onChainVerifier === null || matches
+      ? null
+      : rotateCommand(signerAddress, chainNetwork(entry.key).hardhatNetwork, entry.escrowAddress),
+  };
+}
+
 /** A chain as /health/bridge reports it: its facts plus readiness. Key order is pinned by health.bridge.test.ts. */
 async function chainReport(
   entry: SettlementChainConfig,
@@ -191,6 +226,7 @@ async function chainReport(
     chain,
     configured,
     ...facts,
+    ...(configured ? { verifier: await verifierReport(entry) } : {}),
     ...(reason ? { reason } : {}),
     ...indexerError(entry.key),
     ...(await parkedDisputes(entry.key)),

@@ -59,7 +59,7 @@ export interface WorkerRuntimeConfig {
    * DEFAULT (0.5.x defaulted to 0G testnet while `apiBase` defaults to
    * production, so a default runtime accepted mainnet tasks and failed the
    * chainId pin after assignment). It is 0G ONLY: it never stands in for
-   * another chain. For Base set `rpcUrls.base`. Must be the same network the
+   * another chain. For Base set `rpcUrls.base`, for Arc `rpcUrls.arc`. Must be the same network the
    * backend at `apiBase` settles on.
    */
   rpcUrl?: string;
@@ -80,7 +80,7 @@ export interface WorkerRuntimeConfig {
  * Chains this runtime's CODE can sign submitEvidence on. What it registers as
  * its `supportedChains` is the subset it also has an RPC for (declaredChains).
  */
-export const SETTLEMENT_CHAINS = ['0g', 'base'] as const;
+export const SETTLEMENT_CHAINS = ['0g', 'base', 'arc'] as const;
 export type SettlementChain = (typeof SETTLEMENT_CHAINS)[number];
 
 /**
@@ -93,7 +93,7 @@ function settlementChain(taskId: string, reported: string | null | undefined): S
   const known = SETTLEMENT_CHAINS.find((c) => c === reported);
   if (!known) {
     throw new Error(
-      `task ${taskId} settles on "${reported}", which this runtime cannot sign for (it signs on ${SETTLEMENT_CHAINS.join(' and ')}) — update @blindmarket/sdk`,
+      `task ${taskId} settles on "${reported}", which this runtime cannot sign for (it signs on ${SETTLEMENT_CHAINS.join(', ')}) — update @blindmarket/sdk`,
     );
   }
   return known;
@@ -289,7 +289,7 @@ export class WorkerRuntime {
     }
     if (this.declaredChains.length === 0) {
       throw new Error(
-        '[WorkerRuntime] no RPC configured. Set `rpcUrl` (0G) and/or `rpcUrls.base` to the network the backend at ' +
+        '[WorkerRuntime] no RPC configured. Set `rpcUrls.arc` (where production posts new tasks), `rpcUrls.base` and/or `rpcUrl` (0G) to the network the backend at ' +
           '`apiBase` settles on. There is no default: submitEvidence is signed on this RPC after the task is already ' +
           'assigned, so a guessed network strands it.',
       );
@@ -303,7 +303,7 @@ export class WorkerRuntime {
         `[WorkerRuntime] declaring chains: ${this.declaredChains.join(', ') || 'none'}. ` +
           `No RPC for ${undeclared.join(', ')} — tasks on ${undeclared.length > 1 ? 'those chains' : 'that chain'} are skipped; ` +
           `set ${undeclared.map((c) => `rpcUrls.${c}`).join(', ')} to claim them ` +
-          `(production posts new tasks on Base).`,
+          `(production posts new tasks on Arc).`,
       );
     }
 

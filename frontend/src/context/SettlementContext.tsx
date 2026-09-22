@@ -4,7 +4,7 @@ import { get } from '../lib/api';
 import { defaultSettlement, mergeSettlement, setSettlement, type BackendSettlement } from '../config/settlement';
 
 /**
- * Loads GET /api/v1/health/settlement once and lays the backend's answer over
+ * Loads GET /health/settlement once and lays the backend's answer over
  * the build-time settlement table (config/settlement.ts): which chain new
  * tasks post on, and each chain's token, escrow and relay name.
  *
@@ -16,7 +16,7 @@ import { defaultSettlement, mergeSettlement, setSettlement, type BackendSettleme
 export function SettlementProvider({ children }: { children: ReactNode }) {
   const { data } = useQuery({
     queryKey: ['settlement'],
-    queryFn: () => get<BackendSettlement>('/api/v1/health/settlement'),
+    queryFn: () => get<BackendSettlement>('/health/settlement'),
     staleTime: Infinity,
     retry: 2,
   });

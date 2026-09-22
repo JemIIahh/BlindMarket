@@ -98,6 +98,11 @@ app.use(requestLogger);
 
 // Routes
 app.use('/health', healthRouter);
+// Also under /api/v1: the web app reads /api/v1/health/settlement (and
+// every other client path is /api/v1/*). Mounted only at /health, that
+// request 404'd, the app fell back to its build-time table, and posted
+// in Base USDC to a backend that escrows on Arc (TOKEN_NOT_SETTLEMENT).
+app.use('/api/v1/health', healthRouter);
 app.use('/api/v1/tasks', tasksRouter);
 app.use('/api/v1/submissions', submissionsRouter);
 app.use('/api/v1/reputation', reputationRouter);

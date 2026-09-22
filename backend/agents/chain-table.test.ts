@@ -119,23 +119,58 @@ describe('the backend table and the legacy env agree', () => {
   });
 });
 
+const ARC_ESCROW = '0xaBf70843E0380F1e749d2b85C30dD6820Ff5C731';
+const ARC = {
+  key: 'arc', chainId: 5042002, rpcUrl: 'https://arc.example/rpc', escrow: ARC_ESCROW,
+  token: { address: '0x3600000000000000000000000000000000000000', kind: 'erc20', symbol: 'USDC', decimals: 6 },
+  gasSymbol: 'USDC', nativeIsSettlementToken: true, aa: false, posting: true,
+};
+
+describe('Arc, the chain production posts on', () => {
+  // What production's backend sends since #73: Base kept for legacy tasks,
+  // Arc as the posting chain, no 0G.
+  const prodTable = [{ ...TABLE[1], posting: false }, ARC];
+
+  it('is declared at registration, so the backend offers Arc tasks to this agent', async () => {
+    const { registrationBody } = await loadWorker({ SETTLEMENT_CHAINS_JSON: JSON.stringify(prodTable) });
+    expect(registrationBody({ displayName: 'a', capabilities: [], publicKey: '04ab' }).supportedChains).toEqual(['0g', 'base', 'arc']);
+  });
+
+  it('gets a signer on the Arc RPC and the Arc escrow', async () => {
+    const w = await loadWorker({ SETTLEMENT_CHAINS_JSON: JSON.stringify(prodTable) });
+    expect(w.pickChain('arc')).toBe('arc');
+    expect(rpcOf(w.signerFor('arc'))).toBe(ARC.rpcUrl);
+    expect(w.escrowAddressFor('arc')).toBe(ARC_ESCROW);
+    expect(w.postingChainInfo().key).toBe('arc');
+  });
+
+  it('is accepted when the wallet holds gas, and names USDC when it does not', async () => {
+    const w = await loadWorker({ SETTLEMENT_CHAINS_JSON: JSON.stringify(prodTable) });
+    expect(await w.acceptBlocker('arc', async () => null)).toBeNull();
+    const empty = { address: '0x' + 'ab'.repeat(20), provider: { getBalance: async () => 0n } };
+    expect(await w.preflightGas('arc', empty, false)).toMatch(/holds 0 USDC on arc/);
+  });
+
+  it('says the backend did not inject Arc when this deployment has no Arc entry', async () => {
+    const w = await loadWorker({ SETTLEMENT_CHAINS_JSON: JSON.stringify(TABLE) });
+    expect(w.signerFor('arc')).toBeNull();
+    expect(await w.preflightGas('arc', null, false)).toMatch(/no arc signer — SETTLEMENT_CHAINS_JSON not injected \(backend has no Arc escrow configured\?\)/);
+  });
+});
+
 describe('a chain this worker does not know', () => {
-  const withArc = [...TABLE, {
-    key: 'arc', chainId: 5042002, rpcUrl: 'https://arc.example/rpc', escrow: '0xa4c0000000000000000000000000000000000003',
-    token: { address: USDC, kind: 'erc20', symbol: 'USDC', decimals: 6 },
-    gasSymbol: 'USDC', nativeIsSettlementToken: true, aa: false, posting: true,
-  }];
+  const withUnknown = [...TABLE, { ...ARC, key: 'solana', chainId: 900 }];
 
   it('is never declared at registration, whatever the backend configures', async () => {
-    const { registrationBody } = await loadWorker({ SETTLEMENT_CHAINS_JSON: JSON.stringify(withArc) });
-    expect(registrationBody({ displayName: 'a', capabilities: [], publicKey: '04ab' }).supportedChains).toEqual(['0g', 'base']);
+    const { registrationBody } = await loadWorker({ SETTLEMENT_CHAINS_JSON: JSON.stringify(withUnknown) });
+    expect(registrationBody({ displayName: 'a', capabilities: [], publicKey: '04ab' }).supportedChains).toEqual(['0g', 'base', 'arc']);
   });
 
   it('is refused before accepting a task on it', async () => {
-    const { pickChain, isUnsupportedChain, acceptBlocker } = await loadWorker({ SETTLEMENT_CHAINS_JSON: JSON.stringify(withArc) });
-    expect(isUnsupportedChain('arc')).toBe(true);
-    expect(() => pickChain('arc')).toThrow(/not supported by this worker/);
-    expect(await acceptBlocker('arc', async () => null)).toMatchObject({ unsupported: true });
+    const { pickChain, isUnsupportedChain, acceptBlocker } = await loadWorker({ SETTLEMENT_CHAINS_JSON: JSON.stringify(withUnknown) });
+    expect(isUnsupportedChain('solana')).toBe(true);
+    expect(() => pickChain('solana')).toThrow(/not supported by this worker/);
+    expect(await acceptBlocker('solana', async () => null)).toMatchObject({ unsupported: true });
   });
 });
 

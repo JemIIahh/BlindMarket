@@ -341,7 +341,7 @@ describe('WorkerRuntime.start — refuses a configuration that can only strand t
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     const runtime = new WorkerRuntime({ ...base, privateKey: PRIVATE_KEY });
-    await expect(runtime.start()).rejects.toThrow(/no RPC configured\. Set `rpcUrl` \(0G\) and\/or `rpcUrls\.base`/);
+    await expect(runtime.start()).rejects.toThrow(/no RPC configured\. Set `rpcUrls\.arc`/);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 

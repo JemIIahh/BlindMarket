@@ -82,7 +82,7 @@ export function createBlindMarketTools(bb: BlindMarket): Tool[] {
       // No enum: the backend validates the list, and a newer backend may accept
       // a chain this SDK version doesn't know.
       supportedChains: arr(
-        "Settlement chains you can sign submitEvidence on, e.g. ['0g', 'base']. Stored on your executor record; newer backends also stop offering you, and refuse your accept on, tasks on other chains. Browse results are not filtered, so check a task's chain before accepting (optional)",
+        "Settlement chains you can sign submitEvidence on, e.g. ['base', 'arc']. Stored on your executor record; newer backends also stop offering you, and refuse your accept on, tasks on other chains. Browse results are not filtered, so check a task's chain before accepting (optional)",
         str('Chain slug'),
       ),
     }, async (a) => {

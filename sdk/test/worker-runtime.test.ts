@@ -209,7 +209,7 @@ describe('WorkerRuntime.executeTask — settlement chain', () => {
     const sendTxSpy = stubSend();
     const handler = vi.fn(async () => ({ done: true }));
     const fetchMock = stubFetch({
-      '/accept': { taskId: TASK_ID, status: 'accepted', rootHash: ROOT_HASH, privacy: 'public', chain: 'arc' },
+      '/accept': { taskId: TASK_ID, status: 'accepted', rootHash: ROOT_HASH, privacy: 'public', chain: 'solana' },
     });
     const runtime = mkRuntime(wallet, handler);
 
@@ -219,7 +219,7 @@ describe('WorkerRuntime.executeTask — settlement chain', () => {
     // biome-ignore lint/suspicious/noExplicitAny: reaching into private fields to assert
     const exec = (runtime as any).executions.get(TASK_ID) as TaskExecutionInfo;
     expect(exec.status).toBe('failed');
-    expect(exec.error).toMatch(/"arc", which this runtime cannot sign for/);
+    expect(exec.error).toMatch(/"solana", which this runtime cannot sign for/);
     expect(handler).not.toHaveBeenCalled();
     expect(sendTxSpy).not.toHaveBeenCalled();
     expect(fetchMock.mock.calls.some((call) => String(call[0]).includes('/submit'))).toBe(false);
@@ -426,7 +426,10 @@ describe('WorkerRuntime.start — supportedChains', () => {
     expect(plain.declaredChains).toEqual(['0g']);
     const both = new WorkerRuntime({ apiKey: 'k', displayName: 'a', capabilities: [AgentCap.DATA_PROCESSING], executeTask: async () => ({}), rpcUrl: 'http://og.invalid', rpcUrls: { base: 'https://base.example/rpc' } });
     expect(both.declaredChains).toEqual(['0g', 'base']);
-    expect(both.declaredChains).toEqual([...SETTLEMENT_CHAINS]);
+    const all = new WorkerRuntime({ apiKey: 'k', displayName: 'a', capabilities: [AgentCap.DATA_PROCESSING], executeTask: async () => ({}), rpcUrl: 'http://og.invalid', rpcUrls: { base: 'https://base.example/rpc', arc: 'https://arc.example/rpc' } });
+    expect(all.declaredChains).toEqual([...SETTLEMENT_CHAINS]);
+    const arcOnly = new WorkerRuntime({ apiKey: 'k', displayName: 'a', capabilities: [AgentCap.DATA_PROCESSING], executeTask: async () => ({}), rpcUrls: { arc: 'https://arc.example/rpc' } });
+    expect(arcOnly.declaredChains).toEqual(['arc']);
   });
 
   it('shrinks a stored declaration that names a chain it has no RPC for (it would accept and strand those tasks)', async () => {
@@ -444,10 +447,10 @@ describe('WorkerRuntime.start — supportedChains', () => {
   });
 
   it("keeps the operator's choice where it overlaps what the runtime can settle, instead of widening it", async () => {
-    // Stored ['base', 'arc']: 'arc' is unknown to this runtime, so it must
+    // Stored ['base', 'solana']: 'solana' is unknown to this runtime, so it must
     // re-register — as ['base'], not as everything it could settle.
     const fetchMock = stubFetch({
-      '/a2a/profile': { agent: storedProfile(['base', 'arc']) },
+      '/a2a/profile': { agent: storedProfile(['base', 'solana']) },
       '/a2a/register': { agent: storedProfile(['base']) },
       '/a2a/tasks': { tasks: [] },
     });
@@ -477,16 +480,16 @@ describe('WorkerRuntime.start — supportedChains', () => {
     const bodies = registerBodies(fetchMock);
     expect(bodies).toHaveLength(1);
     expect(bodies[0].supportedChains).toEqual(['0g']);
-    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/declaring chains: 0g\. No RPC for base — tasks on that chain are skipped; set rpcUrls\.base/));
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/declaring chains: 0g\. No RPC for base, arc — tasks on those chains are skipped; set rpcUrls\.base, rpcUrls\.arc/));
   });
 
   it('says nothing at start when every chain has an RPC', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    stubFetch({ '/api-keys/whoami': WHOAMI, '/a2a/register': { agent: storedProfile(['0g', 'base']) }, '/a2a/tasks': { tasks: [] } });
+    stubFetch({ '/api-keys/whoami': WHOAMI, '/a2a/register': { agent: storedProfile(['0g', 'base', 'arc']) }, '/a2a/tasks': { tasks: [] } });
     runtime = new WorkerRuntime({
       apiKey: 'test-key', displayName: 'fresh-agent', capabilities: [AgentCap.DATA_PROCESSING],
       executeTask: async () => ({ done: true }), privateKey: PRIVATE_KEY,
-      rpcUrl: 'http://og.invalid', rpcUrls: { base: 'https://base.example/rpc' },
+      rpcUrl: 'http://og.invalid', rpcUrls: { base: 'https://base.example/rpc', arc: 'https://arc.example/rpc' },
     });
     await runtime.start();
     expect(warn).not.toHaveBeenCalled();
@@ -495,7 +498,7 @@ describe('WorkerRuntime.start — supportedChains', () => {
   it('createAgent registers the declared chains as supportedChains', async () => {
     const fetchMock = stubFetch({
       '/api-keys/whoami': WHOAMI,
-      '/a2a/register': { agent: storedProfile(['0g', 'base']) },
+      '/a2a/register': { agent: storedProfile(['0g', 'base', 'arc']) },
       '/a2a/tasks': { tasks: [] },
     });
     runtime = new WorkerRuntime({
@@ -505,7 +508,7 @@ describe('WorkerRuntime.start — supportedChains', () => {
       executeTask: async () => ({ done: true }),
       privateKey: PRIVATE_KEY,
       rpcUrl: 'http://og.invalid',
-      rpcUrls: { base: 'https://base.example/rpc' },
+      rpcUrls: { base: 'https://base.example/rpc', arc: 'https://arc.example/rpc' },
     });
 
     await runtime.start();
@@ -620,7 +623,7 @@ describe('WorkerRuntime.start — supportedChains', () => {
       '/a2a/register': errorResponse(400, 'Invalid request'),
       '/a2a/tasks': { tasks: [] },
     });
-    runtime = restoredRuntime();
+    runtime = restoredRuntime({ base: 'https://base.example/rpc', arc: 'https://arc.example/rpc' });
     const events: WorkerRuntimeEvent[] = [];
     runtime.on((e) => events.push(e));
 
