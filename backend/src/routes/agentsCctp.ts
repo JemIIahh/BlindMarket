@@ -41,13 +41,18 @@ import {
 
 export const agentsCctpRouter = Router();
 
-// Conservative floor for the ETH the agent's Base wallet needs to pay for the
-// approve + depositForBurnWithHook pair. Observed on Base Sepolia (Sept 2026):
-// the burn uses ≈105–115k gas at ~0.006–0.01 gwei; a USDC approve adds tens
-// of thousands more — together orders of magnitude under this floor. Kept
-// conservative like Base's gas.withdrawMinWei in services/settlementChains.ts,
-// since mainnet Base fees run higher.
-const CCTP_BASE_GAS_MIN = ethers.parseEther('0.0002');
+// Conservative floor for the ETH the agent's wallet needs to pay for the
+// approve + depositForBurnWithHook pair on an ETH-gas source (Base). Observed
+// on Base Sepolia (Sept 2026): the burn uses ≈105–115k gas at ~0.006–0.01
+// gwei; a USDC approve adds tens of thousands more — together orders of
+// magnitude under this floor. Kept conservative like Base's gas.withdrawMinWei
+// in services/settlementChains.ts, since mainnet Base fees run higher. Not used
+// on a USDC-gas source (Arc) — there `usdcGasReserveRaw` is the floor.
+const CCTP_ETH_GAS_MIN = ethers.parseEther('0.0002');
+
+// USDC's native view on a USDC-gas chain (Arc) is 18-dec; its ERC-20 view —
+// and every *Raw amount in this API — is 6-dec. Same as routes/cctp.ts.
+const NATIVE_UNITS_PER_USDC_RAW = 10n ** 12n;
 
 const WithdrawBodySchema = z.object({
   destinationChain: z.string().min(1),
@@ -118,29 +123,51 @@ agentsCctpRouter.post('/:id/cctp/withdraw', requireAuth, async (req: AuthRequest
     const wallet = new ethers.Wallet(pk, source.rpc);
 
     const nativeBalance = await source.rpc.getBalance(wallet.address);
-    if (nativeBalance < CCTP_BASE_GAS_MIN) {
-      res.status(400).json({ success: false, error: { code: 'CCTP_INSUFFICIENT_GAS', message: `Agent's Base wallet needs at least ${ethers.formatEther(CCTP_BASE_GAS_MIN)} ETH to pay for the approve + burn transactions (has ${ethers.formatEther(nativeBalance)})` } });
+    // On a USDC-gas source (Arc) the approve + burn gas is paid from the SAME
+    // USDC being bridged, so a whole-balance burn either reverts after spending
+    // gas or strands the agent with nothing for fees. Same rule as the user
+    // route (routes/cctp.ts /deposit-intent): leave `usdcGasReserveRaw` behind,
+    // compared in the 18-dec native view since the 6-dec ERC-20 view truncates.
+    const reserveRaw = source.usdcGasReserveRaw ?? 0n;
+    if (reserveRaw === 0n && nativeBalance < CCTP_ETH_GAS_MIN) {
+      res.status(400).json({ success: false, error: { code: 'CCTP_INSUFFICIENT_GAS', message: `Agent's ${source.label} wallet needs at least ${ethers.formatEther(CCTP_ETH_GAS_MIN)} ETH to pay for the approve + burn transactions (has ${ethers.formatEther(nativeBalance)})` } });
       return;
     }
 
     const usdc = new ethers.Contract(source.usdcAddress, ERC20_ABI, source.rpc);
     const usdcBalance: bigint = await usdc.balanceOf(wallet.address);
+    // The most the agent can bridge and still cover gas (USDC-gas source only).
+    const availableRaw = nativeBalance / NATIVE_UNITS_PER_USDC_RAW;
+    const maxAmountRaw = reserveRaw > 0n
+      ? (availableRaw > reserveRaw ? availableRaw - reserveRaw : 0n)
+      : usdcBalance;
     let amount: bigint;
     if (amountRaw) {
       amount = BigInt(amountRaw);
       if (amount > usdcBalance) {
-        res.status(409).json({ success: false, error: { code: 'CCTP_INSUFFICIENT_USDC', message: `Requested ${amountRaw} exceeds the agent's Base USDC balance (${usdcBalance.toString()})` } });
+        res.status(409).json({ success: false, error: { code: 'CCTP_INSUFFICIENT_USDC', message: `Requested ${amountRaw} exceeds the agent's ${source.label} USDC balance (${usdcBalance.toString()})` } });
         return;
       }
     } else {
-      amount = usdcBalance;
+      amount = maxAmountRaw < usdcBalance ? maxAmountRaw : usdcBalance;
+    }
+    if (reserveRaw > 0n && nativeBalance < (amount + reserveRaw) * NATIVE_UNITS_PER_USDC_RAW) {
+      res.status(409).json({
+        success: false,
+        error: {
+          code: 'CCTP_INSUFFICIENT_GAS_HEADROOM',
+          message: `Keep ${ethers.formatUnits(reserveRaw, 6)} USDC on ${source.label} for network fees — the agent can bridge up to ${ethers.formatUnits(maxAmountRaw, 6)} USDC.`,
+          details: { reserveRaw: reserveRaw.toString(), maxAmountRaw: maxAmountRaw.toString() },
+        },
+      });
+      return;
     }
     if (amount <= 0n) {
-      res.status(409).json({ success: false, error: { code: 'CCTP_INSUFFICIENT_USDC', message: 'Agent has no Base USDC to withdraw' } });
+      res.status(409).json({ success: false, error: { code: 'CCTP_INSUFFICIENT_USDC', message: `Agent has no ${source.label} USDC to withdraw` } });
       return;
     }
 
-    // Decided by the SOURCE chain (always Base here, so Fast Transfer).
+    // Decided by the SOURCE chain (no Fast Transfer when it is Arc).
     const minFinalityThreshold = finalityThresholdFor(source);
 
     let maxFeeRaw: bigint;
