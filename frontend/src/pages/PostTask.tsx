@@ -20,6 +20,7 @@ import {
 } from '../components/bb';
 import { aesEncrypt, eciesEncrypt, generateAesKey, sha256, toBase64, toBytes } from '../lib/crypto';
 import { stashAesKey } from '../lib/keyStash';
+import { clearPendingIndex, listPendingIndex, savePendingIndex, type PendingIndex } from '../lib/pendingIndex';
 import { assertWalletOnChain, providerFor, signAndSendTx } from '../lib/txSigner';
 import { authedGet, authedPost } from '../lib/api';
 import { trackEvent } from '../hooks/useAnalytics';
@@ -113,6 +114,14 @@ export default function PostTask() {
   const [status, setStatus] = useState<'idle' | 'encrypting' | 'approving' | 'confirming' | 'signing' | 'done' | 'error'>('idle');
   const [error, setError] = useState('');
   const [taskId, setTaskId] = useState<string | null>(null);
+  // Funded escrows whose listing never landed (lib/pendingIndex.ts): shown
+  // with a retry, so the poster lists them instead of funding a second one.
+  const [unlisted, setUnlisted] = useState<PendingIndex[]>([]);
+  const [retrying, setRetrying] = useState<string | null>(null);
+  const [retryError, setRetryError] = useState('');
+  useEffect(() => {
+    setUnlisted(address ? listPendingIndex(address) : []);
+  }, [address]);
   const [confirmAmount, setConfirmAmount] = useState('');
   const [confirmSymbol, setConfirmSymbol] = useState('');
   const [gasEstimate, setGasEstimate] = useState<{ units: bigint; gwei: number; usdc: number } | null>(null);
@@ -454,25 +463,29 @@ export default function PostTask() {
 
       // 8. Register A2A meta on the backend, gated on the receipt.
       // Retry up to 3 times — user-op inclusion can take a few blocks.
+      const indexBody = {
+        txHash,
+        taskHash,
+        isUserOp: sent.userOp ?? false,
+        verificationMode,
+        verificationCriteria,
+        verifierAddress,
+        requiredCapabilities: [],
+        rootHash,
+        wrappedKeys: isPublicTask ? undefined : wrappedKeys,
+        keyCustodyBlob,
+        privacy: isPublicTask ? ('public' as const) : undefined,
+        publicBrief: isPublicTask ? form.instructions.slice(0, 4000) : undefined,
+        routingSummary: form.routingSummary.trim() ? form.routingSummary.trim().slice(0, 500) : undefined,
+      };
+      // The escrow is funded from here on: keep the listing request so a
+      // failure below can be retried instead of re-posted.
+      if (address) savePendingIndex({ taskHash, txHash, poster: address, body: indexBody });
       let indexResp: any = null;
       let lastErr: any = null;
       for (let i = 0; i < 3; i++) {
         try {
-          indexResp = await authedPost<any>('/api/v1/a2a/tasks/index', {
-            txHash,
-            taskHash,
-            isUserOp: sent.userOp ?? false,
-            verificationMode,
-            verificationCriteria,
-            verifierAddress,
-            requiredCapabilities: [],
-            rootHash,
-            wrappedKeys: isPublicTask ? undefined : wrappedKeys,
-            keyCustodyBlob,
-            privacy: isPublicTask ? ('public' as const) : undefined,
-            publicBrief: isPublicTask ? form.instructions.slice(0, 4000) : undefined,
-            routingSummary: form.routingSummary.trim() ? form.routingSummary.trim().slice(0, 500) : undefined,
-          }, token);
+          indexResp = await authedPost<any>('/api/v1/a2a/tasks/index', indexBody, token);
           break;
         } catch (e) {
           lastErr = e;
@@ -480,7 +493,15 @@ export default function PostTask() {
           if (i < 2) await new Promise(r => setTimeout(r, 10000));
         }
       }
-      if (!indexResp) throw lastErr!;
+      if (!indexResp) {
+        if (address) setUnlisted(listPendingIndex(address));
+        throw new Error(
+          `Your payment is locked in escrow (tx ${txHash.slice(0, 10)}…), but the task could not be listed yet: ${(lastErr as Error)?.message ?? 'unknown error'}. ` +
+          'Use "Retry listing" above — posting again would fund a second escrow.',
+        );
+      }
+      clearPendingIndex(taskHash);
+      if (address) setUnlisted(listPendingIndex(address));
 
       const finalTaskId = indexResp.onChainTaskId ?? taskJson?.taskId ?? null;
       setTaskId(finalTaskId);
@@ -497,6 +518,26 @@ export default function PostTask() {
       trackEvent('task_post_error', { message: (err as Error).message });
     } finally {
       submittingRef.current = false;
+    }
+  }
+
+  // List a funded escrow whose listing failed. Same request as the first
+  // attempt; the backend lets the poster who first indexed a hash index it
+  // again, so a retry after a partial success is harmless.
+  async function retryListing(entry: PendingIndex) {
+    setRetrying(entry.taskHash);
+    setRetryError('');
+    try {
+      const token = (await getIdentityToken()) || (await getAccessToken()) || undefined;
+      const resp = await authedPost<{ onChainTaskId?: string | null }>('/api/v1/a2a/tasks/index', entry.body, token);
+      clearPendingIndex(entry.taskHash);
+      setUnlisted(address ? listPendingIndex(address) : []);
+      trackEvent('task_listing_retried', { taskId: resp.onChainTaskId ?? null });
+      navigate('/tasks/mine');
+    } catch (e) {
+      setRetryError(`Listing still failed: ${(e as Error).message}. Your payment stays in escrow — try again shortly.`);
+    } finally {
+      setRetrying(null);
     }
   }
 
@@ -618,6 +659,34 @@ export default function PostTask() {
           </div>
         </div>
       ) : (
+        <>
+        {unlisted.length > 0 && (
+          <div className="border border-warn/50 bg-warn/5 p-4 sm:p-5 mb-4 space-y-3">
+            <div className="flex items-center gap-2 text-warn">
+              <Icon name="shield" size={16} />
+              <span className="text-sm font-semibold">
+                {unlisted.length === 1 ? 'A funded task is not listed yet' : `${unlisted.length} funded tasks are not listed yet`}
+              </span>
+            </div>
+            <p className="text-sm text-ink-2 leading-relaxed">
+              The payment is locked in escrow, but agents can't see the task until it is listed. Retry the listing
+              rather than posting again, which would fund a second escrow.
+            </p>
+            {unlisted.map((entry) => (
+              <div key={entry.taskHash} className="flex items-center justify-between gap-3 flex-wrap">
+                <span className="font-mono text-xs text-ink-3 break-all">tx {entry.txHash.slice(0, 10)}…{entry.txHash.slice(-6)}</span>
+                <Button
+                  variant="outline"
+                  type="button"
+                  label={retrying === entry.taskHash ? 'Listing…' : 'Retry listing'}
+                  disabled={retrying !== null}
+                  onClick={() => retryListing(entry)}
+                />
+              </div>
+            ))}
+            {retryError && <div className="text-sm text-err break-words">{retryError}</div>}
+          </div>
+        )}
         <form onSubmit={handleSubmit} className="border border-line">
           <div className="p-6 border-b border-line">
             <SectionRule num="01" title="Task details" />
@@ -914,6 +983,7 @@ export default function PostTask() {
             )}
           </div>
         </form>
+        </>
       )}
     </div>
     <ConfirmDialog
