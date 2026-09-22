@@ -24,7 +24,16 @@ vi.mock('../services/taskChain.js', () => ({
   resolveCachedTaskByHash: vi.fn(async (hash: string) =>
     hash === BASE_HASH ? { taskId: '7', chain: 'base' } : hash === ARC_HASH ? { taskId: '7', chain: 'arc' } : null),
   resolveTaskChainById: vi.fn(async () => 'base'),
+  // Arc task 7 is the one ARC_HASH is indexed to; any other id is a duplicate.
+  isIndexedTask: vi.fn(async (chain: string, taskId: number | string, hash: string) =>
+    chain === 'arc' && String(taskId) === '7' && hash === ARC_HASH),
 }));
+
+// Arc is the posting chain whatever this machine's env says.
+vi.mock('../services/settlementChains.js', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('../services/settlementChains.js')>();
+  return { ...mod, postingChain: () => 'arc' };
+});
 
 vi.mock('../services/escrow.js', () => ({
   buildCancelTaskOn: vi.fn(async () => ({ to: '0xCca5ab873158b888158AD9Dc36fb4Ee683eFbEBf', data: '0xcancel' })),
@@ -54,6 +63,8 @@ vi.mock('../services/a2aStore.js', () => ({
   getIndexedHashes: vi.fn(async () => new Set<string>()),
   getMeta: vi.fn(async () => null),
   getState: vi.fn(async () => null),
+  projectPublicMeta: vi.fn((m: unknown) => m),
+  projectPublicState: vi.fn((s: Record<string, unknown>) => ({ ...s })),
 }));
 
 vi.mock('../services/resultVisibility.js', () => ({ canViewerSeeResult: vi.fn(async () => false) }));
@@ -98,11 +109,35 @@ describe('GET /tasks/:id', () => {
     expect(arc.body.data).toMatchObject({ chain: 'arc', symbol: null });
   });
 
-  it('reads a numeric id for the resolved chain', async () => {
+  it('reads a numeric id on the posting chain, where new tasks live', async () => {
     const res = await get('7');
     expect(res.status).toBe(200);
-    expect(res.body.data.chain).toBe('base');
-    expect(escrowService.getTaskOn).toHaveBeenCalledWith('base', 7);
+    expect(res.body.data.chain).toBe('arc');
+    expect(escrowService.getTaskOn).toHaveBeenCalledWith('arc', 7);
+  });
+
+  it("serves no A2A state for a duplicate funded under another task's hash, even to the duplicate's poster", async () => {
+    const a2aStore = await import('../services/a2aStore.js');
+    const visibility = await import('../services/resultVisibility.js');
+    vi.mocked(a2aStore.getMeta).mockResolvedValue({ taskId: ARC_HASH, privacy: undefined } as any);
+    vi.mocked(a2aStore.getState).mockResolvedValue({ taskId: ARC_HASH, status: 'verified', resultData: { output: 'secret' } } as any);
+    // The caller IS the duplicate's on-chain poster, so the old gate passed.
+    vi.mocked(visibility.canViewerSeeResult).mockResolvedValue(true);
+
+    const res = await get('8');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toMatchObject({ taskId: '8', a2aMeta: null, a2aState: null, a2aIndexed: false });
+    expect(JSON.stringify(res.body)).not.toContain('secret');
+    expect(a2aStore.getMeta).not.toHaveBeenCalled();
+    expect(a2aStore.getState).not.toHaveBeenCalled();
+
+    // The task the hash is indexed to still gets its A2A state.
+    const own = await get('7');
+    expect(own.body.data.a2aState).toMatchObject({ status: 'verified', resultData: { output: 'secret' } });
+
+    vi.mocked(a2aStore.getMeta).mockResolvedValue(undefined);
+    vi.mocked(a2aStore.getState).mockResolvedValue(undefined);
+    vi.mocked(visibility.canViewerSeeResult).mockResolvedValue(false);
   });
 });
 
@@ -122,5 +157,30 @@ describe('cancel and claim-timeout say which chain their transaction is for', ()
     expect(res.status).toBe(200);
     expect(res.body.data).toMatchObject({ chain: 'base', chainId: 84532 });
     expect(res.body.data.unsignedTx.to).toBe('0xCca5ab873158b888158AD9Dc36fb4Ee683eFbEBf');
+  });
+
+  it.each(['cancel', 'timeout', 'confirm-tx'])('%s resolves only on the chain the client names', async (route) => {
+    vi.mocked(taskChain.resolveTaskChainById).mockResolvedValueOnce('arc');
+    await post(`7/${route}`).send({ chain: 'arc', txHash: '0x' + '11'.repeat(32) });
+    expect(taskChain.resolveTaskChainById).toHaveBeenCalledWith(7, '0x1111111111111111111111111111111111111111', 'arc');
+  });
+
+  it('searches every chain when the client names none', async () => {
+    await post('7/cancel').send({});
+    expect(taskChain.resolveTaskChainById).toHaveBeenCalledWith(7, '0x1111111111111111111111111111111111111111', undefined);
+  });
+
+  it('rejects a chain this backend does not know', async () => {
+    const res = await post('7/cancel').send({ chain: '0g' });
+    expect(res.status).toBe(400);
+    expect(res.body.error?.code ?? res.body.code).toBe('INVALID_CHAIN');
+    expect(taskChain.resolveTaskChainById).not.toHaveBeenCalled();
+  });
+
+  it('refuses when the caller does not own the id on the named chain', async () => {
+    vi.mocked(taskChain.resolveTaskChainById).mockResolvedValueOnce(null);
+    const res = await post('7/cancel').send({ chain: 'arc' });
+    expect(res.status).toBe(403);
+    expect(escrowService.buildCancelTaskOn).not.toHaveBeenCalled();
   });
 });

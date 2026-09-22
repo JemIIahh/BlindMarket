@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Button, Modal } from './bb';
 import { copyToClipboard } from '../lib/utils';
 import { formatPaymentAmount } from '../lib/paymentUnits';
-import { API_BASE_URL, OG_RPC_URL, WORKER_SHARE_PCT, PLATFORM_FEE_PCT } from '../config/constants';
+import { API_BASE_URL, WORKER_SHARE_PCT, PLATFORM_FEE_PCT } from '../config/constants';
 import { getMarketplaceTokenAddress, getPostingChain } from '../config/settlement';
 import type { AgentService } from '../services/marketplace';
 
@@ -37,19 +37,28 @@ const RENTAL_VERIFICATION_CRITERIA = { min_length: 20 };
 
 /**
  * The chain the escrow is funded on: the backend's posting chain. The script
- * uses Base's public RPC rather than the app's own, so a keyed RPC URL never
- * ends up in copied text.
+ * uses the chain's public RPC rather than the app's own (ARC_RPC_URL /
+ * BASE_RPC_URL may be env-overridden with a keyed URL), so a keyed RPC URL
+ * never ends up in copied text. The Arc URLs are ARC_RPC_URL's public
+ * defaults in config/constants.ts.
  */
-function settlementChain(): { name: string; id: number; rpc: string } {
+function settlementChain(): { name: string; id: number; rpc: string; gasCoin: string } {
   const posting = getPostingChain();
-  if (posting.key === 'base') {
+  if (posting.key === 'arc') {
     return {
       name: posting.label,
       id: posting.chainId,
-      rpc: posting.chainId === 8453 ? 'https://mainnet.base.org' : 'https://sepolia.base.org',
+      rpc: posting.chainId === 5042 ? 'https://rpc.mainnet.arc.io' : 'https://rpc.testnet.arc.io',
+      // Arc's gas coin IS USDC.
+      gasCoin: 'USDC',
     };
   }
-  return { name: posting.label, id: posting.chainId, rpc: OG_RPC_URL };
+  return {
+    name: posting.label,
+    id: posting.chainId,
+    rpc: posting.chainId === 8453 ? 'https://mainnet.base.org' : 'https://sepolia.base.org',
+    gasCoin: 'ETH',
+  };
 }
 
 function formatPrice(raw: string): string {
@@ -73,7 +82,7 @@ function buildScript(service: AgentService, symbol: string, apiBase: string, pri
 //                         MUST be created while signed in with the SAME wallet as PRIVATE_KEY —
 //                         the backend resolves the key to its owner wallet, and the funding tx
 //                         must come from that wallet or indexing is rejected (NOT_TASK_AGENT).
-//   PRIVATE_KEY           wallet that pays ${price} ${symbol}${isNativeToken ? ' + gas' : ', plus a little ETH for gas,'} on ${chain.name} (chain ${chain.id})
+//   PRIVATE_KEY           wallet that pays ${price} ${symbol}${isNativeToken ? ' + gas' : `, plus a little ${chain.gasCoin} for gas,`} on ${chain.name} (chain ${chain.id})
 //   RPC_URL               optional; defaults to ${chain.rpc}
 //   PROMPT                what you want the agent to do${isPublic ? ' (PUBLIC: posted in plaintext,\n//                         visible to everyone — do not include secrets)' : ' (encrypted end-to-end; the\n//                         platform only ever sees a hash)'}
 //

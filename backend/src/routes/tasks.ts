@@ -8,9 +8,9 @@ import * as escrowService from '../services/escrow.js';
 import * as registryService from '../services/registry.js';
 import { getTokenDecimals } from '../services/chain.js';
 import { chainRuntime } from '../services/chainRuntime.js';
-import { postingChain, settlementChainConfig } from '../services/settlementChains.js';
+import { isSettlementChainKey, postingChain, settlementChainConfig } from '../services/settlementChains.js';
 import { payoutCurrency } from '../services/settlementUnits.js';
-import { resolveTaskChainById, resolveCachedTaskByHash, type TaskChain } from '../services/taskChain.js';
+import { isIndexedTask, resolveTaskChainById, resolveCachedTaskByHash, type TaskChain } from '../services/taskChain.js';
 import type { AuthRequest, ApiResponse } from '../types.js';
 import { AGENT_CAPABILITIES } from '../types.js';
 import * as a2aStore from '../services/a2aStore.js';
@@ -23,6 +23,21 @@ import { rooms } from '../services/socket.js';
 import { isSafeRegexSource } from '../services/rubricEngine.js';
 
 export const tasksRouter = Router();
+
+/**
+ * The settlement chain a refund-route client names for its task (`chain` in
+ * the body or query), or undefined when it names none. Numeric ids collide
+ * across chains, so a client that knows the chain passes it and the route
+ * reads only that escrow.
+ */
+function requestedChain(req: AuthRequest): TaskChain | undefined {
+  const raw = (req.body as { chain?: unknown } | undefined)?.chain ?? req.query.chain;
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  if (!isSettlementChainKey(raw)) {
+    throw new AppError(400, 'INVALID_CHAIN', `Unknown settlement chain ${JSON.stringify(raw)}`);
+  }
+  return raw;
+}
 
 // --- Schemas ---
 const createTaskSchema = z.object({
@@ -190,9 +205,10 @@ tasksRouter.get('/:id', optionalAuth, async (req: AuthRequest, res, next) => {
 
     const isHexHash = /^0x[0-9a-fA-F]{64}$/.test(rawId);
     let taskId: number;
-    // Numeric ids are 0G-only here (ids collide across chains); a hash names
-    // exactly one task, so it resolves to whichever chain holds it.
-    let chain: TaskChain = 'base';
+    // Ids collide across chains, so a numeric id is read on the posting chain,
+    // where new tasks live (as MCP get_task_status does); a hash names exactly
+    // one task, so it resolves to whichever chain holds it.
+    let chain: TaskChain = postingChain();
     if (isHexHash) {
       const resolved = await resolveCachedTaskByHash(rawId.toLowerCase());
       if (!resolved || !/^\d+$/.test(resolved.taskId)) {
@@ -229,14 +245,17 @@ tasksRouter.get('/:id', optionalAuth, async (req: AuthRequest, res, next) => {
     const symbol = payoutCurrency(chain, task.token)?.symbol ?? null;
     // Same flag as the list endpoint — lets the detail page surface the
     // stranded notice when a Funded task can never be picked up by an agent.
-    const indexedSet = await a2aStore.getIndexedHashes([taskHash]);
+    // A2A state is keyed by hash, and a hash can be escrowed twice: serve it
+    // only for the task the hash is indexed to (a hash lookup always is). A
+    // duplicate's id otherwise reads the original's brief meta and result.
+    const ownsA2a = isHexHash || await isIndexedTask(chain, taskId, taskHash);
+    const indexedSet = ownsA2a ? await a2aStore.getIndexedHashes([taskHash]) : new Set<string>();
     const a2aIndexed = indexedSet.has(taskHash.toLowerCase());
 
     // Fetch A2A off-chain state so TaskDetail can show agent output / verification result
-    const [a2aMeta, a2aState] = await Promise.all([
-      a2aStore.getMeta(taskHash),
-      a2aStore.getState(taskHash),
-    ]);
+    const [a2aMeta, a2aState] = ownsA2a
+      ? await Promise.all([a2aStore.getMeta(taskHash), a2aStore.getState(taskHash)])
+      : [null, null];
 
     // The deliverable (resultData) is poster/worker-only — except on PUBLIC
     // tasks, where the poster opted out of blindness and the result is part
@@ -590,10 +609,10 @@ tasksRouter.post('/:id/cancel', requireAuth, async (req: AuthRequest, res, next)
       throw new AppError(403, 'FORBIDDEN', 'Only the task agent can cancel tasks');
     }
 
-    // The task may be escrowed on Base or on 0G; resolving by ownership also
+    // The task may be escrowed on Base or on Arc; resolving by ownership also
     // does the agent check, since a chain where the caller isn't the agent
-    // never matches.
-    const chain = await resolveTaskChainById(taskId, from);
+    // never matches. A client that names the chain gets only that chain.
+    const chain = await resolveTaskChainById(taskId, from, requestedChain(req));
     if (!chain) {
       throw new AppError(403, 'FORBIDDEN', 'Only the task agent can cancel tasks');
     }
@@ -652,10 +671,10 @@ tasksRouter.post('/:id/timeout', requireAuth, async (req: AuthRequest, res, next
       throw new AppError(403, 'FORBIDDEN', 'Only the task agent can reclaim funds');
     }
 
-    // The task may be escrowed on Base or on 0G; resolving by ownership also
+    // The task may be escrowed on Base or on Arc; resolving by ownership also
     // does the agent check, since a chain where the caller isn't the agent
-    // never matches.
-    const chain = await resolveTaskChainById(taskId, from);
+    // never matches. A client that names the chain gets only that chain.
+    const chain = await resolveTaskChainById(taskId, from, requestedChain(req));
     if (!chain) {
       throw new AppError(403, 'FORBIDDEN', 'Only the task agent can reclaim funds');
     }
@@ -729,7 +748,7 @@ tasksRouter.post('/:id/confirm-tx', requireAuth, async (req: AuthRequest, res, n
 
     // Same ownership gate as cancel/timeout: resolving by ownership doubles
     // as the agent check.
-    const chain = await resolveTaskChainById(taskId, from);
+    const chain = await resolveTaskChainById(taskId, from, requestedChain(req));
     if (!chain) {
       throw new AppError(403, 'FORBIDDEN', 'Only the task agent can confirm refunds');
     }
@@ -782,8 +801,9 @@ tasksRouter.post('/:id/confirm-tx', requireAuth, async (req: AuthRequest, res, n
     // for an instant refund and land here. Close only when the A2A task is this
     // caller's (meta.posterAddress, set from the authenticated poster at index
     // time — the check that matters) and the hash index does not name a
-    // different escrow task. The index is last-writer-wins, so it is a
-    // secondary guard only; no recorded poster means no close.
+    // different escrow task. The indexers keep the first writer (SET NX), but
+    // an entry can be missing, so the index is the secondary guard; no
+    // recorded poster means no close.
     try {
       const onChain = await escrowService.getTaskOn(chain, taskId);
       const taskHash = onChain.taskHash;

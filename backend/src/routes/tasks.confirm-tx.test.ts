@@ -226,7 +226,7 @@ describe('H-04/H-07: a confirmed reclaim closes the A2A state', () => {
       expect(accountingService.confirmPendingTransactions).toHaveBeenCalledWith('9', ['refund']);
     });
 
-    it('holds even after the attacker’s TaskCreated overwrote the last-writer-wins hash index', async () => {
+    it('holds even when the hash index names the attacker’s task (as the pre-NX Arc indexer let it)', async () => {
       getState.mockResolvedValue({ taskId: TASK_HASH, status: 'submitted' });
       resolveCachedTaskByHash.mockResolvedValue({ taskId: '9', chain: 'arc' });
       expect((await attackerConfirm()).status).toBe(200);

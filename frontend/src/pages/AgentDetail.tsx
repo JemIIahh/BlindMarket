@@ -14,7 +14,7 @@ import {
   FormField,
   FormInput,
 } from '../components/bb';
-import { get, authedGet, authedPost } from '../lib/api';
+import { get, authedGet, authedPost, ApiError } from '../lib/api';
 import { useChainAddress } from '../hooks/useChainWallet';
 import { SETTLEMENT_CCTP_CHAIN_KEY, isCctpUsable } from '../config/constants';
 import { agentFundingAddress, getMarketplaceTokenAddress, getPaymentSymbol, getPaymentDecimals, getPostingChain, isNativePayment, useSettlement } from '../config/settlement';
@@ -35,6 +35,7 @@ import { ReviewsSection } from '../components/agent/ReviewsSection';
 import { ServicesSection } from '../components/agent/ServicesSection';
 import type { AgentDetails, SkillStat } from '../components/agent/types';
 import { formatPaymentAmount } from '../lib/paymentUnits';
+import { providerFor } from '../lib/txSigner';
 
 // Default top-up suggestion in USDC. Covers ~100 task executions — the owner
 // edits the amount in the fund dialog before confirming.
@@ -49,6 +50,24 @@ const USDC_ABI = [
   'function balanceOf(address owner) view returns (uint256)',
   'function transfer(address to, uint256 amount) returns (bool)',
 ];
+
+/**
+ * An agent's balance in the posting chain's payment token, read over that
+ * chain's public RPC rather than the viewer's wallet (which may be logged out
+ * or on another chain). The native coin when tasks are paid in it (address(0)
+ * is no ERC-20), else the ERC-20.
+ */
+async function readAgentBalance(address: string): Promise<bigint> {
+  const provider = providerFor(getPostingChain().key);
+  if (isNativePayment()) return provider.getBalance(address);
+  return (await new Contract(getMarketplaceTokenAddress(), USDC_ABI, provider).balanceOf(address)) as bigint;
+}
+
+/** Append /withdraw's per-chain `skipped` reasons to an error message. */
+function withSkippedReasons(message: string, skipped?: Array<{ chain: string; reason: string }>): string {
+  if (!skipped?.length) return message;
+  return `${message} ${skipped.map((s) => `${s.chain}: ${s.reason}`).join('; ')}`;
+}
 
 const ACTION_LABELS: Record<'start' | 'pause' | 'stop' | 'restart', string> = {
   start: 'Start',
@@ -130,17 +149,11 @@ export default function AgentDetail() {
   const agentWallet = agent?.walletAddress;
 
   const refetchBalance = useCallback(async () => {
-    if (!fundingAddress || !walletClient) return;
+    if (!fundingAddress) return;
     try {
-      const provider = new BrowserProvider(walletClient.transport);
-      // The payment token's balance: the native coin when tasks are paid in
-      // it (address(0) is no ERC-20), else the ERC-20.
-      const bal = isNativePayment()
-        ? await provider.getBalance(fundingAddress)
-        : await new Contract(getMarketplaceTokenAddress(), USDC_ABI, provider).balanceOf(fundingAddress);
-      setUsdcBalance(bal as bigint);
+      setUsdcBalance(await readAgentBalance(fundingAddress));
     } catch { /* non-blocking */ }
-  }, [fundingAddress, walletClient, settlement]);
+  }, [fundingAddress, settlement]);
 
   const loadAgent = useCallback(() => {
     if (!id) return;
@@ -166,20 +179,17 @@ export default function AgentDetail() {
     return () => { cancelled = true; };
   }, [agentWallet]);
 
-  // Fetch USDC balance when agent loads
+  // Fetch the agent's balance when it loads — through the posting chain's own
+  // RPC, so it shows for a logged-out viewer or one whose wallet sits on
+  // another chain.
   useEffect(() => {
-    if (!fundingAddress || !walletClient) return;
+    if (!fundingAddress) return;
     let cancelled = false;
-    (async () => {
-      try {
-        const provider = new BrowserProvider(walletClient.transport);
-        const usdc = new Contract(getMarketplaceTokenAddress(), USDC_ABI, provider);
-        const bal = await usdc.balanceOf(fundingAddress);
-        if (!cancelled) setUsdcBalance(bal as bigint);
-      } catch { /* non-blocking */ }
-    })();
+    readAgentBalance(fundingAddress)
+      .then((bal) => { if (!cancelled) setUsdcBalance(bal); })
+      .catch(() => { /* non-blocking */ });
     return () => { cancelled = true; };
-  }, [fundingAddress, walletClient]);
+  }, [fundingAddress, settlement]);
 
   // Public service list — lifted out of the services section because the
   // header's from-price and the "services sold" stat read the same data.
@@ -252,12 +262,16 @@ export default function AgentDetail() {
   // deployment, which the GasBar simply doesn't render for.
   useEffect(() => {
     let cancelled = false;
-    get<{ enabled: boolean; baseChainId?: number | null; chains: Array<{ chainKey: string; label: string }> }>('/api/v1/cctp/config')
+    get<{ enabled: boolean; baseChainId?: number | null; chains: Array<{ chainKey: string; chainId: number; label: string }> }>('/api/v1/cctp/config')
       .then((data) => {
         if (cancelled || !isCctpUsable(data)) return;
-        // Base/Base Sepolia are the source of an outbound bridge, never a
-        // valid destination for it.
-        const destinations = data.chains.filter((c) => !c.chainKey.startsWith('base'));
+        // The settlement leg (Arc — `baseChainId` in the config, the chain the
+        // backend's getSettlementCctpChain burns from) is the source of an
+        // outbound bridge, never a valid destination for it (CCTP_SAME_CHAIN).
+        // Base is an ordinary destination now.
+        const destinations = data.chains.filter(
+          (c) => c.chainKey !== SETTLEMENT_CCTP_CHAIN_KEY && c.chainId !== data.baseChainId,
+        );
         setCctpChains(destinations);
         if (destinations.length > 0) setCctpDestChain((prev) => prev || destinations[0].chainKey);
       })
@@ -381,11 +395,14 @@ export default function AgentDetail() {
   }
 
   // Backend signs the withdrawal tx using the agent's stored rawPrivateKey and
-  // sends funds back to the owner. The agent's wallet is the same EOA on both
-  // 0G and Base, so the single /withdraw endpoint checks both chains and
+  // sends funds back to the owner. The agent's wallet is the same EOA on every
+  // settlement chain, so the single /withdraw endpoint checks each one and
   // sweeps whichever have a sweepable balance — omit tokenAddress for a
   // native sweep, or pass a specific ERC20 address to withdraw that token.
-  // The response lists one entry per chain actually swept (0, 1, or 2).
+  // We pass the posting chain's payment token: on Arc the gas coin IS that
+  // USDC, and the backend refuses a native sweep of it (it must go through
+  // the ERC-20 view so the gas reserve stays behind). The response lists one
+  // entry per chain actually swept.
   //
   // Uses authedPost so the JWT (Privy identity) flows to the backend, where
   // requireAuth + authorizeOwner verify the caller is the agent's owner.
@@ -396,12 +413,13 @@ export default function AgentDetail() {
     setWithdrawStatus('sending');
     setWithdrawError('');
     try {
+      const token = settlement.chains[settlement.postingChain].token;
       const data = await authedPost<{
         swept: Array<{ chain: string; asset: string; txHash: string; amountSent?: string; amountFormatted?: string; amountRaw?: string }>;
         skipped?: Array<{ chain: string; reason: string }>;
-      }>(`/api/v1/agents/${apiId}/withdraw`, {});
+      }>(`/api/v1/agents/${apiId}/withdraw`, token.kind === 'erc20' && token.address ? { tokenAddress: token.address } : {});
       if (!data.swept.length) {
-        throw new Error('Nothing to withdraw on any chain.');
+        throw new Error(withSkippedReasons('Nothing to withdraw on any chain.', data.skipped));
       }
       setWithdrawInfo(
         data.swept.map((s) => ({
@@ -418,7 +436,12 @@ export default function AgentDetail() {
         setAgent(fresh);
       } catch { /* non-blocking */ }
     } catch (err) {
-      setWithdrawError((err as Error).message || 'Withdraw failed');
+      // A 409 "Nothing to withdraw" carries the per-chain reasons (gas too
+      // low, below the reserve, …) in error.skipped — show them, since the
+      // bare message tells the owner nothing they can act on.
+      const skipped = err instanceof ApiError ? err.payload?.skipped : undefined;
+      const message = (err as Error).message || 'Withdraw failed';
+      setWithdrawError(Array.isArray(skipped) ? withSkippedReasons(message, skipped) : message);
       setWithdrawStatus('error');
     }
   }

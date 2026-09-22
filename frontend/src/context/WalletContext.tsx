@@ -46,6 +46,23 @@ export async function switchWalletToChain(
   }
 }
 
+/**
+ * Flows that switch the wallet on purpose (CCTP funding moves it to the source
+ * chain to sign the burn) pause the Arc auto-switch below, which would
+ * otherwise switch straight back and fail their next signature with "Your
+ * wallet is on chain 5042002". Returns the release; calling it twice is a no-op.
+ */
+let autoSwitchPauses = 0;
+export function pauseWalletAutoSwitch(): () => void {
+  autoSwitchPauses++;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    autoSwitchPauses--;
+  };
+}
+
 type WalletAccount = Extract<LinkedAccountWithMetadata, { type: 'wallet' }>;
 
 function isEthWalletAccount(a: LinkedAccountWithMetadata): a is WalletAccount {
@@ -101,7 +118,10 @@ function PrivyWalletProvider({ children }: { children: ReactNode }) {
   const embeddedAddress = walletAccounts.find(isEmbeddedAccount)?.address ?? null;
   const externalAddresses = walletAccounts.filter((a) => !isEmbeddedAccount(a)).map((a) => a.address);
 
-  const switchedRef = useRef(false);
+  // The address the Arc auto-switch has already run for. It runs once per
+  // connected address, on the first chain it sees: later chain changes are
+  // the user's or a flow's (CCTP), and switching back would fight them.
+  const autoSwitchedFor = useRef<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -114,19 +134,25 @@ function PrivyWalletProvider({ children }: { children: ReactNode }) {
         const network = await bp.getNetwork();
         if (!cancelled) {
           setProvider(bp); setSigner(s); setChainId(Number(network.chainId));
-          // Auto-switch to Arc (settlement chain) on any chain that is not Arc.
+          // Auto-switch to Arc (settlement chain) once per connected address,
+          // unless a flow has paused it while it holds the wallet elsewhere.
           const cid = Number(network.chainId);
-          if (cid !== ARC_CHAIN_ID && !switchedRef.current) {
-            switchedRef.current = true;
-            try {
-              await wallet.switchChain(ARC_CHAIN_ID);
-            } catch {
+          if (autoSwitchedFor.current !== wallet.address && autoSwitchPauses === 0) {
+            autoSwitchedFor.current = wallet.address;
+            if (cid !== ARC_CHAIN_ID) {
               try {
-                const eth = await wallet.getEthereumProvider();
-                await eth.request({ method: 'wallet_addEthereumChain', params: [ARC_CHAIN_CONFIG] });
                 await wallet.switchChain(ARC_CHAIN_ID);
-              } catch { /* chain add also failed — user will see the banner */ }
-              switchedRef.current = false;
+              } catch {
+                try {
+                  const eth = await wallet.getEthereumProvider();
+                  await eth.request({ method: 'wallet_addEthereumChain', params: [ARC_CHAIN_CONFIG] });
+                  await wallet.switchChain(ARC_CHAIN_ID);
+                } catch { /* chain add also failed — user will see the banner */ }
+                // Retry on the next chain change, not in a loop: a failed
+                // switch leaves the chain id unchanged, so this effect does
+                // not re-run on its own.
+                autoSwitchedFor.current = null;
+              }
             }
           }
         }

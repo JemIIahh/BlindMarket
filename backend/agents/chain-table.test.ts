@@ -151,6 +151,13 @@ describe('Arc, the chain production posts on', () => {
     expect(await w.preflightGas('arc', empty, false)).toMatch(/holds 0 USDC on arc/);
   });
 
+  it('refuses USDC dust on Arc, where USDC is the 18-decimal gas token', async () => {
+    const w = await loadWorker({ SETTLEMENT_CHAINS_JSON: JSON.stringify(prodTable) });
+    const provider = { getBalance: async () => 10n ** 12n, getFeeData: async () => ({ maxFeePerGas: 160n * 10n ** 9n }) };
+    const dust = { address: '0x' + 'ab'.repeat(20), provider };
+    expect(await w.preflightGas('arc', dust, false)).toMatch(/holds 0\.000001 USDC on arc — below the ~0\.048 USDC one tx needs/);
+  });
+
   it('says the backend did not inject Arc when this deployment has no Arc entry', async () => {
     const w = await loadWorker({ SETTLEMENT_CHAINS_JSON: JSON.stringify(TABLE) });
     expect(w.signerFor('arc')).toBeNull();

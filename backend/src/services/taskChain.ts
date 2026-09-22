@@ -10,7 +10,7 @@ import { baseEscrow } from './chain.js';
 import { getBaseTaskIdByHash, forceBaseTick, seedBaseTaskIdMapping } from './baseEscrowEvents.js';
 import { getArcTaskIdByHash, forceArcTick, seedArcTaskIdMapping } from './arcEscrowEvents.js';
 import { getMeta } from './a2aStore.js';
-import { isSettlementChainKey, settlementChainConfig, type SettlementChainKey } from './settlementChains.js';
+import { isSettlementChainKey, postingChain, settlementChainConfig, type SettlementChainKey } from './settlementChains.js';
 
 /** A settlement chain, as a task's escrow names it (services/settlementChains.ts). */
 export type TaskChain = SettlementChainKey;
@@ -121,10 +121,16 @@ export async function seedTaskId(chain: TaskChain, taskHash: string, taskId: big
  * read id 7 from each escrow and keep the one whose `agent` is the caller.
  * Reading an id that was never created returns a zero-filled struct rather than
  * reverting, so a wrong guess resolves to the zero address and is rejected.
+ *
+ * When the client knows the task's chain (the detail page does), it passes it
+ * and only that chain is read: a poster can own id 7 on both chains, and the
+ * refund must go to the task they are looking at. Without it the posting chain
+ * wins a tie, since that is where new tasks live.
  */
 export async function resolveTaskChainById(
   taskId: number,
   caller: string,
+  chain?: TaskChain,
 ): Promise<TaskChain | null> {
   const escrowService = await import('./escrow.js');
   const wanted = caller.toLowerCase();
@@ -138,7 +144,10 @@ export async function resolveTaskChainById(
     }
   };
 
-  const chains = indexesFor(null);
+  const posting = postingChain();
+  const chains = chain !== undefined
+    ? indexesFor(chain)
+    : indexesFor(null).sort((a, b) => Number(b === posting) - Number(a === posting));
   const agents = await Promise.all(chains.map(readAgent));
 
   const i = agents.findIndex((agent) => agent === wanted);
@@ -151,4 +160,40 @@ export async function resolveTaskChainById(
  */
 export async function resolveCachedTaskByHash(taskHash: string): Promise<ResolvedTask | null> {
   return cachedLookup(taskHash, indexesFor(await recordedChain(taskHash)));
+}
+
+/**
+ * Is escrow task `taskId` on `chain` the task its hash is indexed to? The
+ * escrow does not enforce unique hashes, so anyone can fund a second task
+ * under a live task's hash. Off-chain A2A state (brief meta, result) is keyed
+ * by hash alone: a lookup by the duplicate's id must not serve it, or its
+ * funder passes the poster check with their own on-chain task and reads the
+ * original's result. The index keeps the first writer (the indexers write
+ * with NX; the index route seeds only for the poster who claimed the hash).
+ */
+export async function isIndexedTask(chain: TaskChain, taskId: number | string, taskHash: string): Promise<boolean> {
+  const resolved = await resolveCachedTaskByHash(taskHash.toLowerCase());
+  return !!resolved && resolved.chain === chain && resolved.taskId === String(taskId);
+}
+
+/**
+ * isIndexedTask for the settlement observers (/submissions/confirm, the
+ * DisputeResolved listener), which must not drop a real credit or ruling
+ * just because the index entry is missing (never written, or evicted from
+ * Redis) — unlike a read, a skipped credit is lost. An entry that names
+ * another task still means "a duplicate: skip". With no entry, the task is
+ * taken as the listed one when its on-chain poster is the poster it was
+ * listed by (`posterAddress`, A2A meta): a duplicate funded by anyone else
+ * has a different agent. A task with no listing has nothing to take over.
+ */
+export async function isListedTask(
+  chain: TaskChain,
+  taskId: number | string,
+  taskHash: string,
+  onChainAgent: string,
+  posterAddress: string | null | undefined,
+): Promise<boolean> {
+  const resolved = await resolveCachedTaskByHash(taskHash.toLowerCase());
+  if (resolved) return resolved.chain === chain && resolved.taskId === String(taskId);
+  return !posterAddress || onChainAgent.toLowerCase() === posterAddress.toLowerCase();
 }

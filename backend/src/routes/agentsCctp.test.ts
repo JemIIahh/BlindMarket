@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
 
@@ -116,6 +116,11 @@ const { FAKE_SOURCE, FAKE_DEST, FAKE_ARC, executeApproveAndDepositForBurn, rows,
     label: 'Arc Testnet',
     supportsFastTransfer: false,
     usdcGasReserveRaw: 50_000n,
+    // Arc's native coin IS USDC (18-dec): 10 USDC, matching balanceOf below.
+    rpc: {
+      getBalance: vi.fn(async () => 10n * 10n ** 18n),
+      getTransactionReceipt: async () => null,
+    },
   };
   return {
     FAKE_SOURCE: fakeSource,
@@ -148,7 +153,9 @@ vi.mock('../services/cctp.js', async () => {
 
 vi.mock('../services/cctpTransferStore.js', () => ({
   createTransfer: vi.fn(async (opts: any) => {
-    const row = { id: nextIdRef.current++, stage: 'created', ...opts, idempotency_key: opts.idempotencyKey, burn_tx_hash: null, mint_tx_hash: null, error_message: null, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+    // Snake-case columns like the real cctpTransferStore row (the route reads
+    // agent_id / owner_address / direction when it replays a key).
+    const row = { id: nextIdRef.current++, stage: 'created', ...opts, idempotency_key: opts.idempotencyKey, agent_id: opts.agentId ?? null, owner_address: String(opts.ownerAddress).toLowerCase(), burn_tx_hash: null, mint_tx_hash: null, error_message: null, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
     rows.set(opts.idempotencyKey, row);
     return row;
   }),
@@ -183,6 +190,7 @@ vi.mock('ethers', async () => {
 import { agentsCctpRouter } from './agentsCctp.js';
 import { globalErrorHandler } from '../middleware/errorHandler.js';
 import * as agentRunner from '../services/agentRunner.js';
+import * as cctpChains from '../services/cctpChains.js';
 import { config } from '../config.js';
 
 // config.ts's `cctp.enabled` defaults to false; flip it on for this suite.
@@ -255,6 +263,25 @@ describe('POST /api/v1/agents/:id/cctp/withdraw', () => {
     expect(second.body.data.transferId).toBe(first.body.data.transferId);
   });
 
+  it("refuses a reused idempotencyKey that belongs to another agent's transfer, and does not return it", async () => {
+    const first = await request(app())
+      .post(`/api/v1/agents/${AGENT_ID}/cctp/withdraw`)
+      .set('X-API-Key', 'sk_owner')
+      .send({ destinationChain: 'ethereum-sepolia', idempotencyKey: 'k-shared' });
+    expect(first.status).toBe(200);
+
+    vi.mocked(agentRunner.getAgent).mockResolvedValue(agentRecord({ id: 'agent-2' }) as any);
+    const other = await request(app())
+      .post('/api/v1/agents/agent-2/cctp/withdraw')
+      .set('X-API-Key', 'sk_owner')
+      .send({ destinationChain: 'ethereum-sepolia', idempotencyKey: 'k-shared' });
+
+    expect(other.status).toBe(409);
+    expect(other.body.error.code).toBe('IDEMPOTENCY_KEY_CONFLICT');
+    expect(other.body).not.toHaveProperty('data');
+    expect(executeApproveAndDepositForBurn).toHaveBeenCalledTimes(1);
+  });
+
   it('rejects an agent with no rawPrivateKey on record', async () => {
     vi.mocked(agentRunner.getAgent).mockResolvedValue(agentRecord({ rawPrivateKey: undefined }) as any);
     const res = await request(app())
@@ -306,5 +333,89 @@ describe('POST /api/v1/agents/:id/cctp/withdraw', () => {
     expect(res.body.error.message).toContain('approve');
     expect(rows.get('k-approve-fail').stage).toBe('failed');
     expect(rows.get('k-approve-fail').burn_tx_hash).toBeNull();
+  });
+});
+
+// Prod's settlement leg is Arc: gas is paid in the same USDC being bridged,
+// so the burn must leave `usdcGasReserveRaw` behind (same rule as the user
+// route's /deposit-intent).
+describe('POST /api/v1/agents/:id/cctp/withdraw — USDC-gas source (Arc)', () => {
+  beforeEach(() => {
+    vi.mocked(cctpChains.getSettlementCctpChain).mockReturnValue(FAKE_ARC as any);
+    FAKE_ARC.rpc.getBalance.mockResolvedValue(10n * 10n ** 18n);
+  });
+  afterEach(() => {
+    vi.mocked(cctpChains.getSettlementCctpChain).mockReturnValue(FAKE_SOURCE as any);
+  });
+
+  it('with no amount, bridges the balance minus the gas reserve (not the whole balance)', async () => {
+    const res = await request(app())
+      .post(`/api/v1/agents/${AGENT_ID}/cctp/withdraw`)
+      .set('X-API-Key', 'sk_owner')
+      .send({ destinationChain: 'ethereum-sepolia', idempotencyKey: 'k-arc-src-default' });
+
+    expect(res.status).toBe(200);
+    expect(rows.get('k-arc-src-default').usdcAmountRaw).toBe('9950000');
+    expect(executeApproveAndDepositForBurn).toHaveBeenCalledWith(
+      FAKE_ARC,
+      expect.anything(),
+      expect.objectContaining({ amountRaw: 9_950_000n }),
+    );
+  });
+
+  it('refuses a whole-balance amount that leaves no gas headroom, and names the max', async () => {
+    const res = await request(app())
+      .post(`/api/v1/agents/${AGENT_ID}/cctp/withdraw`)
+      .set('X-API-Key', 'sk_owner')
+      .send({ destinationChain: 'ethereum-sepolia', amountRaw: '10000000', idempotencyKey: 'k-arc-src-full' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('CCTP_INSUFFICIENT_GAS_HEADROOM');
+    expect(res.body.error.details.maxAmountRaw).toBe('9950000');
+    expect(res.body.error.message).not.toMatch(/ETH|Base/);
+    expect(rows.has('k-arc-src-full')).toBe(false);
+    expect(executeApproveAndDepositForBurn).not.toHaveBeenCalled();
+  });
+
+  it('refuses when the balance is at or under the reserve', async () => {
+    FAKE_ARC.rpc.getBalance.mockResolvedValue(40_000n * 10n ** 12n); // 0.04 USDC
+    const res = await request(app())
+      .post(`/api/v1/agents/${AGENT_ID}/cctp/withdraw`)
+      .set('X-API-Key', 'sk_owner')
+      .send({ destinationChain: 'ethereum-sepolia', idempotencyKey: 'k-arc-src-dust' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('CCTP_INSUFFICIENT_GAS_HEADROOM');
+    expect(res.body.error.details.maxAmountRaw).toBe('0');
+    expect(executeApproveAndDepositForBurn).not.toHaveBeenCalled();
+  });
+
+  it('does not apply the ETH gas floor on a USDC-gas source', async () => {
+    // 0.0001 native units is under the 0.0002 "ETH" floor, but on Arc that is
+    // USDC and the reserve rule governs instead.
+    FAKE_ARC.rpc.getBalance.mockResolvedValue(10n ** 14n + 60_000n * 10n ** 12n); // 0.0601 USDC
+    const res = await request(app())
+      .post(`/api/v1/agents/${AGENT_ID}/cctp/withdraw`)
+      .set('X-API-Key', 'sk_owner')
+      .send({ destinationChain: 'ethereum-sepolia', amountRaw: '10000', idempotencyKey: 'k-arc-src-ok' });
+
+    expect(res.status).toBe(200);
+    expect(rows.get('k-arc-src-ok').usdcAmountRaw).toBe('10000');
+  });
+});
+
+describe('POST /api/v1/agents/:id/cctp/withdraw — ETH-gas source gas floor', () => {
+  it('names the source chain in the insufficient-gas message', async () => {
+    const spy = vi.spyOn(FAKE_SOURCE.rpc, 'getBalance').mockResolvedValueOnce(1n);
+    const res = await request(app())
+      .post(`/api/v1/agents/${AGENT_ID}/cctp/withdraw`)
+      .set('X-API-Key', 'sk_owner')
+      .send({ destinationChain: 'ethereum-sepolia', idempotencyKey: 'k-eth-gas' });
+    spy.mockRestore();
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('CCTP_INSUFFICIENT_GAS');
+    expect(res.body.error.message).toContain('Base Sepolia');
+    expect(executeApproveAndDepositForBurn).not.toHaveBeenCalled();
   });
 });

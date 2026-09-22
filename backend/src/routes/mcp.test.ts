@@ -275,6 +275,22 @@ describe('POST /mcp — key-material & secret leak guard', () => {
     expectNoSecrets(res.body);
   });
 
+  it("get_task_status by number serves no A2A state when the hash is indexed to another task (a duplicate funded under it)", async () => {
+    const { redis } = await import('../services/redis.js');
+    // The hash belongs to task 9; escrow task 7 merely reuses it.
+    vi.mocked(redis.get).mockImplementation(async (k) => (String(k).startsWith('base:hash2id:') ? '9' : null));
+    try {
+      const res = await callTool(makeApp(), 'get_task_status', { taskId: '7' }, 'sk_poster');
+      expect(res.status).toBe(200);
+      const payload = JSON.parse(res.body.result.content[0].text);
+      expect(payload.a2aMeta).toBeNull();
+      expect(payload.a2aState).toBeNull();
+      expect(JSON.stringify(res.body)).not.toContain('the secret deliverable');
+    } finally {
+      vi.mocked(redis.get).mockImplementation(async (k) => (String(k).startsWith('base:hash2id:') ? '7' : null));
+    }
+  });
+
   it('get_my_posted_tasks includes the deliverable but never wrapped keys', async () => {
     const res = await callTool(makeApp(), 'get_my_posted_tasks', {}, 'sk_poster');
     expect(res.status).toBe(200);

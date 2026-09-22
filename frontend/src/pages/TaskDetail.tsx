@@ -13,7 +13,7 @@ import { RateAgent } from '../components/RateAgent';
 import { TxPendingModal } from '../components/TxPendingModal';
 import { CustodyChain } from '../components/CustodyChain';
 import { truncateAddress, formatDate } from '../lib/utils';
-import { buildCancelTask, buildClaimTimeout } from '../services/tasks';
+import { assertRefundTarget, buildCancelTask, buildClaimTimeout } from '../services/tasks';
 import { signAndSendTx } from '../lib/txSigner';
 import { WORKER_SHARE_PCT, PLATFORM_FEE_PCT } from '../config/constants';
 import { unitFor, useSettlement } from '../config/settlement';
@@ -86,10 +86,12 @@ export default function TaskDetail() {
     mutationFn: async () => {
       if (!numericTaskId) throw new Error('Missing task id');
       if (!signer) throw new Error('Wallet not connected');
-      const tx = await buildCancelTask(numericTaskId);
-      // The task's chain comes from the backend; the relay must not guess (a
-      // 0G task's cancel used to be relayed onto Base as a no-op).
-      await signAndSendTx(signer, tx, undefined, { chain: data?.onChain?.chain });
+      // Ids collide across chains: name the task's chain so the backend builds
+      // for this task, and sign only if the tx targets that chain's escrow.
+      const chain = data?.onChain?.chain;
+      if (!chain) throw new Error("This task's chain is unknown. Reload the page and try again.");
+      const tx = assertRefundTarget(await buildCancelTask(numericTaskId, chain), chain);
+      await signAndSendTx(signer, tx, undefined, { chain });
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['tasks', id] }),
   });
@@ -98,10 +100,12 @@ export default function TaskDetail() {
     mutationFn: async () => {
       if (!numericTaskId) throw new Error('Missing task id');
       if (!signer) throw new Error('Wallet not connected');
-      const tx = await buildClaimTimeout(numericTaskId);
-      // The task's chain comes from the backend; the relay must not guess (a
-      // 0G task's cancel used to be relayed onto Base as a no-op).
-      await signAndSendTx(signer, tx, undefined, { chain: data?.onChain?.chain });
+      // Ids collide across chains: name the task's chain so the backend builds
+      // for this task, and sign only if the tx targets that chain's escrow.
+      const chain = data?.onChain?.chain;
+      if (!chain) throw new Error("This task's chain is unknown. Reload the page and try again.");
+      const tx = assertRefundTarget(await buildClaimTimeout(numericTaskId, chain), chain);
+      await signAndSendTx(signer, tx, undefined, { chain });
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['tasks', id] }),
   });

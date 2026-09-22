@@ -9,6 +9,7 @@ import {
   agentFundingAddress,
   defaultSettlement,
   explorerUrlFor,
+  gasIsSettlementToken,
   getMarketplaceTokenAddress,
   getPaymentDecimals,
   getPaymentSymbol,
@@ -225,5 +226,22 @@ describe('mergeSettlement', () => {
     expect(getPaymentSymbol()).toBe('USDC');
     resetSettlement();
     expect(getPaymentSymbol()).toBe('USDC');
+  });
+});
+describe('gasIsSettlementToken', () => {
+  afterEach(() => resetSettlement());
+
+  it('is true on Arc (gas is native USDC) and false on Base (gas is ETH)', () => {
+    expect(gasIsSettlementToken('arc')).toBe(true);
+    expect(gasIsSettlementToken('base')).toBe(false);
+  });
+
+  it("follows the backend's gasSymbol", () => {
+    const d = defaultSettlement();
+    setSettlement(mergeSettlement(d, {
+      postingChain: 'base',
+      chains: [{ chain: 'base', chainId: d.chains.base.chainId, tier: 'testnet', escrowAddress: d.chains.base.escrow || null, token: { kind: 'erc20', address: d.chains.base.token.address || null, symbol: 'USDC', decimals: 6 }, relayChain: 'base-sepolia', gasSymbol: 'USDC', postable: true }],
+    }));
+    expect(gasIsSettlementToken('base')).toBe(true);
   });
 });

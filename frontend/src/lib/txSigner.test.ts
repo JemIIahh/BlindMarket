@@ -90,3 +90,36 @@ describe('signAndSendTx wiring', () => {
     }
   });
 });
+
+describe('signAndSendTx reports a revert', () => {
+  const tx = { to: '0x2222222222222222222222222222222222222222', data: '0x', from: '0x1111111111111111111111111111111111111111' };
+  const arcSigner = (wait: () => Promise<unknown>) => ({
+    getAddress: async () => '0x1111111111111111111111111111111111111111',
+    provider: { getNetwork: async () => ({ chainId: 5042002n }) },
+    sendTransaction: vi.fn(async () => ({ hash: '0x' + 'cd'.repeat(32), wait })),
+  }) as any;
+
+  it('throws TX_REVERTED when wait() throws CALL_EXCEPTION (ethers v6 on status 0)', async () => {
+    const err = Object.assign(new Error('transaction execution reverted'), { code: 'CALL_EXCEPTION' });
+    await expect(signAndSendTx(arcSigner(async () => { throw err; }), tx, undefined, { chain: 'arc' }))
+      .rejects.toMatchObject({ code: 'TX_REVERTED' });
+  });
+
+  it('throws TX_REVERTED on a status-0 receipt', async () => {
+    await expect(signAndSendTx(arcSigner(async () => ({ status: 0 })), tx, undefined, { chain: 'arc' }))
+      .rejects.toMatchObject({ code: 'TX_REVERTED' });
+  });
+
+  it('keeps any other wait failure non-fatal: an unconfirmed send, receipt null', async () => {
+    const err = Object.assign(new Error('timeout'), { code: 'TIMEOUT' });
+    await expect(signAndSendTx(arcSigner(async () => { throw err; }), tx, undefined, { chain: 'arc' }))
+      .resolves.toEqual({ hash: '0x' + 'cd'.repeat(32), receipt: null });
+  });
+
+  it('refuses a wallet on the wrong network before sending', async () => {
+    const signer = arcSigner(async () => ({ status: 1 }));
+    signer.provider.getNetwork = async () => ({ chainId: 84532n });
+    await expect(signAndSendTx(signer, tx, undefined, { chain: 'arc' })).rejects.toMatchObject({ code: 'WRONG_CHAIN' });
+    expect(signer.sendTransaction).not.toHaveBeenCalled();
+  });
+});

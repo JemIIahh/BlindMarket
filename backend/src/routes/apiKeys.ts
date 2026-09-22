@@ -21,6 +21,15 @@ apiKeysRouter.post('/', async (req: AuthRequest, res) => {
   if (!name || typeof name !== 'string') {
     throw new AppError(400, 'MISSING_NAME', 'API key name is required');
   }
+  // Only a person (a Privy session, or a key they already hold) mints keys. A
+  // worker's platform token or a device-flow registration token authenticates
+  // as the AGENT's wallet: a key minted with it is owned by that wallet, never
+  // expires, is invisible to the human owner's key list, and survives
+  // POST /agents/:id/revoke-token — a leaked worker token would become a
+  // permanent credential. The legacy shared AGENT_API_KEY has no owner at all.
+  if (req.user!.typ !== undefined || req.user!.address === 'agent') {
+    throw new AppError(403, 'FORBIDDEN', 'API keys can only be created from a signed-in account');
+  }
 
   const result = await createApiKey({
     ownerAddress: req.user!.address,

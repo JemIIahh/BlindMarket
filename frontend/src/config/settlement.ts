@@ -61,6 +61,8 @@ export interface SettlementChainInfo {
   };
   /** The `chain` name POST /tx/relay-tx takes for this chain, or null when the relay does not serve it. */
   relayChain: string | null;
+  /** The native gas coin's symbol (Base: ETH; Arc: USDC, 18 decimals natively). */
+  gasSymbol: string;
   /** The wallet chain (ChainContext) that pays on this chain. Base is legacy and has no wallet. */
   walletChain: SupportedChain | 'base';
   /**
@@ -100,6 +102,7 @@ export function defaultSettlement(): SettlementSnapshot {
         escrow: BASE_ESCROW_ADDRESS,
         token: { kind: 'erc20', address: BASE_USDC_ADDRESS, unit: { symbol: 'USDC', decimals: 6 } },
         relayChain: baseRelayChain(BASE_CHAIN_ID),
+        gasSymbol: 'ETH',
         walletChain: 'base',
         aa: true,
       },
@@ -112,6 +115,7 @@ export function defaultSettlement(): SettlementSnapshot {
         escrow: ARC_ESCROW_ADDRESS,
         token: { kind: 'erc20', address: ARC_USDC_ADDRESS, unit: { symbol: 'USDC', decimals: 6 } },
         relayChain: null,
+        gasSymbol: 'USDC',
         walletChain: 'arc',
         aa: false,
       },
@@ -206,6 +210,7 @@ export function mergeSettlement(defaults: SettlementSnapshot, backend: BackendSe
         unit: { symbol: entry.token.symbol, decimals: entry.token.decimals },
       },
       relayChain: entry.relayChain ?? null,
+      gasSymbol: typeof entry.gasSymbol === 'string' && entry.gasSymbol ? entry.gasSymbol : prev.gasSymbol,
     };
   }
   const named = backend?.postingChain;
@@ -250,6 +255,16 @@ export function useSettlement(): SettlementSnapshot {
 
 export function getPostingChain(): SettlementChainInfo {
   return snapshot.chains[snapshot.postingChain];
+}
+
+/**
+ * Whether `chain`'s native gas coin is its settlement token (Arc: gas is
+ * native USDC, 18 decimals), so a gas cost is already in that token and needs
+ * no price lookup.
+ */
+export function gasIsSettlementToken(chain: SettlementChainKey): boolean {
+  const c = snapshot.chains[chain];
+  return c.gasSymbol === c.token.unit.symbol;
 }
 
 /**

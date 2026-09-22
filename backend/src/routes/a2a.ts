@@ -31,7 +31,7 @@ import { isAlive } from '../services/redis.js';
 import { EXPIRY_GRACE_SEC } from '../constants.js';
 import { config } from '../config.js';
 import * as serviceStore from '../services/serviceStore.js';
-import { consumePendingCost } from '../services/railwaySandbox.js';
+import { consumePendingCost, getPendingCost } from '../services/railwaySandbox.js';
 import * as accountingService from '../services/accountingService.js';
 import { normalizeSettlementAmount, payoutCurrency, pricingUnit, sameUnit, type TaskReward } from '../services/settlementUnits.js';
 import { getTokenDecimals } from '../services/chain.js';
@@ -1052,41 +1052,57 @@ async function releaseAndAnnounce(
  * the cascade is exhausted, the task falls back to CAS-race broadcast.
  * This uses setTimeout, so cascades are lost on server restart — the task
  * remains in a2a:open and can be picked up via CAS race (graceful degradation).
+ *
+ * `position` is the cascade position whose window this timer closes. A holder
+ * that declines (POST /tasks/:id/decline) advances the cascade early and arms
+ * its own timer; this one then finds the cascade moved on and stands down, so
+ * the next agent keeps its full window.
  */
 function scheduleCascadeAdvance(
   taskHash: string,
   requiredCaps: string[],
   chain?: TaskChain,
   delayMs: number = a2aStore.CASCADE_OFFER_MS,
+  position = 0,
 ): void {
   setTimeout(async () => {
     try {
       const state = await a2aStore.getState(taskHash);
       if (!state || state.status !== 'open') return;
-
-      const next = await a2aStore.advanceCascade(taskHash);
-      if (!next) {
-        emitTaskAvailable(taskHash, broadcastMeta(requiredCaps, chain));
-        return;
-      }
-
-      const deadline = Date.now() + a2aStore.CASCADE_OFFER_MS;
-      await a2aStore.setOffer(taskHash, {
-        address: next.address,
-        score: next.score,
-        expiresAt: deadline,
-      });
-      // No rootHash in the broadcast: the WS 'join' handshake is
-      // unauthenticated, so a task:offer payload reaches anyone who joined the
-      // room. The agent only needs the taskId to fire /accept, which returns
-      // rootHash + its wrapped slice over the authenticated channel.
-      emitTaskOffer(next.address, taskHash, offerMeta(requiredCaps, chain), next.score, deadline);
-
-      scheduleCascadeAdvance(taskHash, requiredCaps, chain);
+      // Moved on by a decline — past this position, or exhausted from a
+      // later one. (Gone at position 0 may mean no cascade was ever stored,
+      // which must still fall back to the broadcast.)
+      const cascade = await a2aStore.getCascade(taskHash);
+      if (cascade ? cascade.position !== position : position > 0) return;
+      await offerNextInCascade(taskHash, requiredCaps, chain);
     } catch (err) {
       console.error(`[a2a] cascade advance failed for ${taskHash.slice(0, 10)}…:`, (err as Error).message);
     }
   }, delayMs);
+}
+
+/** Offer the task to the next ranked agent and arm that position's window,
+ *  or broadcast when the cascade is exhausted / was never stored. */
+async function offerNextInCascade(taskHash: string, requiredCaps: string[], chain?: TaskChain): Promise<void> {
+  const next = await a2aStore.advanceCascade(taskHash);
+  if (!next) {
+    emitTaskAvailable(taskHash, broadcastMeta(requiredCaps, chain));
+    return;
+  }
+
+  const deadline = Date.now() + a2aStore.CASCADE_OFFER_MS;
+  await a2aStore.setOffer(taskHash, {
+    address: next.address,
+    score: next.score,
+    expiresAt: deadline,
+  });
+  // No rootHash in the broadcast: the WS 'join' handshake is
+  // unauthenticated, so a task:offer payload reaches anyone who joined the
+  // room. The agent only needs the taskId to fire /accept, which returns
+  // rootHash + its wrapped slice over the authenticated channel.
+  emitTaskOffer(next.address, taskHash, offerMeta(requiredCaps, chain), next.score, deadline);
+
+  scheduleCascadeAdvance(taskHash, requiredCaps, chain, a2aStore.CASCADE_OFFER_MS, next.position);
 }
 
 /**
@@ -2274,6 +2290,78 @@ a2aRouter.post('/tasks/:id/release', requireAuth, async (req: AuthRequest, res, 
 });
 
 /**
+ * POST /api/v1/a2a/tasks/:id/decline
+ *
+ * The current exclusive-offer holder hands the offer back — e.g. a worker
+ * whose wallet cannot pay gas on the task's chain. Without it the task sat
+ * locked to that agent for the rest of its CASCADE_OFFER_MS window, per
+ * unfunded agent in the cascade. Clears the offer and offers the task to the
+ * next ranked agent now (or broadcasts when the cascade is exhausted). Only
+ * the holder may decline, and only while the task is open: anyone else would
+ * be skipping an agent's turn.
+ */
+a2aRouter.post('/tasks/:id/decline', requireAuth, async (req: AuthRequest, res, next) => {
+  try {
+    const taskHash = req.params.id as string;
+    const address = req.user!.address;
+
+    const meta = await a2aStore.getMeta(taskHash);
+    if (!meta) throw new AppError(404, 'NOT_FOUND', 'Task not found or not A2A-enabled');
+
+    const state = await a2aStore.getState(taskHash);
+    if (!state || state.status !== 'open') {
+      throw new AppError(409, 'INVALID_STATE', `Cannot decline in state: ${state?.status ?? 'missing'}`);
+    }
+    const offer = await a2aStore.getOffer(taskHash);
+    if (!offer || offer.address.toLowerCase() !== address.toLowerCase()) {
+      throw new AppError(409, 'NOT_OFFER_HOLDER', 'You do not hold the current offer for this task');
+    }
+
+    await a2aStore.clearOffer(taskHash);
+    await offerNextInCascade(taskHash, meta.requiredCapabilities ?? [], meta.chain);
+
+    const body: ApiResponse = { success: true, data: { taskId: taskHash, declined: true } };
+    res.json(body);
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * Credit a settled pass to the executor BEFORE the state write that ends the
+ * retries. Once a task reads 'verified', /finalize and /verdict stop
+ * re-running (409 / alreadyRecorded), so a credit that failed after that write
+ * was lost for good while the worker was paid on-chain. Here a failed credit
+ * surfaces as a retryable 503 with state unchanged; the retry reaches the
+ * reconcile path (the chain already settled) and credits again — at most once,
+ * via recordWorkerPayout's marker. The compute-cost deduction is consumed only
+ * after the credit lands, so a retry deducts it too.
+ */
+async function creditSettledPass(
+  taskHash: string,
+  executorAddr: string,
+  onChainId: string,
+  grossAmount: bigint,
+  settlement: { chain: TaskChain; token: string },
+  opts: { serviceId?: number; meta?: A2ATaskMeta } = {},
+): Promise<void> {
+  try {
+    await recordWorkerPayout(taskHash, executorAddr, onChainId, grossAmount, settlement, {
+      ...opts,
+      computeCostMicroUnits: getPendingCost(taskHash),
+      rethrow: true,
+    });
+  } catch (err) {
+    throw new AppError(
+      503,
+      'CREDIT_FAILED',
+      `Settled on-chain, but crediting the executor failed: ${(err as Error).message}. State unchanged — retry.`,
+    );
+  }
+  consumePendingCost(taskHash);
+}
+
+/**
  * POST /api/v1/a2a/tasks/:id/finalize
  *
  * Called by the executor after their submitEvidence tx confirms on chain.
@@ -2446,15 +2534,15 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
           ? verificationResult
           : { passed: settledPass, reasons: ['Reconciled from on-chain settlement'] };
       const reconciledStatus: 'verified' | 'failed' = settledPass ? 'verified' : 'failed';
-      await a2aStore.updateState(taskHash, { status: reconciledStatus, verificationResult: reconciled });
+      // Credit first: see creditSettledPass.
       if (settledPass) {
-        const computeCostMicroUnits = consumePendingCost(taskHash);
-        await recordWorkerPayout(taskHash, address, ocId, onChainTask.amount, { chain: ocIdChain, token: onChainTask.token }, {
+        await creditSettledPass(taskHash, address, ocId, onChainTask.amount, { chain: ocIdChain, token: onChainTask.token }, {
           serviceId: meta.serviceId,
-          computeCostMicroUnits,
           meta,
         });
-      } else {
+      }
+      await a2aStore.updateState(taskHash, { status: reconciledStatus, verificationResult: reconciled });
+      if (!settledPass) {
         await recordWorkerDispute(taskHash, address);
       }
       // Diary: completed (+ review nudge) or failed, poster + worker.
@@ -2491,20 +2579,22 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
       );
     }
 
+    // Credit before the state write (see creditSettledPass); sandbox compute
+    // costs are deducted from the worker's payout there. A failed credit
+    // 503s with state 'submitted', and the retry takes the reconcile branch.
+    if (verificationResult.passed) {
+      await creditSettledPass(taskHash, address, ocId, onChainTask.amount, { chain: ocIdChain, token: onChainTask.token }, {
+        serviceId: meta.serviceId,
+        meta,
+      });
+    }
+
     await a2aStore.updateState(taskHash, {
       status: newStatus,
       verificationResult,
     });
 
-    if (verificationResult.passed) {
-      // Deduct sandbox compute costs from worker's payout
-      const computeCostMicroUnits = consumePendingCost(taskHash);
-      await recordWorkerPayout(taskHash, address, ocId, onChainTask.amount, { chain: ocIdChain, token: onChainTask.token }, {
-        serviceId: meta.serviceId,
-        computeCostMicroUnits,
-        meta,
-      });
-    } else {
+    if (!verificationResult.passed) {
       await recordWorkerDispute(taskHash, address);
     }
 
@@ -2628,18 +2718,20 @@ a2aRouter.post('/tasks/:id/verify', requireAuth, async (req: AuthRequest, res, n
       );
     }
 
+    // Credit before the state write (see creditSettledPass): the poster's
+    // retry after a CREDIT_FAILED 503 reconciles against the settled chain.
+    if (passed && state.executorAddress) {
+      await creditSettledPass(taskHash, state.executorAddress, ocId, onChainTask.amount, { chain: ocIdChain, token: onChainTask.token }, {
+        meta,
+      });
+    }
+
     await a2aStore.updateState(taskHash, {
       status: newStatus,
       verificationResult,
     });
 
-    if (passed && state.executorAddress) {
-      const computeCostMicroUnits = consumePendingCost(taskHash);
-      await recordWorkerPayout(taskHash, state.executorAddress, ocId, onChainTask.amount, { chain: ocIdChain, token: onChainTask.token }, {
-        computeCostMicroUnits,
-        meta,
-      });
-    } else if (!passed && state.executorAddress) {
+    if (!passed && state.executorAddress) {
       await recordWorkerDispute(taskHash, state.executorAddress);
     }
 
@@ -2789,17 +2881,19 @@ a2aRouter.post('/tasks/:id/verdict', requireAuth, async (req: AuthRequest, res, 
 
     const verificationResult = { passed, reasons: reasons ?? [] };
     const newStatus: 'verified' | 'failed' = passed ? 'verified' : 'failed';
-    await a2aStore.updateState(taskHash, { status: newStatus, verificationResult });
-
     if (passed && state.executorAddress) {
       // ocId + onChainTask were already resolved + gated above (status must be
       // Completed=4 here), so the payout credit can't be lost to an indexing race.
-      const computeCostMicroUnits = consumePendingCost(taskHash);
-      await recordWorkerPayout(taskHash, state.executorAddress, ocId, onChainTask.amount, { chain: ocIdChain, token: onChainTask.token }, {
-        computeCostMicroUnits,
+      // Credit before the state write (see creditSettledPass): the verifier
+      // treats the CREDIT_FAILED 503 as transient and re-posts next poll.
+      await creditSettledPass(taskHash, state.executorAddress, ocId, onChainTask.amount, { chain: ocIdChain, token: onChainTask.token }, {
         meta,
       });
-    } else if (!passed && state.executorAddress) {
+    }
+
+    await a2aStore.updateState(taskHash, { status: newStatus, verificationResult });
+
+    if (!passed && state.executorAddress) {
       await recordWorkerDispute(taskHash, state.executorAddress);
     }
 

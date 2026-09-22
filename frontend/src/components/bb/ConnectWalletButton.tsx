@@ -1,8 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { usePrivy } from '@privy-io/react-auth';
 import { useAccount, useChainId, useSwitchChain } from 'wagmi';
-import { baseChain, ogTestnet } from '../../config/chains';
-import { isMainnet } from '../../config/constants';
+import { arcChain } from '../../config/chains';
 import { copyToClipboard } from '../../lib/utils';
 
 function shortenAddress(addr: string) {
@@ -20,11 +19,11 @@ function EvmWalletButton({ variant }: Props) {
   const { switchChain } = useSwitchChain();
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
-  const supportedChainIds = [baseChain.id, ogTestnet.id];
-  const activeChain = supportedChainIds.includes(chainId) ? null : baseChain;
-  const networkName = chainId === baseChain.id
-    ? (isMainnet ? 'Base' : 'Base Sepolia')
-    : (isMainnet ? '0G Mainnet' : ogTestnet.name);
+  // The wallet connects to Arc only (wagmi + Privy are configured with
+  // arcChain alone), so Arc is the one network that is not "wrong" — and the
+  // only one a switch can reach.
+  const activeChain = chainId === arcChain.id ? null : arcChain;
+  const networkName = arcChain.name;
 
   useEffect(() => {
     if (!menuOpen) return;
