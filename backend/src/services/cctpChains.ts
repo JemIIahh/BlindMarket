@@ -14,9 +14,8 @@ export type CctpChainKey =
   | 'base' | 'base-sepolia'
   | 'ethereum' | 'ethereum-sepolia'
   | 'arbitrum' | 'arbitrum-sepolia'
-  | 'optimism' | 'optimism-sepolia'
+  | 'optimism-sepolia'
   | 'polygon' | 'polygon-amoy'
-  | 'avalanche' | 'avalanche-fuji'
   | 'arc-testnet';
 
 export interface CctpChainConfig {
@@ -95,17 +94,6 @@ function getPolygonProvider(): ethers.JsonRpcProvider {
     });
   }
   return polygonProvider;
-}
-
-let avalancheProvider: ethers.JsonRpcProvider | null = null;
-function getAvalancheProvider(): ethers.JsonRpcProvider {
-  if (!avalancheProvider) {
-    avalancheProvider = new ethers.JsonRpcProvider(config.cctp.avalancheRpcUrl, config.cctp.avalancheChainId, {
-      batchMaxCount: 1,
-      staticNetwork: true,
-    });
-  }
-  return avalancheProvider;
 }
 
 /**
@@ -194,19 +182,6 @@ function buildChains(): Record<CctpChainKey, CctpChainConfig> {
       supportsFastTransfer: true,
       usdcGasReserveRaw: 0n,
     },
-    optimism: {
-      chainKey: 'optimism',
-      chainId: 10,
-      domain: 2,
-      rpc: getOptimismProvider(),
-      tokenMessengerAddress,
-      messageTransmitterAddress,
-      usdcAddress: config.cctp.optimismUsdcAddress,
-      isTestnet: false,
-      label: 'Optimism',
-      supportsFastTransfer: true,
-      usdcGasReserveRaw: 0n,
-    },
     'optimism-sepolia': {
       chainKey: 'optimism-sepolia',
       chainId: 11155420,
@@ -220,10 +195,10 @@ function buildChains(): Record<CctpChainKey, CctpChainConfig> {
       supportsFastTransfer: true,
       usdcGasReserveRaw: 0n,
     },
-    // Polygon PoS (domain 7) and Avalanche C-Chain (domain 1) — CCTP works on
-    // both but Circle offers no Fast Transfer / Forwarding Service there, so a
-    // burn to/from them does not auto-complete the destination mint (operator
-    // self-relays). Standard Transfer only, hence supportsFastTransfer: false.
+    // Polygon PoS (domain 7) — CCTP works on it but Circle offers no Fast
+    // Transfer / Forwarding Service there, so a burn to/from it does not
+    // auto-complete the destination mint (operator self-relays). Standard
+    // Transfer only, hence supportsFastTransfer: false.
     polygon: {
       chainKey: 'polygon',
       chainId: 137,
@@ -247,32 +222,6 @@ function buildChains(): Record<CctpChainKey, CctpChainConfig> {
       usdcAddress: config.cctp.polygonUsdcAddress,
       isTestnet: true,
       label: 'Polygon Amoy',
-      supportsFastTransfer: false,
-      usdcGasReserveRaw: 0n,
-    },
-    avalanche: {
-      chainKey: 'avalanche',
-      chainId: 43114,
-      domain: 1,
-      rpc: getAvalancheProvider(),
-      tokenMessengerAddress,
-      messageTransmitterAddress,
-      usdcAddress: config.cctp.avalancheUsdcAddress,
-      isTestnet: false,
-      label: 'Avalanche C-Chain',
-      supportsFastTransfer: false,
-      usdcGasReserveRaw: 0n,
-    },
-    'avalanche-fuji': {
-      chainKey: 'avalanche-fuji',
-      chainId: 43113,
-      domain: 1,
-      rpc: getAvalancheProvider(),
-      tokenMessengerAddress,
-      messageTransmitterAddress,
-      usdcAddress: config.cctp.avalancheUsdcAddress,
-      isTestnet: true,
-      label: 'Avalanche Fuji',
       supportsFastTransfer: false,
       usdcGasReserveRaw: 0n,
     },

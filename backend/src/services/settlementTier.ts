@@ -40,7 +40,6 @@ const CCTP_TIER_CHAIN_IDS = {
   CCTP_ARBITRUM_CHAIN_ID: { mainnet: 42161, testnet: 421614 },
   CCTP_OPTIMISM_CHAIN_ID: { mainnet: 10, testnet: 11155420 },
   CCTP_POLYGON_CHAIN_ID: { mainnet: 137, testnet: 80002 },
-  CCTP_AVALANCHE_CHAIN_ID: { mainnet: 43114, testnet: 43113 },
 } as const;
 
 function isTier(value: string): value is SettlementTier {

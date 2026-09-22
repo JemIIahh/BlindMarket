@@ -51,13 +51,6 @@ const SOURCE_CHAIN_WALLET_CONFIG: Record<string, AddEthereumChainParameter> = {
     rpcUrls: ['https://sepolia-rollup.arbitrum.io/rpc'],
     blockExplorerUrls: ['https://sepolia.arbiscan.io'],
   },
-  optimism: {
-    chainId: '0xa',
-    chainName: 'Optimism',
-    nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
-    rpcUrls: ['https://mainnet.optimism.io'],
-    blockExplorerUrls: ['https://optimistic.etherscan.io'],
-  },
   'optimism-sepolia': {
     chainId: '0xaa37dc',
     chainName: 'Optimism Sepolia',
@@ -92,20 +85,6 @@ const SOURCE_CHAIN_WALLET_CONFIG: Record<string, AddEthereumChainParameter> = {
     nativeCurrency: { name: 'POL', symbol: 'POL', decimals: 18 },
     rpcUrls: ['https://rpc-amoy.polygon.technology'],
     blockExplorerUrls: ['https://amoy.polygonscan.com'],
-  },
-  avalanche: {
-    chainId: '0xa86a',
-    chainName: 'Avalanche C-Chain',
-    nativeCurrency: { name: 'AVAX', symbol: 'AVAX', decimals: 18 },
-    rpcUrls: ['https://api.avax.network/ext/bc/C/rpc'],
-    blockExplorerUrls: ['https://snowtrace.io'],
-  },
-  'avalanche-fuji': {
-    chainId: '0xa869',
-    chainName: 'Avalanche Fuji',
-    nativeCurrency: { name: 'AVAX', symbol: 'AVAX', decimals: 18 },
-    rpcUrls: ['https://api.avax-test.network/ext/bc/C/rpc'],
-    blockExplorerUrls: ['https://testnet.snowtrace.io'],
   },
 };
 

@@ -33,8 +33,8 @@ afterEach(() => {
   process.env = { ...ORIGINAL };
 });
 
-const TESTNET_KEYS = ['arbitrum-sepolia', 'arc-testnet', 'avalanche-fuji', 'base-sepolia', 'ethereum-sepolia', 'optimism-sepolia', 'polygon-amoy'];
-const MAINNET_KEYS = ['arbitrum', 'avalanche', 'base', 'ethereum', 'optimism', 'polygon'];
+const TESTNET_KEYS = ['arbitrum-sepolia', 'arc-testnet', 'base-sepolia', 'ethereum-sepolia', 'optimism-sepolia', 'polygon-amoy'];
+const MAINNET_KEYS = ['arbitrum', 'base', 'ethereum', 'polygon'];
 const keys = (list: { chainKey: string }[]) => list.map((c) => c.chainKey).sort();
 
 describe('CCTP network tier follows the Base chain, not NODE_ENV', () => {
