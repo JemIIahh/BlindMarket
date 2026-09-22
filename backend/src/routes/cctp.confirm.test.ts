@@ -85,7 +85,7 @@ vi.mock('../services/cctpChains.js', () => ({
   isCctpConfigured: vi.fn(() => true),
   isSupportedCctpChain: vi.fn(() => true),
   getCctpChain: vi.fn(() => FAKE_SOURCE),
-  getBaseCctpChain: vi.fn(() => ({ ...FAKE_SOURCE, chainKey: 'base-sepolia', domain: 6 })),
+  getSettlementCctpChain: vi.fn(() => ({ ...FAKE_SOURCE, chainKey: 'base-sepolia', domain: 6 })),
   supportedCctpChains: vi.fn(() => [FAKE_SOURCE]),
 }));
 

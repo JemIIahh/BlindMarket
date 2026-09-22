@@ -5,7 +5,7 @@ import { Button, FormField, FormInput, FormSelect, Modal, Spinner } from './bb';
 import { get, authedPost, authedGet } from '../lib/api';
 import { useWallet, switchWalletToChain, type AddEthereumChainParameter } from '../context/WalletContext';
 import { signAndSendDirect } from '../lib/directSigner';
-import { BASE_CCTP_CHAIN_KEY, isCctpUsable } from '../config/constants';
+import { SETTLEMENT_CCTP_CHAIN_KEY, isCctpUsable } from '../config/constants';
 
 /**
  * CCTP Phase B (inbound) — fund the user's Base wallet from USDC held on
@@ -64,15 +64,6 @@ const SOURCE_CHAIN_WALLET_CONFIG: Record<string, AddEthereumChainParameter> = {
     nativeCurrency: { name: 'Sepolia Ether', symbol: 'ETH', decimals: 18 },
     rpcUrls: ['https://sepolia.optimism.io'],
     blockExplorerUrls: ['https://sepolia-optimism.etherscan.io'],
-  },
-  // Arc's gas token IS USDC (18-dec native view of the same balance whose
-  // ERC-20 view is 6-dec) — hence the backend's usdcGasReserveRaw below.
-  'arc-testnet': {
-    chainId: '0x4cef52',
-    chainName: 'Arc Testnet',
-    nativeCurrency: { name: 'USDC', symbol: 'USDC', decimals: 18 },
-    rpcUrls: ['https://rpc.testnet.arc.io'],
-    blockExplorerUrls: ['https://testnet.arcscan.app'],
   },
 };
 
@@ -203,7 +194,7 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
     setQuoteLoading(true);
     const t = setTimeout(() => {
       get<{ maxFeeRaw: string; estimatedReceiveRaw: string }>(
-        `/api/v1/cctp/quote?sourceChain=${sourceChain}&destChain=${BASE_CCTP_CHAIN_KEY}&amountRaw=${amountRaw}`,
+        `/api/v1/cctp/quote?sourceChain=${sourceChain}&destChain=${SETTLEMENT_CCTP_CHAIN_KEY}&amountRaw=${amountRaw}`,
       )
         .then((data) => { if (!cancelled) setQuote(data); })
         .catch(() => { if (!cancelled) setQuote(null); })
@@ -352,7 +343,7 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
     : phase === 'approving' ? 'Confirm the USDC approval in your wallet…'
     : phase === 'burning' ? 'Confirm the transfer in your wallet…'
     : phase === 'confirming' ? 'Waiting for the burn to be mined…'
-    : phase === 'polling' ? 'Bridging — Circle is minting USDC on Base…'
+    : phase === 'polling' ? 'Bridging — Circle is minting USDC on Arc…'
     : '';
 
   return (
@@ -362,8 +353,8 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
           <div className="space-y-4">
             {!externalWallet && (
               <div className="text-xs text-warn border border-line bg-surface-2 p-3">
-                No external wallet linked. You need one (e.g. MetaMask) to sign on the source chain — your Base
-                wallet only holds/signs on Base.
+                No external wallet linked. You need one (e.g. MetaMask) to sign on the source chain — your Arc
+                wallet only holds/signs on Arc.
                 <div className="mt-2">
                   <Button variant="outline" size="sm" label="Link a wallet" onClick={() => connectWallet()} />
                 </div>
@@ -391,7 +382,7 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
                     ? `Exceeds your balance after network fees (max ≈${formatUnits(spendableRaw ?? 0n, 6)} USDC).`
                     : 'Exceeds your balance on this chain.'
                 : quoteLoading ? 'Quoting…'
-                : quote ? `You'll receive ≈${parseFloat(formatUnits(quote.estimatedReceiveRaw, 6)).toFixed(4)} USDC on Base (fee ${formatUnits(quote.maxFeeRaw, 6)} USDC)`
+                : quote ? `You'll receive ≈${parseFloat(formatUnits(quote.estimatedReceiveRaw, 6)).toFixed(4)} USDC on Arc (fee ${formatUnits(quote.maxFeeRaw, 6)} USDC)`
                 : undefined
               }
             >
@@ -410,7 +401,7 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
               </div>
             </FormField>
             <div className="text-xs text-ink-3 border border-line bg-surface-2 p-3">
-              This burns USDC on the source chain and mints native USDC to your Base wallet
+              This burns USDC on the source chain and mints native USDC to your Arc wallet
               (<span className="font-mono">{baseAddress ? `${baseAddress.slice(0, 8)}…` : '—'}</span>) via Circle
               CCTP — usually a few minutes end to end. A small Circle fee is deducted on arrival.
             </div>
@@ -440,7 +431,7 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
 
         {phase === 'done' && (
           <div className="py-6 text-center space-y-3">
-            <div className="text-sm text-ok">USDC arrived on Base.</div>
+            <div className="text-sm text-ok">USDC arrived on Arc.</div>
             {mintTxHash && <div className="font-mono text-xs text-ink-3">mint tx {mintTxHash.slice(0, 10)}…</div>}
             <div className="flex justify-center pt-2">
               <Button variant="primary" size="sm" label="Done" onClick={onClose} />

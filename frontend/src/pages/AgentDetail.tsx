@@ -16,7 +16,7 @@ import {
 } from '../components/bb';
 import { get, authedGet, authedPost } from '../lib/api';
 import { useChainAddress } from '../hooks/useChainWallet';
-import { BASE_CCTP_CHAIN_KEY, isCctpUsable } from '../config/constants';
+import { SETTLEMENT_CCTP_CHAIN_KEY, isCctpUsable } from '../config/constants';
 import { getMarketplaceTokenAddress, getPaymentSymbol, getPaymentDecimals, getPostingChain, isNativePayment, useSettlement } from '../config/settlement';
 import {
   getAgentReviews,
@@ -275,7 +275,7 @@ export default function AgentDetail() {
     setCctpQuoteLoading(true);
     const t = setTimeout(() => {
       get<{ maxFeeRaw: string; estimatedReceiveRaw: string }>(
-        `/api/v1/cctp/quote?sourceChain=${BASE_CCTP_CHAIN_KEY}&destChain=${cctpDestChain}&amountRaw=${usdcBalance}`,
+        `/api/v1/cctp/quote?sourceChain=${SETTLEMENT_CCTP_CHAIN_KEY}&destChain=${cctpDestChain}&amountRaw=${usdcBalance}`,
       )
         .then((data) => { if (!cancelled) setCctpQuote(data); })
         .catch(() => { if (!cancelled) setCctpQuote(null); })

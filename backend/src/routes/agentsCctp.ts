@@ -21,7 +21,7 @@ import {
   isCctpConfigured,
   isSupportedCctpChain,
   getCctpChain,
-  getBaseCctpChain,
+  getSettlementCctpChain,
   supportedCctpChains,
 } from '../services/cctpChains.js';
 import {
@@ -95,14 +95,14 @@ agentsCctpRouter.post('/:id/cctp/withdraw', requireAuth, async (req: AuthRequest
       return;
     }
 
-    const source = getBaseCctpChain();
+    const source = getSettlementCctpChain();
     const dest = getCctpChain(destinationChain);
     if (!source || !dest) {
       res.status(400).json({ success: false, error: { code: 'CCTP_DISABLED', message: 'CCTP chain configuration is incomplete' } });
       return;
     }
     if (dest.chainKey === source.chainKey) {
-      res.status(400).json({ success: false, error: { code: 'CCTP_SAME_CHAIN', message: 'destinationChain must differ from the Base leg' } });
+      res.status(400).json({ success: false, error: { code: 'CCTP_SAME_CHAIN', message: 'destinationChain must differ from the settlement leg' } });
       return;
     }
 

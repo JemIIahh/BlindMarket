@@ -252,8 +252,9 @@ export function isSupportedCctpChain(chainKey: string): chainKey is CctpChainKey
   return supportedCctpChains().some((c) => c.chainKey === chainKey);
 }
 
-/** Base leg for the running network tier — Phase A's source chain and the
- *  chain Phase B ultimately mints into (the user's Base Privy wallet). */
-export function getBaseCctpChain(): CctpChainConfig | null {
-  return getCctpChain(MAINNET_TIER ? 'base' : 'base-sepolia');
+/** The settlement leg of the bridge — the chain Phase A burns from and the
+ *  chain Phase B mints into (the user's Arc wallet). Arc testnet only: Arc
+ *  mainnet has no CCTP entry yet (see config.ts). */
+export function getSettlementCctpChain(): CctpChainConfig | null {
+  return getCctpChain('arc-testnet');
 }

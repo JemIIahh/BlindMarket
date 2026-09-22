@@ -65,18 +65,17 @@ export const BLIND_REPUTATION_ADDRESS =
 
 export { BASE_CHAIN_ID };
 
-// The Base leg's CCTP chainKey — used as the fixed source/dest of a CCTP
-// quote, since neither Phase A (Base -> elsewhere) nor Phase B (elsewhere ->
-// Base) ever varies this side of the route. The backend derives its CCTP tier
-// from its own BASE_CHAIN_ID the same way (backend/src/config.ts).
-export const BASE_CCTP_CHAIN_KEY = isBaseMainnet ? 'base' : 'base-sepolia';
+// The settlement leg's CCTP chainKey — the fixed source/dest of a CCTP quote.
+// Phase A burns FROM here, Phase B mints INTO here (the user's Arc wallet).
+// Arc testnet only: Arc mainnet is not a CCTP chain yet.
+export const SETTLEMENT_CCTP_CHAIN_KEY = 'arc-testnet';
 
-/** CCTP is usable only when the backend's CCTP Base leg is the Base chain
- *  this app settles on. A mismatched deployment (e.g. backend on Base mainnet,
- *  app on Base Sepolia) hides bridging entirely instead of listing the other
- *  network tier's chains — a real mainnet burn from a testnet app. */
+/** CCTP is usable only when the backend's CCTP settlement leg is the chain
+ *  this app settles on. A mismatched deployment hides bridging entirely
+ *  instead of bridging onto the wrong network — a real burn/mint on the
+ *  wrong tier. */
 export function isCctpUsable(cfg: { enabled: boolean; baseChainId?: number | null }): boolean {
-  return cfg.enabled && cfg.baseChainId === BASE_CHAIN_ID;
+  return cfg.enabled && cfg.baseChainId === ARC_CHAIN_ID;
 }
 
 export const BASE_RPC_URL =
