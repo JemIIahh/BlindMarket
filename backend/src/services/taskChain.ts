@@ -10,7 +10,7 @@ import { baseEscrow } from './chain.js';
 import { getBaseTaskIdByHash, forceBaseTick, seedBaseTaskIdMapping } from './baseEscrowEvents.js';
 import { getArcTaskIdByHash, forceArcTick, seedArcTaskIdMapping } from './arcEscrowEvents.js';
 import { getMeta } from './a2aStore.js';
-import { isSettlementChainKey, settlementChainConfig, type SettlementChainKey } from './settlementChains.js';
+import { isSettlementChainKey, postingChain, settlementChainConfig, type SettlementChainKey } from './settlementChains.js';
 
 /** A settlement chain, as a task's escrow names it (services/settlementChains.ts). */
 export type TaskChain = SettlementChainKey;
@@ -121,10 +121,16 @@ export async function seedTaskId(chain: TaskChain, taskHash: string, taskId: big
  * read id 7 from each escrow and keep the one whose `agent` is the caller.
  * Reading an id that was never created returns a zero-filled struct rather than
  * reverting, so a wrong guess resolves to the zero address and is rejected.
+ *
+ * When the client knows the task's chain (the detail page does), it passes it
+ * and only that chain is read: a poster can own id 7 on both chains, and the
+ * refund must go to the task they are looking at. Without it the posting chain
+ * wins a tie, since that is where new tasks live.
  */
 export async function resolveTaskChainById(
   taskId: number,
   caller: string,
+  chain?: TaskChain,
 ): Promise<TaskChain | null> {
   const escrowService = await import('./escrow.js');
   const wanted = caller.toLowerCase();
@@ -138,7 +144,10 @@ export async function resolveTaskChainById(
     }
   };
 
-  const chains = indexesFor(null);
+  const posting = postingChain();
+  const chains = chain !== undefined
+    ? indexesFor(chain)
+    : indexesFor(null).sort((a, b) => Number(b === posting) - Number(a === posting));
   const agents = await Promise.all(chains.map(readAgent));
 
   const i = agents.findIndex((agent) => agent === wanted);

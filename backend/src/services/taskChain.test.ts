@@ -30,6 +30,7 @@ vi.mock('./settlementChains.js', async (importOriginal) => {
       const entry = mod.settlementChainConfig(key);
       return key === 'arc' ? { ...entry, escrowAddress: arcEscrow.current } : entry;
     },
+    postingChain: () => (arcEscrow.current ? 'arc' : 'base'),
   };
 });
 vi.mock('./a2aStore.js', () => ({ getMeta }));
@@ -148,9 +149,32 @@ describe('resolveTaskChainById', () => {
     expect(await resolveTaskChainById(7, OWNER)).toBe('base');
   });
 
-  it('prefers Base when the same id is owned on both chains', async () => {
+  it('prefers the posting chain when the same id is owned on both chains', async () => {
     stubChains(OWNER, OWNER);
+    expect(await resolveTaskChainById(7, OWNER)).toBe('arc');
+
+    // With no Arc escrow, Base is the posting chain (and the only one searched).
+    arcEscrow.current = null;
     expect(await resolveTaskChainById(7, OWNER)).toBe('base');
+  });
+
+  it('reads only the chain the client names', async () => {
+    stubChains(OWNER, OWNER);
+    expect(await resolveTaskChainById(7, OWNER, 'base')).toBe('base');
+    expect(getTaskOn).toHaveBeenCalledTimes(1);
+    expect(getTaskOn).toHaveBeenCalledWith('base', 7);
+
+    getTaskOn.mockClear();
+    expect(await resolveTaskChainById(7, OWNER, 'arc')).toBe('arc');
+    expect(getTaskOn).toHaveBeenCalledTimes(1);
+    expect(getTaskOn).toHaveBeenCalledWith('arc', 7);
+  });
+
+  it('does not fall back to another chain when the named chain is not the caller\'s', async () => {
+    // Base id 7 is the caller's, Arc id 7 is someone else's: a refund asked
+    // for the Arc task must not be built against the Base one.
+    stubChains(OWNER, OTHER);
+    expect(await resolveTaskChainById(7, OWNER, 'arc')).toBeNull();
   });
 
   it('returns null when the caller owns the id on neither chain', async () => {
