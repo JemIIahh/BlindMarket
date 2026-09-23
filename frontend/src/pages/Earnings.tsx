@@ -17,7 +17,7 @@ import {
 import { useAccountingEntries, useAccountingSummary } from '../hooks/useAccounting';
 import { useAuth } from '../context/AuthContext';
 import { authedGet } from '../lib/api';
-import { useChainAddress } from '../hooks/useChainWallet';
+import { useChainAddress, useOwnerAddresses } from '../hooks/useChainWallet';
 import type { Transaction } from '../services/accounting';
 import { API_BASE_URL } from '../config/constants';
 import { getPaymentSymbol, useSettlement } from '../config/settlement';
@@ -109,22 +109,24 @@ export default function Earnings() {
   const [txPage, setTxPage] = useState(1);
   const { isAuthenticated } = useAuth();
   const address = useChainAddress();
+  const owners = useOwnerAddresses();
   const paymentSymbol = getPaymentSymbol();
   const fmt = (n: number | null | undefined) => formatCurrency(n, paymentSymbol);
   const { data: summary, isLoading: summaryLoading, isError: summaryError, refetch: refetchSummary } = useAccountingSummary();
   const { data: entriesRes, isLoading: entriesLoading, error: entriesError } = useAccountingEntries(undefined, undefined, undefined, txPage, PAGE_SIZE);
   const { data: agents, isLoading: agentsLoading, isError: agentsError, refetch: refetchAgents } = useQuery({
-    queryKey: ['agents', address],
+    queryKey: ['agents', owners],
     queryFn: async () => {
       // Throw on failure so react-query surfaces an error state — a silent
       // [] here used to read as "no agents" when the API was down.
-      const res = await fetch(`${API_BASE_URL}/api/v1/agents?owner=${address}`);
+      // Every wallet on the account: an agent's owner can be any of them.
+      const res = await fetch(`${API_BASE_URL}/api/v1/agents?owner=${owners}`);
       if (!res.ok) throw new Error(`Agents request failed (${res.status})`);
       const json = await res.json();
       if (!json.success) throw new Error(json.error || 'Agents request failed');
       return json.data as Agent[];
     },
-    enabled: !!address,
+    enabled: !!owners,
   });
 
   const entries: Transaction[] = entriesRes?.transactions ?? [];

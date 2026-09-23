@@ -11,6 +11,18 @@ export function useChainAddress(): string | undefined {
   return evmAddress ?? undefined;
 }
 
+/**
+ * Every wallet on the signed-in account (the embedded one and any linked
+ * external ones), lowercased, comma-separated: the `owner` for listing their
+ * agents. An agent is owned by whichever wallet the backend resolved at
+ * deploy, which on Arc can be an external wallet while `useChainAddress()` is
+ * the embedded one. Empty string when signed out.
+ */
+export function useOwnerAddresses(): string {
+  const { address, embeddedAddress, externalAddresses } = useWallet();
+  return [...new Set([address, embeddedAddress, ...externalAddresses].filter((a): a is string => !!a).map((a) => a.toLowerCase()))].join(',');
+}
+
 export function useChainIsConnected(): boolean {
   const { address: evmAddress } = useWallet();
   return !!evmAddress;

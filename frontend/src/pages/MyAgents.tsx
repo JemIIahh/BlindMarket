@@ -21,7 +21,7 @@ import { agentFundingAddress, getMarketplaceTokenAddress, getPaymentSymbol, getP
 import { formatEarnings, sumEarnings } from '../lib/paymentUnits';
 import { authedPost } from '../lib/api';
 import { providerFor } from '../lib/txSigner';
-import { useChainAddress } from '../hooks/useChainWallet';
+import { useChainAddress, useOwnerAddresses } from '../hooks/useChainWallet';
 import { useAuth } from '../context/AuthContext';
 
 const LOW_BALANCE_THRESHOLD = 1; // 1 USDC
@@ -93,14 +93,16 @@ export default function MyAgents() {
   // Re-render when the backend's settlement answer arrives (config/settlement.ts).
   useSettlement();
   const address = useChainAddress();
+  // Agents can be owned by any of the account's wallets, not only `address`.
+  const owners = useOwnerAddresses();
   const { isAuthenticated } = useAuth();
   const qc = useQueryClient();
   const [page, setPage] = useState(1);
 
   const { data: agentsRes, isLoading, isError, refetch } = useQuery<{ agents: Agent[]; total: number }>({
-    queryKey: ['my-agents', address, page],
+    queryKey: ['my-agents', owners, page],
     queryFn: async () => {
-      const res = await fetch(`${API_BASE_URL}/api/v1/agents?owner=${address}&page=${page}&pageSize=${AGENTS_PAGE_SIZE}`);
+      const res = await fetch(`${API_BASE_URL}/api/v1/agents?owner=${owners}&page=${page}&pageSize=${AGENTS_PAGE_SIZE}`);
       // Throw rather than return [] on failure, so an API outage shows the
       // error state instead of masquerading as "no agents yet".
       if (!res.ok) throw new Error(`Agents request failed (${res.status})`);
@@ -108,7 +110,7 @@ export default function MyAgents() {
       if (!json.success) throw new Error(json.error?.message || 'Agents request failed');
       return { agents: json.data, total: json.total ?? 0 };
     },
-    enabled: !!address,
+    enabled: !!owners,
   });
 
   const agents = agentsRes?.agents ?? [];
@@ -120,7 +122,7 @@ export default function MyAgents() {
   const action = useMutation({
     mutationFn: ({ id, act }: { id: string; act: Act }) =>
       authedPost<Agent>(`/api/v1/agents/${id}/${act}`, {}),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['my-agents', address] }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['my-agents', owners] }),
   });
 
   const totalEarned = formatEarnings(sumEarnings(agents));

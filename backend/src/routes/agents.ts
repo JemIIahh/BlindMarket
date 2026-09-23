@@ -520,11 +520,22 @@ agentsRouter.post('/deploy', requireAuth, deployLimiter, async (req: AuthRequest
 });
 
 // GET /api/v1/agents
+//
+// `owner` may name several wallets, comma-separated: a user's agents can be
+// owned by any of their linked wallets. The deploy records the wallet the
+// backend resolves from the session (an external wallet, on Arc), while the
+// web app knows the user by their embedded one, so a single-owner listing
+// showed "No agents deployed" for a running agent. One wallet behaves as before.
 agentsRouter.get('/', async (req, res) => {
   const owner = req.query.owner as string | undefined;
   const page = Math.max(1, parseInt(req.query.page as string) || 1);
   const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize as string) || 20));
-  const rawAgents = await listAgents(owner);
+  const owners = owner?.includes(',')
+    ? [...new Set(owner.split(',').map((o) => o.trim().toLowerCase()).filter((o) => /^0x[0-9a-f]{40}$/.test(o)))].slice(0, 10)
+    : null;
+  const rawAgents = owners
+    ? (await listAgents()).filter((a) => owners.includes(a.ownerAddress?.toLowerCase() ?? ''))
+    : await listAgents(owner);
   const total = rawAgents.length;
   const start = (page - 1) * pageSize;
   const paged = rawAgents.slice(start, start + pageSize);
