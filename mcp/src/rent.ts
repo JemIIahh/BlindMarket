@@ -1,9 +1,9 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { Contract, Interface, formatUnits, parseUnits } from 'ethers';
+import { Contract, Interface, JsonRpcProvider, formatUnits, parseUnits } from 'ethers';
 import type { McpConfig } from './config.js';
 import type { WalletCtx } from './wallet.js';
-import { aesDecrypt, aesEncrypt, eciesDecrypt, eciesEncrypt, generateAesKey, sha256Hex } from './crypto.js';
+import { aesDecrypt, aesEncrypt, derivePublicKeyHex, eciesDecrypt, eciesEncrypt, generateAesKey, sha256Hex } from './crypto.js';
 import { createQuote, consumeQuote, getSpend, putSpend, updateSpend, type SpendRecord } from './state.js';
 import { createSettlementResolver, type RelaySettlement, type Settlement } from './settlement.js';
 
@@ -1307,6 +1307,196 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
         });
       } catch (err) {
         return fail((err as ApiError).code ?? 'COMPLETE_FAILED', (err as Error).message);
+      }
+    },
+  );
+
+  // ── deploy_agent ──────────────────────────────────────────────────────────
+
+  /** The env var each provider's API key is read from, so the key never passes through the conversation. */
+  const PROVIDER_KEY_ENV: Record<string, string> = {
+    openai: 'OPENAI_API_KEY',
+    anthropic: 'ANTHROPIC_API_KEY',
+    groq: 'GROQ_API_KEY',
+    gemini: 'GEMINI_API_KEY',
+  };
+  /** Public RPCs by chain id, for a chain with no BLINDMARKET_<CHAIN>_RPC_URL set. */
+  const PUBLIC_RPC: Record<number, string> = { 5042002: 'https://rpc.testnet.arc.io' };
+
+  type TransferTerms = { required: true; method: 'transfer'; chain: string; token: string; recipient: string; amountRaw: string; decimals: number };
+  type FeeTerms = { required: false } | TransferTerms | { required: true; method: 'factory'; chain: string; factory: string | null };
+  interface DeployedAgent { id: string; name: string; walletAddress: string; started?: boolean }
+
+  const coded = (code: string, message: string): ApiError => Object.assign(new Error(message), { code });
+
+  /** The local wallet on `chain`, over BLINDMARKET_<CHAIN>_RPC_URL, checked against the chain id the backend names. */
+  async function walletOn(chain: string) {
+    const res = await fetch(`${cfg.apiBase}/health/bridge`, { signal: AbortSignal.timeout(30_000) });
+    const bridge: any = await res.json().catch(() => ({}));
+    const entry = (bridge?.data ?? bridge)?.chains?.find((c: { chain?: string }) => c.chain === chain);
+    const chainId = Number(entry?.chainId);
+    if (!Number.isInteger(chainId) || chainId <= 0) throw coded('SETTLEMENT_UNKNOWN', `The backend lists no chain id for ${chain}.`);
+    const envName = `BLINDMARKET_${chain.toUpperCase().replace(/-/g, '_')}_RPC_URL`;
+    const rpcUrl = process.env[envName] ?? PUBLIC_RPC[chainId];
+    if (!rpcUrl) throw coded('RPC_UNKNOWN', `No RPC known for ${chain} (chainId ${chainId}) — set ${envName}.`);
+    const provider = new JsonRpcProvider(rpcUrl, chainId, { staticNetwork: true });
+    const served = Number(BigInt(await provider.send('eth_chainId', [])));
+    if (served !== chainId) throw coded('WRONG_RPC', `${envName} serves chain ${served}, not ${chain} (${chainId}). Nothing was paid.`);
+    return walletCtx!.wallet.connect(provider);
+  }
+
+  server.registerTool(
+    'deploy_agent',
+    {
+      title: 'Deploy a Hosted Agent',
+      description: "Deploy a hosted agent that runs on BlindMarket and takes tasks, owned by the API key's wallet. Deploying costs a fee (1 USDC on Arc on production), paid as one USDC transfer on Arc from the local wallet (BLINDMARKET_PRIVATE_KEY), which must be the API key's owner. The model provider's key is read from this server's environment (OPENAI_API_KEY, ANTHROPIC_API_KEY, GROQ_API_KEY or GEMINI_API_KEY; none for 0g-compute), never passed as an argument. TWO-STEP quote/confirm like post_task; requires a unique idempotencyKey, and a retry with the same key never pays twice.",
+      inputSchema: {
+        name: z.string().min(1).max(80).describe('Agent name'),
+        instructions: z.string().min(1).max(100_000).describe("The agent's instructions: what it does and how"),
+        provider: z.enum(['openai', 'anthropic', 'groq', 'gemini', '0g-compute']).describe("LLM provider. '0g-compute' needs no API key: inference is billed to the agent's own wallet"),
+        model: z.string().min(1).describe('Model id, e.g. gpt-4o-mini or claude-sonnet-4-5'),
+        skillSlugs: z.array(z.string()).max(10).optional().describe('Public skills to install at deploy, by slug'),
+        idempotencyKey: z.string().min(8).max(128).describe('Unique key for this deploy — reuse it on retries'),
+        confirm: z.boolean().optional().describe('Set true (with quoteId) to pay the fee and deploy'),
+        quoteId: z.string().optional().describe('From the quote step'),
+      },
+      annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ name, instructions, provider, model, skillSlugs, idempotencyKey, confirm, quoteId }) => {
+      if (!walletCtx) {
+        return fail('NO_WALLET', 'deploy_agent pays the fee from, and encrypts the agent key to, the local wallet — set BLINDMARKET_PRIVATE_KEY to the key of the wallet that owns BLINDMARKET_API_KEY.');
+      }
+      let apiKey = '';
+      if (provider !== '0g-compute') {
+        const envName = PROVIDER_KEY_ENV[provider];
+        apiKey = process.env[envName] ?? '';
+        if (!apiKey) return fail('PROVIDER_KEY_MISSING', `Set ${envName} in this server's environment: the agent calls ${provider} with it. It is read there so it never passes through the conversation.`);
+      }
+      const body = {
+        name, instructions, provider, model, apiKey,
+        capabilities: [],
+        skillSlugs: skillSlugs ?? [],
+        // The agent's private key is encrypted to the local wallet's key.
+        ownerPublicKey: derivePublicKeyHex(walletCtx.wallet.privateKey),
+      };
+      const summary = (a: DeployedAgent) => ({ agentId: a.id, name: a.name, walletAddress: a.walletAddress, started: a.started === true });
+      /** POST /agents/deploy, asking again while the backend has not seen the fee confirm. */
+      const deploy = async (feeTxHash?: string): Promise<DeployedAgent> => {
+        for (let attempt = 1; ; attempt++) {
+          try {
+            return await api<DeployedAgent>('POST', '/api/v1/agents/deploy', feeTxHash ? { ...body, feeTxHash } : body);
+          } catch (err) {
+            if ((err as ApiError).code !== 'DEPLOY_FEE_NOT_FOUND' || attempt >= 3) throw err;
+            await new Promise((r) => setTimeout(r, Number(process.env.BLINDMARKET_DEPLOY_POLL_MS ?? 5000)));
+          }
+        }
+      };
+      const paidNote = () => {
+        const rec = getSpend(idempotencyKey);
+        return rec?.stage === 'sent' && rec.txHash
+          ? ` The fee is paid (${rec.txHash}): retry with the SAME idempotencyKey to deploy without paying again.`
+          : '';
+      };
+
+      const existing = getSpend(idempotencyKey);
+      if (existing && existing.kind !== 'deploy') {
+        return fail('IDEMPOTENCY_KEY_IN_USE', `idempotencyKey ${idempotencyKey} belongs to a ${existing.kind} spend — use a new key for this deploy.`);
+      }
+      if (existing?.stage === 'confirmed') {
+        return ok({ resumed: true, agentId: existing.agentId, feeTxHash: existing.txHash, hint: 'Already deployed with this idempotencyKey.' });
+      }
+      if (existing?.stage === 'sent' && existing.txHash) {
+        // Paid before: finish the deploy with that payment.
+        try {
+          const agent = await deploy(existing.txHash);
+          updateSpend(idempotencyKey, { stage: 'confirmed', agentId: agent.id });
+          return ok({ resumed: true, ...summary(agent), feeTxHash: existing.txHash });
+        } catch (err) {
+          return fail((err as ApiError).code ?? 'DEPLOY_FAILED', `${(err as Error).message}.${paidNote()}`);
+        }
+      }
+
+      let terms: FeeTerms;
+      try {
+        terms = await api<FeeTerms>('GET', '/api/v1/agents/deploy-fee');
+      } catch (err) {
+        return fail((err as ApiError).code ?? 'DEPLOY_FEE_UNKNOWN', (err as Error).message);
+      }
+      if (terms.required && terms.method !== 'transfer') {
+        return fail('UNSUPPORTED_FEE_METHOD', 'This backend takes the deploy fee through AgentFactory only, which this server does not pay. Deploy from the web app.');
+      }
+      const fee = terms.required ? terms as TransferTerms : null;
+      const feeText = fee ? `${formatUnits(BigInt(fee.amountRaw), fee.decimals).replace(/\.0$/, '')} USDC` : 'none';
+
+      if (!confirm) {
+        let walletBalance: string | undefined;
+        if (fee) {
+          try {
+            const w = await walletOn(fee.chain);
+            const bal = await new Contract(fee.token, ['function balanceOf(address) view returns (uint256)'], w).balanceOf(w.address);
+            walletBalance = formatUnits(bal, fee.decimals);
+          } catch (err) {
+            if (['RPC_UNKNOWN', 'WRONG_RPC', 'SETTLEMENT_UNKNOWN'].includes((err as ApiError).code ?? '')) {
+              return fail((err as ApiError).code!, (err as Error).message);
+            }
+          }
+        }
+        const quote = createQuote('deploy', { name, provider, model, fee: feeText });
+        return ok({
+          quote: {
+            agent: { name, provider, model, skills: skillSlugs ?? [] },
+            fee: feeText,
+            chain: fee?.chain,
+            payTo: fee?.recipient,
+            payFrom: walletCtx.wallet.address,
+            walletBalance,
+            quoteId: quote.quoteId,
+          },
+          next: `Re-call deploy_agent with confirm=true, quoteId="${quote.quoteId}", and the SAME idempotencyKey to ${fee ? 'pay the fee and ' : ''}deploy.`,
+        });
+      }
+      if (!quoteId || !consumeQuote(quoteId, 'deploy')) {
+        return fail('QUOTE_REQUIRED', 'Get a quote first (call without confirm), then re-call with confirm=true and the returned quoteId (quotes are single-use and expire after 10 minutes)');
+      }
+
+      try {
+        const now = new Date().toISOString();
+        let feeTxHash: string | undefined;
+        if (fee) {
+          // The backend counts a fee only from the API key's owner: check before paying.
+          const { address: owner } = await api<{ address: string }>('GET', '/api/v1/api-keys/whoami');
+          if (String(owner).toLowerCase() !== walletCtx.wallet.address.toLowerCase()) {
+            return fail('OWNER_MISMATCH', `BLINDMARKET_API_KEY belongs to ${owner} but BLINDMARKET_PRIVATE_KEY is ${walletCtx.wallet.address}. Nothing was paid: the backend counts a deploy fee only from the API key's owner.`);
+          }
+          const w = await walletOn(fee.chain);
+          putSpend({ idempotencyKey, kind: 'deploy', stage: 'created', settlement: fee.chain, token: fee.token, amountWei: fee.amountRaw, createdAt: now, updatedAt: now });
+          const data = new Interface(['function transfer(address to, uint256 amount) returns (bool)'])
+            .encodeFunctionData('transfer', [fee.recipient, BigInt(fee.amountRaw)]);
+          const tx = await w.sendTransaction({ to: fee.token, data });
+          // Recorded the moment it is broadcast: a retry resumes from here and never pays twice.
+          updateSpend(idempotencyKey, { stage: 'sent', txHash: tx.hash });
+          try {
+            await tx.wait();
+          } catch (err) {
+            if ((err as ApiError).code === 'CALL_EXCEPTION') {
+              updateSpend(idempotencyKey, { stage: 'created', txHash: undefined });
+              return fail('FEE_REVERTED', `The fee transfer ${tx.hash} reverted, so nothing was paid. Check the wallet's USDC on ${fee.chain} and retry.`);
+            }
+            // Not confirmed yet: the backend waits for the receipt itself.
+          }
+          feeTxHash = tx.hash;
+        } else {
+          putSpend({ idempotencyKey, kind: 'deploy', stage: 'created', createdAt: now, updatedAt: now });
+        }
+        const agent = await deploy(feeTxHash);
+        updateSpend(idempotencyKey, { stage: 'confirmed', agentId: agent.id });
+        return ok({
+          ...summary(agent),
+          feeTxHash,
+          hint: agent.started ? 'The agent is running.' : 'The agent was created but did not start — start it with start_agent.',
+        });
+      } catch (err) {
+        return fail((err as ApiError).code ?? 'DEPLOY_FAILED', `${(err as Error).message}.${paidNote()}`);
       }
     },
   );

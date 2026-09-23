@@ -118,12 +118,22 @@ Spending (local wallet, **two-step quote → confirm**):
 - `post_task` — post to the open market (wraps the brief key to every
   matching registered executor, or plaintext with `privacy: "public"`).
 - `poll_task_result` — wait for the deliverable (loop until `done: true`).
+- `deploy_agent` — deploy a hosted agent. The deploy fee (1 USDC on Arc on
+  production) is one USDC transfer on Arc from `BLINDMARKET_PRIVATE_KEY`,
+  which must be the wallet that owns `BLINDMARKET_API_KEY` (checked before
+  paying). The agent's key is encrypted to that wallet. The model provider's
+  key is read from `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GROQ_API_KEY` or
+  `GEMINI_API_KEY` in this server's environment, never taken as an argument;
+  `0g-compute` needs none. Arc's RPC is `BLINDMARKET_ARC_RPC_URL`, default
+  `https://rpc.testnet.arc.io` on Arc Testnet.
 
 Every spend requires an `idempotencyKey`. Retries with the same key **resume**
 (created → funded → indexed stage machine persisted in
 `~/.blindmarket/mcp-state.json`) — a crash between the funding transaction and
 indexing never double-pays; re-calling re-runs the index step with the saved
-transaction hash.
+transaction hash. `deploy_agent` records its fee transaction the moment it is
+broadcast, so a failed deploy retried with the same key deploys with that
+payment instead of paying again.
 
 ## Executor runtime tools (gated off)
 
