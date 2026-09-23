@@ -1,0 +1,18 @@
+{
+  "network": "arc-testnet",
+  "chainId": 5042002,
+  "deployer": "0x2f8b1177c83623a560B26B38dE984e154b123D75",
+  "timestamp": "2026-09-23T12:10:47.124Z",
+  "note": "AgentFactory — accepts USDC, emits AgentDeployed events. Backend listens.",
+  "contracts": {
+    "AgentFactory": "0x1E9Abb2F2e66b8Af35BED730500A94760E133a3B",
+    "USDC": "0x3600000000000000000000000000000000000000",
+    "Treasury": "0x2f8b1177c83623a560B26B38dE984e154b123D75"
+  },
+  "config": {
+    "deployFeeUsdc": "1000000"
+  },
+  "blocks": {
+    "AgentFactory": 63589837
+  }
+}

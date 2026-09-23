@@ -485,15 +485,25 @@ describe("Arc settlement tooling", function () {
     it("renders today's records byte for byte as the committed module, production's Arc escrow included", function () {
       expect(render()).to.equal(committed);
       expect(render(dir)).to.equal(committed);
-      // deployments/arc-testnet.json is the escrow production posts on (#73).
+      // deployments/arc-testnet.json is the escrow production posts on (#73);
+      // agent-factory-arc-testnet.json is the factory DeployAgentForm pays.
       const arc = JSON.parse(fs.readFileSync(path.join(DEPLOYMENTS_ROOT, "arc-testnet.json"), "utf-8"));
-      expect(exported(committed, "CONTRACT_ADDRESSES").arcTestnet).to.deep.equal({ blindEscrow: arc.contracts.BlindEscrow, USDC: arc.contracts.USDC });
-      expect(exported(committed, "DEPLOYMENT_BLOCKS")).to.deep.equal({ arcTestnet: { blindEscrow: arc.blocks.BlindEscrow } });
+      const factory = JSON.parse(fs.readFileSync(path.join(DEPLOYMENTS_ROOT, "agent-factory-arc-testnet.json"), "utf-8"));
+      expect(exported(committed, "CONTRACT_ADDRESSES").arcTestnet).to.deep.equal({
+        blindEscrow: arc.contracts.BlindEscrow,
+        agentFactory: factory.contracts.AgentFactory,
+        USDC: arc.contracts.USDC,
+      });
+      expect(exported(committed, "DEPLOYMENT_BLOCKS")).to.deep.equal({
+        arcTestnet: { blindEscrow: arc.blocks.BlindEscrow, agentFactory: factory.blocks.AgentFactory },
+      });
     });
 
     it("adds arcTestnet (and only it) once arc-testnet.json exists", function () {
-      // Start from the records as they were before Arc had a default one.
+      // Start from the records as they were before Arc had a default one —
+      // the factory companion included, or its agentFactory would still emit.
       fs.rmSync(path.join(dir, "arc-testnet.json"));
+      fs.rmSync(path.join(dir, "agent-factory-arc-testnet.json"), { force: true });
       const before = render(dir);
       expect(before).to.not.match(/arc|DEPLOYMENT_BLOCKS/);
       put("arc-testnet.json", { network: "arc-testnet", chainId: ARC_TESTNET_CHAIN_ID, contracts: { BlindEscrow: ESCROW_X, USDC: ARC_USDC } });
@@ -507,6 +517,9 @@ describe("Arc settlement tooling", function () {
     });
 
     it("adds arc after baseTestnet once arc-mainnet.json exists", function () {
+      // Drop the real factory companion: its live agentFactory would emit
+      // alongside the zeroed escrow and break the "only USDC" assertion below.
+      fs.rmSync(path.join(dir, "agent-factory-arc-testnet.json"), { force: true });
       put("arc-mainnet.json", { network: "arc-mainnet", chainId: ARC_MAINNET_CHAIN_ID, contracts: { BlindEscrow: ESCROW_X, USDC: ARC_USDC } });
       put("arc-testnet.json", { network: "arc-testnet", chainId: ARC_TESTNET_CHAIN_ID, contracts: { BlindEscrow: ZERO, USDC: ARC_USDC } });
       const addrs = exported(render(dir), "CONTRACT_ADDRESSES");
@@ -516,6 +529,8 @@ describe("Arc settlement tooling", function () {
     });
 
     it("emits DEPLOYMENT_BLOCKS for the contracts it emits, keyed like CONTRACT_ADDRESSES", function () {
+      // Drop the real factory companion so only the escrow block under test emits.
+      fs.rmSync(path.join(dir, "agent-factory-arc-testnet.json"), { force: true });
       put("arc-testnet.json", {
         network: "arc-testnet",
         chainId: ARC_TESTNET_CHAIN_ID,

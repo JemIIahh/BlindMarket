@@ -1,5 +1,6 @@
 /**
- * Deploy AgentFactory to Base (agent deployment coordinator).
+ * Deploy AgentFactory to a settlement chain (Base or Arc) — the agent
+ * deployment coordinator.
  *
  * Accepts USDC, emits AgentDeployed events. Backend listens for these
  * events to create agent records. Each agent owns its wallet — backend
@@ -7,23 +8,22 @@
  *
  * Writes (merges into) agent-factory-<chain record>.json in the DEPLOYMENT_SET,
  * and updates the AgentFactory mirror in the main record when it has one. On
- * Base Sepolia EXPECTED_ESCROW must name the escrow of the stack this belongs
- * to (so deploy-base.ts runs first for a new set).
+ * a shared chain (Base Sepolia, Arc testnet) EXPECTED_ESCROW must name the
+ * escrow of the stack this belongs to (so deploy-base.ts / deploy-settlement.ts
+ * runs first for a new set).
  *
  * Usage:
  *   DEPLOYMENT_SET=staging EXPECTED_ESCROW=0x... \
  *     npx hardhat run scripts/deploy-agent-factory.ts --network base-sepolia
+ *   EXPECTED_ESCROW=0x... \
+ *     npx hardhat run scripts/deploy-agent-factory.ts --network arc-testnet
  *   I_HAVE_READ_MAINNET_CHECKLIST=yes npx hardhat run scripts/deploy-agent-factory.ts --network base
  */
+import * as path from "path";
 import { ethers } from "../lib/hh.js";
 import { assertSafeNetwork } from "./_guard.js";
-import { deployBlock, preflightDeploy, recordPath, writeDeployment } from "./_deployments.js";
-
-// Base USDC addresses
-const BASE_USDC: Record<number, string> = {
-  8453:  "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", // Base mainnet
-  84532: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", // Base Sepolia
-};
+import { deploymentFileFor, deployBlock, preflightDeploy, recordPath, writeDeployment } from "./_deployments.js";
+import { settlementChainFor } from "./_settlement.js";
 
 // Flat deploy fee: 1 USDC (6 decimals)
 const DEPLOY_FEE_USDC = 1_000_000n;
@@ -33,17 +33,20 @@ async function main() {
   const [deployer] = await ethers.getSigners();
   console.log("Deployer:", deployer.address);
 
-  const balance = await ethers.provider.getBalance(deployer.address);
-  console.log("Balance:", ethers.formatEther(balance), "ETH");
-
   const network = await ethers.provider.getNetwork();
   const chainId = Number(network.chainId);
-  console.log("Chain:", network.name, `(chainId: ${chainId})`);
+  // Throws for a chain with no settlement token (0G) — the factory only
+  // deploys where tasks settle in a USDC ERC-20 (Base, Arc).
+  const chain = settlementChainFor(chainId);
+  const usdcAddress = chain.token;
 
-  const usdcAddress = BASE_USDC[chainId];
-  if (!usdcAddress) {
-    throw new Error(`No USDC address for chainId ${chainId}`);
+  const balance = await ethers.provider.getBalance(deployer.address);
+  // Arc's native balance is USDC with 18 decimals, so formatEther reads it too.
+  console.log("Balance:", ethers.formatEther(balance), chain.gasSymbol);
+  if (balance === 0n) {
+    throw new Error(`Deployer has 0 ${chain.gasSymbol}. Fund it with ${chain.gasSymbol} on ${chain.label}.`);
   }
+  console.log("Chain:", chain.label, `(chainId: ${chainId}, hardhat network: ${network.name})`);
   console.log("USDC:", usdcAddress);
   const target = preflightDeploy({ chainId, deploysEscrow: false });
   const outPath = recordPath(chainId, target.set, "agent-factory-");
@@ -61,8 +64,8 @@ async function main() {
   console.log("AgentFactory:", factoryAddr, `(block ${factoryBlock})`);
   console.log("Deploy fee:", Number(DEPLOY_FEE_USDC) / 1e6, "USDC");
 
-  // Save deployment
-  const networkName = chainId === 8453 ? "base-mainnet" : "base-sepolia";
+  // Save deployment — the record's own file name (e.g. "arc-testnet").
+  const networkName = path.basename(deploymentFileFor(chainId), ".json");
   const deployment = writeDeployment(outPath, {
     network: networkName,
     chainId,
@@ -86,7 +89,10 @@ async function main() {
     writeDeployment(target.file, { network: target.record.network, chainId, contracts: { AgentFactory: factoryAddr } });
     console.log("Updated AgentFactory mirror in:", target.file);
   }
-  console.log(`Backend env: AGENT_FACTORY_ADDRESS=${factoryAddr} AGENT_FACTORY_DEPLOYMENT_BLOCK=${factoryBlock}`);
+  // The backend listens on one factory: Base's via AGENT_FACTORY_ADDRESS, Arc's
+  // via ARC_AGENT_FACTORY_ADDRESS (see backend/src/services/agentFactoryListener.ts).
+  const envPrefix = chain.nativeIsSettlementToken ? "ARC_" : "";
+  console.log(`Backend env: ${envPrefix}AGENT_FACTORY_ADDRESS=${factoryAddr} ${envPrefix}AGENT_FACTORY_DEPLOYMENT_BLOCK=${factoryBlock}`);
 
   console.log("\n=== DEPLOYMENT SUMMARY ===");
   console.log(JSON.stringify(deployment.contracts, null, 2));
