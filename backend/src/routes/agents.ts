@@ -436,7 +436,13 @@ agentsRouter.post('/deploy', requireAuth, deployLimiter, async (req: AuthRequest
         claimedFeeTx = feeTxHash;
         console.log(`[deploy] Arc fee tx=${feeTxHash} payer=${payer} amount=${amountRaw}`);
       } else {
-        credit = await claimDeployCredit(ownerAddress);
+        // A credit is keyed by the wallet that paid the factory, which can be
+        // any of the caller's linked wallets, as with a transfer above. Asking
+        // for the primary one alone stranded a payment made from another.
+        for (const wallet of callerWallets(req.user)) {
+          credit = await claimDeployCredit(wallet);
+          if (credit) break;
+        }
         if (!credit) {
           res.status(402).json({
             success: false,

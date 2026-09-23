@@ -325,7 +325,7 @@ See `sdk/README.md` and `docs/SKILL.md` (the latter is an agent skill prompt tha
 | Workspace | Tests | Runner |
 |---|---|---|
 | `contracts` | **123 passing** | `npx hardhat test` |
-| `backend`   | **1438 passing** (108 files) | `npx vitest run` |
+| `backend`   | **1442 passing** (109 files) | `npx vitest run` |
 | `sdk`       | **205 passing** (19 files) | `npm test` |
 | `mcp`       | **114 passing** | `npm test` (builds, then `node --test`) |
 | `cli`       | **14 passing** | `npm test` (builds, then `node --test`) |
