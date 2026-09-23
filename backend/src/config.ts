@@ -87,6 +87,7 @@ export const DEPLOYMENT_SET_REQUIRED_ENV = [
   'VALIDATOR_POOL_ADDRESS',
   'BASE_ESCROW_ADDRESS',
   'AGENT_FACTORY_ADDRESS',
+  'ARC_AGENT_FACTORY_ADDRESS',
   'USDC_PAYMASTER_ADDRESS',
   'BLIND_ACCOUNT_FACTORY_ADDRESS',
   'ENTRY_POINT_ADDRESS',
@@ -166,6 +167,14 @@ const BASE_ADDR = (BASE_MAINNET ? CONTRACT_ADDRESSES.base : CONTRACT_ADDRESSES.b
   readonly agentFactory?: string;
   readonly USDC: string;
 };
+// Arc settlement is testnet-only here, matching the frontend's own Arc
+// default (frontend/src/config/constants.ts): there is no Arc-mainnet record
+// yet, so the testnet record is the generated fallback.
+const ARC_ADDR = (CONTRACT_ADDRESSES as any).arcTestnet as {
+  readonly blindEscrow?: string;
+  readonly agentFactory?: string;
+  readonly USDC: string;
+} | undefined;
 
 export const config = {
   port: parseInt(optional('PORT', '3001'), 10),
@@ -223,6 +232,11 @@ export const config = {
   arcUsdcAddress: optional('ARC_USDC_ADDRESS', '0x3600000000000000000000000000000000000000'),
   arcMarketplaceSignerPrivateKey: process.env.ARC_MARKETPLACE_SIGNER_PRIVATE_KEY || '',
   arcEscrowDeploymentBlock: parseInt(optional('ARC_ESCROW_DEPLOYMENT_BLOCK', '0'), 10),
+  // AgentFactory on Arc — the factory DeployAgentForm pays and the listener
+  // indexes for deploy credits. Falls back to the generated arcTestnet record;
+  // env wins. (The Base `agentFactoryAddress` above is legacy: the wallet is
+  // Arc-only and nothing polls the Base factory anymore.)
+  arcAgentFactoryAddress: unsetIfZero(optional('ARC_AGENT_FACTORY_ADDRESS', ARC_ADDR?.agentFactory || '')),
 
   // ERC-4337 AA infrastructure (Base) — agents pay gas in USDC instead of ETH.
   usdcPaymasterAddress: unsetIfZero(optional('USDC_PAYMASTER_ADDRESS', (BASE_ADDR as any)?.USDCPaymaster ?? '')),

@@ -9,20 +9,20 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 
-const { gate, listNonTerminal, baseProvider } = vi.hoisted(() => ({
+const { gate, listNonTerminal, arcProvider } = vi.hoisted(() => ({
   gate: { allowed: false },
   listNonTerminal: vi.fn(async () => []),
-  baseProvider: { getBlockNumber: vi.fn(async () => 100) },
+  arcProvider: { getBlockNumber: vi.fn(async () => 100) },
 }));
 
 vi.mock('./deploymentIdentity.js', () => ({ backgroundWritesAllowed: () => gate.allowed }));
 vi.mock('../config.js', () => ({
-  config: { cctp: { irisApiBase: 'https://iris.test' }, agentFactoryAddress: '0x' + 'af'.repeat(20) },
+  config: { cctp: { irisApiBase: 'https://iris.test' }, arcAgentFactoryAddress: '0x' + 'af'.repeat(20) },
 }));
 vi.mock('./cctpChains.js', () => ({ isCctpConfigured: () => true, getCctpChain: vi.fn() }));
 vi.mock('./cctp.js', () => ({ pollIrisAttestation: vi.fn() }));
 vi.mock('./cctpTransferStore.js', () => ({ listNonTerminal, updateTransfer: vi.fn() }));
-vi.mock('./chain.js', () => ({ baseProvider }));
+vi.mock('./chain.js', () => ({ arcProvider }));
 vi.mock('./redis.js', () => ({ redis: { get: vi.fn(async () => null), set: vi.fn() } }));
 
 const settle = () => new Promise((r) => setTimeout(r, 20));
@@ -41,7 +41,7 @@ describe("on another deployment's Redis", () => {
     startAgentFactoryListener();
     await settle();
     stopAgentFactoryListener();
-    expect(baseProvider.getBlockNumber).not.toHaveBeenCalled();
+    expect(arcProvider.getBlockNumber).not.toHaveBeenCalled();
   });
 
   it('both run again once the gate opens (the check answered later)', async () => {
@@ -55,6 +55,6 @@ describe("on another deployment's Redis", () => {
     cctp.stopCctpAttestationPoller();
     factory.stopAgentFactoryListener();
     expect(listNonTerminal).toHaveBeenCalled();
-    expect(baseProvider.getBlockNumber).toHaveBeenCalled();
+    expect(arcProvider.getBlockNumber).toHaveBeenCalled();
   });
 });

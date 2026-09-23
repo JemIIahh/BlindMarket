@@ -46,6 +46,7 @@ describe('deploymentSetProblems', () => {
   it('covers every address config.ts falls back to generated values for, plus the pool, 0G RPC and public URLs', () => {
     expect([...DEPLOYMENT_SET_REQUIRED_ENV].sort()).toEqual([
       'AGENT_FACTORY_ADDRESS',
+      'ARC_AGENT_FACTORY_ADDRESS',
       'BASE_ESCROW_ADDRESS',
       'BLIND_ACCOUNT_FACTORY_ADDRESS',
       'BLIND_ESCROW_ADDRESS',

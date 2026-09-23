@@ -1,5 +1,5 @@
 /**
- * AgentFactory event listener — watches AgentDeployed events on Base and
+ * AgentFactory event listener — watches AgentDeployed events on Arc and
  * records each paid deploy as a durable, claimable credit.
  *
  *   agentfactory:credit:<user>:<nonce>  → JSON {user, nonce, amount, block, txHash, ts}
@@ -21,7 +21,7 @@ import { backgroundWritesAllowed } from './deploymentIdentity.js';
 import type { EventLog } from 'ethers';
 import { ethers } from 'ethers';
 import { config } from '../config.js';
-import { baseProvider } from './chain.js';
+import { arcProvider } from './chain.js';
 import { redis } from './redis.js';
 
 const AGENT_FACTORY_ABI = [
@@ -42,7 +42,11 @@ const KEY = {
 const POLL_INTERVAL_MS = 15_000;
 const MAX_BLOCKS_PER_TICK = 5_000;
 
-const DEPLOYMENT_BLOCK = Number(process.env.AGENT_FACTORY_DEPLOYMENT_BLOCK ?? 0);
+// Indexer start block. The Arc var wins; the Base one is the legacy fallback
+// for stacks that set it before the factory moved to Arc.
+const DEPLOYMENT_BLOCK = Number(
+  process.env.ARC_AGENT_FACTORY_DEPLOYMENT_BLOCK ?? process.env.AGENT_FACTORY_DEPLOYMENT_BLOCK ?? 0,
+);
 
 // ── State ───────────────────────────────────────────────────────────────────
 
@@ -103,21 +107,21 @@ export async function claimDeployCredit(user: string): Promise<AgentDeployCredit
 export function startAgentFactoryListener(): void {
   if (timer) return;
 
-  if (!baseProvider) {
-    console.log('[agentFactory] no Base provider — listener disabled');
+  if (!arcProvider) {
+    console.log('[agentFactory] no Arc provider — listener disabled');
     return;
   }
-  if (!config.agentFactoryAddress) {
-    console.log('[agentFactory] AGENT_FACTORY_ADDRESS not set — listener disabled');
+  if (!config.arcAgentFactoryAddress) {
+    console.log('[agentFactory] ARC_AGENT_FACTORY_ADDRESS not set — listener disabled');
     return;
   }
 
-  contract = new ethers.Contract(config.agentFactoryAddress, AGENT_FACTORY_ABI, baseProvider);
+  contract = new ethers.Contract(config.arcAgentFactoryAddress, AGENT_FACTORY_ABI, arcProvider);
 
   void tick();
   timer = setInterval(tick, POLL_INTERVAL_MS);
   console.log(
-    `[agentFactory] polling ${config.agentFactoryAddress} every ${POLL_INTERVAL_MS / 1000}s`,
+    `[agentFactory] polling ${config.arcAgentFactoryAddress} every ${POLL_INTERVAL_MS / 1000}s`,
   );
 }
 
@@ -134,11 +138,11 @@ async function tick(): Promise<void> {
   if (inFlightPromise) return inFlightPromise;
 
   inFlightPromise = (async () => {
-    if (!contract || !baseProvider) return;
+    if (!contract || !arcProvider) return;
 
     try {
       const addr = await contract.getAddress();
-      const latest = await baseProvider.getBlockNumber();
+      const latest = await arcProvider.getBlockNumber();
       const checkpointKey = KEY.checkpoint(addr);
       const checkpointRaw = await redis.get(checkpointKey);
 
