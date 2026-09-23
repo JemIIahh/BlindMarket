@@ -93,6 +93,57 @@ export const ERC20_ABI = [
   'function approve(address spender, uint256 amount) returns (bool)',
 ];
 
+/**
+ * DepositForBurn event (Circle CCTP V2 TokenMessenger) — field order and
+ * indexed flags per developers.circle.com/cctp/references/contract-interfaces:
+ * indexed = nonce, burnToken, depositor; the rest rides in data.
+ */
+export const DEPOSIT_FOR_BURN_ABI = [
+  'event DepositForBurn(uint64 indexed nonce, address indexed burnToken, uint256 amount, address indexed depositor, bytes32 mintRecipient, uint32 destinationDomain, bytes32 destinationTokenMessenger, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold)',
+];
+
+export interface ExpectedBurn {
+  messenger: string;
+  depositor: string;
+  amount: bigint;
+  mintRecipient: string; // bytes32, left-padded
+  destDomain: number;
+}
+
+/**
+ * True when `logs` hold the expected burn: a DepositForBurn from the
+ * messenger, sent by the depositor, for the amount/recipient/domain. Used by
+ * /confirm's bundle path — a bundler submits UserOps to the EntryPoint, so
+ * the L1 tx targets the EntryPoint and the burn is only visible as a log,
+ * never as tx.to/calldata.
+ */
+export function logsContainBurn(
+  logs: ReadonlyArray<{ address?: string; topics: ReadonlyArray<string>; data: string }>,
+  expected: ExpectedBurn,
+): boolean {
+  const iface = new ethers.Interface(DEPOSIT_FOR_BURN_ABI);
+  const wantRecipient = expected.mintRecipient.toLowerCase();
+  for (const log of logs) {
+    if (!log.address || log.address.toLowerCase() !== expected.messenger.toLowerCase()) continue;
+    let parsed;
+    try {
+      parsed = iface.parseLog({ topics: log.topics, data: log.data });
+    } catch {
+      continue;
+    }
+    if (!parsed) continue;
+    if (
+      String(parsed.args.depositor).toLowerCase() === expected.depositor.toLowerCase() &&
+      BigInt(parsed.args.amount) === expected.amount &&
+      String(parsed.args.mintRecipient).toLowerCase() === wantRecipient &&
+      Number(parsed.args.destinationDomain) === expected.destDomain
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /** CCTP recipients/callers are bytes32 (the protocol also targets non-EVM
  *  chains like Solana) — left-pad a 20-byte EVM address to 32 bytes. */
 export function addressToBytes32(address: string): string {
