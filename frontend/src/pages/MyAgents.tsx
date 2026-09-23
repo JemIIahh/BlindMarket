@@ -14,6 +14,7 @@ import {
   ErrorState,
   SignInGate,
   Pagination,
+  CopyButton,
 } from '../components/bb';
 import { truncateAddress } from '../lib/utils';
 import { API_BASE_URL } from '../config/constants';
@@ -270,7 +271,10 @@ export default function MyAgents() {
                           </Link>
                           {agent.walletAddress && <GasChip agent={agent} />}
                         </div>
-                        <div className="text-[11px] font-mono text-ink-3 mt-0.5 truncate">{truncateAddress(agent.walletAddress)}</div>
+                        <div className="flex flex-wrap items-center gap-x-1.5 mt-0.5">
+                          <span className="text-[11px] font-mono text-ink-3 whitespace-nowrap">{truncateAddress(agent.walletAddress)}</span>
+                          {agent.walletAddress && <CopyButton text={agent.walletAddress} what="wallet address" />}
+                        </div>
                       </div>
                       <span className="text-ink-3 text-xs truncate">{agent.provider} / {agent.model}</span>
                       <div className="flex items-center gap-1.5">
@@ -313,7 +317,10 @@ export default function MyAgents() {
                           {agent.walletAddress && <GasChip agent={agent} />}
                         </div>
                         <div className="text-[11px] text-ink-3 mt-0.5">{agent.provider} / {agent.model}</div>
-                        <div className="text-[10px] font-mono text-ink-3 mt-0.5 truncate">{truncateAddress(agent.walletAddress)}</div>
+                        <div className="flex flex-wrap items-center gap-x-1.5 mt-0.5">
+                          <span className="text-[10px] font-mono text-ink-3 whitespace-nowrap">{truncateAddress(agent.walletAddress)}</span>
+                          {agent.walletAddress && <CopyButton text={agent.walletAddress} what="wallet address" />}
+                        </div>
                       </div>
                       <div className="shrink-0">
                         {isActing ? <StatusTag status={action.variables?.act} /> : <StatusTag status={agent.status} />}

@@ -1,5 +1,5 @@
 import { formatUnits } from 'ethers';
-import { Button, Icon, ConfirmDialog } from '../bb';
+import { Button, Icon, ConfirmDialog, CopyButton } from '../bb';
 
 /** How a withdraw receipt names the chain it swept (backend chain keys). */
 const CHAIN_LABEL: Record<string, string> = { arc: 'Arc', base: 'Base', '0g': '0G' };
@@ -11,6 +11,8 @@ const CHAIN_LABEL: Record<string, string> = { arc: 'Arc', base: 'Base', '0g': '0
  */
 export function GasBar({
   symbol,
+  fundingAddress,
+  chainLabel,
   topUpAmount,
   lowGasThreshold,
   isLowGas,
@@ -41,6 +43,10 @@ export function GasBar({
   cctpSymbol,
 }: {
   symbol: string;
+  /** Where the agent pays gas from on the posting chain: the address to fund. */
+  fundingAddress?: string;
+  /** The posting chain's name, e.g. "Arc". */
+  chainLabel: string;
   topUpAmount: string;
   lowGasThreshold: number;
   isLowGas: boolean;
@@ -165,6 +171,17 @@ export function GasBar({
           )}
         </div>
       </div>
+
+      {/* The address itself, for funding from anywhere else: an exchange,
+          another wallet, a bridge. "Fund wallet" only sends from the
+          connected wallet. */}
+      {fundingAddress && (
+        <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-ink-3">
+          <span>Or send {symbol} on {chainLabel} from any wallet to</span>
+          <span className="font-mono text-ink-2 break-all">{fundingAddress}</span>
+          <CopyButton text={fundingAddress} what="wallet address" />
+        </div>
+      )}
 
       {/* Status / warning line */}
       {(topUpStatus === 'error' ||

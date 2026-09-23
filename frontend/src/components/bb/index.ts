@@ -16,6 +16,7 @@ export { PageHeader } from './PageHeader';
 export { DashboardLayout } from './DashboardLayout';
 export { Modal, ConfirmDialog } from './Modal';
 export { AgentAvatar } from './AgentAvatar';
+export { CopyButton } from './CopyButton';
 export { SignInGate } from './SignInGate';
 export { Toggle } from './Toggle';
 export { Pagination } from './Pagination';

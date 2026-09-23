@@ -1,4 +1,4 @@
-import { Icon, Tag } from '../bb';
+import { CopyButton, Icon, Tag } from '../bb';
 import { truncateAddress } from '../../lib/utils';
 import { ExplorerAddressLinks } from '../ExplorerLinks';
 import type { AgentBadge } from '../../services/marketplace';
@@ -28,15 +28,16 @@ export function IdentityPanel({
           <span className="font-mono text-ink">{truncateAddress(agent.ownerAddress)}</span>
         </div>
 
-        {/* Agent wallet — same EOA on both chains (USDC on Base,
-            identity/reputation on 0G), so link both explorers. */}
+        {/* Agent wallet — the same address on every chain (tasks and gas on
+            Arc, identity and reputation on 0G), so link each explorer. */}
         {agent.walletAddress && (
-          <div className="flex items-center gap-1.5">
+          <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
             <Icon name="wallet" size={14} className="text-ink-3" />
             <span className="text-ink-3 text-[12px]">Wallet</span>
             <span className="font-mono text-ink" title={agent.walletAddress}>
               {truncateAddress(agent.walletAddress)}
             </span>
+            <CopyButton text={agent.walletAddress} what="wallet address" />
             <ExplorerAddressLinks
               address={agent.walletAddress}
               className="font-mono text-[11px] text-ink-3"

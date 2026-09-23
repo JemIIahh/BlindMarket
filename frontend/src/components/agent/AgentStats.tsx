@@ -1,5 +1,6 @@
 import { Icon } from '../bb/Icon';
 import { Button } from '../bb/Button';
+import { CopyButton } from '../bb/CopyButton';
 import { truncateAddress } from '../../lib/utils';
 import { formatEarnings, type Earnings } from '../../lib/paymentUnits';
 import { ExplorerAddressLinks } from '../ExplorerLinks';
@@ -161,7 +162,10 @@ export function AgentStats({
           </div>
           {walletAddress ? (
             <>
-              <div className="font-mono text-sm text-ink truncate" title={walletAddress}>{truncateAddress(walletAddress)}</div>
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                <span className="font-mono text-sm text-ink whitespace-nowrap" title={walletAddress}>{truncateAddress(walletAddress)}</span>
+                <CopyButton text={walletAddress} what="wallet address" />
+              </div>
               <ExplorerAddressLinks
                 address={walletAddress}
                 className="mt-1 font-mono text-[11px] uppercase tracking-widest text-ink-3"

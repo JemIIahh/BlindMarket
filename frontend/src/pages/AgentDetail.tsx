@@ -614,6 +614,8 @@ export default function AgentDetail() {
           {agent.walletAddress && (
             <GasBar
               symbol={balanceSymbol}
+              fundingAddress={fundingAddress}
+              chainLabel={settlement.chains[settlement.postingChain].label}
               topUpAmount={topUpAmount.trim() || DEFAULT_TOP_UP_AMOUNT}
               lowGasThreshold={1}
               isLowGas={isLowGas}
