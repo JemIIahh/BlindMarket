@@ -40,6 +40,7 @@ import {
   listForOwner,
   serializeTransfer,
 } from '../services/cctpTransferStore.js';
+import { relayChainTable } from '../services/relayChains.js';
 
 export const cctpRouter = Router();
 
@@ -72,6 +73,12 @@ cctpRouter.get('/config', (_req, res) => {
         // so the UI knows it before any quote, and enforced by /deposit-intent
         // with this same number.
         usdcGasReserveRaw: (c.usdcGasReserveRaw ?? 0n).toString(),
+        // The `chain` name POST /tx/relay-tx takes for this chain, or null
+        // when the relay doesn't serve it. The fund modal relays the
+        // source-chain approve+burn (USDC gas via the sponsorship ladder)
+        // when the signer is the embedded wallet; external wallets always
+        // sign directly.
+        relayChain: relayChainTable().get(c.chainKey) ?? null,
       })),
     },
   });

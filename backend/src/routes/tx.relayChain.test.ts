@@ -56,6 +56,13 @@ describe('POST /tx/relay-tx chain names', () => {
     ['base', 'eip155:8453'],
     ['base-mainnet', 'eip155:8453'],
     ['base-sepolia', 'eip155:84532'],
+    ['ethereum', 'eip155:1'],
+    ['ethereum-sepolia', 'eip155:11155111'],
+    ['arbitrum', 'eip155:42161'],
+    ['arbitrum-sepolia', 'eip155:421614'],
+    ['optimism-sepolia', 'eip155:11155420'],
+    ['polygon', 'eip155:137'],
+    ['polygon-amoy', 'eip155:80002'],
   ])('signs %s on %s', async (chain, caip2) => {
     const res = await relay(chain);
     expect(res.status).toBe(200);
@@ -74,7 +81,7 @@ describe('POST /tx/relay-tx chain names', () => {
     expect(res.status).toBe(400);
     expect(res.body.error).toMatchObject({
       code: 'INVALID_CHAIN',
-      message: 'Unsupported chain "arc". Supported: base, base-mainnet, base-sepolia',
+      message: 'Unsupported chain "arc". Supported: base, base-mainnet, base-sepolia, ethereum, ethereum-sepolia, arbitrum, arbitrum-sepolia, optimism-sepolia, polygon, polygon-amoy',
     });
     expect(sendTx).not.toHaveBeenCalled();
   });

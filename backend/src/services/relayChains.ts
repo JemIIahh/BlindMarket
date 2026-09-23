@@ -14,6 +14,19 @@ const FIXED_NAMES: ReadonlyArray<readonly [name: string, caip2: string]> = [
   ['base', 'eip155:8453'],
   ['base-mainnet', 'eip155:8453'],
   ['base-sepolia', 'eip155:84532'],
+  // CCTP source chains. The fund-from-another-chain flow relays the
+  // source-chain approve+burn through Privy (user-pays USDC gas via the
+  // sponsorship ladder in routes/tx.ts) when the signer is the embedded
+  // wallet. Names equal the CCTP chainKeys so clients pass them straight
+  // through; whether Privy actually sponsors a chain is negotiated per
+  // request (dashboard config), never assumed here.
+  ['ethereum', 'eip155:1'],
+  ['ethereum-sepolia', 'eip155:11155111'],
+  ['arbitrum', 'eip155:42161'],
+  ['arbitrum-sepolia', 'eip155:421614'],
+  ['optimism-sepolia', 'eip155:11155420'],
+  ['polygon', 'eip155:137'],
+  ['polygon-amoy', 'eip155:80002'],
 ];
 
 /** Every name the relay accepts, in the order its error message lists them, with its CAIP-2 id. */

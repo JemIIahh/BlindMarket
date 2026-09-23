@@ -36,6 +36,13 @@ describe('relayChainTable', () => {
       ['base', 'eip155:8453'],
       ['base-mainnet', 'eip155:8453'],
       ['base-sepolia', 'eip155:84532'],
+      ['ethereum', 'eip155:1'],
+      ['ethereum-sepolia', 'eip155:11155111'],
+      ['arbitrum', 'eip155:42161'],
+      ['arbitrum-sepolia', 'eip155:421614'],
+      ['optimism-sepolia', 'eip155:11155420'],
+      ['polygon', 'eip155:137'],
+      ['polygon-amoy', 'eip155:80002'],
     ]);
   });
 
@@ -46,7 +53,7 @@ describe('relayChainTable', () => {
 
   it('adds a registry chain the relay serves under its own key, after the fixed names', () => {
     relayOverride['arc'] = 'eip155:16661';
-    expect([...relayChainTable().keys()]).toEqual(['base', 'base-mainnet', 'base-sepolia', 'arc']);
+    expect([...relayChainTable().keys()]).toEqual(['base', 'base-mainnet', 'base-sepolia', 'ethereum', 'ethereum-sepolia', 'arbitrum', 'arbitrum-sepolia', 'optimism-sepolia', 'polygon', 'polygon-amoy', 'arc']);
     expect(relayChainTable().get('arc')).toBe('eip155:16661');
   });
 

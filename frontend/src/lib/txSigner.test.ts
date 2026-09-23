@@ -91,6 +91,33 @@ describe('signAndSendTx wiring', () => {
   });
 });
 
+describe('signAndSendTx explicit relay', () => {
+  it('sends the named relay chain verbatim, skipping the settlement derivation', async () => {
+    const bodies: any[] = [];
+    const fetchMock = vi.fn(async (_url: string, init: any) => {
+      bodies.push(JSON.parse(init.body));
+      return { ok: false, status: 500, json: async () => ({ success: false, error: { code: 'STOP', message: 'stop here' } }) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const signer = {
+        getAddress: async () => '0x1111111111111111111111111111111111111111',
+        provider: { getNetwork: async () => ({ chainId: 11155111n }) },
+        sendTransaction: vi.fn(),
+      } as any;
+      const tx = { to: '0x2222222222222222222222222222222222222222', data: '0x', from: '0x1111111111111111111111111111111111111111' };
+      // A CCTP source chain the settlement table doesn't know: without an
+      // explicit relay name this would throw NO_RELAY.
+      await expect(signAndSendTx(signer, tx, undefined, { relay: 'ethereum-sepolia', rpcUrl: 'https://example.invalid' }))
+        .rejects.toThrow('stop here');
+      expect(bodies.map((b) => b.chain)).toEqual(['ethereum-sepolia']);
+      expect(signer.sendTransaction).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
 describe('signAndSendTx reports a revert', () => {
   const tx = { to: '0x2222222222222222222222222222222222222222', data: '0x', from: '0x1111111111111111111111111111111111111111' };
   const arcSigner = (wait: () => Promise<unknown>) => ({

@@ -1,11 +1,23 @@
 import { useState, useEffect, useRef } from 'react';
 import { useWallets, usePrivy } from '@privy-io/react-auth';
-import { parseUnits, formatUnits, JsonRpcProvider, Contract } from 'ethers';
+import { parseUnits, formatUnits, JsonRpcProvider, BrowserProvider, Contract, Interface, zeroPadValue, id as keccakId } from 'ethers';
 import { Button, FormField, FormInput, FormSelect, Modal, Spinner } from './bb';
 import { get, authedPost, authedGet } from '../lib/api';
 import { useWallet, switchWalletToChain, pauseWalletAutoSwitch, type AddEthereumChainParameter } from '../context/WalletContext';
 import { signAndSendDirect } from '../lib/directSigner';
+import { signAndSendTx } from '../lib/txSigner';
 import { ARC_CHAIN_CONFIG, ARC_CHAIN_ID, SETTLEMENT_CCTP_CHAIN_KEY, isCctpUsable } from '../config/constants';
+
+/**
+ * DepositForBurn event (Circle CCTP V2 TokenMessenger) — field order and
+ * indexed flags per developers.circle.com/cctp/references/contract-interfaces:
+ * indexed = nonce, burnToken, depositor; the rest rides in data. Used to find
+ * a burn the relay submitted as a UserOp (no L1 tx hash to /confirm with).
+ */
+const DEPOSIT_FOR_BURN_ABI = [
+  'event DepositForBurn(uint64 indexed nonce, address indexed burnToken, uint256 amount, address indexed depositor, bytes32 mintRecipient, uint32 destinationDomain, bytes32 destinationTokenMessenger, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold)',
+];
+const DEPOSIT_FOR_BURN_TOPIC = keccakId('DepositForBurn(uint64,address,uint256,address,bytes32,uint32,bytes32,bytes32,uint256,uint32)');
 
 /**
  * CCTP Phase B (inbound) — fund the user's Arc wallet from USDC held on
@@ -106,6 +118,10 @@ interface CctpChainOption {
   /** USDC (6-dec raw) to leave on this chain for gas — non-zero only where
    *  gas is paid in USDC (Arc). Same number /deposit-intent enforces. */
   usdcGasReserveRaw?: string;
+  /** The `chain` name POST /tx/relay-tx takes for this chain, or null when
+   *  the relay doesn't serve it. Set, the embedded signer relays (USDC gas);
+   *  unset or external signer, the wallet signs directly (native gas). */
+  relayChain?: string | null;
 }
 
 export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFunded?: () => void }) {
@@ -120,6 +136,8 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
   const [error, setError] = useState('');
   const [transferId, setTransferId] = useState<number | null>(null);
   const [mintTxHash, setMintTxHash] = useState<string | null>(null);
+  // True while the in-flight flow relays the source-chain txs (USDC gas).
+  const [viaRelay, setViaRelay] = useState(false);
   // Preview state — both shown BEFORE the user commits to a chain switch +
   // signature, not only discoverable afterward.
   const [sourceBalance, setSourceBalance] = useState<bigint | null>(null);
@@ -242,9 +260,12 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
   const gasReserveRaw = BigInt(chains.find((c) => c.chainKey === sourceChain)?.usdcGasReserveRaw ?? '0');
   const spendableRaw = sourceBalance === null ? null : sourceBalance > gasReserveRaw ? sourceBalance - gasReserveRaw : 0n;
   const exceedsBalance = spendableRaw !== null && amountRawForCheck !== null && amountRawForCheck > spendableRaw;
-  const insufficientGas = sourceGas !== null
-    && (sourceGas.balance === 0n || (sourceGas.gasPrice !== null && sourceGas.balance < sourceGas.gasPrice * SOURCE_GAS_FLOOR_UNITS));
   const selectedChain = chains.find((c) => c.chainKey === sourceChain);
+  // The embedded signer relays on a relay-served chain (gas in USDC), so the
+  // native-gas floor doesn't apply; external signers always pay native gas.
+  const useRelayForGas = !!selectedChain?.relayChain && signerWallet?.walletClientType === 'privy';
+  const insufficientGas = !useRelayForGas && sourceGas !== null
+    && (sourceGas.balance === 0n || (sourceGas.gasPrice !== null && sourceGas.balance < sourceGas.gasPrice * SOURCE_GAS_FLOOR_UNITS));
   const nativeSymbol = SOURCE_CHAIN_WALLET_CONFIG[sourceChain]?.nativeCurrency.symbol ?? 'ETH';
   const nativeShown = sourceGas
     ? (sourceGas.balance === 0n ? '0' : Number(formatUnits(sourceGas.balance, 18)).toLocaleString(undefined, { maximumSignificantDigits: 3 }))
@@ -296,6 +317,73 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
     if (!chainConfig) { setError(`${chain.label} isn't supported by this version of the app — reload the page.`); return; }
     const sendChain = { chainId: chain.chainId, rpcUrl: chainConfig.rpcUrls[0], label: chain.label };
 
+    // Embedded signer on a relay-served chain: the backend relay sponsors gas
+    // (user-pays USDC, falling back down the ladder). Anything else — an
+    // external signer, or a chain the relay doesn't serve — signs directly
+    // and pays that chain's native gas (except Arc, which is USDC natively).
+    const useRelay = signerWallet.walletClientType === 'privy' && !!chain.relayChain;
+    setViaRelay(useRelay);
+    const sendSourceTx = async (tx: { to: string; data: string; from: string }) => {
+      if (useRelay) {
+        const eth = await signerWallet.getEthereumProvider();
+        const ethersSigner = await new BrowserProvider(eth).getSigner();
+        const sent = await signAndSendTx(ethersSigner, tx, undefined, { relay: chain.relayChain!, rpcUrl: sendChain.rpcUrl });
+        return { hash: sent.hash, receipt: sent.receipt, userOp: sent.userOp ?? false };
+      }
+      const sent = await signAndSendDirect(signerWallet, tx, sendChain);
+      return { ...sent, userOp: false };
+    };
+    // A relayed approve lands as a UserOp with no receipt to check — wait for
+    // the allowance itself instead. Works for the direct path too.
+    const pollAllowance = async (owner: string, spender: string, need: bigint) => {
+      const provider = new JsonRpcProvider(sendChain.rpcUrl, chain.chainId, { staticNetwork: true });
+      const usdc = new Contract(chain.usdcAddress, ['function allowance(address,address) view returns (uint256)'], provider);
+      for (let i = 0; i < 40; i++) {
+        try {
+          if (BigInt(await usdc.allowance(owner, spender)) >= need) return;
+        } catch { /* RPC hiccup; keep waiting */ }
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+      throw new Error("The USDC approval hasn't confirmed yet. Check your wallet, then try again.");
+    };
+    // A UserOp hash is not an L1 tx hash, so /confirm can't take it — find
+    // the burn the UserOp submitted by scanning the messenger's
+    // DepositForBurn events for ours (depositor + token + amount + recipient).
+    const findBurnTxHash = async (messenger: string, fromBlock: number | null): Promise<string> => {
+      const provider = new JsonRpcProvider(sendChain.rpcUrl, chain.chainId, { staticNetwork: true });
+      const iface = new Interface(DEPOSIT_FOR_BURN_ABI);
+      const usdcTopic = zeroPadValue(chain.usdcAddress, 32);
+      const depositorTopic = zeroPadValue(signerWallet.address, 32);
+      const wantRecipient = zeroPadValue(baseAddress, 32).toLowerCase();
+      let start = fromBlock;
+      for (let i = 0; i < 75; i++) { // ~5 min at 4s
+        try {
+          start ??= await provider.getBlockNumber();
+          const latest = await provider.getBlockNumber();
+          const logs = await provider.getLogs({
+            address: messenger,
+            topics: [DEPOSIT_FOR_BURN_TOPIC, null, usdcTopic, depositorTopic],
+            fromBlock: start,
+            toBlock: latest,
+          });
+          for (const log of logs) {
+            try {
+              const parsed = iface.parseLog(log);
+              if (
+                parsed &&
+                BigInt(parsed.args.amount) === amountRaw &&
+                String(parsed.args.mintRecipient).toLowerCase() === wantRecipient
+              ) {
+                return log.transactionHash;
+              }
+            } catch { /* not ours; keep scanning */ }
+          }
+        } catch { /* RPC hiccup; keep polling */ }
+        await new Promise((r) => setTimeout(r, 4000));
+      }
+      throw new Error('The sponsored transfer was submitted but its burn could not be found yet. Wait a minute and check back.');
+    };
+
     // Hold the wallet on the source chain until the burn is sent: the Arc
     // auto-switch (WalletContext) would otherwise pull the embedded wallet
     // back and fail the first signature. Afterwards an embedded wallet goes
@@ -331,19 +419,31 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
 
       if (intent.approveTx) {
         setPhase('approving');
-        const approved = await signAndSendDirect(signerWallet, intent.approveTx, sendChain);
+        const approved = await sendSourceTx(intent.approveTx);
         // The burn pulls USDC via transferFrom — without a mined approve it
         // can only revert, so stop here rather than ask for a doomed signature.
+        if (approved.receipt?.status === 0) {
+          throw new Error('The USDC approval failed on-chain.');
+        }
         if (approved.receipt?.status !== 1) {
-          throw new Error(approved.receipt
-            ? 'The USDC approval failed on-chain.'
-            : 'The USDC approval hasn\'t confirmed yet. Check your wallet, then try again.');
+          // Relayed as a UserOp (or receipt not yet visible): wait for the
+          // allowance itself instead of a receipt.
+          const [spender] = new Interface(['function approve(address spender, uint256 amount)'])
+            .decodeFunctionData('approve', intent.approveTx.data);
+          await pollAllowance(intent.approveTx.from, String(spender), amountRaw);
         }
       }
 
       setPhase('burning');
-      const burnSent = await signAndSendDirect(signerWallet, intent.burnTx, sendChain);
+      const readChain = new JsonRpcProvider(sendChain.rpcUrl, chain.chainId, { staticNetwork: true });
+      const burnFromBlock = await readChain.getBlockNumber().catch(() => null);
+      const burnSent = await sendSourceTx(intent.burnTx);
       restoreWallet();
+
+      // A UserOp hash is not an L1 tx hash — find the burn it submitted first.
+      const burnHash = burnSent.userOp
+        ? await findBurnTxHash(intent.burnTx.to, burnFromBlock)
+        : burnSent.hash;
 
       setPhase('confirming');
       // The tx may not be mined yet by the time we ask — retry a few times
@@ -352,7 +452,7 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
       for (let i = 0; i < 10 && !confirmed; i++) {
         const row = await authedPost<{ stage: string; pending?: boolean; errorMessage?: string | null }>(
           `/api/v1/cctp/deposit-intent/${intent.transferId}/confirm`,
-          { burnTxHash: burnSent.hash },
+          { burnTxHash: burnHash },
         );
         if (row.stage === 'burn_confirmed' || row.stage === 'attestation_pending' || row.stage === 'attestation_ready' || row.stage === 'mint_confirmed') {
           confirmed = true;
@@ -383,8 +483,8 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
 
   const phaseLabel =
     phase === 'switching' ? 'Switching your wallet to the source chain…'
-    : phase === 'approving' ? 'Confirm the USDC approval in your wallet…'
-    : phase === 'burning' ? 'Confirm the transfer in your wallet…'
+    : phase === 'approving' ? (viaRelay ? 'Approving USDC (gas paid in USDC)…' : 'Confirm the USDC approval in your wallet…')
+    : phase === 'burning' ? (viaRelay ? 'Bridging (gas paid in USDC)…' : 'Confirm the transfer in your wallet…')
     : phase === 'confirming' ? 'Waiting for the burn to be mined…'
     : phase === 'polling' ? 'Bridging — Circle is minting USDC on Arc…'
     : '';
@@ -424,7 +524,7 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
               hint={
                 !signerWallet ? undefined
                 : sourceBalance === null ? 'Checking balance…'
-                : `Balance: ${parseFloat(formatUnits(sourceBalance, 6)).toFixed(4)} USDC${gasReserveRaw > 0n ? ` (${formatUnits(gasReserveRaw, 6)} USDC kept for network fees)` : ''}${nativeShown !== null ? ` · ${nativeShown} ${nativeSymbol} for gas` : ''}`
+                : `Balance: ${parseFloat(formatUnits(sourceBalance, 6)).toFixed(4)} USDC${gasReserveRaw > 0n ? ` (${formatUnits(gasReserveRaw, 6)} USDC kept for network fees)` : ''}${useRelayForGas ? ' · gas paid in USDC (sponsored)' : nativeShown !== null ? ` · ${nativeShown} ${nativeSymbol} for gas` : ''}`
               }
             >
               <FormSelect value={sourceChain} onChange={(e) => setSourceChain(e.target.value)}>

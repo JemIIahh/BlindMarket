@@ -19,6 +19,18 @@ function getArcProvider(): JsonRpcProvider {
   return (arcProvider ??= new JsonRpcProvider(ARC_RPC_URL, ARC_CHAIN_ID, { staticNetwork: true }));
 }
 
+const rpcProviders = new Map<string, JsonRpcProvider>();
+/** Read-only provider for an arbitrary RPC URL (receipt polling after a
+ *  relayed send on a non-settlement chain, e.g. a CCTP source chain). */
+function providerForRpc(rpcUrl: string): JsonRpcProvider {
+  let p = rpcProviders.get(rpcUrl);
+  if (!p) {
+    p = new JsonRpcProvider(rpcUrl);
+    rpcProviders.set(rpcUrl, p);
+  }
+  return p;
+}
+
 /**
  * The chain a relayed transaction actually goes to. A caller that names the
  * chain (the backend's `chain` for a task's tx) gets exactly that chain, or
@@ -122,13 +134,18 @@ export async function signAndSendTx(
   signer: ethers.JsonRpcSigner,
   unsignedTx: UnsignedTx,
   value?: bigint,
-  opts: { chain?: string | null } = {},
+  opts: { chain?: string | null; relay?: string; rpcUrl?: string } = {},
 ): Promise<SentTx> {
   // Arc has no relay (relayCaip2 null): sign and broadcast from the wallet's
   // own balance instead. USDC is the native gas coin on Arc, so the wallet
   // pays its own gas and nothing goes through the backend relay.
+  //
+  // `relay` names the backend relay chain explicitly (e.g. a CCTP source
+  // chain from GET /api/v1/cctp/config `relayChain`) and skips the
+  // settlement-table derivation, which only knows base/arc. `rpcUrl` gives
+  // receipt polling a reader on that chain.
   const named = opts.chain ?? null;
-  if (isDirectSigned(named)) {
+  if (!opts.relay && isDirectSigned(named)) {
     await assertWalletOnChain(signer, named);
     const from = await signer.getAddress();
     const res = await signer.sendTransaction({
@@ -146,7 +163,7 @@ export async function signAndSendTx(
     to: unsignedTx.to,
     data: unsignedTx.data,
     value: value ? String(value) : undefined,
-    chain: relayChainNameFor(opts.chain),
+    chain: opts.relay ?? relayChainNameFor(opts.chain),
     asset: 'usdc',
     // Let the backend negotiate gas: user-pays (USDC) → app-pays → wallet-pays,
     // advancing only on Privy's exact refusal for each rung. Without this the
@@ -186,7 +203,7 @@ export async function signAndSendTx(
 
   // Poll the chain the tx was relayed on, not signer.provider — the signer
   // may be sitting on another chain.
-  const provider = providerFor(opts.chain);
+  const provider = opts.rpcUrl ? providerForRpc(opts.rpcUrl) : providerFor(opts.chain);
   for (let i = 0; i < 30; i++) {
     await new Promise(r => setTimeout(r, 3000));
     try {
