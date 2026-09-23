@@ -30,6 +30,7 @@ import { config } from '../config.js';
 import { claimDeployCredit, restoreDeployCredit } from '../services/agentFactoryListener.js';
 import { arcDeployFeeTerms, verifyArcDeployFee, claimArcDeployFee, markArcDeployFeeUsed, releaseArcDeployFee } from '../services/deployFee.js';
 import { discoverModels, ProviderModelsError } from '../services/providerModels.js';
+import { eciesEncrypt } from '../services/crypto.js';
 import { nativeWeiToTokenUnits, normalizeSettlementAmount, pricingUnit } from '../services/settlementUnits.js';
 
 /**
@@ -260,7 +261,7 @@ agentsRouter.get('/deploy-fee', async (_req, res, next) => {
       success: true,
       data: arc
         ? { required: true, ...arc, factory }
-        : { required: true, method: 'factory', chain: 'arc', factory },
+        : { required: true, method: 'factory', chain: 'arc', chainId: config.arcChainId, factory },
     });
   } catch (err) {
     next(err);
@@ -325,38 +326,86 @@ function callerWallets(user: AuthRequest['user']): string[] {
 // ~40s. 20/min still covers the Base path's retry loop (one POST per 5s).
 const deployLimiter = createUserRateLimiter(20);
 
+type DeployRequest = z.infer<typeof DeploySchema>;
+
+/**
+ * Every check POST /deploy makes before it takes a fee. POST /deploy/validate
+ * runs the same checks, so a client can find a bad request before paying for
+ * it. A refusal comes back as the response to send; an AppError (an oversized
+ * composed prompt) is thrown.
+ */
+async function prepareDeploy(body: unknown): Promise<
+  | { ok: false; status: number; body: object }
+  | { ok: true; data: DeployRequest; skills: InstalledSkill[]; capabilities: DeployRequest['capabilities'] }
+> {
+  const parsed = DeploySchema.safeParse(body);
+  if (!parsed.success) return { ok: false, status: 400, body: { success: false, error: parsed.error.flatten() } };
+
+  // Resolve skill slugs → frozen snapshots (server-side only). Only public
+  // skills install at deploy; an owner adds their private skill afterwards
+  // through POST /:id/skills.
+  const skills: InstalledSkill[] = [];
+  // Dedupe: a crafted request could repeat a slug and duplicate its
+  // [SKILL:] section in the composed prompt (the UI prevents this).
+  for (const slug of [...new Set(parsed.data.skillSlugs)]) {
+    const row = await skillStore.getSkillBySlug(slug);
+    if (!row || !row.is_public) {
+      return { ok: false, status: 404, body: { success: false, error: { code: 'SKILL_NOT_FOUND', message: `No public skill "${slug}"` } } };
+    }
+    skills.push(buildInstalledSkill(row));
+  }
+  if (skills.length > 0) {
+    assertComposedSizeOk(parsed.data.instructions, skills, parsed.data.tools as never);
+  }
+  // deployAgent() encrypts the agent's private key to this key. Hex of the
+  // right length that is not a public key passes the schema and would only
+  // fail there, after the fee was claimed.
+  try {
+    eciesEncrypt(Buffer.from('deploy-check'), parsed.data.ownerPublicKey);
+  } catch {
+    return {
+      ok: false,
+      status: 400,
+      body: {
+        success: false,
+        error: {
+          code: 'INVALID_OWNER_PUBLIC_KEY',
+          message: 'ownerPublicKey is not a public key the agent\'s wallet key can be encrypted to. Send the uncompressed secp256k1 public key (130 hex characters starting 04, no 0x) of a wallet you hold.',
+        },
+      },
+    };
+  }
+  // Union the skills' routing tags into the declared capabilities.
+  const capabilities = [...new Set([
+    ...parsed.data.capabilities,
+    ...skills.flatMap((s) => s.capabilities),
+  ])] as DeployRequest['capabilities'];
+  return { ok: true, data: parsed.data, skills, capabilities };
+}
+
+// POST /api/v1/agents/deploy/validate — the checks POST /deploy makes before
+// it takes a fee, with no fee and nothing saved. Clients call it before they
+// pay, so a request the deploy would refuse never costs a payment.
+agentsRouter.post('/deploy/validate', requireAuth, deployLimiter, async (req: AuthRequest, res, next) => {
+  try {
+    const prepared = await prepareDeploy(req.body);
+    if (!prepared.ok) { res.status(prepared.status).json(prepared.body); return; }
+    res.json({ success: true, data: { valid: true } });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // POST /api/v1/agents/deploy
 agentsRouter.post('/deploy', requireAuth, deployLimiter, async (req: AuthRequest, res, next) => {
   try {
-    const parsed = DeploySchema.safeParse(req.body);
-    if (!parsed.success) { res.status(400).json({ success: false, error: parsed.error.flatten() }); return; }
+    const prepared = await prepareDeploy(req.body);
+    if (!prepared.ok) { res.status(prepared.status).json(prepared.body); return; }
+    const { data, skills, capabilities } = prepared;
 
     const ownerAddress = req.user!.address!;
-    console.log(`[deploy] owner=${ownerAddress.slice(0, 10)}… ownerPublicKey length=${parsed.data.ownerPublicKey.length / 2} bytes, hex=${parsed.data.ownerPublicKey.slice(0, 8)}...`);
-
-    // Resolve skill slugs → frozen snapshots (server-side only). Only public
-    // skills install at deploy; an owner adds their private skill afterwards
-    // through POST /:id/skills.
-    const { skillSlugs, feeTxHash, ...deployParams } = parsed.data;
-    const skills: InstalledSkill[] = [];
-    // Dedupe: a crafted request could repeat a slug and duplicate its
-    // [SKILL:] section in the composed prompt (the UI prevents this).
-    for (const slug of [...new Set(skillSlugs)]) {
-      const row = await skillStore.getSkillBySlug(slug);
-      if (!row || !row.is_public) {
-        res.status(404).json({ success: false, error: { code: 'SKILL_NOT_FOUND', message: `No public skill "${slug}"` } });
-        return;
-      }
-      skills.push(buildInstalledSkill(row));
-    }
-    if (skills.length > 0) {
-      assertComposedSizeOk(parsed.data.instructions, skills, parsed.data.tools as never);
-    }
-    // Union the skills' routing tags into the declared capabilities.
-    const capabilities = [...new Set([
-      ...parsed.data.capabilities,
-      ...skills.flatMap((s) => s.capabilities),
-    ])] as (typeof parsed.data.capabilities);
+    console.log(`[deploy] owner=${ownerAddress.slice(0, 10)}… ownerPublicKey length=${data.ownerPublicKey.length / 2} bytes, hex=${data.ownerPublicKey.slice(0, 8)}...`);
+    const { skillSlugs: _slugs, feeTxHash, ...deployParams } = data;
 
     // Take the deploy fee if the paywall is enabled — only AFTER every
     // validation above. A fee is a paid 1 USDC: taking it first meant a

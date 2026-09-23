@@ -187,3 +187,25 @@ describe('POST /tasks with no settlement chain configured', () => {
     expect(chain.buildUnsignedTx).not.toHaveBeenCalled();
   });
 });
+describe('POST /tasks refuses an amount or duration that is not a whole number', () => {
+  it.each([['1.5'], ['1e6'], ['-5'], ['0'], ['abc'], [' 5']])('amount %j → 400 INVALID_AMOUNT, and the hash is not claimed', async (amount) => {
+    const res = await post({ token: USDC, amount });
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('INVALID_AMOUNT');
+    expect(hashClaim.claimTaskHash).not.toHaveBeenCalled();
+  });
+
+  it.each([['1.5'], ['0'], ['one hour']])('duration %j → 400 INVALID_DURATION, and the hash is not claimed', async (duration) => {
+    const res = await post({ token: USDC, duration });
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('INVALID_DURATION');
+    expect(hashClaim.claimTaskHash).not.toHaveBeenCalled();
+  });
+
+  it('still takes 0x hex, which BigInt() always read', async () => {
+    const res = await post({ token: USDC, amount: '0x4c4b40', duration: '0xe10' });
+    expect(res.status).toBe(200);
+    const args = iface.parseTransaction({ data: res.body.data.unsignedTx.data })!.args;
+    expect(args.amount).toBe(5_000_000n);
+  });
+});
