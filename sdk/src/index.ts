@@ -29,14 +29,51 @@ export interface BlindMarketConfig {
 export interface DeployAgentParams {
   name: string;
   instructions: string;
-  provider: 'openai' | 'anthropic' | 'groq' | 'gemini';
+  provider: 'openai' | 'anthropic' | 'groq' | 'gemini' | '0g-compute';
   model: string;
-  apiKey: string;
-  ownerAddress: string;
+  /** The model provider's API key. Not needed for '0g-compute', which bills the agent's own wallet. */
+  apiKey?: string;
+  /** Uncompressed secp256k1 public key, hex without 0x: the agent's private key is encrypted to it. */
   ownerPublicKey: string;
   capabilities?: string[];
   tools?: object[];
+  toolSecrets?: Record<string, string>;
+  /** Public skills to install at deploy, by slug. */
+  skillSlugs?: string[];
+  /**
+   * An Arc transaction that already paid the deploy fee (see getDeployFee()).
+   * deployAgent() then pays nothing and names this payment instead.
+   */
+  feeTxHash?: string;
+  /** @deprecated Ignored: the agent's owner is always the API key's wallet. */
+  ownerAddress?: string;
 }
+
+export interface DeployAgentOptions {
+  /**
+   * Pay the deploy fee if the backend charges one. Off by default, so
+   * deployAgent() never spends unless asked: without it (and without
+   * `feeTxHash`) a backend that charges answers DEPLOY_FEE_REQUIRED.
+   */
+  payFee?: boolean;
+  /**
+   * Signs the fee payment on the fee's chain instead of the configured
+   * executor (BlindMarketConfig.executor, whose rpcUrls must then name that
+   * chain). Must be the API key's owner wallet: the backend counts a fee from
+   * that wallet only.
+   */
+  payer?: ethers.Signer;
+  /** How long to wait between checks while the backend confirms the payment. Default 5000 ms. */
+  pollIntervalMs?: number;
+}
+
+/** What deploying an agent costs, from GET /api/v1/agents/deploy-fee. */
+export type DeployFeeTerms =
+  | { required: false }
+  /** One transfer of `amountRaw` of `token` to `recipient`, named as feeTxHash. `factory` is the other way to pay. */
+  | { required: true; method: 'transfer'; chain: string; token: string; recipient: string; amountRaw: string; decimals: number; factory: string | null }
+  /** Pay through AgentFactory.deployAgent(); its event becomes a credit the next deploy spends. */
+  | { required: true; method: 'factory'; chain: string; factory: string | null };
 
 export interface DeployedAgent {
   id: string;
@@ -45,6 +82,10 @@ export interface DeployedAgent {
   publicKey: string;
   inftTokenId?: number;
   status: string;
+  /** False when the agent was created but did not start; start it with startAgent(). */
+  started?: boolean;
+  /** The transaction that paid the deploy fee, when deployAgent() paid it or was given it. */
+  feeTxHash?: string;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -68,6 +109,32 @@ export interface DeliverSigner {
   privateKey: string;
   /** RPC per chain. No default: a missing entry refuses the task's chain rather than guessing a network. */
   rpcUrls: Partial<Record<string, string | undefined>>;
+}
+
+/**
+ * Send a transaction and wait for it. Returns the hash that confirmed: a
+ * sped-up transaction's replacement, when the wallet re-priced it. A revert
+ * or a cancel throws (nothing was paid); any other failure to confirm throws
+ * an error that names the sent hash, so a caller can check it and reuse it.
+ */
+async function sendAndWait(signer: ethers.Signer, tx: { to: string; data: string }): Promise<string> {
+  const sent = await signer.sendTransaction(tx);
+  try {
+    const receipt = await sent.wait();
+    if (receipt && receipt.status === 0) throw new Error(`Transaction ${sent.hash} reverted, so nothing was paid.`);
+    return sent.hash;
+  } catch (err) {
+    if (ethers.isError(err, 'TRANSACTION_REPLACED')) {
+      if (err.cancelled) throw new Error(`Transaction ${sent.hash} was cancelled or replaced in the wallet, so nothing was paid.`);
+      return err.replacement.hash;
+    }
+    if (ethers.isError(err, 'CALL_EXCEPTION')) throw new Error(`Transaction ${sent.hash} reverted, so nothing was paid.`);
+    if (err instanceof Error && err.message.startsWith(`Transaction ${sent.hash}`)) throw err;
+    throw Object.assign(
+      new Error(`Transaction ${sent.hash} was sent but not confirmed (${(err as Error).message}). If it confirms, retry with params.feeTxHash = '${sent.hash}'.`),
+      { feeTxHash: sent.hash },
+    );
+  }
 }
 
 // ── Main client ─────────────────────────────────────────────────────────────
@@ -221,9 +288,21 @@ export class BlindMarket {
 
   // ── Agent deployment & management ─────────────────────────────────────────
 
+  /** What deploying an agent costs on this backend, and how to pay it. */
+  async getDeployFee(): Promise<DeployFeeTerms> {
+    return this.req<DeployFeeTerms>('GET', '/api/v1/agents/deploy-fee');
+  }
+
   /**
-   * Deploy a new agent. The backend generates a wallet, mints an INFT,
-   * and returns the agent descriptor.
+   * Deploy a new hosted agent. The backend generates its wallet, mints an
+   * INFT, starts it, and returns the agent descriptor.
+   *
+   * Deploying costs a fee (1 USDC on Arc on production; getDeployFee() says).
+   * deployAgent() pays it only with `{ payFee: true }`, from the configured
+   * executor wallet (set `rpcUrls.arc`) or `payer` — the API key's owner
+   * either way. A fee you paid yourself goes in `params.feeTxHash`. If the
+   * deploy fails after paying, the error names the payment: retry with that
+   * `feeTxHash`, and nothing is paid twice.
    *
    * @example
    * const agent = await bb.deployAgent({
@@ -232,13 +311,91 @@ export class BlindMarket {
    *   provider: 'anthropic',
    *   model: 'claude-sonnet-4-5',
    *   apiKey: process.env.ANTHROPIC_API_KEY!,
-   *   ownerAddress: wallet.address,
    *   // Uncompressed, no 0x (`wallet` is an ethers Wallet; its `publicKey` is compressed).
    *   ownerPublicKey: wallet.signingKey.publicKey.slice(2),
-   * });
+   * }, { payFee: true });
    */
-  async deployAgent(params: DeployAgentParams): Promise<DeployedAgent> {
-    return this.req<DeployedAgent>('POST', '/api/v1/agents/deploy', params);
+  async deployAgent(params: DeployAgentParams, opts: DeployAgentOptions = {}): Promise<DeployedAgent> {
+    const { ownerAddress: _ignored, ...body } = params;
+    const pollMs = opts.pollIntervalMs ?? 5_000;
+    // A named payment: the backend may still be waiting for its receipt.
+    if (body.feeTxHash) return this.postDeploy(body, 'DEPLOY_FEE_NOT_FOUND', 3, pollMs);
+
+    const terms = await this.getDeployFee();
+    if (!terms.required) return this.postDeploy(body, null, 1, pollMs);
+    if (!opts.payFee) {
+      // An unspent AgentFactory credit still pays: try before refusing.
+      try {
+        return await this.postDeploy(body, null, 1, pollMs);
+      } catch (err) {
+        if (!(err instanceof ApiError && err.code === 'NO_DEPLOY_CREDIT')) throw err;
+        const cost = terms.method === 'transfer'
+          ? `${ethers.formatUnits(BigInt(terms.amountRaw), terms.decimals).replace(/\.0$/, '')} USDC on ${terms.chain}`
+          : `a fee through AgentFactory on ${terms.chain}`;
+        throw new ApiError(
+          402,
+          `Deploying an agent costs ${cost}. Call deployAgent(params, { payFee: true }) to pay it from your wallet, or pay it yourself and pass params.feeTxHash.`,
+          { terms },
+          'DEPLOY_FEE_REQUIRED',
+        );
+      }
+    }
+
+    const payer = opts.payer ?? this.feePayer(terms.chain);
+    // The backend counts a fee from the API key's owner only: check before paying.
+    await this.assertOwnerKey(await payer.getAddress(), true);
+
+    if (terms.method === 'transfer') {
+      const data = new ethers.Interface(['function transfer(address to, uint256 amount) returns (bool)'])
+        .encodeFunctionData('transfer', [terms.recipient, BigInt(terms.amountRaw)]);
+      const hash = await sendAndWait(payer, { to: terms.token, data });
+      try {
+        return { ...(await this.postDeploy({ ...body, feeTxHash: hash }, 'DEPLOY_FEE_NOT_FOUND', 3, pollMs)), feeTxHash: hash };
+      } catch (err) {
+        if (err instanceof ApiError && ['DEPLOY_FEE_ALREADY_USED', 'DEPLOY_FEE_NOT_PAID', 'DEPLOY_FEE_REVERTED'].includes(err.code ?? '')) throw err;
+        const e = err as Error & { status?: number; code?: string };
+        throw new ApiError(
+          e.status ?? 500,
+          `${e.message} — the deploy fee is paid (transaction ${hash}); retry with params.feeTxHash = '${hash}' so it is not paid twice.`,
+          { feeTxHash: hash },
+          e.code,
+        );
+      }
+    }
+
+    if (!terms.factory) throw new ApiError(503, 'This backend charges through AgentFactory but names no factory address.', { terms }, 'DEPLOY_FEE_UNAVAILABLE');
+    const erc20 = new ethers.Interface(['function approve(address spender, uint256 amount) returns (bool)']);
+    const factory = new ethers.Interface(['function deployAgent(uint256 usdcAmount)', 'function deployFeeUsdc() view returns (uint256)', 'function usdc() view returns (address)']);
+    const reader = payer.provider;
+    if (!reader) throw new Error('The fee payer has no provider to read AgentFactory with.');
+    const [fee] = factory.decodeFunctionResult('deployFeeUsdc', await reader.call({ to: terms.factory, data: factory.encodeFunctionData('deployFeeUsdc') }));
+    const [token] = factory.decodeFunctionResult('usdc', await reader.call({ to: terms.factory, data: factory.encodeFunctionData('usdc') }));
+    await sendAndWait(payer, { to: token as string, data: erc20.encodeFunctionData('approve', [terms.factory, fee as bigint]) });
+    const hash = await sendAndWait(payer, { to: terms.factory, data: factory.encodeFunctionData('deployAgent', [0]) });
+    // The backend indexes the factory every 15s: the credit lags the payment.
+    return { ...(await this.postDeploy(body, 'NO_DEPLOY_CREDIT', 20, pollMs)), feeTxHash: hash };
+  }
+
+  /** POST /agents/deploy, asking again while the backend answers `retryCode`. */
+  private async postDeploy(body: object, retryCode: string | null, attempts: number, pollMs: number): Promise<DeployedAgent> {
+    for (let i = 1; ; i++) {
+      try {
+        return await this.req<DeployedAgent>('POST', '/api/v1/agents/deploy', body);
+      } catch (err) {
+        if (!(err instanceof ApiError) || err.code !== retryCode || i >= attempts) throw err;
+        await new Promise((r) => setTimeout(r, pollMs));
+      }
+    }
+  }
+
+  /** The configured executor as a signer on `chain`. */
+  private feePayer(chain: string): ethers.Signer {
+    if (!this.executor) {
+      throw new ApiError(400, 'Paying the deploy fee needs a signer: set BlindMarketConfig.executor, or pass { payer }.', undefined, 'NO_SIGNER');
+    }
+    const rpc = this.executor.rpcUrls[chain];
+    if (!rpc) throw new ApiError(400, `The deploy fee is paid on ${chain}, but no RPC is configured for it — set rpcUrls.${chain}.`, undefined, 'NO_RPC');
+    return new ethers.Wallet(this.executor.privateKey, new ethers.JsonRpcProvider(rpc));
   }
 
   /**
@@ -327,7 +484,7 @@ export class BlindMarket {
    * the API key's owner. Returns false only when the backend has no whoami
    * route (404 / a non-JSON 404 page) and nothing could be checked.
    */
-  private async assertOwnerKey(address: string): Promise<boolean> {
+  private async assertOwnerKey(address: string, forFee = false): Promise<boolean> {
     let owner: string;
     try {
       owner = (await this.whoami()).address;
@@ -338,8 +495,11 @@ export class BlindMarket {
     if (typeof owner !== 'string' || owner.toLowerCase() !== address.toLowerCase()) {
       throw new ApiError(
         409,
-        `This API key belongs to ${owner} but privateKey belongs to ${address}. Nothing was registered. ` +
-        "The executor is always the API key's owner, and only that wallet can sign submitEvidence — use the owner wallet's key, or mint an API key signed in as this wallet.",
+        forFee
+          ? `This API key belongs to ${owner} but the fee payer is ${address}. Nothing was paid. ` +
+            "The backend counts a deploy fee only from the API key's owner — pay from that wallet, or mint an API key signed in as this one."
+          : `This API key belongs to ${owner} but privateKey belongs to ${address}. Nothing was registered. ` +
+            "The executor is always the API key's owner, and only that wallet can sign submitEvidence — use the owner wallet's key, or mint an API key signed in as this wallet.",
         undefined,
         'OWNER_MISMATCH',
       );

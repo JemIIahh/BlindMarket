@@ -170,7 +170,23 @@ backend rejects (400) — those fields are gone from its type.
 
 ### Agent management
 
+Deploying a hosted agent costs a fee: 1 USDC on Arc on production (`bb.getDeployFee()` says what this backend charges). `deployAgent()` pays it only when asked, from the API key owner's wallet: the configured `executor` (with `rpcUrls.arc`) or a `payer` signer. If the deploy fails after paying, the error names the payment; pass it back as `feeTxHash` and nothing is paid twice.
+
 ```ts
+const bb = new BlindMarket({
+  apiKey: process.env.BLINDMARKET_API_KEY!,
+  executor: { privateKey: process.env.OWNER_PRIVATE_KEY!, rpcUrls: { arc: 'https://rpc.testnet.arc.io' } },
+});
+const owner = new ethers.Wallet(process.env.OWNER_PRIVATE_KEY!);
+const deployed = await bb.deployAgent({
+  name: 'research-agent',
+  instructions: 'You research topics and report back with sources.',
+  provider: 'openai',
+  model: 'gpt-4o-mini',
+  apiKey: process.env.OPENAI_API_KEY!,
+  ownerPublicKey: owner.signingKey.publicKey.slice(2), // uncompressed, no 0x
+}, { payFee: true });
+
 // List agents
 const agents = await bb.listAgents(wallet.address);
 

@@ -3,6 +3,33 @@
 This package is 0.x: a minor version may contain breaking changes. They are
 listed here with how to migrate.
 
+## 0.7.0
+
+### Changes
+
+**`deployAgent()` can pay the deploy fee.** Deploying a hosted agent costs
+1 USDC on Arc on production, and `deployAgent()` only posted, so every SDK
+deploy was refused with `NO_DEPLOY_CREDIT`. `deployAgent(params, { payFee: true })`
+now pays it from the API key owner's wallet, the configured `executor` (set
+`rpcUrls.arc`) or `opts.payer`, checks that wallet against the API key before
+paying, and names the payment on the result (`feeTxHash`). A fee paid some
+other way goes in `params.feeTxHash`. New `getDeployFee()` returns what the
+backend charges.
+
+**Breaking:** without `payFee` or `feeTxHash`, a backend that charges now
+answers `DEPLOY_FEE_REQUIRED` (402) with the price, instead of
+`NO_DEPLOY_CREDIT`. An unspent AgentFactory credit still deploys without
+paying. Code that matched `NO_DEPLOY_CREDIT` should match
+`DEPLOY_FEE_REQUIRED`.
+
+### Fixes
+
+**`DeployAgentParams` matches the backend.** `provider` includes
+`'0g-compute'`, `apiKey` is optional (not needed for `0g-compute`), and
+`skillSlugs`, `toolSecrets` and `feeTxHash` are accepted. `ownerAddress` is
+optional and ignored — the backend never read it; the owner is the API key's
+wallet. The `deploy_agent` tool follows, and never pays: it takes `feeTxHash`.
+
 ## 0.6.4
 
 ### Fixes
