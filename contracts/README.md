@@ -11,10 +11,12 @@ npm run check-addresses  # generated address modules match deployments/*.json
 
 ## Deployment sets and staging
 
-Production uses 0G mainnet plus **Base Sepolia**. The staging stack uses 0G
-testnet plus Base Sepolia, with its **own** escrows, and Arc testnet next. Two
-stacks can share chains 84532, 16602 and 5042002, so a script cannot tell them
-apart by chain id.
+Production uses 0G mainnet (agent infra), **Arc testnet** (where every new
+task is escrowed, since #73) and **Base Sepolia** (tasks posted before that).
+The staging stack uses 0G testnet plus Base Sepolia, with its **own** escrows;
+it has no Arc escrow of its own (the one it deployed became production's, see
+Arc below). Two stacks can share chains 84532, 16602 and 5042002, so a script
+cannot tell them apart by chain id.
 `DEPLOYMENT_SET` picks the records it reads and writes:
 
 | `DEPLOYMENT_SET` | records                           | OpenZeppelin manifests    | chains                     |
@@ -99,12 +101,14 @@ table is `scripts/_settlement.ts`. It:
   `redeploy-blindaccount-factory.ts` refuse both Arc chain ids: Arc needs no
   USDCPaymaster.
 
-Arc testnet has no default escrow yet, so the `already holds BlindEscrow`
-refusal cannot catch a forgotten `DEPLOYMENT_SET=staging` there. A first
-default escrow on a shared chain therefore needs `DEPLOYMENT_SET=default`
-spelled out; without any `DEPLOYMENT_SET` the deploy refuses. This matters
-because `sync-addresses` publishes the default record to the generated
-modules.
+Arc testnet's default escrow is the one production posts on,
+`deployments/arc-testnet.json`. It was deployed with `DEPLOYMENT_SET=staging`
+and moved to the default records (with its `.openzeppelin/unknown-5042002.json`
+manifest) once production adopted it, so default-set commands such as
+`rotate-verifier.ts --network arc-testnet` find it. A deploy that forgets
+`DEPLOYMENT_SET=staging` now meets the `already holds BlindEscrow` refusal. A
+staging Arc escrow of its own goes to `deployments/staging/arc-testnet.json`
+with the command below.
 
 `verify-deployment-config.ts` enforces the same allowlist and token checks on
 Base and Arc, with no `EXPECTED_*` needed. `_guard.ts` treats Arc testnet as a
@@ -116,8 +120,11 @@ DEPLOYMENT_SET=staging npx hardhat run scripts/deploy-settlement.ts --network ar
 
 `sync-addresses` emits `arc` / `arcTestnet` only once `arc-mainnet.json` /
 `arc-testnet.json` exist in the default records, and `DEPLOYMENT_BLOCKS` only
-once a default record has a `blocks` entry for a contract it emits. Arc is not
-a backend settlement chain yet, so nothing reads either.
+once a default record has a `blocks` entry for a contract it emits. The web
+app falls back to the generated Arc escrow and USDC when `VITE_ARC_ESCROW_ADDRESS`
+/ `VITE_ARC_USDC_ADDRESS` are unset. The backend never does: it reads Arc only
+from `ARC_ESCROW_ADDRESS`, so a local or staging backend cannot pick up
+production's escrow by default.
 
 ### Operate staging
 

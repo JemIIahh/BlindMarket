@@ -1,0 +1,14 @@
+{
+  "network": "arc-testnet",
+  "chainId": 5042002,
+  "deployer": "0x2f8b1177c83623a560B26B38dE984e154b123D75",
+  "timestamp": "2026-09-21T09:11:16.775Z",
+  "note": "BlindEscrow only \u2014 agent infra stays on 0G. Settles in the USDC ERC-20 (6 decimals); native USDC (address(0)) must never be allowlisted. No account-abstraction contracts on Arc. Deployed with DEPLOYMENT_SET=staging on 2026-09-21; production has posted every new task on it since #73, so it is the default record. Verifier must be rotated to the marketplace signer.",
+  "contracts": {
+    "BlindEscrow": "0xaBf70843E0380F1e749d2b85C30dD6820Ff5C731",
+    "USDC": "0x3600000000000000000000000000000000000000"
+  },
+  "blocks": {
+    "BlindEscrow": 63235379
+  }
+}

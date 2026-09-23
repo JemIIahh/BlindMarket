@@ -42,6 +42,10 @@ const ADDR = isMainnet ? CONTRACT_ADDRESSES.mainnet : CONTRACT_ADDRESSES.testnet
 const BASE_ADDR = isBaseMainnet
   ? (CONTRACT_ADDRESSES as any).base
   : (CONTRACT_ADDRESSES as any).baseTestnet;
+// Present once contracts/deployments/arc-{testnet,mainnet}.json exists.
+const ARC_ADDR = isArcMainnet
+  ? (CONTRACT_ADDRESSES as any).arc
+  : (CONTRACT_ADDRESSES as any).arcTestnet;
 
 // ── 0G Chain (agent infra) ─────────────────────────────────────────────────
 
@@ -106,15 +110,20 @@ export const ARC_RPC_URL =
   import.meta.env.VITE_ARC_RPC_URL ||
   (isArcMainnet ? 'https://rpc.mainnet.arc.io' : 'https://rpc.testnet.arc.io');
 
-// Arc settlement is not deployed yet, so the escrow has no generated fallback;
-// it is set per environment once Arc's escrow deploys.
-export const ARC_ESCROW_ADDRESS = unsetIfZero(import.meta.env.VITE_ARC_ESCROW_ADDRESS || '');
+// The escrow new tasks post on, generated from contracts/deployments like
+// Base's, so the build-time settlement table (config/settlement.ts) names it
+// even when VITE_ARC_ESCROW_ADDRESS is unset: without it that table fell back
+// to Base whenever GET /health/settlement did not answer. The env var still
+// overrides it (a staging stack sets its own).
+export const ARC_ESCROW_ADDRESS = unsetIfZero(
+  import.meta.env.VITE_ARC_ESCROW_ADDRESS || ARC_ADDR?.blindEscrow || '',
+);
 
 // USDC on Arc is one balance with two views: 18-dec native (the gas coin) and
 // 6-dec ERC-20 at the precompile above any normal address. The escrow only ever
 // allowlists the ERC-20.
 export const ARC_USDC_ADDRESS =
-  import.meta.env.VITE_ARC_USDC_ADDRESS || '0x3600000000000000000000000000000000000000';
+  import.meta.env.VITE_ARC_USDC_ADDRESS || ARC_ADDR?.USDC || '0x3600000000000000000000000000000000000000';
 
 // Privy signer ID for the backend's PRIVY_AUTHORIZATION_KEY (Privy-app-specific).
 export const PRIVY_RELAY_SIGNER_ID: string =

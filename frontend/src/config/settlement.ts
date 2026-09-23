@@ -213,11 +213,18 @@ export function mergeSettlement(defaults: SettlementSnapshot, backend: BackendSe
       gasSymbol: typeof entry.gasSymbol === 'string' && entry.gasSymbol ? entry.gasSymbol : prev.gasSymbol,
     };
   }
+  // A chain this app can post on after the merge: an entry the build accepted
+  // (or never saw), with an escrow and a token. The fallback is held to the
+  // same bar: the backend can report the build's default chain as having no
+  // escrow, and posting there would build a transaction to nowhere.
+  const payable = (k: SettlementChainKey) => !rejected.has(k) && !!chains[k].escrow && !!chains[k].token.address;
   const named = backend?.postingChain;
   const posting =
-    isSettlementChainKey(named) && !rejected.has(named) && chains[named].escrow && chains[named].token.address
+    isSettlementChainKey(named) && payable(named)
       ? named
-      : defaults.postingChain;
+      : payable(defaults.postingChain)
+        ? defaults.postingChain
+        : (Object.keys(chains) as SettlementChainKey[]).find(payable) ?? defaults.postingChain;
   return { postingChain: posting, chains, source: 'backend' };
 }
 
