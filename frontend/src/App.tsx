@@ -74,97 +74,98 @@ export default function App() {
   return (
     <ChainProvider>
       <SettlementProvider>
-      <PrivyProvider
-        appId={privyAppId}
-        config={{
-          defaultChain: arcChain,
-          // cctpSourceChains (see config/chains.ts) — Privy refuses to switch
-          // an external wallet to any chain not in this list, surfacing as
-          // "Unsupported chainId: <id>" rather than a wallet-level error.
-          supportedChains: [arcChain, ...cctpSourceChains],
-          // Follows the saved bb.theme preference at load. Privy's modal theme
-          // is fixed per provider mount, so a mid-session toggle applies to the
-          // modal on the next reload.
-          appearance: { theme: getStoredTheme() },
-          loginMethods: ['email', 'wallet'],
-          // Disable Coinbase Smart Wallet — prefer Privy embedded wallet
-          // for gas sponsorship flow on Base.
-          externalWallets: {
-            coinbaseWallet: {
-              config: {
-                preference: { options: 'eoaOnly' },
+        <PrivyProvider
+          appId={privyAppId}
+          config={{
+            defaultChain: arcChain,
+            // cctpSourceChains (see config/chains.ts) — Privy refuses to switch
+            // an external wallet to any chain not in this list, surfacing as
+            // "Unsupported chainId: <id>" rather than a wallet-level error.
+            supportedChains: [arcChain, ...cctpSourceChains],
+            // Follows the saved bb.theme preference at load. Privy's modal theme
+            // is fixed per provider mount, so a mid-session toggle applies to the
+            // modal on the next reload.
+            appearance: { theme: getStoredTheme() },
+            loginMethods: ['email', 'wallet'],
+            // Disable Coinbase Smart Wallet — prefer Privy embedded wallet
+            // for gas sponsorship flow on Base.
+            externalWallets: {
+              coinbaseWallet: {
+                config: {
+                  preference: { options: 'eoaOnly' },
+                },
               },
             },
-          },
-          embeddedWallets: {
-            ethereum: {
-              createOnLogin: 'all-users',
+            embeddedWallets: {
+              ethereum: {
+                createOnLogin: 'all-users',
+              },
             },
-          },
-        }}
-      >
-        <WagmiProvider config={wagmiConfig}>
-          <WalletProvider>
-            <AuthProvider>
-              <ThemeSync />
-              <ErrorBoundary>
-                <Suspense fallback={<RouteFallback />}>
-                  <Routes>
-                    {/* Public marketing chrome — landing and docs share one nav +
+          }}
+        >
+          <WagmiProvider config={wagmiConfig}>
+            <WalletProvider>
+              <AuthProvider>
+                <ThemeSync />
+                <ErrorBoundary>
+                  <Suspense fallback={<RouteFallback />}>
+                    <Routes>
+                      {/* Public marketing chrome — landing and docs share one nav +
                     footer so the first click doesn't context-switch into the
                     dashboard shell. The app starts at "Launch app". */}
-                    <Route element={<MarketingLayout />}>
-                      <Route path="/" element={<LandingV3 />} />
-                      <Route path="/how-it-works" element={<HowItWorks />} />
-                    </Route>
-                    {/* The redesign (formerly previewed at /v2) is now the live
+                      <Route element={<MarketingLayout />}>
+                        <Route path="/" element={<LandingV3 />} />
+                        <Route path="/how-it-works" element={<HowItWorks />} />
+                      </Route>
+                      {/* The redesign (formerly previewed at /v2) is now the live
                     landing at `/`. Redirect the old preview URL so existing
                     bookmarks/links don't 404. */}
-                    <Route path="/v2" element={<Navigate to="/" replace />} />
-                    <Route path="/register/:token" element={<RegisterAgent />} />
-                    <Route element={<DashboardLayout />}>
-                      <Route path="/tasks/new" element={<PostTask />} />
-                      <Route path="/tasks/mine" element={<MyTasks />} />
-                      <Route path="/tasks/templates" element={<TaskTemplates />} />
-                      <Route path="/tasks/:id" element={<TaskDetail />} />
-                      <Route path="/storage/:rootHash" element={<StorageView />} />
-                      <Route path="/a2a" element={<A2ADashboard />} />
-                      <Route path="/earnings" element={<Earnings />} />
-                      <Route path="/settings" element={<Settings />} />
-                      <Route path="/agents/browse" element={<AgentMarketplace />} />
-                      <Route path="/agents/deploy" element={<DeployAgent />} />
-                      <Route path="/agents/deploy/ui" element={<DeployAgentForm />} />
-                      <Route path="/agents/deploy/sdk" element={<DeployAgentSdk />} />
-                      <Route path="/agents/mine" element={<MyAgents />} />
-                      <Route path="/agents/:id" element={<AgentDetail />} />
-                      <Route path="/messages" element={<Messages />} />
-                      <Route path="/activity" element={<Activity />} />
-                      <Route path="/metrics" element={<Metrics />} />
+                      <Route path="/v2" element={<Navigate to="/" replace />} />
+                      <Route path="/register/:token" element={<RegisterAgent />} />
+                      <Route element={<DashboardLayout />}>
+                        <Route path="/tasks/new" element={<PostTask />} />
+                        <Route path="/tasks/mine" element={<MyTasks />} />
+                        <Route path="/tasks/templates" element={<TaskTemplates />} />
+                        <Route path="/tasks/:id" element={<TaskDetail />} />
+                        <Route path="/storage/:rootHash" element={<StorageView />} />
+                        <Route path="/a2a" element={<A2ADashboard />} />
+                        <Route path="/earnings" element={<Earnings />} />
+                        <Route path="/settings" element={<Settings />} />
+                        <Route path="/agents/browse" element={<AgentMarketplace />} />
+                        <Route path="/agents/deploy" element={<DeployAgent />} />
+                        <Route path="/agents/deploy/ui" element={<DeployAgentForm />} />
+                        <Route path="/agents/deploy/sdk" element={<DeployAgentSdk />} />
+                        <Route path="/agents/mine" element={<MyAgents />} />
+                        <Route path="/agents/:id" element={<AgentDetail />} />
+                        <Route path="/messages" element={<Messages />} />
+                        <Route path="/activity" element={<Activity />} />
+                        <Route path="/metrics" element={<Metrics />} />
 
-                      {/* Pure-A2A pivot: H2H/H2A/A2H surfaces removed from the IA.
+                        {/* Pure-A2A pivot: H2H/H2A/A2H surfaces removed from the IA.
                       Old deep-links bounce to the closest A2A equivalent so we
                       don't 404 anyone with bookmarked URLs (or copy-paste
                       links living in older READMEs). */}
-                      <Route path="/tasks" element={<Navigate to="/a2a" replace />} />
-                      <Route path="/agents" element={<Navigate to="/a2a" replace />} />
-                      <Route path="/agent" element={<Navigate to="/tasks/new" replace />} />
-                      <Route path="/worker" element={<Navigate to="/a2a" replace />} />
-                      <Route path="/validators" element={<Navigate to="/how-it-works" replace />} />
-                      <Route path="/verification" element={<Navigate to="/a2a" replace />} />
-                      <Route path="/leaderboard" element={<Navigate to="/a2a" replace />} />
-                    </Route>
-                    <Route path="*" element={<DashboardLayout />}>
-                      <Route path="*" element={<NotFound />} />
-                    </Route>
-                  </Routes>
-                </Suspense>
-              </ErrorBoundary>
-              <Analytics />
-            </AuthProvider>
-          </WalletProvider>
-        </WagmiProvider>
-      </PrivyProvider>
+                        <Route path="/tasks" element={<Navigate to="/a2a" replace />} />
+                        <Route path="/agents" element={<Navigate to="/a2a" replace />} />
+                        <Route path="/agent" element={<Navigate to="/tasks/new" replace />} />
+                        <Route path="/worker" element={<Navigate to="/a2a" replace />} />
+                        <Route path="/validators" element={<Navigate to="/how-it-works" replace />} />
+                        <Route path="/verification" element={<Navigate to="/a2a" replace />} />
+                        <Route path="/leaderboard" element={<Navigate to="/a2a" replace />} />
+                      </Route>
+                      <Route path="*" element={<DashboardLayout />}>
+                        <Route path="*" element={<NotFound />} />
+                      </Route>
+                    </Routes>
+                  </Suspense>
+                </ErrorBoundary>
+                <Analytics />
+              </AuthProvider>
+            </WalletProvider>
+          </WagmiProvider>
+        </PrivyProvider>
       </SettlementProvider>
     </ChainProvider>
   );
 }
+
