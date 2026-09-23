@@ -19,13 +19,12 @@ import { get, authedPost } from '../lib/api';
 import { signAndSendTx } from '../lib/txSigner';
 import { useChainAddress } from '../hooks/useChainWallet';
 import { getOrCreateExecutorIdentity } from '../lib/executorIdentity';
-// The deploy fee is Base USDC (AgentFactory lives on Base), whatever token
+// The deploy fee is Arc USDC (AgentFactory lives on Arc), whatever token
 // new tasks are priced in — so not the marketplace token.
-import { BASE_CHAIN_ID, BASE_USDC_ADDRESS, unsetIfZero } from '../config/constants';
+import { ARC_CHAIN_ID, ARC_USDC_ADDRESS, unsetIfZero } from '../config/constants';
 import { CONTRACT_ADDRESSES } from '../config/contractAddresses';
-import { isMainnet } from '../config/constants';
 
-// AgentFactory on Base — accepts USDC, emits AgentDeployed event
+// AgentFactory on Arc — accepts USDC, emits AgentDeployed event
 const AGENT_FACTORY_ABI = [
   'function deployAgent(uint256 usdcAmount) external',
   'function getTotalCost(uint256 usdcAmount) external view returns (uint256)',
@@ -39,9 +38,9 @@ const USDC_ABI = [
 ];
 
 const AGENT_FACTORY_ADDRESS = unsetIfZero(
-  isMainnet
-    ? (CONTRACT_ADDRESSES.base as any)?.agentFactory
-    : CONTRACT_ADDRESSES.baseTestnet?.agentFactory,
+  import.meta.env.VITE_ARC_AGENT_FACTORY_ADDRESS ||
+    (CONTRACT_ADDRESSES as any).arcTestnet?.agentFactory ||
+    '',
 );
 
 // Deploy fee: 1 USDC (6 decimals)
@@ -190,8 +189,8 @@ export default function DeployAgentForm() {
   const [error, setError] = useState('');
   const [deployTxHash, setDeployTxHash] = useState('');
 
-  const isBaseChain = chainId === BASE_CHAIN_ID;
-  const needsChainSwitch = !isBaseChain && chainId !== 0;
+  const isArcChain = chainId === ARC_CHAIN_ID;
+  const needsChainSwitch = !isArcChain && chainId !== 0;
 
   const [usdcBalance, setUsdcBalance] = useState<bigint | null>(null);
 
@@ -199,7 +198,7 @@ export default function DeployAgentForm() {
   useEffect(() => {
     if (!address || !walletClient) return;
     const provider = new BrowserProvider(walletClient.transport);
-    const usdc = new Contract(BASE_USDC_ADDRESS, USDC_ABI, provider);
+    const usdc = new Contract(ARC_USDC_ADDRESS, USDC_ABI, provider);
     usdc.balanceOf(address).then((b: bigint) => setUsdcBalance(b)).catch(() => {});
   }, [address, walletClient, status]);
 
@@ -288,20 +287,21 @@ export default function DeployAgentForm() {
       const provider = new BrowserProvider(walletClient.transport);
       const signer = await provider.getSigner();
 
-      // Step 1: Approve USDC spend (relayed — gas paid in USDC)
+      // Step 1: Approve USDC spend. Arc has no relay — the wallet signs
+      // directly and pays gas natively in USDC.
       setStatus('approving');
-      const usdc = new Contract(BASE_USDC_ADDRESS, USDC_ABI, provider);
+      const usdc = new Contract(ARC_USDC_ADDRESS, USDC_ABI, provider);
       const currentAllowance = await usdc.allowance(address, AGENT_FACTORY_ADDRESS);
       if (currentAllowance < DEPLOY_FEE_USDC) {
         const approveTx = await usdc.approve.populateTransaction(AGENT_FACTORY_ADDRESS, DEPLOY_FEE_USDC);
-        const approveResult = await signAndSendTx(signer, approveTx as any, undefined, { chain: 'base' });
-        console.log(`[deploy] USDC approve relay done hash=${approveResult.hash} userOp=${approveResult.userOp ?? false}`);
+        const approveResult = await signAndSendTx(signer, approveTx as any, undefined, { chain: 'arc' });
+        console.log(`[deploy] USDC approve done hash=${approveResult.hash} userOp=${approveResult.userOp ?? false}`);
 
-        // Poll allowance until on-chain — UserOps can take several blocks
+        // Poll allowance until on-chain
         console.log(`[deploy] Waiting for USDC allowance to be confirmed on-chain...`);
         for (let i = 0; i < 20; i++) {
           await new Promise(r => setTimeout(r, 3000));
-          const fresh = new Contract(BASE_USDC_ADDRESS, USDC_ABI, provider);
+          const fresh = new Contract(ARC_USDC_ADDRESS, USDC_ABI, provider);
           const allowance = await fresh.allowance(address, AGENT_FACTORY_ADDRESS);
           if (allowance >= DEPLOY_FEE_USDC) {
             console.log(`[deploy] USDC allowance confirmed: ${allowance}`);
@@ -311,13 +311,13 @@ export default function DeployAgentForm() {
         }
       }
 
-      // Step 2: Pay via AgentFactory (relayed — gas paid in USDC)
+      // Step 2: Pay via AgentFactory (direct-signed — gas paid natively in USDC)
       setStatus('deploying');
       const factory = new Contract(AGENT_FACTORY_ADDRESS, AGENT_FACTORY_ABI, provider);
       console.log('[deploy] Calling deployAgent(0)...');
       const deployTx = await factory.deployAgent.populateTransaction(0);
-      const deployResult = await signAndSendTx(signer, deployTx as any, undefined, { chain: 'base' });
-      console.log(`[deploy] AgentFactory relay done hash=${deployResult.hash} userOp=${deployResult.userOp ?? false}`);
+      const deployResult = await signAndSendTx(signer, deployTx as any, undefined, { chain: 'arc' });
+      console.log(`[deploy] AgentFactory done hash=${deployResult.hash} userOp=${deployResult.userOp ?? false}`);
       if (deployResult.userOp) {
         await new Promise(r => setTimeout(r, 15000));
       }
@@ -403,7 +403,7 @@ export default function DeployAgentForm() {
               <span>Decentralized deployment</span>
             </div>
             <p>
-              Your agent is deployed by a smart contract on Base. The backend listens
+              Your agent is deployed by a smart contract on Arc. The backend listens
               for the on-chain event to create your agent. No single point of failure —
               the backend cannot control your agent.
             </p>
@@ -600,7 +600,7 @@ export default function DeployAgentForm() {
           {!address ? (
             <p className="text-sm text-ink-3">Connect a wallet to deploy an agent.</p>
           ) : needsChainSwitch ? (
-            <p className="text-sm text-ink-3">Switch to Base network to deploy an agent.</p>
+            <p className="text-sm text-ink-3">Switch to Arc network to deploy an agent.</p>
           ) : (
             <>
               <div className="mb-4 border border-line bg-surface-2 px-4 py-3.5 space-y-2">
@@ -673,7 +673,7 @@ export default function DeployAgentForm() {
                 <span>~1.001 USDC</span>
               </div>
             </div>
-            <p className="text-xs text-ink-3">Gas is sponsored by Privy and paid in USDC — no ETH needed.</p>
+            <p className="text-xs text-ink-3">Gas is paid in USDC — Arc uses USDC as its native gas token.</p>
           </div>
         }
         confirmLabel="Confirm deploy"
