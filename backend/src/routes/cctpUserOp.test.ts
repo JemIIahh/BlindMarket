@@ -94,7 +94,7 @@ vi.mock('ethers', async () => {
 
 import { cctpRouter } from './cctp.js';
 import { globalErrorHandler } from '../middleware/errorHandler.js';
-import { buildDepositForBurnCall, addressToBytes32 } from '../services/cctp.js';
+import { buildDepositForBurnCall } from '../services/cctp.js';
 import { BlindAccountABI } from '../services/aa.js';
 import { Interface } from 'ethers';
 import { config } from '../config.js';
