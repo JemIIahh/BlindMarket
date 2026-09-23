@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  ARC_ESCROW_ADDRESS,
   BASE_CHAIN_ID,
   BASE_ESCROW_ADDRESS,
   BASE_USDC_ADDRESS,
-  MARKETPLACE_TOKEN_ADDRESS,
 } from './constants';
 import {
   agentFundingAddress,
@@ -26,7 +26,8 @@ import {
 const ZERO = '0x0000000000000000000000000000000000000000';
 const ARC_USDC = '0x3600000000000000000000000000000000000000';
 
-/** What the testnet build's /health/settlement looks like today (production posts on Base). */
+/** A backend that posts on Base, as production did before #73. Its Base entry
+ *  is the one the entry-validation tests below patch. */
 const backendBasePosting: BackendSettlement = {
   postingChain: 'base',
   chains: [
@@ -35,26 +36,36 @@ const backendBasePosting: BackendSettlement = {
   ],
 };
 
+/** What production's /health/settlement answers today: new tasks post on Arc. */
+const backendArcPosting: BackendSettlement = {
+  postingChain: 'arc',
+  chains: [
+    { ...backendBasePosting.chains[0], postable: false },
+    { ...backendBasePosting.chains[1], escrowAddress: ARC_ESCROW_ADDRESS, postable: true },
+  ],
+};
+
 afterEach(() => resetSettlement());
 
 describe('build-time defaults', () => {
-  it('follow the rule every file used before: Base USDC when a Base escrow is configured', () => {
-    // The testnet build has a Base escrow (contractAddresses.ts baseTestnet).
-    expect(BASE_ESCROW_ADDRESS).not.toBe('');
+  it('post on Arc, whose escrow the build names from contracts/deployments/arc-testnet.json', () => {
+    // Before arc-testnet.json was a default record the build had no Arc
+    // escrow, and these defaults (what the app uses when /health/settlement
+    // does not answer) posted in Base USDC to a backend that escrows on Arc.
+    expect(ARC_ESCROW_ADDRESS).toMatch(/^0x[0-9a-fA-F]{40}$/);
     const d = defaultSettlement();
     expect(d.source).toBe('defaults');
-    expect(d.postingChain).toBe('base');
+    expect(d.postingChain).toBe('arc');
     expect(getPaymentDecimals()).toBe(6);
     expect(getPaymentSymbol()).toBe('USDC');
-    expect(getMarketplaceTokenAddress()).toBe(MARKETPLACE_TOKEN_ADDRESS);
-    expect(getMarketplaceTokenAddress()).toBe(BASE_USDC_ADDRESS);
-    expect(getPostingEscrowAddress()).toBe(BASE_ESCROW_ADDRESS);
+    expect(getMarketplaceTokenAddress()).toBe(ARC_USDC);
+    expect(getPostingEscrowAddress()).toBe(ARC_ESCROW_ADDRESS);
     expect(isNativePayment()).toBe(false);
   });
 
-  it("relay on the same name txSigner hard-coded, keyed on the Base chain id", () => {
+  it('relay only Base, on the name keyed on its chain id; Arc is signed by the wallet', () => {
     expect(BASE_CHAIN_ID).toBe(84532);
-    expect(relayChainFor()).toBe('base-sepolia');
+    expect(relayChainFor()).toBeNull();
     expect(relayChainFor('base')).toBe('base-sepolia');
     expect(relayChainFor('arc')).toBeNull();
   });
@@ -65,7 +76,7 @@ describe('build-time defaults', () => {
       key: 'arc',
       chainId: 5042002,
       tier: 'testnet',
-      escrow: '',
+      escrow: ARC_ESCROW_ADDRESS,
       token: { kind: 'erc20', address: ARC_USDC, unit: { symbol: 'USDC', decimals: 6 } },
       relayChain: null,
       explorer: 'https://testnet.arcscan.app',
@@ -118,13 +129,13 @@ describe('unitFor', () => {
   it('gives each chain its own explorer, unknown chains the posting chain’s', () => {
     expect(explorerUrlFor('arc')).toBe('https://testnet.arcscan.app');
     expect(explorerUrlFor('base')).toBe('https://sepolia.basescan.org');
-    expect(explorerUrlFor(undefined)).toBe('https://sepolia.basescan.org');
+    expect(explorerUrlFor(undefined)).toBe('https://testnet.arcscan.app');
   });
 });
 
 describe('mergeSettlement', () => {
   it("leaves today's stack exactly as the defaults had it", () => {
-    const merged = mergeSettlement(defaultSettlement(), backendBasePosting);
+    const merged = mergeSettlement(defaultSettlement(), backendArcPosting);
     const { source: _s, ...rest } = merged;
     const { source: _d, ...defaults } = defaultSettlement();
     expect(merged.source).toBe('backend');
@@ -156,8 +167,9 @@ describe('mergeSettlement', () => {
     const { source: _d, ...defaults } = defaultSettlement();
     expect(rest).toEqual(defaults);
     setSettlement(merged);
-    expect(getMarketplaceTokenAddress()).toBe(BASE_USDC_ADDRESS);
-    expect(relayChainFor()).toBe('base-sepolia');
+    // The mainnet escrow, token and relay name were not adopted.
+    expect(getMarketplaceTokenAddress()).toBe(ARC_USDC);
+    expect(relayChainFor('base')).toBe('base-sepolia');
   });
 
   it('ignores malformed entries instead of throwing (a throw above the ErrorBoundary blanked the app)', () => {
@@ -178,7 +190,9 @@ describe('mergeSettlement', () => {
     expect(() => mergeSettlement(defaultSettlement(), null as unknown as BackendSettlement)).not.toThrow();
   });
 
-  it('keeps the default posting chain when the backend names one this build cannot pay on', () => {
+  it('never posts on a chain the backend reports without an escrow, even the build default', () => {
+    // backendBasePosting reports Arc with no escrow: neither naming Arc nor
+    // falling back to the build's Arc default may post there.
     const noEscrow: BackendSettlement = {
       postingChain: 'arc',
       chains: [...backendBasePosting.chains],
@@ -188,12 +202,22 @@ describe('mergeSettlement', () => {
     expect(mergeSettlement(defaultSettlement(), { ...backendBasePosting, postingChain: null }).postingChain).toBe('base');
   });
 
+  it('keeps the build default when the backend names no chain it can post on and says nothing against the default', () => {
+    expect(mergeSettlement(defaultSettlement(), { postingChain: null, chains: [] }).postingChain).toBe('arc');
+    expect(mergeSettlement(defaultSettlement(), { postingChain: '0g' as never, chains: [] }).postingChain).toBe('arc');
+  });
+
   it('never posts on a chain whose backend entry it rejected, even though the build has defaults for it', () => {
     const otherNetwork: BackendSettlement = {
       postingChain: 'base',
       chains: [{ ...backendBasePosting.chains[0], chainId: 8453, tier: 'mainnet' }],
     };
-    expect(mergeSettlement(defaultSettlement(), otherNetwork).postingChain).toBe('base');
+    expect(mergeSettlement(defaultSettlement(), otherNetwork).postingChain).toBe('arc');
+    const otherArc: BackendSettlement = {
+      postingChain: 'arc',
+      chains: [backendBasePosting.chains[0], { ...backendArcPosting.chains[1], chainId: 5042, tier: 'mainnet' }],
+    };
+    expect(mergeSettlement(defaultSettlement(), otherArc).postingChain).toBe('base');
   });
 
   it.each([

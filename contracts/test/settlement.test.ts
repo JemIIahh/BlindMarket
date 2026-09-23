@@ -482,13 +482,20 @@ describe("Arc settlement tooling", function () {
       return m ? JSON.parse(m[1]) : undefined;
     };
 
-    it("renders today's records byte for byte as the committed module, with no Arc and no blocks", function () {
+    it("renders today's records byte for byte as the committed module, production's Arc escrow included", function () {
       expect(render()).to.equal(committed);
       expect(render(dir)).to.equal(committed);
-      expect(committed).to.not.match(/arc|DEPLOYMENT_BLOCKS/);
+      // deployments/arc-testnet.json is the escrow production posts on (#73).
+      const arc = JSON.parse(fs.readFileSync(path.join(DEPLOYMENTS_ROOT, "arc-testnet.json"), "utf-8"));
+      expect(exported(committed, "CONTRACT_ADDRESSES").arcTestnet).to.deep.equal({ blindEscrow: arc.contracts.BlindEscrow, USDC: arc.contracts.USDC });
+      expect(exported(committed, "DEPLOYMENT_BLOCKS")).to.deep.equal({ arcTestnet: { blindEscrow: arc.blocks.BlindEscrow } });
     });
 
     it("adds arcTestnet (and only it) once arc-testnet.json exists", function () {
+      // Start from the records as they were before Arc had a default one.
+      fs.rmSync(path.join(dir, "arc-testnet.json"));
+      const before = render(dir);
+      expect(before).to.not.match(/arc|DEPLOYMENT_BLOCKS/);
       put("arc-testnet.json", { network: "arc-testnet", chainId: ARC_TESTNET_CHAIN_ID, contracts: { BlindEscrow: ESCROW_X, USDC: ARC_USDC } });
       const out = render(dir);
       const addrs = exported(out, "CONTRACT_ADDRESSES");
@@ -496,7 +503,7 @@ describe("Arc settlement tooling", function () {
       expect(addrs.arcTestnet).to.deep.equal({ blindEscrow: ESCROW_X, USDC: ARC_USDC });
       expect(out).to.not.match(/DEPLOYMENT_BLOCKS/);
       // Everything before Arc is unchanged.
-      expect(out.startsWith(committed.slice(0, committed.lastIndexOf("\n  }\n}")))).to.equal(true);
+      expect(out.startsWith(before.slice(0, before.lastIndexOf("\n  }\n}")))).to.equal(true);
     });
 
     it("adds arc after baseTestnet once arc-mainnet.json exists", function () {
@@ -528,11 +535,11 @@ describe("Arc settlement tooling", function () {
 
     it("takes a mirrored AgentFactory's block from the record that holds the same address", function () {
       edit("agent-factory-base-sepolia.json", (r) => (r.blocks = { AgentFactory: 777 }));
-      expect(exported(render(dir), "DEPLOYMENT_BLOCKS")).to.deep.equal({ baseTestnet: { agentFactory: 777 } });
+      expect(exported(render(dir), "DEPLOYMENT_BLOCKS").baseTestnet).to.deep.equal({ agentFactory: 777 });
 
       // A companion record whose factory is not the one emitted gives no block.
       edit("agent-factory-base-sepolia.json", (r) => (r.contracts.AgentFactory = ESCROW_X));
-      expect(render(dir)).to.not.match(/DEPLOYMENT_BLOCKS/);
+      expect(exported(render(dir), "DEPLOYMENT_BLOCKS").baseTestnet).to.equal(undefined);
     });
 
     it("refuses a block that is not a block number", function () {

@@ -26,5 +26,14 @@ export const CONTRACT_ADDRESSES = {
     "BlindAccountFactory": "0x6e1F31d05F48bf98A33A4d673fb7D6DB3A13918c",
     "EntryPoint": "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
     "USDC": "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+  },
+  "arcTestnet": {
+    "blindEscrow": "0xaBf70843E0380F1e749d2b85C30dD6820Ff5C731",
+    "USDC": "0x3600000000000000000000000000000000000000"
+  }
+} as const;
+export const DEPLOYMENT_BLOCKS = {
+  "arcTestnet": {
+    "blindEscrow": 63235379
   }
 } as const;
