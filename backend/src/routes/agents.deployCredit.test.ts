@@ -59,10 +59,24 @@ vi.mock('../services/agentFactoryListener.js', () => ({
 vi.mock('../services/skillComposer.js', () => ({
   buildInstalledSkill: vi.fn(), assertComposedSizeOk: vi.fn(),
 }));
+// The Arc fee path — deployFee.test.ts covers the receipt checks themselves.
+const ARC_TERMS = {
+  method: 'transfer', chain: 'arc', token: '0x3600000000000000000000000000000000000000',
+  recipient: '0x2f8b1177c83623a560B26B38dE984e154b123D75', amountRaw: '1000000', decimals: 6,
+};
+vi.mock('../services/deployFee.js', () => ({
+  arcDeployFeeTerms: vi.fn(async () => ARC_TERMS),
+  verifyArcDeployFee: vi.fn(async () => ({ payer: '0x2222222222222222222222222222222222222222', amountRaw: 1_000_000n })),
+  claimArcDeployFee: vi.fn(async () => ({ claimed: true })),
+  markArcDeployFeeUsed: vi.fn(async () => {}),
+  releaseArcDeployFee: vi.fn(async () => {}),
+}));
 
 import { agentsRouter } from './agents.js';
-import { globalErrorHandler } from '../middleware/errorHandler.js';
+import { globalErrorHandler, AppError } from '../middleware/errorHandler.js';
 import { claimDeployCredit, restoreDeployCredit } from '../services/agentFactoryListener.js';
+import { arcDeployFeeTerms, verifyArcDeployFee, claimArcDeployFee, markArcDeployFeeUsed, releaseArcDeployFee } from '../services/deployFee.js';
+import { config } from '../config.js';
 
 const app = express();
 app.use(express.json());
@@ -80,7 +94,100 @@ const deploy = (extra = {}) =>
 beforeEach(() => {
   vi.mocked(claimDeployCredit).mockClear();
   vi.mocked(restoreDeployCredit).mockClear();
+  vi.mocked(verifyArcDeployFee).mockClear();
+  vi.mocked(claimArcDeployFee).mockClear();
+  vi.mocked(markArcDeployFeeUsed).mockClear();
+  vi.mocked(releaseArcDeployFee).mockClear();
   deployAgent.mockClear();
+});
+
+const FEE_TX = '0x' + 'cd'.repeat(32);
+
+describe('POST /agents/deploy — the deploy fee paid on Arc', () => {
+  it("checks the transfer against the caller's wallets, claims it and deploys", async () => {
+    const res = await deploy({ feeTxHash: FEE_TX });
+    expect(res.status).toBe(201);
+    expect(verifyArcDeployFee).toHaveBeenCalledWith(FEE_TX, [OWNER]);
+    expect(claimArcDeployFee).toHaveBeenCalledWith(FEE_TX, OWNER);
+    expect(claimDeployCredit).not.toHaveBeenCalled();
+    expect(deployAgent).toHaveBeenCalledTimes(1);
+    expect(deployAgent.mock.calls[0]).not.toHaveProperty('0.feeTxHash');
+    expect(markArcDeployFeeUsed).toHaveBeenCalledWith(FEE_TX, 'agent-new');
+    expect(releaseArcDeployFee).not.toHaveBeenCalled();
+  });
+
+  it('refuses a transaction that already paid for a deploy, naming the agent', async () => {
+    vi.mocked(claimArcDeployFee).mockResolvedValueOnce({ claimed: false, pending: false, agentId: 'agent-old' });
+    const res = await deploy({ feeTxHash: FEE_TX });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatchObject({ code: 'DEPLOY_FEE_ALREADY_USED', agentId: 'agent-old' });
+    expect(deployAgent).not.toHaveBeenCalled();
+  });
+
+  it('tells a deploy still running with the same transaction apart from a spent one', async () => {
+    vi.mocked(claimArcDeployFee).mockResolvedValueOnce({ claimed: false, pending: true });
+    const res = await deploy({ feeTxHash: FEE_TX });
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('DEPLOY_FEE_IN_USE');
+    expect(deployAgent).not.toHaveBeenCalled();
+  });
+
+  it('passes on why a transaction is not a fee, and claims nothing', async () => {
+    vi.mocked(verifyArcDeployFee).mockRejectedValueOnce(new AppError(402, 'DEPLOY_FEE_NOT_PAID', 'paid from another wallet', 'PAYER_NOT_LINKED'));
+    const res = await deploy({ feeTxHash: FEE_TX });
+    expect(res.status).toBe(402);
+    expect(res.body.error).toMatchObject({ code: 'DEPLOY_FEE_NOT_PAID', reason: 'PAYER_NOT_LINKED' });
+    expect(claimArcDeployFee).not.toHaveBeenCalled();
+    expect(deployAgent).not.toHaveBeenCalled();
+  });
+
+  it('an unknown skill is rejected before the fee is looked at', async () => {
+    const res = await deploy({ feeTxHash: FEE_TX, skillSlugs: ['no-such-skill'] });
+    expect(res.status).toBe(404);
+    expect(verifyArcDeployFee).not.toHaveBeenCalled();
+    expect(claimArcDeployFee).not.toHaveBeenCalled();
+  });
+
+  it('a failing deploy frees the transfer for the retry', async () => {
+    deployAgent.mockRejectedValueOnce(new Error('ECIES wrap failed'));
+    const res = await deploy({ feeTxHash: FEE_TX });
+    expect(res.status).toBe(500);
+    expect(releaseArcDeployFee).toHaveBeenCalledWith(FEE_TX);
+    expect(markArcDeployFeeUsed).not.toHaveBeenCalled();
+    expect(restoreDeployCredit).not.toHaveBeenCalled();
+  });
+
+  it('rejects a feeTxHash that is not a transaction hash', async () => {
+    const res = await deploy({ feeTxHash: '0x1234' });
+    expect(res.status).toBe(400);
+    expect(verifyArcDeployFee).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /agents/deploy-fee', () => {
+  it('gives the Arc terms when this stack has an Arc escrow', async () => {
+    const res = await request(app).get('/api/v1/agents/deploy-fee');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({ required: true, ...ARC_TERMS, factory: config.arcAgentFactoryAddress || null });
+  });
+
+  it('points at AgentFactory when there is no Arc escrow to pay by transfer', async () => {
+    vi.mocked(arcDeployFeeTerms).mockResolvedValueOnce(null);
+    const res = await request(app).get('/api/v1/agents/deploy-fee');
+    expect(res.body.data).toEqual({ required: true, method: 'factory', chain: 'arc', factory: config.arcAgentFactoryAddress || null });
+  });
+
+  it('says no fee is due when the paywall is off', async () => {
+    const cfg = config as { agentFactoryPaywall: boolean };
+    const before = cfg.agentFactoryPaywall;
+    cfg.agentFactoryPaywall = false;
+    try {
+      const res = await request(app).get('/api/v1/agents/deploy-fee');
+      expect(res.body.data).toEqual({ required: false });
+    } finally {
+      cfg.agentFactoryPaywall = before;
+    }
+  });
 });
 
 describe('POST /agents/deploy — the paid credit is only spent on a real deploy', () => {

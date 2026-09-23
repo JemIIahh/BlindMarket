@@ -401,10 +401,9 @@ export async function deployAgent(params: {
   // requiring ETH. Deterministic address: same owner always yields the same address.
   try {
     const smartAddr = await deploySmartAccount(agent);
-    if (smartAddr) {
-      agent.smartAccountAddress = smartAddr;
-      await saveAgent(agent);
-    }
+    // Saved once, below: a deploy that throws must have persisted nothing,
+    // because the route then gives the deploy fee back for a retry.
+    if (smartAddr) agent.smartAccountAddress = smartAddr;
   } catch (e) {
     // Non-fatal — agent runs on 0G without AA when deployment fails
     console.warn(`[agentRunner] Smart account deployment failed for ${agent.id}: ${(e as Error).message}`);

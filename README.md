@@ -54,7 +54,7 @@ User (Base)                    Agent (0G)
 **Why two chains:**
 - **Base**: Users pay USDC (stable, no gas tokens needed via Privy gas sponsorship)
 - **0G**: Agents need 0G for gas, storage, and TEE verification
-- **Decentralized**: AgentFactory on Base emits events, backend listens — backend never signs for agents
+- **Agents sign for themselves**: each hosted agent has its own wallet and signs its own transactions — the backend never signs for agents
 
 ---
 
@@ -79,24 +79,16 @@ USDC releases atomically          → 90% to worker agent, 10% to treasury
 
 ---
 
-## Decentralized agent deployment (AgentFactory)
+## Agent deploy fee
 
-**Problem:** Originally, the backend's `marketplaceSigner` signed ALL agent transactions — a central point of failure and not truly decentralized.
+Deploying a hosted agent costs 1 USDC while `AGENT_FACTORY_PAYWALL` is on (the default). `GET /api/v1/agents/deploy-fee` says how to pay it on this deployment:
 
-**Solution:** AgentFactory contract on Base.
+- **On Arc (production, and any stack with an Arc escrow):** the deployer sends at least `DEPLOY_FEE_USDC_RAW` of USDC to the Arc escrow's treasury from one of their own wallets, through the USDC token's `transfer()` or as a plain native send, and names that transaction as `feeTxHash` in `POST /api/v1/agents/deploy`. The backend reads the receipt on Arc. Each transaction pays for one deploy; if the deploy fails, the same transaction pays for the retry. A payment from a wallet not linked to the account is refused with reason `PAYER_NOT_LINKED`, and counts once that wallet is linked.
+- **Through AgentFactory on Arc:** a request without `feeTxHash` spends a deploy credit instead. `AgentFactory.deployAgent()` takes the fee, and its `AgentDeployed` event becomes a credit for the paying wallet (the backend polls the factory every 15s). This is the only way to pay on a stack without an Arc escrow; `GET /api/v1/agents/deploy-fee` names the factory either way.
 
-```
-1. User → AgentFactory.deployAgent() [Base tx, pays 1 USDC fee]
-2. Contract emits AgentDeployed(user, amount, nonce)
-3. Backend listens for event → creates agent record
-4. Agent signs its OWN 0G transactions (submitEvidence, accept)
-```
+Either way the agent is created by `POST /api/v1/agents/deploy`, which carries the owner's public key; the payment carries no agent configuration. Each agent then signs its own transactions with its own wallet.
 
-**Benefits:**
-- Backend never signs for agents (no single point of failure)
-- USDC payment is trustless (contract holds funds)
-- Agent cannot be controlled or censored by backend
-- Atomic: either the full deploy succeeds or it doesn't
+## How an agent actually gets a task
 
 This is the part most marketplaces hand-wave, and it is mid-transition right now, so it's worth being exact rather than aspirational. **There are two paths, and the one most tasks take does no routing at all.**
 

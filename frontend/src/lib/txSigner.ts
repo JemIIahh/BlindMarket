@@ -203,6 +203,57 @@ export async function signAndSendTx(
   return { hash: txHash, receipt: null };
 }
 
+/**
+ * Send a payment the wallet signs itself (on a chain with no relay, Arc) and
+ * give its hash to `onSent` as soon as the wallet has broadcast it, before
+ * any wait. A caller that saves the hash keeps proof of the payment if the tab
+ * closes or the wallet errors while it confirms. A sped-up transaction is
+ * followed to its replacement, whose hash `onSent` gets too. Throws
+ * TX_REVERTED or TX_CANCELLED when nothing was paid; a payment that could not
+ * be followed to confirmation comes back with a null receipt.
+ */
+export async function sendDirectPayment(
+  signer: ethers.JsonRpcSigner,
+  tx: { to: string; data: string },
+  chain: SettlementChainKey,
+  onSent: (hash: string) => void,
+): Promise<SentTx> {
+  if (!isDirectSigned(chain)) throw new RelayError('NOT_DIRECT', `Transactions on ${chain} are relayed, not signed by the wallet.`);
+  await assertWalletOnChain(signer, chain);
+  // A replacement of this transaction is searched for from this block on.
+  const startBlock = await signer.provider.getBlockNumber();
+  const hash = await signer.sendUncheckedTransaction({ to: tx.to, data: tx.data });
+  onSent(hash);
+
+  // The wallet's node has the transaction first; ask it until it does.
+  let sent: ethers.TransactionResponse | null = null;
+  for (let i = 0; i < 15 && !sent; i++) {
+    sent = await signer.provider.getTransaction(hash).catch(() => null);
+    if (!sent) await new Promise((r) => setTimeout(r, 1000));
+  }
+  if (!sent) return { hash, receipt: null };
+
+  try {
+    const receipt = await sent.replaceableTransaction(startBlock).wait();
+    if (receipt && receipt.status === 0) throw revertedError(hash);
+    return { hash, receipt };
+  } catch (err) {
+    if (err instanceof RelayError) throw err;
+    if (isError(err, 'TRANSACTION_REPLACED')) {
+      // ethers sets `cancelled` for a cancel and for a replacement that is a
+      // different transaction; a speed-up is the same payment, re-priced.
+      if (err.cancelled) {
+        throw new RelayError('TX_CANCELLED', `Transaction ${hash} was cancelled or replaced in the wallet, so this payment was not made.`);
+      }
+      onSent(err.replacement.hash);
+      if (err.receipt.status === 0) throw revertedError(err.replacement.hash);
+      return { hash: err.replacement.hash, receipt: err.receipt };
+    }
+    if (isError(err, 'CALL_EXCEPTION')) throw revertedError(hash);
+    return { hash, receipt: null };
+  }
+}
+
 const ERC20 = new Interface([
   'function approve(address spender, uint256 amount) returns (bool)',
   'function allowance(address owner, address spender) view returns (uint256)',

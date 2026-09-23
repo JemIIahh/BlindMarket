@@ -28,6 +28,7 @@ import { chainRuntime } from '../services/chainRuntime.js';
 import { settlementChainConfigs, type SettlementChainKey } from '../services/settlementChains.js';
 import { config } from '../config.js';
 import { claimDeployCredit, restoreDeployCredit } from '../services/agentFactoryListener.js';
+import { arcDeployFeeTerms, verifyArcDeployFee, claimArcDeployFee, markArcDeployFeeUsed, releaseArcDeployFee } from '../services/deployFee.js';
 import { discoverModels, ProviderModelsError } from '../services/providerModels.js';
 import { nativeWeiToTokenUnits, normalizeSettlementAmount, pricingUnit } from '../services/settlementUnits.js';
 
@@ -222,6 +223,9 @@ const DeploySchema = z.object({
   // Skills to install at deploy — resolved to frozen snapshots SERVER-SIDE
   // (clients send slugs, never snapshots).
   skillSlugs: z.array(z.string().regex(/^[a-z0-9][a-z0-9-]{1,62}$/)).max(10).default([]),
+  // The Arc transaction that paid the deploy fee (GET /deploy-fee has the
+  // terms). Without it the fee must be an AgentFactory deploy credit.
+  feeTxHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/, 'Must be a transaction hash').optional(),
 });
 
 function strip(agent: Awaited<ReturnType<typeof getAgent>>) {
@@ -237,6 +241,30 @@ agentsRouter.get('/providers', (_req, res) => {
       pricing: LLM_PROVIDER_MODELS, // full ModelInfo[] with costs
     },
   });
+});
+
+// GET /api/v1/agents/deploy-fee — what POST /deploy charges and how to pay it.
+// On a stack with an Arc escrow: a USDC transfer on Arc to the escrow's
+// treasury, named in the deploy request as `feeTxHash` (method 'transfer').
+// AgentFactory, when configured, takes the fee too; its event becomes a credit
+// that a request without `feeTxHash` spends (method 'factory').
+agentsRouter.get('/deploy-fee', async (_req, res, next) => {
+  try {
+    if (!config.agentFactoryPaywall) {
+      res.json({ success: true, data: { required: false } });
+      return;
+    }
+    const arc = await arcDeployFeeTerms();
+    const factory = config.arcAgentFactoryAddress || null;
+    res.json({
+      success: true,
+      data: arc
+        ? { required: true, ...arc, factory }
+        : { required: true, method: 'factory', chain: 'arc', factory },
+    });
+  } catch (err) {
+    next(err);
+  }
 });
 
 // POST /api/v1/agents/provider-models — live model list for the deploy form.
@@ -279,8 +307,26 @@ agentsRouter.post('/provider-models', requireAuth, providerModelsLimiter, async 
   }
 });
 
+/**
+ * The wallets a deploy fee may come from: the caller's own. `ownerAddress` is
+ * excluded as in routes/tx.ts — it names the human behind an agent token, and
+ * an agent does not pay from its owner's wallet.
+ */
+function callerWallets(user: AuthRequest['user']): string[] {
+  if (!user) return [];
+  return [...new Set(
+    [user.address, ...(user.addresses ?? [])]
+      .filter((a): a is string => typeof a === 'string' && /^0x[0-9a-fA-F]{40}$/.test(a))
+      .map((a) => a.toLowerCase()),
+  )];
+}
+
+// A deploy with an unconfirmed feeTxHash asks Arc for its receipt for up to
+// ~40s. 20/min still covers the Base path's retry loop (one POST per 5s).
+const deployLimiter = createUserRateLimiter(20);
+
 // POST /api/v1/agents/deploy
-agentsRouter.post('/deploy', requireAuth, async (req: AuthRequest, res, next) => {
+agentsRouter.post('/deploy', requireAuth, deployLimiter, async (req: AuthRequest, res, next) => {
   try {
     const parsed = DeploySchema.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ success: false, error: parsed.error.flatten() }); return; }
@@ -288,9 +334,10 @@ agentsRouter.post('/deploy', requireAuth, async (req: AuthRequest, res, next) =>
     const ownerAddress = req.user!.address!;
     console.log(`[deploy] owner=${ownerAddress.slice(0, 10)}… ownerPublicKey length=${parsed.data.ownerPublicKey.length / 2} bytes, hex=${parsed.data.ownerPublicKey.slice(0, 8)}...`);
 
-    // Resolve skill slugs → frozen snapshots (server-side only). Authenticated
-    // route — both PUBLIC and PRIVATE skills are installable here.
-    const { skillSlugs, ...deployParams } = parsed.data;
+    // Resolve skill slugs → frozen snapshots (server-side only). Only public
+    // skills install at deploy; an owner adds their private skill afterwards
+    // through POST /:id/skills.
+    const { skillSlugs, feeTxHash, ...deployParams } = parsed.data;
     const skills: InstalledSkill[] = [];
     // Dedupe: a crafted request could repeat a slug and duplicate its
     // [SKILL:] section in the composed prompt (the UI prevents this).
@@ -311,21 +358,45 @@ agentsRouter.post('/deploy', requireAuth, async (req: AuthRequest, res, next) =>
       ...skills.flatMap((s) => s.capabilities),
     ])] as (typeof parsed.data.capabilities);
 
-    // Consume a deploy credit if the AgentFactory paywall is enabled — only
-    // AFTER every validation above. A credit is a paid 1 USDC: claiming it
-    // first meant a rejected request (e.g. an unknown skill slug → 404) still
-    // spent the user's payment.
+    // Take the deploy fee if the paywall is enabled — only AFTER every
+    // validation above. A fee is a paid 1 USDC: taking it first meant a
+    // rejected request (e.g. an unknown skill slug → 404) still spent the
+    // user's payment. The Arc transaction named by feeTxHash pays for one
+    // deploy; without one, an AgentFactory deploy credit does.
     let credit: Awaited<ReturnType<typeof claimDeployCredit>> = null;
+    let claimedFeeTx: string | null = null;
     if (config.agentFactoryPaywall) {
-      credit = await claimDeployCredit(ownerAddress);
-      if (!credit) {
-        res.status(402).json({
-          success: false,
-          error: { code: 'NO_DEPLOY_CREDIT', message: 'No deploy credit found. Pay 1 USDC via AgentFactory first.' },
-        });
-        return;
+      if (feeTxHash) {
+        const { payer, amountRaw } = await verifyArcDeployFee(feeTxHash, callerWallets(req.user));
+        const claim = await claimArcDeployFee(feeTxHash, ownerAddress);
+        if (!claim.claimed) {
+          res.status(409).json({
+            success: false,
+            error: claim.pending
+              ? { code: 'DEPLOY_FEE_IN_USE', message: 'A deploy paid with this transaction is still running. Wait for it to finish, then check your agents.' }
+              : {
+                  code: 'DEPLOY_FEE_ALREADY_USED',
+                  message: claim.agentId
+                    ? `That fee transaction already paid for agent ${claim.agentId}. Each agent needs its own fee payment.`
+                    : 'That fee transaction has already paid for a deploy. Each agent needs its own fee payment.',
+                  ...(claim.agentId ? { agentId: claim.agentId } : {}),
+                },
+          });
+          return;
+        }
+        claimedFeeTx = feeTxHash;
+        console.log(`[deploy] Arc fee tx=${feeTxHash} payer=${payer} amount=${amountRaw}`);
+      } else {
+        credit = await claimDeployCredit(ownerAddress);
+        if (!credit) {
+          res.status(402).json({
+            success: false,
+            error: { code: 'NO_DEPLOY_CREDIT', message: 'No deploy fee found. Pay the deploy fee first — GET /api/v1/agents/deploy-fee says where.' },
+          });
+          return;
+        }
+        console.log(`[deploy] consumed credit nonce=${credit.nonce} tx=${credit.txHash}`);
       }
-      console.log(`[deploy] consumed credit nonce=${credit.nonce} tx=${credit.txHash}`);
     }
 
     let agent: Awaited<ReturnType<typeof deployAgent>>;
@@ -337,17 +408,30 @@ agentsRouter.post('/deploy', requireAuth, async (req: AuthRequest, res, next) =>
         skills: skills.length ? skills : undefined,
       } as Parameters<typeof deployAgent>[0]);
     } catch (deployErr) {
-      // No agent was created — give the paid credit back so the user can retry.
+      // No agent was created — give the paid fee back so the user can retry.
       if (credit) {
         await restoreDeployCredit(credit).catch((e) =>
           console.error(`[deploy] FAILED to restore credit nonce=${credit!.nonce} for ${ownerAddress}:`, (e as Error).message),
         );
         console.warn(`[deploy] deploy failed — restored credit nonce=${credit.nonce}`);
       }
+      if (claimedFeeTx) {
+        await releaseArcDeployFee(claimedFeeTx).catch((e) =>
+          console.error(`[deploy] FAILED to release Arc fee tx=${claimedFeeTx} for ${ownerAddress}:`, (e as Error).message),
+        );
+        console.warn(`[deploy] deploy failed — released Arc fee tx=${claimedFeeTx}`);
+      }
       throw deployErr;
     }
 
     // Popularity counters — best-effort, never blocks the deploy.
+    // The agent exists: its fee transaction is spent for good.
+    if (claimedFeeTx) {
+      await markArcDeployFeeUsed(claimedFeeTx, agent.id).catch((e) =>
+        console.error(`[deploy] FAILED to mark Arc fee tx=${claimedFeeTx} used by agent ${agent.id}:`, (e as Error).message),
+      );
+    }
+
     for (const s of skills) void skillStore.incrementInstallCount(s.skillId).catch(() => {});
 
     // Start it. deployAgent() persists status 'stopped' and nothing else moved

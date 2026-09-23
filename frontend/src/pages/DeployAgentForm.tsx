@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useWalletClient, useChainId } from 'wagmi';
-import { BrowserProvider, Contract, formatUnits } from 'ethers';
+import { useWalletClient } from 'wagmi';
+import { BrowserProvider, Contract, Interface, formatUnits, type JsonRpcSigner } from 'ethers';
 import {
   Breadcrumb,
   PageHeader,
@@ -16,13 +16,24 @@ import {
 import { ToolManager, type AnyTool } from '../components/bb/ToolManager';
 import SkillPicker from '../components/bb/SkillPicker';
 import { get, authedPost } from '../lib/api';
-import { signAndSendTx } from '../lib/txSigner';
+import { providerFor, sendDirectPayment, signAndSendTx } from '../lib/txSigner';
+import { useWallet } from '../context/WalletContext';
 import { useChainAddress } from '../hooks/useChainWallet';
 import { getOrCreateExecutorIdentity } from '../lib/executorIdentity';
-// The deploy fee is Arc USDC (AgentFactory lives on Arc), whatever token
-// new tasks are priced in — so not the marketplace token.
-import { ARC_CHAIN_ID, ARC_USDC_ADDRESS, unsetIfZero } from '../config/constants';
+import { ARC_CHAIN_CONFIG, ARC_CHAIN_ID, ARC_USDC_ADDRESS, unsetIfZero } from '../config/constants';
 import { CONTRACT_ADDRESSES } from '../config/contractAddresses';
+
+/**
+ * What deploying charges (GET /api/v1/agents/deploy-fee). On a stack with an
+ * Arc escrow — production — this page pays it as one USDC transfer to the
+ * escrow's treasury and names that transaction in the deploy request.
+ * Otherwise it pays through AgentFactory on Arc, whose event the backend
+ * turns into a deploy credit.
+ */
+type DeployFeeTerms =
+  | { required: false }
+  | { required: true; method: 'transfer'; chain: 'arc'; token: string; recipient: string; amountRaw: string; decimals: number; factory: string | null }
+  | { required: true; method: 'factory'; chain: 'arc'; factory: string | null };
 
 // AgentFactory on Arc — accepts USDC, emits AgentDeployed event
 const AGENT_FACTORY_ABI = [
@@ -35,6 +46,7 @@ const USDC_ABI = [
   'function approve(address spender, uint256 amount) external returns (bool)',
   'function allowance(address owner, address spender) external view returns (uint256)',
   'function balanceOf(address owner) external view returns (uint256)',
+  'function transfer(address to, uint256 amount) external returns (bool)',
 ];
 
 const AGENT_FACTORY_ADDRESS = unsetIfZero(
@@ -43,9 +55,42 @@ const AGENT_FACTORY_ADDRESS = unsetIfZero(
     '',
 );
 
-// Deploy fee: 1 USDC (6 decimals)
+// AgentFactory's deploy fee: 1 USDC (6 decimals)
 const DEPLOY_FEE_USDC = 1_000_000n;
-const DEPLOY_FEE_HUMAN = 1;
+// Arc gas is paid from the same USDC balance. A USDC transfer used ~49k gas,
+// under 0.0023 USDC at Arc testnet's max fee (measured Sep 2026).
+const ARC_GAS_MARGIN = 10_000n; // 0.01 USDC
+
+/** "1", "2.5" — a 6-decimal USDC amount for display. */
+const usdc = (raw: bigint) => String(Number(formatUnits(raw, 6)));
+
+// A fee paid on Arc but not yet used for a deploy (the deploy failed, or the
+// tab closed after paying). Kept per owner so the retry uses it instead of
+// charging again; the backend accepts each payment for one deploy only.
+const pendingFeeKey = (owner: string) => `bb.deployFeeTx.${owner.toLowerCase()}`;
+function readPendingFee(owner: string): string | null {
+  try {
+    const hash = localStorage.getItem(pendingFeeKey(owner));
+    return hash && /^0x[0-9a-fA-F]{64}$/.test(hash) ? hash : null;
+  } catch {
+    return null;
+  }
+}
+function writePendingFee(owner: string, hash: string | null) {
+  try {
+    if (hash) localStorage.setItem(pendingFeeKey(owner), hash);
+    else localStorage.removeItem(pendingFeeKey(owner));
+  } catch { /* storage blocked: a failed deploy then needs a new payment */ }
+}
+
+/** Whether a failed deploy means the saved payment can never pay for one. */
+function feeIsSpent(err: { code?: string; payload?: Record<string, unknown> }): boolean {
+  if (['DEPLOY_FEE_ALREADY_USED', 'DEPLOY_FEE_REVERTED', 'TX_REVERTED', 'TX_CANCELLED'].includes(err.code ?? '')) return true;
+  // Paid from a wallet that isn't on the account: linking it makes the same payment count.
+  return err.code === 'DEPLOY_FEE_NOT_PAID' && err.payload?.reason !== 'PAYER_NOT_LINKED';
+}
+
+const shortHash = (hash: string) => `${hash.slice(0, 10)}…${hash.slice(-6)}`;
 
 type Provider = 'openai' | 'anthropic' | 'groq' | 'gemini' | '0g-compute';
 type ProviderModels = Record<Provider, string[]>;
@@ -122,7 +167,9 @@ You review code for bugs, security issues, and best practices.
 export default function DeployAgentForm() {
   const address = useChainAddress();
   const { data: walletClient } = useWalletClient();
-  const chainId = useChainId();
+  // The wallet's own network. wagmi's useChainId only ever reports the chains
+  // in its config (Arc), so it cannot tell a wallet sitting elsewhere.
+  const { chainId: walletChainId, embeddedAddress, externalAddresses, switchChain } = useWallet();
   const navigate = useNavigate();
 
   // Pre-fetch fallback — mirrors LLM_PROVIDER_MODELS in backend/src/types.ts,
@@ -178,32 +225,66 @@ export default function DeployAgentForm() {
   // Installed skills (slugs).
   const [skillSlugs, setSkillSlugs] = useState<string[]>([]);
   // Slugs imported as PRIVATE drafts via the SkillPicker importer. The deploy
-  // now happens on-chain and the backend creates the agent from the event, so
-  // there is no agent id here to attach them to — they're listed on the success
+  // route installs public skills only, so these are listed on the success
   // screen for the owner to install from the agent's Skills panel instead.
   const [privateSkillSlugs, setPrivateSkillSlugs] = useState<string[]>([]);
 
-  const [status, setStatus] = useState<'idle' | 'confirming' | 'approving' | 'deploying' | 'done' | 'error'>('idle');
+  const [status, setStatus] = useState<'idle' | 'confirming' | 'approving' | 'paying' | 'deploying' | 'done' | 'error'>('idle');
   const submittingRef = useRef(false);
   const confirmResolveRef = useRef<((approve: boolean) => void) | null>(null);
   const [error, setError] = useState('');
-  const [deployTxHash, setDeployTxHash] = useState('');
+  const [deployed, setDeployed] = useState<{ id: string; started: boolean; feeTx: string | null } | null>(null);
 
-  const isArcChain = chainId === ARC_CHAIN_ID;
-  const needsChainSwitch = !isArcChain && chainId !== 0;
-
-  const [usdcBalance, setUsdcBalance] = useState<bigint | null>(null);
-
-  // Load USDC balance
+  // What deploying costs and where it is paid. Undefined while loading.
+  const [feeTerms, setFeeTerms] = useState<DeployFeeTerms | undefined>(undefined);
+  const [feeTermsError, setFeeTermsError] = useState(false);
   useEffect(() => {
-    if (!address || !walletClient) return;
-    const provider = new BrowserProvider(walletClient.transport);
-    const usdc = new Contract(ARC_USDC_ADDRESS, USDC_ABI, provider);
-    usdc.balanceOf(address).then((b: bigint) => setUsdcBalance(b)).catch(() => {});
-  }, [address, walletClient, status]);
+    let cancelled = false;
+    get<DeployFeeTerms>('/api/v1/agents/deploy-fee')
+      .then((t) => { if (!cancelled) setFeeTerms(t); })
+      .catch(() => { if (!cancelled) setFeeTermsError(true); });
+    return () => { cancelled = true; };
+  }, []);
 
-  const usdcBalanceHuman = usdcBalance !== null ? Number(formatUnits(usdcBalance, 6)) : null;
-  const hasEnoughUsdc = usdcBalanceHuman !== null && usdcBalanceHuman >= DEPLOY_FEE_HUMAN;
+  const feeMethod = feeTerms?.required ? feeTerms.method : null;
+  const feeToken = feeTerms?.required ? (feeTerms.method === 'transfer' ? feeTerms.token : ARC_USDC_ADDRESS) : null;
+  const feeRaw = feeTerms?.required && feeTerms.method === 'transfer' ? BigInt(feeTerms.amountRaw) : DEPLOY_FEE_USDC;
+  const factoryAddress = (feeTerms?.required && feeTerms.factory) || AGENT_FACTORY_ADDRESS;
+  // Arc has no relay: the wallet signs the fee transfer itself, so it must be on Arc.
+  const needsArcSwitch = feeMethod !== null && walletChainId !== null && walletChainId !== ARC_CHAIN_ID;
+  // The wallets on this account. The backend counts a fee paid from these only.
+  const accountWallets = [embeddedAddress, ...externalAddresses]
+    .filter((a): a is string => !!a)
+    .map((a) => a.toLowerCase());
+  // The code of the last failed deploy, for what the page offers next.
+  const [errorCode, setErrorCode] = useState<string | null>(null);
+
+  // An Arc payment from an earlier attempt that no deploy has used yet.
+  const [pendingFee, setPendingFee] = useState<string | null>(null);
+  useEffect(() => {
+    setPendingFee(address && feeMethod === 'transfer' ? readPendingFee(address) : null);
+  }, [address, feeMethod, status]);
+
+  // The balance of the wallet that pays, in the fee's token on the fee's
+  // chain — never through the wallet's own provider, which may sit on another
+  // network. Polled so funding the wallet shows up without a reload.
+  const payer = walletClient?.account?.address ?? address;
+  const [usdcBalance, setUsdcBalance] = useState<bigint | null>(null);
+  useEffect(() => {
+    if (!payer || !feeToken) { setUsdcBalance(null); return; }
+    let cancelled = false;
+    const token = new Contract(feeToken, USDC_ABI, providerFor('arc'));
+    const read = () => token.balanceOf(payer)
+      .then((b: bigint) => { if (!cancelled) setUsdcBalance(b); })
+      .catch(() => { /* RPC hiccup: keep the last reading */ });
+    read();
+    const timer = setInterval(read, 15_000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [payer, feeToken, status]);
+
+  const feeNeeded = feeRaw + ARC_GAS_MARGIN;
+  const hasEnoughUsdc = !feeTerms?.required || !!pendingFee || (usdcBalance !== null && usdcBalance >= feeNeeded);
+  const busy = status === 'confirming' || status === 'approving' || status === 'paying' || status === 'deploying';
 
   useEffect(() => {
     if (!address) return; // the lookup is authenticated — deploy needs a session anyway
@@ -266,65 +347,114 @@ export default function DeployAgentForm() {
     });
   }
 
+  /** Pay the fee on Arc: one USDC transfer to the treasury, signed by the wallet. Returns its hash. */
+  async function payFeeOnArc(signer: JsonRpcSigner, terms: Extract<DeployFeeTerms, { method: 'transfer' }>, owner: string): Promise<string> {
+    const from = (await signer.getAddress()).toLowerCase();
+    // A fee from a wallet that isn't on the account is refused by the backend
+    // and would be lost. (Skipped while the account's wallets are unknown.)
+    if (accountWallets.length > 0 && !accountWallets.includes(from)) {
+      throw new Error(
+        `The connected wallet ${from} isn't one of your account's wallets, so a fee paid from it wouldn't count. ` +
+        `Switch to ${embeddedAddress ?? accountWallets[0]}, or link this wallet to your account first.`,
+      );
+    }
+    setStatus('paying');
+    const data = new Interface(USDC_ABI).encodeFunctionData('transfer', [terms.recipient, BigInt(terms.amountRaw)]);
+    // Saved the moment the wallet broadcasts it, before any wait, so no
+    // failure from here on (a closed tab included) costs a second fee.
+    const remember = (hash: string) => { writePendingFee(owner, hash); setPendingFee(hash); };
+    try {
+      const sent = await sendDirectPayment(signer, { to: terms.token, data }, 'arc', remember);
+      console.log(`[deploy] Arc fee paid hash=${sent.hash} confirmed=${!!sent.receipt}`);
+      return sent.hash;
+    } catch (err) {
+      if (feeIsSpent(err as { code?: string })) { writePendingFee(owner, null); setPendingFee(null); }
+      throw err;
+    }
+  }
+
+  /** Drop a saved payment that never confirmed, so the next deploy pays anew. */
+  function forgetPendingFee() {
+    if (address) writePendingFee(address, null);
+    setPendingFee(null);
+    setErrorCode(null);
+    setError('');
+  }
+
+  /** Pay the fee through AgentFactory on Arc (approve, then deployAgent). Returns the factory tx hash. */
+  async function payFeeViaFactory(signer: JsonRpcSigner, owner: string, factoryAddr: string): Promise<string> {
+    // Reads go to Arc whatever network the wallet reports. Arc has no relay:
+    // the wallet signs both transactions and pays their gas in USDC.
+    const arc = providerFor('arc');
+    const readAllowance = () => new Contract(ARC_USDC_ADDRESS, USDC_ABI, arc).allowance(owner, factoryAddr) as Promise<bigint>;
+
+    // Step 1: Approve USDC spend
+    setStatus('approving');
+    if ((await readAllowance()) < DEPLOY_FEE_USDC) {
+      const approveData = new Interface(USDC_ABI).encodeFunctionData('approve', [factoryAddr, DEPLOY_FEE_USDC]);
+      const approveResult = await signAndSendTx(signer, { from: owner, to: ARC_USDC_ADDRESS, data: approveData }, undefined, { chain: 'arc' });
+      console.log(`[deploy] USDC approve done hash=${approveResult.hash}`);
+
+      // Poll allowance until the RPC shows it
+      for (let i = 0; i < 20; i++) {
+        await new Promise(r => setTimeout(r, 3000));
+        const allowance = await readAllowance().catch(() => 0n);
+        if (allowance >= DEPLOY_FEE_USDC) break;
+        if (i === 19) throw new Error('USDC approve timed out — allowance not confirmed after 60s');
+      }
+    }
+
+    // Step 2: Pay via AgentFactory
+    setStatus('paying');
+    const deployData = new Interface(AGENT_FACTORY_ABI).encodeFunctionData('deployAgent', [0]);
+    const deployResult = await signAndSendTx(signer, { from: owner, to: factoryAddr, data: deployData }, undefined, { chain: 'arc' });
+    console.log(`[deploy] AgentFactory done hash=${deployResult.hash}`);
+    return deployResult.hash;
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!address) return;
-    if (!walletClient) return;
-    if (!AGENT_FACTORY_ADDRESS) {
+    if (!address || !feeTerms) return;
+    if (!walletClient) {
+      setError('Your wallet is not ready. Reconnect it and try again.');
+      setErrorCode(null);
+      setStatus('error');
+      return;
+    }
+    if (feeTerms.required && feeTerms.method === 'factory' && !factoryAddress) {
       setError('AgentFactory not configured for this network');
+      setErrorCode(null);
+      setStatus('error');
       return;
     }
     if (submittingRef.current) return;
     submittingRef.current = true;
     setError('');
+    setErrorCode(null);
 
-    // Show confirmation dialog before spending
-    setStatus('confirming');
-    const approved = await new Promise<boolean>((resolve) => { confirmResolveRef.current = resolve; });
-    if (!approved) { setStatus('idle'); submittingRef.current = false; return; }
+    // An Arc payment no deploy has used yet pays for this one.
+    const savedFee = feeTerms.required && feeTerms.method === 'transfer' ? readPendingFee(address) : null;
 
+    // Confirm before spending — not when nothing will be spent.
+    if (feeTerms.required && !savedFee) {
+      setStatus('confirming');
+      const approved = await new Promise<boolean>((resolve) => { confirmResolveRef.current = resolve; });
+      if (!approved) { setStatus('idle'); submittingRef.current = false; return; }
+    }
+
+    let feeTxHash: string | null = savedFee;
     try {
-      const provider = new BrowserProvider(walletClient.transport);
-      const signer = await provider.getSigner();
-
-      // Step 1: Approve USDC spend. Arc has no relay — the wallet signs
-      // directly and pays gas natively in USDC.
-      setStatus('approving');
-      const usdc = new Contract(ARC_USDC_ADDRESS, USDC_ABI, provider);
-      const currentAllowance = await usdc.allowance(address, AGENT_FACTORY_ADDRESS);
-      if (currentAllowance < DEPLOY_FEE_USDC) {
-        const approveTx = await usdc.approve.populateTransaction(AGENT_FACTORY_ADDRESS, DEPLOY_FEE_USDC);
-        const approveResult = await signAndSendTx(signer, approveTx as any, undefined, { chain: 'arc' });
-        console.log(`[deploy] USDC approve done hash=${approveResult.hash} userOp=${approveResult.userOp ?? false}`);
-
-        // Poll allowance until on-chain
-        console.log(`[deploy] Waiting for USDC allowance to be confirmed on-chain...`);
-        for (let i = 0; i < 20; i++) {
-          await new Promise(r => setTimeout(r, 3000));
-          const fresh = new Contract(ARC_USDC_ADDRESS, USDC_ABI, provider);
-          const allowance = await fresh.allowance(address, AGENT_FACTORY_ADDRESS);
-          if (allowance >= DEPLOY_FEE_USDC) {
-            console.log(`[deploy] USDC allowance confirmed: ${allowance}`);
-            break;
-          }
-          if (i === 19) throw new Error('USDC approve timed out — allowance not confirmed after 60s');
-        }
+      const signer = await new BrowserProvider(walletClient.transport).getSigner();
+      let feeTx: string | null = savedFee;
+      if (feeTerms.required && feeTerms.method === 'transfer' && !feeTxHash) {
+        feeTxHash = await payFeeOnArc(signer, feeTerms, address);
+        feeTx = feeTxHash;
+      } else if (feeTerms.required && feeTerms.method === 'factory') {
+        feeTx = await payFeeViaFactory(signer, address, factoryAddress!);
       }
 
-      // Step 2: Pay via AgentFactory (direct-signed — gas paid natively in USDC)
+      // Create the agent (the backend checks the fee, creates its wallet, starts it).
       setStatus('deploying');
-      const factory = new Contract(AGENT_FACTORY_ADDRESS, AGENT_FACTORY_ABI, provider);
-      console.log('[deploy] Calling deployAgent(0)...');
-      const deployTx = await factory.deployAgent.populateTransaction(0);
-      const deployResult = await signAndSendTx(signer, deployTx as any, undefined, { chain: 'arc' });
-      console.log(`[deploy] AgentFactory done hash=${deployResult.hash} userOp=${deployResult.userOp ?? false}`);
-      if (deployResult.userOp) {
-        await new Promise(r => setTimeout(r, 15000));
-      }
-      setDeployTxHash(deployResult.hash);
-
-      // Step 3: Create agent via backend (consumes credit, creates wallet, mints INFT)
-      // The AgentFactory listener polls every 15s — retry until credit is available.
       const ownerIdentity = getOrCreateExecutorIdentity(address);
       const deployBody = {
         ownerPublicKey: ownerIdentity.publicKey,
@@ -337,48 +467,78 @@ export default function DeployAgentForm() {
         tools,
         toolSecrets,
         skillSlugs,
+        ...(feeTxHash ? { feeTxHash } : {}),
       };
-      let result: { id: string } | null = null;
-      for (let attempt = 0; attempt < 20; attempt++) {
+      // Factory: the AgentFactory listener polls every 15s, so the credit can lag
+      // the payment by up to a minute. Arc: the backend already asks Arc for
+      // the fee's receipt several times; a lagging RPC gets two more tries.
+      const maxAttempts = feeTxHash ? 3 : feeTerms.required ? 20 : 1;
+      const retryCode = feeTxHash ? 'DEPLOY_FEE_NOT_FOUND' : 'NO_DEPLOY_CREDIT';
+      let result: { id: string; started?: boolean } | null = null;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
         try {
-          console.log(`[deploy] POST /agents/deploy attempt ${attempt + 1}/20`);
-          result = await authedPost<{ id: string }>('/api/v1/agents/deploy', deployBody);
+          result = await authedPost<{ id: string; started?: boolean }>('/api/v1/agents/deploy', deployBody);
           break;
         } catch (err: any) {
-          console.log(`[deploy] attempt ${attempt + 1} failed:`, err.code, err.message);
-          if (err.code === 'NO_DEPLOY_CREDIT' && attempt < 19) {
-            // Credit not indexed yet — listener polls every 15s, wait up to 60s total
+          console.log(`[deploy] attempt ${attempt + 1}/${maxAttempts} failed:`, err.code, err.message);
+          if (err.code === retryCode && attempt < maxAttempts - 1) {
             await new Promise(r => setTimeout(r, 5000));
             continue;
           }
           throw err;
         }
       }
-      if (!result) throw new Error('Deploy credit not found after payment. Try again in a moment.');
-      setDeployTxHash(result.id);
+      if (!result) throw new Error('The deploy fee was not found after payment. Try again in a moment.');
+      if (feeTxHash) writePendingFee(address, null);
+      setPendingFee(null);
+      setDeployed({ id: result.id, started: result.started === true, feeTx });
       setStatus('done');
-    } catch (err) {
-      setError((err as Error).message);
+    } catch (err: any) {
+      if (feeTxHash && feeIsSpent(err ?? {})) {
+        writePendingFee(address, null);
+        setPendingFee(null);
+      }
+      setError(
+        err?.code === 'ACTION_REJECTED'
+          ? 'You declined the transaction in your wallet, so nothing was paid.'
+          : (err as Error).message,
+      );
+      setErrorCode(typeof err?.code === 'string' ? err.code : null);
       setStatus('error');
     } finally {
       submittingRef.current = false;
     }
   }
 
-  if (status === 'done') {
+  if (status === 'done' && deployed) {
+    const explorer = ARC_CHAIN_CONFIG.blockExplorerUrls[0];
     return (
       <div>
         <Breadcrumb items={['marketplace', 'agents', 'create', 'no-code']} />
         <div className="border border-line p-10 text-center space-y-5 mt-8">
           <div className="flex items-center justify-center gap-2 text-ok">
             <Icon name="check" size={18} />
-            <span className="text-sm font-semibold">Agent deployment initiated</span>
+            <span className="text-sm font-semibold">Agent deployed</span>
           </div>
           <div className="space-y-1.5">
+            {deployed.feeTx && (
+              <div className="text-xs text-ink-3">
+                Deploy fee paid on Arc · tx{' '}
+                <a
+                  href={`${explorer}/tx/${deployed.feeTx}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="font-mono text-ink-2 hover:text-ink"
+                >
+                  {shortHash(deployed.feeTx)}
+                </a>
+              </div>
+            )}
             <div className="text-xs text-ink-3">
-              Deploy tx <span className="font-mono text-ink-2">{deployTxHash.slice(0, 10)}...{deployTxHash.slice(-6)}</span>
+              {deployed.started
+                ? 'Your agent is running.'
+                : 'Your agent was created but did not start — start it from My agents.'}
             </div>
-            <div className="text-xs text-ink-3">Backend is creating your agent from the on-chain event...</div>
           </div>
 
           {privateSkillSlugs.length > 0 && (
@@ -389,32 +549,19 @@ export default function DeployAgentForm() {
                   <Icon name="clock" size={12} className="mt-0.5 shrink-0" />
                   <span className="min-w-0 break-words">
                     <span className="font-mono">{slug}</span> — add this from the agent's
-                    Skills panel once it appears. Private skills can't be installed
-                    during an on-chain deploy.
+                    Skills panel. Private skills can't be installed at deploy.
                   </span>
                 </div>
               ))}
             </div>
           )}
 
-          <div className="mx-auto max-w-md border border-line px-4 py-3 text-left text-[13px] text-ink-2 leading-relaxed space-y-1.5">
-            <div className="flex items-center gap-2 font-semibold text-ink">
-              <Icon name="info" size={15} />
-              <span>Decentralized deployment</span>
-            </div>
-            <p>
-              Your agent is deployed by a smart contract on Arc. The backend listens
-              for the on-chain event to create your agent. No single point of failure —
-              the backend cannot control your agent.
-            </p>
-          </div>
-
           <div className="flex justify-center gap-3 flex-wrap pt-1">
             <Button variant="primary" label="My agents" onClick={() => navigate('/agents/mine')} />
             <Button
               variant="ghost"
               label="Deploy another"
-              onClick={() => { setStatus('idle'); setDeployTxHash(''); setPrivateSkillSlugs([]); }}
+              onClick={() => { setStatus('idle'); setDeployed(null); setPrivateSkillSlugs([]); }}
             />
           </div>
           </div>
@@ -599,35 +746,74 @@ export default function DeployAgentForm() {
         <div className="p-6">
           {!address ? (
             <p className="text-sm text-ink-3">Connect a wallet to deploy an agent.</p>
-          ) : needsChainSwitch ? (
-            <p className="text-sm text-ink-3">Switch to Arc network to deploy an agent.</p>
+          ) : feeTermsError ? (
+            <p className="text-sm text-err">Could not load the deploy fee. Reload the page to try again.</p>
+          ) : !feeTerms ? (
+            <p className="text-sm text-ink-3">Loading the deploy fee…</p>
+          ) : needsArcSwitch ? (
+            <div className="flex items-center gap-3 flex-wrap">
+              <p className="text-sm text-ink-3">The deploy fee is paid on Arc, and your wallet is on another network.</p>
+              <Button type="button" variant="ghost" label="Switch to Arc" onClick={() => { void switchChain(ARC_CHAIN_ID); }} />
+            </div>
           ) : (
             <>
-              <div className="mb-4 border border-line bg-surface-2 px-4 py-3.5 space-y-2">
-                <div className="flex items-center gap-2 text-sm font-semibold text-ink">
-                  <Icon name="bolt" size={15} className="text-cream" />
-                  <span>Deployment uses 2 signatures</span>
+              {feeTerms.required && (
+                <div className="mb-4 border border-line bg-surface-2 px-4 py-3.5 space-y-2">
+                  <div className="flex items-center gap-2 text-sm font-semibold text-ink">
+                    <Icon name="bolt" size={15} className="text-cream" />
+                    <span>{feeTerms.method === 'transfer' ? 'Deployment uses 1 signature' : 'Deployment uses 2 signatures'}</span>
+                  </div>
+                  {feeTerms.method === 'transfer' ? (
+                    <p className="text-[13px] text-ink-2 leading-relaxed">
+                      Sends the {usdc(feeRaw)} USDC deploy fee to the platform treasury on Arc. Gas is paid in USDC from the same balance.
+                    </p>
+                  ) : (
+                    <ol className="text-[13px] text-ink-2 leading-relaxed space-y-1 list-decimal list-inside">
+                      <li>Approve USDC — allows AgentFactory to charge the deploy fee.</li>
+                      <li>Deploy agent — pays {usdc(feeRaw)} USDC, emits on-chain event.</li>
+                    </ol>
+                  )}
+                  {pendingFee ? (
+                    <div className="text-[13px] text-ink-3 pt-0.5">
+                      Fee already paid (tx{' '}
+                      <a
+                        href={`${ARC_CHAIN_CONFIG.blockExplorerUrls[0]}/tx/${pendingFee}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="font-mono text-ink-2 hover:text-ink"
+                      >
+                        {shortHash(pendingFee)}
+                      </a>) — deploying uses it, with no new charge.
+                      {errorCode === 'DEPLOY_FEE_NOT_FOUND' && (
+                        <>
+                          {' '}If the explorer never shows it,{' '}
+                          <button type="button" onClick={forgetPendingFee} className="text-ink-2 underline hover:text-ink">
+                            forget this payment
+                          </button>{' '}
+                          and pay again.
+                        </>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="text-[13px] text-ink-3 pt-0.5">
+                      Your USDC balance on Arc:{' '}
+                      <span className="font-mono text-ink-2">
+                        {usdcBalance !== null ? `${Number(formatUnits(usdcBalance, 6)).toFixed(2)} USDC` : '…'}
+                      </span>
+                    </div>
+                  )}
                 </div>
-                <ol className="text-[13px] text-ink-2 leading-relaxed space-y-1 list-decimal list-inside">
-                  <li>Approve USDC — allows AgentFactory to charge the deploy fee.</li>
-                  <li>Deploy agent — pays {DEPLOY_FEE_HUMAN} USDC, emits on-chain event.</li>
-                </ol>
-                <div className="text-[13px] text-ink-3 pt-0.5">
-                  Your USDC balance:{' '}
-                  <span className="font-mono text-ink-2">
-                    {usdcBalanceHuman !== null ? `${usdcBalanceHuman.toFixed(2)} USDC` : '…'}
-                  </span>
-                </div>
-              </div>
+              )}
 
-              {!hasEnoughUsdc && usdcBalanceHuman !== null && (
+              {!hasEnoughUsdc && usdcBalance !== null && (
                 <div className="mb-4 border border-err/40 bg-err/5 px-4 py-3.5 text-[13px] text-ink-2 leading-relaxed space-y-1.5">
                   <div className="flex items-center gap-2 font-semibold text-err">
                     <Icon name="bolt" size={15} />
                     <span>Not enough USDC to deploy</span>
                   </div>
                   <p>
-                    You need at least <span className="font-mono">{DEPLOY_FEE_HUMAN} USDC</span> for the deploy fee.
+                    You need at least <span className="font-mono">{usdc(feeNeeded)} USDC</span>
+                    {` on Arc — the ${usdc(feeRaw)} USDC fee plus a little for gas.`}
                   </p>
                 </div>
               )}
@@ -636,15 +822,19 @@ export default function DeployAgentForm() {
                 <Button
                   type="submit"
                   variant="primary"
-                  disabled={status === 'confirming' || status === 'approving' || status === 'deploying' || !hasEnoughUsdc}
+                  disabled={busy || !hasEnoughUsdc}
                   label={
                     status === 'confirming'
                       ? 'Confirm deploy…'
                       : status === 'approving'
                       ? 'Approving USDC…'
+                      : status === 'paying'
+                      ? 'Paying deploy fee…'
                       : status === 'deploying'
-                      ? 'Deploying agent…'
-                      : `Deploy agent (${DEPLOY_FEE_HUMAN} USDC) →`
+                      ? 'Creating agent…'
+                      : !feeTerms.required || pendingFee
+                      ? 'Deploy agent →'
+                      : `Deploy agent (${usdc(feeRaw)} USDC) →`
                   }
                 />
               </div>
@@ -659,21 +849,39 @@ export default function DeployAgentForm() {
         description={
           <div className="space-y-2">
             <p className="text-sm text-ink-2">Review before deploying:</p>
-            <div className="rounded-lg bg-surface-2 p-3 space-y-1.5 font-mono text-xs">
-              <div className="flex justify-between">
-                <span className="text-ink-3">Deploy fee</span>
-                <span>~1 USDC</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-ink-3">Gas (paid in USDC)</span>
-                <span>~0.001 USDC</span>
-              </div>
-              <div className="border-t border-line pt-1.5 flex justify-between font-semibold">
-                <span>Total</span>
-                <span>~1.001 USDC</span>
-              </div>
-            </div>
-            <p className="text-xs text-ink-3">Gas is paid in USDC — Arc uses USDC as its native gas token.</p>
+            {feeTerms?.required && feeTerms.method === 'transfer' ? (
+              <>
+                <div className="rounded-lg bg-surface-2 p-3 space-y-1.5 font-mono text-xs">
+                  <div className="flex justify-between">
+                    <span className="text-ink-3">Deploy fee</span>
+                    <span>{usdc(feeRaw)} USDC</span>
+                  </div>
+                  <div className="flex justify-between gap-3">
+                    <span className="text-ink-3">Paid to</span>
+                    <span>treasury {feeTerms.recipient.slice(0, 6)}…{feeTerms.recipient.slice(-4)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-ink-3">Gas (paid in USDC)</span>
+                    <span>under 0.01 USDC</span>
+                  </div>
+                </div>
+                <p className="text-xs text-ink-3">Your wallet signs one USDC transfer on Arc.</p>
+              </>
+            ) : (
+              <>
+                <div className="rounded-lg bg-surface-2 p-3 space-y-1.5 font-mono text-xs">
+                  <div className="flex justify-between">
+                    <span className="text-ink-3">Deploy fee</span>
+                    <span>{usdc(feeRaw)} USDC</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-ink-3">Gas (paid in USDC)</span>
+                    <span>under 0.01 USDC</span>
+                  </div>
+                </div>
+                <p className="text-xs text-ink-3">Your wallet signs two transactions on Arc: a USDC approval, then the deploy through AgentFactory.</p>
+              </>
+            )}
           </div>
         }
         confirmLabel="Confirm deploy"

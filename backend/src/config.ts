@@ -382,10 +382,15 @@ export const config = {
   // generous relative to real per-agent usage.
   sandboxDailyCostCapMicro: parseInt(optional('SANDBOX_DAILY_COST_CAP_MICRO', '10000000'), 10),
 
-  // AgentFactory paywall. When enabled, deploying an agent requires a paid
-  // credit (1 USDC via AgentFactory on Base). Disabled during growth phase;
-  // flip to true before mainnet launch.
+  // The deploy fee paywall, on unless AGENT_FACTORY_PAYWALL=false. When on,
+  // deploying an agent needs a paid fee: a USDC transfer on Arc named in the
+  // request (services/deployFee.ts), or an AgentFactory credit
+  // (agentFactoryListener.ts).
   agentFactoryPaywall: optional('AGENT_FACTORY_PAYWALL', 'true').toLowerCase() === 'true',
+  // The deploy fee in USDC's smallest unit (6 decimals), when it is paid on
+  // Arc as a transfer to the escrow's treasury (services/deployFee.ts). 1 USDC,
+  // the same as AgentFactory's on Base.
+  deployFeeUsdcRaw: BigInt(optional('DEPLOY_FEE_USDC_RAW', '1000000')),
 
   // Circle CCTP V2 — lets a user/agent move native USDC between Base and
   // another EVM chain (burn-and-mint, not a wrapped-asset bridge). See

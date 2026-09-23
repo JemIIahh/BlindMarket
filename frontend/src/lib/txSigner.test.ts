@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { defaultSettlement, mergeSettlement, resetSettlement, setSettlement } from '../config/settlement';
-import { providerFor, baseProvider, relayChainNameFor, signAndSendTx } from './txSigner';
+import { providerFor, baseProvider, relayChainNameFor, sendDirectPayment, signAndSendTx } from './txSigner';
 
 /**
  * The relay `chain` name this app sends. It was hard-coded from the build's
@@ -121,5 +121,70 @@ describe('signAndSendTx reports a revert', () => {
     signer.provider.getNetwork = async () => ({ chainId: 84532n });
     await expect(signAndSendTx(signer, tx, undefined, { chain: 'arc' })).rejects.toMatchObject({ code: 'WRONG_CHAIN' });
     expect(signer.sendTransaction).not.toHaveBeenCalled();
+  });
+});
+
+describe('sendDirectPayment', () => {
+  const HASH = '0x' + 'aa'.repeat(32);
+  const FASTER = '0x' + 'bb'.repeat(32);
+  const payment = { to: '0x3600000000000000000000000000000000000000', data: '0xa9059cbb' };
+  const payer = (wait: () => Promise<unknown>, chainId = 5042002n) => ({
+    getAddress: async () => '0x1111111111111111111111111111111111111111',
+    sendUncheckedTransaction: vi.fn(async () => HASH),
+    provider: {
+      getNetwork: async () => ({ chainId }),
+      getBlockNumber: async () => 10,
+      getTransaction: vi.fn(async () => ({ replaceableTransaction: () => ({ wait }) })),
+    },
+  }) as any;
+  const replaced = (cancelled: boolean, status = 1) => Object.assign(new Error('transaction was replaced'), {
+    code: 'TRANSACTION_REPLACED', cancelled, replacement: { hash: FASTER }, receipt: { status },
+  });
+
+  it('hands over the hash as soon as the wallet broadcasts, before any wait', async () => {
+    const seen: string[] = [];
+    const signer = payer(async () => {
+      expect(seen).toEqual([HASH]); // saved before the wait even started
+      return { status: 1 };
+    });
+    await expect(sendDirectPayment(signer, payment, 'arc', (h) => seen.push(h))).resolves.toEqual({ hash: HASH, receipt: { status: 1 } });
+  });
+
+  it('follows a sped-up payment to its replacement', async () => {
+    const seen: string[] = [];
+    const signer = payer(async () => { throw replaced(false); });
+    await expect(sendDirectPayment(signer, payment, 'arc', (h) => seen.push(h))).resolves.toEqual({ hash: FASTER, receipt: { status: 1 } });
+    expect(seen).toEqual([HASH, FASTER]);
+  });
+
+  it('says nothing was paid when the wallet cancelled or replaced it', async () => {
+    await expect(sendDirectPayment(payer(async () => { throw replaced(true); }), payment, 'arc', () => {}))
+      .rejects.toMatchObject({ code: 'TX_CANCELLED' });
+  });
+
+  it('says nothing was paid when it reverted', async () => {
+    const err = Object.assign(new Error('reverted'), { code: 'CALL_EXCEPTION' });
+    await expect(sendDirectPayment(payer(async () => { throw err; }), payment, 'arc', () => {}))
+      .rejects.toMatchObject({ code: 'TX_REVERTED' });
+    await expect(sendDirectPayment(payer(async () => ({ status: 0 })), payment, 'arc', () => {}))
+      .rejects.toMatchObject({ code: 'TX_REVERTED' });
+  });
+
+  it('keeps an unconfirmed payment as sent, not failed', async () => {
+    const err = Object.assign(new Error('timeout'), { code: 'TIMEOUT' });
+    await expect(sendDirectPayment(payer(async () => { throw err; }), payment, 'arc', () => {}))
+      .resolves.toEqual({ hash: HASH, receipt: null });
+  });
+
+  it('refuses a wallet on the wrong network before sending', async () => {
+    const signer = payer(async () => ({ status: 1 }), 84532n);
+    await expect(sendDirectPayment(signer, payment, 'arc', () => {})).rejects.toMatchObject({ code: 'WRONG_CHAIN' });
+    expect(signer.sendUncheckedTransaction).not.toHaveBeenCalled();
+  });
+
+  it('refuses a relayed chain, which the wallet does not send on', async () => {
+    const signer = payer(async () => ({ status: 1 }));
+    await expect(sendDirectPayment(signer, payment, 'base', () => {})).rejects.toMatchObject({ code: 'NOT_DIRECT' });
+    expect(signer.sendUncheckedTransaction).not.toHaveBeenCalled();
   });
 });
