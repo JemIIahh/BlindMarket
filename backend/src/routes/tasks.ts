@@ -346,6 +346,11 @@ function hasAutoCheck(criteria: z.infer<typeof createTaskSchema>['verificationCr
   return false;
 }
 
+/** A whole number sent as a string: decimal digits, or 0x hex as BigInt() reads it. Null otherwise. */
+function parseWholeNumber(value: string): bigint | null {
+  return /^(?:\d+|0x[0-9a-fA-F]+)$/.test(value) ? BigInt(value) : null;
+}
+
 tasksRouter.post('/', requireAuth, async (req: AuthRequest, res, next) => {
   try {
     const data = createTaskSchema.parse(req.body);
@@ -387,7 +392,21 @@ tasksRouter.post('/', requireAuth, async (req: AuthRequest, res, next) => {
       }
     }
 
-    const amountBigInt = BigInt(data.amount);
+    // Checked before the hash is claimed below. BigInt() on "1.5" or "" throws
+    // a SyntaxError, which answered 500 and, for the duration, only after the
+    // hash was already claimed for this poster.
+    const amountBigInt = parseWholeNumber(data.amount);
+    if (amountBigInt === null || amountBigInt <= 0n) {
+      throw new AppError(
+        400,
+        'INVALID_AMOUNT',
+        "amount must be a whole number above 0, in the token's smallest unit (USDC has 6 decimals: '1500000' is 1.5 USDC)",
+      );
+    }
+    const durationBigInt = parseWholeNumber(data.duration);
+    if (durationBigInt === null || durationBigInt <= 0n) {
+      throw new AppError(400, 'INVALID_DURATION', 'duration must be a whole number of seconds above 0');
+    }
 
     // New tasks are funded on this deployment's posting chain (POSTING_CHAIN,
     // else Base when it has an escrow, else 0G), in that chain's settlement
@@ -426,7 +445,7 @@ tasksRouter.post('/', requireAuth, async (req: AuthRequest, res, next) => {
       amountBigInt,
       'general',
       data.locationZone,
-      BigInt(data.duration),
+      durationBigInt,
       isNative ? amountBigInt : undefined,
       data.verificationMode === 'agent' ? data.verifierAddress : undefined,
     );

@@ -91,6 +91,7 @@ function feeIsSpent(err: { code?: string; payload?: Record<string, unknown> }): 
 }
 
 const shortHash = (hash: string) => `${hash.slice(0, 10)}…${hash.slice(-6)}`;
+const shortAddress = (address: string) => `${address.slice(0, 6)}…${address.slice(-4)}`;
 
 type Provider = 'openai' | 'anthropic' | 'groq' | 'gemini' | '0g-compute';
 type ProviderModels = Record<Provider, string[]>;
@@ -382,17 +383,20 @@ export default function DeployAgentForm() {
   }
 
   /** Pay the fee through AgentFactory on Arc (approve, then deployAgent). Returns the factory tx hash. */
-  async function payFeeViaFactory(signer: JsonRpcSigner, owner: string, factoryAddr: string): Promise<string> {
+  async function payFeeViaFactory(signer: JsonRpcSigner, factoryAddr: string): Promise<string> {
     // Reads go to Arc whatever network the wallet reports. Arc has no relay:
-    // the wallet signs both transactions and pays their gas in USDC.
+    // the wallet signs both transactions and pays their gas in USDC. The
+    // allowance is the signing wallet's: the page's owner address can be
+    // another wallet on the account, whose allowance an approve never moves.
     const arc = providerFor('arc');
-    const readAllowance = () => new Contract(ARC_USDC_ADDRESS, USDC_ABI, arc).allowance(owner, factoryAddr) as Promise<bigint>;
+    const from = await signer.getAddress();
+    const readAllowance = () => new Contract(ARC_USDC_ADDRESS, USDC_ABI, arc).allowance(from, factoryAddr) as Promise<bigint>;
 
     // Step 1: Approve USDC spend
     setStatus('approving');
     if ((await readAllowance()) < DEPLOY_FEE_USDC) {
       const approveData = new Interface(USDC_ABI).encodeFunctionData('approve', [factoryAddr, DEPLOY_FEE_USDC]);
-      const approveResult = await signAndSendTx(signer, { from: owner, to: ARC_USDC_ADDRESS, data: approveData }, undefined, { chain: 'arc' });
+      const approveResult = await signAndSendTx(signer, { from, to: ARC_USDC_ADDRESS, data: approveData }, undefined, { chain: 'arc' });
       console.log(`[deploy] USDC approve done hash=${approveResult.hash}`);
 
       // Poll allowance until the RPC shows it
@@ -407,7 +411,7 @@ export default function DeployAgentForm() {
     // Step 2: Pay via AgentFactory
     setStatus('paying');
     const deployData = new Interface(AGENT_FACTORY_ABI).encodeFunctionData('deployAgent', [0]);
-    const deployResult = await signAndSendTx(signer, { from: owner, to: factoryAddr, data: deployData }, undefined, { chain: 'arc' });
+    const deployResult = await signAndSendTx(signer, { from, to: factoryAddr, data: deployData }, undefined, { chain: 'arc' });
     console.log(`[deploy] AgentFactory done hash=${deployResult.hash}`);
     return deployResult.hash;
   }
@@ -450,7 +454,7 @@ export default function DeployAgentForm() {
         feeTxHash = await payFeeOnArc(signer, feeTerms, address);
         feeTx = feeTxHash;
       } else if (feeTerms.required && feeTerms.method === 'factory') {
-        feeTx = await payFeeViaFactory(signer, address, factoryAddress!);
+        feeTx = await payFeeViaFactory(signer, factoryAddress!);
       }
 
       // Create the agent (the backend checks the fee, creates its wallet, starts it).
@@ -796,7 +800,8 @@ export default function DeployAgentForm() {
                     </div>
                   ) : (
                     <div className="text-[13px] text-ink-3 pt-0.5">
-                      Your USDC balance on Arc:{' '}
+                      Paid from <span className="font-mono text-ink-2">{payer ? shortAddress(payer) : '…'}</span>
+                      {' · '}balance on Arc{' '}
                       <span className="font-mono text-ink-2">
                         {usdcBalance !== null ? `${Number(formatUnits(usdcBalance, 6)).toFixed(2)} USDC` : '…'}
                       </span>
@@ -857,6 +862,10 @@ export default function DeployAgentForm() {
                     <span>{usdc(feeRaw)} USDC</span>
                   </div>
                   <div className="flex justify-between gap-3">
+                    <span className="text-ink-3">Paid from</span>
+                    <span>{payer ? shortAddress(payer) : '…'}</span>
+                  </div>
+                  <div className="flex justify-between gap-3">
                     <span className="text-ink-3">Paid to</span>
                     <span>treasury {feeTerms.recipient.slice(0, 6)}…{feeTerms.recipient.slice(-4)}</span>
                   </div>
@@ -873,6 +882,10 @@ export default function DeployAgentForm() {
                   <div className="flex justify-between">
                     <span className="text-ink-3">Deploy fee</span>
                     <span>{usdc(feeRaw)} USDC</span>
+                  </div>
+                  <div className="flex justify-between gap-3">
+                    <span className="text-ink-3">Paid from</span>
+                    <span>{payer ? shortAddress(payer) : '…'}</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-ink-3">Gas (paid in USDC)</span>

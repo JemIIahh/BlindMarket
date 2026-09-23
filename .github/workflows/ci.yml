@@ -28,10 +28,9 @@ name: CI
 # sdk/src/tools/helpers.ts, hid behind an `as any` and needed a grep even so —
 # a typecheck is necessary, not sufficient.)
 #
-# cli/ is deliberately NOT here: like mcp it now depends on the published
-# `@blindmarket/sdk` (`^0.4.0`), but unlike mcp it has no local-override step
-# and no consumer of the changed surface, so a job would add cost without
-# adding signal. Add it when it gains something worth type-checking.
+# cli/ joined when it became a thin layer over the sdk's spend paths
+# (postTask, deployAgent, refunds): it is now a consumer of exactly the surface
+# that changes, type-checked and tested against the local sdk like mcp.
 
 on:
   push:
@@ -81,6 +80,7 @@ jobs:
           cache-dependency-path: |
             sdk/package-lock.json
             mcp/package-lock.json
+            cli/package-lock.json
       # `build` is `tsc`, so this type-checks the sdk; `npm test` runs its unit
       # tests, including the fixture that checks it still decrypts what the
       # backend encrypts.
@@ -105,6 +105,16 @@ jobs:
       # see a process that exits; launching it can.
       - name: mcp — type-check against the LOCAL sdk, then smoke-test over stdio
         working-directory: mcp
+        run: |
+          npm ci
+          npm i --no-save ../sdk
+          npm test
+      # Same reasoning as mcp: the cli's lockfile holds the published sdk, and
+      # the question is whether it works against the sdk in this commit. Its
+      # tests run whole commands against production's recorded responses
+      # (fixtures/prod) and a stub Arc node.
+      - name: cli — type-check against the LOCAL sdk, then run its tests
+        working-directory: cli
         run: |
           npm ci
           npm i --no-save ../sdk

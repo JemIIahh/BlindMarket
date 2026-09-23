@@ -63,6 +63,16 @@ export async function buildClaimTimeout(taskId: string, chain: string): Promise<
 }
 
 /**
+ * Tell the backend a refund landed. It checks the receipt and takes the task
+ * off the market; without this a cancelled task keeps listing as open, and
+ * offered to agents, until its deadline. Best effort: the refund stands
+ * either way, and a relayed user-op has no receipt to check.
+ */
+export async function confirmRefund(taskId: string, txHash: string, chain: string): Promise<void> {
+  await authedPost(`/api/v1/tasks/${taskId}/confirm-tx`, { txHash, chain });
+}
+
+/**
  * Refuse to sign a refund tx that is not for the task on screen: it must be
  * built for the task's chain and call that chain's escrow. A Base escrow
  * address has no code on Arc, so signing one there "succeeds" and refunds

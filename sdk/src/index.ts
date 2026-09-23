@@ -1,4 +1,9 @@
 import { ethers } from 'ethers';
+import { ApiError } from './apiError.js';
+import {
+  sendAndWait, assertSignerChain, ensureAllowance, tokenBalance, UnconfirmedTransactionError, DEFAULT_CONFIRM_TIMEOUT_MS,
+} from './onchain.js';
+import { generateAesKey, aesEncrypt, eciesEncrypt, sha256, bytesToHex } from './crypto/index.js';
 import type {
   Address, Hex, RootHash, HealthStatus, PlatformStats, OpenTask, TaskDetail,
   CreateTaskTx, ExecutorProfile, RegisterExecutorInput,
@@ -29,14 +34,70 @@ export interface BlindMarketConfig {
 export interface DeployAgentParams {
   name: string;
   instructions: string;
-  provider: 'openai' | 'anthropic' | 'groq' | 'gemini';
+  provider: 'openai' | 'anthropic' | 'groq' | 'gemini' | '0g-compute';
   model: string;
-  apiKey: string;
-  ownerAddress: string;
+  /** The model provider's API key. Not needed for '0g-compute', which bills the agent's own wallet. */
+  apiKey?: string;
+  /** Uncompressed secp256k1 public key, hex without 0x: the agent's private key is encrypted to it. */
   ownerPublicKey: string;
   capabilities?: string[];
   tools?: object[];
+  toolSecrets?: Record<string, string>;
+  /** Public skills to install at deploy, by slug. */
+  skillSlugs?: string[];
+  /**
+   * An Arc transaction that already paid the deploy fee (see getDeployFee()).
+   * deployAgent() then pays nothing and names this payment instead.
+   */
+  feeTxHash?: string;
+  /** @deprecated Ignored: the agent's owner is always the API key's wallet. */
+  ownerAddress?: string;
 }
+
+export interface DeployAgentOptions {
+  /**
+   * Pay the deploy fee if the backend charges one. Off by default, so
+   * deployAgent() never spends unless asked: without it (and without
+   * `feeTxHash`) a backend that charges answers DEPLOY_FEE_REQUIRED.
+   */
+  payFee?: boolean;
+  /**
+   * Signs the fee payment on the fee's chain instead of the configured
+   * executor (BlindMarketConfig.executor, whose rpcUrls must then name that
+   * chain). Must be a wallet of the API key's owner: the backend counts a fee
+   * from that wallet only.
+   */
+  payer?: ethers.Signer;
+  /**
+   * The most deployAgent() will pay, in the fee token's smallest unit (USDC
+   * has 6 decimals). Default 1_000_000 (1 USDC, today's fee). A backend that
+   * asks for more is refused with DEPLOY_FEE_ABOVE_MAX before anything is paid.
+   */
+  maxFeeRaw?: bigint | string;
+  /**
+   * Called with the fee transaction's hash the moment it is broadcast, before
+   * any wait. Persist it: if this process dies before the deploy finishes,
+   * pass it back as `params.feeTxHash` and nothing is paid twice. Not called
+   * for an AgentFactory payment, whose credit the backend keeps for you.
+   */
+  onFeePaid?: (feeTxHash: string) => void | Promise<void>;
+  /** How long to wait between checks while the backend confirms the payment. Default 5000 ms. */
+  pollIntervalMs?: number;
+  /** How long to wait for a payment to confirm on-chain. Default 180000 ms. */
+  confirmTimeoutMs?: number;
+}
+
+/** What deploying an agent costs, from GET /api/v1/agents/deploy-fee. */
+export type DeployFeeTerms =
+  | { required: false }
+  /**
+   * One transfer of `amountRaw` of `token` to `recipient` on chain `chainId`,
+   * named as feeTxHash. `factory` is the other way to pay. Backends before
+   * the field existed leave `chainId` out; deployAgent() will not pay those.
+   */
+  | { required: true; method: 'transfer'; chain: string; chainId?: number; token: string; recipient: string; amountRaw: string; decimals: number; factory: string | null }
+  /** Pay through AgentFactory.deployAgent(); its event becomes a credit the next deploy spends. */
+  | { required: true; method: 'factory'; chain: string; chainId?: number; factory: string | null };
 
 export interface DeployedAgent {
   id: string;
@@ -45,22 +106,137 @@ export interface DeployedAgent {
   publicKey: string;
   inftTokenId?: number;
   status: string;
+  /** False when the agent was created but did not start; start it with startAgent(). */
+  started?: boolean;
+  /** The transaction that paid the deploy fee, when deployAgent() paid it or was given it. */
+  feeTxHash?: string;
+  /**
+   * True when `feeTxHash` had already paid for this agent, one of yours: a
+   * retry after a lost response returns the agent the first call created.
+   */
+  alreadyDeployed?: boolean;
+}
+
+// ── Task posting ────────────────────────────────────────────────────────────
+
+export interface PostTaskParams {
+  /** The brief. Encrypted here, before it leaves this process, unless `privacy` is 'public'. */
+  instructions: string;
+  /**
+   * The escrow, in the settlement token's smallest unit: USDC has 6
+   * decimals, so '2500000' is 2.5 USDC. Paid to the worker (90%) when the
+   * result is verified; refundable while no one has taken the task.
+   */
+  amountRaw: string | bigint;
+  /** Seconds until the deadline. Default 86400 (24h). The escrow allows 1 hour to 90 days. */
+  durationSeconds?: number;
+  /**
+   * 'private' (default): the brief is encrypted and its key wrapped to each
+   * registered executor on the posting chain. 'public': the brief and the
+   * result are plaintext, readable by any agent.
+   */
+  privacy?: 'private' | 'public';
+  /** Default 'auto', with `verificationCriteria` defaulting to `{ min_length: 10, pass_threshold: 60 }`. */
+  verificationMode?: 'manual' | 'auto' | 'agent';
+  verificationCriteria?: Record<string, unknown>;
+  /** The designated verifier, with verificationMode 'agent'. */
+  verifierAddress?: Address;
+  /** Route to agents with these capabilities first. Empty (default) offers it to every agent. */
+  requiredCapabilities?: AgentCapability[];
+  /** Only this executor can take the task, and only it gets the brief's key. */
+  targetExecutor?: Address;
+  /** Default 'global'. */
+  locationZone?: string;
+}
+
+export interface PostTaskOptions {
+  /**
+   * Signs the escrow funding on the posting chain instead of the configured
+   * executor (BlindMarketConfig.executor, whose rpcUrls must name that chain).
+   * Must be the API key's owner wallet: the task is posted as that wallet.
+   */
+  signer?: ethers.Signer;
+  /**
+   * The most postTask() will lock in escrow, in the token's smallest unit.
+   * Refused with AMOUNT_ABOVE_MAX before anything is sent.
+   */
+  maxAmountRaw?: bigint | string;
+  /**
+   * Called the moment the funding transaction is broadcast, with its hash and
+   * the complete listing body. Persist `indexParams`: if this process dies
+   * before the task is listed, indexTask(indexParams) finishes it and the
+   * escrow is not funded twice.
+   */
+  onFunded?: (funding: { txHash: string; taskHash: string; indexParams: IndexTaskParams }) => void | Promise<void>;
+  /** How long to wait for each transaction to confirm. Default 180000 ms. */
+  confirmTimeoutMs?: number;
+}
+
+export interface PostedTask {
+  /** The task's id on the backend (the brief's sha256 commitment). */
+  taskHash: string;
+  /** The on-chain task id, for cancelAndRefund() and reclaimAfterTimeout(). */
+  taskId?: string;
+  /** The transaction that funded the escrow. */
+  txHash: string;
+  chain: string;
+  chainId: number;
+  rootHash: string;
+  privacy: 'private' | 'public';
+  /** How many executors can decrypt the brief. 0 for a public task. */
+  wrappedTo: number;
+  /**
+   * The brief's AES key (hex), for a private task. Keep it to wrap the brief
+   * to an executor that registers later; never send it anywhere.
+   */
+  aesKey?: string;
+}
+
+/** The body of POST /api/v1/a2a/tasks/index, which lists a funded task on the market. */
+export interface IndexTaskParams {
+  txHash: string;
+  taskHash: string;
+  rootHash?: string;
+  wrappedKeys?: Record<string, string>;
+  privacy?: 'private' | 'public';
+  publicBrief?: string;
+  verificationMode?: 'manual' | 'auto' | 'agent';
+  verificationCriteria?: Record<string, unknown>;
+  verifierAddress?: Address;
+  requiredCapabilities?: AgentCapability[];
+  targetExecutor?: Address;
+}
+
+/** A refund the client signed and sent: cancelAndRefund() or reclaimAfterTimeout(). */
+export interface RefundResult {
+  txHash: string;
+  chain: string;
+  chainId: number;
+  /** Whether the backend took the task off the market. False leaves it listed until its deadline; the refund stands either way. */
+  listingClosed: boolean;
+}
+
+export interface RefundOptions {
+  /** Signs on the task's chain instead of the configured executor. */
+  signer?: ethers.Signer;
+  /** The task's chain (PostedTask.chain). Task ids repeat across chains, so naming it refunds that one. */
+  chain?: string;
+  confirmTimeoutMs?: number;
+}
+
+/** One settlement chain, as GET /health/settlement describes it. */
+export interface SettlementChainInfo {
+  chain: string;
+  chainId: number;
+  tier?: string;
+  escrowAddress: string | null;
+  token: { kind: 'native' | 'erc20'; address: string | null; symbol: string; decimals: number };
+  relayChain?: string | null;
+  gasSymbol?: string;
+  postable?: boolean;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
-
-class ApiError extends Error {
-  constructor(
-    public status: number,
-    message: string,
-    public body?: unknown,
-    /** Backend error code (e.g. 'NEEDS_WRAP', 'NOT_SUBMITTED_ON_CHAIN'), when the envelope carried one. */
-    public code?: string,
-  ) {
-    super(message);
-    this.name = 'ApiError';
-  }
-}
 
 /** Per-chain RPC URLs for signing `submitEvidence` — a task is escrowed on exactly one chain. */
 export interface DeliverSigner {
@@ -68,6 +244,18 @@ export interface DeliverSigner {
   privateKey: string;
   /** RPC per chain. No default: a missing entry refuses the task's chain rather than guessing a network. */
   rpcUrls: Partial<Record<string, string | undefined>>;
+}
+
+/** A whole number of base units from a string or bigint; throws 400 INVALID_AMOUNT otherwise. */
+function wholeNumber(value: string | bigint, name: string): bigint {
+  if (typeof value === 'bigint') return value;
+  if (typeof value === 'string' && /^\d+$/.test(value)) return BigInt(value);
+  throw new ApiError(
+    400,
+    `${name} must be a whole number of the token's smallest unit (USDC has 6 decimals: '2500000' is 2.5 USDC), not ${JSON.stringify(value)}. Nothing was sent.`,
+    undefined,
+    'INVALID_AMOUNT',
+  );
 }
 
 // ── Main client ─────────────────────────────────────────────────────────────
@@ -146,9 +334,11 @@ export class BlindMarket {
       },
       body: body ? JSON.stringify(body) : undefined,
     });
-    const json = await res.json() as { success: boolean; data?: T; error?: { code?: string; message: string } };
+    const json = await res.json() as { success: boolean; data?: T; error?: { code?: string; message: string; reason?: string } };
     if (!json.success) {
-      throw new ApiError(res.status, json.error?.message ?? `HTTP ${res.status}`, json, json.error?.code);
+      const err = new ApiError(res.status, json.error?.message ?? `HTTP ${res.status}`, json, json.error?.code);
+      if (typeof json.error?.reason === 'string') err.reason = json.error.reason;
+      throw err;
     }
     return json.data as T;
   }
@@ -196,17 +386,21 @@ export class BlindMarket {
   }
 
   /**
-   * Build an unsigned `cancelTask` transaction.
+   * Build an unsigned `cancelTask` transaction (the refund of a task no one
+   * has taken). `chain`/`chainId` name where to send it. cancelAndRefund()
+   * builds, signs and sends it for you.
    */
-  async cancelTask(taskId: string): Promise<{ unsignedTx: object }> {
-    return this.req('POST', `/api/v1/tasks/${taskId}/cancel`);
+  async cancelTask(taskId: string, chain?: string): Promise<{ unsignedTx: object; chain?: string; chainId?: number }> {
+    // Task ids collide across chains: naming the chain builds for that one.
+    return this.req('POST', `/api/v1/tasks/${taskId}/cancel`, chain ? { chain } : undefined);
   }
 
   /**
-   * Build an unsigned `claimTimeout` transaction.
+   * Build an unsigned `claimTimeout` transaction (the refund of a task whose
+   * deadline passed). reclaimAfterTimeout() builds, signs and sends it for you.
    */
-  async claimTimeout(taskId: string): Promise<{ unsignedTx: object }> {
-    return this.req('POST', `/api/v1/tasks/${taskId}/timeout`);
+  async claimTimeout(taskId: string, chain?: string): Promise<{ unsignedTx: object; chain?: string; chainId?: number }> {
+    return this.req('POST', `/api/v1/tasks/${taskId}/timeout`, chain ? { chain } : undefined);
   }
 
   /**
@@ -219,11 +413,339 @@ export class BlindMarket {
     return this.req('POST', '/api/v1/submissions/submit', params);
   }
 
-  // ── Agent deployment & management ─────────────────────────────────────────
+  // ── Posting a task end to end ─────────────────────────────────────────────
 
   /**
-   * Deploy a new agent. The backend generates a wallet, mints an INFT,
-   * and returns the agent descriptor.
+   * Where new tasks are posted and what each chain settles in
+   * (`GET /health/settlement`): no auth, no RPC reads on the backend.
+   */
+  async getSettlement(): Promise<{ postingChain: string | null; chains: SettlementChainInfo[] }> {
+    return this.req('GET', '/health/settlement');
+  }
+
+  /**
+   * Post a task end to end, from the API key's own wallet: encrypt the brief
+   * (unless public) and wrap its key to the posting chain's executors, upload
+   * it, build createTask, approve the escrow for the amount when the token is
+   * an ERC-20, fund the escrow, and list the task (`POST /a2a/tasks/index`).
+   *
+   * The wallet signs locally, on the backend's posting chain (Arc on
+   * production, where gas is paid in USDC). Before anything is sent it checks
+   * the signer is the API key's owner, that its RPC is on the posting chain,
+   * that the wallet holds the amount, and that the backend built the tx for
+   * the escrow it advertises. The funding hash goes to `onFunded` as soon as
+   * it is sent; an error after that carries it as `err.txHash`, and
+   * indexTask() lists the funded task without paying again.
+   *
+   * @example
+   * const task = await bb.postTask(
+   *   { instructions: 'Summarise this paper in 5 bullets: …', amountRaw: '2000000' }, // 2 USDC
+   *   { onFunded: ({ txHash }) => saveSomewhere(txHash) },
+   * );
+   */
+  async postTask(params: PostTaskParams, opts: PostTaskOptions = {}): Promise<PostedTask> {
+    const amount = wholeNumber(params.amountRaw, 'amountRaw');
+    if (amount <= 0n) throw new ApiError(400, 'amountRaw must be above 0. Nothing was sent.', undefined, 'INVALID_AMOUNT');
+    if (opts.maxAmountRaw !== undefined && amount > BigInt(opts.maxAmountRaw)) {
+      throw new ApiError(402, `The escrow of ${amount} is above your limit of ${opts.maxAmountRaw}. Nothing was sent.`, undefined, 'AMOUNT_ABOVE_MAX');
+    }
+    const duration = params.durationSeconds ?? 86_400;
+    if (!Number.isInteger(duration) || duration < 3_600 || duration > 90 * 86_400) {
+      throw new ApiError(400, 'durationSeconds must be a whole number from 3600 (1 hour) to 7776000 (90 days): the escrow refuses anything else. Nothing was sent.', undefined, 'INVALID_DURATION');
+    }
+    const privacy = params.privacy ?? 'private';
+    const verificationMode = params.verificationMode ?? 'auto';
+    const verificationCriteria = params.verificationCriteria
+      ?? (verificationMode === 'auto' ? { min_length: 10, pass_threshold: 60 } : undefined);
+    const requiredCapabilities = params.requiredCapabilities ?? [];
+
+    // Where the escrow is funded, and in what.
+    const { postingChain, chains } = await this.getSettlement();
+    const entry = chains.find((c) => c.chain === postingChain);
+    if (!postingChain || !entry || !entry.escrowAddress || !entry.token.address) {
+      throw new ApiError(503, `The backend has no chain to post new tasks on right now (posting chain: ${postingChain ?? 'none'}). Nothing was sent.`, { postingChain, chains }, 'SETTLEMENT_NOT_POSTABLE');
+    }
+    const escrow = entry.escrowAddress;
+    const token = entry.token.address;
+    const isNative = entry.token.kind === 'native';
+
+    const signer = opts.signer ?? this.signerOn(postingChain, 'Funding the escrow');
+    const poster = await signer.getAddress();
+    await this.assertSpender(poster, 'A task', true);
+    await assertSignerChain(signer, entry.chainId, `Funding the escrow on ${postingChain}`);
+    if (!isNative) {
+      const balance = await tokenBalance(signer, token, poster);
+      if (balance < amount) {
+        const fmt = (v: bigint) => ethers.formatUnits(v, entry.token.decimals);
+        throw new ApiError(
+          402,
+          `${poster} holds ${fmt(balance)} ${entry.token.symbol} on ${postingChain}; the escrow needs ${fmt(amount)}. Nothing was sent.`,
+          undefined,
+          'INSUFFICIENT_BALANCE',
+        );
+      }
+    }
+
+    // The brief: plaintext, or encrypted to the executors that can take it.
+    const plaintext = new TextEncoder().encode(params.instructions);
+    let blob: Uint8Array;
+    let wrappedKeys: Record<string, string> | undefined;
+    let aesKey: string | undefined;
+    if (privacy === 'public') {
+      blob = plaintext;
+    } else {
+      const qs = new URLSearchParams({ capabilities: requiredCapabilities.join(','), chain: postingChain });
+      const { executors } = await this.req<{ executors: Array<{ address: string; publicKey?: string }> }>('GET', `/api/v1/a2a/executors?${qs}`);
+      let targets = executors.filter((e) => typeof e.publicKey === 'string' && e.publicKey.length > 0);
+      if (params.targetExecutor) {
+        const want = params.targetExecutor.toLowerCase();
+        targets = targets.filter((e) => e.address.toLowerCase() === want);
+        if (targets.length === 0) {
+          throw new ApiError(404, `${params.targetExecutor} is not a registered executor on ${postingChain} with a public key, so it could not read the brief. Nothing was sent.`, undefined, 'EXECUTOR_NOT_FOUND');
+        }
+      }
+      if (targets.length > 200) {
+        throw new ApiError(
+          409,
+          `${targets.length} executors match, more than the 200 a brief can be wrapped to. Narrow requiredCapabilities, name a targetExecutor, or post with privacy 'public'. Nothing was sent.`,
+          undefined,
+          'TOO_MANY_EXECUTORS',
+        );
+      }
+      const key = await generateAesKey();
+      blob = await aesEncrypt(plaintext, key);
+      wrappedKeys = {};
+      for (const e of targets) {
+        try {
+          wrappedKeys[e.address.toLowerCase()] = bytesToHex(await eciesEncrypt(key, e.publicKey!));
+        } catch { /* a malformed public key: that executor can't be wrapped to */ }
+      }
+      if (Object.keys(wrappedKeys).length === 0) {
+        throw new ApiError(
+          409,
+          `No executor on ${postingChain} can decrypt an encrypted brief right now, so no one could take the task. Post with privacy 'public', or wait for executors to register. Nothing was sent.`,
+          undefined,
+          'NO_EXECUTORS',
+        );
+      }
+      aesKey = bytesToHex(key);
+    }
+    const taskHash = `0x${bytesToHex(await sha256(blob))}`;
+    const { rootHash } = await this.uploadBlob(ethers.encodeBase64(blob));
+
+    const built = await this.createTask({
+      taskHash: taskHash as Hex,
+      token: token as Address,
+      amount: amount.toString(),
+      locationZone: params.locationZone ?? 'global',
+      duration: String(duration),
+      targetExecutorType: 'agent',
+      verificationMode,
+      ...(verificationCriteria ? { verificationCriteria } : {}),
+      ...(params.verifierAddress ? { verifierAddress: params.verifierAddress } : {}),
+      requiredCapabilities,
+      rootHash,
+      ...(wrappedKeys ? { wrappedKeys } : {}),
+    });
+    // The tx must go to the escrow and chain checked above: a backend whose
+    // posting chain moved in between would otherwise have it signed blind.
+    if ((built.chain !== undefined && built.chain !== postingChain) || (built.chainId !== undefined && Number(built.chainId) !== entry.chainId)) {
+      throw new ApiError(409, `The backend built this task for ${built.chain} (chain ${built.chainId}), not ${postingChain}: its posting chain changed. Nothing was sent; try again.`, undefined, 'POSTING_CHAIN_CHANGED');
+    }
+    if (built.unsignedTx.to.toLowerCase() !== escrow.toLowerCase()) {
+      throw new ApiError(409, `The backend built this task for ${built.unsignedTx.to}, not the ${postingChain} escrow ${escrow}. Nothing was sent.`, undefined, 'ESCROW_MISMATCH');
+    }
+
+    const timeoutMs = opts.confirmTimeoutMs ?? DEFAULT_CONFIRM_TIMEOUT_MS;
+    // createTask pulls an ERC-20 with transferFrom: approve the escrow first.
+    const nonce = isNative ? undefined : await ensureAllowance(signer, token, escrow, amount, { timeoutMs });
+    const indexParams: IndexTaskParams = {
+      txHash: '',
+      taskHash,
+      rootHash,
+      ...(wrappedKeys ? { wrappedKeys } : {}),
+      privacy,
+      ...(privacy === 'public' ? { publicBrief: params.instructions.slice(0, 4000) } : {}),
+      verificationMode,
+      ...(verificationCriteria ? { verificationCriteria } : {}),
+      ...(params.verifierAddress ? { verifierAddress: params.verifierAddress } : {}),
+      requiredCapabilities,
+      ...(params.targetExecutor ? { targetExecutor: params.targetExecutor } : {}),
+    };
+    let txHash: string;
+    try {
+      ({ hash: txHash } = await sendAndWait(signer, { to: built.unsignedTx.to, data: built.unsignedTx.data }, {
+        value: isNative ? amount : undefined,
+        nonce,
+        timeoutMs,
+        onSent: (hash) => opts.onFunded?.({ txHash: hash, taskHash, indexParams: { ...indexParams, txHash: hash } }),
+        unconfirmedHint: (hash) => `If it confirms, call indexTask() with txHash '${hash}' to list the task; do not fund it again.`,
+      }));
+    } catch (err) {
+      if (err instanceof UnconfirmedTransactionError) {
+        const out = new ApiError(0, err.message, { indexParams: { ...indexParams, txHash: err.hash } }, 'UNCONFIRMED');
+        out.txHash = err.hash;
+        throw out;
+      }
+      throw err;
+    }
+
+    indexParams.txHash = txHash;
+    let indexed: { taskHash: string; onChainTaskId?: string };
+    try {
+      indexed = await this.indexTaskPatiently(indexParams);
+    } catch (err) {
+      const e = err as Error & { status?: number; code?: string };
+      const out = new ApiError(
+        e.status ?? 0,
+        `${e.message} — the escrow is funded (transaction ${txHash}) but the task is not listed yet. Call indexTask() with err.body.indexParams to list it, or cancelAndRefund() it; do not post it again.`,
+        { indexParams },
+        e.code,
+      );
+      out.txHash = txHash;
+      throw out;
+    }
+    return {
+      taskHash,
+      ...(indexed.onChainTaskId !== undefined ? { taskId: String(indexed.onChainTaskId) } : {}),
+      txHash,
+      chain: postingChain,
+      chainId: entry.chainId,
+      rootHash,
+      privacy,
+      wrappedTo: wrappedKeys ? Object.keys(wrappedKeys).length : 0,
+      ...(aesKey ? { aesKey } : {}),
+    };
+  }
+
+  /**
+   * List a funded task on the market (`POST /api/v1/a2a/tasks/index`), from
+   * its funding transaction. Safe to call again for the same task: the
+   * backend merges a repeat from the same poster. postTask() calls it; call
+   * it yourself to finish a post whose funding confirmed but whose listing
+   * failed (the error's `body.indexParams` holds the fields).
+   */
+  async indexTask(params: IndexTaskParams): Promise<{ taskHash: string; onChainTaskId?: string; indexed: boolean }> {
+    return this.req('POST', '/api/v1/a2a/tasks/index', params);
+  }
+
+  /** indexTask(), asking again while the backend's RPC has not seen the receipt or the backend is briefly down. */
+  private async indexTaskPatiently(params: IndexTaskParams): Promise<{ taskHash: string; onChainTaskId?: string }> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await this.indexTask(params);
+      } catch (err) {
+        const transient = err instanceof ApiError
+          ? err.code === 'RECEIPT_NOT_FOUND' || err.status >= 500
+          : err instanceof TypeError; // fetch failed: the network, not the request
+        if (!transient || attempt >= 4) throw err;
+        await new Promise((r) => setTimeout(r, 3_000));
+      }
+    }
+  }
+
+  /**
+   * Cancel a task no one has taken and get its escrow back: builds
+   * cancelTask, checks the signer is on the task's chain, signs and sends it,
+   * then takes the task off the market (`POST /tasks/:id/confirm-tx`).
+   * `taskId` is the on-chain id (PostedTask.taskId); pass `chain`
+   * (PostedTask.chain) too, since ids repeat across chains.
+   */
+  async cancelAndRefund(taskId: string, opts: RefundOptions = {}): Promise<RefundResult> {
+    return this.sendRefund(taskId, await this.cancelTask(taskId, opts.chain), 'Cancelling the task', opts);
+  }
+
+  /** Reclaim the escrow of a task whose deadline passed undelivered (claimTimeout), signed and sent. */
+  async reclaimAfterTimeout(taskId: string, opts: RefundOptions = {}): Promise<RefundResult> {
+    return this.sendRefund(taskId, await this.claimTimeout(taskId, opts.chain), 'Reclaiming the escrow', opts);
+  }
+
+  private async sendRefund(
+    taskId: string,
+    built: { unsignedTx: object; chain?: string; chainId?: number },
+    what: string,
+    opts: RefundOptions,
+  ): Promise<RefundResult> {
+    const { chain, chainId } = built;
+    if (!chain || chainId === undefined) {
+      throw new ApiError(409, `${what}: the backend did not say which chain the task is on, so it cannot be signed safely here. Nothing was sent.`, built, 'CHAIN_UNKNOWN');
+    }
+    const tx = built.unsignedTx as { to: string; data: string };
+    const signer = opts.signer ?? this.signerOn(chain, what);
+    await assertSignerChain(signer, chainId, what);
+    let hash: string;
+    try {
+      ({ hash } = await sendAndWait(signer, { to: tx.to, data: tx.data }, { timeoutMs: opts.confirmTimeoutMs }));
+    } catch (err) {
+      if (err instanceof UnconfirmedTransactionError) {
+        const out = new ApiError(0, `${err.message} Check it before sending another.`, { txHash: err.hash }, 'UNCONFIRMED');
+        out.txHash = err.hash;
+        throw out;
+      }
+      throw err;
+    }
+    return { txHash: hash, chain, chainId, listingClosed: await this.confirmRefund(taskId, hash, chain) };
+  }
+
+  /**
+   * Tell the backend a refund landed (`POST /api/v1/tasks/:id/confirm-tx`),
+   * which checks the receipt and takes the task off the market. Without it a
+   * refunded task keeps listing as open until its deadline. Best effort: the
+   * money has already moved, so a failure here only reports false.
+   */
+  private async confirmRefund(taskId: string, txHash: string, chain: string): Promise<boolean> {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await this.req('POST', `/api/v1/tasks/${taskId}/confirm-tx`, { txHash, chain });
+        return true;
+      } catch (err) {
+        // The backend's RPC can lag the receipt the signer just saw.
+        if (!(err instanceof ApiError && err.code === 'NOT_CONFIRMED') || attempt === 3) return false;
+        await new Promise((r) => setTimeout(r, 3_000));
+      }
+    }
+    return false;
+  }
+
+  // ── Agent deployment & management ─────────────────────────────────────────
+
+  /** What deploying an agent costs on this backend, and how to pay it. */
+  async getDeployFee(): Promise<DeployFeeTerms> {
+    return this.req<DeployFeeTerms>('GET', '/api/v1/agents/deploy-fee');
+  }
+
+  /**
+   * Run every check POST /deploy makes before it takes a fee, with nothing
+   * paid or saved. Throws the same ApiError the deploy would (400 with field
+   * errors, 404 SKILL_NOT_FOUND, 400 INVALID_OWNER_PUBLIC_KEY). Returns false
+   * when the backend predates the check and nothing could be checked.
+   */
+  async validateDeploy(params: DeployAgentParams): Promise<boolean> {
+    const { ownerAddress: _ignored, ...body } = params;
+    try {
+      await this.req('POST', '/api/v1/agents/deploy/validate', body);
+      return true;
+    } catch (err) {
+      if (err instanceof SyntaxError || (err instanceof ApiError && err.status === 404 && err.code !== 'SKILL_NOT_FOUND')) return false;
+      throw err;
+    }
+  }
+
+  /**
+   * Deploy a new hosted agent. The backend generates its wallet, mints an
+   * INFT, starts it, and returns the agent descriptor.
+   *
+   * Deploying costs a fee (1 USDC on Arc on production; getDeployFee() says).
+   * An unspent AgentFactory credit pays first. Otherwise deployAgent() pays
+   * only with `{ payFee: true }`, from the configured executor wallet (set
+   * `rpcUrls.arc`) or `payer`, which must be the API key's owner. Before it
+   * pays it checks the payer's chain, the fee against `maxFeeRaw`, and the
+   * request itself, so nothing is paid for a deploy that would be refused.
+   *
+   * The fee's hash goes to `onFeePaid` as soon as it is sent, and onto any
+   * error after that (`err.feeTxHash`): retry with `params.feeTxHash` set to
+   * it and nothing is paid twice. A retry whose payment already created one
+   * of your agents returns that agent, with `alreadyDeployed: true`.
    *
    * @example
    * const agent = await bb.deployAgent({
@@ -232,13 +754,190 @@ export class BlindMarket {
    *   provider: 'anthropic',
    *   model: 'claude-sonnet-4-5',
    *   apiKey: process.env.ANTHROPIC_API_KEY!,
-   *   ownerAddress: wallet.address,
    *   // Uncompressed, no 0x (`wallet` is an ethers Wallet; its `publicKey` is compressed).
    *   ownerPublicKey: wallet.signingKey.publicKey.slice(2),
-   * });
+   * }, { payFee: true, onFeePaid: (hash) => saveSomewhere(hash) });
    */
-  async deployAgent(params: DeployAgentParams): Promise<DeployedAgent> {
-    return this.req<DeployedAgent>('POST', '/api/v1/agents/deploy', params);
+  async deployAgent(params: DeployAgentParams, opts: DeployAgentOptions = {}): Promise<DeployedAgent> {
+    const { ownerAddress: _ignored, feeTxHash: given, ...rest } = params;
+    const body: Omit<DeployAgentParams, 'ownerAddress'> = rest;
+    const pollMs = opts.pollIntervalMs ?? 5_000;
+    // A named payment: the backend may still be waiting for its receipt.
+    if (given) return this.deployWithFee(body, given, pollMs);
+
+    let terms: DeployFeeTerms;
+    try {
+      terms = await this.getDeployFee();
+    } catch (err) {
+      // A backend from before the fee route: deploy as the SDK always did.
+      if (err instanceof SyntaxError || (err instanceof ApiError && err.status === 404)) return this.postDeploy(body, [], 1, pollMs);
+      throw err;
+    }
+    if (!terms.required) return this.postDeploy(body, [], 1, pollMs);
+
+    // An unspent AgentFactory credit pays before anything new is spent. This
+    // POST also runs every check the deploy makes: a request it would refuse
+    // fails here, before a payment.
+    try {
+      return await this.postDeploy(body, [], 1, pollMs);
+    } catch (err) {
+      if (!(err instanceof ApiError && err.code === 'NO_DEPLOY_CREDIT')) throw err;
+      if (!opts.payFee) {
+        const cost = terms.method === 'transfer'
+          ? `${ethers.formatUnits(BigInt(terms.amountRaw), terms.decimals).replace(/\.0$/, '')} USDC on ${terms.chain}`
+          : `a fee through AgentFactory on ${terms.chain}`;
+        throw new ApiError(
+          402,
+          `Deploying an agent costs ${cost}. Call deployAgent(params, { payFee: true }) to pay it from your wallet, or pay it yourself and pass params.feeTxHash.`,
+          { terms },
+          'DEPLOY_FEE_REQUIRED',
+        );
+      }
+    }
+
+    // Everything checkable is checked before anything is paid.
+    if (body.provider !== '0g-compute' && !body.apiKey) {
+      throw new ApiError(400, `A ${body.provider} agent needs params.apiKey to call its model. Nothing was paid.`, undefined, 'API_KEY_REQUIRED');
+    }
+    if (terms.chainId === undefined) {
+      throw new ApiError(
+        409,
+        'This backend does not say which chain its deploy fee is paid on, so it cannot be paid safely from here. Nothing was paid.',
+        { terms },
+        'DEPLOY_FEE_CHAIN_UNKNOWN',
+      );
+    }
+    const maxFee = BigInt(opts.maxFeeRaw ?? 1_000_000n);
+    const payer = opts.payer ?? this.signerOn(terms.chain, 'Paying the deploy fee');
+    const payerAddress = await payer.getAddress();
+    await this.assertFeePayer(payerAddress);
+    await assertSignerChain(payer, terms.chainId, 'The deploy fee');
+    const timeoutMs = opts.confirmTimeoutMs ?? DEFAULT_CONFIRM_TIMEOUT_MS;
+
+    if (terms.method === 'transfer') {
+      const fee = BigInt(terms.amountRaw);
+      this.assertFeeCeiling(fee, maxFee, terms.decimals);
+      const data = new ethers.Interface(['function transfer(address to, uint256 amount) returns (bool)'])
+        .encodeFunctionData('transfer', [terms.recipient, fee]);
+      let hash: string;
+      try {
+        ({ hash } = await sendAndWait(payer, { to: terms.token, data }, {
+          onSent: opts.onFeePaid,
+          timeoutMs,
+          unconfirmedHint: (h) => `If it confirms, retry with params.feeTxHash = '${h}' so the fee is not paid twice.`,
+        }));
+      } catch (err) {
+        if (err instanceof UnconfirmedTransactionError) throw this.withFee(err, err.hash, 'UNCONFIRMED');
+        throw err;
+      }
+      return this.deployWithFee(body, hash, pollMs);
+    }
+
+    if (!terms.factory) throw new ApiError(503, 'This backend charges through AgentFactory but names no factory address.', { terms }, 'DEPLOY_FEE_UNAVAILABLE');
+    const factory = new ethers.Interface(['function deployAgent(uint256 usdcAmount)', 'function deployFeeUsdc() view returns (uint256)', 'function usdc() view returns (address)']);
+    const reader = payer.provider!;
+    const [fee] = factory.decodeFunctionResult('deployFeeUsdc', await reader.call({ to: terms.factory, data: factory.encodeFunctionData('deployFeeUsdc') }));
+    const [token] = factory.decodeFunctionResult('usdc', await reader.call({ to: terms.factory, data: factory.encodeFunctionData('usdc') }));
+    this.assertFeeCeiling(fee as bigint, maxFee, 6);
+    const nonce = await ensureAllowance(payer, token as string, terms.factory, fee as bigint, { timeoutMs });
+    let factoryTx: string;
+    try {
+      ({ hash: factoryTx } = await sendAndWait(payer, { to: terms.factory, data: factory.encodeFunctionData('deployAgent', [0]) }, { nonce, timeoutMs }));
+    } catch (err) {
+      if (err instanceof UnconfirmedTransactionError) {
+        throw new ApiError(0, `${err.message} If it confirms, its credit pays for the next deployAgent() call; do not pay again.`, { factoryTxHash: err.hash }, 'UNCONFIRMED');
+      }
+      throw err;
+    }
+    // The backend indexes the factory every 15s: the credit lags the payment.
+    try {
+      return { ...(await this.postDeploy(body, ['NO_DEPLOY_CREDIT'], 20, pollMs)), feeTxHash: factoryTx };
+    } catch (err) {
+      const e = err as Error & { status?: number; code?: string };
+      throw new ApiError(
+        e.status ?? 500,
+        `${e.message} The fee was paid through AgentFactory (transaction ${factoryTx}): its credit stays with your wallet and pays for the next deployAgent() call, so do not pay again.`,
+        err instanceof ApiError ? err.body : undefined,
+        e.code,
+      );
+    }
+  }
+
+  /** Deploy with a fee transaction already paid: wait for the backend to see it, and make a retry safe. */
+  private async deployWithFee(body: object, feeTxHash: string, pollMs: number): Promise<DeployedAgent> {
+    try {
+      const agent = await this.postDeploy({ ...body, feeTxHash }, ['DEPLOY_FEE_NOT_FOUND', 'DEPLOY_FEE_IN_USE', 'DEPLOY_FEE_CHECK_FAILED'], 4, pollMs);
+      return { ...agent, feeTxHash };
+    } catch (err) {
+      // This payment already created an agent: a retry after a lost response.
+      // Return it when it is the caller's.
+      if (err instanceof ApiError && err.code === 'DEPLOY_FEE_ALREADY_USED') {
+        const agentId = (err.body as { error?: { agentId?: string } } | undefined)?.error?.agentId;
+        const existing = agentId ? await this.ownAgent(agentId).catch(() => null) : null;
+        if (existing) return { ...existing, feeTxHash, alreadyDeployed: true };
+      }
+      throw this.withFee(err, feeTxHash);
+    }
+  }
+
+  /** `agentId` as a DeployedAgent, when the API key's owner owns it; else null. */
+  private async ownAgent(agentId: string): Promise<DeployedAgent | null> {
+    const [agent, who] = await Promise.all([this.getAgent(agentId), this.whoami()]);
+    const mine = new Set([who.address, ...(who.addresses ?? [])].map((a) => String(a).toLowerCase()));
+    if (!agent?.ownerAddress || !mine.has(agent.ownerAddress.toLowerCase())) return null;
+    const { id, name, walletAddress, publicKey, inftTokenId, status } = agent;
+    return { id, name, walletAddress, publicKey, status, ...(inftTokenId !== undefined ? { inftTokenId } : {}) };
+  }
+
+  /**
+   * An error after the fee was paid, carrying the payment: `feeTxHash` on the
+   * error and in its body, and the message says how to reuse it. The
+   * backend's code, status and envelope are kept.
+   */
+  private withFee(err: unknown, feeTxHash: string, fallbackCode?: string): ApiError {
+    const e = err as Error & { status?: number; code?: string; body?: unknown };
+    const spent = err instanceof ApiError && ['DEPLOY_FEE_ALREADY_USED', 'DEPLOY_FEE_NOT_PAID', 'DEPLOY_FEE_REVERTED'].includes(err.code ?? '');
+    const message = spent || e.message.includes(feeTxHash)
+      ? e.message
+      : `${e.message} — the deploy fee is paid (transaction ${feeTxHash}); retry with params.feeTxHash = '${feeTxHash}' so it is not paid twice.`;
+    const body = e.body && typeof e.body === 'object' ? { ...(e.body as object), feeTxHash } : { feeTxHash };
+    const out = new ApiError(e.status ?? 0, message, body, e.code ?? fallbackCode);
+    if (err instanceof ApiError && err.reason) out.reason = err.reason;
+    out.feeTxHash = feeTxHash;
+    return out;
+  }
+
+  private assertFeeCeiling(fee: bigint, maxFee: bigint, decimals: number): void {
+    if (fee <= maxFee) return;
+    const fmt = (v: bigint) => ethers.formatUnits(v, decimals).replace(/\.0$/, '');
+    throw new ApiError(
+      402,
+      `The deploy fee is ${fmt(fee)} USDC, above your limit of ${fmt(maxFee)}. Nothing was paid. Raise opts.maxFeeRaw to pay it.`,
+      { feeRaw: fee.toString(), maxFeeRaw: maxFee.toString() },
+      'DEPLOY_FEE_ABOVE_MAX',
+    );
+  }
+
+  /** POST /agents/deploy, asking again while the backend answers one of `retryCodes`. */
+  private async postDeploy(body: object, retryCodes: string[], attempts: number, pollMs: number): Promise<DeployedAgent> {
+    for (let i = 1; ; i++) {
+      try {
+        return await this.req<DeployedAgent>('POST', '/api/v1/agents/deploy', body);
+      } catch (err) {
+        if (!(err instanceof ApiError) || !retryCodes.includes(err.code ?? '') || i >= attempts) throw err;
+        await new Promise((r) => setTimeout(r, pollMs));
+      }
+    }
+  }
+
+  /** The configured executor as a signer on `chain`. */
+  private signerOn(chain: string, what: string): ethers.Signer {
+    if (!this.executor) {
+      throw new ApiError(400, `${what} needs a signer: set BlindMarketConfig.executor, or pass one in the options.`, undefined, 'NO_SIGNER');
+    }
+    const rpc = this.executor.rpcUrls[chain];
+    if (!rpc) throw new ApiError(400, `${what} happens on ${chain}, but no RPC is configured for it — set rpcUrls.${chain}.`, undefined, 'NO_RPC');
+    return new ethers.Wallet(this.executor.privateKey, new ethers.JsonRpcProvider(rpc));
   }
 
   /**
@@ -339,12 +1038,47 @@ export class BlindMarket {
       throw new ApiError(
         409,
         `This API key belongs to ${owner} but privateKey belongs to ${address}. Nothing was registered. ` +
-        "The executor is always the API key's owner, and only that wallet can sign submitEvidence — use the owner wallet's key, or mint an API key signed in as this wallet.",
+          "The executor is always the API key's owner, and only that wallet can sign submitEvidence — use the owner wallet's key, or mint an API key signed in as this wallet.",
         undefined,
         'OWNER_MISMATCH',
       );
     }
     return true;
+  }
+
+  /**
+   * Before a spend: throw 409 OWNER_MISMATCH unless `address` is a wallet the
+   * backend will credit the spend to. `exact` needs the API key's own address
+   * (a task is posted as that wallet); otherwise any wallet linked to it
+   * counts, as the deploy fee check does. Unlike assertOwnerKey this fails
+   * closed: money never moves on an unchecked wallet.
+   */
+  private async assertSpender(address: string, what: string, exact: boolean): Promise<void> {
+    let who: { address: string; addresses?: string[] };
+    try {
+      who = await this.whoami();
+    } catch (err) {
+      throw new ApiError(
+        err instanceof ApiError ? err.status : 503,
+        `${what}: could not check which wallet this API key belongs to (${(err as Error).message}). Nothing was sent.`,
+        undefined,
+        'OWNER_UNCHECKED',
+      );
+    }
+    const allowed = new Set([who.address, ...(exact ? [] : who.addresses ?? [])].filter((a) => typeof a === 'string').map((a) => a.toLowerCase()));
+    if (!allowed.has(address.toLowerCase())) {
+      throw new ApiError(
+        409,
+        `This API key belongs to ${who.address} but the signer is ${address}. Nothing was sent. ` +
+          `${what} counts only from the API key's own wallet: sign with that wallet, or mint an API key signed in as this one.`,
+        undefined,
+        'OWNER_MISMATCH',
+      );
+    }
+  }
+
+  private assertFeePayer(address: string): Promise<void> {
+    return this.assertSpender(address, 'A deploy fee', false);
   }
 
   /** List deployed agents, optionally filtered by owner address. */
@@ -584,6 +1318,17 @@ export class BlindMarket {
     }
   }
 
+  /**
+   * Approve or reject the delivered result of a task you posted with
+   * `verificationMode: 'manual'` (`POST /api/v1/a2a/tasks/:hash/verify`).
+   * Approving settles the escrow to the worker (90%); rejecting fails the
+   * round, and the worker may resubmit before the deadline. Only the poster
+   * can review, and only once the task is `submitted`.
+   */
+  async reviewResult(taskHash: string, review: { passed: boolean; reasons?: string[] }): Promise<{ status?: string; verificationResult?: { passed: boolean; reasons?: string[] } }> {
+    return this.req('POST', `/api/v1/a2a/tasks/${encodeURIComponent(taskHash)}/verify`, review);
+  }
+
   /** Get tasks posted by the authenticated user. */
   async getPostedTasks(): Promise<{ tasks: A2ATaskEntry[]; total?: number }> {
     return this.req('GET', '/api/v1/a2a/tasks/posted');
@@ -638,8 +1383,12 @@ export class BlindMarket {
 
   // ── Storage ─────────────────────────────────────────────────────────────
 
-  /** Upload an encrypted blob to 0G Storage. */
-  async uploadBlob(data: Hex): Promise<StorageUploadResult> {
+  /**
+   * Upload a blob to 0G Storage. `data` is the bytes as **base64**: the
+   * backend base64-decodes it. (The type once said Hex; a hex string sent
+   * here uploads the wrong bytes.)
+   */
+  async uploadBlob(data: string): Promise<StorageUploadResult> {
     return this.req<StorageUploadResult>('POST', '/api/v1/storage/upload', { data });
   }
 

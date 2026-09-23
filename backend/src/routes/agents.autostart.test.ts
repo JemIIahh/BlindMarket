@@ -18,6 +18,8 @@ import request from 'supertest';
  */
 
 const OWNER = '0x2222222222222222222222222222222222222222';
+// A real secp256k1 point (private key 0x11…11): the deploy encrypts the agent's key to it.
+const OWNER_PUBLIC_KEY = '044f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa385b6b1b8ead809ca67454d9683fcf2ba03456d6fe2c4abe2b07f0fbdbb2f1c1';
 const AGENT_ID = 'agent-new';
 
 // vi.mock factories are hoisted above module-level consts, so the shared spies
@@ -81,7 +83,7 @@ const deployBody = {
   provider: 'openai', model: 'gpt-4o-mini', apiKey: 'sk-test',
   ownerAddress: OWNER, capabilities: [],
   // uncompressed secp256k1 point — the deploy schema ECIES-wraps the agent key to it
-  ownerPublicKey: '04' + 'ab'.repeat(64),
+  ownerPublicKey: OWNER_PUBLIC_KEY,
 };
 
 const deploy = () =>

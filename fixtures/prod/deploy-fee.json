@@ -1,0 +1,13 @@
+{
+    "success": true,
+    "data": {
+        "required": true,
+        "method": "transfer",
+        "chain": "arc",
+        "token": "0x3600000000000000000000000000000000000000",
+        "recipient": "0x2f8b1177c83623a560B26B38dE984e154b123D75",
+        "amountRaw": "1000000",
+        "decimals": 6,
+        "factory": "0x1E9Abb2F2e66b8Af35BED730500A94760E133a3B"
+    }
+}

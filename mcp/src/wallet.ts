@@ -48,7 +48,7 @@ export function registerWalletTools(
     'wallet_status',
     {
       title: 'Wallet Status',
-      description: 'How rent_service/post_task/cancel_task/claim_timeout pay: the settlement chain the backend is in (Base USDC via the gas-sponsored relay, or native 0G from the local wallet), the wallet that pays, and its balance. The local wallet section is not_configured if BLINDMARKET_PRIVATE_KEY is unset — that only matters for 0G.',
+      description: "How rent_service/post_task/cancel_task/claim_timeout/complete_task pay: the backend's settlement chain and who signs there — the local wallet (BLINDMARKET_PRIVATE_KEY) on a chain with no relay, such as Arc (USDC, gas in USDC) or 0G (native 0G), or the backend relay on Base (no local key). Also the wallet that pays and the public key to register as an executor. The local wallet section is not_configured if BLINDMARKET_PRIVATE_KEY is unset, which only works on a relay chain.",
       inputSchema: {},
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -62,7 +62,7 @@ export function registerWalletTools(
             // accept a private task and never open it.
             executorPublicKey: derivePublicKeyHex(ctx.wallet.privateKey),
           }
-        : { configured: false, hint: 'Set BLINDMARKET_PRIVATE_KEY (and optionally BLINDMARKET_RPC_URL) to spend on 0G. Not needed when the backend settles on Base.' };
+        : { configured: false, hint: 'Set BLINDMARKET_PRIVATE_KEY to the key of the wallet that owns BLINDMARKET_API_KEY: it signs on Arc and 0G. Not needed when the backend settles on a relay chain (Base).' };
       if (ctx) {
         try {
           localWallet.balance0G = formatEther(await ctx.provider.getBalance(ctx.wallet.address));
@@ -77,7 +77,9 @@ export function registerWalletTools(
           const s = await settlement();
           settlementReport = s.payment === 'relay-erc20'
             ? { mode: s.mode, payment: s.payment, chainId: s.chainId, escrowAddress: s.escrowAddress, token: s.token, usdcAddress: s.usdcAddress, relayChain: s.relayChain, payFrom: s.payFrom, signs: 'backend relay (Privy) — no local key involved. Gas: sponsored in USDC where Privy sponsorship is enabled for this chain, otherwise from payFrom\'s own native balance' }
-            : { mode: s.mode, payment: s.payment, chainId: s.chainId ?? null, escrowAddress: s.escrowAddress ?? null, token: s.token, payFrom: ctx?.wallet.address ?? null, signs: ctx ? 'local wallet' : 'NOTHING — set BLINDMARKET_PRIVATE_KEY' };
+            : s.payment === 'local-erc20'
+              ? { mode: s.mode, payment: s.payment, chainId: s.chainId, escrowAddress: s.escrowAddress, token: s.token, usdcAddress: s.usdcAddress, rpcUrl: s.rpcUrl, payFrom: s.payFrom, signs: `local wallet (BLINDMARKET_PRIVATE_KEY) on ${s.chain}, over ${s.rpcUrl}. Escrow and gas are both paid from payFrom` }
+              : { mode: s.mode, payment: s.payment, chainId: s.chainId ?? null, escrowAddress: s.escrowAddress ?? null, token: s.token, payFrom: ctx?.wallet.address ?? null, signs: ctx ? 'local wallet' : 'NOTHING — set BLINDMARKET_PRIVATE_KEY' };
         } catch (err) {
           settlementReport = { mode: 'unknown', error: (err as Error).message };
         }
