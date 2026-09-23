@@ -912,7 +912,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
    *  Same two paths as fundAndIndex: local wallet on 0G, Privy relay on a relay chain.
    *  The backend resolves which chain holds the task and builds the tx for
    *  it; this only decides who signs. */
-  async function sendRefund(record: SpendRecord): Promise<{ taskId: number; txHash: string; gas?: GasMode }> {
+  async function sendRefund(record: SpendRecord): Promise<{ taskId: number; txHash: string; gas?: GasMode; listingClosed: boolean }> {
     const s = await settlement();
     const taskId = record.taskId!;
     let { txHash } = record;
@@ -925,8 +925,10 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
 
     if (record.stage === 'created') {
       const route = record.kind === 'cancel' ? 'cancel' : 'timeout';
+      // Task ids repeat across chains: name this one (the backend knows
+      // 'base' and 'arc'; a 0G task is resolved by ownership as before).
       const { unsignedTx } = await api<{ unsignedTx: { to: string; data: string } }>(
-        'POST', `/api/v1/tasks/${taskId}/${route}`,
+        'POST', `/api/v1/tasks/${taskId}/${route}`, isErc20Settlement(s) ? { chain: s.mode } : undefined,
       );
       // The backend resolves the chain that holds the task and builds for it;
       // the tx carries no chainId. If that chain is not the one this mode
@@ -964,7 +966,26 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
 
     await waitCancelled(s, taskId);
     updateSpend(record.idempotencyKey, { stage: 'confirmed' });
-    return { taskId, txHash: txHash!, gas: record.gas };
+    return { taskId, txHash: txHash!, gas: record.gas, listingClosed: await confirmRefund(s, taskId, txHash!, record.isUserOp ?? false) };
+  }
+
+  /** Tell the backend the refund landed (POST /tasks/:id/confirm-tx): it
+   *  checks the receipt and takes the task off the market, which otherwise
+   *  keeps listing it as open until its deadline. Best effort, since the
+   *  money has already moved. A relayed user-op hash has no receipt to check. */
+  async function confirmRefund(s: Settlement, taskId: number, txHash: string, isUserOp: boolean): Promise<boolean> {
+    if (isUserOp) return false;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await api('POST', `/api/v1/tasks/${taskId}/confirm-tx`, { txHash, ...(isErc20Settlement(s) ? { chain: s.mode } : {}) });
+        return true;
+      } catch (err) {
+        // The backend's RPC can lag the receipt this side just saw.
+        if ((err as ApiError).code !== 'NOT_CONFIRMED' || attempt === 3) return false;
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+    }
+    return false;
   }
 
   /** Shared resume arm: an idempotencyKey that has already moved. The kind

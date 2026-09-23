@@ -40,6 +40,7 @@ interface Backend {
   executors?: unknown[];
   built?: Record<string, unknown>;
   indexAnswers?: Response[];
+  confirmAnswers?: Response[];
   linked?: string[];
 }
 
@@ -47,6 +48,8 @@ function stub(b: Backend = {}) {
   const uploads: string[] = [];
   const posts: Record<string, unknown>[] = [];
   const indexes: Record<string, unknown>[] = [];
+  const refunds: (Record<string, unknown> | undefined)[] = [];
+  const confirms: Record<string, unknown>[] = [];
   const fn = vi.fn(async (url: string | URL, init?: RequestInit) => {
     const u = String(url);
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
@@ -63,12 +66,17 @@ function stub(b: Backend = {}) {
       return b.indexAnswers?.shift() ?? ok({ taskHash: body.taskHash, onChainTaskId: '51', indexed: true });
     }
     if (/\/api\/v1\/tasks\/\d+\/(cancel|timeout)$/.test(u)) {
+      refunds.push(body);
       return ok({ unsignedTx: { to: ESCROW, data: '0xca11', from: OWNER }, chain: 'arc', chainId: CHAIN_ID });
+    }
+    if (/\/api\/v1\/tasks\/\d+\/confirm-tx$/.test(u)) {
+      confirms.push(body);
+      return b.confirmAnswers?.shift() ?? ok({ confirmed: 1 });
     }
     throw new Error(`unhandled fetch ${u}`);
   });
   vi.stubGlobal('fetch', fn);
-  return { fn, uploads, posts, indexes };
+  return { fn, uploads, posts, indexes, refunds, confirms };
 }
 
 const erc20 = new ethers.Interface([
@@ -289,12 +297,21 @@ describe('BlindMarket.postTask — after the escrow is funded', () => {
 });
 
 describe('BlindMarket refunds', () => {
-  it('cancelAndRefund signs the cancel on the chain the backend names', async () => {
-    stub();
+  it('cancelAndRefund signs the cancel on the chain the backend names, then takes the task off the market', async () => {
+    const { refunds, confirms } = stub();
     const w = wallet();
-    await expect(bb().cancelAndRefund('51', { signer: w.signer })).resolves.toEqual({ txHash: FUNDED, chain: 'arc', chainId: CHAIN_ID });
+    await expect(bb().cancelAndRefund('51', { signer: w.signer, chain: 'arc' }))
+      .resolves.toEqual({ txHash: FUNDED, chain: 'arc', chainId: CHAIN_ID, listingClosed: true });
     expect(w.sent[0]).toMatchObject({ to: ESCROW, data: '0xca11' });
+    expect(refunds).toEqual([{ chain: 'arc' }]);
+    expect(confirms).toEqual([{ txHash: FUNDED, chain: 'arc' }]);
   });
+
+  it('a refund stands when the backend cannot confirm it yet; it only reports the listing still open', async () => {
+    stub({ confirmAnswers: [fail(409, 'NOT_CONFIRMED'), fail(409, 'NOT_CONFIRMED'), fail(409, 'NOT_CONFIRMED')] });
+    const res = await bb().cancelAndRefund('51', { signer: wallet().signer });
+    expect(res).toMatchObject({ txHash: FUNDED, listingClosed: false });
+  }, 20_000);
 
   it('reclaimAfterTimeout refuses a signer on another chain', async () => {
     stub();

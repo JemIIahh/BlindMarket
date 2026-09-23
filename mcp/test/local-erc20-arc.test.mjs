@@ -163,6 +163,7 @@ globalThis.fetch = async (url, init = {}) => {
   if (path === '/api/v1/tasks') return json({ unsignedTx: { to: ESCROW, data: '0xc0ffee', from: OWNER.address }, chain: 'arc', chainId: ARC_ID });
   if (path === `/api/v1/tasks/${HASH}`) return json({ taskId: '9', chain: 'arc' });
   if (path === '/api/v1/tasks/8/cancel') return json({ unsignedTx: { to: ESCROW, data: '0xca0ce1' }, chain: 'arc', chainId: ARC_ID });
+  if (path === '/api/v1/tasks/8/confirm-tx') return json({ confirmed: 1 });
   if (path === `/api/v1/a2a/tasks/${HASH}/submit`) return json({ onChainTaskId: 9, evidenceHash: '0x01', chain: 'arc', unsignedSubmitEvidence: { to: ESCROW, data: '0x5b5b', from: OWNER.address, chainId: ARC_ID } });
   if (path === `/api/v1/a2a/tasks/${HASH}/finalize`) { chain.tasks[9] = 4; return json({ status: 'verified', verificationResult: { passed: true } }); }
   if (path === '/api/v1/a2a/tasks/index') return indexAnswers.shift() ?? json({ indexed: true });
@@ -301,6 +302,10 @@ test('cancel_task reads the task from Arc and refunds with a local signature', a
   assert.equal(done.taskId, 8);
   assert.deepEqual(chain.sent.map((tx) => [tx.to, tx.data, tx.chainId]), [[ESCROW, '0xca0ce1', BigInt(ARC_ID)]]);
   assert.equal(chain.tasks[8], 5);
+  // Built for this chain, and taken off the market once it landed.
+  assert.deepEqual(backendCalls.find((c) => c.path === '/api/v1/tasks/8/cancel').body, { chain: 'arc' });
+  assert.deepEqual(backendCalls.find((c) => c.path === '/api/v1/tasks/8/confirm-tx').body, { txHash: chain.sent[0].hash, chain: 'arc' });
+  assert.equal(done.listingClosed, true);
 });
 
 test('complete_task delivers on Arc with a local signature and reports the payout in USDC', async () => {

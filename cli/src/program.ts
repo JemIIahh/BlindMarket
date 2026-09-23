@@ -241,6 +241,7 @@ export function buildProgram(): Command {
       out(`${agent.alreadyDeployed ? 'Already deployed' : 'Deployed'} agent ${agent.id} (${agent.name})`);
       out(`  wallet:  ${agent.walletAddress}`);
       if (agent.feeTxHash) out(`  fee tx:  ${agent.feeTxHash}`);
+      else if (terms.required) out('  fee:     paid by an earlier AgentFactory payment from your wallet; nothing new was paid');
       out(agent.started === false ? '  It did not start: start it from the web app.' : '  It is running.');
     });
 
@@ -397,43 +398,50 @@ export function buildProgram(): Command {
       out(`  poster:  ${task.agent}`);
       out(`  worker:  ${task.worker && !/^0x0{40}$/.test(task.worker) ? task.worker : '(unassigned)'}`);
       out(`  escrow:  ${task.decimals !== undefined ? `${formatUnits(BigInt(task.amount), task.decimals)} ${task.symbol ?? ''}`.trim() : `${task.amount} (raw)`}`);
-      if (task.a2aState?.resultData !== undefined) out(`  result:  ${JSON.stringify(task.a2aState.resultData, null, 2)}`);
+      if (task.a2aState?.resultData != null) out(`  result:  ${JSON.stringify(task.a2aState.resultData, null, 2)}`);
     });
 
   // ── settling ──────────────────────────────────────────────────────────────
 
-  /** A numeric task id, resolving a 0x hash through the backend. */
-  async function taskIdOf(bb: BlindMarket, task: string): Promise<string> {
-    if (/^\d+$/.test(task)) return task;
-    const detail = await bb.getTask(task) as unknown as { taskId?: string };
+  /**
+   * The on-chain task id, and its chain when known: a 0x hash resolves
+   * through the backend, which names both. Ids repeat across chains, so a
+   * bare id takes --chain, else the backend picks the chain you own it on.
+   */
+  async function taskRef(bb: BlindMarket, task: string, chain?: string): Promise<{ id: string; chain?: string }> {
+    if (/^\d+$/.test(task)) return { id: task, ...(chain ? { chain } : {}) };
+    const detail = await bb.getTask(task) as unknown as { taskId?: string; chain?: string };
     if (!detail.taskId) throw new CliError('TASK_NOT_FOUND', `No on-chain task for ${task}.`);
-    return String(detail.taskId);
+    return { id: String(detail.taskId), ...((chain ?? detail.chain) ? { chain: chain ?? detail.chain } : {}) };
   }
+  const listing = (closed: boolean) => (closed ? 'It is off the market.' : 'The backend could not confirm it yet, so it may list as open until its deadline.');
 
   program
     .command('cancel')
     .description('Cancel a task no one has taken, and get the escrow back')
     .requiredOption('--task <id-or-hash>', 'Task id or 0x task hash')
+    .option('--chain <chain>', 'The task\'s chain, e.g. arc (ids repeat across chains)')
     .option('--yes', 'Send without asking')
-    .action(async (opts: { task: string; yes?: boolean }) => {
+    .action(async (opts: { task: string; chain?: string; yes?: boolean }) => {
       const { bb } = await signingClient();
-      const id = await taskIdOf(bb, opts.task);
-      await confirm(`Cancel task ${id} and refund its escrow to your wallet?`, opts.yes);
-      const res = await step('Cancelling…', () => bb.cancelAndRefund(id));
-      out(`Cancelled task ${id} on ${res.chain}; escrow refunded (tx ${res.txHash}).`);
+      const ref = await taskRef(bb, opts.task, opts.chain);
+      await confirm(`Cancel task ${ref.id}${ref.chain ? ` on ${ref.chain}` : ''} and refund its escrow to your wallet?`, opts.yes);
+      const res = await step('Cancelling…', () => bb.cancelAndRefund(ref.id, ref.chain ? { chain: ref.chain } : {}));
+      out(`Cancelled task ${ref.id} on ${res.chain}; escrow refunded (tx ${res.txHash}). ${listing(res.listingClosed)}`);
     });
 
   program
     .command('reclaim')
     .description("Reclaim the escrow of a task whose deadline passed undelivered")
     .requiredOption('--task <id-or-hash>', 'Task id or 0x task hash')
+    .option('--chain <chain>', 'The task\'s chain, e.g. arc (ids repeat across chains)')
     .option('--yes', 'Send without asking')
-    .action(async (opts: { task: string; yes?: boolean }) => {
+    .action(async (opts: { task: string; chain?: string; yes?: boolean }) => {
       const { bb } = await signingClient();
-      const id = await taskIdOf(bb, opts.task);
-      await confirm(`Reclaim the escrow of task ${id}?`, opts.yes);
-      const res = await step('Reclaiming…', () => bb.reclaimAfterTimeout(id));
-      out(`Reclaimed the escrow of task ${id} on ${res.chain} (tx ${res.txHash}).`);
+      const ref = await taskRef(bb, opts.task, opts.chain);
+      await confirm(`Reclaim the escrow of task ${ref.id}${ref.chain ? ` on ${ref.chain}` : ''}?`, opts.yes);
+      const res = await step('Reclaiming…', () => bb.reclaimAfterTimeout(ref.id, ref.chain ? { chain: ref.chain } : {}));
+      out(`Reclaimed the escrow of task ${ref.id} on ${res.chain} (tx ${res.txHash}). ${listing(res.listingClosed)}`);
     });
 
   program

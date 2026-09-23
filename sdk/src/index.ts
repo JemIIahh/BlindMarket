@@ -212,6 +212,16 @@ export interface RefundResult {
   txHash: string;
   chain: string;
   chainId: number;
+  /** Whether the backend took the task off the market. False leaves it listed until its deadline; the refund stands either way. */
+  listingClosed: boolean;
+}
+
+export interface RefundOptions {
+  /** Signs on the task's chain instead of the configured executor. */
+  signer?: ethers.Signer;
+  /** The task's chain (PostedTask.chain). Task ids repeat across chains, so naming it refunds that one. */
+  chain?: string;
+  confirmTimeoutMs?: number;
 }
 
 /** One settlement chain, as GET /health/settlement describes it. */
@@ -380,16 +390,17 @@ export class BlindMarket {
    * has taken). `chain`/`chainId` name where to send it. cancelAndRefund()
    * builds, signs and sends it for you.
    */
-  async cancelTask(taskId: string): Promise<{ unsignedTx: object; chain?: string; chainId?: number }> {
-    return this.req('POST', `/api/v1/tasks/${taskId}/cancel`);
+  async cancelTask(taskId: string, chain?: string): Promise<{ unsignedTx: object; chain?: string; chainId?: number }> {
+    // Task ids collide across chains: naming the chain builds for that one.
+    return this.req('POST', `/api/v1/tasks/${taskId}/cancel`, chain ? { chain } : undefined);
   }
 
   /**
    * Build an unsigned `claimTimeout` transaction (the refund of a task whose
    * deadline passed). reclaimAfterTimeout() builds, signs and sends it for you.
    */
-  async claimTimeout(taskId: string): Promise<{ unsignedTx: object; chain?: string; chainId?: number }> {
-    return this.req('POST', `/api/v1/tasks/${taskId}/timeout`);
+  async claimTimeout(taskId: string, chain?: string): Promise<{ unsignedTx: object; chain?: string; chainId?: number }> {
+    return this.req('POST', `/api/v1/tasks/${taskId}/timeout`, chain ? { chain } : undefined);
   }
 
   /**
@@ -635,22 +646,25 @@ export class BlindMarket {
 
   /**
    * Cancel a task no one has taken and get its escrow back: builds
-   * cancelTask, checks the signer is on the task's chain, signs and sends it.
-   * `taskId` is the on-chain id (PostedTask.taskId).
+   * cancelTask, checks the signer is on the task's chain, signs and sends it,
+   * then takes the task off the market (`POST /tasks/:id/confirm-tx`).
+   * `taskId` is the on-chain id (PostedTask.taskId); pass `chain`
+   * (PostedTask.chain) too, since ids repeat across chains.
    */
-  async cancelAndRefund(taskId: string, opts: { signer?: ethers.Signer; confirmTimeoutMs?: number } = {}): Promise<RefundResult> {
-    return this.sendRefund(await this.cancelTask(taskId), 'Cancelling the task', opts);
+  async cancelAndRefund(taskId: string, opts: RefundOptions = {}): Promise<RefundResult> {
+    return this.sendRefund(taskId, await this.cancelTask(taskId, opts.chain), 'Cancelling the task', opts);
   }
 
   /** Reclaim the escrow of a task whose deadline passed undelivered (claimTimeout), signed and sent. */
-  async reclaimAfterTimeout(taskId: string, opts: { signer?: ethers.Signer; confirmTimeoutMs?: number } = {}): Promise<RefundResult> {
-    return this.sendRefund(await this.claimTimeout(taskId), 'Reclaiming the escrow', opts);
+  async reclaimAfterTimeout(taskId: string, opts: RefundOptions = {}): Promise<RefundResult> {
+    return this.sendRefund(taskId, await this.claimTimeout(taskId, opts.chain), 'Reclaiming the escrow', opts);
   }
 
   private async sendRefund(
+    taskId: string,
     built: { unsignedTx: object; chain?: string; chainId?: number },
     what: string,
-    opts: { signer?: ethers.Signer; confirmTimeoutMs?: number },
+    opts: RefundOptions,
   ): Promise<RefundResult> {
     const { chain, chainId } = built;
     if (!chain || chainId === undefined) {
@@ -659,9 +673,9 @@ export class BlindMarket {
     const tx = built.unsignedTx as { to: string; data: string };
     const signer = opts.signer ?? this.signerOn(chain, what);
     await assertSignerChain(signer, chainId, what);
+    let hash: string;
     try {
-      const { hash } = await sendAndWait(signer, { to: tx.to, data: tx.data }, { timeoutMs: opts.confirmTimeoutMs });
-      return { txHash: hash, chain, chainId };
+      ({ hash } = await sendAndWait(signer, { to: tx.to, data: tx.data }, { timeoutMs: opts.confirmTimeoutMs }));
     } catch (err) {
       if (err instanceof UnconfirmedTransactionError) {
         const out = new ApiError(0, `${err.message} Check it before sending another.`, { txHash: err.hash }, 'UNCONFIRMED');
@@ -670,6 +684,27 @@ export class BlindMarket {
       }
       throw err;
     }
+    return { txHash: hash, chain, chainId, listingClosed: await this.confirmRefund(taskId, hash, chain) };
+  }
+
+  /**
+   * Tell the backend a refund landed (`POST /api/v1/tasks/:id/confirm-tx`),
+   * which checks the receipt and takes the task off the market. Without it a
+   * refunded task keeps listing as open until its deadline. Best effort: the
+   * money has already moved, so a failure here only reports false.
+   */
+  private async confirmRefund(taskId: string, txHash: string, chain: string): Promise<boolean> {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await this.req('POST', `/api/v1/tasks/${taskId}/confirm-tx`, { txHash, chain });
+        return true;
+      } catch (err) {
+        // The backend's RPC can lag the receipt the signer just saw.
+        if (!(err instanceof ApiError && err.code === 'NOT_CONFIRMED') || attempt === 3) return false;
+        await new Promise((r) => setTimeout(r, 3_000));
+      }
+    }
+    return false;
   }
 
   // ── Agent deployment & management ─────────────────────────────────────────

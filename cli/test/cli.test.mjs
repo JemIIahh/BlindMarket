@@ -117,6 +117,7 @@ globalThis.fetch = async (url, init = {}) => {
   if (path === '/api/v1/storage/upload') return json({ rootHash: '0x' + 'cd'.repeat(32) });
   if (path === '/api/v1/tasks') return json({ unsignedTx: { to: ESCROW, data: '0xc0ffee', from: OWNER.address }, chain: 'arc', chainId: ARC.chainId });
   if (path === '/api/v1/tasks/8/cancel') return json({ unsignedTx: { to: ESCROW, data: '0xca0ce1' }, chain: 'arc', chainId: ARC.chainId });
+  if (path === '/api/v1/tasks/8/confirm-tx') return json({ confirmed: 1 });
   if (path === '/api/v1/a2a/tasks/index') return json({ taskHash: body.taskHash, onChainTaskId: '51', indexed: true });
   if (path === '/api/v1/agents/deploy-fee') return json(FEE_TERMS);
   if (path === '/api/v1/agents/deploy/validate') return json({ valid: true });
@@ -265,10 +266,12 @@ test('a key that is not the API key owner\'s pays nothing', async () => {
 
 // ── refunds, login, and what 0.3 left behind ─────────────────────────────────
 
-test('cancel signs the refund on the task\'s chain', async () => {
-  const text = await blind('cancel', '--task', '8', '--yes');
+test('cancel signs the refund on the task\'s chain, then takes it off the market', async () => {
+  const text = await blind('cancel', '--task', '8', '--chain', 'arc', '--yes');
   assert.deepEqual(chain.sent.map((t) => [t.to, t.data, t.chainId]), [[ESCROW, '0xca0ce1', BigInt(ARC.chainId)]]);
-  assert.match(text, /Cancelled task 8 on arc/);
+  assert.deepEqual(posted('/api/v1/tasks/8/cancel')[0].body, { chain: 'arc' });
+  assert.deepEqual(posted('/api/v1/tasks/8/confirm-tx')[0].body, { txHash: chain.sent[0].hash, chain: 'arc' });
+  assert.match(text, /Cancelled task 8 on arc.*It is off the market/);
 });
 
 test('login stores the key encrypted, only for the API key\'s own wallet, in owner-only files', async () => {
