@@ -9,11 +9,15 @@ import { config } from '../config.js';
  * validates and forwards here.
  */
 
+// Pimlico v2 URL slugs. Testnet ones are verified live (a wrong slug fails
+// loudly at estimate time with "chain X is not supported"); mainnet slugs
+// are the documented names but untested — no mainnet paymaster exists yet,
+// so nothing reads them.
 const SLUGS: Record<string, string> = {
   'base-sepolia': 'base-sepolia',
   'base': 'base',
-  'ethereum-sepolia': 'eth-sepolia',
-  'ethereum': 'eth-mainnet',
+  'ethereum-sepolia': 'sepolia',
+  'ethereum': 'ethereum',
   'arbitrum-sepolia': 'arbitrum-sepolia',
   'arbitrum': 'arbitrum-one',
   'optimism-sepolia': 'optimism-sepolia',

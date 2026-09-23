@@ -1,11 +1,23 @@
 import { useState, useEffect, useRef } from 'react';
 import { useWallets, usePrivy } from '@privy-io/react-auth';
-import { parseUnits, formatUnits, JsonRpcProvider, BrowserProvider, Contract, Interface, zeroPadValue, id as keccakId } from 'ethers';
+import { parseUnits, formatUnits, JsonRpcProvider, BrowserProvider, Contract, Interface, ZeroAddress, zeroPadValue, id as keccakId } from 'ethers';
 import { Button, FormField, FormInput, FormSelect, Modal, Spinner } from './bb';
 import { get, authedPost, authedGet } from '../lib/api';
 import { useWallet, switchWalletToChain, pauseWalletAutoSwitch, type AddEthereumChainParameter } from '../context/WalletContext';
 import { signAndSendDirect } from '../lib/directSigner';
 import { signAndSendTx } from '../lib/txSigner';
+import {
+  MAX_ESTIMATE_TOTAL,
+  buildUnsignedOp,
+  encodeBatch,
+  encodeCreateAccount,
+  estimateOp,
+  getSmartAccount,
+  pollOpReceipt,
+  submitOp,
+  userOpHash,
+  type AaChain,
+} from '../lib/userOp';
 import { ARC_CHAIN_CONFIG, ARC_CHAIN_ID, SETTLEMENT_CCTP_CHAIN_KEY, isCctpUsable } from '../config/constants';
 
 /**
@@ -107,7 +119,9 @@ const SOURCE_CHAIN_WALLET_CONFIG: Record<string, AddEthereumChainParameter> = {
 // wallet has the final say. (Arc pays gas in USDC — covered by the reserve.)
 const SOURCE_GAS_FLOOR_UNITS = 100_000n;
 
-type Phase = 'input' | 'switching' | 'approving' | 'burning' | 'confirming' | 'polling' | 'done' | 'error';
+type Phase = 'input' | 'switching' | 'approving' | 'burning' | 'confirming' | 'polling' | 'done' | 'error'
+  // External-wallet UserOp path (gas in USDC via the paymaster).
+  | 'setting-up' | 'estimating' | 'signing-op' | 'submitting-op';
 
 interface CctpChainOption {
   chainKey: string;
@@ -122,7 +136,18 @@ interface CctpChainOption {
    *  the relay doesn't serve it. Set, the embedded signer relays (USDC gas);
    *  unset or external signer, the wallet signs directly (native gas). */
   relayChain?: string | null;
+  /** ERC-4337 USDC-gas for external wallets, or null where undeployed. */
+  aa?: { paymaster: string; factory: string; entrypoint: string } | null;
+  /** Backend bundler wired for this chain: aa + this is the UserOp path. */
+  userOpRelay?: boolean;
 }
+
+// Extra USDC the smart account must hold above the bridged amount to cover
+// the paymaster's charge. Leftovers stay in the account, reusable next time.
+const USEROP_USDC_BUFFER_RAW = 1_000_000n;
+// Source-chain gas floor for the one-time smart-account setup (CREATE2
+// deploy ~1.2M + funding transfer), vs the burn-only floor below.
+const SETUP_GAS_FLOOR_UNITS = 1_500_000n;
 
 export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFunded?: () => void }) {
   const { address: baseAddress } = useWallet();
@@ -179,7 +204,8 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
   const externalSigner = wallets.find((w) => w.walletClientType !== 'privy') ?? null;
   const signerWallet = externalSigner ?? embeddedWallet;
 
-  const busy = phase === 'switching' || phase === 'approving' || phase === 'burning' || phase === 'confirming' || phase === 'polling';
+  const busy = phase === 'switching' || phase === 'approving' || phase === 'burning' || phase === 'confirming' || phase === 'polling'
+    || phase === 'setting-up' || phase === 'estimating' || phase === 'signing-op' || phase === 'submitting-op';
 
   // Live balance on the chosen source chain — a direct read against a public
   // RPC, no wallet interaction (and no chain switch) needed just to read it.
@@ -254,18 +280,41 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
     const v = parseUnits(amount || '0', 6);
     if (v > 0n) amountRawForCheck = v;
   } catch { /* leave null */ }
-  // On a USDC-gas chain (Arc) the approve + burn gas comes out of the same
-  // USDC, so only balance − reserve is bridgeable; bridging the full balance
-  // would revert on-chain. The reserve is 0 on ETH-gas chains.
-  const gasReserveRaw = BigInt(chains.find((c) => c.chainKey === sourceChain)?.usdcGasReserveRaw ?? '0');
-  const spendableRaw = sourceBalance === null ? null : sourceBalance > gasReserveRaw ? sourceBalance - gasReserveRaw : 0n;
-  const exceedsBalance = spendableRaw !== null && amountRawForCheck !== null && amountRawForCheck > spendableRaw;
   const selectedChain = chains.find((c) => c.chainKey === sourceChain);
   // The embedded signer relays on a relay-served chain (gas in USDC), so the
   // native-gas floor doesn't apply; external signers always pay native gas.
   const useRelayForGas = !!selectedChain?.relayChain && signerWallet?.walletClientType === 'privy';
+  // External signer on a UserOp-capable chain: the smart account pays gas in
+  // USDC via the paymaster (after a one-time native-gas setup below).
+  const useUserOpForGas = !!selectedChain?.userOpRelay && !!selectedChain?.aa && !!externalSigner;
+  // On a USDC-gas chain (Arc) the approve + burn gas comes out of the same
+  // USDC, so only balance − reserve is bridgeable; bridging the full balance
+  // would revert on-chain. The reserve is 0 on ETH-gas chains. On the UserOp
+  // path the EOA instead funds the smart account with amount + buffer (the
+  // paymaster's charge comes out of that buffer; leftovers stay reusable).
+  const gasReserveRaw = BigInt(chains.find((c) => c.chainKey === sourceChain)?.usdcGasReserveRaw ?? '0');
+  const effectiveReserve = useUserOpForGas ? USEROP_USDC_BUFFER_RAW : gasReserveRaw;
+  const spendableRaw = sourceBalance === null ? null : sourceBalance > effectiveReserve ? sourceBalance - effectiveReserve : 0n;
+  const exceedsBalance = spendableRaw !== null && amountRawForCheck !== null && amountRawForCheck > spendableRaw;
+  // Deployed smart account of the external signer on this chain (null until
+  // read, or when none exists yet) — drives the setup hint + gas floor.
+  const [smartAccount, setSmartAccount] = useState<string | null>(null);
+  useEffect(() => {
+    const chain = chains.find((c) => c.chainKey === sourceChain);
+    const rpcUrl = SOURCE_CHAIN_WALLET_CONFIG[sourceChain]?.rpcUrls[0];
+    if (!chain?.aa || !externalSigner || !rpcUrl) { setSmartAccount(null); return; }
+    let cancelled = false;
+    setSmartAccount(null);
+    getSmartAccount(chain.aa.factory, externalSigner.address, rpcUrl, chain.chainId)
+      .then((a) => { if (!cancelled) setSmartAccount(a && a !== ZeroAddress ? a : null); })
+      .catch(() => { if (!cancelled) setSmartAccount(null); });
+    return () => { cancelled = true; };
+  }, [sourceChain, externalSigner?.address, chains]);
+  // First bridge on a chain needs the account deployed (~1.2M gas) plus the
+  // funding transfer; later ones only need the burn floor.
+  const gasFloorUnits = useUserOpForGas && !smartAccount ? SETUP_GAS_FLOOR_UNITS : SOURCE_GAS_FLOOR_UNITS;
   const insufficientGas = !useRelayForGas && sourceGas !== null
-    && (sourceGas.balance === 0n || (sourceGas.gasPrice !== null && sourceGas.balance < sourceGas.gasPrice * SOURCE_GAS_FLOOR_UNITS));
+    && (sourceGas.balance === 0n || (sourceGas.gasPrice !== null && sourceGas.balance < sourceGas.gasPrice * gasFloorUnits));
   const nativeSymbol = SOURCE_CHAIN_WALLET_CONFIG[sourceChain]?.nativeCurrency.symbol ?? 'ETH';
   const nativeShown = sourceGas
     ? (sourceGas.balance === 0n ? '0' : Number(formatUnits(sourceGas.balance, 18)).toLocaleString(undefined, { maximumSignificantDigits: 3 }))
@@ -404,7 +453,13 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
       await switchWalletToChain(signerWallet, chain.chainId, chainConfig);
 
       const idempotencyKey = crypto.randomUUID();
-      const intent = await authedPost<{
+
+      // External signer on a UserOp-capable chain: the smart account pays gas
+      // in USDC via the paymaster. Every other combination uses the EOA legs
+      // (direct native-gas sign, or the relay for the embedded wallet).
+      const useUserOp = !!chain.userOpRelay && !!chain.aa && signerWallet.walletClientType !== 'privy';
+
+      const createIntent = (from: string) => authedPost<{
         transferId: number;
         approveTx?: { to: string; data: string; from: string };
         burnTx: { to: string; data: string; from: string };
@@ -412,38 +467,148 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
         sourceChain: chain.chainKey,
         amountRaw: amountRaw.toString(),
         mintRecipient: baseAddress,
-        fromAddress: signerWallet.address,
+        fromAddress: from,
         idempotencyKey,
       });
-      setTransferId(intent.transferId);
 
-      if (intent.approveTx) {
-        setPhase('approving');
-        const approved = await sendSourceTx(intent.approveTx);
-        // The burn pulls USDC via transferFrom — without a mined approve it
-        // can only revert, so stop here rather than ask for a doomed signature.
-        if (approved.receipt?.status === 0) {
-          throw new Error('The USDC approval failed on-chain.');
+      // One-time setup of the smart account (native gas, direct signs):
+      // deploy it when missing, then top it to amount + buffer so the
+      // paymaster's charge clears. Both are yours and reusable afterwards.
+      const ensureSmartAccount = async (): Promise<string> => {
+        const reader = new JsonRpcProvider(sendChain.rpcUrl, chain.chainId, { staticNetwork: true });
+        const factory = new Contract(chain.aa!.factory, ['function accounts(address) view returns (address)'], reader);
+        const existing: string = await factory.accounts(signerWallet.address);
+        if (existing && existing !== ZeroAddress) return existing;
+        setPhase('setting-up');
+        const built = await signAndSendDirect(
+          signerWallet,
+          { to: chain.aa!.factory, data: encodeCreateAccount(signerWallet.address), from: signerWallet.address },
+          sendChain,
+        );
+        if (built.receipt?.status === 0) throw new Error('Smart account deployment failed on-chain.');
+        const addr: string = await factory.accounts(signerWallet.address);
+        if (!addr || addr === ZeroAddress) {
+          throw new Error('Smart account deployment is taking a while — wait a minute and try again.');
         }
-        if (approved.receipt?.status !== 1) {
-          // Relayed as a UserOp (or receipt not yet visible): wait for the
-          // allowance itself instead of a receipt.
-          const [spender] = new Interface(['function approve(address spender, uint256 amount)'])
-            .decodeFunctionData('approve', intent.approveTx.data);
-          await pollAllowance(intent.approveTx.from, String(spender), amountRaw);
+        return addr;
+      };
+
+      const ensureFunded = async (smart: string): Promise<void> => {
+        const reader = new JsonRpcProvider(sendChain.rpcUrl, chain.chainId, { staticNetwork: true });
+        const usdc = new Contract(chain.usdcAddress, ['function balanceOf(address) view returns (uint256)'], reader);
+        const need = amountRaw + USEROP_USDC_BUFFER_RAW;
+        const bal: bigint = await usdc.balanceOf(smart).catch(() => 0n);
+        if (bal >= need) return;
+        setPhase('setting-up');
+        const data = new Interface(['function transfer(address to, uint256 amount)'])
+          .encodeFunctionData('transfer', [smart, need - bal]);
+        const sent = await signAndSendDirect(
+          signerWallet,
+          { to: chain.usdcAddress, data, from: signerWallet.address },
+          sendChain,
+        );
+        if (sent.receipt?.status === 0) throw new Error('Funding transfer failed on-chain.');
+        for (let i = 0; i < 20; i++) {
+          try {
+            if (BigInt(await usdc.balanceOf(smart)) >= need) return;
+          } catch { /* RPC hiccup; keep waiting */ }
+          await new Promise((r) => setTimeout(r, 3000));
         }
+        throw new Error('Funding transfer is taking a while — wait a minute and try again.');
+      };
+
+      // The intent's own calldata as one smart-account batch, estimated,
+      // raw-signed (the account validates the raw digest) and submitted
+      // through the backend. Returns the L1 bundle tx hash.
+      const sendViaUserOp = async (
+        opIntent: { transferId: number; approveTx?: { data: string }; burnTx: { to: string; data: string } },
+        smart: string,
+      ): Promise<string> => {
+        const aaCfg: AaChain = {
+          paymaster: chain.aa!.paymaster,
+          factory: chain.aa!.factory,
+          entrypoint: chain.aa!.entrypoint,
+          usdc: chain.usdcAddress,
+          chainId: chain.chainId,
+          rpcUrl: sendChain.rpcUrl,
+        };
+        const calls = [
+          ...(opIntent.approveTx ? [{ to: chain.usdcAddress, value: 0n, data: opIntent.approveTx.data }] : []),
+          { to: opIntent.burnTx.to, value: 0n, data: opIntent.burnTx.data },
+        ];
+        setPhase('estimating');
+        let op = await buildUnsignedOp(aaCfg, smart, encodeBatch(calls));
+        // Best-effort: the bundler pads estimates past the paymaster's 1M
+        // cap today, so its answer is only taken when it fits under it —
+        // otherwise the fixed limits (sized for approve+burn) stand.
+        try {
+          const gas = await estimateOp(opIntent.transferId, op);
+          const total = Number(BigInt(gas.callGasLimit) + BigInt(gas.verificationGasLimit) + BigInt(gas.preVerificationGas)) + 100_000;
+          if (total < MAX_ESTIMATE_TOTAL) {
+            op = { ...op, callGasLimit: gas.callGasLimit, verificationGasLimit: gas.verificationGasLimit, preVerificationGas: gas.preVerificationGas };
+          }
+        } catch {
+          /* fixed limits stand */
+        }
+        setPhase('signing-op');
+        const hash = userOpHash(op, aaCfg.entrypoint, aaCfg.chainId);
+        const eth = await signerWallet.getEthereumProvider();
+        let signature: string;
+        try {
+          signature = await eth.request({ method: 'eth_sign', params: [signerWallet.address, hash] }) as string;
+        } catch {
+          throw new Error('Your wallet refused the batch signature (eth_sign) — approve it to pay gas in USDC. Anything already moved sits in your smart account, owned by you; closing and bridging with native gas still works.');
+        }
+        setPhase('submitting-op');
+        const opHash = await submitOp(opIntent.transferId, { ...op, signature });
+        return pollOpReceipt(chain.chainKey, opHash);
+      };
+
+      let burnHash: string;
+      let activeTransferId: number;
+      let confirmBody: { burnTxHash: string } | { bundleTxHash: string };
+      if (useUserOp) {
+        const smart = await ensureSmartAccount();
+        await ensureFunded(smart);
+        const opIntent = await createIntent(smart);
+        setTransferId(opIntent.transferId);
+        activeTransferId = opIntent.transferId;
+        burnHash = await sendViaUserOp(opIntent, smart);
+        confirmBody = { bundleTxHash: burnHash };
+      } else {
+        const intent = await createIntent(signerWallet.address);
+        setTransferId(intent.transferId);
+        activeTransferId = intent.transferId;
+
+        if (intent.approveTx) {
+          setPhase('approving');
+          const approved = await sendSourceTx(intent.approveTx);
+          // The burn pulls USDC via transferFrom — without a mined approve it
+          // can only revert, so stop here rather than ask for a doomed signature.
+          if (approved.receipt?.status === 0) {
+            throw new Error('The USDC approval failed on-chain.');
+          }
+          if (approved.receipt?.status !== 1) {
+            // Relayed as a UserOp (or receipt not yet visible): wait for the
+            // allowance itself instead of a receipt.
+            const [spender] = new Interface(['function approve(address spender, uint256 amount)'])
+              .decodeFunctionData('approve', intent.approveTx.data);
+            await pollAllowance(intent.approveTx.from, String(spender), amountRaw);
+          }
+        }
+
+        setPhase('burning');
+        const readChain = new JsonRpcProvider(sendChain.rpcUrl, chain.chainId, { staticNetwork: true });
+        const burnFromBlock = await readChain.getBlockNumber().catch(() => null);
+        const burnSent = await sendSourceTx(intent.burnTx);
+
+        // A UserOp hash is not an L1 tx hash — find the burn it submitted first.
+        burnHash = burnSent.userOp
+          ? await findBurnTxHash(intent.burnTx.to, burnFromBlock)
+          : burnSent.hash;
+        confirmBody = { burnTxHash: burnHash };
       }
-
-      setPhase('burning');
-      const readChain = new JsonRpcProvider(sendChain.rpcUrl, chain.chainId, { staticNetwork: true });
-      const burnFromBlock = await readChain.getBlockNumber().catch(() => null);
-      const burnSent = await sendSourceTx(intent.burnTx);
       restoreWallet();
-
-      // A UserOp hash is not an L1 tx hash — find the burn it submitted first.
-      const burnHash = burnSent.userOp
-        ? await findBurnTxHash(intent.burnTx.to, burnFromBlock)
-        : burnSent.hash;
 
       setPhase('confirming');
       // The tx may not be mined yet by the time we ask — retry a few times
@@ -451,8 +616,8 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
       let confirmed = false;
       for (let i = 0; i < 10 && !confirmed; i++) {
         const row = await authedPost<{ stage: string; pending?: boolean; errorMessage?: string | null }>(
-          `/api/v1/cctp/deposit-intent/${intent.transferId}/confirm`,
-          { burnTxHash: burnHash },
+          `/api/v1/cctp/deposit-intent/${activeTransferId}/confirm`,
+          confirmBody,
         );
         if (row.stage === 'burn_confirmed' || row.stage === 'attestation_pending' || row.stage === 'attestation_ready' || row.stage === 'mint_confirmed') {
           confirmed = true;
@@ -472,7 +637,7 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
       }
 
       setPhase('polling');
-      await pollTransfer(intent.transferId);
+      await pollTransfer(activeTransferId);
     } catch (err) {
       setError((err as Error).message || 'Bridge failed');
       setPhase('error');
@@ -485,6 +650,10 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
     phase === 'switching' ? 'Switching your wallet to the source chain…'
     : phase === 'approving' ? (viaRelay ? 'Approving USDC (gas paid in USDC)…' : 'Confirm the USDC approval in your wallet…')
     : phase === 'burning' ? (viaRelay ? 'Bridging (gas paid in USDC)…' : 'Confirm the transfer in your wallet…')
+    : phase === 'setting-up' ? 'Setting up your smart account (one-time, native gas)…'
+    : phase === 'estimating' ? 'Estimating the sponsored transaction…'
+    : phase === 'signing-op' ? 'Sign the batch in your wallet (gas paid in USDC)…'
+    : phase === 'submitting-op' ? 'Submitting the sponsored transaction…'
     : phase === 'confirming' ? 'Waiting for the burn to be mined…'
     : phase === 'polling' ? 'Bridging — Circle is minting USDC on Arc…'
     : '';
@@ -524,7 +693,7 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
               hint={
                 !signerWallet ? undefined
                 : sourceBalance === null ? 'Checking balance…'
-                : `Balance: ${parseFloat(formatUnits(sourceBalance, 6)).toFixed(4)} USDC${gasReserveRaw > 0n ? ` (${formatUnits(gasReserveRaw, 6)} USDC kept for network fees)` : ''}${useRelayForGas ? ' · gas paid in USDC (sponsored)' : nativeShown !== null ? ` · ${nativeShown} ${nativeSymbol} for gas` : ''}`
+                : `Balance: ${parseFloat(formatUnits(sourceBalance, 6)).toFixed(4)} USDC${gasReserveRaw > 0n ? ` (${formatUnits(gasReserveRaw, 6)} USDC kept for network fees)` : ''}${useRelayForGas ? ' · gas paid in USDC (sponsored)' : useUserOpForGas ? ` · gas paid in USDC (paymaster)${smartAccount ? '' : ' · one-time account setup applies'}` : nativeShown !== null ? ` · ${nativeShown} ${nativeSymbol} for gas` : ''}`
               }
             >
               <FormSelect value={sourceChain} onChange={(e) => setSourceChain(e.target.value)}>
@@ -539,7 +708,9 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
                 exceedsBalance
                   ? gasReserveRaw > 0n
                     ? `Exceeds your balance after network fees (max ≈${formatUnits(spendableRaw ?? 0n, 6)} USDC).`
-                    : 'Exceeds your balance on this chain.'
+                    : useUserOpForGas
+                      ? `Exceeds your balance after the paymaster buffer (max ≈${formatUnits(spendableRaw ?? 0n, 6)} USDC).`
+                      : 'Exceeds your balance on this chain.'
                 : quoteLoading ? 'Quoting…'
                 : quote ? `You'll receive ≈${parseFloat(formatUnits(quote.estimatedReceiveRaw, 6)).toFixed(4)} USDC on Arc (fee ${formatUnits(quote.maxFeeRaw, 6)} USDC)`
                 : undefined
