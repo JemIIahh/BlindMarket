@@ -21,6 +21,7 @@ import { backgroundWritesAllowed } from './deploymentIdentity.js';
 import type { EventLog } from 'ethers';
 import { ethers } from 'ethers';
 import { config } from '../config.js';
+import { CONTRACT_ADDRESSES, DEPLOYMENT_BLOCKS } from '../contractAddresses.js';
 import { arcProvider } from './chain.js';
 import { redis } from './redis.js';
 
@@ -42,11 +43,20 @@ const KEY = {
 const POLL_INTERVAL_MS = 15_000;
 const MAX_BLOCKS_PER_TICK = 5_000;
 
-// Indexer start block. The Arc var wins; the Base one is the legacy fallback
-// for stacks that set it before the factory moved to Arc.
-const DEPLOYMENT_BLOCK = Number(
-  process.env.ARC_AGENT_FACTORY_DEPLOYMENT_BLOCK ?? process.env.AGENT_FACTORY_DEPLOYMENT_BLOCK ?? 0,
-);
+/**
+ * The block the Arc factory was deployed in: nothing before it can hold one of
+ * its events. ARC_AGENT_FACTORY_DEPLOYMENT_BLOCK wins; otherwise the generated
+ * record's, when the configured factory is that one; otherwise 0 (unknown).
+ * Not AGENT_FACTORY_DEPLOYMENT_BLOCK: that is a Base block number, which on
+ * Arc points at an unrelated block about half the chain back — a day of
+ * catch-up at MAX_BLOCKS_PER_TICK before any new credit is recorded.
+ */
+export function factoryDeploymentBlock(factory: string, env: Record<string, string | undefined> = process.env): number {
+  const fromEnv = Number(env.ARC_AGENT_FACTORY_DEPLOYMENT_BLOCK ?? 0);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) return fromEnv;
+  const generated = (CONTRACT_ADDRESSES as { arcTestnet?: { agentFactory?: string } }).arcTestnet?.agentFactory;
+  return generated && generated.toLowerCase() === factory.toLowerCase() ? DEPLOYMENT_BLOCKS.arcTestnet.agentFactory : 0;
+}
 
 // ── State ───────────────────────────────────────────────────────────────────
 
@@ -145,14 +155,17 @@ async function tick(): Promise<void> {
       const latest = await arcProvider.getBlockNumber();
       const checkpointKey = KEY.checkpoint(addr);
       const checkpointRaw = await redis.get(checkpointKey);
+      const floor = factoryDeploymentBlock(addr);
 
       let from: number;
       if (checkpointRaw) {
-        from = Number(checkpointRaw) + 1;
+        // A checkpoint below the factory's deployment block (one set from a
+        // wrong start) skips ahead: no event of this factory is older.
+        from = Math.max(Number(checkpointRaw) + 1, floor);
       } else {
-        // First boot with no checkpoint: start at the deployment block if one
-        // is configured, otherwise here. Never scan from block 0.
-        from = DEPLOYMENT_BLOCK > 0 ? DEPLOYMENT_BLOCK : latest;
+        // First boot with no checkpoint: start at the deployment block if it
+        // is known, otherwise here. Never scan from block 0.
+        from = floor > 0 ? floor : latest;
         await redis.set(checkpointKey, String(from));
       }
       if (from > latest) return;
