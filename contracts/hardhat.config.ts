@@ -80,5 +80,60 @@ export default defineConfig({
       chainId: 5042,
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
     },
+    // CCTP source chains — AA infrastructure (deploy-aa.ts) only. Defaults
+    // match the backend's CCTP RPCs (backend/src/config.ts); override per
+    // network with the env var when needed.
+    "ethereum-sepolia": {
+      type: "http",
+      chainType: "l1",
+      url: process.env.CCTP_ETHEREUM_RPC_URL || "https://ethereum-sepolia-rpc.publicnode.com",
+      chainId: 11155111,
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+    },
+    "arbitrum-sepolia": {
+      type: "http",
+      chainType: "l1",
+      url: process.env.CCTP_ARBITRUM_RPC_URL || "https://sepolia-rollup.arbitrum.io/rpc",
+      chainId: 421614,
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+    },
+    "optimism-sepolia": {
+      type: "http",
+      chainType: "l1",
+      url: process.env.CCTP_OPTIMISM_RPC_URL || "https://sepolia.optimism.io",
+      chainId: 11155420,
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+    },
+    "polygon-amoy": {
+      type: "http",
+      chainType: "l1",
+      url: process.env.CCTP_POLYGON_RPC_URL || "https://rpc-amoy.polygon.technology",
+      chainId: 80002,
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+    },
+    // CCTP mainnet chains — AA deploys only, behind the mainnet checklist
+    // guard. No default RPC: like arc-mainnet these resolve from the
+    // environment only when actually used.
+    "ethereum-mainnet": {
+      type: "http",
+      chainType: "l1",
+      url: configVariable("CCTP_ETHEREUM_MAINNET_RPC_URL"),
+      chainId: 1,
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+    },
+    "arbitrum-mainnet": {
+      type: "http",
+      chainType: "l1",
+      url: configVariable("CCTP_ARBITRUM_MAINNET_RPC_URL"),
+      chainId: 42161,
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+    },
+    "polygon-mainnet": {
+      type: "http",
+      chainType: "l1",
+      url: configVariable("CCTP_POLYGON_MAINNET_RPC_URL"),
+      chainId: 137,
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+    },
   },
 });

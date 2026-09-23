@@ -39,3 +39,26 @@ export const DEPLOYMENT_BLOCKS = {
     "agentFactory": 63589837
   }
 } as const;
+export const AA_ADDRESSES = {
+  "base-sepolia": {
+    "USDCPaymaster": "0xb71D820Be2a1637504ACd6B76276e4C74425D3fF",
+    "BlindAccountFactory": "0x6e1F31d05F48bf98A33A4d673fb7D6DB3A13918c",
+    "BlindAccountImplementation": "0xE1C5C885Df5773B38047A1AfdE90EBf0B5Aad212",
+    "EntryPoint": "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
+    "USDC": "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+  },
+  "ethereum-sepolia": {
+    "USDCPaymaster": "0x7F7C644EAcfE0476069be564f2ddDE97B5ca0A18",
+    "BlindAccountFactory": "0xC8E7359853cCd47529967DDCA61967B3F45eEDC4",
+    "BlindAccountImplementation": "0xEdEbBb1d8EeB6B99070456E0a44a5B6d3393Aedf",
+    "EntryPoint": "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
+    "USDC": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"
+  },
+  "arbitrum-sepolia": {
+    "USDCPaymaster": "0x397141FF57B4003d9aaD74473AC4FE0b3Bfaa842",
+    "BlindAccountFactory": "0xF420F3586c52d45eC6beF23976A36A6C1F1a52E8",
+    "BlindAccountImplementation": "0xFb5850363581169a7CE606cB8A29a51f9aD25700",
+    "EntryPoint": "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
+    "USDC": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d"
+  }
+} as const;

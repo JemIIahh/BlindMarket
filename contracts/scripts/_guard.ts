@@ -18,13 +18,16 @@
  *   - 11155111 (Sepolia, in case used for staging)
  *   - 84532   (Base Sepolia)
  *   - 5042002 (Arc Testnet). Arc Mainnet (5042) is gated like any mainnet.
+ *   - 421614  (Arbitrum Sepolia), 11155420 (Optimism Sepolia), 80002
+ *     (Polygon Amoy) — CCTP source chains with AA infrastructure. Their
+ *     mainnets stay gated like any mainnet.
  *
  * Anything else is treated as mainnet and gated.
  */
 
 import { ethers } from "../lib/hh.js";
 
-export const ALLOWED_TESTNETS: ReadonlySet<number> = new Set<number>([16602, 31337, 1337, 11155111, 84532, 5042002]);
+export const ALLOWED_TESTNETS: ReadonlySet<number> = new Set<number>([16602, 31337, 1337, 11155111, 84532, 5042002, 421614, 11155420, 80002]);
 
 /** The chains the 0G agent-infrastructure contracts (TaskRegistry, BlindReputation, INFT, ValidatorPool) deploy to. */
 export const ZERO_G_CHAIN_IDS: ReadonlySet<number> = new Set<number>([16661, 16602, 31337, 1337]);

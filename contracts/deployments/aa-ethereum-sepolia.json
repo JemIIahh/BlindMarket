@@ -1,0 +1,18 @@
+{
+  "network": "ethereum-sepolia",
+  "chainId": 11155111,
+  "deployer": "0x2f8b1177c83623a560B26B38dE984e154b123D75",
+  "timestamp": "2026-09-23T16:14:25.781Z",
+  "note": "ERC-4337 AA infrastructure — users pay gas in USDC instead of native gas.",
+  "contracts": {
+    "USDCPaymaster": "0x7F7C644EAcfE0476069be564f2ddDE97B5ca0A18",
+    "BlindAccountFactory": "0xC8E7359853cCd47529967DDCA61967B3F45eEDC4",
+    "BlindAccountImplementation": "0xEdEbBb1d8EeB6B99070456E0a44a5B6d3393Aedf",
+    "EntryPoint": "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
+    "USDC": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"
+  },
+  "config": {
+    "ethPriceInUsdc": "3000000000",
+    "maxGasLimit": "1000000"
+  }
+}

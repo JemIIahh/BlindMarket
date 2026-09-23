@@ -136,6 +136,57 @@ const NETWORKS: ReadonlyArray<{ key: string; file: string; ifPresent?: true }> =
   { key: "arcTestnet", file: "arc-testnet.json", ifPresent: true },
 ];
 
+/**
+ * AA infrastructure per CCTP chain, keyed by the backend's CCTP chainKey
+ * (cctpChains.ts) — the fund modal looks up the paymaster/factory for the
+ * source chain here. Emitted as its own export so CONTRACT_ADDRESSES (and
+ * every snapshot test over it) is untouched. A chain appears only once its
+ * aa-<record>.json companion exists (deploy-aa.ts); chains without one
+ * (Arc — native USDC gas) never appear.
+ */
+const AA_CHAINS: ReadonlyArray<{ key: string; file: string }> = [
+  { key: "base", file: "aa-base-mainnet.json" },
+  { key: "base-sepolia", file: "aa-base-sepolia.json" },
+  { key: "ethereum", file: "aa-ethereum-mainnet.json" },
+  { key: "ethereum-sepolia", file: "aa-ethereum-sepolia.json" },
+  { key: "arbitrum", file: "aa-arbitrum-mainnet.json" },
+  { key: "arbitrum-sepolia", file: "aa-arbitrum-sepolia.json" },
+  { key: "optimism-sepolia", file: "aa-optimism-sepolia.json" },
+  { key: "polygon", file: "aa-polygon-mainnet.json" },
+  { key: "polygon-amoy", file: "aa-polygon-amoy.json" },
+];
+
+/** Record keys an AA companion contributes, verbatim (already proper nouns). */
+const AA_KEYS: ReadonlyArray<string> = [
+  "USDCPaymaster",
+  "BlindAccountFactory",
+  "BlindAccountImplementation",
+  "EntryPoint",
+  "USDC",
+];
+
+/** The AA address module for the records in `dir`. Empty object when no
+ *  chain has AA yet — the export is still emitted so consumers can import
+ *  it unconditionally. */
+export function renderAA(dir: string = DEFAULT_RECORDS_DIR): string {
+  const addresses: Record<string, Record<string, string>> = {};
+  for (const n of AA_CHAINS) {
+    const p = path.join(dir, n.file);
+    if (!fs.existsSync(p)) continue;
+    const rec = JSON.parse(fs.readFileSync(p, "utf-8"));
+    const raw: Record<string, string> = rec.contracts ?? {};
+    const picked: Record<string, string> = {};
+    for (const k of AA_KEYS) {
+      const v = raw[k];
+      if (typeof v === "string" && /^0x[0-9a-fA-F]{40}$/.test(v) && !/^0x0{40}$/i.test(v)) {
+        picked[k] = v;
+      }
+    }
+    if (Object.keys(picked).length > 0) addresses[n.key] = picked;
+  }
+  return `export const AA_ADDRESSES = ${JSON.stringify(addresses, null, 2)} as const;\n`;
+}
+
 /** The generated module for the records in `dir`. */
 export function render(dir: string = DEFAULT_RECORDS_DIR): string {
   const addresses: Record<string, Record<string, string>> = {};
@@ -167,7 +218,7 @@ export async function main() {
   if (process.env.DEPLOYMENT_SET) {
     console.warn(`note: DEPLOYMENT_SET=${process.env.DEPLOYMENT_SET} is ignored; generated modules come from the default records only.`);
   }
-  const content = render();
+  const content = render() + renderAA();
   let stale = false;
   for (const target of TARGETS) {
     const existing = fs.existsSync(target) ? fs.readFileSync(target, "utf-8") : null;

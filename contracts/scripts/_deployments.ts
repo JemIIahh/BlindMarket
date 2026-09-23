@@ -37,6 +37,16 @@ export const DEPLOY_FILES: Record<number, string> = {
   // Arc's hardhat networks carry these same names (arc-mainnet, arc-testnet).
   5042: "arc-mainnet.json",
   5042002: "arc-testnet.json",
+  // CCTP source chains. No escrow ever deploys here (no BlindEscrow record);
+  // the files exist so AA infrastructure (deploy-aa.ts writes aa-<file>.json
+  // companions) has a record home per chain.
+  1: "ethereum-mainnet.json",
+  11155111: "ethereum-sepolia.json",
+  42161: "arbitrum-mainnet.json",
+  421614: "arbitrum-sepolia.json",
+  11155420: "optimism-sepolia.json",
+  137: "polygon-mainnet.json",
+  80002: "polygon-amoy.json",
 };
 
 export type DeploymentSet = "default" | "staging";

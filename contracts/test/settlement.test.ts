@@ -26,7 +26,7 @@ import {
   settlementRecord,
   waitForTokenAllowed,
 } from "../scripts/_settlement-deploy.js";
-import { render } from "../scripts/_sync-addresses.js";
+import { render, renderAA } from "../scripts/_sync-addresses.js";
 import { STAGING_MANIFEST_DIR } from "../scripts/_manifest-dir.js";
 
 /**
@@ -142,6 +142,11 @@ describe("Arc settlement tooling", function () {
       expect(ALLOWED_TESTNETS.has(ARC_MAINNET_CHAIN_ID)).to.equal(false);
       expect(ALLOWED_TESTNETS.has(8453)).to.equal(false);
       expect(ALLOWED_TESTNETS.has(84532)).to.equal(true);
+    });
+
+    it("treats CCTP testnet source chains as testnets and their mainnets as gated", function () {
+      for (const id of [421614, 11155420, 80002]) expect(ALLOWED_TESTNETS.has(id)).to.equal(true);
+      for (const id of [1, 42161, 137]) expect(ALLOWED_TESTNETS.has(id)).to.equal(false);
     });
   });
 
@@ -483,8 +488,8 @@ describe("Arc settlement tooling", function () {
     };
 
     it("renders today's records byte for byte as the committed module, production's Arc escrow included", function () {
-      expect(render()).to.equal(committed);
-      expect(render(dir)).to.equal(committed);
+      expect(render() + renderAA()).to.equal(committed);
+      expect(render(dir) + renderAA(dir)).to.equal(committed);
       // deployments/arc-testnet.json is the escrow production posts on (#73);
       // agent-factory-arc-testnet.json is the factory DeployAgentForm pays.
       const arc = JSON.parse(fs.readFileSync(path.join(DEPLOYMENTS_ROOT, "arc-testnet.json"), "utf-8"));
@@ -545,7 +550,7 @@ describe("Arc settlement tooling", function () {
 
     it("drops the block of a zero placeholder", function () {
       edit("base-mainnet.json", (r) => (r.blocks = { BlindEscrow: 5 }));
-      expect(render(dir)).to.equal(committed);
+      expect(render(dir) + renderAA(dir)).to.equal(committed);
     });
 
     it("takes a mirrored AgentFactory's block from the record that holds the same address", function () {
@@ -555,6 +560,21 @@ describe("Arc settlement tooling", function () {
       // A companion record whose factory is not the one emitted gives no block.
       edit("agent-factory-base-sepolia.json", (r) => (r.contracts.AgentFactory = ESCROW_X));
       expect(exported(render(dir), "DEPLOYMENT_BLOCKS").baseTestnet).to.equal(undefined);
+    });
+
+    it("emits per-chain AA addresses only where an aa companion exists", function () {
+      // Today's records: the three chains deploy-aa.ts has run on.
+      const addrs = exported(renderAA(dir), "AA_ADDRESSES");
+      expect(Object.keys(addrs).sort()).to.deep.equal(['arbitrum-sepolia', 'base-sepolia', 'ethereum-sepolia']);
+      expect(addrs['base-sepolia'].USDCPaymaster).to.match(/^0x[0-9a-fA-F]{40}$/);
+
+      // A chain without a companion never appears (Arc: native USDC gas).
+      fs.rmSync(path.join(dir, "aa-base-sepolia.json"));
+      expect(exported(renderAA(dir), "AA_ADDRESSES")['base-sepolia']).to.equal(undefined);
+
+      // Zero placeholders are dropped, not emitted.
+      put("aa-optimism-sepolia.json", { network: "optimism-sepolia", chainId: 11155420, contracts: { USDCPaymaster: ZERO, USDC: ARC_USDC } });
+      expect(exported(renderAA(dir), "AA_ADDRESSES")['optimism-sepolia']).to.deep.equal({ USDC: ARC_USDC });
     });
 
     it("refuses a block that is not a block number", function () {

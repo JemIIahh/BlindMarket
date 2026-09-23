@@ -1,0 +1,18 @@
+{
+  "network": "arbitrum-sepolia",
+  "chainId": 421614,
+  "deployer": "0x2f8b1177c83623a560B26B38dE984e154b123D75",
+  "timestamp": "2026-09-23T16:15:31.648Z",
+  "note": "ERC-4337 AA infrastructure — users pay gas in USDC instead of native gas.",
+  "contracts": {
+    "USDCPaymaster": "0x397141FF57B4003d9aaD74473AC4FE0b3Bfaa842",
+    "BlindAccountFactory": "0xF420F3586c52d45eC6beF23976A36A6C1F1a52E8",
+    "BlindAccountImplementation": "0xFb5850363581169a7CE606cB8A29a51f9aD25700",
+    "EntryPoint": "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
+    "USDC": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d"
+  },
+  "config": {
+    "ethPriceInUsdc": "3000000000",
+    "maxGasLimit": "1000000"
+  }
+}

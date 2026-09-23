@@ -105,8 +105,8 @@ describe("deployment sets (scripts/_deployments)", function () {
     });
 
     it("throws for a chain with no record mapping", function () {
-      expect(() => deploymentFileFor(1)).to.throw(/Unknown chainId 1/);
-      expect(() => recordPath(1, "default")).to.throw(/Unknown chainId 1/);
+      expect(() => deploymentFileFor(99999)).to.throw(/Unknown chainId 99999/);
+      expect(() => recordPath(99999, "default")).to.throw(/Unknown chainId 99999/);
     });
 
     it("allows staging only on Base Sepolia, 0G testnet and Arc testnet", function () {
