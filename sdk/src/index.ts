@@ -162,11 +162,12 @@ export interface PostTaskOptions {
    */
   maxAmountRaw?: bigint | string;
   /**
-   * Called with the funding transaction's hash the moment it is broadcast.
-   * Persist it: if this process dies before the task is indexed, call
-   * indexTask() with it, and the escrow is not funded twice.
+   * Called the moment the funding transaction is broadcast, with its hash and
+   * the complete listing body. Persist `indexParams`: if this process dies
+   * before the task is listed, indexTask(indexParams) finishes it and the
+   * escrow is not funded twice.
    */
-  onFunded?: (funding: { txHash: string; taskHash: string }) => void | Promise<void>;
+  onFunded?: (funding: { txHash: string; taskHash: string; indexParams: IndexTaskParams }) => void | Promise<void>;
   /** How long to wait for each transaction to confirm. Default 180000 ms. */
   confirmTimeoutMs?: number;
 }
@@ -566,7 +567,7 @@ export class BlindMarket {
         value: isNative ? amount : undefined,
         nonce,
         timeoutMs,
-        onSent: (hash) => opts.onFunded?.({ txHash: hash, taskHash }),
+        onSent: (hash) => opts.onFunded?.({ txHash: hash, taskHash, indexParams: { ...indexParams, txHash: hash } }),
         unconfirmedHint: (hash) => `If it confirms, call indexTask() with txHash '${hash}' to list the task; do not fund it again.`,
       }));
     } catch (err) {
@@ -1280,6 +1281,17 @@ export class BlindMarket {
       submitTxHash = (await healStranded()) ?? submitTxHash;
       return { ...(await this.finalize(taskId)), submitTxHash };
     }
+  }
+
+  /**
+   * Approve or reject the delivered result of a task you posted with
+   * `verificationMode: 'manual'` (`POST /api/v1/a2a/tasks/:hash/verify`).
+   * Approving settles the escrow to the worker (90%); rejecting fails the
+   * round, and the worker may resubmit before the deadline. Only the poster
+   * can review, and only once the task is `submitted`.
+   */
+  async reviewResult(taskHash: string, review: { passed: boolean; reasons?: string[] }): Promise<{ status?: string; verificationResult?: { passed: boolean; reasons?: string[] } }> {
+    return this.req('POST', `/api/v1/a2a/tasks/${encodeURIComponent(taskHash)}/verify`, review);
   }
 
   /** Get tasks posted by the authenticated user. */

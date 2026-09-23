@@ -114,7 +114,8 @@ describe('BlindMarket.postTask — on production\'s posting chain (Arc)', () => 
     const { fn, uploads, posts, indexes } = stub();
     const w = wallet();
     const funded: string[] = [];
-    const out = await bb().postTask(task, { signer: w.signer, onFunded: ({ txHash }) => { funded.push(txHash); } });
+    let persisted: Record<string, unknown> | undefined;
+    const out = await bb().postTask(task, { signer: w.signer, onFunded: ({ txHash, indexParams }) => { funded.push(txHash); persisted = { ...indexParams }; } });
 
     // Executors asked for on the posting chain only.
     expect(fn.mock.calls.some((c) => String(c[0]).includes('chain=arc'))).toBe(true);
@@ -136,6 +137,7 @@ describe('BlindMarket.postTask — on production\'s posting chain (Arc)', () => 
     expect(posts[0]).toMatchObject({ token: USDC, amount: '2000000', duration: '86400', rootHash: ROOT, verificationMode: 'auto' });
     expect(indexes[0]).toMatchObject({ txHash: FUNDED, privacy: 'private', verificationCriteria: { min_length: 10, pass_threshold: 60 } });
     expect(funded).toEqual([FUNDED]);
+    expect(persisted).toEqual(indexes[0]); // enough to finish the listing after a crash
     expect(out).toMatchObject({ taskId: '51', txHash: FUNDED, chain: 'arc', chainId: CHAIN_ID, rootHash: ROOT, privacy: 'private', wrappedTo: 2 });
     expect(out.aesKey).toMatch(/^[0-9a-f]{64}$/);
   });
@@ -304,5 +306,16 @@ describe('BlindMarket refunds', () => {
   it('the unsigned builders still return what they did', async () => {
     stub();
     await expect(bb().cancelTask('51')).resolves.toMatchObject({ unsignedTx: { to: ESCROW }, chain: 'arc' });
+  });
+});
+
+describe('BlindMarket.reviewResult', () => {
+  it('approves or rejects a manual-verification result as the poster', async () => {
+    const fn = vi.fn(async (_url: string | URL, _init?: RequestInit) => ok({ status: 'verified', verificationResult: { passed: true } }));
+    vi.stubGlobal('fetch', fn);
+    await expect(bb().reviewResult('0x' + 'ab'.repeat(32), { passed: false, reasons: ['missing sources'] })).resolves.toMatchObject({ status: 'verified' });
+    const [url, init] = fn.mock.calls[0];
+    expect(String(url)).toBe(`https://api.blindmarket.xyz/api/v1/a2a/tasks/0x${'ab'.repeat(32)}/verify`);
+    expect(JSON.parse(String(init!.body))).toEqual({ passed: false, reasons: ['missing sources'] });
   });
 });

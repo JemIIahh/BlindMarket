@@ -20,10 +20,13 @@ the API key owner's wallet:
 
 It checks everything before anything is sent: the signer is the API key's
 own wallet, its RPC is on the posting chain, the wallet holds the amount, and
-the backend built the tx for the escrow it advertises. The funding hash goes
-to `onFunded` as soon as it is sent. An error after funding carries it
+the backend built the tx for the escrow it advertises. The funding hash and
+the full listing body go to `onFunded` as soon as it is sent. An error after funding carries it
 (`err.txHash`) and the listing body (`err.body.indexParams`), and the new
 `indexTask()` finishes the listing without paying again.
+
+**`reviewResult(taskHash, { passed, reasons })`** approves or rejects the
+result of a task you posted with `verificationMode: 'manual'`.
 
 **Refunds are signed and sent for you.** `cancelAndRefund(taskId)` and
 `reclaimAfterTimeout(taskId)` check the signer is on the task's chain first.
