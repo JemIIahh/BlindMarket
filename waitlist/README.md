@@ -44,3 +44,5 @@ Nothing about the BlindMarket app or its API changes.
 ## Stack
 
 Vanilla HTML/CSS/JS. Fonts: Bungee (display), Manrope (text), JetBrains Mono (codes and numbers) from Google Fonts. Three.js (r128, cdnjs) drives the hero's wireframe/particle-cloud visual, which disperses as you scroll. No framework, no build tooling.
+
+
