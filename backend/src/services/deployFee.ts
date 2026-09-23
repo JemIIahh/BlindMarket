@@ -22,6 +22,8 @@ import { config } from '../config.js';
 import { AppError } from '../middleware/errorHandler.js';
 
 const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
+/** AgentFactory.deployAgent() emits this beside its own USDC transfer to the treasury. */
+const AGENT_DEPLOYED_TOPIC = ethers.id('AgentDeployed(address,uint256,uint256,uint256)');
 /** Arc's native USDC has 18 decimals; the ERC-20 shows the same balance with 6. */
 const NATIVE_DECIMALS = 18;
 const TREASURY_TTL_MS = 5 * 60_000;
@@ -35,6 +37,8 @@ const claimKey = (txHash: string) => `deploy-fee:arc:${txHash.toLowerCase()}`;
 export interface ArcDeployFeeTerms {
   method: 'transfer';
   chain: 'arc';
+  /** The chain the fee is paid on: a client checks its wallet is there before paying. */
+  chainId: number;
   /** The USDC ERC-20 on Arc. */
   token: string;
   /** Where the fee goes: the Arc escrow's treasury. */
@@ -77,7 +81,7 @@ async function arcTreasury(escrow: Contract, timeoutMs: number): Promise<string>
 }
 
 async function feeTerms(timeoutMs: number): Promise<{ terms: ArcDeployFeeTerms; escrow: Contract } | null> {
-  const { escrowAddress, token } = settlementChainConfig('arc');
+  const { escrowAddress, token, chainId } = settlementChainConfig('arc');
   const escrow = chainRuntime('arc').escrow;
   if (!escrowAddress || !token.address || !escrow) return null;
   return {
@@ -85,6 +89,7 @@ async function feeTerms(timeoutMs: number): Promise<{ terms: ArcDeployFeeTerms; 
     terms: {
       method: 'transfer',
       chain: 'arc',
+      chainId,
       token: token.address,
       recipient: await arcTreasury(escrow, timeoutMs),
       amountRaw: config.deployFeeUsdcRaw.toString(),
@@ -134,6 +139,18 @@ export async function verifyArcDeployFee(
   }
   if (receipt.status !== 1) {
     throw new AppError(402, 'DEPLOY_FEE_REVERTED', 'The fee transaction reverted on Arc, so nothing was paid.');
+  }
+  // AgentFactory.deployAgent() also moves the fee to the treasury, and its
+  // event already pays for a deploy as a credit. Counting its transaction here
+  // too would let one payment deploy two agents.
+  const factory = config.arcAgentFactoryAddress?.toLowerCase();
+  if (receipt.logs.some((log) => (factory && log.address.toLowerCase() === factory) || log.topics[0] === AGENT_DEPLOYED_TOPIC)) {
+    throw new AppError(
+      402,
+      'DEPLOY_FEE_NOT_PAID',
+      'That transaction paid through AgentFactory, which already counts as a deploy credit. Deploy without feeTxHash to use the credit.',
+      'FACTORY_PAYMENT',
+    );
   }
 
   const fee = BigInt(terms.amountRaw);

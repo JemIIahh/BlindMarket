@@ -11,6 +11,8 @@ import request from 'supertest';
  */
 
 const OWNER = '0x2222222222222222222222222222222222222222';
+// A real secp256k1 point (private key 0x11…11): the deploy encrypts the agent's key to it.
+const OWNER_PUBLIC_KEY = '044f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa385b6b1b8ead809ca67454d9683fcf2ba03456d6fe2c4abe2b07f0fbdbb2f1c1';
 
 // vi.mock factories are hoisted above module-level consts, so the shared spies
 // have to be created inside vi.hoisted() to exist by the time they run.
@@ -61,7 +63,7 @@ vi.mock('../services/skillComposer.js', () => ({
 }));
 // The Arc fee path — deployFee.test.ts covers the receipt checks themselves.
 const ARC_TERMS = {
-  method: 'transfer', chain: 'arc', token: '0x3600000000000000000000000000000000000000',
+  method: 'transfer', chain: 'arc', chainId: 5042002, token: '0x3600000000000000000000000000000000000000',
   recipient: '0x2f8b1177c83623a560B26B38dE984e154b123D75', amountRaw: '1000000', decimals: 6,
 };
 vi.mock('../services/deployFee.js', () => ({
@@ -86,7 +88,7 @@ app.use(globalErrorHandler);
 const body = (extra: Record<string, unknown> = {}) => ({
   name: 'A', instructions: 'do useful things for people',
   provider: 'openai', model: 'gpt-4o-mini', apiKey: 'sk-test', capabilities: [],
-  ownerPublicKey: '04' + 'ab'.repeat(64), ...extra,
+  ownerPublicKey: OWNER_PUBLIC_KEY, ...extra,
 });
 const deploy = (extra = {}) =>
   request(app).post('/api/v1/agents/deploy').set('X-API-Key', 'sk_owner').send(body(extra));
@@ -164,6 +166,51 @@ describe('POST /agents/deploy — the deploy fee paid on Arc', () => {
   });
 });
 
+describe('POST /agents/deploy/validate — the checks before a fee is paid', () => {
+  const validate = (extra: Record<string, unknown> = {}) =>
+    request(app).post('/api/v1/agents/deploy/validate').set('X-API-Key', 'sk_owner').send(body(extra));
+
+  it('passes a request the deploy would accept, and takes no fee and saves nothing', async () => {
+    const res = await validate();
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({ valid: true });
+    expect(verifyArcDeployFee).not.toHaveBeenCalled();
+    expect(claimDeployCredit).not.toHaveBeenCalled();
+    expect(deployAgent).not.toHaveBeenCalled();
+  });
+
+  it('refuses what the deploy would refuse, with the same answer', async () => {
+    for (const extra of [{ name: '' }, { skillSlugs: ['no-such-skill'] }, { ownerPublicKey: '04' + 'ab'.repeat(64) }]) {
+      const [checked, deployed] = await Promise.all([validate(extra), deploy(extra)]);
+      expect(checked.status).toBe(deployed.status);
+      expect(checked.body).toEqual(deployed.body);
+    }
+    expect(deployAgent).not.toHaveBeenCalled();
+  });
+
+  it('needs auth', async () => {
+    const res = await request(app).post('/api/v1/agents/deploy/validate').send(body());
+    expect(res.status).toBe(401);
+  });
+});
+
+describe('POST /agents/deploy — the owner key must be one the agent key can be encrypted to', () => {
+  it('refuses hex that is not a public key before the fee is looked at', async () => {
+    const res = await deploy({ feeTxHash: FEE_TX, ownerPublicKey: '04' + 'ab'.repeat(64) });
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('INVALID_OWNER_PUBLIC_KEY');
+    expect(verifyArcDeployFee).not.toHaveBeenCalled();
+    expect(claimArcDeployFee).not.toHaveBeenCalled();
+    expect(deployAgent).not.toHaveBeenCalled();
+  });
+
+  it('accepts a compressed secp256k1 key too, as it did before', async () => {
+    const compressed = '034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa';
+    const res = await deploy({ feeTxHash: FEE_TX, ownerPublicKey: compressed });
+    expect(res.status).toBe(201);
+  });
+});
+
 describe('GET /agents/deploy-fee', () => {
   it('gives the Arc terms when this stack has an Arc escrow', async () => {
     const res = await request(app).get('/api/v1/agents/deploy-fee');
@@ -174,7 +221,7 @@ describe('GET /agents/deploy-fee', () => {
   it('points at AgentFactory when there is no Arc escrow to pay by transfer', async () => {
     vi.mocked(arcDeployFeeTerms).mockResolvedValueOnce(null);
     const res = await request(app).get('/api/v1/agents/deploy-fee');
-    expect(res.body.data).toEqual({ required: true, method: 'factory', chain: 'arc', factory: config.arcAgentFactoryAddress || null });
+    expect(res.body.data).toEqual({ required: true, method: 'factory', chain: 'arc', chainId: config.arcChainId, factory: config.arcAgentFactoryAddress || null });
   });
 
   it('says no fee is due when the paywall is off', async () => {

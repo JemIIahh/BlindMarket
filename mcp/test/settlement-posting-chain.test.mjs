@@ -142,10 +142,14 @@ test('a chain added later is paid through the relay once the backend describes i
     relayChain: 'arc', gasSymbol: 'USDC', postable: true,
   };
   const data = newBridge({ postingChain: 'arc', chains: [...chainsFixture().map((c) => ({ ...c, postable: false })), arc] });
+  // A chain id with no public RPC known here needs its env var: no guessing.
+  const unknown = newBridge({ postingChain: 'zeta', chains: [...chainsFixture().map((c) => ({ ...c, postable: false })), { ...arc, chain: 'zeta', chainId: 999_999, relayChain: 'zeta' }] });
   await assert.rejects(
-    discoverSettlement({ ...backend(data), env: {} }),
-    (e) => e.code === 'RPC_UNKNOWN' && /BLINDMARKET_ARC_RPC_URL/.test(e.message),
+    discoverSettlement({ ...backend(unknown), env: {} }),
+    (e) => e.code === 'RPC_UNKNOWN' && /BLINDMARKET_ZETA_RPC_URL/.test(e.message),
   );
+  // Arc testnet has a public RPC, keyed by the chain id the backend names.
+  assert.equal((await discoverSettlement({ ...backend(data), env: {} })).rpcUrl, 'https://rpc.testnet.arc.io');
   const s = await discoverSettlement({ ...backend(data), env: { BLINDMARKET_ARC_RPC_URL: 'http://127.0.0.1:9' } });
   assert.equal(s.payment, 'relay-erc20');
   assert.equal(s.mode, 'arc');

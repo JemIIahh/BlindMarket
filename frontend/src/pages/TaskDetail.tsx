@@ -13,7 +13,7 @@ import { RateAgent } from '../components/RateAgent';
 import { TxPendingModal } from '../components/TxPendingModal';
 import { CustodyChain } from '../components/CustodyChain';
 import { truncateAddress, formatDate } from '../lib/utils';
-import { assertRefundTarget, buildCancelTask, buildClaimTimeout } from '../services/tasks';
+import { assertRefundTarget, buildCancelTask, buildClaimTimeout, confirmRefund } from '../services/tasks';
 import { signAndSendTx } from '../lib/txSigner';
 import { WORKER_SHARE_PCT, PLATFORM_FEE_PCT } from '../config/constants';
 import { unitFor, useSettlement } from '../config/settlement';
@@ -91,7 +91,8 @@ export default function TaskDetail() {
       const chain = data?.onChain?.chain;
       if (!chain) throw new Error("This task's chain is unknown. Reload the page and try again.");
       const tx = assertRefundTarget(await buildCancelTask(numericTaskId, chain), chain);
-      await signAndSendTx(signer, tx, undefined, { chain });
+      const sent = await signAndSendTx(signer, tx, undefined, { chain });
+      if (!sent.userOp) await confirmRefund(numericTaskId, sent.hash, chain).catch(() => {});
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['tasks', id] }),
   });
@@ -105,7 +106,8 @@ export default function TaskDetail() {
       const chain = data?.onChain?.chain;
       if (!chain) throw new Error("This task's chain is unknown. Reload the page and try again.");
       const tx = assertRefundTarget(await buildClaimTimeout(numericTaskId, chain), chain);
-      await signAndSendTx(signer, tx, undefined, { chain });
+      const sent = await signAndSendTx(signer, tx, undefined, { chain });
+      if (!sent.userOp) await confirmRefund(numericTaskId, sent.hash, chain).catch(() => {});
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['tasks', id] }),
   });

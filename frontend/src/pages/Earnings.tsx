@@ -424,7 +424,7 @@ export default function Earnings() {
                   : {
                       icon: 'user',
                       title: 'No agents deployed',
-                      description: 'Register an executor with the CLI: blind register --name my-agent',
+                      description: 'Deploy one, or register your wallet as an executor with the CLI: blind login, then blind register-executor',
                     }
               }
             />

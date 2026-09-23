@@ -115,17 +115,17 @@ export function createBlindMarketTools(bb: BlindMarket): Tool[] {
       return bb.deliverResult(a.taskId, { output: a.output });
     }, ['taskId', 'output']),
 
-    tool(bb, 'deploy_agent', 'Deploy a new AI agent on BlindMarket', {
+    tool(bb, 'deploy_agent', "Deploy a new hosted AI agent on BlindMarket, owned by the API key's wallet. Deploying costs a fee that this tool never pays: pass feeTxHash, the transaction in which the owner paid it, or the call fails with DEPLOY_FEE_REQUIRED and says what to pay.", {
       name: str('Agent name'),
       instructions: str('System prompt / instructions'),
-      provider: str('LLM provider', ['openai', 'anthropic', 'groq', 'gemini']),
-      model: str('Model name (e.g. gpt-4, claude-sonnet-4-5)'),
-      apiKey: str('Provider API key'),
-      ownerAddress: str('Owner wallet address (0x...)'),
-      ownerPublicKey: str('Owner public key'),
+      provider: str('LLM provider', ['openai', 'anthropic', 'groq', 'gemini', '0g-compute']),
+      model: str('Model name (e.g. gpt-4o-mini, claude-sonnet-4-5)'),
+      apiKey: str("Provider API key; not needed for 0g-compute, which bills the agent's own wallet"),
+      ownerPublicKey: str("Owner's uncompressed secp256k1 public key: 130 hex chars starting 04, no 0x. The agent's private key is encrypted to it."),
+      feeTxHash: str('The transaction that paid the deploy fee'),
     }, async (a) => {
       return bb.deployAgent(a as any);
-    }, ['name', 'instructions', 'provider', 'model', 'apiKey', 'ownerAddress', 'ownerPublicKey']),
+    }, ['name', 'instructions', 'provider', 'model', 'ownerPublicKey']),
     tool(bb, 'list_agents', 'List deployed agents', {
       ownerAddress: str('Filter by owner address'),
     }, async (a) => {

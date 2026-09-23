@@ -1,0 +1,85 @@
+{
+    "success": true,
+    "data": {
+        "configured": true,
+        "escrowAddress": "0x3d0374963DaaD43e31d42373eb11156A8e8ce2Ff",
+        "chainId": 16661,
+        "base": {
+            "configured": true,
+            "signerAddress": "0xF0c75D55C7c88F5247FE6bB0f681D42F4232151E",
+            "escrowAddress": "0xCca5ab873158b888158AD9Dc36fb4Ee683eFbEBf",
+            "chainId": 84532,
+            "onChainVerifier": "0xF0c75D55C7c88F5247FE6bB0f681D42F4232151E",
+            "verifierMatches": true,
+            "escrowReadError": null,
+            "signerUsdcBalance": "0",
+            "signerEthBalance": "0.000274294789922831",
+            "signerEthLow": true,
+            "signerBalanceError": null,
+            "rotateCommand": null
+        },
+        "chains": [
+            {
+                "chain": "base",
+                "configured": true,
+                "chainId": 84532,
+                "tier": "testnet",
+                "escrowAddress": "0xCca5ab873158b888158AD9Dc36fb4Ee683eFbEBf",
+                "token": {
+                    "kind": "erc20",
+                    "address": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+                    "symbol": "USDC",
+                    "decimals": 6
+                },
+                "relayChain": "base-sepolia",
+                "gasSymbol": "ETH",
+                "postable": false,
+                "verifier": {
+                    "signerAddress": "0xF0c75D55C7c88F5247FE6bB0f681D42F4232151E",
+                    "onChainVerifier": "0xF0c75D55C7c88F5247FE6bB0f681D42F4232151E",
+                    "verifierMatches": true,
+                    "escrowReadError": null,
+                    "signerGasBalance": "0.000274294789922831",
+                    "signerGasLow": false,
+                    "rotateCommand": null
+                }
+            },
+            {
+                "chain": "arc",
+                "configured": true,
+                "chainId": 5042002,
+                "tier": "testnet",
+                "escrowAddress": "0xaBf70843E0380F1e749d2b85C30dD6820Ff5C731",
+                "token": {
+                    "kind": "erc20",
+                    "address": "0x3600000000000000000000000000000000000000",
+                    "symbol": "USDC",
+                    "decimals": 6
+                },
+                "relayChain": null,
+                "gasSymbol": "USDC",
+                "postable": true,
+                "verifier": {
+                    "signerAddress": "0xF0c75D55C7c88F5247FE6bB0f681D42F4232151E",
+                    "onChainVerifier": "0x2f8b1177c83623a560B26B38dE984e154b123D75",
+                    "verifierMatches": false,
+                    "escrowReadError": null,
+                    "signerGasBalance": "0.0",
+                    "signerGasLow": true,
+                    "rotateCommand": "cd contracts && EXPECTED_ESCROW=0xaBf70843E0380F1e749d2b85C30dD6820Ff5C731 MARKETPLACE_SIGNER_ADDRESS=0xF0c75D55C7c88F5247FE6bB0f681D42F4232151E npx hardhat run scripts/rotate-verifier.ts --network arc-testnet"
+                }
+            }
+        ],
+        "postingChain": "arc",
+        "settlementTier": "testnet",
+        "tierSource": "chains",
+        "deploymentIdentity": {
+            "deploymentId": null,
+            "role": "unset",
+            "owner": null,
+            "writersAllowed": true,
+            "stoppable": false,
+            "reason": null
+        }
+    }
+}

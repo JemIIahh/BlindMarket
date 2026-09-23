@@ -21,8 +21,10 @@ import crypto from 'node:crypto';
 export type SpendStage = 'created' | 'approved' | 'funded' | 'indexed' | 'sent' | 'confirmed';
 
 /** Every kind moves money and so carries an idempotencyKey: rent/post pay it
- *  out of the wallet, cancel/timeout pull it back. */
-export type SpendKind = 'rent' | 'post' | 'cancel' | 'timeout';
+ *  out of the wallet, cancel/timeout pull it back, deploy pays the agent
+ *  deploy fee (created → sent once the fee transaction is broadcast →
+ *  confirmed once the agent exists). */
+export type SpendKind = 'rent' | 'post' | 'cancel' | 'timeout' | 'deploy';
 
 export interface SpendRecord {
   idempotencyKey: string;
@@ -59,6 +61,8 @@ export interface SpendRecord {
   requiredCapabilities?: string[];
   amountWei?: string;
   durationSecs?: number;
+  /** deploy only: the agent the fee paid for */
+  agentId?: string;
   createdAt: string;
   updatedAt: string;
 }

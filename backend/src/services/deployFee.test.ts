@@ -14,6 +14,7 @@ const OLD_TREASURY = '0x7777777777777777777777777777777777777777';
 const OWNER = '0x1111111111111111111111111111111111111111';
 const STRANGER = '0x9999999999999999999999999999999999999999';
 const TX = '0x' + 'ab'.repeat(32);
+const FACTORY = '0x1E9Abb2F2e66b8Af35BED730500A94760E133a3B';
 
 const cfg = vi.hoisted(() => ({}) as Record<string, unknown>);
 vi.mock('../config.js', () => ({ config: cfg }));
@@ -49,6 +50,7 @@ const {
 } = await import('./deployFee.js');
 
 const TRANSFER = ethers.id('Transfer(address,address,uint256)');
+const AGENT_DEPLOYED = ethers.id('AgentDeployed(address,uint256,uint256,uint256)');
 const word = (address: string) => ethers.zeroPadValue(address, 32);
 const amount = (raw: bigint) => ethers.AbiCoder.defaultAbiCoder().encode(['uint256'], [raw]);
 
@@ -68,6 +70,7 @@ beforeEach(() => {
     arcRpcUrl: 'https://rpc.testnet.arc.io',
     arcEscrowAddress: '0xaBf70843E0380F1e749d2b85C30dD6820Ff5C731',
     arcUsdcAddress: USDC,
+    arcAgentFactoryAddress: FACTORY,
     deployFeeUsdcRaw: 1_000_000n,
   });
   chain.escrow = true;
@@ -82,7 +85,7 @@ beforeEach(() => {
 describe('arcDeployFeeTerms', () => {
   it("names Arc USDC, the escrow's treasury and the fee", async () => {
     expect(await arcDeployFeeTerms()).toEqual({
-      method: 'transfer', chain: 'arc', token: USDC, recipient: TREASURY, amountRaw: '1000000', decimals: 6,
+      method: 'transfer', chain: 'arc', chainId: 5042002, token: USDC, recipient: TREASURY, amountRaw: '1000000', decimals: 6,
     });
   });
 
@@ -183,6 +186,29 @@ describe('verifyArcDeployFee', () => {
     const approval = { ...transferLog(OWNER, TREASURY, 1_000_000n), topics: [ethers.id('Approval(address,address,uint256)'), word(OWNER), word(TREASURY)] };
     chain.getTransactionReceipt.mockResolvedValue(receipt([approval]));
     await expect(verifyArcDeployFee(TX, [OWNER], fast)).rejects.toMatchObject({ code: 'DEPLOY_FEE_NOT_PAID' });
+  });
+
+  it('refuses an AgentFactory payment, which already pays for a deploy as a credit', async () => {
+    // deployAgent() moves the fee to the treasury (the same Transfer a plain
+    // payment makes) and emits AgentDeployed: counting it here too would let
+    // one payment deploy two agents.
+    const deployed = { address: FACTORY, topics: [AGENT_DEPLOYED, word(OWNER)], data: amount(0n) };
+    chain.getTransactionReceipt.mockResolvedValue(receipt([transferLog(OWNER, TREASURY, 1_000_000n), deployed]));
+    await expect(verifyArcDeployFee(TX, [OWNER], fast))
+      .rejects.toMatchObject({ statusCode: 402, code: 'DEPLOY_FEE_NOT_PAID', reason: 'FACTORY_PAYMENT' });
+  });
+
+  it('refuses a transaction with an AgentDeployed event from any factory', async () => {
+    Object.assign(cfg, { arcAgentFactoryAddress: '' });
+    const deployed = { address: STRANGER, topics: [AGENT_DEPLOYED, word(OWNER)], data: amount(0n) };
+    chain.getTransactionReceipt.mockResolvedValue(receipt([transferLog(OWNER, TREASURY, 1_000_000n), deployed]));
+    await expect(verifyArcDeployFee(TX, [OWNER], fast)).rejects.toMatchObject({ reason: 'FACTORY_PAYMENT' });
+  });
+
+  it('refuses a transaction in which the factory logged anything', async () => {
+    const other = { address: FACTORY.toLowerCase(), topics: [ethers.id('Other()')], data: '0x' };
+    chain.getTransactionReceipt.mockResolvedValue(receipt([transferLog(OWNER, TREASURY, 1_000_000n), other]));
+    await expect(verifyArcDeployFee(TX, [OWNER], fast)).rejects.toMatchObject({ reason: 'FACTORY_PAYMENT' });
   });
 
   it('refuses a transaction that reverted', async () => {
