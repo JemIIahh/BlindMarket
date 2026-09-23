@@ -25,6 +25,12 @@ const snippets = () => [
 
 const bb = new BlindMarket({
   apiKey: process.env.BLINDMARKET_API_KEY!, // sk_...
+  // The key of the wallet the API key belongs to. It signs your transactions
+  // locally, on the chain the backend names, and never leaves this process.
+  executor: {
+    privateKey: process.env.OWNER_PRIVATE_KEY!,
+    rpcUrls: { arc: 'https://rpc.testnet.arc.io' },
+  },
 });`,
   },
   {
@@ -32,9 +38,9 @@ const bb = new BlindMarket({
     title: 'Register as A2A executor',
     code: `import { AgentCap } from '@blindmarket/sdk';
 
-// One-shot: generates wallet + registers in the A2A marketplace.
-// Private key returned once — store it securely.
-const { executor, wallet } = await bb.createAgent({
+// Registers your wallet (the executor key above) in the A2A marketplace.
+// Briefs are wrapped to its public key; it signs its own deliveries.
+const { executor } = await bb.createAgent({
   displayName: 'DataBot',
   capabilities: [
     AgentCap.DATA_PROCESSING,
@@ -44,32 +50,48 @@ const { executor, wallet } = await bb.createAgent({
   minReward: '${parsePaymentAmount('1')}', // 1 ${getPaymentSymbol()}, in the token's smallest unit
 });
 
-console.log('Executor:', executor.address);
-console.log('Private key:', wallet.privateKey); // ⚠️ show once`,
+console.log('Executor:', executor.address);`,
   },
   {
     num: '05',
     title: 'Deploy a server-managed agent',
-    code: `import { ethers } from 'ethers';
+    code: `import { ethers } from '@blindmarket/sdk';
 
-// Each deployed agent gets its own on-chain wallet
-const wallet = ethers.Wallet.createRandom();
+// The agent's wallet key is encrypted to yours: uncompressed, no 0x.
+const owner = new ethers.Wallet(process.env.OWNER_PRIVATE_KEY!);
 
+// Deploying costs a fee (1 USDC on Arc on production), paid from your
+// wallet only with payFee. Nothing is paid for a request the deploy would
+// refuse, or above maxFeeRaw.
 const agent = await bb.deployAgent({
   name: 'research-agent',
-  instructions: 'You research topics and post tasks for humans to verify.',
+  instructions: 'You research topics and report back with sources.',
   provider: 'anthropic',
   model: 'claude-sonnet-5',
-  apiKey: process.env.ANTHROPIC_API_KEY,
-  ownerAddress: wallet.address,
-  ownerPublicKey: wallet.publicKey,
-});
+  apiKey: process.env.ANTHROPIC_API_KEY!,
+  ownerPublicKey: owner.signingKey.publicKey.slice(2),
+}, { payFee: true, onFeePaid: (hash) => console.log('fee paid:', hash) });
 
-console.log(agent.walletAddress); // agent's own wallet
-console.log(agent.inftTokenId);   // on-chain identity`,
+console.log(agent.walletAddress); // agent's own wallet`,
   },
   {
     num: '06',
+    title: 'Post a task',
+    code: `// Encrypts the brief to the executors who can take it, approves and
+// funds the escrow from your wallet, and lists the task.
+const task = await bb.postTask(
+  {
+    instructions: 'Summarise this paper in five bullets: …',
+    amountRaw: '${parsePaymentAmount('2')}', // 2 ${getPaymentSymbol()}, in the token's smallest unit
+  },
+  { onFunded: ({ indexParams }) => save(indexParams) }, // finish with bb.indexTask() after a crash
+);
+
+// No one took it? Get the escrow back:
+await bb.cancelAndRefund(task.taskId!);`,
+  },
+  {
+    num: '07',
     title: 'Give your agent BlindMarket tools',
     code: `import { tools } from '@blindmarket/sdk';
 
