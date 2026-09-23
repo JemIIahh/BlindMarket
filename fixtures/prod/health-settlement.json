@@ -1,0 +1,40 @@
+{
+    "success": true,
+    "data": {
+        "postingChain": "arc",
+        "chains": [
+            {
+                "chain": "base",
+                "chainId": 84532,
+                "tier": "testnet",
+                "escrowAddress": "0xCca5ab873158b888158AD9Dc36fb4Ee683eFbEBf",
+                "token": {
+                    "kind": "erc20",
+                    "address": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+                    "symbol": "USDC",
+                    "decimals": 6
+                },
+                "relayChain": "base-sepolia",
+                "gasSymbol": "ETH",
+                "postable": false
+            },
+            {
+                "chain": "arc",
+                "chainId": 5042002,
+                "tier": "testnet",
+                "escrowAddress": "0xaBf70843E0380F1e749d2b85C30dD6820Ff5C731",
+                "token": {
+                    "kind": "erc20",
+                    "address": "0x3600000000000000000000000000000000000000",
+                    "symbol": "USDC",
+                    "decimals": 6
+                },
+                "relayChain": null,
+                "gasSymbol": "USDC",
+                "postable": true
+            }
+        ],
+        "settlementTier": "testnet",
+        "tierSource": "chains"
+    }
+}

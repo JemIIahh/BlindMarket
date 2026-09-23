@@ -7,14 +7,50 @@ listed here with how to migrate.
 
 ### Changes
 
+**`postTask()` posts a task end to end on the posting chain.** Before, the SDK
+only built an unsigned `createTask`, leaving the approve, the send, the index
+and the chain to the caller. Nobody could post from the SDK on Arc,
+production's posting chain. `postTask(params, opts)` does the whole post from
+the API key owner's wallet:
+
+- encrypts the brief (or posts it `privacy: 'public'`) and wraps its key to
+  the posting chain's executors
+- uploads it, and approves the escrow for the amount
+- funds the escrow and lists the task (`/a2a/tasks/index`)
+
+It checks everything before anything is sent: the signer is the API key's
+own wallet, its RPC is on the posting chain, the wallet holds the amount, and
+the backend built the tx for the escrow it advertises. The funding hash goes
+to `onFunded` as soon as it is sent. An error after funding carries it
+(`err.txHash`) and the listing body (`err.body.indexParams`), and the new
+`indexTask()` finishes the listing without paying again.
+
+**Refunds are signed and sent for you.** `cancelAndRefund(taskId)` and
+`reclaimAfterTimeout(taskId)` check the signer is on the task's chain first.
+`getSettlement()` returns where tasks are posted and in what token.
+
 **`deployAgent()` can pay the deploy fee.** Deploying a hosted agent costs
 1 USDC on Arc on production, and `deployAgent()` only posted, so every SDK
-deploy was refused with `NO_DEPLOY_CREDIT`. `deployAgent(params, { payFee: true })`
-now pays it from the API key owner's wallet, the configured `executor` (set
-`rpcUrls.arc`) or `opts.payer`, checks that wallet against the API key before
-paying, and names the payment on the result (`feeTxHash`). A fee paid some
-other way goes in `params.feeTxHash`. New `getDeployFee()` returns what the
-backend charges.
+deploy was refused with `NO_DEPLOY_CREDIT`.
+`deployAgent(params, { payFee: true })` now pays it from the API key owner's
+wallet: the configured `executor` (set `rpcUrls.arc`) or `opts.payer`.
+
+- **An unspent AgentFactory credit pays first.** Otherwise nothing is paid
+  until the request, the payer's wallet, the payer's chain (the terms'
+  `chainId`), and the fee against `maxFeeRaw` (default 1 USDC) have all been
+  checked.
+- **The hash is handed back.** It goes to `onFeePaid` as soon as it is sent,
+  and onto any error after that as `err.feeTxHash`. Pass it back as
+  `params.feeTxHash` and nothing is paid twice.
+- **A retry returns your agent.** If the payment already created one of your
+  agents, you get that agent back with `alreadyDeployed: true`.
+
+New `getDeployFee()` returns what the backend charges. New `validateDeploy()`
+runs the deploy's checks with nothing paid or saved.
+
+**`ApiError` carries `reason`** (e.g. `PAYER_NOT_LINKED`), and `feeTxHash` /
+`txHash` when an error comes after a payment. It is the same class, and its
+constructor is unchanged.
 
 **Breaking:** without `payFee` or `feeTxHash`, a backend that charges now
 answers `DEPLOY_FEE_REQUIRED` (402) with the price, instead of
@@ -24,11 +60,19 @@ paying. Code that matched `NO_DEPLOY_CREDIT` should match
 
 ### Fixes
 
-**`DeployAgentParams` matches the backend.** `provider` includes
-`'0g-compute'`, `apiKey` is optional (not needed for `0g-compute`), and
-`skillSlugs`, `toolSecrets` and `feeTxHash` are accepted. `ownerAddress` is
-optional and ignored — the backend never read it; the owner is the API key's
-wallet. The `deploy_agent` tool follows, and never pays: it takes `feeTxHash`.
+**`DeployAgentParams` matches the backend.**
+- `provider` includes `'0g-compute'`.
+- `apiKey` is optional (not needed for `0g-compute`).
+- `skillSlugs`, `toolSecrets` and `feeTxHash` are accepted.
+- `ownerAddress` is optional and ignored. The backend never read it; the owner
+  is the API key's wallet.
+- The `deploy_agent` tool follows, and never pays: it takes `feeTxHash`.
+
+**`CreateTaskTx` gains `chain` and `chainId`.** `cancelTask()` and
+`claimTimeout()` are typed with them too. The backend always returned them.
+
+**`uploadBlob()` takes base64**, as the backend reads it. The parameter was
+typed `Hex`, and a hex string uploaded the wrong bytes.
 
 ## 0.6.4
 

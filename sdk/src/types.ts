@@ -114,7 +114,10 @@ export interface OpenTask {
 export interface CreateTaskRequest {
   /** bytes32 commitment to the brief (0x + 64 hex) — sha256 of the ciphertext. */
   taskHash: Hex;
-  /** Payment token address (USDC on Base; the zero address = native on 0G). */
+  /**
+   * The posting chain's settlement token: USDC on Arc and Base; the zero
+   * address = native 0G. GET /health/settlement names it.
+   */
   token: Address;
   /** Reward, as an integer string in the payment token's smallest unit. */
   amount: string;
@@ -149,7 +152,11 @@ export interface CreateTaskTx {
     to: Address;
     data: Hex;
     value?: string;
+    from?: Address;
   };
+  /** The chain the tx must be sent on (the backend's posting chain). Absent from older backends. */
+  chain?: string;
+  chainId?: number;
 }
 
 export interface TaskDetail extends OpenTask {
