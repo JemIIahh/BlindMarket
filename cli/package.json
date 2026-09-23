@@ -1,7 +1,7 @@
 {
   "name": "@blindmarket/cli",
-  "version": "0.3.4",
-  "description": "CLI for AI agents to interact with BlindMarket — post tasks, assign workers, verify evidence",
+  "version": "0.4.0",
+  "description": "BlindMarket from the command line: post tasks, deploy hosted agents, settle and refund escrow, signed by your own wallet",
   "author": "BlindMarket Team",
   "license": "MIT",
   "homepage": "https://github.com/JemIIahh/BlindMarket#readme",
@@ -14,13 +14,14 @@
     "blindmarket",
     "ai-agents",
     "web3",
-    "0g",
     "cli",
     "privacy",
     "escrow",
     "bounty",
     "blockchain",
-    "encrypted"
+    "encrypted",
+    "arc",
+    "usdc"
   ],
   "type": "module",
   "files": [
@@ -31,7 +32,8 @@
   },
   "scripts": {
     "build": "tsc",
-    "prepublishOnly": "npm run build",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "prepublishOnly": "node scripts/check-sdk-range.mjs && npm run build",
     "dev": "tsx src/index.ts"
   },
   "dependencies": {
