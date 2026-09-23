@@ -59,6 +59,7 @@ let deployAnswers;
 let calls;
 let sent;
 let waitResult;
+let validateAnswer;
 beforeEach(() => {
   terms = TRANSFER_TERMS;
   owner = OWNER;
@@ -67,6 +68,7 @@ beforeEach(() => {
   sent = [];
   waitResult = async () => ({ status: 1 });
   chainIdServed = 5042002;
+  validateAnswer = null;
 });
 
 const realFetch = globalThis.fetch;
@@ -79,6 +81,7 @@ globalThis.fetch = async (url, init = {}) => {
   const json = (data) => ({ ok: true, status: 200, json: async () => ({ success: true, data }) });
   if (path === '/health/bridge') return json({ postingChain: 'arc', chains: [{ chain: 'arc', chainId: 5042002 }] });
   if (path === '/api/v1/agents/deploy-fee') return json(terms);
+  if (path === '/api/v1/agents/deploy/validate') return validateAnswer ?? json({ valid: true });
   if (path === '/api/v1/api-keys/whoami') return json({ address: owner.toLowerCase() });
   if (path === '/api/v1/agents/deploy') {
     const next = deployAnswers.shift();
@@ -218,4 +221,38 @@ test('with no fee, confirm deploys without paying', async () => {
   assert.equal(done.agentId, 'agent-1');
   assert.equal(sent.length, 0);
   assert.equal(deploys()[0].body.feeTxHash, undefined);
+});
+
+test('a request the deploy would refuse is refused at the quote, before anything is paid', async () => {
+  validateAnswer = failWith(404, 'SKILL_NOT_FOUND');
+  const error = errorOf(await tools().deploy_agent({ ...args, skillSlugs: ['nope'], idempotencyKey: 'deploy-invalid-1' }));
+  assert.equal(error.code, 'SKILL_NOT_FOUND');
+  assert.match(error.message, /Nothing was paid/);
+  assert.equal(sent.length, 0);
+  assert.equal(deploys().length, 0);
+});
+
+test('checks the request again on confirm, right before paying', async () => {
+  const t = tools();
+  const { quote } = parse(await t.deploy_agent({ ...args, idempotencyKey: 'deploy-invalid-2' }));
+  validateAnswer = failWith(400, 'INVALID_OWNER_PUBLIC_KEY');
+  const error = errorOf(await t.deploy_agent({ ...args, idempotencyKey: 'deploy-invalid-2', confirm: true, quoteId: quote.quoteId }));
+  assert.equal(error.code, 'INVALID_OWNER_PUBLIC_KEY');
+  assert.equal(sent.length, 0);
+});
+
+test('a backend without the validate route still deploys (its own checks run before it takes the fee)', async () => {
+  validateAnswer = { ok: false, status: 404, json: async () => { throw new SyntaxError('Unexpected token <'); } };
+  const t = tools();
+  const { quote } = parse(await t.deploy_agent({ ...args, idempotencyKey: 'deploy-oldbackend-1' }));
+  const done = parse(await t.deploy_agent({ ...args, idempotencyKey: 'deploy-oldbackend-1', confirm: true, quoteId: quote.quoteId }));
+  assert.equal(done.agentId, 'agent-1');
+});
+
+test("refuses a fee whose chain id is not the one the backend lists for that chain", async () => {
+  terms = { ...TRANSFER_TERMS, chainId: 5042 };
+  const error = errorOf(await tools().deploy_agent({ ...args, idempotencyKey: 'deploy-chainid-1' }));
+  assert.equal(error.code, 'SETTLEMENT_UNKNOWN');
+  assert.match(error.message, /chain 5042/);
+  assert.equal(sent.length, 0);
 });

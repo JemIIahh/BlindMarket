@@ -5,7 +5,10 @@ import type { McpConfig } from './config.js';
 import type { WalletCtx } from './wallet.js';
 import { aesDecrypt, aesEncrypt, derivePublicKeyHex, eciesDecrypt, eciesEncrypt, generateAesKey, sha256Hex } from './crypto.js';
 import { createQuote, consumeQuote, getSpend, putSpend, updateSpend, type SpendRecord } from './state.js';
-import { createSettlementResolver, type RelaySettlement, type Settlement } from './settlement.js';
+import {
+  createSettlementResolver, isErc20Settlement, rpcFor, rpcEnvName,
+  type Erc20Settlement, type LocalErc20Settlement, type RelaySettlement, type Settlement,
+} from './settlement.js';
 
 // Read-only view of BlindEscrow.getTask, for reading a task's state directly
 // from the chain that holds it. Field order matches contracts/BlindEscrow.sol;
@@ -108,12 +111,17 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     return json.data as T;
   }
 
-  const settlement = createSettlementResolver({ apiBase: cfg.apiBase ?? 'https://api.blindmarket.xyz', api });
+  const settlement = createSettlementResolver({
+    apiBase: cfg.apiBase ?? 'https://api.blindmarket.xyz',
+    api,
+    localWallet: walletCtx?.wallet.address,
+  });
 
   /** How this process pays. On 0G that is the local wallet, which must exist.
    *  On a relay chain (Base) nothing signs locally — the relay signs from the
    *  API key's owner wallet — so a missing BLINDMARKET_PRIVATE_KEY is not an
-   *  error there. */
+   *  error there. On an ERC-20 chain without a relay (Arc) discovery only
+   *  succeeds with the local wallet, already checked to be the key's owner. */
   async function requireFunding(): Promise<{ s: Settlement; payFrom: string } | { error: ReturnType<typeof fail> }> {
     let s: Settlement;
     try {
@@ -121,7 +129,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     } catch (err) {
       return { error: fail((err as ApiError).code ?? 'SETTLEMENT_UNKNOWN', (err as Error).message) };
     }
-    if (s.payment === 'relay-erc20') return { s, payFrom: s.payFrom };
+    if (isErc20Settlement(s)) return { s, payFrom: s.payFrom };
     if (!walletCtx) {
       return { error: fail('NO_WALLET', 'Spending on 0G needs a local funding wallet — set BLINDMARKET_PRIVATE_KEY (see wallet_status)') };
     }
@@ -142,10 +150,21 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
   /** A new escrow is funded where POST /api/v1/tasks builds: the backend's
    *  posting chain. A process forced onto another chain (to finish or refund
    *  tasks already there) cannot post. Unknown on an older backend. */
-  function notPostingChain(s: Settlement): ApiError | null {
-    if (s.postingChain === undefined || s.mode === s.postingChain) return null;
+  async function notPostingChain(s: Settlement): Promise<ApiError | null> {
+    let posting = s.postingChain;
+    // Forced to 0G, discovery never asked the backend. Ask now, before a quote:
+    // a backend that posts elsewhere refuses the native-0G createTask only
+    // after the brief is uploaded and its hash claimed.
+    if (posting === undefined && s.mode === '0g') {
+      try {
+        const res = await fetch(`${cfg.apiBase}/health/settlement`, { signal: AbortSignal.timeout(15_000) });
+        const json: any = await res.json();
+        if (json?.success && typeof json.data?.postingChain === 'string') posting = json.data.postingChain;
+      } catch { /* an older backend or a blip: keep the old behaviour, the escrow check still guards the send */ }
+    }
+    if (posting === undefined || s.mode === posting) return null;
     const e: ApiError = new Error(
-      `This process settles on ${s.mode} (BLINDMARKET_SETTLEMENT), but the backend posts new tasks on ${s.postingChain}, so a new escrow can only be funded there. Unset BLINDMARKET_SETTLEMENT (or set it to ${s.postingChain}) to post; ${s.mode} stays usable for tasks already on it.`,
+      `This process settles on ${s.mode} (BLINDMARKET_SETTLEMENT), but the backend posts new tasks on ${posting}, so a new escrow can only be funded there. Unset BLINDMARKET_SETTLEMENT (or set it to ${posting}) to post; ${s.mode} stays usable for tasks already on it.`,
     );
     e.code = 'NOT_POSTING_CHAIN';
     return e;
@@ -156,14 +175,20 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     'function approve(address spender, uint256 amount) returns (bool)',
     'function balanceOf(address owner) view returns (uint256)',
   ]);
-  function settlementToken(s: RelaySettlement): Contract {
+  function settlementToken(s: Erc20Settlement): Contract {
     return new Contract(s.token.address, ERC20, s.provider);
+  }
+
+  /** The local wallet on a no-relay ERC-20 chain, over that chain's RPC
+   *  (checked at discovery to serve the chain the backend names). */
+  function localSigner(s: LocalErc20Settlement) {
+    return walletCtx!.wallet.connect(s.provider);
   }
 
   /** Spendable balance of whoever pays, in the settlement token's units. */
   async function payFromBalance(s: Settlement, payFrom: string): Promise<string | null> {
     try {
-      const raw: bigint = s.payment === 'relay-erc20'
+      const raw: bigint = isErc20Settlement(s)
         ? await settlementToken(s).balanceOf(payFrom)
         : await walletCtx!.provider.getBalance(payFrom);
       return formatUnits(raw, s.decimals);
@@ -245,17 +270,35 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     return { hash: r.hash, isUserOp: r.isUserOp === true, gas: r.gas ?? 'user-pays' };
   }
 
+  /** Send a tx on an ERC-20 settlement: through the relay, or signed by the
+   *  local wallet on a chain the relay does not serve. Either way the caller
+   *  persists the hash before waiting (waitRelayed polls the chain's own RPC
+   *  for a plain hash, which a local send always is). `nonce` pins a local
+   *  send right after one this process made: an RPC can answer the next nonce
+   *  lookup from before the earlier tx landed. */
+  async function sendErc20(
+    s: Erc20Settlement,
+    tx: { to: string; data: string },
+    nonce?: number,
+  ): Promise<{ hash: string; isUserOp: boolean; gas?: GasMode; nonce?: number }> {
+    if (s.payment === 'relay-erc20') return relaySend(s, tx);
+    // No gasLimit: estimation runs first, so a predictable revert (a stale
+    // allowance, a passed deadline) fails here without being mined and paid for.
+    const sent = await localSigner(s).sendTransaction({ to: tx.to, data: tx.data, ...(nonce !== undefined ? { nonce } : {}) });
+    return { hash: sent.hash, isUserOp: false, nonce: sent.nonce };
+  }
+
   /** Wait for a relayed tx to land. A plain hash can be polled for its receipt;
    *  a user-op hash cannot (getTransactionReceipt is always null for it), so
    *  that case returns at once and the caller confirms by on-chain STATE —
    *  see ensureAllowance and waitCancelled. */
-  async function waitRelayed(s: RelaySettlement, hash: string, isUserOp: boolean): Promise<void> {
+  async function waitRelayed(s: Erc20Settlement, hash: string, isUserOp: boolean): Promise<void> {
     if (isUserOp) return;
     for (let i = 0; i < 30; i++) {
       const receipt = await s.provider.getTransactionReceipt(hash).catch(() => null);
       if (receipt) {
         if (receipt.status === 0) {
-          const e: ApiError = new Error(`relayed tx ${hash} reverted`);
+          const e: ApiError = new Error(`tx ${hash} reverted`);
           e.code = 'TX_REVERTED';
           throw e;
         }
@@ -263,21 +306,25 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       }
       await new Promise((r) => setTimeout(r, 3000));
     }
-    const e: ApiError = new Error(`relayed tx ${hash} not confirmed after 90s — retry with the same idempotencyKey to resume`);
+    const e: ApiError = new Error(`tx ${hash} not confirmed after 90s — retry with the same idempotencyKey to resume`);
     e.code = 'TX_PENDING';
     throw e;
   }
 
-  /** Relay chains only: createTask pulls the ERC-20 via transferFrom, so the
+  /** ERC-20 chains: createTask pulls the token via transferFrom, so the
    *  escrow needs an allowance first. Confirmed by re-reading allowance()
-   *  rather than by receipt, which is what makes the user-op case decidable. */
-  async function ensureAllowance(s: RelaySettlement, record: SpendRecord): Promise<void> {
+   *  rather than by receipt, which is what makes the user-op case decidable.
+   *  Returns the nonce the createTask should use when this call sent a local
+   *  approve, else undefined. */
+  async function ensureAllowance(s: Erc20Settlement, record: SpendRecord): Promise<number | undefined> {
     const need = BigInt(record.amountWei!);
     const token = settlementToken(s);
-    if ((await token.allowance(s.payFrom, s.escrowAddress)) >= need) return;
+    if ((await token.allowance(s.payFrom, s.escrowAddress)) >= need) return undefined;
+    let nextNonce: number | undefined;
     const approve = async () => {
       const data = ERC20.encodeFunctionData('approve', [s.escrowAddress, need]);
-      const { hash } = await relaySend(s, { to: s.token.address, data });
+      const { hash, nonce } = await sendErc20(s, { to: s.token.address, data });
+      if (nonce !== undefined) nextNonce = nonce + 1;
       // Persist BEFORE waiting: a crash here must resume into the poll below.
       updateSpend(record.idempotencyKey, { stage: 'approved', approveTxHash: hash });
       record.stage = 'approved';
@@ -293,16 +340,16 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
 
     if (record.stage === 'created') {
       await approve();
-      if (await settled()) return;
+      if (await settled()) return nextNonce;
     }
     // Resumed at 'approved' (or the fresh approve never landed): the earlier
     // approve was dropped or reverted. Sending another is safe — ERC-20
     // approve SETS the allowance, it does not add — and it is the only way
     // out of this stage, so do it rather than leave the record stuck.
-    if (await settled()) return;
+    if (await settled()) return nextNonce;
     await approve();
-    if (await settled()) return;
-    const e: ApiError = new Error(`${s.symbol} allowance still below ${formatUnits(need, s.decimals)} after two approves (last ${record.approveTxHash}) — check the relay wallet's ${s.symbol} balance and retry with the same idempotencyKey`);
+    if (await settled()) return nextNonce;
+    const e: ApiError = new Error(`${s.symbol} allowance still below ${formatUnits(need, s.decimals)} after two approves (last ${record.approveTxHash}) — check ${s.payFrom}'s ${s.symbol} balance and retry with the same idempotencyKey`);
     e.code = 'APPROVE_PENDING';
     throw e;
   }
@@ -317,26 +364,31 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
    *           both through the Privy relay with no local signing at all. The
    *           backend picks the escrow; we only check it is the one we approved. */
   async function fundAndIndex(record: SpendRecord): Promise<{ taskHash: string; txHash: string; gas?: GasMode }> {
-    const s = await settlement();
     let { txHash } = record;
 
-    // A record remembers the chain it started on. If the backend flips mode
-    // between attempts, re-funding through the other path would double-fund
-    // or send native value into a USDC transferFrom — refuse instead.
-    if (record.settlement && record.settlement !== s.mode) {
-      const e: ApiError = new Error(`spend ${record.idempotencyKey} started on ${record.settlement} but the backend now settles on ${s.mode} — finish or refund it from the web app`);
-      e.code = 'SETTLEMENT_CHANGED';
-      throw e;
-    }
-
+    // Nothing left to sign once the escrow is funded: /a2a/tasks/index finds
+    // the receipt on whichever chain holds it. So a funded spend finishes
+    // even when settlement cannot be discovered right now, or has moved.
     if (record.stage === 'created' || record.stage === 'approved') {
-      const refused = notPostingChain(s);
+      const s = await settlement();
+      // A record remembers the chain it started on. If the backend flips mode
+      // between attempts, re-funding through the other path would double-fund
+      // or send native value into a USDC transferFrom — refuse instead.
+      if (record.settlement && record.settlement !== s.mode) {
+        const e: ApiError = new Error(
+          `spend ${record.idempotencyKey} started on ${record.settlement} but this process now settles on ${s.mode}. ` +
+          `Nothing was funded yet (stage ${record.stage}): start a new spend with a new idempotencyKey, or set BLINDMARKET_SETTLEMENT=${record.settlement} to finish this one.`,
+        );
+        e.code = 'SETTLEMENT_CHANGED';
+        throw e;
+      }
+      const refused = await notPostingChain(s);
       if (refused) throw refused;
-      if (s.payment === 'relay-erc20') await ensureAllowance(s, record);
+      const nonce = isErc20Settlement(s) ? await ensureAllowance(s, record) : undefined;
 
       const { unsignedTx, chain: builtChain, chainId: builtChainId } = await api('POST', '/api/v1/tasks', {
         taskHash: record.taskHash,
-        token: s.payment === 'relay-erc20' ? s.token.address : ZERO_TOKEN,
+        token: isErc20Settlement(s) ? s.token.address : ZERO_TOKEN,
         amount: record.amountWei,
         locationZone: 'global',
         duration: String(record.durationSecs ?? 3600),
@@ -363,8 +415,8 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       }
       await verifyTarget(s, unsignedTx.to, 'createTask');
 
-      if (s.payment === 'relay-erc20') {
-        const { hash, isUserOp, gas } = await relaySend(s, { to: unsignedTx.to, data: unsignedTx.data });
+      if (isErc20Settlement(s)) {
+        const { hash, isUserOp, gas } = await sendErc20(s, { to: unsignedTx.to, data: unsignedTx.data }, nonce);
         // Persist BEFORE waiting, same reasoning as the 0G branch below.
         updateSpend(record.idempotencyKey, { stage: 'funded', txHash: hash, isUserOp, gas });
         record.gas = gas;
@@ -436,7 +488,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     'rent_service',
     {
       title: 'Rent an Agent Service',
-      description: 'Hire a listed agent service for one call: encrypts your prompt locally (unless privacy=public), funds escrow, and pins the task to the provider agent. Escrow is USDC on Base via the gas-sponsored relay when the backend settles there (no private key needed), else native 0G from the local wallet — see wallet_status. TWO-STEP: first call returns a price quote + quoteId; re-call with confirm=true and that quoteId to actually spend. Requires a unique idempotencyKey (safe to retry with the same key — it resumes, never double-pays).',
+      description: 'Hire a listed agent service for one call: encrypts your prompt locally (unless privacy=public), funds escrow, and pins the task to the provider agent. Escrow is paid on the backend\'s posting chain: USDC on Arc signed by the local wallet (BLINDMARKET_PRIVATE_KEY, which must own BLINDMARKET_API_KEY; gas is also USDC), USDC on Base through the backend relay (no private key needed), or native 0G from the local wallet. wallet_status shows which. TWO-STEP: first call returns a price quote + quoteId; re-call with confirm=true and that quoteId to actually spend. Requires a unique idempotencyKey (safe to retry with the same key — it resumes, never double-pays).',
       inputSchema: {
         serviceId: z.number().int().positive().describe('Service id from browse_services / get_service'),
         prompt: z.string().min(1).max(100_000).describe('What you want the agent to do'),
@@ -449,11 +501,8 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
     async ({ serviceId, prompt, idempotencyKey, privacy, confirm, quoteId, waitSeconds }) => {
-      const f = await requireFunding();
-      if ('error' in f) return f.error;
-      const { s, payFrom } = f;
-
-      // Resume path — this key already spent (or partially spent).
+      // Resume path — this key already spent (or partially spent). Checked
+      // before settlement: a funded spend finishes without it.
       const existing = getSpend(idempotencyKey);
       if (existing) {
         if (existing.stage === 'indexed') {
@@ -469,7 +518,10 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
         }
       }
 
-      const offPosting = notPostingChain(s);
+      const f = await requireFunding();
+      if ('error' in f) return f.error;
+      const { s, payFrom } = f;
+      const offPosting = await notPostingChain(s);
       if (offPosting) return fail(offPosting.code!, offPosting.message);
 
       const service = await api<any>('GET', `/api/v1/marketplace/services/${serviceId}`);
@@ -549,7 +601,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
           requiredCapabilities: [],
           amountWei: String(service.price_raw),
           settlement: s.mode,
-          token: s.payment === 'relay-erc20' ? s.token.address : ZERO_TOKEN,
+          token: isErc20Settlement(s) ? s.token.address : ZERO_TOKEN,
           durationSecs: 3600,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
@@ -562,7 +614,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       } catch (err) {
         const code = (err as ApiError).code;
         if (code === 'NOT_TASK_AGENT') {
-          return fail(code, 'The API key\'s owner wallet does not match the wallet that funded escrow. On 0G, mint an sk_ key while signed in with the BLINDMARKET_PRIVATE_KEY wallet; on Base the relay signs from the key\'s own wallet, so this means the key was rotated mid-spend. The escrow is funded but unindexed — retry with the same idempotencyKey after fixing the key, or use cancel_task for a refund.');
+          return fail(code, 'The API key\'s owner wallet does not match the wallet that funded escrow. When this process signs (0G, Arc), mint an sk_ key while signed in with the BLINDMARKET_PRIVATE_KEY wallet; on a relay chain (Base) the relay signs from the key\'s own wallet, so this means the key was rotated mid-spend. The escrow is funded but unindexed — retry with the same idempotencyKey after fixing the key, or use cancel_task for a refund.');
         }
         return fail(code ?? 'RENT_FAILED', (err as Error).message);
       }
@@ -575,7 +627,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     'post_task',
     {
       title: 'Post a Task to the Open Market',
-      description: 'Post a task any matching agent can pick up: encrypts the brief locally and wraps its key to every registered matching executor (or posts it in plaintext with privacy=public), then funds escrow. Escrow is USDC on Base via the gas-sponsored relay when the backend settles there (no private key needed), else native 0G from the local wallet — see wallet_status. TWO-STEP quote/confirm like rent_service; requires a unique idempotencyKey.',
+      description: 'Post a task any matching agent can pick up: encrypts the brief locally and wraps its key to every registered matching executor (or posts it in plaintext with privacy=public), then funds escrow. Escrow is paid on the backend\'s posting chain: USDC on Arc signed by the local wallet (BLINDMARKET_PRIVATE_KEY, which must own BLINDMARKET_API_KEY; gas is also USDC), USDC on Base through the backend relay (no private key needed), or native 0G from the local wallet. wallet_status shows which. TWO-STEP quote/confirm like rent_service; requires a unique idempotencyKey.',
       inputSchema: {
         instructions: z.string().min(1).max(100_000).describe('The task brief'),
         amount: z.string().regex(/^\d+(\.\d+)?$/).optional().describe('Escrow amount in the settlement token (e.g. "2.5" — USDC on Base, 0G on 0G) — paid to the worker (90%) on verified completion'),
@@ -590,10 +642,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
     async ({ instructions, amount, amount0G, idempotencyKey, capabilities, durationSeconds, privacy, confirm, quoteId }) => {
-      const f = await requireFunding();
-      if ('error' in f) return f.error;
-      const { s, payFrom } = f;
-
+      // Checked before settlement: a funded spend finishes without it.
       const existing = getSpend(idempotencyKey);
       if (existing) {
         if (existing.stage === 'indexed') {
@@ -606,7 +655,10 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
         }
       }
 
-      const offPosting = notPostingChain(s);
+      const f = await requireFunding();
+      if ('error' in f) return f.error;
+      const { s, payFrom } = f;
+      const offPosting = await notPostingChain(s);
       if (offPosting) return fail(offPosting.code!, offPosting.message);
 
       const isPublic = privacy === 'public';
@@ -688,7 +740,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
           requiredCapabilities: capabilities ?? [],
           amountWei: amountWei.toString(),
           settlement: s.mode,
-          token: s.payment === 'relay-erc20' ? s.token.address : ZERO_TOKEN,
+          token: isErc20Settlement(s) ? s.token.address : ZERO_TOKEN,
           durationSecs: durationSeconds ?? 86400,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
@@ -700,7 +752,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       } catch (err) {
         const code = (err as ApiError).code;
         if (code === 'NOT_TASK_AGENT') {
-          return fail(code, 'The API key\'s owner wallet does not match the wallet that funded escrow. On 0G, mint an sk_ key while signed in with the BLINDMARKET_PRIVATE_KEY wallet; on Base the relay signs from the key\'s own wallet, so this means the key was rotated mid-spend. The escrow is funded but unindexed — retry with the same idempotencyKey after fixing the key, or use cancel_task for a refund.');
+          return fail(code, 'The API key\'s owner wallet does not match the wallet that funded escrow. When this process signs (0G, Arc), mint an sk_ key while signed in with the BLINDMARKET_PRIVATE_KEY wallet; on a relay chain (Base) the relay signs from the key\'s own wallet, so this means the key was rotated mid-spend. The escrow is funded but unindexed — retry with the same idempotencyKey after fixing the key, or use cancel_task for a refund.');
         }
         return fail(code ?? 'POST_FAILED', (err as Error).message);
       }
@@ -787,7 +839,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       return e;
     };
 
-    if (s.payment !== 'relay-erc20') {
+    if (!isErc20Settlement(s)) {
       const detail = await api<TaskDetail & { chain?: string }>('GET', `/api/v1/tasks/${encodeURIComponent(task)}`);
       if (detail.chain && detail.chain !== s.chain) throw onOtherChain(detail.taskId, detail.chain);
       return detail;
@@ -866,7 +918,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     let { txHash } = record;
 
     if (record.settlement && record.settlement !== s.mode) {
-      const e: ApiError = new Error(`refund ${record.idempotencyKey} started on ${record.settlement} but the backend now settles on ${s.mode} — finish it from the web app`);
+      const e: ApiError = new Error(`refund ${record.idempotencyKey} started on ${record.settlement} but this process now settles on ${s.mode} — set BLINDMARKET_SETTLEMENT=${record.settlement} to finish it, or finish it from the web app`);
       e.code = 'SETTLEMENT_CHANGED';
       throw e;
     }
@@ -882,8 +934,8 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       // lands on an address with no escrow and burns the gas.
       await verifyTarget(s, unsignedTx.to, `${route}Task`);
 
-      if (s.payment === 'relay-erc20') {
-        const { hash, isUserOp, gas } = await relaySend(s, { to: unsignedTx.to, data: unsignedTx.data });
+      if (isErc20Settlement(s)) {
+        const { hash, isUserOp, gas } = await sendErc20(s, { to: unsignedTx.to, data: unsignedTx.data });
         // Persist BEFORE waiting, same reasoning as the 0G branch below.
         updateSpend(record.idempotencyKey, { stage: 'sent', txHash: hash, isUserOp, gas });
         record.gas = gas;
@@ -904,7 +956,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
         await tx.wait();
       }
     } else if (txHash) {
-      if (s.payment === 'relay-erc20') await waitRelayed(s, txHash, record.isUserOp ?? false);
+      if (isErc20Settlement(s)) await waitRelayed(s, txHash, record.isUserOp ?? false);
       else await walletCtx!.provider.waitForTransaction(txHash);
     } else {
       throw new Error(`Spend record ${record.idempotencyKey} is at stage '${record.stage}' with no txHash — cannot resume safely`);
@@ -1255,6 +1307,15 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
             submitTxHash = sent.hash;
             gas = sent.gas;
             await waitRelayed(s, sent.hash, sent.isUserOp);
+          } else if (s.payment === 'local-erc20') {
+            // Signed locally over this chain's RPC, like the 0G branch below
+            // but with gas estimated: a revert fails here, unpaid.
+            if (tx.from && tx.from.toLowerCase() !== s.payFrom.toLowerCase()) {
+              return fail('WALLET_MISMATCH', `The backend assigned this task to ${tx.from} (the wallet behind BLINDMARKET_API_KEY), but BLINDMARKET_PRIVATE_KEY is ${s.payFrom}. submitEvidence is worker-only — set the private key of ${tx.from}.`);
+            }
+            const sent = await sendErc20(s, { to: tx.to, data: tx.data });
+            submitTxHash = sent.hash;
+            await waitRelayed(s, sent.hash, false);
           } else {
             // submitEvidence is onlyWorker: the backend built the tx for the
             // API key's wallet (tx.from). If BLINDMARKET_PRIVATE_KEY is a
@@ -1320,24 +1381,26 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     groq: 'GROQ_API_KEY',
     gemini: 'GEMINI_API_KEY',
   };
-  /** Public RPCs by chain id, for a chain with no BLINDMARKET_<CHAIN>_RPC_URL set. */
-  const PUBLIC_RPC: Record<number, string> = { 5042002: 'https://rpc.testnet.arc.io' };
-
-  type TransferTerms = { required: true; method: 'transfer'; chain: string; token: string; recipient: string; amountRaw: string; decimals: number };
+  type TransferTerms = { required: true; method: 'transfer'; chain: string; chainId?: number; token: string; recipient: string; amountRaw: string; decimals: number };
   type FeeTerms = { required: false } | TransferTerms | { required: true; method: 'factory'; chain: string; factory: string | null };
   interface DeployedAgent { id: string; name: string; walletAddress: string; started?: boolean }
 
   const coded = (code: string, message: string): ApiError => Object.assign(new Error(message), { code });
 
-  /** The local wallet on `chain`, over BLINDMARKET_<CHAIN>_RPC_URL, checked against the chain id the backend names. */
-  async function walletOn(chain: string) {
+  /** The local wallet on `chain`, over BLINDMARKET_<CHAIN>_RPC_URL (else a
+   *  public RPC for that chain id), checked against the chain id the backend
+   *  names, and against `expectChainId` (the fee terms') when given. */
+  async function walletOn(chain: string, expectChainId?: number) {
     const res = await fetch(`${cfg.apiBase}/health/bridge`, { signal: AbortSignal.timeout(30_000) });
     const bridge: any = await res.json().catch(() => ({}));
     const entry = (bridge?.data ?? bridge)?.chains?.find((c: { chain?: string }) => c.chain === chain);
     const chainId = Number(entry?.chainId);
     if (!Number.isInteger(chainId) || chainId <= 0) throw coded('SETTLEMENT_UNKNOWN', `The backend lists no chain id for ${chain}.`);
-    const envName = `BLINDMARKET_${chain.toUpperCase().replace(/-/g, '_')}_RPC_URL`;
-    const rpcUrl = process.env[envName] ?? PUBLIC_RPC[chainId];
+    if (expectChainId !== undefined && expectChainId !== chainId) {
+      throw coded('SETTLEMENT_UNKNOWN', `The deploy fee is on chain ${expectChainId} but the backend lists ${chain} as chain ${chainId}. Nothing was paid.`);
+    }
+    const envName = rpcEnvName(chain);
+    const rpcUrl = rpcFor(chain, chainId, process.env);
     if (!rpcUrl) throw coded('RPC_UNKNOWN', `No RPC known for ${chain} (chainId ${chainId}) — set ${envName}.`);
     const provider = new JsonRpcProvider(rpcUrl, chainId, { staticNetwork: true });
     const served = Number(BigInt(await provider.send('eth_chainId', [])));
@@ -1391,6 +1454,19 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
           }
         }
       };
+      /** The deploy's own checks, run before anything is quoted or paid. A
+       *  backend without the route (404) is not checked here; the deploy
+       *  still checks before it takes the fee. */
+      const validate = async (): Promise<ReturnType<typeof fail> | null> => {
+        try {
+          await api('POST', '/api/v1/agents/deploy/validate', body);
+          return null;
+        } catch (err) {
+          const code = (err as ApiError).code;
+          if (code === undefined && /failed: 404$/.test((err as Error).message)) return null;
+          return fail(code ?? 'DEPLOY_INVALID', `${(err as Error).message}. Nothing was paid.`);
+        }
+      };
       const paidNote = () => {
         const rec = getSpend(idempotencyKey);
         return rec?.stage === 'sent' && rec.txHash
@@ -1429,10 +1505,12 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       const feeText = fee ? `${formatUnits(BigInt(fee.amountRaw), fee.decimals).replace(/\.0$/, '')} USDC` : 'none';
 
       if (!confirm) {
+        const invalid = await validate();
+        if (invalid) return invalid;
         let walletBalance: string | undefined;
         if (fee) {
           try {
-            const w = await walletOn(fee.chain);
+            const w = await walletOn(fee.chain, fee.chainId);
             const bal = await new Contract(fee.token, ['function balanceOf(address) view returns (uint256)'], w).balanceOf(w.address);
             walletBalance = formatUnits(bal, fee.decimals);
           } catch (err) {
@@ -1468,7 +1546,9 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
           if (String(owner).toLowerCase() !== walletCtx.wallet.address.toLowerCase()) {
             return fail('OWNER_MISMATCH', `BLINDMARKET_API_KEY belongs to ${owner} but BLINDMARKET_PRIVATE_KEY is ${walletCtx.wallet.address}. Nothing was paid: the backend counts a deploy fee only from the API key's owner.`);
           }
-          const w = await walletOn(fee.chain);
+          const invalid = await validate();
+          if (invalid) return invalid;
+          const w = await walletOn(fee.chain, fee.chainId);
           putSpend({ idempotencyKey, kind: 'deploy', stage: 'created', settlement: fee.chain, token: fee.token, amountWei: fee.amountRaw, createdAt: now, updatedAt: now });
           const data = new Interface(['function transfer(address to, uint256 amount) returns (bool)'])
             .encodeFunctionData('transfer', [fee.recipient, BigInt(fee.amountRaw)]);

@@ -38,6 +38,13 @@ import { JsonRpcProvider, getAddress } from 'ethers';
  * the escrow is paid in, which picks the payment path (`payment`):
  *
  *   relay-erc20  — an ERC-20 settlement token on a chain the relay serves.
+ *   local-erc20  — an ERC-20 settlement token on a chain the relay does not
+ *                  serve (Arc: gas is paid in USDC, and there is no Privy
+ *                  relay). The local wallet (BLINDMARKET_PRIVATE_KEY) signs
+ *                  the approve and the createTask itself, over that chain's
+ *                  RPC. It must be the API key's owner: tasks are posted as
+ *                  that wallet, so any other escrow would be funded and then
+ *                  refused at /a2a/tasks/index (NOT_TASK_AGENT).
  *   local-native — the native coin, which this process pays only on 0G.
  *
  * Anything else is UNSUPPORTED_SETTLEMENT rather than a guess. An older
@@ -59,7 +66,7 @@ import { JsonRpcProvider, getAddress } from 'ethers';
 export type SettlementMode = string;
 
 /** How a spend is paid; the send paths branch on this, never on the key. */
-export type PaymentKind = 'local-native' | 'relay-erc20';
+export type PaymentKind = 'local-native' | 'relay-erc20' | 'local-erc20';
 
 /** The escrow's settlement token, as the backend describes it. */
 export interface SettlementToken {
@@ -121,7 +128,34 @@ export interface RelaySettlement extends BackendChains {
 /** Every relay settlement. The name predates chains other than Base. */
 export type BaseSettlement = RelaySettlement;
 
-export type Settlement = OgSettlement | RelaySettlement;
+/** An ERC-20 escrow on a chain the relay does not serve: the local wallet
+ *  signs everything itself, over this chain's RPC. */
+export interface LocalErc20Settlement extends BackendChains {
+  payment: 'local-erc20';
+  mode: SettlementMode;
+  chain: SettlementMode;
+  chainId: number;
+  escrowAddress: string;
+  token: SettlementToken;
+  /** the settlement token's address, under the name the relay settlement uses */
+  usdcAddress: string;
+  decimals: number;
+  symbol: string;
+  rpcUrl: string;
+  /** reads, and the transport the local wallet signs over; checked to serve `chainId` */
+  provider: JsonRpcProvider;
+  /** the local wallet, checksummed: checked at discovery to be the API key's owner */
+  payFrom: string;
+}
+
+/** Every settlement that escrows an ERC-20, however it is signed. */
+export type Erc20Settlement = RelaySettlement | LocalErc20Settlement;
+
+export type Settlement = OgSettlement | RelaySettlement | LocalErc20Settlement;
+
+export function isErc20Settlement(s: Settlement): s is Erc20Settlement {
+  return s.payment === 'relay-erc20' || s.payment === 'local-erc20';
+}
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 
@@ -141,6 +175,13 @@ export const BASE_USDC: Readonly<Record<number, string>> = {
 export const BASE_RPC: Readonly<Record<number, string>> = {
   8453: 'https://mainnet.base.org',
   84532: 'https://sepolia.base.org',
+};
+
+/** Public RPCs for chains this process may sign on, by chain id. An env
+ *  override (BLINDMARKET_<CHAIN>_RPC_URL) always wins. */
+export const PUBLIC_RPC: Readonly<Record<number, string>> = {
+  ...BASE_RPC,
+  5042002: 'https://rpc.testnet.arc.io',
 };
 
 /** How long a discovered mode is trusted before being re-asked. Short enough
@@ -179,6 +220,9 @@ export interface DiscoverDeps {
   api: <T = any>(method: string, path: string, body?: unknown) => Promise<T>;
   fetchImpl?: typeof fetch;
   env?: NodeJS.ProcessEnv;
+  /** The local wallet's address (BLINDMARKET_PRIVATE_KEY), when one is set:
+   *  what pays on an ERC-20 chain the relay does not serve. */
+  localWallet?: string;
 }
 
 /** One discovery. Wrap with createSettlementResolver for the memoised form. */
@@ -328,10 +372,20 @@ async function settlementFromPostingChain(
       throw err('SETTLEMENT_UNKNOWN', `The backend describes ${target}'s settlement token incompletely (${JSON.stringify(token)}).`);
     }
     if (typeof entry.relayChain !== 'string' || !entry.relayChain) {
-      throw err(
-        'UNSUPPORTED_SETTLEMENT',
-        `The backend settles ${target} in ${token.symbol} (ERC-20), but its relay does not serve ${target}, and this MCP pays ERC-20 escrow only through the relay.`,
+      // No relay on this chain (Arc): the local wallet signs, or nothing does.
+      if (!deps.localWallet) {
+        throw err(
+          'UNSUPPORTED_SETTLEMENT',
+          `The backend settles ${target} in ${token.symbol} (ERC-20), and its relay does not serve ${target}, so this process has to sign there itself. ` +
+          `Set BLINDMARKET_PRIVATE_KEY to the key of the wallet that owns BLINDMARKET_API_KEY; it pays the escrow and ${target}'s gas (${entry.gasSymbol ?? 'the native coin'}).`,
+        );
+      }
+      const local = await buildLocalErc20Settlement(
+        { chain: target, chainId, escrow, token: { kind: 'erc20', address: String(token.address).toLowerCase(), symbol: token.symbol, decimals: token.decimals } },
+        env,
+        deps,
       );
+      return { ...local, ...backendChains };
     }
     // The env override predates backends that name the token. Here it can
     // only disagree with the one token POST /api/v1/tasks accepts.
@@ -353,10 +407,69 @@ async function settlementFromPostingChain(
   throw err('UNSUPPORTED_SETTLEMENT', `The backend settles ${target} in a token this MCP cannot pay (${JSON.stringify(token)}).`);
 }
 
-/** An RPC for a relay chain: its env override, else a public one this file knows. */
-function rpcFor(chain: string, chainId: number, env: NodeJS.ProcessEnv): string | null {
-  const envName = chain === 'base' ? 'BLINDMARKET_BASE_RPC_URL' : `BLINDMARKET_${chain.toUpperCase().replace(/-/g, '_')}_RPC_URL`;
-  return env[envName] ?? (chain === 'base' ? BASE_RPC[chainId] : undefined) ?? null;
+/** The env var that overrides a chain's RPC. */
+export function rpcEnvName(chain: string): string {
+  return chain === 'base' ? 'BLINDMARKET_BASE_RPC_URL' : `BLINDMARKET_${chain.toUpperCase().replace(/-/g, '_')}_RPC_URL`;
+}
+
+/** An RPC for a chain: its env override, else a public one this file knows. */
+export function rpcFor(chain: string, chainId: number, env: NodeJS.ProcessEnv): string | null {
+  return env[rpcEnvName(chain)] ?? PUBLIC_RPC[chainId] ?? null;
+}
+
+/** A local-signing settlement on an ERC-20 chain the relay does not serve.
+ *  Checked before any spend can use it: the RPC must serve the chain the
+ *  backend names (a wrong RPC would sign on another network), and the local
+ *  wallet must be the API key's owner (the task is posted as that wallet). */
+async function buildLocalErc20Settlement(
+  p: { chain: string; chainId: number; escrow: string; token: SettlementToken },
+  env: NodeJS.ProcessEnv,
+  deps: DiscoverDeps,
+): Promise<LocalErc20Settlement> {
+  const { chain, chainId } = p;
+  const rpcUrl = rpcFor(chain, chainId, env);
+  if (!rpcUrl) {
+    throw err('RPC_UNKNOWN', `No RPC known for ${chain} (chainId ${chainId}) — set ${rpcEnvName(chain)}.`);
+  }
+  const provider = new JsonRpcProvider(rpcUrl, chainId, { staticNetwork: true });
+  let served: number;
+  try {
+    served = Number(BigInt(await provider.send('eth_chainId', [])));
+  } catch (e) {
+    throw err('RPC_UNREACHABLE', `${rpcEnvName(chain)} (${rpcUrl}) did not answer eth_chainId: ${(e as Error).message}`);
+  }
+  if (served !== chainId) {
+    throw err('WRONG_RPC', `${rpcEnvName(chain)} serves chain ${served}, not ${chain} (${chainId}). Nothing is signed until it points at ${chain}.`);
+  }
+
+  const who = await deps.api<{ address: string; addresses?: string[] }>('GET', '/api/v1/api-keys/whoami');
+  if (!isAddress(who?.address)) {
+    throw err('OWNER_UNKNOWN', `whoami returned "${who?.address}" — the API key must belong to a wallet (not the legacy AGENT_API_KEY principal) to post on ${chain}.`);
+  }
+  const local = getAddress(deps.localWallet!);
+  if (who.address.toLowerCase() !== local.toLowerCase()) {
+    throw err(
+      'OWNER_MISMATCH',
+      `BLINDMARKET_API_KEY belongs to ${who.address} but BLINDMARKET_PRIVATE_KEY is ${local}. On ${chain} the local wallet signs, and tasks are posted and delivered as the API key's wallet, ` +
+      'so an escrow funded from any other wallet is refused at listing (NOT_TASK_AGENT). Use that wallet\'s key, or mint an API key signed in as this one. Nothing was sent.',
+    );
+  }
+
+  const tokenAddress = getAddress(p.token.address);
+  return {
+    payment: 'local-erc20',
+    mode: chain,
+    chain,
+    chainId,
+    escrowAddress: getAddress(p.escrow),
+    token: { ...p.token, address: tokenAddress },
+    usdcAddress: tokenAddress,
+    decimals: p.token.decimals,
+    symbol: p.token.symbol,
+    rpcUrl,
+    provider,
+    payFrom: local,
+  };
 }
 
 /** Assemble a Base settlement from a chain id and escrow address, whichever
@@ -393,8 +506,7 @@ async function buildRelaySettlement(
   const { chain, chainId } = p;
   const rpcUrl = rpcFor(chain, chainId, env);
   if (!rpcUrl) {
-    const envName = chain === 'base' ? 'BLINDMARKET_BASE_RPC_URL' : `BLINDMARKET_${chain.toUpperCase().replace(/-/g, '_')}_RPC_URL`;
-    throw err('RPC_UNKNOWN', `No RPC known for ${chain} (chainId ${chainId}) — set ${envName}.`);
+    throw err('RPC_UNKNOWN', `No RPC known for ${chain} (chainId ${chainId}) — set ${rpcEnvName(chain)}.`);
   }
 
   // The relay refuses any wallet not linked to the caller — and the caller of

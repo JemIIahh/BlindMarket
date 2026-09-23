@@ -84,7 +84,7 @@ const runtimeCfg = {
   privateKey: walletCtx?.wallet.privateKey,
   // The 0G RPC is the one the local wallet was loaded with (the SDK has no
   // fallback RPC); Base is declared only when explicitly configured.
-  rpcUrls: { '0g': walletCtx?.rpcUrl, base: process.env.BLINDMARKET_BASE_RPC_URL },
+  rpcUrls: { '0g': walletCtx?.rpcUrl, base: process.env.BLINDMARKET_BASE_RPC_URL, arc: process.env.BLINDMARKET_ARC_RPC_URL },
   displayName: process.env.BLINDMARKET_EXECUTOR_NAME ?? 'MCP Executor',
   capabilities: parseCapabilities(process.env.BLINDMARKET_EXECUTOR_CAPABILITIES),
   minReward: process.env.BLINDMARKET_EXECUTOR_MIN_REWARD,
