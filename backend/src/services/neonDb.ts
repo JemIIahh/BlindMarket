@@ -782,6 +782,25 @@ const migrations: Array<{ id: number; name: string; sql: string; when?: () => bo
        WHERE supported_chains <@ ARRAY['0g']::TEXT[];
     `,
   },
+  {
+    id: 37,
+    name: 'agent_reviews_canonical_task_id',
+    // One review per task per poster, however the task hash is spelled.
+    // POST /marketplace/reviews stored the id as sent while its gate read the
+    // task case-insensitively, so each re-cased spelling of one hash added a
+    // review (security audit run 1, C12). Keeps the earliest row of each
+    // (task, reviewer), lowercases task_id (reviewStore now writes it
+    // lowercase), and enforces it in the database. A data fix: not re-run.
+    sql: `
+      DELETE FROM agent_reviews a USING agent_reviews b
+       WHERE LOWER(a.task_id) = LOWER(b.task_id)
+         AND a.reviewer_address = b.reviewer_address
+         AND a.id > b.id;
+      UPDATE agent_reviews SET task_id = LOWER(task_id) WHERE task_id <> LOWER(task_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_reviews_task_reviewer_lower
+        ON agent_reviews (LOWER(task_id), reviewer_address);
+    `,
+  },
 ];
 
 /**

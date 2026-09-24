@@ -48,12 +48,13 @@ describe('isRerunSafe', () => {
     expect(isRerunSafe(sql)).toBe(expected);
   });
 
-  it('flags only the data migrations (#16, #31, #36) among the current ones', () => {
+  it('flags only the data migrations (#16, #31, #36, #37) among the current ones', () => {
     // A new migration that isn't safe to re-run fails this test on purpose:
     // write it with IF NOT EXISTS, or add its id here as a conscious decision.
     // #36 clears supported_chains = {0g}: re-run later, it would erase what
-    // agents declared since.
-    expect(rerunUnsafeMigrationIds()).toEqual([16, 31, 36]);
+    // agents declared since. #37 collapses case-variant agent_reviews rows and
+    // lowercases task_id: a data fix, applied once, never re-run automatically.
+    expect(rerunUnsafeMigrationIds()).toEqual([16, 31, 36, 37]);
   });
 });
 
@@ -68,13 +69,21 @@ describe('migrations production has recorded', () => {
   });
 
   it('numbers this branch after it, ending with the nullable follow-up', () => {
-    expect(listMigrations().filter((m) => m.id >= 32)).toEqual([
+    expect(listMigrations().filter((m) => m.id >= 32 && m.id <= 36)).toEqual([
       { id: 32, name: 'agent_executors_supported_chains' },
       { id: 33, name: 'agent_executors_usdc_earnings' },
       { id: 34, name: 'credited_payouts' },
       { id: 35, name: 'transactions_unit' },
       { id: 36, name: 'agent_executors_supported_chains_nullable' },
     ]);
+  });
+
+  it('#37 keeps one review per task and reviewer and enforces it on LOWER(task_id) (security audit run 1, C12)', () => {
+    expect(listMigrations().find((m) => m.id === 37)).toEqual({ id: 37, name: 'agent_reviews_canonical_task_id' });
+    const sql = squash(migrationSql(37))!;
+    expect(sql).toContain('DELETE FROM agent_reviews a USING agent_reviews b WHERE LOWER(a.task_id) = LOWER(b.task_id) AND a.reviewer_address = b.reviewer_address AND a.id > b.id');
+    expect(sql).toContain('UPDATE agent_reviews SET task_id = LOWER(task_id)');
+    expect(sql).toContain('CREATE UNIQUE INDEX IF NOT EXISTS uq_reviews_task_reviewer_lower ON agent_reviews (LOWER(task_id), reviewer_address)');
   });
 
   it('#36 drops the constraint and default, and clears every 0G-only list', () => {

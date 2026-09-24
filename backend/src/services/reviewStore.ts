@@ -29,7 +29,10 @@ export async function submitReview(opts: {
      VALUES ($1, $2, $3, $4, $5)
      ON CONFLICT (task_id, reviewer_address) DO UPDATE SET rating = $4, review = $5
      RETURNING *`,
-    [opts.taskId, opts.agentAddress.toLowerCase(), opts.reviewerAddress.toLowerCase(), opts.rating, opts.review ?? null],
+    // Task ids are keyed lowercase, like addresses: UNIQUE(task_id, reviewer)
+    // compares exactly, so a re-cased hash was a new review (security audit
+    // run 1, C12; migration 37 also enforces it on LOWER(task_id)).
+    [opts.taskId.toLowerCase(), opts.agentAddress.toLowerCase(), opts.reviewerAddress.toLowerCase(), opts.rating, opts.review ?? null],
   );
   return rows[0];
 }
@@ -77,7 +80,7 @@ export async function getReviewForTask(
   const db = await getPool();
   const { rows } = await db.query<AgentReview>(
     'SELECT * FROM agent_reviews WHERE task_id = $1 AND reviewer_address = $2',
-    [taskId, reviewerAddress.toLowerCase()],
+    [taskId.toLowerCase(), reviewerAddress.toLowerCase()],
   );
   return rows[0] ?? null;
 }

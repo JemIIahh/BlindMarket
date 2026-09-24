@@ -16,8 +16,13 @@ export const marketplaceRouter = Router();
 
 // ── Reviews ────────────────────────────────────────────────────────────────
 
+// Task ids are bytes32 hashes. a2aStore resolves every letter case of one (a
+// legacy mixed-case key only by its original spelling, commit 6aaa847), so the
+// gate below reads the task with the id as sent, while agent_reviews is keyed
+// on the lowercase id: keyed on the raw string, each re-cased spelling of one
+// task hash stored another review (security audit run 1, C12).
 const reviewSchema = z.object({
-  taskId: z.string().min(1),
+  taskId: z.string().regex(/^0x[0-9a-f]{64}$/i, 'taskId must be a bytes32 task hash'),
   agentAddress: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
   rating: z.number().int().min(1).max(5),
   review: z.string().max(2000).optional(),
@@ -49,19 +54,20 @@ marketplaceRouter.post('/reviews', requireAuth, async (req: AuthRequest, res, ne
       return;
     }
 
-    const existing = await reviewStore.getReviewForTask(taskId, reviewerAddress);
+    const reviewTaskId = taskId.toLowerCase();
+    const existing = await reviewStore.getReviewForTask(reviewTaskId, reviewerAddress);
     if (existing) {
       res.status(409).json({ success: false, error: { code: 'ALREADY_REVIEWED', message: 'You already reviewed this task' } });
       return;
     }
 
-    const r = await reviewStore.submitReview({ taskId, agentAddress, reviewerAddress, rating, review });
+    const r = await reviewStore.submitReview({ taskId: reviewTaskId, agentAddress, reviewerAddress, rating, review });
     // Worker diary: "New review". Fire-and-forget (notify never throws).
     void notify(agentAddress, {
       type: 'review_received',
       title: `New ${rating}★ review`,
       body: 'A poster rated your work — it’s live on your profile.',
-      taskId: taskId.toLowerCase(),
+      taskId: reviewTaskId,
     });
     res.json({ success: true, data: r } as ApiResponse);
   } catch (err) { next(err); }
@@ -72,7 +78,7 @@ marketplaceRouter.post('/reviews', requireAuth, async (req: AuthRequest, res, ne
 // caller's own review for the task, never anyone else's.
 marketplaceRouter.get('/reviews/task/:taskId', requireAuth, async (req: AuthRequest, res, next) => {
   try {
-    const review = await reviewStore.getReviewForTask(req.params.taskId, req.user!.address);
+    const review = await reviewStore.getReviewForTask(req.params.taskId.toLowerCase(), req.user!.address);
     res.json({ success: true, data: { review } } as ApiResponse);
   } catch (err) { next(err); }
 });
