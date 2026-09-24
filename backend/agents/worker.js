@@ -2375,7 +2375,8 @@ async function downloadBriefBlob(rootHash) {
   // Generous timeout: 0G storage indexer reads routinely exceed the 30s
   // fetchWithTimeout default under load, and an abort here burns one of only
   // MAX_RESUME_ATTEMPTS self-recovery tries on a brief that was fetchable.
-  const dlRes = await fetchWithTimeout(`${BACKEND_URL}/api/v1/storage/${rootHash}`, {
+  // Encoded so a rootHash can never step out of /storage/ (security audit run 1, C24).
+  const dlRes = await fetchWithTimeout(`${BACKEND_URL}/api/v1/storage/${encodeURIComponent(rootHash)}`, {
     headers: { 'Authorization': `Bearer ${AGENT_PLATFORM_TOKEN}` },
   }, 120_000);
   if (!dlRes.ok) throw new Error(`storage download ${dlRes.status}`);

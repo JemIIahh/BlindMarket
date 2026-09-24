@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import { storageIdSchema } from '../services/storageId.js';
 import { requireAuth } from '../middleware/auth.js';
 import { createUserRateLimiter } from '../middleware/rateLimit.js';
 import { AppError } from '../middleware/errorHandler.js';
@@ -94,7 +95,7 @@ const submitSchema = z.object({
     chatID: z.string().optional(),
     verified: z.boolean().optional(),
   }).nullable().optional(),
-  rootHash: z.string().nullable().optional(),
+  rootHash: storageIdSchema.nullable().optional(),
 });
 
 // POST /tasks/index — verified A2A meta write. The poster's frontend calls
@@ -144,7 +145,7 @@ const indexTaskSchema = z.object({
   requiredCapabilities: z
     .array(z.enum(AGENT_CAPABILITIES as unknown as [string, ...string[]]))
     .optional(),
-  rootHash: z.string().min(1).max(256).optional(),
+  rootHash: storageIdSchema.optional(),
   wrappedKeys: z
     .record(
       z.string().regex(/^0x[0-9a-fA-F]{40,66}$/, 'wrappedKeys address must be 0x-prefixed hex'),

@@ -4,6 +4,7 @@ import { AppError } from '../middleware/errorHandler.js';
 import * as storageService from '../services/storage.js';
 import * as cryptoService from '../services/crypto.js';
 import type { AuthRequest, ApiResponse } from '../types.js';
+import { STORAGE_ID_PATTERN } from '../services/storageId.js';
 
 export const storageRouter = Router();
 
@@ -55,7 +56,7 @@ storageRouter.get('/:rootHash', requireAuth, async (req: AuthRequest, res, next)
   try {
     const rootHash = req.params.rootHash as string;
     // Accept both raw hex (0G), 0x-prefixed, and URL-safe Base64 (Walrus blob ID)
-    if (!/^(0x)?[0-9a-fA-F]{64}$/.test(rootHash) && !/^[A-Za-z0-9_-]{32,66}$/.test(rootHash)) {
+    if (!STORAGE_ID_PATTERN.test(rootHash)) {
       throw new AppError(400, 'INVALID_HASH', 'Root hash must be a 64-char hex string or a valid Walrus blob ID');
     }
 

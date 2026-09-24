@@ -1399,7 +1399,8 @@ export class BlindMarket {
    * which returns `{ rootHash, blob }`, not `{ data }`.
    */
   async downloadBlob(rootHash: Hex): Promise<{ rootHash: Hex; blob: string }> {
-    return this.req('GET', `/api/v1/storage/${rootHash}`);
+    // Encoded so a rootHash can never step out of /storage/.
+    return this.req('GET', `/api/v1/storage/${encodeURIComponent(rootHash)}`);
   }
 
   // ── Messages ─────────────────────────────────────────────────────────────
