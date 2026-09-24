@@ -95,11 +95,15 @@ export const ERC20_ABI = [
 
 /**
  * DepositForBurn event (Circle CCTP V2 TokenMessenger) — field order and
- * indexed flags per developers.circle.com/cctp/references/contract-interfaces:
- * indexed = nonce, burnToken, depositor; the rest rides in data.
+ * indexed flags per the contract source itself
+ * (circlefin/evm-cctp-contracts src/v2/TokenMessengerV2.sol): indexed =
+ * burnToken, depositor, minFinalityThreshold; there is NO nonce field.
+ * (developers.circle.com's interface page documents a nonce the contract
+ * doesn't emit — that wrong signature made log scans match nothing.)
+ * Verified live: topic0 0x0c8c1cbd…130a5 on Base Sepolia.
  */
 export const DEPOSIT_FOR_BURN_ABI = [
-  'event DepositForBurn(uint64 indexed nonce, address indexed burnToken, uint256 amount, address indexed depositor, bytes32 mintRecipient, uint32 destinationDomain, bytes32 destinationTokenMessenger, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold)',
+  'event DepositForBurn(address indexed burnToken, uint256 amount, address indexed depositor, bytes32 mintRecipient, uint32 destinationDomain, bytes32 destinationTokenMessenger, bytes32 destinationCaller, uint256 maxFee, uint32 indexed minFinalityThreshold, bytes hookData)',
 ];
 
 export interface ExpectedBurn {

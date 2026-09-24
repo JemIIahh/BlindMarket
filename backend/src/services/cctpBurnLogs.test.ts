@@ -24,9 +24,9 @@ function burnLog(overrides: {
   amount?: bigint;
   recipient?: string;
   destDomain?: number;
+  minFinalityThreshold?: number;
 } = {}) {
   const { topics, data } = iface.encodeEventLog('DepositForBurn', [
-    7n, // nonce
     USDC, // burnToken
     overrides.amount ?? AMOUNT,
     overrides.depositor ?? DEPOSITOR,
@@ -35,7 +35,8 @@ function burnLog(overrides: {
     addressToBytes32(MESSENGER), // destinationTokenMessenger
     ethers.ZeroHash, // destinationCaller
     1000n, // maxFee
-    1000, // minFinalityThreshold
+    overrides.minFinalityThreshold ?? 1000,
+    '0x', // hookData
   ]);
   return {
     address: overrides.messenger ?? MESSENGER,
@@ -53,6 +54,15 @@ const expected = {
 };
 
 describe('logsContainBurn', () => {
+  it('encodes the topic0 Circle actually emits on-chain', () => {
+    // Ground-truth anchor: topic0 of a real DepositForBurn on Base Sepolia
+    // (burn 20 USDC, tx 0x23c971cf…63afcb). If this fails, the ABI fragment
+    // drifted from the contract and every log scan goes blind again.
+    expect(burnLog().topics[0].toLowerCase()).toBe(
+      '0x0c8c1cbdc5190613ebd485511d4e2812cfa45eecb79d845893331fedad5130a5',
+    );
+  });
+
   it('finds the expected burn among unrelated logs', () => {
     const logs = [
       { address: USDC, topics: [ethers.id('Transfer(address,address,uint256)')], data: '0x' },

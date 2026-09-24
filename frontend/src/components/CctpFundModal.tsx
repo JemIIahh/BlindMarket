@@ -22,14 +22,16 @@ import { ARC_CHAIN_CONFIG, ARC_CHAIN_ID, SETTLEMENT_CCTP_CHAIN_KEY, isCctpUsable
 
 /**
  * DepositForBurn event (Circle CCTP V2 TokenMessenger) — field order and
- * indexed flags per developers.circle.com/cctp/references/contract-interfaces:
- * indexed = nonce, burnToken, depositor; the rest rides in data. Used to find
- * a burn the relay submitted as a UserOp (no L1 tx hash to /confirm with).
+ * indexed flags per the contract source itself
+ * (circlefin/evm-cctp-contracts src/v2/TokenMessengerV2.sol): indexed =
+ * burnToken, depositor, minFinalityThreshold; there is NO nonce field. Used
+ * to find a burn the relay submitted as a UserOp (no L1 tx hash to /confirm
+ * with). Verified live: topic0 0x0c8c1cbd…130a5 on Base Sepolia.
  */
 const DEPOSIT_FOR_BURN_ABI = [
-  'event DepositForBurn(uint64 indexed nonce, address indexed burnToken, uint256 amount, address indexed depositor, bytes32 mintRecipient, uint32 destinationDomain, bytes32 destinationTokenMessenger, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold)',
+  'event DepositForBurn(address indexed burnToken, uint256 amount, address indexed depositor, bytes32 mintRecipient, uint32 destinationDomain, bytes32 destinationTokenMessenger, bytes32 destinationCaller, uint256 maxFee, uint32 indexed minFinalityThreshold, bytes hookData)',
 ];
-const DEPOSIT_FOR_BURN_TOPIC = keccakId('DepositForBurn(uint64,address,uint256,address,bytes32,uint32,bytes32,bytes32,uint256,uint32)');
+const DEPOSIT_FOR_BURN_TOPIC = keccakId('DepositForBurn(address,uint256,address,bytes32,uint32,bytes32,bytes32,uint256,uint32,bytes)');
 
 /**
  * CCTP Phase B (inbound) — fund the user's Arc wallet from USDC held on
@@ -411,7 +413,7 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
           const latest = await provider.getBlockNumber();
           const logs = await provider.getLogs({
             address: messenger,
-            topics: [DEPOSIT_FOR_BURN_TOPIC, null, usdcTopic, depositorTopic],
+            topics: [DEPOSIT_FOR_BURN_TOPIC, usdcTopic, depositorTopic],
             fromBlock: start,
             toBlock: latest,
           });
