@@ -239,10 +239,59 @@ describe('recordWorkerPayout: a faulted re-observation never releases an earlier
 });
 
 describe('recordWorkerDispute', () => {
+  const round = (attempt: number | 'ruling', taskId = '7') => ({ chain: 'arc' as const, taskId, attempt });
+
   it('lowers reputation by 10 without touching the other counters', async () => {
-    await recordWorkerDispute(TASK, EXEC);
+    expect(await recordWorkerDispute(TASK, EXEC, round(1))).toBe(true);
     expect(store.adjustReputation).toHaveBeenCalledWith(EXEC, -10);
     expect(store.creditPayoutOnce).not.toHaveBeenCalled();
     expect(store.registerAgent).not.toHaveBeenCalled();
+  });
+
+  /**
+   * One failed round is one dispute, however many observers see it: an A2A
+   * route (/finalize, /verify, /verdict) and a replay of the round's
+   * settlement tx to /submissions/confirm used to record it twice (security
+   * audit run 1, C21). Every observer passes the same round key.
+   */
+  describe('at most once per failed round', () => {
+    const keys = new Map<string, string>();
+    beforeEach(() => {
+      keys.clear();
+      redisMock.set.mockImplementation(async (k: string, v: string, mode?: string) => {
+        if (mode === 'NX' && keys.has(k)) return null;
+        keys.set(k, v);
+        return 'OK';
+      });
+      redisMock.del.mockImplementation(async (k: string) => Number(keys.delete(k)));
+    });
+
+    it('records a round once, and a later round again', async () => {
+      expect(await recordWorkerDispute(TASK, EXEC, round(1))).toBe(true);
+      expect(await recordWorkerDispute(TASK, EXEC.toUpperCase().replace('0X', '0x'), round(1))).toBe(false);
+      expect(await recordWorkerDispute(TASK, EXEC, round(2))).toBe(true);
+      expect(await recordWorkerDispute(TASK, EXEC, round(1, '8'))).toBe(true);
+      expect(await recordWorkerDispute(TASK, EXEC, round('ruling'))).toBe(true);
+      expect(store.adjustReputation).toHaveBeenCalledTimes(4);
+      expect(sideEffects.recordDispute).toHaveBeenCalledTimes(4);
+      expect([...keys.keys()]).toContain('a2a:dispute-round:arc:7:1');
+    });
+
+    it('gives the round back when recording fails, so a later observer records it', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      sideEffects.recordDispute.mockRejectedValueOnce(new Error('db down'));
+      await expect(recordWorkerDispute(TASK, EXEC, round(1), { rethrow: true })).rejects.toThrow('db down');
+      expect(keys.has('a2a:dispute-round:arc:7:1')).toBe(false);
+      expect(await recordWorkerDispute(TASK, EXEC, round(1))).toBe(true);
+    });
+
+    it('records nothing, and deletes nothing, when the round key cannot be taken', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      keys.set('a2a:dispute-round:arc:7:1', EXEC);
+      redisMock.set.mockRejectedValueOnce(new Error('socket closed'));
+      expect(await recordWorkerDispute(TASK, EXEC, round(1))).toBe(false);
+      expect(store.adjustReputation).not.toHaveBeenCalled();
+      expect(keys.has('a2a:dispute-round:arc:7:1')).toBe(true);
+    });
   });
 });

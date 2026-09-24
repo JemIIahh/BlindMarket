@@ -11,7 +11,6 @@ import { chainRuntime } from '../services/chainRuntime.js';
 import { postingChain } from '../services/settlementChains.js';
 import { isListedTask } from '../services/taskChain.js';
 import { getMeta } from '../services/a2aStore.js';
-import { redis } from '../services/redis.js';
 
 export const submissionsRouter = Router();
 
@@ -127,8 +126,10 @@ submissionsRouter.post('/verify', requireAuth, async (req: AuthRequest, res, nex
  * Credit routing (shared with every other settlement observer):
  *   - passed → recordWorkerPayout, whose a2a:credited NX marker dedups
  *     against /finalize, /verdict and the DisputeResolved listener;
- *   - failed → recordWorkerDispute + the slash ledger row, guarded by a
- *     per-txHash marker (failed rounds legitimately repeat per broadcast).
+ *   - failed → recordWorkerDispute + the slash ledger row, at most once per
+ *     failed round, keyed on the round like the A2A routes (/finalize,
+ *     /verify, /verdict) key it, so replaying a round's settlement tx here
+ *     can't record it twice.
  */
 submissionsRouter.post('/confirm', requireAuth, async (req: AuthRequest, res, next) => {
   try {
@@ -204,15 +205,48 @@ submissionsRouter.post('/confirm', requireAuth, async (req: AuthRequest, res, ne
       return;
     }
 
-    // Failed round: one dispute record per broadcast.
-    const marker = `legacy:verify-credited:${txHash.toLowerCase()}`;
-    const first = await redis.set(marker, workerAddr.toLowerCase(), 'NX');
-    if (first === null) {
+    // Failed round: one dispute per round, not per observer. A marker keyed
+    // on this tx hash stopped only a repeat /confirm, so replaying the
+    // settlement tx of a round an A2A route had already recorded docked the
+    // executor twice (security audit run 1, C21). The round is the task's
+    // submissionAttempts at the settlement block, the same key the A2A routes
+    // derive: completeVerification(false) leaves the count unchanged and a
+    // retry's submitEvidence bumps it.
+    let attempt: number;
+    try {
+      const atSettlement = await escrowContract.getTask(taskId, { blockTag: receipt.blockNumber });
+      attempt = Number(atSettlement.submissionAttempts);
+    } catch {
+      // Many RPC nodes keep only recent state, so the historical read can fail.
+      // The current state still names this round while the task sits in
+      // Verified (3): the failed verdict left it there and only a resubmission
+      // would move it on and bump submissionAttempts.
+      const now = await escrowContract.getTask(taskId).catch(() => null);
+      if (!now || Number(now.status) !== 3) {
+        throw new AppError(
+          503,
+          'ROUND_UNAVAILABLE',
+          'Could not tell which submission round this settlement failed, because the task has moved on and the node serves no historical state. Retry against an archive RPC.',
+        );
+      }
+      attempt = Number(now.submissionAttempts);
+    }
+    let recorded: boolean;
+    try {
+      recorded = await recordWorkerDispute(
+        taskHash, workerAddr, { chain: postingChain(), taskId: String(taskId), attempt }, { rethrow: true },
+      );
+    } catch (hookErr) {
+      // The round was released, so a retry records it.
+      console.warn('[submissions] confirm dispute record failed (non-blocking):', hookErr);
+      res.json({ success: true, data: { confirmed: true, passed: false } } as ApiResponse);
+      return;
+    }
+    if (!recorded) {
       res.json({ success: true, data: { confirmed: true, passed: false, duplicate: true } } as ApiResponse);
       return;
     }
     try {
-      await recordWorkerDispute(taskHash, workerAddr);
       await accountingService.recordTransaction({
         address: workerAddr,
         role: 'worker',
@@ -222,7 +256,6 @@ submissionsRouter.post('/confirm', requireAuth, async (req: AuthRequest, res, ne
         unit: payoutCurrency(postingChain(), task.token)?.symbol,
       });
     } catch (hookErr) {
-      await redis.del(marker).catch(() => {});
       console.warn('[submissions] confirm-billing hook failed (non-blocking):', hookErr);
     }
     res.json({ success: true, data: { confirmed: true, passed: false } } as ApiResponse);

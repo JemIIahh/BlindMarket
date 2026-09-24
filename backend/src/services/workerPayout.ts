@@ -279,14 +279,47 @@ export async function recordWorkerPayout(
 }
 
 /**
+ * The failed round a dispute is for: the on-chain task and its
+ * submissionAttempts at settlement (completeVerification(false) leaves the
+ * count unchanged and a retry's submitEvidence bumps it, so it names exactly
+ * one round), or 'ruling' for an admin DisputeResolved ruling.
+ */
+export interface FailedRound {
+  chain: TaskChain;
+  taskId: string;
+  attempt: number | 'ruling';
+}
+
+/**
  * Record a dispute against an executor. Decrements the Redis reputation counter
  * and records the dispute in the Neon PostgreSQL reputation system. On-chain
  * dispute is also recorded by BlindEscrow when completeVerification →
  * BlindReputation.recordDispute() fires.
+ *
+ * At most once per failed round, however many observers see it: returns true
+ * when this call recorded the dispute, false when the round was already
+ * recorded (or recording failed without rethrow).
  * Non-blocking — logged on failure, caller continues.
  */
-export async function recordWorkerDispute(taskHash: string, executorAddr: string, opts: { rethrow?: boolean } = {}): Promise<void> {
+export async function recordWorkerDispute(
+  taskHash: string,
+  executorAddr: string,
+  round: FailedRound,
+  opts: { rethrow?: boolean } = {},
+): Promise<boolean> {
+  // The failed-path twin of the credit gate. /finalize, /verify, /verdict and
+  // /submissions/confirm each recorded the round they observed, so replaying a
+  // round's settlement tx to /submissions/confirm docked the executor a second
+  // time for one on-chain failure (security audit run 1, C21). Keyed on the
+  // round, not the task hash: rounds 2 and 3 are disputes of their own.
+  const roundKey = `a2a:dispute-round:${round.chain}:${round.taskId}:${round.attempt}`;
+  let claimed = false;
   try {
+    if ((await redis.set(roundKey, executorAddr.toLowerCase(), 'NX')) === null) {
+      console.log(`[a2a] dispute for ${taskHash.slice(0, 10)}… round ${round.attempt} already recorded — skipping duplicate`);
+      return false;
+    }
+    claimed = true;
     await agentStore.adjustReputation(executorAddr, -10);
     await reputationDecay.recordDispute(executorAddr, taskHash);
     // Per-skill proof: a dispute counts against the task's capability tags
@@ -308,7 +341,11 @@ export async function recordWorkerDispute(taskHash: string, executorAddr: string
     })();
     // Shadow measurement: task failed/disputed. Best-effort.
     void semanticMatch.recordShadowOutcome(taskHash, { settled: false });
+    return true;
   } catch (err) {
+    // Give the round back so a later observer can record it, but only if
+    // this call took it.
+    if (claimed) await redis.del(roundKey).catch(() => {});
     console.warn(
       `[a2a] recordWorkerDispute failed for ${taskHash.slice(0, 10)}… executor=${executorAddr}:`,
       (err as Error).message,
@@ -316,5 +353,6 @@ export async function recordWorkerDispute(taskHash: string, executorAddr: string
     // Listener path (DisputeResolved) rethrows so its NX marker is released and
     // the tick retries; the routes swallow-and-continue as before.
     if (opts.rethrow) throw err;
+    return false;
   }
 }
