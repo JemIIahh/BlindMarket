@@ -48,13 +48,14 @@ describe('isRerunSafe', () => {
     expect(isRerunSafe(sql)).toBe(expected);
   });
 
-  it('flags only the data migrations (#16, #31, #36, #37) among the current ones', () => {
+  it('flags only the data migrations (#16, #31, #36, #37, #38) among the current ones', () => {
     // A new migration that isn't safe to re-run fails this test on purpose:
     // write it with IF NOT EXISTS, or add its id here as a conscious decision.
     // #36 clears supported_chains = {0g}: re-run later, it would erase what
     // agents declared since. #37 collapses case-variant agent_reviews rows and
     // lowercases task_id: a data fix, applied once, never re-run automatically.
-    expect(rerunUnsafeMigrationIds()).toEqual([16, 31, 36, 37]);
+    // #38 merges case-variant reputation_history rows: also a data fix.
+    expect(rerunUnsafeMigrationIds()).toEqual([16, 31, 36, 37, 38]);
   });
 });
 
@@ -84,6 +85,14 @@ describe('migrations production has recorded', () => {
     expect(sql).toContain('DELETE FROM agent_reviews a USING agent_reviews b WHERE LOWER(a.task_id) = LOWER(b.task_id) AND a.reviewer_address = b.reviewer_address AND a.id > b.id');
     expect(sql).toContain('UPDATE agent_reviews SET task_id = LOWER(task_id)');
     expect(sql).toContain('CREATE UNIQUE INDEX IF NOT EXISTS uq_reviews_task_reviewer_lower ON agent_reviews (LOWER(task_id), reviewer_address)');
+  });
+
+  it('#38 merges reputation rows split by address case under the lowercase key (security audit run 1, C31)', () => {
+    expect(listMigrations().find((m) => m.id === 38)).toEqual({ id: 38, name: 'lowercase_reputation_addresses' });
+    const sql = squash(migrationSql(38))!;
+    expect(sql).toContain('SELECT LOWER(address), SUM(raw_score), SUM(tasks_completed), SUM(disputes), MAX(last_task_at) FROM reputation_history GROUP BY LOWER(address)');
+    expect(sql).toContain('DELETE FROM reputation_history WHERE address <> LOWER(address)');
+    expect(sql).toContain('UPDATE reputation_events SET address = LOWER(address) WHERE address <> LOWER(address)');
   });
 
   it('#36 drops the constraint and default, and clears every 0G-only list', () => {

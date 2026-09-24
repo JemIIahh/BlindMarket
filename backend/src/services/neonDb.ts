@@ -801,6 +801,30 @@ const migrations: Array<{ id: number; name: string; sql: string; when?: () => bo
         ON agent_reviews (LOWER(task_id), reviewer_address);
     `,
   },
+  {
+    id: 38,
+    name: 'lowercase_reputation_addresses',
+    // reputationDecay keyed rows by the caller's casing: settlement wrote the
+    // EIP-55 principal of hosted workers and chain reads, while the ranker read
+    // the lowercase address and saw none of it (security audit run 1, C31).
+    // It now lowercases every address; this merges the rows already split by
+    // case under the lowercase key (sums the counters, keeps the latest
+    // last_task_at), deletes the mixed-case rows and lowercases the event log.
+    // A re-run finds nothing to merge, but it is a data fix: applied once.
+    sql: `
+      INSERT INTO reputation_history (address, raw_score, tasks_completed, disputes, last_task_at)
+      SELECT LOWER(address), SUM(raw_score), SUM(tasks_completed), SUM(disputes), MAX(last_task_at)
+        FROM reputation_history
+       GROUP BY LOWER(address)
+      ON CONFLICT (address) DO UPDATE SET
+        raw_score = EXCLUDED.raw_score,
+        tasks_completed = EXCLUDED.tasks_completed,
+        disputes = EXCLUDED.disputes,
+        last_task_at = EXCLUDED.last_task_at;
+      DELETE FROM reputation_history WHERE address <> LOWER(address);
+      UPDATE reputation_events SET address = LOWER(address) WHERE address <> LOWER(address);
+    `,
+  },
 ];
 
 /**

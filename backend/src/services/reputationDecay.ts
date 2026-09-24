@@ -21,12 +21,22 @@ export interface ReputationEvent {
   created_at: string;
 }
 
+// reputation_history.address and reputation_events.address are TEXT keys that
+// compare case-sensitively. Settlement wrote whatever principal it was handed
+// (the EIP-55 walletAddress in a hosted worker's platform JWT, ethers-decoded
+// chain reads) while scoreAgent reads the lowercase agent_executors key, so a
+// hosted agent's disputes and decayed score never reached the ranker. Every
+// read and write goes through this, like agentStore and skillStatsStore;
+// migration 38 merged the rows already split by case (security audit run 1, C31).
+const key = (address: string): string => address.toLowerCase();
+
 function computeDecayFactor(daysSinceLastTask: number | null): number {
   if (daysSinceLastTask === null) return 1;
   return Math.pow(0.5, daysSinceLastTask / HALF_LIFE_DAYS);
 }
 
 export async function getDecayedReputation(address: string): Promise<DecayedReputation> {
+  address = key(address);
   const db = await getPool();
   const { rows } = await db.query(
     'SELECT * FROM reputation_history WHERE address = $1',
@@ -74,22 +84,19 @@ export async function getDecayedReputation(address: string): Promise<DecayedRepu
 }
 
 export async function recordTaskCompletion(address: string, taskId: string, scoreDelta: number): Promise<void> {
+  address = key(address);
   const db = await getPool();
   const now = new Date().toISOString();
 
-  const { rows } = await db.query('SELECT * FROM reputation_history WHERE address = $1', [address]);
-
-  if (rows.length > 0) {
-    await db.query(
-      'UPDATE reputation_history SET raw_score = raw_score + $1, tasks_completed = tasks_completed + 1, last_task_at = $2 WHERE address = $3',
-      [scoreDelta, now, address],
-    );
-  } else {
-    await db.query(
-      'INSERT INTO reputation_history (address, raw_score, tasks_completed, last_task_at) VALUES ($1, $2, 1, $3)',
-      [address, scoreDelta, now],
-    );
-  }
+  // One upsert: a read-then-write let two first completions race to INSERT.
+  await db.query(
+    `INSERT INTO reputation_history (address, raw_score, tasks_completed, last_task_at) VALUES ($1, $2, 1, $3)
+     ON CONFLICT (address) DO UPDATE SET
+       raw_score = reputation_history.raw_score + EXCLUDED.raw_score,
+       tasks_completed = reputation_history.tasks_completed + 1,
+       last_task_at = EXCLUDED.last_task_at`,
+    [address, scoreDelta, now],
+  );
 
   await db.query(
     'INSERT INTO reputation_events (address, task_id, event_type, score_delta) VALUES ($1, $2, $3, $4)',
@@ -98,18 +105,14 @@ export async function recordTaskCompletion(address: string, taskId: string, scor
 }
 
 export async function recordDispute(address: string, taskId: string): Promise<void> {
+  address = key(address);
   const db = await getPool();
 
-  const { rows } = await db.query('SELECT * FROM reputation_history WHERE address = $1', [address]);
-
-  if (rows.length > 0) {
-    await db.query('UPDATE reputation_history SET disputes = disputes + 1 WHERE address = $1', [address]);
-  } else {
-    await db.query(
-      'INSERT INTO reputation_history (address, raw_score, disputes) VALUES ($1, 0, 1)',
-      [address],
-    );
-  }
+  await db.query(
+    `INSERT INTO reputation_history (address, raw_score, disputes) VALUES ($1, 0, 1)
+     ON CONFLICT (address) DO UPDATE SET disputes = reputation_history.disputes + 1`,
+    [address],
+  );
 
   await db.query(
     'INSERT INTO reputation_events (address, task_id, event_type, score_delta) VALUES ($1, $2, $3, $4)',
@@ -148,7 +151,7 @@ export async function getReputationHistory(address: string, limit: number = 100)
   const db = await getPool();
   const { rows } = await db.query(
     'SELECT * FROM reputation_events WHERE address = $1 ORDER BY created_at DESC LIMIT $2',
-    [address, limit],
+    [key(address), limit],
   );
   return rows as ReputationEvent[];
 }
