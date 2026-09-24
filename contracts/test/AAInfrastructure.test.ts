@@ -302,11 +302,14 @@ describe("USDCPaymaster", function () {
   let mockEP: any;
   let owner: HardhatEthersSigner;
   let sender: HardhatEthersSigner;
+  let signers: HardhatEthersSigner[];
+  const stranger = () => signers[2];
 
   const ETH_PRICE_USDC = 3_000_000_000n;
 
   beforeEach(async function () {
-    [owner, sender] = await ethers.getSigners();
+    signers = await ethers.getSigners();
+    [owner, sender] = signers;
 
     const Token = await ethers.getContractFactory("MockERC20");
     usdc = await Token.deploy("Mock USDC", "MUSDC", 6);
@@ -410,6 +413,94 @@ describe("USDCPaymaster", function () {
       const amount = ethers.parseEther("0.05");
       await expect(paymaster.withdrawEth(owner.address, amount))
         .to.emit(paymaster, "Withdrawn").withArgs(owner.address, amount);
+    });
+  });
+
+  // Security audit C38: postOp pulls every UserOp's USDC charge into the
+  // paymaster itself, and native currency sent to receive() stays in the
+  // contract, but nothing could move either out again (withdrawEth only
+  // reaches the EntryPoint deposit).
+  describe("collected funds exits", function () {
+    const CHARGE = 2_760_000n; // 2.76 USDC, what the audit run left locked
+
+    /** Replay the EntryPoint's postOp so the paymaster collects CHARGE from `sender`. */
+    async function collectCharge() {
+      const pmAddr = await paymaster.getAddress();
+      const epAddr = await mockEP.getAddress();
+      await usdc.mint(sender.address, CHARGE);
+      await usdc.connect(sender).approve(pmAddr, CHARGE); // BlindAccount's constructor approval
+      await ethers.provider.send("hardhat_impersonateAccount", [epAddr]);
+      await ethers.provider.send("hardhat_setBalance", [epAddr, "0x1000000000000000000"]);
+      const ep = await ethers.getSigner(epAddr);
+      const context = ethers.AbiCoder.defaultAbiCoder().encode(["uint256", "address"], [CHARGE, sender.address]);
+      await paymaster.connect(ep).postOp(0, context, 0, 0);
+      await ethers.provider.send("hardhat_stopImpersonatingAccount", [epAddr]);
+      expect(await usdc.balanceOf(pmAddr)).to.equal(CHARGE);
+    }
+
+    it("lets the owner withdraw the USDC postOp collected", async function () {
+      await collectCharge();
+      const pmAddr = await paymaster.getAddress();
+
+      await expect(paymaster.withdrawToken(await usdc.getAddress(), owner.address, CHARGE))
+        .to.emit(paymaster, "TokenWithdrawn").withArgs(await usdc.getAddress(), owner.address, CHARGE);
+
+      expect(await usdc.balanceOf(pmAddr)).to.equal(0);
+      expect(await usdc.balanceOf(owner.address)).to.equal(CHARGE);
+    });
+
+    it("refuses a token withdrawal from anyone but the owner, or to address(0)", async function () {
+      await collectCharge();
+      const usdcAddr = await usdc.getAddress();
+      await expect(paymaster.connect(sender).withdrawToken(usdcAddr, sender.address, CHARGE))
+        .to.be.revertedWithCustomError(paymaster, "NotOwner");
+      await expect(paymaster.withdrawToken(usdcAddr, ethers.ZeroAddress, CHARGE))
+        .to.be.revertedWithCustomError(paymaster, "ZeroAddress");
+      expect(await usdc.balanceOf(await paymaster.getAddress())).to.equal(CHARGE);
+    });
+
+    it("lets the owner withdraw native currency sent to receive(), which withdrawEth cannot reach", async function () {
+      const pmAddr = await paymaster.getAddress();
+      const amount = ethers.parseEther("0.01");
+      await sender.sendTransaction({ to: pmAddr, value: amount });
+
+      // Only the EntryPoint deposit (1 ETH from beforeEach) moves through
+      // withdrawEth; the contract's own balance is untouched by it.
+      await paymaster.withdrawEth(owner.address, ethers.parseEther("1"));
+      expect(await ethers.provider.getBalance(pmAddr)).to.equal(amount);
+
+      await expect(paymaster.connect(sender).withdrawNative(sender.address, amount))
+        .to.be.revertedWithCustomError(paymaster, "NotOwner");
+
+      await expect(paymaster.withdrawNative(stranger().address, amount))
+        .to.emit(paymaster, "NativeWithdrawn").withArgs(stranger().address, amount);
+      expect(await ethers.provider.getBalance(pmAddr)).to.equal(0);
+    });
+
+    it("moves ownership (and with it the withdrawals) in two steps", async function () {
+      await collectCharge();
+      const usdcAddr = await usdc.getAddress();
+      const next = stranger();
+
+      await expect(paymaster.connect(sender).transferOwnership(sender.address))
+        .to.be.revertedWithCustomError(paymaster, "NotOwner");
+
+      await expect(paymaster.transferOwnership(next.address))
+        .to.emit(paymaster, "OwnershipTransferStarted").withArgs(owner.address, next.address);
+      // Nothing changes until the new owner accepts.
+      expect(await paymaster.owner()).to.equal(owner.address);
+      await expect(paymaster.connect(sender).acceptOwnership())
+        .to.be.revertedWithCustomError(paymaster, "NotPendingOwner");
+
+      await expect(paymaster.connect(next).acceptOwnership())
+        .to.emit(paymaster, "OwnershipTransferred").withArgs(owner.address, next.address);
+      expect(await paymaster.owner()).to.equal(next.address);
+      expect(await paymaster.pendingOwner()).to.equal(ethers.ZeroAddress);
+
+      await expect(paymaster.withdrawToken(usdcAddr, owner.address, CHARGE))
+        .to.be.revertedWithCustomError(paymaster, "NotOwner");
+      await paymaster.connect(next).withdrawToken(usdcAddr, next.address, CHARGE);
+      expect(await usdc.balanceOf(next.address)).to.equal(CHARGE);
     });
   });
 });
