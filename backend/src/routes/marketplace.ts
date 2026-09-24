@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { requireAuth, requireFounder } from '../middleware/auth.js';
+import { optionalAuth, requireAuth, requireFounder } from '../middleware/auth.js';
 import type { AuthRequest } from '../types.js';
 import * as reviewStore from '../services/reviewStore.js';
 import { notify } from '../services/notificationStore.js';
@@ -122,9 +122,13 @@ marketplaceRouter.get('/templates/mine', requireAuth, async (req: AuthRequest, r
   } catch (err) { next(err); }
 });
 
-marketplaceRouter.get('/templates/:id', async (req, res, next) => {
+// A private template is served only to its creator; anyone else gets the same
+// 404 as for a missing id.
+marketplaceRouter.get('/templates/:id', optionalAuth, async (req: AuthRequest, res, next) => {
   try {
-    const t = await templateStore.getTemplate(parseInt(req.params.id));
+    const id = Number(req.params.id);
+    const viewer = req.user ? [req.user.address, ...(req.user.addresses ?? [])] : [];
+    const t = Number.isSafeInteger(id) && id > 0 ? await templateStore.getTemplate(id, viewer) : null;
     if (!t) { res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Template not found' } }); return; }
     res.json({ success: true, data: t } as ApiResponse);
   } catch (err) { next(err); }

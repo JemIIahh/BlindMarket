@@ -58,9 +58,14 @@ export async function getTemplatesByCreator(creatorAddress: string): Promise<Tas
   return rows;
 }
 
-export async function getTemplate(id: number): Promise<TaskTemplate | null> {
+/** A template the viewer may see: a public one, or one they created. A private
+ *  template was readable by anyone who knew its id (security audit run 1, C14). */
+export async function getTemplate(id: number, viewerAddresses: readonly string[] = []): Promise<TaskTemplate | null> {
   const db = await getPool();
-  const { rows } = await db.query<TaskTemplate>('SELECT * FROM task_templates WHERE id = $1', [id]);
+  const { rows } = await db.query<TaskTemplate>(
+    'SELECT * FROM task_templates WHERE id = $1 AND (is_public = true OR creator_address = ANY($2))',
+    [id, viewerAddresses.map((a) => a.toLowerCase())],
+  );
   return rows[0] ?? null;
 }
 
