@@ -123,3 +123,13 @@ describe('principalAddresses (M6 claim scoping)', () => {
     ).toBe(true);
   });
 });
+
+describe('stripAgentSecrets with a malformed stored tools value (audit run 1, C22)', () => {
+  it('returns the agent without tools instead of throwing', () => {
+    for (const tools of [{}, 'x', 5]) {
+      const agent = { id: 'agent-x', walletAddress: '0xabc', ownerAddress: '0xdef', tools } as unknown as DeployedAgent;
+      expect(() => stripAgentSecrets(agent)).not.toThrow();
+      expect(stripAgentSecrets(agent)!.tools).toBeUndefined();
+    }
+  });
+});

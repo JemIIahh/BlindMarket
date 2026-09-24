@@ -999,15 +999,34 @@ agentsRouter.post('/:id/link-owner', requireAuth, async (req: AuthRequest, res) 
 // with the agent's (public) owner address — to requireAuth + authorizeOwner,
 // matching start/stop/withdraw. This also makes it honor the authorizedOwners
 // allowlist so a signature-linked wallet can edit too.
+// PATCH takes the deploy form's field rules. It used to save the raw body, and a
+// non-array `tools` crashed the public agent list and the agent's detail for
+// every caller (security audit run 1, C22). Tools are checked for shape only
+// (an array of typed, named objects) and keep their other fields: tools added
+// after deploy carry fields ToolSchema would strip (source, mcp_endpoint, ...).
+const AgentUpdateSchema = z.object({
+  instructions: z.string().min(1).optional(),
+  provider: z.enum(PROVIDERS).optional(),
+  model: z.string().min(1).optional(),
+  apiKey: z.string().optional(),
+  tools: z.array(
+    z.object({ type: z.enum(['http', 'mcp', 'js', 'sandbox', 'tool']), name: z.string().min(1) }).passthrough(),
+  ).max(100).optional(),
+  capabilities: z.array(z.enum(AGENT_CAPABILITIES as unknown as [string, ...string[]])).optional(),
+  // Old clients still send 18-decimal amounts; store them in USDC units.
+  minReward: z.string().regex(/^\d+$/, 'minReward must be an integer string').transform(normalizeSettlementAmount).optional(),
+});
+
 agentsRouter.patch('/:id', requireAuth, async (req: AuthRequest, res) => {
   const agent = await authorizeOwner(req, res, req.params.id);
   if (!agent) return;
-  const { instructions, provider, model, apiKey, tools, capabilities, minReward } = req.body as {
-    instructions?: string; provider?: string; model?: string; apiKey?: string; tools?: object[]; capabilities?: string[]; minReward?: string;
-  };
-  // Old clients still send 18-decimal amounts; store them in USDC units.
-  const normalizedMinReward = typeof minReward === 'string' && /^\d+$/.test(minReward) ? normalizeSettlementAmount(minReward) : minReward;
-  const updated = await updateAgent(req.params.id, { instructions, provider: provider as any, model, apiKey, tools: tools as any, capabilities: capabilities as any, minReward: normalizedMinReward });
+  const parsed = AgentUpdateSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ') } });
+    return;
+  }
+  const { instructions, provider, model, apiKey, tools, capabilities, minReward } = parsed.data;
+  const updated = await updateAgent(req.params.id, { instructions, provider: provider as any, model, apiKey, tools: tools as any, capabilities: capabilities as any, minReward });
   // Semantic matching (Phase 0): instructions/capabilities changed — re-embed.
   if (updated) agentEmbedding.recomputeForWalletBestEffort(updated.walletAddress);
   res.json({ success: true, data: strip(updated) });
