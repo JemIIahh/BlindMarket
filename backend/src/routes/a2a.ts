@@ -141,8 +141,12 @@ const indexTaskSchema = z.object({
     .string()
     .regex(/^0x[0-9a-fA-F]{40,66}$/, 'verifierAddress must be a 0x-prefixed hex string')
     .optional(),
+  // Bounded and de-duplicated like the registration lists: each entry is a
+  // per-skill proof credit at settlement (security audit run 1, C13).
   requiredCapabilities: z
     .array(z.enum(AGENT_CAPABILITIES as unknown as [string, ...string[]]))
+    .max(20)
+    .transform((caps) => [...new Set(caps)])
     .optional(),
   rootHash: z.string().min(1).max(256).optional(),
   wrappedKeys: z
