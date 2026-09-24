@@ -65,3 +65,8 @@ docs/CELO-MULTI-CHAIN.md
 !contracts/sui/.gitkeep
 .aider*
 backend/.env.play
+
+# Every .env variant (.env.mainnet, .env.staging, ...) except the committed templates.
+.env.*
+!.env.example
+!.env.*.example
