@@ -198,7 +198,7 @@ export function TopBar({ onMenuClick }: TopBarProps = {}) {
             >
               <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${shownAsset.dot}`} />
               <span className="hidden min-[520px]:inline text-ink-2">{shownAsset.symbol}</span>
-              <span className="font-mono">{shownAsset.amount}</span>
+              <span className="font-mono">{shownAsset.amount ?? '…'}</span>
               <svg
                 viewBox="0 0 24 24"
                 className={`w-3 h-3 text-ink-3 transition-transform ${assetMenuOpen ? 'rotate-180' : ''}`}
@@ -236,7 +236,7 @@ export function TopBar({ onMenuClick }: TopBarProps = {}) {
                   <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-blue-500" />
                   <span>USDC</span>
                   <span className="text-ink-3">· {networkName}</span>
-                  <span className="ml-auto font-mono">{usdc.formatted}</span>
+                  <span className="ml-auto font-mono">{usdc.formatted ?? '…'}</span>
                   <span className="text-cream">✓</span>
                 </div>
                 {cctpEnabled && (

@@ -103,11 +103,14 @@ export function useUsdcBalance(forAddress?: string | null) {
     query: { enabled: !!address && !!usdcAddress, refetchInterval: 10_000 },
   });
 
-  const balance = rawBalance != null ? Number(rawBalance) / 1e6 : 0;
+  // Unknown (still loading or read failed) must never render as zero — a
+  // failed read displayed as 0.00 sent users hunting a missing balance that
+  // was there all along. Callers show `formatted ?? '…'` while unknown.
+  const balance = rawBalance != null ? Number(rawBalance) / 1e6 : null;
 
   return {
     raw: rawBalance,
-    formatted: balance > 0 ? balance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : '0.00',
+    formatted: balance == null ? null : balance > 0 ? balance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : '0.00',
     symbol: 'USDC',
     decimals: 6,
     refresh: refetch,
