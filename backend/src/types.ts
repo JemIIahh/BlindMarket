@@ -1,5 +1,5 @@
 import type { Request } from 'express';
-import type { SettlementChainKey } from './services/settlementChains.js';
+import type { SettlementChainKey, SettlementUnit } from './services/settlementChains.js';
 
 /** Authenticated user attached by auth middleware */
 export interface AuthUser {
@@ -177,6 +177,10 @@ export interface A2ATaskMeta {
   targetExecutorType: ExecutorType;
   verificationMode: VerificationMode;
   verificationCriteria?: VerificationCriteria;
+  // Escrowed reward from the receipt-verified TaskCreated event, recorded at
+  // /tasks/index so /accept can apply an executor's minReward (security audit
+  // run 1, C05). Absent on rows indexed before it existed.
+  reward?: { amount: string; unit: SettlementUnit };
   requiredCapabilities: AgentCapability[];
   // Address of the EOA that posted the task (authenticated at POST /api/v1/tasks
   // time). Indexed in a2aStore so a poster can query their own pending-review

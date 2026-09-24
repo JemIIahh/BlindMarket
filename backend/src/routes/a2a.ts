@@ -24,7 +24,7 @@ import { postingChain, receiptSearchOrder, settlementChainConfig } from '../serv
 import { ethers } from 'ethers';
 import type { AuthRequest, ApiResponse, AgentCapability, A2ATaskMeta } from '../types.js';
 import { AGENT_CAPABILITIES } from '../types.js';
-import { rankAgents, pickExplorationAgent } from '../services/agentScorer.js';
+import { rankAgents, pickExplorationAgent, meetsRewardFloor } from '../services/agentScorer.js';
 import { supportsChain, supportsTaskChain } from '../services/executorChains.js';
 import { emitTaskOffer, emitTaskAvailable, hasAgentSocket } from '../services/socket.js';
 import { isAlive } from '../services/redis.js';
@@ -582,6 +582,22 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
       throw new AppError(409, 'CHAIN_UNSUPPORTED', chainUnsupportedMessage(meta.chain));
     }
 
+    // The executor's minimum reward. It only ordered cascade offers, so a
+    // pinned, broadcast or feed task below it was still accepted and run on
+    // the owner's model and gas (security audit run 1, C05). A rental is
+    // exempt: its owner priced that service and /tasks/index checked it.
+    if (hasRewardFloor(agent) && meta.serviceId === undefined) {
+      const reward = await rewardForFloor(taskId, meta);
+      if (!reward) {
+        await a2aStore.logAcceptAttempt(taskId, address, 'error');
+        throw new AppError(503, 'REWARD_UNAVAILABLE', "Couldn't read this task's reward to check it against your minimum — retry shortly");
+      }
+      if (!meetsRewardFloor(agent, reward)) {
+        await a2aStore.logAcceptAttempt(taskId, address, 'rejected_precheck');
+        throw new AppError(403, 'BELOW_MIN_REWARD', "This task's reward is below your registered minimum reward");
+      }
+    }
+
     const accept = await a2aStore.tryAccept(taskId, address, new Date().toISOString());
     if (!accept.ok) {
       console.warn(`[a2a] accept: CAS lost for ${taskId}, currentStatus=${accept.currentStatus}`);
@@ -1008,6 +1024,30 @@ a2aRouter.get('/key-custody/pubkey', async (_req, res, next) => {
 // Exclusive offers always name the required caps (empty list included) and,
 // like broadcasts, the chain — so an offered agent that cannot pay gas there
 // declines up front instead of accepting and locking the task.
+function hasRewardFloor(agent: { minReward?: string }): boolean {
+  try {
+    return BigInt(agent.minReward || '0') > 0n;
+  } catch {
+    return false;
+  }
+}
+
+/** A task's escrowed reward for a floor check: from its meta, or, for rows
+ *  indexed before meta carried it, from the chain. null when unreadable. An
+ *  escrow in a token the chain doesn't settle in never clears a floor. */
+async function rewardForFloor(taskHash: string, meta: A2ATaskMeta): Promise<TaskReward | null> {
+  if (meta.reward) return { amount: BigInt(meta.reward.amount), unit: meta.reward.unit };
+  try {
+    const resolved = await resolveTaskByHash(taskHash);
+    if (!resolved) return null;
+    const onChain = await escrowService.getTaskOn(resolved.chain, Number(resolved.taskId));
+    const unit = payoutCurrency(resolved.chain, String(onChain.token));
+    return unit ? { amount: BigInt(onChain.amount), unit } : { amount: 0n, unit: pricingUnit() };
+  } catch {
+    return null;
+  }
+}
+
 function offerMeta(requiredCaps: string[], chain?: TaskChain): Record<string, unknown> {
   return { requiredCapabilities: requiredCaps, ...(chain ? { chain } : {}) };
 }
@@ -1699,6 +1739,15 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
           `The pinned agent doesn't settle on ${taskChain} — cancel the task to get the escrow back`,
         );
       }
+      // A bare pin must meet the pinned agent's minimum reward; a rental
+      // ("Use now", serviceId) was checked against the service price above.
+      if (target && data.serviceId === undefined && !meetsRewardFloor(target, { amount: BigInt(onChainAmount), unit: taskUnit })) {
+        throw new AppError(
+          409,
+          'BELOW_MIN_REWARD',
+          "The escrow is below the pinned agent's minimum reward — cancel the task to get the escrow back",
+        );
+      }
     }
     if (data.verificationMode === 'agent' && data.verifierAddress) {
       const verifier = await agentStore.getAgent(data.verifierAddress);
@@ -1731,6 +1780,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       // TaskCreated event — lets browse hide expired tasks, /accept refuse
       // them pre-CAS, and the expiry sweep close them with no chain read.
       deadline: onChainDeadline,
+      reward: { amount: onChainAmount, unit: taskUnit },
       // rent-your-agent Phase 2: pin + service link (validated above).
       targetExecutor,
       serviceId: data.serviceId,
