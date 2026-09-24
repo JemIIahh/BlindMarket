@@ -21,6 +21,8 @@ const icons: Record<string, string> = {
   alert: 'M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z',
   // bell: notification bell — header bell + activity feed
   bell: 'M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6 6 0 10-12 0v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9',
+  // sidebar: a panel with its left pane split off — the show/hide sidebar toggle
+  sidebar: 'M3 5h18v14H3zM9 5v14',
 };
 
 interface IconProps {
