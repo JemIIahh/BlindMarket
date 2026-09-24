@@ -2,6 +2,7 @@ import { Suspense, useEffect, useState } from 'react';
 import { Outlet, useLocation } from 'react-router-dom';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { ChainBanner } from '../ChainBanner';
+import { isSidebarShortcut } from '../../lib/sidebarShortcut';
 import { Sidebar } from './Sidebar';
 import { TopBar } from './TopBar';
 
@@ -36,6 +37,18 @@ export function DashboardLayout() {
   useEffect(() => {
     saveBool(COLLAPSED_KEY, collapsed);
   }, [collapsed]);
+
+  // ⌘B / Ctrl+B: the rail on desktop, the drawer below md (tablet keyboards).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!isSidebarShortcut(e)) return;
+      e.preventDefault();
+      if (window.matchMedia('(min-width: 768px)').matches) setCollapsed((v) => !v);
+      else setNavOpen((v) => !v);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   return (
     <div className="min-h-screen bg-bg">

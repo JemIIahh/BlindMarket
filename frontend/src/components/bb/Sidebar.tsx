@@ -1,3 +1,5 @@
+import { useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Link, useLocation } from 'react-router-dom';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useQuery } from '@tanstack/react-query';
@@ -7,6 +9,7 @@ import { get, authedGet } from '../../lib/api';
 import { useSocket } from '../../hooks/useSocket';
 import { useAuth } from '../../context/AuthContext';
 import { isMainnet } from '../../config/constants';
+import { SIDEBAR_SHORTCUT_ARIA, SIDEBAR_SHORTCUT_LABEL } from '../../lib/sidebarShortcut';
 
 // Sidebar IA — agent-to-agent lifecycle, top to bottom. Modernized: sans
 // Title-Case labels, an icon per item, and the marketplace promoted to the
@@ -64,6 +67,54 @@ interface SidebarProps {
    * the full 240px sidebar regardless of this flag. */
   collapsed: boolean;
   onToggleCollapse: () => void;
+}
+
+// Show/hide toggle at the top of the sidebar, where Claude, VS Code and Slack
+// put it. It sits at the same spot in both states (the 64px rail centres the
+// same 32px box the full sidebar's 16px padding places), so it never moves
+// under the pointer. The tooltip is portalled because the sidebar clips
+// horizontal overflow, which would cut it off in the rail.
+function SidebarToggle({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
+  const ref = useRef<HTMLButtonElement>(null);
+  const [tip, setTip] = useState<{ top: number; left: number } | null>(null);
+  const label = collapsed ? 'Show sidebar' : 'Hide sidebar';
+  const show = () => {
+    const r = ref.current?.getBoundingClientRect();
+    if (r) setTip({ top: r.bottom + 6, left: r.left });
+  };
+  const hide = () => setTip(null);
+
+  return (
+    <>
+      <button
+        ref={ref}
+        type="button"
+        onClick={onToggle}
+        onMouseEnter={show}
+        onMouseLeave={hide}
+        onFocus={show}
+        onBlur={hide}
+        aria-label={label}
+        aria-expanded={!collapsed}
+        aria-keyshortcuts={SIDEBAR_SHORTCUT_ARIA}
+        className="hidden md:flex shrink-0 w-8 h-8 items-center justify-center text-ink-3 hover:text-ink hover:bg-surface-2 transition-colors"
+      >
+        <Icon name="sidebar" size={18} />
+      </button>
+      {tip &&
+        createPortal(
+          <div
+            role="tooltip"
+            style={{ top: tip.top, left: tip.left }}
+            className="fixed z-50 pointer-events-none flex items-center gap-2 whitespace-nowrap bg-surface-2 border border-line px-2 py-1 text-xs text-ink shadow-lg"
+          >
+            {label}
+            <kbd className="font-mono text-[11px] text-ink-3">{SIDEBAR_SHORTCUT_LABEL}</kbd>
+          </div>,
+          document.body,
+        )}
+    </>
+  );
 }
 
 export function Sidebar({ open, onClose, collapsed, onToggleCollapse }: SidebarProps) {
@@ -142,15 +193,16 @@ export function Sidebar({ open, onClose, collapsed, onToggleCollapse }: SidebarP
         className={`w-[240px] ${collapsed ? 'md:w-16' : 'md:w-[240px]'} h-screen supports-[height:100dvh]:h-dvh fixed left-0 top-0 bg-surface border-r border-line flex flex-col z-40 overflow-x-hidden overflow-y-auto transition-[transform,width] duration-200 ease-out motion-reduce:transition-none md:translate-x-0 ${open ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}`}
       >
         {/* Brand */}
-        <div className={`sticky top-0 z-10 bg-surface flex shrink-0 items-center justify-between px-5 h-16 border-b border-line ${collapsed ? 'md:justify-center md:px-0' : ''}`}>
-          <Link to="/" className="flex items-center gap-2.5" onClick={onClose}>
+        <div className="sticky top-0 z-10 bg-surface flex shrink-0 items-center gap-2 px-5 md:px-4 h-16 border-b border-line">
+          <SidebarToggle collapsed={collapsed} onToggle={onToggleCollapse} />
+          <Link to="/" className={`flex items-center gap-2.5 ${collapsed ? 'md:hidden' : ''}`} onClick={onClose}>
             <LogoMark size={24} blade="var(--bb-ink)" slit="var(--bb-surface)" />
-            <span className={`text-sm font-semibold text-ink tracking-tight ${collapsed ? 'md:hidden' : ''}`}>BlindMarket</span>
+            <span className="text-sm font-semibold text-ink tracking-tight">BlindMarket</span>
           </Link>
           <button
             onClick={onClose}
             aria-label="close menu"
-            className="md:hidden -mr-2 p-2 text-ink-3 hover:text-ink"
+            className="md:hidden ml-auto -mr-2 p-2 text-ink-3 hover:text-ink"
           >
             <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
               <path d="M6 6l12 12M18 6L6 18" />
@@ -220,29 +272,6 @@ export function Sidebar({ open, onClose, collapsed, onToggleCollapse }: SidebarP
             </div>
           ))}
         </nav>
-
-        {/* Desktop collapse toggle — one stable slot in both states. */}
-        <button
-          onClick={onToggleCollapse}
-          aria-expanded={!collapsed}
-          aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-          title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-          className={`hidden md:flex items-center w-full border-t border-line py-2 text-ink-3 hover:text-ink hover:bg-surface-2 transition-colors ${collapsed ? 'justify-center' : 'gap-2 px-5'}`}
-        >
-          <svg
-            viewBox="0 0 24 24"
-            className={`w-3 h-3 transition-transform ${collapsed ? '-rotate-90' : 'rotate-90'}`}
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-          >
-            <path d="M6 9l6 6 6-6" />
-          </svg>
-          <span className={`text-[10px] font-semibold uppercase tracking-wider ${collapsed ? 'md:hidden' : ''}`}>
-            Collapse
-          </span>
-        </button>
 
         {/* Live platform stats — compact widget. Shares the ['stats'] query
             above, so it updates live off the same stats:update socket event.
