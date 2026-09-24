@@ -3,4 +3,3 @@
     { "source": "/((?!_/|api/|health|assets/|.*\\.).*)", "destination": "/index.html" }
   ]
 }
-
