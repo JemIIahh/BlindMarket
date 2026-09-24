@@ -202,6 +202,32 @@ function captureServerError(err: Error, req: Request): void {
   });
 }
 
+/**
+ * An error message with infrastructure detail removed: ethers' shortMessage
+ * (or the first line), without the request/response/info tail, with RPC URLs
+ * masked. For upstream failures whose text is useful to the caller.
+ */
+export function safeErrorMessage(e: unknown): string {
+  const err = (e ?? {}) as { message?: string; code?: string; shortMessage?: string };
+  const base = String(err.shortMessage || err.message || e).split('\n')[0];
+  const stripped = base
+    .replace(/\s*\((?:request|response|info|transaction)=[\s\S]*$/, '')
+    .replace(/https?:\/\/\S+/g, '<rpc>')
+    .replace(/wss?:\/\/\S+/g, '<rpc>');
+  return err.code && !stripped.includes(err.code) ? `${stripped} [${err.code}]` : stripped;
+}
+
+/**
+ * The message a catch-all 5xx may show: an ethers error's short message, or in
+ * production a generic string. Raw error text reached callers from several
+ * handlers, including RPC request URLs and database hosts (security audit run
+ * 1, C23). Log the original server-side before calling this.
+ */
+export function clientErrorMessage(e: unknown, fallback = 'Internal server error'): string {
+  if (typeof (e as { shortMessage?: unknown } | null)?.shortMessage === 'string') return safeErrorMessage(e);
+  return process.env.NODE_ENV === 'production' ? fallback : safeErrorMessage(e);
+}
+
 type Outcome = { status: number; body: ApiErrorResponse; capture: boolean };
 
 /** Decide the response and whether Sentry hears about it. No side effects. */

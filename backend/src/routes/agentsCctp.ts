@@ -17,6 +17,7 @@ import type { AuthRequest } from '../types.js';
 import { requireAuth } from '../middleware/auth.js';
 import { authorizeOwner } from './agents.js';
 import { config } from '../config.js';
+import { clientErrorMessage, safeErrorMessage } from '../middleware/errorHandler.js';
 import {
   isCctpConfigured,
   isSupportedCctpChain,
@@ -180,7 +181,7 @@ agentsCctpRouter.post('/:id/cctp/withdraw', requireAuth, async (req: AuthRequest
     try {
       maxFeeRaw = await estimateMaxFeeRaw(config.cctp.irisApiBase, source.domain, dest.domain, amount, minFinalityThreshold);
     } catch (e) {
-      res.status(502).json({ success: false, error: { code: 'CCTP_FEE_QUOTE_FAILED', message: `Could not get a Fast Transfer fee quote from Circle: ${(e as Error).message}` } });
+      res.status(502).json({ success: false, error: { code: 'CCTP_FEE_QUOTE_FAILED', message: `Could not get a Fast Transfer fee quote from Circle: ${safeErrorMessage(e)}` } });
       return;
     }
     if (maxFeeRaw >= amount) {
@@ -221,8 +222,8 @@ agentsCctpRouter.post('/:id/cctp/withdraw', requireAuth, async (req: AuthRequest
       burnTxHash = result.txHash;
       approveTxHash = result.approveTxHash;
     } catch (e) {
-      await updateTransfer(row.id, { stage: 'failed', error_message: (e as Error).message });
-      res.status(502).json({ success: false, error: { code: 'CCTP_BURN_FAILED', message: `Failed to submit the CCTP burn: ${(e as Error).message}` } });
+      await updateTransfer(row.id, { stage: 'failed', error_message: safeErrorMessage(e) });
+      res.status(502).json({ success: false, error: { code: 'CCTP_BURN_FAILED', message: `Failed to submit the CCTP burn: ${safeErrorMessage(e)}` } });
       return;
     }
 
@@ -234,7 +235,7 @@ agentsCctpRouter.post('/:id/cctp/withdraw', requireAuth, async (req: AuthRequest
     res.status(200).json({ success: true, data: serializeTransfer(updated) });
   } catch (e) {
     console.error('[cctp] withdraw error:', (e as Error).message);
-    res.status(500).json({ success: false, error: { code: 'INTERNAL_ERROR', message: (e as Error).message } });
+    res.status(500).json({ success: false, error: { code: 'INTERNAL_ERROR', message: clientErrorMessage(e) } });
   }
 });
 

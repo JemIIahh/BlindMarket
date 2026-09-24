@@ -33,6 +33,7 @@ import { discoverModels, ProviderModelsError } from '../services/providerModels.
 import { eciesEncrypt } from '../services/crypto.js';
 import { callerWallets } from '../services/callerWallets.js';
 import { nativeWeiToTokenUnits, normalizeSettlementAmount, pricingUnit } from '../services/settlementUnits.js';
+import { clientErrorMessage, safeErrorMessage } from '../middleware/errorHandler.js';
 
 /**
  * Owner-only guard for any agent endpoint that touches funds, keys, or
@@ -875,9 +876,10 @@ agentsRouter.post('/:id/withdraw', requireAuth, async (req: AuthRequest, res) =>
 
     res.json({ success: true, data: { swept, skipped } });
   } catch (err) {
+    console.error(`[agents] withdraw failed for ${req.params.id}:`, err);
     res.status(500).json({
       success: false,
-      error: { code: 'WITHDRAW_FAILED', message: (err as Error).message },
+      error: { code: 'WITHDRAW_FAILED', message: clientErrorMessage(err, 'Withdraw failed') },
     });
   }
 });
@@ -1254,7 +1256,7 @@ agentsRouter.post('/:id/start', requireAuth, async (req: AuthRequest, res) => {
   } catch (e: unknown) {
     res.status(400).json({
       success: false,
-      error: { code: 'AGENT_ACTION_FAILED', message: (e as Error).message },
+      error: { code: 'AGENT_ACTION_FAILED', message: safeErrorMessage(e) },
     });
   }
 });
@@ -1269,7 +1271,7 @@ agentsRouter.post('/:id/pause', requireAuth, async (req: AuthRequest, res) => {
   } catch (e: unknown) {
     res.status(400).json({
       success: false,
-      error: { code: 'AGENT_ACTION_FAILED', message: (e as Error).message },
+      error: { code: 'AGENT_ACTION_FAILED', message: safeErrorMessage(e) },
     });
   }
 });
@@ -1284,7 +1286,7 @@ agentsRouter.post('/:id/stop', requireAuth, async (req: AuthRequest, res) => {
   } catch (e: unknown) {
     res.status(400).json({
       success: false,
-      error: { code: 'AGENT_ACTION_FAILED', message: (e as Error).message },
+      error: { code: 'AGENT_ACTION_FAILED', message: safeErrorMessage(e) },
     });
   }
 });
@@ -1301,7 +1303,7 @@ agentsRouter.post('/:id/restart', requireAuth, async (req: AuthRequest, res) => 
   } catch (e: unknown) {
     res.status(400).json({
       success: false,
-      error: { code: 'AGENT_ACTION_FAILED', message: (e as Error).message },
+      error: { code: 'AGENT_ACTION_FAILED', message: safeErrorMessage(e) },
     });
   }
 });
@@ -1320,7 +1322,7 @@ agentsRouter.get('/:id/stats', async (req, res) => {
   } catch (e: unknown) {
     res.status(500).json({
       success: false,
-      error: { code: 'STATS_FAILED', message: (e as Error).message },
+      error: { code: 'STATS_FAILED', message: safeErrorMessage(e) },
     });
   }
 });
@@ -1336,7 +1338,7 @@ agentsRouter.post('/:id/resume', requireAuth, async (req: AuthRequest, res) => {
   } catch (e: unknown) {
     res.status(400).json({
       success: false,
-      error: { code: 'AGENT_ACTION_FAILED', message: (e as Error).message },
+      error: { code: 'AGENT_ACTION_FAILED', message: safeErrorMessage(e) },
     });
   }
 });

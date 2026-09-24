@@ -290,7 +290,15 @@ export function requireAuth(req: AuthRequest, _res: Response, next: NextFunction
   }).catch((err) => {
     // The 401 thrown above lands here too: pass an AppError through, or an
     // unknown X-API-Key answered 500 AUTH_ERROR instead of 401.
-    next(err instanceof AppError ? err : new AppError(500, 'AUTH_ERROR', err.message));
+    // Anything else is an infrastructure failure (database, Redis). Its text
+    // named the database host to anonymous callers (security audit run 1,
+    // C23), so it is logged here and the client gets a fixed message.
+    if (err instanceof AppError) {
+      next(err);
+      return;
+    }
+    console.error('[Auth] authentication backend error:', err);
+    next(new AppError(500, 'AUTH_ERROR', 'Authentication is temporarily unavailable'));
   });
 }
 
