@@ -444,6 +444,7 @@ export default function DeployAgentForm() {
     const savedFee = feeTerms.required && feeTerms.method === 'transfer' ? readPendingFee(address) : null;
 
     if (feeTerms.required && !savedFee) {
+      setStatus('idle'); // not a stale 'error' with the message cleared, while the wallet answers
       let unlinked: string | null;
       try {
         unlinked = await unlinkedPayer(await new BrowserProvider(walletClient.transport).getSigner());

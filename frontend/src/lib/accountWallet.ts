@@ -23,7 +23,7 @@ export function unlinkedSignerError(
   if (wallets.length === 0 || wallets.includes(from)) return null;
   return (
     `Your wallet is set to ${short(from)}, which isn't linked to your BlindMarket account, so ${consequence}. ` +
-    `Nothing was spent. Switch your wallet to ${wallets.map(short).join(' or ')}, ` +
-    `or link ${short(from)} under Settings → Link wallet, then try again.`
+    `Nothing was spent. Link ${short(from)} under Settings → Link wallet, or pay from a wallet ` +
+    `that is on your account (${wallets.map(short).join(' or ')}), then try again.`
   );
 }

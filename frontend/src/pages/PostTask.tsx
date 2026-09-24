@@ -166,6 +166,7 @@ export default function PostTask() {
     submittingRef.current = true;
 
     try {
+      setStatus('encrypting');
       setError('');
       // The browser wallet signs, and it can be set to an account that isn't
       // this user's (lib/accountWallet.ts): the backend would then refuse to
@@ -174,8 +175,6 @@ export default function PostTask() {
       const signerAddress = await (await new BrowserProvider(walletClient.transport).getSigner()).getAddress();
       const unlinked = unlinkedSignerError(signerAddress, accountWallets, "a task paid from it couldn't be listed");
       if (unlinked) throw new Error(unlinked);
-
-      setStatus('encrypting');
 
       // Capabilities are OPTIONAL at post time. Matching ("does this agent have
       // all required caps?") is enforced server-side at accept/bid time, not

@@ -31,6 +31,10 @@ let inFlightTokenPromise: Promise<string | null> | null = null;
 // Privy's typical retry-after window.
 let backoffUntilMs = 0;
 const PRIVY_BACKOFF_MS = 30_000;
+// Bumped whenever the cached token stops being right (auth flip, linked
+// wallets changed). A fetch started before the bump doesn't cache its result,
+// so an in-flight request can't put the old token back for an hour.
+let tokenGeneration = 0;
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const { ready, authenticated, login, logout, user } = usePrivy();
@@ -49,6 +53,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     // Reset cache on every auth state flip — handles logout/login of a
     // different wallet without stale-token bleed.
+    tokenGeneration++;
     cachedToken = null;
     cachedExp = 0;
     inFlightTokenPromise = null;
@@ -74,10 +79,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           return inFlightTokenPromise;
         }
 
+        const gen = tokenGeneration;
         inFlightTokenPromise = (async () => {
           try {
             const tok = (await getIdentityToken()) || (await getAccessToken());
-            if (tok) {
+            if (tok && gen === tokenGeneration) {
               try {
                 const claims = JSON.parse(atob(tok.split('.')[1]));
                 cachedExp = typeof claims.exp === 'number' ? claims.exp : 0;
@@ -100,7 +106,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             }
             return null;
           } finally {
-            inFlightTokenPromise = null;
+            if (gen === tokenGeneration) inFlightTokenPromise = null;
           }
         })();
 
@@ -114,10 +120,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [authenticated]);
 
   // The backend knows this user's wallets from the identity token's
-  // linked_accounts. A wallet linked or unlinked mid-session would stay
-  // invisible to it until the cached token expired (up to an hour), so a task
-  // paid from a just-linked wallet could still not be listed. Drop the cache
-  // when the linked wallets change; the next request asks Privy for a token.
+  // linked_accounts. Requests that take their token through this getter
+  // (deploy's fee-payer check, cancel/timeout, relay) would keep sending the
+  // pre-link token until it expired, up to an hour, and a just-linked wallet
+  // wouldn't count. When the linked wallets change, the next request fetches
+  // a new token; the old one stays only as the 429-backoff fallback.
   const linkedWallets = (user?.linkedAccounts ?? [])
     .flatMap((a) => (a.type === 'wallet' ? [a.address.toLowerCase()] : []))
     .sort()
@@ -126,8 +133,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (seenLinked.current === linkedWallets) return;
     seenLinked.current = linkedWallets;
-    cachedToken = null;
+    tokenGeneration++;
     cachedExp = 0;
+    inFlightTokenPromise = null;
   }, [linkedWallets]);
 
   // Fire analytics event the first time the user authenticates this session.
