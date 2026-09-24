@@ -65,7 +65,7 @@ export default defineConfig({
     "arc-testnet": {
       type: "http",
       chainType: "l1",
-      url: process.env.ARC_TESTNET_RPC_URL || "https://rpc.testnet.arc.io",
+      url: process.env.ARC_TESTNET_RPC_URL || "https://arc-testnet.drpc.org",
       chainId: 5042002,
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
     },

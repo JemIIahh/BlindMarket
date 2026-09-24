@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Button, Modal } from './bb';
 import { copyToClipboard } from '../lib/utils';
 import { formatPaymentAmount } from '../lib/paymentUnits';
-import { API_BASE_URL, WORKER_SHARE_PCT, PLATFORM_FEE_PCT } from '../config/constants';
+import { API_BASE_URL, WORKER_SHARE_PCT, PLATFORM_FEE_PCT, ARC_RPC_URL } from '../config/constants';
 import { getMarketplaceTokenAddress, getPostingChain } from '../config/settlement';
 import type { AgentService } from '../services/marketplace';
 
@@ -48,7 +48,7 @@ function settlementChain(): { name: string; id: number; rpc: string; gasCoin: st
     return {
       name: posting.label,
       id: posting.chainId,
-      rpc: posting.chainId === 5042 ? 'https://rpc.mainnet.arc.io' : 'https://rpc.testnet.arc.io',
+      rpc: posting.chainId === 5042 ? 'https://rpc.mainnet.arc.io' : ARC_RPC_URL,
       // Arc's gas coin IS USDC.
       gasCoin: 'USDC',
     };

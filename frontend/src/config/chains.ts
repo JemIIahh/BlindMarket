@@ -1,6 +1,6 @@
 import { defineChain } from 'viem';
 import { mainnet, sepolia, arbitrum, arbitrumSepolia, optimism, optimismSepolia, polygon, polygonAmoy, arcTestnet } from 'viem/chains';
-import { OG_CHAIN_ID, OG_RPC_URL, BASE_CHAIN_ID, BASE_RPC_URL } from './constants';
+import { OG_CHAIN_ID, OG_RPC_URL, BASE_CHAIN_ID, BASE_RPC_URL, ARC_RPC_URL } from './constants';
 
 // 0G chain (agent infra)
 const isMainnetChain = OG_CHAIN_ID === 16661;
@@ -50,11 +50,11 @@ export const polygonChain = isBaseMainnet ? polygon : polygonAmoy;
 
 // Arc (Circle's L1, USDC is the gas token) — testnet only; the app doesn't
 // offer Arc mainnet as a CCTP chain (see backend config.ts). viem's canonical
-// def still points at the old rpc.testnet.arc.network domain; Arc's docs now
-// list rpc.testnet.arc.io.
+// def still points at the old rpc.testnet.arc.network domain; the RPC URL
+// follows constants.ARC_RPC_URL (dRPC by default).
 export const arcChain = defineChain({
   ...arcTestnet,
-  rpcUrls: { default: { http: ['https://rpc.testnet.arc.io'] } },
+  rpcUrls: { default: { http: [ARC_RPC_URL] } },
 });
 
 // Every CCTP chain for this tier, for Privy's `supportedChains`.

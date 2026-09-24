@@ -106,9 +106,12 @@ export const BASE_USDC_ADDRESS =
 
 export { ARC_CHAIN_ID };
 
+// dRPC is the default (privacy extensions block rpc.testnet.arc.io for some
+// users — net::ERR_BLOCKED_BY_CLIENT on every balance read). Override with
+// VITE_ARC_RPC_URL; WSS (wss://arc-testnet.drpc.org) also tested working.
 export const ARC_RPC_URL =
   import.meta.env.VITE_ARC_RPC_URL ||
-  (isArcMainnet ? 'https://rpc.mainnet.arc.io' : 'https://rpc.testnet.arc.io');
+  (isArcMainnet ? 'https://rpc.mainnet.arc.io' : 'https://arc-testnet.drpc.org');
 
 // The escrow new tasks post on, generated from contracts/deployments like
 // Base's, so the build-time settlement table (config/settlement.ts) names it

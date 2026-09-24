@@ -226,7 +226,7 @@ export const config = {
 
   // Arc Chain (settlement — USDC payouts, gas in USDC)
   // No generated defaults yet; Arc settlement is deployed per environment.
-  arcRpcUrl: optional('ARC_RPC_URL', 'https://rpc.testnet.arc.io'),
+  arcRpcUrl: optional('ARC_RPC_URL', 'https://arc-testnet.drpc.org'),
   arcChainId: parseInt(optional('ARC_CHAIN_ID', '5042002'), 10),
   arcEscrowAddress: unsetIfZero(optional('ARC_ESCROW_ADDRESS', '')),
   arcUsdcAddress: optional('ARC_USDC_ADDRESS', '0x3600000000000000000000000000000000000000'),
@@ -470,7 +470,7 @@ export const config = {
     // is already instant); Forwarding Service is supported, so transfers still
     // auto-complete. USDC is Arc's native gas token (18-dec native view, 6-dec
     // ERC-20 view of ONE balance).
-    arcRpcUrl: optional('CCTP_ARC_RPC_URL', 'https://rpc.testnet.arc.io'),
+    arcRpcUrl: optional('CCTP_ARC_RPC_URL', 'https://arc-testnet.drpc.org'),
     arcChainId: parseInt(optional('CCTP_ARC_CHAIN_ID', '5042002'), 10),
     arcUsdcAddress: optional('CCTP_ARC_USDC_ADDRESS', '0x3600000000000000000000000000000000000000'),
     // USDC (6-dec raw) a Phase B deposit must leave behind on Arc to pay the

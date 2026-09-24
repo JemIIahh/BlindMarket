@@ -29,7 +29,7 @@ const bb = new BlindMarket({
   // locally, on the chain the backend names, and never leaves this process.
   executor: {
     privateKey: process.env.OWNER_PRIVATE_KEY!,
-    rpcUrls: { arc: 'https://rpc.testnet.arc.io' },
+    rpcUrls: { arc: 'https://arc-testnet.drpc.org' },
   },
 });`,
   },
