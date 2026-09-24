@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import { verificationCriteriaSchema } from '../services/verificationCriteriaSchema.js';
 import { requireAuth } from '../middleware/auth.js';
 import { createUserRateLimiter } from '../middleware/rateLimit.js';
 import { AppError } from '../middleware/errorHandler.js';
@@ -107,36 +108,8 @@ const indexTaskSchema = z.object({
   txHash: z.string().min(1).max(100), // 32-byte hex tx hash
   taskHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/, 'taskHash must be a bytes32 hex string'),
   verificationMode: z.enum(['manual', 'auto', 'oracle', 'agent']).optional(),
-  verificationCriteria: z
-    .object({
-      required_fields: z.array(z.string()).optional(),
-      min_length: z.number().int().positive().optional(),
-      contains_keywords: z.array(z.string()).optional(),
-      max_length: z.number().int().positive().optional(),
-      expected_answer: z.string().optional(),
-      forbidden_phrases: z.array(z.string()).optional(),
-      regex_pattern: z.string().max(200).optional(),
-      expected_schema: z
-        .object({
-          type: z.string().optional(),
-          required: z.array(z.string()).optional(),
-          properties: z.record(z.object({ type: z.string().optional() })).optional(),
-        })
-        .optional(),
-      rubric: z
-        .array(
-          z.object({
-            criterion: z.string(),
-            keywords: z.array(z.string()).optional(),
-            min_mentions: z.number().int().positive().optional(),
-            weight: z.number().positive().optional(),
-          }),
-        )
-        .optional(),
-      pass_threshold: z.number().min(0).max(100).optional(),
-      acceptance: z.string().max(4000).optional(),
-    })
-    .optional(),
+  // Bounded, and shared with POST /tasks (services/verificationCriteriaSchema.ts).
+  verificationCriteria: verificationCriteriaSchema.optional(),
   verifierAddress: z
     .string()
     .regex(/^0x[0-9a-fA-F]{40,66}$/, 'verifierAddress must be a 0x-prefixed hex string')
@@ -3141,7 +3114,14 @@ a2aRouter.get('/executions', requireAuth, async (req: AuthRequest, res, next) =>
     // keyCustodyBlob / rootHash graph for every executor — the exact leak the
     // browse/list/detail projection closed.
     const isSelf = !queryAddr || queryAddr.toLowerCase() === req.user!.address.toLowerCase();
-    const executions = isSelf ? tasks : tasks.map(a2aStore.projectPublicEntry);
+    // The self view still hides the auto-verify answer key: the executor is
+    // the one being checked against it.
+    const executions = isSelf
+      ? tasks.map((t) => ({
+          ...t,
+          meta: { ...t.meta, verificationCriteria: a2aStore.projectCriteria(t.meta.verificationCriteria) },
+        }))
+      : tasks.map(a2aStore.projectPublicEntry);
 
     const body: ApiResponse = {
       success: true,
