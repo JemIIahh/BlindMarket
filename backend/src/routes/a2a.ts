@@ -36,6 +36,7 @@ import * as accountingService from '../services/accountingService.js';
 import { normalizeSettlementAmount, payoutCurrency, pricingUnit, sameUnit, type TaskReward } from '../services/settlementUnits.js';
 import { getTokenDecimals } from '../services/chain.js';
 import { isSafeRegexSource } from '../services/rubricEngine.js';
+import { callerWallets } from '../services/callerWallets.js';
 
 export const a2aRouter = Router();
 
@@ -2973,12 +2974,14 @@ a2aRouter.get('/verifications', requireAuth, async (req: AuthRequest, res, next)
  */
 a2aRouter.get('/tasks/posted', requireAuth, async (req: AuthRequest, res, next) => {
   try {
-    const address = req.user!.address;
     const limit = Math.min(50, parseInt(req.query.limit as string) || 15);
     const offset = Math.max(0, parseInt(req.query.offset as string) || 0);
     const q = ((req.query.q as string) || '').trim().toLowerCase();
     const statusFilter = (req.query.status as string) || 'all';
-    const tasks = await a2aStore.getPosterTasks(address);
+    // Every wallet on the caller's account: a task posted from a linked
+    // wallet other than the session's address is still theirs, and listing
+    // only the session address hid it (and its refund) from My Tasks.
+    const tasks = await a2aStore.getPosterTasksForWallets(callerWallets(req.user));
 
     // The custody key the backend can ACTUALLY unwrap right now. A task sealed
     // to a rotated/disabled custody key is NOT recoverable server-side —
@@ -3038,6 +3041,8 @@ a2aRouter.get('/tasks/posted', requireAuth, async (req: AuthRequest, res, next) 
               symbol: unit?.symbol ?? null,
               decimals,
               worker: onChainTask.worker,
+              // The wallet that posted, which alone can cancel or reclaim.
+              agent: onChainTask.agent,
               createdAt: onChainTask.createdAt.toString(),
               deadline: onChainTask.deadline.toString(),
             },

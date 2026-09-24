@@ -106,7 +106,7 @@ export function relayChainNameFor(chain?: string | null): string {
 }
 
 /** Whether a tx on `chain` is signed and sent from the wallet (no relay serves it). */
-function isDirectSigned(chain: string | null | undefined): chain is SettlementChainKey {
+export function isDirectSigned(chain: string | null | undefined): chain is SettlementChainKey {
   return !!chain && isSettlementChainKey(chain) && !relayChainFor(chain);
 }
 

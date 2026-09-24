@@ -31,6 +31,7 @@ import { claimDeployCredit, restoreDeployCredit } from '../services/agentFactory
 import { arcDeployFeeTerms, verifyArcDeployFee, claimArcDeployFee, markArcDeployFeeUsed, releaseArcDeployFee } from '../services/deployFee.js';
 import { discoverModels, ProviderModelsError } from '../services/providerModels.js';
 import { eciesEncrypt } from '../services/crypto.js';
+import { callerWallets } from '../services/callerWallets.js';
 import { nativeWeiToTokenUnits, normalizeSettlementAmount, pricingUnit } from '../services/settlementUnits.js';
 
 /**
@@ -307,20 +308,6 @@ agentsRouter.post('/provider-models', requireAuth, providerModelsLimiter, async 
     next(err);
   }
 });
-
-/**
- * The wallets a deploy fee may come from: the caller's own. `ownerAddress` is
- * excluded as in routes/tx.ts — it names the human behind an agent token, and
- * an agent does not pay from its owner's wallet.
- */
-function callerWallets(user: AuthRequest['user']): string[] {
-  if (!user) return [];
-  return [...new Set(
-    [user.address, ...(user.addresses ?? [])]
-      .filter((a): a is string => typeof a === 'string' && /^0x[0-9a-fA-F]{40}$/.test(a))
-      .map((a) => a.toLowerCase()),
-  )];
-}
 
 // A deploy with an unconfirmed feeTxHash asks Arc for its receipt for up to
 // ~40s. 20/min still covers the Base path's retry loop (one POST per 5s).

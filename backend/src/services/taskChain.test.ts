@@ -38,7 +38,7 @@ vi.mock('./baseEscrowEvents.js', () => ({ getBaseTaskIdByHash, forceBaseTick }))
 vi.mock('./arcEscrowEvents.js', () => ({ getArcTaskIdByHash, forceArcTick }));
 vi.mock('./escrow.js', () => ({ getTaskOn }));
 
-const { resolveTaskByHash, resolveCachedTaskByHash, resolveTaskChainById, isIndexedTask, isListedTask } = await import('./taskChain.js');
+const { resolveTaskByHash, resolveCachedTaskByHash, resolveTaskChainById, resolvePosterTask, isIndexedTask, isListedTask } = await import('./taskChain.js');
 
 const HASH = '0xabc';
 
@@ -188,6 +188,35 @@ describe('resolveTaskChainById', () => {
       return on(chain, OWNER);
     });
     expect(await resolveTaskChainById(7, OWNER)).toBe('arc');
+  });
+});
+
+describe('resolvePosterTask: the poster may be any of the caller\'s linked wallets', () => {
+  const SESSION = '0x1111111111111111111111111111111111111111';
+  const LINKED = '0xBb8021Dc9a063F4F2525f532fAA3FE1907599026';
+  const STRANGER = '0x9999999999999999999999999999999999999999';
+  const ZERO = '0x0000000000000000000000000000000000000000';
+
+  it('finds a task posted from a linked wallet, and says which wallet posted it', async () => {
+    getTaskOn.mockImplementation(async (chain: string) => ({ chain, agent: chain === 'arc' ? LINKED : ZERO }));
+    expect(await resolvePosterTask(1, [SESSION, LINKED.toLowerCase()], 'arc')).toEqual({ chain: 'arc', poster: LINKED.toLowerCase() });
+  });
+
+  it('refuses when none of the caller\'s wallets posted the task', async () => {
+    getTaskOn.mockImplementation(async (chain: string) => ({ chain, agent: STRANGER }));
+    expect(await resolvePosterTask(1, [SESSION, LINKED], undefined)).toBeNull();
+  });
+
+  it('refuses a caller with no wallets at all', async () => {
+    getTaskOn.mockImplementation(async (chain: string) => ({ chain, agent: ZERO }));
+    expect(await resolvePosterTask(1, [], undefined)).toBeNull();
+    expect(getTaskOn).not.toHaveBeenCalled();
+  });
+
+  it('keeps resolveTaskChainById\'s single-address behaviour', async () => {
+    getTaskOn.mockImplementation(async (chain: string) => ({ chain, agent: chain === 'arc' ? LINKED : ZERO }));
+    expect(await resolveTaskChainById(1, SESSION)).toBeNull();
+    expect(await resolveTaskChainById(1, LINKED)).toBe('arc');
   });
 });
 

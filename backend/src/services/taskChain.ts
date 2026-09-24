@@ -132,8 +132,24 @@ export async function resolveTaskChainById(
   caller: string,
   chain?: TaskChain,
 ): Promise<TaskChain | null> {
+  return (await resolvePosterTask(taskId, [caller], chain))?.chain ?? null;
+}
+
+/**
+ * The chain holding task `taskId` whose poster (the escrow's `agent`) is one of
+ * `callers`, and which of them it is. A user's session names one wallet, but
+ * they may have posted from another linked wallet; the refund must be built
+ * for, and signed by, the wallet that posted. Ownership still gates it: a
+ * chain where none of the callers is the poster never matches.
+ */
+export async function resolvePosterTask(
+  taskId: number,
+  callers: readonly string[],
+  chain?: TaskChain,
+): Promise<{ chain: TaskChain; poster: string } | null> {
   const escrowService = await import('./escrow.js');
-  const wanted = caller.toLowerCase();
+  const wanted = new Set(callers.map((c) => c.toLowerCase()));
+  if (wanted.size === 0) return null;
 
   const readAgent = async (chain: TaskChain): Promise<string | null> => {
     try {
@@ -150,8 +166,8 @@ export async function resolveTaskChainById(
     : indexesFor(null).sort((a, b) => Number(b === posting) - Number(a === posting));
   const agents = await Promise.all(chains.map(readAgent));
 
-  const i = agents.findIndex((agent) => agent === wanted);
-  return i === -1 ? null : chains[i];
+  const i = agents.findIndex((agent) => agent !== null && wanted.has(agent));
+  return i === -1 ? null : { chain: chains[i], poster: agents[i]! };
 }
 
 /**

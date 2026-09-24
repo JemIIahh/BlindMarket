@@ -1,7 +1,6 @@
 import { useParams, Link } from 'react-router-dom';
 import { useState } from 'react';
 import { motion } from 'framer-motion';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
 
 import { useTask } from '../hooks/useTasks';
 import { useWallet } from '../context/WalletContext';
@@ -13,8 +12,7 @@ import { RateAgent } from '../components/RateAgent';
 import { TxPendingModal } from '../components/TxPendingModal';
 import { CustodyChain } from '../components/CustodyChain';
 import { truncateAddress, formatDate } from '../lib/utils';
-import { assertRefundTarget, buildCancelTask, buildClaimTimeout, confirmRefund } from '../services/tasks';
-import { signAndSendTx } from '../lib/txSigner';
+import { useRefundEscrow } from '../hooks/useRefundEscrow';
 import { WORKER_SHARE_PCT, PLATFORM_FEE_PCT } from '../config/constants';
 import { unitFor, useSettlement } from '../config/settlement';
 import { useChainExplorerUrl } from '../hooks/useChainWallet';
@@ -65,55 +63,22 @@ export default function TaskDetail() {
   useSettlement();
   const { id } = useParams();
   const { data, isLoading, isError, refetch } = useTask(id || '');
-  const { address, signer } = useWallet();
+  const { address, embeddedAddress, externalAddresses } = useWallet();
   // The backend names the escrow's chain on the detail response — Arc tasks
   // explore on ArcScan.
   const explorerUrl = useChainExplorerUrl('arc');
   // Auth context kept for any future reads; not used in the A2A view path.
   void useAuth();
-  const qc = useQueryClient();
   const [activeTab, setActiveTab] = useTabParam<DetailTab>('details', DETAIL_TABS.map((t) => t.id));
   const [confirmAction, setConfirmAction] = useState<'cancel' | 'timeout' | null>(null);
 
-  // Build + sign + send the cancel / timeout tx as one mutation so React Query
-  // surfaces the error (auth failure, server error, user-rejected sig) instead
-  // of swallowing it in an unhandled promise.
-  //
-  // The page URL carries the task hash (globally unique), but the
-  // cancel/timeout endpoints take the numeric on-chain id — resolved from
-  // the loaded response (numericTaskId below) at call time.
-  const cancelMutation = useMutation({
-    mutationFn: async () => {
-      if (!numericTaskId) throw new Error('Missing task id');
-      if (!signer) throw new Error('Wallet not connected');
-      // Ids collide across chains: name the task's chain so the backend builds
-      // for this task, and sign only if the tx targets that chain's escrow.
-      const chain = data?.onChain?.chain;
-      if (!chain) throw new Error("This task's chain is unknown. Reload the page and try again.");
-      const tx = assertRefundTarget(await buildCancelTask(numericTaskId, chain), chain);
-      const sent = await signAndSendTx(signer, tx, undefined, { chain });
-      if (!sent.userOp) await confirmRefund(numericTaskId, sent.hash, chain).catch(() => {});
-    },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['tasks', id] }),
-  });
-
-  const timeoutMutation = useMutation({
-    mutationFn: async () => {
-      if (!numericTaskId) throw new Error('Missing task id');
-      if (!signer) throw new Error('Wallet not connected');
-      // Ids collide across chains: name the task's chain so the backend builds
-      // for this task, and sign only if the tx targets that chain's escrow.
-      const chain = data?.onChain?.chain;
-      if (!chain) throw new Error("This task's chain is unknown. Reload the page and try again.");
-      const tx = assertRefundTarget(await buildClaimTimeout(numericTaskId, chain), chain);
-      const sent = await signAndSendTx(signer, tx, undefined, { chain });
-      if (!sent.userOp) await confirmRefund(numericTaskId, sent.hash, chain).catch(() => {});
-    },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['tasks', id] }),
-  });
-
-  const txPending = cancelMutation.isPending || timeoutMutation.isPending;
-  const txError = cancelMutation.error ?? timeoutMutation.error;
+  // Cancel / claim timeout, signed by the wallet that posted the task (see
+  // useRefundEscrow). React Query surfaces a failure (auth, server, rejected
+  // signature) instead of an unhandled promise. The page URL carries the task
+  // hash; the refund routes take the numeric on-chain id (numericTaskId below).
+  const refund = useRefundEscrow();
+  const txPending = refund.isPending;
+  const txError = refund.error;
 
   if (isError && !data) {
     return (
@@ -139,7 +104,12 @@ export default function TaskDetail() {
   const numericTaskId = onChain.taskId || id;
   // `onChain.agent` is the contract's name for the task poster — keep the
   // boolean named isPoster to make the intent clear in UI conditions.
-  const isPoster = address?.toLowerCase() === onChain.agent?.toLowerCase();
+  // Any of the account's wallets: a task posted from a linked external wallet
+  // is the user's too, while `address` is the embedded one.
+  const myWallets = new Set([address, embeddedAddress, ...externalAddresses].filter((a): a is string => !!a).map((a) => a.toLowerCase()));
+  const isPoster = !!onChain.agent && myWallets.has(onChain.agent.toLowerCase());
+  const startRefund = (kind: 'cancel' | 'timeout') =>
+    refund.mutate({ taskId: String(numericTaskId), chain: onChain.chain, poster: onChain.agent, kind });
   // The unit this task's reward is in: what the backend read from the
   // escrow (symbol + decimals), else the task's chain's settlement token.
   // Not the posting chain's unit — a poster's old 0G task is still in 0G.
@@ -617,19 +587,24 @@ export default function TaskDetail() {
                 {onChain.status === TaskStatus.Funded ? (
                   <Button
                     variant="outline"
-                    label={cancelMutation.isPending ? 'Cancelling…' : 'Cancel & refund'}
+                    label={refund.isPending ? 'Cancelling…' : 'Cancel & refund'}
                     onClick={() => setConfirmAction('cancel')}
                     disabled={txPending}
                   />
                 ) : (
                   <Button
                     variant="outline"
-                    label={timeoutMutation.isPending ? 'Claiming…' : 'Claim timeout'}
+                    label={refund.isPending ? 'Claiming…' : 'Claim timeout'}
                     onClick={() => setConfirmAction('timeout')}
                     disabled={txPending}
                   />
                 )}
               </div>
+              {!refund.canSignAs(onChain.agent) && (
+                <div className="mt-3 text-xs text-warn leading-relaxed">
+                  Posted from {truncateAddress(onChain.agent)}. Connect that wallet to sign the refund.
+                </div>
+              )}
               {txError && (
                 <div className="mt-3 text-xs font-mono text-err break-words">
                   {(txError as Error).message}
@@ -646,7 +621,7 @@ export default function TaskDetail() {
       description="This will cancel the task and refund your escrowed USDC to your wallet. This action cannot be undone."
       confirmLabel="Cancel & Refund"
       danger
-      onConfirm={() => { setConfirmAction(null); cancelMutation.mutate(); }}
+      onConfirm={() => { setConfirmAction(null); startRefund('cancel'); }}
       onCancel={() => setConfirmAction(null)}
     />
     <ConfirmDialog
@@ -655,7 +630,7 @@ export default function TaskDetail() {
       description="The accepted agent missed the deadline. This will reclaim your escrowed USDC."
       confirmLabel="Claim Refund"
       danger
-      onConfirm={() => { setConfirmAction(null); timeoutMutation.mutate(); }}
+      onConfirm={() => { setConfirmAction(null); startRefund('timeout'); }}
       onCancel={() => setConfirmAction(null)}
     />
     </>

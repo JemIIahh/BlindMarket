@@ -471,6 +471,44 @@ export async function tryCloseOnChainTerminal(
 }
 
 /**
+ * Tasks an executor holds but has not finished: accepted, in progress,
+ * submitted, or awaiting verification. There is no index for them, so this
+ * scans the state keys (as resyncOpenIndex does) — call it on a slow cadence.
+ */
+export async function listInProgressTasks(): Promise<Array<{ meta: A2ATaskMeta; state: A2ATaskState }>> {
+  const live = new Set(['accepted', 'in_progress', 'submitted', 'awaiting_verification']);
+  const stateKeys: string[] = [];
+  let cursor = '0';
+  do {
+    const [nextCursor, keys] = await redis.scan(cursor, 'MATCH', 'a2a:state:*', 'COUNT', 200);
+    cursor = nextCursor;
+    stateKeys.push(...keys);
+  } while (cursor !== '0');
+  if (stateKeys.length === 0) return [];
+
+  const pipe = redis.pipeline();
+  for (const key of stateKeys) {
+    pipe.get(key);
+    pipe.get(`a2a:meta:${key.slice('a2a:state:'.length)}`);
+  }
+  const results = await pipe.exec();
+  if (!results) return [];
+  const out: Array<{ meta: A2ATaskMeta; state: A2ATaskState }> = [];
+  for (let i = 0; i < stateKeys.length; i++) {
+    const stateRaw = results[i * 2]?.[1] as string | null;
+    const metaRaw = results[i * 2 + 1]?.[1] as string | null;
+    if (!stateRaw || !metaRaw) continue;
+    try {
+      const state = JSON.parse(stateRaw) as A2ATaskState;
+      if (live.has(state.status)) out.push({ meta: JSON.parse(metaRaw) as A2ATaskMeta, state });
+    } catch {
+      // malformed JSON — skip
+    }
+  }
+  return out;
+}
+
+/**
  * Load every task in the open index with its meta+state, unfiltered beyond the
  * defensive invariant checks. Agent-facing callers should use browseAgentTasks
  * (which additionally hides expired tasks); the expiry sweep uses this
@@ -671,6 +709,24 @@ export async function getPosterTasks(
   address: string,
 ): Promise<Array<{ meta: A2ATaskMeta; state: A2ATaskState }>> {
   return loadTasksByIndex(KEY.poster(address));
+}
+
+/**
+ * Tasks posted from any of `addresses` (a user's linked wallets), each once.
+ * The poster index is per wallet, and a task posted from a wallet other than
+ * the session's address is still the user's.
+ */
+export async function getPosterTasksForWallets(
+  addresses: readonly string[],
+): Promise<Array<{ meta: A2ATaskMeta; state: A2ATaskState }>> {
+  const lists = await Promise.all([...new Set(addresses.map((a) => a.toLowerCase()))].map((a) => loadTasksByIndex(KEY.poster(a))));
+  const seen = new Set<string>();
+  return lists.flat().filter((t) => {
+    const id = t.meta.taskId.toLowerCase();
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
 }
 
 /**

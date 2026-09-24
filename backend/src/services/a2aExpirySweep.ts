@@ -5,6 +5,7 @@ import { resolveCachedTaskByHash, resolveTaskByHash } from './taskChain.js';
 import { chainRuntime } from './chainRuntime.js';
 import { loadAgentByWallet } from './deployedAgentStore.js';
 import { emitTaskAvailable } from './socket.js';
+import { notifyOnce } from './notificationStore.js';
 import { SWEEP_INTERVAL_MS, EXPIRY_GRACE_SEC } from '../constants.js';
 
 // Re-export for any callers that import from here (backward compat)
@@ -66,6 +67,7 @@ export function startExpirySweepLoop(): void {
   timer = setInterval(() => {
     void sweepExpiredTasks();
     void sweepGasLiveness();
+    void sweepMissedDeadlines();
   }, SWEEP_INTERVAL_MS);
   console.log(
     `[a2aExpirySweep] sweeping expired open tasks + gas-liveness every ${SWEEP_INTERVAL_MS / 1000}s (grace ${EXPIRY_GRACE_SEC}s)`,
@@ -169,6 +171,15 @@ export async function sweepExpiredTasks(): Promise<void> {
       const result = await a2aStore.tryExpire(tid, 'expired');
       if (result.ok) {
         closed++;
+        // Nothing refunds on its own: tell the poster the escrow is theirs to reclaim.
+        if (meta.posterAddress) {
+          await notifyOnce(`deadline:${tid}`, meta.posterAddress, {
+            type: 'expired',
+            title: 'Your task expired unclaimed',
+            body: 'No agent took it before the deadline. Its escrow is still yours: open the task to reclaim it.',
+            taskId: tid,
+          });
+        }
         // Best-effort cleanup; both keys self-expire via TTL anyway.
         await Promise.all([
           a2aStore.clearOffer(tid).catch(() => {}),
@@ -191,6 +202,61 @@ export async function sweepExpiredTasks(): Promise<void> {
   } finally {
     inFlight = false;
   }
+}
+
+// ── Missed deadlines ────────────────────────────────────────────────────────
+//
+// A task an executor accepted but never finished keeps its escrow after the
+// deadline: nothing refunds on its own, and only the poster can reclaim it
+// (claimTimeout is onlyAgent). Tell the poster, once per task. The escrow is
+// the authority: a task already settled or refunded on-chain is not flagged,
+// whatever Redis still says. Scans every state key, so it runs every few
+// minutes rather than every tick.
+
+export const MISSED_DEADLINE_SCAN_MS = 5 * 60_000;
+let lastMissedDeadlineScan = 0;
+let missedDeadlineInFlight = false;
+
+export async function sweepMissedDeadlines(now = Date.now()): Promise<number> {
+  if (!backgroundWritesAllowed('missed-deadline notices')) return 0;
+  if (missedDeadlineInFlight || now - lastMissedDeadlineScan < MISSED_DEADLINE_SCAN_MS) return 0;
+  missedDeadlineInFlight = true;
+  lastMissedDeadlineScan = now;
+  let notified = 0;
+  try {
+    const nowSec = Math.floor(now / 1000);
+    for (const { meta } of await a2aStore.listInProgressTasks()) {
+      const tid = meta.taskId.toLowerCase();
+      if (!meta.posterAddress) continue;
+      const deadline = meta.deadline ?? (await a2aStore.getCachedDeadline(tid).catch(() => null));
+      if (!deadline || nowSec < deadline + EXPIRY_GRACE_SEC) continue;
+      const resolved = await resolveCachedTaskByHash(tid).catch(() => null);
+      if (!resolved) continue;
+      const task = await escrowService.getTaskOn(resolved.chain, Number(resolved.taskId)).catch(() => null);
+      // The same numeric id can name another task on another chain: require the hash.
+      if (!task || (task.taskHash ?? '').toLowerCase() !== tid) continue;
+      // Assigned, Submitted, Verified: the escrow still holds the money.
+      if (![1, 2, 3].includes(Number(task.status))) continue;
+      const sent = await notifyOnce(`deadline:${tid}`, meta.posterAddress, {
+        type: 'expired',
+        title: 'The agent missed the deadline',
+        body: 'Your task was not delivered in time. Its escrow is still yours: open the task to reclaim it.',
+        taskId: tid,
+      });
+      if (sent) notified++;
+    }
+    if (notified > 0) console.log(`[a2aExpirySweep] missed deadlines: told ${notified} poster(s) their escrow can be reclaimed`);
+  } catch (err) {
+    console.error('[a2aExpirySweep] missed-deadline scan failed (non-fatal):', (err as Error).message);
+  } finally {
+    missedDeadlineInFlight = false;
+  }
+  return notified;
+}
+
+/** Test hook: forget when the last missed-deadline scan ran. */
+export function _resetMissedDeadlineScan(): void {
+  lastMissedDeadlineScan = 0;
 }
 
 // ── Gas-liveness sweep (Part 3) ──────────────────────────────────────────────

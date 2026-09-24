@@ -21,7 +21,9 @@ export type NotificationType =
   | 'completed'
   | 'failed'
   | 'disputed'
-  | 'review_received';
+  | 'review_received'
+  /** A task's deadline passed with its escrow still held: the poster can reclaim it. */
+  | 'expired';
 
 export interface Notification {
   id: string;
@@ -39,6 +41,7 @@ const FEED_TTL_S = 30 * 24 * 3600; // 30 days
 
 const KEY = {
   feed: (address: string) => `notif:feed:${address.toLowerCase()}`,
+  once: (dedupeKey: string) => `notif:once:${dedupeKey}`,
 };
 
 function shortAddr(a: string): string {
@@ -132,6 +135,26 @@ export async function markAllRead(address: string): Promise<number> {
   pipe.expire(key, FEED_TTL_S);
   await pipe.exec();
   return unread;
+}
+
+/**
+ * notify(), at most once per `dedupeKey` (kept as long as the feed itself).
+ * For notices a sweep would otherwise repeat every tick. Returns true when the
+ * notice was sent now; false when it was sent before, or could not be stored.
+ */
+export async function notifyOnce(
+  dedupeKey: string,
+  toAddress: string,
+  input: { type: NotificationType; title: string; body?: string; taskId?: string },
+): Promise<boolean> {
+  try {
+    const first = await redis.set(KEY.once(dedupeKey), '1', 'EX', FEED_TTL_S, 'NX');
+    if (first === null) return false;
+    return (await notify(toAddress, input)) !== null;
+  } catch (err) {
+    console.warn('[notif] notifyOnce failed (non-fatal):', (err as Error).message);
+    return false;
+  }
 }
 
 /**

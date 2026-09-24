@@ -10,7 +10,8 @@ import { getTokenDecimals } from '../services/chain.js';
 import { chainRuntime } from '../services/chainRuntime.js';
 import { isSettlementChainKey, postingChain, settlementChainConfig } from '../services/settlementChains.js';
 import { payoutCurrency } from '../services/settlementUnits.js';
-import { isIndexedTask, resolveTaskChainById, resolveCachedTaskByHash, type TaskChain } from '../services/taskChain.js';
+import { isIndexedTask, resolvePosterTask, resolveCachedTaskByHash, type TaskChain } from '../services/taskChain.js';
+import { callerWallets } from '../services/callerWallets.js';
 import type { AuthRequest, ApiResponse } from '../types.js';
 import { AGENT_CAPABILITIES } from '../types.js';
 import * as a2aStore from '../services/a2aStore.js';
@@ -619,22 +620,23 @@ tasksRouter.post('/:id/cancel', requireAuth, async (req: AuthRequest, res, next)
     }
     const taskId = parseInt(rawId, 10);
 
-    const from = req.user!.address;
-
     // The legacy 'agent' API-key principal has no EOA — buildUnsignedTx would
     // 500 on ethers.getAddress('agent'); this tx must be signed by the task
     // agent's real wallet (onlyAgent on-chain). Refuse it cleanly.
-    if (from === 'agent') {
+    if (req.user!.address === 'agent') {
       throw new AppError(403, 'FORBIDDEN', 'Only the task agent can cancel tasks');
     }
 
     // The task may be escrowed on Base or on Arc; resolving by ownership also
     // does the agent check, since a chain where the caller isn't the agent
-    // never matches. A client that names the chain gets only that chain.
-    const chain = await resolveTaskChainById(taskId, from, requestedChain(req));
-    if (!chain) {
+    // never matches. A client that names the chain gets only that chain. The
+    // poster may be any of the caller's linked wallets, not only the session's
+    // address, and the tx is built for the one that posted: it must sign.
+    const resolved = await resolvePosterTask(taskId, callerWallets(req.user), requestedChain(req));
+    if (!resolved) {
       throw new AppError(403, 'FORBIDDEN', 'Only the task agent can cancel tasks');
     }
+    const { chain, poster: from } = resolved;
 
     const task = await escrowService.getTaskOn(chain, taskId);
     const tx = await escrowService.buildCancelTaskOn(chain, from, taskId);
@@ -681,22 +683,23 @@ tasksRouter.post('/:id/timeout', requireAuth, async (req: AuthRequest, res, next
     }
     const taskId = parseInt(rawId, 10);
 
-    const from = req.user!.address;
-
     // The legacy 'agent' API-key principal has no EOA — buildUnsignedTx would
     // 500 on ethers.getAddress('agent'); this tx must be signed by the task
     // agent's real wallet (onlyAgent on-chain). Refuse it cleanly.
-    if (from === 'agent') {
+    if (req.user!.address === 'agent') {
       throw new AppError(403, 'FORBIDDEN', 'Only the task agent can reclaim funds');
     }
 
     // The task may be escrowed on Base or on Arc; resolving by ownership also
     // does the agent check, since a chain where the caller isn't the agent
-    // never matches. A client that names the chain gets only that chain.
-    const chain = await resolveTaskChainById(taskId, from, requestedChain(req));
-    if (!chain) {
+    // never matches. A client that names the chain gets only that chain. The
+    // poster may be any of the caller's linked wallets, not only the session's
+    // address, and the tx is built for the one that posted: it must sign.
+    const resolved = await resolvePosterTask(taskId, callerWallets(req.user), requestedChain(req));
+    if (!resolved) {
       throw new AppError(403, 'FORBIDDEN', 'Only the task agent can reclaim funds');
     }
+    const { chain, poster: from } = resolved;
 
     const task = await escrowService.getTaskOn(chain, taskId);
 
@@ -760,17 +763,17 @@ tasksRouter.post('/:id/confirm-tx', requireAuth, async (req: AuthRequest, res, n
     const taskId = parseInt(rawId, 10);
     const { txHash } = confirmTxSchema.parse(req.body);
 
-    const from = req.user!.address;
-    if (from === 'agent') {
+    if (req.user!.address === 'agent') {
       throw new AppError(403, 'FORBIDDEN', 'Only the task agent can confirm refunds');
     }
 
     // Same ownership gate as cancel/timeout: resolving by ownership doubles
-    // as the agent check.
-    const chain = await resolveTaskChainById(taskId, from, requestedChain(req));
-    if (!chain) {
+    // as the agent check, over every wallet linked to the caller.
+    const resolved = await resolvePosterTask(taskId, callerWallets(req.user), requestedChain(req));
+    if (!resolved) {
       throw new AppError(403, 'FORBIDDEN', 'Only the task agent can confirm refunds');
     }
+    const { chain, poster: from } = resolved;
     const { provider: prov, escrow: esc } = chainRuntime(chain);
     if (!esc) {
       throw new AppError(503, 'CHAIN_NOT_CONFIGURED', `Settlement chain ${chain} is not configured on this backend`);

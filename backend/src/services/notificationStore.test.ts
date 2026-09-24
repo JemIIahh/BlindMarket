@@ -6,7 +6,7 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
-const mem = vi.hoisted(() => ({ lists: new Map<string, string[]>() }));
+const mem = vi.hoisted(() => ({ lists: new Map<string, string[]>(), keys: new Map<string, string>() }));
 
 vi.mock('./redis.js', () => {
   const lists = mem.lists;
@@ -32,6 +32,12 @@ vi.mock('./redis.js', () => {
         return l.slice(s, end);
       },
       llen: async (k: string) => (lists.get(k) ?? []).length,
+      // SET key value EX s NX: null when the key already exists.
+      set: async (k: string, v: string, ...args: unknown[]) => {
+        if (args.includes('NX') && mem.keys.has(k)) return null;
+        mem.keys.set(k, v);
+        return 'OK';
+      },
       lset: async (k: string, i: number, v: string) => {
         const l = lists.get(k) ?? [];
         if (i < 0 || i >= l.length) throw new Error('index out of range');
@@ -50,10 +56,11 @@ vi.mock('./a2aStore.js', () => ({
   getState: vi.fn(async () => ({ executorAddress: EXEC })),
 }));
 
-import { notify, listNotifications, markRead, markAllRead, notifyLifecycle } from './notificationStore.js';
+import { notify, notifyOnce, listNotifications, markRead, markAllRead, notifyLifecycle } from './notificationStore.js';
 
 beforeEach(() => {
   mem.lists.clear();
+  mem.keys.clear();
 });
 
 describe('notify / list / read', () => {
@@ -108,5 +115,16 @@ describe('notifyLifecycle fan-out', () => {
     await notifyLifecycle(HASH, 'disputed');
     expect((await listNotifications(POSTER)).total).toBe(2);
     expect((await listNotifications(EXEC)).total).toBe(2);
+  });
+});
+
+describe('notifyOnce', () => {
+  it('sends a notice once per key, however often a sweep asks', async () => {
+    const input = { type: 'expired' as const, title: 'The agent missed the deadline', taskId: HASH };
+    expect(await notifyOnce(`deadline:${HASH}`, POSTER, input)).toBe(true);
+    expect(await notifyOnce(`deadline:${HASH}`, POSTER, input)).toBe(false);
+    const page = await listNotifications(POSTER);
+    expect(page.notifications).toHaveLength(1);
+    expect(page.notifications[0]).toMatchObject({ type: 'expired', taskId: HASH });
   });
 });

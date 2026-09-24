@@ -6,7 +6,9 @@ export type NotificationType =
   | 'completed'
   | 'failed'
   | 'disputed'
-  | 'review_received';
+  | 'review_received'
+  /** A task's deadline passed with its escrow still held: the poster can reclaim it. */
+  | 'expired';
 
 export interface Notification {
   id: string;

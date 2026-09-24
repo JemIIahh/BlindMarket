@@ -23,10 +23,10 @@ vi.mock('../middleware/auth.js', () => {
   return { requireAuth: gate, optionalAuth: gate };
 });
 
-const resolveTaskChainById = vi.fn();
+const resolvePosterTask = vi.fn();
 const resolveCachedTaskByHash = vi.fn();
 vi.mock('../services/taskChain.js', () => ({
-  resolveTaskChainById: (...a: unknown[]) => resolveTaskChainById(...a),
+  resolvePosterTask: (...a: unknown[]) => resolvePosterTask(...a),
   resolveCachedTaskByHash: (...a: unknown[]) => resolveCachedTaskByHash(...a),
 }));
 
@@ -89,7 +89,9 @@ const as = (addr: string) => ({ 'x-test-address': addr });
 
 beforeEach(() => {
   vi.clearAllMocks();
-  resolveTaskChainById.mockResolvedValue('arc');
+  // Like the real resolver: the poster is whichever of the caller's own
+  // wallets owns the task, never someone else's.
+  resolvePosterTask.mockImplementation(async (_id: number, callers: string[]) => ({ chain: 'arc', poster: callers[0] }));
   getState.mockResolvedValue(undefined);
   // The A2A task under TASK_HASH is AGENT's, backed by 0G escrow task 7.
   getMeta.mockResolvedValue({ taskId: TASK_HASH, posterAddress: AGENT.toUpperCase().replace('0X', '0x') });
@@ -144,7 +146,7 @@ describe('M5: build-time rows are pending, confirm flips on proof', () => {
   });
 
   it('confirm-tx gates non-agents', async () => {
-    resolveTaskChainById.mockResolvedValue(null);
+    resolvePosterTask.mockResolvedValue(null);
     const res = await request(app()).post('/api/v1/tasks/7/confirm-tx')
       .set(as(OTHER)).send({ txHash: '0x' + '55'.repeat(32) });
     expect(res.status).toBe(403);

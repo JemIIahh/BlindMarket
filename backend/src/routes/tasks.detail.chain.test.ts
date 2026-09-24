@@ -13,7 +13,9 @@ const ARC_HASH = '0x' + '0a'.repeat(32);
 
 vi.mock('../middleware/auth.js', () => {
   const pass = (req: any, _res: any, next: any) => {
-    req.user = { address: '0x1111111111111111111111111111111111111111' };
+    // x-test-addresses: the account's linked wallets, comma-separated.
+    const linked = req.headers['x-test-addresses'];
+    req.user = { address: '0x1111111111111111111111111111111111111111', ...(linked ? { addresses: String(linked).split(',') } : {}) };
     next();
   };
   return { requireAuth: pass, optionalAuth: pass };
@@ -23,7 +25,7 @@ vi.mock('../services/accountingService.js', () => ({ recordTransaction: vi.fn(as
 vi.mock('../services/taskChain.js', () => ({
   resolveCachedTaskByHash: vi.fn(async (hash: string) =>
     hash === BASE_HASH ? { taskId: '7', chain: 'base' } : hash === ARC_HASH ? { taskId: '7', chain: 'arc' } : null),
-  resolveTaskChainById: vi.fn(async () => 'base'),
+  resolvePosterTask: vi.fn(async (_id: number, callers: string[]) => ({ chain: 'base', poster: callers[0] })),
   // Arc task 7 is the one ARC_HASH is indexed to; any other id is a duplicate.
   isIndexedTask: vi.fn(async (chain: string, taskId: number | string, hash: string) =>
     chain === 'arc' && String(taskId) === '7' && hash === ARC_HASH),
@@ -152,7 +154,7 @@ describe('cancel and claim-timeout say which chain their transaction is for', ()
   };
 
   it('returns chain and chainId with the unsigned tx, like POST /tasks', async () => {
-    vi.mocked(taskChain.resolveTaskChainById).mockResolvedValueOnce('base');
+    vi.mocked(taskChain.resolvePosterTask).mockResolvedValueOnce({ chain: 'base', poster: '0x1111111111111111111111111111111111111111' });
     const res = await post('7/cancel');
     expect(res.status).toBe(200);
     expect(res.body.data).toMatchObject({ chain: 'base', chainId: 84532 });
@@ -160,25 +162,37 @@ describe('cancel and claim-timeout say which chain their transaction is for', ()
   });
 
   it.each(['cancel', 'timeout', 'confirm-tx'])('%s resolves only on the chain the client names', async (route) => {
-    vi.mocked(taskChain.resolveTaskChainById).mockResolvedValueOnce('arc');
+    vi.mocked(taskChain.resolvePosterTask).mockResolvedValueOnce({ chain: 'arc', poster: '0x1111111111111111111111111111111111111111' });
     await post(`7/${route}`).send({ chain: 'arc', txHash: '0x' + '11'.repeat(32) });
-    expect(taskChain.resolveTaskChainById).toHaveBeenCalledWith(7, '0x1111111111111111111111111111111111111111', 'arc');
+    expect(taskChain.resolvePosterTask).toHaveBeenCalledWith(7, ['0x1111111111111111111111111111111111111111'], 'arc');
   });
 
   it('searches every chain when the client names none', async () => {
     await post('7/cancel').send({});
-    expect(taskChain.resolveTaskChainById).toHaveBeenCalledWith(7, '0x1111111111111111111111111111111111111111', undefined);
+    expect(taskChain.resolvePosterTask).toHaveBeenCalledWith(7, ['0x1111111111111111111111111111111111111111'], undefined);
   });
 
   it('rejects a chain this backend does not know', async () => {
     const res = await post('7/cancel').send({ chain: '0g' });
     expect(res.status).toBe(400);
     expect(res.body.error?.code ?? res.body.code).toBe('INVALID_CHAIN');
-    expect(taskChain.resolveTaskChainById).not.toHaveBeenCalled();
+    expect(taskChain.resolvePosterTask).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['cancel', 'buildCancelTaskOn'],
+    ['timeout', 'buildClaimTimeoutOn'],
+  ] as const)('%s is built for the linked wallet that posted, not the session address', async (route, builder) => {
+    const LINKED = '0xbb8021dc9a063f4f2525f532faa3fe1907599026';
+    vi.mocked(taskChain.resolvePosterTask).mockResolvedValueOnce({ chain: 'arc', poster: LINKED });
+    const res = await post(`7/${route}`).set('x-test-addresses', `0x1111111111111111111111111111111111111111,${LINKED}`).send({ chain: 'arc' });
+    expect(res.status).toBe(200);
+    expect(taskChain.resolvePosterTask).toHaveBeenCalledWith(7, ['0x1111111111111111111111111111111111111111', LINKED], 'arc');
+    expect(escrowService[builder]).toHaveBeenCalledWith('arc', LINKED, 7);
   });
 
   it('refuses when the caller does not own the id on the named chain', async () => {
-    vi.mocked(taskChain.resolveTaskChainById).mockResolvedValueOnce(null);
+    vi.mocked(taskChain.resolvePosterTask).mockResolvedValueOnce(null);
     const res = await post('7/cancel').send({ chain: 'arc' });
     expect(res.status).toBe(403);
     expect(escrowService.buildCancelTaskOn).not.toHaveBeenCalled();

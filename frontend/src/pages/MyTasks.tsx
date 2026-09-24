@@ -15,7 +15,12 @@ import {
   EmptyState,
   ErrorState,
   FormInput,
+  ConfirmDialog,
 } from '../components/bb';
+import { TxPendingModal } from '../components/TxPendingModal';
+import { useRefundEscrow } from '../hooks/useRefundEscrow';
+import { isReclaimable, refundAction } from '../lib/refund';
+import { truncateAddress } from '../lib/utils';
 import { useSocket } from '../hooks/useSocket';
 import { authedGet } from '../lib/api';
 import { getAesKey } from '../lib/keyStash';
@@ -59,6 +64,8 @@ interface PostedTask {
     symbol?: string | null;
     decimals?: number;
     worker: string;
+    /** The wallet that posted the task, which alone can reclaim it. Absent from older backends. */
+    agent?: string;
     createdAt: string;
     deadline: string;
   };
@@ -225,6 +232,34 @@ export default function MyTasks() {
     }
   });
 
+  // Escrow left behind after a deadline: nothing refunds on its own (only the
+  // poster can), so say so here and offer it on each task.
+  const refund = useRefundEscrow();
+  const [reclaimTarget, setReclaimTarget] = useState<PostedTask | null>(null);
+  const [refundFailedFor, setRefundFailedFor] = useState<string | null>(null);
+  const nowSec = Math.floor(Date.now() / 1000);
+  const reclaimableOf = (t: PostedTask) => !!t.onChain && isReclaimable(t.onChain.status, Number(t.onChain.deadline), nowSec);
+  const posterOf = (t: PostedTask) => t.onChain?.agent ?? t.meta.posterAddress ?? '';
+  const reclaimable = tasks.filter(reclaimableOf);
+  const reclaimableTotals = reclaimable.reduce<Record<string, number>>((acc, t) => {
+    const unit = rowUnit(t.onChain);
+    acc[unit.symbol] = (acc[unit.symbol] ?? 0) + rewardToNumber(t.onChain?.reward, unit.decimals);
+    return acc;
+  }, {});
+  const reclaimableSummary = Object.entries(reclaimableTotals)
+    .map(([symbol, total]) => `${total.toLocaleString(undefined, { maximumFractionDigits: 6 })} ${symbol}`)
+    .join(' + ');
+  const startReclaim = (t: PostedTask) => {
+    const onChain = t.onChain!;
+    const kind = refundAction(onChain.status, Number(onChain.deadline), nowSec);
+    if (!kind) return;
+    setRefundFailedFor(null);
+    refund.mutate(
+      { taskId: onChain.taskId, chain: onChain.chain, poster: posterOf(t), kind },
+      { onError: () => setRefundFailedFor(t.meta.taskId), onSettled: () => setReclaimTarget(null) },
+    );
+  };
+
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     const el = sentinelRef.current;
@@ -260,6 +295,17 @@ export default function MyTasks() {
         <div className="border-t border-l-0 xl:border-t-0 xl:border-l border-line"><StatCard className="h-full" label="Completed" value={String(completedCount)} sub="All time" subColor="ok" /></div>
         <div className="border-t border-l border-line xl:border-t-0"><StatCard className="h-full" label="Total spent" value={`${totalSpent.toLocaleString(undefined, { maximumFractionDigits: 4 })} USDC`} sub="Paid out on completed tasks" /></div>
       </div>
+
+      {reclaimable.length > 0 && (
+        <div className="border border-warn/60 bg-warn/5 px-4 py-3 mb-8 flex items-start gap-3">
+          <Icon name="clock" size={16} className="text-warn shrink-0 mt-0.5" />
+          <p className="text-sm text-ink leading-relaxed">
+            {reclaimable.length === 1 ? '1 task' : `${reclaimable.length} tasks`} passed {reclaimable.length === 1 ? 'its' : 'their'} deadline
+            with <span className="font-mono text-cream">{reclaimableSummary}</span> still in escrow. It doesn't come back on its own:
+            use <span className="text-cream">Reclaim</span> on {reclaimable.length === 1 ? 'the task' : 'each task'} below.
+          </p>
+        </div>
+      )}
 
       <div className="border border-line">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between bg-surface-2 px-4 pt-4 lg:pt-0">
@@ -404,6 +450,33 @@ export default function MyTasks() {
                     </div>
                     <span className="text-[11px] text-ink-3 group-hover:text-cream transition-colors">View →</span>
                   </div>
+                  {reclaimableOf(t) && (
+                    <div
+                      className="pt-3 border-t border-line flex flex-col gap-2"
+                      onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[11px] text-warn">
+                          {status === 0 ? 'Expired with no taker' : 'The agent missed the deadline'}
+                        </span>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          label={refund.isPending && reclaimTarget?.meta.taskId === t.meta.taskId ? 'Reclaiming…' : `Reclaim ${formatRewardForRow(t.onChain)}`}
+                          disabled={refund.isPending}
+                          onClick={() => setReclaimTarget(t)}
+                        />
+                      </div>
+                      {!refund.canSignAs(posterOf(t)) && (
+                        <span className="text-[11px] text-ink-3">
+                          Posted from {truncateAddress(posterOf(t))}: connect that wallet to sign.
+                        </span>
+                      )}
+                      {refundFailedFor === t.meta.taskId && refund.error && (
+                        <span className="text-[11px] font-mono text-err break-words">{(refund.error as Error).message}</span>
+                      )}
+                    </div>
+                  )}
                   {(hasResult || isDone) && (
                     <details
                       open={openResults.has(t.meta.taskId)}
@@ -444,6 +517,20 @@ export default function MyTasks() {
           </div>
         )}
       </div>
+      <TxPendingModal open={refund.isPending} />
+      <ConfirmDialog
+        open={!!reclaimTarget && !refund.isPending}
+        title="Reclaim escrow"
+        description={reclaimTarget?.onChain
+          ? `${formatRewardForRow(reclaimTarget.onChain)} goes back to ${truncateAddress(posterOf(reclaimTarget))}, the wallet that posted this task. `
+            + (reclaimTarget.onChain.status === 0
+              ? 'The task is cancelled.'
+              : 'The agent missed the deadline, so the task is closed unpaid.')
+          : undefined}
+        confirmLabel="Reclaim"
+        onConfirm={() => { if (reclaimTarget) startReclaim(reclaimTarget); }}
+        onCancel={() => setReclaimTarget(null)}
+      />
     </div>
   );
 }
