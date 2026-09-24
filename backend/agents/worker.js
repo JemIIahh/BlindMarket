@@ -2540,7 +2540,8 @@ export function describeVerificationCriteria(criteria) {
   if (criteria.regex_pattern) lines.push(`- The result must match this regular expression: ${criteria.regex_pattern}`);
   // The expected answer itself is NEVER shown: the check scores overlap with
   // that string, so revealing it would let any agent echo it and be paid.
-  if (criteria.expected_answer) lines.push('- The poster has set an exact expected answer (not shown to you) and the result is compared against it. Work the answer out from the brief and give it plainly and briefly — the answer itself, with no explanation, preamble or extra words around it. This overrides the Markdown formatting guidance.');
+  // The backend sends only has_expected_answer; expected_answer is kept for older servers.
+  if (criteria.expected_answer || criteria.has_expected_answer) lines.push('- The poster has set an exact expected answer (not shown to you) and the result is compared against it. Work the answer out from the brief and give it plainly and briefly — the answer itself, with no explanation, preamble or extra words around it. This overrides the Markdown formatting guidance.');
   for (const item of criteria.rubric ?? []) {
     const kw = item.keywords?.length ? ` — checked by looking for: ${list(item.keywords)}${item.min_mentions ? ` (at least ${item.min_mentions})` : ''}` : '';
     lines.push(`- Rubric: ${item.criterion}${kw}.`);
