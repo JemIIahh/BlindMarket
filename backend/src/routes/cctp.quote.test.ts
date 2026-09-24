@@ -126,4 +126,10 @@ describe('GET /api/v1/cctp/config', () => {
     expect(res.body.data.baseChainId).toBe(84532); // FAKE_DEST = the Base Sepolia leg
     expect(res.body.data.network).toBe('testnet');
   });
+
+  it('publishes relay names the relay accepts, never CAIP-2 ids', async () => {
+    const res = await request(app()).get('/api/v1/cctp/config');
+    const byKey = Object.fromEntries(res.body.data.chains.map((c: { chainKey: string; relayChain: string | null }) => [c.chainKey, c.relayChain]));
+    expect(byKey).toEqual({ 'ethereum-sepolia': 'ethereum-sepolia', 'base-sepolia': 'base-sepolia', 'arc-testnet': null });
+  });
 });

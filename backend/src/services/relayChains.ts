@@ -29,6 +29,18 @@ const FIXED_NAMES: ReadonlyArray<readonly [name: string, caip2: string]> = [
   ['polygon-amoy', 'eip155:80002'],
 ];
 
+/**
+ * The relay `chain` name for a chain key, or null when the relay doesn't
+ * serve it. Every key present in the table IS a valid name (fixed names and
+ * registry keys alike) — the CAIP-2 id it maps to must never be sent as
+ * `chain`: POST /tx/relay-tx resolves names, and an id falls out as
+ * INVALID_CHAIN. (Shipped the id once from /cctp/config `relayChain`;
+ * base-sepolia bridges broke with exactly that error.)
+ */
+export function relayNameForKey(key: string): string | null {
+  return relayChainTable().has(key) ? key : null;
+}
+
 /** Every name the relay accepts, in the order its error message lists them, with its CAIP-2 id. */
 export function relayChainTable(): Map<string, string> {
   const table = new Map<string, string>(FIXED_NAMES);

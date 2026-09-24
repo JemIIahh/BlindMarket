@@ -21,7 +21,7 @@ vi.mock('./settlementChains.js', async (importOriginal) => {
   };
 });
 
-const { relayChainTable, relayChainName } = await import('./relayChains.js');
+const { relayChainTable, relayChainName, relayNameForKey } = await import('./relayChains.js');
 const { settlementChainConfig } = await import('./settlementChains.js');
 
 beforeEach(() => {
@@ -60,6 +60,15 @@ describe('relayChainTable', () => {
   it('has no entry for inherited object keys', () => {
     expect(relayChainTable().get('constructor')).toBeUndefined();
     expect(relayChainTable().get('__proto__')).toBeUndefined();
+  });
+
+  it('relayNameForKey returns the name (never the CAIP-2 id) or null', () => {
+    expect(relayNameForKey('base-sepolia')).toBe('base-sepolia');
+    expect(relayNameForKey('base')).toBe('base');
+    expect(relayNameForKey('ethereum-sepolia')).toBe('ethereum-sepolia');
+    expect(relayNameForKey('arc-testnet')).toBeNull();
+    expect(relayNameForKey('eip155:84532')).toBeNull();
+    expect(relayNameForKey('constructor')).toBeNull();
   });
 });
 

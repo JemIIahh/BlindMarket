@@ -41,7 +41,7 @@ import {
   listForOwner,
   serializeTransfer,
 } from '../services/cctpTransferStore.js';
-import { relayChainTable } from '../services/relayChains.js';
+import { relayNameForKey } from '../services/relayChains.js';
 import { getChainAA } from '../services/aaChains.js';
 import { pimlicoRpc, isPimlicoConfigured } from '../services/pimlico.js';
 import { BlindAccountFactoryABI, BlindAccountABI } from '../services/aa.js';
@@ -79,11 +79,11 @@ cctpRouter.get('/config', (_req, res) => {
         // with this same number.
         usdcGasReserveRaw: (c.usdcGasReserveRaw ?? 0n).toString(),
         // The `chain` name POST /tx/relay-tx takes for this chain, or null
-        // when the relay doesn't serve it. The fund modal relays the
-        // source-chain approve+burn (USDC gas via the sponsorship ladder)
-        // when the signer is the embedded wallet; external wallets use the
-        // UserOp path below.
-        relayChain: relayChainTable().get(c.chainKey) ?? null,
+        // when the relay doesn't serve it (the name, never the CAIP-2 id).
+        // The fund modal relays the source-chain approve+burn (USDC gas via
+        // the sponsorship ladder) when the signer is the embedded wallet;
+        // external wallets use the UserOp path below.
+        relayChain: relayNameForKey(c.chainKey),
         // ERC-4337 USDC-gas for external wallets on this chain, or null when
         // no paymaster is deployed (Arc never has one — native USDC gas).
         // `userOpRelay` adds the bundler: both must be present for the modal
