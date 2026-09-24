@@ -9,6 +9,7 @@
  */
 
 import type { ToolDefinition } from '../types.js';
+import { assertEgressUrl, EgressBlockedError, egressFetch, MAX_TOOL_RESPONSE_BYTES, readCappedText } from './egressGuard.js';
 
 // ── Secret resolution ──────────────────────────────────────────────────────
 
@@ -168,17 +169,23 @@ export async function executeTool(
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-    const res = await fetch(url, {
-      method: tool.execution.method,
-      headers,
-      body,
-      signal: controller.signal,
-    });
-
-    clearTimeout(timer);
-
-    // Read response
-    const text = await res.text();
+    // egressFetch refuses private, loopback and link-local destinations,
+    // including after a redirect, and the read is capped: the URL is chosen by
+    // whoever defined the tool.
+    // The timeout covers reading the body too.
+    let res: Awaited<ReturnType<typeof egressFetch>>;
+    let text: string;
+    try {
+      res = await egressFetch(url, {
+        method: tool.execution.method,
+        headers,
+        body,
+        signal: controller.signal,
+      });
+      text = await readCappedText(res, MAX_TOOL_RESPONSE_BYTES);
+    } finally {
+      clearTimeout(timer);
+    }
     let data: unknown;
     try {
       data = JSON.parse(text);
@@ -239,11 +246,14 @@ export function validateToolDefinition(tool: ToolDefinition): string[] {
       errors.push('execution.method must be GET, POST, PUT, PATCH, or DELETE');
     }
     try {
-      // Validate URL (allow {param} placeholders)
+      // Validate URL (allow {param} placeholders). Scheme and literal-IP
+      // destinations are refused here; names are checked when the call is made.
       const urlNoPlaceholders = tool.execution.url.replace(/\{[^}]+\}/g, 'placeholder');
-      new URL(urlNoPlaceholders);
-    } catch {
-      errors.push('execution.url is not a valid URL');
+      assertEgressUrl(urlNoPlaceholders);
+    } catch (e) {
+      errors.push(e instanceof EgressBlockedError && e.message !== 'Destination is not a valid URL'
+        ? `execution.url: ${e.message}`
+        : 'execution.url is not a valid URL');
     }
 
     // Check that every {param} in URL has a matching input_schema property
