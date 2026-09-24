@@ -158,7 +158,7 @@ describe("Arc settlement tooling", function () {
 
     it("defines arc-testnet on 5042002 with a default RPC", async function () {
       expect(net("arc-testnet")?.chainId).to.equal(ARC_TESTNET_CHAIN_ID);
-      expect(await net("arc-testnet")!.url.getUrl()).to.equal(process.env.ARC_TESTNET_RPC_URL || "https://rpc.testnet.arc.io");
+      expect(await net("arc-testnet")!.url.getUrl()).to.equal(process.env.ARC_TESTNET_RPC_URL || "https://arc-testnet.drpc.org");
     });
 
     it("defines arc-mainnet on 5042 with no default RPC: the url is ARC_MAINNET_RPC_URL, read only when the network is used", async function () {
