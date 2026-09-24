@@ -60,9 +60,10 @@ function normalize(term: (typeof PINNED_TASK_TERMS)[number], terms: TaskTerms): 
     case 'publicBrief':
     case 'routingSummary':
       return terms[term] ?? '';
-    // Stored as [] when omitted. Order carries no meaning, repeats do.
+    // Stored as [] when omitted. Compared as a set: order and repeats carry no
+    // meaning (the index route de-duplicates, and older rows may hold repeats).
     case 'requiredCapabilities':
-      return stableJson([...(terms.requiredCapabilities ?? [])].sort());
+      return stableJson([...new Set(terms.requiredCapabilities ?? [])].sort());
   }
 }
 

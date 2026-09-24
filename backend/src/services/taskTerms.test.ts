@@ -50,9 +50,13 @@ describe('changedTaskTerm', () => {
     expect(changedTaskTerm(listed, { ...listed, verifierAddress: '0x0000000000000000000000000000000000000002' })).toBe('verifierAddress');
     expect(changedTaskTerm(listed, { ...listed, routingSummary: 'Something else' })).toBe('routingSummary');
     expect(changedTaskTerm(listed, { ...listed, requiredCapabilities: ['research'] })).toBe('requiredCapabilities');
-    expect(changedTaskTerm(listed, {
-      ...listed,
-      requiredCapabilities: ['data_processing', 'research', 'research'],
-    })).toBe('requiredCapabilities');
+    expect(changedTaskTerm(listed, { ...listed, requiredCapabilities: ['data_processing', 'research', 'translation'] })).toBe('requiredCapabilities');
+  });
+
+  it('compares capabilities as a set, so a legacy row stored with repeats re-indexes cleanly', () => {
+    expect(changedTaskTerm(
+      { ...listed, requiredCapabilities: ['data_processing', 'research', 'research'] },
+      { ...listed, requiredCapabilities: ['research', 'data_processing'] },
+    )).toBeNull();
   });
 });
