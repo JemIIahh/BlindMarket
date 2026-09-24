@@ -10,7 +10,22 @@
  * Completed, Cancelled and Disputed tasks have nothing to reclaim here (a
  * dispute is resolved by the platform, or reclaimable after its window).
  */
+import { Interface } from 'ethers';
+
 export type RefundKind = 'cancel' | 'timeout';
+
+const REFUND_ABI = new Interface(['function cancelTask(uint256 taskId)', 'function claimTimeout(uint256 taskId)']);
+
+/**
+ * The refund call's calldata, encoded in the browser. For a task funded from a
+ * wallet that isn't linked to the account: the backend builds refunds only for
+ * the account's wallets, while both calls are onlyAgent on chain, so the
+ * escrow pays back only the wallet that funded the task whoever builds it.
+ */
+export function encodeRefundCall(kind: RefundKind, taskId: string): string {
+  if (!/^\d+$/.test(taskId)) throw new Error(`Not an on-chain task id: ${taskId}`);
+  return REFUND_ABI.encodeFunctionData(kind === 'cancel' ? 'cancelTask' : 'claimTimeout', [BigInt(taskId)]);
+}
 
 const FUNDED = 0;
 const HELD_BY_EXECUTOR = [1, 2, 3];

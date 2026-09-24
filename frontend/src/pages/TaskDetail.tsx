@@ -16,6 +16,7 @@ import { useRefundEscrow } from '../hooks/useRefundEscrow';
 import { WORKER_SHARE_PCT, PLATFORM_FEE_PCT } from '../config/constants';
 import { unitFor, useSettlement } from '../config/settlement';
 import { useChainExplorerUrl } from '../hooks/useChainWallet';
+import { isDirectSigned } from '../lib/txSigner';
 import { TaskStatus, TaskStatusLabels } from '../types/api';
 
 const fadeUp = {
@@ -108,8 +109,13 @@ export default function TaskDetail() {
   // is the user's too, while `address` is the embedded one.
   const myWallets = new Set([address, embeddedAddress, ...externalAddresses].filter((a): a is string => !!a).map((a) => a.toLowerCase()));
   const isPoster = !!onChain.agent && myWallets.has(onChain.agent.toLowerCase());
+  // The refund also shows when the connected wallet funded the escrow but
+  // isn't linked to the account: the escrow pays back only the wallet that
+  // funded it, and without this such a task (which the backend won't list)
+  // had no way back from the site.
+  const canRefund = isPoster || (refund.canSignAs(onChain.agent) && isDirectSigned(onChain.chain));
   const startRefund = (kind: 'cancel' | 'timeout') =>
-    refund.mutate({ taskId: String(numericTaskId), chain: onChain.chain, poster: onChain.agent, kind });
+    refund.mutate({ taskId: String(numericTaskId), chain: onChain.chain, poster: onChain.agent, kind, linked: isPoster });
   // The unit this task's reward is in: what the backend read from the
   // escrow (symbol + decimals), else the task's chain's settlement token.
   // Not the posting chain's unit — a poster's old 0G task is still in 0G.
@@ -573,7 +579,7 @@ export default function TaskDetail() {
             )}
 
           {/* Poster: Cancel / Timeout actions */}
-          {isPoster && (onChain.status === TaskStatus.Funded || canTimeout) && (
+          {canRefund && (onChain.status === TaskStatus.Funded || canTimeout) && (
             <Panel padding="md" className="mb-6">
               <div className="flex items-center justify-between gap-4 flex-wrap">
                 <div className="min-w-0">
@@ -600,6 +606,11 @@ export default function TaskDetail() {
                   />
                 )}
               </div>
+              {!isPoster && (
+                <div className="mt-3 text-xs text-ink-3 leading-relaxed">
+                  Funded from {truncateAddress(onChain.agent)}, which isn't linked to your account. The refund goes back to that wallet.
+                </div>
+              )}
               {!refund.canSignAs(onChain.agent) && (
                 <div className="mt-3 text-xs text-warn leading-relaxed">
                   Posted from {truncateAddress(onChain.agent)}. Connect that wallet to sign the refund.

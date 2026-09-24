@@ -4,10 +4,10 @@ import { useWallets } from '@privy-io/react-auth';
 import { switchWalletToChain } from '../context/WalletContext';
 import { ARC_CHAIN_CONFIG } from '../config/constants';
 import { getSettlement } from '../config/settlement';
-import { assertRefundTarget, buildCancelTask, buildClaimTimeout, confirmRefund } from '../services/tasks';
+import { assertRefundTarget, buildCancelTask, buildClaimTimeout, confirmRefund, type RefundTx } from '../services/tasks';
 import { isDirectSigned, signAndSendTx } from '../lib/txSigner';
 import { truncateAddress } from '../lib/utils';
-import type { RefundKind } from '../lib/refund';
+import { encodeRefundCall, type RefundKind } from '../lib/refund';
 
 export interface RefundRequest {
   /** The on-chain task id (the refund routes take the id, not the hash). */
@@ -17,6 +17,14 @@ export interface RefundRequest {
   /** The wallet that posted the task (the escrow's `agent`): only it can refund. */
   poster: string;
   kind: RefundKind;
+  /**
+   * False when the funding wallet isn't linked to the account. The backend
+   * builds refunds only for the account's wallets (403 otherwise), so the call
+   * is encoded here instead, and nothing is reported back: such a task was
+   * never listed. Direct-signed chains only (a relay refuses the wallet too).
+   * Defaults to true.
+   */
+  linked?: boolean;
 }
 
 /**
@@ -40,7 +48,7 @@ export function useRefundEscrow() {
     !!poster && wallets.some((w) => w.address.toLowerCase() === poster.toLowerCase());
 
   const mutation = useMutation({
-    mutationFn: async ({ taskId, chain, poster, kind }: RefundRequest) => {
+    mutationFn: async ({ taskId, chain, poster, kind, linked = true }: RefundRequest) => {
       if (!chain) throw new Error("This task's chain is unknown. Reload the page and try again.");
       const wallet = wallets.find((w) => w.address.toLowerCase() === poster.toLowerCase());
       if (!wallet) {
@@ -51,12 +59,20 @@ export function useRefundEscrow() {
         if (wallet.chainId !== `eip155:${chainId}`) await switchWalletToChain(wallet, chainId, ARC_CHAIN_CONFIG);
       }
       const signer = await new ethers.BrowserProvider(await wallet.getEthereumProvider()).getSigner();
-      const built = kind === 'cancel' ? await buildCancelTask(taskId, chain) : await buildClaimTimeout(taskId, chain);
+      let built: RefundTx;
+      if (linked) {
+        built = kind === 'cancel' ? await buildCancelTask(taskId, chain) : await buildClaimTimeout(taskId, chain);
+      } else {
+        if (!isDirectSigned(chain)) {
+          throw new Error(`Link ${truncateAddress(poster)} under Settings → Link wallet to reclaim this escrow.`);
+        }
+        built = { chain, unsignedTx: { to: getSettlement().chains[chain].escrow, data: encodeRefundCall(kind, taskId), from: wallet.address } };
+      }
       // Sign only a tx for this task's chain and escrow.
       const tx = assertRefundTarget(built, chain);
       const sent = await signAndSendTx(signer, tx, undefined, { chain });
       // A relayed user-op has no receipt for the backend to check.
-      if (!sent.userOp) await confirmRefund(taskId, sent.hash, chain).catch(() => {});
+      if (linked && !sent.userOp) await confirmRefund(taskId, sent.hash, chain).catch(() => {});
       return sent;
     },
     onSuccess: () => {

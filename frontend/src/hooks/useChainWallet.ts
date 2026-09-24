@@ -23,6 +23,16 @@ export function useOwnerAddresses(): string {
   return [...new Set([address, embeddedAddress, ...externalAddresses].filter((a): a is string => !!a).map((a) => a.toLowerCase()))].join(',');
 }
 
+/**
+ * The wallets on the signed-in account (the embedded one and any linked
+ * external ones): the only ones the backend counts a payment from. Unlike
+ * useOwnerAddresses this leaves out a connected wallet that isn't linked.
+ */
+export function useAccountWallets(): string[] {
+  const { embeddedAddress, externalAddresses } = useWallet();
+  return [embeddedAddress, ...externalAddresses].filter((a): a is string => !!a).map((a) => a.toLowerCase());
+}
+
 export function useChainIsConnected(): boolean {
   const { address: evmAddress } = useWallet();
   return !!evmAddress;
