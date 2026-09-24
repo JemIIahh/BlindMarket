@@ -106,6 +106,7 @@ contract ValidatorPool is ReentrancyGuard {
     error OnlyEscrow();
     error StakeLocked();
     error TooManyVoters();
+    error InvalidVote();
 
     // ── Constructor ──
 
@@ -186,6 +187,14 @@ contract ValidatorPool is ReentrancyGuard {
      * @param voteFor    Vote.Worker = worker wins, Vote.Agent = agent wins (refund).
      */
     function vote(uint256 disputeId, Vote voteFor) external {
+        // Only a real Worker or Agent vote. Vote.None (0) is a valid ABI value
+        // for the enum, but storing it would leave the AlreadyVoted guard below
+        // open (it tests `!= Vote.None`) while the tally counted it as an Agent
+        // vote, so one validator could vote repeatedly: meet MIN_VOTES alone,
+        // fill all MAX_VOTERS slots, outvote distinct honest validators and be
+        // paid once per voters[] entry. Rejecting None makes every stored vote
+        // mark participation, so each validator holds exactly one entry.
+        if (voteFor != Vote.Worker && voteFor != Vote.Agent) revert InvalidVote();
         Dispute storage d = disputes[disputeId];
         if (d.openedAt == 0) revert DisputeNotFound();
         if (d.finalized) revert AlreadyFinalized();
