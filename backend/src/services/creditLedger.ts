@@ -8,8 +8,12 @@
  * rewinds the indexer checkpoints and deletes every marker written since,
  * while Postgres keeps the credits: the next scan re-credited each ruling.
  * The credits live in the database, so the gate lives there too: one row per
- * task hash, claimed before the credit is written and released only when the
- * credit fails.
+ * task hash. recordWorkerPayout claims it in the same transaction as the
+ * credit (agentStore.creditPayoutOnce), so the row exists exactly when the
+ * credit does and no failure path deletes it: the earlier claim-then-credit
+ * sequence released the row on any error, including one on a re-observation
+ * that never claimed it, and the task was credited again (security audit
+ * run 1, C34).
  *
  * Postgres migration 34 / SQLite migration 16 create the table.
  */
@@ -22,32 +26,40 @@ function usePg(): boolean {
   return Boolean(config.databaseUrl);
 }
 
+/** The claim statement ($1/? = lowercase task hash, chain, lowercase executor).
+ *  Shared with agentStore.creditPayoutOnce, which runs it inside the credit's
+ *  transaction. Takes nothing when a row exists. */
+export const CLAIM_CREDIT_SQL = {
+  pg: `INSERT INTO credited_payouts (task_hash, chain, executor)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (task_hash) DO NOTHING
+       RETURNING task_hash`,
+  sqlite: 'INSERT OR IGNORE INTO credited_payouts (task_hash, chain, executor) VALUES (?, ?, ?)',
+} as const;
+
 /**
- * Claim the credit for `taskHash`. True when this call took it; false when a
- * row already exists (credited before, by any path or backend). Throws on a
- * database failure, so the caller treats it as a failed credit.
+ * Claim the credit for `taskHash` on its own, outside any credit. True when
+ * this call took it; false when a row already exists (credited before, by any
+ * path or backend). Throws on a database failure. recordWorkerPayout does not
+ * use this: it claims inside agentStore.creditPayoutOnce's transaction.
  */
 export async function claimCredit(taskHash: string, chain: TaskChain, executor: string): Promise<boolean> {
   const hash = taskHash.toLowerCase();
   const addr = executor.toLowerCase();
   if (usePg()) {
     const pool = await getPool();
-    const res = await pool.query(
-      `INSERT INTO credited_payouts (task_hash, chain, executor)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (task_hash) DO NOTHING
-       RETURNING task_hash`,
-      [hash, chain, addr],
-    );
+    const res = await pool.query(CLAIM_CREDIT_SQL.pg, [hash, chain, addr]);
     return (res.rowCount ?? 0) > 0;
   }
-  const info = getDb()
-    .prepare('INSERT OR IGNORE INTO credited_payouts (task_hash, chain, executor) VALUES (?, ?, ?)')
-    .run(hash, chain, addr);
+  const info = getDb().prepare(CLAIM_CREDIT_SQL.sqlite).run(hash, chain, addr);
   return Number(info.changes ?? 0) > 0;
 }
 
-/** Give a claim back after the credit it guarded failed, so a retry can credit. */
+/**
+ * Delete a task's claim row, whoever wrote it. Nothing on the credit path
+ * calls this any more: a row stands for a credit that was applied, and
+ * deleting one lets the task be credited again. For operator repair only.
+ */
 export async function releaseCredit(taskHash: string): Promise<void> {
   const hash = taskHash.toLowerCase();
   if (usePg()) {
