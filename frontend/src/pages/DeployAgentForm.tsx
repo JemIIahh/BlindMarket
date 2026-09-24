@@ -19,6 +19,7 @@ import { get, authedPost } from '../lib/api';
 import { providerFor, sendDirectPayment, signAndSendTx } from '../lib/txSigner';
 import { useWallet } from '../context/WalletContext';
 import { useChainAddress } from '../hooks/useChainWallet';
+import { unlinkedSignerError } from '../lib/accountWallet';
 import { getOrCreateExecutorIdentity } from '../lib/executorIdentity';
 import { ARC_CHAIN_CONFIG, ARC_CHAIN_ID, ARC_USDC_ADDRESS, unsetIfZero } from '../config/constants';
 import { CONTRACT_ADDRESSES } from '../config/contractAddresses';
@@ -348,17 +349,18 @@ export default function DeployAgentForm() {
     });
   }
 
+  // A fee from a wallet that isn't on the account is refused by the backend
+  // and would be lost, by either payment method (lib/accountWallet.ts).
+  // Checked before the confirm dialog and again at payment, since the wallet
+  // can switch accounts while the dialog is open.
+  async function unlinkedPayer(signer: JsonRpcSigner): Promise<string | null> {
+    return unlinkedSignerError(await signer.getAddress(), accountWallets, "a deploy fee paid from it wouldn't count");
+  }
+
   /** Pay the fee on Arc: one USDC transfer to the treasury, signed by the wallet. Returns its hash. */
   async function payFeeOnArc(signer: JsonRpcSigner, terms: Extract<DeployFeeTerms, { method: 'transfer' }>, owner: string): Promise<string> {
-    const from = (await signer.getAddress()).toLowerCase();
-    // A fee from a wallet that isn't on the account is refused by the backend
-    // and would be lost. (Skipped while the account's wallets are unknown.)
-    if (accountWallets.length > 0 && !accountWallets.includes(from)) {
-      throw new Error(
-        `The connected wallet ${from} isn't one of your account's wallets, so a fee paid from it wouldn't count. ` +
-        `Switch to ${embeddedAddress ?? accountWallets[0]}, or link this wallet to your account first.`,
-      );
-    }
+    const unlinked = await unlinkedPayer(signer);
+    if (unlinked) throw new Error(unlinked);
     setStatus('paying');
     const data = new Interface(USDC_ABI).encodeFunctionData('transfer', [terms.recipient, BigInt(terms.amountRaw)]);
     // Saved the moment the wallet broadcasts it, before any wait, so no
@@ -388,6 +390,8 @@ export default function DeployAgentForm() {
     // the wallet signs both transactions and pays their gas in USDC. The
     // allowance is the signing wallet's: the page's owner address can be
     // another wallet on the account, whose allowance an approve never moves.
+    const unlinked = await unlinkedPayer(signer);
+    if (unlinked) throw new Error(unlinked);
     const arc = providerFor('arc');
     const from = await signer.getAddress();
     const readAllowance = () => new Contract(ARC_USDC_ADDRESS, USDC_ABI, arc).allowance(from, factoryAddr) as Promise<bigint>;
@@ -438,6 +442,22 @@ export default function DeployAgentForm() {
 
     // An Arc payment no deploy has used yet pays for this one.
     const savedFee = feeTerms.required && feeTerms.method === 'transfer' ? readPendingFee(address) : null;
+
+    if (feeTerms.required && !savedFee) {
+      let unlinked: string | null;
+      try {
+        unlinked = await unlinkedPayer(await new BrowserProvider(walletClient.transport).getSigner());
+      } catch {
+        unlinked = 'Your wallet is not ready. Reconnect it and try again.';
+      }
+      if (unlinked) {
+        setError(unlinked);
+        setErrorCode(null);
+        setStatus('error');
+        submittingRef.current = false;
+        return;
+      }
+    }
 
     // Confirm before spending — not when nothing will be spent.
     if (feeTerms.required && !savedFee) {

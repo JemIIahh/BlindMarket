@@ -27,7 +27,8 @@ import { trackEvent } from '../hooks/useAnalytics';
 import { WORKER_SHARE_PCT, PLATFORM_FEE_PCT } from '../config/constants';
 import { gasIsSettlementToken, getMarketplaceTokenAddress, getPaymentDecimals, getPaymentSymbol, getPostingEscrowAddress, getSettlement, isSettlementChainKey, useSettlement } from '../config/settlement';
 import { useChain } from '../context/ChainContext';
-import { useChainAddress } from '../hooks/useChainWallet';
+import { useAccountWallets, useChainAddress } from '../hooks/useChainWallet';
+import { unlinkedSignerError } from '../lib/accountWallet';
 import { useAuth } from '../context/AuthContext';
 
 // BlindEscrow contract's hard bounds on `duration` (seconds).
@@ -65,6 +66,7 @@ export default function PostTask() {
   const PAYMENT_SYMBOL = getPaymentSymbol();
   const { activeChain } = useChain();
   const address = useChainAddress();
+  const accountWallets = useAccountWallets();
   const { data: walletClient } = useWalletClient();
 
   const navigate = useNavigate();
@@ -164,8 +166,16 @@ export default function PostTask() {
     submittingRef.current = true;
 
     try {
-      setStatus('encrypting');
       setError('');
+      // The browser wallet signs, and it can be set to an account that isn't
+      // this user's (lib/accountWallet.ts): the backend would then refuse to
+      // list the task after it was paid for. Refused here, before anything is
+      // uploaded or spent, and checked again at signing.
+      const signerAddress = await (await new BrowserProvider(walletClient.transport).getSigner()).getAddress();
+      const unlinked = unlinkedSignerError(signerAddress, accountWallets, "a task paid from it couldn't be listed");
+      if (unlinked) throw new Error(unlinked);
+
+      setStatus('encrypting');
 
       // Capabilities are OPTIONAL at post time. Matching ("does this agent have
       // all required caps?") is enforced server-side at accept/bid time, not
@@ -382,7 +392,7 @@ export default function PostTask() {
       try {
         const fd = await chainProvider.getFeeData();
         const feePerUnit = fd.maxFeePerGas ?? fd.gasPrice ?? 0n;
-        const units = await chainProvider.estimateGas({ ...taskJson.unsignedTx, from: address });
+        const units = await chainProvider.estimateGas({ ...taskJson.unsignedTx, from: signerAddress });
         const totalWei = units * feePerUnit;
         let usdc: number;
         if (gasIsSettlementToken(chainKey)) {
@@ -422,17 +432,20 @@ export default function PostTask() {
       const chainInfo = getSettlement().chains[chainKey];
       console.log(`[PostTask] Signing registration TX (${chainInfo.label} escrow, ${chainInfo.relayChain ? 'gas-sponsored via relay' : 'signed by the wallet'})...`);
       const signer = await (new BrowserProvider(walletClient!.transport)).getSigner();
+      if ((await signer.getAddress()).toLowerCase() !== signerAddress.toLowerCase()) {
+        throw new Error('Your wallet switched accounts while posting. Nothing was spent. Post again from the account you want to pay with.');
+      }
 
       // 8a. Approve USDC spend if needed (createTask calls transferFrom)
       // The spender is the escrow createTask pulls from: the tx's own `to`,
       // which POST /tasks built for the posting chain.
       const escrowAddress = taskJson.unsignedTx.to || getPostingEscrowAddress();
-      if (!isNativeToken && address && escrowAddress) {
+      if (!isNativeToken && escrowAddress) {
         const ERC20_ABI = ['function approve(address spender, uint256 amount) returns (bool)', 'function allowance(address owner, address spender) view returns (uint256)'];
         // The posting chain's provider, not the wallet's: the wallet may be
         // on another network, where this read fails to decode.
         const readContract = new Contract(TOKEN, ERC20_ABI, chainProvider);
-        const currentAllowance = await readContract.allowance(address, escrowAddress);
+        const currentAllowance = await readContract.allowance(signerAddress, escrowAddress);
         if (currentAllowance < BigInt(amountBase)) {
           console.log(`[PostTask] Approving USDC spend: ${amountBase} for ${escrowAddress}`);
           const approveTx = await readContract.approve.populateTransaction(escrowAddress, BigInt(amountBase));

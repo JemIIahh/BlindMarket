@@ -10,7 +10,8 @@ import { formatPaymentAmount } from '../lib/paymentUnits';
 import { authedGet, authedPost } from '../lib/api';
 import { getMarketplaceTokenAddress } from '../config/settlement';
 import { useChain } from '../context/ChainContext';
-import { useChainAddress } from '../hooks/useChainWallet';
+import { useAccountWallets, useChainAddress } from '../hooks/useChainWallet';
+import { unlinkedSignerError } from '../lib/accountWallet';
 import type { AgentService } from '../services/marketplace';
 
 /**
@@ -48,6 +49,7 @@ export default function UseServiceModal({
 }) {
   const { activeChain } = useChain();
   const address = useChainAddress();
+  const accountWallets = useAccountWallets();
   const { data: walletClient } = useWalletClient();
 
   const [prompt, setPrompt] = useState('');
@@ -127,6 +129,12 @@ export default function UseServiceModal({
     submittingRef.current = true;
     setError('');
     try {
+      // A call paid from a wallet that isn't on this account is refused at
+      // listing, after the escrow is funded (lib/accountWallet.ts).
+      const signer = await new BrowserProvider(walletClient.transport).getSigner();
+      const unlinked = unlinkedSignerError(await signer.getAddress(), accountWallets, "a call paid from it couldn't be listed");
+      if (unlinked) throw new Error(unlinked);
+
       setPhase('encrypting');
       const token = (await getIdentityToken()) || (await getAccessToken());
       if (!token) throw new Error('No auth token — try logging out and back in.');
@@ -176,7 +184,6 @@ export default function UseServiceModal({
       //    escrow's transferFrom, so approve it first and send no native value;
       //    only a native-token price travels as the tx value.
       setPhase('signing');
-      const signer = await new BrowserProvider(walletClient.transport).getSigner();
       const price = BigInt(service.price_raw);
       const isNativeToken = /^0x0{40}$/i.test(paymentToken);
       if (!isNativeToken) {

@@ -33,7 +33,7 @@ let backoffUntilMs = 0;
 const PRIVY_BACKOFF_MS = 30_000;
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const { ready, authenticated, login, logout } = usePrivy();
+  const { ready, authenticated, login, logout, user } = usePrivy();
   const { address } = useAccount();
   const trackedRef = useRef(false);
   // Flips only AFTER the effect below has installed the token getter. A query
@@ -112,6 +112,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
     setTokenGetterReady(authenticated);
   }, [authenticated]);
+
+  // The backend knows this user's wallets from the identity token's
+  // linked_accounts. A wallet linked or unlinked mid-session would stay
+  // invisible to it until the cached token expired (up to an hour), so a task
+  // paid from a just-linked wallet could still not be listed. Drop the cache
+  // when the linked wallets change; the next request asks Privy for a token.
+  const linkedWallets = (user?.linkedAccounts ?? [])
+    .flatMap((a) => (a.type === 'wallet' ? [a.address.toLowerCase()] : []))
+    .sort()
+    .join(',');
+  const seenLinked = useRef(linkedWallets);
+  useEffect(() => {
+    if (seenLinked.current === linkedWallets) return;
+    seenLinked.current = linkedWallets;
+    cachedToken = null;
+    cachedExp = 0;
+  }, [linkedWallets]);
 
   // Fire analytics event the first time the user authenticates this session.
   useEffect(() => {
