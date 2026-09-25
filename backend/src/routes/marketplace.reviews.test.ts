@@ -27,6 +27,10 @@ vi.mock('../middleware/auth.js', () => ({
     req.user = { address: req.headers['x-test-address'] };
     next();
   },
+  optionalAuth: (req: any, _res: any, next: any) => {
+    if (req.headers['x-test-address']) req.user = { address: req.headers['x-test-address'] };
+    next();
+  },
   requireFounder: (_req: any, _res: any, next: any) => next(),
 }));
 vi.mock('../services/redis.js', () => ({

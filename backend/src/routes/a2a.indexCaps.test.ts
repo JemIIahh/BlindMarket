@@ -96,7 +96,7 @@ const body = (requiredCapabilities: string[]) => ({
   txHash: '0x' + '11'.repeat(32),
   taskHash: TASK,
   verificationMode: 'manual',
-  rootHash: 'root-1',
+  rootHash: '0x' + 'cd'.repeat(32),
   privacy: 'public',
   publicBrief: 'Clean up this CSV',
   targetExecutor: TARGET,
