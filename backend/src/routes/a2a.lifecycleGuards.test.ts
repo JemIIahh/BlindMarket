@@ -109,6 +109,7 @@ import * as escrowService from '../services/escrow.js';
 import { baseProvider } from '../services/chain.js';
 import { settleAssignment, settleVerification } from '../services/a2aSettlement.js';
 import { recordWorkerDispute } from '../services/workerPayout.js';
+import { autoVerify } from '../services/autoVerify.js';
 import { emitTaskAvailable, hasAgentSocket } from '../services/socket.js';
 import { isAlive } from '../services/redis.js';
 import { loadAgentByWallet } from '../services/deployedAgentStore.js';
@@ -214,6 +215,8 @@ describe('retry round not yet on chain', () => {
     expect(res.status).toBe(200);
     expect(res.body.data.reconciled).toBe(true);
     expect(recordWorkerDispute).toHaveBeenCalledTimes(1);
+    // Keyed on the settled round, like every other observer of it (C21).
+    expect(vi.mocked(recordWorkerDispute).mock.calls[0][2]).toMatchObject({ taskId: '7', attempt: 2 });
   });
 
   it('/verify (manual): chain still shows round-1 failure → 503, nothing settled or written', async () => {
@@ -232,6 +235,51 @@ describe('retry round not yet on chain', () => {
     expect(settleVerification).not.toHaveBeenCalled();
     expect(a2aStore.updateState).not.toHaveBeenCalled();
     expect(recordWorkerDispute).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Every observer of a failed round names it the same way, chain + on-chain id
+ * + submissionAttempts at settlement, so recordWorkerDispute records it once
+ * (security audit run 1, C21; /submissions/confirm derives the same key).
+ */
+describe('failed rounds are recorded under their round', () => {
+  it('/finalize (auto) failing autoVerify passes the round it settled', async () => {
+    vi.mocked(a2aStore.getMeta).mockResolvedValue({
+      taskId: TASK, posterAddress: POSTER, verificationMode: 'auto', verificationCriteria: { min_length: 1 },
+    } as any);
+    vi.mocked(a2aStore.getState).mockResolvedValue({
+      status: 'submitted', executorAddress: EXEC, resultData: { output: 'x' }, submissionRound: 3,
+    } as any);
+    vi.mocked(autoVerify).mockReturnValueOnce({ passed: false, reasons: ['too short'] } as any);
+    vi.mocked(escrowService.getTaskOn).mockResolvedValue(onChainTask({ status: 2, submissionAttempts: 3 }) as any);
+
+    const res = await post(`/tasks/${TASK}/finalize`, EXEC);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe('failed');
+    expect(recordWorkerDispute).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(recordWorkerDispute).mock.calls[0].slice(0, 3)).toEqual([
+      TASK, EXEC, expect.objectContaining({ taskId: '7', attempt: 3 }),
+    ]);
+  });
+
+  it('/verdict (agent) recording a failure passes the round it settled', async () => {
+    const VERIFIER = '0x7e7e000000000000000000000000000000000003';
+    vi.mocked(a2aStore.getMeta).mockResolvedValue({
+      taskId: TASK, posterAddress: POSTER, verificationMode: 'agent', verifierAddress: VERIFIER,
+    } as any);
+    vi.mocked(a2aStore.getState).mockResolvedValue({
+      status: 'awaiting_verification', executorAddress: EXEC, resultData: { output: 'x' }, submissionRound: 2,
+    } as any);
+    vi.mocked(escrowService.getTaskOn).mockResolvedValue(onChainTask({ status: 3, submissionAttempts: 2 }) as any);
+
+    const res = await post(`/tasks/${TASK}/verdict`, VERIFIER, { passed: false, reasons: ['wrong answer'] });
+
+    expect(res.status).toBe(200);
+    expect(vi.mocked(recordWorkerDispute).mock.calls[0].slice(0, 3)).toEqual([
+      TASK, EXEC, expect.objectContaining({ taskId: '7', attempt: 2 }),
+    ]);
   });
 });
 

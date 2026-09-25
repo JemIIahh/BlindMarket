@@ -18,7 +18,7 @@ import * as semanticMatch from './semanticMatch.js';
 import * as semanticProof from './semanticProof.js';
 import { redis } from './redis.js';
 import { payoutCurrency } from './settlementUnits.js';
-import { claimCredit, releaseCredit } from './creditLedger.js';
+import { isCredited } from './creditLedger.js';
 import type { TaskChain } from './taskChain.js';
 
 // Earned-badge threshold: N settled completions per (agent, capability) with a
@@ -63,11 +63,13 @@ export async function getFeeBps(chain: TaskChain): Promise<number> {
  * while totalEarnedRaw was only written if a SECOND, internal getTaskIdByHash
  * happened to resolve.
  *
- * IDEMPOTENT per task: a Redis NX marker (a2a:credited:<taskHash>) guarantees a
- * task credits its worker at most once, no matter how many paths observe the
+ * IDEMPOTENT per task: the task's credited_payouts row, claimed in the same
+ * transaction as the credit (agentStore.creditPayoutOnce), guarantees a task
+ * credits its worker at most once, no matter how many paths observe the
  * settlement (a /finalize retry after a lost response, the /verdict route, the
- * DisputeResolved listener). Without it, settle-then-credit retries and the
- * event listener could each credit the same payout.
+ * DisputeResolved listener, /submissions/confirm). A Redis NX marker
+ * (a2a:credited:<taskHash>) in front of it skips the database for the common
+ * repeat.
  *
  * A task escrowed in a token BlindMarket doesn't settle in (or in a unit no
  * earnings total holds) is not credited at all: it is logged, parked under
@@ -110,25 +112,27 @@ export async function recordWorkerPayout(
     }
     return;
   }
+  // Whether THIS call wrote the marker: true when its SET NX took it, null
+  // when the SET failed and the marker's state is unknown. The catch undoes
+  // only what this call did (security audit run 1, C34).
+  let markerSet: boolean | null = false;
   try {
-    // At-most-once gate. NX returns null when the key already exists — some
-    // other path already credited this task; nothing to do. On any FAILURE
-    // below the marker is released again (see catch / early return), so a
-    // transient blip can't permanently burn the credit — the next observer
-    // (finalize retry, /verdict, DisputeResolved listener) retries it.
-    const first = await redis.set(creditedKey, executorAddr.toLowerCase(), 'NX');
+    // Fast path. NX returns null when the key already exists — some other
+    // path already credited this task; nothing to do. The marker is only a
+    // cache in front of the credited_payouts row, which is the authority, so
+    // a SET that errors (a dropped connection, OOM) falls through to the
+    // database claim instead of failing the credit.
+    let first: string | null;
+    try {
+      first = await redis.set(creditedKey, executorAddr.toLowerCase(), 'NX');
+      markerSet = first !== null;
+    } catch (markerErr) {
+      console.warn(`[a2a] credited marker unavailable for ${taskHash.slice(0, 10)}…, using the database claim:`, (markerErr as Error).message);
+      first = 'unknown';
+      markerSet = null;
+    }
     if (first === null) {
       console.log(`[a2a] payout for ${taskHash.slice(0, 10)}… already credited — skipping duplicate`);
-      return;
-    }
-    // Durable gate behind the marker: the credits live in the database, so
-    // the record of which tasks were credited lives there too
-    // (creditLedger.ts). A Redis snapshot restore deletes the markers written
-    // since the snapshot while the credits stay; this row does not go away.
-    // A database failure here throws into the catch below, which releases
-    // both, so the credit stays retryable.
-    if (!(await claimCredit(taskHash, settlement.chain, executorAddr))) {
-      console.log(`[a2a] payout for ${taskHash.slice(0, 10)}… already credited (database) — skipping duplicate`);
       return;
     }
 
@@ -148,19 +152,28 @@ export async function recordWorkerPayout(
 
     // tasksCompleted, reputation, and the earnings total move as one unit —
     // the task counter is never advanced without crediting the matching
-    // earnings.
-    if (!(await agentStore.creditPayout(executorAddr, unit, workerShare))) {
-      // Executor not registered (yet) — release the marker so a later
-      // observation can credit once the registration exists.
+    // earnings — and in the same transaction as the task's credited_payouts
+    // row, the durable gate: a Redis snapshot restore deletes the markers
+    // written since the snapshot while the credits stay; this row does not.
+    const outcome = await agentStore.creditPayoutOnce(
+      { taskHash, chain: settlement.chain }, executorAddr, unit, workerShare,
+    );
+    if (outcome === 'duplicate') {
+      console.log(`[a2a] payout for ${taskHash.slice(0, 10)}… already credited (database) — skipping duplicate`);
+      return;
+    }
+    if (outcome === 'unregistered') {
+      // Executor not registered (yet). Rolled back, so no row stands behind
+      // the marker: drop it so a later observation can credit once the
+      // registration exists.
       console.warn(`[a2a] payout for ${taskHash.slice(0, 10)}… not credited: executor ${executorAddr} is not registered`);
-      await releaseCredit(taskHash).catch(() => {});
-      await redis.del(creditedKey).catch(() => {});
+      if (markerSet !== false) await redis.del(creditedKey).catch(() => {});
       return;
     }
 
     // rent-your-agent: bump the rented service's sold_count in the SAME
     // at-most-once block so a finalize retry can't double-count. Own try/catch —
-    // a bump failure must never release the credit marker (which would re-credit).
+    // a bump failure must not reach the catch below as a failed credit.
     if (opts.serviceId !== undefined) {
       try {
         await serviceStore.incrementSoldCount(opts.serviceId);
@@ -244,13 +257,18 @@ export async function recordWorkerPayout(
     // completeVerification → BlindReputation.rate() fires.
   } catch (err) {
     console.error(`[a2a] recordWorkerPayout failed for ${taskHash.slice(0, 10)}… executor=${executorAddr}:`, (err as Error).message);
-    // Release the at-most-once marker so the credit stays retryable — without
-    // this a single agentStore blip would make the payout permanently
-    // uncreditable from EVERY path while the marker blocks all retries.
-    // Both gates go: the database row was claimed before the credit was
-    // attempted (or its claim is what failed).
-    await releaseCredit(taskHash).catch(() => {});
-    await redis.del(creditedKey).catch(() => {});
+    // The claim and the credit are one transaction, so a failure left no row
+    // of this call's to give back, and a row an earlier credit wrote is never
+    // deleted. Releasing both gates unconditionally here is what let a
+    // re-observation of an already-credited task that hit a Redis or database
+    // fault delete the earlier credit's gates, so the next observation
+    // credited it again (security audit run 1, C34). Only the marker can need
+    // undoing, so a blip doesn't leave it blocking every retry: drop it when
+    // this call set it; when the SET failed and its state is unknown, drop it
+    // only if no credit row stands behind it (keep it if that check fails).
+    if (markerSet === true || (markerSet === null && !(await isCredited(taskHash).catch(() => true)))) {
+      await redis.del(creditedKey).catch(() => {});
+    }
     // Callers with no re-observation path (the DisputeResolved listener) pass
     // rethrow:true so the failure aborts the tick BEFORE its checkpoint advances
     // and the event is re-processed — otherwise a transient blip means the worker
@@ -261,14 +279,47 @@ export async function recordWorkerPayout(
 }
 
 /**
+ * The failed round a dispute is for: the on-chain task and its
+ * submissionAttempts at settlement (completeVerification(false) leaves the
+ * count unchanged and a retry's submitEvidence bumps it, so it names exactly
+ * one round), or 'ruling' for an admin DisputeResolved ruling.
+ */
+export interface FailedRound {
+  chain: TaskChain;
+  taskId: string;
+  attempt: number | 'ruling';
+}
+
+/**
  * Record a dispute against an executor. Decrements the Redis reputation counter
  * and records the dispute in the Neon PostgreSQL reputation system. On-chain
  * dispute is also recorded by BlindEscrow when completeVerification →
  * BlindReputation.recordDispute() fires.
+ *
+ * At most once per failed round, however many observers see it: returns true
+ * when this call recorded the dispute, false when the round was already
+ * recorded (or recording failed without rethrow).
  * Non-blocking — logged on failure, caller continues.
  */
-export async function recordWorkerDispute(taskHash: string, executorAddr: string, opts: { rethrow?: boolean } = {}): Promise<void> {
+export async function recordWorkerDispute(
+  taskHash: string,
+  executorAddr: string,
+  round: FailedRound,
+  opts: { rethrow?: boolean } = {},
+): Promise<boolean> {
+  // The failed-path twin of the credit gate. /finalize, /verify, /verdict and
+  // /submissions/confirm each recorded the round they observed, so replaying a
+  // round's settlement tx to /submissions/confirm docked the executor a second
+  // time for one on-chain failure (security audit run 1, C21). Keyed on the
+  // round, not the task hash: rounds 2 and 3 are disputes of their own.
+  const roundKey = `a2a:dispute-round:${round.chain}:${round.taskId}:${round.attempt}`;
+  let claimed = false;
   try {
+    if ((await redis.set(roundKey, executorAddr.toLowerCase(), 'NX')) === null) {
+      console.log(`[a2a] dispute for ${taskHash.slice(0, 10)}… round ${round.attempt} already recorded — skipping duplicate`);
+      return false;
+    }
+    claimed = true;
     await agentStore.adjustReputation(executorAddr, -10);
     await reputationDecay.recordDispute(executorAddr, taskHash);
     // Per-skill proof: a dispute counts against the task's capability tags
@@ -290,7 +341,11 @@ export async function recordWorkerDispute(taskHash: string, executorAddr: string
     })();
     // Shadow measurement: task failed/disputed. Best-effort.
     void semanticMatch.recordShadowOutcome(taskHash, { settled: false });
+    return true;
   } catch (err) {
+    // Give the round back so a later observer can record it, but only if
+    // this call took it.
+    if (claimed) await redis.del(roundKey).catch(() => {});
     console.warn(
       `[a2a] recordWorkerDispute failed for ${taskHash.slice(0, 10)}… executor=${executorAddr}:`,
       (err as Error).message,
@@ -298,5 +353,6 @@ export async function recordWorkerDispute(taskHash: string, executorAddr: string
     // Listener path (DisputeResolved) rethrows so its NX marker is released and
     // the tick retries; the routes swallow-and-continue as before.
     if (opts.rethrow) throw err;
+    return false;
   }
 }

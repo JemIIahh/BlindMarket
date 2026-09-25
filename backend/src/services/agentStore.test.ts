@@ -15,14 +15,14 @@ import type { AgentExecutor } from '../types.js';
 const { db, cfg, pool } = vi.hoisted(() => ({
   db: { current: null as unknown as Database.Database },
   cfg: { databaseUrl: '' },
-  pool: { query: vi.fn() },
+  pool: { query: vi.fn(), connect: vi.fn() },
 }));
 
 vi.mock('../config.js', () => ({ config: cfg }));
 vi.mock('./database.js', () => ({ getDb: () => db.current }));
 vi.mock('./neonDb.js', () => ({ getPool: async () => pool }));
 
-const { registerAgent, creditPayout, adjustReputation, getAgent } = await import('./agentStore.js');
+const { registerAgent, creditPayout, creditPayoutOnce, adjustReputation, getAgent } = await import('./agentStore.js');
 
 const ADDR = '0xAbCd000000000000000000000000000000000001';
 const ONE_0G = 10n ** 18n;
@@ -64,6 +64,12 @@ beforeEach(() => {
     );
     ALTER TABLE agent_executors ADD COLUMN total_earned_usdc_raw TEXT NOT NULL DEFAULT '0';
     ALTER TABLE agent_executors ADD COLUMN supported_chains TEXT;
+    CREATE TABLE credited_payouts (
+      task_hash TEXT PRIMARY KEY,
+      chain TEXT NOT NULL,
+      executor TEXT NOT NULL,
+      credited_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 });
 
@@ -148,6 +154,83 @@ describe('creditPayout', () => {
     await registerAgent(bootRegistration());
     await expect(creditPayout(ADDR, { symbol: 'USDC', decimals: 18 }, 1n)).rejects.toThrow(/USDC with 18 decimals/);
     expect(await getAgent(ADDR)).toMatchObject({ tasksCompleted: 0, totalEarnedUsdcRaw: '0' });
+  });
+});
+
+/**
+ * creditPayoutOnce claims the task's credited_payouts row and applies the
+ * credit in one transaction, so a failure leaves neither and no path ever
+ * deletes a claim an earlier credit wrote (security audit run 1, C34).
+ */
+describe('creditPayoutOnce', () => {
+  const TASK = '0x' + 'ab'.repeat(32);
+  const claims = () => db.current.prepare('SELECT task_hash, chain, executor FROM credited_payouts').all();
+
+  it('credits a task once, and reports a repeat as a duplicate without touching the counters', async () => {
+    await registerAgent(bootRegistration());
+    expect(await creditPayoutOnce({ taskHash: TASK.toUpperCase().replace('0X', '0x'), chain: 'arc' }, ADDR, USDC, 4_500_000n)).toBe('credited');
+    expect(await creditPayoutOnce({ taskHash: TASK, chain: 'arc' }, ADDR, USDC, 4_500_000n)).toBe('duplicate');
+    expect(await getAgent(ADDR)).toMatchObject({ tasksCompleted: 1, reputation: 51, totalEarnedUsdcRaw: '4500000' });
+    expect(claims()).toEqual([{ task_hash: TASK, chain: 'arc', executor: ADDR.toLowerCase() }]);
+  });
+
+  it('writes no claim for an executor that does not exist', async () => {
+    expect(await creditPayoutOnce({ taskHash: TASK, chain: 'arc' }, ADDR, USDC, 1n)).toBe('unregistered');
+    expect(claims()).toEqual([]);
+  });
+
+  it('rolls the claim back when the credit fails, so a retry can credit', async () => {
+    await registerAgent(bootRegistration());
+    db.current.exec(`CREATE TRIGGER fail_credit BEFORE UPDATE ON agent_executors
+      BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;`);
+    await expect(creditPayoutOnce({ taskHash: TASK, chain: 'arc' }, ADDR, USDC, 1n)).rejects.toThrow('disk I/O error');
+    expect(claims()).toEqual([]);
+    db.current.exec('DROP TRIGGER fail_credit');
+    expect(await creditPayoutOnce({ taskHash: TASK, chain: 'arc' }, ADDR, USDC, 1n)).toBe('credited');
+  });
+
+  describe('on Postgres', () => {
+    const client = { query: vi.fn(), release: vi.fn() };
+    const sent = () => client.query.mock.calls.map(([sql]) => String(sql).trim().split(/\s+/).slice(0, 3).join(' '));
+
+    beforeEach(() => {
+      cfg.databaseUrl = 'postgres://test';
+      client.query.mockReset().mockResolvedValue({ rowCount: 1, rows: [] });
+      client.release.mockReset();
+      pool.connect.mockReset().mockResolvedValue(client);
+    });
+    afterEach(() => { cfg.databaseUrl = ''; });
+
+    it('claims and credits between BEGIN and COMMIT on one connection', async () => {
+      expect(await creditPayoutOnce({ taskHash: TASK, chain: 'base' }, ADDR, USDC, 4_500_000n)).toBe('credited');
+      expect(sent()).toEqual(['BEGIN', 'INSERT INTO credited_payouts', 'UPDATE agent_executors SET', 'COMMIT']);
+      expect(client.query.mock.calls[1][1]).toEqual([TASK, 'base', ADDR.toLowerCase()]);
+      expect(client.query.mock.calls[2][1]).toEqual([ADDR.toLowerCase(), '4500000']);
+      expect(client.release).toHaveBeenCalledTimes(1);
+    });
+
+    it('rolls back without crediting when the task is already claimed', async () => {
+      client.query.mockImplementation(async (sql: string) => ({ rowCount: sql.includes('credited_payouts') ? 0 : 1, rows: [] }));
+      expect(await creditPayoutOnce({ taskHash: TASK, chain: 'base' }, ADDR, USDC, 1n)).toBe('duplicate');
+      expect(sent()).toEqual(['BEGIN', 'INSERT INTO credited_payouts', 'ROLLBACK']);
+    });
+
+    it('rolls the claim back when the executor is missing', async () => {
+      client.query.mockImplementation(async (sql: string) => ({ rowCount: sql.includes('agent_executors') ? 0 : 1, rows: [] }));
+      expect(await creditPayoutOnce({ taskHash: TASK, chain: 'base' }, ADDR, USDC, 1n)).toBe('unregistered');
+      expect(sent()).toEqual(['BEGIN', 'INSERT INTO credited_payouts', 'UPDATE agent_executors SET', 'ROLLBACK']);
+    });
+
+    it('rolls back and rethrows when the credit fails, deleting nothing', async () => {
+      client.query.mockImplementation(async (sql: string) => {
+        if (sql.includes('agent_executors')) throw new Error('Connection terminated unexpectedly');
+        return { rowCount: 1, rows: [] };
+      });
+      await expect(creditPayoutOnce({ taskHash: TASK, chain: 'base' }, ADDR, USDC, 1n)).rejects.toThrow('Connection terminated');
+      expect(sent()).toEqual(['BEGIN', 'INSERT INTO credited_payouts', 'UPDATE agent_executors SET', 'ROLLBACK']);
+      expect(client.query.mock.calls.some(([sql]) => /DELETE/i.test(String(sql)))).toBe(false);
+      expect(client.release).toHaveBeenCalledTimes(1);
+    });
   });
 });
 

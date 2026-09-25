@@ -782,6 +782,49 @@ const migrations: Array<{ id: number; name: string; sql: string; when?: () => bo
        WHERE supported_chains <@ ARRAY['0g']::TEXT[];
     `,
   },
+  {
+    id: 37,
+    name: 'agent_reviews_canonical_task_id',
+    // One review per task per poster, however the task hash is spelled.
+    // POST /marketplace/reviews stored the id as sent while its gate read the
+    // task case-insensitively, so each re-cased spelling of one hash added a
+    // review (security audit run 1, C12). Keeps the earliest row of each
+    // (task, reviewer), lowercases task_id (reviewStore now writes it
+    // lowercase), and enforces it in the database. A data fix: not re-run.
+    sql: `
+      DELETE FROM agent_reviews a USING agent_reviews b
+       WHERE LOWER(a.task_id) = LOWER(b.task_id)
+         AND a.reviewer_address = b.reviewer_address
+         AND a.id > b.id;
+      UPDATE agent_reviews SET task_id = LOWER(task_id) WHERE task_id <> LOWER(task_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_reviews_task_reviewer_lower
+        ON agent_reviews (LOWER(task_id), reviewer_address);
+    `,
+  },
+  {
+    id: 38,
+    name: 'lowercase_reputation_addresses',
+    // reputationDecay keyed rows by the caller's casing: settlement wrote the
+    // EIP-55 principal of hosted workers and chain reads, while the ranker read
+    // the lowercase address and saw none of it (security audit run 1, C31).
+    // It now lowercases every address; this merges the rows already split by
+    // case under the lowercase key (sums the counters, keeps the latest
+    // last_task_at), deletes the mixed-case rows and lowercases the event log.
+    // A re-run finds nothing to merge, but it is a data fix: applied once.
+    sql: `
+      INSERT INTO reputation_history (address, raw_score, tasks_completed, disputes, last_task_at)
+      SELECT LOWER(address), SUM(raw_score), SUM(tasks_completed), SUM(disputes), MAX(last_task_at)
+        FROM reputation_history
+       GROUP BY LOWER(address)
+      ON CONFLICT (address) DO UPDATE SET
+        raw_score = EXCLUDED.raw_score,
+        tasks_completed = EXCLUDED.tasks_completed,
+        disputes = EXCLUDED.disputes,
+        last_task_at = EXCLUDED.last_task_at;
+      DELETE FROM reputation_history WHERE address <> LOWER(address);
+      UPDATE reputation_events SET address = LOWER(address) WHERE address <> LOWER(address);
+    `,
+  },
 ];
 
 /**

@@ -116,8 +116,12 @@ const indexTaskSchema = z.object({
     .string()
     .regex(/^0x[0-9a-fA-F]{40,66}$/, 'verifierAddress must be a 0x-prefixed hex string')
     .optional(),
+  // Bounded and de-duplicated like the registration lists: each entry is a
+  // per-skill proof credit at settlement (security audit run 1, C13).
   requiredCapabilities: z
     .array(z.enum(AGENT_CAPABILITIES as unknown as [string, ...string[]]))
+    .max(20)
+    .transform((caps) => [...new Set(caps)])
     .optional(),
   rootHash: storageIdSchema.optional(),
   wrappedKeys: z
@@ -2538,7 +2542,8 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
       }
       await a2aStore.updateState(taskHash, { status: reconciledStatus, verificationResult: reconciled });
       if (!settledPass) {
-        await recordWorkerDispute(taskHash, address);
+        // Keyed on the round, shared with every observer of it (security audit run 1, C21).
+        await recordWorkerDispute(taskHash, address, { chain: ocIdChain, taskId: ocId, attempt: onChainTask.submissionAttempts });
       }
       // Diary: completed (+ review nudge) or failed, poster + worker.
       void notifyLifecycle(taskHash, settledPass ? 'completed' : 'failed');
@@ -2590,7 +2595,9 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
     });
 
     if (!verificationResult.passed) {
-      await recordWorkerDispute(taskHash, address);
+      // completeVerification(false) leaves submissionAttempts as read above,
+      // so it names this round for every observer (security audit run 1, C21).
+      await recordWorkerDispute(taskHash, address, { chain: ocIdChain, taskId: ocId, attempt: onChainTask.submissionAttempts });
     }
 
     // Diary: completed (+ review nudge) or failed, poster + worker.
@@ -2727,7 +2734,8 @@ a2aRouter.post('/tasks/:id/verify', requireAuth, async (req: AuthRequest, res, n
     });
 
     if (!passed && state.executorAddress) {
-      await recordWorkerDispute(taskHash, state.executorAddress);
+      // One dispute per failed round across observers (security audit run 1, C21).
+      await recordWorkerDispute(taskHash, state.executorAddress, { chain: ocIdChain, taskId: ocId, attempt: onChainTask.submissionAttempts });
     }
 
     // Diary: completed (+ review nudge) or failed, poster + worker.
@@ -2889,7 +2897,8 @@ a2aRouter.post('/tasks/:id/verdict', requireAuth, async (req: AuthRequest, res, 
     await a2aStore.updateState(taskHash, { status: newStatus, verificationResult });
 
     if (!passed && state.executorAddress) {
-      await recordWorkerDispute(taskHash, state.executorAddress);
+      // One dispute per failed round across observers (security audit run 1, C21).
+      await recordWorkerDispute(taskHash, state.executorAddress, { chain: ocIdChain, taskId: ocId, attempt: onChainTask.submissionAttempts });
     }
 
     // Diary: completed (+ review nudge) or failed, poster + worker.
