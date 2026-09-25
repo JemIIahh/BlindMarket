@@ -69,12 +69,11 @@ const verifyLimiter = createUserRateLimiter(config.verifyRatePerMin);
  * declared capabilities. Only a task the poster explicitly marked public has a
  * plaintext brief to include, and only then is it included.
  *
- * "Authoritative" here means the CALLER of this route cannot forge it — not
- * that it is immutable. POST /a2a/tasks/index is deliberately re-runnable and
- * overwrites verificationCriteria / requiredCapabilities / routingSummary from
- * its body with no task-state gate (only `privacy` is pinned), so the on-chain
- * creator can still rewrite the rubric after evidence is submitted. Closing
- * that needs a state gate on re-index, which is out of scope here.
+ * "Authoritative" here means the CALLER of this route cannot forge it. The
+ * poster can't rewrite it after listing either: POST /a2a/tasks/index is
+ * re-runnable, but it refuses (TERMS_IMMUTABLE) a re-index that changes
+ * verificationCriteria, requiredCapabilities, routingSummary, publicBrief or
+ * the verification mode (services/taskTerms.ts).
  *
  * routingSummary is included knowingly: types.ts documents it as a routing
  * hint, not an acceptance criterion, and "need a Python dev" is a weak

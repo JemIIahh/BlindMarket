@@ -19,6 +19,7 @@ export interface AgentDetails {
   capabilities?: string[];
   skills?: InstalledSkillMeta[];
   minReward?: string;
+  verifierEnabled?: boolean;
   apiKeyHint?: string | null;
   reputation?: { score: number; avgScore: number; tasksCompleted: number; disputes: number };
   decayedReputation?: { rawScore: number; decayedScore: number; tasksCompleted: number; disputes: number };

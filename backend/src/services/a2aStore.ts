@@ -1,5 +1,5 @@
 import { redis } from './redis.js';
-import type { A2ATaskMeta, A2ATaskState, AgentCapability } from '../types.js';
+import type { A2ATaskMeta, A2ATaskState, AgentCapability, VerificationCriteria } from '../types.js';
 import {
   ACCEPT_LOCK_TTL_S,
   ATTEMPT_STREAM_TTL_S,
@@ -652,13 +652,28 @@ export async function browseAgentTasks(
  *  before that point needs them, and returning them publicly hands the whole
  *  key-wrap graph to any unauthenticated GET. hasEncryptedBrief preserves the
  *  one signal discovery actually used (does this task carry a brief at all). */
-export type PublicTaskMeta = Omit<A2ATaskMeta, 'wrappedKeys' | 'keyCustodyBlob' | 'rootHash'> & {
+export type PublicTaskMeta = Omit<A2ATaskMeta, 'wrappedKeys' | 'keyCustodyBlob' | 'rootHash' | 'verificationCriteria'> & {
   hasEncryptedBrief: boolean;
   rootHash?: string;
+  verificationCriteria?: PublicCriteria;
 };
 
+/** Auto-verify criteria as anyone but the poster sees them. expected_answer is
+ *  the payout check's answer key: publishing it let any executor copy it and
+ *  pass (security audit run 1, C08). A flag says one exists, so an executor
+ *  still knows to give a short, exact answer. */
+export type PublicCriteria = Omit<VerificationCriteria, 'expected_answer'> & { has_expected_answer?: true };
+
+export function projectCriteria(criteria: VerificationCriteria | undefined): PublicCriteria | undefined {
+  if (!criteria) return undefined;
+  const { expected_answer, ...rest } = criteria;
+  return expected_answer?.trim() ? { ...rest, has_expected_answer: true } : rest;
+}
+
 export function projectPublicMeta(meta: A2ATaskMeta): PublicTaskMeta {
-  const { wrappedKeys: _wrappedKeys, keyCustodyBlob: _keyCustodyBlob, rootHash, ...pub } = meta;
+  const { wrappedKeys: _wrappedKeys, keyCustodyBlob: _keyCustodyBlob, rootHash, verificationCriteria, ...pub } = meta;
+  const criteria = projectCriteria(verificationCriteria);
+  if (criteria) Object.assign(pub, { verificationCriteria: criteria });
   // A PUBLIC task's brief is meant to be read: keep the storage pointer (the
   // blob is plaintext by definition — key material can't exist on these
   // rows, enforced at /tasks/index). Private tasks keep rootHash stripped:
@@ -675,18 +690,26 @@ export function projectPublicMeta(meta: A2ATaskMeta): PublicTaskMeta {
  *  resultData is the executor's plaintext deliverable — both are for
  *  authenticated viewers only. Poster/worker surfaces serve raw state
  *  (/a2a/tasks/posted, self /executions), and REST GET /tasks/:id
- *  re-attaches resultData after its optionalAuth poster/worker check. */
+ *  re-attaches resultData after its optionalAuth poster/worker check.
+ *
+ *  On a task that isn't public, the verdict is cut to passed and score. Its
+ *  reasons, breakdown and errors are written from the decrypted brief and the
+ *  deliverable (a verifier agent quotes both), so they are as private as
+ *  resultData and are re-attached wherever it is (security audit run 1, C09).
+ *  Without the meta the task is treated as private. */
 export type PublicTaskState = Omit<A2ATaskState, 'assignError' | 'verifyError' | 'resultData'>;
 
-export function projectPublicState(state: A2ATaskState): PublicTaskState {
-  const { assignError: _assignError, verifyError: _verifyError, resultData: _resultData, ...pub } = state;
-  return pub;
+export function projectPublicState(state: A2ATaskState, meta?: Pick<A2ATaskMeta, 'privacy'> | null): PublicTaskState {
+  const { assignError: _assignError, verifyError: _verifyError, resultData: _resultData, verificationResult, ...pub } = state;
+  if (!verificationResult) return pub;
+  if (meta?.privacy === 'public') return { ...pub, verificationResult };
+  return { ...pub, verificationResult: { passed: verificationResult.passed, score: verificationResult.score, reasons: [] } };
 }
 
 export function projectPublicEntry(
   entry: { meta: A2ATaskMeta; state: A2ATaskState },
 ): { meta: PublicTaskMeta; state: PublicTaskState } {
-  return { meta: projectPublicMeta(entry.meta), state: projectPublicState(entry.state) };
+  return { meta: projectPublicMeta(entry.meta), state: projectPublicState(entry.state, entry.meta) };
 }
 
 /** Get all tasks accepted (currently or historically) by a specific executor. */

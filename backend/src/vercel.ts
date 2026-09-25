@@ -19,7 +19,6 @@ import { a2aRouter } from './routes/a2a.js';
 import { a2aProtocolRouter } from './routes/a2aProtocol.js';
 import { forensicsRouter } from './routes/forensics.js';
 import { custodyRouter } from './routes/custody.js';
-import { stakingRouter } from './routes/staking.js';
 import { accountingRouter } from './routes/accounting.js';
 import { agentsRouter } from './routes/agents.js';
 import { registrationRouter } from './routes/registration.js';
@@ -58,7 +57,9 @@ app.use('/api/v1/verification', verificationRouter);
 app.use('/api/v1/a2a', a2aRouter);
 app.use('/api/v1/forensics', forensicsRouter);
 app.use('/api/v1/custody', custodyRouter);
-app.use('/api/v1/staking', stakingRouter);
+// /api/v1/staking is unmounted: no client uses it, and it bound a stake to the
+// caller instead of the task's executor, taking the reward from the request body
+// (security audit run 1, C33). routes/staking.ts stays for a redesign.
 app.use('/api/v1/accounting', accountingRouter);
 app.use('/api/v1/agents', agentsRouter);
 app.use('/api/v1/registration', registrationRouter);

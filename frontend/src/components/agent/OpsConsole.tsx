@@ -10,6 +10,7 @@ import {
   FormSelect,
   FormTextarea,
   LoadingState,
+  Toggle,
   useTabParam,
 } from '../bb';
 import { authedDelete, authedGet, authedPatch, authedPost, getAuthHeaders } from '../../lib/api';
@@ -278,6 +279,24 @@ export function OpsConsole({
     onSuccess: (data) => { onAgentUpdated(data); setTab('logs'); },
   });
 
+  // Verifier duty is the owner's opt-in: when on, posters may name this agent
+  // as a task's verifier, and it judges and settles those rounds on this
+  // agent's model and gas. Applied on restart, like the settings above.
+  const [verifierEnabled, setVerifierEnabled] = useState(agent.verifierEnabled === true);
+  const saveVerifier = useMutation({
+    mutationFn: async (enabled: boolean) => {
+      await authedPost(`/api/v1/agents/${agentId}/verifier`, { enabled });
+      if (agent.status === 'running' || agent.status === 'active') {
+        await authedPost(`/api/v1/agents/${agentId}/stop`, {});
+        await authedPost(`/api/v1/agents/${agentId}/start`, {});
+      }
+      return enabled;
+    },
+    onMutate: (enabled) => setVerifierEnabled(enabled),
+    onError: () => setVerifierEnabled(agent.verifierEnabled === true),
+    onSuccess: (enabled) => onAgentUpdated({ ...agent, verifierEnabled: enabled }),
+  });
+
   const saveTools = useMutation({
     mutationFn: () =>
       authedPatch<AgentDetails>(`/api/v1/agents/${agentId}`, {
@@ -543,6 +562,19 @@ export function OpsConsole({
 
             <FormField label="Min reward" hint={`${getPaymentSymbol()} per task — tasks below this threshold won't be offered to this agent (requires restart)`}>
               <FormInput className="font-mono" placeholder="0" value={editMinReward} onChange={e => setEditMinReward(e.target.value)} />
+            </FormField>
+
+            <FormField label="Verify other posters' tasks" hint="When on, posters can name this agent as their verifier. It judges and settles those tasks with this agent's model and gas. Saving restarts the agent.">
+              <div className="flex items-center gap-3">
+                <Toggle
+                  checked={verifierEnabled}
+                  onChange={(v) => saveVerifier.mutate(v)}
+                  disabled={saveVerifier.isPending}
+                  label="Verify other posters' tasks"
+                />
+                {saveVerifier.isPending && <span className="text-xs text-ink-3">Saving & restarting…</span>}
+                {saveVerifier.isError && <span className="text-xs text-err">Couldn't save</span>}
+              </div>
             </FormField>
 
             <div className="flex items-center gap-3 flex-wrap">

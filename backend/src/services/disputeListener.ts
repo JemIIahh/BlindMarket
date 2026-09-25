@@ -232,15 +232,15 @@ async function processDisputeResolved(chain: TaskChain, taskId: bigint, workerFa
       meta,
     });
   } else if (!workerFavored && hasWorker) {
-    // At-most-once for this listener only (recordWorkerDispute itself has no
-    // guard because the routes legitimately record one dispute per failed
-    // round). Released on failure so a transient blip stays retryable, like
-    // the a2a:credited marker.
+    // At-most-once per ruling. recordWorkerDispute also keys each dispute on
+    // its round (here: the ruling on this chain's task id), so no other
+    // observer records it again. Released on failure so a transient blip
+    // stays retryable, like the a2a:credited marker.
     const disputedKey = `a2a:dispute-recorded:${taskHash}`;
     const first = await redis.set(disputedKey, executor.toLowerCase(), 'NX');
     if (first !== null) {
       try {
-        await recordWorkerDispute(taskHash, executor, { rethrow: true });
+        await recordWorkerDispute(taskHash, executor, { chain, taskId: taskId.toString(), attempt: 'ruling' }, { rethrow: true });
       } catch (err) {
         await redis.del(disputedKey).catch(() => {});
         throw err;

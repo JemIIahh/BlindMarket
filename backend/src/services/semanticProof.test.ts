@@ -63,6 +63,15 @@ describe('mergeProofKeys (the shared success/dispute key set)', () => {
     expect(mergeProofKeys(['code_review'], null)).toEqual(['code_review']);
     expect(mergeProofKeys([], null)).toEqual([]);
   });
+  it('lists each key once, so a repeated tag is one completion or failure, not N (security audit run 1, C13)', () => {
+    // skillStatsStore upserts once per key: five copies of a tag used to turn
+    // one settlement into five completions (the earned-badge threshold).
+    const five = Array(5).fill('data_processing');
+    expect(mergeProofKeys(five, null)).toEqual(['data_processing']);
+    expect(mergeProofKeys([...five, 'translation', 'data_processing'], 'sql-analyst')).toEqual([
+      'data_processing', 'translation', `${PROOF_SLUG_PREFIX}sql-analyst`,
+    ]);
+  });
 });
 
 describe('skillDocText', () => {

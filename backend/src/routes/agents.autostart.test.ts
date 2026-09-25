@@ -37,6 +37,7 @@ const { startAgent, deployAgent } = vi.hoisted(() => ({
 }));
 
 vi.mock('../services/agentRunner.js', () => ({
+  startRefusal: vi.fn(() => null),
   deployAgent, startAgent,
   pauseAgent: vi.fn(), stopAgent: vi.fn(), resumeAgent: vi.fn(),
   getAgent: vi.fn(), listAgents: vi.fn(), getAgentLogs: vi.fn(),

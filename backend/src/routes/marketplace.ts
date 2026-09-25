@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { requireAuth, requireFounder } from '../middleware/auth.js';
+import { optionalAuth, requireAuth, requireFounder } from '../middleware/auth.js';
 import type { AuthRequest } from '../types.js';
 import * as reviewStore from '../services/reviewStore.js';
 import { notify } from '../services/notificationStore.js';
@@ -11,13 +11,19 @@ import * as badgeStore from '../services/badgeStore.js';
 import * as serviceStore from '../services/serviceStore.js';
 import * as skillStatsStore from '../services/skillStatsStore.js';
 import type { ApiResponse } from '../types.js';
+import { assertEgressUrl } from '../services/egressGuard.js';
 
 export const marketplaceRouter = Router();
 
 // ── Reviews ────────────────────────────────────────────────────────────────
 
+// Task ids are bytes32 hashes. a2aStore resolves every letter case of one (a
+// legacy mixed-case key only by its original spelling, commit 6aaa847), so the
+// gate below reads the task with the id as sent, while agent_reviews is keyed
+// on the lowercase id: keyed on the raw string, each re-cased spelling of one
+// task hash stored another review (security audit run 1, C12).
 const reviewSchema = z.object({
-  taskId: z.string().min(1),
+  taskId: z.string().regex(/^0x[0-9a-f]{64}$/i, 'taskId must be a bytes32 task hash'),
   agentAddress: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
   rating: z.number().int().min(1).max(5),
   review: z.string().max(2000).optional(),
@@ -49,19 +55,20 @@ marketplaceRouter.post('/reviews', requireAuth, async (req: AuthRequest, res, ne
       return;
     }
 
-    const existing = await reviewStore.getReviewForTask(taskId, reviewerAddress);
+    const reviewTaskId = taskId.toLowerCase();
+    const existing = await reviewStore.getReviewForTask(reviewTaskId, reviewerAddress);
     if (existing) {
       res.status(409).json({ success: false, error: { code: 'ALREADY_REVIEWED', message: 'You already reviewed this task' } });
       return;
     }
 
-    const r = await reviewStore.submitReview({ taskId, agentAddress, reviewerAddress, rating, review });
+    const r = await reviewStore.submitReview({ taskId: reviewTaskId, agentAddress, reviewerAddress, rating, review });
     // Worker diary: "New review". Fire-and-forget (notify never throws).
     void notify(agentAddress, {
       type: 'review_received',
       title: `New ${rating}★ review`,
       body: 'A poster rated your work — it’s live on your profile.',
-      taskId: taskId.toLowerCase(),
+      taskId: reviewTaskId,
     });
     res.json({ success: true, data: r } as ApiResponse);
   } catch (err) { next(err); }
@@ -72,7 +79,7 @@ marketplaceRouter.post('/reviews', requireAuth, async (req: AuthRequest, res, ne
 // caller's own review for the task, never anyone else's.
 marketplaceRouter.get('/reviews/task/:taskId', requireAuth, async (req: AuthRequest, res, next) => {
   try {
-    const review = await reviewStore.getReviewForTask(req.params.taskId, req.user!.address);
+    const review = await reviewStore.getReviewForTask(req.params.taskId.toLowerCase(), req.user!.address);
     res.json({ success: true, data: { review } } as ApiResponse);
   } catch (err) { next(err); }
 });
@@ -122,9 +129,13 @@ marketplaceRouter.get('/templates/mine', requireAuth, async (req: AuthRequest, r
   } catch (err) { next(err); }
 });
 
-marketplaceRouter.get('/templates/:id', async (req, res, next) => {
+// A private template is served only to its creator; anyone else gets the same
+// 404 as for a missing id.
+marketplaceRouter.get('/templates/:id', optionalAuth, async (req: AuthRequest, res, next) => {
   try {
-    const t = await templateStore.getTemplate(parseInt(req.params.id));
+    const id = Number(req.params.id);
+    const viewer = req.user ? [req.user.address, ...(req.user.addresses ?? [])] : [];
+    const t = Number.isSafeInteger(id) && id > 0 ? await templateStore.getTemplate(id, viewer) : null;
     if (!t) { res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Template not found' } }); return; }
     res.json({ success: true, data: t } as ApiResponse);
   } catch (err) { next(err); }
@@ -140,8 +151,19 @@ marketplaceRouter.delete('/templates/:id', requireAuth, async (req: AuthRequest,
 
 // ── Webhooks ───────────────────────────────────────────────────────────────
 
+// Delivery re-checks the destination at connect time (egressGuard); this gives
+// an immediate 400 for a scheme or literal-IP address that could never be used.
+const isAllowedWebhookUrl = (url: string): boolean => {
+  try {
+    assertEgressUrl(url);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 const webhookSchema = z.object({
-  url: z.string().url(),
+  url: z.string().url().refine(isAllowedWebhookUrl, 'url must be a public http or https address'),
   secret: z.string().max(128).optional(),
   events: z.array(z.string()).optional(),
 });

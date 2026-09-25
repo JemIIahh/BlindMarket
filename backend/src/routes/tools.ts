@@ -16,6 +16,7 @@ import { mcpConnect } from '../services/mcpClient.js';
 import { parseOpenApiSpec } from '../services/openApiParser.js';
 import { reportToolError, getToolErrorLogs, clearToolErrorLogs } from '../services/toolErrorLog.js';
 import { getAgent } from '../services/agentRunner.js';
+import { isAgentOwner } from '../services/agentOwnership.js';
 
 export const toolsRouter = Router();
 
@@ -190,21 +191,39 @@ toolsRouter.post('/execute', requireAuth, async (req: AuthRequest, res, next) =>
 // ── POST /api/v1/tools/error-logs ──────────────────────────────────────────
 // Agent reports a failed tool execution (HTTP error, timeout, network error).
 
+// Only the agent's own worker (its platform token carries the agent wallet) or
+// an owner may write to an agent's log, as for POST /agents/:id/usage. Any
+// signed-in user could forge entries into another owner's Ops console and flush
+// the real ones (security audit run 1, C35). The id and name come from the agent
+// record, not the body.
 toolsRouter.post('/error-logs', requireAuth, async (req: AuthRequest, res, next) => {
   try {
-    const entry = reportToolError(z.object({
-      agentId: z.string(),
-      agentName: z.string(),
-      toolName: z.string(),
-      toolType: z.string(),
-      url: z.string(),
-      method: z.string(),
+    const body = z.object({
+      agentId: z.string().min(1),
+      agentName: z.string().optional(),
+      toolName: z.string().max(200),
+      toolType: z.string().max(50),
+      url: z.string().max(2000),
+      method: z.string().max(20),
       statusCode: z.number().nullable(),
-      error: z.string(),
+      error: z.string().max(2000),
       requestInput: z.string().default(''),
       responseOutput: z.string().default(''),
       durationMs: z.number().default(0),
-    }).parse(req.body));
+    }).parse(req.body);
+    const agent = await getAgent(body.agentId);
+    if (!agent) {
+      res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Agent not found' } });
+      return;
+    }
+    const caller = req.user!.address.toLowerCase();
+    const allowed = caller === agent.walletAddress.toLowerCase()
+      || isAgentOwner(agent, [req.user!.address, ...(req.user!.addresses ?? [])]);
+    if (!allowed) {
+      res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Only the agent worker or owner can report tool errors' } });
+      return;
+    }
+    const entry = reportToolError({ ...body, agentId: agent.id, agentName: agent.name });
     res.json({ success: true, data: entry } satisfies ApiResponse);
   } catch (e: any) {
     next(e);

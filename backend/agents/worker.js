@@ -38,6 +38,7 @@ import {
   eciesDecrypt,
   generateAesKey,
 } from '../src/services/crypto.js';
+import { egressFetch, MAX_TOOL_RESPONSE_BYTES, readCappedText } from '../src/services/egressGuard.js';
 import {
   encodeExecuteCallData,
   buildUserOp,
@@ -1012,6 +1013,13 @@ const RESUME_TRANSIENT_WINDOW_MS = 10 * 60 * 1000;
 const verifyingTasks = new Set();
 const verifyFailures = new Map();
 const MAX_VERIFY_ATTEMPTS = 5;
+// Verifier duty is the owner's opt-in (security audit run 1, C04). Without it
+// any poster could name this agent as a task's verifier and have it judge and
+// settle rounds on the owner's model key and wallet gas, uncapped.
+const VERIFIER_ENABLED = process.env.AGENT_VERIFIER_ENABLED === 'true';
+// At most this many verdicts per pass, so a queued burst can't hold the work
+// slot while real offers wait.
+const MAX_VERIFICATIONS_PER_PASS = 3;
 // taskHash → last skip reason logged for a verification this worker cannot settle.
 const verifySkipLogged = new Map();
 
@@ -1198,6 +1206,23 @@ async function fetchWithTimeout(url, options = {}, timeout = 30000) {
       signal: controller.signal,
     });
     return response;
+  } finally {
+    clearTimeout(id);
+  }
+}
+
+// For URLs an owner or skill author configured (http, mcp tools). The shared
+// egress guard refuses private, loopback and metadata addresses, redirects
+// included, and the body read is capped, so a tool can't read the host's
+// internal services or flood this process. Calls to BACKEND_URL keep using
+// fetchWithTimeout: that destination is ours.
+async function toolFetch(url, options = {}, timeout = 30000) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeout);
+  try {
+    const response = await egressFetch(url, { ...options, signal: controller.signal });
+    const text = await readCappedText(response, MAX_TOOL_RESPONSE_BYTES);
+    return { status: response.status, ok: response.ok, text };
   } finally {
     clearTimeout(id);
   }
@@ -1527,12 +1552,12 @@ export function buildTools(currentTaskHash = null, { posterAddress = null, owner
               body = t.body.contentType === 'application/json' ? JSON.stringify(JSON.parse(rawPayload)) : rawPayload;
             }
 
-            const res = await fetchWithTimeout(url, {
+            const res = await toolFetch(url, {
               method: t.method,
               headers,
               body,
             });
-            return { status: res.status, data: await res.text() };
+            return { status: res.status, data: res.text };
           } catch (e) {
             return { error: e.message };
           }
@@ -1544,12 +1569,12 @@ export function buildTools(currentTaskHash = null, { posterAddress = null, owner
         inputSchema: z.object({ input: z.string() }),
         execute: async ({ input }) => {
           try {
-            const res = await fetchWithTimeout(t.endpointUrl, {
+            const res = await toolFetch(t.endpointUrl, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ tool: t.toolName, input }),
             });
-            return await res.json();
+            return JSON.parse(res.text);
           } catch (e) {
             return { error: e.message };
           }
@@ -1750,7 +1775,7 @@ BM_JS_WRAP_EOF`,
           try {
             // MCP tools: route via JSON-RPC to the MCP server directly
             if (t.source === 'mcp' && t.mcp_endpoint) {
-              const mcpRes = await fetchWithTimeout(t.mcp_endpoint, {
+              const mcpRes = await toolFetch(t.mcp_endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...(t.mcp_headers ?? {}) },
                 body: JSON.stringify({
@@ -1760,7 +1785,7 @@ BM_JS_WRAP_EOF`,
                   params: { name: t.mcp_tool_name ?? t.name, arguments: args },
                 }),
               });
-              const mcpText = await mcpRes.text();
+              const mcpText = mcpRes.text;
               let mcpData;
               try { mcpData = JSON.parse(mcpText); } catch { mcpData = null; }
               if (mcpData?.error) {
@@ -2375,7 +2400,8 @@ async function downloadBriefBlob(rootHash) {
   // Generous timeout: 0G storage indexer reads routinely exceed the 30s
   // fetchWithTimeout default under load, and an abort here burns one of only
   // MAX_RESUME_ATTEMPTS self-recovery tries on a brief that was fetchable.
-  const dlRes = await fetchWithTimeout(`${BACKEND_URL}/api/v1/storage/${rootHash}`, {
+  // Encoded so a rootHash can never step out of /storage/ (security audit run 1, C24).
+  const dlRes = await fetchWithTimeout(`${BACKEND_URL}/api/v1/storage/${encodeURIComponent(rootHash)}`, {
     headers: { 'Authorization': `Bearer ${AGENT_PLATFORM_TOKEN}` },
   }, 120_000);
   if (!dlRes.ok) throw new Error(`storage download ${dlRes.status}`);
@@ -2540,7 +2566,8 @@ export function describeVerificationCriteria(criteria) {
   if (criteria.regex_pattern) lines.push(`- The result must match this regular expression: ${criteria.regex_pattern}`);
   // The expected answer itself is NEVER shown: the check scores overlap with
   // that string, so revealing it would let any agent echo it and be paid.
-  if (criteria.expected_answer) lines.push('- The poster has set an exact expected answer (not shown to you) and the result is compared against it. Work the answer out from the brief and give it plainly and briefly — the answer itself, with no explanation, preamble or extra words around it. This overrides the Markdown formatting guidance.');
+  // The backend sends only has_expected_answer; expected_answer is kept for older servers.
+  if (criteria.expected_answer || criteria.has_expected_answer) lines.push('- The poster has set an exact expected answer (not shown to you) and the result is compared against it. Work the answer out from the brief and give it plainly and briefly — the answer itself, with no explanation, preamble or extra words around it. This overrides the Markdown formatting guidance.');
   for (const item of criteria.rubric ?? []) {
     const kw = item.keywords?.length ? ` — checked by looking for: ${list(item.keywords)}${item.min_mentions ? ` (at least ${item.min_mentions})` : ''}` : '';
     lines.push(`- Rubric: ${item.criterion}${kw}.`);
@@ -3787,7 +3814,7 @@ async function judgeTask(brief, output, acceptance) {
 // UI. Any deployed agent can be a verifier; the poster picks one by pubkey at
 // post time.
 async function pollAndVerify() {
-  if (!AGENT_PRIVATE_KEY) return;
+  if (!AGENT_PRIVATE_KEY || !VERIFIER_ENABLED) return;
   const myAddr = (signerWallet?.address ?? '').toLowerCase();
   if (!myAddr) return;
 
@@ -3807,7 +3834,9 @@ async function pollAndVerify() {
   for (const k of [...verifySkipLogged.keys()]) if (!queued.has(k)) verifySkipLogged.delete(k);
   if (queue.length === 0) return;
 
+  let judged = 0;
   for (const item of queue) {
+    if (judged >= MAX_VERIFICATIONS_PER_PASS) break;
     const meta = item?.meta;
     const state = item?.state;
     if (!meta || !state) continue;
@@ -3943,6 +3972,7 @@ async function pollAndVerify() {
           continue;
         }
 
+        judged++;
         verdict = await judgeTask(brief, output, meta.verificationCriteria?.acceptance);
         if (!verdict) {
           // Model error — do NOT post (posting would auto-fail correct work).
