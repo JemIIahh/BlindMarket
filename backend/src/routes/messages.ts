@@ -143,9 +143,13 @@ messagesRouter.post('/send', requireAuth, async (req: AuthRequest, res, next) =>
       fireWebhooks(resolvedTo, 'message_received', { from, taskId, subject }).catch(() => {});
     } catch { /* webhook module optional */ }
 
-    // Notify via Socket.IO for real-time UI updates
+    // Notify via Socket.IO for real-time UI updates. 'platform' is a public room
+    // any socket can join, so this is a bare change ping: listeners refetch the
+    // viewer's own inbox. Sending { to, from, taskId } here told anonymous
+    // listeners who messaged whom, when, about which task (security audit run
+    // 1, C26).
     try {
-      emit('platform', 'message:new', { to: resolvedTo, from, taskId });
+      emit('platform', 'message:new', {});
     } catch { /* socket may not be initialized */ }
     res.json({ success: true, data: msg } as ApiResponse);
   } catch (err) {

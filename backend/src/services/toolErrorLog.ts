@@ -24,7 +24,10 @@ export interface ToolErrorEntry {
   createdAt: string;
 }
 
-const MAX_ENTRIES = 500;
+const MAX_ENTRIES = 2000;
+// Each agent keeps its newest entries, so one agent's reports can't push other
+// agents' entries out of the shared buffer (security audit run 1, C35).
+const MAX_ENTRIES_PER_AGENT = 50;
 const MAX_INPUT_CHARS = 2000;
 const MAX_OUTPUT_CHARS = 2000;
 
@@ -44,6 +47,13 @@ export function reportToolError(entry: Omit<ToolErrorEntry, 'id' | 'createdAt'>)
     createdAt: new Date().toISOString(),
   };
   entries.unshift(record); // newest first
+  let own = 0;
+  for (let i = 0; i < entries.length; i++) {
+    if (entries[i].agentId === record.agentId && ++own > MAX_ENTRIES_PER_AGENT) {
+      entries.splice(i, 1); // this agent's oldest
+      break;
+    }
+  }
   if (entries.length > MAX_ENTRIES) entries.length = MAX_ENTRIES;
   return record;
 }

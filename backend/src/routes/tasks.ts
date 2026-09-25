@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import { storageIdSchema } from '../services/storageId.js';
 import { verificationCriteriaSchema } from '../services/verificationCriteriaSchema.js';
 import { ethers } from 'ethers';
 import { requireAuth, optionalAuth } from '../middleware/auth.js';
@@ -61,7 +62,7 @@ const createTaskSchema = z.object({
   // 0G Storage root hash of the AES-encrypted brief. Required for the
   // encrypted-flow demo; absent for legacy/H2H tasks that don't use the
   // decryption pipeline.
-  rootHash: z.string().min(1).max(256).optional(),
+  rootHash: storageIdSchema.optional(),
   // Map of lowercased executor address → hex ECIES blob (AES key wrapped to
   // that executor's pubkey, browser-side at post time). Keys must be valid
   // 0x-prefixed EOA addresses; values are hex strings of the wrapped blob.
