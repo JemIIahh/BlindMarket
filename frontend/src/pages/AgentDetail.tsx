@@ -136,7 +136,7 @@ export default function AgentDetail() {
   const [linkError, setLinkError] = useState('');
   const [refreshing, setRefreshing] = useState(false);
 
-  // USDC balance on Base
+  // USDC balance on the posting chain (read through its own RPC, below)
   const [usdcBalance, setUsdcBalance] = useState<bigint | null>(null);
 
   const balanceEther = usdcBalance !== null ? Number(formatUnits(usdcBalance, getPaymentDecimals())) : 0;
