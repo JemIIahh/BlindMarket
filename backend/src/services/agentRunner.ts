@@ -17,6 +17,7 @@ import {
   touchHeartbeat, isAlive, getHeartbeat,
 } from './redis.js';
 import { saveAgent, loadAgent, loadAllAgents } from './deployedAgentStore.js';
+import { notify } from './notificationStore.js';
 import { composeAgentRuntime } from './skillComposer.js';
 import type { DeployedAgent, AgentCapability, LLMProvider, AgentTool, InstalledSkill } from '../types.js';
 
@@ -138,12 +139,19 @@ const intentionalStops = new WeakSet<ChildProcess>();
 // Max concurrent forked agent processes. On a 512 MB Render box each Node worker
 // needs ~50 MB baseline; cap at 5 to leave headroom for the API server + Redis.
 const MAX_CONCURRENT_AGENTS = Number(process.env.MAX_CONCURRENT_AGENTS ?? 5);
-// Each owner's share of the pool. It was one global pool with no per-owner
-// limit, so one owner's agents could hold every slot and every other owner's
-// paid deploys could never run (security audit run 1, C10).
-const MAX_AGENTS_PER_OWNER = Number(
-  process.env.MAX_AGENTS_PER_OWNER ?? Math.max(1, Math.floor(MAX_CONCURRENT_AGENTS / 2)),
-);
+// How many workers one owner may run at once, 10 unless MAX_AGENTS_PER_OWNER
+// says otherwise. It was one global pool with no per-owner limit, so one
+// owner's agents could hold every slot and every other owner's paid deploys
+// could never run (security audit run 1, C10). The limit leaves room for other
+// owners only while MAX_CONCURRENT_AGENTS is larger than it; with a smaller
+// pool, the pool is the limit.
+const DEFAULT_AGENTS_PER_OWNER = 10;
+const MAX_AGENTS_PER_OWNER = (() => {
+  const n = Number(process.env.MAX_AGENTS_PER_OWNER);
+  // Unset or malformed falls back rather than becoming NaN, which no count
+  // ever reaches.
+  return Number.isInteger(n) && n > 0 ? n : DEFAULT_AGENTS_PER_OWNER;
+})();
 // Owner of each worker this process forked. Counted through `processes`, which
 // stays the authority on what is live, so a stale entry never counts.
 const processOwners = new Map<string, string>();
@@ -778,6 +786,7 @@ export async function reconcileAgents(): Promise<void> {
     }
   }
   const excess = running.length - toStart.length;
+  const starting = new Set(toStart.map((a) => a.id));
 
   console.log(
     `[agentRunner] reconcile: re-forking ${toStart.length}/${running.length} agent(s)` +
@@ -790,7 +799,18 @@ export async function reconcileAgents(): Promise<void> {
       console.log(`[agentRunner] reconcile: restarted agent ${a.id} (${a.name})`);
     } catch (e) {
       console.error(`[agentRunner] reconcile: failed to restart agent ${a.id} (${a.name}): ${(e as Error).message}`);
+      await markNotRestarted(a, `it failed to start (${(e as Error).message})`);
     }
+  }
+  for (const a of running) {
+    if (starting.has(a.id)) continue;
+    // The starts above are done, so the owner's live workers are its count.
+    await markNotRestarted(
+      a,
+      liveWorkersFor(a.ownerAddress.toLowerCase()) >= MAX_AGENTS_PER_OWNER
+        ? `its owner already runs ${MAX_AGENTS_PER_OWNER} agents, the most one owner can run at once`
+        : `every worker slot on the server is taken (${MAX_CONCURRENT_AGENTS})`,
+    );
   }
 
   if (excess > 0) {
@@ -798,6 +818,29 @@ export async function reconcileAgents(): Promise<void> {
       `[agentRunner] reconcile: ${excess} running agent(s) not re-forked due to MAX_CONCURRENT_AGENTS=${MAX_CONCURRENT_AGENTS}. ` +
       `Increase the env var or start them manually.`,
     );
+  }
+}
+
+/**
+ * A worker reconcile did not bring back. Left 'running', it showed as live in
+ * My Agents while nothing ran it, and it never came back on its own. Mark it
+ * stopped, say why in its log and tell its owner, who can start it again.
+ */
+async function markNotRestarted(a: DeployedAgent, reason: string): Promise<void> {
+  try {
+    appendLog(a.id, `[agentRunner] not restarted after the server restarted: ${reason}. Start it again from My Agents.`);
+    const current = await loadAgent(a.id);
+    if (current && current.status === 'running' && !processes.has(a.id)) {
+      current.status = 'stopped';
+      await saveAgent(current);
+    }
+    await notify(a.ownerAddress, {
+      type: 'agent_stopped',
+      title: `${a.name} is stopped`,
+      body: `It was not restarted after the server restarted: ${reason}. Start it again from My Agents.`,
+    });
+  } catch (e) {
+    console.error(`[agentRunner] reconcile: could not mark agent ${a.id} stopped: ${(e as Error).message}`);
   }
 }
 

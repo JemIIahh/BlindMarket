@@ -23,7 +23,9 @@ export type NotificationType =
   | 'disputed'
   | 'review_received'
   /** A task's deadline passed with its escrow still held: the poster can reclaim it. */
-  | 'expired';
+  | 'expired'
+  /** A hosted agent was left stopped (not restarted with the server): its owner can start it again. */
+  | 'agent_stopped';
 
 export interface Notification {
   id: string;

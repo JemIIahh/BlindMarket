@@ -25,6 +25,7 @@ const TYPE_ICON: Record<NotificationType, string> = {
   disputed: 'shield',
   review_received: 'user',
   expired: 'clock',
+  agent_stopped: 'alert',
 };
 
 function ago(iso: string): string {
