@@ -13,6 +13,7 @@ import { settleAssignment, settleVerification, resolveAssignee } from '../servic
 import { recordWorkerPayout, recordWorkerDispute } from '../services/workerPayout.js';
 import { notifyLifecycle } from '../services/notificationStore.js';
 import { resolveTaskByHash, seedTaskId, type TaskChain } from '../services/taskChain.js';
+import { changedTaskTerm } from '../services/taskTerms.js';
 import * as escrowService from '../services/escrow.js';
 import * as reputationService from '../services/reputation.js';
 import * as reputationDecay from '../services/reputationDecay.js';
@@ -1552,6 +1553,25 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
         'CHAIN_IMMUTABLE',
         `This task was indexed on ${existingMeta.chain}; a receipt from ${taskChain} can't re-index it — cancel the ${taskChain} escrow to get it back`,
       );
+    }
+
+    // A re-index may retry a listing or add wrappedKeys, but it keeps the terms
+    // the task was first listed on. Otherwise a poster could switch an accepted
+    // auto task to manual, or swap its criteria, and reject work that met the
+    // original terms. Pinned from the first index rather than from acceptance:
+    // a state check here would race the accept compare-and-set.
+    if (existingMeta) {
+      const changed = changedTaskTerm(existingMeta, {
+        ...data,
+        requiredCapabilities: data.requiredCapabilities ?? [],
+      });
+      if (changed) {
+        throw new AppError(
+          409,
+          'TERMS_IMMUTABLE',
+          `This task's ${changed} was set when it was first listed and can't be changed — cancel the task and post a new one`,
+        );
+      }
     }
 
     // Only index tasks escrowed in the token this chain settles in, so every
