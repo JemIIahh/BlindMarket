@@ -58,6 +58,7 @@ import { logChainConfig } from './services/chainService.js';
 import { startZombieReaper } from './services/agentRunner.js';
 import { startBackgroundWriters } from './services/backgroundWriters.js';
 import { checkDeploymentIdentity } from './services/deploymentIdentity.js';
+import { assertRpcChainIds, bootRpcEndpoints } from './services/rpcChainIds.js';
 
 // First, so a failed boot check below is reported too. No-op without SENTRY_DSN.
 initSentry(config.sentryDsn, config.sentryEnvironment);
@@ -76,6 +77,10 @@ for (const warning of clientPricingWarnings()) {
 
 logChainConfig();
 console.log(`[chain] New tasks post on ${settlementChainConfig(postingChain()).label}`);
+
+// Every provider takes its chain id on trust (staticNetwork), so ask each RPC
+// which chain it serves before serving requests (services/rpcChainIds.ts).
+await assertRpcChainIds(bootRpcEndpoints());
 
 const app = express();
 app.set('trust proxy', 1);
