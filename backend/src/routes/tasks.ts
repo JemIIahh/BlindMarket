@@ -412,6 +412,25 @@ tasksRouter.post('/', requireAuth, async (req: AuthRequest, res, next) => {
     if (!escrowAddress) {
       throw new AppError(503, 'CHAIN_NOT_CONFIGURED', `This backend has no ${label} escrow to post tasks on (${escrowEnv})`);
     }
+    // A task is known off-chain by its hash, and a public task's hash is the
+    // hash of its brief's text: posting the same public brief again made a
+    // second escrow under a hash that already names a task. Its listing was
+    // then refused (or would have pointed at the first task), after the
+    // poster had paid. Refuse here, before anything is funded.
+    const [listed, escrowed] = await Promise.all([
+      a2aStore.getMeta(data.taskHash),
+      resolveCachedTaskByHash(data.taskHash).catch(() => null),
+    ]);
+    if (listed || escrowed) {
+      throw new AppError(
+        409,
+        'TASK_HASH_IN_USE',
+        `A task with exactly this brief already exists${escrowed ? ` (${escrowed.chain} task ${escrowed.taskId})` : ''}. ` +
+          'A public task is identified by its text, so change the brief, even slightly, and post again. ' +
+          'If that task is one you just paid for, finish listing it instead. Nothing was charged.',
+      );
+    }
+
     // Claim the hash for this poster before the tx exists, so nobody who
     // sees it on-chain can index it first (a2aStore.claimTaskHash). Refused
     // here, before any gas is spent, when another poster already holds it.

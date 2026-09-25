@@ -28,7 +28,7 @@ vi.mock('../config.js', async (importOriginal) => {
     config: { ...mod.config, baseEscrowAddress: ESCROW, baseUsdcAddress: USDC, arcEscrowAddress: '' },
   };
 });
-vi.mock('../services/taskChain.js', () => ({ resolveTaskChainById: vi.fn() }));
+vi.mock('../services/taskChain.js', () => ({ resolveTaskChainById: vi.fn(), resolveCachedTaskByHash: vi.fn(async () => null) }));
 
 const buildCreateTask = vi.fn(async () => ({ to: ESCROW, data: '0xcreate' }));
 vi.mock('../services/escrow.js', () => ({
@@ -42,6 +42,7 @@ vi.mock('../services/accountingService.js', () => ({ recordTransaction: vi.fn(as
 vi.mock('../services/socket.js', () => ({ rooms: { tasks: vi.fn(), platform: vi.fn() } }));
 vi.mock('../services/a2aStore.js', () => ({
   claimTaskHash: vi.fn(async (_hash: string, poster: string) => ({ poster: poster.toLowerCase(), mine: true })),
+  getMeta: vi.fn(async () => undefined),
 }));
 vi.mock('../services/database.js', () => ({ getDb: vi.fn() }));
 vi.mock('../services/neonDb.js', () => ({ getPool: vi.fn() }));
