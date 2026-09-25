@@ -41,6 +41,7 @@ vi.mock('../services/socket.js', () => ({ emit: vi.fn() }));
 vi.mock('../services/webhookStore.js', () => ({ fireWebhooks: vi.fn(async () => {}) }));
 
 import { messagesRouter } from './messages.js';
+import { emit } from '../services/socket.js';
 
 function app() {
   const a = express();
@@ -153,5 +154,16 @@ describe('POST /messages/send without a taskId', () => {
     const res = await send(STRANGER, { to: EXECUTOR });
     expect(res.status).toBe(503);
     expect(sendMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /messages/send public-room ping (audit run 1, C26)', () => {
+  it('announces a new message to the public platform room without who, to whom or which task', async () => {
+    expect((await send(POSTER, { to: EXECUTOR, taskId: TASK })).status).toBe(200);
+    expect(emit).toHaveBeenCalledWith('platform', 'message:new', {});
+    const payload = JSON.stringify(vi.mocked(emit).mock.calls);
+    expect(payload).not.toContain(POSTER.slice(2, 10));
+    expect(payload).not.toContain(EXECUTOR.slice(2, 10));
+    expect(payload).not.toContain(TASK.slice(2, 10));
   });
 });

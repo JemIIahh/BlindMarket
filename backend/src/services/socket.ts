@@ -1,7 +1,7 @@
 import { Server as HttpServer } from 'http';
 import { Server as SocketServer } from 'socket.io';
 import type { CorsOptions } from 'cors';
-import { verifyRegistrationToken } from '../middleware/auth.js';
+import { isJwtRevoked, verifyRegistrationToken } from '../middleware/auth.js';
 import * as a2aStore from './a2aStore.js';
 
 let io: SocketServer | null = null;
@@ -96,17 +96,65 @@ export function shouldReplayBacklog(room: string, agentAddress: string | null): 
   return room === 'tasks' && !!agentAddress;
 }
 
+export interface SocketAgent {
+  address: string;
+  jti?: string;
+}
+
+/**
+ * The agent a socket handshake proves, or null. A revoked token proves
+ * nothing: sockets used to check only the signature, so a platform token the
+ * owner had revoked kept its agent room and task:offer stream (security audit
+ * run 1, C32). Same checks as requireAuth's registration-token branch.
+ */
+export async function authenticateSocketToken(token: unknown): Promise<SocketAgent | null> {
+  if (typeof token !== 'string') return null;
+  const claims = verifyRegistrationToken(token);
+  if (!claims?.address) return null;
+  if (await isJwtRevoked(claims.jti)) return null;
+  return { address: claims.address.toLowerCase(), jti: claims.jti };
+}
+
+/** Disconnect every socket on this process that authenticated with `jti`.
+ *  Called right after a token is revoked. */
+export async function disconnectSocketsForToken(jti: string): Promise<number> {
+  if (!io) return 0;
+  let n = 0;
+  for (const socket of await io.fetchSockets()) {
+    if ((socket.data as { agent?: SocketAgent | null }).agent?.jti === jti) {
+      socket.disconnect(true);
+      n++;
+    }
+  }
+  return n;
+}
+
 export function initSocket(httpServer: HttpServer, corsOptions: CorsOptions): SocketServer {
   io = new SocketServer(httpServer, { cors: corsOptions });
 
-  io.on('connection', (socket) => {
+  // Authenticate before 'connection' fires. Anonymous sockets are still let in
+  // for the public rooms; they just prove no agent.
+  io.use((socket, next) => {
     const token = (socket.handshake.auth as Record<string, unknown> | undefined)?.token;
-    const claims = typeof token === 'string' ? verifyRegistrationToken(token) : null;
-    const agentAddress = claims?.address?.toLowerCase() ?? null;
+    authenticateSocketToken(token).then(
+      (agent) => { socket.data.agent = agent; next(); },
+      () => { socket.data.agent = null; next(); },
+    );
+  });
 
+  io.on('connection', (socket) => {
     // Client joins a room by emitting 'join'
-    socket.on('join', (room: unknown) => {
+    socket.on('join', async (room: unknown) => {
       if (typeof room !== 'string' || room.length > 128) return;
+      // A token revoked after the handshake loses its agent rooms at its next
+      // join, whichever instance revoked it.
+      let agent: SocketAgent | null = socket.data.agent ?? null;
+      if (agent && await isJwtRevoked(agent.jti)) {
+        agent = null;
+        socket.data.agent = null;
+        for (const joined of socket.rooms) if (joined.startsWith('agent:')) socket.leave(joined);
+      }
+      const agentAddress = agent?.address ?? null;
       if (canJoin(room, agentAddress)) {
         socket.join(room);
         // Catch the joiner up on work already waiting. Fire-and-forget: the

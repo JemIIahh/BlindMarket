@@ -19,6 +19,7 @@ import { parkedDisputeCount } from '../services/disputeKeys.js';
 import { config } from '../config.js';
 import { redis, redisSub } from '../services/redis.js';
 import { getPool, getSchemaStatus, latestMigrationId } from '../services/neonDb.js';
+import { safeErrorMessage } from '../middleware/errorHandler.js';
 
 export const healthRouter = Router();
 
@@ -44,15 +45,6 @@ function escrowOrNull(address: string): string | null {
  * request into a failed call's message (`info={ "requestUrl": … }`), and the
  * RPC URL can carry a provider key. Keep the short message and the code.
  */
-export function safeErrorMessage(e: unknown): string {
-  const err = (e ?? {}) as { message?: string; code?: string; shortMessage?: string };
-  const base = String(err.shortMessage || err.message || e).split('\n')[0];
-  const stripped = base
-    .replace(/\s*\((?:request|response|info|transaction)=[\s\S]*$/, '')
-    .replace(/https?:\/\/\S+/g, '<rpc>')
-    .replace(/wss?:\/\/\S+/g, '<rpc>');
-  return err.code && !stripped.includes(err.code) ? `${stripped} [${err.code}]` : stripped;
-}
 
 function rotateCommand(signerAddr: string, network: string, escrowAddress: string | null): string {
   return `cd contracts && ${contractsEnvPrefix(escrowAddress)}MARKETPLACE_SIGNER_ADDRESS=${signerAddr} npx hardhat run scripts/rotate-verifier.ts --network ${network}`;
@@ -453,3 +445,6 @@ healthRouter.get('/db', async (_req, res) => {
     });
   }
 });
+
+// Kept importable from here for existing callers; it lives in errorHandler.
+export { safeErrorMessage };

@@ -16,10 +16,10 @@ vi.mock('../middleware/auth.js', () => ({
   },
 }));
 
-const agents: Record<string, { id: string; ownerAddress: string; authorizedOwners?: string[] }> = {
-  a1: { id: 'a1', ownerAddress: '0xOwner' },
-  a2: { id: 'a2', ownerAddress: '0xSomeoneElse', authorizedOwners: ['0xOWNER'] },
-  a3: { id: 'a3', ownerAddress: '0xSomeoneElse' },
+const agents: Record<string, { id: string; name: string; walletAddress: string; ownerAddress: string; authorizedOwners?: string[] }> = {
+  a1: { id: 'a1', name: 'Agent One', walletAddress: '0xA1Wallet', ownerAddress: '0xOwner' },
+  a2: { id: 'a2', name: 'Agent Two', walletAddress: '0xA2Wallet', ownerAddress: '0xSomeoneElse', authorizedOwners: ['0xOWNER'] },
+  a3: { id: 'a3', name: 'Agent Three', walletAddress: '0xA3Wallet', ownerAddress: '0xSomeoneElse' },
 };
 vi.mock('../services/agentRunner.js', () => ({ getAgent: vi.fn(async (id: string) => agents[id]) }));
 vi.mock('../services/toolExecutor.js', () => ({ validateToolDefinition: vi.fn(), executeTool: vi.fn() }));
@@ -101,13 +101,34 @@ describe('DELETE /error-logs', () => {
 });
 
 describe('POST /error-logs (agent reports)', () => {
-  it('still records a report', async () => {
-    const res = await request(app).post('/api/v1/tools/error-logs').send({
-      agentId: 'a1', agentName: 'a1', toolName: 'x', toolType: 'http', url: '', method: 'GET',
-      statusCode: null, error: 'network',
+  const report = (caller: string, agentId: string, extra: Record<string, unknown> = {}) =>
+    request(app).post('/api/v1/tools/error-logs').set('x-test-address', caller).send({
+      agentId, agentName: agentId, toolName: 'x', toolType: 'http', url: '', method: 'GET',
+      statusCode: null, error: 'network', ...extra,
     });
-    expect(res.status).toBe(200);
-    expect(getToolErrorLogs({ agentId: 'a1' }).total).toBe(3);
+
+  it("records a report from the agent's own worker and from its owner", async () => {
+    expect((await report('0xa1wallet', 'a1')).status).toBe(200);
+    expect((await report('0xOwner', 'a1')).status).toBe(200);
+    expect(getToolErrorLogs({ agentId: 'a1' }).total).toBe(4);
+  });
+
+  it("refuses anyone else writing into an agent's log, and an unknown agent (audit run 1, C35)", async () => {
+    const forged = await report('0xStranger', 'a1', { error: 'FORGED-BY-NON-OWNER' });
+    expect(forged.status).toBe(403);
+    expect((await report('0xStranger', 'nope')).status).toBe(404);
+    expect(JSON.stringify(getToolErrorLogs({ agentId: 'a1' }))).not.toContain('FORGED');
+  });
+
+  it('takes the agent name from the record, not the body', async () => {
+    await report('0xa1wallet', 'a1', { agentName: 'Spoofed' });
+    expect(getToolErrorLogs({ agentId: 'a1' }).entries[0].agentName).toBe('Agent One');
+  });
+
+  it("one agent's reports can't flush another agent's entries", async () => {
+    seed('a1', 300);
+    expect(getToolErrorLogs({ agentId: 'a1' }).total).toBe(50);
+    expect(getToolErrorLogs({ agentId: 'a3' }).total).toBe(2);
   });
 
   it('rejects the old "Clear all" call shape, which is why the button did nothing', async () => {

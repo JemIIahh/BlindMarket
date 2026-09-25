@@ -82,12 +82,16 @@ const ESCROW = '0x00000000000000000000000000000000000e5c00';
 const TASK = '0x' + 'ab'.repeat(32);
 const TASK_CREATED = ethers.id('TaskCreated(uint256,address,address,uint256,bytes32,string,string,uint256)');
 
+// Storage ids: POST /tasks/index validates rootHash as one.
+const ROOT = '0x' + 'cd'.repeat(32);
+const OTHER_ROOT = '0x' + 'ef'.repeat(32);
+
 const listedBody = {
   txHash: '0x' + '11'.repeat(32),
   taskHash: TASK,
   verificationMode: 'auto',
   verificationCriteria: { contains_keywords: ['alpha'], pass_threshold: 70 },
-  rootHash: '0xroot',
+  rootHash: ROOT,
   requiredCapabilities: ['web_research'],
 };
 
@@ -99,7 +103,7 @@ function storedMeta() {
     chain: 'arc',
     verificationMode: 'auto',
     verificationCriteria: { contains_keywords: ['alpha'], pass_threshold: 70 },
-    rootHash: '0xroot',
+    rootHash: ROOT,
     requiredCapabilities: ['web_research'],
     wrappedKeys: { [POSTER]: 'blob' },
   };
@@ -155,7 +159,7 @@ describe('POST /tasks/index — re-index keeps the listed terms', () => {
   it('swapping the criteria or the brief pointer → 409 TERMS_IMMUTABLE', async () => {
     const criteria = await index(POSTER, { ...listedBody, verificationCriteria: { contains_keywords: ['beta'] } });
     expect(criteria.body.error.code).toBe('TERMS_IMMUTABLE');
-    const brief = await index(POSTER, { ...listedBody, rootHash: '0xother' });
+    const brief = await index(POSTER, { ...listedBody, rootHash: OTHER_ROOT });
     expect(brief.body.error.code).toBe('TERMS_IMMUTABLE');
     expect(a2aStore.setMeta).not.toHaveBeenCalled();
   });

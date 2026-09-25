@@ -168,6 +168,13 @@ describe('POST /tasks/index — unsettleable verification modes', () => {
     expect(res.body.error.code).toBe('AUTO_CRITERIA_REQUIRED');
   });
 
+  it('a rootHash that is not a storage id → 400 before any chain read (audit run 1, C24)', async () => {
+    const res = await index({ rootHash: '../a2a/semantic-candidates' });
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('VALIDATION_ERROR');
+    expect(baseProvider.getTransactionReceipt).not.toHaveBeenCalled();
+  });
+
   it("'auto' with a real check passes the gate", async () => {
     vi.mocked(baseProvider.getTransactionReceipt).mockRejectedValue(new Error('past the gate'));
     const res = await index({ verificationMode: 'auto', verificationCriteria: { min_length: 20 } });
