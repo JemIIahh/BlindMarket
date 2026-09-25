@@ -65,6 +65,10 @@ vi.mock('../services/reputation.js', () => ({}));
 vi.mock('../services/reputationDecay.js', () => ({}));
 vi.mock('../services/workerPayout.js', () => ({ recordWorkerPayout: vi.fn(), recordWorkerDispute: vi.fn() }));
 vi.mock('../services/notificationStore.js', () => ({ notifyLifecycle: vi.fn(async () => undefined), notify: vi.fn(async () => null) }));
+vi.mock('../services/verifierDuty.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../services/verifierDuty.js')>()),
+  activeHostedVerifiers: vi.fn(async () => new Map()),
+}));
 
 const { a2aRouter } = await import('./a2a.js');
 const { globalErrorHandler } = await import('../middleware/errorHandler.js');
@@ -73,6 +77,7 @@ const agentStore = await import('../services/agentStore.js');
 const bidsStore = await import('../services/bidsStore.js');
 const taskChain = await import('../services/taskChain.js');
 const { settleAssignment } = await import('../services/a2aSettlement.js');
+const { activeHostedVerifiers } = await import('../services/verifierDuty.js');
 const { supportsChain, supportsTaskChain, LEGACY_SUPPORTED_CHAINS } = await import('../services/executorChains.js');
 
 const TASK = '0xtaskhash';
@@ -257,5 +262,30 @@ describe('GET /verifications and GET /executors', () => {
       '0x1111111111111111111111111111111111111111',
       '0x3333333333333333333333333333333333333333',
     ]);
+  });
+
+  it('role=verifier lists only agents that will verify on the chain, with their names', async () => {
+    vi.mocked(agentStore.listAgents).mockResolvedValue([
+      executor(['arc'], '0x1111111111111111111111111111111111111111'),
+      executor(['arc'], '0x2222222222222222222222222222222222222222'),
+      executor(null, '0x3333333333333333333333333333333333333333'),
+    ] as any);
+    // 0x1111 opted in and is running; 0x2222 is not in the set; 0x3333 opted
+    // in but registered before chain declarations, so it is Base only.
+    vi.mocked(activeHostedVerifiers).mockResolvedValue(new Map([
+      ['0x1111111111111111111111111111111111111111', { name: 'Judge' }],
+      ['0x3333333333333333333333333333333333333333', { name: 'Old judge' }],
+    ]) as any);
+
+    const res = await request(app()).get('/api/v1/a2a/executors?role=verifier&chain=arc');
+    expect(res.status).toBe(200);
+    expect(res.body.data.executors.map((e: any) => [e.address, e.name])).toEqual([
+      ['0x1111111111111111111111111111111111111111', 'Judge'],
+    ]);
+
+    // Without the role the list and its shape are unchanged.
+    const plain = await request(app()).get('/api/v1/a2a/executors?chain=arc');
+    expect(plain.body.data.executors).toHaveLength(2);
+    expect(plain.body.data.executors[0]).not.toHaveProperty('name');
   });
 });

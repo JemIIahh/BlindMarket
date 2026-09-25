@@ -41,7 +41,7 @@ import { normalizeSettlementAmount, payoutCurrency, pricingUnit, sameUnit, type 
 import { getTokenDecimals } from '../services/chain.js';
 import { isSafeRegexSource } from '../services/rubricEngine.js';
 import { callerWallets } from '../services/callerWallets.js';
-import { hostedVerifierNotOptedIn, VERIFIER_NOT_OPTED_IN_MESSAGE } from '../services/verifierDuty.js';
+import { activeHostedVerifiers, hostedVerifierNotOptedIn, VERIFIER_NOT_OPTED_IN_MESSAGE } from '../services/verifierDuty.js';
 
 export const a2aRouter = Router();
 
@@ -245,6 +245,11 @@ a2aRouter.post('/register', requireAuth, async (req: AuthRequest, res, next) => 
  * executor can decrypt the brief.
  *
  * Response shape is intentionally narrow: only fields the wrap step needs.
+ *
+ * `?role=verifier` narrows the list to agents that will judge a task naming
+ * them (activeHostedVerifiers) and adds each one's name, for the web app's
+ * verifier picker. Without it the picker offered every executor, and posting
+ * with any hosted agent whose owner hadn't opted in was refused.
  */
 a2aRouter.get('/executors', async (req, res, next) => {
   try {
@@ -254,6 +259,7 @@ a2aRouter.get('/executors', async (req, res, next) => {
 
     const chain = typeof req.query.chain === 'string' ? req.query.chain.toLowerCase() : undefined;
     const executors = (await agentStore.listAgents(caps)).filter((e) => supportsChain(e, chain));
+    const verifiers = req.query.role === 'verifier' ? await activeHostedVerifiers() : null;
 
     const body: ApiResponse = {
       success: true,
@@ -263,12 +269,14 @@ a2aRouter.get('/executors', async (req, res, next) => {
           // poster has no way to wrap the AES key to them, so listing them
           // would silently include unreachable workers in the bundle.
           .filter((e) => !!e.publicKey)
+          .filter((e) => !verifiers || verifiers.has(e.address.toLowerCase()))
           .map((e) => ({
             address: e.address,
             publicKey: e.publicKey,
             capabilities: e.capabilities,
             reputation: e.reputation,
             supportedChains: e.supportedChains ?? null,
+            ...(verifiers ? { name: verifiers.get(e.address.toLowerCase())?.name ?? null } : {}),
           })),
       },
     };
