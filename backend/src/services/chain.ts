@@ -130,7 +130,8 @@ export async function buildUnsignedTx(
  */
 export async function getTokenDecimals(
   tokenAddress: string,
-  chain: SettlementChainKey = 'base',
+  // '0g' reads the token on the 0G provider (legacy TaskRegistry rows).
+  chain: SettlementChainKey | '0g' = 'base',
 ): Promise<number> {
   if (tokenAddress === '0x0000000000000000000000000000000000000000') return 18;
 

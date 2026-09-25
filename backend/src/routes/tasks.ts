@@ -6,7 +6,7 @@ import { canViewerSeeResult } from '../services/resultVisibility.js';
 import { AppError } from '../middleware/errorHandler.js';
 import * as escrowService from '../services/escrow.js';
 import * as registryService from '../services/registry.js';
-import { getTokenDecimals } from '../services/chain.js';
+import { escrow as ogEscrow, getTokenDecimals } from '../services/chain.js';
 import { chainRuntime } from '../services/chainRuntime.js';
 import { isSettlementChainKey, postingChain, settlementChainConfig } from '../services/settlementChains.js';
 import { payoutCurrency } from '../services/settlementUnits.js';
@@ -142,11 +142,16 @@ tasksRouter.get('/', async (req: AuthRequest, res, next) => {
       // we can ask a2aStore which tasks are indexed for the executor board —
       // tasks created before the current code path was wired up have no
       // a2a:meta entry and are unreachable through /a2a (stranded).
+      //
+      // Registry ids belong to the 0G escrow, so read that one. The posting
+      // chain's escrow has its own id space: reading id N there spliced an
+      // unrelated task's hash, token and indexing status onto this row, and
+      // decimals came from the wrong chain (security audit run 1, C28).
       const enriched = await Promise.all(rawTasks.map(async (t) => {
         const taskId = Number(t.taskId);
         try {
-          const escrowTask = await escrowService.getTask(taskId);
-          const decimals = await getTokenDecimals(escrowTask.token);
+          const escrowTask = await ogEscrow.getTask(taskId);
+          const decimals = await getTokenDecimals(escrowTask.token, '0g');
           return {
             ...serializeBigInts(t as unknown as Record<string, unknown>),
             token: escrowTask.token,
