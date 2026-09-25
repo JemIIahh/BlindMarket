@@ -1013,6 +1013,13 @@ const RESUME_TRANSIENT_WINDOW_MS = 10 * 60 * 1000;
 const verifyingTasks = new Set();
 const verifyFailures = new Map();
 const MAX_VERIFY_ATTEMPTS = 5;
+// Verifier duty is the owner's opt-in (security audit run 1, C04). Without it
+// any poster could name this agent as a task's verifier and have it judge and
+// settle rounds on the owner's model key and wallet gas, uncapped.
+const VERIFIER_ENABLED = process.env.AGENT_VERIFIER_ENABLED === 'true';
+// At most this many verdicts per pass, so a queued burst can't hold the work
+// slot while real offers wait.
+const MAX_VERIFICATIONS_PER_PASS = 3;
 // taskHash → last skip reason logged for a verification this worker cannot settle.
 const verifySkipLogged = new Map();
 
@@ -3807,7 +3814,7 @@ async function judgeTask(brief, output, acceptance) {
 // UI. Any deployed agent can be a verifier; the poster picks one by pubkey at
 // post time.
 async function pollAndVerify() {
-  if (!AGENT_PRIVATE_KEY) return;
+  if (!AGENT_PRIVATE_KEY || !VERIFIER_ENABLED) return;
   const myAddr = (signerWallet?.address ?? '').toLowerCase();
   if (!myAddr) return;
 
@@ -3827,7 +3834,9 @@ async function pollAndVerify() {
   for (const k of [...verifySkipLogged.keys()]) if (!queued.has(k)) verifySkipLogged.delete(k);
   if (queue.length === 0) return;
 
+  let judged = 0;
   for (const item of queue) {
+    if (judged >= MAX_VERIFICATIONS_PER_PASS) break;
     const meta = item?.meta;
     const state = item?.state;
     if (!meta || !state) continue;
@@ -3963,6 +3972,7 @@ async function pollAndVerify() {
           continue;
         }
 
+        judged++;
         verdict = await judgeTask(brief, output, meta.verificationCriteria?.acceptance);
         if (!verdict) {
           // Model error — do NOT post (posting would auto-fail correct work).

@@ -35,6 +35,7 @@ vi.mock('../middleware/auth.js', () => ({
   },
 }));
 vi.mock('../services/agentRunner.js', () => ({
+  startRefusal: vi.fn(() => null),
   deployAgent, startAgent: vi.fn(async () => {}),
   pauseAgent: vi.fn(), stopAgent: vi.fn(), resumeAgent: vi.fn(),
   getAgent: vi.fn(), listAgents: vi.fn(), getAgentLogs: vi.fn(),

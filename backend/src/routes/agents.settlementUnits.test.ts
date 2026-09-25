@@ -130,3 +130,17 @@ describe('PATCH /agents/:id body validation (audit run 1, C22)', () => {
     expect(updateAgent).not.toHaveBeenCalled();
   });
 });
+
+describe('POST /agents/:id/verifier (audit run 1, C04)', () => {
+  it('lets the owner turn verifier duty on and off', async () => {
+    const res = await asOwner(request(app).post('/api/v1/agents/agent-1/verifier')).send({ enabled: true });
+    expect(res.status).toBe(200);
+    expect(updateAgent).toHaveBeenCalledWith('agent-1', { verifierEnabled: true });
+  });
+
+  it('refuses anything but a boolean', async () => {
+    const res = await asOwner(request(app).post('/api/v1/agents/agent-1/verifier')).send({ enabled: 'yes' });
+    expect(res.status).toBe(400);
+    expect(updateAgent).not.toHaveBeenCalled();
+  });
+});

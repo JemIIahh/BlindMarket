@@ -825,6 +825,15 @@ const migrations: Array<{ id: number; name: string; sql: string; when?: () => bo
       UPDATE reputation_events SET address = LOWER(address) WHERE address <> LOWER(address);
     `,
   },
+  {
+    id: 39,
+    name: 'deployed_agents_verifier_enabled',
+    // Owner opt-in for verifier duty (security audit run 1, C04). Off for
+    // every agent, existing ones included: until now any poster could make a
+    // hosted agent judge and settle tasks on its owner's model and gas.
+    // 37 and 38 are taken by the trust-signals migrations.
+    sql: `ALTER TABLE deployed_agents ADD COLUMN IF NOT EXISTS verifier_enabled BOOLEAN NOT NULL DEFAULT false;`,
+  },
 ];
 
 /**

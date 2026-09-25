@@ -29,6 +29,7 @@ const { startAgent, deployAgent } = vi.hoisted(() => ({
 }));
 
 vi.mock('../services/agentRunner.js', () => ({
+  startRefusal: vi.fn(() => null),
   deployAgent, startAgent,
   pauseAgent: vi.fn(), stopAgent: vi.fn(), resumeAgent: vi.fn(),
   getAgent: vi.fn(), listAgents: vi.fn(), getAgentLogs: vi.fn(),
@@ -79,6 +80,7 @@ import { globalErrorHandler, AppError } from '../middleware/errorHandler.js';
 import { claimDeployCredit, restoreDeployCredit } from '../services/agentFactoryListener.js';
 import { arcDeployFeeTerms, verifyArcDeployFee, claimArcDeployFee, markArcDeployFeeUsed, releaseArcDeployFee } from '../services/deployFee.js';
 import { config } from '../config.js';
+import { startRefusal } from '../services/agentRunner.js';
 
 const app = express();
 app.use(express.json());
@@ -259,5 +261,17 @@ describe('POST /agents/deploy — the paid credit is only spent on a real deploy
     expect(res.status).toBe(201);
     expect(claimDeployCredit).toHaveBeenCalledTimes(1);
     expect(restoreDeployCredit).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /agents/deploy — no free worker slot (audit run 1, C10)', () => {
+  it('refuses with 503 AGENT_CAPACITY before taking any fee', async () => {
+    vi.mocked(startRefusal).mockReturnValueOnce('You already run 2 agents, the most one owner can run here at once — stop one first');
+    const res = await deploy({ feeTxHash: FEE_TX });
+    expect(res.status).toBe(503);
+    expect(res.body.error.code).toBe('AGENT_CAPACITY');
+    expect(res.body.error.message).toContain('Your payment has not been used');
+    expect(claimArcDeployFee).not.toHaveBeenCalled();
+    expect(claimDeployCredit).not.toHaveBeenCalled();
   });
 });

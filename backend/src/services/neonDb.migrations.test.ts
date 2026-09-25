@@ -95,6 +95,13 @@ describe('migrations production has recorded', () => {
     expect(sql).toContain('UPDATE reputation_events SET address = LOWER(address) WHERE address <> LOWER(address)');
   });
 
+  it('#39 adds the verifier opt-in, off by default and safe to re-run (audit run 1, C04)', () => {
+    expect(listMigrations().find((m) => m.id === 39)).toEqual({ id: 39, name: 'deployed_agents_verifier_enabled' });
+    expect(squash(migrationSql(39))).toBe(
+      'ALTER TABLE deployed_agents ADD COLUMN IF NOT EXISTS verifier_enabled BOOLEAN NOT NULL DEFAULT false;',
+    );
+  });
+
   it('#36 drops the constraint and default, and clears every 0G-only list', () => {
     const sql = squash(migrationSql(36))!;
     expect(sql).toContain('ALTER COLUMN supported_chains DROP NOT NULL');

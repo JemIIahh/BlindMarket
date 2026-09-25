@@ -10,6 +10,7 @@ import {
   deployAgent, startAgent, pauseAgent, stopAgent, resumeAgent,
   getAgent, listAgents, getAgentLogs, subscribeAgentLogs, updateAgent,
   addAuthorizedOwner, getAgentStats,
+  startRefusal,
 } from '../services/agentRunner.js';
 import * as reputationService from '../services/reputation.js';
 import * as reputationDecay from '../services/reputationDecay.js';
@@ -396,6 +397,14 @@ agentsRouter.post('/deploy', requireAuth, deployLimiter, async (req: AuthRequest
     const ownerAddress = req.user!.address!;
     console.log(`[deploy] owner=${ownerAddress.slice(0, 10)}… ownerPublicKey length=${data.ownerPublicKey.length / 2} bytes, hex=${data.ownerPublicKey.slice(0, 8)}...`);
     const { skillSlugs: _slugs, feeTxHash, ...deployParams } = data;
+
+    // No free worker slot for this owner: refuse before the fee is taken, so
+    // nobody pays for an agent that can't start (security audit run 1, C10).
+    const capacityRefusal = startRefusal(ownerAddress);
+    if (capacityRefusal) {
+      res.status(503).json({ success: false, error: { code: 'AGENT_CAPACITY', message: `${capacityRefusal}. Your payment has not been used.` } });
+      return;
+    }
 
     // Take the deploy fee if the paywall is enabled — only AFTER every
     // validation above. A fee is a paid 1 USDC: taking it first meant a
@@ -1040,6 +1049,24 @@ agentsRouter.patch('/:id', requireAuth, async (req: AuthRequest, res) => {
   // Semantic matching (Phase 0): instructions/capabilities changed — re-embed.
   if (updated) agentEmbedding.recomputeForWalletBestEffort(updated.walletAddress);
   res.json({ success: true, data: strip(updated) });
+});
+
+// POST /api/v1/agents/:id/verifier — the owner lets posters name this agent as a
+// task's verifier, or stops it. Off by default (security audit run 1, C04).
+// The running worker reads it at start, so restart the agent to apply.
+agentsRouter.post('/:id/verifier', requireAuth, async (req: AuthRequest, res) => {
+  const agent = await authorizeOwner(req, res, req.params.id);
+  if (!agent) return;
+  const parsed = z.object({ enabled: z.boolean() }).safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'enabled must be true or false' } });
+    return;
+  }
+  const updated = await updateAgent(req.params.id, { verifierEnabled: parsed.data.enabled });
+  res.json({
+    success: true,
+    data: { verifierEnabled: updated?.verifierEnabled === true, note: 'Restart the agent for the change to take effect.' },
+  });
 });
 
 // ── Agent Services (rent-your-agent Phase 1) ────────────────────────────────

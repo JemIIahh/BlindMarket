@@ -305,6 +305,12 @@ const migrations: Migration[] = [
           ELSE 0 END
         ELSE 0 END;`,
   },
+  {
+    // Mirror of Postgres migration 39: owner opt-in for verifier duty.
+    id: 19,
+    name: 'deployed_agents_verifier_enabled',
+    sql: `ALTER TABLE deployed_agents ADD COLUMN verifier_enabled INTEGER NOT NULL DEFAULT 0;`,
+  },
 ];
 
 /** One migration's SQL, for tests of what a migration does to existing rows. */
