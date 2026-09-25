@@ -164,6 +164,12 @@ the fee changed, the call names another amount or task), refuses with
 single-use either way: get a new quote, check it, and confirm that one. The
 confirm's result reports the amount escrowed (`escrowed`) or the fee paid.
 
+`claim_timeout` refunds a task whose worker never delivered. On work delivered
+before the deadline and never judged it refunds nothing: the escrow sends the
+task for review (an admin rules, and with no ruling within 14 days the worker
+is paid), the quote says so in `note`, and the result reports
+`outcome: "escalate"`.
+
 The backend builds the escrow transactions this process signs (or hands to
 the relay): `createTask`, `cancelTask` / `claimTimeout` and `submitEvidence`.
 Each is decoded first and must be exactly the call the spend asked for (this

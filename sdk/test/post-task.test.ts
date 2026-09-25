@@ -335,6 +335,35 @@ describe('BlindMarket refunds', () => {
     expect(w.sent).toHaveLength(0);
   });
 
+  // On an upgraded escrow, claimTimeout on delivered, never-judged work sends
+  // it for review and refunds nothing (security audit run 1, C18).
+  it('reclaimAfterTimeout reports an escalation, not a refund, and no closed listing', async () => {
+    const claim5 = ESCROW_ABI.encodeFunctionData('claimTimeout', [5n]);
+    stub({
+      refund: () => ({ unsignedTx: { to: ESCROW, data: claim5 }, chain: 'arc', chainId: CHAIN_ID, outcome: 'escalate' }),
+      confirmAnswers: [ok({ confirmed: true, escalated: true })],
+    });
+    await expect(bb().reclaimAfterTimeout('5', { signer: wallet().signer, chain: 'arc' }))
+      .resolves.toEqual({ txHash: FUNDED, chain: 'arc', chainId: CHAIN_ID, listingClosed: false, outcome: 'escalate' });
+  });
+
+  it('trusts the receipt over the build: an escalation the build called a refund reports escalate', async () => {
+    const claim5 = ESCROW_ABI.encodeFunctionData('claimTimeout', [5n]);
+    stub({
+      refund: () => ({ unsignedTx: { to: ESCROW, data: claim5 }, chain: 'arc', chainId: CHAIN_ID, outcome: 'refund' }),
+      confirmAnswers: [ok({ confirmed: true, escalated: true })],
+    });
+    await expect(bb().reclaimAfterTimeout('5', { signer: wallet().signer, chain: 'arc' }))
+      .resolves.toMatchObject({ outcome: 'escalate', listingClosed: false });
+  });
+
+  it('reports a refund the backend confirmed', async () => {
+    const claim5 = ESCROW_ABI.encodeFunctionData('claimTimeout', [5n]);
+    stub({ refund: () => ({ unsignedTx: { to: ESCROW, data: claim5 }, chain: 'arc', chainId: CHAIN_ID, outcome: 'refund' }) });
+    await expect(bb().reclaimAfterTimeout('5', { signer: wallet().signer, chain: 'arc' }))
+      .resolves.toMatchObject({ outcome: 'refund', listingClosed: true });
+  });
+
   it('the unsigned builders still return what they did', async () => {
     stub();
     await expect(bb().cancelTask('51')).resolves.toMatchObject({ unsignedTx: { to: ESCROW }, chain: 'arc' });

@@ -170,6 +170,11 @@ await bb.cancelAndRefund(task.taskId!);
 await bb.reclaimAfterTimeout(task.taskId!);
 ```
 
+`reclaimAfterTimeout()` refunds a task whose worker never delivered. Work that
+was delivered before the deadline and never judged is not refunded: the
+escrow sends the task for review (an admin rules, and with no ruling within
+14 days the worker is paid), and the result says `outcome: 'escalate'`.
+
 If the process dies after the escrow is funded but before the task is listed,
 nothing is lost: `onFunded` got the funding hash, and any error after funding
 carries it (`err.txHash`) with the listing body in `err.body.indexParams`.

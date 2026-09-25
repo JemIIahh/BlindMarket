@@ -215,6 +215,14 @@ export interface RefundResult {
   chainId: number;
   /** Whether the backend took the task off the market. False leaves it listed until its deadline; the refund stands either way. */
   listingClosed: boolean;
+  /**
+   * What the transaction did, when the backend says: 'refund' returned the
+   * escrow to the poster; 'escalate' (reclaimAfterTimeout on work delivered
+   * before the deadline and never judged) sent the task for review and
+   * refunded nothing. An admin rules on it, and with no ruling within 14 days
+   * the worker is paid.
+   */
+  outcome?: 'refund' | 'escalate';
 }
 
 export interface RefundOptions {
@@ -403,8 +411,11 @@ export class BlindMarket {
   /**
    * Build an unsigned `claimTimeout` transaction (the refund of a task whose
    * deadline passed). reclaimAfterTimeout() builds, signs and sends it for you.
+   * `outcome` says what it will do: on work delivered before the deadline and
+   * never judged, the escrow sends the task for review ('escalate') instead
+   * of refunding it, and `message` explains.
    */
-  async claimTimeout(taskId: string, chain?: string): Promise<{ unsignedTx: object; chain?: string; chainId?: number }> {
+  async claimTimeout(taskId: string, chain?: string): Promise<{ unsignedTx: object; chain?: string; chainId?: number; outcome?: 'refund' | 'escalate'; message?: string }> {
     return this.req('POST', `/api/v1/tasks/${taskId}/timeout`, chain ? { chain } : undefined);
   }
 
@@ -706,7 +717,12 @@ export class BlindMarket {
     return this.sendRefund(taskId, await this.cancelTask(taskId, opts.chain), 'cancelTask', 'Cancelling the task', opts);
   }
 
-  /** Reclaim the escrow of a task whose deadline passed undelivered (claimTimeout), signed and sent. */
+  /**
+   * Reclaim the escrow of a task whose deadline passed undelivered
+   * (claimTimeout), signed and sent. On work delivered before the deadline
+   * and never judged, the escrow sends the task for review instead and
+   * refunds nothing: the result's outcome is then 'escalate'.
+   */
   async reclaimAfterTimeout(taskId: string, opts: RefundOptions = {}): Promise<RefundResult> {
     return this.sendRefund(taskId, await this.claimTimeout(taskId, opts.chain), 'claimTimeout', 'Reclaiming the escrow', opts);
   }
@@ -718,7 +734,7 @@ export class BlindMarket {
    */
   private async sendRefund(
     taskId: string,
-    built: { unsignedTx: object; chain?: string; chainId?: number },
+    built: { unsignedTx: object; chain?: string; chainId?: number; outcome?: 'refund' | 'escalate' },
     fn: 'cancelTask' | 'claimTimeout',
     what: string,
     opts: RefundOptions,
@@ -754,27 +770,33 @@ export class BlindMarket {
       }
       throw err;
     }
-    return { txHash: hash, chain, chainId, listingClosed: await this.confirmRefund(taskId, hash, chain) };
+    const confirmed = await this.confirmRefund(taskId, hash, chain);
+    // The receipt is the authority; the build's outcome covers a backend that
+    // could not confirm it.
+    const outcome = confirmed.escalated ? 'escalate' : built.outcome;
+    return { txHash: hash, chain, chainId, listingClosed: confirmed.closed, ...(outcome ? { outcome } : {}) };
   }
 
   /**
    * Tell the backend a refund landed (`POST /api/v1/tasks/:id/confirm-tx`),
    * which checks the receipt and takes the task off the market. Without it a
    * refunded task keeps listing as open until its deadline. Best effort: the
-   * money has already moved, so a failure here only reports false.
+   * money has already moved, so a failure here only reports it not closed.
+   * A claim that sent the task for review closes nothing (escalated).
    */
-  private async confirmRefund(taskId: string, txHash: string, chain: string): Promise<boolean> {
+  private async confirmRefund(taskId: string, txHash: string, chain: string): Promise<{ closed: boolean; escalated: boolean }> {
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        await this.req('POST', `/api/v1/tasks/${taskId}/confirm-tx`, { txHash, chain });
-        return true;
+        const res = await this.req<{ escalated?: boolean } | undefined>('POST', `/api/v1/tasks/${taskId}/confirm-tx`, { txHash, chain });
+        const escalated = res?.escalated === true;
+        return { closed: !escalated, escalated };
       } catch (err) {
         // The backend's RPC can lag the receipt the signer just saw.
-        if (!(err instanceof ApiError && err.code === 'NOT_CONFIRMED') || attempt === 3) return false;
+        if (!(err instanceof ApiError && err.code === 'NOT_CONFIRMED') || attempt === 3) return { closed: false, escalated: false };
         await new Promise((r) => setTimeout(r, 3_000));
       }
     }
-    return false;
+    return { closed: false, escalated: false };
   }
 
   // ── Agent deployment & management ─────────────────────────────────────────

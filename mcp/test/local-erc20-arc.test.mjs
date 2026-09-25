@@ -54,6 +54,7 @@ const ESCROW_CALLS = new Interface([
   'function createTask(bytes32 taskHash, address token, uint256 amount, string category, string locationZone, uint256 duration)',
   'function submitEvidence(uint256 taskId, bytes32 evidenceHash)',
   'function cancelTask(uint256 taskId)',
+  'function claimTimeout(uint256 taskId)',
 ]);
 const createTaskData = (b) => ESCROW_CALLS.encodeFunctionData('createTask', [b.taskHash, b.token, b.amount, 'general', b.locationZone, b.duration]);
 const cancelData = (id) => ESCROW_CALLS.encodeFunctionData('cancelTask', [BigInt(id)]);
@@ -101,7 +102,7 @@ before(async () => {
               const taskId = Number(ESCROW_READ.decodeFunctionData('getTask', data)[0]);
               result = ESCROW_READ.encodeFunctionResult('getTask', [[
                 OWNER.address, OWNER.address, USDC, 2_500_000n, HASH, '0x' + '00'.repeat(32),
-                chain.tasks[taskId] ?? 0, 'delegated', 'global', 1n, FUTURE, 0,
+                chain.tasks[taskId] ?? 0, 'delegated', 'global', 1n, chain.deadlines?.[taskId] ?? FUTURE, 0,
               ]]);
             } else {
               assert.equal(to.toLowerCase(), USDC.toLowerCase(), 'reads go to the backend-named token or escrow');
@@ -116,6 +117,11 @@ before(async () => {
             if (tx.to.toLowerCase() === USDC.toLowerCase()) chain.allowance = ERC20.decodeFunctionData('approve', tx.data)[1];
             if (callName(tx.data) === 'cancelTask') chain.tasks[8] = 5;
             if (callName(tx.data) === 'submitEvidence') chain.tasks[9] = 2;
+            // An upgraded escrow sends a Submitted task for review (Disputed).
+            if (callName(tx.data) === 'claimTimeout') {
+              const id = Number(ESCROW_CALLS.decodeFunctionData('claimTimeout', tx.data)[0]);
+              chain.tasks[id] = chain.tasks[id] === 2 ? 6 : 5;
+            }
             result = tx.hash;
             break;
           }
@@ -321,6 +327,33 @@ test('cancel_task reads the task from Arc and refunds with a local signature', a
   assert.deepEqual(backendCalls.find((c) => c.path === '/api/v1/tasks/8/cancel').body, { chain: 'arc' });
   assert.deepEqual(backendCalls.find((c) => c.path === '/api/v1/tasks/8/confirm-tx').body, { txHash: chain.sent[0].hash, chain: 'arc' });
   assert.equal(done.listingClosed, true);
+});
+
+// On an upgraded escrow, claimTimeout on delivered, never-judged work sends
+// it for review: the task ends Disputed, not Cancelled, and nothing is
+// refunded (security audit run 1, C18). The tool used to wait 90s for
+// Cancelled and fail REFUND_PENDING, on every retry.
+test('claim_timeout on delivered work reports it sent for review, not refunded', async () => {
+  chain.tasks[10] = 2;
+  chain.deadlines = { 10: 1n };
+  overrides['/api/v1/tasks/10/timeout'] = () => ({
+    unsignedTx: { to: ESCROW, data: ESCROW_CALLS.encodeFunctionData('claimTimeout', [10n]) }, chain: 'arc', chainId: ARC_ID, outcome: 'escalate',
+  });
+  const t = tools();
+  const { quote } = parse(await t.claim_timeout({ task: '10', idempotencyKey: 'arc-timeout-review-1' }));
+  assert.equal(quote.status, 'Submitted');
+  assert.match(quote.note, /sends it for review instead of refunding you/);
+  const done = parse(await t.claim_timeout({ task: '10', idempotencyKey: 'arc-timeout-review-1', confirm: true, quoteId: quote.quoteId }));
+  assert.equal(done.outcome, 'escalate');
+  assert.equal(done.listingClosed, false);
+  assert.equal(done.refunded, undefined);
+  assert.match(done.hint, /nothing was refunded/);
+  assert.equal(chain.tasks[10], 6);
+  assert.equal(backendCalls.some((c) => c.path === '/api/v1/tasks/10/confirm-tx'), false, 'no refund to confirm');
+  // A retry with the same key reports the same outcome without sending again.
+  const again = parse(await t.claim_timeout({ task: '10', idempotencyKey: 'arc-timeout-review-1' }));
+  assert.equal(again.outcome, 'escalate');
+  assert.equal(chain.sent.length, 1);
 });
 
 test('complete_task delivers on Arc with a local signature and reports the payout in USDC', async () => {

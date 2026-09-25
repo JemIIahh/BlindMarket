@@ -33,6 +33,13 @@ export interface SpendRecord {
   taskHash?: string;
   /** on-chain numeric task id — the refund routes address tasks by id, not hash */
   taskId?: number;
+  /** claim_timeout: the task's on-chain status when the claim was made. A
+   *  Submitted (2) task ends Disputed, not Cancelled, on an escrow that sends
+   *  work delivered before the deadline and never judged for review. */
+  fromStatus?: number;
+  /** A confirmed refund: 'refund' returned the escrow, 'escalate' sent the
+   *  task for review and refunded nothing. */
+  outcome?: 'refund' | 'escalate';
   txHash?: string;
   /** which chain this spend settles on — decides local-sign vs relay on resume */
   /** the backend chain key the spend started on ('0g', 'base', …) */

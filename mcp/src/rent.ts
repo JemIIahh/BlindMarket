@@ -361,7 +361,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
   /** Wait for a relayed tx to land. A plain hash can be polled for its receipt;
    *  a user-op hash cannot (getTransactionReceipt is always null for it), so
    *  that case returns at once and the caller confirms by on-chain STATE —
-   *  see ensureAllowance and waitCancelled. */
+   *  see ensureAllowance and waitLanded. */
   async function waitRelayed(s: Erc20Settlement, hash: string, isUserOp: boolean): Promise<void> {
     if (isUserOp) return;
     for (let i = 0; i < 30; i++) {
@@ -902,6 +902,11 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
   //   Disputed (6)                      → claimTimeout, but only once
   //                                       DISPUTE_WINDOW has elapsed
   //
+  // On an upgraded escrow, claimTimeout on a Submitted task (work delivered
+  // before the deadline, never judged) refunds nothing: it sends the task for
+  // review and leaves it Disputed (security audit run 1, C18). A failed
+  // (Verified) task refunds only after the worker's 3-day appeal window.
+  //
   // So the quote step reads the live status first and refuses a path the
   // contract would reject, rather than letting the caller burn gas to find out.
   //
@@ -1019,17 +1024,19 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     };
   }
 
-  /** The refund has landed when the task reads Cancelled on-chain. Checking
+  /** The refund has landed when the task reads one of `settled` on-chain:
+   *  Cancelled, or for a claim on a Submitted task also Disputed (sent for
+   *  review; an escrow from before that change refunds it instead). Checking
    *  state rather than a receipt is what makes a relayed user-op decidable
    *  (there is no receipt to poll), and it is a cheap truth check for the
-   *  local-signing path too. */
-  async function waitCancelled(s: Settlement, taskId: number): Promise<void> {
+   *  local-signing path too. Resolves to the status it read. */
+  async function waitLanded(s: Settlement, taskId: number, settled: readonly number[]): Promise<number> {
     for (let i = 0; i < 30; i++) {
       const detail = await loadTask(s, String(taskId)).catch(() => null);
-      if (detail && Number(detail.status) === 5) return;
+      if (detail && settled.includes(Number(detail.status))) return Number(detail.status);
       await new Promise((r) => setTimeout(r, 3000));
     }
-    const e: ApiError = new Error(`task ${taskId} still not Cancelled on-chain after 90s — retry with the same idempotencyKey to keep waiting`);
+    const e: ApiError = new Error(`task ${taskId} still not ${settled.map(statusName).join(' or ')} on-chain after 90s — retry with the same idempotencyKey to keep waiting`);
     e.code = 'REFUND_PENDING';
     throw e;
   }
@@ -1039,7 +1046,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
    *  Same two paths as fundAndIndex: local wallet on 0G, Privy relay on a relay chain.
    *  The backend resolves which chain holds the task and builds the tx for
    *  it; this only decides who signs. */
-  async function sendRefund(record: SpendRecord): Promise<{ taskId: number; txHash: string; gas?: GasMode; listingClosed: boolean }> {
+  async function sendRefund(record: SpendRecord): Promise<{ taskId: number; txHash: string; gas?: GasMode; listingClosed: boolean; outcome: 'refund' | 'escalate' }> {
     const s = await settlement();
     const taskId = record.taskId!;
     let { txHash } = record;
@@ -1093,9 +1100,12 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       throw new Error(`Spend record ${record.idempotencyKey} is at stage '${record.stage}' with no txHash — cannot resume safely`);
     }
 
-    await waitCancelled(s, taskId);
-    updateSpend(record.idempotencyKey, { stage: 'confirmed' });
-    return { taskId, txHash: txHash!, gas: record.gas, listingClosed: await confirmRefund(s, taskId, txHash!, record.isUserOp ?? false) };
+    const landed = await waitLanded(s, taskId, record.kind === 'timeout' && record.fromStatus === 2 ? [5, 6] : [5]);
+    const outcome = landed === 6 ? 'escalate' : 'refund';
+    updateSpend(record.idempotencyKey, { stage: 'confirmed', outcome });
+    // Sent for review: the task stays live and there is no refund to confirm.
+    const listingClosed = outcome === 'escalate' ? false : await confirmRefund(s, taskId, txHash!, record.isUserOp ?? false);
+    return { taskId, txHash: txHash!, gas: record.gas, listingClosed, outcome };
   }
 
   /** Tell the backend the refund landed (POST /tasks/:id/confirm-tx): it
@@ -1130,7 +1140,10 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
         resumed: true,
         taskId: existing.taskId,
         txHash: existing.txHash,
-        hint: 'Already refunded — this idempotencyKey completed earlier.',
+        ...(existing.outcome ? { outcome: existing.outcome } : {}),
+        hint: existing.outcome === 'escalate'
+          ? 'Already sent for review — this idempotencyKey completed earlier. Nothing was refunded.'
+          : 'Already refunded — this idempotencyKey completed earlier.',
       });
     }
     try {
@@ -1222,7 +1235,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     'claim_timeout',
     {
       title: 'Reclaim Escrow After the Deadline',
-      description: 'Reclaim the escrow on a task that WAS assigned but never completed, once its deadline has passed (status Assigned, Submitted, or Verified-failed). For a task no worker ever picked up, use cancel_task instead — it needs no deadline. TWO-STEP quote/confirm; requires a unique idempotencyKey.',
+      description: 'Reclaim the escrow on a task that WAS assigned but never completed, once its deadline has passed (status Assigned, or Verified-failed once the worker\'s 3-day appeal window has passed). On a Submitted task (work delivered before the deadline, never judged) it sends the task for review instead and refunds nothing: an admin rules, and with no ruling within 14 days the worker is paid; the result says outcome "escalate". For a task no worker ever picked up, use cancel_task instead — it needs no deadline. TWO-STEP quote/confirm; requires a unique idempotencyKey.',
       inputSchema: {
         task: z.string().min(1).describe('Task id (e.g. "51") or the 0x task hash returned by post_task'),
         idempotencyKey: z.string().min(8).max(128).describe('Unique key for this refund — reuse it on retries'),
@@ -1274,7 +1287,9 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
             settlement: s.mode,
             // DISPUTE_WINDOW is enforced on-chain and disputedAt is not exposed
             // here, so a disputed task can still revert after this quote.
-            ...(status === 6 ? { note: 'Task is Disputed — this only succeeds once the on-chain DISPUTE_WINDOW has elapsed since the dispute was raised, otherwise it reverts with DisputeWindowActive.' } : {}),
+            ...(status === 6 ? { note: 'Task is Disputed — this only succeeds once the on-chain DISPUTE_WINDOW has elapsed since the dispute was raised, otherwise it reverts with DisputeWindowActive. Delivered work that was sent for review never returns to you by timeout.' } : {}),
+            ...(status === 2 ? { note: 'The work was delivered before the deadline and never judged. The escrow sends it for review instead of refunding you: an admin rules, and with no ruling within 14 days the worker is paid. (An escrow from before that change refunds it.)' } : {}),
+            ...(status === 3 ? { note: "The work failed verification. This reverts with AppealWindowActive until the worker's 3-day appeal window after the verdict has passed." } : {}),
             quoteId: quote.quoteId,
           },
           next: `Re-call claim_timeout with confirm=true, quoteId="${quote.quoteId}", and the SAME idempotencyKey to send it.`,
@@ -1290,6 +1305,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
           stage: 'created',
           settlement: s.mode,
           taskId: Number(detail.taskId),
+          fromStatus: status,
           taskHash: detail.taskHash,
           amountWei: detail.amount,
           createdAt: new Date().toISOString(),
@@ -1297,6 +1313,9 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
         };
         putSpend(record);
         const done = await sendRefund(record);
+        if (done.outcome === 'escalate') {
+          return ok({ ...done, hint: 'Sent for review: nothing was refunded. An admin rules on the delivered work; with no ruling within 14 days the worker is paid.' });
+        }
         return ok({ ...done, refunded: refundAmount(detail), hint: 'Escrow returned to the posting wallet.' });
       } catch (err) {
         return fail((err as ApiError).code ?? 'TIMEOUT_CLAIM_FAILED', (err as Error).message);
