@@ -18,6 +18,7 @@ import {
 } from './redis.js';
 import { saveAgent, loadAgent, loadAllAgents } from './deployedAgentStore.js';
 import { notify } from './notificationStore.js';
+import { parseReadiness, saveAgentReadiness } from './agentReadiness.js';
 import { composeAgentRuntime } from './skillComposer.js';
 import type { DeployedAgent, AgentCapability, LLMProvider, AgentTool, InstalledSkill } from '../types.js';
 
@@ -574,7 +575,7 @@ export async function startAgent(id: string, opts?: { skipResume?: boolean }): P
 
   child.on('message', async (msg: unknown) => {
     if (typeof msg !== 'object' || msg === null) return;
-    const m = msg as { type?: unknown; taskHash?: unknown; completed?: unknown };
+    const m = msg as { type?: unknown; taskHash?: unknown; completed?: unknown; readiness?: unknown };
     // In-flight task reports — only from the child that currently owns the id.
     if (m.type === 'task-started' && isTaskHashLike(m.taskHash)) {
       if (processes.get(id) === child) inFlightTasks.set(id, m.taskHash);
@@ -592,6 +593,9 @@ export async function startAgent(id: string, opts?: { skipResume?: boolean }): P
     }
     if (m.type === 'heartbeat') {
       await touchHeartbeat(id);
+      // Whether the worker is taking tasks, for the owner (GET /agents/:id/readiness).
+      const readiness = processes.get(id) === child ? parseReadiness(m.readiness) : null;
+      if (readiness) await saveAgentReadiness(id, readiness).catch(() => {});
       const a = await loadAgent(id);
       if (a) {
         a.lastActiveAt = new Date().toISOString();

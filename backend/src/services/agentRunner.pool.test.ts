@@ -29,6 +29,11 @@ vi.mock('./redis.js', () => ({
   redis: { set: vi.fn(), get: vi.fn(), del: vi.fn() },
 }));
 vi.mock('./chain.js', () => ({ inft: null }));
+const saveAgentReadiness = vi.hoisted(() => vi.fn(async () => {}));
+vi.mock('./agentReadiness.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./agentReadiness.js')>()),
+  saveAgentReadiness,
+}));
 vi.mock('./deploymentIdentity.js', () => ({
   backgroundWritesAllowed: () => true,
   deploymentIdentityStatus: () => null,
@@ -126,5 +131,22 @@ describe('hosted-worker pool: per-owner share (audit run 1, C10)', () => {
     expect(agents.get('a1').status).toBe('stopped');
     expect(appendLog).toHaveBeenCalledWith('a1', expect.stringMatching(/it failed to start \(spawn EACCES\)/));
     expect(notify).toHaveBeenCalledWith(OWNER_A, expect.objectContaining({ type: 'agent_stopped' }));
+  });
+});
+
+// The worker's heartbeat says whether it is taking tasks; the owner's agent
+// page reads it back (GET /agents/:id/readiness).
+describe('worker readiness reports', () => {
+  it("stores the readiness a heartbeat carries, from the agent's live worker", async () => {
+    await startAgent(agent('a1', OWNER_A).id);
+    const child = forkMock.mock.results[0].value;
+    const onMessage = child.on.mock.calls.find(([event]: [string]) => event === 'message')[1];
+    const fund = { chain: '0g', address: '0x3a38cd7A3321A6716815f7B555F4dA6baDCCBC82', holdsWei: '1600000000000000000', needWei: '3100000000000000000', shortfallWei: '1500000000000000000' };
+    await onMessage({ type: 'heartbeat', timestamp: 1, readiness: { ready: false, reason: 'no 0G Compute account yet', fund } });
+    expect(saveAgentReadiness).toHaveBeenCalledWith('a1', expect.objectContaining({ ready: false, reason: 'no 0G Compute account yet', fund }));
+
+    saveAgentReadiness.mockClear();
+    await onMessage({ type: 'heartbeat', timestamp: 2 }); // an older worker: no report
+    expect(saveAgentReadiness).not.toHaveBeenCalled();
   });
 });

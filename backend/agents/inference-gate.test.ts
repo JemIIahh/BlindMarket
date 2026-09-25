@@ -18,7 +18,7 @@ vi.mock('socket.io-client', () => ({ io: () => ({ on: vi.fn(), emit: vi.fn() }) 
 const ORIGINAL = { ...process.env };
 process.env = { ...ORIGINAL, AGENT_PRIVATE_KEY: '0x' + '11'.repeat(32), AGENT_ID: 'test-agent', SETTLEMENT_CHAINS_JSON: '' };
 // @ts-expect-error — plain-JS worker, no d.ts
-const { createInferenceGate, ogLedgerPlan, OG_LEDGER_OPEN_WEI, OG_SETUP_GAS_RESERVE_WEI } = await import('./worker.js');
+const { createInferenceGate, ogLedgerPlan, readinessFrom, NOT_CHECKED_YET, OG_LEDGER_OPEN_WEI, OG_SETUP_GAS_RESERVE_WEI } = await import('./worker.js');
 
 afterEach(() => {
   process.env = { ...ORIGINAL };
@@ -125,5 +125,27 @@ describe('inference gate', () => {
     const { g } = gate(async () => { throw new Error('RPC down'); });
     expect(await g.check()).toBe(false);
     expect(g.blocker()).toBe('the model check failed: RPC down');
+  });
+});
+
+// What the heartbeat tells the owner's agent page.
+describe('readiness report', () => {
+  const fund = { chain: '0g', address: '0x3a38cd7A3321A6716815f7B555F4dA6baDCCBC82', holdsWei: '1600000000000000000', needWei: '3100000000000000000', shortfallWei: '1500000000000000000' };
+
+  it('is ready once a check passed, whatever the setup left behind', () => {
+    expect(readinessFrom(null, fund, false)).toEqual({ ready: true, reason: null });
+  });
+
+  it('says it is still checking before the first check ends', () => {
+    expect(readinessFrom(NOT_CHECKED_YET, fund, false)).toEqual({ ready: false, checking: true, reason: NOT_CHECKED_YET });
+  });
+
+  it('names the 0G the wallet needs while the account cannot be opened', () => {
+    expect(readinessFrom('no 0G Compute account yet', fund, false)).toEqual({ ready: false, reason: 'no 0G Compute account yet', fund });
+  });
+
+  it('asks for no 0G once the account is open, even while a model call is failing', () => {
+    expect(readinessFrom("a task's model call failed: 500", fund, true)).toEqual({ ready: false, reason: "a task's model call failed: 500" });
+    expect(readinessFrom('key revoked', null, false)).toEqual({ ready: false, reason: 'key revoked' });
   });
 });

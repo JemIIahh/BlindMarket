@@ -413,6 +413,10 @@ let _ogRpc = null;
 let _ogWallet = null;
 let _ogAccountReady = false;
 let _ogSetupProblem = null;
+// What the wallet must hold to open the account, while it can't: reported to
+// the owner through the heartbeat (readinessReport). Wei as strings.
+/** @type {{ chain: '0g', address: string, holdsWei: string, needWei: string, shortfallWei: string } | null} */
+let _ogFundNeed = null;
 let _ogSetupAttemptAt = 0;
 let _ogSetupInFlight = null;
 const OG_SETUP_RETRY_MS = 5 * 60_000;
@@ -455,6 +459,9 @@ async function setUpOgCompute() {
     const hasLedger = await _ogComputeBroker.ledger.getLedger().then(() => true, () => false);
     const walletWei = hasLedger ? 0n : await _ogRpc.getBalance(_ogWallet.address);
     const plan = ogLedgerPlan(hasLedger, walletWei);
+    _ogFundNeed = plan.action === 'fund'
+      ? { chain: '0g', address: _ogWallet.address, holdsWei: String(walletWei), needWei: String(plan.needWei), shortfallWei: String(plan.shortfallWei) }
+      : null;
     if (plan.action === 'fund') {
       _ogSetupProblem =
         `no 0G Compute account yet: the agent wallet ${_ogWallet.address} holds ${fmt(walletWei)} 0G on the 0G chain, ` +
@@ -1210,6 +1217,9 @@ log(`started | provider=${OG_COMPUTE_ENABLED ? '0g-compute' : AGENT_PROVIDER} mo
 
 // ── Inference readiness ─────────────────────────────────────────────────────
 
+// An agent's reason for not taking work before its first model check ends.
+export const NOT_CHECKED_YET = 'the model has not been checked yet';
+
 /**
  * Whether this agent can run its model, so it takes work only when it can
  * finish it. /accept assigns a task on-chain and the escrow cannot unassign it
@@ -1229,7 +1239,7 @@ log(`started | provider=${OG_COMPUTE_ENABLED ? '0g-compute' : AGENT_PROVIDER} mo
  */
 export function createInferenceGate({ probe, recheckMs = 5 * 60_000, now = () => Date.now(), onChange = () => {} }) {
   /** @type {string | null} */
-  let blocker = 'the model has not been checked yet';
+  let blocker = NOT_CHECKED_YET;
   /** @type {number | null} */
   let checkedAt = null;
   /** @type {Promise<boolean> | null} */
@@ -1286,7 +1296,7 @@ async function probeInference() {
     );
     return null;
   } catch (e) {
-    return `${AGENT_MODEL} did not answer a test prompt: ${errorLine(e)}` +
+    return `the model ${AGENT_MODEL} did not answer a test prompt: ${errorLine(e)}` +
       (OG_COMPUTE_ENABLED ? ' (a 0g-compute agent pays for each call from its 0G Compute account: check the agent wallet\'s 0G)' : '');
   }
 }
@@ -1299,8 +1309,26 @@ const inferenceGate = createInferenceGate({
   onChange: (reason) => {
     if (reason === null) inferenceHoldLogged.clear();
     log(reason === null ? 'model check passed — taking tasks' : `not taking tasks: ${reason}`);
+    // Tell the owner now rather than at the next beat.
+    sendHeartbeat();
   },
 });
+
+/**
+ * Whether this agent is taking tasks, for the owner's agent page (the
+ * heartbeat carries it; GET /agents/:id/readiness serves it), from the gate's
+ * reason. `fund` is set while a 0g-compute agent's wallet can't open its 0G
+ * Compute account. Exported for tests.
+ */
+export function readinessFrom(reason, fundNeed, accountReady) {
+  if (reason === null) return { ready: true, reason: null };
+  if (reason === NOT_CHECKED_YET) return { ready: false, checking: true, reason };
+  return { ready: false, reason, ...(fundNeed && !accountReady ? { fund: fundNeed } : {}) };
+}
+
+function readinessReport() {
+  return readinessFrom(inferenceGate.blocker(), _ogFundNeed, _ogAccountReady);
+}
 
 // Declines an offer (or skips a broadcast) while the model check is failing.
 // True when the task was turned down.
@@ -4231,7 +4259,7 @@ function bumpVerifyFailure(taskHash) {
 
 function sendHeartbeat() {
   if (process.send) {
-    process.send({ type: 'heartbeat', timestamp: Date.now() });
+    process.send({ type: 'heartbeat', timestamp: Date.now(), readiness: readinessReport() });
   }
 }
 
