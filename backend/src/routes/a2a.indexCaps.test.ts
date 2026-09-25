@@ -145,6 +145,14 @@ describe('POST /tasks/index — requiredCapabilities', () => {
     expect(vi.mocked(a2aStore.setMeta).mock.calls[0][0].requiredCapabilities).toEqual(['data_processing', 'translation']);
   });
 
+  // The chain key alone survives a move to another network (chainScope), so
+  // the listing records the network too.
+  it('records the network the task was listed on', async () => {
+    const res = await index(body(['translation']));
+    expect(res.status).toBe(200);
+    expect(vi.mocked(a2aStore.setMeta).mock.calls[0][0]).toMatchObject({ chain: 'arc', chainId: 5042002 });
+  });
+
   it('refuses more than 20 entries before reading the chain', async () => {
     const res = await index(body(Array(21).fill('translation')));
     expect(res.status).toBe(400);

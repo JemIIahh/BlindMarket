@@ -10,6 +10,10 @@
  *   base:events:escrow              → <chainId>:<escrow> these keys belong to
  *                                     (see escrowFingerprint)
  *
+ * The `base:` prefix is chainScope('base'): it is `base` on Base Sepolia, where these
+ * keys have always lived, and `base@<chainId>` on any other network, so a
+ * move to another network starts from an empty index.
+ *
  * All writes are idempotent (SET overwrite with identical value), so
  * at-least-once delivery from the poll loop is safe.
  *
@@ -31,14 +35,17 @@ import { backgroundWritesAllowed } from './deploymentIdentity.js';
 import { handleDisputeResolved, retryParkedDisputes } from './disputeListener.js';
 import { checkEscrowFingerprint } from './escrowFingerprint.js';
 import { config } from '../config.js';
+import { chainScope } from './chainScope.js';
 
 // ── Redis keys ──────────────────────────────────────────────────────────────
 
+// Under the network's scope (chainScope), so a move to another Base network
+// starts from an empty index instead of reading this one's.
 const KEY = {
-  hash2id: (hash: string) => `base:hash2id:${hash.toLowerCase()}`,
-  id2hash: (taskId: bigint | string) => `base:id2hash:${String(taskId)}`,
-  checkpoint: 'base:events:checkpoint',
-  disputeCheckpoint: 'base:events:dispute-checkpoint',
+  hash2id: (hash: string) => `${chainScope('base')}:hash2id:${hash.toLowerCase()}`,
+  id2hash: (taskId: bigint | string) => `${chainScope('base')}:id2hash:${String(taskId)}`,
+  get checkpoint() { return `${chainScope('base')}:events:checkpoint`; },
+  get disputeCheckpoint() { return `${chainScope('base')}:events:dispute-checkpoint`; },
 };
 
 // ── Polling config ──────────────────────────────────────────────────────────

@@ -268,3 +268,24 @@ describe('a second task funded under the same hash', () => {
     expect(await isListedTask('arc', 7, HASH, STRANGER, undefined)).toBe(true);
   });
 });
+
+// A task listed on a network its chain has since moved off (chainScope):
+// its escrow is not the one this backend reads, and escrow ids restart at 1,
+// so it must not resolve to the new network's task with the same id.
+describe('a task from a network the chain has moved off', () => {
+  it('resolves to nothing and reads no index', async () => {
+    // This backend runs Arc on testnet (5042002); the task was listed on 5042.
+    getMeta.mockResolvedValue({ chain: 'arc', chainId: 5042 });
+    getArcTaskIdByHash.mockResolvedValue('7');
+    expect(await resolveTaskByHash(HASH)).toBeNull();
+    expect(await resolveCachedTaskByHash(HASH)).toBeNull();
+    expect(getArcTaskIdByHash).not.toHaveBeenCalled();
+    expect(forceArcTick).not.toHaveBeenCalled();
+  });
+
+  it('resolves a task listed on the network the chain runs on, as before', async () => {
+    getMeta.mockResolvedValue({ chain: 'arc', chainId: 5042002 });
+    getArcTaskIdByHash.mockResolvedValue('7');
+    expect(await resolveTaskByHash(HASH)).toEqual({ taskId: '7', chain: 'arc' });
+  });
+});

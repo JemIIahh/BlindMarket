@@ -19,6 +19,7 @@
 import { getDb } from './database.js';
 import { getPool } from './neonDb.js';
 import { config } from '../config.js';
+import { chainScope } from './chainScope.js';
 
 export const PENDING_CLAIM_TTL_S = 600;
 
@@ -26,9 +27,10 @@ export type PaymentClaim =
   | { claimed: true }
   | { claimed: false; pending: boolean; agentId?: string };
 
+// Under the network's scope (chainScope): 'arc:' on Arc testnet, as before.
 export const factoryPaymentKey = (factory: string, nonce: string): string =>
-  `arc:factory:${factory.toLowerCase()}:${nonce}`;
-export const transferPaymentKey = (txHash: string): string => `arc:transfer:${txHash.toLowerCase()}`;
+  `${chainScope('arc')}:factory:${factory.toLowerCase()}:${nonce}`;
+export const transferPaymentKey = (txHash: string): string => `${chainScope('arc')}:transfer:${txHash.toLowerCase()}`;
 
 function usePg(): boolean {
   return Boolean(config.databaseUrl);

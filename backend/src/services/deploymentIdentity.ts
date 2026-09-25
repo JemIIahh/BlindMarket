@@ -58,17 +58,18 @@
 import * as Sentry from '@sentry/node';
 import { config } from '../config.js';
 import { redis } from './redis.js';
-import { settlementChainConfigs } from './settlementChains.js';
-import { FINGERPRINT_KEY } from './escrowFingerprint.js';
+import { SETTLEMENT_CHAIN_KEYS, settlementChainConfigs, type SettlementChainKey } from './settlementChains.js';
+import { fingerprintKey } from './escrowFingerprint.js';
+import { chainScope } from './chainScope.js';
 import { TIER_CHAIN_IDS, type SettlementTier } from './settlementTier.js';
 
 export const IDENTITY_KEY = 'deployment:identity';
 
-/** The TaskCreated checkpoint each indexer keeps (baseEscrowEvents.ts and arcEscrowEvents.ts KEY.checkpoint). */
-export const INDEX_CHECKPOINT_KEY: Readonly<Record<keyof typeof FINGERPRINT_KEY, string>> = {
-  base: 'base:events:checkpoint',
-  arc: 'arc:events:checkpoint',
-};
+/** The TaskCreated checkpoint each indexer keeps (baseEscrowEvents.ts and
+ *  arcEscrowEvents.ts KEY.checkpoint), under this process's network scope. */
+export function indexCheckpointKey(chain: SettlementChainKey): string {
+  return `${chainScope(chain)}:events:checkpoint`;
+}
 
 /** How long a check waits for Redis before letting writes run anyway. */
 export const CHECK_TIMEOUT_MS = 10_000;
@@ -199,7 +200,8 @@ interface Foreign {
 async function foreignIndexState(store: IdentityRedis, facts: DeploymentFacts): Promise<{ fingerprints: Foreign[]; unvouched: Foreign[] }> {
   const fingerprints: Foreign[] = [];
   const unvouched: Foreign[] = [];
-  for (const [chain, key] of Object.entries(FINGERPRINT_KEY)) {
+  for (const chain of SETTLEMENT_CHAIN_KEYS) {
+    const key = fingerprintKey(chain);
     const fingerprint = await store.get(key);
     const mine = facts.chains[chain];
     if (fingerprint !== null) {
@@ -212,7 +214,7 @@ async function foreignIndexState(store: IdentityRedis, facts: DeploymentFacts): 
         });
       }
     } else {
-      const checkpoint = INDEX_CHECKPOINT_KEY[chain as keyof typeof INDEX_CHECKPOINT_KEY];
+      const checkpoint = indexCheckpointKey(chain);
       if ((await store.get(checkpoint)) !== null) unvouched.push({ key: checkpoint, text: `${checkpoint} with no ${key}` });
     }
   }

@@ -4,7 +4,10 @@
  *
  *   agentfactory:credit:<user>:<nonce>  → JSON {user, nonce, amount, block, txHash, ts}
  *   agentfactory:credits:<user>         → set of nonces paid by that user
- *   agentfactory:events:checkpoint      → last block number processed
+ *   agentfactory:events:checkpoint:<factory> → last block number processed
+ *
+ * Credits live under `agentfactory@<chainId>` instead once Arc runs on a
+ * network other than its first (chainScope).
  *
  * Why a credit and not an agent: the deploy transaction carries no agent
  * configuration and, critically, no owner public key. Agent private keys are
@@ -18,6 +21,8 @@
  * at-least-once delivery from the poll loop is safe across restarts.
  */
 import { backgroundWritesAllowed } from './deploymentIdentity.js';
+import { chainScope } from './chainScope.js';
+import { settlementChainConfig } from './settlementChains.js';
 import type { EventLog } from 'ethers';
 import { ethers } from 'ethers';
 import { config } from '../config.js';
@@ -32,10 +37,14 @@ const AGENT_FACTORY_ABI = [
 
 // ── Redis keys ──────────────────────────────────────────────────────────────
 
+// Credits are per network (chainScope): factory nonces restart at 1 on every
+// factory, so an Arc testnet credit read on Arc mainnet would pass for, and
+// then shadow, a mainnet payment with the same nonce.
+const creditPrefix = () => (chainScope('arc') === 'arc' ? 'agentfactory' : `agentfactory@${settlementChainConfig('arc').chainId}`);
 const KEY = {
   credit: (user: string, nonce: bigint | string) =>
-    `agentfactory:credit:${user.toLowerCase()}:${String(nonce)}`,
-  creditsByUser: (user: string) => `agentfactory:credits:${user.toLowerCase()}`,
+    `${creditPrefix()}:credit:${user.toLowerCase()}:${String(nonce)}`,
+  creditsByUser: (user: string) => `${creditPrefix()}:credits:${user.toLowerCase()}`,
   checkpoint: (addr: string) => `agentfactory:events:checkpoint:${addr.toLowerCase()}`,
 };
 

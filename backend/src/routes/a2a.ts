@@ -1790,6 +1790,8 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       requiredCapabilities: requiredCaps,
       posterAddress: address,
       chain: taskChain,
+      // The network, too: the chain key alone survives a move to another network (chainScope).
+      chainId: settlementChainConfig(taskChain).chainId,
       verifierAddress: data.verifierAddress?.toLowerCase(),
       rootHash: data.rootHash,
       wrappedKeys: finalWrappedKeys,
