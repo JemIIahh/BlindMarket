@@ -3,6 +3,36 @@
 This package is 0.x: a minor version may contain breaking changes. They are
 listed here with how to migrate.
 
+## 0.8.0
+
+### Breaking / behaviour changes
+
+- **Escrow calls are verified before signing (C41).** `sdk/src/escrowCalls.ts`
+  decodes the backend-built tx before anything is signed and checks it is
+  exactly the expected function (`createTask`, `cancelTask`/`claimTimeout`,
+  `submitEvidence`) with the expected arguments, canonical calldata with no
+  trailing bytes, targeting the escrow from `/health/settlement` for the named
+  chain, carrying no value (except a native `createTask` where value must equal
+  the computed amount), and — for `/submit` — an evidence hash equal to
+  `keccak256(JSON.stringify(resultData))`. Only `{ to, data }` is signed.
+  Anything else fails with `ESCROW_MISMATCH`, `TX_MISMATCH`, `CHAIN_MISMATCH`
+  or `CHAIN_UNKNOWN` before any signature.
+- **`deliverResult` reads `/health/settlement` first** to resolve the escrow.
+- **`WorkerRuntime` applies `minReward` when picking tasks (C40).** Browse
+  skips listings whose reward is missing, malformed, not 6-decimal USDC, or
+  below the floor. Values of 10^12 or more are treated as legacy 18-decimal
+  and divided down. Unset, `''` or `'0'` means no floor. Requires the backend
+  `/accept` gate from #89 (403 `BELOW_MIN_REWARD`); a runtime with `minReward`
+  set claims nothing until listings carry `meta.reward`, so deploy the backend
+  first.
+- **`start()` validates `minReward`.** A non-whole-number floor throws.
+- **Timeout-claim escalation (C18).** After the escrow upgrade, `claimTimeout`
+  on a Submitted task sends delivered work for review instead of refunding.
+  `RefundResult.outcome` reports `'escalate'` (from `POST /tasks/:id/timeout`).
+- **`list_open_tasks` / `listTasks()` list the legacy 0G registry** and point
+  to `browse_a2a_tasks`. `fetch_brief` no longer says a `rootHash` comes from
+  `list_open_tasks`.
+
 ## 0.7.0
 
 ### Changes
