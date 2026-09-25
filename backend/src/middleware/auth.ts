@@ -161,6 +161,31 @@ function getAddressForChain(wallets: WalletAddress[], chainType: string): string
  * before either claim existed). Callers that gate privileged roles (see
  * requireFounder) must reject on this field.
  */
+const warnedCutoffs = new Set<string>();
+
+/** A token cutoff from the environment, in Unix seconds (0 = unset). A value
+ *  that isn't a positive integer used to become NaN and silently disable the
+ *  cutoff; it is now reported. A millisecond value is converted, since it
+ *  would otherwise reject every token. */
+function tokenMinIat(name: string): number {
+  const raw = process.env[name];
+  if (!raw) return 0;
+  let value = Number(raw);
+  const warn = (message: string) => {
+    if (!warnedCutoffs.has(name)) console.error(`[Auth] ${name}=${raw} ${message}`);
+    warnedCutoffs.add(name);
+  };
+  if (!Number.isInteger(value) || value <= 0) {
+    warn('is not a Unix time in seconds; the cutoff is NOT applied');
+    return 0;
+  }
+  if (value > 1e11) {
+    warn('looks like milliseconds; using it as seconds / 1000');
+    value = Math.floor(value / 1000);
+  }
+  return value;
+}
+
 export function verifyRegistrationToken(token: string): { address: string; ownerAddress?: string; typ: 'agent-registration' | 'agent-platform'; jti?: string } | null {
   if (!config.jwtSecret) {
     console.warn('[Auth] Registration token rejected: JWT_SECRET not configured');
@@ -177,16 +202,19 @@ export function verifyRegistrationToken(token: string): { address: string; owner
       console.warn('[Auth] Registration token rejected: Missing address or ownerAddress claims', Object.keys(claims));
       return null;
     }
-    const minIat = Number(process.env.REGISTRATION_TOKEN_MIN_IAT ?? 0);
-    if (minIat > 0 && (typeof claims.iat !== 'number' || claims.iat < minIat)) {
-      console.warn('[Auth] Registration token rejected: issued before REGISTRATION_TOKEN_MIN_IAT');
-      return null;
-    }
     // M6 (audit): honor the minter's typ, allowlisted — server-minted worker
     // tokens carry 'agent-platform', device-flow tokens 'agent-registration'
     // (or nothing, pre-typ). Anything else falls back to the unprivileged
     // registration flavor; it can never escalate by self-declaring.
     const typ = claims.typ === 'agent-platform' ? 'agent-platform' : 'agent-registration';
+    // Each class has its own cutoff, so killing device-flow tokens no longer
+    // kills every hosted worker's token too (security audit run 1, C27).
+    const cutoffName = typ === 'agent-platform' ? 'PLATFORM_TOKEN_MIN_IAT' : 'REGISTRATION_TOKEN_MIN_IAT';
+    const minIat = tokenMinIat(cutoffName);
+    if (minIat > 0 && (typeof claims.iat !== 'number' || claims.iat < minIat)) {
+      console.warn(`[Auth] Registration token rejected: issued before ${cutoffName}`);
+      return null;
+    }
     return {
       address: claims.address,
       ownerAddress: claims.ownerAddress as string,
@@ -204,9 +232,11 @@ export function verifyRegistrationToken(token: string): { address: string; owner
  * platform tokens, registration tokens). Owners revoke via
  * POST /agents/:id/revoke-token, which sets `revoked:jwt:<jti>`; every
  * verifyRegistrationToken success is checked here before the principal is
- * attached. TTL (366d) covers the max token lifetime so flags die with the
- * tokens they kill. Pre-jti tokens grandfather through — rotate them out via
- * REGISTRATION_TOKEN_MIN_IAT.
+ * attached. Device-flow registration tokens are revoked through
+ * POST /registration/revoke. TTL (366d) covers the max token lifetime so flags
+ * die with the tokens they kill. Pre-jti tokens grandfather through — rotate
+ * them out via REGISTRATION_TOKEN_MIN_IAT (or PLATFORM_TOKEN_MIN_IAT for
+ * hosted-worker tokens).
  *
  * Fail-open on Redis outage (availability over revocation, same precedent as
  * the sandbox quota): a revoked token works until Redis recovers. Logged
@@ -290,7 +320,15 @@ export function requireAuth(req: AuthRequest, _res: Response, next: NextFunction
   }).catch((err) => {
     // The 401 thrown above lands here too: pass an AppError through, or an
     // unknown X-API-Key answered 500 AUTH_ERROR instead of 401.
-    next(err instanceof AppError ? err : new AppError(500, 'AUTH_ERROR', err.message));
+    // Anything else is an infrastructure failure (database, Redis). Its text
+    // named the database host to anonymous callers (security audit run 1,
+    // C23), so it is logged here and the client gets a fixed message.
+    if (err instanceof AppError) {
+      next(err);
+      return;
+    }
+    console.error('[Auth] authentication backend error:', err);
+    next(new AppError(500, 'AUTH_ERROR', 'Authentication is temporarily unavailable'));
   });
 }
 

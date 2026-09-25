@@ -33,6 +33,8 @@ import { discoverModels, ProviderModelsError } from '../services/providerModels.
 import { eciesEncrypt } from '../services/crypto.js';
 import { callerWallets } from '../services/callerWallets.js';
 import { nativeWeiToTokenUnits, normalizeSettlementAmount, pricingUnit } from '../services/settlementUnits.js';
+import { disconnectSocketsForToken } from '../services/socket.js';
+import { clientErrorMessage, safeErrorMessage } from '../middleware/errorHandler.js';
 import { serviceDescription, serviceName } from '../services/serviceText.js';
 
 /**
@@ -685,6 +687,9 @@ agentsRouter.post('/:id/revoke-token', requireAuth, async (req: AuthRequest, res
       if (jti) {
         await redis.set(`revoked:jwt:${jti}`, '1', 'EX', REVOKED_JWT_TTL_S);
         denied = true;
+        // Sockets authenticate once, at the handshake; drop the ones already
+        // open with the old token (security audit run 1, C32).
+        void disconnectSocketsForToken(jti).catch(() => {});
       }
     } catch (e) {
       console.warn(`[agents] revoke-token denylist write failed for ${req.params.id}:`, (e as Error).message);
@@ -694,6 +699,9 @@ agentsRouter.post('/:id/revoke-token', requireAuth, async (req: AuthRequest, res
     {
       address: agent.walletAddress, ownerAddress: agent.ownerAddress.toLowerCase(), agentName: agent.name,
       jti: randomUUID(),
+      // Same claims agentRunner mints. Without typ the rotated token was read
+      // as a device-flow registration token and lost the worker's owner scope.
+      typ: 'agent-platform',
     },
     config.jwtSecret,
     { algorithm: 'HS256', expiresIn: '365d' } as jwt.SignOptions,
@@ -876,9 +884,10 @@ agentsRouter.post('/:id/withdraw', requireAuth, async (req: AuthRequest, res) =>
 
     res.json({ success: true, data: { swept, skipped } });
   } catch (err) {
+    console.error(`[agents] withdraw failed for ${req.params.id}:`, err);
     res.status(500).json({
       success: false,
-      error: { code: 'WITHDRAW_FAILED', message: (err as Error).message },
+      error: { code: 'WITHDRAW_FAILED', message: clientErrorMessage(err, 'Withdraw failed') },
     });
   }
 });
@@ -1274,7 +1283,7 @@ agentsRouter.post('/:id/start', requireAuth, async (req: AuthRequest, res) => {
   } catch (e: unknown) {
     res.status(400).json({
       success: false,
-      error: { code: 'AGENT_ACTION_FAILED', message: (e as Error).message },
+      error: { code: 'AGENT_ACTION_FAILED', message: safeErrorMessage(e) },
     });
   }
 });
@@ -1289,7 +1298,7 @@ agentsRouter.post('/:id/pause', requireAuth, async (req: AuthRequest, res) => {
   } catch (e: unknown) {
     res.status(400).json({
       success: false,
-      error: { code: 'AGENT_ACTION_FAILED', message: (e as Error).message },
+      error: { code: 'AGENT_ACTION_FAILED', message: safeErrorMessage(e) },
     });
   }
 });
@@ -1304,7 +1313,7 @@ agentsRouter.post('/:id/stop', requireAuth, async (req: AuthRequest, res) => {
   } catch (e: unknown) {
     res.status(400).json({
       success: false,
-      error: { code: 'AGENT_ACTION_FAILED', message: (e as Error).message },
+      error: { code: 'AGENT_ACTION_FAILED', message: safeErrorMessage(e) },
     });
   }
 });
@@ -1321,7 +1330,7 @@ agentsRouter.post('/:id/restart', requireAuth, async (req: AuthRequest, res) => 
   } catch (e: unknown) {
     res.status(400).json({
       success: false,
-      error: { code: 'AGENT_ACTION_FAILED', message: (e as Error).message },
+      error: { code: 'AGENT_ACTION_FAILED', message: safeErrorMessage(e) },
     });
   }
 });
@@ -1340,7 +1349,7 @@ agentsRouter.get('/:id/stats', async (req, res) => {
   } catch (e: unknown) {
     res.status(500).json({
       success: false,
-      error: { code: 'STATS_FAILED', message: (e as Error).message },
+      error: { code: 'STATS_FAILED', message: safeErrorMessage(e) },
     });
   }
 });
@@ -1356,7 +1365,7 @@ agentsRouter.post('/:id/resume', requireAuth, async (req: AuthRequest, res) => {
   } catch (e: unknown) {
     res.status(400).json({
       success: false,
-      error: { code: 'AGENT_ACTION_FAILED', message: (e as Error).message },
+      error: { code: 'AGENT_ACTION_FAILED', message: safeErrorMessage(e) },
     });
   }
 });

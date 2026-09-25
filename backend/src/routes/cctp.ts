@@ -46,6 +46,7 @@ import { getChainAA } from '../services/aaChains.js';
 import { pimlicoRpc, isPimlicoConfigured } from '../services/pimlico.js';
 import { BlindAccountFactoryABI, BlindAccountABI } from '../services/aa.js';
 import { createUserRateLimiter } from '../middleware/rateLimit.js';
+import { clientErrorMessage, safeErrorMessage } from '../middleware/errorHandler.js';
 
 export const cctpRouter = Router();
 
@@ -149,7 +150,7 @@ cctpRouter.get('/quote', async (req, res) => {
       data: { maxFeeRaw: maxFeeRaw.toString(), estimatedReceiveRaw: estimatedReceiveRaw.toString() },
     });
   } catch (e) {
-    res.status(502).json({ success: false, error: { code: 'CCTP_FEE_QUOTE_FAILED', message: `Could not get a CCTP fee quote from Circle: ${(e as Error).message}` } });
+    res.status(502).json({ success: false, error: { code: 'CCTP_FEE_QUOTE_FAILED', message: `Could not get a CCTP fee quote from Circle: ${safeErrorMessage(e)}` } });
   }
 });
 
@@ -238,7 +239,7 @@ cctpRouter.post('/deposit-intent', requireAuth, async (req: AuthRequest, res) =>
     try {
       maxFeeRaw = await estimateMaxFeeRaw(config.cctp.irisApiBase, source.domain, dest.domain, amount, minFinalityThreshold);
     } catch (e) {
-      res.status(502).json({ success: false, error: { code: 'CCTP_FEE_QUOTE_FAILED', message: `Could not get a CCTP fee quote from Circle: ${(e as Error).message}` } });
+      res.status(502).json({ success: false, error: { code: 'CCTP_FEE_QUOTE_FAILED', message: `Could not get a CCTP fee quote from Circle: ${safeErrorMessage(e)}` } });
       return;
     }
     if (maxFeeRaw >= amount) {
@@ -309,7 +310,7 @@ cctpRouter.post('/deposit-intent', requireAuth, async (req: AuthRequest, res) =>
     res.status(200).json({ success: true, data: { transferId: row.id, approveTx, burnTx } });
   } catch (e) {
     console.error('[cctp] deposit-intent error:', (e as Error).message);
-    res.status(500).json({ success: false, error: { code: 'INTERNAL_ERROR', message: (e as Error).message } });
+    res.status(500).json({ success: false, error: { code: 'INTERNAL_ERROR', message: clientErrorMessage(e) } });
   }
 });
 
@@ -466,7 +467,7 @@ cctpRouter.post('/deposit-intent/:transferId/confirm', requireAuth, async (req: 
     res.status(200).json({ success: true, data: serializeTransfer(updated) });
   } catch (e) {
     console.error('[cctp] confirm error:', (e as Error).message);
-    res.status(500).json({ success: false, error: { code: 'INTERNAL_ERROR', message: (e as Error).message } });
+    res.status(500).json({ success: false, error: { code: 'INTERNAL_ERROR', message: clientErrorMessage(e) } });
   }
 });
 
@@ -689,7 +690,7 @@ cctpRouter.post('/userop', requireAuth, userOpLimiter, async (req: AuthRequest, 
         const gas = await pimlicoRpc(row.source_chain, 'eth_estimateUserOperationGas', [userOp, aa.entrypoint]);
         res.status(200).json({ success: true, data: { gas } });
       } catch (e) {
-        res.status(502).json({ success: false, error: { code: 'CCTP_ESTIMATE_FAILED', message: (e as Error).message } });
+        res.status(502).json({ success: false, error: { code: 'CCTP_ESTIMATE_FAILED', message: safeErrorMessage(e) } });
       }
       return;
     }
@@ -703,11 +704,11 @@ cctpRouter.post('/userop', requireAuth, userOpLimiter, async (req: AuthRequest, 
       console.log(`[cctp] userop submitted transfer=${row.id} chain=${row.source_chain} hash=${userOpHash}`);
       res.status(200).json({ success: true, data: { userOpHash } });
     } catch (e) {
-      res.status(502).json({ success: false, error: { code: 'CCTP_SUBMIT_FAILED', message: (e as Error).message } });
+      res.status(502).json({ success: false, error: { code: 'CCTP_SUBMIT_FAILED', message: safeErrorMessage(e) } });
     }
   } catch (e) {
     console.error('[cctp] userop error:', (e as Error).message);
-    res.status(500).json({ success: false, error: { code: 'INTERNAL_ERROR', message: (e as Error).message } });
+    res.status(500).json({ success: false, error: { code: 'INTERNAL_ERROR', message: clientErrorMessage(e) } });
   }
 });
 
@@ -744,6 +745,6 @@ cctpRouter.get('/userop-receipt', requireAuth, async (req: AuthRequest, res) => 
     });
   } catch (e) {
     console.error('[cctp] userop-receipt error:', (e as Error).message);
-    res.status(500).json({ success: false, error: { code: 'INTERNAL_ERROR', message: (e as Error).message } });
+    res.status(500).json({ success: false, error: { code: 'INTERNAL_ERROR', message: clientErrorMessage(e) } });
   }
 });

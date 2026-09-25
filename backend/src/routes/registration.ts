@@ -5,7 +5,9 @@ import jwt from 'jsonwebtoken';
 import { z } from 'zod';
 import { config } from '../config.js';
 import { redis } from '../services/redis.js';
-import type { ApiResponse } from '../types.js';
+import { disconnectSocketsForToken } from '../services/socket.js';
+import { requireAuth, REVOKED_JWT_TTL_S } from '../middleware/auth.js';
+import type { ApiResponse, AuthRequest } from '../types.js';
 
 export const registrationRouter = Router();
 
@@ -21,6 +23,14 @@ interface RegSession {
 
 const SESSION_TTL_S = 10 * 60; // 10 minutes
 const key = (token: string) => `reg:session:${token}`;
+
+// Every issued registration token is recorded against its agent wallet and the
+// owner who confirmed it, for as long as it can be valid, so it can be revoked
+// on its own. Before, nothing recorded them and no route could map a
+// revocation request to one (security audit run 1, C27).
+interface IssuedToken { agentWallet: string; ownerAddress: string }
+const issuedKey = (jti: string) => `reg:token:${jti}`;
+const walletTokensKey = (wallet: string) => `reg:tokens:${wallet.toLowerCase()}`;
 
 async function getSession(token: string): Promise<RegSession | null> {
   const raw = await redis.get(key(token));
@@ -149,6 +159,7 @@ registrationRouter.post('/confirm/:token', async (req, res) => {
     res.status(401).json({ success: false, error: { code: 'INVALID_SIGNATURE', message: 'Signature does not match address' } });
     return;
   }
+  const jti = randomBytes(16).toString('hex'); // M3 (audit): revocable via the auth denylist
   const apiKey = jwt.sign(
     {
       address: session.agentWallet,
@@ -157,11 +168,52 @@ registrationRouter.post('/confirm/:token', async (req, res) => {
       // Marks this JWT as agent-registration-issued so requireFounder can
       // reject it regardless of the address claim it carries.
       typ: 'agent-registration',
-      jti: randomBytes(16).toString('hex'), // M3 (audit): revocable via the auth denylist
+      jti,
     },
     config.jwtSecret,
     { algorithm: 'HS256', expiresIn: '365d' } as jwt.SignOptions,
   );
+  const issued: IssuedToken = { agentWallet: session.agentWallet.toLowerCase(), ownerAddress: ownerAddress.toLowerCase() };
+  await redis.set(issuedKey(jti), JSON.stringify(issued), 'EX', REVOKED_JWT_TTL_S);
+  await redis.sadd(walletTokensKey(issued.agentWallet), jti);
+  await redis.expire(walletTokensKey(issued.agentWallet), REVOKED_JWT_TTL_S);
   await saveSession({ ...session, status: 'confirmed', ownerAddress: ownerAddress.toLowerCase(), apiKey }, SESSION_TTL_S);
   res.json({ success: true, data: { apiKey, agentWallet: session.agentWallet } } satisfies ApiResponse);
+});
+
+const RevokeSchema = z.union([
+  z.object({ jti: z.string().regex(/^[0-9a-f]{32}$/, 'jti must be the token id (32 hex characters)') }),
+  z.object({ agentWallet: z.string().regex(/^0x[0-9a-fA-F]{40}$/, 'agentWallet must be an address') }),
+]);
+
+/**
+ * POST /api/v1/registration/revoke — revoke one registration token ({ jti }),
+ * or every recorded one for an agent wallet ({ agentWallet }). Allowed for the
+ * agent wallet itself and for the owner who confirmed the registration.
+ * Works whether or not new registrations are enabled. Anything the caller
+ * can't revoke looks the same as a token that doesn't exist.
+ */
+registrationRouter.post('/revoke', requireAuth, async (req: AuthRequest, res, next) => {
+  try {
+    const body = RevokeSchema.parse(req.body);
+    const caller = new Set([req.user!.address, ...(req.user!.addresses ?? [])].map((a) => a.toLowerCase()));
+    const jtis = 'jti' in body ? [body.jti] : await redis.smembers(walletTokensKey(body.agentWallet));
+    let revoked = 0;
+    for (const jti of jtis) {
+      const raw = await redis.get(issuedKey(jti));
+      if (!raw) continue;
+      const issued = JSON.parse(raw) as IssuedToken;
+      if (!caller.has(issued.agentWallet) && !caller.has(issued.ownerAddress)) continue;
+      await redis.set(`revoked:jwt:${jti}`, '1', 'EX', REVOKED_JWT_TTL_S);
+      void disconnectSocketsForToken(jti).catch(() => {});
+      revoked++;
+    }
+    if (revoked === 0) {
+      res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'No registration token you can revoke' } });
+      return;
+    }
+    res.json({ success: true, data: { revoked } } satisfies ApiResponse);
+  } catch (err) {
+    next(err);
+  }
 });
