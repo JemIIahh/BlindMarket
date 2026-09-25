@@ -33,7 +33,17 @@ const { store, redisMock, sideEffects, escrowMock, ledger } = vi.hoisted(() => (
   },
 }));
 
-vi.mock('../config.js', () => ({ config: { baseEscrowAddress: '0xescrow', baseUsdcAddress: '0x036CbD53842c5426634e7929541eC2318f3dCF7e', arcEscrowAddress: '0xarcEscrow', arcUsdcAddress: '0x3600000000000000000000000000000000000000' } }));
+// The chain ids pick each chain's network (chainScope): Base Sepolia and Arc
+// testnet, the networks the bare chain keys have always meant.
+const cfg = vi.hoisted(() => ({
+  baseEscrowAddress: '0xescrow',
+  baseUsdcAddress: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
+  baseChainId: 84532,
+  arcEscrowAddress: '0xarcEscrow',
+  arcUsdcAddress: '0x3600000000000000000000000000000000000000',
+  arcChainId: 5042002,
+}));
+vi.mock('../config.js', () => ({ config: cfg }));
 vi.mock('./agentStore.js', () => store);
 vi.mock('./redis.js', () => ({ redis: redisMock }));
 vi.mock('./escrow.js', () => escrowMock);
@@ -59,6 +69,7 @@ const onArc = { chain: 'arc' as const, token: ARC_USDC };
 
 beforeEach(() => {
   vi.clearAllMocks();
+  cfg.arcChainId = 5042002;
   // mockReset: a once-value a failing test left unconsumed must not leak on.
   redisMock.set.mockReset().mockResolvedValue('OK');
   redisMock.del.mockResolvedValue(1);
@@ -275,6 +286,19 @@ describe('recordWorkerDispute', () => {
       expect(store.adjustReputation).toHaveBeenCalledTimes(4);
       expect(sideEffects.recordDispute).toHaveBeenCalledTimes(4);
       expect([...keys.keys()]).toContain('a2a:dispute-round:arc:7:1');
+    });
+
+    // Escrow ids restart at 1 on every escrow, so a round belongs to its
+    // chain's network (chainScope): Arc testnet keeps the key it has always
+    // had, and task 7 on Arc mainnet is a round of its own.
+    it("keys a round by its chain's network: unchanged on Arc testnet, its own on Arc mainnet", async () => {
+      expect(await recordWorkerDispute(TASK, EXEC, round(1))).toBe(true);
+      expect([...keys.keys()]).toEqual(['a2a:dispute-round:arc:7:1']);
+
+      cfg.arcChainId = 5042;
+      expect(await recordWorkerDispute(TASK, EXEC, round(1))).toBe(true);
+      expect(keys.has('a2a:dispute-round:arc@5042:7:1')).toBe(true);
+      expect(store.adjustReputation).toHaveBeenCalledTimes(2);
     });
 
     it('gives the round back when recording fails, so a later observer records it', async () => {

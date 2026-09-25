@@ -34,6 +34,14 @@ vi.mock('./redis.js', () => ({ redis }));
 const sentry = vi.hoisted(() => ({ captureMessage: vi.fn() }));
 vi.mock('@sentry/node', () => sentry);
 
+// The network this process runs each chain on, which picks its index keys
+// (chainScope): Arc testnet and Base Sepolia unless a test moves one.
+const net = vi.hoisted(() => ({ arc: 5042002, base: 84532 }));
+vi.mock('./settlementChains.js', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('./settlementChains.js')>();
+  return { ...mod, settlementChainConfig: (key: 'arc' | 'base') => ({ ...mod.settlementChainConfig(key), chainId: net[key] }) };
+});
+
 import {
   resolveIdentity, checkDeploymentIdentity, deploymentIdentityStatus, backgroundWritesAllowed, onBackgroundWritesStopped, onBackgroundWritesResumed,
   _resetIdentityForTests, IDENTITY_KEY, CHECK_TIMEOUT_MS, RETRY_MS, type DeploymentFacts, type Self,
@@ -81,10 +89,31 @@ function plantStagingFingerprints() {
   store.set('base:events:escrow', `84532:${STAGING.chains.base.escrow}`);
 }
 
+// Chains on real networks, for the tests where the network a process runs a
+// chain on (net, which picks its keys) must agree with its facts.
+const ARC_TESTNET = { chainId: 5042002, escrow: '0xabf70843e0380f1e749d2b85c30dd6820ff5c731' };
+const ARC_MAINNET = { chainId: 5042, escrow: '0xa4c0000000000000000000000000000000005042' };
+const BASE_SEPOLIA = { chainId: 84532, escrow: '0xcca5ab873158b888158ad9dc36fb4ee683efbebf' };
+/** A process on Arc mainnet whose Base Sepolia escrow is not production's. */
+const ON_ARC_MAINNET: DeploymentFacts = {
+  tier: null,
+  chains: { arc: ARC_MAINNET, base: { chainId: 84532, escrow: '0xa1f75b5ec92f4485d4eefa339dc2b8af25df0ec5' } },
+};
+
+/** Production's index on Arc testnet and Base Sepolia: the bare 'arc:' and 'base:' keys. */
+function arcTestnetHistory() {
+  store.set('arc:events:escrow', `5042002:${ARC_TESTNET.escrow}`);
+  store.set('arc:events:checkpoint', '63970000');
+  store.set('base:events:escrow', `84532:${BASE_SEPOLIA.escrow}`);
+  store.set('base:events:checkpoint', '47295000');
+}
+
 beforeEach(() => {
   store.clear();
   vi.clearAllMocks();
   _resetIdentityForTests();
+  net.arc = 5042002;
+  net.base = 84532;
 });
 
 describe('production (never stopped)', () => {
@@ -336,11 +365,14 @@ describe('local development (stoppable, no DEPLOYMENT_ID)', () => {
     expect(s.reason).toMatch(/cannot vouch for/);
   });
 
+  // Its facts and the network it runs Arc on agree: it reads Arc mainnet's
+  // keys (arc@5042:), so production's Arc testnet index is another network's.
   it("stops on another network's fingerprint, and names the keys to delete if the Redis is its own", async () => {
-    productionHistory({ fingerprints: true });
-    const s = await resolveIdentity(redis, localDev(), NOW);
+    arcTestnetHistory();
+    net.arc = 5042;
+    const s = await resolveIdentity(redis, localDev({ facts: ON_ARC_MAINNET }), NOW);
     expect(s).toMatchObject({ role: 'not-owner', writersAllowed: false });
-    expect(s.reason).toMatch(/arc:events:escrow=16661/);
+    expect(s.reason).toMatch(/arc:events:escrow=5042002:0xabf7.* \(this process: 5042:0xa4c0/);
     expect(s.reason).toMatch(/delete base:events:escrow, arc:events:escrow and restart/);
   });
 
@@ -367,6 +399,68 @@ describe('local development (stoppable, no DEPLOYMENT_ID)', () => {
   it("runs on a record whose chains are its own (a local stack's own claim)", async () => {
     await resolveIdentity(redis, staging(), NOW);
     expect(await resolveIdentity(redis, localDev(), NOW)).toMatchObject({ role: 'unset', owner: 'staging-testnet', writersAllowed: true });
+  });
+});
+
+/**
+ * Index keys are per network (chainScope): 'arc:' on Arc testnet, 'arc@5042:'
+ * on Arc mainnet. A process reads its own network's keys, so it would never
+ * see another network's index there. A stoppable process reads the other
+ * networks' keys too: nothing it wrote is under them. Production does not:
+ * once it moves a chain, the old network's keys are its own history.
+ */
+describe('another network of a chain', () => {
+  it("stops a process on Arc testnet on Arc mainnet's index (arc@5042:)", async () => {
+    store.set('arc@5042:events:escrow', `5042:${ARC_MAINNET.escrow}`);
+    store.set('arc@5042:events:checkpoint', '1200000');
+    store.set('base:events:escrow', `84532:${BASE_SEPOLIA.escrow}`);
+    const own: DeploymentFacts = { tier: null, chains: { arc: ARC_TESTNET, base: BASE_SEPOLIA } };
+    const s = await resolveIdentity(redis, localDev({ facts: own }), NOW);
+    expect(s).toMatchObject({ role: 'not-owner', writersAllowed: false });
+    expect(s.reason).toMatch(/arc@5042:events:escrow=5042:0xa4c0/);
+  });
+
+  it("counts another network's checkpoint with no fingerprint, which on its own network is only noted", async () => {
+    store.set('arc:events:checkpoint', '63970000');
+    expect(await resolveIdentity(redis, localDev({ facts: { tier: null, chains: { arc: ARC_TESTNET } } }), NOW))
+      .toMatchObject({ role: 'unset', writersAllowed: true });
+    net.arc = 5042;
+    const s = await resolveIdentity(redis, localDev({ facts: { tier: null, chains: { arc: ARC_MAINNET } } }), NOW);
+    expect(s).toMatchObject({ role: 'not-owner', writersAllowed: false });
+    expect(s.reason).toMatch(/arc:events:checkpoint with no arc:events:escrow/);
+  });
+
+  it('does not claim a Redis with another network\'s index for a staging stack', async () => {
+    arcTestnetHistory();
+    net.arc = 5042;
+    // Production's Base escrow too: only the Arc testnet keys are not its own.
+    const facts: DeploymentFacts = { tier: null, chains: { arc: ARC_MAINNET, base: BASE_SEPOLIA } };
+    const s = await resolveIdentity(redis, staging({ facts }), NOW);
+    expect(s).toMatchObject({ role: 'not-owner', owner: null, writersAllowed: false });
+    expect(s.reason).toMatch(/holds another deployment's index \(arc:events:escrow=5042002/);
+    expect(store.has(IDENTITY_KEY)).toBe(false);
+  });
+
+  it('"unclaimed" does not take another network\'s index from before identity checks', async () => {
+    store.set('arc:events:checkpoint', '63970000');
+    net.arc = 5042;
+    const s = await resolveIdentity(redis, staging({ facts: ON_ARC_MAINNET, claim: 'unclaimed' }), NOW);
+    expect(s).toMatchObject({ role: 'not-owner', writersAllowed: false });
+    expect(s.reason).toMatch(/DEPLOYMENT_CLAIM=unclaimed ignored: this looks like production's Redis/);
+    expect(store.has(IDENTITY_KEY)).toBe(false);
+  });
+
+  it('leaves production on Arc mainnet alone with its own Arc testnet history, and reads none of it', async () => {
+    arcTestnetHistory();
+    store.set('arc@5042:events:escrow', `5042:${ARC_MAINNET.escrow}`);
+    net.arc = 5042;
+    const facts: DeploymentFacts = { tier: null, chains: { arc: ARC_MAINNET, base: BASE_SEPOLIA } };
+    expect(await resolveIdentity(redis, production({ deploymentId: null, facts }), NOW))
+      .toEqual({ deploymentId: null, role: 'unset', owner: null, writersAllowed: true, stoppable: false, reason: null });
+    expect(await resolveIdentity(redis, production({ facts }), NOW))
+      .toEqual({ deploymentId: 'production', role: 'owner', owner: 'production', writersAllowed: true, stoppable: false, reason: null });
+    expect(redis.get).not.toHaveBeenCalledWith('arc:events:escrow');
+    expect(redis.get).not.toHaveBeenCalledWith('arc:events:checkpoint');
   });
 });
 
@@ -431,7 +525,8 @@ describe('checkDeploymentIdentity', () => {
     const check = checkDeploymentIdentity(undefined, late, staging());
     await vi.advanceTimersByTimeAsync(CHECK_TIMEOUT_MS);
     expect(await check).toMatchObject({ role: 'unknown' });
-    // The abandoned attempt makes five slow reads, then tries to claim.
+    // The abandoned attempt makes nine slow reads (the record, then each
+    // chain's fingerprint and checkpoint on both its networks), then tries to claim.
     await vi.advanceTimersByTimeAsync(10 * 60_000);
     expect(late.get).toBeDefined();
     expect(store.has(IDENTITY_KEY)).toBe(false);

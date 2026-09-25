@@ -42,6 +42,13 @@
  *   on the same chain (an earlier local run) and a checkpoint with no
  *   fingerprint are only logged, with the keys to delete.
  *
+ * Index keys are kept per network (chainScope), so a stoppable process also
+ * reads each chain's keys for the networks it does not run that chain on. A
+ * fingerprint or checkpoint there was written on another network, so it is
+ * another deployment's, with or without a DEPLOYMENT_ID. Production does not
+ * read them: once a chain moves, its Redis holds the old network's keys as its
+ * own history.
+ *
  * A check that gets no answer (Redis down or slow) leaves production
  * writing — failing closed there would stop the owner on a blip — and keeps
  * a stoppable process's writes off until a check answers: whatever such a
@@ -60,15 +67,16 @@ import { config } from '../config.js';
 import { redis } from './redis.js';
 import { SETTLEMENT_CHAIN_KEYS, settlementChainConfigs, type SettlementChainKey } from './settlementChains.js';
 import { fingerprintKey } from './escrowFingerprint.js';
-import { chainScope } from './chainScope.js';
+import { chainScope, otherNetworkIds } from './chainScope.js';
 import { TIER_CHAIN_IDS, type SettlementTier } from './settlementTier.js';
 
 export const IDENTITY_KEY = 'deployment:identity';
 
 /** The TaskCreated checkpoint each indexer keeps (baseEscrowEvents.ts and
- *  arcEscrowEvents.ts KEY.checkpoint), under this process's network scope. */
-export function indexCheckpointKey(chain: SettlementChainKey): string {
-  return `${chainScope(chain)}:events:checkpoint`;
+ *  arcEscrowEvents.ts KEY.checkpoint), under the scope of network `chainId`,
+ *  by default this process's. */
+export function indexCheckpointKey(chain: SettlementChainKey, chainId?: number): string {
+  return `${chainScope(chain, chainId)}:events:checkpoint`;
 }
 
 /** How long a check waits for Redis before letting writes run anyway. */
@@ -188,6 +196,8 @@ interface Foreign {
   text: string;
   /** A fingerprint for another escrow on the chain id this process uses. */
   sameChain?: boolean;
+  /** Under the scope of a network this process does not run the chain on. */
+  otherNetwork?: boolean;
 }
 
 /**
@@ -195,17 +205,23 @@ interface Foreign {
  * it. `fingerprints`: fingerprints for escrows this process does not index.
  * `unvouched`: checkpoints with no fingerprint (production before
  * fingerprints). Looks at every chain's keys: the A2A queue is shared
- * whichever chains a deployment settles on.
+ * whichever chains a deployment settles on. With `otherNetworks`, also at each
+ * chain's keys for its other networks (chainScope.otherNetworkIds), none of
+ * which this process wrote.
  */
-async function foreignIndexState(store: IdentityRedis, facts: DeploymentFacts): Promise<{ fingerprints: Foreign[]; unvouched: Foreign[] }> {
+async function foreignIndexState(
+  store: IdentityRedis,
+  facts: DeploymentFacts,
+  { otherNetworks = false }: { otherNetworks?: boolean } = {},
+): Promise<{ fingerprints: Foreign[]; unvouched: Foreign[] }> {
   const fingerprints: Foreign[] = [];
   const unvouched: Foreign[] = [];
   for (const chain of SETTLEMENT_CHAIN_KEYS) {
+    const mine = facts.chains[chain];
+    const expected = mine ? `${mine.chainId}:${mine.escrow}` : null;
     const key = fingerprintKey(chain);
     const fingerprint = await store.get(key);
-    const mine = facts.chains[chain];
     if (fingerprint !== null) {
-      const expected = mine ? `${mine.chainId}:${mine.escrow}` : null;
       if (fingerprint !== expected) {
         fingerprints.push({
           key,
@@ -216,6 +232,24 @@ async function foreignIndexState(store: IdentityRedis, facts: DeploymentFacts): 
     } else {
       const checkpoint = indexCheckpointKey(chain);
       if ((await store.get(checkpoint)) !== null) unvouched.push({ key: checkpoint, text: `${checkpoint} with no ${key}` });
+    }
+    if (!otherNetworks) continue;
+    for (const chainId of otherNetworkIds(chain)) {
+      const otherKey = fingerprintKey(chain, chainId);
+      const otherFingerprint = await store.get(otherKey);
+      if (otherFingerprint !== null) {
+        fingerprints.push({
+          key: otherKey,
+          text: `${otherKey}=${otherFingerprint} (this process: ${expected ?? `no ${chain} escrow`})`,
+          sameChain: false,
+          otherNetwork: true,
+        });
+        continue;
+      }
+      const checkpoint = indexCheckpointKey(chain, chainId);
+      if ((await store.get(checkpoint)) !== null) {
+        unvouched.push({ key: checkpoint, text: `${checkpoint} with no ${otherKey}`, otherNetwork: true });
+      }
     }
   }
   return { fingerprints, unvouched };
@@ -257,8 +291,10 @@ export async function resolveIdentity(
         ? disagree(record.id, `this Redis belongs to deployment "${record.id}" (${Object.entries(record.chains).map(([k, c]) => `${k} ${c.chainId}`).join(', ')}), whose chains are not this process's; give this process its own REDIS_URL`)
         : allowed('unset', record.id, null);
     }
-    const { fingerprints, unvouched } = await foreignIndexState(store, facts);
-    const otherChain = fingerprints.filter((f) => !f.sameChain);
+    const { fingerprints, unvouched } = await foreignIndexState(store, facts, { otherNetworks: stoppable });
+    // Another network's checkpoint counts even without its fingerprint: no
+    // process on this network wrote it.
+    const otherChain = [...fingerprints.filter((f) => !f.sameChain), ...unvouched.filter((f) => f.otherNetwork)];
     const keys = [...fingerprints, ...unvouched].map((f) => f.key).join(', ');
     if (otherChain.length > 0) {
       return disagree(null, `this Redis holds another network's index (${list(otherChain)}); give this process its own REDIS_URL. If this Redis really is this process's own, delete ${keys} and restart`);
@@ -277,7 +313,7 @@ export async function resolveIdentity(
     // "unclaimed" is for a Redis whose record was lost, not for production's
     // Redis from before identity checks (bare checkpoints, no fingerprints).
     const bareHistory = self.claim === 'unclaimed' && record === null
-      && await (async () => { const f = await foreignIndexState(store, facts); return f.fingerprints.length === 0 && f.unvouched.length > 0; })();
+      && await (async () => { const f = await foreignIndexState(store, facts, { otherNetworks: stoppable }); return f.fingerprints.length === 0 && f.unvouched.length > 0; })();
     const named = self.claim === 'unclaimed' ? record === null : record?.id === self.claim;
     if (bareHistory) {
       claimNote = `DEPLOYMENT_CLAIM=unclaimed ignored: this looks like production's Redis from before identity checks`;
@@ -317,7 +353,7 @@ export async function resolveIdentity(
     return withNote(allowed('owner', record.id, moved.length > 0 ? `recorded ${moved.join(', ')} for "${record.id}"` : null));
   }
 
-  const { fingerprints, unvouched } = await foreignIndexState(store, facts);
+  const { fingerprints, unvouched } = await foreignIndexState(store, facts, { otherNetworks: stoppable });
   if (stoppable && fingerprints.length > 0) {
     return withNote(disagree(null, `this Redis holds another deployment's index (${list([...fingerprints, ...unvouched])}); not claiming it. If it really is this stack's own (an escrow it redeployed, say), restart once with DEPLOYMENT_CLAIM=unclaimed`));
   }

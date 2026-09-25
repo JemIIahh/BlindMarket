@@ -15,6 +15,7 @@ import { settleAssignment, settleVerification, resolveAssignee } from '../servic
 import { recordWorkerPayout, recordWorkerDispute } from '../services/workerPayout.js';
 import { notifyLifecycle } from '../services/notificationStore.js';
 import { resolveCachedTaskByHash, resolveTaskByHash, seedTaskId, type TaskChain } from '../services/taskChain.js';
+import { onCurrentNetwork } from '../services/chainScope.js';
 import { changedTaskTerm } from '../services/taskTerms.js';
 import * as escrowService from '../services/escrow.js';
 import * as reputationService from '../services/reputation.js';
@@ -1559,6 +1560,21 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
         409,
         'TASK_HASH_TAKEN',
         'Another poster claimed this hash when they built its funding transaction — cancel your escrow to get it back, and post with a new brief',
+      );
+    }
+
+    // The hash was listed on a network its chain has since moved off
+    // (chainScope.onCurrentNetwork). That listing resolves to no escrow task
+    // any more, so the check below cannot see it, but its off-chain state is
+    // keyed by the hash alone: a2a:state, and credited_payouts, which would
+    // take this task's credit as already paid. The same public brief posted
+    // again needs a new hash, as POST /tasks tells a poster before funding.
+    if (existingMeta && !onCurrentNetwork(existingMeta)) {
+      throw new AppError(
+        409,
+        'TASK_HASH_IN_USE',
+        `This brief's hash already belongs to a task listed on another ${existingMeta.chain} network, so this escrow (${taskChain} task ${onChainTaskId}) can't be listed under it. ` +
+          `Cancel task ${onChainTaskId} to get the payment back, then post again with the brief changed, even slightly: a public task is identified by its text.`,
       );
     }
 
