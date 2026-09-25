@@ -24,6 +24,7 @@ import { config } from '../config.js';
 import { CONTRACT_ADDRESSES, DEPLOYMENT_BLOCKS } from '../contractAddresses.js';
 import { arcProvider } from './chain.js';
 import { redis } from './redis.js';
+import { claimPayment, factoryPaymentKey, isPaymentRecorded, markPaymentUsed, releasePayment } from './spentDeployPayments.js';
 
 const AGENT_FACTORY_ABI = [
   'event AgentDeployed(address indexed user, uint256 usdcAmount, uint256 nonce, uint256 timestamp)',
@@ -98,9 +99,15 @@ export async function listDeployCredits(user: string): Promise<AgentDeployCredit
  * (idempotent: SET of the same JSON + SADD of an existing member are no-ops).
  */
 export async function restoreDeployCredit(credit: AgentDeployCredit): Promise<void> {
+  await releasePayment(creditPaymentKey(credit.nonce));
   await redis.set(KEY.credit(credit.user, credit.nonce), JSON.stringify(credit));
   await redis.sadd(KEY.creditsByUser(credit.user), credit.nonce);
 }
+
+// Credits are also claimed in spent_deploy_payments, which outlives Redis: a
+// credit spent there is dropped instead of deploying a second agent
+// (security audit run 1, C29).
+const creditPaymentKey = (nonce: string): string => factoryPaymentKey(config.arcAgentFactoryAddress ?? '', nonce);
 
 export async function claimDeployCredit(user: string): Promise<AgentDeployCredit | null> {
   const credits = await listDeployCredits(user);
@@ -108,10 +115,17 @@ export async function claimDeployCredit(user: string): Promise<AgentDeployCredit
     const removed = await redis.srem(KEY.creditsByUser(user), credit.nonce);
     if (removed === 1) {
       await redis.del(KEY.credit(user, credit.nonce));
-      return credit;
+      const claim = await claimPayment(creditPaymentKey(credit.nonce), user);
+      if (claim.claimed) return credit;
+      console.warn(`[agentFactory] dropped deploy credit nonce=${credit.nonce} for ${user}: already spent`);
     }
   }
   return null;
+}
+
+/** Record the agent a claimed credit paid for; the credit can't come back. */
+export async function markDeployCreditUsed(credit: AgentDeployCredit, agentId: string): Promise<void> {
+  await markPaymentUsed(creditPaymentKey(credit.nonce), agentId);
 }
 
 export function startAgentFactoryListener(): void {
@@ -197,7 +211,8 @@ async function tick(): Promise<void> {
   return inFlightPromise;
 }
 
-async function recordCredit(event: EventLog): Promise<void> {
+/** Exported for tests; tick() is the only caller. */
+export async function recordCredit(event: EventLog): Promise<void> {
   const args = event.args;
   if (!args) return;
 
@@ -213,6 +228,11 @@ async function recordCredit(event: EventLog): Promise<void> {
     txHash: event.transactionHash,
     ts: Number(args.timestamp ?? 0n),
   };
+
+  // A re-delivered event for a credit already claimed or spent must not bring
+  // it back: chunks are retried, overlapping ticks re-read them, and a lost
+  // checkpoint rescans from the factory's deployment block.
+  if (await isPaymentRecorded(creditPaymentKey(credit.nonce))) return;
 
   // Idempotent: SET to an identical value and SADD of an existing member are
   // both no-ops, so replaying a chunk after a restart changes nothing.

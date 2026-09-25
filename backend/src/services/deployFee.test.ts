@@ -45,6 +45,17 @@ vi.mock('./redis.js', () => ({
   },
 }));
 
+// Claims live in spent_deploy_payments; run them on an in-memory SQLite built
+// from the real migration, not the file database.
+const mem = vi.hoisted(() => ({ db: null as any }));
+vi.mock('./database.js', async () => {
+  const Database = (await import('better-sqlite3')).default;
+  const actual = await vi.importActual<typeof import('./database.js')>('./database.js');
+  mem.db = new Database(':memory:');
+  mem.db.exec(actual.sqliteMigrationSql(20)!);
+  return { ...actual, getDb: () => mem.db };
+});
+
 const {
   arcDeployFeeTerms, verifyArcDeployFee, claimArcDeployFee, markArcDeployFeeUsed, releaseArcDeployFee, _resetDeployFeeCache,
 } = await import('./deployFee.js');
@@ -64,6 +75,8 @@ const fast = { attempts: 2, delayMs: 0 };
 const USDC_18 = 10n ** 12n; // native USDC has 18 decimals, the token 6
 
 beforeEach(() => {
+  store.clear();
+  mem.db?.exec('DELETE FROM spent_deploy_payments');
   for (const key of Object.keys(cfg)) delete cfg[key];
   Object.assign(cfg, {
     arcChainId: 5042002,
@@ -265,11 +278,40 @@ describe('the claim on a fee transaction', () => {
     expect(await claimArcDeployFee(TX, OWNER)).toEqual({ claimed: true });
   });
 
-  it('expires a claim whose deploy never finished, and keeps a used one', async () => {
-    const { redis } = await import('./redis.js');
+  it('lets a claim whose deploy never finished be taken over after 10 minutes, but never a used one', async () => {
+    const t0 = Date.now();
+    const clock = vi.spyOn(Date, 'now');
+    try {
+      clock.mockReturnValue(t0);
+      await claimArcDeployFee(TX, OWNER);
+      clock.mockReturnValue(t0 + 599_000);
+      expect(await claimArcDeployFee(TX, OWNER)).toEqual({ claimed: false, pending: true });
+      clock.mockReturnValue(t0 + 601_000);
+      expect(await claimArcDeployFee(TX, OWNER)).toEqual({ claimed: true });
+      await markArcDeployFeeUsed(TX, 'agent-1');
+      clock.mockReturnValue(t0 + 10 * 86_400_000);
+      expect(await claimArcDeployFee(TX, OWNER)).toEqual({ claimed: false, pending: false, agentId: 'agent-1' });
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it('survives losing Redis: a used transaction stays used (audit run 1, C29)', async () => {
     await claimArcDeployFee(TX, OWNER);
-    expect(vi.mocked(redis.set).mock.calls.at(-1)).toEqual([expect.any(String), `pending:${OWNER}`, 'EX', 600, 'NX']);
     await markArcDeployFeeUsed(TX, 'agent-1');
-    expect(vi.mocked(redis.set).mock.calls.at(-1)).toEqual([expect.any(String), 'used:agent-1']);
+    store.clear();
+    expect(await claimArcDeployFee(TX, OWNER)).toEqual({ claimed: false, pending: false, agentId: 'agent-1' });
+  });
+
+  it('carries over a transaction marked used in Redis before claims moved to the database', async () => {
+    store.set(`deploy-fee:arc:${TX.toLowerCase()}`, 'used:agent-legacy');
+    expect(await claimArcDeployFee(TX, OWNER)).toEqual({ claimed: false, pending: false, agentId: 'agent-legacy' });
+  });
+
+  it('never releases a transaction that paid for an agent', async () => {
+    await claimArcDeployFee(TX, OWNER);
+    await markArcDeployFeeUsed(TX, 'agent-1');
+    await releaseArcDeployFee(TX);
+    expect(await claimArcDeployFee(TX, OWNER)).toEqual({ claimed: false, pending: false, agentId: 'agent-1' });
   });
 });

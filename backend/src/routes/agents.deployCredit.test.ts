@@ -56,6 +56,7 @@ vi.mock('../services/agentEmbedding.js', () => ({}));
 // The deploy paywall — a real credit comes from an on-chain AgentFactory
 // payment. Grant one so the test exercises the start, not the USDC gate.
 vi.mock('../services/agentFactoryListener.js', () => ({
+  markDeployCreditUsed: vi.fn(async () => undefined),
   claimDeployCredit: vi.fn(async () => ({ user: '0x2222222222222222222222222222222222222222', nonce: '7', usdcAmount: '1000000', block: 1, txHash: '0xpaid', ts: 0 })),
   restoreDeployCredit: vi.fn(async () => {}),
 }));

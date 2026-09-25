@@ -20,6 +20,7 @@ import { chainRuntime } from './chainRuntime.js';
 import { settlementChainConfig } from './settlementChains.js';
 import { config } from '../config.js';
 import { AppError } from '../middleware/errorHandler.js';
+import { claimPayment, markPaymentUsed, recordUsedPayment, releasePayment, transferPaymentKey } from './spentDeployPayments.js';
 
 const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
 /** AgentFactory.deployAgent() emits this beside its own USDC transfer to the treasury. */
@@ -30,8 +31,9 @@ const TREASURY_TTL_MS = 5 * 60_000;
 /** One RPC read. The provider's own timeout is 120s (chain.ts), too long to hold a deploy request on. */
 const RPC_TIMEOUT_MS = 6_000;
 /** A claim whose deploy never finished (the process died mid-deploy) frees itself after this. */
-const PENDING_CLAIM_TTL_S = 600;
-const claimKey = (txHash: string) => `deploy-fee:arc:${txHash.toLowerCase()}`;
+// Where claims lived before they moved to spent_deploy_payments; read so a
+// transaction spent before the move is still known as spent.
+const legacyClaimKey = (txHash: string) => `deploy-fee:arc:${txHash.toLowerCase()}`;
 
 /** What the deploy page needs to pay the fee on Arc with a transfer. */
 export interface ArcDeployFeeTerms {
@@ -204,28 +206,26 @@ export type ArcDeployFeeClaim =
   | { claimed: false; pending: boolean; agentId?: string };
 
 /** Reserve a verified fee transaction for one deploy. */
+// The claim is durable (spent_deploy_payments). It lived only in Redis, so a
+// used transaction became spendable again when Redis lost the mark (security
+// audit run 1, C29).
 export async function claimArcDeployFee(txHash: string, owner: string): Promise<ArcDeployFeeClaim> {
-  const key = claimKey(txHash);
-  for (let tries = 0; tries < 2; tries++) {
-    if ((await redis.set(key, `pending:${owner.toLowerCase()}`, 'EX', PENDING_CLAIM_TTL_S, 'NX')) !== null) {
-      return { claimed: true };
-    }
-    const held = await redis.get(key);
-    if (held === null) continue; // released between the two calls: claim again
-    if (held.startsWith('pending:')) return { claimed: false, pending: true };
-    return { claimed: false, pending: false, agentId: held.startsWith('used:') ? held.slice('used:'.length) : undefined };
+  const key = transferPaymentKey(txHash);
+  const legacy = await redis.get(legacyClaimKey(txHash)).catch(() => null);
+  if (legacy?.startsWith('used:')) {
+    await recordUsedPayment(key, owner, legacy.slice('used:'.length));
   }
-  return { claimed: false, pending: true };
+  return claimPayment(key, owner);
 }
 
 /** Record that a claimed fee transaction paid for `agentId`. A used payment stays used: no expiry. */
 export async function markArcDeployFeeUsed(txHash: string, agentId: string): Promise<void> {
-  await redis.set(claimKey(txHash), `used:${agentId}`);
+  await markPaymentUsed(transferPaymentKey(txHash), agentId);
 }
 
 /** Give a claimed fee transaction back after a deploy that did not happen, so it can pay for the retry. */
 export async function releaseArcDeployFee(txHash: string): Promise<void> {
-  await redis.del(claimKey(txHash));
+  await releasePayment(transferPaymentKey(txHash));
 }
 
 /** Test hook: forget the cached treasury. */

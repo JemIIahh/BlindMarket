@@ -52,7 +52,8 @@ vi.mock('../services/agentStore.js', () => ({}));
 vi.mock('../services/serviceStore.js', () => ({}));
 vi.mock('../services/skillStore.js', () => ({ incrementInstallCount: vi.fn(async () => {}), getSkillBySlug: vi.fn(async () => null) }));
 vi.mock('../services/agentEmbedding.js', () => ({}));
-vi.mock('../services/agentFactoryListener.js', () => ({ claimDeployCredit, restoreDeployCredit }));
+vi.mock('../services/agentFactoryListener.js', () => ({
+  markDeployCreditUsed: vi.fn(async () => undefined), claimDeployCredit, restoreDeployCredit }));
 vi.mock('../services/skillComposer.js', () => ({ buildInstalledSkill: vi.fn(), assertComposedSizeOk: vi.fn() }));
 vi.mock('../services/deployFee.js', () => ({
   arcDeployFeeTerms: vi.fn(async () => null),
