@@ -37,6 +37,7 @@ import { normalizeSettlementAmount, payoutCurrency, pricingUnit, sameUnit, type 
 import { getTokenDecimals } from '../services/chain.js';
 import { isSafeRegexSource } from '../services/rubricEngine.js';
 import { callerWallets } from '../services/callerWallets.js';
+import { hostedVerifierNotOptedIn, VERIFIER_NOT_OPTED_IN_MESSAGE } from '../services/verifierDuty.js';
 
 export const a2aRouter = Router();
 
@@ -1757,6 +1758,9 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
           'VERIFIER_CHAIN_UNSUPPORTED',
           `The designated verifier doesn't settle on ${taskChain} — cancel the task to get the escrow back`,
         );
+      }
+      if (await hostedVerifierNotOptedIn(data.verifierAddress)) {
+        throw new AppError(409, 'VERIFIER_NOT_OPTED_IN', `${VERIFIER_NOT_OPTED_IN_MESSAGE} Cancel this task to get the escrow back.`);
       }
     }
 

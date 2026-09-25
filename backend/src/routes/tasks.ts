@@ -22,6 +22,7 @@ import { getPool } from '../services/neonDb.js';
 import { config } from '../config.js';
 import { rooms } from '../services/socket.js';
 import { isSafeRegexSource } from '../services/rubricEngine.js';
+import { hostedVerifierNotOptedIn, VERIFIER_NOT_OPTED_IN_MESSAGE } from '../services/verifierDuty.js';
 
 export const tasksRouter = Router();
 
@@ -437,6 +438,12 @@ tasksRouter.post('/', requireAuth, async (req: AuthRequest, res, next) => {
     // request or in BASE_USDC_ADDRESS, would make ethers throw.
     const tokenAddress = ethers.getAddress(token.address.toLowerCase());
     const isNative = token.kind === 'native';
+
+    // Checked before the funding tx is built, so nothing is escrowed for a
+    // verifier that would never act (security audit run 1, C04).
+    if (data.verificationMode === 'agent' && data.verifierAddress && await hostedVerifierNotOptedIn(data.verifierAddress)) {
+      throw new AppError(409, 'VERIFIER_NOT_OPTED_IN', VERIFIER_NOT_OPTED_IN_MESSAGE);
+    }
 
     const tx = await escrowService.buildCreateTaskOn(
       chain,

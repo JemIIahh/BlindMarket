@@ -25,6 +25,11 @@ const TASK = '0x' + 'cd'.repeat(32);
 const abi = JSON.parse(readFileSync(new URL('../abi/BlindEscrow.json', import.meta.url), 'utf-8'));
 const iface = new ethers.Interface(Array.isArray(abi) ? abi : abi.abi);
 
+const { verifierOptedOut } = vi.hoisted(() => ({ verifierOptedOut: { value: false } }));
+vi.mock('../services/verifierDuty.js', () => ({
+  hostedVerifierNotOptedIn: vi.fn(async () => verifierOptedOut.value),
+  VERIFIER_NOT_OPTED_IN_MESSAGE: 'not opted in',
+}));
 vi.mock('../config.js', async (importOriginal) => {
   const mod = await importOriginal<typeof import('../config.js')>();
   Object.assign(cfg, mod.config);
@@ -143,6 +148,17 @@ describe('POST /tasks on a deployment with a Base escrow', () => {
     expect(res.status).toBe(200);
     expect(res.body.data.unsignedTx.to).toBe(BASE_ESCROW);
     expect(methodOf(res.body.data.unsignedTx)).toBe('createTaskWithVerifier');
+  });
+
+  it('refuses a hosted verifier whose owner has not opted in, before building (audit run 1, C04)', async () => {
+    verifierOptedOut.value = true;
+    try {
+      const res = await post({ token: USDC, verificationMode: 'agent', verifierAddress: VERIFIER });
+      expect(res.status).toBe(409);
+      expect(res.body.error.code).toBe('VERIFIER_NOT_OPTED_IN');
+    } finally {
+      verifierOptedOut.value = false;
+    }
   });
 
   it('refuses native value with 400, before building or booking anything', async () => {

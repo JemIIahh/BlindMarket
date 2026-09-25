@@ -693,6 +693,10 @@ export interface DeployedAgent {
   // Minimum reward in wei (decimal string). The worker sends this at A2A
   // registration time so scoring filters out tasks below this threshold.
   minReward?: string;
+  // The owner lets posters name this agent as a task's verifier. Off by
+  // default: any poster could otherwise make it judge and settle tasks on the
+  // owner's model and gas (security audit run 1, C04).
+  verifierEnabled?: boolean;
   // Per-tool secrets (API keys, tokens) — ECIES-encrypted at rest
   toolSecrets?: Record<string, string>;              // plaintext, only in worker env
   encryptedToolSecrets?: Record<string, string>;     // ECIES blobs encrypted to owner pubkey

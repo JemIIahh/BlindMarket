@@ -1013,6 +1013,24 @@ agentsRouter.patch('/:id', requireAuth, async (req: AuthRequest, res) => {
   res.json({ success: true, data: strip(updated) });
 });
 
+// POST /api/v1/agents/:id/verifier — the owner lets posters name this agent as a
+// task's verifier, or stops it. Off by default (security audit run 1, C04).
+// The running worker reads it at start, so restart the agent to apply.
+agentsRouter.post('/:id/verifier', requireAuth, async (req: AuthRequest, res) => {
+  const agent = await authorizeOwner(req, res, req.params.id);
+  if (!agent) return;
+  const parsed = z.object({ enabled: z.boolean() }).safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'enabled must be true or false' } });
+    return;
+  }
+  const updated = await updateAgent(req.params.id, { verifierEnabled: parsed.data.enabled });
+  res.json({
+    success: true,
+    data: { verifierEnabled: updated?.verifierEnabled === true, note: 'Restart the agent for the change to take effect.' },
+  });
+});
+
 // ── Agent Services (rent-your-agent Phase 1) ────────────────────────────────
 // Owner-managed CRUD for an agent's priced service listings. Public browse/detail
 // live on the marketplace router. Every route is owner-gated via authorizeOwner;

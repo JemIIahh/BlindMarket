@@ -68,13 +68,20 @@ describe('migrations production has recorded', () => {
   });
 
   it('numbers this branch after it, ending with the nullable follow-up', () => {
-    expect(listMigrations().filter((m) => m.id >= 32)).toEqual([
+    expect(listMigrations().filter((m) => m.id >= 32 && m.id <= 36)).toEqual([
       { id: 32, name: 'agent_executors_supported_chains' },
       { id: 33, name: 'agent_executors_usdc_earnings' },
       { id: 34, name: 'credited_payouts' },
       { id: 35, name: 'transactions_unit' },
       { id: 36, name: 'agent_executors_supported_chains_nullable' },
     ]);
+  });
+
+  it('#39 adds the verifier opt-in, off by default and safe to re-run (audit run 1, C04)', () => {
+    expect(listMigrations().find((m) => m.id === 39)).toEqual({ id: 39, name: 'deployed_agents_verifier_enabled' });
+    expect(squash(migrationSql(39))).toBe(
+      'ALTER TABLE deployed_agents ADD COLUMN IF NOT EXISTS verifier_enabled BOOLEAN NOT NULL DEFAULT false;',
+    );
   });
 
   it('#36 drops the constraint and default, and clears every 0G-only list', () => {

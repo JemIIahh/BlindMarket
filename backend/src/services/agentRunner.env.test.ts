@@ -182,6 +182,21 @@ describe('startAgent forks workers with an allowlisted env, not the full process
     expect(env.AGENT_PLATFORM_TOKEN).toBe(agent.platformToken);
   });
 
+  it("tells the worker whether its owner opted in to verifier duty, off by default (audit run 1, C04)", async () => {
+    const { startAgent } = await import('./agentRunner.js');
+    const off = makeAgent('agent-env-verifier-off');
+    agentHolder.current = off;
+    await startAgent(off.id, { skipResume: true });
+    expect((forkMock.mock.calls.at(-1)![2].env as Record<string, string>).AGENT_VERIFIER_ENABLED).toBe('false');
+    const { stopAgent } = await import('./agentRunner.js');
+    await stopAgent(off.id);
+
+    const on = { ...makeAgent('agent-env-verifier-on'), verifierEnabled: true };
+    agentHolder.current = on;
+    await startAgent(on.id, { skipResume: true });
+    expect((forkMock.mock.calls.at(-1)![2].env as Record<string, string>).AGENT_VERIFIER_ENABLED).toBe('true');
+  });
+
   it('hands the worker every configured settlement chain as data', async () => {
     const agent = makeAgent('agent-env-chains');
     agentHolder.current = agent;
