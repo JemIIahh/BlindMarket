@@ -35,7 +35,7 @@ const TESTNET = CONTRACT_ADDRESSES.arcTestnet;
 const ids = (chains: readonly { id: number }[]) => chains.map((c) => c.id);
 
 describe('Arc network', () => {
-  it('is Arc testnet with no env, exactly as production runs today', async () => {
+  it('is Arc testnet with no Arc env set, as production runs it today', async () => {
     const c = await load();
     expect(c.ARC_CHAIN_ID).toBe(5042002);
     expect(c.arcChain).toMatchObject({ id: 5042002, name: 'Arc Testnet', rpcUrls: { default: { http: ['https://arc-testnet.drpc.org'] } } });
