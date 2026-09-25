@@ -11,6 +11,7 @@ import * as badgeStore from '../services/badgeStore.js';
 import * as serviceStore from '../services/serviceStore.js';
 import * as skillStatsStore from '../services/skillStatsStore.js';
 import type { ApiResponse } from '../types.js';
+import { assertEgressUrl } from '../services/egressGuard.js';
 
 export const marketplaceRouter = Router();
 
@@ -146,8 +147,19 @@ marketplaceRouter.delete('/templates/:id', requireAuth, async (req: AuthRequest,
 
 // ── Webhooks ───────────────────────────────────────────────────────────────
 
+// Delivery re-checks the destination at connect time (egressGuard); this gives
+// an immediate 400 for a scheme or literal-IP address that could never be used.
+const isAllowedWebhookUrl = (url: string): boolean => {
+  try {
+    assertEgressUrl(url);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 const webhookSchema = z.object({
-  url: z.string().url(),
+  url: z.string().url().refine(isAllowedWebhookUrl, 'url must be a public http or https address'),
   secret: z.string().max(128).optional(),
   events: z.array(z.string()).optional(),
 });

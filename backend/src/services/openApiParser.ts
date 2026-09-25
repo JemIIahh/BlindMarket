@@ -10,6 +10,10 @@
 import type { ToolDefinition, ToolDSL } from '../types.js';
 import { compileFromOpenApi, type OpenApiOperationInput } from './toolDslCompiler.js';
 import { renderToolDefinition } from './toolDslRenderer.js';
+import { egressFetch, readCappedText } from './egressGuard.js';
+
+/** Large public specs run to several MB; anything past this is refused. */
+const MAX_OPENAPI_SPEC_BYTES = 10 * 1024 * 1024;
 
 // ── OpenAPI types (subset we need) ─────────────────────────────────────────
 
@@ -162,16 +166,18 @@ function applyAuthFromSecurity(
 }
 
 async function fetchAndParseSpec(url: string): Promise<OpenApiSpec> {
-  const res = await fetch(url, {
+  // The spec URL is chosen by the caller: guarded destination, capped read.
+  const res = await egressFetch(url, {
     headers: { Accept: 'application/json, text/yaml, text/plain' },
     signal: AbortSignal.timeout(15_000),
   });
 
   if (!res.ok) {
+    await res.body?.cancel().catch(() => {});
     throw new Error(`Failed to fetch OpenAPI spec: ${res.status}`);
   }
 
-  const text = await res.text();
+  const text = await readCappedText(res, MAX_OPENAPI_SPEC_BYTES);
   return parseSpecContent(text);
 }
 

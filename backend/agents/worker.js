@@ -38,6 +38,7 @@ import {
   eciesDecrypt,
   generateAesKey,
 } from '../src/services/crypto.js';
+import { egressFetch, MAX_TOOL_RESPONSE_BYTES, readCappedText } from '../src/services/egressGuard.js';
 import {
   encodeExecuteCallData,
   buildUserOp,
@@ -1203,6 +1204,23 @@ async function fetchWithTimeout(url, options = {}, timeout = 30000) {
   }
 }
 
+// For URLs an owner or skill author configured (http, mcp tools). The shared
+// egress guard refuses private, loopback and metadata addresses, redirects
+// included, and the body read is capped, so a tool can't read the host's
+// internal services or flood this process. Calls to BACKEND_URL keep using
+// fetchWithTimeout: that destination is ours.
+async function toolFetch(url, options = {}, timeout = 30000) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeout);
+  try {
+    const response = await egressFetch(url, { ...options, signal: controller.signal });
+    const text = await readCappedText(response, MAX_TOOL_RESPONSE_BYTES);
+    return { status: response.status, ok: response.ok, text };
+  } finally {
+    clearTimeout(id);
+  }
+}
+
 // ── Tool builders ────────────────────────────────────────────────────────────
 
 // Marker the sandboxed `js`-tool wrapper script prefixes its result line
@@ -1527,12 +1545,12 @@ export function buildTools(currentTaskHash = null, { posterAddress = null, owner
               body = t.body.contentType === 'application/json' ? JSON.stringify(JSON.parse(rawPayload)) : rawPayload;
             }
 
-            const res = await fetchWithTimeout(url, {
+            const res = await toolFetch(url, {
               method: t.method,
               headers,
               body,
             });
-            return { status: res.status, data: await res.text() };
+            return { status: res.status, data: res.text };
           } catch (e) {
             return { error: e.message };
           }
@@ -1544,12 +1562,12 @@ export function buildTools(currentTaskHash = null, { posterAddress = null, owner
         inputSchema: z.object({ input: z.string() }),
         execute: async ({ input }) => {
           try {
-            const res = await fetchWithTimeout(t.endpointUrl, {
+            const res = await toolFetch(t.endpointUrl, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ tool: t.toolName, input }),
             });
-            return await res.json();
+            return JSON.parse(res.text);
           } catch (e) {
             return { error: e.message };
           }
@@ -1750,7 +1768,7 @@ BM_JS_WRAP_EOF`,
           try {
             // MCP tools: route via JSON-RPC to the MCP server directly
             if (t.source === 'mcp' && t.mcp_endpoint) {
-              const mcpRes = await fetchWithTimeout(t.mcp_endpoint, {
+              const mcpRes = await toolFetch(t.mcp_endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...(t.mcp_headers ?? {}) },
                 body: JSON.stringify({
@@ -1760,7 +1778,7 @@ BM_JS_WRAP_EOF`,
                   params: { name: t.mcp_tool_name ?? t.name, arguments: args },
                 }),
               });
-              const mcpText = await mcpRes.text();
+              const mcpText = mcpRes.text;
               let mcpData;
               try { mcpData = JSON.parse(mcpText); } catch { mcpData = null; }
               if (mcpData?.error) {
@@ -2540,7 +2558,8 @@ export function describeVerificationCriteria(criteria) {
   if (criteria.regex_pattern) lines.push(`- The result must match this regular expression: ${criteria.regex_pattern}`);
   // The expected answer itself is NEVER shown: the check scores overlap with
   // that string, so revealing it would let any agent echo it and be paid.
-  if (criteria.expected_answer) lines.push('- The poster has set an exact expected answer (not shown to you) and the result is compared against it. Work the answer out from the brief and give it plainly and briefly — the answer itself, with no explanation, preamble or extra words around it. This overrides the Markdown formatting guidance.');
+  // The backend sends only has_expected_answer; expected_answer is kept for older servers.
+  if (criteria.expected_answer || criteria.has_expected_answer) lines.push('- The poster has set an exact expected answer (not shown to you) and the result is compared against it. Work the answer out from the brief and give it plainly and briefly — the answer itself, with no explanation, preamble or extra words around it. This overrides the Markdown formatting guidance.');
   for (const item of criteria.rubric ?? []) {
     const kw = item.keywords?.length ? ` — checked by looking for: ${list(item.keywords)}${item.min_mentions ? ` (at least ${item.min_mentions})` : ''}` : '';
     lines.push(`- Rubric: ${item.criterion}${kw}.`);
