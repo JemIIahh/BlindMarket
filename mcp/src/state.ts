@@ -114,31 +114,74 @@ export function updateSpend(idempotencyKey: string, patch: Partial<SpendRecord>)
 // quoteId; the spend only executes when re-called with confirm:true and that
 // quoteId. Harness-agnostic human-in-the-loop (MCP elicitation support is
 // spotty across clients).
+//
+// A quote authorizes exactly the spend it quoted, not "some spend of this
+// kind". Each tool normalizes what it is about to spend (amount in base
+// units, chain, token, escrow, payer, the service and its price, the task,
+// the fee terms, a hash of the brief …) into SpendFields, both when it quotes
+// and again on confirm after every lookup and before anything is uploaded,
+// approved or sent. consumeQuote compares the two: a listing re-priced in
+// between, a different amount or task, or a settlement that moved under the
+// quote refuses with QUOTE_MISMATCH and nothing is sent. Without this the
+// confirm spent whatever its own arguments and the backend's answers said at
+// that moment (security audit run 1, C20).
+
+/** One normalized spend: every value that decides what a confirm moves.
+ *  Free text (a prompt, instructions) goes in as a hash, never in the clear. */
+export type SpendFields = Record<string, string | number | boolean | null | undefined>;
 
 export interface Quote {
   quoteId: string;
   kind: SpendKind;
   summary: Record<string, unknown>;
+  /** sha256 of the canonical spend this quote authorizes (spendBinding). */
+  binding: string;
+  /** The normalized spend itself, kept only to say what changed on a mismatch. */
+  spend: SpendFields;
   expiresAt: number;
 }
 
 const QUOTE_TTL_MS = 10 * 60 * 1000;
 const quotes = new Map<string, Quote>();
 
-export function createQuote(kind: SpendKind, summary: Record<string, unknown>): Quote {
+/** Canonical digest of exactly what a confirm may spend: key order and
+ *  undefined-vs-null do not matter, every value does. */
+export function spendBinding(kind: SpendKind, spend: SpendFields): string {
+  const canon = JSON.stringify([kind, Object.keys(spend).sort().map((k) => [k, spend[k] ?? null])]);
+  return crypto.createHash('sha256').update(canon).digest('hex');
+}
+
+export function createQuote(kind: SpendKind, summary: Record<string, unknown>, spend: SpendFields): Quote {
   const quote: Quote = {
     quoteId: crypto.randomBytes(8).toString('hex'),
     kind,
     summary,
+    binding: spendBinding(kind, spend),
+    spend: { ...spend },
     expiresAt: Date.now() + QUOTE_TTL_MS,
   };
   quotes.set(quote.quoteId, quote);
   return quote;
 }
 
-export function consumeQuote(quoteId: string, kind: SpendKind): Quote | null {
-  const quote = quotes.get(quoteId);
-  if (!quote || quote.kind !== kind || quote.expiresAt < Date.now()) return null;
-  quotes.delete(quoteId); // single use
-  return quote;
+export type QuoteCheck =
+  | { ok: true; quote: Quote }
+  /** No such quote, another kind's, expired, or already used. */
+  | { ok: false; code: 'QUOTE_REQUIRED' }
+  /** The confirm would spend something other than what was quoted. */
+  | { ok: false; code: 'QUOTE_MISMATCH'; quote: Quote; changed: string[] };
+
+/**
+ * Check a confirm against its quote. Single use: a quote is consumed whether
+ * or not the confirm matches it, so a mismatch always needs a fresh quote the
+ * caller can look at before confirming.
+ */
+export function consumeQuote(quoteId: string | undefined, kind: SpendKind, spend: SpendFields): QuoteCheck {
+  const quote = quoteId ? quotes.get(quoteId) : undefined;
+  if (!quote || quote.kind !== kind || quote.expiresAt < Date.now()) return { ok: false, code: 'QUOTE_REQUIRED' };
+  quotes.delete(quote.quoteId); // single use, matched or not
+  if (quote.binding === spendBinding(kind, spend)) return { ok: true, quote };
+  const keys = new Set([...Object.keys(quote.spend), ...Object.keys(spend)]);
+  const changed = [...keys].filter((k) => (quote.spend[k] ?? null) !== (spend[k] ?? null)).sort();
+  return { ok: false, code: 'QUOTE_MISMATCH', quote, changed };
 }

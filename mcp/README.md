@@ -153,6 +153,17 @@ Spending (local wallet, **two-step quote → confirm**):
   `0g-compute` needs none. Arc's RPC is `BLINDMARKET_ARC_RPC_URL`, default
   `https://rpc.testnet.arc.io` on Arc Testnet.
 
+A `quoteId` authorizes exactly the spend it quoted: the amount in base units,
+the chain, escrow, token and paying wallet, the `idempotencyKey`, and the
+service and its price (`rent_service`), the brief, duration and capabilities
+(`post_task`), the task and its escrow (`cancel_task`, `claim_timeout`), or the
+agent and the fee terms (`deploy_agent`). The confirm re-derives all of it
+after its lookups and, if anything differs (a provider re-priced its listing,
+the fee changed, the call names another amount or task), refuses with
+`QUOTE_MISMATCH` before anything is uploaded, approved or sent. Quotes are
+single-use either way: get a new quote, check it, and confirm that one. The
+confirm's result reports the amount escrowed (`escrowed`) or the fee paid.
+
 Every spend requires an `idempotencyKey`. Retries with the same key **resume**
 (created → funded → indexed stage machine persisted in
 `~/.blindmarket/mcp-state.json`) — a crash between the funding transaction and

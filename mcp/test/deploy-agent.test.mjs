@@ -256,3 +256,36 @@ test("refuses a fee whose chain id is not the one the backend lists for that cha
   assert.match(error.message, /chain 5042/);
   assert.equal(sent.length, 0);
 });
+
+// Security audit run 1, C20: the confirm re-reads the fee terms, and pays only what was quoted.
+test('a fee that changed between the quote and the confirm is refused, with nothing paid', async () => {
+  for (const [key, changed] of [['amount', { amountRaw: '5000000' }], ['recipient', { recipient: '0x' + 'ab'.repeat(20) }]]) {
+    terms = TRANSFER_TERMS;
+    const t = tools();
+    const { quote } = parse(await t.deploy_agent({ ...args, idempotencyKey: `deploy-fee-moved-${key}` }));
+    assert.equal(quote.fee, '1 USDC');
+    terms = { ...TRANSFER_TERMS, ...changed };
+    const error = errorOf(await t.deploy_agent({ ...args, idempotencyKey: `deploy-fee-moved-${key}`, confirm: true, quoteId: quote.quoteId }));
+    assert.equal(error.code, 'QUOTE_MISMATCH', key);
+    assert.match(error.message, /deploy fee changed since the quote \(quoted 1 USDC/);
+    assert.match(error.message, /new quote/);
+  }
+  assert.equal(sent.length, 0);
+  assert.equal(deploys().length, 0);
+});
+
+test('a confirm for another agent than the one quoted is refused', async () => {
+  const t = tools();
+  const { quote } = parse(await t.deploy_agent({ ...args, idempotencyKey: 'deploy-args-moved-1' }));
+  const error = errorOf(await t.deploy_agent({ ...args, model: 'gpt-4o', idempotencyKey: 'deploy-args-moved-1', confirm: true, quoteId: quote.quoteId }));
+  assert.equal(error.code, 'QUOTE_MISMATCH');
+  assert.match(error.message, /changed: model/);
+  assert.equal(sent.length, 0);
+  assert.equal(deploys().length, 0);
+
+  // The quoted deploy itself confirms, and the result names the fee paid.
+  const again = parse(await t.deploy_agent({ ...args, idempotencyKey: 'deploy-args-moved-2' }));
+  const done = parse(await t.deploy_agent({ ...args, idempotencyKey: 'deploy-args-moved-2', confirm: true, quoteId: again.quote.quoteId }));
+  assert.equal(done.fee, '1 USDC');
+  assert.equal(sent.length, 1);
+});
