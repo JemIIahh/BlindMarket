@@ -3,7 +3,7 @@ import { Button, Modal } from './bb';
 import { copyToClipboard } from '../lib/utils';
 import { formatPaymentAmount } from '../lib/paymentUnits';
 import { isWellFormedListing, plainLine } from '../lib/untrustedText';
-import { API_BASE_URL, WORKER_SHARE_PCT, PLATFORM_FEE_PCT, ARC_RPC_URL } from '../config/constants';
+import { API_BASE_URL, WORKER_SHARE_PCT, PLATFORM_FEE_PCT, arcPublicRpcUrl } from '../config/constants';
 import { getMarketplaceTokenAddress, getPostingChain } from '../config/settlement';
 import type { AgentService } from '../services/marketplace';
 
@@ -40,8 +40,7 @@ const RENTAL_VERIFICATION_CRITERIA = { min_length: 20 };
  * The chain the escrow is funded on: the backend's posting chain. The script
  * uses the chain's public RPC rather than the app's own (ARC_RPC_URL /
  * BASE_RPC_URL may be env-overridden with a keyed URL), so a keyed RPC URL
- * never ends up in copied text. The Arc URLs are ARC_RPC_URL's public
- * defaults in config/constants.ts.
+ * never ends up in copied text. It used ARC_RPC_URL itself on Arc testnet.
  */
 function settlementChain(): { name: string; id: number; rpc: string; gasCoin: string } {
   const posting = getPostingChain();
@@ -49,7 +48,7 @@ function settlementChain(): { name: string; id: number; rpc: string; gasCoin: st
     return {
       name: posting.label,
       id: posting.chainId,
-      rpc: posting.chainId === 5042 ? 'https://rpc.mainnet.arc.io' : ARC_RPC_URL,
+      rpc: arcPublicRpcUrl(posting.chainId),
       // Arc's gas coin IS USDC.
       gasCoin: 'USDC',
     };

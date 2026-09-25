@@ -27,9 +27,11 @@ const OG_CHAIN_ID = Number(
 const BASE_CHAIN_ID = Number(
   import.meta.env.VITE_BASE_CHAIN_ID || (networkIsMainnet ? '8453' : '84532'),
 );
-// Arc (Circle's L1, USDC is the gas token) is testnet-only here, matching the
-// backend's own Arc default. Mainnet (5042) has no default RPC, so it must be
-// set explicitly via VITE_ARC_CHAIN_ID / VITE_ARC_RPC_URL.
+// Arc (Circle's L1, USDC is the gas token) runs on the network
+// VITE_ARC_CHAIN_ID names, Arc testnet (5042002) unless it says Arc mainnet
+// (5042), as the backend's follows ARC_CHAIN_ID. Never VITE_NETWORK: a build
+// with VITE_NETWORK=mainnet still settles on Arc testnet until this says
+// otherwise.
 const ARC_CHAIN_ID = Number(
   import.meta.env.VITE_ARC_CHAIN_ID || '5042002',
 );
@@ -42,10 +44,11 @@ const ADDR = isMainnet ? CONTRACT_ADDRESSES.mainnet : CONTRACT_ADDRESSES.testnet
 const BASE_ADDR = isBaseMainnet
   ? (CONTRACT_ADDRESSES as any).base
   : (CONTRACT_ADDRESSES as any).baseTestnet;
-// Present once contracts/deployments/arc-{testnet,mainnet}.json exists.
+// Present once contracts/deployments/arc-{testnet,mainnet}.json exists. Only
+// this network's record: another network's contracts are not on this one.
 const ARC_ADDR = isArcMainnet
   ? (CONTRACT_ADDRESSES as any).arc
-  : (CONTRACT_ADDRESSES as any).arcTestnet;
+  : ARC_CHAIN_ID === 5042002 ? (CONTRACT_ADDRESSES as any).arcTestnet : undefined;
 
 // ── 0G Chain (agent infra) ─────────────────────────────────────────────────
 
@@ -70,9 +73,9 @@ export const BLIND_REPUTATION_ADDRESS =
 export { BASE_CHAIN_ID };
 
 // The settlement leg's CCTP chainKey — the fixed source/dest of a CCTP quote.
-// Phase A burns FROM here, Phase B mints INTO here (the user's Arc wallet).
-// Arc testnet only: Arc mainnet is not a CCTP chain yet.
-export const SETTLEMENT_CCTP_CHAIN_KEY = 'arc-testnet';
+// Phase A burns FROM here, Phase B mints INTO here (the user's Arc wallet):
+// the backend's CCTP entry for this Arc network.
+export const SETTLEMENT_CCTP_CHAIN_KEY = isArcMainnet ? 'arc' : 'arc-testnet';
 
 /** CCTP is usable only when the backend's CCTP settlement leg is the chain
  *  this app settles on. A mismatched deployment hides bridging entirely
@@ -106,12 +109,22 @@ export const BASE_USDC_ADDRESS =
 
 export { ARC_CHAIN_ID };
 
-// dRPC is the default (privacy extensions block rpc.testnet.arc.io for some
-// users — net::ERR_BLOCKED_BY_CLIENT on every balance read). Override with
-// VITE_ARC_RPC_URL; WSS (wss://arc-testnet.drpc.org) also tested working.
-export const ARC_RPC_URL =
-  import.meta.env.VITE_ARC_RPC_URL ||
-  (isArcMainnet ? 'https://rpc.mainnet.arc.io' : 'https://arc-testnet.drpc.org');
+/**
+ * Arc's public RPC for a chain id: Circle's on mainnet (5042), dRPC on testnet
+ * (privacy extensions block rpc.testnet.arc.io for some users —
+ * net::ERR_BLOCKED_BY_CLIENT on every balance read). Text people copy (SDK
+ * samples, generated scripts) uses this, never ARC_RPC_URL, which
+ * VITE_ARC_RPC_URL may point at a keyed URL.
+ */
+export function arcPublicRpcUrl(chainId: number): string {
+  return chainId === 5042 ? 'https://rpc.mainnet.arc.io' : 'https://arc-testnet.drpc.org';
+}
+
+export const ARC_PUBLIC_RPC_URL = arcPublicRpcUrl(ARC_CHAIN_ID);
+
+// Override with VITE_ARC_RPC_URL; WSS (wss://arc-testnet.drpc.org) also
+// tested working.
+export const ARC_RPC_URL = import.meta.env.VITE_ARC_RPC_URL || ARC_PUBLIC_RPC_URL;
 
 // The escrow new tasks post on, generated from contracts/deployments like
 // Base's, so the build-time settlement table (config/settlement.ts) names it
@@ -127,6 +140,13 @@ export const ARC_ESCROW_ADDRESS = unsetIfZero(
 // allowlists the ERC-20.
 export const ARC_USDC_ADDRESS =
   import.meta.env.VITE_ARC_USDC_ADDRESS || ARC_ADDR?.USDC || '0x3600000000000000000000000000000000000000';
+
+// The AgentFactory the deploy fee is paid to, from this Arc network's record:
+// none on Arc mainnet until its deploy is recorded, never the testnet one. The
+// backend names the factory too (the deploy fee terms), and that wins.
+export const ARC_AGENT_FACTORY_ADDRESS = unsetIfZero(
+  import.meta.env.VITE_ARC_AGENT_FACTORY_ADDRESS || ARC_ADDR?.agentFactory || '',
+);
 
 // Privy signer ID for the backend's PRIVY_AUTHORIZATION_KEY (Privy-app-specific).
 export const PRIVY_RELAY_SIGNER_ID: string =
@@ -173,7 +193,10 @@ export const ARC_CHAIN_CONFIG = {
   chainName: isArcMainnet ? 'Arc' : 'Arc Testnet',
   nativeCurrency: { name: 'USDC', symbol: 'USDC', decimals: 18 },
   rpcUrls: [ARC_RPC_URL],
-  blockExplorerUrls: [isArcMainnet ? 'https://arcscan.app' : 'https://testnet.arcscan.app'],
+  // Arc mainnet's Blockscout is explorer.arc.io (its runtime config names
+  // network 5042; arcscan.app does not answer). testnet.arcscan.app redirects
+  // to explorer.testnet.arc.io and keeps the path.
+  blockExplorerUrls: [isArcMainnet ? 'https://explorer.arc.io' : 'https://testnet.arcscan.app'],
 } as const;
 
 // Single user-facing wallet chain: Arc (settlement). Base is legacy read-only
