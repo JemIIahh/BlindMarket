@@ -66,7 +66,8 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
     uint8 public constant MAX_SUBMISSION_ATTEMPTS = 3; // max resubmissions after failed verification
     uint256 public constant MIN_DEADLINE = 1 hours;    // minimum task duration
     uint256 public constant MAX_DEADLINE = 90 days;    // maximum task duration
-    uint256 public constant DISPUTE_WINDOW = 14 days;  // time after a dispute is raised before claimTimeout can recover it
+    uint256 public constant DISPUTE_WINDOW = 14 days;  // time after a dispute is raised before claimTimeout can recover it (or, for escalated unjudged work, releaseUnjudgedWork)
+    uint256 public constant APPEAL_WINDOW = 3 days;    // time after a failed verdict in which the worker may still raiseDispute, even past the deadline
 
     // ── State ──
 
@@ -96,6 +97,19 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
     // address(0) = TEE path disabled (legacy address-gated flow only).
     address public teeSigner;
 
+    // Time of the task's latest passed=false verdict (0 = never failed, or
+    // failed before this upgrade). The worker may appeal it with raiseDispute
+    // for APPEAL_WINDOW after it, even past the deadline, and claimTimeout on
+    // a Verified task waits that window out. Trailing state, UUPS-append-only.
+    mapping(uint256 => uint256) public failedVerdictAt;
+
+    // True once claimTimeout escalated delivered-but-never-judged work (a
+    // Submitted task past its deadline) to Disputed. Such a dispute never
+    // falls back to the poster: the admin rules on it with resolveDispute, or,
+    // if no ruling comes within DISPUTE_WINDOW, the worker collects it with
+    // releaseUnjudgedWork. Trailing state, UUPS-append-only.
+    mapping(uint256 => bool) public unjudgedEscalation;
+
     // ── Events ──
 
     event TaskCreated(uint256 indexed taskId, address indexed agent, address token, uint256 amount, bytes32 taskHash, string category, string locationZone, uint256 deadline);
@@ -120,6 +134,8 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
     event TaskRegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
     event TeeSignerUpdated(address indexed oldSigner, address indexed newSigner);
     event TEESettled(uint256 indexed taskId, bool passed, address indexed teeSigner);
+    event UnjudgedWorkEscalated(uint256 indexed taskId);
+    event UnjudgedWorkReleased(uint256 indexed taskId, uint256 workerPayout, uint256 platformFee);
 
     // ── Errors (custom errors are cheaper than string reverts) ──
 
@@ -142,6 +158,9 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
     error FeeExceedsMax();
     error InvalidTEESignature();
     error TEESignerNotSet();
+    error AppealWindowActive();
+    error EscalatedForAdjudication();
+    error NotEscalated();
 
     // ── Modifiers ──
 
@@ -428,8 +447,10 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
 
             emit TaskCompleted(taskId, payout, fee);
         } else {
-            // Failed verification — worker can retry if attempts remain
+            // Failed verification — worker can retry if attempts remain, or
+            // appeal with raiseDispute within APPEAL_WINDOW.
             t.status = TaskStatus.Verified;
+            failedVerdictAt[taskId] = block.timestamp;
 
             // Record dispute if max attempts reached (optional bookkeeping)
             if (t.submissionAttempts >= MAX_SUBMISSION_ATTEMPTS && address(reputationContract) != address(0)) {
@@ -503,6 +524,7 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
             emit TaskCompleted(taskId, payout, fee);
         } else {
             t.status = TaskStatus.Verified;
+            failedVerdictAt[taskId] = block.timestamp;
 
             if (t.submissionAttempts >= MAX_SUBMISSION_ATTEMPTS && address(reputationContract) != address(0)) {
                 try reputationContract.recordDispute(t.worker, taskId) {} catch {}
@@ -532,15 +554,42 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
     }
 
     /**
-     * @notice Agent reclaims funds after deadline expires.
-     *         Works for Assigned, Submitted, or Verified (failed) tasks.
-     *         Prevents funds from being locked forever if worker ghosts.
+     * @notice Poster's recovery once the deadline has passed.
+     *         - Assigned (never delivered): full refund to the poster. Prevents
+     *           funds from being locked forever if the worker ghosts.
+     *         - Submitted (delivered before the deadline, never judged): NOT a
+     *           refund. The task is escalated to Disputed for the admin's
+     *           resolveDispute; if no ruling comes within DISPUTE_WINDOW the
+     *           worker can collect it with releaseUnjudgedWork. A verdict that
+     *           never arrives must not count as a refund to the poster, who in
+     *           manual mode (or through a per-task verifier it controls) holds
+     *           that verdict.
+     *         - Verified (failed): refund, once the worker's APPEAL_WINDOW after
+     *           the latest fail verdict has passed.
+     *         - Disputed: refund once DISPUTE_WINDOW has elapsed since the
+     *           dispute was raised, except for an escalation of unjudged work,
+     *           which never falls back to the poster.
      */
     function claimTimeout(uint256 taskId) external onlyAgent(taskId) nonReentrant {
         Task storage t = _tasks[taskId];
         if (block.timestamp < t.deadline) revert DeadlineNotReached();
 
+        if (t.status == TaskStatus.Submitted) {
+            // Delivered on time and never judged: adjudicate, never refund by
+            // default. No funds move here.
+            t.status = TaskStatus.Disputed;
+            t.disputedAt = block.timestamp;
+            unjudgedEscalation[taskId] = true;
+            emit UnjudgedWorkEscalated(taskId);
+            emit TaskDisputed(taskId, msg.sender);
+            return;
+        }
+
         if (t.status == TaskStatus.Disputed) {
+            // Escalated unjudged work settles only through resolveDispute or
+            // the worker's releaseUnjudgedWork, never back to the poster.
+            if (unjudgedEscalation[taskId]) revert EscalatedForAdjudication();
+
             // A stale dispute must not freeze escrow forever if the admin key
             // is ever lost or unavailable. Once DISPUTE_WINDOW has elapsed
             // since raiseDispute, the poster's timeout refund becomes
@@ -555,13 +604,13 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
             // is still 0, not just when the window hasn't yet run.
             bool windowElapsed = t.disputedAt != 0 && block.timestamp >= t.disputedAt + DISPUTE_WINDOW;
             if (!windowElapsed) revert DisputeWindowActive();
-        } else {
-            // Only allow timeout on active-but-incomplete statuses
-            bool canTimeout = t.status == TaskStatus.Assigned ||
-                              t.status == TaskStatus.Submitted ||
-                              t.status == TaskStatus.Verified;
-
-            if (!canTimeout) revert InvalidStatus(t.status, TaskStatus.Assigned);
+        } else if (t.status == TaskStatus.Verified) {
+            // A failed verdict: the worker keeps APPEAL_WINDOW to raiseDispute,
+            // even past the deadline. failedVerdictAt is 0 for tasks failed
+            // before this upgrade, so their window reads as long elapsed.
+            if (block.timestamp < failedVerdictAt[taskId] + APPEAL_WINDOW) revert AppealWindowActive();
+        } else if (t.status != TaskStatus.Assigned) {
+            revert InvalidStatus(t.status, TaskStatus.Assigned);
         }
 
         // Effects
@@ -575,7 +624,9 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
 
     /**
      * @notice Agent or worker can raise a dispute. Moves task to Disputed status.
-     *         Disputes are resolved by admin via resolveDispute().
+     *         Disputes are resolved by admin via resolveDispute(). Before the
+     *         deadline either party can; after it, only the worker can, to
+     *         appeal a failed verdict within APPEAL_WINDOW of it.
      */
     function raiseDispute(uint256 taskId) external whenNotPaused {
         Task storage t = _tasks[taskId];
@@ -586,11 +637,18 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         bool canDispute = t.status == TaskStatus.Submitted || t.status == TaskStatus.Verified;
         if (!canDispute) revert InvalidStatus(t.status, TaskStatus.Submitted);
 
-        // After the deadline the agent's claimTimeout refund is the guaranteed
-        // exit. A party must not be able to raise a NEW dispute post-deadline to
-        // move the task to Disputed (which claimTimeout cannot recover) purely to
-        // freeze the escrow and block that refund — a griefing / fund-lock vector.
-        if (block.timestamp >= t.deadline) revert DeadlineReached();
+        // After the deadline a party must not be able to raise a NEW dispute
+        // purely to freeze the escrow and delay the poster's claimTimeout — a
+        // griefing / fund-lock vector. The one exception is the worker's appeal
+        // of a failed verdict within APPEAL_WINDOW of it: without it, a fail
+        // verdict landing near (or after) the deadline would hand the escrow to
+        // the poster with no review. The appeal is bounded — the resulting
+        // dispute falls back to claimTimeout after DISPUTE_WINDOW like any
+        // other.
+        bool workerAppeal = msg.sender == t.worker &&
+            t.status == TaskStatus.Verified &&
+            block.timestamp < failedVerdictAt[taskId] + APPEAL_WINDOW;
+        if (block.timestamp >= t.deadline && !workerAppeal) revert DeadlineReached();
 
         t.status = TaskStatus.Disputed;
         t.disputedAt = block.timestamp;
@@ -632,6 +690,35 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
             emit DisputeResolved(taskId, false);
             emit TaskCancelled(taskId, t.amount);
         }
+    }
+
+    /**
+     * @notice The worker collects the escrow of delivered work that was never
+     *         judged, once claimTimeout escalated it and DISPUTE_WINDOW has
+     *         passed without an admin ruling. Pays the usual worker/fee split.
+     * @dev Keeps these funds recoverable if the admin key is unavailable. The
+     *      default here is the worker, not the poster (unlike a dispute raised
+     *      over a verdict): the work arrived before the deadline and the party
+     *      that should have judged it never did. No reputation is recorded,
+     *      since nobody judged the work.
+     */
+    function releaseUnjudgedWork(uint256 taskId) external onlyWorker(taskId) nonReentrant whenNotPaused {
+        Task storage t = _tasks[taskId];
+        if (t.status != TaskStatus.Disputed) revert InvalidStatus(t.status, TaskStatus.Disputed);
+        if (!unjudgedEscalation[taskId]) revert NotEscalated();
+        if (block.timestamp < t.disputedAt + DISPUTE_WINDOW) revert DisputeWindowActive();
+
+        // ── Effects ──
+        uint256 fee = (t.amount * feeBps) / 10_000;
+        uint256 payout = t.amount - fee;
+        t.status = TaskStatus.Completed;
+
+        // ── Interactions ──
+        _transferPayout(t.token, t.worker, payout);
+        _transferPayout(t.token, treasury, fee);
+
+        emit UnjudgedWorkReleased(taskId, payout, fee);
+        emit TaskCompleted(taskId, payout, fee);
     }
 
     // ── Admin Functions ──

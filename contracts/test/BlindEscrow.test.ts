@@ -500,12 +500,22 @@ describe("BlindEscrow", function () {
       await expect(tx).to.emit(escrow, "DeadlineExpired").withArgs(1, AMOUNT);
     });
 
-    it("should work for Submitted status after deadline", async function () {
+    it("escalates a Submitted task to Disputed after the deadline instead of refunding it (C18)", async function () {
       await escrow.connect(worker).submitEvidence(1, EVIDENCE_HASH);
       await time.increase(ONE_WEEK + 1);
 
-      await escrow.connect(agent).claimTimeout(1);
-      expect((await escrow.getTask(1)).status).to.equal(5);
+      const before = await token.balanceOf(agent.address);
+      const tx = await escrow.connect(agent).claimTimeout(1);
+
+      const task = await escrow.getTask(1);
+      expect(task.status).to.equal(6); // Disputed, not Cancelled
+      expect(task.disputedAt).to.be.gt(0);
+      expect(await escrow.unjudgedEscalation(1)).to.be.true;
+      expect(await token.balanceOf(agent.address)).to.equal(before);
+      expect(await token.balanceOf(await escrow.getAddress())).to.equal(AMOUNT);
+      await expect(tx).to.emit(escrow, "UnjudgedWorkEscalated").withArgs(1);
+      await expect(tx).to.emit(escrow, "TaskDisputed").withArgs(1, agent.address);
+      await expect(tx).to.not.emit(escrow, "DeadlineExpired");
     });
 
     it("should work for Verified (failed) status after deadline", async function () {
@@ -563,8 +573,10 @@ describe("BlindEscrow", function () {
         .to.be.revertedWithCustomError(escrow, "DeadlineReached");
       await expect(escrow.connect(agent).raiseDispute(1))
         .to.be.revertedWithCustomError(escrow, "DeadlineReached");
-      // The agent's guaranteed timeout refund still works.
+      // The poster's claimTimeout still works; for delivered, never-judged
+      // work it escalates to the admin instead of refunding (C18).
       await expect(escrow.connect(agent).claimTimeout(1)).to.not.revert(ethers);
+      expect((await escrow.getTask(1)).status).to.equal(6); // Disputed
     });
 
     it("should allow worker to raise dispute after failed verification", async function () {
@@ -725,6 +737,207 @@ describe("BlindEscrow", function () {
       await expect(
         escrow.connect(agent).raiseDispute(1)
       ).to.be.revertedWithCustomError(escrow, "DeadlineReached");
+    });
+  });
+
+  // ── Delivered work vs. the poster's timeout refund (security audit C18) ──
+  // claimTimeout used to refund the poster for Submitted work (delivered before
+  // the deadline, never judged) and for Verified work the moment the deadline
+  // passed, while raiseDispute closed at that same deadline. Whoever held the
+  // verdict (the poster in manual mode, or a per-task verifier that is the
+  // poster's second wallet) could keep on-time work and take the whole escrow
+  // back by staying silent or failing it.
+
+  describe("unjudged work and failed verdicts (C18)", function () {
+    const DISPUTE_WINDOW = 14 * ONE_DAY;
+    const APPEAL_WINDOW = 3 * ONE_DAY;
+    let posterAlt: HardhatEthersSigner; // the poster's own second wallet
+
+    beforeEach(async function () {
+      posterAlt = stranger;
+    });
+
+    async function deliveredTask(opts: { agentVerifier: boolean }) {
+      const t = await token.getAddress();
+      if (opts.agentVerifier) {
+        await escrow.connect(agent).createTaskWithVerifier(TASK_HASH, t, AMOUNT, "c", "z", ONE_DAY, posterAlt.address);
+      } else {
+        await escrow.connect(agent).createTask(TASK_HASH, t, AMOUNT, "c", "z", ONE_DAY);
+      }
+      await escrow.connect(verifier).marketplaceAssign(1, worker.address);
+      await time.increase(600);
+      await escrow.connect(worker).submitEvidence(1, EVIDENCE_HASH); // ~23h50m before the deadline
+    }
+
+    async function toDeadline() {
+      await time.increaseTo((await escrow.getTask(1)).deadline);
+    }
+
+    it("a silent poster-controlled verifier cannot turn on-time work into a refund (record S1)", async function () {
+      await deliveredTask({ agentVerifier: true });
+      await toDeadline();
+
+      const posterBefore = await token.balanceOf(agent.address);
+      await escrow.connect(agent).claimTimeout(1);
+      expect((await escrow.getTask(1)).status).to.equal(6); // Disputed
+      expect(await token.balanceOf(agent.address)).to.equal(posterBefore);
+
+      // Escalated unjudged work never falls back to the poster, not even after
+      // DISPUTE_WINDOW.
+      await expect(escrow.connect(agent).claimTimeout(1))
+        .to.be.revertedWithCustomError(escrow, "EscalatedForAdjudication");
+      await time.increase(DISPUTE_WINDOW * 2);
+      await expect(escrow.connect(agent).claimTimeout(1))
+        .to.be.revertedWithCustomError(escrow, "EscalatedForAdjudication");
+
+      // The admin adjudicates.
+      const workerBefore = await token.balanceOf(worker.address);
+      const treasuryBefore = await token.balanceOf(treasury.address);
+      await escrow.connect(admin).resolveDispute(1, true);
+      const fee = (AMOUNT * 1000n) / 10000n;
+      expect(await token.balanceOf(worker.address)).to.equal(workerBefore + AMOUNT - fee);
+      expect(await token.balanceOf(treasury.address)).to.equal(treasuryBefore + fee);
+      expect(await token.balanceOf(agent.address)).to.equal(posterBefore);
+    });
+
+    it("manual mode, poster silent: the admin can still rule for the poster on bad work (record S2)", async function () {
+      await deliveredTask({ agentVerifier: false });
+      await toDeadline();
+      await escrow.connect(agent).claimTimeout(1);
+
+      const before = await token.balanceOf(agent.address);
+      await escrow.connect(admin).resolveDispute(1, false);
+      expect((await escrow.getTask(1)).status).to.equal(5); // Cancelled
+      expect(await token.balanceOf(agent.address)).to.equal(before + AMOUNT);
+    });
+
+    it("pays the worker if no ruling comes within DISPUTE_WINDOW of the escalation", async function () {
+      await deliveredTask({ agentVerifier: false });
+      await toDeadline();
+      await escrow.connect(agent).claimTimeout(1);
+      const escalatedAt = (await escrow.getTask(1)).disputedAt;
+
+      await expect(escrow.connect(agent).releaseUnjudgedWork(1))
+        .to.be.revertedWithCustomError(escrow, "NotWorker");
+      await time.setNextBlockTimestamp(escalatedAt + BigInt(DISPUTE_WINDOW) - 1n);
+      await expect(escrow.connect(worker).releaseUnjudgedWork(1))
+        .to.be.revertedWithCustomError(escrow, "DisputeWindowActive");
+
+      const workerBefore = await token.balanceOf(worker.address);
+      const treasuryBefore = await token.balanceOf(treasury.address);
+      const posterBefore = await token.balanceOf(agent.address);
+      const fee = (AMOUNT * 1000n) / 10000n;
+      await time.setNextBlockTimestamp(escalatedAt + BigInt(DISPUTE_WINDOW));
+      await expect(escrow.connect(worker).releaseUnjudgedWork(1))
+        .to.emit(escrow, "UnjudgedWorkReleased").withArgs(1, AMOUNT - fee, fee)
+        .and.to.emit(escrow, "TaskCompleted").withArgs(1, AMOUNT - fee, fee);
+
+      expect((await escrow.getTask(1)).status).to.equal(4); // Completed
+      expect(await token.balanceOf(worker.address)).to.equal(workerBefore + AMOUNT - fee);
+      expect(await token.balanceOf(treasury.address)).to.equal(treasuryBefore + fee);
+      expect(await token.balanceOf(agent.address)).to.equal(posterBefore);
+      // Nobody judged it, so no rating.
+      const [tasksCompleted] = await reputation.getReputation(worker.address);
+      expect(tasksCompleted).to.equal(0);
+    });
+
+    it("releaseUnjudgedWork applies only to escalations, never to a dispute raised over a verdict", async function () {
+      await deliveredTask({ agentVerifier: false });
+      await escrow.connect(worker).raiseDispute(1);
+      await time.increase(ONE_DAY + DISPUTE_WINDOW + 1);
+      await expect(escrow.connect(worker).releaseUnjudgedWork(1))
+        .to.be.revertedWithCustomError(escrow, "NotEscalated");
+      // That dispute keeps its existing fallback to the poster.
+      await expect(escrow.connect(agent).claimTimeout(1)).to.emit(escrow, "DeadlineExpired");
+    });
+
+    it("gives the worker APPEAL_WINDOW after a fail verdict, even past the deadline (record S1b/S2b)", async function () {
+      await deliveredTask({ agentVerifier: true });
+      await escrow.connect(posterAlt).completeVerification(1, false);
+      const failedAt = await escrow.failedVerdictAt(1);
+      expect(failedAt).to.be.gt(0);
+      await toDeadline();
+
+      // Past the deadline the poster cannot refund yet, and cannot raise a
+      // dispute itself (the griefing guard still holds for it).
+      await expect(escrow.connect(agent).claimTimeout(1))
+        .to.be.revertedWithCustomError(escrow, "AppealWindowActive");
+      await expect(escrow.connect(agent).raiseDispute(1))
+        .to.be.revertedWithCustomError(escrow, "DeadlineReached");
+      // The worker cannot resubmit past the deadline, but can appeal.
+      await expect(escrow.connect(worker).submitEvidence(1, EVIDENCE_HASH_2))
+        .to.be.revertedWithCustomError(escrow, "DeadlineReached");
+      await expect(escrow.connect(worker).raiseDispute(1))
+        .to.emit(escrow, "TaskDisputed").withArgs(1, worker.address);
+
+      const workerBefore = await token.balanceOf(worker.address);
+      await escrow.connect(admin).resolveDispute(1, true);
+      const fee = (AMOUNT * 1000n) / 10000n;
+      expect(await token.balanceOf(worker.address)).to.equal(workerBefore + AMOUNT - fee);
+    });
+
+    it("a fail verdict relayed after the deadline still opens the appeal window", async function () {
+      await deliveredTask({ agentVerifier: false });
+      await toDeadline();
+      await time.increase(60);
+      // Manual mode: the platform relays the poster's /verify {passed:false}.
+      await escrow.connect(verifier).completeVerification(1, false);
+      await expect(escrow.connect(agent).claimTimeout(1))
+        .to.be.revertedWithCustomError(escrow, "AppealWindowActive");
+      await expect(escrow.connect(worker).raiseDispute(1)).to.not.revert(ethers);
+    });
+
+    it("refunds the poster once an unappealed fail verdict's window has passed (control)", async function () {
+      await deliveredTask({ agentVerifier: false });
+      await escrow.connect(verifier).completeVerification(1, false);
+      const failedAt = await escrow.failedVerdictAt(1);
+      await toDeadline();
+
+      await time.setNextBlockTimestamp(failedAt + BigInt(APPEAL_WINDOW) - 1n);
+      await expect(escrow.connect(agent).claimTimeout(1))
+        .to.be.revertedWithCustomError(escrow, "AppealWindowActive");
+
+      const before = await token.balanceOf(agent.address);
+      await time.setNextBlockTimestamp(failedAt + BigInt(APPEAL_WINDOW));
+      await expect(escrow.connect(agent).claimTimeout(1)).to.emit(escrow, "DeadlineExpired").withArgs(1, AMOUNT);
+      expect(await token.balanceOf(agent.address)).to.equal(before + AMOUNT);
+
+      // A late appeal is refused.
+      await expect(escrow.connect(worker).raiseDispute(1))
+        .to.be.revertedWithCustomError(escrow, "InvalidStatus");
+    });
+
+    it("the worker's appeal closes with APPEAL_WINDOW", async function () {
+      await deliveredTask({ agentVerifier: false });
+      await escrow.connect(verifier).completeVerification(1, false);
+      await time.increase(ONE_DAY + APPEAL_WINDOW);
+      await expect(escrow.connect(worker).raiseDispute(1))
+        .to.be.revertedWithCustomError(escrow, "DeadlineReached");
+    });
+
+    it("treats a task failed before this upgrade (failedVerdictAt == 0) as it always did", async function () {
+      await deliveredTask({ agentVerifier: false });
+      await escrow.connect(verifier).completeVerification(1, false);
+
+      // failedVerdictAt is the mapping right after teeSigner (slot 11), at
+      // slot 12; zero task 1's entry, as for a pre-upgrade verdict.
+      const slot = ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(["uint256", "uint256"], [1, 12]));
+      const esc = await escrow.getAddress();
+      expect(BigInt(await ethers.provider.getStorage(esc, slot))).to.equal(await escrow.failedVerdictAt(1));
+      await ethers.provider.send("hardhat_setStorageAt", [esc, slot, ethers.ZeroHash]);
+      expect(await escrow.failedVerdictAt(1)).to.equal(0);
+
+      await toDeadline();
+      await expect(escrow.connect(agent).claimTimeout(1)).to.emit(escrow, "DeadlineExpired");
+    });
+
+    it("an Assigned task that was never delivered is still refunded at the deadline (control)", async function () {
+      await escrow.connect(agent).createTask(TASK_HASH, await token.getAddress(), AMOUNT, "c", "z", ONE_DAY);
+      await escrow.connect(verifier).marketplaceAssign(1, worker.address);
+      await toDeadline();
+      const before = await token.balanceOf(agent.address);
+      await expect(escrow.connect(agent).claimTimeout(1)).to.emit(escrow, "DeadlineExpired").withArgs(1, AMOUNT);
+      expect(await token.balanceOf(agent.address)).to.equal(before + AMOUNT);
     });
   });
 
@@ -933,6 +1146,7 @@ describe("BlindEscrow", function () {
 
       expect((await escrow.getTask(1)).status).to.equal(3); // Verified
       expect(await token.balanceOf(worker.address)).to.equal(workerBefore);
+      expect(await escrow.failedVerdictAt(1)).to.be.gt(0); // opens the worker's appeal window (C18)
     });
 
     it("honors a per-task verifier over the global one", async function () {
