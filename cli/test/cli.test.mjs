@@ -1,7 +1,7 @@
 import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtempSync, readFileSync, statSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, statSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Interface, Transaction, Wallet, getAddress } from 'ethers';
@@ -29,6 +29,8 @@ const { buildProgram } = await import('../dist/program.js');
 const SETTLEMENT = JSON.parse(readFileSync(new URL('../../fixtures/prod/health-settlement.json', import.meta.url), 'utf-8')).data;
 const FEE_TERMS = { ...JSON.parse(readFileSync(new URL('../../fixtures/prod/deploy-fee.json', import.meta.url), 'utf-8')).data, chainId: 5042002 };
 const ARC = SETTLEMENT.chains.find((c) => c.chain === 'arc');
+/** Arc mainnet: a backend with ARC_CHAIN_ID=5042 names it 'arc' too, with the same USDC address. */
+const ARC_MAINNET_ID = 5042;
 const ESCROW = getAddress(ARC.escrowAddress);
 const USDC = getAddress(ARC.token.address);
 const TREASURY = getAddress(FEE_TERMS.recipient);
@@ -43,9 +45,11 @@ const ERC20 = new Interface([
 const ESCROW_CALLS = new Interface([
   'function createTask(bytes32 taskHash, address token, uint256 amount, string category, string locationZone, uint256 duration)',
   'function cancelTask(uint256 taskId)',
+  'function claimTimeout(uint256 taskId)',
 ]);
 const createTaskData = (b) => ESCROW_CALLS.encodeFunctionData('createTask', [b.taskHash, b.token, b.amount, 'general', b.locationZone, b.duration]);
 const cancelData = (id) => ESCROW_CALLS.encodeFunctionData('cancelTask', [BigInt(id)]);
+const claimData = (id) => ESCROW_CALLS.encodeFunctionData('claimTimeout', [BigInt(id)]);
 
 let chain;
 let rpc;
@@ -77,13 +81,16 @@ before(async () => {
             result = tx.hash;
             break;
           }
-          case 'eth_getTransactionReceipt':
-            result = {
+          case 'eth_getTransactionReceipt': {
+            // Only for a transaction this node has: one sent to it, or one a test mined.
+            const status = chain.sent.some((t) => t.hash === params[0]) ? '0x1' : chain.mined.get(params[0]);
+            result = status === undefined ? null : {
               transactionHash: params[0], transactionIndex: '0x0', blockHash: '0x' + 'b'.repeat(64), blockNumber: '0x10',
               from: OWNER.address, to: ESCROW, contractAddress: null, cumulativeGasUsed: '0x5208', gasUsed: '0x5208',
-              effectiveGasPrice: '0x1', logs: [], logsBloom: '0x' + '0'.repeat(512), status: '0x1', type: '0x2',
+              effectiveGasPrice: '0x1', logs: [], logsBloom: '0x' + '0'.repeat(512), status, type: '0x2',
             };
             break;
+          }
           default: throw new Error(`stub RPC: unexpected ${method}`);
         }
         return { jsonrpc: '2.0', id, result };
@@ -100,11 +107,16 @@ after(() => rpc.close());
 let calls;
 let answers;
 let whoami;
+/** What /health/settlement and /deploy-fee answer: production's, unless a test moves the backend. */
+let settlement;
+let feeTerms;
 beforeEach(() => {
-  chain = { served: ARC.chainId, allowance: 0n, sent: [] };
+  chain = { served: ARC.chainId, allowance: 0n, sent: [], mined: new Map() };
   calls = [];
   answers = {};
   whoami = OWNER.address;
+  settlement = SETTLEMENT;
+  feeTerms = FEE_TERMS;
   for (const f of ['state.json', 'config.json', 'keystore.json']) rmSync(join(process.env.BLIND_CONFIG_DIR, f), { force: true });
 });
 
@@ -118,15 +130,15 @@ globalThis.fetch = async (url, init = {}) => {
   const json = (data) => ({ ok: true, status: 200, json: async () => ({ success: true, data }) });
   const queued = answers[path]?.shift();
   if (queued) return queued;
-  if (path === '/health/settlement') return json(SETTLEMENT);
+  if (path === '/health/settlement') return json(settlement);
   if (path === '/api/v1/api-keys/whoami') return json({ address: whoami, addresses: [whoami] });
   if (path.startsWith('/api/v1/a2a/executors')) return json({ executors: [] });
   if (path === '/api/v1/storage/upload') return json({ rootHash: '0x' + 'cd'.repeat(32) });
-  if (path === '/api/v1/tasks') return json({ unsignedTx: { to: ESCROW, data: createTaskData(body), from: OWNER.address }, chain: 'arc', chainId: ARC.chainId });
+  if (path === '/api/v1/tasks') return json({ unsignedTx: { to: ESCROW, data: createTaskData(body), from: OWNER.address }, chain: 'arc', chainId: settlement.chains.find((c) => c.chain === 'arc').chainId });
   if (path === '/api/v1/tasks/8/cancel') return json({ unsignedTx: { to: ESCROW, data: cancelData(8) }, chain: 'arc', chainId: ARC.chainId });
   if (path === '/api/v1/tasks/8/confirm-tx') return json({ confirmed: 1 });
   if (path === '/api/v1/a2a/tasks/index') return json({ taskHash: body.taskHash, onChainTaskId: '51', indexed: true });
-  if (path === '/api/v1/agents/deploy-fee') return json(FEE_TERMS);
+  if (path === '/api/v1/agents/deploy-fee') return json(feeTerms);
   if (path === '/api/v1/agents/deploy/validate') return json({ valid: true });
   if (path === '/api/v1/agents/deploy') {
     if (!body.feeTxHash) return failWith(402, 'NO_DEPLOY_CREDIT');
@@ -136,6 +148,7 @@ globalThis.fetch = async (url, init = {}) => {
   throw new Error('unexpected backend call ' + path);
 };
 const failWith = (status, code, extra = {}) => ({ ok: false, status, json: async () => ({ success: false, error: { code, message: code, ...extra } }) });
+const answer = (data) => ({ ok: true, status: 200, json: async () => ({ success: true, data }) });
 
 /** Run `blind <args>`: resolves with stdout lines, rejects with the thrown error. */
 async function blind(...args) {
@@ -150,6 +163,7 @@ async function blind(...args) {
   }
 }
 const state = () => JSON.parse(readFileSync(join(process.env.BLIND_CONFIG_DIR, 'state.json'), 'utf-8'));
+const writeState = (s) => writeFileSync(join(process.env.BLIND_CONFIG_DIR, 'state.json'), JSON.stringify(s));
 const posted = (path) => calls.filter((c) => c.path === path);
 
 // ── post-task ────────────────────────────────────────────────────────────────
@@ -243,6 +257,136 @@ test('a deploy that fails after paying keeps the payment, and the retry pays not
   assert.equal(chain.sent.length, 1, 'paid once');
   assert.equal(posted('/api/v1/agents/deploy').at(-1).body.feeTxHash, chain.sent[0].hash);
   assert.deepEqual(state().pendingFees, {});
+});
+
+/** The backend (and the stub node) on Arc mainnet from here on: same key and USDC, another chain id. */
+function onMainnet() {
+  chain.served = ARC_MAINNET_ID;
+  settlement = { ...SETTLEMENT, chains: SETTLEMENT.chains.map((c) => (c.chain === 'arc' ? { ...c, chainId: ARC_MAINNET_ID, tier: 'mainnet' } : c)) };
+  feeTerms = { ...FEE_TERMS, chainId: ARC_MAINNET_ID };
+}
+
+test('post-task on Arc mainnet funds the escrow there', async () => {
+  onMainnet();
+  const text = await blind('post-task', '--instructions', 'Summarise this paragraph in one sentence.', '--reward', '2.5', '--public', '--yes');
+  assert.deepEqual(chain.sent.map((t) => [t.to, t.chainId]), [[USDC, BigInt(ARC_MAINNET_ID)], [ESCROW, BigInt(ARC_MAINNET_ID)]]);
+  assert.match(text, /Posted public task on arc/);
+});
+
+test('a fee saved on Arc Testnet is not offered to Arc mainnet: the deploy there pays there', async () => {
+  answers['/api/v1/agents/deploy'] = [failWith(402, 'NO_DEPLOY_CREDIT'), failWith(500, 'INTERNAL_ERROR')];
+  await assert.rejects(
+    blind('deploy-agent', '--name', 'a', '--instructions', 'Research and cite.', '--provider', 'openai', '--model', 'gpt-4o-mini', '--yes'),
+    (e) => e.code === 'INTERNAL_ERROR',
+  );
+  const testnetFee = chain.sent[0].hash;
+
+  onMainnet();
+  const text = await blind('deploy-agent', '--name', 'a', '--instructions', 'Research and cite.', '--provider', 'openai', '--model', 'gpt-4o-mini', '--yes');
+  assert.doesNotMatch(text, /already paid/);
+  assert.equal(chain.sent.length, 2);
+  assert.equal(chain.sent[1].chainId, BigInt(ARC_MAINNET_ID));
+  assert.equal(posted('/api/v1/agents/deploy').at(-1).body.feeTxHash, chain.sent[1].hash);
+  assert.deepEqual(Object.values(state().pendingFees), [testnetFee], 'still saved for Arc Testnet');
+});
+
+test('with no BLINDMARKET_ARC_RPC_URL, post-task on Arc mainnet signs over https://rpc.mainnet.arc.io', async () => {
+  // The SDK's ethers sends every RPC request through FetchRequest: note where
+  // each one goes, and answer it from the stub node, so none leaves this machine.
+  const { ethers: sdkEthers } = await import('@blindmarket/sdk');
+  const stub = process.env.BLINDMARKET_ARC_RPC_URL;
+  delete process.env.BLINDMARKET_ARC_RPC_URL;
+  const urls = new Set();
+  sdkEthers.FetchRequest.registerGetUrl(async (req) => {
+    urls.add(req.url);
+    const res = await realFetch(stub, { method: 'POST', headers: { 'content-type': 'application/json' }, body: req.body });
+    return { statusCode: res.status, statusMessage: res.statusText, headers: Object.fromEntries(res.headers), body: new Uint8Array(await res.arrayBuffer()) };
+  });
+  try {
+    onMainnet();
+    await blind('post-task', '--instructions', 'Summarise this paragraph in one sentence.', '--reward', '2.5', '--public', '--yes');
+    assert.deepEqual([...urls], ['https://rpc.mainnet.arc.io']);
+    assert.deepEqual(chain.sent.map((t) => [t.to, t.chainId]), [[USDC, BigInt(ARC_MAINNET_ID)], [ESCROW, BigInt(ARC_MAINNET_ID)]]);
+  } finally {
+    sdkEthers.FetchRequest.registerGetUrl(sdkEthers.FetchRequest.createGetUrlFunc());
+    process.env.BLINDMARKET_ARC_RPC_URL = stub;
+  }
+});
+
+// ── a deploy fee 0.4 saved without its chain ─────────────────────────────────
+
+/** Where 0.4 kept a paid-but-unused deploy fee: backend and wallet, no chain id. */
+const UNKEYED = `https://backend.test|${OWNER.address.toLowerCase()}`;
+const DEPLOY = ['deploy-agent', '--name', 'a', '--instructions', 'Research and cite.', '--provider', 'openai', '--model', 'gpt-4o-mini', '--yes'];
+
+test('a fee 0.4 saved is used once its receipt is on the fee chain, and kept under its chain id', async () => {
+  const hash = '0x' + '5a'.repeat(32);
+  chain.mined.set(hash, '0x1');
+  writeState({ pendingFees: { [UNKEYED]: hash } });
+  answers['/api/v1/agents/deploy'] = [failWith(500, 'INTERNAL_ERROR')];
+  await assert.rejects(blind(...DEPLOY), (e) => e.code === 'INTERNAL_ERROR');
+  assert.deepEqual(state().pendingFees, { [`${UNKEYED}|${FEE_TERMS.chainId}`]: hash });
+
+  const text = await blind(...DEPLOY);
+  assert.match(text, new RegExp(`already paid in ${hash}`));
+  assert.equal(chain.sent.length, 0, 'nothing paid');
+  assert.deepEqual(posted('/api/v1/agents/deploy').map((c) => c.body.feeTxHash), [hash, hash]);
+  assert.deepEqual(state().pendingFees, {});
+});
+
+test('a fee 0.4 saved that the fee chain does not have is dropped, and the deploy pays there', async () => {
+  onMainnet();
+  const hash = '0x' + '5b'.repeat(32); // paid on Arc Testnet
+  writeState({ pendingFees: { [UNKEYED]: hash } });
+  const text = await blind(...DEPLOY);
+  assert.match(text, new RegExp(`earlier version saved \\(${hash}\\) is not on arc \\(chain ${ARC_MAINNET_ID}\\)`));
+  assert.equal(chain.sent.length, 1);
+  assert.equal(chain.sent[0].chainId, BigInt(ARC_MAINNET_ID));
+  assert.equal(posted('/api/v1/agents/deploy').at(-1).body.feeTxHash, chain.sent[0].hash);
+  assert.deepEqual(state().pendingFees, {});
+});
+
+test('a fee 0.4 saved that reverted is dropped, and the deploy pays', async () => {
+  const hash = '0x' + '5d'.repeat(32);
+  chain.mined.set(hash, '0x0');
+  writeState({ pendingFees: { [UNKEYED]: hash } });
+  await blind(...DEPLOY);
+  assert.equal(chain.sent.length, 1);
+  assert.equal(posted('/api/v1/agents/deploy').at(-1).body.feeTxHash, chain.sent[0].hash);
+  assert.deepEqual(state().pendingFees, {});
+});
+
+test('a fee 0.4 saved that cannot be checked stops the deploy before paying, and stays saved', async () => {
+  const hash = '0x' + '5c'.repeat(32);
+  writeState({ pendingFees: { [UNKEYED]: hash } });
+  chain.served = 84532; // BLINDMARKET_ARC_RPC_URL is on another chain
+  await assert.rejects(blind(...DEPLOY), (e) => e.code === 'FEE_UNCHECKED' && /serves chain 84532/.test(e.message));
+  assert.equal(chain.sent.length, 0);
+  assert.deepEqual(state().pendingFees, { [UNKEYED]: hash });
+});
+
+test('an SDK older than 0.8 is refused, and 0.8 is named', async () => {
+  const { assertSdk, sdkVersion } = await import('../dist/client.js');
+  const installed = JSON.parse(readFileSync(new URL('../node_modules/@blindmarket/sdk/package.json', import.meta.url), 'utf-8')).version;
+  assert.equal(sdkVersion(), installed);
+  const bb = { postTask() {} };
+  assert.throws(() => assertSdk(bb, '0.7.0'), (e) => e.code === 'SDK_TOO_OLD' && /0\.8 or later/.test(e.message) && /@\^0\.8\.0/.test(e.message));
+  assert.throws(() => assertSdk({}, '0.8.0'), (e) => e.code === 'SDK_TOO_OLD');
+  assert.doesNotThrow(() => assertSdk(bb, '0.8.0'));
+});
+
+test('reclaim reports what the claim did, and never calls an unreported outcome a refund', async () => {
+  const built = (extra) => [answer({ unsignedTx: { to: ESCROW, data: claimData(8) }, chain: 'arc', chainId: ARC.chainId, ...extra })];
+  const reclaim = () => blind('reclaim', '--task', '8', '--chain', 'arc', '--yes');
+  answers['/api/v1/tasks/8/timeout'] = built({ outcome: 'refund' });
+  assert.match(await reclaim(), /Reclaimed the escrow of task 8 on arc/);
+  answers['/api/v1/tasks/8/timeout'] = built({ outcome: 'escalate' });
+  assert.match(await reclaim(), /Sent task 8 on arc for review/);
+  answers['/api/v1/tasks/8/timeout'] = built({});
+  const text = await reclaim();
+  assert.match(text, /did not say whether it refunded the escrow or sent delivered work for review/);
+  assert.doesNotMatch(text, /Reclaimed/);
+  assert.equal(chain.sent.length, 3);
 });
 
 test('deploy-agent needs the provider key in the environment, and never pays for a refused request', async () => {

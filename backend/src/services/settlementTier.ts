@@ -17,17 +17,17 @@ export type SettlementTier = (typeof SETTLEMENT_TIERS)[number];
 
 /**
  * Chain ids per tier for each settlement chain, with the env var that sets it.
- * The registry reads these to say which tier a chain is on; Phase 2 adds arc
- * (mainnet 5042, testnet 5042002).
+ * The registry reads these to say which tier a chain is on.
  *
  * Adding a chain here has a second half: its chain id in config.ts must
- * default from the tier too (see tierChainId). CCTP_ARC_CHAIN_ID is hard-coded
- * to its testnet id today, so an arc entry added here alone would refuse an
- * explicit mainnet Arc id while quietly keeping the default on testnet.
+ * default from the tier too (see tierChainId), and so must every other
+ * setting that names the same network. CCTP's Arc leg is one: CCTP_ARC_CHAIN_ID
+ * defaults to ARC_CHAIN_ID, so the two move together.
  */
 export const TIER_CHAIN_IDS = {
   '0g': { mainnet: 16661, testnet: 16602, env: 'OG_CHAIN_ID' },
   base: { mainnet: 8453, testnet: 84532, env: 'BASE_CHAIN_ID' },
+  arc: { mainnet: 5042, testnet: 5042002, env: 'ARC_CHAIN_ID' },
 } as const;
 
 /**
@@ -40,6 +40,7 @@ const CCTP_TIER_CHAIN_IDS = {
   CCTP_ARBITRUM_CHAIN_ID: { mainnet: 42161, testnet: 421614 },
   CCTP_OPTIMISM_CHAIN_ID: { mainnet: 10, testnet: 11155420 },
   CCTP_POLYGON_CHAIN_ID: { mainnet: 137, testnet: 80002 },
+  CCTP_ARC_CHAIN_ID: { mainnet: 5042, testnet: 5042002 },
 } as const;
 
 function isTier(value: string): value is SettlementTier {

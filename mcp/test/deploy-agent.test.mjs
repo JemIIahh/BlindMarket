@@ -18,6 +18,7 @@ process.env.BLINDMARKET_DEPLOY_POLL_MS = '0';
 process.env.OPENAI_API_KEY = 'sk-openai-test';
 
 const { registerRentTools } = await import('../dist/rent.js');
+const { getSpend, putSpend } = await import('../dist/state.js');
 
 const OWNER_KEY = Wallet.createRandom();
 const OWNER = OWNER_KEY.address;
@@ -30,6 +31,8 @@ const TRANSFER_TERMS = { required: true, method: 'transfer', chain: 'arc', token
 let rpc;
 let rpcUrl;
 let chainIdServed;
+/** Transactions the stub node has mined, by hash: their receipt status. */
+let mined;
 before(async () => {
   rpc = createServer((req, res) => {
     let raw = '';
@@ -39,7 +42,13 @@ before(async () => {
         let result;
         if (method === 'eth_chainId') result = '0x' + chainIdServed.toString(16);
         else if (method === 'eth_call') result = ERC20.encodeFunctionResult('balanceOf', [12_500_000n]);
-        else throw new Error(`stub RPC: unexpected ${method}`);
+        else if (method === 'eth_getTransactionReceipt') {
+          result = mined.has(params[0]) ? {
+            transactionHash: params[0], transactionIndex: '0x0', blockHash: '0x' + 'b'.repeat(64), blockNumber: '0x10',
+            from: OWNER, to: USDC, contractAddress: null, cumulativeGasUsed: '0x5208', gasUsed: '0x5208',
+            effectiveGasPrice: '0x1', logs: [], logsBloom: '0x' + '0'.repeat(512), status: mined.get(params[0]), type: '0x2',
+          } : null;
+        } else throw new Error(`stub RPC: unexpected ${method}`);
         return { jsonrpc: '2.0', id, result };
       };
       const parsed = JSON.parse(raw);
@@ -60,6 +69,8 @@ let calls;
 let sent;
 let waitResult;
 let validateAnswer;
+/** The chain id /health/bridge lists for arc: 5042002 (Arc Testnet) until a test moves it. */
+let bridgeChainId;
 beforeEach(() => {
   terms = TRANSFER_TERMS;
   owner = OWNER;
@@ -68,6 +79,8 @@ beforeEach(() => {
   sent = [];
   waitResult = async () => ({ status: 1 });
   chainIdServed = 5042002;
+  bridgeChainId = 5042002;
+  mined = new Map();
   validateAnswer = null;
 });
 
@@ -79,7 +92,7 @@ globalThis.fetch = async (url, init = {}) => {
   const body = init.body ? JSON.parse(init.body) : undefined;
   calls.push({ method: init.method ?? 'GET', path, body });
   const json = (data) => ({ ok: true, status: 200, json: async () => ({ success: true, data }) });
-  if (path === '/health/bridge') return json({ postingChain: 'arc', chains: [{ chain: 'arc', chainId: 5042002 }] });
+  if (path === '/health/bridge') return json({ postingChain: 'arc', chains: [{ chain: 'arc', chainId: bridgeChainId }] });
   if (path === '/api/v1/agents/deploy-fee') return json(terms);
   if (path === '/api/v1/agents/deploy/validate') return validateAnswer ?? json({ valid: true });
   if (path === '/api/v1/api-keys/whoami') return json({ address: owner.toLowerCase() });
@@ -288,4 +301,69 @@ test('a confirm for another agent than the one quoted is refused', async () => {
   const done = parse(await t.deploy_agent({ ...args, idempotencyKey: 'deploy-args-moved-2', confirm: true, quoteId: again.quote.quoteId }));
   assert.equal(done.fee, '1 USDC');
   assert.equal(sent.length, 1);
+});
+
+// ── A payment after the backend moved the fee's chain to another network ────
+//
+// A chain keeps its key ('arc') on Arc Testnet (5042002) and Arc mainnet
+// (5042). A fee paid on one never counts on the other, so a retry must not
+// send it there again, or be told to retry with it forever.
+
+const NOT_FOUND = () => [1, 2, 3].map(() => failWith(409, 'DEPLOY_FEE_NOT_FOUND'));
+/** A deploy record written before records kept the chain id, its fee sent. */
+function unchainedRecord(idempotencyKey, txHash) {
+  const now = new Date().toISOString();
+  putSpend({ idempotencyKey, kind: 'deploy', stage: 'sent', settlement: 'arc', token: USDC, amountWei: '1000000', txHash, createdAt: now, updatedAt: now });
+}
+function onMainnet() {
+  terms = { ...TRANSFER_TERMS, chainId: 5042 };
+  bridgeChainId = 5042;
+  chainIdServed = 5042;
+}
+
+test('a fee paid on Arc Testnet is refused, not sent again, once the backend takes the fee on Arc mainnet', async () => {
+  terms = { ...TRANSFER_TERMS, chainId: 5042002 };
+  deployAnswers = [failWith(500, 'INTERNAL_ERROR')];
+  const t = tools();
+  const { quote } = parse(await t.deploy_agent({ ...args, idempotencyKey: 'deploy-moved-1' }));
+  errorOf(await t.deploy_agent({ ...args, idempotencyKey: 'deploy-moved-1', confirm: true, quoteId: quote.quoteId }));
+  assert.equal(getSpend('deploy-moved-1').chainId, 5042002);
+
+  onMainnet();
+  const error = errorOf(await t.deploy_agent({ ...args, idempotencyKey: 'deploy-moved-1' }));
+  assert.equal(error.code, 'SETTLEMENT_CHANGED');
+  assert.match(error.message, /new idempotencyKey to pay on chain 5042\b/);
+  assert.doesNotMatch(error.message, /same idempotencyKey/i);
+  assert.equal(deploys().length, 1, 'the testnet payment is not sent again');
+  assert.equal(sent.length, 1);
+});
+
+test('a fee recorded without its chain that the fee chain does not have sends no one back into the same retry', async () => {
+  unchainedRecord('deploy-unchained-1', '0x' + 'a1'.repeat(32));
+  onMainnet();
+  deployAnswers = NOT_FOUND();
+  const error = errorOf(await tools().deploy_agent({ ...args, idempotencyKey: 'deploy-unchained-1' }));
+  assert.equal(error.code, 'SETTLEMENT_CHANGED');
+  assert.match(error.message, /paid on another network/);
+  assert.match(error.message, /new idempotencyKey/);
+  assert.doesNotMatch(error.message, /same idempotencyKey/i);
+  assert.equal(sent.length, 0);
+});
+
+test('a fee recorded without its chain that is on the fee chain takes its chain id, and the same key finishes the deploy', async () => {
+  const hash = '0x' + 'a2'.repeat(32);
+  unchainedRecord('deploy-unchained-2', hash);
+  mined.set(hash, '0x1');
+  terms = { ...TRANSFER_TERMS, chainId: 5042002 };
+  deployAnswers = NOT_FOUND();
+  const t = tools();
+  const error = errorOf(await t.deploy_agent({ ...args, idempotencyKey: 'deploy-unchained-2' }));
+  assert.equal(error.code, 'DEPLOY_FEE_NOT_FOUND');
+  assert.match(error.message, /has not seen it yet/);
+  assert.equal(getSpend('deploy-unchained-2').chainId, 5042002);
+
+  const done = parse(await t.deploy_agent({ ...args, idempotencyKey: 'deploy-unchained-2' }));
+  assert.equal(done.resumed, true);
+  assert.equal(deploys().at(-1).body.feeTxHash, hash);
+  assert.equal(sent.length, 0, 'nothing paid');
 });

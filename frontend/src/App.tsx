@@ -4,7 +4,7 @@ import { PrivyProvider } from '@privy-io/react-auth';
 import { WagmiProvider } from '@privy-io/wagmi';
 import { Analytics } from '@vercel/analytics/react';
 import { wagmiConfig } from './config/wagmi';
-import { arcChain, cctpSourceChains } from './config/chains';
+import { arcChain, privySupportedChains } from './config/chains';
 import { WalletProvider } from './context/WalletContext';
 import { AuthProvider } from './context/AuthContext';
 import { ChainProvider } from './context/ChainContext';
@@ -78,10 +78,11 @@ export default function App() {
           appId={privyAppId}
           config={{
             defaultChain: arcChain,
-            // cctpSourceChains (see config/chains.ts) — Privy refuses to switch
-            // an external wallet to any chain not in this list, surfacing as
-            // "Unsupported chainId: <id>" rather than a wallet-level error.
-            supportedChains: [arcChain, ...cctpSourceChains],
+            // Arc, the CCTP sources and the settlement Base chain (see
+            // config/chains.ts) — Privy refuses to switch an external wallet to
+            // any chain not in this list, surfacing as "Unsupported chainId:
+            // <id>" rather than a wallet-level error.
+            supportedChains: privySupportedChains,
             // Follows the saved bb.theme preference at load. Privy's modal theme
             // is fixed per provider mount, so a mid-session toggle applies to the
             // modal on the next reload.

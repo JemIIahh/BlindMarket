@@ -225,7 +225,7 @@ This is the hot key the backend uses to call `marketplaceAssign` and
 - [ ] **Flip to `SETTLEMENT_TIER=mainnet`** once every settlement chain the
       backend uses (0G, Base, and Arc from Phase 2) is on mainnet. Production
       runs mixed today (0G mainnet + Base Sepolia), so the tier is unset and
-      only warns. Set, it defaults every chain id to mainnet and refuses to
+      only warns. Arc can move to mainnet before then (§3.6). Set, it defaults every chain id to mainnet and refuses to
       boot on any testnet id; `GET /health/bridge` must then report
       `settlementTier: "mainnet"`, `tierSource: "SETTLEMENT_TIER"`.
 - [ ] **`GET /health/bridge` reports `deploymentIdentity.role: "owner"`,
@@ -252,6 +252,45 @@ This is the hot key the backend uses to call `marketplaceAssign` and
 
   **Why this matters:** when you discover a leak at 3am, you don't want
   to be reading docs.
+
+### 3.6 Moving Arc to mainnet
+
+Arc can move on its own: `ARC_CHAIN_ID` picks its network, and no other
+chain has to move with it. Leave `SETTLEMENT_TIER` unset while Base stays on
+Sepolia; the tier would refuse Base Sepolia's chain id.
+
+- [ ] **Finish or refund every open Arc testnet task first.** Once Arc runs
+      on mainnet, tasks listed on testnet are retired: they leave the open
+      feed, and the backend no longer reads or settles them.
+- [ ] Deploy the escrow, then the factory, then regenerate the addresses:
+      `I_HAVE_READ_MAINNET_CHECKLIST=yes ARC_MAINNET_RPC_URL=https://... npx hardhat run scripts/deploy-settlement.ts --network arc-mainnet`,
+      the same for `scripts/deploy-agent-factory.ts`, then
+      `npx hardhat run scripts/sync-addresses.ts`, and commit the generated
+      `arc` record. Give the escrow its own verifier key (§3) and the Safe as
+      admin (§2).
+- [ ] Backend env: `ARC_CHAIN_ID=5042`, `ARC_ESCROW_ADDRESS`,
+      `ARC_ESCROW_DEPLOYMENT_BLOCK`, `ARC_MARKETPLACE_SIGNER_PRIVATE_KEY` (the
+      new key), and `ARC_RPC_URL` for an endpoint you control or pay for (the
+      public one is the default, and production warns about it). Remove
+      `CCTP_ARC_CHAIN_ID` and `CCTP_ARC_RPC_URL` if set: they default to the
+      `ARC_*` values, and with CCTP on the backend refuses to boot when
+      `CCTP_ARC_CHAIN_ID` disagrees with `ARC_CHAIN_ID`.
+- [ ] Frontend env: `VITE_ARC_CHAIN_ID=5042`, plus `VITE_ARC_RPC_URL` unless
+      the public RPC will do. The escrow and factory come from the generated
+      record, or from `VITE_ARC_ESCROW_ADDRESS` / `VITE_ARC_AGENT_FACTORY_ADDRESS`.
+- [ ] Publish the SDK, MCP server and CLI, so their default Arc RPC covers
+      chain 5042. Until then, their users set `BLINDMARKET_ARC_RPC_URL`.
+- [ ] After the deploy, the backend log shows `[chain] Arc — chainId: 5042
+      (mainnet)` and `[a2aSettlement] Arc bridge active`, and no
+      `[boot] rpc:` line. `GET /health/settlement` names Arc, chain 5042, as
+      the posting chain. Then take one small task through post → accept →
+      verify → settle and check the 90/10 split on-chain.
+
+  **Why this matters:** everything the backend stores for Arc (the task
+  index, checkpoints, dispute markers, deploy credits) is kept per network,
+  so mainnet starts clean instead of reading testnet's. And every RPC is
+  asked which chain it serves at boot: a testnet URL left in place when
+  `ARC_CHAIN_ID` changes stops the boot instead of running as mainnet.
 
 ---
 

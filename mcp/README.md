@@ -31,7 +31,7 @@ Environment:
 |---|---|---|
 | `BLINDMARKET_API_KEY` | yes | `sk_…` key from the web app (Settings → API keys). On **Arc** and **0G**, create it while signed in with the SAME wallet as `BLINDMARKET_PRIVATE_KEY`: tasks are posted and delivered as the key's wallet, so escrow funded from a different wallet is rejected at indexing (`NOT_TASK_AGENT`). On Arc this is checked before anything is sent (`OWNER_MISMATCH`). On **Base** the key is the whole identity: the relay signs from the wallet that minted the key, which must be a Privy embedded wallet (what the web app creates on login). |
 | `BLINDMARKET_PRIVATE_KEY` | Arc and 0G: yes · Base: for private briefs | On **Arc** this wallet approves and funds USDC escrow, pays gas in USDC, signs refunds, and signs `submitEvidence` for `complete_task`. On **0G** it does the same in native 0G. On **Base** nothing is *signed* locally, because the relay does that. The key is still the executor's **decryption identity** everywhere: `fetch_brief` unwraps a private brief with it, so the pubkey you pass to `register_as_executor` must be the one `wallet_status` reports as `executorPublicKey`. Omit it only for read-only use. |
-| `BLINDMARKET_ARC_RPC_URL` | no | Arc RPC the local wallet signs over. Default `https://rpc.testnet.arc.io` for Arc Testnet (5042002). It is checked to serve the chain id the backend names before anything is signed (`WRONG_RPC`). |
+| `BLINDMARKET_ARC_RPC_URL` | no | Arc RPC the local wallet signs over. Default by the chain id the backend names for `arc`: `https://rpc.mainnet.arc.io` (Arc mainnet, 5042) / `https://rpc.testnet.arc.io` (Arc Testnet, 5042002). It is checked to serve that chain id before anything is signed (`WRONG_RPC`). |
 | `BLINDMARKET_API_BASE` | no | Default `https://api.blindmarket.xyz` |
 | `BLINDMARKET_RPC_URL` | no | 0G RPC for the local wallet. Default `https://evmrpc.0g.ai` |
 | `BLINDMARKET_SETTLEMENT` | no | A chain key to require (`arc`, `base`, `0g`, …). Default: ask the backend (`GET /health/bridge`). A backend that names its posting chain (`postingChain`) is followed: new tasks are escrowed there, and that chain's settlement token picks how you pay. An ERC-20 the relay serves (USDC on Base) goes through the relay. An ERC-20 on a chain with no relay (USDC on Arc) is signed by the local wallet. Native 0G comes from the local wallet. Anything else is refused with `UNSUPPORTED_SETTLEMENT`. Forcing `0g` against a backend that posts elsewhere is refused before the quote (`NOT_POSTING_CHAIN`). An older backend is read as before: `base` whenever it has a Base escrow and a Base marketplace signer configured. `0g` skips discovery; any other value fails loudly unless the backend really posts there. |
@@ -80,9 +80,10 @@ claude mcp add blindmarket \
   -- node /path/to/BlindBounty/mcp/dist/index.js
 ```
 
-The key must be the wallet that minted the `sk_` key, holding USDC on Arc
-Testnet for escrow and gas. `wallet_status` should then show
-`payment: "local-erc20"` and `mode: "arc"`.
+The key must be the wallet that minted the `sk_` key, holding USDC for escrow
+and gas on the Arc network the backend settles on: Arc mainnet (chain 5042) or
+Arc Testnet (5042002). `wallet_status` should then show
+`payment: "local-erc20"`, `mode: "arc"` and that `chainId`.
 
 **Claude Code: Base (no private key)**
 
@@ -151,7 +152,8 @@ Spending (local wallet, **two-step quote → confirm**):
   key is read from `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GROQ_API_KEY` or
   `GEMINI_API_KEY` in this server's environment, never taken as an argument;
   `0g-compute` needs none. Arc's RPC is `BLINDMARKET_ARC_RPC_URL`, default
-  `https://rpc.testnet.arc.io` on Arc Testnet.
+  `https://rpc.mainnet.arc.io` on Arc mainnet (5042) and
+  `https://rpc.testnet.arc.io` on Arc Testnet (5042002).
 
 A `quoteId` authorizes exactly the spend it quoted: the amount in base units,
 the chain, escrow, token and paying wallet, the `idempotencyKey`, and the
@@ -184,9 +186,19 @@ Every spend requires an `idempotencyKey`. Retries with the same key **resume**
 `~/.blindmarket/mcp-state.json`) — a crash between the funding transaction and
 indexing never double-pays; re-calling re-runs the index step with the saved
 transaction hash. A funded spend finishes even when the settlement chain can't
-be discovered at that moment, since listing it needs no signature. `deploy_agent` records its fee transaction the moment it is
-broadcast, so a failed deploy retried with the same key deploys with that
-payment instead of paying again.
+be discovered at that moment, since listing it needs no signature. A retry
+that would still sign (nothing funded, no refund sent) continues only on the
+network the spend started on. The record keeps the chain id, because a chain
+key names one network at a time: `arc` is Arc Testnet (5042002) or Arc mainnet
+(5042), whichever the backend runs. On another network, or for a record
+written before chain ids were kept, the retry answers `SETTLEMENT_CHANGED` and
+nothing is sent. `deploy_agent` records its fee transaction, and its chain id,
+the moment it is broadcast, so a failed deploy retried with the same key
+deploys with that payment instead of paying again. Once the backend takes the
+fee on another network, that payment does not count there, and the retry
+answers `SETTLEMENT_CHANGED` and asks for a new key. A fee recorded without its
+chain id that the backend cannot find is looked up on the fee chain: when it is
+there the same key finishes the deploy, and when it is not the retry says so.
 
 ## Executor runtime tools (gated off)
 
@@ -199,7 +211,8 @@ that loop is verified against stubbed backends only — not yet end to end on a
 live one. It signs `submitEvidence` **locally** (no relay): it needs
 `BLINDMARKET_PRIVATE_KEY` to be the wallet that owns `BLINDMARKET_API_KEY`, and
 an RPC for the settlement chain (`BLINDMARKET_RPC_URL` for 0G,
-`BLINDMARKET_BASE_RPC_URL` for Base — there is no default for Base, and tasks
+`BLINDMARKET_BASE_RPC_URL` for Base, `BLINDMARKET_ARC_RPC_URL` for Arc — there
+is no default for Base or Arc here, and tasks
 on a chain without an RPC are skipped by the runtime itself: older backends
 store the declared `supportedChains` without filtering offers or `/accept` by
 it).

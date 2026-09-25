@@ -273,8 +273,8 @@ export async function runSettlementDeploy(
   if (chain.nativeIsSettlementToken) {
     // generate-marketplace-signer.ts writes the 0G signer's key name into
     // backend/.env, which is not what an Arc escrow needs.
-    console.log(`1. Signer: create a key used only by this ${chain.label} escrow (set "${target.set}").`);
-    console.log("   Arc is not a backend settlement chain yet, so no backend env var takes it.");
+    console.log(`1. Signer: create a key used only by this ${chain.label} escrow (set "${target.set}") and set it as`);
+    console.log("   ARC_MARKETPLACE_SIGNER_PRIVATE_KEY in that stack's backend env (not backend/.env).");
   } else if (target.set === "default") {
     console.log("1. Generate marketplace signer:  npx hardhat run scripts/generate-marketplace-signer.ts --network", network.name);
   } else {
@@ -285,7 +285,8 @@ export async function runSettlementDeploy(
   }
   console.log(`2. Rotate verifier:              ${setEnv}EXPECTED_ESCROW=${escrow.address} MARKETPLACE_SIGNER_ADDRESS=0x... npx hardhat run scripts/rotate-verifier.ts --network`, network.name);
   if (chain.nativeIsSettlementToken) {
-    console.log(`3. Backend: nothing to set yet. The record holds blocks.BlindEscrow=${escrow.block}.`);
+    console.log(`3. Backend env:                  ARC_CHAIN_ID=${chainId} ARC_ESCROW_ADDRESS=${escrow.address} ARC_ESCROW_DEPLOYMENT_BLOCK=${escrow.block}`);
+    console.log(`   ARC_RPC_URL must serve chain ${chainId}: the backend refuses to boot on an RPC for another chain.`);
     console.log("   No account-abstraction deploy on Arc: deploy-aa.ts refuses it.");
   } else {
     console.log(`3. Backend env:                  BASE_ESCROW_ADDRESS=${escrow.address} BASE_ESCROW_DEPLOYMENT_BLOCK=${escrow.block}`);

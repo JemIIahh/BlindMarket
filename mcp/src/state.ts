@@ -44,6 +44,9 @@ export interface SpendRecord {
   /** which chain this spend settles on — decides local-sign vs relay on resume */
   /** the backend chain key the spend started on ('0g', 'base', …) */
   settlement?: string;
+  /** the chain id it started on: a key keeps its name on another network
+   *  (Arc Testnet 5042002 and Arc mainnet 5042 are both 'arc') */
+  chainId?: number;
   /** escrow token: zero address for native 0G, the ERC-20 (USDC) address on a relay chain */
   token?: string;
   /** Base only: the USDC approve tx, persisted so a resume never re-approves */

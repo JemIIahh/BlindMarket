@@ -16,7 +16,7 @@ export type CctpChainKey =
   | 'arbitrum' | 'arbitrum-sepolia'
   | 'optimism-sepolia'
   | 'polygon' | 'polygon-amoy'
-  | 'arc-testnet';
+  | 'arc' | 'arc-testnet';
 
 export interface CctpChainConfig {
   chainKey: CctpChainKey;
@@ -37,9 +37,26 @@ export interface CctpChainConfig {
   usdcGasReserveRaw: bigint;
 }
 
-// Network tier = the Base network this deployment settles on
-// (config.cctp.mainnet), not NODE_ENV — see config.ts for why.
+// Network tier = the Arc network tasks settle on (config.cctp.mainnet): Arc is
+// one leg of every transfer. Not NODE_ENV — see config.ts for why.
 const MAINNET_TIER = config.cctp.mainnet;
+
+let cctpBaseProvider: ethers.JsonRpcProvider | null = null;
+/**
+ * Base on the CCTP tier: the settlement Base provider when that is the same
+ * network, otherwise one of its own (config.cctp.baseRpcUrl says why).
+ */
+function getBaseProvider(): ethers.JsonRpcProvider {
+  const chainId = MAINNET_TIER ? 8453 : 84532;
+  if (chainId === config.baseChainId && config.cctp.baseRpcUrl === config.baseRpcUrl) return baseProvider;
+  if (!cctpBaseProvider) {
+    cctpBaseProvider = new ethers.JsonRpcProvider(config.cctp.baseRpcUrl, chainId, {
+      batchMaxCount: 1,
+      staticNetwork: true,
+    });
+  }
+  return cctpBaseProvider;
+}
 
 let ethereumProvider: ethers.JsonRpcProvider | null = null;
 function getEthereumProvider(): ethers.JsonRpcProvider {
@@ -108,10 +125,10 @@ function buildChains(): Record<CctpChainKey, CctpChainConfig> {
       chainKey: 'base',
       chainId: 8453,
       domain: 6,
-      rpc: baseProvider,
+      rpc: getBaseProvider(),
       tokenMessengerAddress,
       messageTransmitterAddress,
-      usdcAddress: config.baseUsdcAddress,
+      usdcAddress: config.cctp.baseUsdcAddress,
       isTestnet: false,
       label: 'Base',
       supportsFastTransfer: true,
@@ -121,10 +138,10 @@ function buildChains(): Record<CctpChainKey, CctpChainConfig> {
       chainKey: 'base-sepolia',
       chainId: 84532,
       domain: 6,
-      rpc: baseProvider,
+      rpc: getBaseProvider(),
       tokenMessengerAddress,
       messageTransmitterAddress,
-      usdcAddress: config.baseUsdcAddress,
+      usdcAddress: config.cctp.baseUsdcAddress,
       isTestnet: true,
       label: 'Base Sepolia',
       supportsFastTransfer: true,
@@ -225,13 +242,26 @@ function buildChains(): Record<CctpChainKey, CctpChainConfig> {
       supportsFastTransfer: false,
       usdcGasReserveRaw: 0n,
     },
-    // Testnet only — there is no Arc mainnet entry until its CCTP addresses
-    // are checked on-chain (see config.ts). Same shared messenger/transmitter
-    // pair: verified deployed at those addresses on Arc testnet
-    // (localDomain() = 26).
+    // Arc, the settlement leg (getSettlementCctpChain): one entry per
+    // network, and one provider for the one the tier offers. Same shared
+    // messenger/transmitter pair on both, verified deployed at those
+    // addresses with localDomain() = 26 (Arc mainnet read 2026-09-25).
+    arc: {
+      chainKey: 'arc',
+      chainId: 5042,
+      domain: 26,
+      rpc: getArcProvider(),
+      tokenMessengerAddress,
+      messageTransmitterAddress,
+      usdcAddress: config.cctp.arcUsdcAddress,
+      isTestnet: false,
+      label: 'Arc',
+      supportsFastTransfer: false,
+      usdcGasReserveRaw: config.cctp.arcGasReserveRaw,
+    },
     'arc-testnet': {
       chainKey: 'arc-testnet',
-      chainId: config.cctp.arcChainId,
+      chainId: 5042002,
       domain: 26,
       rpc: getArcProvider(),
       tokenMessengerAddress,
@@ -251,6 +281,21 @@ function chains(): Record<CctpChainKey, CctpChainConfig> {
   return chainsCache;
 }
 
+/** The Arc leg on this tier: every transfer mints into or burns from it. */
+const settlementLeg = (): CctpChainKey => (MAINNET_TIER ? 'arc' : 'arc-testnet');
+
+// Legs turned off for this process because their RPC serves another chain
+// (rpcChainIds.ts). An off leg is not offered for new transfers; a transfer
+// already on it keeps its entry and waits for a fixed RPC instead of being
+// failed. The Arc leg is part of every transfer, so turning it off turns off
+// CCTP.
+const offLegs = new Set<CctpChainKey>();
+
+/** Stops offering `chainKey` for new transfers, for the life of this process. */
+export function disableCctpLeg(chainKey: CctpChainKey): void {
+  offLegs.add(chainKey);
+}
+
 export function isCctpConfigured(): boolean {
   // Every CCTP route and the poller need the cctp_transfers table. Without a
   // DATABASE_URL, getPool() is a silent no-op (inserts return no row), so a
@@ -259,22 +304,31 @@ export function isCctpConfigured(): boolean {
   return config.cctp.enabled
     && !!config.cctp.tokenMessengerAddress
     && !!config.cctp.messageTransmitterAddress
-    && !!config.databaseUrl;
+    && !!config.databaseUrl
+    && !offLegs.has(settlementLeg());
 }
 
+/**
+ * A chain on this backend's tier, or null. Off the tier there is nothing to
+ * read it through: after Arc moves to mainnet, a transfer left on a testnet
+ * leg resolves to null, and the poller fails it instead of reading it through
+ * the mainnet providers and Iris forever.
+ */
 export function getCctpChain(chainKey: CctpChainKey): CctpChainConfig | null {
   if (!isCctpConfigured()) return null;
-  return chains()[chainKey] ?? null;
+  const chain = chains()[chainKey];
+  return chain && chain.isTestnet === !MAINNET_TIER ? chain : null;
 }
 
 /**
  * Mainnet and testnet chains are never mixed on a single CCTP transfer — the
- * running backend is always on one network tier (MAINNET_TIER, from its Base
- * chain), so only that tier's chains are ever offered.
+ * running backend is always on one network tier (MAINNET_TIER, from the Arc
+ * network tasks settle on), so only that tier's chains are ever offered, less
+ * any leg turned off for its RPC.
  */
 export function supportedCctpChains(): CctpChainConfig[] {
   if (!isCctpConfigured()) return [];
-  return Object.values(chains()).filter((c) => c.isTestnet === !MAINNET_TIER);
+  return Object.values(chains()).filter((c) => c.isTestnet === !MAINNET_TIER && !offLegs.has(c.chainKey));
 }
 
 export function isSupportedCctpChain(chainKey: string): chainKey is CctpChainKey {
@@ -282,8 +336,8 @@ export function isSupportedCctpChain(chainKey: string): chainKey is CctpChainKey
 }
 
 /** The settlement leg of the bridge — the chain Phase A burns from and the
- *  chain Phase B mints into (the user's Arc wallet). Arc testnet only: Arc
- *  mainnet has no CCTP entry yet (see config.ts). */
+ *  chain Phase B mints into (the user's Arc wallet): Arc on the CCTP tier,
+ *  which assertBootConfig holds to the Arc network tasks settle on. */
 export function getSettlementCctpChain(): CctpChainConfig | null {
-  return getCctpChain('arc-testnet');
+  return getCctpChain(settlementLeg());
 }

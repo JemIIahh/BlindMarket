@@ -1,18 +1,18 @@
 // Publish guard. This CLI calls SDK methods that first shipped in
-// @blindmarket/sdk 0.7.0 (postTask, deployAgent's payFee, reviewResult). The
-// dependency stays at the published ^0.6 range in the repo so `npm ci` works
-// before 0.7.0 is on npm (CI overrides it with the local sdk). Publishing with
-// that range would install an SDK without those methods, so it is refused
-// here until the range is bumped: `npm i @blindmarket/sdk@^0.7.0`, once 0.7.0
-// is on npm.
+// @blindmarket/sdk 0.7.0 (postTask, deployAgent's payFee, reviewResult) and
+// reads RefundResult.outcome, new in 0.8.0. CI builds against the local sdk,
+// which hid a range left at ^0.7.0: the build failed against the published
+// SDK, and a range that allows an SDK without them is refused here. Raise
+// MIN_MINOR with the range (`npm i @blindmarket/sdk@^0.X.0`) once 0.X is on npm.
+const MIN_MINOR = 8;
 import { readFileSync } from 'node:fs';
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf-8'));
 const range = pkg.dependencies?.['@blindmarket/sdk'] ?? '';
 const m = /^\^(\d+)\.(\d+)\.(\d+)$/.exec(range);
-const ok = m && (Number(m[1]) > 0 || Number(m[2]) >= 7);
+const ok = m && (Number(m[1]) > 0 || Number(m[2]) >= MIN_MINOR);
 if (!ok) {
-  console.error(`@blindmarket/cli needs "@blindmarket/sdk": "^0.7.0" or later to publish; package.json has "${range}".`);
-  console.error('Publish @blindmarket/sdk 0.7.0 first, then run `npm i @blindmarket/sdk@^0.7.0` here and commit the lockfile.');
+  console.error(`@blindmarket/cli needs "@blindmarket/sdk": "^0.${MIN_MINOR}.0" or later to publish; package.json has "${range}".`);
+  console.error(`Publish @blindmarket/sdk 0.${MIN_MINOR}.0 first, then run \`npm i @blindmarket/sdk@^0.${MIN_MINOR}.0\` here and commit the lockfile.`);
   process.exit(1);
 }

@@ -35,6 +35,7 @@ describe('chainTier', () => {
   it('keeps the chain ids the rest of the backend hard-coded before', () => {
     expect(TIER_CHAIN_IDS['0g']).toMatchObject({ mainnet: 16661, testnet: 16602, env: 'OG_CHAIN_ID' });
     expect(TIER_CHAIN_IDS.base).toMatchObject({ mainnet: 8453, testnet: 84532, env: 'BASE_CHAIN_ID' });
+    expect(TIER_CHAIN_IDS.arc).toMatchObject({ mainnet: 5042, testnet: 5042002, env: 'ARC_CHAIN_ID' });
   });
 });
 
@@ -55,6 +56,14 @@ describe('tierMismatches', () => {
     expect(tierMismatches(env({ BASE_CHAIN_ID: '8453' }), 'testnet')).toEqual([
       'BASE_CHAIN_ID=8453 is mainnet, but SETTLEMENT_TIER=testnet expects 84532',
     ]);
+  });
+
+  it("checks Arc and CCTP's Arc leg too", () => {
+    expect(tierMismatches(env({ ARC_CHAIN_ID: '5042002', CCTP_ARC_CHAIN_ID: '5042002' }), 'mainnet')).toEqual([
+      'ARC_CHAIN_ID=5042002 is testnet, but SETTLEMENT_TIER=mainnet expects 5042',
+      'CCTP_ARC_CHAIN_ID=5042002 is testnet, but SETTLEMENT_TIER=mainnet expects 5042',
+    ]);
+    expect(tierMismatches(env({ ARC_CHAIN_ID: '5042', CCTP_ARC_CHAIN_ID: '5042' }), 'mainnet')).toEqual([]);
   });
 
   it('reads ids the way config.ts does: only a plain decimal is a chain id', () => {

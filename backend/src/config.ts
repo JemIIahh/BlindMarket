@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { CONTRACT_ADDRESSES } from './contractAddresses.js';
+import { CONTRACT_ADDRESSES, DEPLOYMENT_BLOCKS } from './contractAddresses.js';
 import { chainTier, readSettlementTier, tierMismatches, TIER_CHAIN_IDS } from './services/settlementTier.js';
 
 function required(key: string): string {
@@ -96,19 +96,18 @@ export const DEPLOYMENT_SET_REQUIRED_ENV = [
 ] as const;
 
 /**
- * The 0G and Base chains each non-default set runs on. contracts/scripts/
- * _deployments.ts SET_CHAINS also lists Arc testnet (5042002) for staging;
- * the backend does not settle on Arc yet, so it is not checked here.
+ * The chains each non-default set runs on, as contracts/scripts/
+ * _deployments.ts SET_CHAINS lists them.
  */
-const DEPLOYMENT_SET_CHAINS: Record<'staging', { og: number; base: number }> = {
-  staging: { og: 16602, base: 84532 },
+const DEPLOYMENT_SET_CHAINS: Record<'staging', { og: number; base: number; arc: number }> = {
+  staging: { og: 16602, base: 84532, arc: 5042002 },
 };
 
 /** Why a backend in `set` must not boot; empty for the default set. */
 export function deploymentSetProblems(
   set: '' | 'staging',
   env: Record<string, string | undefined>,
-  chainIds: { og: number; base: number },
+  chainIds: { og: number; base: number; arc: number },
 ): string[] {
   if (!set) return [];
   const problems: string[] = [];
@@ -132,6 +131,9 @@ export function deploymentSetProblems(
         `this backend has ${chainIds.og} and ${chainIds.base}. Set both explicitly.`,
     );
   }
+  if (chainIds.arc !== want.arc) {
+    problems.push(`DEPLOYMENT_SET=${set} runs on Arc testnet (ARC_CHAIN_ID=${want.arc}); this backend has ARC_CHAIN_ID=${chainIds.arc}.`);
+  }
   return problems;
 }
 
@@ -146,6 +148,29 @@ const BASE_MAINNET = BASE_CHAIN_ID === TIER_CHAIN_IDS.base.mainnet;
 
 const OG_CHAIN_ID = parseInt(optional('OG_CHAIN_ID', tierChainId('0g', IS_PROD ? 16661 : 16602)), 10);
 const OG_MAINNET = OG_CHAIN_ID === TIER_CHAIN_IDS['0g'].mainnet;
+
+// The settlement Base network's RPC and USDC. CCTP's Base leg reuses them when
+// it is the same network (see cctp below).
+const BASE_RPC_URL = optional('BASE_RPC_URL', BASE_MAINNET ? 'https://mainnet.base.org' : 'https://sepolia.base.org');
+const BASE_USDC_ADDRESS = optional('BASE_USDC_ADDRESS', BASE_MAINNET ? '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' : '0x036CbD53842c5426634e7929541eC2318f3dCF7e');
+
+// Arc network tasks settle on. Unlike 0G and Base, its default does not follow
+// NODE_ENV: production has posted on Arc testnet since Arc became the posting
+// chain, so only SETTLEMENT_TIER or an explicit ARC_CHAIN_ID moves it.
+const ARC_CHAIN_ID = parseInt(optional('ARC_CHAIN_ID', tierChainId('arc', TIER_CHAIN_IDS.arc.testnet)), 10);
+const ARC_MAINNET = ARC_CHAIN_ID === TIER_CHAIN_IDS.arc.mainnet;
+
+/** Circle's public Arc mainnet RPC. It answered chain 5042 on 2026-09-25. */
+export const ARC_MAINNET_PUBLIC_RPC_URL = 'https://rpc.mainnet.arc.io';
+const ARC_RPC_URL = optional('ARC_RPC_URL', ARC_MAINNET ? ARC_MAINNET_PUBLIC_RPC_URL : 'https://arc-testnet.drpc.org');
+// USDC's ERC-20 view has this address on Arc mainnet and testnet alike.
+const ARC_USDC_ADDRESS = optional('ARC_USDC_ADDRESS', '0x3600000000000000000000000000000000000000');
+
+// CCTP moves USDC into and out of the user's Arc wallet, so Arc is one leg of
+// every transfer and the CCTP tier is Arc's. It used to be Base's, from when
+// Base was the settlement chain: a Base-mainnet stack offered mainnet source
+// chains while minting into Arc testnet.
+const CCTP_MAINNET = ARC_MAINNET;
 
 // Contract-address fallbacks are single-sourced from contracts/deployments/*.json
 // via contracts/scripts/sync-addresses.ts (do not hand-edit contractAddresses.ts).
@@ -167,14 +192,31 @@ const BASE_ADDR = (BASE_MAINNET ? CONTRACT_ADDRESSES.base : CONTRACT_ADDRESSES.b
   readonly agentFactory?: string;
   readonly USDC: string;
 };
-// Arc settlement is testnet-only here, matching the frontend's own Arc
-// default (frontend/src/config/constants.ts): there is no Arc-mainnet record
-// yet, so the testnet record is the generated fallback.
-const ARC_ADDR = (CONTRACT_ADDRESSES as any).arcTestnet as {
-  readonly blindEscrow?: string;
-  readonly agentFactory?: string;
-  readonly USDC: string;
-} | undefined;
+
+/** A generated Arc record: its addresses, and the blocks they were deployed in. */
+export interface ArcGeneratedRecord {
+  addresses: { readonly blindEscrow?: string; readonly agentFactory?: string; readonly USDC?: string };
+  blocks: { readonly blindEscrow?: number; readonly agentFactory?: number };
+}
+
+/**
+ * The generated record for the Arc network `chainId` (`arc` from
+ * contracts/deployments/arc-mainnet.json, `arcTestnet` from arc-testnet.json),
+ * or null for a network with no record: Arc mainnet until its deploy is
+ * recorded. Nothing falls back to another network's record, whose factory
+ * address would be polled for deploy credits on a chain it is not on.
+ */
+export function arcGeneratedRecord(chainId: number): ArcGeneratedRecord | null {
+  const tier = chainTier('arc', chainId);
+  if (!tier) return null;
+  const key = tier === 'mainnet' ? 'arc' : 'arcTestnet';
+  const addresses = (CONTRACT_ADDRESSES as { readonly [k: string]: ArcGeneratedRecord['addresses'] | undefined })[key];
+  if (!addresses) return null;
+  const blocks = (DEPLOYMENT_BLOCKS as { readonly [k: string]: ArcGeneratedRecord['blocks'] | undefined })[key] ?? {};
+  return { addresses, blocks };
+}
+
+const ARC_ADDR = arcGeneratedRecord(ARC_CHAIN_ID)?.addresses;
 
 export const config = {
   port: parseInt(optional('PORT', '3001'), 10),
@@ -198,7 +240,7 @@ export const config = {
   ogChainId: OG_CHAIN_ID,
 
   // Base Chain (settlement — BlindEscrow, USDC payouts)
-  baseRpcUrl: optional('BASE_RPC_URL', BASE_MAINNET ? 'https://mainnet.base.org' : 'https://sepolia.base.org'),
+  baseRpcUrl: BASE_RPC_URL,
   baseChainId: BASE_CHAIN_ID,
   /**
    * The tier SETTLEMENT_TIER names, or null when each chain follows its own
@@ -218,24 +260,26 @@ export const config = {
   // truthy string, which switches POST /tasks onto the Base escrow and points
   // createTask at address(0) — so collapse it to ''.
   baseEscrowAddress: unsetIfZero(optional('BASE_ESCROW_ADDRESS', BASE_ADDR?.blindEscrow ?? '')),
-  baseUsdcAddress: optional('BASE_USDC_ADDRESS', BASE_MAINNET ? '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' : '0x036CbD53842c5426634e7929541eC2318f3dCF7e'),
+  baseUsdcAddress: BASE_USDC_ADDRESS,
   // The generated module carries a zero-address placeholder for networks the
   // factory hasn't been deployed to yet. Treat that as "not configured" so the
   // listener stays disabled instead of polling address(0) forever.
   agentFactoryAddress: unsetIfZero(optional('AGENT_FACTORY_ADDRESS', BASE_ADDR?.agentFactory || '')),
 
-  // Arc Chain (settlement — USDC payouts, gas in USDC)
-  // No generated defaults yet; Arc settlement is deployed per environment.
-  arcRpcUrl: optional('ARC_RPC_URL', 'https://arc-testnet.drpc.org'),
-  arcChainId: parseInt(optional('ARC_CHAIN_ID', '5042002'), 10),
+  // Arc Chain (settlement — USDC payouts, gas in USDC). ARC_CHAIN_ID picks
+  // the network (5042 mainnet, 5042002 testnet) and the defaults here follow
+  // it. The escrow has no generated default: each environment sets its own.
+  arcRpcUrl: ARC_RPC_URL,
+  arcChainId: ARC_CHAIN_ID,
   arcEscrowAddress: unsetIfZero(optional('ARC_ESCROW_ADDRESS', '')),
-  arcUsdcAddress: optional('ARC_USDC_ADDRESS', '0x3600000000000000000000000000000000000000'),
+  arcUsdcAddress: ARC_USDC_ADDRESS,
   arcMarketplaceSignerPrivateKey: process.env.ARC_MARKETPLACE_SIGNER_PRIVATE_KEY || '',
   arcEscrowDeploymentBlock: parseInt(optional('ARC_ESCROW_DEPLOYMENT_BLOCK', '0'), 10),
   // AgentFactory on Arc — the factory DeployAgentForm pays and the listener
-  // indexes for deploy credits. Falls back to the generated arcTestnet record;
-  // env wins. (The Base `agentFactoryAddress` above is legacy: the wallet is
-  // Arc-only and nothing polls the Base factory anymore.)
+  // indexes for deploy credits. Falls back to the generated record for this
+  // Arc network (none on mainnet until its deploy is recorded); env wins.
+  // (The Base `agentFactoryAddress` above is legacy: the wallet is Arc-only
+  // and nothing polls the Base factory anymore.)
   arcAgentFactoryAddress: unsetIfZero(optional('ARC_AGENT_FACTORY_ADDRESS', ARC_ADDR?.agentFactory || '')),
 
   // ERC-4337 AA infrastructure (Base) — agents pay gas in USDC instead of ETH.
@@ -399,31 +443,41 @@ export const config = {
   // until this is explicitly enabled per environment (plans/... CCTP plan).
   cctp: {
     enabled: optional('CCTP_ENABLED', 'false').toLowerCase() === 'true',
-    /** Mainnet CCTP tier iff this deployment settles on Base mainnet (8453). */
-    mainnet: BASE_MAINNET,
+    /** Mainnet CCTP tier iff tasks settle on Arc mainnet (5042): Arc is one leg of every transfer. */
+    mainnet: CCTP_MAINNET,
     // TokenMessengerV2 / MessageTransmitterV2 addresses are identical across
     // every EVM chain for a given network tier (Circle's deterministic
     // deployment) — one pair of addresses covers both the Base and Ethereum
     // legs. Verified against developers.circle.com Sept 2026; re-check if
     // Circle redeploys.
-    tokenMessengerAddress: optional('CCTP_TOKEN_MESSENGER_ADDRESS', BASE_MAINNET
+    tokenMessengerAddress: optional('CCTP_TOKEN_MESSENGER_ADDRESS', CCTP_MAINNET
       ? '0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d'
       : '0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA'),
-    messageTransmitterAddress: optional('CCTP_MESSAGE_TRANSMITTER_ADDRESS', BASE_MAINNET
+    messageTransmitterAddress: optional('CCTP_MESSAGE_TRANSMITTER_ADDRESS', CCTP_MAINNET
       ? '0x81D40F21F12A8F0E3252Bccb954D722d4c464B64'
       : '0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275'),
-    irisApiBase: optional('CCTP_IRIS_API_BASE', BASE_MAINNET
+    irisApiBase: optional('CCTP_IRIS_API_BASE', CCTP_MAINNET
       ? 'https://iris-api.circle.com'
       : 'https://iris-api-sandbox.circle.com'),
+    // Base leg. It is the settlement Base network, sharing its RPC and USDC,
+    // when that network is on the CCTP tier. When it is not (Arc mainnet next
+    // to a Base Sepolia escrow kept for its older tasks), the leg is Base on
+    // the CCTP tier, read through its own RPC.
+    baseRpcUrl: optional('CCTP_BASE_RPC_URL', BASE_MAINNET === CCTP_MAINNET
+      ? BASE_RPC_URL
+      : CCTP_MAINNET ? 'https://mainnet.base.org' : 'https://sepolia.base.org'),
+    baseUsdcAddress: optional('CCTP_BASE_USDC_ADDRESS', BASE_MAINNET === CCTP_MAINNET
+      ? BASE_USDC_ADDRESS
+      : CCTP_MAINNET ? '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' : '0x036CbD53842c5426634e7929541eC2318f3dCF7e'),
     // Ethereum leg — Base already has baseRpcUrl/baseChainId/baseUsdcAddress
     // above; CCTP is the first feature needing a second EVM chain, so its
     // config lives here rather than growing the top-level config with an
     // ethereum* prefix used nowhere else.
-    ethereumRpcUrl: optional('CCTP_ETHEREUM_RPC_URL', BASE_MAINNET
+    ethereumRpcUrl: optional('CCTP_ETHEREUM_RPC_URL', CCTP_MAINNET
       ? 'https://ethereum-rpc.publicnode.com'
       : 'https://ethereum-sepolia-rpc.publicnode.com'),
-    ethereumChainId: parseInt(optional('CCTP_ETHEREUM_CHAIN_ID', BASE_MAINNET ? '1' : '11155111'), 10),
-    ethereumUsdcAddress: optional('CCTP_ETHEREUM_USDC_ADDRESS', BASE_MAINNET
+    ethereumChainId: parseInt(optional('CCTP_ETHEREUM_CHAIN_ID', CCTP_MAINNET ? '1' : '11155111'), 10),
+    ethereumUsdcAddress: optional('CCTP_ETHEREUM_USDC_ADDRESS', CCTP_MAINNET
       ? '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'
       : '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238'),
     // Arbitrum and Optimism (OP Mainnet) — both Fast-Transfer-eligible per
@@ -435,18 +489,18 @@ export const config = {
     // routes needs a human to run scripts/recover-stuck-cctp-transfer.ts by
     // hand — a materially different (and much heavier) feature than "add a
     // chain config entry." Revisit only alongside a real automated relayer.
-    arbitrumRpcUrl: optional('CCTP_ARBITRUM_RPC_URL', BASE_MAINNET
+    arbitrumRpcUrl: optional('CCTP_ARBITRUM_RPC_URL', CCTP_MAINNET
       ? 'https://arb1.arbitrum.io/rpc'
       : 'https://sepolia-rollup.arbitrum.io/rpc'),
-    arbitrumChainId: parseInt(optional('CCTP_ARBITRUM_CHAIN_ID', BASE_MAINNET ? '42161' : '421614'), 10),
-    arbitrumUsdcAddress: optional('CCTP_ARBITRUM_USDC_ADDRESS', BASE_MAINNET
+    arbitrumChainId: parseInt(optional('CCTP_ARBITRUM_CHAIN_ID', CCTP_MAINNET ? '42161' : '421614'), 10),
+    arbitrumUsdcAddress: optional('CCTP_ARBITRUM_USDC_ADDRESS', CCTP_MAINNET
       ? '0xaf88d065e77c8cC2239327C5EDb3A432268e5831'
       : '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d'),
-    optimismRpcUrl: optional('CCTP_OPTIMISM_RPC_URL', BASE_MAINNET
+    optimismRpcUrl: optional('CCTP_OPTIMISM_RPC_URL', CCTP_MAINNET
       ? 'https://mainnet.optimism.io'
       : 'https://sepolia.optimism.io'),
-    optimismChainId: parseInt(optional('CCTP_OPTIMISM_CHAIN_ID', BASE_MAINNET ? '10' : '11155420'), 10),
-    optimismUsdcAddress: optional('CCTP_OPTIMISM_USDC_ADDRESS', BASE_MAINNET
+    optimismChainId: parseInt(optional('CCTP_OPTIMISM_CHAIN_ID', CCTP_MAINNET ? '10' : '11155420'), 10),
+    optimismUsdcAddress: optional('CCTP_OPTIMISM_USDC_ADDRESS', CCTP_MAINNET
       ? '0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85'
       : '0x5fd84259d66Cd46123540766Be93DFE6D43130D7'),
     // Polygon PoS (domain 7) — CCTP works on it, but Circle offers no Fast
@@ -455,24 +509,26 @@ export const config = {
     // supportsFastTransfer:false in cctpChains.ts, same as Arc. Avalanche is
     // deliberately NOT added: Privy has no USDC gas sponsorship there, so a
     // burn from it can't be gasless-in-USDC.
-    polygonRpcUrl: optional('CCTP_POLYGON_RPC_URL', BASE_MAINNET
-      ? 'https://polygon-rpc.com'
-      : 'https://rpc-amoy.polygon.technology'),
-    polygonChainId: parseInt(optional('CCTP_POLYGON_CHAIN_ID', BASE_MAINNET ? '137' : '80002'), 10),
-    polygonUsdcAddress: optional('CCTP_POLYGON_USDC_ADDRESS', BASE_MAINNET
+    // publicnode, like Ethereum's defaults: polygon-rpc.com answers "API key
+    // disabled" and rpc-amoy.polygon.technology does not resolve (2026-09-25).
+    polygonRpcUrl: optional('CCTP_POLYGON_RPC_URL', CCTP_MAINNET
+      ? 'https://polygon-bor-rpc.publicnode.com'
+      : 'https://polygon-amoy-bor-rpc.publicnode.com'),
+    polygonChainId: parseInt(optional('CCTP_POLYGON_CHAIN_ID', CCTP_MAINNET ? '137' : '80002'), 10),
+    polygonUsdcAddress: optional('CCTP_POLYGON_USDC_ADDRESS', CCTP_MAINNET
       ? '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359'
       : '0x41E94Eb019C0762f9Bfcf9Fb1E58725BfB0e7582'),
-    // Arc — Circle's own L1 (docs.arc.io). These defaults are Arc TESTNET
-    // (5042002) and do not follow the Base tier, so no mainnet chain entry
-    // exists here. Arc Mainnet itself is live (its RPC answered chain id 5042
-    // on 2026-09-17); adding it as a CCTP chain needs its contract addresses
-    // checked first. CCTP domain 26. Fast Transfer is N/A on Arc (its finality
-    // is already instant); Forwarding Service is supported, so transfers still
-    // auto-complete. USDC is Arc's native gas token (18-dec native view, 6-dec
-    // ERC-20 view of ONE balance).
-    arcRpcUrl: optional('CCTP_ARC_RPC_URL', 'https://arc-testnet.drpc.org'),
-    arcChainId: parseInt(optional('CCTP_ARC_CHAIN_ID', '5042002'), 10),
-    arcUsdcAddress: optional('CCTP_ARC_USDC_ADDRESS', '0x3600000000000000000000000000000000000000'),
+    // Arc — Circle's own L1 (docs.arc.io), and the settlement leg: the Arc
+    // network tasks settle on, so these default to ARC_* and follow
+    // ARC_CHAIN_ID (assertBootConfig refuses a CCTP_ARC_CHAIN_ID that
+    // disagrees). CCTP domain 26 on both networks; on Arc mainnet the V2 pair
+    // above has code and localDomain() = 26 (read 2026-09-25). Fast Transfer
+    // is N/A on Arc (its finality is already instant); Forwarding Service is
+    // supported, so transfers still auto-complete. USDC is Arc's native gas
+    // token (18-dec native view, 6-dec ERC-20 view of ONE balance).
+    arcRpcUrl: optional('CCTP_ARC_RPC_URL', ARC_RPC_URL),
+    arcChainId: parseInt(optional('CCTP_ARC_CHAIN_ID', String(ARC_CHAIN_ID)), 10),
+    arcUsdcAddress: optional('CCTP_ARC_USDC_ADDRESS', ARC_USDC_ADDRESS),
     // USDC (6-dec raw) a Phase B deposit must leave behind on Arc to pay the
     // approve + burn gas, since gas comes out of the same USDC being bridged.
     // 50000 = 0.05 USDC: ~13x the observed Arc testnet cost (approve <=55k
@@ -516,7 +572,7 @@ export function assertBootConfig(): void {
   const warnings: string[] = [];
 
   fatals.push(
-    ...deploymentSetProblems(config.deploymentSet, process.env, { og: config.ogChainId, base: config.baseChainId }),
+    ...deploymentSetProblems(config.deploymentSet, process.env, { og: config.ogChainId, base: config.baseChainId, arc: config.arcChainId }),
   );
 
   // NODE_ENV=production defaults BASE_CHAIN_ID to Base mainnet. A production
@@ -567,6 +623,32 @@ export function assertBootConfig(): void {
     }
   }
 
+  if (config.cctp.enabled) {
+    // Each leg's provider is built with its chain id, and a malformed one
+    // throws there, at boot, as a bare RangeError.
+    const legIds = {
+      CCTP_ETHEREUM_CHAIN_ID: config.cctp.ethereumChainId,
+      CCTP_ARBITRUM_CHAIN_ID: config.cctp.arbitrumChainId,
+      CCTP_OPTIMISM_CHAIN_ID: config.cctp.optimismChainId,
+      CCTP_POLYGON_CHAIN_ID: config.cctp.polygonChainId,
+      CCTP_ARC_CHAIN_ID: config.cctp.arcChainId,
+    };
+    for (const [name, id] of Object.entries(legIds)) {
+      if (!Number.isSafeInteger(id) || id <= 0) fatals.push(`${name}=${process.env[name] ?? ''} is not a chain id.`);
+    }
+    // CCTP mints into the user's Arc wallet, so its Arc leg must be the Arc
+    // network tasks settle on, on the tier CCTP runs. Only an explicit
+    // CCTP_ARC_CHAIN_ID, or an Arc network Circle has no CCTP on, can break it.
+    const arcLeg = TIER_CHAIN_IDS.arc[config.cctp.mainnet ? 'mainnet' : 'testnet'];
+    if (config.arcChainId !== arcLeg || config.cctp.arcChainId !== arcLeg) {
+      fatals.push(
+        `CCTP_ENABLED=true but CCTP's Arc leg is chain ${config.cctp.arcChainId} (CCTP_ARC_CHAIN_ID) and tasks settle on Arc chain ` +
+          `${config.arcChainId} (ARC_CHAIN_ID); both must be Arc ${config.cctp.mainnet ? 'mainnet' : 'testnet'} (${arcLeg}), or USDC ` +
+          `is minted on a network the escrow is not on. Remove CCTP_ARC_CHAIN_ID (it defaults to ARC_CHAIN_ID).`,
+      );
+    }
+  }
+
   if (isProd) {
     // JWT_SECRET signs the 365d agent platform tokens (agentRunner). Empty in
     // prod means agents can't start and any token path is unsigned — never valid.
@@ -597,6 +679,14 @@ export function assertBootConfig(): void {
     }
     if (!config.databaseUrl && config.cctp.enabled) {
       warnings.push('CCTP_ENABLED=true but DATABASE_URL is empty — bridging is DISABLED (it needs the cctp_transfers table).');
+    }
+    // The public endpoint is the default so a stack boots without one, but
+    // the indexers and the settlement bridge read Arc on every tick.
+    if (config.arcEscrowAddress && config.arcChainId === TIER_CHAIN_IDS.arc.mainnet && config.arcRpcUrl === ARC_MAINNET_PUBLIC_RPC_URL) {
+      warnings.push(
+        `Arc mainnet is read through the public RPC ${ARC_MAINNET_PUBLIC_RPC_URL}, the default. ` +
+          'Set ARC_RPC_URL to an endpoint you control or pay for.',
+      );
     }
   }
 

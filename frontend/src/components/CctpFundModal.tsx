@@ -102,14 +102,17 @@ const SOURCE_CHAIN_WALLET_CONFIG: Record<string, AddEthereumChainParameter> = {
     chainId: '0x89',
     chainName: 'Polygon PoS',
     nativeCurrency: { name: 'POL', symbol: 'POL', decimals: 18 },
-    rpcUrls: ['https://polygon-rpc.com'],
+    // publicnode, as for Ethereum: polygon-rpc.com answers "API key disabled"
+    // and rpc-amoy.polygon.technology does not resolve (2026-09-25). These
+    // also serve the balance reads and receipts below.
+    rpcUrls: ['https://polygon-bor-rpc.publicnode.com'],
     blockExplorerUrls: ['https://polygonscan.com'],
   },
   'polygon-amoy': {
     chainId: '0x13882',
     chainName: 'Polygon Amoy',
     nativeCurrency: { name: 'POL', symbol: 'POL', decimals: 18 },
-    rpcUrls: ['https://rpc-amoy.polygon.technology'],
+    rpcUrls: ['https://polygon-amoy-bor-rpc.publicnode.com'],
     blockExplorerUrls: ['https://amoy.polygonscan.com'],
   },
 };

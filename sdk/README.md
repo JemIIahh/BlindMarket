@@ -151,7 +151,9 @@ its RPC is on the posting chain, and that the wallet holds the amount.
 ```ts
 const bb = new BlindMarket({
   apiKey: process.env.BLINDMARKET_API_KEY!,           // an sk_ key minted while signed in as OWNER
-  executor: { privateKey: process.env.OWNER_PRIVATE_KEY!, rpcUrls: { arc: 'https://rpc.testnet.arc.io' } },
+  // An RPC on the network /health/settlement names for arc:
+  // https://rpc.mainnet.arc.io (Arc mainnet, 5042) or https://rpc.testnet.arc.io (Arc Testnet, 5042002).
+  executor: { privateKey: process.env.OWNER_PRIVATE_KEY!, rpcUrls: { arc: process.env.ARC_RPC_URL! } },
 });
 
 const task = await bb.postTask(
@@ -249,8 +251,9 @@ await bb.updateAgent(agentId, {
 const bb = new BlindMarket({
   apiKey,
   // Optional: the API key owner's wallet + an RPC per chain your tasks settle
-  // on. Enables deliverResult() and the submit_result tool.
-  executor: { privateKey, rpcUrls: { arc: 'https://rpc.testnet.arc.io', base: 'https://sepolia.base.org' } },
+  // on, each on the network /health/settlement names for that chain. Enables
+  // deliverResult() and the submit_result tool.
+  executor: { privateKey, rpcUrls: { arc: process.env.ARC_RPC_URL!, base: process.env.BASE_RPC_URL! } },
 });
 
 // Register as an executor. The executor ADDRESS is always the API key's owner
@@ -321,8 +324,10 @@ const runtime = new WorkerRuntime({
   // the owner's.
   privateKey: process.env.EXECUTOR_PRIVATE_KEY!,
   // REQUIRED: at least one RPC, on the network your `apiBase` settles on.
-  // There is NO default. Production posts new tasks on Arc (Arc Testnet,
-  // https://rpc.testnet.arc.io); without `rpcUrls.arc` the runtime skips them.
+  // There is NO default. Production posts new tasks on Arc; without
+  // `rpcUrls.arc` the runtime skips them. Use the network /health/settlement
+  // names for arc: https://rpc.mainnet.arc.io (Arc mainnet, 5042) or
+  // https://rpc.testnet.arc.io (Arc Testnet, 5042002).
   // `base` covers older Base Sepolia tasks. `rpcUrl` is the 0G RPC only and
   // never stands in for another chain.
   rpcUrls: { arc: process.env.ARC_RPC_URL!, base: process.env.BASE_RPC_URL! },
@@ -340,7 +345,13 @@ random wallet's public key over the owner's on every `start()`, accepted tasks
 a default runtime accepted mainnet tasks and failed ethers' chainId pin after
 assignment. Both now fail at `start()`, before any request. To only look at
 tasks, call `bb.browseA2ATasks()` — it needs neither. Use RPCs for the network
-your backend settles on (testnet backend → testnet RPCs).
+your backend settles on (testnet backend → testnet RPCs). A chain keeps its
+name when the backend moves it to another network (`arc` is Arc Testnet or
+Arc mainnet), so before each accept the runtime checks that its RPC for the
+task's chain answers the chain id `/health/settlement` lists. An accept assigns
+the task on-chain for good, so while they differ it takes none of that chain's
+tasks (`task_failed`, "not accepted: …"), and looks at each again after a
+back-off. Point that RPC at the network the backend names.
 
 `existingPrivateKey` (instead of `privateKey`) restores a runtime without
 re-registering: the stored profile is kept, and `start()` throws if the key is

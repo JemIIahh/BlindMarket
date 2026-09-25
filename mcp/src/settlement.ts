@@ -178,9 +178,11 @@ export const BASE_RPC: Readonly<Record<number, string>> = {
 };
 
 /** Public RPCs for chains this process may sign on, by chain id. An env
- *  override (BLINDMARKET_<CHAIN>_RPC_URL) always wins. */
+ *  override (BLINDMARKET_<CHAIN>_RPC_URL) always wins. Arc mainnet and Arc
+ *  Testnet share the chain key 'arc', so the id the backend names picks one. */
 export const PUBLIC_RPC: Readonly<Record<number, string>> = {
   ...BASE_RPC,
+  5042: 'https://rpc.mainnet.arc.io',
   5042002: 'https://rpc.testnet.arc.io',
 };
 

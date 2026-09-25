@@ -22,8 +22,7 @@ import { useWallet } from '../context/WalletContext';
 import { useChainAddress } from '../hooks/useChainWallet';
 import { unlinkedSignerError } from '../lib/accountWallet';
 import { getOrCreateExecutorIdentity } from '../lib/executorIdentity';
-import { ARC_CHAIN_CONFIG, ARC_CHAIN_ID, ARC_USDC_ADDRESS, unsetIfZero } from '../config/constants';
-import { CONTRACT_ADDRESSES } from '../config/contractAddresses';
+import { ARC_AGENT_FACTORY_ADDRESS, ARC_CHAIN_CONFIG, ARC_CHAIN_ID, ARC_USDC_ADDRESS } from '../config/constants';
 import { OG_COMPUTE_ACCOUNT_0G, OG_COMPUTE_START_0G } from '../lib/agentReadiness';
 import { WARN_BOX } from '../components/agent/AgentReadinessCard';
 
@@ -52,12 +51,6 @@ const USDC_ABI = [
   'function balanceOf(address owner) external view returns (uint256)',
   'function transfer(address to, uint256 amount) external returns (bool)',
 ];
-
-const AGENT_FACTORY_ADDRESS = unsetIfZero(
-  import.meta.env.VITE_ARC_AGENT_FACTORY_ADDRESS ||
-    (CONTRACT_ADDRESSES as any).arcTestnet?.agentFactory ||
-    '',
-);
 
 // AgentFactory's deploy fee: 1 USDC (6 decimals)
 const DEPLOY_FEE_USDC = 1_000_000n;
@@ -260,7 +253,7 @@ export default function DeployAgentForm() {
   const feeMethod = feeTerms?.required ? feeTerms.method : null;
   const feeToken = feeTerms?.required ? (feeTerms.method === 'transfer' ? feeTerms.token : ARC_USDC_ADDRESS) : null;
   const feeRaw = feeTerms?.required && feeTerms.method === 'transfer' ? BigInt(feeTerms.amountRaw) : DEPLOY_FEE_USDC;
-  const factoryAddress = (feeTerms?.required && feeTerms.factory) || AGENT_FACTORY_ADDRESS;
+  const factoryAddress = (feeTerms?.required && feeTerms.factory) || ARC_AGENT_FACTORY_ADDRESS;
   // Arc has no relay: the wallet signs the fee transfer itself, so it must be on Arc.
   const needsArcSwitch = feeMethod !== null && walletChainId !== null && walletChainId !== ARC_CHAIN_ID;
   // The wallets on this account. The backend counts a fee paid from these only.

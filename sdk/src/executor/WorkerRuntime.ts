@@ -270,6 +270,8 @@ export class WorkerRuntime {
   private listeners = new Set<(event: WorkerRuntimeEvent) => void>();
   /** Set once the runtime has said it skips listings with no recorded reward. */
   private warnedNoReward = false;
+  /** The chain id each configured RPC answered, by URL, kept once it matched the backend's. */
+  private rpcChainIds = new Map<string, bigint>();
 
   constructor(config: WorkerRuntimeConfig) {
     this.config = { ...DEFAULTS, ...config };
@@ -624,6 +626,37 @@ export class WorkerRuntime {
   // ── Accept ──────────────────────────────────────────────────────────────
 
   /**
+   * Why a task on `chain` must not be accepted, or null: this runtime's RPC
+   * for the chain answers another chain id than the one the backend settles
+   * it on (GET /health/settlement). A chain keeps its key when the backend
+   * moves it to another network (Arc Testnet 5042002, Arc mainnet 5042), and
+   * submitEvidence can only be signed where the task is. Nothing is held back
+   * when either side cannot be read or the backend does not list the chain:
+   * deliverResult() checks the chain again before it signs.
+   */
+  private async wrongNetwork(chain: string | undefined): Promise<string | null> {
+    const known = SETTLEMENT_CHAINS.find((c) => c === chain);
+    const rpc = known ? rpcFor(this.config, known) : undefined;
+    if (!rpc) return null;
+    try {
+      const { chains } = await this.bb.getSettlement();
+      const listed = chains.find((c) => c.chain === chain)?.chainId;
+      if (listed === undefined || !Number.isInteger(listed)) return null;
+      // A match is kept: a URL's network does not change under it. Anything
+      // else is asked again next time, so one wrong answer is not kept.
+      if (this.rpcChainIds.get(rpc) === BigInt(listed)) return null;
+      const served = (await new ethers.JsonRpcProvider(rpc).getNetwork()).chainId;
+      if (served === BigInt(listed)) {
+        this.rpcChainIds.set(rpc, served);
+        return null;
+      }
+      return `the RPC for ${chain} serves chain ${served}, but the backend settles ${chain} on chain ${listed}, where this runtime could not sign its submitEvidence. Point it at chain ${listed}.`;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * POST /accept, re-trying while the backend says the claim is still ours:
    * 503 ASSIGNMENT_PENDING means the assign tx is broadcast but unconfirmed
    * and the task stays `accepted` for this executor until a retry confirms it
@@ -771,6 +804,20 @@ export class WorkerRuntime {
     if (!exec) return;
 
     try {
+      // An accept assigns on-chain for good, so not on a network this
+      // runtime's RPC is not on. The task is looked at again after a back-off
+      // that grows while the answer stays wrong.
+      const wrong = await this.wrongNetwork(meta?.chain);
+      if (wrong) {
+        this.executions.delete(taskId);
+        const retry = this.retryState(taskId);
+        retry.reaccept = undefined;
+        retry.failures++;
+        retry.notBefore = Date.now() + backoff(RELEASED_BACKOFF_MS, retry.failures, MAX_BACKOFF_MS);
+        this.emit({ type: 'task_failed', taskId, error: `not accepted: ${wrong}` });
+        return;
+      }
+
       // Accept task — get the rootHash + this executor's ECIES-wrapped AES
       // key. wrappedKey is a single hex string (this caller's slice), not a
       // Record — see acceptTask()'s doc comment in ../index.ts.

@@ -188,13 +188,13 @@ Set every contract address that staging does not deploy to
 production's contract. With `DEPLOYMENT_SET` set, the backend refuses to boot
 unless each of the addresses above, `OG_RPC_URL`, `PUBLIC_API_URL` and
 `PUBLIC_APP_URL` is present (zero counts), neither URL is production's, and
-the chain ids are 16602 and 84532.
+the chain ids are 16602, 84532 and 5042002 (Arc testnet).
 
 The staging frontend needs `VITE_OG_CHAIN_ID=16602`, `VITE_BASE_CHAIN_ID=84532`
 and the `VITE_*_ADDRESS` overrides (`VITE_BLIND_ESCROW_ADDRESS`,
 `VITE_TASK_REGISTRY_ADDRESS`, `VITE_BLIND_REPUTATION_ADDRESS`,
-`VITE_BASE_ESCROW_ADDRESS`). An empty override also falls back to production.
-**Known gap (follow-up):** `frontend/src/pages/DeployAgentForm.tsx` has no
-AgentFactory override. A staging frontend would pay production's Base Sepolia
-AgentFactory, so keep agent deployment off the staging frontend until that
-override exists.
+`VITE_BASE_ESCROW_ADDRESS`, `VITE_ARC_ESCROW_ADDRESS`,
+`VITE_ARC_AGENT_FACTORY_ADDRESS`). An empty override also falls back to
+production: without `VITE_ARC_ESCROW_ADDRESS` a staging frontend posts to
+production's Arc escrow. The deploy form pays the AgentFactory the staging
+backend names in its deploy-fee terms, which wins over the frontend's own.
