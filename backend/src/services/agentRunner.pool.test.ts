@@ -20,8 +20,11 @@ vi.mock('./deployedAgentStore.js', () => ({
   loadAllAgents: vi.fn(async () => [...agents.values()]),
   saveAgent: vi.fn(async (a: any) => { agents.set(a.id, a); }),
 }));
+const notify = vi.hoisted(() => vi.fn(async () => null));
+vi.mock('./notificationStore.js', () => ({ notify }));
+const appendLog = vi.hoisted(() => vi.fn());
 vi.mock('./redis.js', () => ({
-  appendLog: vi.fn(), getLogs: vi.fn(async () => []), subscribeAgentLogs: vi.fn(),
+  appendLog, getLogs: vi.fn(async () => []), subscribeAgentLogs: vi.fn(),
   touchHeartbeat: vi.fn(), isAlive: vi.fn(async () => false), getHeartbeat: vi.fn(async () => null),
   redis: { set: vi.fn(), get: vi.fn(), del: vi.fn() },
 }));
@@ -51,6 +54,8 @@ function agent(id: string, owner: string) {
 beforeEach(async () => {
   for (const id of agents.keys()) await stopAgent(id).catch(() => {});
   agents.clear();
+  appendLog.mockClear();
+  notify.mockClear();
   forkMock.mockReset();
   forkMock.mockImplementation(() => ({ stdout: { on: vi.fn() }, stderr: { on: vi.fn() }, on: vi.fn(), pid: 1, kill: vi.fn() }));
 });
@@ -87,5 +92,39 @@ describe('hosted-worker pool: per-owner share (audit run 1, C10)', () => {
     await reconcileAgents();
     const forkedNames = forkMock.mock.calls.map((c) => (c[2].env as Record<string, string>).AGENT_ID).sort();
     expect(forkedNames).toEqual(['a1', 'a2', 'b1']);
+  });
+
+  // An agent reconcile leaves out used to stay 'running' with no worker: live
+  // in My Agents, doing nothing, never coming back on its own.
+  it('marks an agent it leaves out stopped, says why in its log and tells the owner', async () => {
+    for (const [id, owner] of [['a1', OWNER_A], ['a2', OWNER_A], ['a3', OWNER_A], ['b1', OWNER_B]] as const) {
+      agent(id, owner).status = 'running';
+    }
+    await reconcileAgents();
+    expect(agents.get('a3').status).toBe('stopped');
+    expect(['a1', 'a2', 'b1'].map((id) => agents.get(id).status)).toEqual(['running', 'running', 'running']);
+    expect(appendLog).toHaveBeenCalledWith('a3', expect.stringMatching(/not restarted after the server restarted: its owner already runs 2 agents.*Start it again/));
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledWith(OWNER_A, expect.objectContaining({ type: 'agent_stopped', title: 'a3 is stopped' }));
+  });
+
+  it('names a full pool as the reason when the owner is under its share', async () => {
+    for (const [id, owner] of [['a1', OWNER_A], ['a2', OWNER_A], ['b1', OWNER_B], ['b2', OWNER_B], ['c1', '0xcccc00000000000000000000000000000000000c']] as const) {
+      agent(id, owner).status = 'running';
+    }
+    await reconcileAgents();
+    // Round-robin, oldest first: a1, b1, c1, a2 take the 4 slots; b2 is left out.
+    expect(agents.get('b2').status).toBe('stopped');
+    expect(agents.get('c1').status).toBe('running');
+    expect(appendLog).toHaveBeenCalledWith('b2', expect.stringMatching(/every worker slot on the server is taken \(4\)/));
+  });
+
+  it('marks an agent whose restart fails stopped instead of leaving it running', async () => {
+    agent('a1', OWNER_A).status = 'running';
+    forkMock.mockImplementationOnce(() => { throw new Error('spawn EACCES'); });
+    await reconcileAgents();
+    expect(agents.get('a1').status).toBe('stopped');
+    expect(appendLog).toHaveBeenCalledWith('a1', expect.stringMatching(/it failed to start \(spawn EACCES\)/));
+    expect(notify).toHaveBeenCalledWith(OWNER_A, expect.objectContaining({ type: 'agent_stopped' }));
   });
 });
