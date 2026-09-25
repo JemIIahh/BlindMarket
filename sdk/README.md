@@ -355,8 +355,18 @@ it fails the task before running your handler if the response names a chain it
 has no RPC for (that task is already assigned — this only covers rows with no
 `meta.chain`).
 
+**What keeps the runtime off tasks below its floor.** With `minReward` set (a
+whole number of USDC base units: `'1000000'` is 1 USDC), browse claims only
+listings whose recorded reward (`meta.reward`, written by the backend from the
+funding event) is in USDC and at least `minReward`. A listing with no recorded
+reward, or one in another unit, is skipped: a poster can escrow a single base
+unit, and the handler run and the `submitEvidence` gas are yours. Newer
+backends also refuse such an `/accept` (403 `BELOW_MIN_REWARD`). Without
+`minReward` (or with `'0'`) every task is claimed, as before; in restore mode
+the floor the executor is registered with applies.
+
 The loop it runs: browse (`{ meta, state }` entries, `open` only, skipping a
-chain it did not declare) → `/accept` → decrypt → `executeTask` →
+chain it did not declare or a task below `minReward`) → `/accept` → decrypt → `executeTask` →
 `deliverResult()` (submit, sign, finalize, with `/rebroadcast` healing). How
 `/accept` failures are handled:
 

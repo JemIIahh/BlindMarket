@@ -759,3 +759,100 @@ describe('WorkerRuntime.browse — { meta, state } entries', () => {
   });
 });
 
+
+describe('WorkerRuntime.browse — minReward (security audit run 1, C40)', () => {
+  const ARC_RPC = 'http://arc.invalid';
+  const id = (n: number) => `0x${n.toString(16).padStart(64, '0')}`;
+  const usdc = (amount: string) => ({ amount, unit: { symbol: 'USDC', decimals: 6 } });
+  const listing = (n: number, reward?: unknown) => ({ meta: { taskId: id(n), chain: 'arc', ...(reward === undefined ? {} : { reward }) }, state: { taskId: id(n), status: 'open' } });
+  /** Every open Arc listing a poster could make, from dust to well above a 1 USDC floor. */
+  const LISTINGS = [
+    listing(1, usdc('1')), // 0.000001 USDC: the recorded attack
+    listing(2), // indexed before the backend recorded rewards
+    listing(3, { amount: '1000000000000000000', unit: { symbol: '0G', decimals: 18 } }), // another unit
+    listing(4, usdc('999999')),
+    listing(5, usdc('1000000')),
+    listing(6, usdc('2500000')),
+    listing(7, { amount: '1.5', unit: { symbol: 'USDC', decimals: 6 } }), // malformed
+  ];
+
+  function runtimeWith(config: Partial<ConstructorParameters<typeof WorkerRuntime>[0]>) {
+    const runtime = new WorkerRuntime({
+      apiKey: 'test-key', displayName: 'floor-check', capabilities: [],
+      executeTask: async () => ({ done: true }),
+      rpcUrls: { arc: ARC_RPC },
+      ...config,
+    });
+    // biome-ignore lint/suspicious/noExplicitAny: private fields/methods under test
+    const r = runtime as any;
+    r.wallet = { address: '0xworker', privateKey: `0x${'1'.repeat(64)}`, publicKey: `04${'1'.repeat(128)}` };
+    const claimed: string[] = [];
+    // claim() hands the task to executeTask, whose first step is POST /accept.
+    r.executeTask = async (taskId: string) => { claimed.push(taskId); };
+    return { r, claimed };
+  }
+  const accepts = (fetchMock: ReturnType<typeof stubFetch>) => fetchMock.mock.calls.filter((c) => String(c[0]).includes('/accept'));
+
+  it('claims only listings whose recorded USDC reward is at least minReward', async () => {
+    const fetchMock = stubFetch({ '/a2a/tasks': { tasks: LISTINGS } });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { r, claimed } = runtimeWith({ minReward: '1000000' });
+    await r.browse();
+    expect(claimed).toEqual([id(5), id(6)]);
+    expect(accepts(fetchMock)).toHaveLength(0);
+  });
+
+  it('with no minReward (or 0) it claims every listing, as before', async () => {
+    for (const minReward of [undefined, '', '0']) {
+      stubFetch({ '/a2a/tasks': { tasks: LISTINGS } });
+      const { r, claimed } = runtimeWith({ minReward, maxConcurrentTasks: 10 });
+      await r.browse();
+      expect(claimed, String(minReward)).toEqual(LISTINGS.map((l) => l.meta.taskId));
+    }
+  });
+
+  it('reads a floor of 10^12 or more as 18-decimal units, as the backend stores it', async () => {
+    stubFetch({ '/a2a/tasks': { tasks: LISTINGS } });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { r, claimed } = runtimeWith({ minReward: '1000000000000000000' }); // 1e18 → 1000000 (1 USDC)
+    await r.browse();
+    expect(claimed).toEqual([id(5), id(6)]);
+  });
+
+  it('in restore mode, applies the floor the executor is registered with', async () => {
+    stubFetch({ '/a2a/tasks': { tasks: [listing(1, usdc('4999')), listing(2, usdc('5000'))] } });
+    const { r, claimed } = runtimeWith({});
+    r.profile = { minReward: '5000' };
+    await r.browse();
+    expect(claimed).toEqual([id(2)]);
+  });
+
+  it('says once, not per task, that listings without a recorded reward are skipped', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    stubFetch({ '/a2a/tasks': { tasks: [listing(1), listing(2)] } });
+    const { r, claimed } = runtimeWith({ minReward: '1' });
+    await r.browse();
+    await r.browse();
+    expect(claimed).toEqual([]);
+    expect(warn.mock.calls.filter((c) => String(c[0]).includes('without a recorded reward'))).toHaveLength(1);
+  });
+
+  it('still re-tries the /accept of a task it already claimed that may be held for it', async () => {
+    stubFetch({ '/a2a/tasks': { tasks: [] } });
+    const { r, claimed } = runtimeWith({ minReward: '1000000' });
+    r.retries.set(id(9), { notBefore: 0, failures: 1, wrapTimeouts: 0, bidded: false, reaccept: { state: { taskId: id(9), status: 'open' }, meta: { taskId: id(9), chain: 'arc' }, rounds: 1 } });
+    await r.browse();
+    expect(claimed).toEqual([id(9)]);
+  });
+
+  it('start() refuses a minReward that is not a whole number of base units, before any request', async () => {
+    const fetchMock = stubFetch({});
+    const runtime = new WorkerRuntime({
+      apiKey: 'test-key', displayName: 'floor-check', capabilities: [],
+      executeTask: async () => ({ done: true }), rpcUrls: { arc: ARC_RPC },
+      privateKey: `0x${'1'.repeat(64)}`, minReward: '1.5',
+    });
+    await expect(runtime.start()).rejects.toThrow(/minReward must be a whole number/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});

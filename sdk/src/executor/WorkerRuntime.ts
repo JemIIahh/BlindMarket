@@ -35,6 +35,17 @@ export interface WorkerRuntimeConfig {
   existingAddress?: string;
   /** @deprecated Ignored — the public key is derived from `existingPrivateKey`. */
   existingPublicKey?: string;
+  /**
+   * The least a task must pay for this runtime to take it: a whole number of
+   * the pricing token's smallest unit (USDC, 6 decimals: '1000000' is 1 USDC).
+   * Registered with the executor, and applied where tasks are picked: browse
+   * claims only listings whose recorded reward (`meta.reward`) is in USDC and
+   * at least this much. A listing with no recorded reward, or one in another
+   * unit, is skipped. Unset (or '0') takes every task, as before. In restore
+   * mode (`existingPrivateKey`) the registered floor applies when this is
+   * unset. A floor of 10^12 or more is read as the old 18-decimal units, as
+   * the backend reads it.
+   */
   minReward?: string;
   preferredCapabilities?: AgentCapability[];
   browseIntervalMs?: number;
@@ -201,6 +212,43 @@ class AcceptAbandoned extends Error {
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+/**
+ * The unit minReward is written in: the pricing token's smallest unit, USDC
+ * with 6 decimals (CreateAgentParams.minReward), the backend's pricing unit on
+ * every chain it settles on. A reward in any other unit cannot be compared.
+ */
+const MIN_REWARD_UNIT = { symbol: 'USDC', decimals: 6 } as const;
+
+/**
+ * 10^12 base units is 1,000,000 USDC, no plausible floor: the backend reads a
+ * floor at or above it as the old 18-decimal units and stores it divided by
+ * 10^12, rounded up (normalizeSettlementAmount in
+ * backend/src/services/settlementUnits.ts). The runtime applies the floor the
+ * backend holds the executor to.
+ */
+const LEGACY_SCALE = 10n ** 12n;
+
+/** A minReward as the backend holds it, in USDC base units; undefined for no floor (unset, empty, malformed or zero). */
+function rewardFloor(raw: string | null | undefined): bigint | undefined {
+  if (typeof raw !== 'string' || !/^\d+$/.test(raw)) return undefined;
+  const value = BigInt(raw);
+  const floor = value >= LEGACY_SCALE ? (value + LEGACY_SCALE - 1n) / LEGACY_SCALE : value;
+  return floor === 0n ? undefined : floor;
+}
+
+/**
+ * Whether a listing's recorded reward clears `floor`. A missing reward, a
+ * malformed one, or one in another unit never does: comparing a floor with
+ * something it cannot price would let a 1-base-unit task through.
+ */
+function clearsRewardFloor(meta: A2APublicTaskMeta | undefined, floor: bigint): boolean {
+  const reward = meta?.reward as { amount?: unknown; unit?: { symbol?: unknown; decimals?: unknown } } | undefined;
+  if (!reward || typeof reward !== 'object') return false;
+  if (reward.unit?.symbol !== MIN_REWARD_UNIT.symbol || reward.unit?.decimals !== MIN_REWARD_UNIT.decimals) return false;
+  if (typeof reward.amount !== 'string' || !/^\d+$/.test(reward.amount)) return false;
+  return BigInt(reward.amount) >= floor;
+}
+
 /** base, 2·base, 4·base … capped. `n` is 1 for the first failure. */
 function backoff(base: number, n: number, cap: number): number {
   return Math.min(base * 2 ** Math.max(0, n - 1), cap);
@@ -220,6 +268,8 @@ export class WorkerRuntime {
   private retries = new Map<string, RetryState>();
   private retryTimers = new Set<ReturnType<typeof setTimeout>>();
   private listeners = new Set<(event: WorkerRuntimeEvent) => void>();
+  /** Set once the runtime has said it skips listings with no recorded reward. */
+  private warnedNoReward = false;
 
   constructor(config: WorkerRuntimeConfig) {
     this.config = { ...DEFAULTS, ...config };
@@ -285,6 +335,12 @@ export class WorkerRuntime {
           "the API key's owner, and only that wallet can sign submitEvidence — a keyless runtime would overwrite the " +
           "owner's registered public key and strand every task it accepted. To only look at tasks, call " +
           'BlindMarket.browseA2ATasks() directly.',
+      );
+    }
+    const minReward = this.config.minReward;
+    if (minReward !== undefined && minReward !== '' && !/^\d+$/.test(minReward)) {
+      throw new Error(
+        `[WorkerRuntime] minReward must be a whole number of the pricing token's smallest unit (USDC has 6 decimals: '1000000' is 1 USDC), not ${JSON.stringify(minReward)}.`,
       );
     }
     if (this.declaredChains.length === 0) {
@@ -486,6 +542,11 @@ export class WorkerRuntime {
         // (and the post-accept check in executeTask, which covers rows with
         // no chain) is what keeps such tasks out.
         if (entry.meta?.chain && !(this.declaredChains as string[]).includes(entry.meta.chain)) continue;
+        // Nor a task below this runtime's minReward: the handler run and the
+        // submitEvidence gas are the operator's, and a poster can escrow 1
+        // base unit. Newer backends also refuse such an /accept (403
+        // BELOW_MIN_REWARD); older ones apply the floor only when ranking offers.
+        if (!this.meetsFloor(entry.meta)) continue;
         this.claim(taskId, state, entry.meta);
       }
 
@@ -500,6 +561,30 @@ export class WorkerRuntime {
     } catch (err) {
       this.emit({ type: 'error', error: `Browse failed: ${err}` });
     }
+  }
+
+  /**
+   * The floor browse applies: `minReward`, else (restore mode) the floor the
+   * executor is registered with. Undefined: no floor.
+   */
+  private get minRewardFloor(): bigint | undefined {
+    const configured = this.config.minReward;
+    return rewardFloor(configured !== undefined && configured !== '' ? configured : this.profile?.minReward);
+  }
+
+  /** Whether a listing clears the floor (always, without one). */
+  private meetsFloor(meta: A2APublicTaskMeta | undefined): boolean {
+    const floor = this.minRewardFloor;
+    if (floor === undefined) return true;
+    if (clearsRewardFloor(meta, floor)) return true;
+    if (meta?.reward === undefined && !this.warnedNoReward) {
+      this.warnedNoReward = true;
+      console.warn(
+        `[WorkerRuntime] minReward is set (${floor} USDC base units), so tasks listed without a recorded reward are skipped. ` +
+          'A backend older than the reward field lists none: unset minReward to take them.',
+      );
+    }
+    return false;
   }
 
   /** Executions holding a concurrency slot. A task waiting for a wrap or backing off holds none. */
