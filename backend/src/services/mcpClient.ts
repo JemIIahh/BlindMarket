@@ -10,6 +10,7 @@
 import type { ToolDefinition, ToolDSL } from '../types.js';
 import { compileFromMcp, type McpToolInput } from './toolDslCompiler.js';
 import { renderToolDefinition } from './toolDslRenderer.js';
+import { egressFetch, MAX_TOOL_RESPONSE_BYTES, readCappedText } from './egressGuard.js';
 
 // ── MCP JSON-RPC types ─────────────────────────────────────────────────────
 
@@ -204,7 +205,8 @@ async function mcpPost(
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const res = await fetch(url, {
+    // The server URL is chosen by the caller: guarded destination, capped read.
+    const res = await egressFetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -215,14 +217,14 @@ async function mcpPost(
       signal: controller.signal,
     });
 
-    clearTimeout(timer);
-
     if (!res.ok) {
-      const text = await res.text().catch(() => '');
+      const text = await readCappedText(res, MAX_TOOL_RESPONSE_BYTES).catch(() => '');
       throw new Error(`MCP server returned ${res.status}: ${text.slice(0, 200)}`);
     }
 
-    return await res.json() as JsonRpcResponse;
+    const text = await readCappedText(res, MAX_TOOL_RESPONSE_BYTES);
+    clearTimeout(timer);
+    return JSON.parse(text) as JsonRpcResponse;
   } catch (e: any) {
     clearTimeout(timer);
     if (e.name === 'AbortError') {

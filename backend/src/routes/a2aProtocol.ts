@@ -75,7 +75,7 @@ a2aProtocolRouter.post('/', async (req, res) => {
       // authenticated REST /accept.
       res.json(rpcSuccess(id, {
         meta: a2aStore.projectPublicMeta(meta),
-        state: state ? a2aStore.projectPublicState(state) : null,
+        state: state ? a2aStore.projectPublicState(state, meta) : null,
       }));
       break;
     }

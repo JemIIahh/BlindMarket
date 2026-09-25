@@ -55,7 +55,13 @@ function httpsPost(url, headers, body) {
 }
 
 const RPC = 'https://evmrpc-testnet.0g.ai';
-const PRIVATE_KEY = '0xd84c36bbba9bd95fa21bc14e9a58c0deab22080a997ae61ef27288786dc65137';
+// Never hard-code a key here. The key that used to sit on this line was committed
+// and must be treated as compromised: see the security audit (run 1).
+const PRIVATE_KEY = process.env.OG_TEST_PRIVATE_KEY;
+if (!PRIVATE_KEY) {
+  console.error('Set OG_TEST_PRIVATE_KEY to a funded 0G testnet key (3+ A0GI) to run this script.');
+  process.exit(1);
+}
 
 async function main() {
   const provider = new ethers.JsonRpcProvider(RPC);

@@ -2,7 +2,6 @@ import type { VerificationCriteria } from '../types.js';
 import {
   WeightedRubric,
   ContainsKeywords,
-  LengthBetween,
   JsonSchema,
   HasFields,
   NoForbiddenPhrases,
@@ -12,6 +11,7 @@ import {
   RegexTimeoutError,
 } from './rubricEngine.js';
 import type { RubricResult } from './rubricEngine.js';
+import { verificationCriteriaSchema } from './verificationCriteriaSchema.js';
 
 export interface AutoVerifyResult {
   passed: boolean;
@@ -159,17 +159,30 @@ const HOMOGLYPHS: Record<string, string> = {
 };
 const HOMOGLYPH_CLASS = new RegExp(`[${Object.keys(HOMOGLYPHS).join('')}]`, 'g');
 
-/** Text as the phrase patterns read it: lowercase, accents and look-alikes folded, bounded. */
-function foldForScan(flat: string): string {
-  const windowed = flat.length > 2 * SCAN_WINDOW
-    ? `${flat.slice(0, SCAN_WINDOW)} … ${flat.slice(-SCAN_WINDOW)}`
-    : flat;
-  return windowed
+/** Lowercase, accents and look-alike letters folded. */
+function foldText(text: string): string {
+  return text
     .toLowerCase()
     .normalize('NFKD')
     .replace(/\p{M}/gu, '')
     .replace(HOMOGLYPH_CLASS, ch => HOMOGLYPHS[ch]);
 }
+
+/** Text as the phrase patterns read it: folded, and bounded to the two ends. */
+function foldForScan(flat: string): string {
+  const windowed = flat.length > 2 * SCAN_WINDOW
+    ? `${flat.slice(0, SCAN_WINDOW)} … ${flat.slice(-SCAN_WINDOW)}`
+    : flat;
+  return foldText(windowed);
+}
+
+/**
+ * A poster's phrase and the output as a reader sees them: canonical, one line,
+ * folded, whole text. Matching the raw output let "un<ZWSP>able", a soft hyphen,
+ * an NBSP or a Cyrillic look-alike slip a forbidden phrase past the check
+ * (security audit run 1, C30).
+ */
+const phraseText = (text: string): string => foldText(flatten(canonical(text)));
 
 // "Not done", "Assumptions", "Not done / assumptions" as a heading, list item,
 // numbered item or bold label — followed by ':' or the end of the line, so a
@@ -285,6 +298,12 @@ const OPPOSITES: Record<string, string[]> = {
   yes: ['no'], no: ['yes'], true: ['false'], false: ['true'],
 };
 
+// Answer tokens keep a number whole ("12.5", "1,234.56"). WORD splits it at the
+// separator, so "13.5" used to half-match an expected "12.5".
+const ANSWER_WORD = new RegExp(`\\p{N}+(?:[.,]\\p{N}+)+(?![\\p{L}\\p{N}])|${WORD.source}`, 'gu');
+const answerWords = (text: string): string[] => text.toLowerCase().match(ANSWER_WORD) ?? [];
+const isNumberToken = (w: string): boolean => /^\p{N}+(?:[.,]\p{N}+)*$/u.test(w);
+
 /**
  * expected_answer match on word tokens, so "Paris.", "**Paris**" and "The
  * answer is 42." match 'Paris' / '42'. Containing the answer is not enough for
@@ -295,22 +314,26 @@ const OPPOSITES: Record<string, string[]> = {
  * are set aside. Long expected answers keep the plain overlap score.
  */
 function scoreExpectedAnswer(expectedRaw: string, flatOutput: string, note: (text: string) => void): number {
-  const expected = words(flatten(canonical(expectedRaw)));
+  const expected = answerWords(flatten(canonical(expectedRaw)));
   if (!expected.length) {
     // Nothing word-like to compare ("->", "∅"): literal containment.
     return flatOutput.includes(flatten(canonical(expectedRaw))) ? 1 : 0;
   }
-  const actual = words(flatOutput);
-  const actualSet = new Set(actual);
+  const actualSet = new Set(answerWords(flatOutput));
   const overlap = expected.filter(w => actualSet.has(w)).length / expected.length;
-  if (overlap < 1 || expected.length > SHORT_EXPECTED_TOKENS) return overlap;
+  if (expected.length > SHORT_EXPECTED_TOKENS) return overlap;
+  // A short answer is right or wrong: "George Bush" is not half of "George
+  // Washington".
+  if (overlap < 1) {
+    if (overlap > 0) note('only part of the expected answer is present');
+    return 0;
+  }
 
   const expectedSet = new Set(expected);
   const others = [...actualSet].filter(w => !expectedSet.has(w) && !ANSWER_DRESSING.has(w));
-  const isNumber = (w: string) => /^\p{N}+$/u.test(w);
-  const competing = expected.length === 1
-    ? others.filter(w => (isNumber(expected[0]) && isNumber(w)) || OPPOSITES[expected[0]]?.includes(w))
-    : [];
+  const expectsNumber = expected.some(isNumberToken);
+  const competing = others.filter(w =>
+    (expectsNumber && isNumberToken(w)) || expected.some(e => OPPOSITES[e]?.includes(w)));
   if (competing.length) {
     note(`output also offers "${competing[0]}" — more than one answer`);
     return 0;
@@ -333,7 +356,10 @@ const hardFail = (reason: string): AutoVerifyResult =>
  * New fields (max_length, forbidden_phrases, regex_pattern, expected_schema,
  * rubric items) add richer scoring dimensions.
  *
- * Returns a 0-100 score. Task passes if score >= pass_threshold (default 60).
+ * Returns a 0-100 score. Task passes if score >= pass_threshold (default 60)
+ * AND every absolute poster requirement is met in full: required_fields,
+ * contains_keywords, forbidden_phrases, regex_pattern, expected_schema, and a
+ * short expected_answer.
  */
 export function autoVerify(
   resultData: Record<string, unknown>,
@@ -343,6 +369,13 @@ export function autoVerify(
   const output = typeof resultData.output === 'string'
     ? resultData.output
     : JSON.stringify(resultData);
+
+  // Criteria past the size limits (stored before they existed, or written
+  // around the routes) are refused rather than run: their cost grows with the
+  // number of fields and this runs on the request thread.
+  if (!verificationCriteriaSchema.safeParse(criteria).success) {
+    return hardFail('Verification criteria exceed the supported size — cannot auto-verify against them');
+  }
 
   // Empty deliverable is a hard fail before any rubric runs. Several rubrics
   // pass vacuously on an empty string (forbidden phrases, max_length), so a
@@ -436,15 +469,6 @@ export function autoVerify(
     });
   }
 
-  // Min length
-  if (criteria.min_length) {
-    rubrics.push({
-      name: 'min_length',
-      weight: 1,
-      fn: LengthBetween(criteria.min_length),
-    });
-  }
-
   // Contains keywords — only counts inside real content. Echoing the keywords
   // back ('revenue churn') used to score 100. Without a real poster min_length
   // (at least the default floor) the output needs MIN_KEYWORD_CONTEXT_WORDS
@@ -484,11 +508,13 @@ export function autoVerify(
   }
 
   // Forbidden phrases — poster's custom list
-  if (criteria.forbidden_phrases?.length) {
+  const forbidden = (criteria.forbidden_phrases ?? []).map(phraseText).filter(Boolean);
+  if (forbidden.length) {
+    const noForbidden = NoForbiddenPhrases(forbidden);
     rubrics.push({
       name: 'forbidden_phrases',
       weight: 2,
-      fn: NoForbiddenPhrases(criteria.forbidden_phrases),
+      fn: (out: string) => noForbidden(phraseText(out)),
     });
   }
 
@@ -564,16 +590,29 @@ export function autoVerify(
   const rubric = new WeightedRubric(rubrics);
   const result = rubric.score(output, threshold);
 
+  // What the poster states as a requirement is a gate, not a weight. Averaged
+  // in, a missing required keyword or a present forbidden phrase was outvoted
+  // by rubrics any non-refusal earns, and the escrow paid out (security audit
+  // run 1, C11). The score stays, so clients can still explain the verdict.
+  const shortExpected = Boolean(criteria.expected_answer?.trim())
+    && answerWords(flatten(canonical(criteria.expected_answer!))).length <= SHORT_EXPECTED_TOKENS;
+  const GATED = new Set([
+    'required_fields', 'contains_keywords', 'forbidden_phrases', 'regex_pattern', 'expected_schema',
+    ...(shortExpected ? ['expected_answer'] : []),
+  ]);
+  const gateMissed = result.breakdown.some(r => GATED.has(r.name) && (r.error || r.score < 1));
+  const passed = result.passed && !gateMissed;
+
   const reasons = result.breakdown
-    .filter(r => r.error || r.score < 0.5)
+    .filter(r => r.error || r.score < 0.5 || (GATED.has(r.name) && r.score < 1))
     .map(r => r.error
       ? `[CRASHED] ${r.error}`
       : `${r.name}: ${notes[r.name] ?? `${(r.score * 100).toFixed(0)}%`}`);
 
-  if (result.passed) reasons.unshift('All verification criteria met');
+  if (passed) reasons.unshift('All verification criteria met');
 
   return {
-    passed: result.passed,
+    passed,
     score: Math.round(result.score * 100),
     reasons,
     breakdown: result.breakdown,
