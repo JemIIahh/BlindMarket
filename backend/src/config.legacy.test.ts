@@ -35,6 +35,13 @@ const CLEARED = {
   CCTP_ETHEREUM_CHAIN_ID: '',
   CCTP_ARBITRUM_CHAIN_ID: '',
   CCTP_OPTIMISM_CHAIN_ID: '',
+  CCTP_ARC_CHAIN_ID: '',
+  CCTP_ARC_RPC_URL: '',
+  CCTP_BASE_RPC_URL: '',
+  CCTP_BASE_USDC_ADDRESS: '',
+  ARC_CHAIN_ID: '',
+  ARC_RPC_URL: '',
+  ARC_AGENT_FACTORY_ADDRESS: '',
   DEPLOYMENT_SET: '',
 };
 
@@ -61,10 +68,24 @@ const shape = (config: Awaited<ReturnType<typeof load>>) => ({
   baseRpcUrl: config.baseRpcUrl,
   baseEscrowAddress: config.baseEscrowAddress,
   baseUsdcAddress: config.baseUsdcAddress,
+  arcChainId: config.arcChainId,
+  arcRpcUrl: config.arcRpcUrl,
+  arcAgentFactoryAddress: config.arcAgentFactoryAddress,
   cctpMainnet: config.cctp.mainnet,
   cctpEthereumChainId: config.cctp.ethereumChainId,
+  cctpArcChainId: config.cctp.arcChainId,
+  cctpBaseRpcUrl: config.cctp.baseRpcUrl,
   irisApiBase: config.cctp.irisApiBase,
 });
+
+// Arc testnet, as production and local development have run it since Arc
+// became the posting chain.
+const ARC_TESTNET = {
+  arcChainId: 5042002,
+  arcRpcUrl: 'https://arc-testnet.drpc.org',
+  arcAgentFactoryAddress: '0x1E9Abb2F2e66b8Af35BED730500A94760E133a3B',
+  cctpArcChainId: 5042002,
+};
 
 describe('config with no chain env vars', () => {
   it('production on Base Sepolia: 0G mainnet, Base Sepolia, testnet CCTP', async () => {
@@ -79,8 +100,10 @@ describe('config with no chain env vars', () => {
       baseRpcUrl: 'https://sepolia.base.org',
       baseEscrowAddress: '0xCca5ab873158b888158AD9Dc36fb4Ee683eFbEBf',
       baseUsdcAddress: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
+      ...ARC_TESTNET,
       cctpMainnet: false,
       cctpEthereumChainId: 11155111,
+      cctpBaseRpcUrl: 'https://sepolia.base.org',
       irisApiBase: 'https://iris-api-sandbox.circle.com',
     });
   });
@@ -97,22 +120,29 @@ describe('config with no chain env vars', () => {
       baseRpcUrl: 'https://sepolia.base.org',
       baseEscrowAddress: '0xCca5ab873158b888158AD9Dc36fb4Ee683eFbEBf',
       baseUsdcAddress: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
+      ...ARC_TESTNET,
       cctpMainnet: false,
       cctpEthereumChainId: 11155111,
+      cctpBaseRpcUrl: 'https://sepolia.base.org',
       irisApiBase: 'https://iris-api-sandbox.circle.com',
     });
   });
 
-  it('production on Base mainnet: mainnet Base defaults and mainnet CCTP', async () => {
+  // BEHAVIOUR CHANGE: CCTP follows Arc, the chain it mints into. With Base
+  // alone on mainnet it used to offer mainnet source chains while minting into
+  // Arc testnet.
+  it('production on Base mainnet: mainnet Base defaults; CCTP stays on Arc testnet\'s tier', async () => {
     const config = await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '8453' });
     expect(shape(config)).toMatchObject({
       ogChainId: 16661,
       baseChainId: 8453,
       baseRpcUrl: 'https://mainnet.base.org',
       baseUsdcAddress: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
-      cctpMainnet: true,
-      cctpEthereumChainId: 1,
-      irisApiBase: 'https://iris-api.circle.com',
+      ...ARC_TESTNET,
+      cctpMainnet: false,
+      cctpEthereumChainId: 11155111,
+      cctpBaseRpcUrl: 'https://sepolia.base.org',
+      irisApiBase: 'https://iris-api-sandbox.circle.com',
     });
   });
 });

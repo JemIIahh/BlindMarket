@@ -24,6 +24,8 @@ vi.mock('./settlementChains.js', async (importOriginal) => {
 const { factoryCheckpointKey, factoryDeploymentBlock } = await import('./agentFactoryListener.js');
 const { CONTRACT_ADDRESSES, DEPLOYMENT_BLOCKS } = await import('../contractAddresses.js');
 
+afterEach(() => { net.arc = 5042002; });
+
 const GENERATED = (CONTRACT_ADDRESSES as { arcTestnet: { agentFactory: string } }).arcTestnet.agentFactory;
 const OTHER = '0x1111111111111111111111111111111111111111';
 
@@ -41,6 +43,12 @@ describe('factoryDeploymentBlock', () => {
     expect(factoryDeploymentBlock(OTHER, {})).toBe(0);
   });
 
+  it('reads the record of the Arc network the backend runs', () => {
+    // agentFactoryListener.records.test.ts covers a mainnet record at the same address.
+    net.arc = 1234;
+    expect(factoryDeploymentBlock(GENERATED, {})).toBe(0);
+  });
+
   it("ignores the Base factory's block number", () => {
     expect(factoryDeploymentBlock(OTHER, { AGENT_FACTORY_DEPLOYMENT_BLOCK: '31000000' })).toBe(0);
     expect(factoryDeploymentBlock(GENERATED, { AGENT_FACTORY_DEPLOYMENT_BLOCK: '31000000' })).toBe(DEPLOYMENT_BLOCKS.arcTestnet.agentFactory);
@@ -48,8 +56,6 @@ describe('factoryDeploymentBlock', () => {
 });
 
 describe('factoryCheckpointKey', () => {
-  afterEach(() => { net.arc = 5042002; });
-
   it('keeps the key it has always had on Arc testnet', () => {
     expect(factoryCheckpointKey(OTHER.toUpperCase().replace('0X', '0x'))).toBe(`agentfactory:events:checkpoint:${OTHER}`);
   });

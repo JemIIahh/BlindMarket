@@ -25,8 +25,7 @@ import { chainScope } from './chainScope.js';
 import { settlementChainConfig } from './settlementChains.js';
 import type { EventLog } from 'ethers';
 import { ethers } from 'ethers';
-import { config } from '../config.js';
-import { CONTRACT_ADDRESSES, DEPLOYMENT_BLOCKS } from '../contractAddresses.js';
+import { arcGeneratedRecord, config } from '../config.js';
 import { arcProvider } from './chain.js';
 import { redis } from './redis.js';
 import { claimPayment, factoryPaymentKey, isPaymentRecorded, markPaymentUsed, releasePayment } from './spentDeployPayments.js';
@@ -64,17 +63,25 @@ const MAX_BLOCKS_PER_TICK = 5_000;
 
 /**
  * The block the Arc factory was deployed in: nothing before it can hold one of
- * its events. ARC_AGENT_FACTORY_DEPLOYMENT_BLOCK wins; otherwise the generated
- * record's, when the configured factory is that one; otherwise 0 (unknown).
+ * its events. ARC_AGENT_FACTORY_DEPLOYMENT_BLOCK wins; otherwise the block in
+ * the generated record for this Arc network, when the configured factory is
+ * that record's; otherwise 0 (unknown). Only this network's record: a mainnet
+ * factory can share the testnet one's address (same deployer and nonce), and
+ * the testnet block would put the start past the mainnet head.
  * Not AGENT_FACTORY_DEPLOYMENT_BLOCK: that is a Base block number, which on
  * Arc points at an unrelated block about half the chain back — a day of
  * catch-up at MAX_BLOCKS_PER_TICK before any new credit is recorded.
  */
-export function factoryDeploymentBlock(factory: string, env: Record<string, string | undefined> = process.env): number {
+export function factoryDeploymentBlock(
+  factory: string,
+  env: Record<string, string | undefined> = process.env,
+  chainId: number = settlementChainConfig('arc').chainId,
+): number {
   const fromEnv = Number(env.ARC_AGENT_FACTORY_DEPLOYMENT_BLOCK ?? 0);
   if (Number.isFinite(fromEnv) && fromEnv > 0) return fromEnv;
-  const generated = (CONTRACT_ADDRESSES as { arcTestnet?: { agentFactory?: string } }).arcTestnet?.agentFactory;
-  return generated && generated.toLowerCase() === factory.toLowerCase() ? DEPLOYMENT_BLOCKS.arcTestnet.agentFactory : 0;
+  const record = arcGeneratedRecord(chainId);
+  if (!record || record.addresses.agentFactory?.toLowerCase() !== factory.toLowerCase()) return 0;
+  return record.blocks.agentFactory ?? 0;
 }
 
 // ── State ───────────────────────────────────────────────────────────────────

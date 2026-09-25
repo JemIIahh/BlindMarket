@@ -41,6 +41,8 @@ export interface SettlementChainConfig {
    * URL can carry an API key: it may be logged, but no route returns it.
    */
   rpcUrl: string;
+  /** Env var that sets rpcUrl. */
+  rpcEnv: string;
   /** Each chain has its own tier. */
   tier: 'mainnet' | 'testnet';
   /** The contracts/ hardhat network that operates on this chain. */
@@ -111,6 +113,7 @@ const BUILDERS: { readonly [K in SettlementChainKey]: () => SettlementChainConfi
       label: 'Base',
       chainId: config.baseChainId,
       rpcUrl: config.baseRpcUrl,
+      rpcEnv: 'BASE_RPC_URL',
       tier: mainnet ? 'mainnet' : 'testnet',
       hardhatNetwork: mainnet ? 'base' : 'base-sepolia',
       escrowAddress: addressOrNull(config.baseEscrowAddress),
@@ -132,13 +135,13 @@ const BUILDERS: { readonly [K in SettlementChainKey]: () => SettlementChainConfi
     };
   },
   arc: () => {
-    // Arc mainnet = 5042, Arc testnet = 5042002.
-    const mainnet = config.arcChainId === 5042;
+    const mainnet = chainTier('arc', config.arcChainId) === 'mainnet';
     return {
       key: 'arc',
       label: 'Arc',
       chainId: config.arcChainId,
       rpcUrl: config.arcRpcUrl,
+      rpcEnv: 'ARC_RPC_URL',
       tier: mainnet ? 'mainnet' : 'testnet',
       hardhatNetwork: mainnet ? 'arc-mainnet' : 'arc-testnet',
       escrowAddress: addressOrNull(config.arcEscrowAddress),

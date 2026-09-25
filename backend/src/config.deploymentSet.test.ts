@@ -14,7 +14,7 @@ import {
  */
 
 const ZERO = '0x0000000000000000000000000000000000000000';
-const STAGING_CHAINS = { og: 16602, base: 84532 };
+const STAGING_CHAINS = { og: 16602, base: 84532, arc: 5042002 };
 const fullEnv = (): Record<string, string | undefined> => ({
   ...Object.fromEntries(DEPLOYMENT_SET_REQUIRED_ENV.map((k) => [k, '0x1111111111111111111111111111111111111111'])),
   PUBLIC_API_URL: 'https://api.staging.example',
@@ -40,7 +40,7 @@ describe('parseDeploymentSet', () => {
 
 describe('deploymentSetProblems', () => {
   it('asks nothing of the default set', () => {
-    expect(deploymentSetProblems('', {}, { og: 16661, base: 8453 })).toEqual([]);
+    expect(deploymentSetProblems('', {}, { og: 16661, base: 8453, arc: 5042 })).toEqual([]);
   });
 
   it('covers every address config.ts falls back to generated values for, plus the pool, 0G RPC and public URLs', () => {
@@ -90,26 +90,32 @@ describe('deploymentSetProblems', () => {
   });
 
   it('refuses staging on other chain ids', () => {
-    expect(deploymentSetProblems('staging', fullEnv(), { og: 16661, base: 84532 })).toEqual([
+    expect(deploymentSetProblems('staging', fullEnv(), { ...STAGING_CHAINS, og: 16661 })).toEqual([
       expect.stringContaining('OG_CHAIN_ID=16602 and BASE_CHAIN_ID=84532; this backend has 16661 and 84532'),
     ]);
     // NODE_ENV=production defaults Base to mainnet.
-    expect(deploymentSetProblems('staging', fullEnv(), { og: 16602, base: 8453 })).toHaveLength(1);
+    expect(deploymentSetProblems('staging', fullEnv(), { ...STAGING_CHAINS, base: 8453 })).toHaveLength(1);
+  });
+
+  it('refuses staging on Arc mainnet', () => {
+    expect(deploymentSetProblems('staging', fullEnv(), { ...STAGING_CHAINS, arc: 5042 })).toEqual([
+      'DEPLOYMENT_SET=staging runs on Arc testnet (ARC_CHAIN_ID=5042002); this backend has ARC_CHAIN_ID=5042.',
+    ]);
   });
 });
 
 describe('assertBootConfig with a deployment set', () => {
-  const saved = { set: config.deploymentSet, og: config.ogChainId, base: config.baseChainId };
+  const saved = { set: config.deploymentSet, og: config.ogChainId, base: config.baseChainId, arc: config.arcChainId };
 
   afterEach(() => {
-    Object.assign(config, { deploymentSet: saved.set, ogChainId: saved.og, baseChainId: saved.base });
+    Object.assign(config, { deploymentSet: saved.set, ogChainId: saved.og, baseChainId: saved.base, arcChainId: saved.arc });
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
   });
 
   function stage(env: Record<string, string | undefined>) {
     vi.spyOn(console, 'error').mockImplementation(() => {});
-    Object.assign(config, { deploymentSet: 'staging', ogChainId: 16602, baseChainId: 84532 });
+    Object.assign(config, { deploymentSet: 'staging', ogChainId: 16602, baseChainId: 84532, arcChainId: 5042002 });
     for (const k of DEPLOYMENT_SET_REQUIRED_ENV) vi.stubEnv(k, env[k]);
   }
 

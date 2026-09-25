@@ -16,6 +16,8 @@ const CLEARED = {
   BLIND_ESCROW_ADDRESS: '', TASK_REGISTRY_ADDRESS: '', BLIND_REPUTATION_ADDRESS: '', INFT_ADDRESS: '',
   BASE_ESCROW_ADDRESS: '', BASE_USDC_ADDRESS: '', AGENT_FACTORY_ADDRESS: '', DEPLOYMENT_SET: '',
   CCTP_ETHEREUM_CHAIN_ID: '', CCTP_ARBITRUM_CHAIN_ID: '', CCTP_OPTIMISM_CHAIN_ID: '',
+  CCTP_POLYGON_CHAIN_ID: '', ARC_CHAIN_ID: '', ARC_RPC_URL: '', ARC_ESCROW_ADDRESS: '', ARC_AGENT_FACTORY_ADDRESS: '',
+  CCTP_ENABLED: '', CCTP_ARC_CHAIN_ID: '', CCTP_ARC_RPC_URL: '', CCTP_BASE_RPC_URL: '', CCTP_BASE_USDC_ADDRESS: '',
   PUBLIC_API_URL: '', PUBLIC_APP_URL: '',
   // Production boot needs these; they are not what these tests are about.
   JWT_SECRET: 'test-secret', DATABASE_URL: 'postgres://tier-test@localhost:1/none',
@@ -78,6 +80,84 @@ describe('chain ids default from SETTLEMENT_TIER', () => {
 
   it('throws on a value that is not a tier', async () => {
     await expect(load({ SETTLEMENT_TIER: 'main' })).rejects.toThrow(/SETTLEMENT_TIER="main" is not a network tier/);
+  });
+});
+
+describe('Arc follows ARC_CHAIN_ID, and CCTP follows Arc', () => {
+  const TESTNET_FACTORY = '0x1E9Abb2F2e66b8Af35BED730500A94760E133a3B';
+
+  it('the mainnet tier puts Arc on mainnet, read through its public RPC by default, and CCTP mints there', async () => {
+    const { config, ARC_MAINNET_PUBLIC_RPC_URL, arcGeneratedRecord } = await load({ SETTLEMENT_TIER: 'mainnet', NODE_ENV: 'development' });
+    expect(config).toMatchObject({ arcChainId: 5042, arcRpcUrl: ARC_MAINNET_PUBLIC_RPC_URL });
+    expect(config.cctp).toMatchObject({ mainnet: true, arcChainId: 5042, arcRpcUrl: ARC_MAINNET_PUBLIC_RPC_URL });
+    // The mainnet record's factory, or none: never the testnet one, which
+    // would be polled for credits on mainnet.
+    expect(config.arcAgentFactoryAddress).toBe(arcGeneratedRecord(5042)?.addresses.agentFactory ?? '');
+    expect(config.arcAgentFactoryAddress).not.toBe(TESTNET_FACTORY);
+  });
+
+  it('NODE_ENV never moves Arc: production with no tier stays on Arc testnet', async () => {
+    const { config } = await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '84532' });
+    expect(config).toMatchObject({ arcChainId: 5042002, arcRpcUrl: 'https://arc-testnet.drpc.org', arcAgentFactoryAddress: TESTNET_FACTORY });
+    expect(config.cctp).toMatchObject({ mainnet: false, arcChainId: 5042002 });
+    const testnet = await load({ SETTLEMENT_TIER: 'testnet', NODE_ENV: 'production' });
+    expect(testnet.config.arcChainId).toBe(5042002);
+  });
+
+  it('ARC_CHAIN_ID=5042 alone moves Arc and CCTP to mainnet; the Base escrow can stay on Sepolia', async () => {
+    const { config, arcGeneratedRecord } = await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '84532', ARC_CHAIN_ID: '5042' });
+    expect(config).toMatchObject({ arcChainId: 5042, baseChainId: 84532, baseRpcUrl: 'https://sepolia.base.org' });
+    expect(config.cctp).toMatchObject({
+      mainnet: true,
+      arcChainId: 5042,
+      // CCTP's Base leg is Base mainnet, apart from the Sepolia escrow's RPC.
+      baseRpcUrl: 'https://mainnet.base.org',
+      baseUsdcAddress: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+    });
+    expect(config.arcAgentFactoryAddress).toBe(arcGeneratedRecord(5042)?.addresses.agentFactory ?? '');
+  });
+
+  // The one default that moves for production: CCTP's Arc leg reads through
+  // ARC_RPC_URL (the same network) unless CCTP_ARC_RPC_URL names another.
+  it("reads CCTP's Arc leg through ARC_RPC_URL unless CCTP_ARC_RPC_URL is set", async () => {
+    const env = { NODE_ENV: 'production', BASE_CHAIN_ID: '84532', ARC_RPC_URL: 'https://arc-testnet.example/key' };
+    expect((await load(env)).config.cctp.arcRpcUrl).toBe('https://arc-testnet.example/key');
+    expect((await load({ ...env, CCTP_ARC_RPC_URL: 'https://cctp-arc.example' })).config.cctp.arcRpcUrl).toBe('https://cctp-arc.example');
+  });
+
+  it('refuses a CCTP chain id that is not a number while bridging is on', async () => {
+    const { assertBootConfig } = await load({ NODE_ENV: 'development', CCTP_ENABLED: 'true', CCTP_POLYGON_CHAIN_ID: 'polygon' });
+    expect(() => assertBootConfig()).toThrow(/1 fatal problem/);
+    expect(errored.join('\n')).toMatch(/CCTP_POLYGON_CHAIN_ID=polygon is not a chain id\./);
+  });
+
+  it('refuses ARC_CHAIN_ID off the tier', async () => {
+    const { assertBootConfig } = await load({ SETTLEMENT_TIER: 'testnet', NODE_ENV: 'development', ARC_CHAIN_ID: '5042' });
+    expect(() => assertBootConfig()).toThrow(/1 fatal problem/);
+    expect(errored.join('\n')).toMatch(/ARC_CHAIN_ID=5042 is mainnet, but SETTLEMENT_TIER=testnet expects 5042002/);
+  });
+
+  it('refuses a CCTP Arc leg on another network than the escrow', async () => {
+    const { assertBootConfig } = await load({ NODE_ENV: 'development', CCTP_ENABLED: 'true', ARC_CHAIN_ID: '5042', CCTP_ARC_CHAIN_ID: '5042002' });
+    expect(() => assertBootConfig()).toThrow(/1 fatal problem/);
+    expect(errored.join('\n')).toMatch(
+      /CCTP's Arc leg is chain 5042002 \(CCTP_ARC_CHAIN_ID\) and tasks settle on Arc chain 5042 \(ARC_CHAIN_ID\); both must be Arc mainnet \(5042\)/,
+    );
+    // Bridging off, the CCTP settings are unused.
+    const off = await load({ NODE_ENV: 'development', ARC_CHAIN_ID: '5042', CCTP_ARC_CHAIN_ID: '5042002' });
+    expect(() => off.assertBootConfig()).not.toThrow();
+    // Left to its default, the leg follows ARC_CHAIN_ID.
+    const followed = await load({ NODE_ENV: 'development', CCTP_ENABLED: 'true', ARC_CHAIN_ID: '5042' });
+    expect(() => followed.assertBootConfig()).not.toThrow();
+  });
+
+  it('warns when production reads Arc mainnet through the public RPC', async () => {
+    const env = { NODE_ENV: 'production', BASE_CHAIN_ID: '84532', ARC_CHAIN_ID: '5042', ARC_ESCROW_ADDRESS: '0x1111111111111111111111111111111111111111' };
+    (await load(env)).assertBootConfig();
+    expect(warned.join('\n')).toMatch(/Arc mainnet is read through the public RPC https:\/\/rpc\.mainnet\.arc\.io, the default/);
+    warned.length = 0;
+    (await load({ ...env, ARC_RPC_URL: 'https://arc-mainnet.example/key' })).assertBootConfig();
+    expect(warned.join('\n')).not.toMatch(/public RPC/);
   });
 });
 
