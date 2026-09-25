@@ -33,6 +33,7 @@ import { arcDeployFeeTerms, verifyArcDeployFee, claimArcDeployFee, markArcDeploy
 import { discoverModels, ProviderModelsError } from '../services/providerModels.js';
 import { eciesEncrypt } from '../services/crypto.js';
 import { callerWallets } from '../services/callerWallets.js';
+import { loadAgentReadiness } from '../services/agentReadiness.js';
 import { nativeWeiToTokenUnits, normalizeSettlementAmount, pricingUnit } from '../services/settlementUnits.js';
 import { disconnectSocketsForToken } from '../services/socket.js';
 import { clientErrorMessage, safeErrorMessage } from '../middleware/errorHandler.js';
@@ -572,6 +573,16 @@ agentsRouter.get('/:id/logs/json', requireAuth, async (req: AuthRequest, res) =>
   if (!agent) return;
   const history = await getAgentLogs(req.params.id);
   res.json({ success: true, data: history });
+});
+
+// GET /api/v1/agents/:id/readiness — whether the agent's worker is taking
+// tasks and, if not, why: its last heartbeat report (services/agentReadiness).
+// Owner-only, since a model provider's error can echo part of an API key.
+// readiness is null while the worker is stopped or has not reported yet.
+agentsRouter.get('/:id/readiness', requireAuth, async (req: AuthRequest, res) => {
+  const agent = await authorizeOwner(req, res, req.params.id);
+  if (!agent) return;
+  res.json({ success: true, data: { readiness: await loadAgentReadiness(agent.id) } });
 });
 
 // Usage telemetry (LLM tokens + estimated cost per model).
