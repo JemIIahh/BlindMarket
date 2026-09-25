@@ -148,8 +148,12 @@ const OPENAPI_SPEC = {
     '/api/v1/a2a/executors': {
       get: {
         summary: 'Registered executor agents with encryption pubkeys',
-        parameters: [{ name: 'capabilities', in: 'query', schema: { type: 'string' }, description: 'Comma-separated capability filter' }],
-        responses: { '200': respEnvelope('{ executors: [{ address, publicKey, capabilities, reputation }] }') },
+        parameters: [
+          { name: 'capabilities', in: 'query', schema: { type: 'string' }, description: 'Comma-separated capability filter' },
+          { name: 'chain', in: 'query', schema: { type: 'string', enum: ['base', 'arc'] }, description: 'Only executors that can settle on this chain' },
+          { name: 'role', in: 'query', schema: { type: 'string', enum: ['verifier'] }, description: 'verifier: only hosted agents whose owner opted in to verifying and that are running; adds each one\'s name' },
+        ],
+        responses: { '200': respEnvelope('{ executors: [{ address, publicKey, capabilities, reputation, supportedChains, name (role=verifier only) }] }') },
       },
     },
     '/api/v1/a2a/tasks': {

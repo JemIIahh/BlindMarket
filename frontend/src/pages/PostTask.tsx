@@ -60,7 +60,7 @@ export default function PostTask() {
   // The posting chain's token and unit, read per render: these used to be
   // module-level constants, evaluated when the chunk loaded and never again,
   // so the page never saw the backend's answer.
-  useSettlement();
+  const { postingChain } = useSettlement();
   const TOKEN = getMarketplaceTokenAddress();
   const PAYMENT_DECIMALS = getPaymentDecimals();
   const PAYMENT_SYMBOL = getPaymentSymbol();
@@ -104,10 +104,10 @@ export default function PostTask() {
     criteriaForbidden: '',
     criteriaPassThreshold: '60',
   });
-  // Registered agents the poster can designate as a verifier. Fetched from the
-  // public executors list (no auth needed) — we need each agent's publicKey to
-  // ECIES-wrap the brief key to the chosen verifier.
-  const [verifiers, setVerifiers] = useState<Array<{ address: string; publicKey: string; capabilities: string[]; reputation: number }>>([]);
+  // Agents the poster can designate as a verifier: those whose owner opted in,
+  // that are running, and that settle on the posting chain (role=verifier).
+  // We need each one's publicKey to ECIES-wrap the brief key to it.
+  const [verifiers, setVerifiers] = useState<Array<{ address: string; publicKey: string; capabilities: string[]; reputation: number; name?: string | null }>>([]);
   // Pure A2A surface — every task posted from this UI is an agent-targeted
   // task that auto-verifies on submission. The executor toggle and
   // verification-mode picker are removed; we hardcode the values that drive
@@ -147,17 +147,17 @@ export default function PostTask() {
     trackEvent('post_task_view');
   }, []);
 
-  // Load the list of registered agents for the verifier picker (agent-verify
-  // mode). Authed route — skip while signed out (the picker just shows none)
-  // instead of 401ing on every visit to this page.
+  // Load the agents that will verify on the posting chain, for the verifier
+  // picker (agent-verify mode). Every other agent would be refused at post.
+  // Skipped while signed out (the picker just shows none).
   useEffect(() => {
     if (!isAuthenticated) return;
-    authedGet<{ executors: Array<{ address: string; publicKey: string; capabilities: string[]; reputation: number }> }>(
-      '/api/v1/a2a/executors',
+    authedGet<{ executors: Array<{ address: string; publicKey: string; capabilities: string[]; reputation: number; name?: string | null }> }>(
+      `/api/v1/a2a/executors?role=verifier&chain=${encodeURIComponent(postingChain)}`,
     )
       .then((r) => setVerifiers(r.executors ?? []))
       .catch(() => { /* picker stays empty; poster can use Auto */ });
-  }, [isAuthenticated]);
+  }, [isAuthenticated, postingChain]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -881,12 +881,12 @@ export default function PostTask() {
                           .filter(v => v.publicKey && v.address.toLowerCase() !== address?.toLowerCase())
                           .map(v => (
                             <option key={v.address} value={v.address}>
-                              {v.address.slice(0, 10)}… · rep {v.reputation}
+                              {v.name || 'Unnamed agent'} · {v.address.slice(0, 6)}…{v.address.slice(-4)} · rep {v.reputation}
                             </option>
                           ))}
                       </select>
                       {verifiers.filter(v => v.publicKey && v.address.toLowerCase() !== address?.toLowerCase()).length === 0 && (
-                        <p className="mt-1 text-xs text-ink-3">No other registered agents to verify yet — register one or use Auto.</p>
+                        <p className="mt-1 text-xs text-ink-3">No agents are taking verification jobs right now. Use Auto, or turn on "Verify other posters' tasks" for one of your agents.</p>
                       )}
                     </div>
                     <FormField label="Acceptance criteria (optional)" hint="What 'correct' means — keep it generic to protect task privacy.">
