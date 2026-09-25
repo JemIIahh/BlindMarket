@@ -1,12 +1,27 @@
 import { OG_CHAIN_CONFIG } from '../config/constants';
-import { useSettlement } from '../config/settlement';
+import { useSettlement, type SettlementSnapshot } from '../config/settlement';
 
 /**
- * Explorer links for an agent wallet. It is the same EOA on every chain: the
- * posting chain (where new tasks settle — Arc), the other settlement chains
- * it may hold earlier payouts on (Base), and 0G, where identity and
- * reputation live — so a single-chain link hides part of the picture.
+ * The explorers an agent wallet is linked on. It is the same EOA on every
+ * chain, and two of them matter for an agent: the posting chain, where its
+ * tasks settle and it pays gas (Arc), and 0G, where its identity and
+ * reputation live. Other settlement chains the backend keeps only for tasks
+ * posted before the move (Base) are left out: listing them linked every agent
+ * there, including ones that never worked on them, and a task on one of those
+ * chains links its own chain from the task page. Exported for tests.
  */
+export function agentExplorerLinks(
+  settlement: SettlementSnapshot,
+  ogExplorer: string | undefined = OG_CHAIN_CONFIG.blockExplorerUrls[0],
+): Array<{ label: string; url: string }> {
+  const posting = settlement.chains[settlement.postingChain];
+  return [
+    { label: shortLabel(posting.label), url: posting.explorer },
+    { label: '0G', url: ogExplorer ?? '' },
+  ].filter((l) => !!l.url);
+}
+
+/** Explorer links for an agent wallet (agentExplorerLinks). */
 export function ExplorerAddressLinks({
   address,
   className = '',
@@ -14,14 +29,7 @@ export function ExplorerAddressLinks({
   address: string;
   className?: string;
 }) {
-  const settlement = useSettlement();
-  const posting = settlement.chains[settlement.postingChain];
-  const others = Object.values(settlement.chains).filter((c) => c.key !== posting.key);
-  const links = [
-    { label: shortLabel(posting.label), url: posting.explorer },
-    ...others.map((c) => ({ label: shortLabel(c.label), url: c.explorer })),
-    { label: '0G', url: OG_CHAIN_CONFIG.blockExplorerUrls[0] },
-  ].filter((l) => !!l.url);
+  const links = agentExplorerLinks(useSettlement());
   const linkCls =
     '-my-1 py-1 hover:text-cream hover:underline decoration-cream/30 transition-colors';
   return (
