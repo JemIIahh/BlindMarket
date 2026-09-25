@@ -10,6 +10,10 @@
  *   arc:events:escrow              → <chainId>:<escrow> these keys belong to
  *                                     (see escrowFingerprint)
  *
+ * The `arc:` prefix is chainScope('arc'): it is `arc` on Arc testnet, where these
+ * keys have always lived, and `arc@<chainId>` on any other network, so a
+ * move to another network starts from an empty index.
+ *
  * All writes are idempotent, so at-least-once delivery from the poll loop is
  * safe. hash2id is first-writer-wins (SET NX): a later TaskCreated reusing a
  * live task's hash must not repoint it (see indexTaskCreated).
@@ -28,14 +32,17 @@ import { backgroundWritesAllowed } from './deploymentIdentity.js';
 import { handleDisputeResolved, retryParkedDisputes } from './disputeListener.js';
 import { checkEscrowFingerprint } from './escrowFingerprint.js';
 import { config } from '../config.js';
+import { chainScope } from './chainScope.js';
 
 // ── Redis keys ──────────────────────────────────────────────────────────────
 
+// Under the network's scope (chainScope), so a move to another Arc network
+// starts from an empty index instead of reading this one's.
 const KEY = {
-  hash2id: (hash: string) => `arc:hash2id:${hash.toLowerCase()}`,
-  id2hash: (taskId: bigint | string) => `arc:id2hash:${String(taskId)}`,
-  checkpoint: 'arc:events:checkpoint',
-  disputeCheckpoint: 'arc:events:dispute-checkpoint',
+  hash2id: (hash: string) => `${chainScope('arc')}:hash2id:${hash.toLowerCase()}`,
+  id2hash: (taskId: bigint | string) => `${chainScope('arc')}:id2hash:${String(taskId)}`,
+  get checkpoint() { return `${chainScope('arc')}:events:checkpoint`; },
+  get disputeCheckpoint() { return `${chainScope('arc')}:events:dispute-checkpoint`; },
 };
 
 // ── Polling config ──────────────────────────────────────────────────────────

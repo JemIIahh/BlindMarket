@@ -5,13 +5,18 @@ import { describe, it, expect, vi } from 'vitest';
 // their own schedule — after this file's few milliseconds of tests are over —
 // and vitest fails the whole run with "Closing rpc while onUserConsoleLog was
 // pending" whenever the log lands during teardown (seen in CI).
-vi.mock('./neonDb.js', () => ({ getPool: vi.fn() }));
-vi.mock('./a2aStore.js', () => ({}));
+// What the feed reads: the open tasks, and their shadow-log rows.
+const feed = vi.hoisted(() => ({ open: [] as unknown[], rows: [] as unknown[] }));
+vi.mock('./neonDb.js', () => ({ getPool: vi.fn(async () => ({ query: async () => ({ rows: feed.rows }) })) }));
+vi.mock('./a2aStore.js', () => ({ listOpenTasks: vi.fn(async () => feed.open) }));
 vi.mock('./taskChain.js', () => ({ resolveCachedTaskByHash: vi.fn() }));
 vi.mock('./escrow.js', () => ({}));
-vi.mock('../config.js', () => ({ config: {} }));
+// Arc testnet and Base Sepolia: the networks the chains run on (chainScope).
+vi.mock('../config.js', () => ({
+  config: { arcChainId: 5042002, baseChainId: 84532, demandGapSimThreshold: 0.55, demandGapMinAgeMs: 10 * 60 * 1000 },
+}));
 
-import { computeDemandGaps, type DemandShadowRow, type OpenTaskInfo } from './demandFeed.js';
+import { computeDemandGaps, demandFeed, type DemandShadowRow, type OpenTaskInfo } from './demandFeed.js';
 
 const NOW = 1_800_000_000_000; // fixed clock
 const OPTS = { simThreshold: 0.55, minAgeMs: 10 * 60 * 1000, now: NOW };
@@ -83,5 +88,25 @@ describe('computeDemandGaps (the Wanted board selector)', () => {
     // bad timestamp dropped; missing similarity treated as no-candidates
     expect(gaps.map((g) => g.taskHash)).toEqual(['0xnosim']);
     expect(gaps[0].bestFit).toBeNull();
+  });
+});
+
+describe('demandFeed', () => {
+  // A task listed on a network its chain has since moved off can't be taken
+  // on this one (chainScope.onCurrentNetwork): the open feed hides it, and so
+  // must the board.
+  it('leaves out tasks listed on a network their chain has moved off', async () => {
+    const listed = (taskId: string, network: { chain: string; chainId?: number }) => ({
+      meta: { taskId, targetExecutorType: 'agent', requiredCapabilities: [], ...network },
+      state: { taskId, status: 'open' },
+    });
+    feed.open = [
+      listed('0xcurrent', { chain: 'arc', chainId: 5042002 }),
+      listed('0xbefore', { chain: 'arc' }), // listed before chainId existed: Arc testnet
+      listed('0xmoved', { chain: 'arc', chainId: 5042 }),
+    ];
+    const hourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    feed.rows = ['0xcurrent', '0xbefore', '0xmoved'].map((hash) => row(hash, 0.2, { created_at: hourAgo }));
+    expect((await demandFeed()).map((g) => g.taskHash).sort()).toEqual(['0xbefore', '0xcurrent']);
   });
 });

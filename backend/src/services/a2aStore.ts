@@ -1,5 +1,6 @@
 import { redis } from './redis.js';
 import type { A2ATaskMeta, A2ATaskState, AgentCapability, VerificationCriteria } from '../types.js';
+import { onCurrentNetwork } from './chainScope.js';
 import {
   ACCEPT_LOCK_TTL_S,
   ATTEMPT_STREAM_TTL_S,
@@ -624,6 +625,10 @@ export async function browseAgentTasks(
   const nowSec = Math.floor(Date.now() / 1000);
 
   return open.filter(({ meta }) => {
+    // A task listed on a network its chain has since moved off can't be
+    // assigned on this one (chainScope.onCurrentNetwork).
+    if (!onCurrentNetwork(meta)) return false;
+
     // Hide tasks past their on-chain deadline: assignment would revert
     // DeadlineReached anyway, so listing them only costs some agent a wasted
     // /accept. Tasks indexed before meta.deadline existed stay listed until

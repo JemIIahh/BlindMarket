@@ -12,14 +12,14 @@
 
 import { redis } from './redis.js';
 import type { TaskChain } from './taskChain.js';
+import { chainScope } from './chainScope.js';
 
-/** Fingerprint key per chain, next to that indexer's other keys. A new chain
- *  should put its chain id in its key prefix, so a testnet and a mainnet
- *  backend never share keys in the first place. */
-export const FINGERPRINT_KEY: Record<TaskChain, string> = {
-  base: 'base:events:escrow',
-  arc: 'arc:events:escrow',
-};
+/** Fingerprint key for a chain, next to that indexer's other keys and under
+ *  the same network scope (chainScope), so a testnet and a mainnet backend
+ *  never share keys in the first place. */
+export function fingerprintKey(chain: TaskChain, chainId?: number): string {
+  return `${chainScope(chain, chainId)}:events:escrow`;
+}
 
 const RECHECK_MS = 60_000;
 
@@ -49,7 +49,7 @@ export async function checkEscrowFingerprint(
   }
   if (now - state.checkedAt < RECHECK_MS) return;
 
-  const key = FINGERPRINT_KEY[chain];
+  const key = fingerprintKey(chain, chainId);
   const expected = `${chainId}:${escrowAddress.toLowerCase()}`;
   try {
     const written = await redis.set(key, expected, 'NX');

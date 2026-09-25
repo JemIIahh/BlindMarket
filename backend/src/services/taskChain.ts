@@ -11,6 +11,7 @@ import { getBaseTaskIdByHash, forceBaseTick, seedBaseTaskIdMapping } from './bas
 import { getArcTaskIdByHash, forceArcTick, seedArcTaskIdMapping } from './arcEscrowEvents.js';
 import { getMeta } from './a2aStore.js';
 import { isSettlementChainKey, postingChain, settlementChainConfig, type SettlementChainKey } from './settlementChains.js';
+import { onCurrentNetwork } from './chainScope.js';
 
 /** A settlement chain, as a task's escrow names it (services/settlementChains.ts). */
 export type TaskChain = SettlementChainKey;
@@ -56,23 +57,32 @@ const TASK_INDEX: { readonly [K in TaskChain]: TaskIndex } = {
 
 const SEARCH_ORDER = Object.keys(TASK_INDEX) as TaskChain[];
 
+/** A task listed on a network its chain has since moved off (onCurrentNetwork). */
+const RETIRED = 'retired' as const;
+
 /**
  * The chain /tasks/index recorded for a task, or null for rows indexed before
  * the field existed (or when the meta can't be read, which falls back to
- * searching every chain, as before).
+ * searching every chain, as before). RETIRED when the task was listed on a
+ * network its chain has since moved off: that escrow is not the one this
+ * backend reads, so the task resolves to nothing rather than to whatever the
+ * new network's escrow holds under the same id.
  */
-async function recordedChain(taskHash: string): Promise<TaskChain | null> {
+async function recordedChain(taskHash: string): Promise<TaskChain | null | typeof RETIRED> {
   try {
-    return (await getMeta(taskHash))?.chain ?? null;
+    const meta = await getMeta(taskHash);
+    if (!onCurrentNetwork(meta)) return RETIRED;
+    return meta?.chain ?? null;
   } catch {
     return null;
   }
 }
 
 /** Which indexes to consult for a task, given its recorded chain, in search
- *  order. Exact matches only: a chain this code doesn't know searches
- *  nothing, rather than every legacy index. */
-function indexesFor(chain: TaskChain | null): TaskChain[] {
+ *  order. Exact matches only: a chain this code doesn't know, or a retired
+ *  task, searches nothing, rather than every legacy index. */
+function indexesFor(chain: TaskChain | null | typeof RETIRED): TaskChain[] {
+  if (chain === RETIRED) return [];
   return SEARCH_ORDER.filter((c) => (chain === null || chain === c) && TASK_INDEX[c].enabled());
 }
 

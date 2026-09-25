@@ -192,6 +192,11 @@ export interface A2ATaskMeta {
   // accept assigns the task on-chain, after which it cannot be released).
   // Absent on rows indexed before this field existed — treat as unknown.
   chain?: SettlementChainKey;
+  // The network that chain ran on when the task was listed (e.g. 5042002 for
+  // Arc testnet, 5042 for Arc mainnet). A task from a network the chain has
+  // since moved off is retired: chainScope.onCurrentNetwork. Absent on rows
+  // indexed before it existed, which were listed on the chain's first network.
+  chainId?: number;
   // Lowercased EOA address of a poster-designated verifier agent
   // (verificationMode='agent'). The brief AES key is ECIES-wrapped to this
   // address too (it appears in wrappedKeys), so the verifier can decrypt the

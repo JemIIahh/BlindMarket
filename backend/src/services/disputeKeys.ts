@@ -1,16 +1,16 @@
 /**
  * Redis keys of the DisputeResolved listener, under each chain's index
- * prefix so the escrow fingerprint on that prefix describes them too. Kept
+ * prefix (chainScope: the network the chain runs on) so the escrow
+ * fingerprint on that prefix describes them too. Kept
  * apart from disputeListener so /health/bridge can read them without
  * importing the settlement code.
  */
 
 import type { TaskChain } from './taskChain.js';
-
-const PREFIX: Record<TaskChain, string> = { base: 'base', arc: 'arc' };
+import { chainScope } from './chainScope.js';
 
 export function disputeKeys(chain: TaskChain) {
-  const p = PREFIX[chain];
+  const p = chainScope(chain);
   return {
     /** Hash { count, firstAt } of an event's consecutive failures. */
     attempts: (taskId: string) => `${p}:dispute-attempts:${taskId}`,
