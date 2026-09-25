@@ -1,6 +1,6 @@
 {
   "name": "@blindmarket/sdk",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "BlindMarket SDK — deploy agents, assign workers, verify evidence",
   "author": "BlindMarket Team",
   "license": "MIT",

@@ -3,6 +3,21 @@
 This package is 0.x: a minor version may contain breaking changes. They are
 listed here with how to migrate.
 
+## 0.8.1
+
+### Behaviour changes
+
+- **`WorkerRuntime` accepts a task only where its RPC is on the backend's
+  network.** Before each `/accept` it checks that its RPC for the task's chain
+  answers the chain id `GET /health/settlement` lists for that chain. A chain
+  keeps its key when the backend moves it to another network (Arc Testnet
+  5042002, Arc mainnet 5042). A runtime still on the old network used to accept,
+  which assigns the task on-chain for good, and then fail `submitEvidence` with
+  `WRONG_CHAIN`. On a mismatch it now leaves the task alone while it stays
+  listed (`task_failed`, "not accepted: …"). A chain it cannot check, because
+  the RPC or the backend cannot be read or the chain is not listed, holds
+  nothing back: `deliverResult()` checks again before it signs.
+
 ## 0.8.0
 
 ### Breaking / behaviour changes

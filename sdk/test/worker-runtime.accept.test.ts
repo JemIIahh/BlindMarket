@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { WorkerRuntime, type TaskExecutionInfo, type WorkerRuntimeEvent } from '../src/executor/index.js';
-import { AgentCap } from '../src/types.js';
+import { AgentCap, type A2APublicTaskMeta } from '../src/types.js';
 
 /**
  * The /accept failure paths of WorkerRuntime, against a stubbed fetch. The
@@ -31,7 +31,11 @@ const ACCEPTED = { taskId: TASK_ID, status: 'accepted', rootHash: ROOT_HASH, pri
 interface Counters { accepts: Record<string, number>; bids: Record<string, number>; browses: number }
 
 /** `accept(taskId, n)` answers the n-th /accept for that task; everything after accept succeeds. */
-function stubBackend(accept: (taskId: string, n: number) => Response, listing: () => unknown[] = () => []): Counters {
+function stubBackend(
+  accept: (taskId: string, n: number) => Response,
+  listing: () => unknown[] = () => [],
+  settlement: unknown = { postingChain: 'arc', chains: [] },
+): Counters {
   const c: Counters = { accepts: {}, bids: {}, browses: 0 };
   const idOf = (u: string) => /\/a2a\/tasks\/([^/]+)\//.exec(u)?.[1] ?? '';
   vi.stubGlobal('fetch', vi.fn(async (url: string | URL) => {
@@ -42,7 +46,7 @@ function stubBackend(accept: (taskId: string, n: number) => Response, listing: (
       c.accepts[id] = (c.accepts[id] ?? 0) + 1;
       return accept(id, c.accepts[id]);
     }
-    if (u.includes('/health/settlement')) return ok({ postingChain: 'arc', chains: [] });
+    if (u.includes('/health/settlement')) return ok(settlement);
     if (u.includes('/storage/')) return ok({ rootHash: ROOT_HASH, blob: Buffer.from('brief').toString('base64') });
     if (u.includes('/submit')) return ok({ taskId: idOf(u), status: 'submitted', unsignedSubmitEvidence: null });
     if (u.includes('/finalize')) return ok({ taskId: idOf(u), status: 'awaiting_verification' });
@@ -78,9 +82,9 @@ function mkRuntime(config: Record<string, unknown> = {}): { runtime: WorkerRunti
 }
 
 /** What browse() does for one listed task, awaited. */
-async function run(r: Internals, taskId = TASK_ID): Promise<void> {
+async function run(r: Internals, taskId = TASK_ID, meta?: A2APublicTaskMeta): Promise<void> {
   r.executions.set(taskId, { taskId, status: 'bidding', startedAt: Date.now() } satisfies TaskExecutionInfo);
-  await r.executeTask(taskId, { taskId, status: 'open' });
+  await r.executeTask(taskId, { taskId, status: 'open' }, meta);
 }
 
 const open = (taskId: string) => ({ meta: { taskId, chain: '0g' }, state: { taskId, status: 'open' } });
@@ -318,6 +322,55 @@ describe('WorkerRuntime /accept — 403 NEEDS_WRAP', () => {
     expect(r.retries.has(TASK_ID)).toBe(true);
     await r.browse();
     expect(r.retries.has(TASK_ID)).toBe(false);
+  });
+});
+
+describe('WorkerRuntime /accept — only where its RPC is on the network the backend settles', () => {
+  const ARC_RPC = 'http://arc.invalid';
+  const ARC_TASK: A2APublicTaskMeta = { taskId: TASK_ID, chain: 'arc' };
+  /** GET /health/settlement listing Arc as `chainId`: 5042 for Arc mainnet, under the same key as Arc Testnet. */
+  const settlementOn = (chainId: number) => ({
+    postingChain: 'arc',
+    chains: [{ chain: 'arc', chainId, escrowAddress: `0x${'a5'.repeat(20)}`, token: { kind: 'erc20', address: `0x36${'0'.repeat(38)}`, symbol: 'USDC', decimals: 6 } }],
+  });
+  const rpcServes = (chainId: bigint) =>
+    vi.spyOn(ethers.JsonRpcProvider.prototype, 'getNetwork').mockResolvedValue(new ethers.Network('stub', chainId));
+
+  it('does not accept an Arc task while rpcUrls.arc serves Arc Testnet and the backend settles Arc on mainnet', async () => {
+    const c = stubBackend(() => ok({ ...ACCEPTED, chain: 'arc' }), () => [], settlementOn(5042));
+    rpcServes(5042002n);
+    const { r, events } = mkRuntime({ rpcUrls: { arc: ARC_RPC } });
+    await run(r, TASK_ID, ARC_TASK);
+
+    expect(c.accepts[TASK_ID]).toBeUndefined(); // an accept assigns on-chain for good
+    expect(r.executions.has(TASK_ID)).toBe(false);
+    expect(failures(events)).toHaveLength(1);
+    expect(failures(events)[0].error).toMatch(/serves chain 5042002, but the backend settles arc on chain 5042\b/);
+    // Only a new rpcUrls changes that: the task is left alone while it stays listed.
+    expect(r.retries.get(TASK_ID).notBefore).toBeGreaterThan(Date.now() + 3_600_000);
+  });
+
+  it('accepts it once the RPC is on that network', async () => {
+    const c = stubBackend(() => ok({ ...ACCEPTED, chain: 'arc' }), () => [], settlementOn(5042));
+    rpcServes(5042n);
+    const { r } = mkRuntime({ rpcUrls: { arc: ARC_RPC } });
+    await run(r, TASK_ID, ARC_TASK);
+    expect(c.accepts[TASK_ID]).toBe(1);
+    expect(r.executions.get(TASK_ID).status).toBe('completed');
+  });
+
+  it('holds nothing back when the chain cannot be checked: delivery checks it again before signing', async () => {
+    // The backend does not list the chain, then the RPC cannot be read.
+    const c = stubBackend(() => ok({ ...ACCEPTED, chain: 'arc' }));
+    const { r } = mkRuntime({ rpcUrls: { arc: ARC_RPC } });
+    await run(r, TASK_ID, ARC_TASK);
+    expect(c.accepts[TASK_ID]).toBe(1);
+
+    const c2 = stubBackend(() => ok({ ...ACCEPTED, chain: 'arc' }), () => [], settlementOn(5042));
+    vi.spyOn(ethers.JsonRpcProvider.prototype, 'getNetwork').mockRejectedValue(new Error('connect ECONNREFUSED'));
+    const { r: r2 } = mkRuntime({ rpcUrls: { arc: ARC_RPC } });
+    await run(r2, TASK_ID, ARC_TASK);
+    expect(c2.accepts[TASK_ID]).toBe(1);
   });
 });
 

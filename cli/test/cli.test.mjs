@@ -29,6 +29,8 @@ const { buildProgram } = await import('../dist/program.js');
 const SETTLEMENT = JSON.parse(readFileSync(new URL('../../fixtures/prod/health-settlement.json', import.meta.url), 'utf-8')).data;
 const FEE_TERMS = { ...JSON.parse(readFileSync(new URL('../../fixtures/prod/deploy-fee.json', import.meta.url), 'utf-8')).data, chainId: 5042002 };
 const ARC = SETTLEMENT.chains.find((c) => c.chain === 'arc');
+/** Arc mainnet: a backend with ARC_CHAIN_ID=5042 names it 'arc' too, with the same USDC address. */
+const ARC_MAINNET_ID = 5042;
 const ESCROW = getAddress(ARC.escrowAddress);
 const USDC = getAddress(ARC.token.address);
 const TREASURY = getAddress(FEE_TERMS.recipient);
@@ -100,11 +102,16 @@ after(() => rpc.close());
 let calls;
 let answers;
 let whoami;
+/** What /health/settlement and /deploy-fee answer: production's, unless a test moves the backend. */
+let settlement;
+let feeTerms;
 beforeEach(() => {
   chain = { served: ARC.chainId, allowance: 0n, sent: [] };
   calls = [];
   answers = {};
   whoami = OWNER.address;
+  settlement = SETTLEMENT;
+  feeTerms = FEE_TERMS;
   for (const f of ['state.json', 'config.json', 'keystore.json']) rmSync(join(process.env.BLIND_CONFIG_DIR, f), { force: true });
 });
 
@@ -118,15 +125,15 @@ globalThis.fetch = async (url, init = {}) => {
   const json = (data) => ({ ok: true, status: 200, json: async () => ({ success: true, data }) });
   const queued = answers[path]?.shift();
   if (queued) return queued;
-  if (path === '/health/settlement') return json(SETTLEMENT);
+  if (path === '/health/settlement') return json(settlement);
   if (path === '/api/v1/api-keys/whoami') return json({ address: whoami, addresses: [whoami] });
   if (path.startsWith('/api/v1/a2a/executors')) return json({ executors: [] });
   if (path === '/api/v1/storage/upload') return json({ rootHash: '0x' + 'cd'.repeat(32) });
-  if (path === '/api/v1/tasks') return json({ unsignedTx: { to: ESCROW, data: createTaskData(body), from: OWNER.address }, chain: 'arc', chainId: ARC.chainId });
+  if (path === '/api/v1/tasks') return json({ unsignedTx: { to: ESCROW, data: createTaskData(body), from: OWNER.address }, chain: 'arc', chainId: settlement.chains.find((c) => c.chain === 'arc').chainId });
   if (path === '/api/v1/tasks/8/cancel') return json({ unsignedTx: { to: ESCROW, data: cancelData(8) }, chain: 'arc', chainId: ARC.chainId });
   if (path === '/api/v1/tasks/8/confirm-tx') return json({ confirmed: 1 });
   if (path === '/api/v1/a2a/tasks/index') return json({ taskHash: body.taskHash, onChainTaskId: '51', indexed: true });
-  if (path === '/api/v1/agents/deploy-fee') return json(FEE_TERMS);
+  if (path === '/api/v1/agents/deploy-fee') return json(feeTerms);
   if (path === '/api/v1/agents/deploy/validate') return json({ valid: true });
   if (path === '/api/v1/agents/deploy') {
     if (!body.feeTxHash) return failWith(402, 'NO_DEPLOY_CREDIT');
@@ -243,6 +250,52 @@ test('a deploy that fails after paying keeps the payment, and the retry pays not
   assert.equal(chain.sent.length, 1, 'paid once');
   assert.equal(posted('/api/v1/agents/deploy').at(-1).body.feeTxHash, chain.sent[0].hash);
   assert.deepEqual(state().pendingFees, {});
+});
+
+/** The backend (and the stub node) on Arc mainnet from here on: same key and USDC, another chain id. */
+function onMainnet() {
+  chain.served = ARC_MAINNET_ID;
+  settlement = { ...SETTLEMENT, chains: SETTLEMENT.chains.map((c) => (c.chain === 'arc' ? { ...c, chainId: ARC_MAINNET_ID, tier: 'mainnet' } : c)) };
+  feeTerms = { ...FEE_TERMS, chainId: ARC_MAINNET_ID };
+}
+
+test('post-task on Arc mainnet funds the escrow there', async () => {
+  onMainnet();
+  const text = await blind('post-task', '--instructions', 'Summarise this paragraph in one sentence.', '--reward', '2.5', '--public', '--yes');
+  assert.deepEqual(chain.sent.map((t) => [t.to, t.chainId]), [[USDC, BigInt(ARC_MAINNET_ID)], [ESCROW, BigInt(ARC_MAINNET_ID)]]);
+  assert.match(text, /Posted public task on arc/);
+});
+
+test('a fee saved on Arc Testnet is not offered to Arc mainnet: the deploy there pays there', async () => {
+  answers['/api/v1/agents/deploy'] = [failWith(402, 'NO_DEPLOY_CREDIT'), failWith(500, 'INTERNAL_ERROR')];
+  await assert.rejects(
+    blind('deploy-agent', '--name', 'a', '--instructions', 'Research and cite.', '--provider', 'openai', '--model', 'gpt-4o-mini', '--yes'),
+    (e) => e.code === 'INTERNAL_ERROR',
+  );
+  const testnetFee = chain.sent[0].hash;
+
+  onMainnet();
+  const text = await blind('deploy-agent', '--name', 'a', '--instructions', 'Research and cite.', '--provider', 'openai', '--model', 'gpt-4o-mini', '--yes');
+  assert.doesNotMatch(text, /already paid/);
+  assert.equal(chain.sent.length, 2);
+  assert.equal(chain.sent[1].chainId, BigInt(ARC_MAINNET_ID));
+  assert.equal(posted('/api/v1/agents/deploy').at(-1).body.feeTxHash, chain.sent[1].hash);
+  assert.deepEqual(Object.values(state().pendingFees), [testnetFee], 'still saved for Arc Testnet');
+});
+
+test('with no BLINDMARKET_ARC_RPC_URL, Arc signs over the public RPC of the network the backend names', async () => {
+  const { signingClient } = await import('../dist/client.js');
+  const configured = process.env.BLINDMARKET_ARC_RPC_URL;
+  delete process.env.BLINDMARKET_ARC_RPC_URL;
+  try {
+    // The SDK keeps its executor config on a TypeScript-private field.
+    const arcRpc = async () => (await signingClient()).bb.executor.rpcUrls.arc;
+    assert.equal(await arcRpc(), 'https://rpc.testnet.arc.io');
+    onMainnet();
+    assert.equal(await arcRpc(), 'https://rpc.mainnet.arc.io');
+  } finally {
+    process.env.BLINDMARKET_ARC_RPC_URL = configured;
+  }
 });
 
 test('deploy-agent needs the provider key in the environment, and never pays for a refused request', async () => {

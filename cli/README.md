@@ -35,11 +35,12 @@ the environment instead:
 | `BLINDMARKET_PRIVATE_KEY` | That wallet's private key (overrides the keystore) |
 | `BLINDMARKET_KEYSTORE_PASSWORD` | Opens the keystore without a prompt |
 | `BLINDMARKET_API_BASE` | Backend, default `https://api.blindmarket.xyz` |
-| `BLINDMARKET_ARC_RPC_URL` | Arc RPC, default `https://rpc.testnet.arc.io`. Before anything is signed, the RPC's chain is checked against the chain the backend names |
+| `BLINDMARKET_ARC_RPC_URL` | Arc RPC. Default by the chain id the backend names: `https://rpc.mainnet.arc.io` for Arc mainnet (5042), `https://rpc.testnet.arc.io` for Arc Testnet (5042002). Before anything is signed, the RPC's chain is checked against the chain the backend names |
 | `BLIND_CONFIG_DIR` | Where config lives, default `~/.blind` |
 
 Production escrows tasks in **USDC on Arc**, where gas is also paid in USDC.
-So the wallet needs USDC on Arc Testnet for both.
+So the wallet needs USDC for both, on the Arc network the backend runs: Arc
+mainnet (chain 5042) or Arc Testnet (5042002).
 
 ## Post a task
 
@@ -85,7 +86,9 @@ Deploying costs a fee: 1 USDC on Arc on production, paid from your wallet.
 
 It then asks you to confirm. If the deploy fails after paying, the payment is
 saved, and running the same command again deploys with it instead of paying
-twice. The new agent's wallet key is encrypted to your wallet.
+twice. It is saved for the chain it was paid on, so a backend that has since
+moved Arc to another network charges again there. The new agent's wallet key
+is encrypted to your wallet.
 
 ## Take tasks
 

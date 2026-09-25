@@ -7,10 +7,12 @@ import { CliError } from './errors.js';
 /**
  * Public RPCs by chain id, for a chain with no BLINDMARKET_<CHAIN>_RPC_URL.
  * A wrong one cannot sign on the wrong network: the SDK checks the RPC's
- * chain id against the one the backend names before anything is sent.
+ * chain id against the one the backend names before anything is sent. Arc
+ * Testnet and Arc mainnet are both the chain `arc`: the id picks the RPC.
  */
 const PUBLIC_RPC: Readonly<Record<number, string>> = {
   5042002: 'https://rpc.testnet.arc.io',
+  5042: 'https://rpc.mainnet.arc.io',
   84532: 'https://sepolia.base.org',
   8453: 'https://mainnet.base.org',
   16602: 'https://evmrpc-testnet.0g.ai',

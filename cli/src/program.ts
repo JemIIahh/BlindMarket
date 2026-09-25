@@ -213,7 +213,9 @@ export function buildProgram(): Command {
       };
       await step('Checking the deploy…', () => bb.validateDeploy(params));
       const terms = await bb.getDeployFee();
-      const saved = pendingFee(cfg.apiBase, signer.address);
+      // A payment is saved for the chain id it was made on.
+      const feeChainId = terms.required ? terms.chainId : undefined;
+      const saved = pendingFee(cfg.apiBase, signer.address, feeChainId);
       if (saved) {
         out(`Using the deploy fee already paid in ${saved} (an earlier attempt), so nothing is paid again.`);
       } else if (terms.required && terms.method === 'transfer') {
@@ -226,18 +228,18 @@ export function buildProgram(): Command {
       try {
         agent = await step('Deploying…', () => bb.deployAgent(
           { ...params, ...(saved ? { feeTxHash: saved } : {}) },
-          { payFee: true, maxFeeRaw, onFeePaid: (hash) => setPendingFee(cfg.apiBase, signer.address, hash) },
+          { payFee: true, maxFeeRaw, onFeePaid: (hash) => setPendingFee(cfg.apiBase, signer.address, feeChainId, hash) },
         ));
       } catch (e) {
         // A payment that can never pay for a deploy is forgotten, so the next attempt pays anew.
         const err = e as ApiError;
         const spent = ['DEPLOY_FEE_ALREADY_USED', 'DEPLOY_FEE_REVERTED'].includes(err.code ?? '')
           || (err.code === 'DEPLOY_FEE_NOT_PAID' && err.reason !== 'PAYER_NOT_LINKED');
-        if (spent) setPendingFee(cfg.apiBase, signer.address, null);
+        if (spent) setPendingFee(cfg.apiBase, signer.address, feeChainId, null);
         else if (err.feeTxHash) out(`The fee is paid (${err.feeTxHash}) and saved: run the same command again and it deploys without paying twice.`);
         throw e;
       }
-      setPendingFee(cfg.apiBase, signer.address, null);
+      setPendingFee(cfg.apiBase, signer.address, feeChainId, null);
       out(`${agent.alreadyDeployed ? 'Already deployed' : 'Deployed'} agent ${agent.id} (${agent.name})`);
       out(`  wallet:  ${agent.walletAddress}`);
       if (agent.feeTxHash) out(`  fee tx:  ${agent.feeTxHash}`);

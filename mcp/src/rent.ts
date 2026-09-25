@@ -129,6 +129,18 @@ function settlementFields(s: Settlement, payFrom: string): SpendFields {
   };
 }
 
+/** How the network a spend was recorded on differs from the one `s` settles
+ *  on now, or null. A chain key keeps its name when the backend moves it to
+ *  another network (Arc Testnet 5042002 and Arc mainnet 5042 are both 'arc'),
+ *  so the record's chain id decides. A record written before records kept one
+ *  cannot be checked. */
+function networkChange(record: SpendRecord, s: Settlement): string | null {
+  if (s.chainId === undefined || record.chainId === s.chainId) return null;
+  return record.chainId === undefined
+    ? `was recorded without a chain id, so it cannot be checked against ${s.mode} on chain ${s.chainId}`
+    : `started on ${s.mode} chain ${record.chainId}, but the backend's ${s.mode} is chain ${s.chainId} now`;
+}
+
 export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: WalletCtx | null): { settlement: () => Promise<Settlement> } {
   /** Every authenticated call funnels through api(), so this is the one place
    *  the missing-key case needs handling. Without it the caller gets the
@@ -452,6 +464,14 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
         e.code = 'SETTLEMENT_CHANGED';
         throw e;
       }
+      // Nor on another network under the same key: the spend was quoted and
+      // confirmed for the one it started on.
+      const moved = networkChange(record, s);
+      if (moved) {
+        const e: ApiError = new Error(`spend ${record.idempotencyKey} ${moved}. Nothing was funded yet (stage ${record.stage}): start a new spend with a new idempotencyKey.`);
+        e.code = 'SETTLEMENT_CHANGED';
+        throw e;
+      }
       const refused = await notPostingChain(s);
       if (refused) throw refused;
       const nonce = isErc20Settlement(s) ? await ensureAllowance(s, record) : undefined;
@@ -701,6 +721,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
           // The quoted price, which the binding above just matched.
           amountWei: priceRaw.toString(),
           settlement: s.mode,
+          chainId: s.chainId,
           token: isErc20Settlement(s) ? s.token.address : ZERO_TOKEN,
           durationSecs: 3600,
           createdAt: new Date().toISOString(),
@@ -850,6 +871,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
           requiredCapabilities: capabilities ?? [],
           amountWei: amountWei.toString(),
           settlement: s.mode,
+          chainId: s.chainId,
           token: isErc20Settlement(s) ? s.token.address : ZERO_TOKEN,
           durationSecs,
           createdAt: new Date().toISOString(),
@@ -1056,6 +1078,20 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       e.code = 'SETTLEMENT_CHANGED';
       throw e;
     }
+    // Nor on another network under the same key, where the task id names
+    // another task. Only a refund that would still sign needs a chain id on
+    // record; a sent one waits for its own transaction.
+    const moved = networkChange(record, s);
+    if (moved && (record.stage === 'created' || record.chainId !== undefined)) {
+      const e: ApiError = new Error(
+        `refund ${record.idempotencyKey} ${moved}. ` +
+        (record.stage === 'created'
+          ? 'Nothing was sent: quote the refund again with a new idempotencyKey.'
+          : `Its transaction ${record.txHash} was sent on chain ${record.chainId}.`),
+      );
+      e.code = 'SETTLEMENT_CHANGED';
+      throw e;
+    }
 
     if (record.stage === 'created') {
       const route = record.kind === 'cancel' ? 'cancel' : 'timeout';
@@ -1216,6 +1252,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
           kind: 'cancel',
           stage: 'created',
           settlement: s.mode,
+          chainId: s.chainId,
           taskId: Number(detail.taskId),
           taskHash: detail.taskHash,
           amountWei: detail.amount,
@@ -1304,6 +1341,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
           kind: 'timeout',
           stage: 'created',
           settlement: s.mode,
+          chainId: s.chainId,
           taskId: Number(detail.taskId),
           fromStatus: status,
           taskHash: detail.taskHash,

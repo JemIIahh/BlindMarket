@@ -28,6 +28,7 @@ const { registerRentTools } = await import('../dist/rent.js');
 const { registerWalletTools } = await import('../dist/wallet.js');
 const { registerMarketTools } = await import('../dist/tools.js');
 const { discoverSettlement } = await import('../dist/settlement.js');
+const { putSpend } = await import('../dist/state.js');
 
 const PROD_BRIDGE = JSON.parse(readFileSync(new URL('../../fixtures/prod/health-bridge.json', import.meta.url), 'utf-8'));
 const PROD_SETTLEMENT = JSON.parse(readFileSync(new URL('../../fixtures/prod/health-settlement.json', import.meta.url), 'utf-8'));
@@ -36,6 +37,9 @@ assert.equal(ARC.relayChain, null, 'the fixture is production: Arc has no relay'
 const ESCROW = getAddress(ARC.escrowAddress);
 const USDC = getAddress(ARC.token.address);
 const ARC_ID = ARC.chainId;
+/** Arc mainnet (ARC_CHAIN_ID=5042): the same chain key and USDC address, its own escrow. */
+const ARC_MAINNET_ID = 5042;
+const MAINNET_ESCROW = getAddress('0x' + 'a5'.repeat(20));
 
 const OWNER = Wallet.createRandom();
 const HASH = '0x' + 'ee'.repeat(32);
@@ -98,7 +102,7 @@ before(async () => {
           case 'eth_estimateGas': result = '0x30000'; break;
           case 'eth_call': {
             const { to, data } = params[0];
-            if (to.toLowerCase() === ESCROW.toLowerCase()) {
+            if ([ESCROW, MAINNET_ESCROW].some((a) => a.toLowerCase() === to.toLowerCase())) {
               const taskId = Number(ESCROW_READ.decodeFunctionData('getTask', data)[0]);
               result = ESCROW_READ.encodeFunctionResult('getTask', [[
                 OWNER.address, OWNER.address, USDC, 2_500_000n, HASH, '0x' + '00'.repeat(32),
@@ -453,4 +457,107 @@ test('complete_task refuses a submitEvidence for another result, a native transf
   }
   assert.equal(chain.sent.length, 0);
   assert.equal(chain.tasks[9], 1);
+});
+
+// ── Arc mainnet: the same chain key on another network ──────────────────────
+//
+// A backend with ARC_CHAIN_ID=5042 still calls the chain 'arc', with the same
+// USDC address. Only the chain id tells Arc mainnet from Arc Testnet.
+
+const mainnetBridge = () => ({
+  ...PROD_BRIDGE.data,
+  chains: PROD_BRIDGE.data.chains.map((c) => (c.chain === 'arc'
+    ? { ...c, chainId: ARC_MAINNET_ID, tier: 'mainnet', escrowAddress: MAINNET_ESCROW.toLowerCase() }
+    : c)),
+});
+
+/** The backend (and the stub node) on Arc mainnet from here on. */
+function onMainnet() {
+  chain.served = ARC_MAINNET_ID;
+  overrides['/health/bridge'] = mainnetBridge;
+  overrides['/api/v1/tasks'] = (body) => ({ unsignedTx: { to: MAINNET_ESCROW, data: createTaskData(body), from: OWNER.address }, chain: 'arc', chainId: ARC_MAINNET_ID });
+  overrides['/api/v1/tasks/8/cancel'] = () => ({ unsignedTx: { to: MAINNET_ESCROW, data: cancelData(8) }, chain: 'arc', chainId: ARC_MAINNET_ID });
+}
+
+test('on Arc mainnet it signs over an RPC serving 5042, and refuses one still on Arc Testnet', async () => {
+  onMainnet();
+  const s = await discover({ BLINDMARKET_ARC_RPC_URL: rpcUrl }, OWNER.address);
+  assert.equal(s.payment, 'local-erc20');
+  assert.equal(s.mode, 'arc');
+  assert.equal(s.chainId, ARC_MAINNET_ID);
+  assert.equal(s.escrowAddress, MAINNET_ESCROW);
+  chain.served = ARC_ID;
+  await assert.rejects(
+    discover({ BLINDMARKET_ARC_RPC_URL: rpcUrl }, OWNER.address),
+    (e) => e.code === 'WRONG_RPC' && /serves chain 5042002, not arc \(5042\)/.test(e.message),
+  );
+});
+
+test('post_task on Arc mainnet: approve + createTask signed for chain 5042', async () => {
+  onMainnet();
+  const t = tools();
+  const args = { instructions: 'Summarise this paragraph in one sentence.', amount: '2.5', idempotencyKey: 'arc-mainnet-post-1', privacy: 'public' };
+  const { quote } = parse(await t.post_task(args));
+  assert.equal(quote.settlement, 'arc');
+  parse(await t.post_task({ ...args, confirm: true, quoteId: quote.quoteId }));
+  assert.deepEqual(chain.sent.map((tx) => [tx.to, tx.chainId]), [[USDC, BigInt(ARC_MAINNET_ID)], [MAINNET_ESCROW, BigInt(ARC_MAINNET_ID)]]);
+  assert.deepEqual(ERC20.decodeFunctionData('approve', chain.sent[0].data).map(String), [MAINNET_ESCROW, '2500000']);
+});
+
+test('a post confirmed on Arc Testnet is not funded on Arc mainnet by a retry after the backend moved', async () => {
+  const args = { instructions: 'Summarise this paragraph in one sentence.', amount: '2.5', idempotencyKey: 'arc-moved-post-1', privacy: 'public' };
+  const t = tools();
+  const { quote } = parse(await t.post_task(args));
+  // The approve goes out on Arc Testnet, then the build fails.
+  overrides['/api/v1/tasks'] = () => { throw new TypeError('fetch failed'); };
+  errorOf(await t.post_task({ ...args, confirm: true, quoteId: quote.quoteId }));
+  assert.deepEqual(chain.sent.map((tx) => [tx.to, tx.chainId]), [[USDC, BigInt(ARC_ID)]]);
+
+  onMainnet();
+  const error = errorOf(await tools().post_task(args));
+  assert.equal(error.code, 'SETTLEMENT_CHANGED');
+  assert.match(error.message, /chain 5042002/);
+  assert.match(error.message, /chain 5042\b/);
+  assert.equal(chain.sent.length, 1, 'nothing signed on Arc mainnet');
+});
+
+test('a refund confirmed on Arc Testnet is not sent on Arc mainnet by a retry after the backend moved', async () => {
+  const t = tools();
+  const { quote } = parse(await t.cancel_task({ task: '8', idempotencyKey: 'arc-moved-cancel-1' }));
+  overrides['/api/v1/tasks/8/cancel'] = () => { throw new TypeError('fetch failed'); };
+  errorOf(await t.cancel_task({ task: '8', idempotencyKey: 'arc-moved-cancel-1', confirm: true, quoteId: quote.quoteId }));
+  assert.equal(chain.sent.length, 0);
+
+  // Task 8 on Arc mainnet is another task, possibly another of this wallet's.
+  onMainnet();
+  const error = errorOf(await tools().cancel_task({ task: '8', idempotencyKey: 'arc-moved-cancel-1' }));
+  assert.equal(error.code, 'SETTLEMENT_CHANGED');
+  assert.equal(chain.sent.length, 0);
+  assert.equal(chain.tasks[8], 0);
+});
+
+test('a refund sent on Arc Testnet is not waited for on Arc mainnet', async () => {
+  const now = new Date().toISOString();
+  putSpend({
+    idempotencyKey: 'arc-moved-cancel-2', kind: 'cancel', stage: 'sent', settlement: 'arc', chainId: ARC_ID,
+    taskId: 8, taskHash: HASH, amountWei: '2500000', txHash: '0x' + '77'.repeat(32), createdAt: now, updatedAt: now,
+  });
+  onMainnet();
+  const error = errorOf(await tools().cancel_task({ task: '8', idempotencyKey: 'arc-moved-cancel-2' }));
+  assert.equal(error.code, 'SETTLEMENT_CHANGED');
+  assert.match(error.message, /was sent on chain 5042002/);
+  assert.equal(chain.sent.length, 0);
+});
+
+test('a spend recorded without its chain id does not sign again where the backend names one', async () => {
+  const now = new Date().toISOString();
+  putSpend({
+    idempotencyKey: 'arc-unkeyed-post-1', kind: 'post', stage: 'approved', taskHash: '0x' + '12'.repeat(32), rootHash: '0x' + 'cd'.repeat(32),
+    privacy: 'public', publicBrief: 'Summarise this paragraph in one sentence.', verificationMode: 'auto', requiredCapabilities: [],
+    amountWei: '2500000', settlement: 'arc', token: USDC, durationSecs: 86400, createdAt: now, updatedAt: now,
+  });
+  const error = errorOf(await tools().post_task({ instructions: 'Summarise this paragraph in one sentence.', amount: '2.5', idempotencyKey: 'arc-unkeyed-post-1' }));
+  assert.equal(error.code, 'SETTLEMENT_CHANGED');
+  assert.match(error.message, /without a chain id/);
+  assert.equal(chain.sent.length, 0);
 });
