@@ -15,7 +15,7 @@ vi.mock('./redis.js', () => ({
   redis: { get: vi.fn(), set: vi.fn(), pipeline: vi.fn(), smembers: vi.fn(), eval: vi.fn() },
 }));
 
-import { projectPublicMeta, projectPublicState, projectPublicEntry } from './a2aStore.js';
+import { projectCriteria, projectPublicMeta, projectPublicState, projectPublicEntry } from './a2aStore.js';
 
 const fullMeta = {
   taskId: '0xtask',
@@ -123,5 +123,57 @@ describe('projectPublicEntry', () => {
     expect(pub.meta.hasEncryptedBrief).toBe(true);
     expect('assignError' in pub.state).toBe(false);
     expect('verifyError' in pub.state).toBe(false);
+  });
+});
+
+describe('auto-verify answer key (audit run 1, C08)', () => {
+  const withAnswer = { ...fullMeta, verificationCriteria: { expected_answer: '7391', pass_threshold: 60 } };
+
+  it('drops expected_answer and says one exists', () => {
+    const pub = projectPublicMeta(withAnswer as any);
+    expect(pub.verificationCriteria).toEqual({ pass_threshold: 60, has_expected_answer: true });
+    expect(JSON.stringify(pub)).not.toContain('7391');
+    // The stored meta is left alone: autoVerify still reads the real answer.
+    expect(withAnswer.verificationCriteria.expected_answer).toBe('7391');
+  });
+
+  it('leaves criteria without an answer as they are, and omits absent criteria', () => {
+    const pub = projectPublicMeta({ ...fullMeta, verificationCriteria: { min_length: 20 } } as any);
+    expect(pub.verificationCriteria).toEqual({ min_length: 20 });
+    expect('verificationCriteria' in projectPublicMeta(fullMeta as any)).toBe(false);
+  });
+
+  it('projectCriteria does the same for the executor self view', () => {
+    expect(projectCriteria({ expected_answer: '42', contains_keywords: ['x'] })).toEqual({ contains_keywords: ['x'], has_expected_answer: true });
+    expect(projectCriteria(undefined)).toBeUndefined();
+  });
+});
+
+describe('verdict text on non-public tasks (audit run 1, C09)', () => {
+  const verdict = {
+    passed: false,
+    score: 40,
+    reasons: ['The brief asked for BRIEF-QUOTE-4410 but the output said OUTPUT-QUOTE-5520'],
+    breakdown: [{ name: 'judge', score: 0.4, weight: 1, reason: 'quotes the brief' }],
+  };
+  const state = { taskId: '0xtask', status: 'failed' as const, verificationResult: verdict };
+
+  it('keeps only passed and score on a private task', () => {
+    const pub = projectPublicState(state as any, { privacy: undefined });
+    expect(pub.verificationResult).toEqual({ passed: false, score: 40, reasons: [] });
+    expect(JSON.stringify(pub)).not.toContain('QUOTE');
+  });
+
+  it('treats a missing meta as private', () => {
+    expect(projectPublicState(state as any).verificationResult).toEqual({ passed: false, score: 40, reasons: [] });
+  });
+
+  it('keeps the full verdict on a public task', () => {
+    expect(projectPublicState(state as any, { privacy: 'public' }).verificationResult).toEqual(verdict);
+  });
+
+  it('projectPublicEntry uses the entry meta', () => {
+    const entry = projectPublicEntry({ meta: fullMeta as any, state: state as any });
+    expect(entry.state.verificationResult?.reasons).toEqual([]);
   });
 });
