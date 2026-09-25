@@ -1,6 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { Contract, Interface, JsonRpcProvider, formatUnits, parseUnits } from 'ethers';
+import { Contract, Interface, JsonRpcProvider, formatUnits, keccak256, parseUnits, toUtf8Bytes, type Result } from 'ethers';
 import type { McpConfig } from './config.js';
 import type { WalletCtx } from './wallet.js';
 import { aesDecrypt, aesEncrypt, derivePublicKeyHex, eciesDecrypt, eciesEncrypt, generateAesKey, sha256Hex } from './crypto.js';
@@ -40,6 +40,19 @@ const ESCROW_READ_ABI = [
  */
 
 const ZERO_TOKEN = '0x0000000000000000000000000000000000000000';
+
+// The only calls the backend builds for this process to sign or relay:
+// backend/src/services/escrow.ts (createTask, cancelTask, claimTimeout,
+// submitEvidence). verifyTarget checks where a transaction goes, but the
+// escrow address comes from the same backend, so a hostile answer could name
+// the token as the escrow and hand over an approve; the call, its arguments
+// and its value are what bound it (security audit run 1, C41).
+const ESCROW_CALLS = new Interface([
+  'function createTask(bytes32 taskHash, address token, uint256 amount, string category, string locationZone, uint256 duration)',
+  'function submitEvidence(uint256 taskId, bytes32 evidenceHash)',
+  'function cancelTask(uint256 taskId)',
+  'function claimTimeout(uint256 taskId)',
+]);
 const GAS_LIMIT = 1000000n; // matches the canonical rent script
 // Auto-verify releases the payment, so the bar can't be "one character" — but
 // 40 made a correct 30-character URL unpayable. 20 is the platform floor
@@ -61,6 +74,36 @@ function fail(code: string, message: string) {
 }
 
 interface ApiError extends Error { code?: string }
+
+/**
+ * Throw TX_MISMATCH, before anything is signed or relayed, unless the
+ * backend's unsigned `tx` is exactly `fn` (canonically encoded) with
+ * arguments `argsOk` accepts, and names no value other than `value`. Only
+ * `to` and `data` are ever forwarded, so a value the backend names is never
+ * sent; a wrong one still means the transaction is not the one asked for.
+ */
+function assertEscrowCall(
+  tx: { data?: unknown; value?: unknown },
+  fn: 'createTask' | 'submitEvidence' | 'cancelTask' | 'claimTimeout',
+  argsOk: (args: Result) => boolean,
+  what: string,
+  value = 0n,
+): void {
+  const data = typeof tx.data === 'string' ? tx.data.toLowerCase() : '';
+  let ok = false;
+  try {
+    const args = ESCROW_CALLS.decodeFunctionData(fn, data);
+    ok = ESCROW_CALLS.encodeFunctionData(fn, args).toLowerCase() === data && argsOk(args);
+  } catch { /* another function, or not ABI data at all */ }
+  if (ok && tx.value != null) {
+    try { ok = BigInt(tx.value as string | number | bigint) === value; } catch { ok = false; }
+  }
+  if (!ok) {
+    const e: ApiError = new Error(`backend built ${what} that is not the ${fn} call this spend asked for (another function, other arguments, or a value). Nothing was sent.`);
+    e.code = 'TX_MISMATCH';
+    throw e;
+  }
+}
 
 const QUOTE_REQUIRED_MESSAGE = 'Get a quote first (call without confirm), then re-call with confirm=true and the returned quoteId (quotes are single-use and expire after 10 minutes)';
 
@@ -441,6 +484,17 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
         throw e;
       }
       await verifyTarget(s, unsignedTx.to, 'createTask');
+      // And it must be this spend's createTask: its task hash, token, amount
+      // and duration (the amount is what was approved above, or the value sent below).
+      const amount = BigInt(record.amountWei!);
+      const token = isErc20Settlement(s) ? s.token.address : ZERO_TOKEN;
+      assertEscrowCall(unsignedTx, 'createTask', (a) =>
+        String(a[0]).toLowerCase() === String(record.taskHash).toLowerCase()
+        && String(a[1]).toLowerCase() === token.toLowerCase()
+        && a[2] === amount
+        && a[4] === 'global'
+        && a[5] === BigInt(record.durationSecs ?? 3600),
+      'createTask', isErc20Settlement(s) ? 0n : amount);
 
       if (isErc20Settlement(s)) {
         const { hash, isUserOp, gas } = await sendErc20(s, { to: unsignedTx.to, data: unsignedTx.data }, nonce);
@@ -1008,6 +1062,8 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       // broadcasts on, stop here — relaying a 0G refund onto another chain
       // lands on an address with no escrow and burns the gas.
       await verifyTarget(s, unsignedTx.to, `${route}Task`);
+      // And exactly this refund, for this task, with no value.
+      assertEscrowCall(unsignedTx, record.kind === 'cancel' ? 'cancelTask' : 'claimTimeout', (a) => a[0] === BigInt(taskId), `${route}Task`);
 
       if (isErc20Settlement(s)) {
         const { hash, isUserOp, gas } = await sendErc20(s, { to: unsignedTx.to, data: unsignedTx.data });
@@ -1398,6 +1454,18 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
           }
           const tx = sub.unsignedSubmitEvidence;
           await verifyTarget(s, tx.to, 'submitEvidence');
+          // A zero-value submitEvidence for this task, committing THIS output
+          // (keccak256 of the JSON /submit hashes, backend/src/routes/a2a.ts).
+          // /rebroadcast re-sends the first stored output, so there only the
+          // task is checked.
+          const evidence = keccak256(toUtf8Bytes(JSON.stringify({ output })));
+          assertEscrowCall(tx, 'submitEvidence', (a) =>
+            a[0] === BigInt(detail.taskId) && (healed || String(a[1]).toLowerCase() === evidence), 'submitEvidence');
+          // The chain it is signed for is this process's, never the backend's.
+          const pinned = s.chainId ?? walletCtx?.chainId;
+          if (tx.chainId !== undefined && pinned !== undefined && Number(tx.chainId) !== pinned) {
+            return fail('CHAIN_MISMATCH', `The backend built submitEvidence for chain ${tx.chainId}, but this process settles ${s.mode} on chain ${pinned}. Nothing was sent.`);
+          }
           if (s.payment === 'relay-erc20') {
             const sent = await relaySend(s, { to: tx.to, data: tx.data });
             submitTxHash = sent.hash;
@@ -1421,12 +1489,13 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
               return fail('WALLET_MISMATCH', `The backend assigned this task to ${tx.from} (the wallet behind BLINDMARKET_API_KEY), but BLINDMARKET_PRIVATE_KEY is ${walletCtx!.wallet.address}. submitEvidence is worker-only — set the private key of ${tx.from}.`);
             }
             // 0G: sign locally, exactly as fundAndIndex does for createTask.
-            // The backend pins chainId onto the tx; ethers refuses to send it
-            // if this wallet's provider is on a different network — the guard
-            // against a Base tx reaching a 0G signer.
+            // The chain id is pinned from this process's settlement (checked
+            // against the backend's above); ethers refuses to send it if this
+            // wallet's provider is on a different network — the guard against
+            // a Base tx reaching a 0G signer.
             const tx0g = await walletCtx!.wallet.sendTransaction({
               to: tx.to, data: tx.data, gasLimit: GAS_LIMIT,
-              ...(tx.chainId !== undefined ? { chainId: tx.chainId } : {}),
+              ...(pinned !== undefined ? { chainId: pinned } : {}),
             });
             submitTxHash = tx0g.hash;
             await tx0g.wait();

@@ -164,6 +164,15 @@ the fee changed, the call names another amount or task), refuses with
 single-use either way: get a new quote, check it, and confirm that one. The
 confirm's result reports the amount escrowed (`escrowed`) or the fee paid.
 
+The backend builds the escrow transactions this process signs (or hands to
+the relay): `createTask`, `cancelTask` / `claimTimeout` and `submitEvidence`.
+Each is decoded first and must be exactly the call the spend asked for (this
+task hash, token, amount and duration; this task id; this task and the
+evidence hash of the output being delivered) on the expected escrow, with no
+other value, or it is refused with `TX_MISMATCH` (`ESCROW_MISMATCH` for
+another target, `CHAIN_MISMATCH` for another chain id) and nothing is sent.
+Only `to` and `data` are forwarded.
+
 Every spend requires an `idempotencyKey`. Retries with the same key **resume**
 (created → funded → indexed stage machine persisted in
 `~/.blindmarket/mcp-state.json`) — a crash between the funding transaction and

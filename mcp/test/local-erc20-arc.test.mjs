@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Interface, JsonRpcProvider, Transaction, Wallet, getAddress } from 'ethers';
+import { Interface, JsonRpcProvider, Transaction, Wallet, getAddress, keccak256, toUtf8Bytes } from 'ethers';
 
 /**
  * Production posts every new task on Arc: a USDC (ERC-20) escrow the backend
@@ -48,6 +48,17 @@ const ESCROW_READ = new Interface([
   'function getTask(uint256) view returns (tuple(address agent,address worker,address token,uint256 amount,bytes32 taskHash,bytes32 evidenceHash,uint8 status,string category,string locationZone,uint256 createdAt,uint256 deadline,uint8 submissionAttempts))',
 ]);
 const FUTURE = BigInt(Math.floor(Date.now() / 1000) + 3600);
+
+/** What the real backend builds (backend/src/services/escrow.ts, routes/a2a.ts): the MCP signs nothing else. */
+const ESCROW_CALLS = new Interface([
+  'function createTask(bytes32 taskHash, address token, uint256 amount, string category, string locationZone, uint256 duration)',
+  'function submitEvidence(uint256 taskId, bytes32 evidenceHash)',
+  'function cancelTask(uint256 taskId)',
+]);
+const createTaskData = (b) => ESCROW_CALLS.encodeFunctionData('createTask', [b.taskHash, b.token, b.amount, 'general', b.locationZone, b.duration]);
+const cancelData = (id) => ESCROW_CALLS.encodeFunctionData('cancelTask', [BigInt(id)]);
+const submitData = (id, resultData) => ESCROW_CALLS.encodeFunctionData('submitEvidence', [BigInt(id), keccak256(toUtf8Bytes(JSON.stringify(resultData)))]);
+const callName = (data) => { try { return ESCROW_CALLS.parseTransaction({ data }).name; } catch { return null; } };
 
 /** What the stub chain holds, and every raw transaction it was sent. */
 let chain;
@@ -103,8 +114,8 @@ before(async () => {
             const tx = Transaction.from(params[0]);
             chain.sent.push(tx);
             if (tx.to.toLowerCase() === USDC.toLowerCase()) chain.allowance = ERC20.decodeFunctionData('approve', tx.data)[1];
-            if (tx.data === '0xca0ce1') chain.tasks[8] = 5;
-            if (tx.data === '0x5b5b') chain.tasks[9] = 2;
+            if (callName(tx.data) === 'cancelTask') chain.tasks[8] = 5;
+            if (callName(tx.data) === 'submitEvidence') chain.tasks[9] = 2;
             result = tx.hash;
             break;
           }
@@ -134,7 +145,10 @@ let backendCalls;
 let whoami;
 let bridgeDown;
 let indexAnswers;
+/** path → (body) => the backend's answer, in place of the default. */
+let overrides;
 beforeEach(() => {
+  overrides = {};
   resetChain();
   backendCalls = [];
   whoami = OWNER.address.toLowerCase();
@@ -151,6 +165,7 @@ globalThis.fetch = async (url, init = {}) => {
   const body = init.body ? JSON.parse(init.body) : undefined;
   backendCalls.push({ method: init.method ?? 'GET', path, body });
   const json = (data) => ({ ok: true, status: 200, json: async () => ({ success: true, data }) });
+  if (overrides[path]) return json(overrides[path](body));
   if (path === '/health/bridge') {
     if (bridgeDown) throw new TypeError('fetch failed');
     return json(PROD_BRIDGE.data);
@@ -160,11 +175,11 @@ globalThis.fetch = async (url, init = {}) => {
   if (path.startsWith('/api/v1/a2a/executors')) return json({ executors: [] });
   if (path === '/api/v1/a2a/register') return json({ agent: { address: whoami, supportedChains: body.supportedChains } });
   if (path === '/api/v1/storage/upload') return json({ rootHash: '0x' + 'cd'.repeat(32) });
-  if (path === '/api/v1/tasks') return json({ unsignedTx: { to: ESCROW, data: '0xc0ffee', from: OWNER.address }, chain: 'arc', chainId: ARC_ID });
+  if (path === '/api/v1/tasks') return json({ unsignedTx: { to: ESCROW, data: createTaskData(body), from: OWNER.address }, chain: 'arc', chainId: ARC_ID });
   if (path === `/api/v1/tasks/${HASH}`) return json({ taskId: '9', chain: 'arc' });
-  if (path === '/api/v1/tasks/8/cancel') return json({ unsignedTx: { to: ESCROW, data: '0xca0ce1' }, chain: 'arc', chainId: ARC_ID });
+  if (path === '/api/v1/tasks/8/cancel') return json({ unsignedTx: { to: ESCROW, data: cancelData(8) }, chain: 'arc', chainId: ARC_ID });
   if (path === '/api/v1/tasks/8/confirm-tx') return json({ confirmed: 1 });
-  if (path === `/api/v1/a2a/tasks/${HASH}/submit`) return json({ onChainTaskId: 9, evidenceHash: '0x01', chain: 'arc', unsignedSubmitEvidence: { to: ESCROW, data: '0x5b5b', from: OWNER.address, chainId: ARC_ID } });
+  if (path === `/api/v1/a2a/tasks/${HASH}/submit`) return json({ onChainTaskId: 9, evidenceHash: '0x01', chain: 'arc', unsignedSubmitEvidence: { to: ESCROW, data: submitData(9, body.resultData), from: OWNER.address, chainId: ARC_ID } });
   if (path === `/api/v1/a2a/tasks/${HASH}/finalize`) { chain.tasks[9] = 4; return json({ status: 'verified', verificationResult: { passed: true } }); }
   if (path === '/api/v1/a2a/tasks/index') return indexAnswers.shift() ?? json({ indexed: true });
   throw new Error('unexpected backend call ' + path);
@@ -255,7 +270,7 @@ test('post_task: quote in USDC, then approve + createTask signed locally for Arc
   assert.equal(approve.to, USDC);
   assert.deepEqual(ERC20.decodeFunctionData('approve', approve.data).map(String), [ESCROW, '2500000']);
   assert.equal(create.to, ESCROW);
-  assert.equal(create.data, '0xc0ffee');
+  assert.equal(create.data, createTaskData(backendCalls.find((c) => c.method === 'POST' && c.path === '/api/v1/tasks').body));
   assert.equal(create.nonce, approve.nonce + 1, 'createTask pinned to the nonce after the approve');
 
   const posted = backendCalls.find((c) => c.method === 'POST' && c.path === '/api/v1/tasks').body;
@@ -300,7 +315,7 @@ test('cancel_task reads the task from Arc and refunds with a local signature', a
   assert.equal(quote.settlement, 'arc');
   const done = parse(await t.cancel_task({ task: '8', idempotencyKey: 'arc-cancel-1', confirm: true, quoteId: quote.quoteId }));
   assert.equal(done.taskId, 8);
-  assert.deepEqual(chain.sent.map((tx) => [tx.to, tx.data, tx.chainId]), [[ESCROW, '0xca0ce1', BigInt(ARC_ID)]]);
+  assert.deepEqual(chain.sent.map((tx) => [tx.to, tx.data, tx.chainId]), [[ESCROW, cancelData(8), BigInt(ARC_ID)]]);
   assert.equal(chain.tasks[8], 5);
   // Built for this chain, and taken off the market once it landed.
   assert.deepEqual(backendCalls.find((c) => c.path === '/api/v1/tasks/8/cancel').body, { chain: 'arc' });
@@ -314,7 +329,7 @@ test('complete_task delivers on Arc with a local signature and reports the payou
   assert.equal(done.onChainStatus, 'Completed');
   assert.equal(done.paidTo, OWNER.address);
   assert.match(done.hint, /2\.5 USDC/);
-  assert.deepEqual(chain.sent.map((tx) => [tx.to, tx.data, tx.chainId]), [[ESCROW, '0x5b5b', BigInt(ARC_ID)]]);
+  assert.deepEqual(chain.sent.map((tx) => [tx.to, tx.data, tx.chainId]), [[ESCROW, submitData(9, { output: 'A one-sentence summary of the paragraph, as asked.' }), BigInt(ARC_ID)]]);
 });
 
 test('wallet_status reports the local wallet signing on Arc', async () => {
@@ -350,4 +365,59 @@ test('forced to 0G against a backend that posts on Arc, post_task refuses before
   assert.equal(error.code, 'NOT_POSTING_CHAIN');
   assert.match(error.message, /posts new tasks on arc/);
   assert.equal(backendCalls.some((c) => c.path === '/api/v1/storage/upload'), false, 'nothing uploaded, no hash claimed');
+});
+
+// ── Security audit run 1, C41: only the escrow call asked for is signed ─────
+
+const DEAD = '0x000000000000000000000000000000000000dEaD';
+const MAX = 2n ** 256n - 1n;
+
+test('cancel_task refuses a backend "refund" that is an approve or another task\'s cancel, with nothing signed', async () => {
+  const t = tools();
+  const cases = [
+    ['approve on the escrow', { to: ESCROW, data: ERC20.encodeFunctionData('approve', [DEAD, MAX]) }, 'TX_MISMATCH'],
+    ['another task', { to: ESCROW, data: cancelData(7) }, 'TX_MISMATCH'],
+    ['approve on the token', { to: USDC, data: ERC20.encodeFunctionData('approve', [DEAD, MAX]) }, 'ESCROW_MISMATCH'],
+  ];
+  for (const [i, [name, unsignedTx, code]] of cases.entries()) {
+    overrides['/api/v1/tasks/8/cancel'] = () => ({ unsignedTx, chain: 'arc', chainId: ARC_ID });
+    const key = `arc-c41-cancel-${i}`;
+    const { quote } = parse(await t.cancel_task({ task: '8', idempotencyKey: key }));
+    const error = errorOf(await t.cancel_task({ task: '8', idempotencyKey: key, confirm: true, quoteId: quote.quoteId }));
+    assert.equal(error.code, code, name);
+    assert.match(error.message, /Nothing was sent|expecting escrow/, name);
+  }
+  assert.equal(chain.sent.length, 0);
+  assert.equal(chain.tasks[8], 0);
+});
+
+test('post_task refuses a createTask for another amount than the one quoted and approved', async () => {
+  overrides['/api/v1/tasks'] = (body) => ({ unsignedTx: { to: ESCROW, data: createTaskData({ ...body, amount: '250000000' }) }, chain: 'arc', chainId: ARC_ID });
+  const t = tools();
+  const args = { instructions: 'Summarise this paragraph in one sentence.', amount: '2.5', idempotencyKey: 'arc-c41-post-1', privacy: 'public' };
+  const { quote } = parse(await t.post_task(args));
+  const error = errorOf(await t.post_task({ ...args, confirm: true, quoteId: quote.quoteId }));
+  assert.equal(error.code, 'TX_MISMATCH');
+  // Only the approve of the quoted 2.5 USDC went out (it precedes the build); no createTask.
+  assert.deepEqual(chain.sent.map((tx) => tx.to), [USDC]);
+  assert.deepEqual(ERC20.decodeFunctionData('approve', chain.sent[0].data).map(String), [ESCROW, '2500000']);
+  assert.equal(backendCalls.some((c) => c.path === '/api/v1/a2a/tasks/index'), false);
+});
+
+test('complete_task refuses a submitEvidence for another result, a native transfer, or another chain', async () => {
+  const submitPath = `/api/v1/a2a/tasks/${HASH}/submit`;
+  const output = 'A one-sentence summary of the paragraph, as asked.';
+  const cases = [
+    ['other result', { to: ESCROW, data: submitData(9, { output: 'not what this call delivered' }) }, 'TX_MISMATCH'],
+    ['other task', { to: ESCROW, data: submitData(8, { output }) }, 'TX_MISMATCH'],
+    ['native transfer', { to: DEAD, data: '0x', value: '5000000000000000000' }, 'ESCROW_MISMATCH'],
+    ['other chain', { to: ESCROW, data: submitData(9, { output }), chainId: 84532 }, 'CHAIN_MISMATCH'],
+  ];
+  for (const [name, unsignedSubmitEvidence, code] of cases) {
+    overrides[submitPath] = () => ({ onChainTaskId: 9, chain: 'arc', unsignedSubmitEvidence });
+    const error = errorOf(await tools().complete_task({ task: HASH, output }));
+    assert.equal(error.code, code, name);
+  }
+  assert.equal(chain.sent.length, 0);
+  assert.equal(chain.tasks[9], 1);
 });

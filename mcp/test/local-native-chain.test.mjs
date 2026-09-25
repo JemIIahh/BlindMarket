@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Interface } from 'ethers';
 
 /**
  * On 0G the local wallet pays, and the escrow ADDRESS is checked before every
@@ -25,8 +26,11 @@ beforeEach(() => {
   sent = [];
 });
 
-globalThis.fetch = async (url) => {
+const ESCROW_CALLS = new Interface(['function createTask(bytes32 taskHash, address token, uint256 amount, string category, string locationZone, uint256 duration)']);
+
+globalThis.fetch = async (url, init = {}) => {
   const path = String(url).replace(/^https?:\/\/[^/]+/, '');
+  const body = init.body ? JSON.parse(init.body) : undefined;
   const json = (data) => ({ ok: true, status: 200, json: async () => ({ success: true, data }) });
   if (path === '/health/bridge') {
     return json({
@@ -35,7 +39,10 @@ globalThis.fetch = async (url) => {
     });
   }
   if (path === '/api/v1/storage/upload') return json({ rootHash: '0x' + 'cd'.repeat(32) });
-  if (path === '/api/v1/tasks') return json({ unsignedTx: { to: OG_ESCROW, data: '0xc0ffee' }, chain: '0g', chainId: builtChainId });
+  if (path === '/api/v1/tasks') {
+    const data = ESCROW_CALLS.encodeFunctionData('createTask', [body.taskHash, body.token, body.amount, 'general', body.locationZone, body.duration]);
+    return json({ unsignedTx: { to: OG_ESCROW, data, value: body.amount }, chain: '0g', chainId: builtChainId });
+  }
   // A hash the backend resolves to a Base task.
   if (path === `/api/v1/tasks/${'0x' + 'ba'.repeat(32)}`) return json({ taskId: '5', taskHash: '0x' + 'ba'.repeat(32), status: 0, amount: '1000000', deadline: '9999999999', token: '0x' + '36'.repeat(20), decimals: 6, chain: 'base' });
   throw new Error('unexpected backend call ' + path);

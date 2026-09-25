@@ -180,6 +180,19 @@ The lower-level builders are unchanged: `createTask()`, `cancelTask()` and
 `claimTimeout()` return unsigned transactions, now with the `chain` and
 `chainId` to send them on.
 
+**What the client signs.** `postTask()`, `cancelAndRefund()`,
+`reclaimAfterTimeout()` and `deliverResult()` sign transactions the backend
+builds, so each one is decoded and checked first: it must be exactly the call
+asked for (`createTask` with this task hash, token, amount, zone and duration;
+`cancelTask` / `claimTimeout` for this task id; `submitEvidence` for this task,
+committing the result just sent) on the escrow `/health/settlement` lists for
+the chain, with no value (`postTask` sends the amount it computed on a native
+chain), and a refund must be on the chain you named. Only `to` and `data` are
+signed; gas, fee, nonce, type and chain id fields from the backend are dropped.
+Anything else throws before signing: `ESCROW_MISMATCH` (another target),
+`TX_MISMATCH` (another function or arguments, or a value), `CHAIN_MISMATCH`
+(another chain) or `CHAIN_UNKNOWN` (a chain with no listed escrow).
+
 ```ts
 const tasks = await bb.listTasks();
 const detail = await bb.getTask(taskId);
@@ -272,7 +285,9 @@ const { rootHash, wrappedKey, privacy } = accepted;
 // Deliver: /submit → sign + broadcast submitEvidence → /finalize.
 // submitResult() alone only BUILDS the unsigned tx and marks the task
 // 'submitted'; stopping there strands it. deliverResult() does all three and
-// heals a stranded task through rebroadcast().
+// heals a stranded task through rebroadcast(). It signs only a zero-value
+// submitEvidence on the task chain's escrow committing this result (see
+// "What the client signs" above).
 await bb.deliverResult(taskId, { output: 'Task completed successfully' });
 
 // Manual healing, if you drive submitResult()/finalize() yourself:
