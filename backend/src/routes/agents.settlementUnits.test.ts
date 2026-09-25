@@ -49,7 +49,8 @@ vi.mock('../services/agentStore.js', () => ({}));
 vi.mock('../services/serviceStore.js', () => ({ createService, updateService }));
 vi.mock('../services/skillStore.js', () => ({ incrementInstallCount: vi.fn(), getSkillBySlug: vi.fn(async () => null) }));
 vi.mock('../services/agentEmbedding.js', () => ({ recomputeForWalletBestEffort: vi.fn() }));
-vi.mock('../services/agentFactoryListener.js', () => ({ claimDeployCredit: vi.fn(), restoreDeployCredit: vi.fn() }));
+vi.mock('../services/agentFactoryListener.js', () => ({
+  markDeployCreditUsed: vi.fn(async () => undefined), claimDeployCredit: vi.fn(), restoreDeployCredit: vi.fn() }));
 vi.mock('../services/skillComposer.js', () => ({ buildInstalledSkill: vi.fn(), assertComposedSizeOk: vi.fn() }));
 
 const { agentsRouter } = await import('./agents.js');

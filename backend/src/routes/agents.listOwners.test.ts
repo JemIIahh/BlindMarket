@@ -35,7 +35,8 @@ vi.mock('../services/redis.js', () => ({ redis: { get: vi.fn(), set: vi.fn(), ex
 vi.mock('../services/serviceStore.js', () => ({}));
 vi.mock('../services/skillStore.js', () => ({ incrementInstallCount: vi.fn(), getSkillBySlug: vi.fn(async () => null) }));
 vi.mock('../services/agentEmbedding.js', () => ({ recomputeForWalletBestEffort: vi.fn() }));
-vi.mock('../services/agentFactoryListener.js', () => ({ claimDeployCredit: vi.fn(), restoreDeployCredit: vi.fn() }));
+vi.mock('../services/agentFactoryListener.js', () => ({
+  markDeployCreditUsed: vi.fn(async () => undefined), claimDeployCredit: vi.fn(), restoreDeployCredit: vi.fn() }));
 vi.mock('../services/skillComposer.js', () => ({ buildInstalledSkill: vi.fn(), assertComposedSizeOk: vi.fn() }));
 
 const { agentsRouter } = await import('./agents.js');

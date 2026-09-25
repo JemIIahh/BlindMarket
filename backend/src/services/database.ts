@@ -305,6 +305,17 @@ const migrations: Migration[] = [
           ELSE 0 END
         ELSE 0 END;`,
   },
+  {
+    // Mirror of Postgres migration 40 (19 is taken by another fix batch).
+    id: 20,
+    name: 'spent_deploy_payments',
+    sql: `CREATE TABLE IF NOT EXISTS spent_deploy_payments (
+      payment_key TEXT PRIMARY KEY,
+      owner TEXT NOT NULL,
+      agent_id TEXT,
+      claimed_at INTEGER NOT NULL
+    );`,
+  },
 ];
 
 /** One migration's SQL, for tests of what a migration does to existing rows. */

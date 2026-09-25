@@ -68,7 +68,7 @@ describe('migrations production has recorded', () => {
   });
 
   it('numbers this branch after it, ending with the nullable follow-up', () => {
-    expect(listMigrations().filter((m) => m.id >= 32)).toEqual([
+    expect(listMigrations().filter((m) => m.id >= 32 && m.id <= 36)).toEqual([
       { id: 32, name: 'agent_executors_supported_chains' },
       { id: 33, name: 'agent_executors_usdc_earnings' },
       { id: 34, name: 'credited_payouts' },

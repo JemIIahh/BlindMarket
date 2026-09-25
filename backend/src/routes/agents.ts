@@ -27,7 +27,7 @@ import { ethers } from 'ethers';
 import { chainRuntime } from '../services/chainRuntime.js';
 import { settlementChainConfigs, type SettlementChainKey } from '../services/settlementChains.js';
 import { config } from '../config.js';
-import { claimDeployCredit, restoreDeployCredit } from '../services/agentFactoryListener.js';
+import { claimDeployCredit, markDeployCreditUsed, restoreDeployCredit } from '../services/agentFactoryListener.js';
 import { arcDeployFeeTerms, verifyArcDeployFee, claimArcDeployFee, markArcDeployFeeUsed, releaseArcDeployFee } from '../services/deployFee.js';
 import { discoverModels, ProviderModelsError } from '../services/providerModels.js';
 import { eciesEncrypt } from '../services/crypto.js';
@@ -471,6 +471,12 @@ agentsRouter.post('/deploy', requireAuth, deployLimiter, async (req: AuthRequest
     if (claimedFeeTx) {
       await markArcDeployFeeUsed(claimedFeeTx, agent.id).catch((e) =>
         console.error(`[deploy] FAILED to mark Arc fee tx=${claimedFeeTx} used by agent ${agent.id}:`, (e as Error).message),
+      );
+    }
+    if (credit) {
+      const spent = credit;
+      await markDeployCreditUsed(spent, agent.id).catch((e) =>
+        console.error(`[deploy] FAILED to mark credit nonce=${spent.nonce} used by agent ${agent.id}:`, (e as Error).message),
       );
     }
 

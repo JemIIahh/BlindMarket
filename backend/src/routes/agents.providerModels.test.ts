@@ -37,7 +37,8 @@ vi.mock('../services/agentStore.js', () => ({}));
 vi.mock('../services/serviceStore.js', () => ({}));
 vi.mock('../services/skillStore.js', () => ({ incrementInstallCount: vi.fn(async () => {}) }));
 vi.mock('../services/agentEmbedding.js', () => ({}));
-vi.mock('../services/agentFactoryListener.js', () => ({ claimDeployCredit: vi.fn() }));
+vi.mock('../services/agentFactoryListener.js', () => ({
+  markDeployCreditUsed: vi.fn(async () => undefined), claimDeployCredit: vi.fn() }));
 vi.mock('../services/skillComposer.js', () => ({ buildInstalledSkill: vi.fn(), assertComposedSizeOk: vi.fn() }));
 // Keep the real error class (the route branches on instanceof); stub the fetch.
 vi.mock('../services/providerModels.js', async (importOriginal) => {

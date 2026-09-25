@@ -782,6 +782,20 @@ const migrations: Array<{ id: number; name: string; sql: string; when?: () => bo
        WHERE supported_chains <@ ARRAY['0g']::TEXT[];
     `,
   },
+  {
+    id: 40,
+    name: 'spent_deploy_payments',
+    // Durable record of which deploy-fee payments paid for an agent
+    // (services/spentDeployPayments.ts; security audit run 1, C29). 37-39 are
+    // taken by other fix batches.
+    sql: `
+      CREATE TABLE IF NOT EXISTS spent_deploy_payments (
+        payment_key TEXT PRIMARY KEY,
+        owner TEXT NOT NULL,
+        agent_id TEXT,
+        claimed_at BIGINT NOT NULL
+      );`,
+  },
 ];
 
 /**
