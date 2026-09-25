@@ -1,5 +1,6 @@
 import { getPool } from './neonDb.js';
 import { createHmac, randomBytes } from 'crypto';
+import { egressFetch } from './egressGuard.js';
 
 export interface AgentWebhook {
   id: number;
@@ -62,12 +63,15 @@ export async function fireWebhooks(
     try {
       const body = JSON.stringify({ event, agent: agentAddress, payload, timestamp: Date.now() });
       const signature = createHmac('sha256', hook.secret).update(body).digest('hex');
-      await fetch(hook.url, {
+      // The hook URL is chosen by the caller, and re-checked here as well as at
+      // registration: a name can resolve somewhere else by delivery time.
+      const res = await egressFetch(hook.url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-BlindMarket-Signature': signature },
         body,
         signal: AbortSignal.timeout(10_000),
       });
+      await res.body?.cancel().catch(() => {});
     } catch (e) {
       console.warn(`[webhook] failed for ${agentAddress.slice(0, 10)}…: ${(e as Error).message}`);
     }

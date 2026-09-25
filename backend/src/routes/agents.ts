@@ -33,6 +33,7 @@ import { discoverModels, ProviderModelsError } from '../services/providerModels.
 import { eciesEncrypt } from '../services/crypto.js';
 import { callerWallets } from '../services/callerWallets.js';
 import { nativeWeiToTokenUnits, normalizeSettlementAmount, pricingUnit } from '../services/settlementUnits.js';
+import { serviceDescription, serviceName } from '../services/serviceText.js';
 
 /**
  * Owner-only guard for any agent endpoint that touches funds, keys, or
@@ -1039,8 +1040,8 @@ agentsRouter.patch('/:id', requireAuth, async (req: AuthRequest, res) => {
 // one agent can't touch another agent's services (cross-agent tamper → 404).
 
 const serviceSchema = z.object({
-  name: z.string().min(5).max(60),
-  description: z.string().max(2000).optional().default(''),
+  name: serviceName,
+  description: serviceDescription.optional().default(''),
   priceRaw: z.string().regex(/^\d+$/, "priceRaw must be an integer string in the payment token's smallest unit").transform(normalizeSettlementAmount),
   serviceType: z.enum(['api', 'a2a']),
   active: z.boolean().optional().default(true),
@@ -1048,8 +1049,8 @@ const serviceSchema = z.object({
 // No defaults here — an absent field in a PATCH must stay undefined (skipped),
 // not get reset to a default.
 const serviceUpdateSchema = z.object({
-  name: z.string().min(5).max(60).optional(),
-  description: z.string().max(2000).optional(),
+  name: serviceName.optional(),
+  description: serviceDescription.optional(),
   priceRaw: z.string().regex(/^\d+$/, "priceRaw must be an integer string in the payment token's smallest unit").transform(normalizeSettlementAmount).optional(),
   serviceType: z.enum(['api', 'a2a']).optional(),
   active: z.boolean().optional(),
