@@ -14,7 +14,7 @@ import { autoVerify } from '../services/autoVerify.js';
 import { settleAssignment, settleVerification, resolveAssignee } from '../services/a2aSettlement.js';
 import { recordWorkerPayout, recordWorkerDispute } from '../services/workerPayout.js';
 import { notifyLifecycle } from '../services/notificationStore.js';
-import { resolveTaskByHash, seedTaskId, type TaskChain } from '../services/taskChain.js';
+import { resolveCachedTaskByHash, resolveTaskByHash, seedTaskId, type TaskChain } from '../services/taskChain.js';
 import { changedTaskTerm } from '../services/taskTerms.js';
 import * as escrowService from '../services/escrow.js';
 import * as reputationService from '../services/reputation.js';
@@ -1572,6 +1572,22 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
         'CHAIN_IMMUTABLE',
         `This task was indexed on ${existingMeta.chain}; a receipt from ${taskChain} can't re-index it — cancel the ${taskChain} escrow to get it back`,
       );
+    }
+
+    // The hash already names a different escrow task: the same public brief
+    // posted again (a public task's hash is its text), or a duplicate hash.
+    // The listing is that task's, and this escrow can't take it over. Say
+    // which task to cancel rather than blaming changed terms.
+    if (existingMeta) {
+      const indexed = await resolveCachedTaskByHash(taskHash).catch(() => null);
+      if (indexed && (indexed.chain !== taskChain || indexed.taskId !== onChainTaskId)) {
+        throw new AppError(
+          409,
+          'TASK_HASH_IN_USE',
+          `This brief's hash already belongs to ${indexed.chain} task ${indexed.taskId}, so this escrow (${taskChain} task ${onChainTaskId}) can't be listed under it. ` +
+            `Cancel task ${onChainTaskId} to get the payment back, then post again with the brief changed, even slightly: a public task is identified by its text.`,
+        );
+      }
     }
 
     // A re-index may retry a listing or add wrappedKeys, but it keeps the terms

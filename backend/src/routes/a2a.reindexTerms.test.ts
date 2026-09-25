@@ -68,13 +68,15 @@ vi.mock('../services/settlementChains.js', async (importOriginal) => ({
 vi.mock('../services/taskChain.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../services/taskChain.js')>()),
   seedTaskId: vi.fn(() => Promise.resolve()),
+  // The escrow task the hash is indexed to: this receipt's, unless a test says.
+  resolveCachedTaskByHash: vi.fn(async () => ({ chain: 'arc', taskId: '7' })),
 }));
 
 import { a2aRouter } from './a2a.js';
 import { globalErrorHandler } from '../middleware/errorHandler.js';
 import * as a2aStore from '../services/a2aStore.js';
 import { chainRuntime } from '../services/chainRuntime.js';
-import { seedTaskId } from '../services/taskChain.js';
+import { resolveCachedTaskByHash, seedTaskId } from '../services/taskChain.js';
 
 const POSTER = '0x9090000000000000000000000000000000000002';
 const STRANGER = '0x5555000000000000000000000000000000000005';
@@ -168,6 +170,19 @@ describe('POST /tasks/index — re-index keeps the listed terms', () => {
     const res = await index(POSTER, { ...listedBody });
     expect(res.body.error?.code).not.toBe('TERMS_IMMUTABLE');
     expect(seedTaskId).toHaveBeenCalled();
+  });
+
+  // The same public brief posted again: a public task's hash is its text, so
+  // the new escrow (task 7 here) carries the hash of an earlier task (3).
+  it('a second escrow under a hash that names another task → 409 TASK_HASH_IN_USE naming the task to cancel', async () => {
+    vi.mocked(resolveCachedTaskByHash).mockResolvedValueOnce({ chain: 'arc', taskId: '3' });
+    const res = await index(POSTER, { ...listedBody, verificationCriteria: { contains_keywords: ['beta'] } });
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('TASK_HASH_IN_USE');
+    expect(res.body.error.message).toContain('already belongs to arc task 3');
+    expect(res.body.error.message).toContain('Cancel task 7');
+    expect(seedTaskId).not.toHaveBeenCalled();
+    expect(a2aStore.setMeta).not.toHaveBeenCalled();
   });
 
   it('a stranger is still refused by the poster check first', async () => {

@@ -57,8 +57,17 @@ vi.mock('../services/socket.js', () => ({
   rooms: { tasks: vi.fn(), platform: vi.fn() },
 }));
 
-const hashClaim = vi.hoisted(() => ({ claimTaskHash: vi.fn(async (_hash: string, poster: string) => ({ poster: poster.toLowerCase(), mine: true })) }));
+const hashClaim = vi.hoisted(() => ({
+  claimTaskHash: vi.fn(async (_hash: string, poster: string) => ({ poster: poster.toLowerCase(), mine: true })),
+  getMeta: vi.fn(async (_hash: string): Promise<unknown> => undefined),
+}));
 vi.mock('../services/a2aStore.js', () => hashClaim);
+// The escrow hash index: which escrow task, if any, a hash already names.
+const hashIndex = vi.hoisted(() => ({ resolveCachedTaskByHash: vi.fn(async (_hash: string): Promise<unknown> => null) }));
+vi.mock('../services/taskChain.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../services/taskChain.js')>()),
+  resolveCachedTaskByHash: hashIndex.resolveCachedTaskByHash,
+}));
 
 const { tasksRouter } = await import('./tasks.js');
 const { globalErrorHandler } = await import('../middleware/errorHandler.js');
@@ -187,6 +196,38 @@ describe('POST /tasks claims the task hash for its poster', () => {
     expect(hashClaim.claimTaskHash).toHaveBeenCalledTimes(1);
     expect(hashClaim.claimTaskHash.mock.calls[0][0]).toBe(TASK);
     expect(hashClaim.claimTaskHash.mock.invocationCallOrder[0]).toBeLessThan((chain.buildUnsignedTx as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]);
+  });
+});
+
+// A public task's hash is the hash of its brief's text, so posting the same
+// public brief again reused a hash that already names a task. The listing
+// was refused after the poster had paid for the second escrow.
+describe('POST /tasks refuses a hash already in use, before anything is funded', () => {
+  it('when a task is already listed under it', async () => {
+    hashClaim.getMeta.mockResolvedValueOnce({ taskId: TASK, posterAddress: '0x1111111111111111111111111111111111111111' });
+    const res = await post({ token: USDC });
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('TASK_HASH_IN_USE');
+    expect(res.body.error.message).toMatch(/change the brief.*Nothing was charged/);
+    expect(hashClaim.claimTaskHash).not.toHaveBeenCalled();
+    expect(chain.buildUnsignedTx).not.toHaveBeenCalled();
+    expect(accountingService.recordTransaction).not.toHaveBeenCalled();
+  });
+
+  it('when an escrow task already carries it, and names that task', async () => {
+    hashIndex.resolveCachedTaskByHash.mockResolvedValueOnce({ chain: 'arc', taskId: '1' });
+    const res = await post({ token: USDC });
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('TASK_HASH_IN_USE');
+    expect(res.body.error.message).toContain('(arc task 1)');
+    expect(chain.buildUnsignedTx).not.toHaveBeenCalled();
+  });
+
+  it('builds a new hash as before', async () => {
+    const res = await post({ token: USDC });
+    expect(res.status).toBe(200);
+    expect(hashClaim.getMeta).toHaveBeenCalledWith(TASK);
+    expect(hashIndex.resolveCachedTaskByHash).toHaveBeenCalledWith(TASK);
   });
 });
 
