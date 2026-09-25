@@ -31,6 +31,7 @@ import { chainRuntime } from './chainRuntime.js';
 import { SETTLEMENT_CHAIN_KEYS, settlementChainConfig } from './settlementChains.js';
 import { config } from '../config.js';
 import { resolveTaskByHash, type TaskChain, type ResolvedTask } from './taskChain.js';
+import { getTaskOn } from './escrow.js';
 import * as a2aStore from './a2aStore.js';
 import { loadAgentByWallet } from './deployedAgentStore.js';
 import { rooms } from './socket.js';
@@ -149,6 +150,42 @@ async function waitForResolvedTask(taskHash: string): Promise<ResolvedTask | nul
     if (resolved) return resolved;
     if (Date.now() >= deadline) return null;
     await new Promise((r) => setTimeout(r, HASH_LOOKUP_POLL_INTERVAL_MS));
+  }
+}
+
+const EMPTY_TASK_HASH = `0x${'0'.repeat(64)}`;
+const TASK_HASH_READS = 3;
+const TASK_HASH_RETRY_MS = 1_500;
+
+/**
+ * Why escrow task `taskId` must not be acted on for `taskHash`, or null when
+ * it carries that hash. The hash index behind resolveTaskByHash is a cache and
+ * can name the wrong task: keys left by another escrow or network under the
+ * same chain key, or a duplicate hash. Escrow ids also restart at 1 on every
+ * escrow. A backend-signed call by a wrong id moves money on an unrelated
+ * task: marketplaceAssign takes any Funded task, and completeVerification
+ * pays whoever submitted on it. So both read the task first and refuse on a
+ * mismatch or a failed read. A task that reads as empty is read again a few
+ * times, since an RPC node can lag its creation.
+ */
+export async function escrowTaskMismatch(
+  chain: TaskChain,
+  taskId: string,
+  taskHash: string,
+  retryMs = TASK_HASH_RETRY_MS,
+): Promise<string | null> {
+  for (let read = 1; ; read++) {
+    let onChain: string;
+    try {
+      onChain = String((await getTaskOn(chain, Number(taskId))).taskHash ?? '').toLowerCase();
+    } catch (err) {
+      return `could not read ${chain} escrow task ${taskId} to check it is this task: ${(err as Error).message}`;
+    }
+    if (onChain === taskHash.toLowerCase()) return null;
+    if (onChain !== EMPTY_TASK_HASH || read >= TASK_HASH_READS) {
+      return `${chain} escrow task ${taskId} carries hash ${onChain.slice(0, 10)}…, not this task's ${taskHash.slice(0, 10)}…: the hash index names another task, so nothing was sent`;
+    }
+    await new Promise((r) => setTimeout(r, retryMs));
   }
 }
 
@@ -314,6 +351,13 @@ export async function settleAssignment(taskHash: string, executor: string): Prom
     console.error(`[a2aSettlement] ${msg}`);
     await safePersistAssignError(taskHash, msg);
     return { success: false, error: msg };
+  }
+
+  const mismatch = await escrowTaskMismatch(chain, taskId, taskHash);
+  if (mismatch) {
+    console.error(`[a2aSettlement] assignment refused: ${mismatch}`);
+    await safePersistAssignError(taskHash, mismatch);
+    return { success: false, error: mismatch };
   }
 
   // On Base, AA agents must be assigned under their smart account (see
@@ -621,6 +665,13 @@ export async function settleVerification(
       console.error(`[a2aSettlement] ${msg}`);
       await safePersistVerifyError(taskHash, msg);
       return { success: false, error: msg };
+    }
+
+    const mismatch = await escrowTaskMismatch(chain, taskId, taskHash);
+    if (mismatch) {
+      console.error(`[a2aSettlement] verification refused: ${mismatch}`);
+      await safePersistVerifyError(taskHash, mismatch);
+      return { success: false, error: mismatch };
     }
 
     // TEE settlement is a property of the contract we are about to call, not
