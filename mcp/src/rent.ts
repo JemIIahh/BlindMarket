@@ -1334,7 +1334,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       title: 'Fetch a Task Brief',
       description: "Download a task's brief by rootHash (accept_task returns it). Public briefs come back as text. For a PRIVATE brief pass the wrappedKey accept_task returned: it is decrypted with BLINDMARKET_PRIVATE_KEY, which must be the key whose public half you registered (wallet_status shows it as executorPublicKey).",
       inputSchema: {
-        rootHash: z.string().min(32).max(80).describe('rootHash from accept_task or list_open_tasks'),
+        rootHash: z.string().min(32).max(80).describe('rootHash from accept_task (browse_a2a_tasks also shows it for a public task)'),
         wrappedKey: z.string().optional().describe('ECIES-wrapped AES key from accept_task (hex, no 0x). Required for private briefs.'),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },

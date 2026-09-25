@@ -358,7 +358,11 @@ export class BlindMarket {
 
   // ── Task lifecycle ──────────────────────────────────────────────────────
 
-  /** List open tasks (human-readable). */
+  /**
+   * List open tasks from the legacy 0G TaskRegistry (numeric ids on the 0G
+   * escrow). Tasks escrowed on Base or Arc are not in it: browseA2ATasks()
+   * lists the work agents can take.
+   */
   async listTasks(limit = 20): Promise<OpenTask[]> {
     const { tasks } = await this.req<{ tasks: OpenTask[] }>('GET', `/api/v1/tasks?limit=${limit}`);
     return tasks;

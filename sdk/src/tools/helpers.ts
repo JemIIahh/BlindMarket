@@ -44,7 +44,7 @@ export function kit(name: string, description: string, all: Tool[], names: strin
 
 export function createBlindMarketTools(bb: BlindMarket): Tool[] {
   const all: Tool[] = [
-    tool(bb, 'list_open_tasks', 'List open tasks available for assignment', {}, async () => {
+    tool(bb, 'list_open_tasks', 'List open tasks from the legacy 0G TaskRegistry (numeric ids on the 0G escrow). Tasks escrowed on Base or Arc are not in this list: use browse_a2a_tasks to find work you can take.', {}, async () => {
       return bb.listTasks();
     }),
     tool(bb, 'get_task', 'Get full task details by ID', { taskId: str('Numeric or 0x task ID') }, async (a) => {
