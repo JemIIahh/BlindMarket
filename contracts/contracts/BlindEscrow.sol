@@ -55,7 +55,7 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         string category;        // "photography", "verification", etc.
         string locationZone;    // approximate zone, not precise coords
         uint256 createdAt;
-        uint256 deadline;       // block.timestamp after which agent can reclaim
+        uint256 deadline;       // creation-time deadline; effectiveDeadline() adds the time the escrow spent paused
         uint8 submissionAttempts; // how many times worker has submitted
         uint256 disputedAt;     // block.timestamp raiseDispute was called (0 = never disputed / pre-upgrade)
     }
@@ -110,6 +110,15 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
     // releaseUnjudgedWork. Trailing state, UUPS-append-only.
     mapping(uint256 => bool) public unjudgedEscalation;
 
+    // Pause accounting. An emergency pause freezes every worker and verifier
+    // action, so it must not let a task's clock run out meanwhile: each
+    // deadline (and the dispute / appeal windows) moves by the time the escrow
+    // has spent paused since the task was created. Trailing state,
+    // UUPS-append-only.
+    uint256 public pausedTotal;  // seconds spent in completed pauses (since this upgrade)
+    uint256 public pausedSince;  // start of the running pause; 0 while unpaused, or while unknown (installed mid-pause, see recordPauseStart)
+    mapping(uint256 => uint256) internal _pausedTotalAtCreate; // pausedTotal when each task was created
+
     // ── Events ──
 
     event TaskCreated(uint256 indexed taskId, address indexed agent, address token, uint256 amount, bytes32 taskHash, string category, string locationZone, uint256 deadline);
@@ -136,6 +145,7 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
     event TEESettled(uint256 indexed taskId, bool passed, address indexed teeSigner);
     event UnjudgedWorkEscalated(uint256 indexed taskId);
     event UnjudgedWorkReleased(uint256 indexed taskId, uint256 workerPayout, uint256 platformFee);
+    event PauseStartRecorded(uint256 pausedAt);
 
     // ── Errors (custom errors are cheaper than string reverts) ──
 
@@ -161,6 +171,7 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
     error AppealWindowActive();
     error EscalatedForAdjudication();
     error NotEscalated();
+    error InvalidPauseStart();
 
     // ── Modifiers ──
 
@@ -280,6 +291,9 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
             submissionAttempts: 0,
             disputedAt: 0
         });
+        // createTask is whenNotPaused, so pausedSince is 0 here and pausedTotal
+        // is the whole paused time so far.
+        _pausedTotalAtCreate[taskId] = pausedTotal;
 
         if (verifierAgent != address(0)) {
             // The poster cannot verify their own task.
@@ -315,6 +329,25 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         }
     }
 
+    /// @dev Seconds the escrow has spent paused since this upgrade, the running
+    ///      pause included (its start is known unless installed mid-pause).
+    function _pausedSeconds() internal view returns (uint256 total) {
+        total = pausedTotal;
+        if (pausedSince != 0) total += block.timestamp - pausedSince;
+    }
+
+    /// @dev Seconds paused since `taskId` was created: how far its deadline and
+    ///      windows move. Counting from creation can only lengthen a window
+    ///      that opened later (a dispute or appeal window), never shorten it.
+    function _pauseExtension(uint256 taskId) internal view returns (uint256) {
+        return _pausedSeconds() - _pausedTotalAtCreate[taskId];
+    }
+
+    /// @dev The task's deadline moved by the time the escrow spent paused.
+    function _deadline(uint256 taskId) internal view returns (uint256) {
+        return _tasks[taskId].deadline + _pauseExtension(taskId);
+    }
+
     /**
      * @dev Verify that `signature` is a valid enclave signature over `signedText`.
      *      Uses OpenZeppelin's ECDSA, which rejects malleable (high-s) signatures
@@ -340,7 +373,7 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         if (t.status != TaskStatus.Funded) revert InvalidStatus(t.status, TaskStatus.Funded);
         if (worker == address(0)) revert ZeroAddress();
         if (worker == msg.sender) revert SelfAssignment();
-        if (block.timestamp >= t.deadline) revert DeadlineReached();
+        if (block.timestamp >= _deadline(taskId)) revert DeadlineReached();
 
         t.worker = worker;
         t.status = TaskStatus.Assigned;
@@ -367,7 +400,7 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         if (t.status != TaskStatus.Funded) revert InvalidStatus(t.status, TaskStatus.Funded);
         if (worker == address(0)) revert ZeroAddress();
         if (worker == t.agent) revert SelfAssignment();
-        if (block.timestamp >= t.deadline) revert DeadlineReached();
+        if (block.timestamp >= _deadline(taskId)) revert DeadlineReached();
 
         t.worker = worker;
         t.status = TaskStatus.Assigned;
@@ -393,7 +426,7 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
 
         if (!isAssigned && !isRetry) revert InvalidStatus(t.status, TaskStatus.Assigned);
         if (evidenceHash == bytes32(0)) revert EmptyHash();
-        if (block.timestamp >= t.deadline) revert DeadlineReached();
+        if (block.timestamp >= _deadline(taskId)) revert DeadlineReached();
 
         if (isRetry) {
             if (t.submissionAttempts >= MAX_SUBMISSION_ATTEMPTS) revert MaxSubmissionAttemptsReached();
@@ -569,10 +602,13 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
      *         - Disputed: refund once DISPUTE_WINDOW has elapsed since the
      *           dispute was raised, except for an escalation of unjudged work,
      *           which never falls back to the poster.
+     *         Pause-neutral: it is whenNotPaused like every other non-admin
+     *         transition that moves funds, and the deadline and windows are
+     *         measured with the time spent paused added (see effectiveDeadline).
      */
-    function claimTimeout(uint256 taskId) external onlyAgent(taskId) nonReentrant {
+    function claimTimeout(uint256 taskId) external onlyAgent(taskId) nonReentrant whenNotPaused {
         Task storage t = _tasks[taskId];
-        if (block.timestamp < t.deadline) revert DeadlineNotReached();
+        if (block.timestamp < _deadline(taskId)) revert DeadlineNotReached();
 
         if (t.status == TaskStatus.Submitted) {
             // Delivered on time and never judged: adjudicate, never refund by
@@ -602,13 +638,16 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
             // lands. Those must keep requiring admin resolution via
             // resolveDispute — so windowElapsed is false whenever disputedAt
             // is still 0, not just when the window hasn't yet run.
-            bool windowElapsed = t.disputedAt != 0 && block.timestamp >= t.disputedAt + DISPUTE_WINDOW;
+            bool windowElapsed = t.disputedAt != 0 &&
+                block.timestamp >= t.disputedAt + DISPUTE_WINDOW + _pauseExtension(taskId);
             if (!windowElapsed) revert DisputeWindowActive();
         } else if (t.status == TaskStatus.Verified) {
             // A failed verdict: the worker keeps APPEAL_WINDOW to raiseDispute,
             // even past the deadline. failedVerdictAt is 0 for tasks failed
             // before this upgrade, so their window reads as long elapsed.
-            if (block.timestamp < failedVerdictAt[taskId] + APPEAL_WINDOW) revert AppealWindowActive();
+            if (block.timestamp < failedVerdictAt[taskId] + APPEAL_WINDOW + _pauseExtension(taskId)) {
+                revert AppealWindowActive();
+            }
         } else if (t.status != TaskStatus.Assigned) {
             revert InvalidStatus(t.status, TaskStatus.Assigned);
         }
@@ -645,10 +684,11 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         // the poster with no review. The appeal is bounded — the resulting
         // dispute falls back to claimTimeout after DISPUTE_WINDOW like any
         // other.
+        uint256 ext = _pauseExtension(taskId);
         bool workerAppeal = msg.sender == t.worker &&
             t.status == TaskStatus.Verified &&
-            block.timestamp < failedVerdictAt[taskId] + APPEAL_WINDOW;
-        if (block.timestamp >= t.deadline && !workerAppeal) revert DeadlineReached();
+            block.timestamp < failedVerdictAt[taskId] + APPEAL_WINDOW + ext;
+        if (block.timestamp >= t.deadline + ext && !workerAppeal) revert DeadlineReached();
 
         t.status = TaskStatus.Disputed;
         t.disputedAt = block.timestamp;
@@ -657,6 +697,8 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
 
     /**
      * @notice Admin resolves a dispute. If workerFavored, pays worker. Otherwise refunds agent.
+     *         Deliberately NOT pause-gated: the admin can still settle disputes
+     *         while the escrow is paused.
      */
     function resolveDispute(uint256 taskId, bool workerFavored) external onlyAdmin nonReentrant {
         Task storage t = _tasks[taskId];
@@ -706,7 +748,7 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         Task storage t = _tasks[taskId];
         if (t.status != TaskStatus.Disputed) revert InvalidStatus(t.status, TaskStatus.Disputed);
         if (!unjudgedEscalation[taskId]) revert NotEscalated();
-        if (block.timestamp < t.disputedAt + DISPUTE_WINDOW) revert DisputeWindowActive();
+        if (block.timestamp < t.disputedAt + DISPUTE_WINDOW + _pauseExtension(taskId)) revert DisputeWindowActive();
 
         // ── Effects ──
         uint256 fee = (t.amount * feeBps) / 10_000;
@@ -781,10 +823,31 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
 
     function pause() external onlyAdmin {
         _pause();
+        pausedSince = block.timestamp;
     }
 
     function unpause() external onlyAdmin {
         _unpause();
+        // pausedSince is 0 here only if this implementation was installed
+        // during a pause and recordPauseStart was not called: that pause's
+        // start is unknown, so it is not counted. Never add
+        // `block.timestamp - 0`, which would push every in-flight deadline out
+        // by decades and lock ghosted-worker refunds.
+        if (pausedSince != 0) pausedTotal += block.timestamp - pausedSince;
+        pausedSince = 0;
+    }
+
+    /**
+     * @notice Upgrade-time repair. When this implementation is installed while
+     *         the escrow is paused (the documented emergency path), the running
+     *         pause's start is unknown and unpause would not count it. Before
+     *         unpausing, the admin records it: pass the block timestamp of the
+     *         Paused event. Only while paused, only when the start is unknown.
+     */
+    function recordPauseStart(uint256 pausedAt) external onlyAdmin whenPaused {
+        if (pausedSince != 0 || pausedAt == 0 || pausedAt > block.timestamp) revert InvalidPauseStart();
+        pausedSince = pausedAt;
+        emit PauseStartRecorded(pausedAt);
     }
 
     // ── View Functions ──
@@ -793,7 +856,14 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         return _tasks[taskId];
     }
 
+    /// @notice The task's deadline moved by the time the escrow has spent paused
+    ///         since it was created (a running pause included). getTask().deadline
+    ///         is the unmoved creation-time value; deadline checks use this one.
+    function effectiveDeadline(uint256 taskId) external view returns (uint256) {
+        return _deadline(taskId);
+    }
+
     function isTaskExpired(uint256 taskId) external view returns (bool) {
-        return block.timestamp >= _tasks[taskId].deadline;
+        return block.timestamp >= _deadline(taskId);
     }
 }

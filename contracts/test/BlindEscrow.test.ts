@@ -1034,6 +1034,183 @@ describe("BlindEscrow", function () {
     });
   });
 
+  // ── Emergency pause is neutral (security audit C36) ──
+  // claimTimeout was not pause-gated and deadlines kept running while every
+  // worker / verifier / dispute action reverted EnforcedPause, so a pause that
+  // outlasted a task's remaining time let the poster take the whole escrow.
+
+  describe("emergency pause is neutral (C36)", function () {
+    const ONE_HOUR = 3600;
+    // pausedTotal, pausedSince, _pausedTotalAtCreate follow failedVerdictAt
+    // (12) and unjudgedEscalation (13).
+    const PAUSED_SINCE_SLOT = 15;
+
+    async function hourTask() {
+      await escrow.connect(agent).createTask(TASK_HASH, await token.getAddress(), AMOUNT, "rent", "z", ONE_HOUR);
+      const id = (await escrow.nextTaskId()) - 1n;
+      await escrow.connect(verifier).marketplaceAssign(id, worker.address);
+      return id;
+    }
+
+    it("a poster cannot claim on-time work while paused, nor right after (record scenario)", async function () {
+      const id = await hourTask();
+      const createdAt = (await escrow.getTask(id)).createdAt;
+      await time.setNextBlockTimestamp(createdAt + 60n);
+      await escrow.connect(worker).submitEvidence(id, EVIDENCE_HASH);
+      await time.setNextBlockTimestamp(createdAt + 600n);
+      await escrow.connect(admin).pause();
+
+      const deadline = (await escrow.getTask(id)).deadline;
+      await time.increaseTo(deadline);
+      await expect(escrow.connect(agent).claimTimeout(id)).to.be.revertedWithCustomError(escrow, "EnforcedPause");
+      await expect(escrow.connect(verifier).completeVerification(id, true)).to.be.revertedWithCustomError(escrow, "EnforcedPause");
+      await expect(escrow.connect(worker).raiseDispute(id)).to.be.revertedWithCustomError(escrow, "EnforcedPause");
+
+      // Two hours of pause, then unpause: the task keeps the time it had left.
+      await time.setNextBlockTimestamp(createdAt + 600n + 2n * BigInt(ONE_HOUR));
+      await escrow.connect(admin).unpause();
+      expect(await escrow.pausedTotal()).to.equal(2n * BigInt(ONE_HOUR));
+      expect(await escrow.effectiveDeadline(id)).to.equal(deadline + 2n * BigInt(ONE_HOUR));
+      expect(await escrow.isTaskExpired(id)).to.be.false;
+      await expect(escrow.connect(agent).claimTimeout(id)).to.be.revertedWithCustomError(escrow, "DeadlineNotReached");
+
+      const workerBefore = await token.balanceOf(worker.address);
+      const treasuryBefore = await token.balanceOf(treasury.address);
+      await escrow.connect(verifier).completeVerification(id, true);
+      const fee = (AMOUNT * 1000n) / 10000n;
+      expect(await token.balanceOf(worker.address)).to.equal(workerBefore + AMOUNT - fee);
+      expect(await token.balanceOf(treasury.address)).to.equal(treasuryBefore + fee);
+    });
+
+    it("an Assigned worker blocked by the pause can still deliver afterwards", async function () {
+      const id = await hourTask();
+      const deadline = (await escrow.getTask(id)).deadline;
+      await time.setNextBlockTimestamp(deadline - 1800n); // 30 min left
+      await escrow.connect(admin).pause();
+      await expect(escrow.connect(worker).submitEvidence(id, EVIDENCE_HASH)).to.be.revertedWithCustomError(escrow, "EnforcedPause");
+
+      await time.setNextBlockTimestamp(deadline - 1800n + 2n * BigInt(ONE_HOUR));
+      await escrow.connect(admin).unpause();
+      await expect(escrow.connect(agent).claimTimeout(id)).to.be.revertedWithCustomError(escrow, "DeadlineNotReached");
+      await expect(escrow.connect(worker).submitEvidence(id, EVIDENCE_HASH)).to.emit(escrow, "EvidenceSubmitted");
+    });
+
+    it("a ghosted worker's task is refunded later by exactly the paused time (control)", async function () {
+      const id = await hourTask();
+      const deadline = (await escrow.getTask(id)).deadline;
+      await escrow.connect(admin).pause();
+      const pausedAt = BigInt(await time.latest());
+      await time.setNextBlockTimestamp(pausedAt + 5000n);
+      await escrow.connect(admin).unpause();
+
+      const effective = deadline + 5000n;
+      expect(await escrow.effectiveDeadline(id)).to.equal(effective);
+      await time.setNextBlockTimestamp(effective - 1n);
+      await expect(escrow.connect(agent).claimTimeout(id)).to.be.revertedWithCustomError(escrow, "DeadlineNotReached");
+      const before = await token.balanceOf(agent.address);
+      await time.setNextBlockTimestamp(effective);
+      await expect(escrow.connect(agent).claimTimeout(id)).to.emit(escrow, "DeadlineExpired").withArgs(id, AMOUNT);
+      expect(await token.balanceOf(agent.address)).to.equal(before + AMOUNT);
+    });
+
+    it("does not move the deadline of a task created after the pause", async function () {
+      await escrow.connect(admin).pause();
+      await time.increase(5000);
+      await escrow.connect(admin).unpause();
+      const id = await hourTask();
+      expect(await escrow.effectiveDeadline(id)).to.equal((await escrow.getTask(id)).deadline);
+    });
+
+    it("counts a running pause in the views", async function () {
+      const id = await hourTask();
+      const deadline = (await escrow.getTask(id)).deadline;
+      await escrow.connect(admin).pause();
+      const pausedAt = BigInt(await time.latest());
+      await time.increaseTo(deadline + 100n);
+      const now = BigInt(await time.latest());
+      expect(await escrow.effectiveDeadline(id)).to.equal(deadline + (now - pausedAt));
+      expect(await escrow.isTaskExpired(id)).to.be.false;
+    });
+
+    it("keeps resolveDispute available to the admin while paused", async function () {
+      const id = await hourTask();
+      await escrow.connect(worker).submitEvidence(id, EVIDENCE_HASH);
+      await escrow.connect(worker).raiseDispute(id);
+      await escrow.connect(admin).pause();
+      await expect(escrow.connect(admin).resolveDispute(id, true)).to.emit(escrow, "DisputeResolved").withArgs(id, true);
+    });
+
+    it("extends the worker's appeal window by a pause inside it", async function () {
+      const id = await hourTask();
+      await escrow.connect(worker).submitEvidence(id, EVIDENCE_HASH);
+      await escrow.connect(verifier).completeVerification(id, false);
+      const failedAt = await escrow.failedVerdictAt(id);
+      await escrow.connect(admin).pause();
+      const pausedAt = BigInt(await time.latest());
+      await time.setNextBlockTimestamp(pausedAt + BigInt(ONE_DAY));
+      await escrow.connect(admin).unpause();
+
+      // Past the unmoved 3-day window, but inside it once the day of pause is added.
+      await time.setNextBlockTimestamp(failedAt + BigInt(3 * ONE_DAY) + 100n);
+      await expect(escrow.connect(agent).claimTimeout(id)).to.be.revertedWithCustomError(escrow, "AppealWindowActive");
+      await expect(escrow.connect(worker).raiseDispute(id)).to.emit(escrow, "TaskDisputed");
+    });
+
+    describe("installed while paused (pausedSince unknown)", function () {
+      /** What an upgrade during a pause leaves behind: paused, but pausedSince reads 0. */
+      async function forgetPauseStart() {
+        const esc = await escrow.getAddress();
+        const slot = ethers.toBeHex(PAUSED_SINCE_SLOT, 32);
+        expect(BigInt(await ethers.provider.getStorage(esc, slot))).to.equal(await escrow.pausedSince());
+        await ethers.provider.send("hardhat_setStorageAt", [esc, slot, ethers.ZeroHash]);
+        expect(await escrow.pausedSince()).to.equal(0);
+        expect(await escrow.paused()).to.be.true;
+      }
+
+      it("never adds block.timestamp to the paused total on unpause", async function () {
+        const id = await hourTask();
+        const deadline = (await escrow.getTask(id)).deadline;
+        await escrow.connect(admin).pause();
+        await forgetPauseStart();
+        await time.increase(5000);
+        await escrow.connect(admin).unpause();
+
+        // The pause went uncounted (its start is unknown) rather than pushing
+        // the deadline out by decades: a ghosted worker's refund still works.
+        expect(await escrow.pausedTotal()).to.equal(0);
+        expect(await escrow.effectiveDeadline(id)).to.equal(deadline);
+        expect(BigInt(await time.latest())).to.be.gte(deadline);
+        await expect(escrow.connect(agent).claimTimeout(id)).to.emit(escrow, "DeadlineExpired");
+      });
+
+      it("lets the admin record the pause's start so it is counted", async function () {
+        const id = await hourTask();
+        const deadline = (await escrow.getTask(id)).deadline;
+        await escrow.connect(admin).pause();
+        const pausedAt = BigInt(await time.latest());
+        await forgetPauseStart();
+
+        await expect(escrow.connect(stranger).recordPauseStart(pausedAt)).to.be.revertedWithCustomError(escrow, "NotAdmin");
+        const future = BigInt(await time.latest()) + 1000n;
+        await expect(escrow.connect(admin).recordPauseStart(future)).to.be.revertedWithCustomError(escrow, "InvalidPauseStart");
+        await expect(escrow.connect(admin).recordPauseStart(0)).to.be.revertedWithCustomError(escrow, "InvalidPauseStart");
+        await expect(escrow.connect(admin).recordPauseStart(pausedAt))
+          .to.emit(escrow, "PauseStartRecorded").withArgs(pausedAt);
+        // One-shot: the start is known now.
+        await expect(escrow.connect(admin).recordPauseStart(pausedAt)).to.be.revertedWithCustomError(escrow, "InvalidPauseStart");
+
+        await time.setNextBlockTimestamp(pausedAt + 5000n);
+        await escrow.connect(admin).unpause();
+        expect(await escrow.pausedTotal()).to.equal(5000);
+        expect(await escrow.effectiveDeadline(id)).to.equal(deadline + 5000n);
+      });
+
+      it("refuses recordPauseStart while unpaused", async function () {
+        await expect(escrow.connect(admin).recordPauseStart(1)).to.be.revertedWithCustomError(escrow, "ExpectedPause");
+      });
+    });
+  });
+
   // ── View helpers ──
 
   describe("view functions", function () {
