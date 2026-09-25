@@ -31,9 +31,11 @@ import { chainRuntime } from './chainRuntime.js';
 import { SETTLEMENT_CHAIN_KEYS, settlementChainConfig } from './settlementChains.js';
 import { config } from '../config.js';
 import { resolveTaskByHash, type TaskChain, type ResolvedTask } from './taskChain.js';
+import { getTaskOn } from './escrow.js';
 import * as a2aStore from './a2aStore.js';
 import { loadAgentByWallet } from './deployedAgentStore.js';
 import { rooms } from './socket.js';
+import type { OnChainTask } from '../types.js';
 
 // How long to wait for the TaskCreated event listener to populate the
 // taskHash → taskId mapping before giving up on a settlement attempt.
@@ -152,6 +154,94 @@ async function waitForResolvedTask(taskHash: string): Promise<ResolvedTask | nul
   }
 }
 
+const EMPTY_TASK_HASH = `0x${'0'.repeat(64)}`;
+const TASK_READS = 3;
+const TASK_READ_RETRY_MS = 1_500;
+
+/** What reading an escrow task before acting on it found (readEscrowTask). */
+type EscrowTaskRead =
+  | { ok: true; task: OnChainTask }
+  /** `lasting`: the task carries another hash, which no later read changes. */
+  | { ok: false; lasting: boolean; reason: string };
+
+/**
+ * Reads escrow task `taskId` before a backend-signed call acts on it for
+ * `taskHash`, and passes it only when it carries that hash. The hash index
+ * behind resolveTaskByHash is a cache and can name a task with another hash:
+ * keys left by another escrow or network under the same chain key, and
+ * escrow ids restart at 1 on every escrow. A backend-signed call by such an
+ * id moves money on an unrelated task: marketplaceAssign takes any Funded
+ * task, and completeVerification pays whoever submitted on it.
+ *
+ * It cannot tell apart escrow tasks that carry the same hash. A hash funded
+ * more than once (prod tasks 7, 8 and 10 share one) resolves to whichever
+ * copy the index holds, and every copy passes.
+ *
+ * A read that throws, or a task that reads as empty (an RPC node can lag its
+ * creation), is read again a few times. If it still fails, the result is not
+ * lasting: nothing was sent, and a later attempt reads again.
+ */
+async function readEscrowTask(
+  chain: TaskChain,
+  taskId: string,
+  taskHash: string,
+  retryMs: number,
+): Promise<EscrowTaskRead> {
+  let reason = '';
+  for (let read = 1; read <= TASK_READS; read++) {
+    if (read > 1) await new Promise((r) => setTimeout(r, retryMs));
+    let task: OnChainTask;
+    try {
+      task = await getTaskOn(chain, Number(taskId));
+    } catch (err) {
+      reason = `could not read ${chain} escrow task ${taskId} to check it is this task: ${(err as Error).message}`;
+      continue;
+    }
+    const onChain = String(task.taskHash ?? '').toLowerCase();
+    if (onChain === taskHash.toLowerCase()) return { ok: true, task };
+    if (onChain !== EMPTY_TASK_HASH) {
+      return {
+        ok: false,
+        lasting: true,
+        reason: `${chain} escrow task ${taskId} carries hash ${onChain.slice(0, 10)}…, not this task's ${taskHash.slice(0, 10)}…: the hash index names another task, so nothing was sent`,
+      };
+    }
+    reason = `${chain} escrow task ${taskId} reads as empty, not as this task's ${taskHash.slice(0, 10)}…, so nothing was sent`;
+  }
+  return { ok: false, lasting: false, reason };
+}
+
+/** Why escrow task `taskId` must not be acted on for `taskHash`, or null when it carries that hash (readEscrowTask). */
+export async function escrowTaskMismatch(
+  chain: TaskChain,
+  taskId: string,
+  taskHash: string,
+  retryMs = TASK_READ_RETRY_MS,
+): Promise<string | null> {
+  const read = await readEscrowTask(chain, taskId, taskHash, retryMs);
+  return read.ok ? null : read.reason;
+}
+
+/**
+ * Why completeVerification must not pay escrow task `taskId`'s worker for
+ * this A2A task, or null. The worker must be the executor the state names:
+ * its EOA, or the smart account the escrow records for it on an AA chain. An
+ * executor the state doesn't name is not checked.
+ */
+async function verificationWorkerMismatch(
+  task: OnChainTask,
+  chain: TaskChain,
+  taskId: string,
+  executor: string | undefined,
+): Promise<string | null> {
+  if (!executor) return null;
+  const worker = String(task.worker).toLowerCase();
+  if (worker === executor.toLowerCase()) return null;
+  const agent = await loadAgentByWallet(executor).catch(() => null);
+  if (agent?.smartAccountAddress && worker === agent.smartAccountAddress.toLowerCase()) return null;
+  return `${chain} escrow task ${taskId} is assigned to ${task.worker}, not this task's executor ${executor}, so nothing was sent`;
+}
+
 function isAlreadySettled(err: unknown): boolean {
   // BlindEscrow's marketplaceAssign/completeVerification revert with
   // InvalidStatus when the task is no longer in the expected state. From the
@@ -190,6 +280,10 @@ export interface SettleResult {
   /** The assign tx was broadcast (txHash set) but did not confirm in time. It
    *  may still mine; the gas-liveness sweep reconciles it against the chain. */
   pending?: boolean;
+  /** Terminal: the hash index names an escrow task carrying another hash.
+   *  Reading again does not change that, so do not releaseToOpen: every
+   *  future /accept would be refused the same way. */
+  escrowMismatch?: boolean;
 }
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
@@ -314,6 +408,22 @@ export async function settleAssignment(taskHash: string, executor: string): Prom
     console.error(`[a2aSettlement] ${msg}`);
     await safePersistAssignError(taskHash, msg);
     return { success: false, error: msg };
+  }
+
+  const read = await readEscrowTask(chain, taskId, taskHash, TASK_READ_RETRY_MS);
+  if (!read.ok) {
+    console.error(`[a2aSettlement] assignment refused: ${read.reason}`);
+    if (read.lasting) {
+      // Persisted, so /submit refuses too; marked, so /accept closes the task
+      // instead of re-listing it for the next agent to be refused the same way.
+      await safePersistAssignError(taskHash, read.reason);
+      return { success: false, error: read.reason, escrowMismatch: true };
+    }
+    // Not persisted: nothing was sent, and /submit checks the on-chain worker
+    // itself. An assignError here would make /submit refuse (BRIDGE_FAILED)
+    // the rightful worker of a task already assigned, which a re-accept of it
+    // re-checks through this same read.
+    return { success: false, error: read.reason };
   }
 
   // On Base, AA agents must be assigned under their smart account (see
@@ -621,6 +731,18 @@ export async function settleVerification(
       console.error(`[a2aSettlement] ${msg}`);
       await safePersistVerifyError(taskHash, msg);
       return { success: false, error: msg };
+    }
+
+    // verifyError gates nothing (the routes answer 503 and keep the state for
+    // a retry); it is persisted here, as for every other refusal, to show why.
+    const read = await readEscrowTask(chain, taskId, taskHash, TASK_READ_RETRY_MS);
+    const refused = read.ok
+      ? await verificationWorkerMismatch(read.task, chain, taskId, _vExecutor)
+      : read.reason;
+    if (refused) {
+      console.error(`[a2aSettlement] verification refused: ${refused}`);
+      await safePersistVerifyError(taskHash, refused);
+      return { success: false, error: refused };
     }
 
     // TEE settlement is a property of the contract we are about to call, not

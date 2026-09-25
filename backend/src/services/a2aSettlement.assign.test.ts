@@ -42,6 +42,8 @@ vi.mock('./chain.js', () => ({
   arcEscrow: { marketplaceAssign, getTask },
 }));
 vi.mock('./taskChain.js', () => ({ resolveTaskByHash: vi.fn(async () => ({ taskId: '7', chain: 'arc' })) }));
+// The escrow task the id names carries this task's hash (escrowTaskMismatch).
+vi.mock('./escrow.js', () => ({ getTaskOn: vi.fn(async () => ({ taskHash: TASK })) }));
 vi.mock('./a2aStore.js', () => ({
   updateState: (...a: unknown[]) => updateState(...(a as [string, Record<string, unknown>])),
   getState: (...a: unknown[]) => getState(...(a as [string])),
