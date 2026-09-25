@@ -24,8 +24,10 @@ import { ethers } from 'ethers';
 // within a test, instead of stubbing each call with canned return values.
 // JWT_SECRET lives here too — vi.mock factories are hoisted above ALL
 // top-level code, so anything they reference must be hoisted alongside them.
-const { store, JWT_SECRET } = vi.hoisted(() => ({
+const { store, sets, apiKeys, JWT_SECRET } = vi.hoisted(() => ({
   store: new Map<string, string>(),
+  sets: new Map<string, Set<string>>(),
+  apiKeys: new Map<string, string>(),
   JWT_SECRET: 'test-registration-secret',
 }));
 
@@ -33,6 +35,9 @@ vi.mock('../services/redis.js', () => ({
   redis: {
     get: vi.fn((k: string) => Promise.resolve(store.get(k) ?? null)),
     set: vi.fn((k: string, v: string) => { store.set(k, v); return Promise.resolve('OK'); }),
+    sadd: vi.fn((k: string, v: string) => { sets.set(k, (sets.get(k) ?? new Set()).add(v)); return Promise.resolve(1); }),
+    smembers: vi.fn((k: string) => Promise.resolve([...(sets.get(k) ?? [])])),
+    expire: vi.fn(() => Promise.resolve(1)),
   },
 }));
 
@@ -45,7 +50,7 @@ vi.mock('../config.js', () => ({
 }));
 
 vi.mock('../services/apiKeyStore.js', () => ({
-  lookupApiKey: vi.fn(() => Promise.resolve(null)),
+  lookupApiKey: vi.fn((k: string) => Promise.resolve(apiKeys.has(k) ? { ownerAddress: apiKeys.get(k) } : null)),
 }));
 
 import { registrationRouter, agentRegistrationMessage } from './registration.js';
@@ -66,6 +71,9 @@ function app() {
   const protectedRouter = Router();
   protectedRouter.get('/protected', requireAuth, requireFounder, (_req: AuthRequest, res) => {
     res.json({ success: true, data: { ok: true } });
+  });
+  protectedRouter.get('/me', requireAuth, (req: AuthRequest, res) => {
+    res.json({ success: true, data: { address: req.user!.address } });
   });
   a.use('/test', protectedRouter);
 
@@ -99,16 +107,31 @@ async function openSession(opts: {
   });
 }
 
+/** Run the device flow end to end and return the minted token. */
+async function register(agentName: string) {
+  const agentWallet = ethers.Wallet.createRandom();
+  const ownerWallet = ethers.Wallet.createRandom();
+  const { token } = (await openSession({ agentName, agentWallet })).body.data;
+  const signature = await ownerWallet.signMessage(confirmMessage(agentName, agentWallet.address, token));
+  const res = await request(app()).post(`/api/v1/registration/confirm/${token}`).send({ ownerAddress: ownerWallet.address, signature });
+  const apiKey = res.body.data.apiKey as string;
+  return { apiKey, jti: (jwt.decode(apiKey) as { jti: string }).jti, agentWallet, ownerWallet };
+}
+
 beforeEach(() => {
   store.clear();
+  sets.clear();
+  apiKeys.clear();
   vi.clearAllMocks();
   delete process.env.FOUNDER_ADDRESSES;
   delete process.env.REGISTRATION_TOKEN_MIN_IAT;
+  delete process.env.PLATFORM_TOKEN_MIN_IAT;
 });
 
 afterEach(() => {
   delete process.env.FOUNDER_ADDRESSES;
   delete process.env.REGISTRATION_TOKEN_MIN_IAT;
+  delete process.env.PLATFORM_TOKEN_MIN_IAT;
 });
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -216,5 +239,66 @@ describe('verifyRegistrationToken — REGISTRATION_TOKEN_MIN_IAT epoch', () => {
     // Sanity: the same token verifies fine with no epoch configured.
     delete process.env.REGISTRATION_TOKEN_MIN_IAT;
     expect(verifyRegistrationToken(token)).not.toBeNull();
+  });
+});
+
+describe('POST /registration/revoke (audit run 1, C27)', () => {
+  it('6) the agent wallet revokes its own token, and the token stops working', async () => {
+    const { apiKey, jti } = await register('revoke-self');
+    expect((await request(app()).get('/test/me').set('Authorization', `Bearer ${apiKey}`)).status).toBe(200);
+
+    const res = await request(app()).post('/api/v1/registration/revoke').set('Authorization', `Bearer ${apiKey}`).send({ jti });
+    expect(res.status).toBe(200);
+    expect(res.body.data.revoked).toBe(1);
+
+    const after = await request(app()).get('/test/me').set('Authorization', `Bearer ${apiKey}`);
+    expect(after.status).toBe(401);
+  });
+
+  it('7) the confirming owner revokes every token for the wallet', async () => {
+    const { apiKey, agentWallet, ownerWallet } = await register('revoke-by-owner');
+    apiKeys.set('sk_owner', ownerWallet.address.toLowerCase());
+    const res = await request(app()).post('/api/v1/registration/revoke').set('X-API-Key', 'sk_owner').send({ agentWallet: agentWallet.address });
+    expect(res.status).toBe(200);
+    expect((await request(app()).get('/test/me').set('Authorization', `Bearer ${apiKey}`)).status).toBe(401);
+  });
+
+  it('8) anyone else gets the same 404 as for a token that does not exist', async () => {
+    const { apiKey, jti, agentWallet } = await register('revoke-stranger');
+    apiKeys.set('sk_stranger', ethers.Wallet.createRandom().address.toLowerCase());
+    for (const body of [{ jti }, { agentWallet: agentWallet.address }, { jti: 'f'.repeat(32) }]) {
+      const res = await request(app()).post('/api/v1/registration/revoke').set('X-API-Key', 'sk_stranger').send(body);
+      expect(res.status).toBe(404);
+    }
+    expect((await request(app()).get('/test/me').set('Authorization', `Bearer ${apiKey}`)).status).toBe(200);
+  });
+});
+
+describe('verifyRegistrationToken — one cutoff per token class (audit run 1, C27)', () => {
+  const nowS = Math.floor(Date.now() / 1000);
+  const mint = (typ: string) => jwt.sign(
+    { address: '0xabc', ownerAddress: '0xdef', typ, iat: nowS - 100 * 86400 },
+    JWT_SECRET,
+    { algorithm: 'HS256', expiresIn: '365d' },
+  );
+
+  it('9) REGISTRATION_TOKEN_MIN_IAT leaves hosted-worker tokens alone; PLATFORM_TOKEN_MIN_IAT covers them', () => {
+    process.env.REGISTRATION_TOKEN_MIN_IAT = String(nowS - 50 * 86400);
+    expect(verifyRegistrationToken(mint('agent-registration'))).toBeNull();
+    expect(verifyRegistrationToken(mint('agent-platform'))).not.toBeNull();
+    delete process.env.REGISTRATION_TOKEN_MIN_IAT;
+    process.env.PLATFORM_TOKEN_MIN_IAT = String(nowS - 50 * 86400);
+    expect(verifyRegistrationToken(mint('agent-platform'))).toBeNull();
+    expect(verifyRegistrationToken(mint('agent-registration'))).not.toBeNull();
+  });
+
+  it('10) a millisecond cutoff is read as seconds; a malformed one is reported, not silently applied', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    process.env.REGISTRATION_TOKEN_MIN_IAT = String((nowS - 50 * 86400) * 1000);
+    expect(verifyRegistrationToken(mint('agent-registration'))).toBeNull();
+    process.env.PLATFORM_TOKEN_MIN_IAT = '2026-01-01';
+    expect(verifyRegistrationToken(mint('agent-platform'))).not.toBeNull();
+    expect(error.mock.calls.flat().join(' ')).toContain('PLATFORM_TOKEN_MIN_IAT=2026-01-01');
+    error.mockRestore();
   });
 });

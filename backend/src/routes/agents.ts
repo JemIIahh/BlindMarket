@@ -34,6 +34,9 @@ import { discoverModels, ProviderModelsError } from '../services/providerModels.
 import { eciesEncrypt } from '../services/crypto.js';
 import { callerWallets } from '../services/callerWallets.js';
 import { nativeWeiToTokenUnits, normalizeSettlementAmount, pricingUnit } from '../services/settlementUnits.js';
+import { disconnectSocketsForToken } from '../services/socket.js';
+import { clientErrorMessage, safeErrorMessage } from '../middleware/errorHandler.js';
+import { serviceDescription, serviceName } from '../services/serviceText.js';
 
 /**
  * Owner-only guard for any agent endpoint that touches funds, keys, or
@@ -693,6 +696,9 @@ agentsRouter.post('/:id/revoke-token', requireAuth, async (req: AuthRequest, res
       if (jti) {
         await redis.set(`revoked:jwt:${jti}`, '1', 'EX', REVOKED_JWT_TTL_S);
         denied = true;
+        // Sockets authenticate once, at the handshake; drop the ones already
+        // open with the old token (security audit run 1, C32).
+        void disconnectSocketsForToken(jti).catch(() => {});
       }
     } catch (e) {
       console.warn(`[agents] revoke-token denylist write failed for ${req.params.id}:`, (e as Error).message);
@@ -702,6 +708,9 @@ agentsRouter.post('/:id/revoke-token', requireAuth, async (req: AuthRequest, res
     {
       address: agent.walletAddress, ownerAddress: agent.ownerAddress.toLowerCase(), agentName: agent.name,
       jti: randomUUID(),
+      // Same claims agentRunner mints. Without typ the rotated token was read
+      // as a device-flow registration token and lost the worker's owner scope.
+      typ: 'agent-platform',
     },
     config.jwtSecret,
     { algorithm: 'HS256', expiresIn: '365d' } as jwt.SignOptions,
@@ -884,9 +893,10 @@ agentsRouter.post('/:id/withdraw', requireAuth, async (req: AuthRequest, res) =>
 
     res.json({ success: true, data: { swept, skipped } });
   } catch (err) {
+    console.error(`[agents] withdraw failed for ${req.params.id}:`, err);
     res.status(500).json({
       success: false,
-      error: { code: 'WITHDRAW_FAILED', message: (err as Error).message },
+      error: { code: 'WITHDRAW_FAILED', message: clientErrorMessage(err, 'Withdraw failed') },
     });
   }
 });
@@ -1008,15 +1018,34 @@ agentsRouter.post('/:id/link-owner', requireAuth, async (req: AuthRequest, res) 
 // with the agent's (public) owner address — to requireAuth + authorizeOwner,
 // matching start/stop/withdraw. This also makes it honor the authorizedOwners
 // allowlist so a signature-linked wallet can edit too.
+// PATCH takes the deploy form's field rules. It used to save the raw body, and a
+// non-array `tools` crashed the public agent list and the agent's detail for
+// every caller (security audit run 1, C22). Tools are checked for shape only
+// (an array of typed, named objects) and keep their other fields: tools added
+// after deploy carry fields ToolSchema would strip (source, mcp_endpoint, ...).
+const AgentUpdateSchema = z.object({
+  instructions: z.string().min(1).optional(),
+  provider: z.enum(PROVIDERS).optional(),
+  model: z.string().min(1).optional(),
+  apiKey: z.string().optional(),
+  tools: z.array(
+    z.object({ type: z.enum(['http', 'mcp', 'js', 'sandbox', 'tool']), name: z.string().min(1) }).passthrough(),
+  ).max(100).optional(),
+  capabilities: z.array(z.enum(AGENT_CAPABILITIES as unknown as [string, ...string[]])).optional(),
+  // Old clients still send 18-decimal amounts; store them in USDC units.
+  minReward: z.string().regex(/^\d+$/, 'minReward must be an integer string').transform(normalizeSettlementAmount).optional(),
+});
+
 agentsRouter.patch('/:id', requireAuth, async (req: AuthRequest, res) => {
   const agent = await authorizeOwner(req, res, req.params.id);
   if (!agent) return;
-  const { instructions, provider, model, apiKey, tools, capabilities, minReward } = req.body as {
-    instructions?: string; provider?: string; model?: string; apiKey?: string; tools?: object[]; capabilities?: string[]; minReward?: string;
-  };
-  // Old clients still send 18-decimal amounts; store them in USDC units.
-  const normalizedMinReward = typeof minReward === 'string' && /^\d+$/.test(minReward) ? normalizeSettlementAmount(minReward) : minReward;
-  const updated = await updateAgent(req.params.id, { instructions, provider: provider as any, model, apiKey, tools: tools as any, capabilities: capabilities as any, minReward: normalizedMinReward });
+  const parsed = AgentUpdateSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ') } });
+    return;
+  }
+  const { instructions, provider, model, apiKey, tools, capabilities, minReward } = parsed.data;
+  const updated = await updateAgent(req.params.id, { instructions, provider: provider as any, model, apiKey, tools: tools as any, capabilities: capabilities as any, minReward });
   // Semantic matching (Phase 0): instructions/capabilities changed — re-embed.
   if (updated) agentEmbedding.recomputeForWalletBestEffort(updated.walletAddress);
   res.json({ success: true, data: strip(updated) });
@@ -1047,8 +1076,8 @@ agentsRouter.post('/:id/verifier', requireAuth, async (req: AuthRequest, res) =>
 // one agent can't touch another agent's services (cross-agent tamper → 404).
 
 const serviceSchema = z.object({
-  name: z.string().min(5).max(60),
-  description: z.string().max(2000).optional().default(''),
+  name: serviceName,
+  description: serviceDescription.optional().default(''),
   priceRaw: z.string().regex(/^\d+$/, "priceRaw must be an integer string in the payment token's smallest unit").transform(normalizeSettlementAmount),
   serviceType: z.enum(['api', 'a2a']),
   active: z.boolean().optional().default(true),
@@ -1056,8 +1085,8 @@ const serviceSchema = z.object({
 // No defaults here — an absent field in a PATCH must stay undefined (skipped),
 // not get reset to a default.
 const serviceUpdateSchema = z.object({
-  name: z.string().min(5).max(60).optional(),
-  description: z.string().max(2000).optional(),
+  name: serviceName.optional(),
+  description: serviceDescription.optional(),
   priceRaw: z.string().regex(/^\d+$/, "priceRaw must be an integer string in the payment token's smallest unit").transform(normalizeSettlementAmount).optional(),
   serviceType: z.enum(['api', 'a2a']).optional(),
   active: z.boolean().optional(),
@@ -1281,7 +1310,7 @@ agentsRouter.post('/:id/start', requireAuth, async (req: AuthRequest, res) => {
   } catch (e: unknown) {
     res.status(400).json({
       success: false,
-      error: { code: 'AGENT_ACTION_FAILED', message: (e as Error).message },
+      error: { code: 'AGENT_ACTION_FAILED', message: safeErrorMessage(e) },
     });
   }
 });
@@ -1296,7 +1325,7 @@ agentsRouter.post('/:id/pause', requireAuth, async (req: AuthRequest, res) => {
   } catch (e: unknown) {
     res.status(400).json({
       success: false,
-      error: { code: 'AGENT_ACTION_FAILED', message: (e as Error).message },
+      error: { code: 'AGENT_ACTION_FAILED', message: safeErrorMessage(e) },
     });
   }
 });
@@ -1311,7 +1340,7 @@ agentsRouter.post('/:id/stop', requireAuth, async (req: AuthRequest, res) => {
   } catch (e: unknown) {
     res.status(400).json({
       success: false,
-      error: { code: 'AGENT_ACTION_FAILED', message: (e as Error).message },
+      error: { code: 'AGENT_ACTION_FAILED', message: safeErrorMessage(e) },
     });
   }
 });
@@ -1328,7 +1357,7 @@ agentsRouter.post('/:id/restart', requireAuth, async (req: AuthRequest, res) => 
   } catch (e: unknown) {
     res.status(400).json({
       success: false,
-      error: { code: 'AGENT_ACTION_FAILED', message: (e as Error).message },
+      error: { code: 'AGENT_ACTION_FAILED', message: safeErrorMessage(e) },
     });
   }
 });
@@ -1347,7 +1376,7 @@ agentsRouter.get('/:id/stats', async (req, res) => {
   } catch (e: unknown) {
     res.status(500).json({
       success: false,
-      error: { code: 'STATS_FAILED', message: (e as Error).message },
+      error: { code: 'STATS_FAILED', message: safeErrorMessage(e) },
     });
   }
 });
@@ -1363,7 +1392,7 @@ agentsRouter.post('/:id/resume', requireAuth, async (req: AuthRequest, res) => {
   } catch (e: unknown) {
     res.status(400).json({
       success: false,
-      error: { code: 'AGENT_ACTION_FAILED', message: (e as Error).message },
+      error: { code: 'AGENT_ACTION_FAILED', message: safeErrorMessage(e) },
     });
   }
 });

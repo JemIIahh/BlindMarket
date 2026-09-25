@@ -3,6 +3,8 @@ import { getDb } from './database.js';
 import { config } from '../config.js';
 import type { AgentExecutor, AgentCapability } from '../types.js';
 import type { SettlementUnit } from './settlementUnits.js';
+import type { TaskChain } from './taskChain.js';
+import { CLAIM_CREDIT_SQL } from './creditLedger.js';
 
 const MAX_AGENTS = 1_000;
 
@@ -172,34 +174,103 @@ export async function creditPayout(
   const col = target.column;
   if (usePg()) {
     const db = await getPool();
-    const { rowCount } = await db.query(
-      `UPDATE agent_executors
+    const { rowCount } = await db.query(pgCreditSql(col), [addr, amountRaw.toString()]);
+    return (rowCount ?? 0) > 0;
+  }
+  const db = getDb();
+  return db.transaction(() => sqliteCredit(db, col, addr, amountRaw))();
+}
+
+/** creditPayout's counter update in Postgres: $1 = address, $2 = amount. */
+function pgCreditSql(col: string): string {
+  return `UPDATE agent_executors
          SET tasks_completed = tasks_completed + 1,
              reputation = LEAST(100, reputation + 1),
              ${col} = (COALESCE(NULLIF(${col}, ''), '0')::numeric + $2::numeric)::text,
              updated_at = NOW()
-       WHERE address = $1`,
-      [addr, amountRaw.toString()],
-    );
-    return (rowCount ?? 0) > 0;
+       WHERE address = $1`;
+}
+
+/**
+ * creditPayout's counter update in SQLite; the caller runs it inside a
+ * transaction. SQLite integers are 64-bit, too small for 18-decimal totals,
+ * so the sum is done in JS (better-sqlite3 is synchronous). False when no
+ * such executor exists.
+ */
+function sqliteCredit(db: ReturnType<typeof getDb>, col: string, addr: string, amountRaw: bigint): boolean {
+  const row = db.prepare(`SELECT ${col} AS earned FROM agent_executors WHERE address = ?`).get(addr) as
+    { earned: string | null } | undefined;
+  if (!row) return false;
+  const total = (BigInt(row.earned || '0') + amountRaw).toString();
+  db.prepare(
+    `UPDATE agent_executors
+       SET tasks_completed = tasks_completed + 1,
+           reputation = MIN(100, reputation + 1),
+           ${col} = ?,
+           updated_at = datetime('now')
+     WHERE address = ?`,
+  ).run(total, addr);
+  return true;
+}
+
+export type CreditOutcome = 'credited' | 'duplicate' | 'unregistered';
+
+/**
+ * creditPayout at most once per settled task: claims the task's
+ * credited_payouts row (creditLedger.ts) and applies the credit in ONE
+ * transaction, so the row exists exactly when the credit does.
+ *   'credited'     — this call claimed the task and credited it;
+ *   'duplicate'    — an earlier credit's row stands, nothing changed;
+ *   'unregistered' — no such executor, rolled back, nothing written.
+ * A failure rolls both back and throws. No path deletes a claim: the old
+ * claim / credit / compensating-release sequence let a re-observation that
+ * hit a fault delete the row an EARLIER credit wrote, and the next
+ * observation credited the task again (security audit run 1, C34).
+ */
+export async function creditPayoutOnce(
+  claim: { taskHash: string; chain: TaskChain },
+  address: string,
+  unit: SettlementUnit,
+  amountRaw: bigint,
+): Promise<CreditOutcome> {
+  const target = EARNINGS_COLUMN[unit.symbol];
+  if (!hasEarningsTotal(unit)) {
+    throw new Error(`no earnings total for ${unit.symbol} with ${unit.decimals} decimals`);
   }
-  // SQLite integers are 64-bit, too small for 18-decimal totals, so the sum
-  // is done in JS inside a transaction (better-sqlite3 is synchronous).
+  const hash = claim.taskHash.toLowerCase();
+  const addr = address.toLowerCase();
+  const col = target.column;
+  if (usePg()) {
+    const client = await (await getPool()).connect();
+    try {
+      await client.query('BEGIN');
+      const claimed = await client.query(CLAIM_CREDIT_SQL.pg, [hash, claim.chain, addr]);
+      if ((claimed.rowCount ?? 0) === 0) {
+        await client.query('ROLLBACK');
+        return 'duplicate';
+      }
+      const { rowCount } = await client.query(pgCreditSql(col), [addr, amountRaw.toString()]);
+      if ((rowCount ?? 0) === 0) {
+        await client.query('ROLLBACK');
+        return 'unregistered';
+      }
+      await client.query('COMMIT');
+      return 'credited';
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
   const db = getDb();
-  return db.transaction(() => {
-    const row = db.prepare(`SELECT ${col} AS earned FROM agent_executors WHERE address = ?`).get(addr) as
-      { earned: string | null } | undefined;
-    if (!row) return false;
-    const total = (BigInt(row.earned || '0') + amountRaw).toString();
-    db.prepare(
-      `UPDATE agent_executors
-         SET tasks_completed = tasks_completed + 1,
-             reputation = MIN(100, reputation + 1),
-             ${col} = ?,
-             updated_at = datetime('now')
-       WHERE address = ?`,
-    ).run(total, addr);
-    return true;
+  return db.transaction((): CreditOutcome => {
+    // Registration first: nothing to roll back when there is no executor.
+    if (!db.prepare('SELECT 1 FROM agent_executors WHERE address = ?').get(addr)) return 'unregistered';
+    const claimed = db.prepare(CLAIM_CREDIT_SQL.sqlite).run(hash, claim.chain, addr);
+    if (Number(claimed.changes ?? 0) === 0) return 'duplicate';
+    sqliteCredit(db, col, addr, amountRaw);
+    return 'credited';
   })();
 }
 

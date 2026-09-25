@@ -1,5 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import { storageIdSchema } from '../services/storageId.js';
+import { verificationCriteriaSchema } from '../services/verificationCriteriaSchema.js';
 import { requireAuth } from '../middleware/auth.js';
 import { createUserRateLimiter } from '../middleware/rateLimit.js';
 import { AppError } from '../middleware/errorHandler.js';
@@ -13,6 +15,7 @@ import { settleAssignment, settleVerification, resolveAssignee } from '../servic
 import { recordWorkerPayout, recordWorkerDispute } from '../services/workerPayout.js';
 import { notifyLifecycle } from '../services/notificationStore.js';
 import { resolveTaskByHash, seedTaskId, type TaskChain } from '../services/taskChain.js';
+import { changedTaskTerm } from '../services/taskTerms.js';
 import * as escrowService from '../services/escrow.js';
 import * as reputationService from '../services/reputation.js';
 import * as reputationDecay from '../services/reputationDecay.js';
@@ -95,7 +98,7 @@ const submitSchema = z.object({
     chatID: z.string().optional(),
     verified: z.boolean().optional(),
   }).nullable().optional(),
-  rootHash: z.string().nullable().optional(),
+  rootHash: storageIdSchema.nullable().optional(),
 });
 
 // POST /tasks/index — verified A2A meta write. The poster's frontend calls
@@ -108,44 +111,20 @@ const indexTaskSchema = z.object({
   txHash: z.string().min(1).max(100), // 32-byte hex tx hash
   taskHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/, 'taskHash must be a bytes32 hex string'),
   verificationMode: z.enum(['manual', 'auto', 'oracle', 'agent']).optional(),
-  verificationCriteria: z
-    .object({
-      required_fields: z.array(z.string()).optional(),
-      min_length: z.number().int().positive().optional(),
-      contains_keywords: z.array(z.string()).optional(),
-      max_length: z.number().int().positive().optional(),
-      expected_answer: z.string().optional(),
-      forbidden_phrases: z.array(z.string()).optional(),
-      regex_pattern: z.string().max(200).optional(),
-      expected_schema: z
-        .object({
-          type: z.string().optional(),
-          required: z.array(z.string()).optional(),
-          properties: z.record(z.object({ type: z.string().optional() })).optional(),
-        })
-        .optional(),
-      rubric: z
-        .array(
-          z.object({
-            criterion: z.string(),
-            keywords: z.array(z.string()).optional(),
-            min_mentions: z.number().int().positive().optional(),
-            weight: z.number().positive().optional(),
-          }),
-        )
-        .optional(),
-      pass_threshold: z.number().min(0).max(100).optional(),
-      acceptance: z.string().max(4000).optional(),
-    })
-    .optional(),
+  // Bounded, and shared with POST /tasks (services/verificationCriteriaSchema.ts).
+  verificationCriteria: verificationCriteriaSchema.optional(),
   verifierAddress: z
     .string()
     .regex(/^0x[0-9a-fA-F]{40,66}$/, 'verifierAddress must be a 0x-prefixed hex string')
     .optional(),
+  // Bounded and de-duplicated like the registration lists: each entry is a
+  // per-skill proof credit at settlement (security audit run 1, C13).
   requiredCapabilities: z
     .array(z.enum(AGENT_CAPABILITIES as unknown as [string, ...string[]]))
+    .max(20)
+    .transform((caps) => [...new Set(caps)])
     .optional(),
-  rootHash: z.string().min(1).max(256).optional(),
+  rootHash: storageIdSchema.optional(),
   wrappedKeys: z
     .record(
       z.string().regex(/^0x[0-9a-fA-F]{40,66}$/, 'wrappedKeys address must be 0x-prefixed hex'),
@@ -1595,6 +1574,25 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       );
     }
 
+    // A re-index may retry a listing or add wrappedKeys, but it keeps the terms
+    // the task was first listed on. Otherwise a poster could switch an accepted
+    // auto task to manual, or swap its criteria, and reject work that met the
+    // original terms. Pinned from the first index rather than from acceptance:
+    // a state check here would race the accept compare-and-set.
+    if (existingMeta) {
+      const changed = changedTaskTerm(existingMeta, {
+        ...data,
+        requiredCapabilities: data.requiredCapabilities ?? [],
+      });
+      if (changed) {
+        throw new AppError(
+          409,
+          'TERMS_IMMUTABLE',
+          `This task's ${changed} was set when it was first listed and can't be changed — cancel the task and post a new one`,
+        );
+      }
+    }
+
     // Only index tasks escrowed in the token this chain settles in, so every
     // payout can be booked in a known unit. Refused before anything is
     // written: an unindexed task is never offered, and the poster can still
@@ -2598,7 +2596,8 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
       }
       await a2aStore.updateState(taskHash, { status: reconciledStatus, verificationResult: reconciled });
       if (!settledPass) {
-        await recordWorkerDispute(taskHash, address);
+        // Keyed on the round, shared with every observer of it (security audit run 1, C21).
+        await recordWorkerDispute(taskHash, address, { chain: ocIdChain, taskId: ocId, attempt: onChainTask.submissionAttempts });
       }
       // Diary: completed (+ review nudge) or failed, poster + worker.
       void notifyLifecycle(taskHash, settledPass ? 'completed' : 'failed');
@@ -2650,7 +2649,9 @@ a2aRouter.post('/tasks/:id/finalize', requireAuth, async (req: AuthRequest, res,
     });
 
     if (!verificationResult.passed) {
-      await recordWorkerDispute(taskHash, address);
+      // completeVerification(false) leaves submissionAttempts as read above,
+      // so it names this round for every observer (security audit run 1, C21).
+      await recordWorkerDispute(taskHash, address, { chain: ocIdChain, taskId: ocId, attempt: onChainTask.submissionAttempts });
     }
 
     // Diary: completed (+ review nudge) or failed, poster + worker.
@@ -2787,7 +2788,8 @@ a2aRouter.post('/tasks/:id/verify', requireAuth, async (req: AuthRequest, res, n
     });
 
     if (!passed && state.executorAddress) {
-      await recordWorkerDispute(taskHash, state.executorAddress);
+      // One dispute per failed round across observers (security audit run 1, C21).
+      await recordWorkerDispute(taskHash, state.executorAddress, { chain: ocIdChain, taskId: ocId, attempt: onChainTask.submissionAttempts });
     }
 
     // Diary: completed (+ review nudge) or failed, poster + worker.
@@ -2949,7 +2951,8 @@ a2aRouter.post('/tasks/:id/verdict', requireAuth, async (req: AuthRequest, res, 
     await a2aStore.updateState(taskHash, { status: newStatus, verificationResult });
 
     if (!passed && state.executorAddress) {
-      await recordWorkerDispute(taskHash, state.executorAddress);
+      // One dispute per failed round across observers (security audit run 1, C21).
+      await recordWorkerDispute(taskHash, state.executorAddress, { chain: ocIdChain, taskId: ocId, attempt: onChainTask.submissionAttempts });
     }
 
     // Diary: completed (+ review nudge) or failed, poster + worker.
@@ -3195,7 +3198,14 @@ a2aRouter.get('/executions', requireAuth, async (req: AuthRequest, res, next) =>
     // keyCustodyBlob / rootHash graph for every executor — the exact leak the
     // browse/list/detail projection closed.
     const isSelf = !queryAddr || queryAddr.toLowerCase() === req.user!.address.toLowerCase();
-    const executions = isSelf ? tasks : tasks.map(a2aStore.projectPublicEntry);
+    // The self view still hides the auto-verify answer key: the executor is
+    // the one being checked against it.
+    const executions = isSelf
+      ? tasks.map((t) => ({
+          ...t,
+          meta: { ...t.meta, verificationCriteria: a2aStore.projectCriteria(t.meta.verificationCriteria) },
+        }))
+      : tasks.map(a2aStore.projectPublicEntry);
 
     const body: ApiResponse = {
       success: true,

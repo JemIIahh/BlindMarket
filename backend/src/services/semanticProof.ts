@@ -50,9 +50,15 @@ export const PROOF_SLUG_PREFIX = 'skill:';
 
 /** The ONE place caps + resolved slug become the proof-ledger key set —
  *  success and dispute paths must credit/debit identical keys or the
- *  earned-badge failure-ratio guard goes blind. */
+ *  earned-badge failure-ratio guard goes blind.
+ *  Each key appears once: skillStatsStore upserts once per entry, so a tag
+ *  the poster listed five times turned one settlement into five completions
+ *  (an instant 'earned' badge) and one failed round into five failures
+ *  (security audit run 1, C13). Tasks stored before the index schema
+ *  de-duplicated requiredCapabilities still carry repeats. */
 export function mergeProofKeys(caps: string[], slug: string | null): string[] {
-  return slug ? [...caps, `${PROOF_SLUG_PREFIX}${slug}`] : caps;
+  const keys = slug ? [...caps, `${PROOF_SLUG_PREFIX}${slug}`] : caps;
+  return [...new Set(keys)];
 }
 
 /** The text a skill exposes for matching — name + routing tags ONLY.

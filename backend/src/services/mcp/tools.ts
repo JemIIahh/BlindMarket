@@ -257,8 +257,13 @@ export function buildMcpServer(user: AuthUser): McpServer {
         ...JSON.parse(JSON.stringify(task, bigintReplacer)),
         decimals,
         a2aMeta: meta ? a2aStore.projectPublicMeta(meta) : null,
+        // The full verdict text travels with the deliverable.
         a2aState: state
-          ? { ...a2aStore.projectPublicState(state), resultData: canSeeResult ? state.resultData ?? null : null }
+          ? {
+              ...a2aStore.projectPublicState(state, meta),
+              resultData: canSeeResult ? state.resultData ?? null : null,
+              ...(canSeeResult && state.verificationResult ? { verificationResult: state.verificationResult } : {}),
+            }
           : null,
       });
     },
@@ -314,10 +319,15 @@ export function buildMcpServer(user: AuthUser): McpServer {
       if (!hasWallet) return fail('UNAUTHORIZED', 'This tool needs a wallet-backed API key');
       const tasks = await a2aStore.getPosterTasks(user.address);
       // Poster's own surface: project the meta (no reason to pump ECIES blobs
-      // into an LLM context, even the poster's own) but keep the deliverable.
+      // into an LLM context, even the poster's own) but keep the poster's own
+      // criteria, the deliverable and the full verdict.
       const projected = tasks.map((t) => ({
-        meta: a2aStore.projectPublicMeta(t.meta),
-        state: { ...a2aStore.projectPublicState(t.state), resultData: t.state.resultData ?? null },
+        meta: { ...a2aStore.projectPublicMeta(t.meta), verificationCriteria: t.meta.verificationCriteria },
+        state: {
+          ...a2aStore.projectPublicState(t.state, t.meta),
+          resultData: t.state.resultData ?? null,
+          verificationResult: t.state.verificationResult,
+        },
       }));
       return ok({ tasks: projected, total: projected.length });
     },

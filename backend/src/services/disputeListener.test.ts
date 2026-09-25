@@ -186,7 +186,8 @@ describe('a ruling for the poster', () => {
 
     await listener.handleDisputeResolved('base', 7n, false);
 
-    expect(payout.recordWorkerDispute).toHaveBeenCalledWith(HASH, OWNER, { rethrow: true });
+    // Keyed on the ruling, so no other observer records it again (security audit run 1, C21).
+    expect(payout.recordWorkerDispute).toHaveBeenCalledWith(HASH, OWNER, { chain: 'base', taskId: '7', attempt: 'ruling' }, { rethrow: true });
     expect(payout.recordWorkerPayout).not.toHaveBeenCalled();
     expect(notifyLifecycle).toHaveBeenCalledWith(HASH, 'disputed');
     expect(a2aStore.updateState).toHaveBeenCalledWith(HASH, { status: 'failed' });

@@ -1,5 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import { storageIdSchema } from '../services/storageId.js';
+import { verificationCriteriaSchema } from '../services/verificationCriteriaSchema.js';
 import { ethers } from 'ethers';
 import { requireAuth, optionalAuth } from '../middleware/auth.js';
 import { canViewerSeeResult } from '../services/resultVisibility.js';
@@ -55,32 +57,13 @@ const createTaskSchema = z.object({
   // unsigned tx targets createTaskWithVerifier so the verifier is committed
   // on-chain at task creation (the poster signs it, not the platform).
   verifierAddress: z.string().regex(/^0x[0-9a-fA-F]{40,66}$/, 'Invalid verifier address').optional(),
-  verificationCriteria: z.object({
-    required_fields: z.array(z.string()).optional(),
-    min_length: z.number().int().positive().optional(),
-    contains_keywords: z.array(z.string()).optional(),
-    max_length: z.number().int().positive().optional(),
-    expected_answer: z.string().optional(),
-    forbidden_phrases: z.array(z.string()).optional(),
-    regex_pattern: z.string().max(200).optional(),
-    expected_schema: z.object({
-      type: z.string().optional(),
-      required: z.array(z.string()).optional(),
-      properties: z.record(z.object({ type: z.string().optional() })).optional(),
-    }).optional(),
-    rubric: z.array(z.object({
-      criterion: z.string(),
-      keywords: z.array(z.string()).optional(),
-      min_mentions: z.number().int().positive().optional(),
-      weight: z.number().positive().optional(),
-    })).optional(),
-    pass_threshold: z.number().min(0).max(100).optional(),
-  }).optional(),
+  // Bounded, and shared with POST /a2a/tasks/index (services/verificationCriteriaSchema.ts).
+  verificationCriteria: verificationCriteriaSchema.optional(),
   requiredCapabilities: z.array(z.enum(AGENT_CAPABILITIES as unknown as [string, ...string[]])).optional(),
   // 0G Storage root hash of the AES-encrypted brief. Required for the
   // encrypted-flow demo; absent for legacy/H2H tasks that don't use the
   // decryption pipeline.
-  rootHash: z.string().min(1).max(256).optional(),
+  rootHash: storageIdSchema.optional(),
   // Map of lowercased executor address → hex ECIES blob (AES key wrapped to
   // that executor's pubkey, browser-side at post time). Keys must be valid
   // 0x-prefixed EOA addresses; values are hex strings of the wrapped blob.
@@ -288,8 +271,13 @@ tasksRouter.get('/:id', optionalAuth, async (req: AuthRequest, res, next) => {
         // Strip operator-internal diagnostics (assignError/verifyError) on this
         // surface. resultData (the deliverable) is attached only for the
         // poster, the assigned worker, or the poster-agent's owner(s).
+        // The full verdict text travels with the deliverable.
         a2aState: a2aState
-          ? { ...a2aStore.projectPublicState(a2aState), resultData: canSeeResult ? a2aState.resultData ?? null : null }
+          ? {
+              ...a2aStore.projectPublicState(a2aState, a2aMeta),
+              resultData: canSeeResult ? a2aState.resultData ?? null : null,
+              ...(canSeeResult && a2aState.verificationResult ? { verificationResult: a2aState.verificationResult } : {}),
+            }
           : null,
         meta: meta ? {
           ...serializeBigInts(meta as unknown as Record<string, unknown>),

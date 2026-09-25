@@ -62,7 +62,9 @@ export type PublicInstalledSkill = Pick<InstalledSkill, 'skillId' | 'slug' | 'na
 const REDACTED = '•••';
 
 function redactTools(tools: AgentTool[] | undefined): AgentTool[] | undefined {
-  if (!tools) return undefined;
+  // A row saved before PATCH validated its body can hold a non-array value;
+  // one such row must not fail the whole public list (security audit run 1, C22).
+  if (!Array.isArray(tools)) return undefined;
   return tools.map((t) => {
     if (!t || typeof t !== 'object') return t;
     const rec = t as unknown as Record<string, unknown>;

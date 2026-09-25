@@ -39,22 +39,22 @@ vi.mock('../services/escrow.js', () => ({
 
 const getReceipt = vi.fn();
 const parseLog = vi.fn();
+// The escrow's task as of a block: /confirm reads the failed round's attempt
+// count at the settlement block.
+const getTaskAt = vi.fn();
 
 vi.mock('../services/chain.js', () => ({
   baseProvider: { getTransactionReceipt: (...a: unknown[]) => getReceipt(...a) },
   baseEscrow: {
     getAddress: async () => ESCROW,
     interface: { parseLog: (...a: unknown[]) => parseLog(...a) },
+    getTask: (...a: unknown[]) => getTaskAt(...a),
   },
-}));
-
-vi.mock('../services/redis.js', () => ({
-  redis: { set: vi.fn(async () => 'OK'), del: vi.fn(async () => 1) },
 }));
 
 vi.mock('../services/workerPayout.js', () => ({
   recordWorkerPayout: vi.fn(async () => undefined),
-  recordWorkerDispute: vi.fn(async () => undefined),
+  recordWorkerDispute: vi.fn(async () => true),
 }));
 
 vi.mock('../services/accountingService.js', () => ({
@@ -85,10 +85,11 @@ function app() {
 }
 
 const as = (addr: string) => ({ 'x-test-address': addr });
-const okReceipt = (logs: unknown[]) => ({ status: 1, logs });
+const okReceipt = (logs: unknown[]) => ({ status: 1, blockNumber: 123, logs });
 
 beforeEach(() => {
   vi.clearAllMocks();
+  getTaskAt.mockResolvedValue({ submissionAttempts: 2n });
 });
 
 describe('H4: no credit at unsigned-build time', () => {
@@ -161,18 +162,72 @@ describe('POST /submissions/confirm', () => {
     expect(workerPayout.recordWorkerPayout).not.toHaveBeenCalled();
   });
 
-  it('records one dispute per failed broadcast (repeat confirm is a duplicate)', async () => {
+  it('records one dispute per failed round (repeat confirm is a duplicate)', async () => {
     getReceipt.mockResolvedValue(okReceipt([{ address: ESCROW }]));
     parseLog.mockReturnValue({ name: 'VerificationCompleted', args: { taskId: 7n, passed: false } });
-    const { redis } = await import('../services/redis.js');
-    let claimed = false;
-    vi.mocked(redis.set).mockImplementation(async () => (claimed ? null : (claimed = true, 'OK' as never)));
+    // recordWorkerDispute holds the per-round gate (workerPayout.test.ts).
+    vi.mocked(workerPayout.recordWorkerDispute).mockResolvedValueOnce(true).mockResolvedValueOnce(false);
     const body = { taskId: 7, txHash: '0x' + '55'.repeat(32) };
     const r1 = await request(app()).post('/api/v1/submissions/confirm').set(as(POSTER)).send(body);
     expect(r1.status).toBe(200);
     expect(r1.body.data).toMatchObject({ confirmed: true, passed: false });
+    expect(r1.body.data.duplicate).toBeUndefined();
     const r2 = await request(app()).post('/api/v1/submissions/confirm').set(as(POSTER)).send(body);
     expect(r2.body.data.duplicate).toBe(true);
-    expect(workerPayout.recordWorkerDispute).toHaveBeenCalledTimes(1);
+    expect(accountingService.recordTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * A failed round an A2A route (/finalize, /verify, /verdict) already
+   * recorded must not be recorded again when its settlement tx is replayed
+   * here: /confirm used to guard only with a marker keyed on the tx hash,
+   * which only it wrote (security audit run 1, C21). It now names the round
+   * the way the A2A routes do: chain, on-chain id, and the attempt count at
+   * the settlement block.
+   */
+  it('keys the dispute on the round at the settlement block, the same key the A2A routes use', async () => {
+    getReceipt.mockResolvedValue(okReceipt([{ address: ESCROW }]));
+    parseLog.mockReturnValue({ name: 'VerificationCompleted', args: { taskId: 7n, passed: false } });
+    const res = await request(app()).post('/api/v1/submissions/confirm')
+      .set(as(POSTER)).send({ taskId: 7, txHash: '0x' + '66'.repeat(32) });
+    expect(res.status).toBe(200);
+    expect(getTaskAt).toHaveBeenCalledWith(7, { blockTag: 123 });
+    expect(workerPayout.recordWorkerDispute).toHaveBeenCalledWith(
+      '0xhash', WORKER, { chain: 'base', taskId: '7', attempt: 2 }, { rethrow: true },
+    );
+  });
+
+  it('adds no dispute and no slash row for a round an A2A route already recorded', async () => {
+    getReceipt.mockResolvedValue(okReceipt([{ address: ESCROW }]));
+    parseLog.mockReturnValue({ name: 'VerificationCompleted', args: { taskId: 7n, passed: false } });
+    vi.mocked(workerPayout.recordWorkerDispute).mockResolvedValueOnce(false);
+    const res = await request(app()).post('/api/v1/submissions/confirm')
+      .set(as(POSTER)).send({ taskId: 7, txHash: '0x' + '77'.repeat(32) });
+    expect(res.body.data).toMatchObject({ confirmed: true, passed: false, duplicate: true });
+    expect(accountingService.recordTransaction).not.toHaveBeenCalled();
+  });
+
+  it('without historical state, reads the round from the current state while the task still sits in Verified', async () => {
+    getReceipt.mockResolvedValue(okReceipt([{ address: ESCROW }]));
+    parseLog.mockReturnValue({ name: 'VerificationCompleted', args: { taskId: 7n, passed: false } });
+    getTaskAt.mockRejectedValueOnce(new Error('missing trie node'));
+    getTaskAt.mockResolvedValueOnce({ status: 3n, submissionAttempts: 2n });
+    const res = await request(app()).post('/api/v1/submissions/confirm')
+      .set(as(POSTER)).send({ taskId: 7, txHash: '0x' + '99'.repeat(32) });
+    expect(res.status).toBe(200);
+    expect(workerPayout.recordWorkerDispute).toHaveBeenCalledWith(
+      '0xhash', WORKER, { chain: 'base', taskId: '7', attempt: 2 }, { rethrow: true },
+    );
+  });
+
+  it('refuses with a retryable 503 when there is no historical state and the task has moved on', async () => {
+    getReceipt.mockResolvedValue(okReceipt([{ address: ESCROW }]));
+    parseLog.mockReturnValue({ name: 'VerificationCompleted', args: { taskId: 7n, passed: false } });
+    getTaskAt.mockRejectedValueOnce(new Error('missing trie node'));
+    const res = await request(app()).post('/api/v1/submissions/confirm')
+      .set(as(POSTER)).send({ taskId: 7, txHash: '0x' + '88'.repeat(32) });
+    expect(res.status).toBe(503);
+    expect(res.body.error.code).toBe('ROUND_UNAVAILABLE');
+    expect(workerPayout.recordWorkerDispute).not.toHaveBeenCalled();
   });
 });

@@ -86,6 +86,16 @@ interface Row {
   pass: boolean;
 }
 
+// Built from code points so no invisible character sits in this file's source.
+const ch = (code: number): string => String.fromCodePoint(code);
+const ZERO_WIDTH_SPACE = ch(0x200b);
+const SOFT_HYPHEN = ch(0x00ad);
+const NO_BREAK_SPACE = ch(0x00a0);
+const CYRILLIC_O = ch(0x043e);
+
+const MEMO = 'This memo reviews the quarter for the board. Sales teams closed several new enterprise accounts in the north region, hiring stayed flat, and the product group shipped two releases on schedule. Support volume dropped after the help center update, and the finance team finished the audit preparation early.';
+const EXCUSE_PHRASES: VerificationCriteria = { min_length: 10, forbidden_phrases: ['unable to complete'] };
+
 const TABLE: Row[] = [
   // 1. Failure excuses
   { name: 'bare excuse, no criteria', output: EXCUSE, criteria: {}, pass: false },
@@ -187,6 +197,28 @@ const TABLE: Row[] = [
   { name: 'rental: 20-character result', output: 'x'.repeat(20), criteria: RENTAL, pass: false },
   { name: 'rental: excuse', output: EXCUSE, criteria: RENTAL, pass: false },
   { name: 'rental: real answer', output: 'The capital of France is Paris, on the river Seine.', criteria: RENTAL, pass: true },
+
+  // 10. Absolute poster criteria are gates, not weights (audit run 1, C11)
+  { name: 'no required keyword, forbidden list set', output: MEMO, criteria: { min_length: 10, contains_keywords: ['revenue', 'churn', 'margin'], forbidden_phrases: ['lorem ipsum'], pass_threshold: 60 }, pass: false },
+  { name: 'forbidden phrase next to a met keyword', output: `Revenue review. ${MEMO} Lorem ipsum filler follows.`, criteria: { min_length: 10, contains_keywords: ['revenue'], forbidden_phrases: ['lorem ipsum'], pass_threshold: 60 }, pass: false },
+  { name: 'one of five required keywords', output: `Revenue review. ${MEMO}`, criteria: { min_length: 10, contains_keywords: ['revenue', 'churn', 'margin', 'forecast', 'cohort'], pass_threshold: 60 }, pass: false },
+  { name: 'one keyword short at threshold 90', output: `Revenue and churn review. ${MEMO}`, criteria: { min_length: 10, contains_keywords: ['revenue', 'churn', 'margin'], forbidden_phrases: ['lorem ipsum'], pass_threshold: 90 }, pass: false },
+  { name: 'every required keyword present', output: `Revenue, churn and margin review. ${MEMO}`, criteria: { min_length: 10, contains_keywords: ['revenue', 'churn', 'margin'], forbidden_phrases: ['lorem ipsum'], pass_threshold: 60 }, pass: true },
+  { name: 'half the required fields', output: '{"summary":"Revenue grew 12 percent year over year."}', criteria: { required_fields: ['summary', 'risks'] }, pass: false },
+  { name: 'wrong decimal answer', output: '13.5', criteria: { expected_answer: '12.5' }, pass: false },
+  { name: 'two decimal guesses', output: '12.5 13.5', criteria: { expected_answer: '12.5' }, pass: false },
+  { name: 'three decimal guesses at threshold 100', output: '1.5 2.5 3.5', criteria: { expected_answer: '2.5', pass_threshold: 100 }, pass: false },
+  { name: 'half of a two-word answer', output: 'George Bush', criteria: { expected_answer: 'George Washington' }, pass: false },
+  { name: 'right decimal answer', output: '12.5', criteria: { expected_answer: '12.5' }, pass: true },
+  { name: 'right two-word answer, dressed', output: 'The answer is George Washington.', criteria: { expected_answer: 'George Washington' }, pass: true },
+
+  // 11. Forbidden phrases as a reader sees them (audit run 1, C30)
+  { name: 'forbidden phrase, plain', output: `${MEMO} I was unable to complete the regional breakdown.`, criteria: EXCUSE_PHRASES, pass: false },
+  { name: 'forbidden phrase split by a zero-width space', output: `${MEMO} I was un${ZERO_WIDTH_SPACE}able to complete the regional breakdown.`, criteria: EXCUSE_PHRASES, pass: false },
+  { name: 'forbidden phrase split by a soft hyphen', output: `${MEMO} I was un${SOFT_HYPHEN}able to complete the regional breakdown.`, criteria: EXCUSE_PHRASES, pass: false },
+  { name: 'forbidden phrase with a no-break space', output: `${MEMO} I was unable${NO_BREAK_SPACE}to complete the regional breakdown.`, criteria: EXCUSE_PHRASES, pass: false },
+  { name: 'forbidden phrase with a Cyrillic look-alike', output: `${MEMO} I was unable t${CYRILLIC_O} complete the regional breakdown.`, criteria: EXCUSE_PHRASES, pass: false },
+  { name: 'no forbidden phrase', output: `${MEMO} The regional breakdown is attached.`, criteria: EXCUSE_PHRASES, pass: true },
 ];
 
 describe('autoVerify — regression table', () => {

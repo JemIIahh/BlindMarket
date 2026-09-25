@@ -107,6 +107,30 @@ describe('agent minimum reward', () => {
   });
 });
 
+describe('PATCH /agents/:id body validation (audit run 1, C22)', () => {
+  it('refuses a non-array tools value, and never stores it', async () => {
+    for (const tools of [{}, 'x', 5, [null], [{ name: 'no type' }], [{ type: 'evil', name: 'x' }]]) {
+      const res = await asOwner(request(app).patch('/api/v1/agents/agent-1')).send({ tools });
+      expect(res.status).toBe(400);
+    }
+    expect(updateAgent).not.toHaveBeenCalled();
+  });
+
+  it('keeps extra fields on a tool (MCP tools added after deploy carry them)', async () => {
+    const tool = { type: 'tool', name: 'lookup', mcp_endpoint: 'https://mcp.example.com', source: 'mcp' };
+    const res = await asOwner(request(app).patch('/api/v1/agents/agent-1')).send({ tools: [tool] });
+    expect(res.status).toBe(200);
+    expect(updateAgent).toHaveBeenCalledWith('agent-1', expect.objectContaining({ tools: [tool] }));
+  });
+
+  it('refuses an unknown provider, an empty model and a non-integer minReward', async () => {
+    for (const body of [{ provider: 'nope' }, { model: '' }, { minReward: '1.5' }]) {
+      expect((await asOwner(request(app).patch('/api/v1/agents/agent-1')).send(body)).status).toBe(400);
+    }
+    expect(updateAgent).not.toHaveBeenCalled();
+  });
+});
+
 describe('POST /agents/:id/verifier (audit run 1, C04)', () => {
   it('lets the owner turn verifier duty on and off', async () => {
     const res = await asOwner(request(app).post('/api/v1/agents/agent-1/verifier')).send({ enabled: true });

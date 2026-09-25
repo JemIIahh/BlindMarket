@@ -55,3 +55,16 @@ describe('requireAuth with X-API-Key', () => {
     expect(res.body.error.code).toBe('AUTH_ERROR');
   });
 });
+
+describe('requireAuth hides infrastructure errors (audit run 1, C23)', () => {
+  it('a failed key lookup names no database host, and the original is logged', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    lookup.failWith = new Error('getaddrinfo EAI_AGAIN ep-dummy-fixture-000000-pooler.us-east-2.aws.neon.tech');
+    const res = await request(app()).get('/private').set('X-API-Key', 'sk_any');
+    expect(res.status).toBe(500);
+    expect(res.body.error.code).toBe('AUTH_ERROR');
+    expect(JSON.stringify(res.body)).not.toContain('neon.tech');
+    expect(error.mock.calls.flat().map(String).join(' ')).toContain('neon.tech');
+    error.mockRestore();
+  });
+});
