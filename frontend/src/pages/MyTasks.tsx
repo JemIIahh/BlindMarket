@@ -457,7 +457,7 @@ export default function MyTasks() {
                     >
                       <div className="flex items-center justify-between gap-2">
                         <span className="text-[11px] text-warn">
-                          {status === 0 ? 'Expired with no taker' : 'The agent missed the deadline'}
+                          {status === 0 ? 'Expired with no taker' : status === 3 ? 'Failed verification' : 'The agent missed the deadline'}
                         </span>
                         <Button
                           variant="outline"
@@ -525,7 +525,9 @@ export default function MyTasks() {
           ? `${formatRewardForRow(reclaimTarget.onChain)} goes back to ${truncateAddress(posterOf(reclaimTarget))}, the wallet that posted this task. `
             + (reclaimTarget.onChain.status === 0
               ? 'The task is cancelled.'
-              : 'The agent missed the deadline, so the task is closed unpaid.')
+              : reclaimTarget.onChain.status === 3
+                ? 'The work failed verification, so the task is closed unpaid.'
+                : 'The agent missed the deadline, so the task is closed unpaid.')
           : undefined}
         confirmLabel="Reclaim"
         onConfirm={() => { if (reclaimTarget) startReclaim(reclaimTarget); }}

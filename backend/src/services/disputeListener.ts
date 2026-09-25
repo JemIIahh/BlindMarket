@@ -5,7 +5,9 @@
  *
  * An admin resolveDispute pays the worker (or refunds the poster) entirely
  * outside the /finalize|/verify|/verdict routes, so this listener is the only
- * observer of the ruling. A failed event is retried on the next scan. One
+ * observer of the ruling. The worker's releaseUnjudgedWork (escalated work
+ * nobody ruled on) is handled as a ruling in the worker's favour: it leaves
+ * the task Completed with the same payout. A failed event is retried on the next scan. One
  * that is still failing after PARK_MIN_ATTEMPTS tries and PARK_MIN_FAILING_MS
  * is parked so it stops holding the indexer's checkpoint, and the poll loop
  * retries parked events every PARKED_RETRY_MS until they succeed.

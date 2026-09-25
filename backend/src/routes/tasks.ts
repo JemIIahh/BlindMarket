@@ -15,7 +15,7 @@ import { payoutCurrency } from '../services/settlementUnits.js';
 import { isIndexedTask, resolvePosterTask, resolveCachedTaskByHash, type TaskChain } from '../services/taskChain.js';
 import { callerWallets } from '../services/callerWallets.js';
 import type { AuthRequest, ApiResponse } from '../types.js';
-import { AGENT_CAPABILITIES } from '../types.js';
+import { AGENT_CAPABILITIES, TaskStatus } from '../types.js';
 import * as a2aStore from '../services/a2aStore.js';
 import { randomUUID } from 'crypto';
 import * as accountingService from '../services/accountingService.js';
@@ -703,35 +703,61 @@ tasksRouter.post('/:id/timeout', requireAuth, async (req: AuthRequest, res, next
 
     const task = await escrowService.getTaskOn(chain, taskId);
 
-    // Check if deadline passed
+    // The raw deadline is never later than the one the escrow enforces, so
+    // this refuses early without another read.
     if (BigInt(Math.floor(Date.now() / 1000)) < task.deadline) {
       throw new AppError(400, 'DEADLINE_NOT_REACHED', 'Cannot reclaim before deadline');
     }
 
+    // The escrow decides whether the claim goes through: the deadline moves by
+    // the time it spent paused, a failed verdict leaves the worker an appeal
+    // window, and a dispute its own window. A claim it would reject is refused
+    // here with the reason instead of handed to the wallet to revert.
+    const revert = await escrowService.claimTimeoutRevertOn(chain, from, taskId);
+    if (revert) throw await claimTimeoutRefusal(revert, chain, taskId, task.status);
+
+    // Work delivered before the deadline and never judged is not refunded: an
+    // upgraded escrow sends it for review (security audit run 1, C18).
+    const outcome: 'refund' | 'escalate' =
+      task.status === TaskStatus.Submitted && (await escrowService.escalatesUnjudgedWorkOn(chain, taskId))
+        ? 'escalate'
+        : 'refund';
+
     const tx = await escrowService.buildClaimTimeoutOn(chain, from, taskId);
 
     // Record refund accounting event as PENDING (M5 audit): unsigned-tx build
-    // only. POST /tasks/:id/confirm-tx flips it once the reclaim lands.
-    try {
-      const decimals = await getTokenDecimals(task.token, chain);
-      const amount = Number(task.amount) / (10 ** decimals);
-      accountingService.recordTransaction({
-        address: from,
-        role: 'agent',
-        taskId: String(taskId),
-        type: 'refund',
-        amount,
-        unit: payoutCurrency(chain, task.token)?.symbol,
-        status: 'pending',
-      });
-    } catch (accErr) {
-      console.warn('[tasks] Accounting record failed (non-blocking):', accErr);
+    // only. POST /tasks/:id/confirm-tx flips it once the reclaim lands. An
+    // escalation returns nothing to the poster, so it records no refund.
+    if (outcome === 'refund') {
+      try {
+        const decimals = await getTokenDecimals(task.token, chain);
+        const amount = Number(task.amount) / (10 ** decimals);
+        accountingService.recordTransaction({
+          address: from,
+          role: 'agent',
+          taskId: String(taskId),
+          type: 'refund',
+          amount,
+          unit: payoutCurrency(chain, task.token)?.symbol,
+          status: 'pending',
+        });
+      } catch (accErr) {
+        console.warn('[tasks] Accounting record failed (non-blocking):', accErr);
+      }
     }
 
     const body: ApiResponse = {
       success: true,
       // chain and chainId name where the tx must be sent (a task lives on one chain).
-      data: { unsignedTx: tx, chain, chainId: settlementChainConfig(chain).chainId },
+      // outcome says what the tx does: 'refund' returns the escrow to the
+      // poster, 'escalate' sends delivered work for review (message explains).
+      data: {
+        unsignedTx: tx,
+        chain,
+        chainId: settlementChainConfig(chain).chainId,
+        outcome,
+        ...(outcome === 'escalate' ? { message: ESCALATE_MESSAGE } : {}),
+      },
     };
     const replacer = (key: string, value: any) => typeof value === 'bigint' ? value.toString() : value;
     res.json(JSON.parse(JSON.stringify(body, replacer)));
@@ -739,6 +765,66 @@ tasksRouter.post('/:id/timeout', requireAuth, async (req: AuthRequest, res, next
     next(err);
   }
 });
+
+// The windows are BlindEscrow's DISPUTE_WINDOW (14 days) and APPEAL_WINDOW
+// (3 days).
+const ESCALATE_MESSAGE =
+  'This work was delivered before the deadline and never judged, so claiming the timeout sends it for review ' +
+  'instead of refunding you. An admin rules on it; with no ruling within 14 days the worker is paid.';
+
+/** Why the escrow would reject a claimTimeout, named by its custom error. */
+async function claimTimeoutRefusal(
+  revert: string,
+  chain: TaskChain,
+  taskId: number,
+  status: TaskStatus,
+): Promise<AppError> {
+  switch (revert) {
+    case 'EnforcedPause':
+      return new AppError(
+        409,
+        'ESCROW_PAUSED',
+        "The escrow is paused. Claim the timeout once it resumes; the time it spends paused is added to the task's deadline.",
+      );
+    case 'DeadlineNotReached': {
+      // Later than getTask().deadline when the escrow was paused meanwhile.
+      const deadline = await escrowService.effectiveDeadlineOn(chain, taskId).catch(() => null);
+      return new AppError(
+        400,
+        'DEADLINE_NOT_REACHED',
+        deadline
+          ? `Cannot reclaim before ${new Date(Number(deadline) * 1000).toISOString()}: the deadline plus the time the escrow spent paused.`
+          : 'Cannot reclaim before deadline',
+      );
+    }
+    case 'AppealWindowActive':
+      return new AppError(
+        409,
+        'APPEAL_WINDOW_ACTIVE',
+        'The worker can appeal the failed verdict for 3 days after it. Claim the timeout once that window has passed.',
+      );
+    case 'EscalatedForAdjudication':
+      return new AppError(
+        409,
+        'ESCALATED_FOR_ADJUDICATION',
+        'This delivered work was sent for review. An admin rules on it, and with no ruling within 14 days the worker is paid; it does not return to you by timeout.',
+      );
+    case 'DisputeWindowActive':
+      return new AppError(
+        409,
+        'DISPUTE_WINDOW_ACTIVE',
+        'This task is in dispute. An admin rules on it; if there is no ruling within 14 days of the dispute, you can claim the timeout then.',
+      );
+    case 'NotAgent':
+      return new AppError(403, 'FORBIDDEN', 'Only the task agent can reclaim funds');
+    case 'InvalidStatus':
+      return status === TaskStatus.Funded
+        ? new AppError(409, 'USE_CANCEL', 'Nobody took this task. Cancel it instead; that refunds you right away.')
+        : new AppError(409, 'INVALID_STATUS', 'This task is already settled; there is nothing to reclaim.');
+    default:
+      return new AppError(409, 'CLAIM_TIMEOUT_REJECTED', `The escrow would reject this claim (${revert}).`);
+  }
+}
 
 /**
  * POST /api/v1/tasks/:id/confirm-tx
@@ -748,7 +834,9 @@ tasksRouter.post('/:id/timeout', requireAuth, async (req: AuthRequest, res, next
  * on-chain. Requires receipt status=1 plus this task's TaskCancelled (cancel)
  * or DeadlineExpired (timeout) event from the chain's escrow address — logs
  * are address-filtered first so lookalike events from other contracts can't
- * confirm. Idempotent: a repeat matches zero pending rows.
+ * confirm. Idempotent: a repeat matches zero pending rows. A timeout that
+ * sent delivered work for review (UnjudgedWorkEscalated) confirms as
+ * { escalated: true } and refunds nothing.
  */
 const confirmTxSchema = z.object({
   txHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/, 'Must be a transaction hash'),
@@ -786,6 +874,7 @@ tasksRouter.post('/:id/confirm-tx', requireAuth, async (req: AuthRequest, res, n
 
     const escAddr = (await esc.getAddress()).toLowerCase();
     let settled: 'cancelled' | 'expired' | null = null;
+    let escalated = false;
     for (const log of receipt.logs) {
       if (log.address.toLowerCase() !== escAddr) continue;
       let parsed: { name: string; args: unknown } | null = null;
@@ -801,12 +890,22 @@ tasksRouter.post('/:id/confirm-tx', requireAuth, async (req: AuthRequest, res, n
         settled = parsed.name === 'TaskCancelled' ? 'cancelled' : 'expired';
         break;
       }
+      if (parsed.name === 'UnjudgedWorkEscalated') escalated = true;
+    }
+    if (!settled && escalated) {
+      // claimTimeout on delivered, unjudged work: the escrow moved it to
+      // Disputed and kept the funds (security audit run 1, C18). Nothing was
+      // refunded and the task is not over: an admin ruling or the worker's
+      // releaseUnjudgedWork ends it, and the dispute listener mirrors either.
+      // So no refund is confirmed and the A2A state stays open.
+      res.json({ success: true, data: { confirmed: true, escalated: true } } as ApiResponse);
+      return;
     }
     if (!settled) {
       throw new AppError(
         409,
         'NO_SETTLEMENT_EVENT',
-        'Receipt carries no TaskCancelled / DeadlineExpired for this task from the escrow — nothing to confirm',
+        'Receipt carries no TaskCancelled / DeadlineExpired / UnjudgedWorkEscalated for this task from the escrow — nothing to confirm',
       );
     }
 

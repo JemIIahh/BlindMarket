@@ -34,6 +34,9 @@ vi.mock('../services/escrow.js', () => ({
   getTaskOn: vi.fn(async () => ({ token: '0x0000000000000000000000000000000000000000', amount: 100n, taskHash: TASK_HASH })),
   buildCancelTaskOn: vi.fn(async () => ({ to: ESCROW, data: '0xcancel' })),
   buildClaimTimeoutOn: vi.fn(async () => ({ to: ESCROW, data: '0xtimeout' })),
+  claimTimeoutRevertOn: vi.fn(async () => null),
+  escalatesUnjudgedWorkOn: vi.fn(async () => true),
+  effectiveDeadlineOn: vi.fn(async () => null),
 }));
 
 const getReceipt = vi.fn();
@@ -150,6 +153,34 @@ describe('M5: build-time rows are pending, confirm flips on proof', () => {
     const res = await request(app()).post('/api/v1/tasks/7/confirm-tx')
       .set(as(OTHER)).send({ txHash: '0x' + '55'.repeat(32) });
     expect(res.status).toBe(403);
+  });
+});
+
+// A timeout on delivered, unjudged work sends it for review on an upgraded
+// escrow: no refund to confirm, and the task is not over (security audit
+// run 1, C18).
+describe('confirm-tx on an escalation', () => {
+  it('confirms as escalated without confirming a refund or closing the A2A task', async () => {
+    getState.mockResolvedValue({ taskId: TASK_HASH, status: 'awaiting_verification' });
+    getReceipt.mockResolvedValue({ status: 1, logs: [{ address: ESCROW }, { address: ESCROW }] });
+    parseLog
+      .mockReturnValueOnce({ name: 'UnjudgedWorkEscalated', args: { taskId: 7n } })
+      .mockReturnValueOnce({ name: 'TaskDisputed', args: { taskId: 7n, initiator: AGENT } });
+    const res = await request(app()).post('/api/v1/tasks/7/confirm-tx')
+      .set(as(AGENT)).send({ txHash: '0x' + '81'.repeat(32) });
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({ confirmed: true, escalated: true });
+    expect(accountingService.confirmPendingTransactions).not.toHaveBeenCalled();
+    expect(tryCloseOnChainTerminal).not.toHaveBeenCalled();
+  });
+
+  it("does not count another task's escalation", async () => {
+    getReceipt.mockResolvedValue({ status: 1, logs: [{ address: ESCROW }] });
+    parseLog.mockReturnValue({ name: 'UnjudgedWorkEscalated', args: { taskId: 8n } });
+    const res = await request(app()).post('/api/v1/tasks/7/confirm-tx')
+      .set(as(AGENT)).send({ txHash: '0x' + '82'.repeat(32) });
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('NO_SETTLEMENT_EVENT');
   });
 });
 
