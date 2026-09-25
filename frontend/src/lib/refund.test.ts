@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { id } from 'ethers';
-import { encodeRefundCall, isReclaimable, refundAction } from './refund';
+import { encodeRefundCall, isReclaimable, refundAction, timeoutSendsForReview } from './refund';
 
 const DEADLINE = 1_790_246_651; // 2026-09-24 10:44:11 UTC
 const BEFORE = DEADLINE - 60;
@@ -31,6 +31,18 @@ describe('isReclaimable', () => {
   it('flags escrow left behind after the deadline: an unclaimed task, or one its agent missed', () => {
     expect(isReclaimable(0, DEADLINE, AFTER)).toBe(true);
     expect(isReclaimable(1, DEADLINE, AFTER)).toBe(true);
+  });
+
+  it('flags a failed task, whose escrow returns once the appeal window has passed', () => {
+    expect(isReclaimable(3, DEADLINE, AFTER)).toBe(true);
+  });
+
+  // A timeout on delivered, unjudged work sends it for review; nothing comes
+  // back to the poster (security audit run 1, C18).
+  it('does not flag delivered work, whose timeout sends it for review', () => {
+    expect(isReclaimable(2, DEADLINE, AFTER)).toBe(false);
+    expect(timeoutSendsForReview(2)).toBe(true);
+    expect([0, 1, 3].map(timeoutSendsForReview)).toEqual([false, false, false]);
   });
 
   it('does not flag a live task, or one already settled', () => {

@@ -29,7 +29,9 @@ export interface RefundRequest {
 
 /**
  * Take a task's escrow back: cancelTask for a task nobody took, claimTimeout
- * once an assigned task's deadline has passed.
+ * once an assigned task's deadline has passed. On a task whose work was
+ * delivered and never judged, claimTimeout sends it for review instead of
+ * refunding it (see lib/refund.ts).
  *
  * Signed by the wallet that POSTED the task, which is not always the one the
  * page treats as the user's (useWallet prefers the embedded wallet, while a

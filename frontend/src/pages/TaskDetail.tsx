@@ -13,6 +13,7 @@ import { TxPendingModal } from '../components/TxPendingModal';
 import { CustodyChain } from '../components/CustodyChain';
 import { truncateAddress, formatDate } from '../lib/utils';
 import { useRefundEscrow } from '../hooks/useRefundEscrow';
+import { timeoutSendsForReview } from '../lib/refund';
 import { WORKER_SHARE_PCT, PLATFORM_FEE_PCT } from '../config/constants';
 import { unitFor, useSettlement } from '../config/settlement';
 import { useChainExplorerUrl } from '../hooks/useChainWallet';
@@ -134,6 +135,8 @@ export default function TaskDetail() {
     TaskStatus.Submitted,
     TaskStatus.Verified
   ].includes(onChain.status);
+  // Delivered, unjudged work: the timeout sends it for review, it is not refunded.
+  const sendsForReview = timeoutSendsForReview(onChain.status);
 
   const taskLabel = onChain.taskId || id?.slice(0, 10);
 
@@ -587,7 +590,11 @@ export default function TaskDetail() {
                   <p className="text-xs text-ink-3 mt-1 leading-relaxed">
                     {onChain.status === TaskStatus.Funded
                       ? 'Cancel this task to reclaim your escrowed funds. (Useful if no agent picks it up.)'
-                      : 'The accepted agent missed the deadline. Reclaim your funds now.'}
+                      : sendsForReview
+                        ? 'The agent delivered before the deadline and nobody has judged the work. Send it for review: an admin rules on it, and with no ruling within 14 days the agent is paid.'
+                        : onChain.status === TaskStatus.Verified
+                          ? "The work failed verification. Reclaim your funds once the agent's 3-day appeal window has passed."
+                          : 'The accepted agent missed the deadline. Reclaim your funds now.'}
                   </p>
                 </div>
                 {onChain.status === TaskStatus.Funded ? (
@@ -600,7 +607,7 @@ export default function TaskDetail() {
                 ) : (
                   <Button
                     variant="outline"
-                    label={refund.isPending ? 'Claiming…' : 'Claim timeout'}
+                    label={sendsForReview ? (refund.isPending ? 'Sending…' : 'Send for review') : (refund.isPending ? 'Claiming…' : 'Claim timeout')}
                     onClick={() => setConfirmAction('timeout')}
                     disabled={txPending}
                   />
@@ -608,12 +615,12 @@ export default function TaskDetail() {
               </div>
               {!isPoster && (
                 <div className="mt-3 text-xs text-ink-3 leading-relaxed">
-                  Funded from {truncateAddress(onChain.agent)}, which isn't linked to your account. The refund goes back to that wallet.
+                  Funded from {truncateAddress(onChain.agent)}, which isn't linked to your account.{sendsForReview ? '' : ' The refund goes back to that wallet.'}
                 </div>
               )}
               {!refund.canSignAs(onChain.agent) && (
                 <div className="mt-3 text-xs text-warn leading-relaxed">
-                  Posted from {truncateAddress(onChain.agent)}. Connect that wallet to sign the refund.
+                  Posted from {truncateAddress(onChain.agent)}. Connect that wallet to sign {sendsForReview ? 'it' : 'the refund'}.
                 </div>
               )}
               {txError && (
@@ -637,9 +644,13 @@ export default function TaskDetail() {
     />
     <ConfirmDialog
       open={confirmAction === 'timeout'}
-      title="Claim timeout refund"
-      description="The accepted agent missed the deadline. This will reclaim your escrowed USDC."
-      confirmLabel="Claim Refund"
+      title={sendsForReview ? 'Send for review' : 'Claim timeout refund'}
+      description={sendsForReview
+        ? 'An admin rules on the delivered work. With no ruling within 14 days the agent is paid. Your escrow is not refunded.'
+        : onChain.status === TaskStatus.Verified
+          ? 'The work failed verification. This will reclaim your escrowed USDC.'
+          : 'The accepted agent missed the deadline. This will reclaim your escrowed USDC.'}
+      confirmLabel={sendsForReview ? 'Send for review' : 'Claim Refund'}
       danger
       onConfirm={() => { setConfirmAction(null); startRefund('timeout'); }}
       onCancel={() => setConfirmAction(null)}
