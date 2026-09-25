@@ -32,7 +32,9 @@ export default function StorageView() {
     let cancelled = false;
     setLoading(true);
     setError('');
-    authedGet<{ rootHash: string; blob: string }>(`/api/v1/storage/${rootHash}`)
+    // Encoded: the route param is decoded, and may come from a task's output
+    // root, which an executor sets. Unencoded, '../' reached other API routes.
+    authedGet<{ rootHash: string; blob: string }>(`/api/v1/storage/${encodeURIComponent(rootHash)}`)
       .then((d) => {
         if (!cancelled) setBlobB64(d.blob);
       })
