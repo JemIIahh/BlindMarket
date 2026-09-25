@@ -31,6 +31,15 @@ const EXECUTORS = [
   { address: executorB.address, publicKey: executorB.signingKey.publicKey },
 ];
 
+/** What the real backend builds (backend/src/services/escrow.ts). */
+const ESCROW_ABI = new ethers.Interface([
+  'function createTask(bytes32 taskHash, address token, uint256 amount, string category, string locationZone, uint256 duration)',
+  'function cancelTask(uint256 taskId)',
+  'function claimTimeout(uint256 taskId)',
+]);
+const createTaskData = (body: { taskHash: string; token: string; amount: string; locationZone: string; duration: string }) =>
+  ESCROW_ABI.encodeFunctionData('createTask', [body.taskHash, body.token, body.amount, 'general', body.locationZone, body.duration]);
+
 const ok = (data: unknown) => ({ status: 200, json: async () => ({ success: true, data }) }) as unknown as Response;
 const fail = (status: number, code: string, message = code) =>
   ({ status, json: async () => ({ success: false, error: { code, message } }) }) as unknown as Response;
@@ -39,6 +48,8 @@ interface Backend {
   settlement?: unknown;
   executors?: unknown[];
   built?: Record<string, unknown>;
+  /** The refund the backend builds, in place of the real cancelTask/claimTimeout. */
+  refund?: (fn: 'cancel' | 'timeout', id: string) => Record<string, unknown>;
   indexAnswers?: Response[];
   confirmAnswers?: Response[];
   linked?: string[];
@@ -59,15 +70,19 @@ function stub(b: Backend = {}) {
     if (u.endsWith('/api/v1/storage/upload')) { uploads.push(body.data); return ok({ rootHash: ROOT }); }
     if (u.endsWith('/api/v1/tasks')) {
       posts.push(body);
-      return ok(b.built ?? { unsignedTx: { to: ESCROW, data: '0xc0ffee', from: OWNER }, chain: 'arc', chainId: CHAIN_ID });
+      return ok(b.built ?? { unsignedTx: { to: ESCROW, data: createTaskData(body), from: OWNER }, chain: 'arc', chainId: CHAIN_ID });
     }
     if (u.endsWith('/api/v1/a2a/tasks/index')) {
       indexes.push(body);
       return b.indexAnswers?.shift() ?? ok({ taskHash: body.taskHash, onChainTaskId: '51', indexed: true });
     }
-    if (/\/api\/v1\/tasks\/\d+\/(cancel|timeout)$/.test(u)) {
+    const refund = /\/api\/v1\/tasks\/(\d+)\/(cancel|timeout)$/.exec(u);
+    if (refund) {
       refunds.push(body);
-      return ok({ unsignedTx: { to: ESCROW, data: '0xca11', from: OWNER }, chain: 'arc', chainId: CHAIN_ID });
+      const fn = refund[2] as 'cancel' | 'timeout';
+      if (b.refund) return ok(b.refund(fn, refund[1]));
+      const data = ESCROW_ABI.encodeFunctionData(fn === 'cancel' ? 'cancelTask' : 'claimTimeout', [BigInt(refund[1])]);
+      return ok({ unsignedTx: { to: ESCROW, data, from: OWNER }, chain: 'arc', chainId: CHAIN_ID });
     }
     if (/\/api\/v1\/tasks\/\d+\/confirm-tx$/.test(u)) {
       confirms.push(body);
@@ -139,7 +154,7 @@ describe('BlindMarket.postTask — on production\'s posting chain (Arc)', () => 
     // Approve exactly the amount to the escrow, then createTask with the next nonce and no value.
     expect(w.sent.map((t) => t.to)).toEqual([USDC, ESCROW]);
     expect(erc20.decodeFunctionData('approve', w.sent[0].data).map(String)).toEqual([ESCROW, '2000000']);
-    expect(w.sent[1]).toMatchObject({ data: '0xc0ffee', nonce: 4 });
+    expect(w.sent[1]).toMatchObject({ data: createTaskData(posts[0] as never), nonce: 4 });
     expect(w.sent[1].value).toBeUndefined();
 
     expect(posts[0]).toMatchObject({ token: USDC, amount: '2000000', duration: '86400', rootHash: ROOT, verificationMode: 'auto' });
@@ -302,7 +317,7 @@ describe('BlindMarket refunds', () => {
     const w = wallet();
     await expect(bb().cancelAndRefund('51', { signer: w.signer, chain: 'arc' }))
       .resolves.toEqual({ txHash: FUNDED, chain: 'arc', chainId: CHAIN_ID, listingClosed: true });
-    expect(w.sent[0]).toMatchObject({ to: ESCROW, data: '0xca11' });
+    expect(w.sent[0]).toEqual({ to: ESCROW, data: ESCROW_ABI.encodeFunctionData('cancelTask', [51n]) });
     expect(refunds).toEqual([{ chain: 'arc' }]);
     expect(confirms).toEqual([{ txHash: FUNDED, chain: 'arc' }]);
   });
@@ -320,9 +335,125 @@ describe('BlindMarket refunds', () => {
     expect(w.sent).toHaveLength(0);
   });
 
+  // On an upgraded escrow, claimTimeout on delivered, never-judged work sends
+  // it for review and refunds nothing (security audit run 1, C18).
+  it('reclaimAfterTimeout reports an escalation, not a refund, and no closed listing', async () => {
+    const claim5 = ESCROW_ABI.encodeFunctionData('claimTimeout', [5n]);
+    stub({
+      refund: () => ({ unsignedTx: { to: ESCROW, data: claim5 }, chain: 'arc', chainId: CHAIN_ID, outcome: 'escalate' }),
+      confirmAnswers: [ok({ confirmed: true, escalated: true })],
+    });
+    await expect(bb().reclaimAfterTimeout('5', { signer: wallet().signer, chain: 'arc' }))
+      .resolves.toEqual({ txHash: FUNDED, chain: 'arc', chainId: CHAIN_ID, listingClosed: false, outcome: 'escalate' });
+  });
+
+  it('trusts the receipt over the build: an escalation the build called a refund reports escalate', async () => {
+    const claim5 = ESCROW_ABI.encodeFunctionData('claimTimeout', [5n]);
+    stub({
+      refund: () => ({ unsignedTx: { to: ESCROW, data: claim5 }, chain: 'arc', chainId: CHAIN_ID, outcome: 'refund' }),
+      confirmAnswers: [ok({ confirmed: true, escalated: true })],
+    });
+    await expect(bb().reclaimAfterTimeout('5', { signer: wallet().signer, chain: 'arc' }))
+      .resolves.toMatchObject({ outcome: 'escalate', listingClosed: false });
+  });
+
+  it('reports a refund the backend confirmed', async () => {
+    const claim5 = ESCROW_ABI.encodeFunctionData('claimTimeout', [5n]);
+    stub({ refund: () => ({ unsignedTx: { to: ESCROW, data: claim5 }, chain: 'arc', chainId: CHAIN_ID, outcome: 'refund' }) });
+    await expect(bb().reclaimAfterTimeout('5', { signer: wallet().signer, chain: 'arc' }))
+      .resolves.toMatchObject({ outcome: 'refund', listingClosed: true });
+  });
+
   it('the unsigned builders still return what they did', async () => {
     stub();
     await expect(bb().cancelTask('51')).resolves.toMatchObject({ unsignedTx: { to: ESCROW }, chain: 'arc' });
+  });
+});
+
+describe('BlindMarket — only the escrow call asked for is signed (security audit run 1, C41)', () => {
+  const erc20Calls = new ethers.Interface(['function approve(address,uint256)', 'function transfer(address,uint256)']);
+  const MAX = 2n ** 256n - 1n;
+  const DEAD = '0x000000000000000000000000000000000000dEaD';
+
+  it('refuses a "refund" that is an ERC-20 approve on the token, before signing anything', async () => {
+    stub({ refund: () => ({ unsignedTx: { to: USDC, data: erc20Calls.encodeFunctionData('approve', [DEAD, MAX]) }, chain: 'arc', chainId: CHAIN_ID }) });
+    const w = wallet();
+    await expect(bb().cancelAndRefund('5', { signer: w.signer, chain: 'arc' })).rejects.toMatchObject({ code: 'ESCROW_MISMATCH' });
+    expect(w.sent).toHaveLength(0);
+  });
+
+  it('refuses an approve, another function or another task id aimed at the escrow itself', async () => {
+    for (const data of [
+      erc20Calls.encodeFunctionData('approve', [DEAD, MAX]),
+      ESCROW_ABI.encodeFunctionData('claimTimeout', [5n]), // the other refund
+      ESCROW_ABI.encodeFunctionData('cancelTask', [6n]), // another task
+      ESCROW_ABI.encodeFunctionData('cancelTask', [5n]) + 'ff', // trailing bytes
+    ]) {
+      stub({ refund: () => ({ unsignedTx: { to: ESCROW, data }, chain: 'arc', chainId: CHAIN_ID }) });
+      const w = wallet();
+      await expect(bb().cancelAndRefund('5', { signer: w.signer, chain: 'arc' }), data).rejects.toMatchObject({ code: 'TX_MISMATCH' });
+      expect(w.sent).toHaveLength(0);
+    }
+  });
+
+  it('refuses a refund with a value, or built for another chain than the one asked for', async () => {
+    const cancel5 = ESCROW_ABI.encodeFunctionData('cancelTask', [5n]);
+    stub({ refund: () => ({ unsignedTx: { to: ESCROW, data: cancel5, value: '5000000000000000000' }, chain: 'arc', chainId: CHAIN_ID }) });
+    const w = wallet();
+    await expect(bb().cancelAndRefund('5', { signer: w.signer, chain: 'arc' })).rejects.toMatchObject({ code: 'TX_MISMATCH' });
+
+    const base = SETTLEMENT.chains.find((c: { chain: string }) => c.chain === 'base');
+    stub({ refund: () => ({ unsignedTx: { to: base.escrowAddress, data: cancel5 }, chain: 'base', chainId: base.chainId }) });
+    await expect(bb().cancelAndRefund('5', { signer: w.signer, chain: 'arc' })).rejects.toMatchObject({ code: 'CHAIN_MISMATCH' });
+
+    // A chain id the backend's own settlement table does not give that chain.
+    stub({ refund: () => ({ unsignedTx: { to: ESCROW, data: cancel5 }, chain: 'arc', chainId: 8453 }) });
+    await expect(bb().cancelAndRefund('5', { signer: w.signer })).rejects.toMatchObject({ code: 'CHAIN_MISMATCH' });
+
+    // A chain the backend lists no escrow for cannot be checked.
+    stub({ refund: () => ({ unsignedTx: { to: ESCROW, data: cancel5 }, chain: 'solana', chainId: 1 }) });
+    await expect(bb().cancelAndRefund('5', { signer: w.signer })).rejects.toMatchObject({ code: 'CHAIN_UNKNOWN' });
+    expect(w.sent).toHaveLength(0);
+  });
+
+  it('signs only to and data of a correct refund, never the backend\'s gas, nonce, type or chainId', async () => {
+    const data = ESCROW_ABI.encodeFunctionData('claimTimeout', [5n]);
+    stub({ refund: () => ({ unsignedTx: { to: ESCROW, data, from: OWNER, gasLimit: '1', maxFeePerGas: '999999999999', nonce: 77, type: 0, chainId: CHAIN_ID }, chain: 'arc', chainId: CHAIN_ID }) });
+    const w = wallet();
+    await expect(bb().reclaimAfterTimeout('5', { signer: w.signer, chain: 'arc' })).resolves.toMatchObject({ txHash: FUNDED });
+    expect(w.sent).toEqual([{ to: ESCROW, data }]);
+  });
+
+  it('postTask refuses a createTask with another amount, token, task hash or duration than it asked for', async () => {
+    type Body = { taskHash: string; token: string; amount: string; locationZone: string; duration: string };
+    const variants: Array<(b: Body) => Body> = [
+      (b) => ({ ...b, amount: '2000000000' }),
+      (b) => ({ ...b, token: '0x00000000000000000000000000000000000000cc' }),
+      (b) => ({ ...b, taskHash: `0x${'99'.repeat(32)}` }),
+      (b) => ({ ...b, duration: '60' }),
+    ];
+    for (const change of variants) {
+      const s = stub();
+      s.fn.mockImplementation(async (url: string | URL, init?: RequestInit) => {
+        const u = String(url);
+        const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+        if (u.endsWith('/api/v1/tasks')) return ok({ unsignedTx: { to: ESCROW, data: createTaskData(change(body)) }, chain: 'arc', chainId: CHAIN_ID });
+        if (u.endsWith('/health/settlement')) return ok(SETTLEMENT);
+        if (u.endsWith('/api/v1/api-keys/whoami')) return ok({ address: OWNER, addresses: [OWNER] });
+        if (u.endsWith('/api/v1/storage/upload')) return ok({ rootHash: ROOT });
+        throw new Error(`unhandled fetch ${u}`);
+      });
+      const w = wallet();
+      await expect(bb().postTask({ ...task, privacy: 'public' }, { signer: w.signer })).rejects.toMatchObject({ code: 'TX_MISMATCH' });
+      expect(w.sent).toHaveLength(0); // not even the approve
+    }
+  });
+
+  it('postTask refuses an approve dressed as the escrow funding', async () => {
+    stub({ built: { unsignedTx: { to: ESCROW, data: erc20Calls.encodeFunctionData('transfer', [DEAD, 2_000_000n]) }, chain: 'arc', chainId: CHAIN_ID } });
+    const w = wallet();
+    await expect(bb().postTask(task, { signer: w.signer })).rejects.toMatchObject({ code: 'TX_MISMATCH' });
+    expect(w.sent).toHaveLength(0);
   });
 });
 

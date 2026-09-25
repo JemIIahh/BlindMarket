@@ -1,10 +1,13 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { Contract, Interface, JsonRpcProvider, formatUnits, parseUnits } from 'ethers';
+import { Contract, Interface, JsonRpcProvider, formatUnits, keccak256, parseUnits, toUtf8Bytes, type Result } from 'ethers';
 import type { McpConfig } from './config.js';
 import type { WalletCtx } from './wallet.js';
 import { aesDecrypt, aesEncrypt, derivePublicKeyHex, eciesDecrypt, eciesEncrypt, generateAesKey, sha256Hex } from './crypto.js';
-import { createQuote, consumeQuote, getSpend, putSpend, updateSpend, type SpendRecord } from './state.js';
+import {
+  createQuote, consumeQuote, getSpend, putSpend, updateSpend,
+  type QuoteCheck, type SpendFields, type SpendRecord,
+} from './state.js';
 import {
   createSettlementResolver, isErc20Settlement, rpcFor, rpcEnvName,
   type Erc20Settlement, type LocalErc20Settlement, type RelaySettlement, type Settlement,
@@ -37,6 +40,19 @@ const ESCROW_READ_ABI = [
  */
 
 const ZERO_TOKEN = '0x0000000000000000000000000000000000000000';
+
+// The only calls the backend builds for this process to sign or relay:
+// backend/src/services/escrow.ts (createTask, cancelTask, claimTimeout,
+// submitEvidence). verifyTarget checks where a transaction goes, but the
+// escrow address comes from the same backend, so a hostile answer could name
+// the token as the escrow and hand over an approve; the call, its arguments
+// and its value are what bound it (security audit run 1, C41).
+const ESCROW_CALLS = new Interface([
+  'function createTask(bytes32 taskHash, address token, uint256 amount, string category, string locationZone, uint256 duration)',
+  'function submitEvidence(uint256 taskId, bytes32 evidenceHash)',
+  'function cancelTask(uint256 taskId)',
+  'function claimTimeout(uint256 taskId)',
+]);
 const GAS_LIMIT = 1000000n; // matches the canonical rent script
 // Auto-verify releases the payment, so the bar can't be "one character" — but
 // 40 made a correct 30-character URL unpayable. 20 is the platform floor
@@ -58,6 +74,60 @@ function fail(code: string, message: string) {
 }
 
 interface ApiError extends Error { code?: string }
+
+/**
+ * Throw TX_MISMATCH, before anything is signed or relayed, unless the
+ * backend's unsigned `tx` is exactly `fn` (canonically encoded) with
+ * arguments `argsOk` accepts, and names no value other than `value`. Only
+ * `to` and `data` are ever forwarded, so a value the backend names is never
+ * sent; a wrong one still means the transaction is not the one asked for.
+ */
+function assertEscrowCall(
+  tx: { data?: unknown; value?: unknown },
+  fn: 'createTask' | 'submitEvidence' | 'cancelTask' | 'claimTimeout',
+  argsOk: (args: Result) => boolean,
+  what: string,
+  value = 0n,
+): void {
+  const data = typeof tx.data === 'string' ? tx.data.toLowerCase() : '';
+  let ok = false;
+  try {
+    const args = ESCROW_CALLS.decodeFunctionData(fn, data);
+    ok = ESCROW_CALLS.encodeFunctionData(fn, args).toLowerCase() === data && argsOk(args);
+  } catch { /* another function, or not ABI data at all */ }
+  if (ok && tx.value != null) {
+    try { ok = BigInt(tx.value as string | number | bigint) === value; } catch { ok = false; }
+  }
+  if (!ok) {
+    const e: ApiError = new Error(`backend built ${what} that is not the ${fn} call this spend asked for (another function, other arguments, or a value). Nothing was sent.`);
+    e.code = 'TX_MISMATCH';
+    throw e;
+  }
+}
+
+const QUOTE_REQUIRED_MESSAGE = 'Get a quote first (call without confirm), then re-call with confirm=true and the returned quoteId (quotes are single-use and expire after 10 minutes)';
+
+/** Why a confirm was refused against its quote. Nothing was uploaded,
+ *  approved or sent by then. `why` replaces the generic list of what changed. */
+function quoteRefused(check: Exclude<QuoteCheck, { ok: true }>, tool: string, why?: string) {
+  if (check.code === 'QUOTE_REQUIRED') return fail('QUOTE_REQUIRED', QUOTE_REQUIRED_MESSAGE);
+  return fail(
+    'QUOTE_MISMATCH',
+    `Nothing was sent: ${why ?? `this confirm would spend something other than quote ${check.quote.quoteId} (changed: ${check.changed.join(', ')})`}. ` +
+      `That quote is now used up. Call ${tool} again without confirm to get a new quote, check it, then confirm with the new quoteId.`,
+  );
+}
+
+/** The chain, escrow, token and wallet a spend moves money on, for its quote binding. */
+function settlementFields(s: Settlement, payFrom: string): SpendFields {
+  return {
+    chain: s.mode,
+    chainId: s.chainId ?? null,
+    escrow: s.escrowAddress ? s.escrowAddress.toLowerCase() : null,
+    token: isErc20Settlement(s) ? s.token.address.toLowerCase() : ZERO_TOKEN,
+    payFrom: payFrom.toLowerCase(),
+  };
+}
 
 export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: WalletCtx | null): { settlement: () => Promise<Settlement> } {
   /** Every authenticated call funnels through api(), so this is the one place
@@ -291,7 +361,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
   /** Wait for a relayed tx to land. A plain hash can be polled for its receipt;
    *  a user-op hash cannot (getTransactionReceipt is always null for it), so
    *  that case returns at once and the caller confirms by on-chain STATE —
-   *  see ensureAllowance and waitCancelled. */
+   *  see ensureAllowance and waitLanded. */
   async function waitRelayed(s: Erc20Settlement, hash: string, isUserOp: boolean): Promise<void> {
     if (isUserOp) return;
     for (let i = 0; i < 30; i++) {
@@ -414,6 +484,17 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
         throw e;
       }
       await verifyTarget(s, unsignedTx.to, 'createTask');
+      // And it must be this spend's createTask: its task hash, token, amount
+      // and duration (the amount is what was approved above, or the value sent below).
+      const amount = BigInt(record.amountWei!);
+      const token = isErc20Settlement(s) ? s.token.address : ZERO_TOKEN;
+      assertEscrowCall(unsignedTx, 'createTask', (a) =>
+        String(a[0]).toLowerCase() === String(record.taskHash).toLowerCase()
+        && String(a[1]).toLowerCase() === token.toLowerCase()
+        && a[2] === amount
+        && a[4] === 'global'
+        && a[5] === BigInt(record.durationSecs ?? 3600),
+      'createTask', isErc20Settlement(s) ? 0n : amount);
 
       if (isErc20Settlement(s)) {
         const { hash, isUserOp, gas } = await sendErc20(s, { to: unsignedTx.to, data: unsignedTx.data }, nonce);
@@ -488,7 +569,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     'rent_service',
     {
       title: 'Rent an Agent Service',
-      description: 'Hire a listed agent service for one call: encrypts your prompt locally (unless privacy=public), funds escrow, and pins the task to the provider agent. Escrow is paid on the backend\'s posting chain: USDC on Arc signed by the local wallet (BLINDMARKET_PRIVATE_KEY, which must own BLINDMARKET_API_KEY; gas is also USDC), USDC on Base through the backend relay (no private key needed), or native 0G from the local wallet. wallet_status shows which. TWO-STEP: first call returns a price quote + quoteId; re-call with confirm=true and that quoteId to actually spend. Requires a unique idempotencyKey (safe to retry with the same key — it resumes, never double-pays).',
+      description: 'Hire a listed agent service for one call: encrypts your prompt locally (unless privacy=public), funds escrow, and pins the task to the provider agent. Escrow is paid on the backend\'s posting chain: USDC on Arc signed by the local wallet (BLINDMARKET_PRIVATE_KEY, which must own BLINDMARKET_API_KEY; gas is also USDC), USDC on Base through the backend relay (no private key needed), or native 0G from the local wallet. wallet_status shows which. TWO-STEP: first call returns a price quote + quoteId; re-call with the SAME arguments plus confirm=true and that quoteId to actually spend (a confirm that differs from its quote, or a listing re-priced since the quote, is refused with QUOTE_MISMATCH and nothing is sent). Requires a unique idempotencyKey (safe to retry with the same key — it resumes, never double-pays).',
       inputSchema: {
         serviceId: z.number().int().positive().describe('Service id from browse_services / get_service'),
         prompt: z.string().min(1).max(100_000).describe('What you want the agent to do'),
@@ -543,9 +624,23 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
         return fail('PRICE_UNITS_SUSPECT', `service ${serviceId} lists price_raw=${priceRaw} which is ${formatUnits(priceRaw, s.decimals)} ${s.symbol} — this looks like an 18-decimal 0G price on a ${s.symbol} chain. Not sending. Re-list the service in ${s.symbol} base units.`);
       }
       const price = formatUnits(priceRaw, s.decimals);
+      // Exactly what this call would spend, derived after every lookup above
+      // and before anything is uploaded or sent. The quote stores it and the
+      // confirm must match it: a provider can re-price its listing between
+      // the two calls, and the confirm call carries no price of its own.
+      const spend: SpendFields = {
+        ...settlementFields(s, payFrom),
+        idempotencyKey,
+        serviceId: String(serviceId),
+        listingId: String(service.id),
+        agent: String(service.agent_address).toLowerCase(),
+        priceRaw: priceRaw.toString(),
+        privacy: isPublic ? 'public' : 'private',
+        prompt: sha256Hex(Buffer.from(prompt, 'utf8')),
+      };
 
       if (!confirm) {
-        const quote = createQuote('rent', { serviceId, price, currency: s.symbol });
+        const quote = createQuote('rent', { serviceId, price, currency: s.symbol }, spend);
         return ok({
           quote: {
             service: { id: service.id, name: service.name, agent: service.agent_address },
@@ -560,8 +655,12 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
           next: `Re-call rent_service with confirm=true, quoteId="${quote.quoteId}", and the SAME idempotencyKey to execute this spend.`,
         });
       }
-      if (!quoteId || !consumeQuote(quoteId, 'rent')) {
-        return fail('QUOTE_REQUIRED', 'Get a quote first (call without confirm), then re-call with confirm=true and the returned quoteId (quotes are single-use and expire after 10 minutes)');
+      const check = consumeQuote(quoteId, 'rent', spend);
+      if (!check.ok) {
+        const repriced = check.code === 'QUOTE_MISMATCH' && check.changed.includes('priceRaw')
+          ? `the listing's price changed from ${check.quote.summary.price} ${check.quote.summary.currency} to ${price} ${s.symbol} since the quote`
+          : undefined;
+        return quoteRefused(check, 'rent_service', repriced);
       }
 
       try {
@@ -599,7 +698,8 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
           verificationMode: 'auto',
           verificationCriteria: RENTAL_VERIFICATION_CRITERIA,
           requiredCapabilities: [],
-          amountWei: String(service.price_raw),
+          // The quoted price, which the binding above just matched.
+          amountWei: priceRaw.toString(),
           settlement: s.mode,
           token: isErc20Settlement(s) ? s.token.address : ZERO_TOKEN,
           durationSecs: 3600,
@@ -610,7 +710,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
 
         const done = await fundAndIndex(record);
         const polled = await pollPosted(done.taskHash, waitSeconds ?? 45);
-        return ok({ ...done, ...polled });
+        return ok({ ...done, escrowed: { amount: price, amountRaw: priceRaw.toString(), currency: s.symbol }, ...polled });
       } catch (err) {
         const code = (err as ApiError).code;
         if (code === 'NOT_TASK_AGENT') {
@@ -627,7 +727,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     'post_task',
     {
       title: 'Post a Task to the Open Market',
-      description: 'Post a task any matching agent can pick up: encrypts the brief locally and wraps its key to every registered matching executor (or posts it in plaintext with privacy=public), then funds escrow. Escrow is paid on the backend\'s posting chain: USDC on Arc signed by the local wallet (BLINDMARKET_PRIVATE_KEY, which must own BLINDMARKET_API_KEY; gas is also USDC), USDC on Base through the backend relay (no private key needed), or native 0G from the local wallet. wallet_status shows which. TWO-STEP quote/confirm like rent_service; requires a unique idempotencyKey.',
+      description: 'Post a task any matching agent can pick up: encrypts the brief locally and wraps its key to every registered matching executor (or posts it in plaintext with privacy=public), then funds escrow. Escrow is paid on the backend\'s posting chain: USDC on Arc signed by the local wallet (BLINDMARKET_PRIVATE_KEY, which must own BLINDMARKET_API_KEY; gas is also USDC), USDC on Base through the backend relay (no private key needed), or native 0G from the local wallet. wallet_status shows which. TWO-STEP quote/confirm like rent_service: confirm with the same arguments, or it is refused with QUOTE_MISMATCH; requires a unique idempotencyKey.',
       inputSchema: {
         instructions: z.string().min(1).max(100_000).describe('The task brief'),
         amount: z.string().regex(/^\d+(\.\d+)?$/).optional().describe('Escrow amount in the settlement token (e.g. "2.5" — USDC on Base, 0G on 0G) — paid to the worker (90%) on verified completion'),
@@ -672,9 +772,20 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       } catch {
         return fail('AMOUNT_INVALID', `"${amountStr}" is not a valid ${s.symbol} amount — at most ${s.decimals} decimal places.`);
       }
+      const durationSecs = durationSeconds ?? 86400;
+      // What this call would spend, bound into the quote (see rent_service).
+      const spend: SpendFields = {
+        ...settlementFields(s, payFrom),
+        idempotencyKey,
+        amountRaw: amountWei.toString(),
+        durationSecs,
+        capabilities: JSON.stringify(capabilities ?? []),
+        privacy: isPublic ? 'public' : 'private',
+        instructions: sha256Hex(Buffer.from(instructions, 'utf8')),
+      };
 
       if (!confirm) {
-        const quote = createQuote('post', { amount: amountStr, currency: s.symbol });
+        const quote = createQuote('post', { amount: amountStr, currency: s.symbol }, spend);
         return ok({
           quote: {
             escrow: amountStr,
@@ -689,9 +800,8 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
           next: `Re-call post_task with confirm=true, quoteId="${quote.quoteId}", and the SAME idempotencyKey to execute this spend.`,
         });
       }
-      if (!quoteId || !consumeQuote(quoteId, 'post')) {
-        return fail('QUOTE_REQUIRED', 'Get a quote first (call without confirm), then re-call with confirm=true and the returned quoteId (quotes are single-use and expire after 10 minutes)');
-      }
+      const check = consumeQuote(quoteId, 'post', spend);
+      if (!check.ok) return quoteRefused(check, 'post_task');
 
       try {
         const plaintext = Buffer.from(instructions, 'utf8');
@@ -741,14 +851,20 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
           amountWei: amountWei.toString(),
           settlement: s.mode,
           token: isErc20Settlement(s) ? s.token.address : ZERO_TOKEN,
-          durationSecs: durationSeconds ?? 86400,
+          durationSecs,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         };
         putSpend(record);
 
         const done = await fundAndIndex(record);
-        return ok({ ...done, wrappedTo: wrappedKeys ? Object.keys(wrappedKeys).length : 0, privacy: record.privacy, hint: 'Use poll_task_result to wait for the deliverable.' });
+        return ok({
+          ...done,
+          escrowed: { amount: formatUnits(amountWei, s.decimals), amountRaw: amountWei.toString(), currency: s.symbol },
+          wrappedTo: wrappedKeys ? Object.keys(wrappedKeys).length : 0,
+          privacy: record.privacy,
+          hint: 'Use poll_task_result to wait for the deliverable.',
+        });
       } catch (err) {
         const code = (err as ApiError).code;
         if (code === 'NOT_TASK_AGENT') {
@@ -785,6 +901,11 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
   //   Assigned/Submitted/Verified (1-3) → claimTimeout, deadline must have passed
   //   Disputed (6)                      → claimTimeout, but only once
   //                                       DISPUTE_WINDOW has elapsed
+  //
+  // On an upgraded escrow, claimTimeout on a Submitted task (work delivered
+  // before the deadline, never judged) refunds nothing: it sends the task for
+  // review and leaves it Disputed (security audit run 1, C18). A failed
+  // (Verified) task refunds only after the worker's 3-day appeal window.
   //
   // So the quote step reads the live status first and refuses a path the
   // contract would reject, rather than letting the caller burn gas to find out.
@@ -892,17 +1013,30 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     return formatUnits(BigInt(detail.amount), detail.decimals ?? 18);
   }
 
-  /** The refund has landed when the task reads Cancelled on-chain. Checking
+  /** What a cancel_task / claim_timeout confirm may send, for its quote binding. */
+  function refundFields(s: Settlement, payFrom: string, idempotencyKey: string, detail: TaskDetail): SpendFields {
+    return {
+      ...settlementFields(s, payFrom),
+      idempotencyKey,
+      taskId: String(detail.taskId),
+      taskHash: String(detail.taskHash).toLowerCase(),
+      amountRaw: String(detail.amount),
+    };
+  }
+
+  /** The refund has landed when the task reads one of `settled` on-chain:
+   *  Cancelled, or for a claim on a Submitted task also Disputed (sent for
+   *  review; an escrow from before that change refunds it instead). Checking
    *  state rather than a receipt is what makes a relayed user-op decidable
    *  (there is no receipt to poll), and it is a cheap truth check for the
-   *  local-signing path too. */
-  async function waitCancelled(s: Settlement, taskId: number): Promise<void> {
+   *  local-signing path too. Resolves to the status it read. */
+  async function waitLanded(s: Settlement, taskId: number, settled: readonly number[]): Promise<number> {
     for (let i = 0; i < 30; i++) {
       const detail = await loadTask(s, String(taskId)).catch(() => null);
-      if (detail && Number(detail.status) === 5) return;
+      if (detail && settled.includes(Number(detail.status))) return Number(detail.status);
       await new Promise((r) => setTimeout(r, 3000));
     }
-    const e: ApiError = new Error(`task ${taskId} still not Cancelled on-chain after 90s — retry with the same idempotencyKey to keep waiting`);
+    const e: ApiError = new Error(`task ${taskId} still not ${settled.map(statusName).join(' or ')} on-chain after 90s — retry with the same idempotencyKey to keep waiting`);
     e.code = 'REFUND_PENDING';
     throw e;
   }
@@ -912,7 +1046,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
    *  Same two paths as fundAndIndex: local wallet on 0G, Privy relay on a relay chain.
    *  The backend resolves which chain holds the task and builds the tx for
    *  it; this only decides who signs. */
-  async function sendRefund(record: SpendRecord): Promise<{ taskId: number; txHash: string; gas?: GasMode; listingClosed: boolean }> {
+  async function sendRefund(record: SpendRecord): Promise<{ taskId: number; txHash: string; gas?: GasMode; listingClosed: boolean; outcome: 'refund' | 'escalate' }> {
     const s = await settlement();
     const taskId = record.taskId!;
     let { txHash } = record;
@@ -935,6 +1069,8 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       // broadcasts on, stop here — relaying a 0G refund onto another chain
       // lands on an address with no escrow and burns the gas.
       await verifyTarget(s, unsignedTx.to, `${route}Task`);
+      // And exactly this refund, for this task, with no value.
+      assertEscrowCall(unsignedTx, record.kind === 'cancel' ? 'cancelTask' : 'claimTimeout', (a) => a[0] === BigInt(taskId), `${route}Task`);
 
       if (isErc20Settlement(s)) {
         const { hash, isUserOp, gas } = await sendErc20(s, { to: unsignedTx.to, data: unsignedTx.data });
@@ -964,9 +1100,12 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       throw new Error(`Spend record ${record.idempotencyKey} is at stage '${record.stage}' with no txHash — cannot resume safely`);
     }
 
-    await waitCancelled(s, taskId);
-    updateSpend(record.idempotencyKey, { stage: 'confirmed' });
-    return { taskId, txHash: txHash!, gas: record.gas, listingClosed: await confirmRefund(s, taskId, txHash!, record.isUserOp ?? false) };
+    const landed = await waitLanded(s, taskId, record.kind === 'timeout' && record.fromStatus === 2 ? [5, 6] : [5]);
+    const outcome = landed === 6 ? 'escalate' : 'refund';
+    updateSpend(record.idempotencyKey, { stage: 'confirmed', outcome });
+    // Sent for review: the task stays live and there is no refund to confirm.
+    const listingClosed = outcome === 'escalate' ? false : await confirmRefund(s, taskId, txHash!, record.isUserOp ?? false);
+    return { taskId, txHash: txHash!, gas: record.gas, listingClosed, outcome };
   }
 
   /** Tell the backend the refund landed (POST /tasks/:id/confirm-tx): it
@@ -1001,7 +1140,10 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
         resumed: true,
         taskId: existing.taskId,
         txHash: existing.txHash,
-        hint: 'Already refunded — this idempotencyKey completed earlier.',
+        ...(existing.outcome ? { outcome: existing.outcome } : {}),
+        hint: existing.outcome === 'escalate'
+          ? 'Already sent for review — this idempotencyKey completed earlier. Nothing was refunded.'
+          : 'Already refunded — this idempotencyKey completed earlier.',
       });
     }
     try {
@@ -1047,8 +1189,11 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
         return fail('WRONG_REFUND_PATH', `Task ${detail.taskId} is ${statusName(status)}, and cancelTask only accepts Funded tasks.${alt}`);
       }
 
+      // The task (and its escrow) this refund is for, bound into the quote: a
+      // confirm naming another task is refused rather than refunding it.
+      const spend = refundFields(s, payFrom, idempotencyKey, detail);
       if (!confirm) {
-        const quote = createQuote('cancel', { taskId: detail.taskId });
+        const quote = createQuote('cancel', { taskId: detail.taskId }, spend);
         return ok({
           quote: {
             action: 'cancelTask',
@@ -1062,9 +1207,8 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
           next: `Re-call cancel_task with confirm=true, quoteId="${quote.quoteId}", and the SAME idempotencyKey to send it.`,
         });
       }
-      if (!quoteId || !consumeQuote(quoteId, 'cancel')) {
-        return fail('QUOTE_REQUIRED', 'Get a quote first (call without confirm), then re-call with confirm=true and the returned quoteId (quotes are single-use and expire after 10 minutes)');
-      }
+      const check = consumeQuote(quoteId, 'cancel', spend);
+      if (!check.ok) return quoteRefused(check, 'cancel_task');
 
       try {
         const record: SpendRecord = {
@@ -1091,7 +1235,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     'claim_timeout',
     {
       title: 'Reclaim Escrow After the Deadline',
-      description: 'Reclaim the escrow on a task that WAS assigned but never completed, once its deadline has passed (status Assigned, Submitted, or Verified-failed). For a task no worker ever picked up, use cancel_task instead — it needs no deadline. TWO-STEP quote/confirm; requires a unique idempotencyKey.',
+      description: 'Reclaim the escrow on a task that WAS assigned but never completed, once its deadline has passed (status Assigned, or Verified-failed once the worker\'s 3-day appeal window has passed). On a Submitted task (work delivered before the deadline, never judged) it sends the task for review instead and refunds nothing: an admin rules, and with no ruling within 14 days the worker is paid; the result says outcome "escalate". For a task no worker ever picked up, use cancel_task instead — it needs no deadline. TWO-STEP quote/confirm; requires a unique idempotencyKey.',
       inputSchema: {
         task: z.string().min(1).describe('Task id (e.g. "51") or the 0x task hash returned by post_task'),
         idempotencyKey: z.string().min(8).max(128).describe('Unique key for this refund — reuse it on retries'),
@@ -1129,8 +1273,9 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
         return fail('DEADLINE_NOT_REACHED', `Task ${detail.taskId} is still live until ${new Date(Number(deadline) * 1000).toISOString()} — claimTimeout reverts before then.`);
       }
 
+      const spend = refundFields(s, payFrom, idempotencyKey, detail);
       if (!confirm) {
-        const quote = createQuote('timeout', { taskId: detail.taskId });
+        const quote = createQuote('timeout', { taskId: detail.taskId }, spend);
         return ok({
           quote: {
             action: 'claimTimeout',
@@ -1142,15 +1287,16 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
             settlement: s.mode,
             // DISPUTE_WINDOW is enforced on-chain and disputedAt is not exposed
             // here, so a disputed task can still revert after this quote.
-            ...(status === 6 ? { note: 'Task is Disputed — this only succeeds once the on-chain DISPUTE_WINDOW has elapsed since the dispute was raised, otherwise it reverts with DisputeWindowActive.' } : {}),
+            ...(status === 6 ? { note: 'Task is Disputed — this only succeeds once the on-chain DISPUTE_WINDOW has elapsed since the dispute was raised, otherwise it reverts with DisputeWindowActive. Delivered work that was sent for review never returns to you by timeout.' } : {}),
+            ...(status === 2 ? { note: 'The work was delivered before the deadline and never judged. The escrow sends it for review instead of refunding you: an admin rules, and with no ruling within 14 days the worker is paid. (An escrow from before that change refunds it.)' } : {}),
+            ...(status === 3 ? { note: "The work failed verification. This reverts with AppealWindowActive until the worker's 3-day appeal window after the verdict has passed." } : {}),
             quoteId: quote.quoteId,
           },
           next: `Re-call claim_timeout with confirm=true, quoteId="${quote.quoteId}", and the SAME idempotencyKey to send it.`,
         });
       }
-      if (!quoteId || !consumeQuote(quoteId, 'timeout')) {
-        return fail('QUOTE_REQUIRED', 'Get a quote first (call without confirm), then re-call with confirm=true and the returned quoteId (quotes are single-use and expire after 10 minutes)');
-      }
+      const check = consumeQuote(quoteId, 'timeout', spend);
+      if (!check.ok) return quoteRefused(check, 'claim_timeout');
 
       try {
         const record: SpendRecord = {
@@ -1159,6 +1305,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
           stage: 'created',
           settlement: s.mode,
           taskId: Number(detail.taskId),
+          fromStatus: status,
           taskHash: detail.taskHash,
           amountWei: detail.amount,
           createdAt: new Date().toISOString(),
@@ -1166,6 +1313,9 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
         };
         putSpend(record);
         const done = await sendRefund(record);
+        if (done.outcome === 'escalate') {
+          return ok({ ...done, hint: 'Sent for review: nothing was refunded. An admin rules on the delivered work; with no ruling within 14 days the worker is paid.' });
+        }
         return ok({ ...done, refunded: refundAmount(detail), hint: 'Escrow returned to the posting wallet.' });
       } catch (err) {
         return fail((err as ApiError).code ?? 'TIMEOUT_CLAIM_FAILED', (err as Error).message);
@@ -1203,7 +1353,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       title: 'Fetch a Task Brief',
       description: "Download a task's brief by rootHash (accept_task returns it). Public briefs come back as text. For a PRIVATE brief pass the wrappedKey accept_task returned: it is decrypted with BLINDMARKET_PRIVATE_KEY, which must be the key whose public half you registered (wallet_status shows it as executorPublicKey).",
       inputSchema: {
-        rootHash: z.string().min(32).max(80).describe('rootHash from accept_task or list_open_tasks'),
+        rootHash: z.string().min(32).max(80).describe('rootHash from accept_task (browse_a2a_tasks also shows it for a public task)'),
         wrappedKey: z.string().optional().describe('ECIES-wrapped AES key from accept_task (hex, no 0x). Required for private briefs.'),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
@@ -1323,6 +1473,18 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
           }
           const tx = sub.unsignedSubmitEvidence;
           await verifyTarget(s, tx.to, 'submitEvidence');
+          // A zero-value submitEvidence for this task, committing THIS output
+          // (keccak256 of the JSON /submit hashes, backend/src/routes/a2a.ts).
+          // /rebroadcast re-sends the first stored output, so there only the
+          // task is checked.
+          const evidence = keccak256(toUtf8Bytes(JSON.stringify({ output })));
+          assertEscrowCall(tx, 'submitEvidence', (a) =>
+            a[0] === BigInt(detail.taskId) && (healed || String(a[1]).toLowerCase() === evidence), 'submitEvidence');
+          // The chain it is signed for is this process's, never the backend's.
+          const pinned = s.chainId ?? walletCtx?.chainId;
+          if (tx.chainId !== undefined && pinned !== undefined && Number(tx.chainId) !== pinned) {
+            return fail('CHAIN_MISMATCH', `The backend built submitEvidence for chain ${tx.chainId}, but this process settles ${s.mode} on chain ${pinned}. Nothing was sent.`);
+          }
           if (s.payment === 'relay-erc20') {
             const sent = await relaySend(s, { to: tx.to, data: tx.data });
             submitTxHash = sent.hash;
@@ -1346,12 +1508,13 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
               return fail('WALLET_MISMATCH', `The backend assigned this task to ${tx.from} (the wallet behind BLINDMARKET_API_KEY), but BLINDMARKET_PRIVATE_KEY is ${walletCtx!.wallet.address}. submitEvidence is worker-only — set the private key of ${tx.from}.`);
             }
             // 0G: sign locally, exactly as fundAndIndex does for createTask.
-            // The backend pins chainId onto the tx; ethers refuses to send it
-            // if this wallet's provider is on a different network — the guard
-            // against a Base tx reaching a 0G signer.
+            // The chain id is pinned from this process's settlement (checked
+            // against the backend's above); ethers refuses to send it if this
+            // wallet's provider is on a different network — the guard against
+            // a Base tx reaching a 0G signer.
             const tx0g = await walletCtx!.wallet.sendTransaction({
               to: tx.to, data: tx.data, gasLimit: GAS_LIMIT,
-              ...(tx.chainId !== undefined ? { chainId: tx.chainId } : {}),
+              ...(pinned !== undefined ? { chainId: pinned } : {}),
             });
             submitTxHash = tx0g.hash;
             await tx0g.wait();
@@ -1524,6 +1687,24 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       }
       const fee = terms.required ? terms as TransferTerms : null;
       const feeText = fee ? `${formatUnits(BigInt(fee.amountRaw), fee.decimals).replace(/\.0$/, '')} USDC` : 'none';
+      // The fee terms and the agent this call would pay for, bound into the
+      // quote: the confirm re-reads the terms, and pays only what was quoted.
+      const spend: SpendFields = {
+        idempotencyKey,
+        payFrom: walletCtx.wallet.address.toLowerCase(),
+        name,
+        provider,
+        model,
+        instructions: sha256Hex(Buffer.from(instructions, 'utf8')),
+        skills: JSON.stringify(skillSlugs ?? []),
+        feeRequired: fee !== null,
+        feeChain: fee?.chain ?? null,
+        feeChainId: fee?.chainId ?? null,
+        feeToken: fee ? String(fee.token).toLowerCase() : null,
+        feeRecipient: fee ? String(fee.recipient).toLowerCase() : null,
+        feeAmountRaw: fee ? String(fee.amountRaw) : null,
+        feeDecimals: fee?.decimals ?? null,
+      };
 
       if (!confirm) {
         const invalid = await validate();
@@ -1540,7 +1721,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
             }
           }
         }
-        const quote = createQuote('deploy', { name, provider, model, fee: feeText });
+        const quote = createQuote('deploy', { name, provider, model, fee: feeText }, spend);
         return ok({
           quote: {
             agent: { name, provider, model, skills: skillSlugs ?? [] },
@@ -1554,8 +1735,12 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
           next: `Re-call deploy_agent with confirm=true, quoteId="${quote.quoteId}", and the SAME idempotencyKey to ${fee ? 'pay the fee and ' : ''}deploy.`,
         });
       }
-      if (!quoteId || !consumeQuote(quoteId, 'deploy')) {
-        return fail('QUOTE_REQUIRED', 'Get a quote first (call without confirm), then re-call with confirm=true and the returned quoteId (quotes are single-use and expire after 10 minutes)');
+      const check = consumeQuote(quoteId, 'deploy', spend);
+      if (!check.ok) {
+        const feeChanged = check.code === 'QUOTE_MISMATCH' && check.changed.some((k) => k.startsWith('fee'))
+          ? `the deploy fee changed since the quote (quoted ${check.quote.summary.fee}, now ${feeText}${fee ? ` to ${fee.recipient} on ${fee.chain}` : ''})`
+          : undefined;
+        return quoteRefused(check, 'deploy_agent', feeChanged);
       }
 
       try {
@@ -1593,6 +1778,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
         updateSpend(idempotencyKey, { stage: 'confirmed', agentId: agent.id });
         return ok({
           ...summary(agent),
+          fee: feeText,
           feeTxHash,
           hint: agent.started ? 'The agent is running.' : 'The agent was created but did not start — start it with start_agent.',
         });

@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { getAddress, Interface } from 'ethers';
+import { getAddress, Interface, keccak256, toUtf8Bytes } from 'ethers';
 
 /**
  * The send paths branch on HOW a spend is paid (`payment`), not on the chain's
@@ -38,6 +38,16 @@ const ESCROW_READ = new Interface([
   'function getTask(uint256) view returns (tuple(address agent,address worker,address token,uint256 amount,bytes32 taskHash,bytes32 evidenceHash,uint8 status,string category,string locationZone,uint256 createdAt,uint256 deadline,uint8 submissionAttempts))',
 ]);
 const FUTURE = BigInt(Math.floor(Date.now() / 1000) + 3600);
+/** What the real backend builds (backend/src/services/escrow.ts, routes/a2a.ts): the MCP relays nothing else. */
+const ESCROW_CALLS = new Interface([
+  'function createTask(bytes32 taskHash, address token, uint256 amount, string category, string locationZone, uint256 duration)',
+  'function submitEvidence(uint256 taskId, bytes32 evidenceHash)',
+  'function cancelTask(uint256 taskId)',
+]);
+const createTaskData = (b) => ESCROW_CALLS.encodeFunctionData('createTask', [b.taskHash, b.token, b.amount, 'general', b.locationZone, b.duration]);
+const cancelData = (id) => ESCROW_CALLS.encodeFunctionData('cancelTask', [BigInt(id)]);
+const submitData = (id, resultData) => ESCROW_CALLS.encodeFunctionData('submitEvidence', [BigInt(id), keccak256(toUtf8Bytes(JSON.stringify(resultData)))]);
+const callName = (data) => { try { return ESCROW_CALLS.parseTransaction({ data }).name; } catch { return null; } };
 
 /** On-chain state the stub node serves, reset per test. */
 let chain;
@@ -126,20 +136,20 @@ globalThis.fetch = async (url, init = {}) => {
   if (path === '/api/v1/api-keys/whoami') return json({ address: PRIVY_WALLET.toLowerCase() });
   if (path.startsWith('/api/v1/a2a/executors')) return json({ executors: [] });
   if (path === '/api/v1/storage/upload') return json({ rootHash: '0x' + 'cd'.repeat(32) });
-  if (path === '/api/v1/tasks') return json({ unsignedTx: { to: ESCROW, data: '0xc0ffee' }, chain: 'arc', chainId: 5042002 });
+  if (path === '/api/v1/tasks') return json({ unsignedTx: { to: ESCROW, data: createTaskData(body) }, chain: 'arc', chainId: 5042002 });
   if (path === `/api/v1/tasks/${HASH}`) return json({ taskId: '9', chain: 'arc' });
   // The same poster's 0G task #8: its id also exists on Arc (task 8 above).
   if (path === `/api/v1/tasks/${OG_HASH}`) return json({ taskId: '8', chain: '0g' });
-  if (path === '/api/v1/tasks/18/cancel') return json({ unsignedTx: { to: BASE_ESCROW, data: '0xba5e' } });
-  if (path === '/api/v1/tasks/8/cancel') return json({ unsignedTx: { to: ESCROW, data: '0xca0ce1' } });
-  if (path === `/api/v1/a2a/tasks/${HASH}/submit`) return json({ onChainTaskId: 9, evidenceHash: '0x01', chain: 'arc', unsignedSubmitEvidence: { to: ESCROW, data: '0x5b5b' } });
+  if (path === '/api/v1/tasks/18/cancel') return json({ unsignedTx: { to: BASE_ESCROW, data: cancelData(18) } });
+  if (path === '/api/v1/tasks/8/cancel') return json({ unsignedTx: { to: ESCROW, data: cancelData(8) } });
+  if (path === `/api/v1/a2a/tasks/${HASH}/submit`) return json({ onChainTaskId: 9, evidenceHash: '0x01', chain: 'arc', unsignedSubmitEvidence: { to: ESCROW, data: submitData(9, body.resultData) } });
   if (path === `/api/v1/a2a/tasks/${HASH}/finalize`) { chain.tasks[9] = 4; return json({ status: 'verified', verificationResult: { passed: true } }); }
   if (path === '/api/v1/tx/relay-tx') {
     const to = body.to.toLowerCase();
     if (to === TOKEN.toLowerCase()) chain.allowance = ERC20.decodeFunctionData('approve', body.data)[1];
-    if (to === ESCROW.toLowerCase() && body.data === '0xca0ce1') chain.tasks[8] = 5;
-    if (to === ESCROW.toLowerCase() && body.data === '0x5b5b') chain.tasks[9] = 2;
-    if (to === BASE_ESCROW.toLowerCase() && body.data === '0xba5e') chain.tasks[18] = 5;
+    if (to === ESCROW.toLowerCase() && body.data === cancelData(8)) chain.tasks[8] = 5;
+    if (to === ESCROW.toLowerCase() && callName(body.data) === 'submitEvidence') chain.tasks[9] = 2;
+    if (to === BASE_ESCROW.toLowerCase() && body.data === cancelData(18)) chain.tasks[18] = 5;
     return json({ hash: '0x' + String(backendCalls.length).padStart(64, '0'), isUserOp: false, gas: 'user-pays' });
   }
   if (path === '/api/v1/a2a/tasks/index') return json({ indexed: true });
@@ -195,7 +205,7 @@ test('cancel_task reads the task from this chain\'s escrow and refunds through t
 
   const done = parse(await t.cancel_task({ task: '8', idempotencyKey: 'relay-chain-cancel-1', confirm: true, quoteId: quote.quoteId }));
   assert.equal(done.taskId, 8);
-  assert.deepEqual(relayed().map((b) => [b.to.toLowerCase(), b.data, b.chain]), [[ESCROW.toLowerCase(), '0xca0ce1', 'arc']]);
+  assert.deepEqual(relayed().map((b) => [b.to.toLowerCase(), b.data, b.chain]), [[ESCROW.toLowerCase(), cancelData(8), 'arc']]);
   assert.equal(chain.tasks[8], 5);
 });
 
@@ -205,7 +215,7 @@ test('complete_task delivers through the relay and reports the payout in the cha
   assert.equal(done.onChainStatus, 'Completed');
   assert.equal(done.paidTo, PRIVY_WALLET);
   assert.match(done.hint, /2\.5 USDC/);
-  assert.deepEqual(relayed().map((b) => [b.to.toLowerCase(), b.data, b.chain]), [[ESCROW.toLowerCase(), '0x5b5b', 'arc']]);
+  assert.deepEqual(relayed().map((b) => [b.to.toLowerCase(), b.data, b.chain]), [[ESCROW.toLowerCase(), submitData(9, { output: 'A one-sentence summary of the paragraph, as asked.' }), 'arc']]);
 });
 
 test('wallet_status reports the relay wallet and the chain\'s token', async () => {

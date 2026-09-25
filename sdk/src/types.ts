@@ -213,6 +213,13 @@ export interface A2APublicTaskMeta {
   privacy?: 'public';
   hasEncryptedBrief?: boolean;
   rootHash?: string;
+  /**
+   * The escrowed reward, recorded by the backend from the verified TaskCreated
+   * event at /tasks/index: `amount` is a whole number of the unit's base units
+   * (USDC: 6 decimals, so '1000000' is 1 USDC). Absent on tasks indexed by a
+   * backend older than the field. WorkerRuntime compares it with `minReward`.
+   */
+  reward?: { amount: string; unit: { symbol: 'USDC' | '0G'; decimals: 6 | 18 } };
   [key: string]: unknown;
 }
 

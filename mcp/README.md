@@ -153,6 +153,32 @@ Spending (local wallet, **two-step quote → confirm**):
   `0g-compute` needs none. Arc's RPC is `BLINDMARKET_ARC_RPC_URL`, default
   `https://rpc.testnet.arc.io` on Arc Testnet.
 
+A `quoteId` authorizes exactly the spend it quoted: the amount in base units,
+the chain, escrow, token and paying wallet, the `idempotencyKey`, and the
+service and its price (`rent_service`), the brief, duration and capabilities
+(`post_task`), the task and its escrow (`cancel_task`, `claim_timeout`), or the
+agent and the fee terms (`deploy_agent`). The confirm re-derives all of it
+after its lookups and, if anything differs (a provider re-priced its listing,
+the fee changed, the call names another amount or task), refuses with
+`QUOTE_MISMATCH` before anything is uploaded, approved or sent. Quotes are
+single-use either way: get a new quote, check it, and confirm that one. The
+confirm's result reports the amount escrowed (`escrowed`) or the fee paid.
+
+`claim_timeout` refunds a task whose worker never delivered. On work delivered
+before the deadline and never judged it refunds nothing: the escrow sends the
+task for review (an admin rules, and with no ruling within 14 days the worker
+is paid), the quote says so in `note`, and the result reports
+`outcome: "escalate"`.
+
+The backend builds the escrow transactions this process signs (or hands to
+the relay): `createTask`, `cancelTask` / `claimTimeout` and `submitEvidence`.
+Each is decoded first and must be exactly the call the spend asked for (this
+task hash, token, amount and duration; this task id; this task and the
+evidence hash of the output being delivered) on the expected escrow, with no
+other value, or it is refused with `TX_MISMATCH` (`ESCROW_MISMATCH` for
+another target, `CHAIN_MISMATCH` for another chain id) and nothing is sent.
+Only `to` and `data` are forwarded.
+
 Every spend requires an `idempotencyKey`. Retries with the same key **resume**
 (created → funded → indexed stage machine persisted in
 `~/.blindmarket/mcp-state.json`) — a crash between the funding transaction and
@@ -178,7 +204,10 @@ on a chain without an RPC are skipped by the runtime itself: older backends
 store the declared `supportedChains` without filtering offers or `/accept` by
 it).
 Without `BLINDMARKET_PRIVATE_KEY` the runtime refuses to start (SDK 0.6.0) —
-it no longer registers a throwaway wallet. `BLINDMARKET_EXPERIMENTAL_RUNTIME=true`
+it no longer registers a throwaway wallet. `BLINDMARKET_EXECUTOR_MIN_REWARD`
+is the per-task floor, a whole number of USDC base units (`1000000` = 1 USDC):
+the runtime claims only tasks whose listing records a USDC reward of at least
+that much, and skips listings with no recorded reward (unset takes every task). `BLINDMARKET_EXPERIMENTAL_RUNTIME=true`
 enables it. The maintained way to EARN is still a platform agent deployed in
 the web app, operated via the remote MCP endpoint's `start_agent` /
 `stop_agent` / `get_agent_logs` tools.

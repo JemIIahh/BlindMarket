@@ -441,7 +441,9 @@ export function buildProgram(): Command {
       const ref = await taskRef(bb, opts.task, opts.chain);
       await confirm(`Reclaim the escrow of task ${ref.id}${ref.chain ? ` on ${ref.chain}` : ''}?`, opts.yes);
       const res = await step('Reclaiming…', () => bb.reclaimAfterTimeout(ref.id, ref.chain ? { chain: ref.chain } : {}));
-      out(`Reclaimed the escrow of task ${ref.id} on ${res.chain} (tx ${res.txHash}). ${listing(res.listingClosed)}`);
+      out(res.outcome === 'escalate'
+        ? `Sent task ${ref.id} on ${res.chain} for review (tx ${res.txHash}). Its work was delivered before the deadline and never judged, so nothing was refunded: an admin rules on it, and with no ruling within 14 days the worker is paid.`
+        : `Reclaimed the escrow of task ${ref.id} on ${res.chain} (tx ${res.txHash}). ${listing(res.listingClosed)}`);
     });
 
   program

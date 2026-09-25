@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { ethers } from 'ethers';
+import { evidenceHashOf } from '../src/escrowCalls.js';
 import {
   SETTLEMENT_CHAINS,
   WorkerRuntime,
@@ -31,6 +33,34 @@ import type { A2ATaskState } from '../src/types.js';
 const TASK_ID = `0x${'ab'.repeat(32)}`;
 const ROOT_HASH = `0x${'cd'.repeat(32)}`;
 
+/**
+ * deliverResult() signs only a submitEvidence on the escrow /health/settlement
+ * lists for the task's chain, committing the handler's result (security audit
+ * run 1, C41). Production's table lists Base and Arc; the 0G entry stands in
+ * for a backend that still settles there, which the "no chain named" path needs.
+ */
+const PROD_SETTLEMENT = JSON.parse(readFileSync(new URL('../../fixtures/prod/health-settlement.json', import.meta.url), 'utf-8')).data;
+const OG_ESCROW = '0x00000000000000000000000000000000000000Ab';
+const SETTLEMENT = {
+  ...PROD_SETTLEMENT,
+  chains: [
+    ...PROD_SETTLEMENT.chains,
+    { chain: '0g', chainId: 16602, escrowAddress: OG_ESCROW, token: { kind: 'native', address: null, symbol: '0G', decimals: 18 } },
+  ],
+};
+const escrowOf = (chain: string): string => SETTLEMENT.chains.find((c: { chain: string }) => c.chain === chain).escrowAddress;
+const SUBMIT_EVIDENCE = new ethers.Interface(['function submitEvidence(uint256 taskId, bytes32 evidenceHash)']);
+/** The submitEvidence the backend builds for `result` (backend/src/routes/a2a.ts). */
+function submitTx(chain: string, result: Record<string, unknown> = { done: true }, taskId = 1n) {
+  return { to: escrowOf(chain), data: SUBMIT_EVIDENCE.encodeFunctionData('submitEvidence', [taskId, evidenceHashOf(result)]) };
+}
+/** Chain ids the stub RPCs below answer with. */
+const RPC_CHAIN_IDS: Record<string, bigint> = {
+  'http://og.invalid': 16602n,
+  'https://base.example/rpc': 84532n,
+  'http://base.invalid': 84532n,
+};
+
 function jsonResponse(data: unknown): Response {
   return { status: 200, json: async () => ({ success: true, data }) } as unknown as Response;
 }
@@ -49,9 +79,10 @@ function errorResponse(status: number, message: string): RawResponse {
 /** Route stubbed fetch calls by a substring match against the URL. Each
  * endpoint below has a unique path segment, so substring routing is enough. */
 function stubFetch(routes: Record<string, unknown>) {
+  const all: Record<string, unknown> = { '/health/settlement': SETTLEMENT, ...routes };
   const fn = vi.fn(async (url: string | URL, _init?: RequestInit) => {
     const u = String(url);
-    const hit = Object.entries(routes).find(([match]) => u.includes(match));
+    const hit = Object.entries(all).find(([match]) => u.includes(match));
     if (!hit) throw new Error(`worker-runtime.test.ts: unhandled fetch ${u}`);
     return hit[1] instanceof RawResponse ? hit[1].response : jsonResponse(hit[1]);
   });
@@ -80,6 +111,13 @@ function mkRuntime(
   (runtime as any).executions.set(TASK_ID, { taskId: TASK_ID, status: 'bidding', startedAt: Date.now() } satisfies TaskExecutionInfo);
   return runtime;
 }
+
+beforeEach(() => {
+  // deliverResult() checks the signer's RPC serves the task's chain.
+  vi.spyOn(ethers.JsonRpcProvider.prototype, 'getNetwork').mockImplementation(async function (this: ethers.JsonRpcProvider) {
+    return new ethers.Network('stub', RPC_CHAIN_IDS[this._getConnection().url] ?? 1n);
+  });
+});
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -134,7 +172,7 @@ describe('WorkerRuntime.executeTask — encrypted task', () => {
         onChainTaskId: '1',
         status: 'submitted',
         evidenceHash: `0x${'33'.repeat(32)}`,
-        unsignedSubmitEvidence: { to: '0x000000000000000000000000000000000000ab', data: '0x1234', from: '0x000000000000000000000000000000000000cd' },
+        unsignedSubmitEvidence: { ...submitTx('0g'), from: '0x00000000000000000000000000000000000000cd' },
       },
       '/finalize': { taskId: TASK_ID, status: 'verified', verificationResult: { passed: true, reasons: [] } },
     });
@@ -258,7 +296,7 @@ describe('WorkerRuntime.executeTask — settlement chain', () => {
       '/storage/': { rootHash: ROOT_HASH, blob: Buffer.from('x').toString('base64') },
       '/submit': {
         taskId: TASK_ID, status: 'submitted', chain: 'base',
-        unsignedSubmitEvidence: { to: '0x00000000000000000000000000000000000000ab', data: '0x1234' },
+        unsignedSubmitEvidence: submitTx('base'),
       },
       '/finalize': { taskId: TASK_ID, status: 'submitted', awaitingPosterApproval: true },
     });
@@ -279,7 +317,7 @@ describe('WorkerRuntime.executeTask — settlement chain', () => {
       '/storage/': { rootHash: ROOT_HASH, blob: Buffer.from('x').toString('base64') },
       '/submit': {
         taskId: TASK_ID, status: 'submitted', chain: 'solana',
-        unsignedSubmitEvidence: { to: '0x00000000000000000000000000000000000000ab', data: '0x1234' },
+        unsignedSubmitEvidence: submitTx('0g'),
       },
     });
     const runtime = mkRuntime(wallet);
@@ -292,7 +330,7 @@ describe('WorkerRuntime.executeTask — settlement chain', () => {
     expect(sendTxSpy).not.toHaveBeenCalled();
   });
 
-  it('signs on the 0G RPC when the backend names no chain', async () => {
+  it('signs on the 0G RPC when the backend names no chain (and lists a 0G escrow)', async () => {
     const providers: string[] = [];
     vi.spyOn(ethers.Wallet.prototype, 'sendTransaction').mockImplementation(async function (this: ethers.Wallet) {
       providers.push((this.provider as ethers.JsonRpcProvider)._getConnection().url);
@@ -303,7 +341,7 @@ describe('WorkerRuntime.executeTask — settlement chain', () => {
       '/storage/': { rootHash: ROOT_HASH, blob: Buffer.from('x').toString('base64') },
       '/submit': {
         taskId: TASK_ID, status: 'submitted',
-        unsignedSubmitEvidence: { to: '0x00000000000000000000000000000000000000ab', data: '0x1234' },
+        unsignedSubmitEvidence: submitTx('0g'),
       },
       '/finalize': { taskId: TASK_ID, status: 'submitted', awaitingPosterApproval: true },
     });
@@ -323,6 +361,64 @@ describe('WorkerRuntime.executeTask — settlement chain', () => {
     // biome-ignore lint/suspicious/noExplicitAny: reaching into private fields to assert
     expect(((runtime as any).executions.get(TASK_ID) as TaskExecutionInfo).status).toBe('completed');
     expect(providers).toEqual(['http://og.invalid']);
+  });
+});
+
+describe('WorkerRuntime.executeTask — the backend cannot choose what the executor signs (security audit run 1, C41)', () => {
+  const wallet = { address: '0xworker', privateKey: `0x${'1'.repeat(64)}`, publicKey: `04${'1'.repeat(128)}` };
+  const a2a: A2ATaskState = { taskId: TASK_ID, status: 'assigned' };
+  const routes = (unsignedSubmitEvidence: Record<string, unknown>, settlement: unknown = SETTLEMENT) => ({
+    '/health/settlement': settlement,
+    '/accept': { taskId: TASK_ID, status: 'accepted', rootHash: ROOT_HASH, privacy: 'public', chain: 'base' },
+    '/storage/': { rootHash: ROOT_HASH, blob: Buffer.from('x').toString('base64') },
+    '/submit': { taskId: TASK_ID, status: 'submitted', chain: 'base', unsignedSubmitEvidence },
+    '/finalize': { taskId: TASK_ID, status: 'submitted', awaitingPosterApproval: true },
+  });
+  const base = () => {
+    const runtime = mkRuntime(wallet);
+    // biome-ignore lint/suspicious/noExplicitAny: private config under test
+    (runtime as any).config.rpcUrls = { base: 'https://base.example/rpc' };
+    return runtime;
+  };
+
+  it('fails the task, with nothing signed, when /submit hands back a native transfer instead of submitEvidence', async () => {
+    const sendTxSpy = vi.spyOn(ethers.Wallet.prototype, 'sendTransaction');
+    stubFetch(routes({ to: '0x000000000000000000000000000000000000dEaD', value: '5000000000000000000', data: '0x' }));
+    const runtime = base();
+    // biome-ignore lint/suspicious/noExplicitAny: private method under test
+    await (runtime as any).executeTask(TASK_ID, a2a);
+    // biome-ignore lint/suspicious/noExplicitAny: reaching into private fields to assert
+    const exec = (runtime as any).executions.get(TASK_ID) as TaskExecutionInfo;
+    expect(exec.status).toBe('failed');
+    expect(exec.error).toMatch(/not the escrow/);
+    expect(sendTxSpy).not.toHaveBeenCalled();
+  });
+
+  it('fails the task when the submitEvidence commits another result than the handler returned', async () => {
+    const sendTxSpy = vi.spyOn(ethers.Wallet.prototype, 'sendTransaction');
+    stubFetch(routes(submitTx('base', { done: false })));
+    const runtime = base();
+    // biome-ignore lint/suspicious/noExplicitAny: private method under test
+    await (runtime as any).executeTask(TASK_ID, a2a);
+    // biome-ignore lint/suspicious/noExplicitAny: reaching into private fields to assert
+    expect(((runtime as any).executions.get(TASK_ID) as TaskExecutionInfo).error).toMatch(/other arguments/);
+    expect(sendTxSpy).not.toHaveBeenCalled();
+  });
+
+  it('refuses a task the backend names no chain for when it lists no 0G escrow (production)', async () => {
+    const sendTxSpy = vi.spyOn(ethers.Wallet.prototype, 'sendTransaction');
+    stubFetch({
+      '/health/settlement': PROD_SETTLEMENT,
+      '/accept': { taskId: TASK_ID, status: 'accepted', rootHash: ROOT_HASH, privacy: 'public' },
+      '/storage/': { rootHash: ROOT_HASH, blob: Buffer.from('x').toString('base64') },
+      '/submit': { taskId: TASK_ID, status: 'submitted', unsignedSubmitEvidence: submitTx('0g') },
+    });
+    const runtime = mkRuntime(wallet);
+    // biome-ignore lint/suspicious/noExplicitAny: private method under test
+    await (runtime as any).executeTask(TASK_ID, a2a);
+    // biome-ignore lint/suspicious/noExplicitAny: reaching into private fields to assert
+    expect(((runtime as any).executions.get(TASK_ID) as TaskExecutionInfo).error).toMatch(/lists no escrow for 0g/);
+    expect(sendTxSpy).not.toHaveBeenCalled();
   });
 });
 
@@ -663,3 +759,100 @@ describe('WorkerRuntime.browse — { meta, state } entries', () => {
   });
 });
 
+
+describe('WorkerRuntime.browse — minReward (security audit run 1, C40)', () => {
+  const ARC_RPC = 'http://arc.invalid';
+  const id = (n: number) => `0x${n.toString(16).padStart(64, '0')}`;
+  const usdc = (amount: string) => ({ amount, unit: { symbol: 'USDC', decimals: 6 } });
+  const listing = (n: number, reward?: unknown) => ({ meta: { taskId: id(n), chain: 'arc', ...(reward === undefined ? {} : { reward }) }, state: { taskId: id(n), status: 'open' } });
+  /** Every open Arc listing a poster could make, from dust to well above a 1 USDC floor. */
+  const LISTINGS = [
+    listing(1, usdc('1')), // 0.000001 USDC: the recorded attack
+    listing(2), // indexed before the backend recorded rewards
+    listing(3, { amount: '1000000000000000000', unit: { symbol: '0G', decimals: 18 } }), // another unit
+    listing(4, usdc('999999')),
+    listing(5, usdc('1000000')),
+    listing(6, usdc('2500000')),
+    listing(7, { amount: '1.5', unit: { symbol: 'USDC', decimals: 6 } }), // malformed
+  ];
+
+  function runtimeWith(config: Partial<ConstructorParameters<typeof WorkerRuntime>[0]>) {
+    const runtime = new WorkerRuntime({
+      apiKey: 'test-key', displayName: 'floor-check', capabilities: [],
+      executeTask: async () => ({ done: true }),
+      rpcUrls: { arc: ARC_RPC },
+      ...config,
+    });
+    // biome-ignore lint/suspicious/noExplicitAny: private fields/methods under test
+    const r = runtime as any;
+    r.wallet = { address: '0xworker', privateKey: `0x${'1'.repeat(64)}`, publicKey: `04${'1'.repeat(128)}` };
+    const claimed: string[] = [];
+    // claim() hands the task to executeTask, whose first step is POST /accept.
+    r.executeTask = async (taskId: string) => { claimed.push(taskId); };
+    return { r, claimed };
+  }
+  const accepts = (fetchMock: ReturnType<typeof stubFetch>) => fetchMock.mock.calls.filter((c) => String(c[0]).includes('/accept'));
+
+  it('claims only listings whose recorded USDC reward is at least minReward', async () => {
+    const fetchMock = stubFetch({ '/a2a/tasks': { tasks: LISTINGS } });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { r, claimed } = runtimeWith({ minReward: '1000000' });
+    await r.browse();
+    expect(claimed).toEqual([id(5), id(6)]);
+    expect(accepts(fetchMock)).toHaveLength(0);
+  });
+
+  it('with no minReward (or 0) it claims every listing, as before', async () => {
+    for (const minReward of [undefined, '', '0']) {
+      stubFetch({ '/a2a/tasks': { tasks: LISTINGS } });
+      const { r, claimed } = runtimeWith({ minReward, maxConcurrentTasks: 10 });
+      await r.browse();
+      expect(claimed, String(minReward)).toEqual(LISTINGS.map((l) => l.meta.taskId));
+    }
+  });
+
+  it('reads a floor of 10^12 or more as 18-decimal units, as the backend stores it', async () => {
+    stubFetch({ '/a2a/tasks': { tasks: LISTINGS } });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { r, claimed } = runtimeWith({ minReward: '1000000000000000000' }); // 1e18 → 1000000 (1 USDC)
+    await r.browse();
+    expect(claimed).toEqual([id(5), id(6)]);
+  });
+
+  it('in restore mode, applies the floor the executor is registered with', async () => {
+    stubFetch({ '/a2a/tasks': { tasks: [listing(1, usdc('4999')), listing(2, usdc('5000'))] } });
+    const { r, claimed } = runtimeWith({});
+    r.profile = { minReward: '5000' };
+    await r.browse();
+    expect(claimed).toEqual([id(2)]);
+  });
+
+  it('says once, not per task, that listings without a recorded reward are skipped', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    stubFetch({ '/a2a/tasks': { tasks: [listing(1), listing(2)] } });
+    const { r, claimed } = runtimeWith({ minReward: '1' });
+    await r.browse();
+    await r.browse();
+    expect(claimed).toEqual([]);
+    expect(warn.mock.calls.filter((c) => String(c[0]).includes('without a recorded reward'))).toHaveLength(1);
+  });
+
+  it('still re-tries the /accept of a task it already claimed that may be held for it', async () => {
+    stubFetch({ '/a2a/tasks': { tasks: [] } });
+    const { r, claimed } = runtimeWith({ minReward: '1000000' });
+    r.retries.set(id(9), { notBefore: 0, failures: 1, wrapTimeouts: 0, bidded: false, reaccept: { state: { taskId: id(9), status: 'open' }, meta: { taskId: id(9), chain: 'arc' }, rounds: 1 } });
+    await r.browse();
+    expect(claimed).toEqual([id(9)]);
+  });
+
+  it('start() refuses a minReward that is not a whole number of base units, before any request', async () => {
+    const fetchMock = stubFetch({});
+    const runtime = new WorkerRuntime({
+      apiKey: 'test-key', displayName: 'floor-check', capabilities: [],
+      executeTask: async () => ({ done: true }), rpcUrls: { arc: ARC_RPC },
+      privateKey: `0x${'1'.repeat(64)}`, minReward: '1.5',
+    });
+    await expect(runtime.start()).rejects.toThrow(/minReward must be a whole number/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});

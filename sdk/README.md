@@ -170,6 +170,11 @@ await bb.cancelAndRefund(task.taskId!);
 await bb.reclaimAfterTimeout(task.taskId!);
 ```
 
+`reclaimAfterTimeout()` refunds a task whose worker never delivered. Work that
+was delivered before the deadline and never judged is not refunded: the
+escrow sends the task for review (an admin rules, and with no ruling within
+14 days the worker is paid), and the result says `outcome: 'escalate'`.
+
 If the process dies after the escrow is funded but before the task is listed,
 nothing is lost: `onFunded` got the funding hash, and any error after funding
 carries it (`err.txHash`) with the listing body in `err.body.indexParams`.
@@ -179,6 +184,19 @@ Call `bb.indexTask(err.body.indexParams)` to list it (a repeat is safe), or
 The lower-level builders are unchanged: `createTask()`, `cancelTask()` and
 `claimTimeout()` return unsigned transactions, now with the `chain` and
 `chainId` to send them on.
+
+**What the client signs.** `postTask()`, `cancelAndRefund()`,
+`reclaimAfterTimeout()` and `deliverResult()` sign transactions the backend
+builds, so each one is decoded and checked first: it must be exactly the call
+asked for (`createTask` with this task hash, token, amount, zone and duration;
+`cancelTask` / `claimTimeout` for this task id; `submitEvidence` for this task,
+committing the result just sent) on the escrow `/health/settlement` lists for
+the chain, with no value (`postTask` sends the amount it computed on a native
+chain), and a refund must be on the chain you named. Only `to` and `data` are
+signed; gas, fee, nonce, type and chain id fields from the backend are dropped.
+Anything else throws before signing: `ESCROW_MISMATCH` (another target),
+`TX_MISMATCH` (another function or arguments, or a value), `CHAIN_MISMATCH`
+(another chain) or `CHAIN_UNKNOWN` (a chain with no listed escrow).
 
 ```ts
 const tasks = await bb.listTasks();
@@ -272,7 +290,9 @@ const { rootHash, wrappedKey, privacy } = accepted;
 // Deliver: /submit → sign + broadcast submitEvidence → /finalize.
 // submitResult() alone only BUILDS the unsigned tx and marks the task
 // 'submitted'; stopping there strands it. deliverResult() does all three and
-// heals a stranded task through rebroadcast().
+// heals a stranded task through rebroadcast(). It signs only a zero-value
+// submitEvidence on the task chain's escrow committing this result (see
+// "What the client signs" above).
 await bb.deliverResult(taskId, { output: 'Task completed successfully' });
 
 // Manual healing, if you drive submitResult()/finalize() yourself:
@@ -340,8 +360,18 @@ it fails the task before running your handler if the response names a chain it
 has no RPC for (that task is already assigned — this only covers rows with no
 `meta.chain`).
 
+**What keeps the runtime off tasks below its floor.** With `minReward` set (a
+whole number of USDC base units: `'1000000'` is 1 USDC), browse claims only
+listings whose recorded reward (`meta.reward`, written by the backend from the
+funding event) is in USDC and at least `minReward`. A listing with no recorded
+reward, or one in another unit, is skipped: a poster can escrow a single base
+unit, and the handler run and the `submitEvidence` gas are yours. Newer
+backends also refuse such an `/accept` (403 `BELOW_MIN_REWARD`). Without
+`minReward` (or with `'0'`) every task is claimed, as before; in restore mode
+the floor the executor is registered with applies.
+
 The loop it runs: browse (`{ meta, state }` entries, `open` only, skipping a
-chain it did not declare) → `/accept` → decrypt → `executeTask` →
+chain it did not declare or a task below `minReward`) → `/accept` → decrypt → `executeTask` →
 `deliverResult()` (submit, sign, finalize, with `/rebroadcast` healing). How
 `/accept` failures are handled:
 

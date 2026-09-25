@@ -42,6 +42,7 @@ function stubBackend(accept: (taskId: string, n: number) => Response, listing: (
       c.accepts[id] = (c.accepts[id] ?? 0) + 1;
       return accept(id, c.accepts[id]);
     }
+    if (u.includes('/health/settlement')) return ok({ postingChain: 'arc', chains: [] });
     if (u.includes('/storage/')) return ok({ rootHash: ROOT_HASH, blob: Buffer.from('brief').toString('base64') });
     if (u.includes('/submit')) return ok({ taskId: idOf(u), status: 'submitted', unsignedSubmitEvidence: null });
     if (u.includes('/finalize')) return ok({ taskId: idOf(u), status: 'awaiting_verification' });

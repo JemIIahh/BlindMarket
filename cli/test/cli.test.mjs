@@ -39,6 +39,13 @@ const ERC20 = new Interface([
   'function approve(address,uint256) returns (bool)',
   'function transfer(address,uint256) returns (bool)',
 ]);
+// What the real backend builds (backend/src/services/escrow.ts): the SDK signs nothing else.
+const ESCROW_CALLS = new Interface([
+  'function createTask(bytes32 taskHash, address token, uint256 amount, string category, string locationZone, uint256 duration)',
+  'function cancelTask(uint256 taskId)',
+]);
+const createTaskData = (b) => ESCROW_CALLS.encodeFunctionData('createTask', [b.taskHash, b.token, b.amount, 'general', b.locationZone, b.duration]);
+const cancelData = (id) => ESCROW_CALLS.encodeFunctionData('cancelTask', [BigInt(id)]);
 
 let chain;
 let rpc;
@@ -115,8 +122,8 @@ globalThis.fetch = async (url, init = {}) => {
   if (path === '/api/v1/api-keys/whoami') return json({ address: whoami, addresses: [whoami] });
   if (path.startsWith('/api/v1/a2a/executors')) return json({ executors: [] });
   if (path === '/api/v1/storage/upload') return json({ rootHash: '0x' + 'cd'.repeat(32) });
-  if (path === '/api/v1/tasks') return json({ unsignedTx: { to: ESCROW, data: '0xc0ffee', from: OWNER.address }, chain: 'arc', chainId: ARC.chainId });
-  if (path === '/api/v1/tasks/8/cancel') return json({ unsignedTx: { to: ESCROW, data: '0xca0ce1' }, chain: 'arc', chainId: ARC.chainId });
+  if (path === '/api/v1/tasks') return json({ unsignedTx: { to: ESCROW, data: createTaskData(body), from: OWNER.address }, chain: 'arc', chainId: ARC.chainId });
+  if (path === '/api/v1/tasks/8/cancel') return json({ unsignedTx: { to: ESCROW, data: cancelData(8) }, chain: 'arc', chainId: ARC.chainId });
   if (path === '/api/v1/tasks/8/confirm-tx') return json({ confirmed: 1 });
   if (path === '/api/v1/a2a/tasks/index') return json({ taskHash: body.taskHash, onChainTaskId: '51', indexed: true });
   if (path === '/api/v1/agents/deploy-fee') return json(FEE_TERMS);
@@ -268,10 +275,24 @@ test('a key that is not the API key owner\'s pays nothing', async () => {
 
 test('cancel signs the refund on the task\'s chain, then takes it off the market', async () => {
   const text = await blind('cancel', '--task', '8', '--chain', 'arc', '--yes');
-  assert.deepEqual(chain.sent.map((t) => [t.to, t.data, t.chainId]), [[ESCROW, '0xca0ce1', BigInt(ARC.chainId)]]);
+  assert.deepEqual(chain.sent.map((t) => [t.to, t.data, t.chainId]), [[ESCROW, cancelData(8), BigInt(ARC.chainId)]]);
   assert.deepEqual(posted('/api/v1/tasks/8/cancel')[0].body, { chain: 'arc' });
   assert.deepEqual(posted('/api/v1/tasks/8/confirm-tx')[0].body, { txHash: chain.sent[0].hash, chain: 'arc' });
   assert.match(text, /Cancelled task 8 on arc.*It is off the market/);
+});
+
+test('cancel refuses a backend "refund" that is not cancelTask on the escrow, and signs nothing (security audit run 1, C41)', async () => {
+  const MAX = 2n ** 256n - 1n;
+  for (const [unsignedTx, code] of [
+    [{ to: USDC, data: ERC20.encodeFunctionData('approve', ['0x000000000000000000000000000000000000dEaD', MAX]) }, 'ESCROW_MISMATCH'],
+    [{ to: ESCROW, data: ERC20.encodeFunctionData('approve', ['0x000000000000000000000000000000000000dEaD', MAX]) }, 'TX_MISMATCH'],
+    [{ to: ESCROW, data: cancelData(9) }, 'TX_MISMATCH'],
+  ]) {
+    answers['/api/v1/tasks/8/cancel'] = [{ ok: true, status: 200, json: async () => ({ success: true, data: { unsignedTx, chain: 'arc', chainId: ARC.chainId } }) }];
+    await assert.rejects(blind('cancel', '--task', '8', '--chain', 'arc', '--yes'), (e) => e.code === code);
+  }
+  assert.equal(chain.sent.length, 0);
+  assert.equal(posted('/api/v1/tasks/8/confirm-tx').length, 0);
 });
 
 test('login stores the key encrypted, only for the API key\'s own wallet, in owner-only files', async () => {

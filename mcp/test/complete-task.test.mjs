@@ -1,5 +1,6 @@
 import { test, describe, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { Interface, keccak256, toUtf8Bytes } from 'ethers';
 import { registerRentTools } from '../dist/rent.js';
 import { registerWalletTools } from '../dist/wallet.js';
 import { aesEncrypt, eciesEncrypt, generateAesKey, derivePublicKeyHex } from '../dist/crypto.js';
@@ -16,6 +17,9 @@ const ESCROW = '0x' + 'e5'.repeat(20);
 const HASH = '0x' + 'ab'.repeat(32);
 const FUTURE = String(Math.floor(Date.now() / 1000) + 3600);
 const PAST = String(Math.floor(Date.now() / 1000) - 60);
+/** The submitEvidence the backend builds for task 7 and `resultData` (backend/src/routes/a2a.ts). */
+const SUBMIT = new Interface(['function submitEvidence(uint256 taskId, bytes32 evidenceHash)']);
+const submitData = (resultData) => SUBMIT.encodeFunctionData('submitEvidence', [7n, keccak256(toUtf8Bytes(JSON.stringify(resultData)))]);
 
 function harness({ status, attempts = 0, deadline = FUTURE, afterStatus = 4, verify = { passed: true, reasons: [] }, submitFrom, storageBlob, noWallet = false, stranded = false } = {}) {
   const calls = [];
@@ -31,8 +35,9 @@ function harness({ status, attempts = 0, deadline = FUTURE, afterStatus = 4, ver
     if (path.startsWith('/api/v1/tasks/')) return json(task());
     // stranded: an earlier /submit already flipped off-chain state to 'submitted'
     if (path.endsWith('/submit') && stranded) return { ok: false, status: 409, json: async () => ({ success: false, error: { code: 'INVALID_STATE', message: 'Cannot submit in state: submitted' } }) };
-    if (path.endsWith('/rebroadcast')) return json({ onChainTaskId: 7, evidenceHash: '0x01', chain: '0g', unsignedSubmitEvidence: { to: ESCROW, data: '0xdead', chainId: 16602 } });
-    if (path.endsWith('/submit')) { return json({ onChainTaskId: 7, evidenceHash: '0x01', chain: '0g', unsignedSubmitEvidence: { to: ESCROW, data: '0xdead', chainId: 16602, ...(submitFrom ? { from: submitFrom } : {}) } }); }
+    // /rebroadcast rebuilds from the result an earlier, interrupted /submit stored.
+    if (path.endsWith('/rebroadcast')) return json({ onChainTaskId: 7, evidenceHash: '0x01', chain: '0g', unsignedSubmitEvidence: { to: ESCROW, data: submitData({ output: 'first try' }), chainId: 16602 } });
+    if (path.endsWith('/submit')) { const { resultData } = JSON.parse(init.body); return json({ onChainTaskId: 7, evidenceHash: '0x01', chain: '0g', unsignedSubmitEvidence: { to: ESCROW, data: submitData(resultData), chainId: 16602, ...(submitFrom ? { from: submitFrom } : {}) } }); }
     if (path.startsWith('/api/v1/storage/')) return json({ blob: (storageBlob ?? Buffer.from('plain brief')).toString('base64') });
     if (path.endsWith('/finalize')) { onChain = afterStatus; attempts += 1; return json({ status: verify.passed ? 'verified' : 'failed', verificationResult: verify }); }
     throw new Error('unexpected fetch ' + path);

@@ -4,6 +4,7 @@ import {
   sendAndWait, assertSignerChain, ensureAllowance, tokenBalance, UnconfirmedTransactionError, DEFAULT_CONFIRM_TIMEOUT_MS,
 } from './onchain.js';
 import { generateAesKey, aesEncrypt, eciesEncrypt, sha256, bytesToHex } from './crypto/index.js';
+import { checkEscrowCall, evidenceHashOf, taskIdOf } from './escrowCalls.js';
 import type {
   Address, Hex, RootHash, HealthStatus, PlatformStats, OpenTask, TaskDetail,
   CreateTaskTx, ExecutorProfile, RegisterExecutorInput,
@@ -214,6 +215,14 @@ export interface RefundResult {
   chainId: number;
   /** Whether the backend took the task off the market. False leaves it listed until its deadline; the refund stands either way. */
   listingClosed: boolean;
+  /**
+   * What the transaction did, when the backend says: 'refund' returned the
+   * escrow to the poster; 'escalate' (reclaimAfterTimeout on work delivered
+   * before the deadline and never judged) sent the task for review and
+   * refunded nothing. An admin rules on it, and with no ruling within 14 days
+   * the worker is paid.
+   */
+  outcome?: 'refund' | 'escalate';
 }
 
 export interface RefundOptions {
@@ -357,7 +366,11 @@ export class BlindMarket {
 
   // ── Task lifecycle ──────────────────────────────────────────────────────
 
-  /** List open tasks (human-readable). */
+  /**
+   * List open tasks from the legacy 0G TaskRegistry (numeric ids on the 0G
+   * escrow). Tasks escrowed on Base or Arc are not in it: browseA2ATasks()
+   * lists the work agents can take.
+   */
   async listTasks(limit = 20): Promise<OpenTask[]> {
     const { tasks } = await this.req<{ tasks: OpenTask[] }>('GET', `/api/v1/tasks?limit=${limit}`);
     return tasks;
@@ -398,8 +411,11 @@ export class BlindMarket {
   /**
    * Build an unsigned `claimTimeout` transaction (the refund of a task whose
    * deadline passed). reclaimAfterTimeout() builds, signs and sends it for you.
+   * `outcome` says what it will do: on work delivered before the deadline and
+   * never judged, the escrow sends the task for review ('escalate') instead
+   * of refunding it, and `message` explains.
    */
-  async claimTimeout(taskId: string, chain?: string): Promise<{ unsignedTx: object; chain?: string; chainId?: number }> {
+  async claimTimeout(taskId: string, chain?: string): Promise<{ unsignedTx: object; chain?: string; chainId?: number; outcome?: 'refund' | 'escalate'; message?: string }> {
     return this.req('POST', `/api/v1/tasks/${taskId}/timeout`, chain ? { chain } : undefined);
   }
 
@@ -424,6 +440,29 @@ export class BlindMarket {
   }
 
   /**
+   * `chain`'s entry in /health/settlement, with its escrow: every transaction
+   * the backend builds for this client to sign must target that escrow.
+   * Throws 409 CHAIN_UNKNOWN when the backend lists no escrow for it.
+   */
+  private async settlementEntry(
+    chain: string,
+    what: string,
+    settlement?: { chains: SettlementChainInfo[] },
+  ): Promise<SettlementChainInfo & { escrowAddress: string }> {
+    const { chains } = settlement ?? await this.getSettlement();
+    const entry = chains.find((c) => c.chain === chain);
+    if (!entry?.escrowAddress || !Number.isInteger(entry.chainId)) {
+      throw new ApiError(
+        409,
+        `${what}: the backend lists no escrow for ${chain} (GET /health/settlement), so a transaction built for it cannot be checked before signing. Nothing was sent.`,
+        undefined,
+        'CHAIN_UNKNOWN',
+      );
+    }
+    return entry as SettlementChainInfo & { escrowAddress: string };
+  }
+
+  /**
    * Post a task end to end, from the API key's own wallet: encrypt the brief
    * (unless public) and wrap its key to the posting chain's executors, upload
    * it, build createTask, approve the escrow for the amount when the token is
@@ -432,8 +471,10 @@ export class BlindMarket {
    * The wallet signs locally, on the backend's posting chain (Arc on
    * production, where gas is paid in USDC). Before anything is sent it checks
    * the signer is the API key's owner, that its RPC is on the posting chain,
-   * that the wallet holds the amount, and that the backend built the tx for
-   * the escrow it advertises. The funding hash goes to `onFunded` as soon as
+   * that the wallet holds the amount, and that the backend built exactly this
+   * createTask (task hash, token, amount, zone, duration) for the escrow it
+   * advertises, with no other value: 409 ESCROW_MISMATCH / TX_MISMATCH
+   * otherwise. Only the tx's to and data are signed. The funding hash goes to `onFunded` as soon as
    * it is sent; an error after that carries it as `err.txHash`, and
    * indexTask() lists the funded task without paying again.
    *
@@ -454,6 +495,7 @@ export class BlindMarket {
       throw new ApiError(400, 'durationSeconds must be a whole number from 3600 (1 hour) to 7776000 (90 days): the escrow refuses anything else. Nothing was sent.', undefined, 'INVALID_DURATION');
     }
     const privacy = params.privacy ?? 'private';
+    const locationZone = params.locationZone ?? 'global';
     const verificationMode = params.verificationMode ?? 'auto';
     const verificationCriteria = params.verificationCriteria
       ?? (verificationMode === 'auto' ? { min_length: 10, pass_threshold: 60 } : undefined);
@@ -537,7 +579,7 @@ export class BlindMarket {
       taskHash: taskHash as Hex,
       token: token as Address,
       amount: amount.toString(),
-      locationZone: params.locationZone ?? 'global',
+      locationZone,
       duration: String(duration),
       targetExecutorType: 'agent',
       verificationMode,
@@ -552,9 +594,23 @@ export class BlindMarket {
     if ((built.chain !== undefined && built.chain !== postingChain) || (built.chainId !== undefined && Number(built.chainId) !== entry.chainId)) {
       throw new ApiError(409, `The backend built this task for ${built.chain} (chain ${built.chainId}), not ${postingChain}: its posting chain changed. Nothing was sent; try again.`, undefined, 'POSTING_CHAIN_CHANGED');
     }
-    if (built.unsignedTx.to.toLowerCase() !== escrow.toLowerCase()) {
-      throw new ApiError(409, `The backend built this task for ${built.unsignedTx.to}, not the ${postingChain} escrow ${escrow}. Nothing was sent.`, undefined, 'ESCROW_MISMATCH');
-    }
+    // And it must be exactly this createTask: the escrow, the task hash, the
+    // token, the amount, the zone and the duration asked for (a verifier
+    // commits through createTaskWithVerifier). Only its to and data are signed;
+    // the value is the amount computed here.
+    const withVerifier = verificationMode === 'agent' && !!params.verifierAddress && params.verifierAddress.toLowerCase() !== ethers.ZeroAddress;
+    const createCall = checkEscrowCall(built.unsignedTx, {
+      escrow,
+      fn: withVerifier ? 'createTaskWithVerifier' : 'createTask',
+      args: (a) => String(a[0]).toLowerCase() === taskHash.toLowerCase()
+        && String(a[1]).toLowerCase() === token.toLowerCase()
+        && a[2] === amount
+        && a[4] === locationZone
+        && a[5] === BigInt(duration)
+        && (!withVerifier || String(a[6]).toLowerCase() === params.verifierAddress!.toLowerCase()),
+      value: isNative ? amount : 0n,
+      chainId: entry.chainId,
+    }, `Funding the escrow on ${postingChain}`);
 
     const timeoutMs = opts.confirmTimeoutMs ?? DEFAULT_CONFIRM_TIMEOUT_MS;
     // createTask pulls an ERC-20 with transferFrom: approve the escrow first.
@@ -574,7 +630,7 @@ export class BlindMarket {
     };
     let txHash: string;
     try {
-      ({ hash: txHash } = await sendAndWait(signer, { to: built.unsignedTx.to, data: built.unsignedTx.data }, {
+      ({ hash: txHash } = await sendAndWait(signer, createCall, {
         value: isNative ? amount : undefined,
         nonce,
         timeoutMs,
@@ -650,19 +706,36 @@ export class BlindMarket {
    * then takes the task off the market (`POST /tasks/:id/confirm-tx`).
    * `taskId` is the on-chain id (PostedTask.taskId); pass `chain`
    * (PostedTask.chain) too, since ids repeat across chains.
+   *
+   * Only a zero-value `cancelTask(taskId)` on the escrow /health/settlement
+   * lists for the chain is signed (to and data only), and only on the chain
+   * you named: 409 ESCROW_MISMATCH, TX_MISMATCH, CHAIN_MISMATCH or
+   * CHAIN_UNKNOWN otherwise, with nothing sent. reclaimAfterTimeout() does
+   * the same for `claimTimeout(taskId)`.
    */
   async cancelAndRefund(taskId: string, opts: RefundOptions = {}): Promise<RefundResult> {
-    return this.sendRefund(taskId, await this.cancelTask(taskId, opts.chain), 'Cancelling the task', opts);
+    return this.sendRefund(taskId, await this.cancelTask(taskId, opts.chain), 'cancelTask', 'Cancelling the task', opts);
   }
 
-  /** Reclaim the escrow of a task whose deadline passed undelivered (claimTimeout), signed and sent. */
+  /**
+   * Reclaim the escrow of a task whose deadline passed undelivered
+   * (claimTimeout), signed and sent. On work delivered before the deadline
+   * and never judged, the escrow sends the task for review instead and
+   * refunds nothing: the result's outcome is then 'escalate'.
+   */
   async reclaimAfterTimeout(taskId: string, opts: RefundOptions = {}): Promise<RefundResult> {
-    return this.sendRefund(taskId, await this.claimTimeout(taskId, opts.chain), 'Reclaiming the escrow', opts);
+    return this.sendRefund(taskId, await this.claimTimeout(taskId, opts.chain), 'claimTimeout', 'Reclaiming the escrow', opts);
   }
 
+  /**
+   * Sign the refund the backend built, once it is checked to be exactly
+   * `fn(taskId)` on the escrow of the chain it names (the one the caller
+   * named, when it named one), with no value. Only its to and data are signed.
+   */
   private async sendRefund(
     taskId: string,
-    built: { unsignedTx: object; chain?: string; chainId?: number },
+    built: { unsignedTx: object; chain?: string; chainId?: number; outcome?: 'refund' | 'escalate' },
+    fn: 'cancelTask' | 'claimTimeout',
     what: string,
     opts: RefundOptions,
   ): Promise<RefundResult> {
@@ -670,12 +743,25 @@ export class BlindMarket {
     if (!chain || chainId === undefined) {
       throw new ApiError(409, `${what}: the backend did not say which chain the task is on, so it cannot be signed safely here. Nothing was sent.`, built, 'CHAIN_UNKNOWN');
     }
-    const tx = built.unsignedTx as { to: string; data: string };
+    if (opts.chain && chain !== opts.chain) {
+      throw new ApiError(409, `${what}: you asked for task ${taskId} on ${opts.chain}, but the backend built the refund for ${chain}. Nothing was sent.`, built, 'CHAIN_MISMATCH');
+    }
+    const entry = await this.settlementEntry(chain, what);
+    if (Number(chainId) !== entry.chainId) {
+      throw new ApiError(409, `${what}: the backend built the refund for chain ${chainId}, but lists ${chain} as chain ${entry.chainId}. Nothing was sent.`, built, 'CHAIN_MISMATCH');
+    }
+    const id = taskIdOf(taskId);
+    const call = checkEscrowCall(built.unsignedTx, {
+      escrow: entry.escrowAddress,
+      fn,
+      args: (a) => id !== undefined && a[0] === id,
+      chainId: entry.chainId,
+    }, what);
     const signer = opts.signer ?? this.signerOn(chain, what);
-    await assertSignerChain(signer, chainId, what);
+    await assertSignerChain(signer, entry.chainId, what);
     let hash: string;
     try {
-      ({ hash } = await sendAndWait(signer, { to: tx.to, data: tx.data }, { timeoutMs: opts.confirmTimeoutMs }));
+      ({ hash } = await sendAndWait(signer, call, { timeoutMs: opts.confirmTimeoutMs }));
     } catch (err) {
       if (err instanceof UnconfirmedTransactionError) {
         const out = new ApiError(0, `${err.message} Check it before sending another.`, { txHash: err.hash }, 'UNCONFIRMED');
@@ -684,27 +770,33 @@ export class BlindMarket {
       }
       throw err;
     }
-    return { txHash: hash, chain, chainId, listingClosed: await this.confirmRefund(taskId, hash, chain) };
+    const confirmed = await this.confirmRefund(taskId, hash, chain);
+    // The receipt is the authority; the build's outcome covers a backend that
+    // could not confirm it.
+    const outcome = confirmed.escalated ? 'escalate' : built.outcome;
+    return { txHash: hash, chain, chainId, listingClosed: confirmed.closed, ...(outcome ? { outcome } : {}) };
   }
 
   /**
    * Tell the backend a refund landed (`POST /api/v1/tasks/:id/confirm-tx`),
    * which checks the receipt and takes the task off the market. Without it a
    * refunded task keeps listing as open until its deadline. Best effort: the
-   * money has already moved, so a failure here only reports false.
+   * money has already moved, so a failure here only reports it not closed.
+   * A claim that sent the task for review closes nothing (escalated).
    */
-  private async confirmRefund(taskId: string, txHash: string, chain: string): Promise<boolean> {
+  private async confirmRefund(taskId: string, txHash: string, chain: string): Promise<{ closed: boolean; escalated: boolean }> {
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        await this.req('POST', `/api/v1/tasks/${taskId}/confirm-tx`, { txHash, chain });
-        return true;
+        const res = await this.req<{ escalated?: boolean } | undefined>('POST', `/api/v1/tasks/${taskId}/confirm-tx`, { txHash, chain });
+        const escalated = res?.escalated === true;
+        return { closed: !escalated, escalated };
       } catch (err) {
         // The backend's RPC can lag the receipt the signer just saw.
-        if (!(err instanceof ApiError && err.code === 'NOT_CONFIRMED') || attempt === 3) return false;
+        if (!(err instanceof ApiError && err.code === 'NOT_CONFIRMED') || attempt === 3) return { closed: false, escalated: false };
         await new Promise((r) => setTimeout(r, 3_000));
       }
     }
-    return false;
+    return { closed: false, escalated: false };
   }
 
   // ── Agent deployment & management ─────────────────────────────────────────
@@ -1265,6 +1357,13 @@ export class BlindMarket {
    * unsigned `submitEvidence` on the chain the backend names → `finalize()`.
    * Safe to re-call on a task stranded in 'submitted': INVALID_STATE at submit
    * and NOT_SUBMITTED_ON_CHAIN at finalize both heal through `rebroadcast()`.
+   *
+   * The executor key signs only a zero-value `submitEvidence(onChainTaskId,
+   * evidenceHash)` on the escrow /health/settlement lists for that chain,
+   * where (from /submit) evidenceHash is keccak256 of `JSON.stringify(resultData)`,
+   * over an RPC checked to serve that chain, and only its to and data.
+   * Anything else throws 409 ESCROW_MISMATCH, TX_MISMATCH, CHAIN_MISMATCH or
+   * CHAIN_UNKNOWN (or WRONG_CHAIN for the RPC) with nothing sent.
    */
   async deliverResult(
     taskId: string,
@@ -1275,7 +1374,24 @@ export class BlindMarket {
     if (!signer) {
       throw new ApiError(400, 'deliverResult() needs a signer — pass one, or set BlindMarketConfig.executor. submitEvidence is onlyWorker, so the backend cannot broadcast it for you.');
     }
-    const send = async (built: { chain?: string; unsignedSubmitEvidence?: Record<string, unknown> | null }) => {
+    // Read before /submit, which records the result: a lookup failing here
+    // leaves nothing half-done.
+    const settlement = await this.getSettlement();
+    // The evidence the backend commits for this result (backend/src/routes/a2a.ts).
+    const evidence = evidenceHashOf(resultData);
+    const what = `Delivering task ${taskId}`;
+    /**
+     * Sign the submitEvidence the backend built, once it is checked to be a
+     * zero-value submitEvidence on the escrow of the chain it names, for the
+     * on-chain task it names, and (from /submit) committing THIS result. Only
+     * its to and data are signed, on the signer's RPC for that chain, checked
+     * to serve it. /rebroadcast re-sends the first stored result, so there the
+     * evidence hash is not this call's.
+     */
+    const send = async (
+      built: { chain?: string; onChainTaskId?: string | number; unsignedSubmitEvidence?: Record<string, unknown> | null },
+      fromSubmit: boolean,
+    ) => {
       if (!built.unsignedSubmitEvidence) return undefined;
       // Absent `chain` = a backend older than the field, where every task is on 0G.
       // Any other name must have its own RPC entry: signing an unknown chain's
@@ -1285,16 +1401,24 @@ export class BlindMarket {
       if (!rpc) {
         throw new Error(`task ${taskId} is escrowed on ${chain} but no RPC is configured for it — set rpcUrls.${chain}`);
       }
-      // The tx carries chainId, so a wrong RPC fails at ethers instead of
-      // landing on the wrong network.
+      const entry = await this.settlementEntry(chain, what, settlement);
+      const onChainId = built.onChainTaskId === undefined ? undefined : taskIdOf(built.onChainTaskId);
+      const call = checkEscrowCall(built.unsignedSubmitEvidence, {
+        escrow: entry.escrowAddress,
+        fn: 'submitEvidence',
+        args: (a) => (built.onChainTaskId === undefined || a[0] === onChainId)
+          && (!fromSubmit || String(a[1]).toLowerCase() === evidence),
+        chainId: entry.chainId,
+      }, what);
       const wallet = new ethers.Wallet(signer.privateKey, new ethers.JsonRpcProvider(rpc));
-      const tx = await wallet.sendTransaction(built.unsignedSubmitEvidence as ethers.TransactionRequest);
+      await assertSignerChain(wallet, entry.chainId, what);
+      const tx = await wallet.sendTransaction(call);
       await tx.wait();
       return tx.hash;
     };
     const healStranded = async () => {
       try {
-        return await send(await this.rebroadcast(taskId));
+        return await send(await this.rebroadcast(taskId), false);
       } catch (err) {
         // Evidence is already on-chain — nothing to broadcast, go finalize.
         if (err instanceof ApiError && err.code === 'ALREADY_SUBMITTED') return undefined;
@@ -1304,7 +1428,7 @@ export class BlindMarket {
 
     let submitTxHash: string | undefined;
     try {
-      submitTxHash = await send(await this.submitResult(taskId, resultData));
+      submitTxHash = await send(await this.submitResult(taskId, resultData), true);
     } catch (err) {
       if (!(err instanceof ApiError && err.code === 'INVALID_STATE')) throw err;
       submitTxHash = await healStranded();
