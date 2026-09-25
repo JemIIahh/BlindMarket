@@ -10,6 +10,7 @@ import {
   deployAgent, startAgent, pauseAgent, stopAgent, resumeAgent,
   getAgent, listAgents, getAgentLogs, subscribeAgentLogs, updateAgent,
   addAuthorizedOwner, getAgentStats,
+  startRefusal,
 } from '../services/agentRunner.js';
 import * as reputationService from '../services/reputation.js';
 import * as reputationDecay from '../services/reputationDecay.js';
@@ -393,6 +394,14 @@ agentsRouter.post('/deploy', requireAuth, deployLimiter, async (req: AuthRequest
     const ownerAddress = req.user!.address!;
     console.log(`[deploy] owner=${ownerAddress.slice(0, 10)}… ownerPublicKey length=${data.ownerPublicKey.length / 2} bytes, hex=${data.ownerPublicKey.slice(0, 8)}...`);
     const { skillSlugs: _slugs, feeTxHash, ...deployParams } = data;
+
+    // No free worker slot for this owner: refuse before the fee is taken, so
+    // nobody pays for an agent that can't start (security audit run 1, C10).
+    const capacityRefusal = startRefusal(ownerAddress);
+    if (capacityRefusal) {
+      res.status(503).json({ success: false, error: { code: 'AGENT_CAPACITY', message: `${capacityRefusal}. Your payment has not been used.` } });
+      return;
+    }
 
     // Take the deploy fee if the paywall is enabled — only AFTER every
     // validation above. A fee is a paid 1 USDC: taking it first meant a

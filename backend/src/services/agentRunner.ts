@@ -138,6 +138,33 @@ const intentionalStops = new WeakSet<ChildProcess>();
 // Max concurrent forked agent processes. On a 512 MB Render box each Node worker
 // needs ~50 MB baseline; cap at 5 to leave headroom for the API server + Redis.
 const MAX_CONCURRENT_AGENTS = Number(process.env.MAX_CONCURRENT_AGENTS ?? 5);
+// Each owner's share of the pool. It was one global pool with no per-owner
+// limit, so one owner's agents could hold every slot and every other owner's
+// paid deploys could never run (security audit run 1, C10).
+const MAX_AGENTS_PER_OWNER = Number(
+  process.env.MAX_AGENTS_PER_OWNER ?? Math.max(1, Math.floor(MAX_CONCURRENT_AGENTS / 2)),
+);
+// Owner of each worker this process forked. Counted through `processes`, which
+// stays the authority on what is live, so a stale entry never counts.
+const processOwners = new Map<string, string>();
+
+function liveWorkersFor(owner: string): number {
+  let n = 0;
+  for (const id of processes.keys()) if (processOwners.get(id) === owner) n++;
+  return n;
+}
+
+/** Why a new worker for `ownerAddress` can't start on this process now, or
+ *  null when it can. Deploy checks it before taking the fee. */
+export function startRefusal(ownerAddress: string): string | null {
+  if (processes.size >= MAX_CONCURRENT_AGENTS) {
+    return `Max concurrent agents (${MAX_CONCURRENT_AGENTS}) reached — stop an agent first or increase MAX_CONCURRENT_AGENTS`;
+  }
+  if (liveWorkersFor(ownerAddress.toLowerCase()) >= MAX_AGENTS_PER_OWNER) {
+    return `You already run ${MAX_AGENTS_PER_OWNER} agents, the most one owner can run here at once — stop one first`;
+  }
+  return null;
+}
 
 // ── Zombie reaper ──────────────────────────────────────────────────────────────
 // Every 60 s, sweep the processes map and kill any agent whose Redis heartbeat
@@ -428,11 +455,8 @@ export async function startAgent(id: string, opts?: { skipResume?: boolean }): P
   // Enforce max concurrent agents so a reconcile storm can't OOM the instance.
   // Checked AFTER the already-running dedup so an in-flight agent is never
   // counted against the cap twice.
-  if (processes.size >= MAX_CONCURRENT_AGENTS) {
-    throw new Error(
-      `Max concurrent agents (${MAX_CONCURRENT_AGENTS}) reached — stop an agent first or increase MAX_CONCURRENT_AGENTS`,
-    );
-  }
+  const refusal = startRefusal(agent.ownerAddress);
+  if (refusal) throw new Error(refusal);
 
   // Migration: Generate platform token if missing
   if (!agent.platformToken) {
@@ -648,6 +672,7 @@ export async function startAgent(id: string, opts?: { skipResume?: boolean }): P
     throw new Error(`This backend is on another deployment's Redis (${deploymentIdentityStatus()?.reason}), so it starts no agents. Give it its own REDIS_URL.`);
   }
   processes.set(id, child);
+  processOwners.set(id, agent.ownerAddress.toLowerCase());
   agent.status = 'running';
   await saveAgent(agent);
 }
@@ -730,8 +755,28 @@ export async function reconcileAgents(): Promise<void> {
   const running = agents.filter((a) => a.status === 'running' && !processes.has(a.id));
   if (running.length === 0) return;
 
+  // Free slots go round-robin across owners, each owner's oldest agent first,
+  // up to the per-owner share, rather than to the newest deploys: otherwise a
+  // restart handed the whole pool back to whoever deployed last.
   const available = Math.max(0, MAX_CONCURRENT_AGENTS - processes.size);
-  const toStart = running.slice(0, available);
+  const queues = new Map<string, DeployedAgent[]>();
+  for (const a of [...running].sort((x, y) => x.deployedAt.localeCompare(y.deployedAt))) {
+    const owner = a.ownerAddress.toLowerCase();
+    queues.set(owner, [...(queues.get(owner) ?? []), a]);
+  }
+  const taken = new Map<string, number>();
+  const toStart: DeployedAgent[] = [];
+  for (let progressed = true; progressed && toStart.length < available;) {
+    progressed = false;
+    for (const [owner, queue] of queues) {
+      if (toStart.length >= available) break;
+      const held = liveWorkersFor(owner) + (taken.get(owner) ?? 0);
+      if (queue.length === 0 || held >= MAX_AGENTS_PER_OWNER) continue;
+      toStart.push(queue.shift()!);
+      taken.set(owner, (taken.get(owner) ?? 0) + 1);
+      progressed = true;
+    }
+  }
   const excess = running.length - toStart.length;
 
   console.log(
