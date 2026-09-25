@@ -31,6 +31,7 @@ import { AgentTasks } from '../components/agent/AgentTasks';
 import { GasBar } from '../components/agent/GasBar';
 import { IdentityPanel } from '../components/agent/IdentityPanel';
 import { OpsConsole } from '../components/agent/OpsConsole';
+import { AgentReadinessCard } from '../components/agent/AgentReadinessCard';
 import { ReviewsSection } from '../components/agent/ReviewsSection';
 import { ServicesSection } from '../components/agent/ServicesSection';
 import type { AgentDetails, SkillStat } from '../components/agent/types';
@@ -611,6 +612,8 @@ export default function AgentDetail() {
       {isOwner && (
         <div id="operations" className="mt-12 scroll-mt-6">
           <SectionRule num="03" title="Operations" />
+          {/* Whether the running agent is taking tasks, and what it needs if not. */}
+          <AgentReadinessCard agentId={apiId} running={agent.status === 'running'} className="mb-4" />
           {agent.walletAddress && (
             <GasBar
               symbol={balanceSymbol}

@@ -12,6 +12,7 @@ import {
   FormInput,
   FormSelect,
   ConfirmDialog,
+  CopyButton,
 } from '../components/bb';
 import { ToolManager, type AnyTool } from '../components/bb/ToolManager';
 import SkillPicker from '../components/bb/SkillPicker';
@@ -23,6 +24,8 @@ import { unlinkedSignerError } from '../lib/accountWallet';
 import { getOrCreateExecutorIdentity } from '../lib/executorIdentity';
 import { ARC_CHAIN_CONFIG, ARC_CHAIN_ID, ARC_USDC_ADDRESS, unsetIfZero } from '../config/constants';
 import { CONTRACT_ADDRESSES } from '../config/contractAddresses';
+import { OG_COMPUTE_ACCOUNT_0G, OG_COMPUTE_START_0G } from '../lib/agentReadiness';
+import { WARN_BOX } from '../components/agent/AgentReadinessCard';
 
 /**
  * What deploying charges (GET /api/v1/agents/deploy-fee). On a stack with an
@@ -235,7 +238,13 @@ export default function DeployAgentForm() {
   const submittingRef = useRef(false);
   const confirmResolveRef = useRef<((approve: boolean) => void) | null>(null);
   const [error, setError] = useState('');
-  const [deployed, setDeployed] = useState<{ id: string; started: boolean; feeTx: string | null } | null>(null);
+  const [deployed, setDeployed] = useState<{
+    id: string;
+    started: boolean;
+    feeTx: string | null;
+    /** Set for a 0g-compute agent: the wallet the owner funds with 0G next. */
+    ogFundAddress: string | null;
+  } | null>(null);
 
   // What deploying costs and where it is paid. Undefined while loading.
   const [feeTerms, setFeeTerms] = useState<DeployFeeTerms | undefined>(undefined);
@@ -499,10 +508,10 @@ export default function DeployAgentForm() {
       // the fee's receipt several times; a lagging RPC gets two more tries.
       const maxAttempts = feeTxHash ? 3 : feeTerms.required ? 20 : 1;
       const retryCode = feeTxHash ? 'DEPLOY_FEE_NOT_FOUND' : 'NO_DEPLOY_CREDIT';
-      let result: { id: string; started?: boolean } | null = null;
+      let result: { id: string; started?: boolean; walletAddress?: string } | null = null;
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
         try {
-          result = await authedPost<{ id: string; started?: boolean }>('/api/v1/agents/deploy', deployBody);
+          result = await authedPost<{ id: string; started?: boolean; walletAddress?: string }>('/api/v1/agents/deploy', deployBody);
           break;
         } catch (err: any) {
           console.log(`[deploy] attempt ${attempt + 1}/${maxAttempts} failed:`, err.code, err.message);
@@ -516,7 +525,12 @@ export default function DeployAgentForm() {
       if (!result) throw new Error('The deploy fee was not found after payment. Try again in a moment.');
       if (feeTxHash) writePendingFee(address, null);
       setPendingFee(null);
-      setDeployed({ id: result.id, started: result.started === true, feeTx });
+      setDeployed({
+        id: result.id,
+        started: result.started === true,
+        feeTx,
+        ogFundAddress: form.provider === '0g-compute' ? result.walletAddress ?? null : null,
+      });
       setStatus('done');
     } catch (err: any) {
       if (feeTxHash && feeIsSpent(err ?? {})) {
@@ -566,6 +580,24 @@ export default function DeployAgentForm() {
             </div>
           </div>
 
+          {deployed.ogFundAddress && (
+            <div className={`mx-auto max-w-md text-left ${WARN_BOX} px-4 py-3.5 space-y-2.5`}>
+              <div className="flex items-center gap-2 text-sm font-semibold text-ink">
+                <Icon name="alert" size={14} className="text-warn" />
+                <span>One more step: fund it with 0G</span>
+              </div>
+              <p className="text-xs text-ink-2 leading-relaxed">
+                Send at least <span className="font-semibold text-ink">{OG_COMPUTE_START_0G} 0G</span> on the 0G chain to the
+                agent's wallet. {OG_COMPUTE_ACCOUNT_0G} 0G opens its 0G Compute account; it takes no task until then.
+              </p>
+              <div className="flex items-center justify-between gap-2 border border-line bg-surface-2 px-3 py-2">
+                <span className="font-mono text-xs text-ink break-all">{deployed.ogFundAddress}</span>
+                <CopyButton text={deployed.ogFundAddress} />
+              </div>
+              <p className="text-[11px] text-ink-3">The agent's page shows when it starts taking tasks.</p>
+            </div>
+          )}
+
           {privateSkillSlugs.length > 0 && (
             <div className="mx-auto max-w-md text-left space-y-1">
               <div className="text-xs font-medium text-ink-2">Private skills still to attach</div>
@@ -582,7 +614,11 @@ export default function DeployAgentForm() {
           )}
 
           <div className="flex justify-center gap-3 flex-wrap pt-1">
-            <Button variant="primary" label="My agents" onClick={() => navigate('/agents/mine')} />
+            {deployed.ogFundAddress ? (
+              <Button variant="primary" label="Open agent" onClick={() => navigate(`/agents/${deployed.id}`)} />
+            ) : (
+              <Button variant="primary" label="My agents" onClick={() => navigate('/agents/mine')} />
+            )}
             <Button
               variant="ghost"
               label="Deploy another"
@@ -735,10 +771,15 @@ export default function DeployAgentForm() {
                   Inference is billed to the agent's own wallet, which pays the
                   0G Compute ledger directly.
                 </p>
-                <p>
-                  Before it takes a task, the agent's wallet needs at least 3.1 0G on
-                  the 0G chain: 3 0G opens its 0G Compute account and the rest pays
-                  gas. Until then it won't accept tasks.
+              </div>
+              <div className="border-t border-line pt-2.5 space-y-1">
+                <div className="flex items-baseline justify-between gap-3">
+                  <span className="text-ink">Fund before its first task</span>
+                  <span className="font-mono text-cream shrink-0">{OG_COMPUTE_START_0G} 0G</span>
+                </div>
+                <p className="text-ink-3 text-[12px]">
+                  After you deploy, send it to the agent's wallet on the 0G chain: {OG_COMPUTE_ACCOUNT_0G} 0G opens
+                  its 0G Compute account and the rest pays gas. It won't take tasks until then.
                 </p>
               </div>
             </div>
