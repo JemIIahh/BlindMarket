@@ -1211,6 +1211,102 @@ describe("BlindEscrow", function () {
     });
   });
 
+  // ── Reputation only for arm's-length, fee-bearing completions (security audit C37) ──
+  // The poster picks the worker and a per-task verifier, and a 1-wei task paid
+  // no fee, so one operator with three addresses could mint a five-star rating
+  // for 1 wei plus gas, as often as it liked.
+
+  describe("reputation ratings (C37)", function () {
+    const NATIVE = ethers.ZeroAddress;
+    const teeWallet = ethers.Wallet.createRandom();
+    const ATTESTATION = "0g-tee-commitment:req=0x01,res=0x02";
+
+    async function settle(opts: { token: string; amount: bigint; perTaskVerifier?: HardhatEthersSigner; tee?: boolean }) {
+      const value = opts.token === NATIVE ? opts.amount : 0n;
+      const hash = ethers.keccak256(ethers.toUtf8Bytes(`task-${await escrow.nextTaskId()}`));
+      if (opts.perTaskVerifier) {
+        await escrow.connect(agent).createTaskWithVerifier(hash, opts.token, opts.amount, "c", "z", ONE_DAY, opts.perTaskVerifier.address, { value });
+      } else {
+        await escrow.connect(agent).createTask(hash, opts.token, opts.amount, "c", "z", ONE_DAY, { value });
+      }
+      const id = (await escrow.nextTaskId()) - 1n;
+      await escrow.connect(agent).assignWorker(id, worker.address);
+      await escrow.connect(worker).submitEvidence(id, EVIDENCE_HASH);
+      const v = opts.perTaskVerifier ?? verifier;
+      if (opts.tee) {
+        const sig = await teeWallet.signMessage(ATTESTATION);
+        await escrow.connect(v).completeVerificationWithTEE(id, true, sig, ethers.hexlify(ethers.toUtf8Bytes(ATTESTATION)));
+      } else {
+        await escrow.connect(v).completeVerification(id, true);
+      }
+      expect((await escrow.getTask(id)).status).to.equal(4); // settlement itself is unaffected
+      return id;
+    }
+
+    async function ratings(): Promise<bigint> {
+      const [tasksCompleted] = await reputation.getReputation(worker.address);
+      return tasksCompleted;
+    }
+
+    beforeEach(async function () {
+      await escrow.connect(admin).allowToken(NATIVE);
+      await escrow.connect(admin).setTeeSigner(teeWallet.address);
+    });
+
+    it("a 1-wei loop through a poster-designated verifier mints no rating (record attack)", async function () {
+      const treasuryBefore = await ethers.provider.getBalance(treasury.address);
+      for (let i = 0; i < 5; i++) {
+        await settle({ token: NATIVE, amount: 1n, perTaskVerifier: stranger });
+      }
+      const [tasksCompleted, avgScore, disputes] = await reputation.getReputation(worker.address);
+      expect([tasksCompleted, avgScore, disputes]).to.deep.equal([0n, 0n, 0n]);
+      expect(await ethers.provider.getBalance(treasury.address)).to.equal(treasuryBefore); // no fee paid
+    });
+
+    it("does not rate a zero-fee completion, even by the platform verifier", async function () {
+      await settle({ token: await token.getAddress(), amount: 9n }); // 9 * 1000 / 10000 = 0 fee
+      await settle({ token: await token.getAddress(), amount: 9n, tee: true });
+      expect(await ratings()).to.equal(0);
+    });
+
+    it("does not rate a fee-bearing completion settled by a poster-designated verifier", async function () {
+      await settle({ token: await token.getAddress(), amount: AMOUNT, perTaskVerifier: stranger });
+      await settle({ token: await token.getAddress(), amount: AMOUNT, perTaskVerifier: stranger, tee: true });
+      expect(await ratings()).to.equal(0);
+    });
+
+    it("still rates a fee-bearing completion settled by the platform verifier (control)", async function () {
+      await settle({ token: await token.getAddress(), amount: 10n }); // fee 1: the smallest fee-bearing task
+      await settle({ token: await token.getAddress(), amount: AMOUNT, tee: true });
+      const [tasksCompleted, avgScore] = await reputation.getReputation(worker.address);
+      expect(tasksCompleted).to.equal(2);
+      expect(avgScore).to.equal(500);
+    });
+
+    it("applies the admin's per-token minimum, at-or-above rated", async function () {
+      const t = await token.getAddress();
+      await expect(escrow.connect(admin).setMinRatedAmount(t, AMOUNT * 2n))
+        .to.emit(escrow, "MinRatedAmountUpdated").withArgs(t, 0, AMOUNT * 2n);
+      expect(await escrow.minRatedAmount(t)).to.equal(AMOUNT * 2n);
+
+      await settle({ token: t, amount: AMOUNT }); // below the floor
+      await settle({ token: t, amount: AMOUNT, tee: true });
+      expect(await ratings()).to.equal(0);
+
+      await settle({ token: t, amount: AMOUNT * 2n }); // exactly the floor
+      expect(await ratings()).to.equal(1);
+
+      // The floor is per token: native is unaffected.
+      await settle({ token: NATIVE, amount: ethers.parseEther("0.001") });
+      expect(await ratings()).to.equal(2);
+    });
+
+    it("only lets the admin set the minimum", async function () {
+      await expect(escrow.connect(agent).setMinRatedAmount(await token.getAddress(), 1))
+        .to.be.revertedWithCustomError(escrow, "NotAdmin");
+    });
+  });
+
   // ── View helpers ──
 
   describe("view functions", function () {

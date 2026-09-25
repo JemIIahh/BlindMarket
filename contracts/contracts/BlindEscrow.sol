@@ -119,6 +119,11 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
     uint256 public pausedSince;  // start of the running pause; 0 while unpaused, or while unknown (installed mid-pause, see recordPauseStart)
     mapping(uint256 => uint256) internal _pausedTotalAtCreate; // pausedTotal when each task was created
 
+    // Per-token minimum task amount for a passed verification to earn a
+    // BlindReputation rating (0 = no minimum beyond a non-zero platform fee).
+    // Trailing state, UUPS-append-only.
+    mapping(address => uint256) public minRatedAmount;
+
     // ── Events ──
 
     event TaskCreated(uint256 indexed taskId, address indexed agent, address token, uint256 amount, bytes32 taskHash, string category, string locationZone, uint256 deadline);
@@ -146,6 +151,7 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
     event UnjudgedWorkEscalated(uint256 indexed taskId);
     event UnjudgedWorkReleased(uint256 indexed taskId, uint256 workerPayout, uint256 platformFee);
     event PauseStartRecorded(uint256 pausedAt);
+    event MinRatedAmountUpdated(address indexed token, uint256 oldAmount, uint256 newAmount);
 
     // ── Errors (custom errors are cheaper than string reverts) ──
 
@@ -349,6 +355,22 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
     }
 
     /**
+     * @dev Whether a passed verification earns the worker a BlindReputation
+     *      rating. The poster picks every party to a completion (worker via
+     *      assignWorker, verifier via createTaskWithVerifier) and distinct
+     *      addresses cost nothing, so a rating must carry economic weight and
+     *      come from a verifier the poster did not choose:
+     *        - the platform fee is non-zero (a completion that paid nothing
+     *          proves nothing; below 10 units at 1000 bps the fee rounds to 0),
+     *        - the amount meets the admin-set per-token minRatedAmount,
+     *        - the task has no poster-designated per-task verifier.
+     *      Settlement itself is unaffected; only the rating is withheld.
+     */
+    function _earnsRating(uint256 taskId, Task storage t, uint256 fee) internal view returns (bool) {
+        return fee > 0 && t.amount >= minRatedAmount[t.token] && taskVerifier[taskId] == address(0);
+    }
+
+    /**
      * @dev Verify that `signature` is a valid enclave signature over `signedText`.
      *      Uses OpenZeppelin's ECDSA, which rejects malleable (high-s) signatures
      *      and bad lengths instead of returning a junk address.
@@ -473,8 +495,9 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
             _transferPayout(t.token, treasury, fee);
 
             // Record reputation if connected (optional — the worker is already
-            // paid above; a reverting/paused reputation contract must not undo it).
-            if (address(reputationContract) != address(0)) {
+            // paid above; a reverting/paused reputation contract must not undo it)
+            // and only for a completion that can't be self-dealt for free.
+            if (address(reputationContract) != address(0) && _earnsRating(taskId, t, fee)) {
                 try reputationContract.rate(t.worker, 5, taskId) {} catch {}
             }
 
@@ -550,7 +573,7 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
             _transferPayout(t.token, t.worker, payout);
             _transferPayout(t.token, treasury, fee);
 
-            if (address(reputationContract) != address(0)) {
+            if (address(reputationContract) != address(0) && _earnsRating(taskId, t, fee)) {
                 try reputationContract.rate(t.worker, 5, taskId) {} catch {}
             }
 
@@ -788,6 +811,14 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         if (_verifier == address(0)) revert ZeroAddress();
         emit VerifierUpdated(verifier, _verifier);
         verifier = _verifier;
+    }
+
+    /// @notice Set the minimum task amount, in `token` units, for a passed
+    ///         verification to earn a reputation rating. 0 leaves only the
+    ///         non-zero-fee requirement.
+    function setMinRatedAmount(address token, uint256 amount) external onlyAdmin {
+        emit MinRatedAmountUpdated(token, minRatedAmount[token], amount);
+        minRatedAmount[token] = amount;
     }
 
     function setTeeSigner(address _teeSigner) external onlyAdmin {
