@@ -280,8 +280,10 @@ export interface A2ATaskState {
   // Why a 'failed' task failed. 'expired' = the on-chain deadline passed while
   // the task was still open/Funded (closed by the expiry sweep or an /accept
   // that hit DeadlineReached); 'unindexed' = phantom meta with no TaskCreated
-  // event in the chain's history (reverted createTask). Distinguishes these
-  // from verification failures so dashboards/agents don't read them as bad work.
+  // event in the chain's history (reverted createTask); 'escrow_mismatch' =
+  // the hash index names an escrow task carrying another hash, so it could not
+  // be assigned (closed at /accept). Distinguishes these from verification
+  // failures so dashboards/agents don't read them as bad work.
   failedReason?: string;
   executorAddress?: string;
   acceptedAt?: string;

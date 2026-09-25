@@ -378,6 +378,45 @@ describe('POST /accept — self-accept + settlement worker-match', () => {
     );
     expect(a2aStore.releaseToOpen).not.toHaveBeenCalled();
   });
+
+  it('escrow task carries another hash: 409 ESCROW_MISMATCH, closed instead of re-listed', async () => {
+    vi.mocked(a2aStore.getMeta).mockResolvedValue(
+      meta({ rootHash: ROOT, wrappedKeys: { [AGENT]: 'deadbeef' } }) as any,
+    );
+    vi.mocked(a2aStore.tryAccept).mockResolvedValue({ ok: true, state: {} } as any);
+    vi.mocked(settleAssignment).mockResolvedValueOnce({
+      success: false, escrowMismatch: true, error: 'arc escrow task 7 carries hash 0xcdcdcdcd…',
+    } as any);
+
+    const res = await accept();
+
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('ESCROW_MISMATCH');
+    expect(res.body.data?.wrappedKey).toBeUndefined();
+    expect(a2aStore.updateState).toHaveBeenCalledWith(
+      TASK, { status: 'failed', failedReason: 'escrow_mismatch', executorAddress: undefined },
+    );
+    // Not re-listed: the next agent would be refused the same way, round after round.
+    expect(a2aStore.tryReleaseAccepted).not.toHaveBeenCalled();
+    expect(emitTaskAvailable).not.toHaveBeenCalled();
+  });
+
+  it('a settlement failure that can pass later still re-lists the task', async () => {
+    vi.mocked(a2aStore.getMeta).mockResolvedValue(
+      meta({ rootHash: ROOT, wrappedKeys: { [AGENT]: 'deadbeef' } }) as any,
+    );
+    vi.mocked(a2aStore.tryAccept).mockResolvedValue({ ok: true, state: {} } as any);
+    vi.mocked(settleAssignment).mockResolvedValueOnce({
+      success: false, error: 'could not read arc escrow task 7 to check it is this task: rpc down',
+    } as any);
+
+    const res = await accept();
+
+    expect(res.status).toBe(503);
+    expect(res.body.error.code).toBe('SETTLEMENT_FAILED');
+    expect(a2aStore.tryReleaseAccepted).toHaveBeenCalled();
+    expect(a2aStore.updateState).not.toHaveBeenCalledWith(TASK, expect.objectContaining({ status: 'failed' }));
+  });
 });
 
 // ── Deadline pre-check (batch-4) ─────────────────────────────────────────────

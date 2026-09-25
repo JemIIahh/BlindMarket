@@ -717,6 +717,26 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
         }
         throw new AppError(409, 'ASSIGNED_ELSEWHERE', 'Task is already assigned on-chain to a different executor');
       }
+      // The hash index names an escrow task carrying another hash, so nothing
+      // was sent. TERMINAL: re-listing would hand the task to the next agent
+      // to be refused the same way, round after round. Close it off-chain
+      // ('escrow_mismatch' tells the poster why); an escrow funded for it, if
+      // any, stays Funded and refundable via cancelTask. assignError keeps
+      // the detail for operators.
+      if (settleResult.escrowMismatch) {
+        console.error(`[a2a] accept: task ${taskId} is indexed to an escrow task with another hash — closing instead of re-opening`);
+        try {
+          await a2aStore.updateState(taskId, { status: 'failed', failedReason: 'escrow_mismatch', executorAddress: undefined });
+        } catch (closeErr) {
+          console.error(`[a2a] accept: could not close task ${taskId}:`, (closeErr as Error).message);
+        }
+        await a2aStore.logAcceptAttempt(taskId, address, 'error');
+        throw new AppError(
+          409,
+          'ESCROW_MISMATCH',
+          'This task is recorded against an on-chain escrow task with a different hash, so it cannot be assigned. It has been closed; the poster can reclaim any escrow via cancelTask.',
+        );
+      }
       // Assign tx broadcast but unconfirmed: it may still mine, so re-listing
       // here could hand the task to a second agent. Stay 'accepted' — the
       // caller's retry confirms via the idempotent branch above, and the expiry
