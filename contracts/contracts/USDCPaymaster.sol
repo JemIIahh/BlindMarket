@@ -17,6 +17,10 @@ import {ERC4337Utils} from "@openzeppelin/contracts/account/utils/draft-ERC4337U
  *         2. EntryPoint executes the UserOp (gas paid from paymaster's ETH deposit)
  *         3. postOp — transfers USDC from sender to paymaster
  *
+ *         Collected USDC accumulates in this contract; the owner withdraws it
+ *         with withdrawToken. Ownership moves in two steps (transferOwnership,
+ *         then acceptOwnership by the new owner).
+ *
  *         The paymaster needs:
  *         - ETH deposit at EntryPoint (platform funds this)
  *         - A configured ETH/USDC price (owner can update, oracle coming later)
@@ -27,10 +31,15 @@ contract USDCPaymaster is IPaymaster {
 
     error NotEntryPoint();
     error NotOwner();
+    error NotPendingOwner();
+    error ZeroAddress();
+    error NativeTransferFailed();
     error InsufficientUSDC();
     error GasTooHigh();
 
     address public owner;
+    /// @notice Proposed new owner; takes over only once it calls acceptOwnership().
+    address public pendingOwner;
     IEntryPoint public immutable entryPoint;
     IERC20 public immutable usdc;
 
@@ -49,6 +58,10 @@ contract USDCPaymaster is IPaymaster {
     event EthPriceUpdated(uint256 newPrice);
     event Deposited(address indexed from, uint256 ethAmount);
     event Withdrawn(address indexed to, uint256 ethAmount);
+    event TokenWithdrawn(address indexed token, address indexed to, uint256 amount);
+    event NativeWithdrawn(address indexed to, uint256 amount);
+    event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
     constructor(
         address _entryPoint,
@@ -61,7 +74,9 @@ contract USDCPaymaster is IPaymaster {
         ethPriceInUsdc = _ethPriceInUsdc;
     }
 
-    /// @notice Receive ETH (for gas funding)
+    /// @notice Receive native currency. It stays in this contract (it is NOT
+    ///         the EntryPoint deposit that pays for gas): the owner moves it out
+    ///         with withdrawNative, and funds gas with deposit().
     receive() external payable {}
 
     /// @notice Fund the paymaster's ETH balance at EntryPoint for gas payments
@@ -75,6 +90,46 @@ contract USDCPaymaster is IPaymaster {
         if (msg.sender != owner) revert NotOwner();
         entryPoint.withdrawTo(to, amount);
         emit Withdrawn(to, amount);
+    }
+
+    /// @notice Withdraw an ERC-20 held by this contract (owner only). postOp
+    ///         pulls each UserOp's USDC charge into the paymaster itself, so
+    ///         this is how the platform recovers the USDC that repays the gas it
+    ///         fronted from the EntryPoint deposit. Without it that USDC, and
+    ///         any token sent here by mistake, would be locked for good.
+    function withdrawToken(IERC20 token, address to, uint256 amount) external {
+        if (msg.sender != owner) revert NotOwner();
+        if (to == address(0)) revert ZeroAddress();
+        token.safeTransfer(to, amount);
+        emit TokenWithdrawn(address(token), to, amount);
+    }
+
+    /// @notice Withdraw native currency held by this contract itself, i.e. sent
+    ///         straight to receive() (owner only). withdrawEth only reaches the
+    ///         EntryPoint deposit, not this balance.
+    function withdrawNative(address payable to, uint256 amount) external {
+        if (msg.sender != owner) revert NotOwner();
+        if (to == address(0)) revert ZeroAddress();
+        (bool ok, ) = to.call{value: amount}("");
+        if (!ok) revert NativeTransferFailed();
+        emit NativeWithdrawn(to, amount);
+    }
+
+    /// @notice Start a two-step ownership transfer (owner only), e.g. to the
+    ///         platform Safe. The current owner keeps control until the new
+    ///         owner calls acceptOwnership(). Proposing address(0) cancels.
+    function transferOwnership(address newOwner) external {
+        if (msg.sender != owner) revert NotOwner();
+        pendingOwner = newOwner;
+        emit OwnershipTransferStarted(owner, newOwner);
+    }
+
+    /// @notice The proposed owner takes over.
+    function acceptOwnership() external {
+        if (msg.sender != pendingOwner) revert NotPendingOwner();
+        emit OwnershipTransferred(owner, msg.sender);
+        owner = msg.sender;
+        pendingOwner = address(0);
     }
 
     /// @notice Update the ETH/USDC price (owner only). Price is USDC per 1 ETH
@@ -138,7 +193,8 @@ contract USDCPaymaster is IPaymaster {
         // On opReverted the paymaster still paid gas — charge the estimated amount.
         uint256 charge = actualUsdcCost > requiredUsdc ? actualUsdcCost : requiredUsdc;
 
-        // Transfer USDC from sender to paymaster
+        // Transfer USDC from sender to paymaster (the owner recovers it with
+        // withdrawToken)
         usdc.safeTransferFrom(sender, address(this), charge);
     }
 }

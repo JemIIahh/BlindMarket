@@ -6,6 +6,11 @@
  * EXPECTED_* env vars are provided — asserts each matches, exiting non-zero on
  * any mismatch so it can gate a release. Runs on any network with a record.
  *
+ * It also reads the owner() of every AgentFactory recorded for the chain (the
+ * agent-factory-<record>.json companion and any mirror in the main record) and
+ * checks it against EXPECTED_ADMIN, so a Safe migration that left a factory
+ * with the deployer EOA fails here instead of passing.
+ *
  * On a chain that settles in a USDC ERC-20 (Base, Arc; see _settlement.ts) it
  * also enforces, with no EXPECTED_* needed: the escrow allows that token, the
  * escrow does NOT allow address(0), and the token reports 6 decimals and
@@ -20,7 +25,8 @@
  *     npx hardhat run scripts/verify-deployment-config.ts --network base-sepolia
  */
 import { ethers, network } from "../lib/hh.js";
-import { resolveEscrowTarget } from "./_deployments.js";
+import { readRecord, recordPath, resolveEscrowTarget } from "./_deployments.js";
+import { recordedAgentFactories } from "./_safe-migration.js";
 import { settlementInvariants } from "./_settlement-deploy.js";
 import { SETTLEMENT_CHAINS, settlementTokenFor } from "./_settlement.js";
 
@@ -29,7 +35,7 @@ const NATIVE = "0x0000000000000000000000000000000000000000";
 async function main() {
   // Read-only: prints the resolved set/escrow; EXPECTED_ESCROW is checked below
   // like the other EXPECTED_* values instead of being required.
-  const { escrow: proxy } = await resolveEscrowTarget({ sends: false });
+  const { escrow: proxy, record, set } = await resolveEscrowTarget({ sends: false });
   const escrow = await ethers.getContractAt("BlindEscrow", proxy);
   console.log(`network: ${network.name}\nBlindEscrow: ${proxy}\n`);
 
@@ -61,6 +67,16 @@ async function main() {
   line("paused", paused, process.env.EXPECTED_PAUSED);
   const nativeLabel = settlement ? `native ${settlement.gasSymbol} (address(0))` : "native 0G";
   console.log(`    nextTaskId: ${nextTaskId}  |  ${nativeLabel} in allowlist: ${nativeAllowed}`);
+
+  // Every recorded AgentFactory's owner must be the admin too. Arc's factory is
+  // recorded only in the companion, which this check used to never read.
+  const factories = recordedAgentFactories(record, readRecord(recordPath(chainId, set, "agent-factory-")));
+  for (const addr of factories) {
+    const factory = await ethers.getContractAt("AgentFactory", addr);
+    const [owner, pendingOwner] = await Promise.all([(factory as any).owner(), (factory as any).pendingOwner()]);
+    line(`AgentFactory ${addr} owner`, owner, process.env.EXPECTED_ADMIN);
+    if (pendingOwner !== NATIVE) console.log(`    AgentFactory ${addr} pendingOwner: ${pendingOwner} (not yet accepted)`);
+  }
 
   // Sanity flags independent of EXPECTED_*:
   if (admin === verifier) { console.log("  ⚠ admin == verifier — these roles should be SEPARATE (checklist §3)."); }

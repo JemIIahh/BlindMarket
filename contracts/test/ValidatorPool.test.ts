@@ -205,6 +205,41 @@ describe("ValidatorPool", function () {
         .to.be.revertedWithCustomError(pool, "AlreadyVoted");
     });
 
+    // Security audit C19: Vote.None (0) is a valid ABI value for the enum.
+    // Storing it left the AlreadyVoted guard open while the tally counted it
+    // as an Agent vote, so one validator could vote over and over.
+    it("rejects Vote.None and records nothing", async () => {
+      await registerAll();
+      const dId = await openDispute();
+
+      await expect(pool.connect(v1).vote(dId, 0))
+        .to.be.revertedWithCustomError(pool, "InvalidVote");
+
+      expect(await pool.getVote(dId, v1.address)).to.equal(0);
+      expect(await pool.lockedInDisputes(v1.address)).to.equal(0);
+      const d = await pool.getDispute(dId);
+      expect(d.workerVotes).to.equal(0);
+      expect(d.agentVotes).to.equal(0);
+    });
+
+    it("rejects any second vote, whatever its value", async () => {
+      await registerAll();
+      const dId = await openDispute();
+      await pool.connect(v1).vote(dId, 2); // Agent
+
+      await expect(pool.connect(v1).vote(dId, 0))
+        .to.be.revertedWithCustomError(pool, "InvalidVote");
+      await expect(pool.connect(v1).vote(dId, 1))
+        .to.be.revertedWithCustomError(pool, "AlreadyVoted");
+      await expect(pool.connect(v1).vote(dId, 2))
+        .to.be.revertedWithCustomError(pool, "AlreadyVoted");
+
+      const d = await pool.getDispute(dId);
+      expect(d.agentVotes).to.equal(1);
+      expect(d.workerVotes).to.equal(0);
+      expect(await pool.lockedInDisputes(v1.address)).to.equal(1);
+    });
+
     it("reverts if not a validator", async () => {
       const dId = await openDispute();
       await expect(pool.connect(stranger).vote(dId, 1))
@@ -277,6 +312,48 @@ describe("ValidatorPool", function () {
       expect((await pool.validators(v1.address)).stake).to.be.gt(MIN_STAKE);
       expect(await me.resolveCount()).to.equal(1);
       expect(await me.lastWorkerFavored()).to.be.true;
+    });
+
+    // Security audit C19, the record's attack: one low-stake validator tried
+    // three None votes and then an Agent vote against three honest Worker
+    // voters. Before the fix it won 4:3, was not slashed, took the whole slash
+    // pool, and withdrew 4x its deposit.
+    it("one validator cannot outvote distinct honest validators with repeated None votes", async () => {
+      await registerAll(); // v1..v3 are the honest Worker voters
+      const { dId, me } = await openDisputeViaContract();
+
+      const [,,,,,, atk] = await ethers.getSigners();
+      await token.mint(atk.address, MIN_STAKE);
+      await token.connect(atk).approve(await pool.getAddress(), MIN_STAKE);
+      await pool.connect(atk).register(MIN_STAKE);
+
+      await pool.connect(v1).vote(dId, 1);
+      await pool.connect(v2).vote(dId, 1);
+      await pool.connect(v3).vote(dId, 1);
+      for (let i = 0; i < 3; i++) {
+        await expect(pool.connect(atk).vote(dId, 0))
+          .to.be.revertedWithCustomError(pool, "InvalidVote");
+      }
+      await pool.connect(atk).vote(dId, 2); // its one real vote
+      expect(await pool.lockedInDisputes(atk.address)).to.equal(1);
+
+      await time.increase(VOTE_WINDOW + 1);
+      await pool.finalizeDispute(dId);
+
+      const d = await pool.getDispute(dId);
+      expect(d.workerVotes).to.equal(3);
+      expect(d.agentVotes).to.equal(1);
+      expect(d.workerFavored).to.be.true;
+      expect(await me.lastWorkerFavored()).to.be.true;
+
+      // The attacker is the one slashed, and every recorded stake stays backed
+      // by the pool's balance (rewards never exceed the slash pool).
+      expect((await pool.validators(atk.address)).stake).to.equal(MIN_STAKE - MIN_STAKE / 10n);
+      let totalStake = 0n;
+      for (const s of [v1, v2, v3, atk]) totalStake += (await pool.validators(s.address)).stake;
+      expect(totalStake).to.be.lte(await token.balanceOf(await pool.getAddress()));
+      await expect(pool.connect(atk).unstake()).to.not.revert(ethers);
+      for (const s of [v1, v2, v3]) await expect(pool.connect(s).unstake()).to.not.revert(ethers);
     });
 
     it("worker wins when votes tied", async () => {

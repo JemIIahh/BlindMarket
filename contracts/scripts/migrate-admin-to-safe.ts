@@ -10,17 +10,27 @@
  *   - AgentFactory: `transferOwnership(SAFE)`. Ownable2Step (OpenZeppelin) —
  *     also TWO-STEP and reversible, but a DIFFERENT function pair
  *     (transferOwnership/acceptOwnership + owner()) than the custom
- *     proposeAdmin/acceptAdmin/admin() the contracts above use, so it can't
- *     share the twoStep loop. Only present on Base deployments.
+ *     proposeAdmin/acceptAdmin/admin() the contracts above use. Read from the
+ *     agent-factory-<record>.json companion (where deploy-agent-factory.ts
+ *     writes it) as well as any mirror in the main record, so Arc's factory,
+ *     which is recorded only in the companion, is migrated too. Every distinct
+ *     live factory is migrated; zero placeholders are ignored.
  *   - INFT: `transferOwnership(SAFE)`. ONE-STEP and IRREVERSIBLE. Gated behind
  *     INCLUDE_INFT=yes so it can't happen by accident. INFT is dormant (see
  *     MAINNET-DECISIONS.md §5); you may prefer to leave it and move it when the
  *     iNFT feature is activated.
+ *   - ValidatorPool and the recorded USDCPaymasters have no transfer function:
+ *     reported as still held by the deployer (they need a redeploy), never
+ *     silently skipped.
  *
  * Guards: SAFE_ADDRESS must be a DEPLOYED CONTRACT (has bytecode) — this is the
- * main defense against handing the protocol to a mistyped EOA. Each contract is
- * skipped if it's absent from this chain's deployment file, or if the EOA
- * isn't its current admin/owner (idempotent-ish).
+ * main defense against handing the protocol to a mistyped EOA. Every recorded
+ * contract's holder is read BEFORE anything is sent: if one is held by neither
+ * the signer nor the Safe the run sends nothing and exits non-zero, naming it
+ * (it used to log SKIP, and the operator could believe the deployer held no
+ * role afterwards). Contracts absent from this chain's records are skipped.
+ * Re-running is safe: contracts already held by, or already proposed to, the
+ * Safe get no new transaction.
  *
  * Usage:
  *   I_HAVE_READ_MAINNET_CHECKLIST=yes SAFE_ADDRESS=0xSafe \
@@ -29,13 +39,17 @@
  *   # on Base Sepolia / 0G testnet also set EXPECTED_ESCROW=<escrow> (and
  *   # DEPLOYMENT_SET=staging for the staging stack)
  *
- * AFTER this runs: from the Safe, call acceptAdmin() on BlindEscrow /
- * BlindReputation / TaskRegistry, and acceptOwnership() on AgentFactory.
- * Verify with verify-deployment-config.ts.
+ * AFTER this runs: the closing NEXT lines name exactly which contracts the Safe
+ * must acceptAdmin() / acceptOwnership() on. Verify with
+ * verify-deployment-config.ts (it also checks each AgentFactory's owner).
+ *
+ * The per-contract logic lives in _safe-migration.ts (tested in
+ * test/safe-migration.test.ts); this file resolves the records and runs it.
  */
 import { ethers, network } from "../lib/hh.js";
 import { assertSafeNetwork } from "./_guard.js";
-import { resolveEscrowTarget } from "./_deployments.js";
+import { readRecord, recordPath, resolveEscrowTarget } from "./_deployments.js";
+import { migrationPlan, nextSteps, runSafeMigration } from "./_safe-migration.js";
 
 async function main() {
   await assertSafeNetwork();
@@ -53,74 +67,18 @@ async function main() {
       `Refusing to migrate control to a possibly-mistyped EOA.`);
   }
 
-  const { record: dep } = await resolveEscrowTarget({ sends: true });
-  const c = dep.contracts;
+  const { record: main, set, chainId } = await resolveEscrowTarget({ sends: true });
+  const records = {
+    main,
+    agentFactory: readRecord(recordPath(chainId, set, "agent-factory-")),
+    aa: readRecord(recordPath(chainId, set, "aa-")),
+  };
   const [signer] = await ethers.getSigners();
   console.log(`network: ${network.name}\nsigner (deployer EOA): ${signer.address}\ntarget Safe: ${safeAddr}\n`);
 
-  // 2-step UUPS contracts: proposeAdmin (reversible; Safe must acceptAdmin after).
-  // Not every chain's deployment file has all three — Base, for instance, only
-  // deploys BlindEscrow — so a missing address is a SKIP, not a crash.
-  const twoStep = [
-    { name: "BlindEscrow", addr: c.BlindEscrow, art: "BlindEscrow" },
-    { name: "BlindReputation", addr: c.BlindReputation, art: "BlindReputation" },
-    { name: "TaskRegistry", addr: c.TaskRegistry, art: "TaskRegistry" },
-  ];
-  for (const t of twoStep) {
-    if (!t.addr) {
-      console.log(`- ${t.name}: no address in this deployment file — SKIP.`);
-      continue;
-    }
-    const ct = await ethers.getContractAt(t.art, t.addr);
-    const admin = await (ct as any).admin();
-    if (admin.toLowerCase() !== signer.address.toLowerCase()) {
-      console.log(`- ${t.name}: admin is ${admin} (not the signer) — SKIP.`);
-      continue;
-    }
-    const tx = await (ct as any).proposeAdmin(safeAddr);
-    await tx.wait();
-    console.log(`- ${t.name}: proposeAdmin(${safeAddr}) ✓ (tx ${tx.hash}) — Safe must acceptAdmin().`);
-  }
-
-  // AgentFactory: Ownable2Step (OpenZeppelin) — transferOwnership() then the
-  // Safe must call acceptOwnership() from the Safe UI. Two-step and
-  // reversible until accepted, same as the contracts above, but a different
-  // function pair so it can't reuse the twoStep loop. Only present on Base.
-  if (!c.AgentFactory) {
-    console.log(`- AgentFactory: no address in this deployment file — SKIP.`);
-  } else {
-    const factory = await ethers.getContractAt("AgentFactory", c.AgentFactory);
-    const owner = await (factory as any).owner();
-    if (owner.toLowerCase() !== signer.address.toLowerCase()) {
-      console.log(`- AgentFactory: owner is ${owner} (not the signer) — SKIP.`);
-    } else {
-      const tx = await (factory as any).transferOwnership(safeAddr);
-      await tx.wait();
-      console.log(`- AgentFactory: transferOwnership(${safeAddr}) ✓ (tx ${tx.hash}) — Safe must acceptOwnership().`);
-    }
-  }
-
-  // 1-step INFT (irreversible) — opt-in only.
-  if (process.env.INCLUDE_INFT === "yes") {
-    if (!c.INFT) {
-      console.log(`- INFT: no address in this deployment file — SKIP.`);
-    } else {
-      const inft = await ethers.getContractAt("INFT", c.INFT);
-      const owner = await (inft as any).owner();
-      if (owner.toLowerCase() !== signer.address.toLowerCase()) {
-        console.log(`- INFT: owner is ${owner} (not the signer) — SKIP.`);
-      } else {
-        const tx = await (inft as any).transferOwnership(safeAddr);
-        await tx.wait();
-        console.log(`- INFT: transferOwnership(${safeAddr}) ✓ (tx ${tx.hash}) — IRREVERSIBLE, done.`);
-      }
-    }
-  } else {
-    console.log(`- INFT: skipped (set INCLUDE_INFT=yes to transfer its ownership — irreversible).`);
-  }
-
-  console.log(`\nNEXT: from the Safe UI, call acceptAdmin() on BlindEscrow, BlindReputation, TaskRegistry (whichever were proposed above), and acceptOwnership() on AgentFactory.`);
-  console.log(`Then verify: EXPECTED_ADMIN=${safeAddr} npx hardhat run scripts/verify-deployment-config.ts --network ${network.name}`);
+  const plan = migrationPlan(records, { includeInft: process.env.INCLUDE_INFT === "yes" });
+  const outcome = await runSafeMigration({ signer, safe: safeAddr, plan });
+  for (const line of nextSteps(outcome, safeAddr, network.name)) console.log(line);
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
