@@ -40,6 +40,8 @@ vi.mock('../services/settlementChains.js', async (importOriginal) => {
 vi.mock('../services/escrow.js', () => ({
   buildCancelTaskOn: vi.fn(async () => ({ to: '0xCca5ab873158b888158AD9Dc36fb4Ee683eFbEBf', data: '0xcancel' })),
   buildClaimTimeoutOn: vi.fn(async () => ({ to: '0xCca5ab873158b888158AD9Dc36fb4Ee683eFbEBf', data: '0xtimeout' })),
+  claimTimeoutRevertOn: vi.fn(async () => null),
+  escalatesUnjudgedWorkOn: vi.fn(async () => false),
   getTaskOn: vi.fn(async (_chain: string, taskId: number) => ({
     taskId: String(taskId),
     agent: '0x1111111111111111111111111111111111111111',

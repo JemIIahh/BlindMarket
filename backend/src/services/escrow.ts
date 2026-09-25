@@ -138,6 +138,59 @@ export async function buildClaimTimeoutOn(
   return buildUnsignedTx(escrowFor(chain), 'claimTimeout', [taskId], from);
 }
 
+/** An eth_call the contract reverted (as opposed to an RPC failure). */
+function isCallException(err: unknown): err is { code: 'CALL_EXCEPTION'; revert?: { name?: string } | null } {
+  return (err as { code?: string } | null)?.code === 'CALL_EXCEPTION';
+}
+
+/**
+ * Dry-run the poster's claimTimeout as `from`. Resolves to null when the
+ * escrow would accept it, or to the name of the custom error it would revert
+ * with ('reverted' when the revert carries none this ABI decodes). An RPC
+ * failure throws. The escrow's own rules decide (deadline moved by pauses,
+ * appeal and dispute windows, escalated work), so they are not restated here.
+ */
+export async function claimTimeoutRevertOn(chain: TaskChain, from: string, taskId: number): Promise<string | null> {
+  try {
+    await escrowFor(chain).claimTimeout.staticCall(taskId, { from: ethers.getAddress(from) });
+    return null;
+  } catch (err) {
+    if (!isCallException(err)) throw err;
+    return err.revert?.name ?? 'reverted';
+  }
+}
+
+/**
+ * The deadline the escrow enforces: the task's deadline moved by the time the
+ * escrow spent paused since it was created (BlindEscrow.effectiveDeadline,
+ * security audit run 1, C36). Null on an escrow from before that upgrade,
+ * which enforces the raw getTask().deadline.
+ */
+export async function effectiveDeadlineOn(chain: TaskChain, taskId: number): Promise<bigint | null> {
+  try {
+    return BigInt(await escrowFor(chain).effectiveDeadline(taskId));
+  } catch (err) {
+    if (isCallException(err)) return null;
+    throw err;
+  }
+}
+
+/**
+ * Whether the escrow on `chain` escalates delivered, unjudged work instead of
+ * refunding it at the deadline (security audit run 1, C18). False on an
+ * escrow from before that upgrade, where claimTimeout on a Submitted task
+ * still refunds the poster.
+ */
+export async function escalatesUnjudgedWorkOn(chain: TaskChain, taskId: number): Promise<boolean> {
+  try {
+    await escrowFor(chain).unjudgedEscalation(taskId);
+    return true;
+  } catch (err) {
+    if (isCallException(err)) return false;
+    throw err;
+  }
+}
+
 /** Read the per-task verifier from whichever chain holds the task. */
 export async function getTaskVerifierOn(chain: TaskChain, taskId: number): Promise<string> {
   const contract = chainRuntime(chain).escrow;
