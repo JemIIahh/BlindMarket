@@ -735,6 +735,11 @@ export default function DeployAgentForm() {
                   Inference is billed to the agent's own wallet, which pays the
                   0G Compute ledger directly.
                 </p>
+                <p>
+                  Before it takes a task, the agent's wallet needs at least 3.1 0G on
+                  the 0G chain: 3 0G opens its 0G Compute account and the rest pays
+                  gas. Until then it won't accept tasks.
+                </p>
               </div>
             </div>
           )}

@@ -383,108 +383,125 @@ const DELEGATE_GAS_RESERVE_OG = process.env.DELEGATE_GAS_RESERVE_OG ?? '0.005';
 const OG_COMPUTE_ENABLED = !AGENT_API_KEY && !!AGENT_PRIVATE_KEY;
 const OG_COMPUTE_ROUTER_BASE_URL = 'https://router-api.0g.ai/v1';
 
-// Lazy-initialised 0G Compute broker + provider address. Initialised once when
-// the first LLM call hits the fetch interceptor below.
+// The least a new 0G Compute account (ledger) can open with: the LedgerManager
+// contract's MIN_ACCOUNT_BALANCE, which @0gfoundation/0g-compute-ts-sdk checks
+// before it sends anything (LedgerProcessor.MIN_LEDGER_BALANCE_OG, 3 0G). The
+// worker used to open one with a 1 0G deposit, which the SDK refuses, so no new
+// 0g-compute agent could ever run a model.
+export const OG_LEDGER_OPEN_WEI = 3n * 10n ** 18n;
+// Kept back in the wallet for the gas of opening the account and acknowledging
+// the provider.
+export const OG_SETUP_GAS_RESERVE_WEI = 10n ** 17n;
+
+/**
+ * What the 0G Compute account setup does for a wallet: use the account it
+ * already has, open one, or wait until the wallet can pay for it.
+ */
+export function ogLedgerPlan(hasLedger, walletWei) {
+  if (hasLedger) return { action: 'use' };
+  const needWei = OG_LEDGER_OPEN_WEI + OG_SETUP_GAS_RESERVE_WEI;
+  if (walletWei >= needWei) return { action: 'open' };
+  return { action: 'fund', needWei, shortfallWei: needWei - walletWei };
+}
+
+// 0G Compute broker + provider, created once. The account setup re-runs (at
+// most every OG_SETUP_RETRY_MS) until it succeeds, so topping up the agent
+// wallet fixes a failed setup without a restart.
 let _ogComputeBroker = null;
 let _ogComputeProvider = null;
+let _ogRpc = null;
+let _ogWallet = null;
+let _ogAccountReady = false;
+let _ogSetupProblem = null;
+let _ogSetupAttemptAt = 0;
+let _ogSetupInFlight = null;
+const OG_SETUP_RETRY_MS = 5 * 60_000;
 
-async function ensureOgComputeBroker() {
-  if (_ogComputeBroker) return _ogComputeBroker;
+async function ensureOgComputeBroker({ force = false } = {}) {
   if (!OG_COMPUTE_ENABLED) return null;
+  if (_ogAccountReady) return _ogComputeBroker;
+  if (_ogSetupInFlight) return _ogSetupInFlight;
+  if (!force && _ogSetupAttemptAt && Date.now() - _ogSetupAttemptAt < OG_SETUP_RETRY_MS) return _ogComputeBroker;
+  _ogSetupAttemptAt = Date.now();
+  _ogSetupInFlight = setUpOgCompute().finally(() => { _ogSetupInFlight = null; });
+  return _ogSetupInFlight;
+}
+
+async function setUpOgCompute() {
+  const fmt = (wei) => ethers.formatEther(wei);
   try {
-    const { ethers, formatEther } = await import('ethers');
-    const { createRequire } = await import('module');
-    const req = createRequire(import.meta.url);
-    const mod = req('@0gfoundation/0g-compute-ts-sdk');
-    const createBroker = mod.createZGComputeNetworkBroker;
-    const rpcProvider = new ethers.JsonRpcProvider(OG_RPC_URL, OG_CHAIN_ID, {
-      batchMaxCount: 1, staticNetwork: true,
-    });
-    const wallet = new ethers.Wallet(AGENT_PRIVATE_KEY, rpcProvider);
-    _ogComputeBroker = await createBroker(wallet);
-    const services = await _ogComputeBroker.inference.listService();
-    if (!services?.length) {
-      log('0G Compute: no inference providers available right now — inference will fail until one appears');
+    if (!_ogComputeBroker) {
+      const { createRequire } = await import('module');
+      const req = createRequire(import.meta.url);
+      const mod = req('@0gfoundation/0g-compute-ts-sdk');
+      _ogRpc = new ethers.JsonRpcProvider(OG_RPC_URL, OG_CHAIN_ID, { batchMaxCount: 1, staticNetwork: true });
+      _ogWallet = new ethers.Wallet(AGENT_PRIVATE_KEY, _ogRpc);
+      _ogComputeBroker = await mod.createZGComputeNetworkBroker(_ogWallet);
+    }
+    if (!_ogComputeProvider) {
+      const services = await _ogComputeBroker.inference.listService();
+      if (!services?.length) {
+        _ogSetupProblem = 'no 0G Compute inference provider is available right now';
+        log(`0G Compute: ${_ogSetupProblem}`);
+        return _ogComputeBroker;
+      }
+      _ogComputeProvider = services[0].provider || services[0].providerAddress;
+    }
+
+    // 1) The account (ledger): the wallet's prepaid inference balance, which
+    //    the provider sub-account is funded from. Opened only when there is
+    //    none: a deposit into an existing one (what the old code did on every
+    //    boot) just moves more of the wallet into it.
+    const hasLedger = await _ogComputeBroker.ledger.getLedger().then(() => true, () => false);
+    const walletWei = hasLedger ? 0n : await _ogRpc.getBalance(_ogWallet.address);
+    const plan = ogLedgerPlan(hasLedger, walletWei);
+    if (plan.action === 'fund') {
+      _ogSetupProblem =
+        `no 0G Compute account yet: the agent wallet ${_ogWallet.address} holds ${fmt(walletWei)} 0G on the 0G chain, ` +
+        `and opening one takes ${fmt(OG_LEDGER_OPEN_WEI)} 0G plus about ${fmt(OG_SETUP_GAS_RESERVE_WEI)} for gas. ` +
+        `Send it at least ${fmt(plan.shortfallWei)} more 0G`;
+      log(`0G Compute: ${_ogSetupProblem}`);
       return _ogComputeBroker;
     }
-    _ogComputeProvider = services[0].provider || services[0].providerAddress;
-
-    // 1) Ledger — the wallet's prepaid inference balance. Must exist before any
-    //    provider sub-account can be funded. Create it (first depositFund) or
-    //    confirm it already exists. If the wallet is below the create threshold
-    //    we still PROBE for an existing ledger, so a previously-funded agent
-    //    isn't stranded just because its balance dipped (the old code skipped
-    //    provider setup entirely in that case).
-    let ledgerReady = false;
-    try {
-      const bal = await rpcProvider.getBalance(wallet.address);
-      const depositAmount = '1.0';
-      const depositWei = ethers.parseEther(depositAmount);
-      const minBalance = ethers.parseEther('0.5');
-      if (bal >= depositWei + minBalance) {
-        log(`0G Compute: creating ledger with a ${depositAmount} 0G deposit...`);
-        await _ogComputeBroker.ledger.depositFund(depositAmount);
-        ledgerReady = true;
-        log('0G Compute: ledger account created');
-      } else {
-        try {
-          await _ogComputeBroker.ledger.getLedger();
-          ledgerReady = true;
-          log(`0G Compute: ledger exists (wallet ${formatEther(bal)} 0G is below the ${formatEther(depositWei + minBalance)} 0G to create a new one, but one is already funded)`);
-        } catch {
-          log(`0G Compute: NO ledger, and wallet balance ${formatEther(bal)} 0G is below the ${formatEther(depositWei + minBalance)} 0G needed to create one — top up the agent wallet and Restart. Inference will fail until then.`);
-        }
-      }
-    } catch (ledgerErr) {
-      const m = (ledgerErr?.message || '').toLowerCase();
-      if (m.includes('ledgerexists') || m.includes('already')) {
-        ledgerReady = true;
-        log('0G Compute: ledger account exists');
-      } else {
-        log(`0G Compute: ledger setup failed — ${ledgerErr.message}. Inference will fail until this succeeds.`);
+    if (plan.action === 'open') {
+      log(`0G Compute: opening the account with a ${fmt(OG_LEDGER_OPEN_WEI)} 0G deposit...`);
+      try {
+        await _ogComputeBroker.ledger.addLedger(Number(fmt(OG_LEDGER_OPEN_WEI)));
+        log('0G Compute: account opened');
+      } catch (openErr) {
+        const m = (openErr?.message || '').toLowerCase();
+        if (!m.includes('ledgerexists') && !m.includes('already')) throw openErr;
+        log('0G Compute: account already open');
       }
     }
 
     // 2) Provider sub-account — acknowledgeProviderSigner CREATES the per-provider
     //    sub-account that getRequestHeaders needs; startAutoFunding keeps it
-    //    funded. Runs whenever a ledger is ready (NOT only right after a fresh
-    //    deposit, which stranded existing-ledger agents). The acknowledge was
-    //    previously swallowed by a bare `catch {}` — the #1 reason a failure
-    //    surfaced later as an undiagnosable "Sub-account not found".
-    if (ledgerReady && _ogComputeProvider) {
-      const p = _ogComputeProvider.slice(0, 10);
-      try {
-        const acked = await _ogComputeBroker.inference.userAcknowledged(_ogComputeProvider).catch(() => false);
-        if (!acked) {
-          log(`0G Compute: acknowledging provider ${p}…`);
-          await _ogComputeBroker.inference.acknowledgeProviderSigner(_ogComputeProvider);
-        }
-        log(`0G Compute: provider ${p}… acknowledged`);
-      } catch (ackErr) {
-        const m = (ackErr?.message || '').toLowerCase();
-        if (m.includes('already') || m.includes('acknowledged')) {
-          log(`0G Compute: provider ${p}… already acknowledged`);
-        } else {
-          log(`0G Compute: provider acknowledge FAILED — ${ackErr.message}  (this is what surfaces as "Sub-account not found" at inference; top up the agent wallet and Restart)`);
-        }
+    //    funded from the account above.
+    const p = _ogComputeProvider.slice(0, 10);
+    try {
+      const acked = await _ogComputeBroker.inference.userAcknowledged(_ogComputeProvider).catch(() => false);
+      if (!acked) {
+        log(`0G Compute: acknowledging provider ${p}…`);
+        await _ogComputeBroker.inference.acknowledgeProviderSigner(_ogComputeProvider);
       }
-      try {
-        await _ogComputeBroker.inference.startAutoFunding(_ogComputeProvider);
-      } catch (fundErr) {
-        log(`0G Compute: startAutoFunding failed — ${fundErr.message}`);
-      }
-      // 3) Verify the sub-account is actually usable, so a broken setup is
-      //    visible HERE (at boot) instead of on the first paid job.
-      try {
-        await _ogComputeBroker.inference.getAccount(_ogComputeProvider);
-        log(`0G Compute: provider sub-account ready ✓ (provider=${p}…)`);
-      } catch (acctErr) {
-        log(`0G Compute: provider sub-account NOT ready — ${acctErr.message}. Inference will fail until the ledger + acknowledge succeed.`);
-      }
+    } catch (ackErr) {
+      const m = (ackErr?.message || '').toLowerCase();
+      if (!m.includes('already') && !m.includes('acknowledged')) throw ackErr;
     }
-    log(`0G Compute: broker init done, provider=${_ogComputeProvider?.slice(0, 10)}…`);
+    try {
+      await _ogComputeBroker.inference.startAutoFunding(_ogComputeProvider);
+    } catch (fundErr) {
+      log(`0G Compute: startAutoFunding failed — ${fundErr.message}`);
+    }
+    // 3) The sub-account is usable: only now can this agent pay for a call.
+    await _ogComputeBroker.inference.getAccount(_ogComputeProvider);
+    _ogAccountReady = true;
+    _ogSetupProblem = null;
+    log(`0G Compute: account and provider ${p}… ready ✓`);
   } catch (e) {
-    log(`0G Compute: broker init failed — ${e.message}`);
+    _ogSetupProblem = `0G Compute setup failed: ${e.message}`;
+    log(`0G Compute: setup failed — ${e.message}`);
   }
   return _ogComputeBroker;
 }
@@ -1190,6 +1207,109 @@ function getModel() {
 export const RUN_SAMPLING = AGENT_PROVIDER === 'anthropic' && !OG_COMPUTE_ENABLED ? {} : { temperature: 0 };
 
 log(`started | provider=${OG_COMPUTE_ENABLED ? '0g-compute' : AGENT_PROVIDER} model=${AGENT_MODEL} tools=${agentTools.length}`);
+
+// ── Inference readiness ─────────────────────────────────────────────────────
+
+/**
+ * Whether this agent can run its model, so it takes work only when it can
+ * finish it. /accept assigns a task on-chain and the escrow cannot unassign it
+ * before its deadline, so an agent that accepted work it could not think
+ * through left the poster's money locked until then (Arc task 10, Sep 25: a
+ * 0g-compute agent whose 0G Compute account was never opened accepted and
+ * never delivered). Same idea as the gas gate before accept (pickAffordable).
+ *
+ * check() runs `probe` — which resolves to null when the model answered, or to
+ * the reason it can't — and caches the answer. A pass holds until a task's
+ * model call fails (suspect()); a failure is re-probed at most every
+ * recheckMs, or at once with force. blocker() is the reason this agent is not
+ * taking work, or null. onChange hears each change of reason. Exported for
+ * tests.
+ *
+ * @param {{ probe: () => Promise<string | null>, recheckMs?: number, now?: () => number, onChange?: (reason: string | null) => void }} opts
+ */
+export function createInferenceGate({ probe, recheckMs = 5 * 60_000, now = () => Date.now(), onChange = () => {} }) {
+  /** @type {string | null} */
+  let blocker = 'the model has not been checked yet';
+  /** @type {number | null} */
+  let checkedAt = null;
+  /** @type {Promise<boolean> | null} */
+  let inFlight = null;
+  const set = (next) => {
+    if (next === blocker) return;
+    blocker = next;
+    onChange(next);
+  };
+  return {
+    blocker: () => blocker,
+    check({ force = false } = {}) {
+      if (blocker === null) return Promise.resolve(true);
+      if (inFlight) return inFlight;
+      if (!force && checkedAt !== null && now() - checkedAt < recheckMs) return Promise.resolve(false);
+      checkedAt = now();
+      inFlight = (async () => {
+        try {
+          set((await probe()) ?? null);
+        } catch (e) {
+          set(`the model check failed: ${e?.message ?? e}`);
+        }
+        return blocker === null;
+      })().finally(() => { inFlight = null; });
+      return inFlight;
+    },
+    /** A task's model call failed: take no new work until a check passes. */
+    suspect(reason) {
+      set(reason);
+      checkedAt = null;
+    },
+  };
+}
+
+const INFERENCE_PROBE_TIMEOUT_MS = 90_000;
+
+/** One line of an error, short enough for a log line or a reason. */
+function errorLine(e) {
+  return String(e?.message ?? e).split('\n')[0].slice(0, 200);
+}
+
+// One tiny model call through the same model the tasks use: it proves the key,
+// the credit, the model id and (on 0g-compute) the 0G Compute account all work.
+async function probeInference() {
+  if (OG_COMPUTE_ENABLED) {
+    await ensureOgComputeBroker({ force: true });
+    if (!_ogAccountReady) return _ogSetupProblem ?? '0G Compute is not set up';
+  }
+  try {
+    await raceWithTimeout(
+      (abortSignal) => generateText({ model: getModel(), prompt: 'Reply with the single word OK.', maxOutputTokens: 64, abortSignal, ...RUN_SAMPLING }),
+      INFERENCE_PROBE_TIMEOUT_MS,
+      'model check',
+    );
+    return null;
+  } catch (e) {
+    return `${AGENT_MODEL} did not answer a test prompt: ${errorLine(e)}` +
+      (OG_COMPUTE_ENABLED ? ' (a 0g-compute agent pays for each call from its 0G Compute account: check the agent wallet\'s 0G)' : '');
+  }
+}
+
+// Tasks already logged as held for the model check (resumeAssignedTasks).
+const inferenceHoldLogged = new Set();
+
+const inferenceGate = createInferenceGate({
+  probe: probeInference,
+  onChange: (reason) => {
+    if (reason === null) inferenceHoldLogged.clear();
+    log(reason === null ? 'model check passed — taking tasks' : `not taking tasks: ${reason}`);
+  },
+});
+
+// Declines an offer (or skips a broadcast) while the model check is failing.
+// True when the task was turned down.
+async function inferenceGateOffer(taskId, exclusive = false) {
+  if (await inferenceGate.check()) return false;
+  log(`skipping task ${taskId.slice(0, 10)}…: not taking tasks (${inferenceGate.blocker()})`);
+  if (exclusive) await declineOffer(taskId);
+  return true;
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -2131,6 +2251,10 @@ async function pollAndWork() {
   }
   _working = true;
   try {
+    // Re-check a model that failed its check (at most every few minutes, so
+    // topping up a wallet or fixing a key needs no restart). Free once passed.
+    await inferenceGate.check();
+
     // Liveness no longer rides on the poll loop — a dedicated timer beats the
     // heartbeat (see HEARTBEAT_INTERVAL_MS / startup), so a long task or a high
     // POLL_INTERVAL_MS can't make a live agent look dead.
@@ -2209,6 +2333,11 @@ async function pollAndWork() {
       log(`found ${entries.length} open tasks, but already touched all of them`);
       return;
     }
+
+    // Inference gate BEFORE accept, for the same reason as the gas gate below:
+    // an agent that can't run its model must not take a task on-chain. The
+    // reason was logged when the check failed (createInferenceGate).
+    if (inferenceGate.blocker()) return;
 
     // Gas gate BEFORE accept: /accept assigns the task on-chain, after which
     // the backend refuses /release (ON_CHAIN_LOCKED) — so an agent that
@@ -3038,6 +3167,9 @@ async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrapp
       }
     } catch (llmErr) {
       log(`LLM ERROR for ${acceptedTaskHash.slice(0, 10)}…: ${llmErr.message}`);
+      // Take no new work until a model check passes again (a key revoked or
+      // credit spent mid-day would otherwise strand every task accepted next).
+      inferenceGate.suspect(`a task's model call failed: ${errorLine(llmErr)}`);
       if (llmErr.stack) log(`LLM Stack: ${llmErr.stack.split('\n').slice(0, 3).join(' | ')}`);
       // Transport failures surface with an empty message ("Cannot connect to
       // API: ") — log the underlying cause when present so the next one is
@@ -3636,6 +3768,17 @@ async function resumeAssignedTasks() {
       submitGasShortfall.delete(taskHash);
     }
 
+    // Owed work that can't be thought through yet is waiting, not failing:
+    // hold it until the model check passes, without spending its attempts.
+    // Finalize-only runs no model.
+    if (!finalizeOnly && inferenceGate.blocker()) {
+      if (!inferenceHoldLogged.has(taskHash)) {
+        inferenceHoldLogged.add(taskHash);
+        log(`resume: holding ${taskHash.slice(0, 10)}… until the model check passes (attempt not counted)`);
+      }
+      continue;
+    }
+
     const attempts = resumeFailures.get(taskHash) ?? 0;
     if (attempts >= MAX_RESUME_ATTEMPTS) {
       if (attempts === MAX_RESUME_ATTEMPTS) {
@@ -3815,6 +3958,8 @@ async function judgeTask(brief, output, acceptance) {
 // post time.
 async function pollAndVerify() {
   if (!AGENT_PRIVATE_KEY || !VERIFIER_ENABLED) return;
+  // The judge is a model call: a failing one would only spend verify attempts.
+  if (inferenceGate.blocker()) return;
   const myAddr = (signerWallet?.address ?? '').toLowerCase();
   if (!myAddr) return;
 
@@ -4196,6 +4341,7 @@ function connectWebSocket() {
   wsClient.on('task:offer', async (data) => {
     log(`WS received task:offer for ${data.taskId?.slice(0, 10) || 'unknown'}… (score=${data.score})`);
     if (!data.taskId) return;
+    if (await inferenceGateOffer(data.taskId, true)) return;
     if (await gasGateBroadcast(data.taskId, data.meta?.chain, true)) return;
     acceptFromWs(data.taskId);
   });
@@ -4203,6 +4349,7 @@ function connectWebSocket() {
   wsClient.on('task:available', async (data) => {
     log(`WS received task:available for ${data.taskId?.slice(0, 10) || 'unknown'}…`);
     if (!data.taskId) return;
+    if (await inferenceGateOffer(data.taskId)) return;
     if (await gasGateBroadcast(data.taskId, data.meta?.chain)) return;
     acceptFromWs(data.taskId);
   });
@@ -4238,6 +4385,9 @@ async function tryAcceptTask(taskHash, opts = {}) {
 // resume path can tell a terminal refusal from one worth retrying. status 0 =
 // never reached the backend (skipped on the local applied mark).
 async function attemptAccept(taskHash, { force = false } = {}) {
+  // Never take a new task while the model check is failing (force is the
+  // resume path, for a task that is already ours).
+  if (!force && inferenceGate.blocker()) return { ok: false, status: 0, code: 'INFERENCE_NOT_READY' };
   if (!force && appliedTasks.has(taskHash) && !isAppliedTaskStale(taskHash)) return { ok: false, status: 0, code: 'LOCALLY_SKIPPED' };
   if (!force && skipForReleaseCooldown(taskHash)) return { ok: false, status: 0, code: 'RELEASE_COOLDOWN' };
   appliedTasks.delete(taskHash); // clear stale entry so accept runs fresh
@@ -4340,14 +4490,13 @@ if (process.env.NODE_ENV !== 'test') {
     if (blamed.length > 0) log(`crash memory: not driving ${blamed.join(', ')} — in flight for ${TASK_CRASH_LIMIT}+ crashes`);
 
     await ensureRegisteredAsA2AExecutor();
-    // Warm up 0G Compute (ledger + provider sub-account) at BOOT, before we
-    // accept any work, so the first job doesn't race the lazy setup — and any
-    // failure is logged HERE instead of surfacing as an undiagnosable inference
-    // error on a paid job. No-op for API-key agents (OG_COMPUTE_ENABLED=false).
-    // Under a ceiling: the setup is on-chain calls with no timeout of their own,
-    // and a hang here would mean the agent never starts polling at all.
-    await raceWithTimeout(() => ensureOgComputeBroker(), LLM_TIMEOUT_MS, '0G Compute warm-up')
-      .catch((e) => log(`0G Compute: ${e.message} — continuing; inference may fail until setup completes`));
+    // Check the model answers BEFORE taking any work (createInferenceGate); on
+    // 0g-compute this also opens the 0G Compute account. Under a ceiling: the
+    // setup is on-chain calls with no timeout of their own, and a hang here
+    // would mean the agent never starts polling. Until a check passes, the
+    // agent takes no task; the poll loop re-checks every few minutes.
+    await raceWithTimeout(() => inferenceGate.check({ force: true }), LLM_TIMEOUT_MS, 'model check')
+      .catch((e) => log(`model check: ${e.message} — not taking tasks until it passes`));
     // Connect WebSocket for push-based assignment (instant task offers)
     connectWebSocket();
     // Safety-net poll: resume/verify on a long interval even when WS is up.
