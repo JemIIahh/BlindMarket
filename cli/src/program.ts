@@ -1,6 +1,6 @@
 import { Command } from 'commander';
 import { readFileSync } from 'fs';
-import { Wallet, formatUnits, parseUnits } from 'ethers';
+import { JsonRpcProvider, Wallet, formatUnits, parseUnits } from 'ethers';
 import ora from 'ora';
 import { BlindMarket, ApiError } from '@blindmarket/sdk';
 import type { AgentCapability } from '@blindmarket/sdk';
@@ -9,7 +9,7 @@ import {
   pendingFee, setPendingFee, pendingPosts, setPendingPost,
 } from './config.js';
 import { api } from './api.js';
-import { client, signingClient } from './client.js';
+import { client, signingClient, rpcEnvName, rpcUrlFor } from './client.js';
 import { saveKeystore, signingKeySource, keystorePath, publicKeyHex } from './keys.js';
 import { askHidden, confirm } from './prompt.js';
 import { CliError } from './errors.js';
@@ -63,6 +63,25 @@ async function step<T>(label: string, fn: () => Promise<T>): Promise<T> {
   } catch (e) {
     spin.fail(label);
     throw e;
+  }
+}
+
+/**
+ * Whether the deploy fee `hash`, saved by an earlier version without its
+ * chain, is a successful transaction on `chain`: its receipt, read from the
+ * chain's RPC once that RPC answers `chainId`. Throws, before anything is
+ * paid, when that cannot be read.
+ */
+async function earlierFeeOn(hash: string, chain: string, chainId: number): Promise<boolean> {
+  try {
+    const url = rpcUrlFor(chain, chainId);
+    if (!url) throw new Error(`no RPC is known for chain ${chainId}; set ${rpcEnvName(chain)}`);
+    const provider = new JsonRpcProvider(url, chainId, { staticNetwork: true });
+    const served = Number(BigInt(await provider.send('eth_chainId', [])));
+    if (served !== chainId) throw new Error(`${rpcEnvName(chain)} serves chain ${served}`);
+    return (await provider.getTransactionReceipt(hash))?.status === 1;
+  } catch (e) {
+    throw new CliError('FEE_UNCHECKED', `The deploy fee an earlier version saved (${hash}) could not be checked on ${chain} (chain ${chainId}): ${(e as Error).message}. Nothing was paid.`);
   }
 }
 
@@ -213,9 +232,22 @@ export function buildProgram(): Command {
       };
       await step('Checking the deploy…', () => bb.validateDeploy(params));
       const terms = await bb.getDeployFee();
-      // A payment is saved for the chain id it was made on.
+      // A payment is saved under the chain id it was made on. One an earlier
+      // version saved without it pays only if it is on that chain; either way
+      // the unkeyed entry goes, so it is never offered blindly again.
       const feeChainId = terms.required ? terms.chainId : undefined;
-      const saved = pendingFee(cfg.apiBase, signer.address, feeChainId);
+      let saved = pendingFee(cfg.apiBase, signer.address, feeChainId);
+      const unkeyed = feeChainId !== undefined && !saved ? pendingFee(cfg.apiBase, signer.address) : undefined;
+      if (unkeyed && terms.required && feeChainId !== undefined) {
+        const onChain = await step('Checking an earlier payment…', () => earlierFeeOn(unkeyed, terms.chain, feeChainId));
+        setPendingFee(cfg.apiBase, signer.address, undefined, null);
+        if (onChain) {
+          setPendingFee(cfg.apiBase, signer.address, feeChainId, unkeyed);
+          saved = unkeyed;
+        } else {
+          out(`The deploy fee an earlier version saved (${unkeyed}) is not on ${terms.chain} (chain ${feeChainId}), so it cannot pay for this deploy.`);
+        }
+      }
       if (saved) {
         out(`Using the deploy fee already paid in ${saved} (an earlier attempt), so nothing is paid again.`);
       } else if (terms.required && terms.method === 'transfer') {
@@ -443,9 +475,14 @@ export function buildProgram(): Command {
       const ref = await taskRef(bb, opts.task, opts.chain);
       await confirm(`Reclaim the escrow of task ${ref.id}${ref.chain ? ` on ${ref.chain}` : ''}?`, opts.yes);
       const res = await step('Reclaiming…', () => bb.reclaimAfterTimeout(ref.id, ref.chain ? { chain: ref.chain } : {}));
+      // A missing outcome is not a refund: an older backend does not report
+      // one, and for work delivered before the deadline the claim sends the
+      // task for review instead.
       out(res.outcome === 'escalate'
         ? `Sent task ${ref.id} on ${res.chain} for review (tx ${res.txHash}). Its work was delivered before the deadline and never judged, so nothing was refunded: an admin rules on it, and with no ruling within 14 days the worker is paid.`
-        : `Reclaimed the escrow of task ${ref.id} on ${res.chain} (tx ${res.txHash}). ${listing(res.listingClosed)}`);
+        : res.outcome === 'refund'
+          ? `Reclaimed the escrow of task ${ref.id} on ${res.chain} (tx ${res.txHash}). ${listing(res.listingClosed)}`
+          : `Claimed the timeout of task ${ref.id} on ${res.chain} (tx ${res.txHash}), but the backend did not say whether it refunded the escrow or sent delivered work for review. Check with \`blind status --task ${ref.id}\`.`);
     });
 
   program

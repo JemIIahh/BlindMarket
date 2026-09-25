@@ -270,7 +270,7 @@ export class WorkerRuntime {
   private listeners = new Set<(event: WorkerRuntimeEvent) => void>();
   /** Set once the runtime has said it skips listings with no recorded reward. */
   private warnedNoReward = false;
-  /** The chain id each configured RPC answered, by URL. */
+  /** The chain id each configured RPC answered, by URL, kept once it matched the backend's. */
   private rpcChainIds = new Map<string, bigint>();
 
   constructor(config: WorkerRuntimeConfig) {
@@ -642,12 +642,14 @@ export class WorkerRuntime {
       const { chains } = await this.bb.getSettlement();
       const listed = chains.find((c) => c.chain === chain)?.chainId;
       if (listed === undefined || !Number.isInteger(listed)) return null;
-      let served = this.rpcChainIds.get(rpc);
-      if (served === undefined) {
-        served = (await new ethers.JsonRpcProvider(rpc).getNetwork()).chainId;
+      // A match is kept: a URL's network does not change under it. Anything
+      // else is asked again next time, so one wrong answer is not kept.
+      if (this.rpcChainIds.get(rpc) === BigInt(listed)) return null;
+      const served = (await new ethers.JsonRpcProvider(rpc).getNetwork()).chainId;
+      if (served === BigInt(listed)) {
         this.rpcChainIds.set(rpc, served);
+        return null;
       }
-      if (served === BigInt(listed)) return null;
       return `the RPC for ${chain} serves chain ${served}, but the backend settles ${chain} on chain ${listed}, where this runtime could not sign its submitEvidence. Point it at chain ${listed}.`;
     } catch {
       return null;
@@ -803,14 +805,15 @@ export class WorkerRuntime {
 
     try {
       // An accept assigns on-chain for good, so not on a network this
-      // runtime's RPC is not on. Only a new rpcUrls changes that: the task is
-      // left alone while it stays listed.
+      // runtime's RPC is not on. The task is looked at again after a back-off
+      // that grows while the answer stays wrong.
       const wrong = await this.wrongNetwork(meta?.chain);
       if (wrong) {
         this.executions.delete(taskId);
         const retry = this.retryState(taskId);
         retry.reaccept = undefined;
-        retry.notBefore = Date.now() + MAX_WRAP_BACKOFF_MS;
+        retry.failures++;
+        retry.notBefore = Date.now() + backoff(RELEASED_BACKOFF_MS, retry.failures, MAX_BACKOFF_MS);
         this.emit({ type: 'task_failed', taskId, error: `not accepted: ${wrong}` });
         return;
       }

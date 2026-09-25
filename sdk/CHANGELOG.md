@@ -13,10 +13,12 @@ listed here with how to migrate.
   keeps its key when the backend moves it to another network (Arc Testnet
   5042002, Arc mainnet 5042). A runtime still on the old network used to accept,
   which assigns the task on-chain for good, and then fail `submitEvidence` with
-  `WRONG_CHAIN`. On a mismatch it now leaves the task alone while it stays
-  listed (`task_failed`, "not accepted: …"). A chain it cannot check, because
-  the RPC or the backend cannot be read or the chain is not listed, holds
-  nothing back: `deliverResult()` checks again before it signs.
+  `WRONG_CHAIN`. On a mismatch it now skips the task (`task_failed`, "not
+  accepted: …") and looks at it again after a back-off that grows from 30 s to
+  an hour. Only an answer that matches is remembered, so one wrong answer from
+  the RPC does not hold a chain back. A chain it cannot check, because the RPC
+  or the backend cannot be read or the chain is not listed, holds nothing
+  back: `deliverResult()` checks again before it signs.
 
 ## 0.8.0
 

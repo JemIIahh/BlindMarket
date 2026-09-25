@@ -561,3 +561,33 @@ test('a spend recorded without its chain id does not sign again where the backen
   assert.match(error.message, /without a chain id/);
   assert.equal(chain.sent.length, 0);
 });
+
+test('a post recorded without its chain id still finishes once funded: listing it signs nothing', async () => {
+  const now = new Date().toISOString();
+  const txHash = '0x' + '66'.repeat(32);
+  putSpend({
+    idempotencyKey: 'arc-unkeyed-post-2', kind: 'post', stage: 'funded', txHash, taskHash: '0x' + '13'.repeat(32), rootHash: '0x' + 'cd'.repeat(32),
+    privacy: 'public', publicBrief: 'Summarise this paragraph in one sentence.', verificationMode: 'auto', requiredCapabilities: [],
+    amountWei: '2500000', settlement: 'arc', token: USDC, durationSecs: 86400, createdAt: now, updatedAt: now,
+  });
+  const done = parse(await tools().post_task({ instructions: 'Summarise this paragraph in one sentence.', amount: '2.5', idempotencyKey: 'arc-unkeyed-post-2' }));
+  assert.equal(done.resumed, true);
+  assert.equal(done.txHash, txHash);
+  assert.equal(backendCalls.find((c) => c.path === '/api/v1/a2a/tasks/index').body.txHash, txHash);
+  assert.equal(chain.sent.length, 0);
+});
+
+test('a refund recorded without its chain id still finishes once sent: it waits for its own transaction', async () => {
+  const now = new Date().toISOString();
+  const txHash = '0x' + '67'.repeat(32);
+  chain.tasks[8] = 5; // the refund landed
+  putSpend({
+    idempotencyKey: 'arc-unkeyed-cancel-1', kind: 'cancel', stage: 'sent', settlement: 'arc',
+    taskId: 8, taskHash: HASH, amountWei: '2500000', txHash, createdAt: now, updatedAt: now,
+  });
+  const done = parse(await tools().cancel_task({ task: '8', idempotencyKey: 'arc-unkeyed-cancel-1' }));
+  assert.equal(done.resumed, true);
+  assert.equal(done.outcome, 'refund');
+  assert.equal(done.txHash, txHash);
+  assert.equal(chain.sent.length, 0);
+});

@@ -1,3 +1,4 @@
+import { readFileSync } from 'fs';
 import { BlindMarket, type SettlementChainInfo } from '@blindmarket/sdk';
 import type { Wallet } from 'ethers';
 import { resolveConfig, type Config } from './config.js';
@@ -21,6 +22,9 @@ const PUBLIC_RPC: Readonly<Record<number, string>> = {
 
 export const rpcEnvName = (chain: string) => `BLINDMARKET_${chain.toUpperCase().replace(/-/g, '_')}_RPC_URL`;
 
+/** The RPC for `chain`: BLINDMARKET_<CHAIN>_RPC_URL, else the public one for `chainId`, the id the backend names. */
+export const rpcUrlFor = (chain: string, chainId: number): string | undefined => process.env[rpcEnvName(chain)] ?? PUBLIC_RPC[chainId];
+
 export interface Client {
   cfg: Config;
   bb: BlindMarket;
@@ -40,11 +44,23 @@ function loggedIn(): Config {
   return cfg;
 }
 
-function assertSdk(bb: BlindMarket): void {
+/** The installed @blindmarket/sdk's version, from its package.json; null when that cannot be read. */
+export function sdkVersion(): string | null {
+  try {
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.resolve('@blindmarket/sdk')), 'utf-8')) as { name?: string; version?: string };
+    return pkg.name === '@blindmarket/sdk' ? pkg.version ?? null : null;
+  } catch {
+    return null;
+  }
+}
+
+export function assertSdk(bb: BlindMarket, version = sdkVersion()): void {
   // A package manager can still pair this CLI with an older SDK (a pinned or
-  // hoisted install): fail with the fix, not "postTask is not a function".
-  if (typeof (bb as { postTask?: unknown }).postTask !== 'function') {
-    throw new CliError('SDK_TOO_OLD', 'This CLI needs @blindmarket/sdk 0.7 or later. Reinstall @blindmarket/cli, or run `npm i @blindmarket/sdk@^0.7.0` beside it.');
+  // hoisted install): fail with the fix, not "postTask is not a function", or
+  // a timeout claim that went to review reported as a refund (0.7 has no outcome).
+  const [major, minor] = (version ?? '').split('.').map(Number);
+  if (typeof (bb as { postTask?: unknown }).postTask !== 'function' || (major === 0 && minor < 8)) {
+    throw new CliError('SDK_TOO_OLD', 'This CLI needs @blindmarket/sdk 0.8 or later. Reinstall @blindmarket/cli, or run `npm i @blindmarket/sdk@^0.8.0` beside it.');
   }
 }
 
@@ -67,7 +83,7 @@ export async function signingClient(): Promise<SigningClient> {
   const signer = await loadSigner();
   const { postingChain, chains } = await reader.getSettlement();
   const rpcUrls: Record<string, string | undefined> = {};
-  for (const c of chains) rpcUrls[c.chain] = process.env[rpcEnvName(c.chain)] ?? PUBLIC_RPC[c.chainId];
+  for (const c of chains) rpcUrls[c.chain] = rpcUrlFor(c.chain, c.chainId);
   const bb = new BlindMarket({ apiKey: cfg.apiKey!, apiBase: cfg.apiBase, executor: { privateKey: signer.privateKey, rpcUrls } });
   return { cfg, bb, signer, postingChain, chains };
 }

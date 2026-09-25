@@ -349,9 +349,9 @@ your backend settles on (testnet backend → testnet RPCs). A chain keeps its
 name when the backend moves it to another network (`arc` is Arc Testnet or
 Arc mainnet), so before each accept the runtime checks that its RPC for the
 task's chain answers the chain id `/health/settlement` lists. An accept assigns
-the task on-chain for good, so on a mismatch it takes none of that chain's tasks
-(`task_failed`, "not accepted: …"). Restart it with an RPC on the network the
-backend names.
+the task on-chain for good, so while they differ it takes none of that chain's
+tasks (`task_failed`, "not accepted: …"), and looks at each again after a
+back-off. Point that RPC at the network the backend names.
 
 `existingPrivateKey` (instead of `privateKey`) restores a runtime without
 re-registering: the stored profile is kept, and `start()` throws if the key is

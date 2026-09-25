@@ -1630,6 +1630,39 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     return walletCtx!.wallet.connect(provider);
   }
 
+  /**
+   * The backend cannot find a deploy fee recorded before records kept its
+   * chain id, so it may have been paid on another network. Its receipt on the
+   * fee chain's RPC decides the answer, which never sends the caller back into
+   * a retry that cannot succeed. Found there, the backend has not seen it yet:
+   * the record takes that chain id, and the same key finishes the deploy.
+   */
+  async function unchainedFeeNotFound(idempotencyKey: string, hash: string, fee: TransferTerms | null) {
+    let found: boolean | null = null;
+    if (fee) {
+      try {
+        const w = await walletOn(fee.chain, fee.chainId);
+        found = (await w.provider!.getTransactionReceipt(hash))?.status === 1;
+      } catch { /* not checkable from here */ }
+    }
+    if (fee && found) {
+      if (fee.chainId !== undefined) updateSpend(idempotencyKey, { chainId: fee.chainId });
+      return fail('DEPLOY_FEE_NOT_FOUND', `The deploy fee ${hash} is on ${fee.chain}, but the backend has not seen it yet. Retry with the same idempotencyKey in a minute; nothing is paid again.`);
+    }
+    if (fee && found === false) {
+      return fail(
+        'SETTLEMENT_CHANGED',
+        `The deploy fee ${hash} was recorded without its chain, and it is not on ${fee.chain}${fee.chainId !== undefined ? ` (chain ${fee.chainId})` : ''}, where the backend takes the fee now: it was paid on another network and does not count here. ` +
+        `Nothing was paid again: deploy with a new idempotencyKey to pay on ${fee.chain}.`,
+      );
+    }
+    return fail(
+      'DEPLOY_FEE_NOT_FOUND',
+      `The backend cannot find the deploy fee ${hash}, which was recorded without its chain, and it could not be checked here. It may have been paid on another network, where it does not count. ` +
+      'Nothing was paid again: find where it landed before paying with a new idempotencyKey.',
+    );
+  }
+
   server.registerTool(
     'deploy_agent',
     {
@@ -1704,13 +1737,28 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
         return ok({ resumed: true, agentId: existing.agentId, feeTxHash: existing.txHash, hint: 'Already deployed with this idempotencyKey.' });
       }
       if (existing?.stage === 'sent' && existing.txHash) {
-        // Paid before: finish the deploy with that payment.
+        // Paid before: finish the deploy with that payment. It counts only on
+        // the network it was paid on, and a chain keeps its key when the
+        // backend moves it to another one, so the chain ids decide.
+        const current = await api<FeeTerms>('GET', '/api/v1/agents/deploy-fee').catch(() => null);
+        const currentFee = current?.required && current.method === 'transfer' ? current : null;
+        if (existing.chainId !== undefined && currentFee?.chainId !== undefined && currentFee.chainId !== existing.chainId) {
+          return fail(
+            'SETTLEMENT_CHANGED',
+            `The deploy fee for ${idempotencyKey} was paid on chain ${existing.chainId} (${existing.txHash}), but the backend takes it on chain ${currentFee.chainId} now, where that payment does not count. ` +
+            `Nothing was paid again: deploy with a new idempotencyKey to pay on chain ${currentFee.chainId}.`,
+          );
+        }
         try {
           const agent = await deploy(existing.txHash);
           updateSpend(idempotencyKey, { stage: 'confirmed', agentId: agent.id });
           return ok({ resumed: true, ...summary(agent), feeTxHash: existing.txHash });
         } catch (err) {
-          return fail((err as ApiError).code ?? 'DEPLOY_FAILED', `${(err as Error).message}.${paidNote()}`);
+          const code = (err as ApiError).code;
+          if (code === 'DEPLOY_FEE_NOT_FOUND' && existing.chainId === undefined) {
+            return unchainedFeeNotFound(idempotencyKey, existing.txHash, currentFee);
+          }
+          return fail(code ?? 'DEPLOY_FAILED', `${(err as Error).message}.${paidNote()}`);
         }
       }
 
@@ -1793,7 +1841,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
           const invalid = await validate();
           if (invalid) return invalid;
           const w = await walletOn(fee.chain, fee.chainId);
-          putSpend({ idempotencyKey, kind: 'deploy', stage: 'created', settlement: fee.chain, token: fee.token, amountWei: fee.amountRaw, createdAt: now, updatedAt: now });
+          putSpend({ idempotencyKey, kind: 'deploy', stage: 'created', settlement: fee.chain, chainId: fee.chainId, token: fee.token, amountWei: fee.amountRaw, createdAt: now, updatedAt: now });
           const data = new Interface(['function transfer(address to, uint256 amount) returns (bool)'])
             .encodeFunctionData('transfer', [fee.recipient, BigInt(fee.amountRaw)]);
           const tx = await w.sendTransaction({ to: fee.token, data });

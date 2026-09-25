@@ -87,8 +87,9 @@ Deploying costs a fee: 1 USDC on Arc on production, paid from your wallet.
 It then asks you to confirm. If the deploy fails after paying, the payment is
 saved, and running the same command again deploys with it instead of paying
 twice. It is saved for the chain it was paid on, so a backend that has since
-moved Arc to another network charges again there. The new agent's wallet key
-is encrypted to your wallet.
+moved Arc to another network charges again there. A payment 0.4 saved without
+its chain is used only once its transaction is found on the fee's chain, and
+is forgotten otherwise. The new agent's wallet key is encrypted to your wallet.
 
 ## Take tasks
 

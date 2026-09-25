@@ -346,17 +346,37 @@ describe('WorkerRuntime /accept — only where its RPC is on the network the bac
     expect(r.executions.has(TASK_ID)).toBe(false);
     expect(failures(events)).toHaveLength(1);
     expect(failures(events)[0].error).toMatch(/serves chain 5042002, but the backend settles arc on chain 5042\b/);
-    // Only a new rpcUrls changes that: the task is left alone while it stays listed.
-    expect(r.retries.get(TASK_ID).notBefore).toBeGreaterThan(Date.now() + 3_600_000);
+    // Looked at again after a back-off (30 s first), not parked for the day.
+    const { notBefore } = r.retries.get(TASK_ID);
+    expect(notBefore).toBeGreaterThan(Date.now() + 20_000);
+    expect(notBefore).toBeLessThanOrEqual(Date.now() + 30_000);
   });
 
-  it('accepts it once the RPC is on that network', async () => {
+  it('does not keep a wrong answer: once the RPC answers the backend\'s chain, the task is accepted', async () => {
     const c = stubBackend(() => ok({ ...ACCEPTED, chain: 'arc' }), () => [], settlementOn(5042));
-    rpcServes(5042n);
+    rpcServes(5042002n);
     const { r } = mkRuntime({ rpcUrls: { arc: ARC_RPC } });
+    await run(r, TASK_ID, ARC_TASK);
+    expect(c.accepts[TASK_ID]).toBeUndefined();
+
+    rpcServes(5042n);
+    r.retries.get(TASK_ID).notBefore = 0;
     await run(r, TASK_ID, ARC_TASK);
     expect(c.accepts[TASK_ID]).toBe(1);
     expect(r.executions.get(TASK_ID).status).toBe('completed');
+  });
+
+  it('accepts it when the RPC is on that network, and asks the RPC once', async () => {
+    const c = stubBackend(() => ok({ ...ACCEPTED, chain: 'arc' }), () => [], settlementOn(5042));
+    const getNetwork = rpcServes(5042n);
+    const { r } = mkRuntime({ rpcUrls: { arc: ARC_RPC } });
+    const other = `0x${'ef'.repeat(32)}`;
+    await run(r, TASK_ID, ARC_TASK);
+    await run(r, other, { taskId: other, chain: 'arc' });
+    expect(c.accepts[TASK_ID]).toBe(1);
+    expect(c.accepts[other]).toBe(1);
+    expect(r.executions.get(TASK_ID).status).toBe('completed');
+    expect(getNetwork).toHaveBeenCalledTimes(1); // a matching answer is kept
   });
 
   it('holds nothing back when the chain cannot be checked: delivery checks it again before signing', async () => {

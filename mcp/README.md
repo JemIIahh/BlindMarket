@@ -192,9 +192,13 @@ network the spend started on. The record keeps the chain id, because a chain
 key names one network at a time: `arc` is Arc Testnet (5042002) or Arc mainnet
 (5042), whichever the backend runs. On another network, or for a record
 written before chain ids were kept, the retry answers `SETTLEMENT_CHANGED` and
-nothing is sent. `deploy_agent` records its fee transaction the moment it is
-broadcast, so a failed deploy retried with the same key deploys with that
-payment instead of paying again.
+nothing is sent. `deploy_agent` records its fee transaction, and its chain id,
+the moment it is broadcast, so a failed deploy retried with the same key
+deploys with that payment instead of paying again. Once the backend takes the
+fee on another network, that payment does not count there, and the retry
+answers `SETTLEMENT_CHANGED` and asks for a new key. A fee recorded without its
+chain id that the backend cannot find is looked up on the fee chain: when it is
+there the same key finishes the deploy, and when it is not the retry says so.
 
 ## Executor runtime tools (gated off)
 
