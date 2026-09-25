@@ -13,8 +13,9 @@
  * All writes are idempotent (SET overwrite with identical value), so
  * at-least-once delivery from the poll loop is safe.
  *
- * It also mirrors DisputeResolved rulings into the off-chain accounting
- * (see disputeListener), behind its own checkpoint:
+ * It also mirrors DisputeResolved rulings, and UnjudgedWorkReleased payouts
+ * of escalated work, into the off-chain accounting (see disputeListener),
+ * behind its own checkpoint:
  *
  *   base:events:dispute-checkpoint  → last block scanned for DisputeResolved
  *
@@ -266,10 +267,18 @@ async function indexDisputes(indexedTo: number): Promise<void> {
     const to = Math.min(upTo, from + MAX_BLOCKS_PER_TICK - 1);
 
     const events = await baseEscrow.queryFilter(baseEscrow.filters.DisputeResolved(), from, to);
+    // The worker collecting escalated work nobody ruled on pays out exactly
+    // like a ruling in its favour (security audit run 1, C18).
+    const releases = await baseEscrow.queryFilter(baseEscrow.filters.UnjudgedWorkReleased(), from, to);
     for (const ev of events) {
       const args = (ev as EventLog).args;
       if (!args) continue;
       await handleDisputeResolved('base', args.taskId as bigint, args.workerFavored as boolean);
+    }
+    for (const ev of releases) {
+      const args = (ev as EventLog).args;
+      if (!args) continue;
+      await handleDisputeResolved('base', args.taskId as bigint, true);
     }
     await redis.set(KEY.disputeCheckpoint, String(to));
 

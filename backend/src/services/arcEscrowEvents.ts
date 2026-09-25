@@ -14,8 +14,9 @@
  * safe. hash2id is first-writer-wins (SET NX): a later TaskCreated reusing a
  * live task's hash must not repoint it (see indexTaskCreated).
  *
- * It also mirrors DisputeResolved rulings into the off-chain accounting
- * (see disputeListener), behind its own checkpoint:
+ * It also mirrors DisputeResolved rulings, and UnjudgedWorkReleased payouts
+ * of escalated work, into the off-chain accounting (see disputeListener),
+ * behind its own checkpoint:
  *
  *   arc:events:dispute-checkpoint  → last block scanned for DisputeResolved
  */
@@ -204,10 +205,18 @@ async function indexDisputes(indexedTo: number): Promise<void> {
 
     const filter = arcEscrow.filters.DisputeResolved();
     const events = await arcEscrow.queryFilter(filter, from, to);
+    // The worker collecting escalated work nobody ruled on pays out exactly
+    // like a ruling in its favour (security audit run 1, C18).
+    const releases = await arcEscrow.queryFilter(arcEscrow.filters.UnjudgedWorkReleased(), from, to);
     for (const ev of events) {
       const args = (ev as EventLog).args;
       if (!args) continue;
       await handleDisputeResolved('arc', args.taskId as bigint, args.workerFavored as boolean);
+    }
+    for (const ev of releases) {
+      const args = (ev as EventLog).args;
+      if (!args) continue;
+      await handleDisputeResolved('arc', args.taskId as bigint, true);
     }
     await redis.set(KEY.disputeCheckpoint, String(to));
   } catch (err) {
