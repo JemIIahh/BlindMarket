@@ -19,6 +19,7 @@ import * as semanticProof from './semanticProof.js';
 import { redis } from './redis.js';
 import { payoutCurrency } from './settlementUnits.js';
 import { isCredited } from './creditLedger.js';
+import { chainScope } from './chainScope.js';
 import type { TaskChain } from './taskChain.js';
 
 // Earned-badge threshold: N settled completions per (agent, capability) with a
@@ -311,8 +312,10 @@ export async function recordWorkerDispute(
   // /submissions/confirm each recorded the round they observed, so replaying a
   // round's settlement tx to /submissions/confirm docked the executor a second
   // time for one on-chain failure (security audit run 1, C21). Keyed on the
-  // round, not the task hash: rounds 2 and 3 are disputes of their own.
-  const roundKey = `a2a:dispute-round:${round.chain}:${round.taskId}:${round.attempt}`;
+  // round, not the task hash: rounds 2 and 3 are disputes of their own. And
+  // on the chain's network (chainScope), since escrow ids restart at 1 on a
+  // new escrow: another network's round for the same id is not this one.
+  const roundKey = `a2a:dispute-round:${chainScope(round.chain)}:${round.taskId}:${round.attempt}`;
   let claimed = false;
   try {
     if ((await redis.set(roundKey, executorAddr.toLowerCase(), 'NX')) === null) {

@@ -185,6 +185,28 @@ describe('POST /tasks/index — re-index keeps the listed terms', () => {
     expect(a2aStore.setMeta).not.toHaveBeenCalled();
   });
 
+  // A listing from a network the chain has since moved off (chainScope) no
+  // longer resolves to an escrow task, but its a2a:state and credited_payouts
+  // row are keyed by the hash, so no new escrow may take the hash over,
+  // whatever the index says.
+  it('an escrow under the hash of a task listed on another network → 409 TASK_HASH_IN_USE, nothing written', async () => {
+    vi.mocked(a2aStore.getMeta).mockResolvedValue({ ...storedMeta(), chainId: 5042 } as any);
+    const res = await index(POSTER, { ...listedBody });
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('TASK_HASH_IN_USE');
+    expect(res.body.error.message).toContain('listed on another arc network');
+    expect(res.body.error.message).toContain('Cancel task 7');
+    expect(seedTaskId).not.toHaveBeenCalled();
+    expect(a2aStore.setMeta).not.toHaveBeenCalled();
+  });
+
+  it('a listing that records the network the chain runs on passes that check', async () => {
+    vi.mocked(a2aStore.getMeta).mockResolvedValue({ ...storedMeta(), chainId: 5042002 } as any);
+    const res = await index(POSTER, { ...listedBody });
+    expect(res.body.error?.code).not.toBe('TASK_HASH_IN_USE');
+    expect(seedTaskId).toHaveBeenCalled();
+  });
+
   it('a stranger is still refused by the poster check first', async () => {
     const res = await index(STRANGER, { ...listedBody, verificationMode: 'manual' });
     expect(res.body.error.code).toBe('NOT_TASK_AGENT');

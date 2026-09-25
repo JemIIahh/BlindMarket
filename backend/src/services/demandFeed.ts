@@ -1,6 +1,7 @@
 import { getPool } from './neonDb.js';
 import * as a2aStore from './a2aStore.js';
 import { resolveCachedTaskByHash } from './taskChain.js';
+import { onCurrentNetwork } from './chainScope.js';
 import * as escrowService from './escrow.js';
 import { config } from '../config.js';
 
@@ -124,7 +125,9 @@ export async function demandFeed(limit = 20): Promise<DemandGap[]> {
 }
 
 async function recomputeGaps(): Promise<DemandGap[]> {
-  const open = await a2aStore.listOpenTasks();
+  // As on the open feed (a2aStore.browseAgentTasks): a task listed on a
+  // network its chain has since moved off is not demand anyone can take.
+  const open = (await a2aStore.listOpenTasks()).filter(({ meta }) => onCurrentNetwork(meta));
   const openByHash = new Map<string, OpenTaskInfo>(
     open.map(({ meta }) => [
       meta.taskId.toLowerCase(),

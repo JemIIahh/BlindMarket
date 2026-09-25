@@ -67,7 +67,9 @@ describe('escrow fingerprint', () => {
 
   // Keys are per network (chainScope): Arc testnet keeps the bare 'arc:'
   // prefix, Arc mainnet gets 'arc@5042:', so a move starts from its own keys
-  // instead of tripping over (or reading) the old network's.
+  // instead of tripping over (or reading) the old network's. Whether the old
+  // network's keys mean the Redis is another deployment's is decided in
+  // deploymentIdentity.ts (deploymentIdentity.test.ts, "another network of a chain").
   it('gives another network of the chain its own keys, leaving the old network\'s alone', async () => {
     store.set('arc:events:escrow', `5042002:${ESCROW.toLowerCase()}`);
     const fp = await load();

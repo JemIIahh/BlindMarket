@@ -41,7 +41,9 @@ vi.mock('./redis.js', () => ({
 vi.mock('./database.js', () => ({ getDb: vi.fn() }));
 vi.mock('./neonDb.js', () => ({ getPool: vi.fn() }));
 
-const { chainScope, onCurrentNetwork } = await import('./chainScope.js');
+const { CHAIN_NETWORK_IDS, FIRST_NETWORK_CHAIN_ID, chainScope, onCurrentNetwork, otherNetworkIds } = await import('./chainScope.js');
+const { isSettlementChainKey } = await import('./settlementChains.js');
+const { TIER_CHAIN_IDS } = await import('./settlementTier.js');
 const { disputeKeys } = await import('./disputeKeys.js');
 const { fingerprintKey } = await import('./escrowFingerprint.js');
 const { factoryPaymentKey, transferPaymentKey } = await import('./spentDeployPayments.js');
@@ -64,6 +66,26 @@ describe('chainScope', () => {
     net.arc = 5042;
     expect(chainScope('arc')).toBe('arc@5042');
     expect(chainScope('base', 8453)).toBe('base@8453');
+  });
+
+  it('knows every network a settlement chain has a tier for, its first network among them', () => {
+    for (const [chain, ids] of Object.entries(TIER_CHAIN_IDS)) {
+      if (!isSettlementChainKey(chain)) continue;
+      expect(CHAIN_NETWORK_IDS[chain]).toEqual(expect.arrayContaining([ids.mainnet, ids.testnet]));
+    }
+    for (const [chain, ids] of Object.entries(CHAIN_NETWORK_IDS)) {
+      expect(ids).toContain(FIRST_NETWORK_CHAIN_ID[chain as keyof typeof FIRST_NETWORK_CHAIN_ID]);
+    }
+  });
+
+  it("names a chain's networks other than the one this backend runs it on", () => {
+    expect(otherNetworkIds('arc')).toEqual([5042]);
+    expect(otherNetworkIds('base')).toEqual([8453]);
+    net.arc = 5042;
+    expect(otherNetworkIds('arc')).toEqual([5042002]);
+    // A network no tier lists (a local devnet): every known one is another's.
+    net.arc = 31337;
+    expect(otherNetworkIds('arc')).toEqual([5042002, 5042]);
   });
 
   it('scopes every per-chain store by the network', () => {

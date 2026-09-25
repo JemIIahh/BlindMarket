@@ -4,11 +4,11 @@
  * A chain key names a chain ('arc', 'base'), not a network: the same key runs
  * on Arc testnet today and on Arc mainnet after the move. Everything the
  * backend stores per chain (the hash<->id index and its checkpoints, the
- * escrow fingerprint, dispute markers, deploy credits, spent deploy payments)
- * describes one escrow on one network. Keyed by chain alone, a move to
- * another network would read the old network's state as the new one's, and
- * escrow ids restart at 1 on every escrow, so an old entry names an unrelated
- * task on the new escrow.
+ * escrow fingerprint, dispute markers and rounds, deploy credits, spent
+ * deploy payments) describes one escrow on one network. Keyed by chain alone,
+ * a move to another network would read the old network's state as the new
+ * one's, and escrow ids restart at 1 on every escrow, so an old entry names
+ * an unrelated task on the new escrow.
  *
  * So state is stored under chainScope(chain). The network each chain has run
  * on in production so far keeps the bare chain key, and existing state stays
@@ -23,9 +23,29 @@ export const FIRST_NETWORK_CHAIN_ID: Readonly<Record<SettlementChainKey, number>
   arc: 5042002,
 };
 
+/**
+ * Every network each chain runs on: its testnet (the first network) and its
+ * mainnet. chainScope.test.ts checks them against settlementTier.ts
+ * TIER_CHAIN_IDS.
+ */
+export const CHAIN_NETWORK_IDS: Readonly<Record<SettlementChainKey, readonly number[]>> = {
+  base: [84532, 8453],
+  arc: [5042002, 5042],
+};
+
 /** Key prefix for a chain's stored state on `chainId`, by default the network this backend runs the chain on. */
 export function chainScope(chain: SettlementChainKey, chainId: number = settlementChainConfig(chain).chainId): string {
   return chainId === FIRST_NETWORK_CHAIN_ID[chain] ? chain : `${chain}@${chainId}`;
+}
+
+/**
+ * The networks of `chain` whose stored state lives under another scope than
+ * this backend's: state this backend did not write, whatever it holds
+ * (deploymentIdentity.ts).
+ */
+export function otherNetworkIds(chain: SettlementChainKey): number[] {
+  const own = chainScope(chain);
+  return CHAIN_NETWORK_IDS[chain].filter((chainId) => chainScope(chain, chainId) !== own);
 }
 
 /**
