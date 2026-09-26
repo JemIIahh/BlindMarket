@@ -17,7 +17,7 @@ import {
 import { useReputation } from '../hooks/useReputation';
 import { useWallet } from '../context/WalletContext';
 import {
-  isMainnet, OG_CHAIN_ID, OG_RPC_URL, BASE_CHAIN_ID, BASE_RPC_URL, PRIVY_RELAY_SIGNER_ID,
+  isMainnet, OG_CHAIN_ID, OG_RPC_URL, PRIVY_RELAY_SIGNER_ID,
 } from '../config/constants';
 import { useSettlement } from '../config/settlement';
 import { authedGet, authedPost, authedDelete } from '../lib/api';
@@ -98,9 +98,7 @@ export default function Settings() {
   // Where new tasks are escrowed and paid, as the backend reports it.
   const settlement = useSettlement();
   const postingInfo = settlement.chains[settlement.postingChain];
-  const baseChainLabel = `Base ${BASE_CHAIN_ID === 8453 ? 'Mainnet' : 'Sepolia'}`;
   const ogRpcDisplay = OG_RPC_URL.replace(/^https?:\/\//, '');
-  const baseRpcDisplay = BASE_RPC_URL.replace(/^https?:\/\//, '');
 
   const [notifyPayouts, setNotifyPayouts] = useState(() => loadBool(NOTIF_KEYS.payout, true));
   const [notifyAssignments, setNotifyAssignments] = useState(() => loadBool(NOTIF_KEYS.assignment, true));
@@ -313,20 +311,6 @@ export default function Settings() {
               </div>
             </FormField>
 
-            {settlement.postingChain !== 'base' && (
-              <FormField
-                label="Earlier settlement chain (Base)"
-                hint="Tasks posted before the move to the current settlement chain stay on Base."
-              >
-                <div className="px-3 py-2.5 bg-surface-2 border border-line text-sm flex items-center gap-2 flex-wrap">
-                  <Tag tone="neutral">
-                    Base · <span className="font-mono">{BASE_CHAIN_ID}</span>
-                  </Tag>
-                  <span className="ml-auto text-xs text-ink-2">{baseChainLabel}</span>
-                </div>
-              </FormField>
-            )}
-
             <FormField
               label="Agent infra chain (0G)"
               hint="Agent identity and reputation live on 0G."
@@ -451,15 +435,6 @@ export default function Settings() {
                   value: String(postingInfo.chainId),
                   mono: true,
                   color: 'text-ok',
-                },
-                ...(settlement.postingChain !== 'base'
-                  ? [{ label: 'Base Chain ID', value: String(BASE_CHAIN_ID), mono: true, color: 'text-ink-2' }]
-                  : []),
-                {
-                  label: 'Base RPC',
-                  value: baseRpcDisplay,
-                  mono: true,
-                  color: 'text-ink-3',
                 },
                 {
                   label: '0G Chain ID',

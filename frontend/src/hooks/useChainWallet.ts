@@ -1,10 +1,12 @@
-import { useCallback } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { formatUnits } from 'viem';
-import { useAccount, useBalance as useWagmiBalance, useReadContract } from 'wagmi';
+import { ethers } from 'ethers';
+import { useAccount, useBalance as useWagmiBalance } from 'wagmi';
 import { usePrivy } from '@privy-io/react-auth';
 import { ARC_CHAIN_ID, getNativeCurrency, getChainConfig, type SupportedChain } from '../config/constants';
 import { useSettlement } from '../config/settlement';
 import { useWallet } from '../context/WalletContext';
+import { providerFor } from '../lib/txSigner';
 
 export function useChainAddress(): string | undefined {
   const { address: evmAddress } = useWallet();
@@ -98,32 +100,59 @@ export function useUsdcBalance(forAddress?: string | null) {
   const { address: privyAddress } = useWallet();
   const settlement = useSettlement();
   const posting = settlement.chains[settlement.postingChain];
-  // The posting chain's settlement token (USDC on Arc and Base) and its chain
-  // id — the balance is read there, not hardcoded to Base.
   const usdcAddress = posting.token.address;
   const usdcChainId = posting.chainId;
-  // Privy embedded wallet may not sync with wagmi's useAccount immediately
   const address = forAddress !== undefined ? forAddress : (wagmiAddress || privyAddress);
-  const { data: rawBalance, refetch, isRefetching } = useReadContract({
-    address: usdcAddress as `0x${string}`,
-    abi: ERC20_ABI,
-    functionName: 'balanceOf',
-    args: address ? [address as `0x${string}`] : undefined,
-    chainId: usdcChainId,
-    query: { enabled: !!address && !!usdcAddress, refetchInterval: 10_000 },
-  });
 
-  // Unknown (still loading or read failed) must never render as zero — a
-  // failed read displayed as 0.00 sent users hunting a missing balance that
-  // was there all along. Callers show `formatted ?? '…'` while unknown.
-  const balance = rawBalance != null ? Number(rawBalance) / 1e6 : null;
+  // Read via the read-only Arc provider (PublicNode) instead of wagmi's
+  // wallet-bound provider: Privy's embedded wallet may not serve eth_call on
+  // Arc mainnet, and the user's wallet might be on another chain. PublicNode
+  // always answers, so the balance shows regardless of wallet state.
+  const [formatted, setFormatted] = useState<string | null>(null);
+  const [raw, setRaw] = useState<bigint | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const refresh = useCallback(async () => {
+    if (!address || !usdcAddress || !usdcChainId) {
+      setFormatted(null);
+      setRaw(null);
+      return;
+    }
+    setRefreshing(true);
+    try {
+      const provider = providerFor('arc');
+      const callData = new ethers.Interface(ERC20_ABI).encodeFunctionData('balanceOf', [address]);
+      const result = await provider.call({ to: usdcAddress, data: callData });
+      const decoded = new ethers.Interface(ERC20_ABI).decodeFunctionResult('balanceOf', result);
+      const value = decoded[0] as bigint;
+      setRaw(value);
+      const balance = Number(value) / 1e6;
+      setFormatted(
+        balance > 0
+          ? balance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })
+          : '0.00',
+      );
+    } catch {
+      // Keep the previous value on transient RPC errors; null while never read.
+      setFormatted((prev) => prev);
+      setRaw((prev) => prev);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [address, usdcAddress, usdcChainId]);
+
+  useEffect(() => {
+    void refresh();
+    const t = setInterval(refresh, 10_000);
+    return () => clearInterval(t);
+  }, [refresh]);
 
   return {
-    raw: rawBalance,
-    formatted: balance == null ? null : balance > 0 ? balance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : '0.00',
+    raw,
+    formatted,
     symbol: 'USDC',
     decimals: 6,
-    refresh: refetch,
-    refreshing: isRefetching,
+    refresh,
+    refreshing,
   };
 }

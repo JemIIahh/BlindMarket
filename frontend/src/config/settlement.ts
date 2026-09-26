@@ -86,7 +86,10 @@ function baseRelayChain(chainId: number): string {
   return chainId === 8453 ? 'base-mainnet' : 'base-sepolia';
 }
 
-/** The build-time table. Exported for tests; callers read the snapshot. */
+/** The build-time table. Exported for tests; callers read the snapshot.
+ *  Arc is the active settlement chain the wallet posts on. Base stays here for
+ *  legacy read-only consumers (older tasks, explorer links) — Settings no
+ *  longer surfaces it. */
 export function defaultSettlement(): SettlementSnapshot {
   return {
     // The posting rule the backend follows: Arc when it has an escrow, else
