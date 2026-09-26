@@ -12,8 +12,27 @@ cd "$ROOT/dashboard"
 [ ! -d node_modules ] && npm install --legacy-peer-deps --silent
 
 echo "🚀 Starting backend + dashboard..."
+# Stack select: ./dev.sh [local|testnet|production] (default local).
+# testnet/production overlay backend/.env.<stack> via node's --env-file,
+# before dotenv loads backend/.env: keys set in the overlay win, the rest
+# falls back to backend/.env. (--env-file is refused in NODE_OPTIONS, so the
+# tsx CLI is launched through node directly for those stacks.) Real deploys
+# don't use this — the hosting dashboard provides the environment directly.
+STACK="${1:-local}"
+BACKEND_CMD="npm run dev"
+case "$STACK" in
+  local) ;;
+  testnet|production)
+    ENV_FILE="$ROOT/backend/.env.$STACK"
+    [ -f "$ENV_FILE" ] || { echo "❌ missing $ENV_FILE"; exit 1; }
+    BACKEND_CMD="node --env-file=$ENV_FILE ./node_modules/tsx/dist/cli.mjs watch src/index.ts"
+    echo "   Stack     → $STACK ($ENV_FILE)"
+    ;;
+  *) echo "usage: ./dev.sh [local|testnet|production]"; exit 1 ;;
+esac
 # Start backend in background, dashboard in foreground
-npm run dev &
+# shellcheck disable=SC2086
+$BACKEND_CMD &
 BACKEND_PID=$!
 
 cd "$ROOT/dashboard"
