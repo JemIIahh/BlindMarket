@@ -329,8 +329,17 @@ describe("deployment sets (scripts/_deployments)", function () {
       // Base Sepolia's default record already has an escrow: the existing
       // "already holds" refusal applies, not this one.
       await rejects(() => preflightDeploy({ chainId: BASE_SEPOLIA, deploysEscrow: true }, {}), /already holds BlindEscrow/);
-      // Not shared: a fresh chain in the default set needs no explicit set.
-      await quiet(() => preflightDeploy({ chainId: ARC_MAINNET, deploysEscrow: true }, {}));
+      // Arc mainnet's default record holds its escrow since the mainnet deploy.
+      await rejects(() => preflightDeploy({ chainId: ARC_MAINNET, deploysEscrow: true }, {}), /already holds BlindEscrow/);
+      // Not shared: a chain in the default set with no escrow yet needs no
+      // explicit set. Base mainnet's record holds only zero placeholders; once
+      // it holds an escrow, the "already holds" refusal applies instead.
+      const baseMainnet = readRecord(recordPath(BASE_MAINNET, "default"))?.contracts?.BlindEscrow;
+      if (baseMainnet && !/^0x0{40}$/i.test(baseMainnet)) {
+        await rejects(() => preflightDeploy({ chainId: BASE_MAINNET, deploysEscrow: true }, {}), /already holds BlindEscrow/);
+        return;
+      }
+      await quiet(() => preflightDeploy({ chainId: BASE_MAINNET, deploysEscrow: true }, {}));
     });
 
     it("targets the staging record when DEPLOYMENT_SET=staging", async function () {
