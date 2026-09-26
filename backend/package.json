@@ -13,7 +13,8 @@
     "typecheck:all": "npm run typecheck && npm run typecheck:agents",
     "test": "vitest run",
     "test:watch": "vitest",
-    "eval:match": "tsx eval/run.ts"
+    "eval:match": "tsx eval/run.ts",
+    "migrate:redis": "tsx scripts/migrate-redis-to-redis.ts"
   },
   "dependencies": {
     "@0gfoundation/0g-compute-ts-sdk": "^0.8.0",
