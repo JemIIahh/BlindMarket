@@ -72,10 +72,15 @@ describe('chain ids default from SETTLEMENT_TIER', () => {
     expect(config.cctp.mainnet).toBe(false);
   });
 
-  it('is null when unset, and each chain keeps its own default', async () => {
+  it('is mainnet under NODE_ENV=production; each chain keeps its own default when tier is set explicitly', async () => {
+    // NODE_ENV=production is the single switch: it derives tier=mainnet, so
+    // every chain picks the mainnet chain id by default.
     const { config } = await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '84532' });
-    expect(config.settlementTier).toBeNull();
+    expect(config.settlementTier).toBe('mainnet');
     expect(config.ogChainId).toBe(16661);
+    // Explicit SETTLEMENT_TIER still wins over the NODE_ENV default.
+    const explicit = await load({ NODE_ENV: 'production', SETTLEMENT_TIER: 'testnet' });
+    expect(explicit.config.settlementTier).toBe('testnet');
   });
 
   it('throws on a value that is not a tier', async () => {
@@ -96,11 +101,13 @@ describe('Arc follows ARC_CHAIN_ID, and CCTP follows Arc', () => {
     expect(config.arcAgentFactoryAddress).not.toBe(TESTNET_FACTORY);
   });
 
-  it('NODE_ENV never moves Arc: production with no tier stays on Arc testnet', async () => {
+  it('NODE_ENV=production moves Arc to mainnet by default; ARC_CHAIN_ID keeps testnet when set', async () => {
+    // NODE_ENV=production now derives tier=mainnet, so Arc follows to mainnet.
     const { config } = await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '84532' });
-    expect(config).toMatchObject({ arcChainId: 5042002, arcRpcUrl: 'https://arc-testnet-rpc.publicnode.com', arcAgentFactoryAddress: TESTNET_FACTORY });
-    expect(config.cctp).toMatchObject({ mainnet: false, arcChainId: 5042002 });
-    const testnet = await load({ SETTLEMENT_TIER: 'testnet', NODE_ENV: 'production' });
+    expect(config).toMatchObject({ arcChainId: 5042, arcRpcUrl: 'https://arc-rpc.publicnode.com' });
+    expect(config.cctp).toMatchObject({ mainnet: true, arcChainId: 5042 });
+    // Explicit ARC_CHAIN_ID still wins for the mixed-shape legacy stacks.
+    const testnet = await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '84532', ARC_CHAIN_ID: '5042002' });
     expect(testnet.config.arcChainId).toBe(5042002);
   });
 
@@ -123,7 +130,7 @@ describe('Arc follows ARC_CHAIN_ID, and CCTP follows Arc', () => {
     const record = arcGeneratedRecord(5042);
     expect(mainnet.config.arcEscrowAddress).toBe(record?.addresses.blindEscrow ?? '');
     expect(mainnet.config.arcEscrowDeploymentBlock).toBe(record?.blocks.blindEscrow ?? 0);
-    const testnet = await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '84532' });
+    const testnet = await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '84532', ARC_CHAIN_ID: '5042002' });
     const testnetRecord = arcGeneratedRecord(5042002);
     expect(testnet.config.arcEscrowAddress).toBe(testnetRecord?.addresses.blindEscrow ?? '');
     expect(testnet.config.arcEscrowDeploymentBlock).toBe(testnetRecord?.blocks.blindEscrow ?? 0);
@@ -180,7 +187,9 @@ describe('Arc follows ARC_CHAIN_ID, and CCTP follows Arc', () => {
   });
 
   it('warns when production reads Arc mainnet through the public RPC', async () => {
-    const env = { NODE_ENV: 'production', BASE_CHAIN_ID: '84532', ARC_CHAIN_ID: '5042', ARC_ESCROW_ADDRESS: '0x1111111111111111111111111111111111111111' };
+    // NODE_ENV=production auto-derives tier=mainnet, so the whole stack is
+    // mainnet. A keyed URL silences the public-RPC warning.
+    const env = { NODE_ENV: 'production', ARC_CHAIN_ID: '5042', ARC_ESCROW_ADDRESS: '0x1111111111111111111111111111111111111111' };
     (await load(env)).assertBootConfig();
     expect(warned.join('\n')).toMatch(/Arc mainnet is read through the public RPC https:\/\/arc-rpc\.publicnode\.com, the default/);
     warned.length = 0;
@@ -229,16 +238,16 @@ describe('a chain id that contradicts the tier', () => {
 });
 
 describe('a stack with no tier named', () => {
-  it('warns when its chains are on different tiers — production today', async () => {
+  // NODE_ENV=production auto-derives tier=mainnet, so every chain follows it.
+  // An explicit chain id that contradicts the tier is refused at boot.
+  it('refuses a chain id that contradicts the NODE_ENV-derived tier', async () => {
     const { assertBootConfig } = await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '84532' });
-    assertBootConfig();
-    expect(warned.join('\n')).toMatch(
-      /0G is on mainnet \(16661\) and Base is on testnet \(84532\) — this stack is half mainnet, half testnet/,
-    );
+    expect(() => assertBootConfig()).toThrow(/1 fatal problem/);
+    expect(errored.join('\n')).toMatch(/BASE_CHAIN_ID=84532 is testnet, but SETTLEMENT_TIER=mainnet expects 8453/);
   });
 
   it('says nothing when both chains are on the same tier', async () => {
-    const { assertBootConfig } = await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '8453' });
+    const { assertBootConfig } = await load({ NODE_ENV: 'production' });
     assertBootConfig();
     expect(warned.join('\n')).not.toMatch(/half mainnet/);
   });

@@ -21,6 +21,31 @@ function unsetIfZero(address: string): string {
   return address.toLowerCase() === ZERO_ADDRESS ? '' : address;
 }
 
+/**
+ * NODE_ENV is the single switch. Two values, two coherent stacks:
+ *
+ *   NODE_ENV=production   → SETTLEMENT_TIER=mainnet, DEPLOYMENT_ID=production,
+ *                          ALLOW_NONMAINNET_PROD unset, boot prod posture
+ *   NODE_ENV=development  → no tier, no DEPLOYMENT_ID, no Redis claim,
+ *                          local dev posture
+ *
+ * SETTLEMENT_TIER and DEPLOYMENT_ID can still be set explicitly to override
+ * (a testnet production deploy sets SETTLEMENT_TIER=testnet while keeping
+ * NODE_ENV=production), but the common case needs one knob, not three.
+ * A contradiction between NODE_ENV and SETTLEMENT_TIER/DEPLOYMENT_ID is
+ * reported at boot, not silently overwritten.
+ */
+function deriveFromNodeEnv(): void {
+  const nodeEnv = (process.env.NODE_ENV ?? '').trim().toLowerCase();
+  if (nodeEnv === 'production') {
+    if (!process.env.SETTLEMENT_TIER) process.env.SETTLEMENT_TIER = 'mainnet';
+    if (!process.env.DEPLOYMENT_ID) process.env.DEPLOYMENT_ID = 'production';
+  }
+  // development: no tier, no id, dev posture — nothing to fill.
+}
+
+deriveFromNodeEnv();
+
 const IS_PROD = process.env.NODE_ENV === 'production';
 
 /**

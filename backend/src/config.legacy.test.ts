@@ -1,14 +1,14 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
 /**
- * What config resolves to with no chain env vars set, pinned before
- * SETTLEMENT_TIER existed.
+ * What config resolves to with no chain env vars set, pinned after NODE_ENV
+ * became the single switch.
  *
- * Production (NODE_ENV=production, BASE_CHAIN_ID=84532) and local development
- * are the two combinations that actually run, and neither may move: a changed
- * escrow or USDC address points the backend at contracts that aren't there.
- * Only mismatched combinations — a chain id from one tier with a NODE_ENV from
- * the other — are allowed to change, and they have their own tests.
+ * Two coherent stacks only — production (full mainnet) and development (testnet
+ * defaults). A mixed-tier "production on testnet" shape no longer exists; it
+ * was the source of the 2026-05-25 cross-env poaching incident and the live
+ * verifier-mismatch that has been unresolved since. Moving to mainnet also
+ * fixes the verifier role drift on Arc.
  *
  * Every chain var is cleared to '' rather than deleted, because config.ts
  * loads dotenv on import and would otherwise pick up the developer's .env.
@@ -17,6 +17,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 const ORIGINAL = { ...process.env };
 
 const CLEARED = {
+  STACK: '',
   SETTLEMENT_TIER: '',
   OG_RPC_URL: '',
   OG_CHAIN_ID: '',
@@ -78,8 +79,16 @@ const shape = (config: Awaited<ReturnType<typeof load>>) => ({
   irisApiBase: config.cctp.irisApiBase,
 });
 
-// Arc testnet, as production and local development have run it since Arc
-// became the posting chain.
+// Arc mainnet: the production shape. Full mainnet — 0G mainnet, Base mainnet,
+// Arc mainnet, mainnet CCTP.
+const ARC_MAINNET = {
+  arcChainId: 5042,
+  arcRpcUrl: 'https://arc-rpc.publicnode.com',
+  arcAgentFactoryAddress: '0x5A3312575F66c403ebcFfD1D9Fb868736B5102eb',
+  cctpArcChainId: 5042,
+};
+
+// Arc testnet: the development shape. Testnet on every chain.
 const ARC_TESTNET = {
   arcChainId: 5042002,
   arcRpcUrl: 'https://arc-testnet-rpc.publicnode.com',
@@ -88,27 +97,29 @@ const ARC_TESTNET = {
 };
 
 describe('config with no chain env vars', () => {
-  it('production on Base Sepolia: 0G mainnet, Base Sepolia, testnet CCTP', async () => {
-    expect(shape(await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '84532' }))).toEqual({
+  it('production: full mainnet on every chain', async () => {
+    expect(shape(await load({ NODE_ENV: 'production' }))).toEqual({
       ogChainId: 16661,
       ogRpcUrl: 'https://0g-rpc.publicnode.com',
       blindEscrowAddress: '0x3d0374963DaaD43e31d42373eb11156A8e8ce2Ff',
       taskRegistryAddress: '0x9CCF9c196006B573FaA9C9c9CebDd1296dbd5cE0',
       blindReputationAddress: '0x3af9232009C5da30AdA366B6E09849A040162A1a',
       inftAddress: '0xfE70a007AFD022A4824d1975A1facFA266F66E28',
-      baseChainId: 84532,
-      baseRpcUrl: 'https://base-sepolia-rpc.publicnode.com',
-      baseEscrowAddress: '0xCca5ab873158b888158AD9Dc36fb4Ee683eFbEBf',
-      baseUsdcAddress: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
-      ...ARC_TESTNET,
-      cctpMainnet: false,
-      cctpEthereumChainId: 11155111,
-      cctpBaseRpcUrl: 'https://base-sepolia-rpc.publicnode.com',
-      irisApiBase: 'https://iris-api-sandbox.circle.com',
+      baseChainId: 8453,
+      baseRpcUrl: 'https://base-rpc.publicnode.com',
+      // Base mainnet escrow is not deployed yet (contracts/deployments/base.json
+      // has USDC only); reads default to '' until the escrow ships.
+      baseEscrowAddress: '',
+      baseUsdcAddress: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+      ...ARC_MAINNET,
+      cctpMainnet: true,
+      cctpEthereumChainId: 1,
+      cctpBaseRpcUrl: 'https://base-rpc.publicnode.com',
+      irisApiBase: 'https://iris-api.circle.com',
     });
   });
 
-  it('development: 0G testnet, Base Sepolia, testnet CCTP', async () => {
+  it('development: 0G testnet, Base Sepolia, Arc testnet', async () => {
     expect(shape(await load({ NODE_ENV: 'development' }))).toEqual({
       ogChainId: 16602,
       ogRpcUrl: 'https://evmrpc-testnet.0g.ai',
@@ -120,24 +131,6 @@ describe('config with no chain env vars', () => {
       baseRpcUrl: 'https://base-sepolia-rpc.publicnode.com',
       baseEscrowAddress: '0xCca5ab873158b888158AD9Dc36fb4Ee683eFbEBf',
       baseUsdcAddress: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
-      ...ARC_TESTNET,
-      cctpMainnet: false,
-      cctpEthereumChainId: 11155111,
-      cctpBaseRpcUrl: 'https://base-sepolia-rpc.publicnode.com',
-      irisApiBase: 'https://iris-api-sandbox.circle.com',
-    });
-  });
-
-  // BEHAVIOUR CHANGE: CCTP follows Arc, the chain it mints into. With Base
-  // alone on mainnet it used to offer mainnet source chains while minting into
-  // Arc testnet.
-  it('production on Base mainnet: mainnet Base defaults; CCTP stays on Arc testnet\'s tier', async () => {
-    const config = await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '8453' });
-    expect(shape(config)).toMatchObject({
-      ogChainId: 16661,
-      baseChainId: 8453,
-      baseRpcUrl: 'https://base-rpc.publicnode.com',
-      baseUsdcAddress: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
       ...ARC_TESTNET,
       cctpMainnet: false,
       cctpEthereumChainId: 11155111,
