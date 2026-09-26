@@ -91,4 +91,31 @@ describe('startBackgroundWriters', () => {
     await startBackgroundWriters(backgroundWriters({ AGENT_RECONCILE_ON_BOOT: 'false' }));
     expect(started).not.toContain('reconcileAgents');
   });
+
+  it('splits writers by RUN_MODE: api runs non-indexers + reconcile, indexer runs only chain indexers, all runs everything', async () => {
+    identity.status = { role: 'owner', writersAllowed: true };
+    const cases = [
+      {
+        env: { RUN_MODE: 'api' },
+        expected: ['startCctpAttestationPoller', 'startExpirySweepLoop', 'reconcileAgents'],
+      },
+      {
+        env: { RUN_MODE: 'indexer' },
+        expected: ['startBaseEscrowEventLoop', 'startArcEscrowEventLoop', 'startAgentFactoryListener'],
+      },
+      {
+        env: { RUN_MODE: 'all' },
+        expected: EVERY_WRITER,
+      },
+    ];
+    for (const { env, expected } of cases) {
+      started.length = 0;
+      await startBackgroundWriters(backgroundWriters(env));
+      expect(started).toEqual(expected);
+    }
+  });
+
+  it('refuses an unknown RUN_MODE', () => {
+    expect(() => backgroundWriters({ RUN_MODE: 'invalid' })).toThrow(/RUN_MODE=.*invalid/);
+  });
 });

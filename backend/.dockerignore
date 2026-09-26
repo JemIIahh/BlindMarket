@@ -1,0 +1,24 @@
+# Build output
+dist/
+node_modules/
+*.tsbuildinfo
+
+# Tests
+coverage/
+*.test.ts
+*.test.mjs
+vitest.config.ts
+
+# Local env files — never embed secrets in images
+.env
+.env.*
+!.env.example
+!.env.staging-testnet.example
+!.env.base-sepolia.example
+
+# Misc
+.git/
+.github/
+.vitest/
+*.md
+docs/

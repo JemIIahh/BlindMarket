@@ -13,13 +13,15 @@ services:
       timeout: 5s
       retries: 5
 
-  backend:
+  api:
     build: ./backend
+    image: blindmarket-backend:latest
     restart: unless-stopped
     ports:
       - "3001:3001"
     env_file: ./backend/.env
     environment:
+      RUN_MODE: api
       REDIS_URL: redis://redis:6379
     depends_on:
       redis:
@@ -27,14 +29,28 @@ services:
     volumes:
       - backend_data:/app/data
 
+  indexer:
+    image: blindmarket-backend:latest
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+    command: ["node", "dist/indexer.js"]
+    env_file: ./backend/.env
+    environment:
+      RUN_MODE: indexer
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      - api
+
   frontend:
     build: ./frontend
     restart: unless-stopped
     ports:
       - "5173:80"
     depends_on:
-      - backend
+      - api
 
 volumes:
   redis_data:
   backend_data:
+

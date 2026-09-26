@@ -93,6 +93,23 @@ export function parseDeploymentId(raw: string | undefined): string | null {
   return value;
 }
 
+/**
+ * Which half of the backend this process runs, for split topologies (one API
+ * container + one indexer container sharing a Redis, see docker-compose.yml).
+ * `all` (default) is today's behaviour: HTTP + every background writer.
+ * `api` serves HTTP and runs every writer EXCEPT the chain-event indexers;
+ * `indexer` runs only those indexers and never binds a port. Anything else
+ * fails at load — a typo must not silently drop indexing or double-poll.
+ */
+export type RunMode = 'all' | 'api' | 'indexer';
+
+export function parseRunMode(raw: string | undefined): RunMode {
+  const value = (raw ?? '').trim().toLowerCase();
+  if (value === '' || value === 'all') return 'all';
+  if (value === 'api' || value === 'indexer') return value;
+  throw new Error(`RUN_MODE="${raw}" is not a run mode. Use "all" (HTTP + indexers), "api" (HTTP, no chain indexers) or "indexer" (chain indexers, no HTTP).`);
+}
+
 /** Where a production backend says it lives, when PUBLIC_*_URL is unset. */
 export const PRODUCTION_PUBLIC_URLS = {
   PUBLIC_API_URL: 'https://api.blindmarket.xyz',
@@ -402,6 +419,8 @@ export const config = {
   // right escrow — see contractsEnvPrefix in services/chainNetwork.ts.
   deploymentSet: DEPLOYMENT_SET,
   deploymentId: parseDeploymentId(process.env.DEPLOYMENT_ID),
+  // Which half of the backend this process runs (all | api | indexer).
+  runMode: parseRunMode(process.env.RUN_MODE),
   // Set for ONE boot to take this Redis over for DEPLOYMENT_ID from the
   // owner it names, or "unclaimed". Read as set and checked where it is used
   // (services/deploymentIdentity.ts): production ignores it, so a value left

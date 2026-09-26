@@ -7,7 +7,7 @@
     "dev": "tsx watch src/index.ts",
     "start": "npx tsx src/index.ts",
     "start:waitlist": "node --import tsx src/waitlist/server.ts",
-    "build": "echo 'No build step needed — using tsx'",
+    "build": "tsc -p tsconfig.json --outDir dist && cp -r src/abi dist/abi && cp -r agents dist/agents",
     "typecheck": "tsc --noEmit",
     "typecheck:agents": "tsc -p tsconfig.agents.json",
     "typecheck:all": "npm run typecheck && npm run typecheck:agents",
