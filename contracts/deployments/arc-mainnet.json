@@ -1,0 +1,14 @@
+{
+  "network": "arc-mainnet",
+  "chainId": 5042,
+  "deployer": "0x7820e786d9AaeBbEbdcE4b0CFaF0db092e34E5Aa",
+  "timestamp": "2026-09-26T00:24:36.827Z",
+  "note": "BlindEscrow only — agent infra stays on 0G. Settles in the USDC ERC-20 (6 decimals); native USDC (address(0)) must never be allowlisted. No account-abstraction contracts on Arc. Verifier must be rotated to marketplace signer.",
+  "contracts": {
+    "BlindEscrow": "0xd2B819B57a9568Cb6bFc98C687F9a851EC8330C4",
+    "USDC": "0x3600000000000000000000000000000000000000"
+  },
+  "blocks": {
+    "BlindEscrow": 22772389
+  }
+}
