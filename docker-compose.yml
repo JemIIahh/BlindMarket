@@ -42,15 +42,14 @@ services:
     depends_on:
       - api
 
-  frontend:
-    build: ./frontend
-    restart: unless-stopped
-    ports:
-      - "5173:80"
-    depends_on:
-      - api
-
+  # frontend:
+  #   build: ./frontend
+  #   restart: unless-stopped
+  #   ports:
+  #     - "5173:80"
+  #   depends_on:
+  #     - api
+  #
 volumes:
   redis_data:
   backend_data:
-
