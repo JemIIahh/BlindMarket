@@ -132,8 +132,11 @@ export function useUsdcBalance(forAddress?: string | null) {
           ? balance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })
           : '0.00',
       );
-    } catch {
-      // Keep the previous value on transient RPC errors; null while never read.
+    } catch (err) {
+      // Log so a silent failure (wrong chain, RPC down) is visible instead
+      // of looking like "no balance". The TopBar still shows '…' until a
+      // refresh succeeds.
+      console.warn('[useUsdcBalance] read failed:', (err as Error)?.message ?? err);
       setFormatted((prev) => prev);
       setRaw((prev) => prev);
     } finally {
