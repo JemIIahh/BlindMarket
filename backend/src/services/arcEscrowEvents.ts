@@ -26,7 +26,7 @@
  */
 
 import type { EventLog } from 'ethers';
-import { arcEscrow, arcProvider } from './chain.js';
+import { arcArchiveEscrow, arcEscrow, arcProvider } from './chain.js';
 import { redis } from './redis.js';
 import { backgroundWritesAllowed } from './deploymentIdentity.js';
 import { handleDisputeResolved, retryParkedDisputes } from './disputeListener.js';
@@ -44,6 +44,42 @@ const KEY = {
   get checkpoint() { return `${chainScope('arc')}:events:checkpoint`; },
   get disputeCheckpoint() { return `${chainScope('arc')}:events:dispute-checkpoint`; },
 };
+
+function isPrunedHistoryError(err: unknown): boolean {
+  const msg = (err as Error)?.message ?? '';
+  const code = (err as { code?: unknown }).code;
+  return (
+    msg.toLowerCase().includes('pruned history') ||
+    msg.toLowerCase().includes('pruned') ||
+    (typeof code === 'number' && code === 4444) ||
+    msg.toLowerCase().includes('history unavailable')
+  );
+}
+
+/**
+ * Query Arc escrow logs, falling back to an archive RPC when the primary
+ * RPC has pruned the requested block range. Without an archive RPC the error
+ * is re-thrown with a note telling the operator to set ARC_ARCHIVE_RPC_URL.
+ */
+async function queryArcEscrowLogs(
+  filter: any,
+  from: number,
+  to: number,
+): Promise<any[]> {
+  if (!arcEscrow) return [];
+  try {
+    return await arcEscrow.queryFilter(filter, from, to);
+  } catch (err) {
+    if (!isPrunedHistoryError(err)) throw err;
+    if (arcArchiveEscrow) {
+      console.warn(`[arcEscrowEvents] primary RPC pruned history for blocks ${from}..${to}, trying archive RPC`);
+      return arcArchiveEscrow.queryFilter(filter, from, to);
+    }
+    throw new Error(
+      `${(err as Error).message} — set ARC_ARCHIVE_RPC_URL to an Arc RPC that retains full history (or a window covering your escrow's deploy block).`,
+    );
+  }
+}
 
 // ── Polling config ──────────────────────────────────────────────────────────
 
@@ -166,7 +202,7 @@ async function indexTaskCreated(): Promise<number | null> {
     const lagBlocks = latest - to;
 
     const filter = arcEscrow.filters.TaskCreated();
-    const events = await arcEscrow.queryFilter(filter, from, to);
+    const events = await queryArcEscrowLogs(filter, from, to);
 
     if (events.length > 0) {
       const pipe = redis.pipeline();
@@ -219,10 +255,10 @@ async function indexDisputes(indexedTo: number): Promise<void> {
     if (from > to) return;
 
     const filter = arcEscrow.filters.DisputeResolved();
-    const events = await arcEscrow.queryFilter(filter, from, to);
+    const events = await queryArcEscrowLogs(filter, from, to);
     // The worker collecting escalated work nobody ruled on pays out exactly
     // like a ruling in its favour (security audit run 1, C18).
-    const releases = await arcEscrow.queryFilter(arcEscrow.filters.UnjudgedWorkReleased(), from, to);
+    const releases = await queryArcEscrowLogs(arcEscrow.filters.UnjudgedWorkReleased(), from, to);
     for (const ev of events) {
       const args = (ev as EventLog).args;
       if (!args) continue;

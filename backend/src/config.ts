@@ -357,6 +357,10 @@ export const config = {
   // chain id; set an address or block only to override the record (a redeploy
   // not yet recorded, or a staging stack that must name its own).
   arcRpcUrl: ARC_RPC_URL,
+  // Optional archive RPC for Arc log scans. Public/free RPCs often prune history,
+  // so eth_getLogs on old blocks fails; set this to an endpoint that keeps full
+  // archive (or at least enough for your escrow's age).
+  arcArchiveRpcUrl: optional('ARC_ARCHIVE_RPC_URL', ''),
   arcChainId: ARC_CHAIN_ID,
   arcEscrowAddress: ARC_ESCROW,
   arcUsdcAddress: ARC_USDC_ADDRESS,

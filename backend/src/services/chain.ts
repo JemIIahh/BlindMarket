@@ -85,6 +85,14 @@ export const arcProvider: ethers.JsonRpcProvider = new ethers.JsonRpcProvider(ar
   staticNetwork: true,
 });
 
+// Optional archive-only provider for Arc log scans. Public endpoints (e.g.
+// PublicNode) prune history; when the primary RPC returns "pruned history
+// unavailable" we fall back to this endpoint, which is expected to keep the
+// full chain or a deeper window.
+const arcArchiveProvider = config.arcArchiveRpcUrl
+  ? new ethers.JsonRpcProvider(config.arcArchiveRpcUrl, config.arcChainId, { batchMaxCount: 1, staticNetwork: true })
+  : null;
+
 /** Marketplace signer for Arc escrow (holds verifier role on Arc BlindEscrow). */
 export const arcMarketplaceSigner: ethers.Wallet | null = config.arcMarketplaceSignerPrivateKey
   ? new ethers.Wallet(config.arcMarketplaceSignerPrivateKey, arcProvider)
@@ -94,6 +102,13 @@ export const arcMarketplaceSigner: ethers.Wallet | null = config.arcMarketplaceS
 export const arcEscrow: ethers.Contract | null = config.arcEscrowAddress
   ? new ethers.Contract(config.arcEscrowAddress, loadAbi('BlindEscrow'), arcProvider)
   : null;
+
+/** Archive-backed read-only BlindEscrow on Arc, used only when the primary
+ *  RPC prunes history. Null when no ARC_ARCHIVE_RPC_URL is set. */
+export const arcArchiveEscrow: ethers.Contract | null =
+  config.arcEscrowAddress && arcArchiveProvider
+    ? new ethers.Contract(config.arcEscrowAddress, loadAbi('BlindEscrow'), arcArchiveProvider)
+    : null;
 
 /** Write-capable BlindEscrow on Arc bound to the Arc marketplace signer. */
 export const arcEscrowAsMarketplace: ethers.Contract | null = config.arcEscrowAddress && arcMarketplaceSigner

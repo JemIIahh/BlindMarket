@@ -66,6 +66,7 @@ cctpRouter.get('/config', (_req, res) => {
       // mismatched deployment must fail closed, not offer mainnet chains to a
       // testnet app (or the reverse).
       network: config.cctp.mainnet ? 'mainnet' : 'testnet',
+      arcChainId: config.cctp.arcChainId,
       baseChainId: getSettlementCctpChain()?.chainId ?? null,
       chains: supportedCctpChains().map((c) => ({
         chainKey: c.chainKey,

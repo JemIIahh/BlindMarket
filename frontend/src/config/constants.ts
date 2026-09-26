@@ -68,12 +68,18 @@ export { BASE_CHAIN_ID };
 // the backend's CCTP entry for this Arc network.
 export const SETTLEMENT_CCTP_CHAIN_KEY = isArcMainnet ? 'arc' : 'arc-testnet';
 
-/** CCTP is usable only when the backend's CCTP settlement leg is the chain
+/** CCTP is usable only when the backend's CCTP Arc leg is the chain
  *  this app settles on. A mismatched deployment hides bridging entirely
  *  instead of bridging onto the wrong network — a real burn/mint on the
  *  wrong tier. */
-export function isCctpUsable(cfg: { enabled: boolean; baseChainId?: number | null }): boolean {
-  return cfg.enabled && cfg.baseChainId === ARC_CHAIN_ID;
+export function isCctpUsable(cfg: { enabled: boolean; arcChainId?: number | null; baseChainId?: number | null }): boolean {
+  if (!cfg.enabled) return false;
+  if (cfg.arcChainId != null) return cfg.arcChainId === ARC_CHAIN_ID;
+  // Legacy backends that don't return arcChainId: fall back to baseChainId so
+  // existing testnet↔testnet setups still pass. Base ≠ Arc chain ids, so this
+  // is only correct when the backend runs on Arc testnet (5042002) and a
+  // Base Sepolia (84532) CCTP leg — exactly the legacy production shape.
+  return cfg.baseChainId === ARC_CHAIN_ID;
 }
 
 export const BASE_RPC_URL =
