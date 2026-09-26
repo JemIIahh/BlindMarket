@@ -16,6 +16,7 @@ services:
   api:
     build: ./backend
     image: blindmarket-backend:latest
+    pull_policy: never
     restart: unless-stopped
     ports:
       - "3001:3001"
@@ -31,6 +32,7 @@ services:
 
   indexer:
     image: blindmarket-backend:latest
+    pull_policy: never
     restart: unless-stopped
     deploy:
       replicas: 1
