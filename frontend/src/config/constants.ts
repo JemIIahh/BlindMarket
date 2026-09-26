@@ -13,28 +13,19 @@ export const WORKER_SHARE_PCT = 100 - PLATFORM_FEE_PCT; // 90
 export const FEE_SPLIT_LABEL = `${WORKER_SHARE_PCT}/${PLATFORM_FEE_PCT}`; // "90/10"
 
 // Chain/network configuration is driven by a single `VITE_NETWORK` env var.
-// Valid values: mainnet | testnet. Defaults to testnet.
-// Individual chain IDs / RPCs can still be overridden with VITE_OG_CHAIN_ID,
-// VITE_BASE_CHAIN_ID, VITE_OG_RPC_URL and VITE_BASE_RPC_URL.
+// Valid values: mainnet | testnet. Defaults to testnet. Individual chain IDs
+// are derived from VITE_NETWORK; only RPCs can be overridden with env vars.
 const NETWORK = (import.meta.env.VITE_NETWORK as 'mainnet' | 'testnet') || 'testnet';
 const networkIsMainnet = NETWORK === 'mainnet';
 
 // Contract-address fallbacks are single-sourced from contracts/deployments/*.json
 // via contracts/scripts/sync-addresses.ts (do not hand-edit contractAddresses.ts).
-const OG_CHAIN_ID = Number(
-  import.meta.env.VITE_OG_CHAIN_ID || (networkIsMainnet ? '16661' : '16602'),
-);
-const BASE_CHAIN_ID = Number(
-  import.meta.env.VITE_BASE_CHAIN_ID || (networkIsMainnet ? '8453' : '84532'),
-);
-// Arc (Circle's L1, USDC is the gas token) runs on the network
-// VITE_ARC_CHAIN_ID names, Arc testnet (5042002) unless it says Arc mainnet
-// (5042), as the backend's follows ARC_CHAIN_ID. Never VITE_NETWORK: a build
-// with VITE_NETWORK=mainnet still settles on Arc testnet until this says
-// otherwise.
-const ARC_CHAIN_ID = Number(
-  import.meta.env.VITE_ARC_CHAIN_ID || '5042002',
-);
+// All chain ids come from VITE_NETWORK only. No env overrides: mainnet build
+// gets 0G mainnet (16661), Base mainnet (8453), Arc mainnet (5042); testnet
+// build gets 0G testnet (16602), Base Sepolia (84532), Arc testnet (5042002).
+const OG_CHAIN_ID = Number(networkIsMainnet ? '16661' : '16602');
+const BASE_CHAIN_ID = Number(networkIsMainnet ? '8453' : '84532');
+const ARC_CHAIN_ID = Number(networkIsMainnet ? '5042' : '5042002');
 
 const isMainnet = OG_CHAIN_ID === 16661;
 const isBaseMainnet = BASE_CHAIN_ID === 8453;
