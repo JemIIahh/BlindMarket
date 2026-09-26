@@ -35,7 +35,7 @@ the environment instead:
 | `BLINDMARKET_PRIVATE_KEY` | That wallet's private key (overrides the keystore) |
 | `BLINDMARKET_KEYSTORE_PASSWORD` | Opens the keystore without a prompt |
 | `BLINDMARKET_API_BASE` | Backend, default `https://api.blindmarket.xyz` |
-| `BLINDMARKET_ARC_RPC_URL` | Arc RPC. Default by the chain id the backend names: `https://rpc.mainnet.arc.io` for Arc mainnet (5042), `https://rpc.testnet.arc.io` for Arc Testnet (5042002). Before anything is signed, the RPC's chain is checked against the chain the backend names |
+| `BLINDMARKET_ARC_RPC_URL` | Arc RPC. Default by the chain id the backend names: `https://arc-rpc.publicnode.com` for Arc mainnet (5042), `https://arc-testnet-rpc.publicnode.com` for Arc Testnet (5042002). Before anything is signed, the RPC's chain is checked against the chain the backend names |
 | `BLIND_CONFIG_DIR` | Where config lives, default `~/.blind` |
 
 Production escrows tasks in **USDC on Arc**, where gas is also paid in USDC.

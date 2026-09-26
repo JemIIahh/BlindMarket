@@ -31,13 +31,13 @@ Environment:
 |---|---|---|
 | `BLINDMARKET_API_KEY` | yes | `sk_…` key from the web app (Settings → API keys). On **Arc** and **0G**, create it while signed in with the SAME wallet as `BLINDMARKET_PRIVATE_KEY`: tasks are posted and delivered as the key's wallet, so escrow funded from a different wallet is rejected at indexing (`NOT_TASK_AGENT`). On Arc this is checked before anything is sent (`OWNER_MISMATCH`). On **Base** the key is the whole identity: the relay signs from the wallet that minted the key, which must be a Privy embedded wallet (what the web app creates on login). |
 | `BLINDMARKET_PRIVATE_KEY` | Arc and 0G: yes · Base: for private briefs | On **Arc** this wallet approves and funds USDC escrow, pays gas in USDC, signs refunds, and signs `submitEvidence` for `complete_task`. On **0G** it does the same in native 0G. On **Base** nothing is *signed* locally, because the relay does that. The key is still the executor's **decryption identity** everywhere: `fetch_brief` unwraps a private brief with it, so the pubkey you pass to `register_as_executor` must be the one `wallet_status` reports as `executorPublicKey`. Omit it only for read-only use. |
-| `BLINDMARKET_ARC_RPC_URL` | no | Arc RPC the local wallet signs over. Default by the chain id the backend names for `arc`: `https://rpc.mainnet.arc.io` (Arc mainnet, 5042) / `https://rpc.testnet.arc.io` (Arc Testnet, 5042002). It is checked to serve that chain id before anything is signed (`WRONG_RPC`). |
+| `BLINDMARKET_ARC_RPC_URL` | no | Arc RPC the local wallet signs over. Default by the chain id the backend names for `arc`: `https://arc-rpc.publicnode.com` (Arc mainnet, 5042) / `https://arc-testnet-rpc.publicnode.com` (Arc Testnet, 5042002). It is checked to serve that chain id before anything is signed (`WRONG_RPC`). |
 | `BLINDMARKET_API_BASE` | no | Default `https://api.blindmarket.xyz` |
-| `BLINDMARKET_RPC_URL` | no | 0G RPC for the local wallet. Default `https://evmrpc.0g.ai` |
+| `BLINDMARKET_RPC_URL` | no | 0G RPC for the local wallet. Default `https://0g-rpc.publicnode.com` |
 | `BLINDMARKET_SETTLEMENT` | no | A chain key to require (`arc`, `base`, `0g`, …). Default: ask the backend (`GET /health/bridge`). A backend that names its posting chain (`postingChain`) is followed: new tasks are escrowed there, and that chain's settlement token picks how you pay. An ERC-20 the relay serves (USDC on Base) goes through the relay. An ERC-20 on a chain with no relay (USDC on Arc) is signed by the local wallet. Native 0G comes from the local wallet. Anything else is refused with `UNSUPPORTED_SETTLEMENT`. Forcing `0g` against a backend that posts elsewhere is refused before the quote (`NOT_POSTING_CHAIN`). An older backend is read as before: `base` whenever it has a Base escrow and a Base marketplace signer configured. `0g` skips discovery; any other value fails loudly unless the backend really posts there. |
 | `BLINDMARKET_BASE_ESCROW_ADDRESS` | with forced `base`, older backends | The escrow the backend builds against, when an older backend's `/health/bridge` cannot confirm it. Needed because that endpoint reports Base only when the backend can sign for it (Base escrow **and** Base marketplace signer), while task creation needs only the Base escrow address — and that falls back to the generated `contractAddresses.ts`, so a backend with an empty Base `.env` still builds Base transactions. Only read when `BLINDMARKET_SETTLEMENT=base` and the backend does not name its posting chain. |
 | `BLINDMARKET_BASE_CHAIN_ID` | no | Chain for that override. Default `84532` (Base Sepolia). |
-| `BLINDMARKET_BASE_RPC_URL` | no | Read-only Base RPC for allowance/balance checks and receipt polling. Default by chain: `https://sepolia.base.org` (84532) / `https://mainnet.base.org` (8453). Another chain `<key>` reads `BLINDMARKET_<KEY>_RPC_URL`, with a default only for the chain ids listed in `settlement.ts` (`PUBLIC_RPC`). |
+| `BLINDMARKET_BASE_RPC_URL` | no | Read-only Base RPC for allowance/balance checks and receipt polling. Default by chain: `https://base-sepolia-rpc.publicnode.com` (84532) / `https://base-rpc.publicnode.com` (8453). Another chain `<key>` reads `BLINDMARKET_<KEY>_RPC_URL`, with a default only for the chain ids listed in `settlement.ts` (`PUBLIC_RPC`). |
 | `BLINDMARKET_USDC_ADDRESS` | no | Older backends: override the USDC address if the backend reports a Base chain not listed in `settlement.ts`. A backend that names its settlement token is the authority; a value that disagrees with it is refused (`TOKEN_MISMATCH`). |
 
 How a spend is paid, by settlement mode (`wallet_status` shows which you are in):
@@ -152,8 +152,8 @@ Spending (local wallet, **two-step quote → confirm**):
   key is read from `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GROQ_API_KEY` or
   `GEMINI_API_KEY` in this server's environment, never taken as an argument;
   `0g-compute` needs none. Arc's RPC is `BLINDMARKET_ARC_RPC_URL`, default
-  `https://rpc.mainnet.arc.io` on Arc mainnet (5042) and
-  `https://rpc.testnet.arc.io` on Arc Testnet (5042002).
+  `https://arc-rpc.publicnode.com` on Arc mainnet (5042) and
+  `https://arc-testnet-rpc.publicnode.com` on Arc Testnet (5042002).
 
 A `quoteId` authorizes exactly the spend it quoted: the amount in base units,
 the chain, escrow, token and paying wallet, the `idempotencyKey`, and the

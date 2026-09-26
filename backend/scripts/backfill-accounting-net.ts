@@ -38,7 +38,7 @@
  *
  *   # Point at a specific DB / chain when the defaults don't match your env:
  *   DB_PATH=/srv/blindmarket/data/blindmarket.db \
- *   OG_RPC_URL=https://evmrpc.0g.ai \
+ *   OG_RPC_URL=https://0g-rpc.publicnode.com \
  *   BLIND_ESCROW_ADDRESS=0x3d0374963DaaD43e31d42373eb11156A8e8ce2Ff \
  *   npx tsx scripts/backfill-accounting-net.ts --apply
  *
@@ -68,7 +68,7 @@ const DB_PATH = process.env.DB_PATH ?? path.resolve(__dirname, '../data/blindmar
 // automatically. RPC and escrow MUST be the same network — a mismatch makes
 // getTask/feeBps revert (e.g. the mainnet escrow address is BlindReputation on
 // testnet, which has no feeBps()).
-const OG_RPC_URL = process.env.OG_RPC_URL ?? 'https://evmrpc.0g.ai';
+const OG_RPC_URL = process.env.OG_RPC_URL ?? 'https://0g-rpc.publicnode.com';
 const ESCROW_ADDRESS =
   process.env.BLIND_ESCROW_ADDRESS ??
   process.env.ESCROW_ADDRESS ??
@@ -112,7 +112,7 @@ async function main(): Promise<void> {
       `feeBps() reverted at ${ESCROW_ADDRESS} on chain ${network.chainId}.\n` +
         'This almost always means OG_RPC_URL and the escrow address are on different\n' +
         'networks. Set BLIND_ESCROW_ADDRESS + OG_RPC_URL to the same chain (mainnet:\n' +
-        '0x3d0374963DaaD43e31d42373eb11156A8e8ce2Ff @ https://evmrpc.0g.ai).',
+        '0x3d0374963DaaD43e31d42373eb11156A8e8ce2Ff @ https://0g-rpc.publicnode.com).',
     );
     process.exit(1);
   }

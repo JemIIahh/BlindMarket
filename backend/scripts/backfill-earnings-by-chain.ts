@@ -50,8 +50,8 @@
  *
  * Usage (from backend/, with the target's env):
  *   DATABASE_URL=postgres://… \
- *   OG_RPC_URL=https://evmrpc.0g.ai BLIND_ESCROW_ADDRESS=0x3d03… ESCROW_DEPLOYMENT_BLOCK=33459885 \
- *   BASE_RPC_URL=https://sepolia.base.org BASE_ESCROW_ADDRESS=0xCca5… \
+ *   OG_RPC_URL=https://0g-rpc.publicnode.com BLIND_ESCROW_ADDRESS=0x3d03… ESCROW_DEPLOYMENT_BLOCK=33459885 \
+ *   BASE_RPC_URL=https://base-sepolia-rpc.publicnode.com BASE_ESCROW_ADDRESS=0xCca5… \
  *   BASE_ESCROW_DEPLOYMENT_BLOCK=46211199 BASE_USDC_ADDRESS=0x036C… \
  *   REDIS_URL=redis://… \
  *   npx tsx scripts/backfill-earnings-by-chain.ts [--apply] [--skip-listener-check] [--claim-pending]
@@ -133,7 +133,7 @@ function sources(): EscrowSource[] {
   const list: EscrowSource[] = [{
     label: '0G',
     unit: '0G',
-    rpcUrl: APPLY ? required('OG_RPC_URL') : process.env.OG_RPC_URL || 'https://evmrpc.0g.ai',
+    rpcUrl: APPLY ? required('OG_RPC_URL') : process.env.OG_RPC_URL || 'https://0g-rpc.publicnode.com',
     escrow: APPLY ? required('BLIND_ESCROW_ADDRESS') : process.env.BLIND_ESCROW_ADDRESS || '0x3d0374963DaaD43e31d42373eb11156A8e8ce2Ff',
     fromBlock: positiveBlock('ESCROW_DEPLOYMENT_BLOCK', APPLY ? undefined : 33_459_885),
     token: NATIVE,

@@ -45,7 +45,7 @@ const EXECUTE = process.argv.includes('--execute');
 const posterArgIdx = process.argv.indexOf('--poster');
 const POSTER_ARG = posterArgIdx >= 0 ? process.argv[posterArgIdx + 1] : undefined;
 
-const OG_RPC_URL = process.env.OG_RPC_URL ?? 'https://evmrpc.0g.ai';
+const OG_RPC_URL = process.env.OG_RPC_URL ?? 'https://0g-rpc.publicnode.com';
 const ESCROW_ADDRESS =
   process.env.BLIND_ESCROW_ADDRESS ??
   process.env.ESCROW_ADDRESS ??

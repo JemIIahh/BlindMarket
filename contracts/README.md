@@ -84,7 +84,7 @@ They are one balance. The escrow must only ever allowlist the ERC-20.
 
 | hardhat network | chain id | RPC                                                     | record             |
 | --------------- | -------- | ------------------------------------------------------- | ------------------ |
-| `arc-testnet`   | 5042002  | `ARC_TESTNET_RPC_URL`, default `https://rpc.testnet.arc.io` | `arc-testnet.json` |
+| `arc-testnet`   | 5042002  | `ARC_TESTNET_RPC_URL`, default `https://arc-testnet-rpc.publicnode.com` | `arc-testnet.json` |
 | `arc-mainnet`   | 5042     | `ARC_MAINNET_RPC_URL`, **no default**                    | `arc-mainnet.json` |
 
 `scripts/deploy-settlement.ts` deploys a USDC settlement escrow on Base or Arc

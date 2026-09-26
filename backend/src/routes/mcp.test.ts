@@ -83,13 +83,16 @@ const F = vi.hoisted(() => {
 
 vi.mock('../services/redis.js', () => ({
   redis: {
-    get: vi.fn(async (k: string) => (k.startsWith('base:hash2id:') ? '7' : null)),
+    // A bare number is read on the posting chain (Arc testnet, generated
+    // record), so the fixture hash is indexed there. Base maps nothing: the
+    // same hash resolving on both chains would be ambiguous.
+    get: vi.fn(async (k: string) => (k.startsWith('arc:hash2id:') ? '7' : null)),
     set: vi.fn(), pipeline: vi.fn(), smembers: vi.fn(async () => []), eval: vi.fn(),
   },
 }));
 
 vi.mock('../services/chain.js', () => ({
-  // A Base escrow in this harness: resolveCachedTaskByHash consults the Base index.
+  // Escrows in this harness: resolveCachedTaskByHash consults both indexes.
   baseEscrow: {},
   arcEscrow: null,
   getTokenDecimals: vi.fn(async () => 18),
@@ -278,7 +281,7 @@ describe('POST /mcp — key-material & secret leak guard', () => {
   it("get_task_status by number serves no A2A state when the hash is indexed to another task (a duplicate funded under it)", async () => {
     const { redis } = await import('../services/redis.js');
     // The hash belongs to task 9; escrow task 7 merely reuses it.
-    vi.mocked(redis.get).mockImplementation(async (k) => (String(k).startsWith('base:hash2id:') ? '9' : null));
+    vi.mocked(redis.get).mockImplementation(async (k) => (String(k).startsWith('arc:hash2id:') ? '9' : null));
     try {
       const res = await callTool(makeApp(), 'get_task_status', { taskId: '7' }, 'sk_poster');
       expect(res.status).toBe(200);
@@ -287,7 +290,7 @@ describe('POST /mcp — key-material & secret leak guard', () => {
       expect(payload.a2aState).toBeNull();
       expect(JSON.stringify(res.body)).not.toContain('the secret deliverable');
     } finally {
-      vi.mocked(redis.get).mockImplementation(async (k) => (String(k).startsWith('base:hash2id:') ? '7' : null));
+      vi.mocked(redis.get).mockImplementation(async (k) => (String(k).startsWith('arc:hash2id:') ? '7' : null));
     }
   });
 

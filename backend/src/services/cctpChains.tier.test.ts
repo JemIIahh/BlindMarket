@@ -100,7 +100,7 @@ describe("CCTP's Base leg", () => {
   it('is Base on the CCTP tier, through its own RPC, when the Base escrow stays on another tier', async () => {
     // Arc mainnet next to the Base Sepolia escrow kept for its older tasks.
     const { config, chains, chain } = await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '84532', ARC_CHAIN_ID: '5042' });
-    expect(config.baseRpcUrl).toBe('https://sepolia.base.org');
+    expect(config.baseRpcUrl).toBe('https://base-sepolia-rpc.publicnode.com');
     const leg = chains.getCctpChain('base');
     expect(leg).toMatchObject({ chainId: 8453, usdcAddress: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' });
     expect(leg?.rpc).not.toBe(chain.baseProvider);
@@ -152,13 +152,13 @@ describe('Base defaults follow BASE_CHAIN_ID too', () => {
   it('production on Base Sepolia uses Base SEPOLIA USDC + RPC', async () => {
     const { config } = await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '84532', BASE_USDC_ADDRESS: '', BASE_RPC_URL: '' });
     expect(config.baseUsdcAddress).toBe('0x036CbD53842c5426634e7929541eC2318f3dCF7e');
-    expect(config.baseRpcUrl).toBe('https://sepolia.base.org');
+    expect(config.baseRpcUrl).toBe('https://base-sepolia-rpc.publicnode.com');
   });
 
   it('a Base mainnet deployment uses mainnet USDC + RPC', async () => {
     const { config } = await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '8453', BASE_USDC_ADDRESS: '', BASE_RPC_URL: '' });
     expect(config.baseUsdcAddress).toBe('0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913');
-    expect(config.baseRpcUrl).toBe('https://mainnet.base.org');
+    expect(config.baseRpcUrl).toBe('https://base-rpc.publicnode.com');
   });
 
   it('an explicit BASE_USDC_ADDRESS still wins', async () => {

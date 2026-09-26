@@ -57,7 +57,7 @@ export { isMainnet };
 
 export const OG_RPC_URL =
   import.meta.env.VITE_OG_RPC_URL ||
-  (networkIsMainnet ? 'https://evmrpc.0g.ai' : 'https://evmrpc-testnet.0g.ai');
+  (networkIsMainnet ? 'https://0g-rpc.publicnode.com' : 'https://evmrpc-testnet.0g.ai');
 
 export const BLIND_ESCROW_ADDRESS =
   import.meta.env.VITE_BLIND_ESCROW_ADDRESS || ADDR.blindEscrow;
@@ -87,7 +87,7 @@ export function isCctpUsable(cfg: { enabled: boolean; baseChainId?: number | nul
 
 export const BASE_RPC_URL =
   import.meta.env.VITE_BASE_RPC_URL ||
-  (networkIsMainnet ? 'https://mainnet.base.org' : 'https://sepolia.base.org');
+  (networkIsMainnet ? 'https://base-rpc.publicnode.com' : 'https://base-sepolia-rpc.publicnode.com');
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 
@@ -110,20 +110,21 @@ export const BASE_USDC_ADDRESS =
 export { ARC_CHAIN_ID };
 
 /**
- * Arc's public RPC for a chain id: Circle's on mainnet (5042), dRPC on testnet
- * (privacy extensions block rpc.testnet.arc.io for some users —
- * net::ERR_BLOCKED_BY_CLIENT on every balance read). Text people copy (SDK
- * samples, generated scripts) uses this, never ARC_RPC_URL, which
- * VITE_ARC_RPC_URL may point at a keyed URL.
+ * Arc's public RPC for a chain id, PublicNode on both tiers (privacy
+ * extensions block rpc.testnet.arc.io for some users —
+ * net::ERR_BLOCKED_BY_CLIENT on every balance read — and the previous
+ * testnet default, arc-testnet.drpc.org's free plan, rejects log scans over
+ * 100 blocks). Text people copy (SDK samples, generated scripts) uses this,
+ * never ARC_RPC_URL, which VITE_ARC_RPC_URL may point at a keyed URL.
  */
 export function arcPublicRpcUrl(chainId: number): string {
-  return chainId === 5042 ? 'https://rpc.mainnet.arc.io' : 'https://arc-testnet.drpc.org';
+  return chainId === 5042 ? 'https://arc-rpc.publicnode.com' : 'https://arc-testnet-rpc.publicnode.com';
 }
 
 export const ARC_PUBLIC_RPC_URL = arcPublicRpcUrl(ARC_CHAIN_ID);
 
-// Override with VITE_ARC_RPC_URL; WSS (wss://arc-testnet.drpc.org) also
-// tested working.
+// Override with VITE_ARC_RPC_URL; WSS (wss://arc-testnet-rpc.publicnode.com)
+// also tested working.
 export const ARC_RPC_URL = import.meta.env.VITE_ARC_RPC_URL || ARC_PUBLIC_RPC_URL;
 
 // The escrow new tasks post on, generated from contracts/deployments like

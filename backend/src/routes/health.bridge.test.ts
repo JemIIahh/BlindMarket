@@ -202,7 +202,7 @@ describe('GET /health/bridge', () => {
   it('names the missing Base escrow when only its signer is set', async () => {
     setUp({ base: false, baseEscrow: false, baseSigner: true });
     const data = await bridge();
-    expect(data).toMatchObject({ configured: false, base: null, reason: 'Base: BASE_ESCROW_ADDRESS not set' });
+    expect(data).toMatchObject({ configured: false, base: null, reason: 'Base: BASE_CHAIN_ID=84532 record not set' });
   });
 
   it('never reports the zero address as an escrow', async () => {

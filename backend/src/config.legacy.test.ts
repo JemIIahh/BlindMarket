@@ -82,7 +82,7 @@ const shape = (config: Awaited<ReturnType<typeof load>>) => ({
 // became the posting chain.
 const ARC_TESTNET = {
   arcChainId: 5042002,
-  arcRpcUrl: 'https://arc-testnet.drpc.org',
+  arcRpcUrl: 'https://arc-testnet-rpc.publicnode.com',
   arcAgentFactoryAddress: '0x1E9Abb2F2e66b8Af35BED730500A94760E133a3B',
   cctpArcChainId: 5042002,
 };
@@ -91,19 +91,19 @@ describe('config with no chain env vars', () => {
   it('production on Base Sepolia: 0G mainnet, Base Sepolia, testnet CCTP', async () => {
     expect(shape(await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '84532' }))).toEqual({
       ogChainId: 16661,
-      ogRpcUrl: 'https://evmrpc.0g.ai',
+      ogRpcUrl: 'https://0g-rpc.publicnode.com',
       blindEscrowAddress: '0x3d0374963DaaD43e31d42373eb11156A8e8ce2Ff',
       taskRegistryAddress: '0x9CCF9c196006B573FaA9C9c9CebDd1296dbd5cE0',
       blindReputationAddress: '0x3af9232009C5da30AdA366B6E09849A040162A1a',
       inftAddress: '0xfE70a007AFD022A4824d1975A1facFA266F66E28',
       baseChainId: 84532,
-      baseRpcUrl: 'https://sepolia.base.org',
+      baseRpcUrl: 'https://base-sepolia-rpc.publicnode.com',
       baseEscrowAddress: '0xCca5ab873158b888158AD9Dc36fb4Ee683eFbEBf',
       baseUsdcAddress: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
       ...ARC_TESTNET,
       cctpMainnet: false,
       cctpEthereumChainId: 11155111,
-      cctpBaseRpcUrl: 'https://sepolia.base.org',
+      cctpBaseRpcUrl: 'https://base-sepolia-rpc.publicnode.com',
       irisApiBase: 'https://iris-api-sandbox.circle.com',
     });
   });
@@ -117,13 +117,13 @@ describe('config with no chain env vars', () => {
       blindReputationAddress: '0xFEAFe4ab073FfB47aBb5AD458622b3F9B10C81dD',
       inftAddress: '0xc4498099413f8a7D709175eC252aFa7543c6d39a',
       baseChainId: 84532,
-      baseRpcUrl: 'https://sepolia.base.org',
+      baseRpcUrl: 'https://base-sepolia-rpc.publicnode.com',
       baseEscrowAddress: '0xCca5ab873158b888158AD9Dc36fb4Ee683eFbEBf',
       baseUsdcAddress: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
       ...ARC_TESTNET,
       cctpMainnet: false,
       cctpEthereumChainId: 11155111,
-      cctpBaseRpcUrl: 'https://sepolia.base.org',
+      cctpBaseRpcUrl: 'https://base-sepolia-rpc.publicnode.com',
       irisApiBase: 'https://iris-api-sandbox.circle.com',
     });
   });
@@ -136,12 +136,12 @@ describe('config with no chain env vars', () => {
     expect(shape(config)).toMatchObject({
       ogChainId: 16661,
       baseChainId: 8453,
-      baseRpcUrl: 'https://mainnet.base.org',
+      baseRpcUrl: 'https://base-rpc.publicnode.com',
       baseUsdcAddress: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
       ...ARC_TESTNET,
       cctpMainnet: false,
       cctpEthereumChainId: 11155111,
-      cctpBaseRpcUrl: 'https://sepolia.base.org',
+      cctpBaseRpcUrl: 'https://base-sepolia-rpc.publicnode.com',
       irisApiBase: 'https://iris-api-sandbox.circle.com',
     });
   });

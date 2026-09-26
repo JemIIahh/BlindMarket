@@ -22,7 +22,7 @@ export interface WalletCtx {
   chainId: number;
 }
 
-export const DEFAULT_RPC_URL = 'https://evmrpc.0g.ai';
+export const DEFAULT_RPC_URL = 'https://0g-rpc.publicnode.com';
 export const DEFAULT_CHAIN_ID = 16661;
 
 export function loadWallet(): WalletCtx | null {

@@ -81,7 +81,7 @@ describe('buildSubmitEvidence (defaults to the posting chain)', () => {
     vi.doMock('./chain.js', () => ({ baseEscrow: null, arcEscrow: arcEscrowStub, buildUnsignedTx }));
     const { buildSubmitEvidenceOn: unconfigured } = await import('./escrow.js');
 
-    await expect(unconfigured('base', WORKER, 7, EVIDENCE)).rejects.toThrow('BASE_ESCROW_ADDRESS');
+    await expect(unconfigured('base', WORKER, 7, EVIDENCE)).rejects.toThrow('BASE_CHAIN_ID=84532 record');
     expect(buildUnsignedTx).not.toHaveBeenCalled();
     vi.doUnmock('./chain.js');
   });

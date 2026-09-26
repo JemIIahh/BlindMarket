@@ -82,7 +82,7 @@ test("production's /health/bridge (no postingChain) settles exactly as before", 
     escrowAddress: '0xCca5ab873158b888158AD9Dc36fb4Ee683eFbEBf',
     token: { kind: 'erc20', address: USDC_SEPOLIA, symbol: 'USDC', decimals: 6 },
     usdcAddress: USDC_SEPOLIA, decimals: 6, symbol: 'USDC', relayChain: 'base-sepolia',
-    rpcUrl: 'https://sepolia.base.org', payFrom: PRIVY_WALLET,
+    rpcUrl: 'https://base-sepolia-rpc.publicnode.com', payFrom: PRIVY_WALLET,
   });
 });
 
@@ -103,7 +103,7 @@ test('posting on Base pays through the relay, even with no Base signer configure
     escrowAddress: '0xa1F75b5eC92f4485d4EeFa339DC2B8aF25Df0eC5',
     token: { kind: 'erc20', address: USDC_SEPOLIA, symbol: 'USDC', decimals: 6 },
     usdcAddress: USDC_SEPOLIA, decimals: 6, symbol: 'USDC', relayChain: 'base-sepolia',
-    rpcUrl: 'https://sepolia.base.org', payFrom: PRIVY_WALLET,
+    rpcUrl: 'https://base-sepolia-rpc.publicnode.com', payFrom: PRIVY_WALLET,
     postingChain: 'base', escrowChains: ['0g', 'base'],
   });
   assert.equal(be.calls.whoami, 1);
@@ -149,10 +149,10 @@ test('a chain added later is paid through the relay once the backend describes i
     (e) => e.code === 'RPC_UNKNOWN' && /BLINDMARKET_ZETA_RPC_URL/.test(e.message),
   );
   // Arc testnet has a public RPC, keyed by the chain id the backend names.
-  assert.equal((await discoverSettlement({ ...backend(data), env: {} })).rpcUrl, 'https://rpc.testnet.arc.io');
+  assert.equal((await discoverSettlement({ ...backend(data), env: {} })).rpcUrl, 'https://arc-testnet-rpc.publicnode.com');
   // So does Arc mainnet, under the same chain key: only the id tells them apart.
   const mainnet = newBridge({ postingChain: 'arc', chains: [...chainsFixture().map((c) => ({ ...c, postable: false })), { ...arc, chainId: 5042, tier: 'mainnet' }] });
-  assert.equal((await discoverSettlement({ ...backend(mainnet), env: {} })).rpcUrl, 'https://rpc.mainnet.arc.io');
+  assert.equal((await discoverSettlement({ ...backend(mainnet), env: {} })).rpcUrl, 'https://arc-rpc.publicnode.com');
   const s = await discoverSettlement({ ...backend(data), env: { BLINDMARKET_ARC_RPC_URL: 'http://127.0.0.1:9' } });
   assert.equal(s.payment, 'relay-erc20');
   assert.equal(s.mode, 'arc');

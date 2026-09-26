@@ -56,7 +56,7 @@ function settlementChain(): { name: string; id: number; rpc: string; gasCoin: st
   return {
     name: posting.label,
     id: posting.chainId,
-    rpc: posting.chainId === 8453 ? 'https://mainnet.base.org' : 'https://sepolia.base.org',
+    rpc: posting.chainId === 8453 ? 'https://base-rpc.publicnode.com' : 'https://base-sepolia-rpc.publicnode.com',
     gasCoin: 'ETH',
   };
 }

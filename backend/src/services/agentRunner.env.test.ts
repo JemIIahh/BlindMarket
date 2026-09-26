@@ -206,12 +206,17 @@ describe('startAgent forks workers with an allowlisted env, not the full process
     const env = forkMock.mock.calls[0][2].env as Record<string, string>;
     const table = JSON.parse(env.SETTLEMENT_CHAINS_JSON) as Array<Record<string, unknown>>;
 
-    // Base has an escrow; Arc is not deployed yet, so it is absent.
-    expect(table.map((c) => c.key)).toEqual(['base']);
+    // Base and Arc testnet both have generated escrow records, so both are
+    // present; Arc is the posting chain.
+    expect(table.map((c) => c.key)).toEqual(['base', 'arc']);
     expect(table.find((c) => c.key === 'base')).toMatchObject({
       token: { kind: 'erc20', symbol: 'USDC', decimals: 6 },
       gasSymbol: 'ETH',
       aa: true,
+      posting: false,
+    });
+    expect(table.find((c) => c.key === 'arc')).toMatchObject({
+      token: { kind: 'erc20', symbol: 'USDC', decimals: 6 },
       posting: true,
     });
     // Exactly one chain is the posting chain.

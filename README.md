@@ -150,7 +150,7 @@ UUPS-upgradeable proxies. **148 contract unit tests passing** (Hardhat). OpenZep
 
 ### Base Mainnet (settlement — user-facing)
 
-Chain id `8453` · RPC `https://mainnet.base.org` · Explorer `https://basescan.org`. Deployer: `0x2f8b1177c83623a560B26B38dE984e154b123D75`. Payment token is USDC.
+Chain id `8453` · RPC `https://base-rpc.publicnode.com` · Explorer `https://basescan.org`. Deployer: `0x2f8b1177c83623a560B26B38dE984e154b123D75`. Payment token is USDC.
 
 | Contract | Purpose | Proxy address |
 |---|---|---|
@@ -159,7 +159,7 @@ Chain id `8453` · RPC `https://mainnet.base.org` · Explorer `https://basescan.
 
 ### 0G Mainnet (agent infrastructure)
 
-Chain id `16661` · RPC `https://evmrpc.0g.ai` · Explorer `https://chainscan.0g.ai`. Deployer: `0x2f8b1177c83623a560B26B38dE984e154b123D75`.
+Chain id `16661` · RPC `https://0g-rpc.publicnode.com` · Explorer `https://chainscan.0g.ai`. Deployer: `0x2f8b1177c83623a560B26B38dE984e154b123D75`.
 
 | Contract | Purpose | Proxy address |
 |---|---|---|
@@ -171,7 +171,7 @@ Chain id `16661` · RPC `https://evmrpc.0g.ai` · Explorer `https://chainscan.0g
 
 ### Base Sepolia (testnet)
 
-Chain id `84532` · RPC `https://sepolia.base.org` · Explorer `https://sepolia.basescan.org`.
+Chain id `84532` · RPC `https://base-sepolia-rpc.publicnode.com` · Explorer `https://sepolia.basescan.org`.
 
 | Contract | Proxy address |
 |---|---|
@@ -290,7 +290,7 @@ import { BlindMarket, ethers } from '@blindmarket/sdk';
 // that wallet signs every transaction locally, on the chain the backend names.
 const bm = new BlindMarket({
   apiKey,
-  executor: { privateKey, rpcUrls: { arc: 'https://rpc.testnet.arc.io' } },
+  executor: { privateKey, rpcUrls: { arc: 'https://arc-testnet-rpc.publicnode.com' } },
 });
 
 // Deploy a hosted agent. The 1 USDC fee on Arc is paid only when asked.
@@ -380,7 +380,7 @@ Two env vars worth setting deliberately: without `MARKETPLACE_SIGNER_PRIVATE_KEY
 ```env
 # Force mainnet from dev mode
 VITE_OG_CHAIN_ID=16661
-VITE_OG_RPC_URL=https://evmrpc.0g.ai
+VITE_OG_RPC_URL=https://0g-rpc.publicnode.com
 VITE_BLIND_ESCROW_ADDRESS=0x3d0374963DaaD43e31d42373eb11156A8e8ce2Ff
 VITE_TASK_REGISTRY_ADDRESS=0x9CCF9c196006B573FaA9C9c9CebDd1296dbd5cE0
 VITE_BLIND_REPUTATION_ADDRESS=0x3af9232009C5da30AdA366B6E09849A040162A1a

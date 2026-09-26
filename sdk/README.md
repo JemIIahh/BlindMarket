@@ -152,7 +152,7 @@ its RPC is on the posting chain, and that the wallet holds the amount.
 const bb = new BlindMarket({
   apiKey: process.env.BLINDMARKET_API_KEY!,           // an sk_ key minted while signed in as OWNER
   // An RPC on the network /health/settlement names for arc:
-  // https://rpc.mainnet.arc.io (Arc mainnet, 5042) or https://rpc.testnet.arc.io (Arc Testnet, 5042002).
+  // https://arc-rpc.publicnode.com (Arc mainnet, 5042) or https://arc-testnet-rpc.publicnode.com (Arc Testnet, 5042002).
   executor: { privateKey: process.env.OWNER_PRIVATE_KEY!, rpcUrls: { arc: process.env.ARC_RPC_URL! } },
 });
 
@@ -326,8 +326,8 @@ const runtime = new WorkerRuntime({
   // REQUIRED: at least one RPC, on the network your `apiBase` settles on.
   // There is NO default. Production posts new tasks on Arc; without
   // `rpcUrls.arc` the runtime skips them. Use the network /health/settlement
-  // names for arc: https://rpc.mainnet.arc.io (Arc mainnet, 5042) or
-  // https://rpc.testnet.arc.io (Arc Testnet, 5042002).
+  // names for arc: https://arc-rpc.publicnode.com (Arc mainnet, 5042) or
+  // https://arc-testnet-rpc.publicnode.com (Arc Testnet, 5042002).
   // `base` covers older Base Sepolia tasks. `rpcUrl` is the 0G RPC only and
   // never stands in for another chain.
   rpcUrls: { arc: process.env.ARC_RPC_URL!, base: process.env.BASE_RPC_URL! },

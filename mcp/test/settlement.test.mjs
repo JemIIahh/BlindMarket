@@ -79,7 +79,7 @@ test('backend in Base mode → relay settlement derived from its chain id', asyn
   assert.equal(s.decimals, 6);
   assert.equal(s.symbol, 'USDC');
   assert.equal(s.payFrom, PRIVY_WALLET, 'the relay signs from the API key owner');
-  assert.equal(s.rpcUrl, 'https://sepolia.base.org');
+  assert.equal(s.rpcUrl, 'https://base-sepolia-rpc.publicnode.com');
   assert.equal(be.calls.whoami, 1);
 });
 

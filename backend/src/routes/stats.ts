@@ -3,6 +3,7 @@ import { ethers } from 'ethers';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { config } from '../config.js';
 import { provider } from '../services/chain.js';
 import { redis } from '../services/redis.js';
 import { loadAllAgents } from '../services/deployedAgentStore.js';
@@ -96,10 +97,10 @@ statsRouter.get('/', async (_req, res) => {
     registryService.openTaskCount(),
     // Active agents (running) from Redis
     loadAllAgents().then(a => a.filter(x => x.status === 'running').length),
-    // Validator count from ValidatorPool if deployed
+    // Validator count from ValidatorPool if deployed (generated record).
     (async () => {
-      const addr = process.env.VALIDATOR_POOL_ADDRESS;
-      if (!addr || /^0x0{40}$/i.test(addr)) return 0;
+      const addr = config.validatorPoolAddress;
+      if (!addr) return 0;
       const abi = loadAbi('ValidatorPool');
       if (!abi) return 0;
       const contract = new ethers.Contract(addr, abi, provider);

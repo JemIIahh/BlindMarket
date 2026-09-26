@@ -47,6 +47,7 @@ describe('deploymentSetProblems', () => {
     expect([...DEPLOYMENT_SET_REQUIRED_ENV].sort()).toEqual([
       'AGENT_FACTORY_ADDRESS',
       'ARC_AGENT_FACTORY_ADDRESS',
+      'ARC_ESCROW_ADDRESS',
       'BASE_ESCROW_ADDRESS',
       'BLIND_ACCOUNT_FACTORY_ADDRESS',
       'BLIND_ESCROW_ADDRESS',

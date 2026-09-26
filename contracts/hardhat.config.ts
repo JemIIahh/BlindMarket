@@ -42,21 +42,21 @@ export default defineConfig({
     "0g-mainnet": {
       type: "http",
       chainType: "l1",
-      url: "https://evmrpc.0g.ai",
+      url: "https://0g-rpc.publicnode.com",
       chainId: 16661,
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
     },
     "base-sepolia": {
       type: "http",
       chainType: "l1",
-      url: process.env.BASE_RPC_URL || "https://sepolia.base.org",
+      url: process.env.BASE_RPC_URL || "https://base-sepolia-rpc.publicnode.com",
       chainId: 84532,
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
     },
     "base": {
       type: "http",
       chainType: "l1",
-      url: process.env.BASE_RPC_URL || "https://mainnet.base.org",
+      url: process.env.BASE_RPC_URL || "https://base-rpc.publicnode.com",
       chainId: 8453,
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
     },
@@ -65,7 +65,7 @@ export default defineConfig({
     "arc-testnet": {
       type: "http",
       chainType: "l1",
-      url: process.env.ARC_TESTNET_RPC_URL || "https://arc-testnet.drpc.org",
+      url: process.env.ARC_TESTNET_RPC_URL || "https://arc-testnet-rpc.publicnode.com",
       chainId: 5042002,
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
     },

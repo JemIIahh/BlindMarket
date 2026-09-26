@@ -67,6 +67,10 @@ vi.mock('../services/chain.js', () => ({
   provider: { getTransactionReceipt: vi.fn() },
   baseProvider: { getTransactionReceipt: vi.fn() },
   baseEscrow: { interface: {}, getAddress: vi.fn() },
+  // Arc testnet has a generated escrow record, so it is the posting chain and
+  // /tasks/index polls its receipt first.
+  arcProvider: { getTransactionReceipt: vi.fn() },
+  arcEscrow: { interface: {}, getAddress: vi.fn() },
 }));
 
 vi.mock('../services/escrow.js', () => ({ getTaskOn: vi.fn(), getTask: vi.fn() }));
@@ -106,7 +110,7 @@ import { globalErrorHandler } from '../middleware/errorHandler.js';
 import * as a2aStore from '../services/a2aStore.js';
 import * as agentStore from '../services/agentStore.js';
 import * as escrowService from '../services/escrow.js';
-import { baseProvider } from '../services/chain.js';
+import { baseProvider, arcProvider } from '../services/chain.js';
 import { settleAssignment, settleVerification } from '../services/a2aSettlement.js';
 import { recordWorkerDispute } from '../services/workerPayout.js';
 import { autoVerify } from '../services/autoVerify.js';
@@ -176,10 +180,10 @@ describe('POST /tasks/index — unsettleable verification modes', () => {
   });
 
   it("'auto' with a real check passes the gate", async () => {
-    vi.mocked(baseProvider.getTransactionReceipt).mockRejectedValue(new Error('past the gate'));
+    vi.mocked(arcProvider.getTransactionReceipt).mockRejectedValue(new Error('past the gate'));
     const res = await index({ verificationMode: 'auto', verificationCriteria: { min_length: 20 } });
     expect(res.body.error?.code).not.toBe('AUTO_CRITERIA_REQUIRED');
-    expect(baseProvider.getTransactionReceipt).toHaveBeenCalled();
+    expect(arcProvider.getTransactionReceipt).toHaveBeenCalled();
   });
 });
 

@@ -33,7 +33,7 @@ export const networks = {
     name: '0g-mainnet',
     chainType: 'evm' as const,
     chainId: 16661,
-    rpc: ['https://evmrpc.0g.ai'],
+    rpc: ['https://0g-rpc.publicnode.com'],
     contracts: {
       escrow: '0x3d0374963DaaD43e31d42373eb11156A8e8ce2Ff',
       registry: '0x9CCF9c196006B573FaA9C9c9CebDd1296dbd5cE0',

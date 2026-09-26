@@ -173,8 +173,8 @@ export const BASE_USDC: Readonly<Record<number, string>> = {
 };
 
 export const BASE_RPC: Readonly<Record<number, string>> = {
-  8453: 'https://mainnet.base.org',
-  84532: 'https://sepolia.base.org',
+  8453: 'https://base-rpc.publicnode.com',
+  84532: 'https://base-sepolia-rpc.publicnode.com',
 };
 
 /** Public RPCs for chains this process may sign on, by chain id. An env
@@ -182,8 +182,8 @@ export const BASE_RPC: Readonly<Record<number, string>> = {
  *  Testnet share the chain key 'arc', so the id the backend names picks one. */
 export const PUBLIC_RPC: Readonly<Record<number, string>> = {
   ...BASE_RPC,
-  5042: 'https://rpc.mainnet.arc.io',
-  5042002: 'https://rpc.testnet.arc.io',
+  5042: 'https://arc-rpc.publicnode.com',
+  5042002: 'https://arc-testnet-rpc.publicnode.com',
 };
 
 /** How long a discovered mode is trusted before being re-asked. Short enough

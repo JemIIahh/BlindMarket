@@ -5,20 +5,18 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { requireAuth } from '../middleware/auth.js';
 import { AppError } from '../middleware/errorHandler.js';
+import { config } from '../config.js';
 import { provider, buildUnsignedTx } from '../services/chain.js';
 import type { AuthRequest, ApiResponse } from '../types.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const abi = JSON.parse(readFileSync(join(__dirname, '../abi/ValidatorPool.json'), 'utf-8')).abi;
 
-// A zero address means "not deployed on this stack" (see DEPLOYMENT_SET_REQUIRED_ENV).
-const VALIDATOR_POOL_ADDRESS = /^0x0{40}$/i.test(process.env.VALIDATOR_POOL_ADDRESS ?? '')
-  ? ''
-  : process.env.VALIDATOR_POOL_ADDRESS || '';
-
 function getContract() {
-  if (!VALIDATOR_POOL_ADDRESS) throw new AppError(503, 'NOT_CONFIGURED', 'ValidatorPool not deployed');
-  return new ethers.Contract(VALIDATOR_POOL_ADDRESS, abi, provider);
+  // The pool address comes from the generated record for this 0G network
+  // (config); there is no env var to set. Empty means not deployed here.
+  if (!config.validatorPoolAddress) throw new AppError(503, 'NOT_CONFIGURED', 'ValidatorPool not deployed');
+  return new ethers.Contract(config.validatorPoolAddress, abi, provider);
 }
 
 export const validatorsRouter = Router();

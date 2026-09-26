@@ -7,7 +7,7 @@ import { Redis } from 'ioredis';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const RPC = process.env.OG_RPC_URL ?? 'https://evmrpc.0g.ai';
+const RPC = process.env.OG_RPC_URL ?? 'https://0g-rpc.publicnode.com';
 const CHAIN_ID = Number(process.env.OG_CHAIN_ID ?? 16661);
 const ESCROW = process.env.BLIND_ESCROW_ADDRESS ?? '0x3d0374963DaaD43e31d42373eb11156A8e8ce2Ff';
 const REDIS_URL = process.env.REDIS_URL ?? 'redis://localhost:6379';

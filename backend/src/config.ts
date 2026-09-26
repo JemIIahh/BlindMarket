@@ -30,6 +30,36 @@ const IS_PROD = process.env.NODE_ENV === 'production';
  */
 const SETTLEMENT_TIER = readSettlementTier(process.env);
 
+/**
+ * Which deployment set this backend runs as: '' (default — production and
+ * local dev, addresses from the generated records) or 'staging' (names its
+ * own contracts via env, enforced by DEPLOYMENT_SET_REQUIRED_ENV).
+ */
+const DEPLOYMENT_SET = parseDeploymentSet(process.env.DEPLOYMENT_SET);
+
+/**
+ * A contract address from its generated record (contracts/deployments via
+ * sync-addresses.ts), selected by chain id. The environment NEVER overrides
+ * it on the default set: set the chain id (OG_CHAIN_ID, BASE_CHAIN_ID,
+ * ARC_CHAIN_ID), not the address. A *_ADDRESS env var there is ignored with
+ * a warning — delete it. Only a staging stack reads addresses from env.
+ */
+const warnedAddressEnv = new Set<string>();
+function recordAddress(envKey: string, generated: string | undefined): string {
+  const raw = (process.env[envKey] ?? '').trim();
+  if (DEPLOYMENT_SET === 'staging') return raw;
+  if (raw && raw.toLowerCase() !== (generated ?? '').toLowerCase()) {
+    if (!warnedAddressEnv.has(envKey)) {
+      warnedAddressEnv.add(envKey);
+      console.warn(
+        `[config] ${envKey} is set but ignored: contract addresses come from the generated record for this network. ` +
+          `Unset it (staging stacks excepted).`,
+      );
+    }
+  }
+  return generated ?? '';
+}
+
 /** The tier's chain id for `key`, or `fallback` when no tier is set. */
 function tierChainId(key: keyof typeof TIER_CHAIN_IDS, fallback: number): string {
   return String(SETTLEMENT_TIER ? TIER_CHAIN_IDS[key][SETTLEMENT_TIER] : fallback);
@@ -70,13 +100,13 @@ export const PRODUCTION_PUBLIC_URLS = {
 } as const;
 
 /**
- * Env vars a non-default deployment set must set explicitly. optional() treats
- * an unset or empty value as missing and falls back to the generated
- * (production) addresses, production's RPC, or production's public URLs, so a
- * staging stack that forgot one would talk to production's contracts, or
- * send the agents that discover it to production's API. A zero address
- * counts as set ("not deployed on this stack"). VALIDATOR_POOL_ADDRESS has no
- * fallback but is listed so staging can't silently omit its pool.
+ * Env vars a staging stack must set explicitly. Staging has no generated
+ * records file, so it names its own contracts; a staging stack that forgot
+ * one would otherwise fall back to production's addresses, production's RPC,
+ * or production's public URLs. A zero address counts as set ("not deployed
+ * on this stack"). VALIDATOR_POOL_ADDRESS has no production fallback either
+ * (routes read it only on staging) but is listed so staging can't silently
+ * omit its pool.
  */
 export const DEPLOYMENT_SET_REQUIRED_ENV = [
   'OG_RPC_URL',
@@ -87,6 +117,7 @@ export const DEPLOYMENT_SET_REQUIRED_ENV = [
   'VALIDATOR_POOL_ADDRESS',
   'BASE_ESCROW_ADDRESS',
   'AGENT_FACTORY_ADDRESS',
+  'ARC_ESCROW_ADDRESS',
   'ARC_AGENT_FACTORY_ADDRESS',
   'USDC_PAYMASTER_ADDRESS',
   'BLIND_ACCOUNT_FACTORY_ADDRESS',
@@ -150,8 +181,9 @@ const OG_CHAIN_ID = parseInt(optional('OG_CHAIN_ID', tierChainId('0g', IS_PROD ?
 const OG_MAINNET = OG_CHAIN_ID === TIER_CHAIN_IDS['0g'].mainnet;
 
 // The settlement Base network's RPC and USDC. CCTP's Base leg reuses them when
-// it is the same network (see cctp below).
-const BASE_RPC_URL = optional('BASE_RPC_URL', BASE_MAINNET ? 'https://mainnet.base.org' : 'https://sepolia.base.org');
+// it is the same network (see cctp below). PublicNode on both tiers: the
+// public base.org endpoints rate-limit log scans the indexers need.
+const BASE_RPC_URL = optional('BASE_RPC_URL', BASE_MAINNET ? 'https://base-rpc.publicnode.com' : 'https://base-sepolia-rpc.publicnode.com');
 const BASE_USDC_ADDRESS = optional('BASE_USDC_ADDRESS', BASE_MAINNET ? '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' : '0x036CbD53842c5426634e7929541eC2318f3dCF7e');
 
 // Arc network tasks settle on. Unlike 0G and Base, its default does not follow
@@ -160,9 +192,15 @@ const BASE_USDC_ADDRESS = optional('BASE_USDC_ADDRESS', BASE_MAINNET ? '0x833589
 const ARC_CHAIN_ID = parseInt(optional('ARC_CHAIN_ID', tierChainId('arc', TIER_CHAIN_IDS.arc.testnet)), 10);
 const ARC_MAINNET = ARC_CHAIN_ID === TIER_CHAIN_IDS.arc.mainnet;
 
-/** Circle's public Arc mainnet RPC. It answered chain 5042 on 2026-09-25. */
-export const ARC_MAINNET_PUBLIC_RPC_URL = 'https://rpc.mainnet.arc.io';
-const ARC_RPC_URL = optional('ARC_RPC_URL', ARC_MAINNET ? ARC_MAINNET_PUBLIC_RPC_URL : 'https://arc-testnet.drpc.org');
+/** PublicNode's Arc mainnet RPC. It answered chain 5042 on 2026-09-26. */
+export const ARC_MAINNET_PUBLIC_RPC_URL = 'https://arc-rpc.publicnode.com';
+/**
+ * PublicNode on both tiers. The previous testnet default
+ * (arc-testnet.drpc.org, free plan) rejects eth_getLogs spans over 100
+ * blocks, which wedged the Arc indexer (500-block chunks); PublicNode
+ * answered 10k-block spans cleanly on 2026-09-26.
+ */
+const ARC_RPC_URL = optional('ARC_RPC_URL', ARC_MAINNET ? ARC_MAINNET_PUBLIC_RPC_URL : 'https://arc-testnet-rpc.publicnode.com');
 // USDC's ERC-20 view has this address on Arc mainnet and testnet alike.
 const ARC_USDC_ADDRESS = optional('ARC_USDC_ADDRESS', '0x3600000000000000000000000000000000000000');
 
@@ -202,9 +240,9 @@ export interface ArcGeneratedRecord {
 /**
  * The generated record for the Arc network `chainId` (`arc` from
  * contracts/deployments/arc-mainnet.json, `arcTestnet` from arc-testnet.json),
- * or null for a network with no record: Arc mainnet until its deploy is
- * recorded. Nothing falls back to another network's record, whose factory
- * address would be polled for deploy credits on a chain it is not on.
+ * or null for a network with no record. Nothing falls back to another
+ * network's record, whose factory address would be polled for deploy credits
+ * on a chain it is not on.
  */
 export function arcGeneratedRecord(chainId: number): ArcGeneratedRecord | null {
   const tier = chainTier('arc', chainId);
@@ -216,7 +254,34 @@ export function arcGeneratedRecord(chainId: number): ArcGeneratedRecord | null {
   return { addresses, blocks };
 }
 
-const ARC_ADDR = arcGeneratedRecord(ARC_CHAIN_ID)?.addresses;
+const ARC_RECORD = arcGeneratedRecord(ARC_CHAIN_ID);
+const ARC_ADDR = ARC_RECORD?.addresses;
+
+// The escrow this backend polls: the generated record for this Arc network,
+// selected by ARC_CHAIN_ID above. Set the chain id, not the address.
+const ARC_ESCROW = unsetIfZero(recordAddress('ARC_ESCROW_ADDRESS', ARC_ADDR?.blindEscrow ?? ''));
+
+/**
+ * The block the Arc escrow was deployed in: nothing before it can hold one of
+ * its events. ARC_ESCROW_DEPLOYMENT_BLOCK wins; otherwise the block in the
+ * generated record for this Arc network, when the configured escrow is that
+ * record's (same guard as the factory side: an escrow can share another
+ * network's address with the same deployer and nonce, and the wrong network's
+ * block would start the index past the head); otherwise 0 (unknown), and the
+ * indexer starts at the head.
+ */
+function arcEscrowDeploymentBlock(): number {
+  const fromEnv = Number(process.env.ARC_ESCROW_DEPLOYMENT_BLOCK ?? 0);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) return Math.floor(fromEnv);
+  if (
+    ARC_RECORD &&
+    ARC_ESCROW &&
+    ARC_RECORD.addresses.blindEscrow?.toLowerCase() === ARC_ESCROW.toLowerCase()
+  ) {
+    return ARC_RECORD.blocks.blindEscrow ?? 0;
+  }
+  return 0;
+}
 
 export const config = {
   port: parseInt(optional('PORT', '3001'), 10),
@@ -235,8 +300,9 @@ export const config = {
   // and production ignores the flag entirely. See services/verification.ts.
   allowInsecureLocalVerify: optional('ALLOW_INSECURE_LOCAL_VERIFY', 'false').toLowerCase() === 'true',
 
-  // 0G Chain (agent infra — TaskRegistry, Reputation, INFT)
-  ogRpcUrl: optional('OG_RPC_URL', OG_MAINNET ? 'https://evmrpc.0g.ai' : 'https://evmrpc-testnet.0g.ai'),
+  // 0G Chain (agent infra — TaskRegistry, Reputation, INFT). PublicNode serves
+  // mainnet only (verified 2026-09-26); testnet stays on the official endpoint.
+  ogRpcUrl: optional('OG_RPC_URL', OG_MAINNET ? 'https://0g-rpc.publicnode.com' : 'https://evmrpc-testnet.0g.ai'),
   ogChainId: OG_CHAIN_ID,
 
   // Base Chain (settlement — BlindEscrow, USDC payouts)
@@ -249,43 +315,46 @@ export const config = {
    */
   settlementTier: SETTLEMENT_TIER,
 
-  // Contracts — 0G (agent infra)
-  blindEscrowAddress: optional('BLIND_ESCROW_ADDRESS', ADDR.blindEscrow),
-  taskRegistryAddress: optional('TASK_REGISTRY_ADDRESS', ADDR.taskRegistry),
-  blindReputationAddress: optional('BLIND_REPUTATION_ADDRESS', ADDR.blindReputation),
-  inftAddress: optional('INFT_ADDRESS', ADDR.inft),
+  // Contracts — 0G (agent infra). Generated records selected by OG_CHAIN_ID
+  // above; the *_ADDRESS env vars only take effect on a staging stack.
+  blindEscrowAddress: unsetIfZero(recordAddress('BLIND_ESCROW_ADDRESS', ADDR.blindEscrow)),
+  taskRegistryAddress: unsetIfZero(recordAddress('TASK_REGISTRY_ADDRESS', ADDR.taskRegistry)),
+  blindReputationAddress: unsetIfZero(recordAddress('BLIND_REPUTATION_ADDRESS', ADDR.blindReputation)),
+  inftAddress: unsetIfZero(recordAddress('INFT_ADDRESS', ADDR.inft)),
+  validatorPoolAddress: unsetIfZero(recordAddress('VALIDATOR_POOL_ADDRESS', ADDR.validatorPool)),
 
   // Contracts — Base (settlement)
   // Zero here means Base isn't deployed on this network yet. Left as-is it is a
   // truthy string, which switches POST /tasks onto the Base escrow and points
   // createTask at address(0) — so collapse it to ''.
-  baseEscrowAddress: unsetIfZero(optional('BASE_ESCROW_ADDRESS', BASE_ADDR?.blindEscrow ?? '')),
+  baseEscrowAddress: unsetIfZero(recordAddress('BASE_ESCROW_ADDRESS', BASE_ADDR?.blindEscrow ?? '')),
   baseUsdcAddress: BASE_USDC_ADDRESS,
   // The generated module carries a zero-address placeholder for networks the
   // factory hasn't been deployed to yet. Treat that as "not configured" so the
   // listener stays disabled instead of polling address(0) forever.
-  agentFactoryAddress: unsetIfZero(optional('AGENT_FACTORY_ADDRESS', BASE_ADDR?.agentFactory || '')),
+  agentFactoryAddress: unsetIfZero(recordAddress('AGENT_FACTORY_ADDRESS', BASE_ADDR?.agentFactory || '')),
 
   // Arc Chain (settlement — USDC payouts, gas in USDC). ARC_CHAIN_ID picks
-  // the network (5042 mainnet, 5042002 testnet) and the defaults here follow
-  // it. The escrow has no generated default: each environment sets its own.
+  // the network (5042 mainnet, 5042002 testnet) and the addresses and blocks
+  // below follow it via the generated record (ARC_ESCROW above). Set the
+  // chain id; set an address or block only to override the record (a redeploy
+  // not yet recorded, or a staging stack that must name its own).
   arcRpcUrl: ARC_RPC_URL,
   arcChainId: ARC_CHAIN_ID,
-  arcEscrowAddress: unsetIfZero(optional('ARC_ESCROW_ADDRESS', '')),
+  arcEscrowAddress: ARC_ESCROW,
   arcUsdcAddress: ARC_USDC_ADDRESS,
   arcMarketplaceSignerPrivateKey: process.env.ARC_MARKETPLACE_SIGNER_PRIVATE_KEY || '',
-  arcEscrowDeploymentBlock: parseInt(optional('ARC_ESCROW_DEPLOYMENT_BLOCK', '0'), 10),
+  arcEscrowDeploymentBlock: arcEscrowDeploymentBlock(),
   // AgentFactory on Arc — the factory DeployAgentForm pays and the listener
-  // indexes for deploy credits. Falls back to the generated record for this
-  // Arc network (none on mainnet until its deploy is recorded); env wins.
+  // indexes for deploy credits. The generated record for this Arc network.
   // (The Base `agentFactoryAddress` above is legacy: the wallet is Arc-only
   // and nothing polls the Base factory anymore.)
-  arcAgentFactoryAddress: unsetIfZero(optional('ARC_AGENT_FACTORY_ADDRESS', ARC_ADDR?.agentFactory || '')),
+  arcAgentFactoryAddress: unsetIfZero(recordAddress('ARC_AGENT_FACTORY_ADDRESS', ARC_ADDR?.agentFactory || '')),
 
   // ERC-4337 AA infrastructure (Base) — agents pay gas in USDC instead of ETH.
-  usdcPaymasterAddress: unsetIfZero(optional('USDC_PAYMASTER_ADDRESS', (BASE_ADDR as any)?.USDCPaymaster ?? '')),
-  blindAccountFactoryAddress: unsetIfZero(optional('BLIND_ACCOUNT_FACTORY_ADDRESS', (BASE_ADDR as any)?.BlindAccountFactory ?? '')),
-  entryPointAddress: unsetIfZero(optional('ENTRY_POINT_ADDRESS', (BASE_ADDR as any)?.EntryPoint ?? '')),
+  usdcPaymasterAddress: unsetIfZero(recordAddress('USDC_PAYMASTER_ADDRESS', (BASE_ADDR as any)?.USDCPaymaster ?? '')),
+  blindAccountFactoryAddress: unsetIfZero(recordAddress('BLIND_ACCOUNT_FACTORY_ADDRESS', (BASE_ADDR as any)?.BlindAccountFactory ?? '')),
+  entryPointAddress: unsetIfZero(recordAddress('ENTRY_POINT_ADDRESS', (BASE_ADDR as any)?.EntryPoint ?? '')),
   // Pimlico bundler for UserOp submission on Base
   pimlicoBundlerUrl: optional('PIMLICO_BUNDLER_URL', ''),
   pimlicoApiKey: optional('PIMLICO_API_KEY', ''),
@@ -331,7 +400,7 @@ export const config = {
   // contracts/ deployment set holding this stack's records ('' = the default
   // records, i.e. production). Only used to print ops commands that target the
   // right escrow — see contractsEnvPrefix in services/chainNetwork.ts.
-  deploymentSet: parseDeploymentSet(process.env.DEPLOYMENT_SET),
+  deploymentSet: DEPLOYMENT_SET,
   deploymentId: parseDeploymentId(process.env.DEPLOYMENT_ID),
   // Set for ONE boot to take this Redis over for DEPLOYMENT_ID from the
   // owner it names, or "unclaimed". Read as set and checked where it is used
@@ -465,7 +534,7 @@ export const config = {
     // the CCTP tier, read through its own RPC.
     baseRpcUrl: optional('CCTP_BASE_RPC_URL', BASE_MAINNET === CCTP_MAINNET
       ? BASE_RPC_URL
-      : CCTP_MAINNET ? 'https://mainnet.base.org' : 'https://sepolia.base.org'),
+      : CCTP_MAINNET ? 'https://base-rpc.publicnode.com' : 'https://base-sepolia-rpc.publicnode.com'),
     baseUsdcAddress: optional('CCTP_BASE_USDC_ADDRESS', BASE_MAINNET === CCTP_MAINNET
       ? BASE_USDC_ADDRESS
       : CCTP_MAINNET ? '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' : '0x036CbD53842c5426634e7929541eC2318f3dCF7e'),
@@ -575,19 +644,9 @@ export function assertBootConfig(): void {
     ...deploymentSetProblems(config.deploymentSet, process.env, { og: config.ogChainId, base: config.baseChainId, arc: config.arcChainId }),
   );
 
-  // NODE_ENV=production defaults BASE_CHAIN_ID to Base mainnet. A production
-  // env that sets BASE_ESCROW_ADDRESS to the Base Sepolia escrow but forgets
-  // BASE_CHAIN_ID would boot as "Base mainnet" with mainnet USDC and the
-  // Sepolia escrow address, and every tier check would read it as mainnet.
-  const sepoliaEscrow = (CONTRACT_ADDRESSES.baseTestnet as { blindEscrow?: string }).blindEscrow;
-  if (BASE_MAINNET && sepoliaEscrow && (config.baseEscrowAddress || '').toLowerCase() === sepoliaEscrow.toLowerCase()) {
-    fatals.push(
-      `BASE_CHAIN_ID=${config.baseChainId} (Base mainnet) but BASE_ESCROW_ADDRESS=${config.baseEscrowAddress} is the Base Sepolia ` +
-        `escrow from contracts/deployments/base-sepolia.json. Set BASE_CHAIN_ID=84532 (production posts on Base Sepolia today), ` +
-        `or a Base mainnet escrow address.`,
-    );
-  }
-
+  // Contract addresses come from the generated records selected by chain id,
+  // so a mainnet/testnet address mixup through env is no longer possible:
+  // there is no address env var to set wrongly on the default set.
   if (config.settlementTier) {
     // An explicit tier is a promise about every chain. A chain id that breaks
     // it would settle real money on the wrong network, so this is fatal even

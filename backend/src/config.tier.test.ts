@@ -51,9 +51,9 @@ describe('chain ids default from SETTLEMENT_TIER', () => {
     expect(config).toMatchObject({
       settlementTier: 'mainnet',
       ogChainId: 16661,
-      ogRpcUrl: 'https://evmrpc.0g.ai',
+      ogRpcUrl: 'https://0g-rpc.publicnode.com',
       baseChainId: 8453,
-      baseRpcUrl: 'https://mainnet.base.org',
+      baseRpcUrl: 'https://base-rpc.publicnode.com',
       baseUsdcAddress: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
     });
     expect(config.cctp.mainnet).toBe(true);
@@ -98,7 +98,7 @@ describe('Arc follows ARC_CHAIN_ID, and CCTP follows Arc', () => {
 
   it('NODE_ENV never moves Arc: production with no tier stays on Arc testnet', async () => {
     const { config } = await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '84532' });
-    expect(config).toMatchObject({ arcChainId: 5042002, arcRpcUrl: 'https://arc-testnet.drpc.org', arcAgentFactoryAddress: TESTNET_FACTORY });
+    expect(config).toMatchObject({ arcChainId: 5042002, arcRpcUrl: 'https://arc-testnet-rpc.publicnode.com', arcAgentFactoryAddress: TESTNET_FACTORY });
     expect(config.cctp).toMatchObject({ mainnet: false, arcChainId: 5042002 });
     const testnet = await load({ SETTLEMENT_TIER: 'testnet', NODE_ENV: 'production' });
     expect(testnet.config.arcChainId).toBe(5042002);
@@ -106,15 +106,43 @@ describe('Arc follows ARC_CHAIN_ID, and CCTP follows Arc', () => {
 
   it('ARC_CHAIN_ID=5042 alone moves Arc and CCTP to mainnet; the Base escrow can stay on Sepolia', async () => {
     const { config, arcGeneratedRecord } = await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '84532', ARC_CHAIN_ID: '5042' });
-    expect(config).toMatchObject({ arcChainId: 5042, baseChainId: 84532, baseRpcUrl: 'https://sepolia.base.org' });
+    expect(config).toMatchObject({ arcChainId: 5042, baseChainId: 84532, baseRpcUrl: 'https://base-sepolia-rpc.publicnode.com' });
     expect(config.cctp).toMatchObject({
       mainnet: true,
       arcChainId: 5042,
       // CCTP's Base leg is Base mainnet, apart from the Sepolia escrow's RPC.
-      baseRpcUrl: 'https://mainnet.base.org',
+      baseRpcUrl: 'https://base-rpc.publicnode.com',
       baseUsdcAddress: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
     });
     expect(config.arcAgentFactoryAddress).toBe(arcGeneratedRecord(5042)?.addresses.agentFactory ?? '');
+  });
+
+  it('the Arc escrow and its deploy block follow ARC_CHAIN_ID; address env is ignored', async () => {
+    const { arcGeneratedRecord } = await load({ NODE_ENV: 'production' });
+    const mainnet = await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '84532', ARC_CHAIN_ID: '5042' });
+    const record = arcGeneratedRecord(5042);
+    expect(mainnet.config.arcEscrowAddress).toBe(record?.addresses.blindEscrow ?? '');
+    expect(mainnet.config.arcEscrowDeploymentBlock).toBe(record?.blocks.blindEscrow ?? 0);
+    const testnet = await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '84532' });
+    const testnetRecord = arcGeneratedRecord(5042002);
+    expect(testnet.config.arcEscrowAddress).toBe(testnetRecord?.addresses.blindEscrow ?? '');
+    expect(testnet.config.arcEscrowDeploymentBlock).toBe(testnetRecord?.blocks.blindEscrow ?? 0);
+    // An address env var no longer defines anything on the default set: it is
+    // ignored (with a warning) in favour of the record. Only a staging stack
+    // reads addresses from env.
+    const ignored = await load({
+      NODE_ENV: 'production', BASE_CHAIN_ID: '84532', ARC_CHAIN_ID: '5042',
+      ARC_ESCROW_ADDRESS: '0x1111111111111111111111111111111111111111',
+    });
+    expect(ignored.config.arcEscrowAddress).toBe(record?.addresses.blindEscrow ?? '');
+    expect(ignored.config.arcEscrowDeploymentBlock).toBe(record?.blocks.blindEscrow ?? 0);
+    expect(warned.join('\n')).toMatch(/ARC_ESCROW_ADDRESS is set but ignored/);
+    // The deploy-block env still tunes rescans: it wins over the record.
+    const tuned = await load({
+      NODE_ENV: 'production', BASE_CHAIN_ID: '84532', ARC_CHAIN_ID: '5042',
+      ARC_ESCROW_DEPLOYMENT_BLOCK: '12345',
+    });
+    expect(tuned.config.arcEscrowDeploymentBlock).toBe(12345);
   });
 
   // The one default that moves for production: CCTP's Arc leg reads through
@@ -154,7 +182,7 @@ describe('Arc follows ARC_CHAIN_ID, and CCTP follows Arc', () => {
   it('warns when production reads Arc mainnet through the public RPC', async () => {
     const env = { NODE_ENV: 'production', BASE_CHAIN_ID: '84532', ARC_CHAIN_ID: '5042', ARC_ESCROW_ADDRESS: '0x1111111111111111111111111111111111111111' };
     (await load(env)).assertBootConfig();
-    expect(warned.join('\n')).toMatch(/Arc mainnet is read through the public RPC https:\/\/rpc\.mainnet\.arc\.io, the default/);
+    expect(warned.join('\n')).toMatch(/Arc mainnet is read through the public RPC https:\/\/arc-rpc\.publicnode\.com, the default/);
     warned.length = 0;
     (await load({ ...env, ARC_RPC_URL: 'https://arc-mainnet.example/key' })).assertBootConfig();
     expect(warned.join('\n')).not.toMatch(/public RPC/);
@@ -177,7 +205,7 @@ describe('a 0G chain id that disagrees with NODE_ENV', () => {
   it('a script on 0G mainnet with no NODE_ENV gets MAINNET addresses (it got testnet ones before)', async () => {
     const { config } = await load({ NODE_ENV: 'development', OG_CHAIN_ID: '16661' });
     expect(config.blindEscrowAddress).toBe('0x3d0374963DaaD43e31d42373eb11156A8e8ce2Ff');
-    expect(config.ogRpcUrl).toBe('https://evmrpc.0g.ai');
+    expect(config.ogRpcUrl).toBe('https://0g-rpc.publicnode.com');
   });
 });
 
@@ -257,26 +285,3 @@ describe('a production backend on the testnet tier', () => {
   });
 });
 
-
-describe('assertBootConfig refuses Base mainnet with the Base Sepolia escrow', () => {
-  const SEPOLIA_ESCROW = '0xCca5ab873158b888158AD9Dc36fb4Ee683eFbEBf';
-
-  it('names the mistake when NODE_ENV=production defaults BASE_CHAIN_ID to 8453', async () => {
-    const { assertBootConfig } = await load({ NODE_ENV: 'production', BASE_ESCROW_ADDRESS: SEPOLIA_ESCROW, JWT_SECRET: 'x', DATABASE_URL: 'postgres://x' });
-    expect(() => assertBootConfig()).toThrow(/1 fatal problem/);
-    expect(errored.join('\n')).toMatch(/BASE_CHAIN_ID=8453 \(Base mainnet\) but BASE_ESCROW_ADDRESS=0xCca5.*Base Sepolia escrow/);
-  });
-
-  it('compares the escrow address case-insensitively', async () => {
-    const { assertBootConfig } = await load({ NODE_ENV: 'production', BASE_ESCROW_ADDRESS: SEPOLIA_ESCROW.toLowerCase(), JWT_SECRET: 'x', DATABASE_URL: 'postgres://x' });
-    expect(() => assertBootConfig()).toThrow(/1 fatal problem/);
-    expect(errored.join('\n')).toMatch(/Base Sepolia escrow/);
-  });
-
-  it('boots when BASE_CHAIN_ID says Sepolia, or the escrow is not Sepolia’s', async () => {
-    const ok = await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '84532', BASE_ESCROW_ADDRESS: SEPOLIA_ESCROW, JWT_SECRET: 'x', DATABASE_URL: 'postgres://x' });
-    expect(() => ok.assertBootConfig()).not.toThrow();
-    const other = await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '8453', BASE_ESCROW_ADDRESS: '0x1111111111111111111111111111111111111111', JWT_SECRET: 'x', DATABASE_URL: 'postgres://x' });
-    expect(() => other.assertBootConfig()).not.toThrow();
-  });
-});

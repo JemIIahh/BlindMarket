@@ -50,7 +50,14 @@ const KEY = {
 const POLL_INTERVAL_MS = 5_000;
 const MAX_BLOCKS_PER_TICK = 500;
 
-const DEPLOYMENT_BLOCK = Number(process.env.ARC_ESCROW_DEPLOYMENT_BLOCK ?? 0);
+// First indexing starts here when Redis has no checkpoint: the deploy block
+// from config (ARC_ESCROW_DEPLOYMENT_BLOCK, else the generated record for this
+// Arc network), so a fresh backend backfills from the escrow's birth instead
+// of the head. Read per tick: tests reload config with different env.
+function deploymentBlock(): number {
+  const block = config.arcEscrowDeploymentBlock;
+  return Number.isSafeInteger(block) && block > 0 ? block : 0;
+}
 const LAG_LOG_INTERVAL_MS = 60_000;
 const DISPUTE_CONFIRMATIONS = 5;
 
@@ -140,8 +147,9 @@ async function indexTaskCreated(): Promise<number | null> {
     if (checkpointRaw) {
       from = Number(checkpointRaw) + 1;
     } else {
-      from = Number.isSafeInteger(DEPLOYMENT_BLOCK) && DEPLOYMENT_BLOCK > 0
-        ? Math.min(DEPLOYMENT_BLOCK, latest)
+      const startBlock = deploymentBlock();
+      from = startBlock > 0
+        ? Math.min(startBlock, latest)
         : latest;
       await redis.set(KEY.disputeCheckpoint, String(latest), 'NX');
       await redis.set(KEY.checkpoint, String(from - 1));

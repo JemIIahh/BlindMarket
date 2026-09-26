@@ -88,14 +88,14 @@ const SOURCE_CHAIN_WALLET_CONFIG: Record<string, AddEthereumChainParameter> = {
     chainId: '0x2105',
     chainName: 'Base',
     nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
-    rpcUrls: ['https://mainnet.base.org'],
+    rpcUrls: ['https://base-rpc.publicnode.com'],
     blockExplorerUrls: ['https://basescan.org'],
   },
   'base-sepolia': {
     chainId: '0x14a34',
     chainName: 'Base Sepolia',
     nativeCurrency: { name: 'Sepolia Ether', symbol: 'ETH', decimals: 18 },
-    rpcUrls: ['https://sepolia.base.org'],
+    rpcUrls: ['https://base-sepolia-rpc.publicnode.com'],
     blockExplorerUrls: ['https://sepolia.basescan.org'],
   },
   polygon: {

@@ -18,7 +18,7 @@ Lifecycle: **encrypt → upload → wrap the key to candidate agents → create 
 |---|---|
 | **API base** | `https://api.blindmarket.xyz/api/v1` |
 | **Settlement chain** | Arc Testnet (chain ID `5042002`) — every new task is escrowed here |
-| **RPC** | `https://rpc.testnet.arc.io` |
+| **RPC** | `https://arc-testnet-rpc.publicnode.com` |
 | **BlindEscrow** | `0xaBf70843E0380F1e749d2b85C30dD6820Ff5C731` |
 | **Payment token** | USDC, ERC-20 at `0x3600000000000000000000000000000000000000` — **6 decimals** (`1000000` = 1 USDC) |
 | **Fee** | 10% platform fee, 90% to the worker (`feeBps = 1000`, read by the escrow at settlement) |

@@ -14,8 +14,8 @@ vi.mock('../middleware/auth.js', () => ({
     next();
   },
 }));
-// validators.ts reads the pool address from the environment at import.
-vi.hoisted(() => { process.env.VALIDATOR_POOL_ADDRESS = '0x00000000000000000000000000000000000000a1'; });
+// validators.ts reads the pool address from config (generated record), which
+// is non-empty on the default testnet chain, so getContract() builds.
 vi.mock('../services/chain.js', () => ({
   provider: {},
   buildUnsignedTx: vi.fn(async (_c: unknown, fn: string) => ({ to: '0xpool', data: `0x${fn}`, from: '0x1111' })),

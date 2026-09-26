@@ -18,7 +18,7 @@
  *   npx tsx scripts/backfill-a2a-mappings.ts
  *
  *   # Mainnet override (when tasks actually exist there)
- *   OG_RPC_URL=https://evmrpc.0g.ai \
+ *   OG_RPC_URL=https://0g-rpc.publicnode.com \
  *   ESCROW_ADDRESS=0x3d0374963DaaD43e31d42373eb11156A8e8ce2Ff \
  *   ESCROW_DEPLOYMENT_BLOCK=<find by binary search> \
  *   npx tsx scripts/backfill-a2a-mappings.ts

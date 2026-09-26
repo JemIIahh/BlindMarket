@@ -19,7 +19,7 @@
 The fastest modular EVM L1 — deploy Solidity contracts like any EVM chain.
 
 **RPC Endpoints:**
-- Mainnet: `https://evmrpc.0g.ai`
+- Mainnet: `https://0g-rpc.publicnode.com`
 - Testnet: `https://evmrpc-testnet.0g.ai`
 
 **Chain IDs:**
@@ -166,7 +166,7 @@ pnpm add @0glabs/0g-serving-broker
 import { ethers } from 'ethers';
 import { createZGComputeNetworkBroker } from '@0glabs/0g-serving-broker';
 
-const provider = new ethers.JsonRpcProvider('https://evmrpc.0g.ai');
+const provider = new ethers.JsonRpcProvider('https://0g-rpc.publicnode.com');
 const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
 const broker = await createZGComputeNetworkBroker(wallet);
 ```

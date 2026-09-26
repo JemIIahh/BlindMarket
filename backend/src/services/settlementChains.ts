@@ -47,8 +47,12 @@ export interface SettlementChainConfig {
   tier: 'mainnet' | 'testnet';
   /** The contracts/ hardhat network that operates on this chain. */
   hardhatNetwork: string;
-  /** This deployment's escrow, or null when it does not settle here (unset or the zero address). */
+  /** This deployment's escrow, or null when it does not settle here (no generated record for this chain id). */
   escrowAddress: string | null;
+  /**
+   * Where that escrow comes from, for "not configured" errors: the generated
+   * record selected by chain id (a staging stack names its own via env).
+   */
   escrowEnv: string;
   signerEnv: string;
   /** Env var naming the block the indexer starts from on an empty Redis. */
@@ -117,7 +121,7 @@ const BUILDERS: { readonly [K in SettlementChainKey]: () => SettlementChainConfi
       tier: mainnet ? 'mainnet' : 'testnet',
       hardhatNetwork: mainnet ? 'base' : 'base-sepolia',
       escrowAddress: addressOrNull(config.baseEscrowAddress),
-      escrowEnv: 'BASE_ESCROW_ADDRESS',
+      escrowEnv: `BASE_CHAIN_ID=${config.baseChainId} record`,
       signerEnv: 'BASE_MARKETPLACE_SIGNER_PRIVATE_KEY',
       deploymentBlockEnv: 'BASE_ESCROW_DEPLOYMENT_BLOCK',
       token: { kind: 'erc20', address: config.baseUsdcAddress || null, unit: USDC_UNIT },
@@ -145,7 +149,7 @@ const BUILDERS: { readonly [K in SettlementChainKey]: () => SettlementChainConfi
       tier: mainnet ? 'mainnet' : 'testnet',
       hardhatNetwork: mainnet ? 'arc-mainnet' : 'arc-testnet',
       escrowAddress: addressOrNull(config.arcEscrowAddress),
-      escrowEnv: 'ARC_ESCROW_ADDRESS',
+      escrowEnv: `ARC_CHAIN_ID=${config.arcChainId} record`,
       signerEnv: 'ARC_MARKETPLACE_SIGNER_PRIVATE_KEY',
       deploymentBlockEnv: 'ARC_ESCROW_DEPLOYMENT_BLOCK',
       token: { kind: 'erc20', address: config.arcUsdcAddress || null, unit: USDC_UNIT },
@@ -197,7 +201,7 @@ export function postingChain(): SettlementChainKey {
   if (arc.escrowAddress !== null) return 'arc';
   const base = settlementChainConfig('base');
   if (base.escrowAddress !== null) return 'base';
-  console.warn('[settlementChains] No settlement chain is configured (ARC_ESCROW_ADDRESS or BASE_ESCROW_ADDRESS); defaulting to arc');
+  console.warn('[settlementChains] No settlement chain is configured (no Arc or Base escrow record); defaulting to arc');
   return 'arc';
 }
 
