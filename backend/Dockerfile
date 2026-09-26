@@ -4,13 +4,10 @@ RUN apt-get update && apt-get install -y python3 make g++ && rm -rf /var/lib/apt
 COPY package.json package-lock.json ./
 RUN npm ci --legacy-peer-deps
 COPY . .
-# Verbose build: if tsc fails, print the exact diagnostics before failing.
-RUN npx tsc --version && \
-    npx tsc -p tsconfig.json --outDir dist 2>&1 || (echo "[build] tsc failed" && cat tsconfig.json && exit 1) && \
-    cp -r src/abi dist/abi && \
-    cp -r agents dist/agents && \
-    echo "[build] compiled successfully" && \
-    ls -la dist/
+# Separate verbose steps so Docker prints the exact failing command output.
+RUN echo "[build] tsc version:" && npx tsc --version
+RUN npx tsc -p tsconfig.json --outDir dist
+RUN cp -r src/abi dist/abi && cp -r agents dist/agents && ls -la dist/
 
 FROM node:22-slim
 WORKDIR /app
