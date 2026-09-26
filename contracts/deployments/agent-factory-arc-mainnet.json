@@ -1,0 +1,18 @@
+{
+  "network": "arc-mainnet",
+  "chainId": 5042,
+  "deployer": "0x7820e786d9AaeBbEbdcE4b0CFaF0db092e34E5Aa",
+  "timestamp": "2026-09-26T00:25:04.556Z",
+  "note": "AgentFactory — accepts USDC, emits AgentDeployed events. Backend listens.",
+  "contracts": {
+    "AgentFactory": "0x5A3312575F66c403ebcFfD1D9Fb868736B5102eb",
+    "USDC": "0x3600000000000000000000000000000000000000",
+    "Treasury": "0x7820e786d9AaeBbEbdcE4b0CFaF0db092e34E5Aa"
+  },
+  "config": {
+    "deployFeeUsdc": "1000000"
+  },
+  "blocks": {
+    "AgentFactory": 22772454
+  }
+}

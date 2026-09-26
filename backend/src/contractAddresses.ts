@@ -27,6 +27,11 @@ export const CONTRACT_ADDRESSES = {
     "EntryPoint": "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
     "USDC": "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
   },
+  "arc": {
+    "blindEscrow": "0xd2B819B57a9568Cb6bFc98C687F9a851EC8330C4",
+    "agentFactory": "0x5A3312575F66c403ebcFfD1D9Fb868736B5102eb",
+    "USDC": "0x3600000000000000000000000000000000000000"
+  },
   "arcTestnet": {
     "blindEscrow": "0xaBf70843E0380F1e749d2b85C30dD6820Ff5C731",
     "agentFactory": "0x1E9Abb2F2e66b8Af35BED730500A94760E133a3B",
@@ -34,6 +39,10 @@ export const CONTRACT_ADDRESSES = {
   }
 } as const;
 export const DEPLOYMENT_BLOCKS = {
+  "arc": {
+    "blindEscrow": 22772389,
+    "agentFactory": 22772454
+  },
   "arcTestnet": {
     "blindEscrow": 63235379,
     "agentFactory": 63589837
