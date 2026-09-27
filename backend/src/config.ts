@@ -212,11 +212,11 @@ export function deploymentSetProblems(
 }
 
 // Base network this deployment settles on, and whether that network is Base
-// MAINNET. Every Base default (RPC, USDC, contract table) and the CCTP tier
-// key off this — NOT off NODE_ENV. The deployed app runs NODE_ENV=production
-// on Base Sepolia: NODE_ENV-keyed defaults gave it Base MAINNET's USDC address
-// (no contract on Sepolia → balances read 0, burns revert) and would have put
-// CCTP on mainnet contracts/chains/Iris.
+// MAINNET. Every Base default (RPC, USDC, contract table) keys off this chain
+// id, not off NODE_ENV directly: a Base Sepolia deploy once got Base MAINNET's
+// USDC address from NODE_ENV-keyed defaults (no contract on Sepolia → balances
+// read 0, burns revert). NODE_ENV reaches it only through the tier it derives
+// (deriveFromNodeEnv): production defaults to Base mainnet.
 const BASE_CHAIN_ID = parseInt(optional('BASE_CHAIN_ID', tierChainId('base', IS_PROD ? 8453 : 84532)), 10);
 const BASE_MAINNET = BASE_CHAIN_ID === TIER_CHAIN_IDS.base.mainnet;
 
@@ -230,9 +230,11 @@ const OG_MAINNET = OG_CHAIN_ID === TIER_CHAIN_IDS['0g'].mainnet;
 const BASE_RPC_URL = optional('BASE_RPC_URL', BASE_MAINNET ? NETWORKS.networks.base.mainnet.rpcUrl : NETWORKS.networks.base.testnet.rpcUrl);
 const BASE_USDC_ADDRESS = optional('BASE_USDC_ADDRESS', BASE_MAINNET ? NETWORKS.networks.base.mainnet.usdc : NETWORKS.networks.base.testnet.usdc);
 
-// Arc network tasks settle on. Unlike 0G and Base, its default does not follow
-// NODE_ENV: production has posted on Arc testnet since Arc became the posting
-// chain, so only SETTLEMENT_TIER or an explicit ARC_CHAIN_ID moves it.
+// Arc network tasks settle on. It defaults from the tier: NODE_ENV=production
+// derives SETTLEMENT_TIER=mainnet (deriveFromNodeEnv), so production runs Arc
+// mainnet, and a stack with no tier (development) falls back to Arc testnet.
+// An explicit ARC_CHAIN_ID wins; one that contradicts the tier is refused at
+// boot (assertBootConfig).
 const ARC_CHAIN_ID = parseInt(optional('ARC_CHAIN_ID', tierChainId('arc', TIER_CHAIN_IDS.arc.testnet)), 10);
 const ARC_MAINNET = ARC_CHAIN_ID === TIER_CHAIN_IDS.arc.mainnet;
 
@@ -719,8 +721,8 @@ export function assertBootConfig(): void {
       }
     }
   } else {
-    // No tier named: report it when the chains disagree. Production is mixed
-    // today (0G mainnet + Base Sepolia), so this cannot be fatal yet.
+    // No tier named, which production never is (NODE_ENV=production derives
+    // one): a development stack may mix tiers on purpose, so this only warns.
     const ogTier = chainTier('0g', config.ogChainId);
     const baseTier = chainTier('base', config.baseChainId);
     if (ogTier && baseTier && ogTier !== baseTier) {
