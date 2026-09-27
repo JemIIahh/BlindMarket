@@ -19,7 +19,7 @@ export function SignInGate({ prompt }: { prompt: string }) {
   if (isAuthenticated) return null;
 
   return (
-    <div className="mb-6 p-4 border border-warn/40 bg-warn/5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-sm">
+    <div className="mb-6 p-4 rounded-2xl border border-[color-mix(in_srgb,var(--bb-warn)_40%,transparent)] bg-[color-mix(in_srgb,var(--bb-warn)_5%,transparent)] flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-sm">
       <span className="flex items-center gap-2 text-ink-2">
         <Icon name={address ? 'lock' : 'wallet'} size={16} className="text-warn shrink-0" />
         {address

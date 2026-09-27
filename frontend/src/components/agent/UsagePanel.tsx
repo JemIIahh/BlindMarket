@@ -72,8 +72,9 @@ export function UsagePanel({ agentId }: { agentId: string }) {
             <button
               key={d}
               onClick={() => setWindowDays(d)}
-              className={`px-2.5 py-1 text-xs font-mono border transition-colors ${
-                windowDays === d ? 'border-cream text-ink' : 'border-line text-ink-3 hover:text-ink-2'
+              aria-pressed={windowDays === d}
+              className={`rounded-full px-3 py-1 text-xs font-mono border transition-colors ${
+                windowDays === d ? 'border-invert bg-invert text-invert-fg' : 'border-line text-ink-3 hover:text-ink-2'
               }`}
             >
               {d}d
@@ -96,7 +97,7 @@ export function UsagePanel({ agentId }: { agentId: string }) {
               { label: 'Est. cost', value: fmtUsd(data.totals.costUsd, data.totals.estimatedCost) },
               { label: 'Models', value: String(models.length) },
             ].map((s) => (
-              <div key={s.label} className="border border-line px-3 py-2.5">
+              <div key={s.label} className="rounded-xl border border-line px-4 py-3">
                 <div className="text-[11px] text-ink-3 tracking-wide">{s.label}</div>
                 <div className="text-lg font-mono text-ink mt-0.5">{s.value}</div>
               </div>
@@ -125,7 +126,7 @@ export function UsagePanel({ agentId }: { agentId: string }) {
               <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2">
                 {modelKeys.map((k) => (
                   <span key={k} className="inline-flex items-center gap-1.5 text-xs font-mono text-ink-3">
-                    <span className="w-2 h-2 inline-block" style={{ background: colorOf(k) }} />
+                    <span className="w-2 h-2 inline-block rounded-full" style={{ background: colorOf(k) }} />
                     {k}
                   </span>
                 ))}
@@ -138,8 +139,8 @@ export function UsagePanel({ agentId }: { agentId: string }) {
             {models.map((m) => {
               const key = `${m.provider}/${m.model}`;
               return (
-                <div key={key} className="flex items-center gap-3 border border-line px-3 py-2.5 flex-wrap">
-                  <span className="w-2 h-2 shrink-0" style={{ background: colorOf(key) }} />
+                <div key={key} className="flex items-center gap-3 rounded-xl border border-line px-4 py-3 flex-wrap">
+                  <span className="w-2 h-2 shrink-0 rounded-full" style={{ background: colorOf(key) }} />
                   <span className="font-mono text-sm text-ink truncate flex-1 min-w-[140px]">{key}</span>
                   <span className="text-xs font-mono text-ink-3">{m.calls} calls</span>
                   <span className="text-xs font-mono text-ink-3">↑{fmtTokens(m.promptTokens)} ↓{fmtTokens(m.completionTokens)}</span>

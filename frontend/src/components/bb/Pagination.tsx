@@ -37,7 +37,7 @@ export function Pagination({ page, totalPages, totalItems, pageSize, onPageChang
         <button
           onClick={() => onPageChange(page - 1)}
           disabled={page <= 1}
-          className="w-8 h-8 flex items-center justify-center border border-line bg-surface-2 hover:bg-surface-3 disabled:opacity-30 disabled:cursor-not-allowed transition-colors text-ink-3"
+          className="w-8 h-8 flex items-center justify-center rounded-full border border-line bg-surface-2 hover:border-line-2 disabled:opacity-30 disabled:cursor-not-allowed transition-colors text-ink-3"
           aria-label="Previous page"
         >
           ‹
@@ -49,10 +49,10 @@ export function Pagination({ page, totalPages, totalItems, pageSize, onPageChang
             <button
               key={p}
               onClick={() => onPageChange(p)}
-              className={`w-8 h-8 flex items-center justify-center border transition-colors ${
+              className={`w-8 h-8 flex items-center justify-center rounded-full border transition-colors ${
                 p === page
-                  ? 'bg-cream text-bg border-cream font-medium'
-                  : 'border-line bg-surface-2 hover:bg-surface-3 text-ink-3 hover:text-ink'
+                  ? 'bg-invert text-invert-fg border-invert font-medium'
+                  : 'border-line bg-surface-2 hover:border-line-2 text-ink-3 hover:text-ink'
               }`}
             >
               {p}
@@ -62,7 +62,7 @@ export function Pagination({ page, totalPages, totalItems, pageSize, onPageChang
         <button
           onClick={() => onPageChange(page + 1)}
           disabled={page >= totalPages}
-          className="w-8 h-8 flex items-center justify-center border border-line bg-surface-2 hover:bg-surface-3 disabled:opacity-30 disabled:cursor-not-allowed transition-colors text-ink-3"
+          className="w-8 h-8 flex items-center justify-center rounded-full border border-line bg-surface-2 hover:border-line-2 disabled:opacity-30 disabled:cursor-not-allowed transition-colors text-ink-3"
           aria-label="Next page"
         >
           ›

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Button, FormField, FormInput, FormTextarea, Tag, Icon, Spinner } from './index';
 import { authedPost, get } from '../../lib/api';
+import { friendlyErrorText } from '../../lib/friendlyError';
 
 /**
  * Skill browse + install picker for the deploy form. A "skill" is a reusable
@@ -108,7 +109,7 @@ export default function SkillPicker({
             aria-selected={tab === id}
             onClick={() => setTab(id)}
             className={`pb-2.5 -mb-px text-xs border-b-2 transition-colors ${tab === id
-              ? 'text-ink font-medium border-cream'
+              ? 'text-ink font-medium border-accent'
               : 'text-ink-3 border-transparent hover:text-ink-2'}`}
           >
             {label}
@@ -137,13 +138,14 @@ export default function SkillPicker({
                     key={s.slug}
                     type="button"
                     onClick={() => toggle(s)}
-                    className={`text-left border p-3 transition-colors ${active
-                      ? 'border-cream/50 bg-cream/5'
+                    aria-pressed={active}
+                    className={`text-left rounded-xl border p-3.5 transition-colors ${active
+                      ? 'border-[color:color-mix(in_srgb,var(--bb-accent)_45%,transparent)] bg-[color:color-mix(in_srgb,var(--bb-accent)_5%,transparent)]'
                       : 'border-line bg-surface-2 hover:border-line-2'}`}
                   >
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-sm font-medium text-ink truncate">{s.name}</span>
-                      {active && <Icon name="check" size={14} className="text-cream shrink-0" />}
+                      {active && <Icon name="check" size={14} className="text-accent shrink-0" />}
                     </div>
                     <p className="text-xs text-ink-3 mt-1 line-clamp-2">{s.description}</p>
                     <div className="flex flex-wrap gap-1 mt-2">
@@ -179,7 +181,7 @@ export default function SkillPicker({
           <div className="text-xs text-ink-2 font-medium">{selectedSkills.length} skill(s) selected</div>
           <div className="flex flex-wrap gap-1.5">
             {selectedSkills.map((s) => (
-              <span key={s.slug} className="inline-flex items-center gap-1 px-2 py-0.5 text-xs border border-cream/40 bg-cream/5 text-cream">
+              <span key={s.slug} className="inline-flex items-center gap-1 px-2.5 py-0.5 text-xs border border-[color:color-mix(in_srgb,var(--bb-accent)_45%,transparent)] bg-[color:color-mix(in_srgb,var(--bb-accent)_5%,transparent)] text-ink rounded-full">
                 {s.name}
                 <button type="button" onClick={() => toggle(s)} aria-label={`Remove ${s.name}`}>
                   <Icon name="x" size={11} />
@@ -263,7 +265,7 @@ function SkillMdImport({
       const p = await authedPost<ParsedPreview>('/api/v1/skills/parse-skillmd', { text: source });
       return { key: nextKey(), sourceLabel, parsed: p, slug: deriveSlug(p.name), status: 'ready' };
     } catch (e) {
-      return { key: nextKey(), sourceLabel, parsed: null, slug: '', status: 'error', error: (e as Error).message };
+      return { key: nextKey(), sourceLabel, parsed: null, slug: '', status: 'error', error: friendlyErrorText(e) };
     }
   };
 
@@ -318,7 +320,7 @@ function SkillMdImport({
         setQueue((q) => q.filter((x) => x.key !== item.key)); // done → selected chip below
       } catch (e) {
         // e.g. 409 SLUG_TAKEN — stays on the card; edit the slug and re-import.
-        setQueue((q) => q.map((x) => (x.key === item.key ? { ...x, status: 'error', error: (e as Error).message } : x)));
+        setQueue((q) => q.map((x) => (x.key === item.key ? { ...x, status: 'error', error: friendlyErrorText(e) } : x)));
       }
     }
     setBusy(false);
@@ -328,7 +330,7 @@ function SkillMdImport({
     <div className="space-y-3">
       {/* Sources: multiple files, or repeated pastes — both feed the queue. */}
       <div className="flex flex-wrap items-center gap-3">
-        <label className={`inline-flex items-center gap-2 px-3 py-1.5 border border-line text-xs cursor-pointer transition-colors ${slotsLeft <= 0 ? 'opacity-40 cursor-not-allowed' : 'hover:border-line-2 text-ink-2'}`}>
+        <label className={`inline-flex items-center gap-2 rounded-full px-3.5 py-1.5 border border-line text-xs cursor-pointer transition-colors ${slotsLeft <= 0 ? 'opacity-40 cursor-not-allowed' : 'hover:border-line-2 text-ink-2'}`}>
           <Icon name="plus" size={12} />
           Add SKILL.md files
           <input
@@ -359,7 +361,7 @@ function SkillMdImport({
       {queue.length > 0 && (
         <div className="space-y-2 pt-1">
           {queue.map((item) => (
-            <div key={item.key} className={`border p-3 space-y-2 ${item.status === 'error' ? 'border-err/50 bg-err/5' : dupSlugs.has(item.slug) ? 'border-warn/50 bg-warn/5' : 'border-line bg-surface-2'}`}>
+            <div key={item.key} className={`rounded-xl border p-3.5 space-y-2 ${item.status === 'error' ? 'border-[color-mix(in_srgb,var(--bb-err)_50%,transparent)] bg-[color-mix(in_srgb,var(--bb-err)_5%,transparent)]' : dupSlugs.has(item.slug) ? 'border-[color-mix(in_srgb,var(--bb-warn)_50%,transparent)] bg-[color-mix(in_srgb,var(--bb-warn)_5%,transparent)]' : 'border-line bg-surface-2'}`}>
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
                   {item.parsed ? (
@@ -380,8 +382,8 @@ function SkillMdImport({
                 </div>
               </div>
               {item.parsed && item.parsed.warnings.length > 0 && (
-                <div className="border-l-2 border-warn pl-2 py-0.5 space-y-1">
-                  {item.parsed.warnings.map((w, i) => <div key={i} className="text-[11px] text-warn leading-snug">{w}</div>)}
+                <div className="rounded-lg border border-[color:color-mix(in_srgb,var(--bb-warn)_45%,transparent)] bg-[color:color-mix(in_srgb,var(--bb-warn)_7%,transparent)] px-3 py-2 space-y-1">
+                  {item.parsed.warnings.map((w, i) => <div key={i} className="text-[11px] text-ink-2 leading-snug">{w}</div>)}
                 </div>
               )}
               {item.parsed && (
@@ -394,7 +396,7 @@ function SkillMdImport({
                   <summary className="text-[11px] text-ink-3 cursor-pointer hover:text-ink-2 select-none">
                     Preview instructions ({(item.parsed.instructions.length / 1024).toFixed(1)} KB)
                   </summary>
-                  <pre className="whitespace-pre-wrap break-words text-[11px] text-ink-3 max-h-40 overflow-y-auto border border-line p-2 mt-1.5">{item.parsed.instructions}</pre>
+                  <pre className="whitespace-pre-wrap break-words text-[11px] text-ink-3 max-h-40 overflow-y-auto rounded-lg border border-line p-2.5 mt-1.5">{item.parsed.instructions}</pre>
                 </details>
               )}
               {dupSlugs.has(item.slug) && <div className="text-[11px] text-warn">Duplicate slug in this import list — rename one.</div>}

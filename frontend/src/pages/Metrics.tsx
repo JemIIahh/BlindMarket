@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
 import { useAccount } from 'wagmi';
-import { Breadcrumb, PageHeader, Panel, StatCard, LoadingState, ErrorState } from '../components/bb';
+import { Breadcrumb, PageHeader, Panel, StatCard, LoadingState, ErrorState, Segmented } from '../components/bb';
 import { useAuth } from '../context/AuthContext';
 import { authedGet } from '../lib/api';
+import { friendlyErrorText } from '../lib/friendlyError';
 import { FOUNDER_ADDRESSES } from '../config/constants';
 
 interface FunnelRow {
@@ -36,6 +37,13 @@ const STAGE_LABEL: Record<string, string> = {
   task_funded: 'Task funded',
 };
 
+type WindowId = '7' | '30' | '90';
+const WINDOWS: readonly { id: WindowId; label: string }[] = [
+  { id: '7', label: '7d' },
+  { id: '30', label: '30d' },
+  { id: '90', label: '90d' },
+];
+
 export default function Metrics() {
   const { address, isConnected } = useAccount();
   const { isAuthenticated } = useAuth();
@@ -55,7 +63,7 @@ export default function Metrics() {
     setError(null);
     authedGet<FunnelResponse>(`/api/v1/analytics/funnel?windowDays=${windowDays}`)
       .then(d => { if (!cancelled) setData(d); })
-      .catch(e => { if (!cancelled) setError(e?.message || 'Failed to load'); })
+      .catch(e => { if (!cancelled) setError(friendlyErrorText(e ?? 'Failed to load')); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [isFounder, isAuthenticated, windowDays, reloadKey]);
@@ -98,29 +106,24 @@ export default function Metrics() {
         description={`Funnel · last ${windowDays} days · unique visitors per stage.`}
       />
 
-      <div className="mb-6 flex items-center gap-2 text-xs font-mono">
-        {[7, 30, 90].map(n => (
-          <button
-            key={n}
-            onClick={() => setWindowDays(n)}
-            className={`px-3 py-1 border ${
-              windowDays === n
-                ? 'border-cream bg-surface-2 text-ink'
-                : 'border-line text-ink-2 hover:bg-surface-2'
-            }`}
-          >
-            {n}d
-          </button>
-        ))}
+      <div className="mb-6">
+        <Segmented
+          label="Window"
+          options={WINDOWS}
+          value={String(windowDays) as WindowId}
+          onChange={(v) => setWindowDays(Number(v))}
+        />
       </div>
 
-      {loading && <LoadingState label="Loading funnel…" />}
+      {loading && <div className="card-dark"><LoadingState label="Loading funnel…" /></div>}
       {error && (
-        <ErrorState
-          title="Couldn't load metrics"
-          description={error}
-          onRetry={() => setReloadKey(k => k + 1)}
-        />
+        <div className="card-dark">
+          <ErrorState
+            title="Couldn't load metrics"
+            description={error}
+            onRetry={() => setReloadKey(k => k + 1)}
+          />
+        </div>
       )}
 
       {data && (
@@ -135,7 +138,7 @@ export default function Metrics() {
           </div>
 
           <Panel>
-            <div className="px-5 py-6">
+            <div>
               {data.funnel.rows.map((row, i) => {
                 const topN = data.funnel.rows[0]?.uniqueVisitors ?? 0;
                 const widthPct = topN > 0 ? Math.max((row.uniqueVisitors / topN) * 100, 2) : 0;
@@ -167,7 +170,7 @@ export default function Metrics() {
                     {/* Stage row */}
                     <div className="flex items-center gap-4">
                       {/* Step number */}
-                      <div className="w-7 h-7 flex items-center justify-center border border-line text-[11px] font-mono text-ink-3 shrink-0">
+                      <div className="w-7 h-7 flex items-center justify-center rounded-full border border-line text-[11px] font-mono text-ink-3 shrink-0">
                         {i + 1}
                       </div>
 
@@ -184,9 +187,9 @@ export default function Metrics() {
                           </span>
                         </div>
 
-                        <div className="relative h-9 bg-surface-2 border border-line">
+                        <div className="relative h-9 overflow-hidden rounded-lg bg-surface-2 border border-line">
                           <div
-                            className="absolute inset-y-0 left-0 bg-cream/40 border-r border-cream transition-all duration-500"
+                            className="absolute inset-y-0 left-0 bg-[color-mix(in_srgb,var(--bb-accent)_18%,transparent)] border-r border-[color-mix(in_srgb,var(--bb-accent)_55%,transparent)] transition-all duration-500"
                             style={{ width: `${widthPct}%` }}
                           />
                           <div className="absolute inset-0 flex items-center justify-between px-3">
@@ -211,7 +214,7 @@ export default function Metrics() {
               top events
             </h3>
             <Panel>
-              <div className="divide-y divide-line/50">
+              <div className="divide-y divide-line">
                 {data.topEvents.map(e => (
                   <div
                     key={e.event}

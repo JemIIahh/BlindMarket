@@ -8,7 +8,7 @@ import { Tag } from './Tag';
  * mismatched status colours.
  */
 
-/** Spinner — SVG (not a rounded div; border-radius is forced to 0 app-wide). */
+/** Spinner — an SVG ring with an accent arc. */
 export function Spinner({ size = 16, className = '' }: { size?: number; className?: string }) {
   return (
     <svg className={`animate-spin ${className}`} width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden>
@@ -20,14 +20,14 @@ export function Spinner({ size = 16, className = '' }: { size?: number; classNam
 
 /** Shimmering placeholder block. */
 export function Skeleton({ className = '' }: { className?: string }) {
-  return <div className={`bg-surface-2 animate-pulse ${className}`} aria-hidden />;
+  return <div className={`bb-shimmer rounded-md ${className}`} aria-hidden />;
 }
 
-/** Centered loading indicator. */
+/** Centered loading indicator: an accent light sweeping a hairline. */
 export function LoadingState({ label = 'Loading…' }: { label?: string }) {
   return (
-    <div className="flex items-center justify-center gap-2.5 py-16 text-sm text-ink-3">
-      <Spinner />
+    <div role="status" className="flex flex-col items-center justify-center gap-3 py-16 text-sm text-ink-3">
+      <div className="bb-scan w-40" aria-hidden />
       <span>{label}</span>
     </div>
   );
@@ -47,7 +47,7 @@ export function EmptyState({
 }) {
   return (
     <div className="flex flex-col items-center justify-center text-center py-16 px-6">
-      <div className="w-11 h-11 border border-line flex items-center justify-center text-ink-3 mb-4">
+      <div className="w-11 h-11 rounded-full border border-line flex items-center justify-center text-ink-3 mb-4">
         <Icon name={icon} size={20} />
       </div>
       <p className="text-sm font-medium text-ink">{title}</p>
@@ -69,7 +69,7 @@ export function ErrorState({
 }) {
   return (
     <div className="flex flex-col items-center justify-center text-center py-16 px-6">
-      <div className="w-11 h-11 border border-err/40 flex items-center justify-center text-err mb-4">
+      <div className="w-11 h-11 rounded-full border border-[color-mix(in_srgb,var(--bb-err)_40%,transparent)] flex items-center justify-center text-err mb-4">
         <Icon name="alert" size={20} />
       </div>
       <p className="text-sm font-medium text-ink">{title}</p>
@@ -77,7 +77,7 @@ export function ErrorState({
       {onRetry && (
         <button
           onClick={onRetry}
-          className="mt-5 text-xs font-mono uppercase tracking-widest border border-line px-3 py-1.5 text-ink-2 hover:text-ink hover:bg-surface-2 transition-colors"
+          className="bb-btn bb-btn-secondary mt-5 h-9 px-4 text-[13px]"
         >
           Retry
         </button>
@@ -87,23 +87,26 @@ export function ErrorState({
 }
 
 // ── Semantic status → tone ───────────────────────────────────────────
-type Tone = 'ok' | 'warn' | 'err' | 'info' | 'neutral';
+type Tone = 'ok' | 'warn' | 'err' | 'info' | 'neutral' | 'accent';
 
 const STATUS_TONE: Record<string, Tone> = {
-  // queued / awaiting — neutral, no action needed
-  open: 'neutral', posted: 'neutral', funded: 'neutral', waiting: 'neutral',
-  idle: 'neutral', stopped: 'neutral', refunded: 'neutral',
-  // active / in-flight — warm, something is happening
-  assigned: 'warn', accepted: 'warn', in_progress: 'warn', executing: 'warn',
-  active: 'warn', paused: 'warn',
-  // submitted / verifying — info, awaiting a verdict
-  submitted: 'info', verifying: 'info', pending: 'info', awaiting_verification: 'info',
+  // open for work — the accent, so available tasks stand out
+  open: 'accent', posted: 'accent', funded: 'accent',
+  // in flight or awaiting a verdict — someone is on it
+  assigned: 'info', accepted: 'info', in_progress: 'info', executing: 'info',
+  active: 'info', submitted: 'info', verifying: 'info', pending: 'info',
+  awaiting_verification: 'info',
+  // needs the owner's attention
+  paused: 'warn',
   // done — green
   completed: 'ok', verified: 'ok', settled: 'ok', paid: 'ok', success: 'ok', running: 'ok',
   // failed — red. The plain 'verified' key above is the OFF-chain a2a status
   // (means passed); on-chain TaskStatus.Verified means "verified and FAILED"
   // and reaches us as the label 'Verification failed'.
-  failed: 'err', verification_failed: 'err', cancelled: 'err', canceled: 'err', disputed: 'err', error: 'err', expired: 'err',
+  failed: 'err', verification_failed: 'err', disputed: 'err', error: 'err',
+  // over without a result — muted, not an error
+  expired: 'neutral', cancelled: 'neutral', canceled: 'neutral', refunded: 'neutral',
+  waiting: 'neutral', idle: 'neutral', stopped: 'neutral',
 };
 
 export function statusTone(status?: string): Tone {

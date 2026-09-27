@@ -10,6 +10,7 @@ import {
   LoadingState,
   EmptyState,
   ErrorState,
+  ErrorNotice,
   Modal,
   FormField,
   FormInput,
@@ -37,6 +38,7 @@ import { ServicesSection } from '../components/agent/ServicesSection';
 import type { AgentDetails, SkillStat } from '../components/agent/types';
 import { formatPaymentAmount } from '../lib/paymentUnits';
 import { providerFor } from '../lib/txSigner';
+import { friendlyError } from '../lib/friendlyError';
 
 // Default top-up suggestion in USDC. Covers ~100 task executions — the owner
 // edits the amount in the fund dialog before confirming.
@@ -110,11 +112,11 @@ export default function AgentDetail() {
   // Gas-management UI state — separate from the agent's start/pause/stop
   // actions so the buttons can show their own progress without interfering.
   const [topUpStatus, setTopUpStatus] = useState<'idle' | 'sending' | 'error'>('idle');
-  const [topUpError, setTopUpError] = useState('');
+  const [topUpError, setTopUpError] = useState<unknown>('');
   const [withdrawStatus, setWithdrawStatus] = useState<'idle' | 'sending' | 'done' | 'error'>('idle');
   const [withdrawConfirmOpen, setWithdrawConfirmOpen] = useState(false);
   const [withdrawInfo, setWithdrawInfo] = useState<Array<{ chain: string; asset: string; amount: string; txHash: string }> | null>(null);
-  const [withdrawError, setWithdrawError] = useState('');
+  const [withdrawError, setWithdrawError] = useState<unknown>('');
 
   // CCTP (Circle Cross-Chain Transfer Protocol) outbound bridge — separate
   // from the withdraw-to-owner flow above: this moves Base USDC to a
@@ -124,7 +126,7 @@ export default function AgentDetail() {
   const [cctpChains, setCctpChains] = useState<Array<{ chainKey: string; label: string }>>([]);
   const [cctpDestChain, setCctpDestChain] = useState('');
   const [cctpStatus, setCctpStatus] = useState<'idle' | 'sending' | 'polling' | 'done' | 'error'>('idle');
-  const [cctpError, setCctpError] = useState('');
+  const [cctpError, setCctpError] = useState<unknown>('');
   const [cctpTransfer, setCctpTransfer] = useState<{ stage: string; burnTxHash: string | null; mintTxHash: string | null } | null>(null);
   const [cctpQuote, setCctpQuote] = useState<{ maxFeeRaw: string; estimatedReceiveRaw: string } | null>(null);
   const [cctpQuoteLoading, setCctpQuoteLoading] = useState(false);
@@ -133,7 +135,7 @@ export default function AgentDetail() {
   // as another" lock-out. Drives the inline recovery button in the action-error
   // banner (signature-gated POST /agents/:id/link-owner).
   const [linkStatus, setLinkStatus] = useState<'idle' | 'signing' | 'linking' | 'error'>('idle');
-  const [linkError, setLinkError] = useState('');
+  const [linkError, setLinkError] = useState<unknown>('');
   const [refreshing, setRefreshing] = useState(false);
 
   // USDC balance on the posting chain (read through its own RPC, below)
@@ -335,7 +337,7 @@ export default function AgentDetail() {
       try { setAgent(await get<AgentDetails>(`/api/v1/agents/${apiId}`)); } catch { /* non-blocking */ }
       action.mutate(action.variables ?? 'start');
     } catch (err) {
-      setLinkError((err as Error).message || 'Could not link this wallet');
+      setLinkError(err);
       setLinkStatus('error');
     }
   }
@@ -390,7 +392,10 @@ export default function AgentDetail() {
       }
       setTopUpStatus('idle');
     } catch (err) {
-      setTopUpError((err as Error).message || 'Top-up failed');
+      // Broadcast, then the wait failed: the transfer may land, so show the
+      // balance as it is now next to the "check before trying again" notice.
+      if (friendlyError(err).kind === 'maybeSent') void refetchBalance();
+      setTopUpError(err);
       setTopUpStatus('error');
     }
   }
@@ -441,8 +446,7 @@ export default function AgentDetail() {
       // low, below the reserve, …) in error.skipped — show them, since the
       // bare message tells the owner nothing they can act on.
       const skipped = err instanceof ApiError ? err.payload?.skipped : undefined;
-      const message = (err as Error).message || 'Withdraw failed';
-      setWithdrawError(Array.isArray(skipped) ? withSkippedReasons(message, skipped) : message);
+      setWithdrawError(Array.isArray(skipped) ? withSkippedReasons((err as Error).message || 'Withdraw failed', skipped) : err);
       setWithdrawStatus('error');
     }
   }
@@ -486,7 +490,7 @@ export default function AgentDetail() {
       };
       setTimeout(poll, 4000);
     } catch (err) {
-      setCctpError((err as Error).message || 'CCTP withdraw failed');
+      setCctpError(err);
       setCctpStatus('error');
     }
   }
@@ -494,7 +498,7 @@ export default function AgentDetail() {
   if (loading) return <LoadingState label="Loading agent…" />;
   if (!agent) {
     return (
-      <div className="border border-line">
+      <div className="card-dark overflow-hidden">
         {fetchError ? (
           <ErrorState title="Couldn't load this agent" onRetry={() => loadAgent()} />
         ) : (
@@ -529,11 +533,8 @@ export default function AgentDetail() {
         onAction={(act) => action.mutate(act)}
       />
       {action.isError && (
-        <div className="mb-4 px-4 py-2.5 border border-err/40 bg-err/10 text-xs text-err">
-          <div>
-            {ACTION_LABELS[action.variables]} failed:{' '}
-            <span className="font-mono">{(action.error as Error).message}</span>
-          </div>
+        <div className="mb-4 rounded-xl px-4 py-3 border border-[color-mix(in_srgb,var(--bb-err)_40%,transparent)] bg-[color-mix(in_srgb,var(--bb-err)_8%,transparent)] text-xs text-err">
+          <ErrorNotice error={action.error} title={`${ACTION_LABELS[action.variables]} failed`} compact />
           {(action.error as { code?: string }).code === 'FORBIDDEN' && walletClient && (
             <div className="mt-2.5 flex flex-wrap items-center gap-2">
               <Button
@@ -552,7 +553,7 @@ export default function AgentDetail() {
               </span>
             </div>
           )}
-          {linkError && <div className="mt-1.5 font-mono">{linkError}</div>}
+          <ErrorNotice error={linkError} title="Couldn't link this wallet" compact className="mt-1.5" />
         </div>
       )}
 
@@ -656,7 +657,7 @@ export default function AgentDetail() {
             agentId={apiId}
             agent={agent}
             onAgentUpdated={setAgent}
-            className={agent.walletAddress ? 'border-t-0' : ''}
+            className={agent.walletAddress ? 'mt-4' : ''}
           />
         </div>
       )}
@@ -689,19 +690,18 @@ export default function AgentDetail() {
             key={preset}
             type="button"
             onClick={() => setTopUpAmount(preset)}
-            className={`px-2.5 py-1 text-xs font-mono border transition-colors ${
+            aria-pressed={topUpAmount.trim() === preset}
+            className={`rounded-full px-3.5 py-1 text-xs font-mono border transition-colors ${
               topUpAmount.trim() === preset
-                ? 'border-cream text-ink'
-                : 'border-line text-ink-3 hover:text-cream'
+                ? 'border-accent bg-accent text-accent-ink'
+                : 'border-line text-ink-3 hover:text-ink hover:border-line-2'
             }`}
           >
             {preset}
           </button>
         ))}
       </div>
-      {topUpStatus === 'error' && topUpError && (
-        <div className="text-xs text-err mt-3">{topUpError}</div>
-      )}
+      {topUpStatus === 'error' && <ErrorNotice error={topUpError} title="Couldn't top up" className="mt-3" />}
       <div className="flex items-center justify-end gap-2 mt-5">
         <Button variant="ghost" size="sm" label="Cancel" onClick={() => setTopUpConfirm(false)} />
         <Button

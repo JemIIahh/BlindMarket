@@ -13,6 +13,7 @@ import {
   type Column,
   useTabParam,
   Button,
+  ErrorNotice,
 } from '../components/bb';
 import { useAccountingEntries, useAccountingSummary } from '../hooks/useAccounting';
 import { useAuth } from '../context/AuthContext';
@@ -333,69 +334,66 @@ export default function Earnings() {
     <div>
       <Breadcrumb items={['account', 'earnings']} />
       <PageHeader
-        title="Earnings"
-        description="Wallet balance, payouts, and withdrawal history."
+        title="Earnings."
+        titleMuted="What your agents earned."
       />
 
       {!isAuthenticated && (
-        <div className="mb-6 px-4 py-3 border border-line bg-surface-2 text-xs text-ink-3 leading-relaxed">
+        <div className="mb-6 rounded-2xl border border-line bg-surface-2 px-5 py-3 text-[13px] text-ink-3 leading-relaxed">
           Connect your wallet to see your earnings. Showing anonymized totals only.
         </div>
       )}
 
       {/* Summary fetch failed — say so instead of dashes that read as zero. */}
       {summaryError && (
-        <div className="mb-4 p-3 border border-err/40 bg-err/5 flex items-center justify-between gap-3 text-sm text-ink-2">
+        <div className="mb-4 rounded-2xl border border-[color-mix(in_srgb,var(--bb-err)_40%,transparent)] bg-[color-mix(in_srgb,var(--bb-err)_6%,transparent)] px-5 py-3 flex items-center justify-between gap-3 text-sm text-ink-2">
           <span>Couldn't load the earnings summary.</span>
           <Button variant="outline" size="sm" label="Retry" onClick={() => refetchSummary()} />
         </div>
       )}
 
       {/* Stat cards — live from accounting API */}
-      <div className="grid grid-cols-2 xl:grid-cols-4 gap-0 border border-line mb-8">
+      <div className="grid grid-cols-2 xl:grid-cols-4 gap-4 mb-8">
         <StatCard
+          className="h-full"
           label="Total earned"
           value={summaryLoading ? '…' : fmt(summary?.totalEarned)}
           sub={summary && summary.taskCount > 0 ? `${summary.taskCount} tasks` : 'Across all time'}
         />
-        <div className="border-l border-line">
-          <StatCard
-            className="h-full"
-            label="Net revenue"
-            value={summaryLoading ? '…' : fmt(summary?.netRevenue)}
-            sub="After fees"
-            subColor="ok"
-          />
-        </div>
-        <div className="border-t xl:border-t-0 xl:border-l border-line">
-          <StatCard
-            className="h-full"
-            label="Total fees"
-            value={summaryLoading ? '…' : fmt(summary?.totalFees)}
-            sub="10% platform"
-            subColor="warn"
-          />
-        </div>
-        <div className="border-t border-l xl:border-t-0 border-line">
-          <StatCard
-            className="h-full"
-            label="Pending"
-            value={execLoading && !!address ? '…' : String(pendingTasks.length)}
-            sub="Awaiting settlement"
-            subColor={pendingTasks.length > 0 ? 'warn' : 'ok'}
-          />
-        </div>
+        <StatCard
+          className="h-full"
+          label="Net revenue"
+          value={summaryLoading ? '…' : fmt(summary?.netRevenue)}
+          sub="After fees"
+          subColor="ok"
+        />
+        <StatCard
+          className="h-full"
+          label="Total fees"
+          value={summaryLoading ? '…' : fmt(summary?.totalFees)}
+          sub="10% platform"
+          subColor="warn"
+        />
+        <StatCard
+          className="h-full"
+          label="Pending"
+          value={execLoading && !!address ? '…' : String(pendingTasks.length)}
+          sub="Awaiting settlement"
+          subColor={pendingTasks.length > 0 ? 'warn' : 'ok'}
+        />
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-6 border-b border-line mb-8">
+      <div role="tablist" className="flex gap-5 sm:gap-7 border-b border-line mb-8 overflow-x-auto">
         {TABS.map((t) => (
           <button
             key={t.id}
+            role="tab"
+            aria-selected={tab === t.id}
             onClick={() => setTab(t.id)}
-            className={`pb-3 -mb-px text-sm border-b-2 transition-colors ${
+            className={`pb-3 -mb-px text-[14px] sm:text-[15px] border-b-2 transition-colors whitespace-nowrap shrink-0 ${
               tab === t.id
-                ? 'text-ink font-medium border-cream'
+                ? 'text-ink font-medium border-ink'
                 : 'text-ink-3 border-transparent hover:text-ink-2'
             }`}
           >
@@ -497,9 +495,7 @@ export default function Earnings() {
             <SectionRule num="03" title="Transaction log" side={`${totalEntries} entries`} />
             <div className="mt-4">
               {entriesError ? (
-                <div className="border border-line px-5 py-8 text-center text-xs font-mono text-err break-all">
-                  Failed to load accounting: {(entriesError as Error).message}
-                </div>
+                <ErrorNotice error={entriesError} title="Couldn't load the transaction log" />
               ) : (
                 <DataTable<Transaction>
                   columns={txColumns}
@@ -519,20 +515,20 @@ export default function Earnings() {
               <div className="flex items-center justify-between px-5 py-3 border-t border-line text-xs text-ink-3">
                 <span>Page {txPage} of {totalTxPages}</span>
                 <div className="flex gap-2">
-                  <button
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    label="Previous"
                     onClick={() => setTxPage(p => Math.max(1, p - 1))}
                     disabled={txPage <= 1}
-                    className="px-3 py-1 border border-line bg-surface-2 hover:bg-surface-3 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                  >
-                    Previous
-                  </button>
-                  <button
+                  />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    label="Next"
                     onClick={() => setTxPage(p => Math.min(totalTxPages, p + 1))}
                     disabled={txPage >= totalTxPages}
-                    className="px-3 py-1 border border-line bg-surface-2 hover:bg-surface-3 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                  >
-                    Next
-                  </button>
+                  />
                 </div>
               </div>
             )}

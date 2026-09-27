@@ -12,6 +12,7 @@ import {
   LoadingState,
   Toggle,
   useTabParam,
+  ErrorNotice,
 } from '../bb';
 import { authedDelete, authedGet, authedPatch, authedPost, getAuthHeaders } from '../../lib/api';
 import { API_BASE_URL } from '../../config/constants';
@@ -81,7 +82,7 @@ export function OpsConsole({
   const [errorLogs, setErrorLogs] = useState<any[]>([]);
   const [errorLogsTotal, setErrorLogsTotal] = useState(0);
   const [errorLogsLoading, setErrorLogsLoading] = useState(false);
-  const [clearErrorsFailed, setClearErrorsFailed] = useState<string | null>(null);
+  const [clearErrorsFailed, setClearErrorsFailed] = useState<unknown>(null);
 
   // Edit form — seeded from the loaded agent; the page remounts this
   // component when the agent changes, so no re-sync effect is needed.
@@ -306,7 +307,7 @@ export function OpsConsole({
   });
 
   return (
-    <div className={`border border-line flex flex-col min-w-0 ${className}`}>
+    <div className={`card-dark overflow-hidden flex flex-col min-w-0 ${className}`}>
       {/* Tab strip — active tab tinted bg, visually attached to panel */}
       <div
         role="tablist"
@@ -323,7 +324,7 @@ export function OpsConsole({
               onClick={() => setTab(t)}
               className={`flex items-center gap-2 px-4 pt-3 pb-3 -mb-px text-sm whitespace-nowrap border-b-2 transition-colors shrink-0 ${
                 active
-                  ? 'text-cream border-cream bg-cream/10 font-medium'
+                  ? 'text-ink border-accent font-medium'
                   : 'text-ink-3 border-transparent hover:bg-surface-2 hover:text-ink-2'
               }`}
             >
@@ -353,10 +354,10 @@ export function OpsConsole({
               const tsMatch = clean.match(/^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:Z|))\s+(.*)$/);
               const isErr = clean.includes('[err]');
               return (
-                <div key={i} className={`px-3 py-1.5 text-xs font-mono flex flex-col gap-0.5 sm:flex-row sm:gap-3 ${isErr ? 'text-err bg-err/10' : 'text-ink-3 hover:bg-surface-2'}`}>
+                <div key={i} className={`px-3 py-1.5 text-xs font-mono flex flex-col gap-0.5 sm:flex-row sm:gap-3 ${isErr ? 'text-err bg-[color:color-mix(in_srgb,var(--bb-err)_8%,transparent)]' : 'text-ink-3 hover:bg-surface-2'}`}>
                   {tsMatch ? (
                     <>
-                      <span className="text-ink-3/60 shrink-0" title={tsMatch[1]}>
+                      <span className="text-ink-3 opacity-70 shrink-0" title={tsMatch[1]}>
                         {new Date(tsMatch[1].replace('Z', '').replace(' ', 'T') + 'Z').toLocaleString([], { hour12: false })}
                       </span>
                       <span className="break-all">{tsMatch[2]}</span>
@@ -399,7 +400,7 @@ export function OpsConsole({
                     setClearErrorsFailed(null);
                     authedDelete(`/api/v1/tools/error-logs?agentId=${encodeURIComponent(agentId)}`)
                       .then(() => { setErrorLogs([]); setErrorLogsTotal(0); })
-                      .catch((err) => setClearErrorsFailed(err instanceof Error ? err.message : 'Could not clear the error log.'));
+                      .catch((err) => setClearErrorsFailed(err ?? 'Could not clear the error log.'));
                   }}
                   className="px-2 py-1.5 -mx-2 -my-1.5 text-xs text-ink-3 hover:text-ink transition-colors"
                 >
@@ -407,9 +408,7 @@ export function OpsConsole({
                 </button>
               )}
             </div>
-            {clearErrorsFailed && (
-              <p className="mb-4 text-xs text-err break-words">Couldn't clear the error log: {clearErrorsFailed}</p>
-            )}
+            <ErrorNotice error={clearErrorsFailed} title="Couldn't clear the error log" compact className="mb-4" />
             {errorLogsLoading ? (
               <LoadingState />
             ) : errorLogs.length === 0 ? (
@@ -420,7 +419,7 @@ export function OpsConsole({
             ) : (
               <div className="space-y-3">
                 {errorLogs.map((e: any) => (
-                  <div key={e.id} className="border border-line p-4 space-y-2">
+                  <div key={e.id} className="rounded-xl border border-line p-4 space-y-2">
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                       <span className="text-sm font-medium text-ink break-all">{e.toolName}</span>
                       <Tag tone="neutral">{e.toolType}</Tag>
@@ -440,13 +439,13 @@ export function OpsConsole({
                     {e.requestInput && e.requestInput !== '{}' && (
                       <details className="text-xs text-ink-3">
                         <summary className="cursor-pointer hover:text-ink-2">Request input</summary>
-                        <pre className="mt-1 p-2 bg-surface-2 border border-line overflow-x-auto whitespace-pre-wrap">{e.requestInput}</pre>
+                        <pre className="mt-1 rounded-lg p-2.5 bg-surface-2 border border-line overflow-x-auto whitespace-pre-wrap">{e.requestInput}</pre>
                       </details>
                     )}
                     {e.responseOutput && (
                       <details className="text-xs text-ink-3">
                         <summary className="cursor-pointer hover:text-ink-2">Response output</summary>
-                        <pre className="mt-1 p-2 bg-surface-2 border border-line overflow-x-auto whitespace-pre-wrap">{e.responseOutput}</pre>
+                        <pre className="mt-1 rounded-lg p-2.5 bg-surface-2 border border-line overflow-x-auto whitespace-pre-wrap">{e.responseOutput}</pre>
                       </details>
                     )}
                     {e.durationMs > 0 && (
@@ -468,7 +467,7 @@ export function OpsConsole({
         {tab === 'tools' && (
           <div className="p-5 space-y-4">
             {toolsSaved && (
-              <div className="border border-cream/30 bg-cream/5 p-4 text-sm text-ink-2">
+              <div className="rounded-xl border border-line-2 bg-surface-2 p-4 text-sm text-ink-2">
                 Tools saved. <strong>Restart the agent</strong> for changes to take effect — stop then start.
               </div>
             )}
@@ -531,20 +530,20 @@ export function OpsConsole({
             </div>
 
             {editProvider !== agent.provider && (
-              <div className="flex items-start gap-2 p-3 bg-warn/10 border border-warn/30 text-warn text-xs">
-                <Icon name="alert" size={14} className="shrink-0 mt-0.5" />
+              <div className="flex items-start gap-2 rounded-xl p-3 border border-[color:color-mix(in_srgb,var(--bb-warn)_40%,transparent)] bg-[color:color-mix(in_srgb,var(--bb-warn)_8%,transparent)] text-ink-2 text-xs">
+                <Icon name="alert" size={14} className="shrink-0 mt-0.5 text-warn" />
                 <span>Changing provider will clear the current API key. Enter a new key before saving.</span>
               </div>
             )}
 
             <FormField label="API key">
               {agent.apiKeyHint && !apiKeyVisible ? (
-                <div className="flex items-center gap-3 p-3 bg-ok/10 border border-ok/30 rounded">
+                <div className="flex items-center gap-3 rounded-xl p-3 border border-[color:color-mix(in_srgb,var(--bb-ok)_30%,transparent)] bg-[color:color-mix(in_srgb,var(--bb-ok)_8%,transparent)]">
                   <span className="text-sm text-ok font-mono">key on file · {agent.apiKeyHint}</span>
                   <button
                     type="button"
                     onClick={() => setApiKeyVisible(true)}
-                    className="px-2 py-1.5 ml-auto -mr-2 -my-1.5 text-xs text-cream hover:underline"
+                    className="px-2 py-1.5 ml-auto -mr-2 -my-1.5 text-xs text-accent hover:underline"
                   >
                     Replace
                   </button>
@@ -587,7 +586,7 @@ export function OpsConsole({
               {editProvider !== agent.provider && !editApiKey && (
                 <span className="text-xs text-ink-3">Enter a new API key to save provider change</span>
               )}
-              {save.isError && <span className="text-xs text-err break-words">Save failed{save.error instanceof Error ? `: ${save.error.message}` : ''}</span>}
+              {save.isError && <ErrorNotice error={save.error ?? 'Save failed.'} title="Save failed" compact />}
             </div>
 
             {/* Skills — installed as frozen snapshots; managed via the
@@ -612,7 +611,7 @@ export function OpsConsole({
           <div className="absolute bottom-3 right-3 z-10 flex flex-col gap-1.5">
             <button
               onClick={refreshLogs}
-              className="w-8 h-8 flex items-center justify-center bg-surface-2 hover:bg-bg text-ink border border-line shadow-lg transition-all hover:scale-110"
+              className="w-8 h-8 flex items-center justify-center rounded-full bg-surface-2 hover:bg-bg text-ink border border-line shadow-lg transition-all hover:scale-110"
               title="Refresh logs"
               aria-label="Refresh logs"
             >
@@ -623,7 +622,7 @@ export function OpsConsole({
             </button>
             <button
               onClick={scrollToTop}
-              className="w-8 h-8 flex items-center justify-center bg-surface-2 hover:bg-bg text-ink border border-line shadow-lg transition-all hover:scale-110"
+              className="w-8 h-8 flex items-center justify-center rounded-full bg-surface-2 hover:bg-bg text-ink border border-line shadow-lg transition-all hover:scale-110"
               title="Scroll to top"
               aria-label="Scroll logs to top"
             >
@@ -633,7 +632,7 @@ export function OpsConsole({
             </button>
             <button
               onClick={scrollToBottom}
-              className={`w-8 h-8 flex items-center justify-center border shadow-lg transition-all hover:scale-110 ${autoScroll ? 'bg-cream/20 text-cream border-cream/40' : 'bg-surface-2 hover:bg-bg text-ink border-line'}`}
+              className={`w-8 h-8 flex items-center justify-center rounded-full border shadow-lg transition-all hover:scale-110 ${autoScroll ? 'bg-invert text-invert-fg border-invert' : 'bg-surface-2 hover:bg-bg text-ink border-line'}`}
               title={autoScroll ? 'Auto-scroll on (click to disable)' : 'Scroll to bottom'}
               aria-label={autoScroll ? 'Auto-scroll on, click to disable' : 'Scroll logs to bottom'}
             >

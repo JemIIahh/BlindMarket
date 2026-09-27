@@ -51,7 +51,7 @@ export function DashboardLayout() {
   }, []);
 
   return (
-    <div className="min-h-screen bg-bg">
+    <div className="min-h-screen bb-ambient">
       <Sidebar
         open={navOpen}
         onClose={() => setNavOpen(false)}
@@ -61,8 +61,14 @@ export function DashboardLayout() {
       <div
         className={`${collapsed ? 'md:ml-16' : 'md:ml-[240px]'} flex flex-col min-h-screen transition-[margin-left] duration-200 ease-out motion-reduce:transition-none`}
       >
-        <TopBar onMenuClick={() => setNavOpen(true)} />
-        <ChainBanner />
+        {/* The frosted top bar stays put while the page scrolls under it.
+            z-20 keeps it below the mobile drawer's backdrop (z-30). The
+            banner's own sticky is contained by this wrapper, so the two
+            never overlap. */}
+        <div className="sticky top-0 z-20">
+          <TopBar onMenuClick={() => setNavOpen(true)} />
+          <ChainBanner />
+        </div>
         <main
           className="flex-1 px-4 sm:px-6 md:px-8 pt-4 sm:pt-6 md:pt-8"
           style={{

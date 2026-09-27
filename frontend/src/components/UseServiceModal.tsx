@@ -2,12 +2,13 @@ import { useState, useRef, useEffect } from 'react';
 import { useWalletClient } from 'wagmi';
 import { getIdentityToken, getAccessToken } from '@privy-io/react-auth';
 import { BrowserProvider } from 'ethers';
-import { Button, FormField, FormTextarea, Modal, Spinner } from './bb';
+import { Button, ErrorNotice, FormField, FormTextarea, Modal, RadioPills, Spinner } from './bb';
 import { aesEncrypt, eciesEncrypt, generateAesKey, sha256, toBase64, toBytes } from '../lib/crypto';
 import { stashAesKey } from '../lib/keyStash';
 import { ensureBaseAllowance, signAndSendTx } from '../lib/txSigner';
 import { formatPaymentAmount } from '../lib/paymentUnits';
 import { authedGet, authedPost } from '../lib/api';
+import { UserFacingError } from '../lib/friendlyError';
 import { getMarketplaceTokenAddress } from '../config/settlement';
 import { useChain } from '../context/ChainContext';
 import { useAccountWallets, useChainAddress } from '../hooks/useChainWallet';
@@ -57,7 +58,7 @@ export default function UseServiceModal({
   // public posts it in plaintext (prompt + result become public record).
   const [privacy, setPrivacy] = useState<'private' | 'public'>('private');
   const [phase, setPhase] = useState<Phase>('input');
-  const [error, setError] = useState('');
+  const [error, setError] = useState<unknown>('');
   const [output, setOutput] = useState<string | null>(null);
   const submittingRef = useRef(false);
 
@@ -116,7 +117,10 @@ export default function UseServiceModal({
         }
       } catch { /* transient — keep polling */ }
     }
-    setError('Timed out waiting for the agent. It may still be running — check My tasks for the result and settlement.');
+    setError(new UserFacingError(
+      'Timed out waiting for the agent. It may still be running — check My tasks for the result and settlement.',
+      { title: 'Still in progress', kind: 'maybeSent' },
+    ));
     setPhase('error');
   }
 
@@ -192,6 +196,8 @@ export default function UseServiceModal({
       const sent = await signAndSendTx(signer, taskJson.unsignedTx, isNativeToken ? price : undefined, { chain: taskJson.chain });
 
       // 5. Index the meta — pinned to the agent + linked to the service.
+      // Paid by now: a failure here must not read as "try again", which
+      // would fund a second escrow.
       await authedPost('/api/v1/a2a/tasks/index', {
         txHash: sent.hash,
         taskHash,
@@ -204,13 +210,18 @@ export default function UseServiceModal({
         serviceId: service.id,
         privacy: isPublic ? 'public' : undefined,
         publicBrief: isPublic ? prompt.slice(0, 4000) : undefined,
-      }, token);
+      }, token).catch((e: unknown) => {
+        throw new UserFacingError(
+          "Your payment is in escrow, but the call couldn't be listed. Don't pay again: send the details below to support.",
+          { title: 'Paid, but not started', cause: new Error(`tx ${sent.hash}: ${e instanceof Error ? e.message : String(e)}`) },
+        );
+      });
 
       // 6. Wait for the agent to run + settle, then show the result.
       setPhase('running');
       await pollForResult(taskHash, token);
     } catch (err) {
-      setError((err as Error).message);
+      setError(err);
       setPhase('error');
     } finally {
       submittingRef.current = false;
@@ -243,27 +254,18 @@ export default function UseServiceModal({
             >
               <FormTextarea rows={4} placeholder="What do you want this agent to do?" value={prompt} onChange={(e) => setPrompt(e.target.value)} />
             </FormField>
-            <div className="flex flex-wrap gap-1.5">
-              {([['private', 'Private (encrypted)'], ['public', 'Public']] as const).map(([mode, label]) => (
-                <button
-                  key={mode}
-                  type="button"
-                  onClick={() => setPrivacy(mode)}
-                  className={`px-2.5 py-1 text-xs border transition-colors ${privacy === mode
-                    ? 'bg-cream/10 border-cream/40 text-cream'
-                    : 'bg-surface-2 border-line text-ink-3 hover:text-ink-2'
-                    }`}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-            <div className="text-xs text-ink-3 border border-line bg-surface-2 p-3">
+            <RadioPills
+              label="Privacy"
+              value={privacy}
+              options={[['private', 'Private (encrypted)'], ['public', 'Public']] as const}
+              onChange={setPrivacy}
+            />
+            <div className="rounded-xl border border-line bg-surface-2 p-3.5 text-xs text-ink-3 leading-relaxed">
               You pay <span className="font-mono text-ink">{priceLabel}</span> per call. Payment is released to the
               agent on completion (90% agent / 10% platform) regardless of the output — you're paying for the
               invocation, like any per-call API.
             </div>
-            {error && <div className="text-xs text-err break-words">{error}</div>}
+            <ErrorNotice error={error} title="Couldn't run the agent" />
             <div className="flex justify-end gap-2">
               <Button variant="ghost" size="sm" label="Cancel" onClick={onClose} />
               <Button variant="primary" size="sm" label={`Pay ${priceLabel} & run`} onClick={handleUse} />
@@ -284,8 +286,8 @@ export default function UseServiceModal({
 
         {phase === 'done' && (
           <div className="space-y-4">
-            <div className="text-xs uppercase tracking-wider text-ink-3">Result</div>
-            <pre className="whitespace-pre-wrap break-words text-sm text-ink border border-line bg-surface-2 p-3 max-h-80 overflow-y-auto">{output}</pre>
+            <div className="font-mono text-[11px] font-medium uppercase tracking-widest text-ink-3">Result</div>
+            <pre className="whitespace-pre-wrap break-words rounded-xl border border-line bg-surface-2 p-3.5 text-sm text-ink max-h-80 overflow-y-auto">{output}</pre>
             <div className="flex justify-end">
               <Button variant="primary" size="sm" label="Done" onClick={onClose} />
             </div>

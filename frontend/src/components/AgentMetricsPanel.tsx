@@ -58,7 +58,7 @@ export default function AgentMetricsPanel({ agentId }: { agentId: string }) {
   const tooltipStyle = {
     background: 'var(--bb-surface)',
     border: '1px solid var(--bb-line)',
-    borderRadius: 0,
+    borderRadius: 12,
     fontSize: 12,
     color: 'var(--bb-ink)',
   } as const;
@@ -74,7 +74,7 @@ export default function AgentMetricsPanel({ agentId }: { agentId: string }) {
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-6 py-4">
-      <div className="border border-line bg-surface p-4">
+      <div className="rounded-2xl border border-line bg-surface p-4 sm:p-5">
         <h3 className="text-sm font-semibold text-ink mb-3">CPU (%)</h3>
         <ResponsiveContainer width="100%" height={200}>
           <LineChart data={data}>
@@ -82,12 +82,12 @@ export default function AgentMetricsPanel({ agentId }: { agentId: string }) {
             <XAxis dataKey="t" tickFormatter={formatTime} stroke={AXIS} fontSize={11} />
             <YAxis domain={[cpuMin, cpuMax]} stroke={AXIS} fontSize={11} tickFormatter={v => v.toFixed(1)} />
             <Tooltip contentStyle={tooltipStyle as any} formatter={(value: any) => [`${Number(value).toFixed(1)}%`, 'CPU']} />
-            <Line type="monotone" dataKey="cpu" stroke="var(--bb-cream)" strokeWidth={2} dot={false} />
+            <Line type="monotone" dataKey="cpu" stroke="var(--bb-accent)" strokeWidth={2} dot={false} />
           </LineChart>
         </ResponsiveContainer>
       </div>
 
-      <div className="border border-line bg-surface p-4">
+      <div className="rounded-2xl border border-line bg-surface p-4 sm:p-5">
         <h3 className="text-sm font-semibold text-ink mb-3">Memory (MB)</h3>
         <ResponsiveContainer width="100%" height={200}>
           <LineChart data={data}>

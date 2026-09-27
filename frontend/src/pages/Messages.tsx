@@ -13,6 +13,7 @@ import {
   LoadingState,
   EmptyState,
   ErrorState,
+  ErrorNotice,
 } from '../components/bb';
 import { authedGet, authedPost } from '../lib/api';
 import { useSocket } from '../hooks/useSocket';
@@ -131,13 +132,14 @@ export default function Messages() {
     <div>
       <Breadcrumb items={['account', 'messages']} />
       <PageHeader
-        title="Messages"
-        description={`${unread} unread · conversations with task posters and the agents you work with`}
+        title="Messages."
+        titleMuted="Talk with posters and agents."
       />
 
       {unread > 0 && (
-        <div className="mb-6 px-4 py-3 border border-cream/30 bg-cream/5 text-xs text-cream flex items-center justify-between gap-3">
-          <span>
+        <div className="card-dark mb-6 px-5 py-3 text-sm text-ink flex items-center justify-between gap-3">
+          <span className="flex items-center gap-2.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-accent shrink-0" aria-hidden />
             {unread} unread message{unread !== 1 ? 's' : ''}
           </span>
           <Button
@@ -156,7 +158,7 @@ export default function Messages() {
             <span className="text-[11px] font-mono font-semibold uppercase tracking-widest text-ink-3">
               inbox · {messages.length}
             </span>
-            <span className="text-[11px] font-mono text-ink-3/50">|</span>
+            <span className="text-[11px] font-mono text-line-2" aria-hidden>|</span>
             <span className="text-[11px] font-mono text-ink-3">
               sent · {sent.length}
             </span>
@@ -176,11 +178,11 @@ export default function Messages() {
               description="Messages from task posters and the agents you work with appear here."
             />
           ) : (
-            <div className="divide-y divide-line">
+            <div className="-mx-2 space-y-1">
               {messages.map((msg) => (
                 <div
                   key={msg.id}
-                  className={`px-5 py-4 cursor-pointer hover:bg-surface-2 transition-colors ${!msg.read_at ? 'bg-cream/5' : ''}`}
+                  className={`rounded-xl px-4 py-4 cursor-pointer hover:bg-surface-2 transition-colors ${!msg.read_at ? 'bg-[color-mix(in_srgb,var(--bb-accent)_5%,transparent)]' : ''}`}
                   onClick={() => {
                     setSelectedMsg(msg);
                     setReplyTo(msg.from_address);
@@ -192,12 +194,12 @@ export default function Messages() {
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 mb-1">
-                        {!msg.read_at && <span className="w-1.5 h-1.5 bg-cream flex-shrink-0" />}
+                        {!msg.read_at && <span className="w-1.5 h-1.5 rounded-full bg-accent flex-shrink-0" aria-label="unread" />}
                         <span className="text-xs font-mono text-ink-3">
                           from {shortAddr(msg.from_address)}
                         </span>
                         {msg.task_id && (
-                          <span className="text-[10px] font-mono text-ink-3/50">
+                          <span className="text-[10px] font-mono text-ink-3">
                             task #{msg.task_id.slice(0, 10)}…
                           </span>
                         )}
@@ -226,14 +228,14 @@ export default function Messages() {
                   onRetry={() => refetchSent()}
                 />
               ) : (
-                <div className="divide-y divide-line">
+                <div className="-mx-2 space-y-1">
                   {sent.map((msg) => (
-                    <div key={msg.id} className="px-5 py-3">
+                    <div key={msg.id} className="rounded-xl px-4 py-3">
                       <div className="flex items-center gap-2 mb-1">
                         <span className="text-xs font-mono text-ink-3">
                           to {shortAddr(msg.to_address)}
                         </span>
-                        <span className="text-[10px] font-mono text-ink-3/50">{timeAgo(msg.created_at)}</span>
+                        <span className="text-[10px] font-mono text-ink-3">{timeAgo(msg.created_at)}</span>
                       </div>
                       {msg.subject && (
                         <div className="text-xs text-ink-2 mb-0.5">{msg.subject}</div>
@@ -270,14 +272,14 @@ export default function Messages() {
 
             {replyTo ? (
               <div className="space-y-3">
-                <FormField label="subject">
+                <FormField label="Subject">
                   <FormInput
                     value={replySubject}
                     onChange={(e) => setReplySubject(e.target.value)}
                     placeholder="Optional"
                   />
                 </FormField>
-                <FormField label="message" required>
+                <FormField label="Message" required>
                   <FormTextarea
                     value={replyBody}
                     onChange={(e) => setReplyBody(e.target.value)}
@@ -304,29 +306,24 @@ export default function Messages() {
                     }}
                   />
                 </div>
-                {sendMutation.isError && (
-                  <div className="text-xs text-err">{(sendMutation.error as Error).message}</div>
-                )}
+                {sendMutation.isError && <ErrorNotice error={sendMutation.error} title="Couldn't send the message" compact />}
               </div>
             ) : (
               <EmptyState
                 icon="send"
                 title="No message selected"
-                description="Open a message on the left to read it and reply. Agents message you here when they need task clarification."
+                description="Open a message to read it and reply."
               />
             )}
           </Panel>
 
-          <div className="border border-line bg-surface-2 p-4">
-            <div className="text-[11px] font-mono font-semibold uppercase tracking-widest text-ink-3 mb-3">
+          <div className="rounded-2xl border border-line bg-surface-2 p-5">
+            <div className="text-[11px] font-mono font-semibold uppercase tracking-widest text-ink-3 mb-2">
               how messaging works
             </div>
-            <div className="space-y-2 text-xs text-ink-3 leading-relaxed">
-              <p>Agents can message you when they need more detail about a task.</p>
-              <p>You can reply with extra context or clarification.</p>
-              <p>Messages are scoped to tasks — open a task to filter the thread.</p>
-              <p>Agents see your message in their inbox and can reply.</p>
-            </div>
+            <p className="text-[13px] text-ink-3 leading-relaxed">
+              Agents message you when they need more detail about a task, and your reply lands in their inbox.
+            </p>
           </div>
         </div>
       </div>

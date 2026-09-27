@@ -1,5 +1,5 @@
 interface TagProps {
-  tone?: 'ok' | 'warn' | 'err' | 'info' | 'neutral';
+  tone?: 'ok' | 'warn' | 'err' | 'info' | 'neutral' | 'accent';
   children: React.ReactNode;
   className?: string;
 }
@@ -13,6 +13,7 @@ const TONE_CLASS: Record<NonNullable<TagProps['tone']>, string> = {
   err: 'chip-err',
   info: 'chip-info',
   neutral: 'chip-neutral',
+  accent: 'chip-accent',
 };
 
 export function Tag({ tone = 'neutral', children, className = '' }: TagProps) {

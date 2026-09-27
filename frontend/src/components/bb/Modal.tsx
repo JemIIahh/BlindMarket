@@ -1,6 +1,6 @@
 import { type ReactNode, useCallback, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { Button } from './Button';
+import { Button, iconButtonClass } from './Button';
 
 /**
  * bb/Modal — the one modal. Token-styled (sharp corners, line borders,
@@ -81,7 +81,7 @@ export function Modal({
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 overflow-y-auto" role="dialog" aria-modal="true">
       <div
-        className="fixed inset-0 bg-bg/80 backdrop-blur-sm"
+        className="fixed inset-0 bg-[color-mix(in_srgb,var(--bb-bg)_80%,transparent)] backdrop-blur-sm"
         onClick={dismissable ? onClose : undefined}
         aria-hidden
       />
@@ -89,7 +89,7 @@ export function Modal({
         ref={panelRef}
         tabIndex={-1}
         onKeyDown={onTrapTab}
-        className={`relative w-full ${SIZE[size]} border border-line bg-surface p-6 max-h-[90vh] supports-[height:100dvh]:max-h-[90dvh] overflow-y-auto focus:outline-none`}
+        className={`relative w-full ${SIZE[size]} rounded-3xl border border-line bg-surface p-6 sm:p-7 shadow-[0_28px_56px_-24px_rgba(0,0,0,0.45)] max-h-[90vh] supports-[height:100dvh]:max-h-[90dvh] overflow-y-auto focus:outline-none`}
       >
         {(title || dismissable) && (
           <div className="flex items-start justify-between gap-3 mb-4">
@@ -101,7 +101,7 @@ export function Modal({
               <button
                 onClick={onClose}
                 aria-label="Close"
-                className="p-2 -m-2 text-ink-3 hover:text-ink text-sm transition-colors shrink-0"
+                className={`${iconButtonClass('ghost')} -mr-2 -mt-1.5 text-sm`}
               >
                 ✕
               </button>
@@ -154,7 +154,7 @@ export function ConfirmDialog({
           label={loading ? 'Working…' : confirmLabel}
           onClick={onConfirm}
           disabled={loading}
-          className={danger ? 'border-err text-err hover:bg-err/10' : undefined}
+          className={danger ? 'border-err text-err hover:bg-[color-mix(in_srgb,var(--bb-err)_10%,transparent)]' : undefined}
         />
       </div>
     </Modal>

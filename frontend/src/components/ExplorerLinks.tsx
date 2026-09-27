@@ -31,7 +31,7 @@ export function ExplorerAddressLinks({
 }) {
   const links = agentExplorerLinks(useSettlement());
   const linkCls =
-    '-my-1 py-1 hover:text-cream hover:underline decoration-cream/30 transition-colors';
+    '-my-1 py-1 hover:text-accent hover:underline decoration-line-2 underline-offset-[3px] transition-colors';
   return (
     <span className={`inline-flex items-center gap-1.5 ${className}`}>
       {links.map((l, i) => (

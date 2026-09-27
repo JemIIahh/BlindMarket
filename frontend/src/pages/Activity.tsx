@@ -71,8 +71,8 @@ export default function Activity() {
     <div>
       <Breadcrumb items={['account', 'activity']} />
       <PageHeader
-        title="Activity"
-        description="Your event diary — assignments, submissions, completions, reviews, and disputes."
+        title="Activity."
+        titleMuted="What happened on your tasks."
         right={
           unread > 0 ? (
             <Button
@@ -87,27 +87,31 @@ export default function Activity() {
       />
 
       {!isAuthenticated ? (
-        <EmptyState
-          icon="bell"
-          title="Connect your wallet"
-          description="Connect a wallet to see the events on your tasks."
-        />
+        <div className="card-dark">
+          <EmptyState
+            icon="bell"
+            title="Connect your wallet"
+            description="Connect a wallet to see the events on your tasks."
+          />
+        </div>
       ) : isLoading ? (
-        <LoadingState label="Loading activity…" />
+        <div className="card-dark"><LoadingState label="Loading activity…" /></div>
       ) : isError ? (
-        <ErrorState title="Couldn't load activity" onRetry={() => refetch()} />
+        <div className="card-dark"><ErrorState title="Couldn't load activity" onRetry={() => refetch()} /></div>
       ) : notifications.length === 0 ? (
-        <EmptyState
-          icon="bell"
-          title="No activity yet"
-          description="When an agent accepts your task, submits work, or you get paid, it lands here."
-        />
+        <div className="card-dark">
+          <EmptyState
+            icon="bell"
+            title="No activity yet"
+            description="When an agent accepts your task, submits work, or you get paid, it lands here."
+          />
+        </div>
       ) : (
-        <div className="border border-line divide-y divide-line">
+        <div className="card-dark overflow-hidden divide-y divide-line">
           {notifications.map((n) => {
             const inner = (
-              <div className="flex items-start gap-3 p-4 hover:bg-surface-2/60 transition-colors">
-                <span className={`mt-0.5 shrink-0 ${n.read ? 'text-ink-3' : 'text-cream'}`}>
+              <div className="flex items-start gap-3 px-5 py-4 hover:bg-surface-2 transition-colors">
+                <span className={`mt-0.5 shrink-0 ${n.read ? 'text-ink-3' : 'text-accent'}`}>
                   <Icon name={TYPE_ICON[n.type] ?? 'bell'} size={17} />
                 </span>
                 <div className="flex-1 min-w-0">
@@ -115,7 +119,7 @@ export default function Activity() {
                     <span className={`text-sm ${n.read ? 'text-ink-2' : 'text-ink font-medium'}`}>
                       {n.title}
                     </span>
-                    {!n.read && <span className="w-1.5 h-1.5 bg-cream shrink-0" aria-label="unread" />}
+                    {!n.read && <span className="w-1.5 h-1.5 rounded-full bg-accent shrink-0" aria-label="unread" />}
                   </div>
                   {n.body && (
                     <p className="text-xs text-ink-3 mt-0.5 leading-relaxed">{n.body}</p>
@@ -123,7 +127,7 @@ export default function Activity() {
                   <p className="text-[11px] text-ink-3 font-mono mt-1">{ago(n.createdAt)}</p>
                 </div>
                 {n.taskId && (
-                  <span className="text-[11px] text-ink-3 shrink-0 group-hover:text-cream">View →</span>
+                  <span className="text-[12px] text-ink-3 shrink-0 group-hover:text-accent transition-colors">View →</span>
                 )}
               </div>
             );

@@ -23,27 +23,49 @@ export default {
         warn:       'var(--bb-warn)',
         err:        'var(--bb-err)',
         info:       'var(--bb-info)',
+        // Accent = the strong neutral of each theme (cream on dark, ink on
+        // paper), no extra hue. Opacity modifiers like bg-accent/10 generate
+        // NO CSS on var() colours: use
+        // bg-[color-mix(in_srgb,var(--bb-accent)_12%,transparent)] instead.
+        accent:        'var(--bb-accent)',
+        'accent-lift': 'var(--bb-accent-lift)',
+        'accent-deep': 'var(--bb-accent-deep)',
+        'accent-ink':  'var(--bb-accent-ink)',
+        glass:         'var(--bb-glass)',
+        'glass-line':  'var(--bb-glass-line)',
+      },
+      transitionTimingFunction: {
+        bb: 'cubic-bezier(0.23, 1, 0.32, 1)',
+      },
+      transitionDuration: {
+        240: '240ms',
       },
       fontFamily: {
-        sans: ["'IBM Plex Sans'", 'system-ui', '-apple-system', "'Segoe UI'", 'Roboto', 'sans-serif'],
+        // One family across the app and the landing, plus mono for labels and numbers.
+        sans: ["'Instrument Sans'", 'system-ui', '-apple-system', "'Segoe UI'", 'Roboto', 'sans-serif'],
         mono: ["'IBM Plex Mono'", 'ui-monospace', "'SF Mono'", 'Menlo', 'monospace'],
         // Dot-matrix / LED display face — used for the landing hero headline.
         display: ["'Doto'", "'IBM Plex Mono'", 'ui-monospace', 'monospace'],
         // Marketing surface (landing + marketing chrome) display face.
         // ONE family only — no serif accents (user feedback, Jul 2026).
         mk: ["'Instrument Sans'", 'system-ui', '-apple-system', 'sans-serif'],
+        // The body face the marketing surface was designed on, before `sans`
+        // became Instrument Sans: MarketingLayout keeps it so landing text
+        // without font-mk renders exactly as it did.
+        plex: ["'IBM Plex Sans'", 'system-ui', '-apple-system', "'Segoe UI'", 'Roboto', 'sans-serif'],
       },
-      /* Sharp corners — zero border-radius everywhere */
+      /* Radius scale, matched to the landing page: pills for buttons and
+         chips, 20px cards, 28px dialogs. */
       borderRadius: {
-        DEFAULT: '0',
+        DEFAULT: '10px',
         none: '0',
-        sm: '0',
-        md: '0',
-        lg: '0',
-        xl: '0',
-        '2xl': '0',
-        '3xl': '0',
-        full: '0',
+        sm: '6px',
+        md: '10px',
+        lg: '12px',
+        xl: '16px',
+        '2xl': '20px',
+        '3xl': '28px',
+        full: '9999px',
       },
       fontSize: {
         '2xs': ['0.625rem', { lineHeight: '0.875rem' }],

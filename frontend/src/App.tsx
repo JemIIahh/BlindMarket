@@ -52,10 +52,10 @@ const privyAppId = import.meta.env.VITE_PRIVY_APP_ID;
 function MissingEnv() {
   return (
     <div className="min-h-screen bg-bg text-ink flex items-center justify-center p-6">
-      <div className="max-w-md border border-line bg-surface p-6">
+      <div className="max-w-md rounded-3xl border border-line bg-surface p-7">
         <h1 className="text-base font-semibold mb-2">BlindMarket can't start</h1>
         <p className="text-sm text-ink-2 leading-relaxed">
-          This build is missing <code className="font-mono text-cream">VITE_PRIVY_APP_ID</code>.
+          This build is missing <code className="font-mono text-ink">VITE_PRIVY_APP_ID</code>.
           Set it in the deployment environment and rebuild.
         </p>
       </div>

@@ -27,12 +27,12 @@ export function ReviewsSection({
       />
 
       {/* Score summary row */}
-      <div className="flex border border-line">
+      <div className="card-dark flex overflow-hidden">
         {/* Left: numeric score + caption */}
-        <div className="shrink-0 px-5 py-4 flex flex-col items-center justify-center sm:border-r border-line">
+        <div className="shrink-0 px-6 py-5 flex flex-col items-center justify-center sm:border-r border-line">
           {hasStats ? (
             <>
-              <span className="font-mono text-4xl font-bold text-cream tabular-nums">
+              <span className="text-4xl font-medium tracking-[-0.03em] text-accent tabular-nums">
                 {stats!.avgRating.toFixed(2)}
               </span>
               <span className="text-[11px] text-ink-3 font-mono mt-1">
@@ -41,14 +41,14 @@ export function ReviewsSection({
             </>
           ) : (
             <>
-              <span className="font-mono text-4xl font-bold text-ink-3 tabular-nums">—</span>
+              <span className="text-4xl font-medium text-ink-3 tabular-nums">—</span>
               <span className="text-[11px] text-ink-3 mt-1">no reviews yet</span>
             </>
           )}
         </div>
 
         {/* Right: histogram when reviews exist, muted copy when empty */}
-        <div className="flex-1 px-5 py-4 min-w-0">
+        <div className="flex-1 px-6 py-5 min-w-0">
           {hasStats ? (
             <div className="space-y-1.5">
               {[5, 4, 3, 2, 1].map((star) => {
@@ -56,9 +56,9 @@ export function ReviewsSection({
                 return (
                   <div key={star} className="flex items-center gap-3 font-mono text-[11px] text-ink-3">
                     <span className="w-10 shrink-0">{star}★</span>
-                    <div className="flex-1 h-1.5 bg-surface-2">
+                    <div className="flex-1 h-1.5 overflow-hidden rounded-full bg-surface-2">
                       <div
-                        className="h-full bg-cream"
+                        className="h-full rounded-full bg-accent"
                         style={{ width: `${(count / maxDist) * 100}%` }}
                       />
                     </div>
@@ -79,7 +79,7 @@ export function ReviewsSection({
       {reviews.length > 0 && (
         <div className="mt-4 space-y-2">
           {reviews.map((r) => (
-            <div key={r.id} className="border border-line p-4">
+            <div key={r.id} className="card-dark p-5">
               <div className="flex items-center gap-3 mb-1.5">
                 <span className="text-ink font-mono text-sm">
                   {'★'.repeat(r.rating)}{'☆'.repeat(5 - r.rating)}
@@ -102,10 +102,10 @@ export function ReviewsSection({
       {/* Reviews are poster-only and bound to a completed task, so they are
           left from the task page — the old inline form submitted an empty
           taskId and could never succeed. */}
-      <div className="mt-4 border border-line px-4 py-3">
+      <div className="mt-4 rounded-2xl border border-line px-5 py-3.5">
         <p className="text-xs text-ink-3 leading-relaxed">
           Only the poster of a completed task can leave a review. Hired this agent?{' '}
-          <Link to="/tasks/mine" className="text-cream hover:underline decoration-cream/30">
+          <Link to="/tasks/mine" className="text-accent underline decoration-line-2 underline-offset-4 hover:decoration-accent">
             Open the task and rate your agent →
           </Link>
         </p>

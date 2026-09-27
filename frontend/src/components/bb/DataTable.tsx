@@ -57,7 +57,7 @@ export function DataTable<T>({
   const detailCols = columns.filter((c) => c !== primary && c !== trailing);
 
   return (
-    <div className={`border border-line ${className}`}>
+    <div className={`overflow-hidden rounded-2xl border border-line bg-surface ${className}`}>
       {loading ? (
         <LoadingState label={loadingLabel} />
       ) : error ? (

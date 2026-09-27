@@ -10,6 +10,7 @@ import { useState, useCallback } from 'react';
 import { Button, Tag, FormField, FormInput, FormSelect, FormTextarea } from './index';
 import { HeaderManager } from './HeaderManager';
 import { authedPost } from '../../lib/api';
+import { friendlyErrorText } from '../../lib/friendlyError';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -187,7 +188,7 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
       setMcpTools(toolsWithDsl);
       setMcpSelected(new Set(toolsWithDsl.map((_, i) => i)));
     } catch (e: any) {
-      setMcpError(e.message || 'Failed to connect to MCP server');
+      setMcpError(friendlyErrorText(e ?? 'Failed to connect to MCP server'));
     } finally {
       setMcpLoading(false);
     }
@@ -226,7 +227,7 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
       setOpenApiTitle(res.title ?? '');
       setOpenApiSelected(new Set(toolsWithDsl.map((_, i) => i)));
     } catch (e: any) {
-      setOpenApiError(e.message || 'Failed to import OpenAPI spec');
+      setOpenApiError(friendlyErrorText(e ?? 'Failed to import OpenAPI spec'));
     } finally {
       setOpenApiLoading(false);
     }
@@ -425,7 +426,7 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
           const needsReview = dsl?.needs_review;
           const typeLabel = t.type === 'tool' ? 'API' : t.type === 'mcp' ? 'MCP' : t.type === 'sandbox' ? 'Sandbox' : t.type === 'js' ? 'JS' : 'HTTP';
           return (
-          <div key={i} className="flex items-center justify-between gap-3 border border-line px-4 py-3 text-sm cursor-pointer hover:bg-surface-2 transition-colors" onClick={() => editTool(i)}>
+          <div key={i} className="flex items-center justify-between gap-3 rounded-xl border border-line px-4 py-3 text-sm cursor-pointer hover:bg-surface-2 transition-colors" onClick={() => editTool(i)}>
             <div className="flex flex-wrap sm:flex-nowrap items-center gap-x-2 gap-y-1 min-w-0">
               <span className="text-ink font-medium truncate">{t.name}</span>
               <Tag tone="neutral" className="sm:hidden shrink-0">{typeLabel}</Tag>
@@ -462,7 +463,7 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
 
       {/* ── MCP Connect ──────────────────────────────────────────────── */}
       {mode === 'mcp' && (
-        <div className="border border-line p-4 space-y-4">
+        <div className="rounded-2xl border border-line p-5 space-y-4">
           <div className="flex items-center justify-between">
             <h4 className="text-sm font-semibold text-ink">Connect MCP Server</h4>
             <Button type="button" variant="ghost" label="Cancel" onClick={() => { setMode(null); setMcpTools([]); }} />
@@ -496,7 +497,7 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
               <p className="text-xs text-ink-3">{mcpTools.length} tools found. Select which to import:</p>
               <div className={`space-y-1 ${mcpTools.length > 8 ? 'max-h-56 overflow-y-auto' : ''}`}>
                 {mcpTools.map((t, i) => (
-                  <label key={i} className="flex flex-wrap sm:flex-nowrap items-center gap-x-3 gap-y-1 border border-line px-3 py-2 text-sm cursor-pointer hover:bg-surface-2">
+                  <label key={i} className="flex flex-wrap sm:flex-nowrap items-center gap-x-3 gap-y-1 rounded-lg border border-line px-3 py-2 text-sm cursor-pointer hover:bg-surface-2">
                     <input
                       type="checkbox"
                       checked={mcpSelected.has(i)}
@@ -505,7 +506,7 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
                         e.target.checked ? next.add(i) : next.delete(i);
                         setMcpSelected(next);
                       }}
-                      className="accent-cream"
+                      className="accent-accent"
                     />
                     <span className="font-medium text-ink flex-1 min-w-24 truncate sm:flex-initial sm:min-w-0">{t.name}</span>
                     {t._dsl?.needs_review && (
@@ -529,7 +530,7 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
 
       {/* ── OpenAPI Import ───────────────────────────────────────────── */}
       {mode === 'openapi' && (
-        <div className="border border-line p-4 space-y-4">
+        <div className="rounded-2xl border border-line p-5 space-y-4">
           <div className="flex items-center justify-between">
             <h4 className="text-sm font-semibold text-ink">Import from OpenAPI Spec</h4>
             <Button type="button" variant="ghost" label="Cancel" onClick={() => { setMode(null); setOpenApiTools([]); }} />
@@ -563,7 +564,7 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
               </p>
 
               {/* Auth override — when spec doesn't declare security schemes */}
-              <div className="border border-line p-3 space-y-2 bg-surface-2">
+              <div className="rounded-xl border border-line p-3.5 space-y-2 bg-surface-2">
                 <p className="text-xs text-ink-3 font-medium">Authentication</p>
                 <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
                   <label className="text-xs text-ink shrink-0">Auth type:</label>
@@ -587,7 +588,7 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
                         value={openApiAuthKeyName}
                         onChange={e => setOpenApiAuthKeyName(e.target.value)}
                         placeholder={openApiAuthType === 'bearer' ? 'Authorization' : 'X-API-Key'}
-                        className="flex-1 w-full min-w-0 sm:w-auto px-2 py-1 bg-surface text-ink text-xs font-mono border-0 outline-none focus:ring-1 focus:ring-cream/30"
+                        className="flex-1 w-full min-w-0 sm:w-auto px-2 py-1 bg-surface text-ink text-xs font-mono border-0 outline-none rounded-md focus:ring-1 focus:ring-line-2"
                       />
                     </div>
                     <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
@@ -597,7 +598,7 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
                         value={openApiAuthSecretRef}
                         onChange={e => setOpenApiAuthSecretRef(e.target.value)}
                         placeholder="e.g. github_token"
-                        className="flex-1 w-full min-w-0 sm:w-auto px-2 py-1 bg-surface text-ink text-xs font-mono border-0 outline-none focus:ring-1 focus:ring-cream/30"
+                        className="flex-1 w-full min-w-0 sm:w-auto px-2 py-1 bg-surface text-ink text-xs font-mono border-0 outline-none rounded-md focus:ring-1 focus:ring-line-2"
                       />
                     </div>
                   </>
@@ -606,7 +607,7 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
 
               {/* Auth requirements from spec-declared schemes OR manual override */}
               {Object.keys(authRequirements).length > 0 && onSecretsChange && (
-                <div className="border border-line p-3 space-y-2 bg-surface-2">
+                <div className="rounded-xl border border-line p-3.5 space-y-2 bg-surface-2">
                   <p className="text-xs text-ink-3">
                     This API requires authentication. Enter your credentials:
                   </p>
@@ -621,7 +622,7 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
                         value={secrets[ref] ?? ''}
                         onChange={e => onSecretsChange({ ...secrets, [ref]: e.target.value })}
                         placeholder={`Enter ${auth.key_name || 'secret'}`}
-                        className="flex-1 w-full min-w-0 sm:w-auto px-3 py-1.5 bg-surface text-ink text-xs font-mono border-0 outline-none focus:ring-1 focus:ring-cream/30"
+                        className="flex-1 w-full min-w-0 sm:w-auto px-3 py-1.5 bg-surface text-ink text-xs font-mono border-0 outline-none rounded-md focus:ring-1 focus:ring-line-2"
                       />
                     </div>
                   ))}
@@ -630,7 +631,7 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
 
               <div className={`space-y-1 ${openApiTools.length > 8 ? 'max-h-56 overflow-y-auto' : ''}`}>
                 {openApiTools.map((t, i) => (
-                  <label key={i} className="flex flex-wrap sm:flex-nowrap items-center gap-x-3 gap-y-1 border border-line px-3 py-2 text-sm cursor-pointer hover:bg-surface-2">
+                  <label key={i} className="flex flex-wrap sm:flex-nowrap items-center gap-x-3 gap-y-1 rounded-lg border border-line px-3 py-2 text-sm cursor-pointer hover:bg-surface-2">
                     <input
                       type="checkbox"
                       checked={openApiSelected.has(i)}
@@ -639,7 +640,7 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
                         e.target.checked ? next.add(i) : next.delete(i);
                         setOpenApiSelected(next);
                       }}
-                      className="accent-cream"
+                      className="accent-accent"
                     />
                     <Tag tone="neutral" className="shrink-0">{t.execution.method}</Tag>
                     <span className="font-medium text-ink flex-1 min-w-24 truncate sm:flex-initial sm:min-w-0">{t.name}</span>
@@ -664,10 +665,10 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
 
       {/* ── Manual Entry ─────────────────────────────────────────────── */}
       {mode === 'manual' && (
-        <div className="border border-line p-4 space-y-4">
+        <div className="rounded-2xl border border-line p-5 space-y-4">
           <div className="flex items-center justify-between">
             <h4 className="text-sm font-semibold text-ink">{editingIndex !== null ? 'Edit Tool' : 'Add Tool Manually'}</h4>
-            <div className="flex items-center gap-0 border border-line w-fit">
+            <div className="inline-flex items-center gap-1 rounded-full border border-line bg-surface p-1 w-fit">
               <button type="button" onClick={() => {
                 // JSON → Form: parse JSON into form ONLY if jsonText has content
                 if (jsonText.trim()) {
@@ -716,7 +717,8 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
                 }
                 setToolMode('form');
               }}
-                className={`px-3 py-1 text-xs font-medium transition-colors ${toolMode === 'form' ? 'bg-cream/10 text-cream' : 'text-ink-3 hover:text-ink-2'}`}>
+                aria-pressed={toolMode === 'form'}
+                className={`rounded-full px-3.5 py-1 text-xs font-medium transition-colors ${toolMode === 'form' ? 'bg-invert text-invert-fg' : 'text-ink-3 hover:text-ink-2'}`}>
                 Form
               </button>
               <div className="w-px h-4 bg-line" />
@@ -757,7 +759,8 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
                 }
                 setToolMode('json');
               }}
-                className={`px-3 py-1 text-xs font-medium transition-colors ${toolMode === 'json' ? 'bg-cream/10 text-cream' : 'text-ink-3 hover:text-ink-2'}`}>
+                aria-pressed={toolMode === 'json'}
+                className={`rounded-full px-3.5 py-1 text-xs font-medium transition-colors ${toolMode === 'json' ? 'bg-invert text-invert-fg' : 'text-ink-3 hover:text-ink-2'}`}>
                 Paste JSON
               </button>
             </div>
@@ -799,16 +802,16 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
                   </FormField>
 
                   {/* Parameters */}
-                  <div className="border border-line p-3 space-y-2 bg-surface-2">
+                  <div className="rounded-xl border border-line p-3.5 space-y-2 bg-surface-2">
                     <div className="flex items-center justify-between">
                       <p className="text-xs text-ink-3 font-medium">Parameters</p>
-                      <button type="button" onClick={() => setManualParams(p => [...p, { name: '', type: 'string', description: '', required: false }])} className="p-2 -m-2 text-xs text-cream hover:underline">+ Add</button>
+                      <button type="button" onClick={() => setManualParams(p => [...p, { name: '', type: 'string', description: '', required: false }])} className="p-2 -m-2 text-xs text-accent hover:underline">+ Add</button>
                     </div>
                     {manualParams.length === 0 && <p className="text-xs text-ink-3">No parameters — agent will send an empty body or construct one from the description.</p>}
                     {manualParams.map((p, i) => (
                       <div key={i} className="grid grid-cols-2 sm:grid-cols-[1fr_80px_1fr_auto_auto] gap-2 items-center">
-                        <input type="text" value={p.name} onChange={e => setManualParams(ps => ps.map((x, j) => j === i ? { ...x, name: e.target.value } : x))} placeholder="param_name" className="w-full min-w-0 px-2 py-1 bg-surface text-ink text-xs font-mono border-0 outline-none focus:ring-1 focus:ring-cream/30" />
-                        <select value={p.type} onChange={e => setManualParams(ps => ps.map((x, j) => j === i ? { ...x, type: e.target.value } : x))} className="w-full min-w-0 px-2 py-1 bg-surface text-ink text-xs border-0 outline-none">
+                        <input type="text" value={p.name} onChange={e => setManualParams(ps => ps.map((x, j) => j === i ? { ...x, name: e.target.value } : x))} placeholder="param_name" className="w-full min-w-0 px-2 py-1 bg-surface text-ink text-xs font-mono border-0 outline-none rounded-md focus:ring-1 focus:ring-line-2" />
+                        <select value={p.type} onChange={e => setManualParams(ps => ps.map((x, j) => j === i ? { ...x, type: e.target.value } : x))} className="w-full min-w-0 rounded-md px-2 py-1 bg-surface text-ink text-xs border-0 outline-none">
                           <option value="string">string</option>
                           <option value="integer">integer</option>
                           <option value="number">number</option>
@@ -816,9 +819,9 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
                           <option value="object">object</option>
                           <option value="array">array</option>
                         </select>
-                        <input type="text" value={p.description} onChange={e => setManualParams(ps => ps.map((x, j) => j === i ? { ...x, description: e.target.value } : x))} placeholder="description" className="col-span-2 sm:col-span-1 w-full min-w-0 px-2 py-1 bg-surface text-ink text-xs border-0 outline-none focus:ring-1 focus:ring-cream/30" />
+                        <input type="text" value={p.description} onChange={e => setManualParams(ps => ps.map((x, j) => j === i ? { ...x, description: e.target.value } : x))} placeholder="description" className="col-span-2 sm:col-span-1 w-full min-w-0 px-2 py-1 bg-surface text-ink text-xs border-0 outline-none rounded-md focus:ring-1 focus:ring-line-2" />
                         <label className="flex items-center gap-1 text-xs text-ink-3 whitespace-nowrap">
-                          <input type="checkbox" checked={p.required} onChange={e => setManualParams(ps => ps.map((x, j) => j === i ? { ...x, required: e.target.checked } : x))} className="accent-cream" />
+                          <input type="checkbox" checked={p.required} onChange={e => setManualParams(ps => ps.map((x, j) => j === i ? { ...x, required: e.target.checked } : x))} className="accent-accent" />
                           req
                         </label>
                         <button type="button" onClick={() => setManualParams(ps => ps.filter((_, j) => j !== i))} className="justify-self-end sm:justify-self-auto p-2 -m-2 text-xs text-err hover:underline">✕</button>
@@ -840,7 +843,7 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
                       </div>
                     )}
                   </div>
-                  <div className="border border-line p-3 space-y-2 bg-surface-2">
+                  <div className="rounded-xl border border-line p-3.5 space-y-2 bg-surface-2">
                     <p className="text-xs text-ink-3 font-medium">Auth (optional)</p>
                     <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
                       <label className="text-xs text-ink shrink-0">Type:</label>
@@ -864,7 +867,7 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
                             value={manualAuthKeyName}
                             onChange={e => setManualAuthKeyName(e.target.value)}
                             placeholder={manualAuthType === 'bearer' ? 'Authorization' : 'X-API-Key'}
-                            className="flex-1 w-full min-w-0 sm:w-auto px-2 py-1 bg-surface text-ink text-xs font-mono border-0 outline-none focus:ring-1 focus:ring-cream/30"
+                            className="flex-1 w-full min-w-0 sm:w-auto px-2 py-1 bg-surface text-ink text-xs font-mono border-0 outline-none rounded-md focus:ring-1 focus:ring-line-2"
                           />
                         </div>
                         <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
@@ -874,7 +877,7 @@ export function ToolManager({ tools, onChange, secrets = {}, onSecretsChange }: 
                             value={manualAuthSecretRef}
                             onChange={e => setManualAuthSecretRef(e.target.value)}
                             placeholder="e.g. my_api_key"
-                            className="flex-1 w-full min-w-0 sm:w-auto px-2 py-1 bg-surface text-ink text-xs font-mono border-0 outline-none focus:ring-1 focus:ring-cream/30"
+                            className="flex-1 w-full min-w-0 sm:w-auto px-2 py-1 bg-surface text-ink text-xs font-mono border-0 outline-none rounded-md focus:ring-1 focus:ring-line-2"
                           />
                         </div>
                       </>

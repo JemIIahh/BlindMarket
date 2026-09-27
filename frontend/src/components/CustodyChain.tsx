@@ -39,7 +39,7 @@ export function CustodyChain({ taskId }: { taskId: string }) {
   if (!isAuthenticated) {
     return (
       <div className="py-8 text-center space-y-3">
-        <div className="w-12 h-12 bg-surface-2 border border-line flex items-center justify-center mx-auto mb-2">
+        <div className="w-12 h-12 rounded-full bg-surface-2 border border-line flex items-center justify-center mx-auto mb-2">
           <Icon name="lock" size={22} className="text-ink-3" />
         </div>
         <p className="text-sm text-ink-2">Sign in required</p>
@@ -65,7 +65,7 @@ export function CustodyChain({ taskId }: { taskId: string }) {
             onClick={() => setActiveTab(tab.id)}
             className={`pb-2.5 -mb-px text-xs border-b-2 transition-colors ${
               activeTab === tab.id
-                ? 'text-ink font-medium border-cream'
+                ? 'text-ink font-medium border-ink'
                 : 'text-ink-3 border-transparent hover:text-ink-2'
             }`}
           >
@@ -103,12 +103,12 @@ export function CustodyChain({ taskId }: { taskId: string }) {
                 <div key={entry.id} className="flex gap-3">
                   {/* Timeline dots & line */}
                   <div className="flex flex-col items-center">
-                    <div className="w-2.5 h-2.5 bg-cream mt-1.5 z-10" />
+                    <div className="w-2.5 h-2.5 rounded-full bg-accent mt-1.5 z-10" />
                     {i < chainData.chain.length - 1 && <div className="w-px flex-1 bg-line" />}
                   </div>
                   {/* Entry card */}
                   <div className="flex-1 pb-4">
-                    <div className="border border-line bg-surface-2 p-3">
+                    <div className="rounded-xl border border-line bg-surface-2 p-3.5">
                       <div className="flex items-center justify-between mb-1">
                         <span className="text-2xs text-ink-3">
                           #{entry.id} &middot; {new Date(entry.created_at).toLocaleString()}

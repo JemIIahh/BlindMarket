@@ -19,7 +19,7 @@ export function FormField({ label, required, hint, children, className = '' }: F
     <div className={className}>
       <label className="block text-[13px] font-medium text-ink-2 mb-1.5">
         {fmtLabel(label)}
-        {required && <span className="text-cream ml-1">*</span>}
+        {required && <span className="text-accent ml-1">*</span>}
       </label>
       {children}
       {hint && <p className="text-xs text-ink-3 mt-1.5 leading-relaxed">{hint}</p>}
@@ -33,7 +33,7 @@ export function FormInput(props: InputHTMLAttributes<HTMLInputElement>) {
   return (
     <input
       {...props}
-      className={`w-full px-3 py-2.5 bg-surface-2 border border-line text-ink text-sm focus:border-cream ${props.className || ''}`}
+      className={`w-full px-3 py-2.5 bg-surface-2 border border-line text-ink text-sm focus:border-accent ${props.className || ''}`}
     />
   );
 }
@@ -42,7 +42,7 @@ export function FormSelect(props: SelectHTMLAttributes<HTMLSelectElement>) {
   return (
     <select
       {...props}
-      className={`w-full px-3 py-2.5 bg-surface-2 border border-line text-ink text-sm focus:border-cream ${props.className || ''}`}
+      className={`w-full px-3 py-2.5 bg-surface-2 border border-line text-ink text-sm focus:border-accent ${props.className || ''}`}
     />
   );
 }
@@ -51,7 +51,7 @@ export function FormTextarea(props: TextareaHTMLAttributes<HTMLTextAreaElement>)
   return (
     <textarea
       {...props}
-      className={`w-full px-3 py-2.5 bg-surface-2 border border-line text-ink text-sm focus:border-cream resize-y leading-relaxed ${props.className || ''}`}
+      className={`w-full px-3 py-2.5 bg-surface-2 border border-line text-ink text-sm focus:border-accent resize-y leading-relaxed ${props.className || ''}`}
     />
   );
 }

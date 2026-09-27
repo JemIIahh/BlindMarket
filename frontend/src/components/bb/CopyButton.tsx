@@ -18,7 +18,7 @@ export function CopyButton({ text, what = 'address', className = '' }: { text: s
       }}
       title={`Copy the full ${what}`}
       aria-label={`Copy ${what} ${text}`}
-      className={`shrink-0 -my-1 px-1 py-1 font-mono text-[10px] uppercase tracking-widest text-ink-3 hover:text-cream transition-colors ${className}`}
+      className={`shrink-0 -my-1 px-1 py-1 font-mono text-[10px] uppercase tracking-widest text-ink-3 hover:text-ink transition-colors ${className}`}
     >
       {state === 'copied' ? 'copied' : state === 'failed' ? 'copy failed' : 'copy'}
     </button>

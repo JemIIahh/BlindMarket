@@ -5,7 +5,7 @@ import { motion } from 'framer-motion';
 import { useTask } from '../hooks/useTasks';
 import { useWallet } from '../context/WalletContext';
 import { useAuth } from '../context/AuthContext';
-import { Panel, SectionRule, Tag, Button, StatusTag, Skeleton, ErrorState, useTabParam, ConfirmDialog } from '../components/bb';
+import { Panel, SectionRule, Tag, Button, StatusTag, Skeleton, ErrorState, ErrorNotice, useTabParam, ConfirmDialog } from '../components/bb';
 import { EncryptionIndicator } from '../components/EncryptionIndicator';
 import { Markdown } from '../components/Markdown';
 import { RateAgent } from '../components/RateAgent';
@@ -19,6 +19,9 @@ import { unitFor, useSettlement } from '../config/settlement';
 import { useChainExplorerUrl } from '../hooks/useChainWallet';
 import { isDirectSigned } from '../lib/txSigner';
 import { TaskStatus, TaskStatusLabels } from '../types/api';
+import type { A2ATaskMeta } from '../types/api';
+import { normalizeBrief, splitBrief } from '../lib/briefText';
+import { PosterAvatar, type AvatarConfig } from '../components/avatar/PosterAvatar';
 
 const fadeUp = {
   hidden: { opacity: 0, y: 20 },
@@ -93,9 +96,9 @@ export default function TaskDetail() {
   if (isLoading || !data) {
     return (
       <div className="max-w-3xl mx-auto space-y-4">
-        <Skeleton className="h-10 w-3/5" />
-        <Skeleton className="h-52 w-full" />
-        <Skeleton className="h-40 w-full" />
+        <Skeleton className="h-10 w-3/5 rounded-lg" />
+        <Skeleton className="h-52 w-full rounded-2xl" />
+        <Skeleton className="h-40 w-full rounded-2xl" />
       </div>
     );
   }
@@ -139,6 +142,19 @@ export default function TaskDetail() {
   const sendsForReview = timeoutSendsForReview(onChain.status);
 
   const taskLabel = onChain.taskId || id?.slice(0, 10);
+  // The escrow stores a zero hash until the worker submits evidence.
+  const hasEvidence = !!onChain.evidenceHash && !/^(0x)?0*$/i.test(onChain.evidenceHash);
+
+  // What the task is, in the poster's words: a public task's brief (its first
+  // line heads the page), or the routing summary a private task shows in
+  // place of its sealed brief.
+  const a2aMeta = onChain.a2aMeta as (A2ATaskMeta & { routingSummary?: string; posterAvatar?: AvatarConfig | null }) | undefined;
+  const isPublicTask = a2aMeta?.privacy === 'public';
+  const brief = isPublicTask ? normalizeBrief(a2aMeta?.publicBrief) : '';
+  const headline = splitBrief(isPublicTask ? brief : a2aMeta?.routingSummary).title;
+  const taskTags = (a2aMeta?.requiredCapabilities ?? []).filter(Boolean);
+  // 'general' is what the web app posts for every task; 'unknown' means none.
+  const category = meta.category && !['unknown', 'general'].includes(meta.category) ? meta.category : null;
 
   return (
     <>
@@ -155,52 +171,73 @@ export default function TaskDetail() {
       <nav className="flex items-center flex-wrap gap-x-2 gap-y-1 text-xs text-ink-3 mb-6">
         <Link
           to={isPoster ? '/tasks/mine' : '/a2a'}
-          className="hover:text-cream transition-colors"
+          className="hover:text-accent transition-colors"
         >
           {isPoster ? 'My tasks' : 'Marketplace'}
         </Link>
-        <span className="text-ink-3/50">/</span>
+        <span className="text-line-2">/</span>
         <span className="text-ink-2">Task #{taskLabel}</span>
       </nav>
 
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-8">
         <div className="min-w-0">
-          <div className="flex items-center gap-3 mb-2 flex-wrap">
-            <h1 className="text-3xl sm:text-[38px] font-bold text-ink leading-[1.05] tracking-tight break-words">
-              {onChain.taskId ? (
-                <>Task <span className="font-mono">#{onChain.taskId}</span></>
-              ) : (
-                <>Task <span className="font-mono text-ink-2">(hash {id?.slice(0, 10)}…)</span></>
-              )}
-            </h1>
-            <StatusTag status={TaskStatusLabels[onChain.status]} />
-          </div>
-          <div className="flex items-center gap-4 text-sm text-ink-3 flex-wrap">
-            <span>{(meta.category ?? 'unknown').replace(/_/g, ' ')}</span>
+          {headline ? (
+            <>
+              <div className="flex items-center gap-2.5 mb-4 flex-wrap">
+                <span className="font-mono text-[11px] uppercase tracking-widest text-ink-3">
+                  Task {onChain.taskId ? `#${onChain.taskId}` : `${id?.slice(0, 10)}…`}
+                </span>
+                <StatusTag status={TaskStatusLabels[onChain.status]} />
+              </div>
+              <h1
+                className={`${headline.length > 70 ? 'text-[26px] sm:text-[32px]' : 'text-[32px] sm:text-[42px]'} font-medium text-ink leading-[1.08] tracking-[-0.03em] break-words mb-4`}
+              >
+                {headline}
+              </h1>
+            </>
+          ) : (
+            <div className="flex items-center gap-3 mb-3 flex-wrap">
+              <h1 className="text-[32px] sm:text-[42px] font-medium text-ink leading-[1.05] tracking-[-0.03em] break-words">
+                {onChain.taskId ? (
+                  <>Task <span className="font-mono">#{onChain.taskId}</span></>
+                ) : (
+                  <>Task <span className="font-mono text-ink-2">(hash {id?.slice(0, 10)}…)</span></>
+                )}
+              </h1>
+              <StatusTag status={TaskStatusLabels[onChain.status]} />
+            </div>
+          )}
+          <div className="flex items-center gap-x-4 gap-y-2 text-sm text-ink-3 flex-wrap">
+            {category && <span>{category.replace(/_/g, ' ')}</span>}
             <span>{meta.locationZone || 'Global'}</span>
-            <EncryptionIndicator encrypted={true} />
+            <EncryptionIndicator encrypted={!isPublicTask} />
+            {taskTags.map((tag) => (
+              <span key={tag} className="rounded-full border border-line px-2.5 py-1 text-[11.5px] leading-none text-ink-2">
+                {tag.replace(/_/g, ' ')}
+              </span>
+            ))}
           </div>
         </div>
         <div className="sm:text-right shrink-0">
-          <div className="text-3xl font-bold font-mono text-cream">
-            {reward.toLocaleString(undefined, { maximumFractionDigits: 4 })} {unit.symbol}
+          <div className="text-[34px] font-medium leading-none tracking-[-0.03em] tabular-nums text-ink">
+            {reward.toLocaleString(undefined, { maximumFractionDigits: 4 })} <span className="text-ink-3">{unit.symbol}</span>
           </div>
-          <div className="text-[11px] tracking-wide text-ink-3 mt-1">Escrow locked</div>
+          <div className="mt-2.5 font-mono text-[10.5px] uppercase tracking-widest text-ink-3">Escrow locked</div>
         </div>
       </div>
 
       {/* Tabs: Details / Custody */}
-      <div role="tablist" className="flex gap-6 border-b border-line mb-6">
+      <div role="tablist" className="flex gap-7 border-b border-line mb-6">
         {DETAIL_TABS.map((tab) => (
           <button
             key={tab.id}
             role="tab"
             aria-selected={activeTab === tab.id}
             onClick={() => setActiveTab(tab.id)}
-            className={`pb-3 -mb-px text-sm border-b-2 transition-colors ${
+            className={`pb-3 -mb-px text-[15px] border-b-2 transition-colors ${
               activeTab === tab.id
-                ? 'text-ink font-medium border-cream'
+                ? 'text-ink font-medium border-ink'
                 : 'text-ink-3 border-transparent hover:text-ink-2'
             }`}
           >
@@ -230,19 +267,25 @@ export default function TaskDetail() {
                     href={explorerSearchUrl(explorerUrl, onChain.chain === 'base', onChain.taskHash)}
                     target="_blank"
                     rel="noreferrer"
-                    className="text-ink hover:text-cream hover:underline decoration-cream/30 transition-colors"
+                    className="text-ink hover:text-accent hover:underline decoration-line-2 underline-offset-[3px] transition-colors"
                   >
                     {onChain.taskHash}
                   </a>
                 </p>
               </Field>
               <Field label="Posted by">
-                <p className="text-sm font-mono" title={`${onChain.agent} — open in chain explorer`}>
+                <p className="flex items-center gap-2 text-sm font-mono" title={`${onChain.agent} — open in chain explorer`}>
+                  <PosterAvatar
+                    config={a2aMeta?.posterAvatar}
+                    seed={(a2aMeta?.posterAddress || onChain.agent || id || '').toLowerCase()}
+                    size={24}
+                    className="border border-line"
+                  />
                   <a
                     href={`${explorerUrl}/address/${onChain.agent}`}
                     target="_blank"
                     rel="noreferrer"
-                    className="text-ink hover:text-cream hover:underline decoration-cream/30 transition-colors"
+                    className="text-ink hover:text-accent hover:underline decoration-line-2 underline-offset-[3px] transition-colors"
                   >
                     {truncateAddress(onChain.agent)}
                   </a>
@@ -256,7 +299,7 @@ export default function TaskDetail() {
                     <Link
                       to={`/agents/${onChain.worker}`}
                       title={onChain.worker}
-                      className="text-ink hover:text-cream hover:underline decoration-cream/30 transition-colors"
+                      className="text-ink hover:text-accent hover:underline decoration-line-2 underline-offset-[3px] transition-colors"
                     >
                       {truncateAddress(onChain.worker)} <span className="font-sans text-xs">→</span>
                     </Link>
@@ -276,18 +319,18 @@ export default function TaskDetail() {
                 <p className="text-sm text-ink capitalize">{onChain.a2aMeta?.targetExecutorType || 'human'}</p>
               </Field>
               <Field label="Evidence hash" span2>
-                <p className="text-sm font-mono break-all" title={onChain.evidenceHash ? `${onChain.evidenceHash} — open in chain explorer` : undefined}>
-                  {onChain.evidenceHash ? (
+                <p className="text-sm font-mono break-all" title={hasEvidence ? `${onChain.evidenceHash} — open in chain explorer` : undefined}>
+                  {hasEvidence ? (
                     <a
                       href={explorerSearchUrl(explorerUrl, onChain.chain === 'base', onChain.evidenceHash)}
                       target="_blank"
                       rel="noreferrer"
-                      className="text-ink hover:text-cream hover:underline decoration-cream/30 transition-colors"
+                      className="text-ink hover:text-accent hover:underline decoration-line-2 underline-offset-[3px] transition-colors"
                     >
                       {onChain.evidenceHash}
                     </a>
                   ) : (
-                    <span className="text-ink">—</span>
+                    <span className="font-sans text-ink-3">Not submitted yet</span>
                   )}
                 </p>
               </Field>
@@ -296,7 +339,7 @@ export default function TaskDetail() {
                   <p className="text-sm font-mono break-all">
                     <Link
                       to={`/storage/${meta.rootHash}`}
-                      className="text-cream hover:underline decoration-cream/30"
+                      className="text-accent underline decoration-line-2 underline-offset-[3px] hover:decoration-accent"
                     >
                       {meta.rootHash}
                     </Link>
@@ -308,7 +351,7 @@ export default function TaskDetail() {
                   <p className="text-sm font-mono break-all">
                     <Link
                       to={`/storage/${a2aState.outputRootHash}`}
-                      className="text-cream hover:underline decoration-cream/30"
+                      className="text-accent underline decoration-line-2 underline-offset-[3px] hover:decoration-accent"
                     >
                       {a2aState.outputRootHash}
                     </Link>
@@ -322,7 +365,7 @@ export default function TaskDetail() {
                       href={`${explorerUrl}/tx/${a2aState.assignTxHash}`}
                       target="_blank"
                       rel="noreferrer"
-                      className="text-cream hover:underline decoration-cream/30"
+                      className="text-accent underline decoration-line-2 underline-offset-[3px] hover:decoration-accent"
                     >
                       {a2aState.assignTxHash}
                     </a>
@@ -336,7 +379,7 @@ export default function TaskDetail() {
                       href={`${explorerUrl}/tx/${a2aState.verifyTxHash}`}
                       target="_blank"
                       rel="noreferrer"
-                      className="text-cream hover:underline decoration-cream/30"
+                      className="text-accent underline decoration-line-2 underline-offset-[3px] hover:decoration-accent"
                     >
                       {a2aState.verifyTxHash}
                     </a>
@@ -348,14 +391,14 @@ export default function TaskDetail() {
             {/* Public task: the poster opted out of blindness — the brief is
                 part of the public record, so show it. Private tasks have no
                 readable brief on this surface (hasEncryptedBrief covers it). */}
-            {onChain.a2aMeta?.privacy === 'public' && onChain.a2aMeta?.publicBrief && (
+            {isPublicTask && brief && (
               <div className="mt-6 pt-6 border-t border-line">
                 <div className="flex items-center gap-2 mb-2">
                   <span className="text-[11px] text-ink-3 tracking-wide">Brief</span>
                   <Tag tone="neutral">public</Tag>
                 </div>
-                <p className="text-sm text-ink-2 leading-relaxed whitespace-pre-wrap">
-                  {onChain.a2aMeta.publicBrief}
+                <p className="text-sm text-ink-2 leading-relaxed whitespace-pre-wrap break-words">
+                  {brief}
                 </p>
               </div>
             )}
@@ -389,14 +432,14 @@ export default function TaskDetail() {
                 <Link
                   to={`/agents/${onChain.worker}`}
                   title={onChain.worker}
-                  className="font-mono text-ink hover:text-cream hover:underline decoration-cream/30 transition-colors"
+                  className="font-mono text-ink hover:text-accent hover:underline decoration-line-2 underline-offset-[3px] transition-colors"
                 >
                   {truncateAddress(onChain.worker)}
                 </Link>{' '}
                 is executing the task off-chain. They'll sign and broadcast their evidence when ready.{' '}
                 <Link
                   to={`/agents/${onChain.worker}`}
-                  className="text-cream hover:underline decoration-cream/30 text-xs whitespace-nowrap"
+                  className="text-accent underline decoration-line-2 underline-offset-[3px] hover:decoration-accent text-xs whitespace-nowrap"
                 >
                   View agent →
                 </Link>
@@ -432,7 +475,7 @@ export default function TaskDetail() {
                 <Link
                   to={`/agents/${onChain.worker}`}
                   title={onChain.worker}
-                  className="font-mono text-ink hover:text-cream hover:underline decoration-cream/30 transition-colors"
+                  className="font-mono text-ink hover:text-accent hover:underline decoration-line-2 underline-offset-[3px] transition-colors"
                 >
                   {truncateAddress(onChain.worker)}
                 </Link>, {PLATFORM_FEE_PCT}% to the
@@ -462,7 +505,7 @@ export default function TaskDetail() {
                 <h2 className="text-sm font-semibold text-ink">Agent output</h2>
                 <div className="flex items-center gap-2">
                   {a2aState.verificationResult?.teeVerified && (
-                    <span className="text-[10px] font-mono uppercase tracking-wider text-ok border border-ok/30 px-1.5 py-0.5" title="Execution verified in Trusted Execution Environment">
+                    <span className="rounded-full text-[10px] font-mono uppercase tracking-wider text-ok border border-[color:color-mix(in_srgb,var(--bb-ok)_35%,transparent)] px-2 py-0.5" title="Execution verified in Trusted Execution Environment">
                       TEE ✓
                     </span>
                   )}
@@ -491,7 +534,7 @@ export default function TaskDetail() {
                         <span className="text-ink-3 font-sans">0G storage (output): </span>
                         <Link
                           to={`/storage/${a2aState.outputRootHash}`}
-                          className="text-cream hover:underline decoration-cream/30"
+                          className="text-accent underline decoration-line-2 underline-offset-[3px] hover:decoration-accent"
                         >
                           {a2aState.outputRootHash}
                         </Link>
@@ -510,7 +553,7 @@ export default function TaskDetail() {
                     {Object.keys(a2aState.resultData).length > 1 && (
                       <details className="mt-3">
                         <summary className="text-[11px] text-ink-3 cursor-pointer hover:text-ink-2">Advanced details</summary>
-                        <pre className="mt-2 text-xs font-mono text-ink bg-surface-2 border border-line p-3 overflow-x-auto whitespace-pre-wrap">
+                        <pre className="mt-2 rounded-lg text-xs font-mono text-ink bg-surface-2 border border-line p-3 overflow-x-auto whitespace-pre-wrap">
                           {JSON.stringify(a2aState.resultData, null, 2)}
                         </pre>
                       </details>
@@ -521,7 +564,7 @@ export default function TaskDetail() {
                     {Object.keys(a2aState.resultData).length > 0 ? (
                       <>
                         <p className="text-xs text-ink-3 mb-2 italic">Agent provided structured data:</p>
-                        <pre className="text-xs font-mono text-ink bg-surface-2 border border-line p-4 overflow-x-auto whitespace-pre-wrap">
+                        <pre className="rounded-lg text-xs font-mono text-ink bg-surface-2 border border-line p-4 overflow-x-auto whitespace-pre-wrap">
                           {JSON.stringify(a2aState.resultData, null, 2)}
                         </pre>
                       </>
@@ -535,7 +578,7 @@ export default function TaskDetail() {
                     <span className="text-ink-3 font-sans">0G storage (output): </span>
                     <Link
                       to={`/storage/${a2aState.outputRootHash}`}
-                      className="text-cream hover:underline decoration-cream/30"
+                      className="text-accent underline decoration-line-2 underline-offset-[3px] hover:decoration-accent"
                     >
                       {a2aState.outputRootHash}
                     </Link>
@@ -557,7 +600,7 @@ export default function TaskDetail() {
                     <div className="space-y-1">
                       {a2aState.verificationResult.breakdown.map((r, i) => (
                         <div key={i} className="flex items-center gap-2 text-xs font-mono">
-                          <span className={`w-1.5 h-1.5 ${r.score >= 0.8 ? 'bg-ok' : r.score >= 0.5 ? 'bg-warn' : 'bg-err'}`} />
+                          <span className={`w-1.5 h-1.5 rounded-full ${r.score >= 0.8 ? 'bg-ok' : r.score >= 0.5 ? 'bg-warn' : 'bg-err'}`} />
                           <span className="text-ink-2">{r.name}</span>
                           <span className="text-ink-3">{Math.round(r.score * 100)}%</span>
                         </div>
@@ -623,11 +666,11 @@ export default function TaskDetail() {
                   Posted from {truncateAddress(onChain.agent)}. Connect that wallet to sign {sendsForReview ? 'it' : 'the refund'}.
                 </div>
               )}
-              {txError && (
-                <div className="mt-3 text-xs font-mono text-err break-words">
-                  {(txError as Error).message}
-                </div>
-              )}
+              <ErrorNotice
+                error={txError}
+                title={refund.variables?.kind === 'cancel' ? "Couldn't cancel the task" : sendsForReview ? "Couldn't send it for review" : "Couldn't claim the timeout"}
+                className="mt-3"
+              />
             </Panel>
           )}
         </>
