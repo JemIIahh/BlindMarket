@@ -6,7 +6,8 @@
  * 0G from NODE_ENV, Base from BASE_CHAIN_ID, CCTP from Base. Production ended
  * up mixed (0G mainnet + Base Sepolia) and nothing said so. One setting names
  * the tier, every chain id defaults from it, and a chain id that contradicts
- * it is refused at boot.
+ * it is refused at boot. NODE_ENV=production names it (mainnet) when it is
+ * unset: see deriveFromNodeEnv in config.ts.
  *
  * This module is pure: no config, no env read of its own, no I/O. config.ts
  * imports it while building `config`, so it must not import config.ts back.

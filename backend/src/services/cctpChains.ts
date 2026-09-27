@@ -38,7 +38,8 @@ export interface CctpChainConfig {
 }
 
 // Network tier = the Arc network tasks settle on (config.cctp.mainnet): Arc is
-// one leg of every transfer. Not NODE_ENV — see config.ts for why.
+// one leg of every transfer. NODE_ENV reaches it only through Arc's chain id,
+// which defaults from the tier NODE_ENV=production derives (config.ts).
 const MAINNET_TIER = config.cctp.mainnet;
 
 let cctpBaseProvider: ethers.JsonRpcProvider | null = null;
