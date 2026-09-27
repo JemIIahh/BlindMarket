@@ -36,7 +36,7 @@ export function Markdown({ text }: { text: string }) {
               href={href}
               target={href?.startsWith('http') ? '_blank' : undefined}
               rel={href?.startsWith('http') ? 'noreferrer' : undefined}
-              className="text-cream hover:underline decoration-cream/30"
+              className="text-accent underline decoration-line-2 underline-offset-[3px] hover:decoration-accent"
             >
               {children}
             </a>
@@ -49,18 +49,18 @@ export function Markdown({ text }: { text: string }) {
           ul: ({ children }) => <ul className="list-disc pl-5 space-y-1">{children}</ul>,
           ol: ({ children }) => <ol className="list-decimal pl-5 space-y-1">{children}</ol>,
           blockquote: ({ children }) => (
-            <blockquote className="border-l-2 border-cream/40 pl-3 italic text-ink-3">{children}</blockquote>
+            <blockquote className="border-l-2 border-line-2 pl-3 italic text-ink-3">{children}</blockquote>
           ),
           code: ({ children }) => (
-            <code className="font-mono text-xs bg-surface-2 px-1 py-0.5 break-all">{children}</code>
+            <code className="rounded-sm font-mono text-xs bg-surface-2 px-1 py-0.5 break-all">{children}</code>
           ),
           pre: ({ children }) => (
-            <pre className="text-xs font-mono text-ink bg-surface-2 border border-line p-3 overflow-x-auto whitespace-pre-wrap">
+            <pre className="rounded-lg text-xs font-mono text-ink bg-surface-2 border border-line p-3 overflow-x-auto whitespace-pre-wrap">
               {children}
             </pre>
           ),
           table: ({ children }) => (
-            <div className="overflow-x-auto border border-line">
+            <div className="overflow-x-auto rounded-lg border border-line">
               <table className="w-full text-xs border-collapse">{children}</table>
             </div>
           ),

@@ -17,12 +17,15 @@ import {
   SignInGate,
   Spinner,
   ConfirmDialog,
+  ErrorNotice,
+  RadioPills,
 } from '../components/bb';
 import { aesEncrypt, eciesEncrypt, generateAesKey, sha256, toBase64, toBytes } from '../lib/crypto';
 import { stashAesKey } from '../lib/keyStash';
 import { clearPendingIndex, listPendingIndex, savePendingIndex, type PendingIndex } from '../lib/pendingIndex';
-import { assertWalletOnChain, providerFor, signAndSendTx } from '../lib/txSigner';
+import { assertWalletOnChain, providerFor, signAndSendTx, type SentTx } from '../lib/txSigner';
 import { authedGet, authedPost } from '../lib/api';
+import { UserFacingError, friendlyError } from '../lib/friendlyError';
 import { trackEvent } from '../hooks/useAnalytics';
 import { WORKER_SHARE_PCT, PLATFORM_FEE_PCT } from '../config/constants';
 import { gasIsSettlementToken, getMarketplaceTokenAddress, getPaymentDecimals, getPaymentSymbol, getPostingEscrowAddress, getSettlement, isSettlementChainKey, useSettlement } from '../config/settlement';
@@ -30,6 +33,7 @@ import { useChain } from '../context/ChainContext';
 import { useAccountWallets, useChainAddress } from '../hooks/useChainWallet';
 import { unlinkedSignerError } from '../lib/accountWallet';
 import { useAuth } from '../context/AuthContext';
+import { PostingAs } from '../components/avatar/AvatarEditor';
 
 // BlindEscrow contract's hard bounds on `duration` (seconds).
 // Source: BlindEscrow.sol:64-65 — MIN_DEADLINE = 1 hours, MAX_DEADLINE = 90 days.
@@ -114,13 +118,13 @@ export default function PostTask() {
   // the autonomous flow. The H2A manual-approval path still lives in the
   // backend (/a2a/verify) for the A2H roadmap; it's just not exposed here.
   const [status, setStatus] = useState<'idle' | 'encrypting' | 'approving' | 'confirming' | 'signing' | 'done' | 'error'>('idle');
-  const [error, setError] = useState('');
+  const [error, setError] = useState<unknown>(null);
   const [taskId, setTaskId] = useState<string | null>(null);
   // Funded escrows whose listing never landed (lib/pendingIndex.ts): shown
   // with a retry, so the poster lists them instead of funding a second one.
   const [unlisted, setUnlisted] = useState<PendingIndex[]>([]);
   const [retrying, setRetrying] = useState<string | null>(null);
-  const [retryError, setRetryError] = useState('');
+  const [retryError, setRetryError] = useState<unknown>(null);
   useEffect(() => {
     setUnlisted(address ? listPendingIndex(address) : []);
   }, [address]);
@@ -167,7 +171,7 @@ export default function PostTask() {
 
     try {
       setStatus('encrypting');
-      setError('');
+      setError(null);
       // The browser wallet signs, and it can be set to an account that isn't
       // this user's (lib/accountWallet.ts): the backend would then refuse to
       // list the task after it was paid for. Refused here, before anything is
@@ -462,7 +466,21 @@ export default function PostTask() {
         }
       }
 
-      const sent = await signAndSendTx(signer, taskJson.unsignedTx, isNativeToken ? BigInt(amountBase) : undefined, { chain: taskJson.chain });
+      let sent: SentTx;
+      // Set when the wallet broadcast the escrow tx but the wait for it failed
+      // (ethers' post-broadcast NETWORK_ERROR / BAD_DATA): it may have funded
+      // the escrow, so the listing below goes ahead from that hash, and a
+      // failure leaves "Retry listing" instead of a prompt to post again.
+      let unconfirmed = false;
+      try {
+        sent = await signAndSendTx(signer, taskJson.unsignedTx, isNativeToken ? BigInt(amountBase) : undefined, { chain: taskJson.chain });
+      } catch (sendErr) {
+        const broadcast = friendlyError(sendErr).txHash;
+        if (!broadcast) throw sendErr;
+        console.warn(`[PostTask] Task TX broadcast (${broadcast}) but not confirmed:`, (sendErr as Error).message);
+        sent = { hash: broadcast, receipt: null };
+        unconfirmed = true;
+      }
       const txHash = sent.hash;
       console.log(`[PostTask] Task TX submitted: hash=${txHash} userOp=${sent.userOp ?? false}`);
 
@@ -507,10 +525,17 @@ export default function PostTask() {
       }
       if (!indexResp) {
         if (address) setUnlisted(listPendingIndex(address));
-        throw new Error(
-          `Your payment is locked in escrow (tx ${txHash.slice(0, 10)}…), but the task could not be listed yet: ${(lastErr as Error)?.message ?? 'unknown error'}. ` +
-          'Use "Retry listing" above — posting again would fund a second escrow.',
-        );
+        throw unconfirmed
+          ? new UserFacingError(
+            `Your wallet sent the payment (tx ${txHash.slice(0, 10)}…), but it isn't confirmed yet. ` +
+            'Use "Retry listing" above once it confirms — posting again could fund a second escrow.',
+            { title: 'Payment not confirmed yet', cause: lastErr },
+          )
+          : new UserFacingError(
+            `Your payment is locked in escrow (tx ${txHash.slice(0, 10)}…), but the task could not be listed yet. ` +
+            'Use "Retry listing" above — posting again would fund a second escrow.',
+            { title: 'Paid, but not listed yet', cause: lastErr },
+          );
       }
       clearPendingIndex(taskHash);
       if (address) setUnlisted(listPendingIndex(address));
@@ -525,7 +550,7 @@ export default function PostTask() {
         amount: Number(form.amount),
       });
     } catch (err) {
-      setError((err as Error).message);
+      setError(err);
       setStatus('error');
       trackEvent('task_post_error', { message: (err as Error).message });
     } finally {
@@ -538,7 +563,7 @@ export default function PostTask() {
   // again, so a retry after a partial success is harmless.
   async function retryListing(entry: PendingIndex) {
     setRetrying(entry.taskHash);
-    setRetryError('');
+    setRetryError(null);
     try {
       const token = (await getIdentityToken()) || (await getAccessToken()) || undefined;
       const resp = await authedPost<{ onChainTaskId?: string | null }>('/api/v1/a2a/tasks/index', entry.body, token);
@@ -547,7 +572,7 @@ export default function PostTask() {
       trackEvent('task_listing_retried', { taskId: resp.onChainTaskId ?? null });
       navigate('/tasks/mine');
     } catch (e) {
-      setRetryError(`Listing still failed: ${(e as Error).message}. Your payment stays in escrow — try again shortly.`);
+      setRetryError(new UserFacingError('Your payment stays in escrow. Try again shortly.', { title: 'Listing still failed', cause: e }));
     } finally {
       setRetrying(null);
     }
@@ -566,15 +591,12 @@ export default function PostTask() {
     <>
     <div>
       <Breadcrumb items={['tasks', 'post']} />
-      <PageHeader
-        title="Post a task"
-        description="Encrypt your instructions and lock payment in escrow. An autonomous agent accepts, completes, and auto-verifies — settlement happens on chain without you signing again."
-      />
+      <PageHeader title="Post a task." titleMuted="Escrow pays out when the work passes." />
 
       {status === 'done' ? (
-        <div className="border border-line">
+        <div className="card-dark rounded-3xl overflow-hidden">
           <div className="p-6 sm:p-8 border-b border-line flex flex-col items-center text-center gap-3">
-            <div className="w-11 h-11 border border-ok/50 bg-ok/5 flex items-center justify-center text-ok">
+            <div className="w-12 h-12 rounded-full border border-[color:color-mix(in_srgb,var(--bb-ok)_45%,transparent)] bg-[color:color-mix(in_srgb,var(--bb-ok)_8%,transparent)] flex items-center justify-center text-ok">
               <Icon name="check" size={20} />
             </div>
             <div className="space-y-1.5">
@@ -600,7 +622,7 @@ export default function PostTask() {
               // Public task — no key handling at all: every agent (including
               // external ones reaching the marketplace over MCP) can read the
               // brief. Nothing can be key-stranded.
-              <div className="border border-ok/40 bg-ok/5 p-4 sm:p-5 space-y-3">
+              <div className="rounded-2xl border border-[color:color-mix(in_srgb,var(--bb-ok)_40%,transparent)] bg-[color:color-mix(in_srgb,var(--bb-ok)_6%,transparent)] p-4 sm:p-5 space-y-3">
                 <div className="flex items-center gap-2 text-ok">
                   <Icon name="check" size={16} />
                   <span className="text-sm font-semibold">Open to all agents</span>
@@ -617,7 +639,7 @@ export default function PostTask() {
               // Case A — at least one matching agent was wrapped at post-time, so
               // the brief can be decrypted without any further action from the
               // poster. No need to keep a tab alive.
-              <div className="border border-ok/40 bg-ok/5 p-4 sm:p-5 space-y-3">
+              <div className="rounded-2xl border border-[color:color-mix(in_srgb,var(--bb-ok)_40%,transparent)] bg-[color:color-mix(in_srgb,var(--bb-ok)_6%,transparent)] p-4 sm:p-5 space-y-3">
                 <div className="flex items-center gap-2 text-ok">
                   <Icon name="check" size={16} />
                   <span className="text-sm font-semibold">Ready for pickup</span>
@@ -636,8 +658,8 @@ export default function PostTask() {
               // also sealed to the platform's custody key, so server-side re-wrap
               // on /accept will handle late joiners automatically — no browser
               // window needed.
-              <div className="border border-line p-4 sm:p-5 space-y-4">
-                <div className="flex items-center gap-2 text-cream">
+              <div className="rounded-2xl border border-line p-4 sm:p-5 space-y-4">
+                <div className="flex items-center gap-2 text-accent">
                   <Icon name="shield" size={16} />
                   <span className="text-sm font-semibold">Awaiting first bidder</span>
                 </div>
@@ -673,7 +695,7 @@ export default function PostTask() {
       ) : (
         <>
         {unlisted.length > 0 && (
-          <div className="border border-warn/50 bg-warn/5 p-4 sm:p-5 mb-4 space-y-3">
+          <div className="rounded-2xl border border-[color:color-mix(in_srgb,var(--bb-warn)_45%,transparent)] bg-[color:color-mix(in_srgb,var(--bb-warn)_6%,transparent)] p-4 sm:p-5 mb-4 space-y-3">
             <div className="flex items-center gap-2 text-warn">
               <Icon name="shield" size={16} />
               <span className="text-sm font-semibold">
@@ -715,52 +737,38 @@ export default function PostTask() {
                 </div>
               </div>
             ))}
-            {retryError && <div className="text-sm text-err break-words">{retryError}</div>}
+            <ErrorNotice error={retryError} />
           </div>
         )}
-        <form onSubmit={handleSubmit} className="border border-line">
-          <div className="p-6 border-b border-line">
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div className="card-dark rounded-3xl p-6 sm:p-8">
             <SectionRule num="01" title="Task details" />
-            <div className="space-y-5">
+            <PostingAs className="mb-6" />
+            <div className="space-y-6">
               <FormField
                 label="Privacy"
-                hint="Private briefs are encrypted end-to-end. Public briefs are readable by every agent — and by anyone."
+                hint={form.privacy === 'private'
+                  ? 'Only the agent that takes the task (and your verifier, if you pick one) can read the brief; the platform never sees it.'
+                  : 'Anyone can read the brief and the result, so leave out anything secret.'}
               >
-                <div className="flex flex-wrap gap-1.5 mb-1">
-                  {([
-                    ['private', 'Private (encrypted)'],
-                    ['public', 'Public (open to all agents)'],
-                  ] as const).map(([mode, label]) => {
-                    const active = form.privacy === mode;
-                    return (
-                      <button
-                        key={mode}
-                        type="button"
-                        onClick={() => { if (!busy) setForm(f => ({ ...f, privacy: mode })); }}
-                        disabled={busy}
-                        className={`px-2.5 py-1 text-xs border transition-colors ${active
-                          ? 'bg-cream/10 border-cream/40 text-cream'
-                          : 'bg-surface-2 border-line text-ink-3 hover:text-ink-2'
-                          }`}
-                      >
-                        {label}
-                      </button>
-                    );
-                  })}
-                </div>
-                <div className="text-xs text-ink-3">
-                  {form.privacy === 'private'
-                    ? 'Only agents you wrap the key to can read the brief; the platform never sees it.'
-                    : 'Brief and result are public record — no encryption, no key handling, reachable by any agent on any platform. Don’t include secrets.'}
-                </div>
+                <RadioPills
+                  label="Privacy"
+                  value={form.privacy}
+                  disabled={busy}
+                  onChange={(privacy) => setForm(f => ({ ...f, privacy }))}
+                  options={[
+                    ['private', 'Private'],
+                    ['public', 'Public'],
+                  ]}
+                />
               </FormField>
 
               <FormField
                 label="Instructions"
                 required
                 hint={form.privacy === 'private'
-                  ? 'This will be encrypted — only the assigned agent can read it.'
-                  : 'This will be posted in plaintext — visible to everyone.'}
+                  ? 'Encrypted in your browser before it is uploaded.'
+                  : 'Posted as plain text for anyone to read.'}
               >
                 <FormTextarea
                   required
@@ -775,7 +783,7 @@ export default function PostTask() {
               {form.privacy === 'private' && (
                 <FormField
                   label="Routing summary (optional)"
-                  hint="A public one-line description of what kind of agent you need — used only to match your task to the right agents. Your encrypted brief stays sealed; don't put secrets here."
+                  hint="A public one-liner shown on the task board, so keep secrets out of it."
                 >
                   <FormInput
                     type="text"
@@ -804,35 +812,25 @@ export default function PostTask() {
                 label="Verification"
                 hint="How the submission is checked before escrow releases."
               >
-                <div className="flex flex-wrap gap-1.5 mb-3">
-                  {([
-                    ['auto', 'Auto (length / keyword rubric)'],
-                    ['agent', 'Verifier agent (semantic)'],
-                  ] as const).map(([mode, label]) => {
-                    const active = form.verificationMode === mode;
-                    return (
-                      <button
-                        key={mode}
-                        type="button"
-                        onClick={() => { if (!busy) setForm(f => ({ ...f, verificationMode: mode })); }}
-                        disabled={busy}
-                        className={`px-2.5 py-1 text-xs border transition-colors ${active
-                          ? 'bg-cream/10 border-cream/40 text-cream'
-                          : 'bg-surface-2 border-line text-ink-3 hover:text-ink-2'
-                          }`}
-                      >
-                        {label}
-                      </button>
-                    );
-                  })}
+                <div className="mb-4">
+                  <RadioPills
+                    label="Verification"
+                    value={form.verificationMode}
+                    disabled={busy}
+                    onChange={(verificationMode) => setForm(f => ({ ...f, verificationMode }))}
+                    options={[
+                      ['auto', 'Auto check'],
+                      ['agent', 'Agent review'],
+                    ]}
+                  />
                 </div>
 
                 {form.verificationMode === 'auto' ? (
-                  <div className="space-y-3">
+                  <div className="space-y-4 rounded-2xl border border-line p-4 sm:p-5">
                     <p className="text-xs text-ink-3 leading-relaxed">
-                      Submissions are scored against your criteria. Escrow releases automatically when the score passes.
+                      The work is scored against your rules and paid out when it passes.
                     </p>
-                    <FormField label="Required keywords" hint="Comma-separated. Output must contain these words/phrases.">
+                    <FormField label="Required keywords" hint="Comma-separated words the result must include.">
                       <FormInput
                         value={form.criteriaContains}
                         onChange={e => setForm(f => ({ ...f, criteriaContains: e.target.value }))}
@@ -840,7 +838,7 @@ export default function PostTask() {
                         disabled={busy}
                       />
                     </FormField>
-                    <FormField label="Forbidden phrases" hint="Comma-separated. Output must NOT contain these — catches excuses like 'unable to complete'.">
+                    <FormField label="Forbidden phrases" hint="Comma-separated phrases that fail the result, like “unable to complete”.">
                       <FormInput
                         value={form.criteriaForbidden}
                         onChange={e => setForm(f => ({ ...f, criteriaForbidden: e.target.value }))}
@@ -848,7 +846,7 @@ export default function PostTask() {
                         disabled={busy}
                       />
                     </FormField>
-                    <FormField label={`Pass threshold: ${form.criteriaPassThreshold}%`} hint="Minimum score (0–100) to auto-approve. Higher = stricter.">
+                    <FormField label={`Pass threshold: ${form.criteriaPassThreshold}%`} hint="The lowest score that passes; higher is stricter.">
                       <input
                         type="range"
                         min="10"
@@ -856,19 +854,19 @@ export default function PostTask() {
                         step="5"
                         value={form.criteriaPassThreshold}
                         onChange={e => setForm(f => ({ ...f, criteriaPassThreshold: e.target.value }))}
-                        className="w-full accent-cream"
+                        className="w-full accent-accent"
                         disabled={busy}
                       />
                     </FormField>
                   </div>
                 ) : (
-                  <div className="space-y-3">
+                  <div className="space-y-4 rounded-2xl border border-line p-4 sm:p-5">
                     <div>
                       <label className="block text-xs text-ink-3 mb-1.5">
                         Verifier agent — decrypts the brief and judges the work
                       </label>
                       <select
-                        className="w-full bg-surface-2 border border-line text-ink-2 text-sm px-3 py-2 font-mono focus:border-cream/40 outline-none"
+                        className="w-full rounded-lg bg-surface-2 border border-line text-ink-2 text-sm px-3 py-2.5 font-mono focus:border-line-2 outline-none"
                         value={form.verifierAddress}
                         disabled={busy}
                         onChange={(e) => {
@@ -898,12 +896,10 @@ export default function PostTask() {
                         disabled={busy}
                       />
                     </FormField>
-                    <div className="flex gap-2.5 border border-warn/30 bg-warn/5 px-3 py-2">
+                    <div className="flex gap-2.5 rounded-xl border border-[color:color-mix(in_srgb,var(--bb-warn)_35%,transparent)] bg-[color:color-mix(in_srgb,var(--bb-warn)_6%,transparent)] px-3.5 py-2.5">
                       <Icon name="lock" size={14} className="text-warn shrink-0 mt-0.5" />
-                      <p className="text-xs text-ink-3 leading-relaxed">
-                        The verifier agent can read your decrypted brief — pick one you trust. Keep
-                        acceptance criteria generic: specifics can leak task intent even though the
-                        brief stays encrypted from the platform.
+                      <p className="text-xs text-ink-2 leading-relaxed">
+                        The verifier reads your decrypted brief, so pick one you trust and keep the criteria general.
                       </p>
                     </div>
                   </div>
@@ -912,7 +908,7 @@ export default function PostTask() {
             </div>
           </div>
 
-          <div className="p-6 border-b border-line">
+          <div className="card-dark rounded-3xl p-6 sm:p-8">
             <SectionRule num="02" title="Payment" />
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <FormField
@@ -967,7 +963,7 @@ export default function PostTask() {
             </div>
           </div>
 
-          <div className="p-6">
+          <div className="px-1 pt-3">
             {/* Pipeline strip — the encrypt→fund flow spans several slow
                 steps; showing which one is live keeps a 30s wait from
                 reading as a hang. Stages map onto the existing status
@@ -987,10 +983,10 @@ export default function PostTask() {
                       {active ? (
                         <Spinner size={12} />
                       ) : (
-                        <span className={`w-1.5 h-1.5 inline-block ${done ? 'bg-ok' : 'bg-line-2'}`} />
+                        <span className={`w-1.5 h-1.5 inline-block rounded-full ${done ? 'bg-ok' : 'bg-line-2'}`} />
                       )}
                       <span className={active ? 'text-ink' : done ? 'text-ok' : 'text-ink-3'}>{step.label}</span>
-                      {i < all.length - 1 && <span className="text-ink-3/50">→</span>}
+                      {i < all.length - 1 && <span className="text-line-2" aria-hidden>→</span>}
                     </span>
                   );
                 })}
@@ -1006,12 +1002,7 @@ export default function PostTask() {
                 disabled={busy}
               />
             )}
-            {status === 'error' && (
-              <div className="mt-3 flex items-start gap-2 text-sm text-err">
-                <Icon name="shield" size={16} className="shrink-0 mt-0.5" />
-                <span className="break-words">{error}</span>
-              </div>
-            )}
+            {status === 'error' && <ErrorNotice error={error} title="Couldn't post the task" className="mt-3" />}
           </div>
         </form>
         </>

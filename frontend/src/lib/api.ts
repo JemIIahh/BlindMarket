@@ -129,6 +129,15 @@ export async function authedPatch<T>(path: string, body?: unknown, overrideToken
   return handleResponse<T>(res);
 }
 
+export async function authedPut<T>(path: string, body?: unknown, overrideToken?: string): Promise<T> {
+  const res = await fetchWithTimeout(`${API_BASE_URL}${path}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...(await getAuthHeaders(overrideToken)) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  return handleResponse<T>(res);
+}
+
 export async function authedDelete<T = void>(path: string, overrideToken?: string): Promise<T> {
   const res = await fetchWithTimeout(`${API_BASE_URL}${path}`, {
     method: 'DELETE',

@@ -4,15 +4,20 @@ import {
   PageHeader,
   SectionRule,
   Button,
-  Tag,
+  ButtonLink,
   StatusTag,
   FormField,
   FormInput,
   LoadingState,
   EmptyState,
   ErrorState,
+  ErrorNotice,
+  LiveDot,
+  Segmented,
   useTabParam,
 } from '../components/bb';
+import { TaskCard, TaskCardSkeleton, type BrowseTask } from '../components/task/TaskCard';
+import { sumRewards, topRewardIndex } from '../components/task/format';
 import {
   useAgentProfile,
   useBrowseAgentTasks,
@@ -26,25 +31,37 @@ import { getOrCreateExecutorIdentity } from '../lib/executorIdentity';
 
 type Tab = 'browse' | 'executions' | 'register';
 
-const TABS: { id: Tab; label: string }[] = [
-  { id: 'browse', label: 'Browse tasks' },
-  { id: 'executions', label: 'My executions' },
-  { id: 'register', label: 'Register executor' },
+// `short` is shown below the sm breakpoint, where the three full labels don't
+// fit a 360px screen.
+const TABS: { id: Tab; label: string; short: string }[] = [
+  { id: 'browse', label: 'Browse tasks', short: 'Browse' },
+  { id: 'executions', label: 'My executions', short: 'Executions' },
+  { id: 'register', label: 'Register executor', short: 'Register' },
 ];
 
-type BrowseRow = {
-  meta: {
-    taskId: string;
-    verificationMode: string;
-    targetExecutorType: string;
-    // Present only on public tasks — poster opted out of blindness, so the
-    // brief itself is browsable (see backend projectPublicMeta).
-    privacy?: 'public';
-    publicBrief?: string;
-  };
-  state: { status: string };
-  onChain?: { taskId?: string };
-};
+type PrivacyFilter = 'all' | 'public' | 'private';
+
+const PRIVACY_FILTERS: { id: PrivacyFilter; label: string }[] = [
+  { id: 'all', label: 'All' },
+  { id: 'public', label: 'Public' },
+  { id: 'private', label: 'Private' },
+];
+
+const isPublicTask = (t: BrowseTask) => t.meta.privacy === 'public';
+
+/**
+ * Best-paying first, then the soonest deadline. The backend lists open tasks
+ * in Redis set order, which isn't meaningful and can change between polls,
+ * so without this the cards could reshuffle every 30 seconds.
+ */
+function byReward(a: BrowseTask, b: BrowseTask): number {
+  const value = ({ meta: { reward } }: BrowseTask) =>
+    reward && /^\d+$/.test(reward.amount) && typeof reward.unit?.decimals === 'number'
+      ? Number(reward.amount) / 10 ** reward.unit.decimals
+      : -1;
+  const deadline = (t: BrowseTask) => t.meta.deadline || Number.MAX_SAFE_INTEGER;
+  return value(b) - value(a) || deadline(a) - deadline(b) || a.meta.taskId.localeCompare(b.meta.taskId);
+}
 
 export default function A2ADashboard() {
   // Re-render when the backend's settlement answer arrives (config/settlement.ts).
@@ -55,7 +72,8 @@ export default function A2ADashboard() {
   const [agentCardUrl, setAgentCardUrl] = useState('');
   const [mcpEndpoint, setMcpEndpoint] = useState('');
   const [rate, setRate] = useState('');
-  const [registerError, setRegisterError] = useState<string | null>(null);
+  const [registerError, setRegisterError] = useState<unknown>(null);
+  const [privacyFilter, setPrivacyFilter] = useState<PrivacyFilter>('all');
 
   const { isAuthenticated } = useAuth();
   const address = useChainAddress();
@@ -64,15 +82,18 @@ export default function A2ADashboard() {
   const { data: execs, isLoading: execsLoading, isError: execsError, refetch: refetchExecs } = useMyExecutions({ enabled: activeTab === 'executions' });
   const registerMutation = useRegisterAgent();
 
-  // Canonical task URL uses the task hash (globally unique across chains —
-  // numeric ids collide between Base and 0G). Numeric URLs keep working
-  // (backend + route accept both). The label keeps the short numeric form
-  // when available since it reads better in a dense grid.
-  const taskId = (e: { meta: { taskId: string }; onChain?: { taskId?: string } }) => e.meta.taskId || e.onChain?.taskId;
-  const taskLabel = (e: { meta: { taskId: string }; onChain?: { taskId?: string } }) =>
-    e.onChain?.taskId ? `#${e.onChain.taskId}` : `${e.meta.taskId.slice(0, 10)}…`;
-
-  const browseRows = (browse?.tasks as BrowseRow[] | undefined) ?? [];
+  const browseRows = [...((browse?.tasks as BrowseTask[] | undefined) ?? [])].sort(byReward);
+  const publicCount = browseRows.filter(isPublicTask).length;
+  // The filter only earns its space when both kinds are on the board.
+  const showFilter = publicCount > 0 && publicCount < browseRows.length;
+  const visibleRows = !showFilter || privacyFilter === 'all'
+    ? browseRows
+    : browseRows.filter((t) => isPublicTask(t) === (privacyFilter === 'public'));
+  const featured = topRewardIndex(visibleRows.map((t) => t.meta.reward));
+  const escrowTotal = sumRewards(browseRows.map((t) => t.meta.reward));
+  const now = Date.now();
+  const filterCount = (id: PrivacyFilter) =>
+    id === 'all' ? browseRows.length : id === 'public' ? publicCount : browseRows.length - publicCount;
 
   const agentCardPreview = `{
   "name": "${displayName || '<agent_name>'}",
@@ -83,33 +104,33 @@ export default function A2ADashboard() {
 
   return (
     <div>
-      <PageHeader
-        title="Marketplace"
-        description="Browse open agent tasks, accept and execute, and track your runs. Auto-verified and settled on-chain — no human in the loop."
-      />
+      <PageHeader title="Tasks for agents." titleMuted="Pick one, get paid." />
 
       {/* Tabs */}
-      <div role="tablist" className="flex gap-6 border-b border-line mb-8 overflow-x-auto">
+      <div role="tablist" className="flex gap-5 sm:gap-7 border-b border-line mb-8 overflow-x-auto">
         {TABS.map((tab) => (
           <button
             key={tab.id}
             role="tab"
             aria-selected={activeTab === tab.id}
             onClick={() => setActiveTab(tab.id)}
-            className={`pb-3 -mb-px text-sm border-b-2 transition-colors whitespace-nowrap shrink-0 ${
+            className={`pb-3 -mb-px text-[14px] sm:text-[15px] border-b-2 transition-colors whitespace-nowrap shrink-0 ${
               activeTab === tab.id
-                ? 'text-ink font-medium border-cream'
+                ? 'text-ink font-medium border-ink'
                 : 'text-ink-3 border-transparent hover:text-ink-2'
             }`}
           >
-            {tab.label}
+            <span className="sm:hidden">{tab.short}</span>
+            <span className="hidden sm:inline">{tab.label}</span>
           </button>
         ))}
       </div>
 
       {activeTab === 'browse' && (
         browseLoading ? (
-          <LoadingState label="Loading tasks…" />
+          <div role="status" aria-label="Loading tasks" className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {Array.from({ length: 6 }, (_, i) => <TaskCardSkeleton key={i} />)}
+          </div>
         ) : browseError ? (
           <ErrorState title="Couldn't load tasks" onRetry={() => refetchBrowse()} />
         ) : browseRows.length === 0 ? (
@@ -118,68 +139,51 @@ export default function A2ADashboard() {
             title="No open tasks right now"
             description="Agent-targeted tasks will appear here as they’re posted."
             action={
-              <Link to="/tasks/new">
-                <Button variant="outline" label="Post a task" size="sm" />
-              </Link>
+              <ButtonLink to="/tasks/new" variant="outline" label="Post a task" size="sm" />
             }
           />
         ) : (
-          /* Connected card grid — shared 1px borders, sharp corners (BlindMarket
-             grid idiom). Each card is a single Link to the task detail. */
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 border-t border-l border-line">
-            {browseRows.map((r) => (
-              <Link
-                key={r.meta.taskId}
-                to={`/tasks/${taskId(r)}`}
-                className="group flex flex-col gap-4 border-b border-r border-line p-5 min-h-[180px] hover:bg-surface-2 transition-colors"
-              >
-                {/* identifier + status */}
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="text-2xs uppercase tracking-wider text-ink-3">Task</div>
-                    <div className="font-mono text-sm text-ink truncate group-hover:text-cream transition-colors">
-                      {taskLabel(r)}
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    {r.meta.privacy === 'public' && <Tag tone="neutral">public</Tag>}
-                    <StatusTag status={r.state.status} />
-                  </div>
-                </div>
-
-                {/* public tasks: the brief IS the pitch — show it */}
-                {r.meta.privacy === 'public' && r.meta.publicBrief && (
-                  <p className="text-xs text-ink-2 leading-relaxed line-clamp-2">
-                    {r.meta.publicBrief}
-                  </p>
+          <>
+            {/* Board summary: the live count and what's up for grabs */}
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-3 mb-5">
+              <div className="flex items-center gap-2.5 text-[15px] text-ink-3">
+                <LiveDot />
+                <span>
+                  <span className="font-medium tabular-nums text-ink">{browseRows.length}</span> open
+                </span>
+                {escrowTotal && (
+                  <>
+                    <span aria-hidden>·</span>
+                    <span>
+                      <span className="font-medium tabular-nums text-ink">{escrowTotal}</span> in escrow
+                    </span>
+                  </>
                 )}
+              </div>
+              {showFilter && (
+                <Segmented
+                  label="Show tasks"
+                  value={privacyFilter}
+                  onChange={setPrivacyFilter}
+                  options={PRIVACY_FILTERS.map((f) => ({ ...f, count: filterCount(f.id) }))}
+                  className="sm:ml-auto"
+                />
+              )}
+            </div>
 
-                <div className="flex-1" />
-
-                {/* footer: meta + view affordance */}
-                <div className="flex items-end justify-between border-t border-line -mx-5 px-5 pt-3">
-                  <div className="flex gap-5">
-                    <div>
-                      <div className="text-2xs uppercase tracking-wider text-ink-3">Verify</div>
-                      <div className="text-xs text-ink-2 capitalize">{r.meta.verificationMode}</div>
-                    </div>
-                    <div>
-                      <div className="text-2xs uppercase tracking-wider text-ink-3">Target</div>
-                      <div className="text-xs text-ink-2 capitalize">{r.meta.targetExecutorType}</div>
-                    </div>
-                  </div>
-                  <span className="text-2xs uppercase tracking-wider text-ink-3 group-hover:text-cream transition-colors">
-                    View →
-                  </span>
-                </div>
-              </Link>
-            ))}
-          </div>
+            {/* Separate rounded cards, as on the landing page. Each card is a
+                single Link to the task detail. */}
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {visibleRows.map((t, i) => (
+                <TaskCard key={t.meta.taskId} task={t} now={now} featured={i === featured} />
+              ))}
+            </div>
+          </>
         )
       )}
 
       {activeTab === 'executions' && (
-        <div className="border border-line overflow-x-auto">
+        <div className="card-dark rounded-2xl overflow-x-auto">
           {execsLoading ? (
             <LoadingState label="Loading executions…" />
           ) : execsError ? (
@@ -208,28 +212,28 @@ export default function A2ADashboard() {
                     <summary
                       className={`grid grid-cols-[1fr_auto] md:grid-cols-[90px_1fr_110px_1fr_80px_80px_70px] gap-3 md:gap-4 px-5 py-3.5 text-sm list-none items-center ${hasResult ? 'cursor-pointer hover:bg-surface-2' : 'cursor-default'} transition-colors`}
                     >
-                      <Link to={`/tasks/${idStr}`} className="font-mono text-ink-2 hover:text-cream transition-colors truncate">
+                      <Link to={`/tasks/${idStr}`} className="font-mono text-ink-2 hover:text-accent transition-colors truncate">
                         {onChainId ? `#${onChainId}` : `${e.meta.taskId.slice(0, 10)}…`}
                       </Link>
                       <span className="hidden md:block text-ink-3 truncate">{e.state.acceptedAt ? new Date(e.state.acceptedAt).toLocaleString() : '—'}</span>
                       <span className="justify-self-end md:justify-self-auto flex items-center gap-2 md:block">
                         <StatusTag status={e.state.status} />
                         {hasResult && (
-                          <span aria-hidden className="md:hidden text-cream group-open:rotate-90 inline-block transition-transform">▸</span>
+                          <span aria-hidden className="md:hidden text-accent group-open:rotate-90 inline-block transition-transform">▸</span>
                         )}
                       </span>
                       <span className="hidden md:block text-ink-3 truncate">{e.state.submittedAt ? new Date(e.state.submittedAt).toLocaleString() : '—'}</span>
                       <span className="hidden md:block text-ink-3">{e.state.verificationResult?.passed ? '✓' : '—'}</span>
-                      <span className={`hidden md:block text-[10px] font-mono ${e.state.verificationResult?.teeVerified ? 'text-ok' : 'text-ink-3/40'}`}>
+                      <span className={`hidden md:block text-[10px] font-mono ${e.state.verificationResult?.teeVerified ? 'text-ok' : 'text-ink-3'}`}>
                         {e.state.verificationResult?.teeVerified ? 'TEE' : '—'}
                       </span>
-                      <span className={`hidden md:block text-[11px] uppercase tracking-wider ${hasResult ? 'text-cream group-open:text-ink' : 'text-ink-3/50'}`}>
+                      <span className={`hidden md:block text-[11px] uppercase tracking-wider ${hasResult ? 'text-accent group-open:text-ink' : 'text-ink-3'}`}>
                         {hasResult ? <>view <span className="group-open:rotate-90 inline-block transition-transform">▸</span></> : '—'}
                       </span>
                     </summary>
                     {hasResult && (
                       <div className="px-5 pb-4">
-                        <pre className="max-h-80 overflow-auto bg-surface-2 border border-line p-4 text-[11px] font-mono text-ink leading-relaxed whitespace-pre-wrap break-words">
+                        <pre className="max-h-80 overflow-auto rounded-lg bg-surface-2 border border-line p-4 text-[11px] font-mono text-ink leading-relaxed whitespace-pre-wrap break-words">
                           {JSON.stringify(e.state.resultData, null, 2)}
                         </pre>
                       </div>
@@ -243,11 +247,11 @@ export default function A2ADashboard() {
       )}
 
       {activeTab === 'register' && (
-        <div className="grid grid-cols-1 lg:grid-cols-[1fr_340px] gap-0 border border-line">
-          <div className="p-6 space-y-5">
-            <div className="border border-line bg-surface-2 px-4 py-3 text-xs text-ink-3 leading-relaxed">
-              <span className="text-cream font-medium">Heads up:</span> if you deployed an agent via{' '}
-              <Link to="/agents/deploy" className="text-ink-2 underline hover:text-cream">Create agent</Link>, it
+        <div className="card-dark rounded-2xl overflow-hidden grid grid-cols-1 lg:grid-cols-[1fr_340px] gap-0">
+          <div className="p-6 sm:p-7 space-y-5">
+            <div className="rounded-xl border border-line bg-surface-2 px-4 py-3 text-xs text-ink-3 leading-relaxed">
+              <span className="text-ink font-medium">Heads up:</span> if you deployed an agent via{' '}
+              <Link to="/agents/deploy" className="text-ink-2 underline decoration-line-2 underline-offset-[3px] hover:text-accent hover:decoration-accent">Create agent</Link>, it
               auto-registers on startup — you don’t need this form. This is for registering an externally-operated
               executor (a bot running on your own infrastructure, not ours).
             </div>
@@ -291,19 +295,19 @@ export default function A2ADashboard() {
                       ...(mcpEndpoint ? { mcpEndpointUrl: mcpEndpoint } : {}),
                     });
                   } catch (err) {
-                    setRegisterError((err as Error).message || 'Registration failed');
+                    setRegisterError(err ?? 'Registration failed');
                   }
                 }}
               />
               {!isAuthenticated && <span className="text-xs text-ink-3">Connect wallet to register</span>}
               {profile?.agent && <span className="text-xs text-ok">✓ Registered as {profile.agent.displayName}</span>}
-              {registerError && <span className="text-xs text-err break-all">{registerError}</span>}
+              <ErrorNotice error={registerError} title="Couldn't register" compact />
             </div>
           </div>
 
-          <div className="border-t lg:border-t-0 lg:border-l border-line p-6 space-y-6">
+          <div className="border-t lg:border-t-0 lg:border-l border-line p-6 sm:p-7 space-y-6">
             <SectionRule num="A" title="Agent card preview" />
-            <pre className="bg-surface-2 border border-line p-4 text-xs font-mono text-ink-3 leading-relaxed overflow-x-auto">
+            <pre className="rounded-lg bg-surface-2 border border-line p-4 text-xs font-mono text-ink-3 leading-relaxed overflow-x-auto">
               {agentCardPreview}
             </pre>
 

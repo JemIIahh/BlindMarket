@@ -25,6 +25,7 @@ import { config } from '../config.js';
 import { rooms } from '../services/socket.js';
 import { isSafeRegexSource } from '../services/rubricEngine.js';
 import { hostedVerifierNotOptedIn, VERIFIER_NOT_OPTED_IN_MESSAGE } from '../services/verifierDuty.js';
+import { withPosterAvatars } from '../services/avatarStore.js';
 
 export const tasksRouter = Router();
 
@@ -247,6 +248,13 @@ tasksRouter.get('/:id', optionalAuth, async (req: AuthRequest, res, next) => {
       ? await Promise.all([a2aStore.getMeta(taskHash), a2aStore.getState(taskHash)])
       : [null, null];
 
+    // Public projection — this route has no auth, and full A2A meta
+    // carries the brief's key material (wrappedKeys/keyCustodyBlob) plus
+    // the storage pointer. Strip it; the executor's slice travels only in
+    // the authenticated /a2a/tasks/:id/accept response. The poster's avatar
+    // rides along when they made one (services/avatarStore.ts).
+    const [publicA2aMeta] = a2aMeta ? await withPosterAvatars([a2aStore.projectPublicMeta(a2aMeta)]) : [null];
+
     // The deliverable (resultData) is poster/worker-only — except on PUBLIC
     // tasks, where the poster opted out of blindness and the result is part
     // of the public record. Viewer addresses come from optionalAuth (Privy
@@ -268,11 +276,7 @@ tasksRouter.get('/:id', optionalAuth, async (req: AuthRequest, res, next) => {
         chain,
         symbol,
         a2aIndexed,
-        // Public projection — this route has no auth, and full A2A meta
-        // carries the brief's key material (wrappedKeys/keyCustodyBlob) plus
-        // the storage pointer. Strip it; the executor's slice travels only in
-        // the authenticated /a2a/tasks/:id/accept response.
-        a2aMeta: a2aMeta ? a2aStore.projectPublicMeta(a2aMeta) : null,
+        a2aMeta: publicA2aMeta,
         // Strip operator-internal diagnostics (assignError/verifyError) on this
         // surface. resultData (the deliverable) is attached only for the
         // poster, the assigned worker, or the poster-agent's owner(s).

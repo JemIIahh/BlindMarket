@@ -10,6 +10,7 @@ import {
   FormSelect,
   LoadingState,
   ErrorState,
+  ErrorNotice,
 } from '../bb';
 import {
   getAgentServices,
@@ -61,7 +62,7 @@ export function ServicesSection({
   const [price, setPrice] = useState('');
   const [serviceType, setServiceType] = useState<'api' | 'a2a'>('api');
   const [saving, setSaving] = useState(false);
-  const [formError, setFormError] = useState('');
+  const [formError, setFormError] = useState<unknown>('');
   const [showDesc, setShowDesc] = useState(false);
 
   const loadOwnerServices = useCallback(async () => {
@@ -85,7 +86,7 @@ export function ServicesSection({
       retryRef.current = retry;
       setFormError("This wallet isn't linked to the agent yet — link it and retry.");
     } else {
-      setFormError((err as Error).message);
+      setFormError(err);
     }
   }
 
@@ -99,7 +100,7 @@ export function ServicesSection({
       retryRef.current = null;
       if (retry) await retry();
     } catch (err) {
-      setFormError((err as Error).message || 'Could not link this wallet');
+      setFormError(err);
     } finally {
       setLinking(false);
     }
@@ -163,14 +164,14 @@ export function ServicesSection({
       ) : (
         <>
           {agentStatus !== 'running' && services && services.length > 0 && (
-            <div className="mb-3 text-xs text-ink-3 border border-line bg-surface-2 px-3 py-2">
+            <div className="mb-3 rounded-xl text-xs text-ink-3 border border-line bg-surface-2 px-4 py-2.5">
               This agent is stopped — the owner must start it before it can take calls.
             </div>
           )}
           {services && services.length > 0 ? (
             <div className="grid gap-3 sm:grid-cols-2">
               {services.map(s => (
-                <div key={s.id} className="border border-line bg-surface-2 p-4">
+                <div key={s.id} className="card-dark p-5">
                   <div className="flex items-start justify-between gap-2">
                     <div className="text-ink font-medium">{s.name}</div>
                     <Tag tone="info">{s.service_type}</Tag>
@@ -179,7 +180,7 @@ export function ServicesSection({
                   <div className="flex flex-wrap items-center justify-between gap-3 mt-4 pt-3 border-t border-line">
                     <div className="min-w-0">
                       <span className="whitespace-nowrap">
-                        <span className="font-mono text-cream text-sm">{fmt(s.price_raw)}</span>
+                        <span className="font-mono text-accent text-sm">{fmt(s.price_raw)}</span>
                         <span className="font-mono text-ink-3 text-xs"> / call</span>
                       </span>
                       {s.sold_count > 0 && (
@@ -208,7 +209,7 @@ export function ServicesSection({
             </div>
           ) : (
             <div className="space-y-3">
-              <div className="border border-dashed border-line bg-surface-2 px-5 py-6 text-center">
+              <div className="rounded-2xl border border-dashed border-line-2 px-5 py-8 text-center">
                 <div className="flex justify-center mb-2">
                   <Icon name="briefcase" size={20} className="text-ink-3" />
                 </div>
@@ -229,7 +230,7 @@ export function ServicesSection({
               </div>
               <div className="grid gap-3 sm:grid-cols-2" aria-label="Example services">
                 {EXAMPLE_SERVICES.map(t => (
-                  <div key={t.slug} className="border border-dashed border-line bg-surface-2/50 p-4">
+                  <div key={t.slug} className="rounded-2xl border border-dashed border-line p-5">
                     <div className="flex items-start justify-between gap-2">
                       <div className="text-ink-2 font-medium">{t.name}</div>
                       <Tag>example</Tag>
@@ -257,7 +258,7 @@ export function ServicesSection({
           {ownerServices && ownerServices.length > 0 && (
             <div className="mb-4 space-y-2">
               {ownerServices.map(s => (
-                <div key={s.id} className="flex items-center justify-between gap-3 border border-line bg-surface-2 px-4 py-2.5">
+                <div key={s.id} className="card-dark flex items-center justify-between gap-3 px-5 py-3">
                   <div className="min-w-0">
                     <div className="text-ink text-sm truncate">
                       {s.name}{!s.active && <span className="text-ink-3 text-xs"> · inactive</span>}
@@ -273,7 +274,7 @@ export function ServicesSection({
             </div>
           )}
 
-          <div className="border border-line bg-surface-2 p-4 space-y-3">
+          <div className="card-dark p-5 sm:p-6 space-y-4">
             {/* Deciding what to sell is the hard part of a first listing —
                 these fill the form in, and everything stays editable. */}
             <div className="space-y-1.5">
@@ -284,7 +285,7 @@ export function ServicesSection({
                     key={t.slug}
                     type="button"
                     onClick={() => applyTemplate(t)}
-                    className="px-2 py-1 text-xs border border-line bg-surface text-ink-2 hover:border-cream hover:text-ink transition-colors"
+                    className="rounded-full px-3 py-1 text-xs border border-line bg-surface text-ink-2 hover:border-accent hover:text-ink transition-colors"
                   >
                     {t.name}
                   </button>
@@ -342,7 +343,7 @@ export function ServicesSection({
               </button>
             )}
 
-            {formError && <div className="text-xs text-err">{formError}</div>}
+            <ErrorNotice error={formError} title="Couldn't save the service" compact />
             {needsLink && (
               <Button variant="outline" size="sm" label={linking ? 'Linking…' : 'Link this wallet & retry'} disabled={linking} onClick={linkAndRetry} />
             )}

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Panel, Button, FormTextarea } from './bb';
+import { Panel, Button, FormTextarea, ErrorNotice } from './bb';
 import { truncateAddress } from '../lib/utils';
 import { getMyTaskReview, submitReview, type AgentReview } from '../services/marketplace';
 
@@ -22,7 +22,7 @@ export function RateAgent({
   const [rating, setRating] = useState(5);
   const [text, setText] = useState('');
   const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState<unknown>('');
 
   useEffect(() => {
     let cancelled = false;
@@ -55,7 +55,7 @@ export function RateAgent({
       setExisting(r);
       setText('');
     } catch (err) {
-      setError((err as Error).message);
+      setError(err);
     } finally {
       setSubmitting(false);
     }
@@ -68,13 +68,13 @@ export function RateAgent({
       <h3 className="text-sm font-semibold text-ink mb-1">Rate your agent</h3>
       {existing ? (
         <p className="text-sm text-ink-2 leading-relaxed">
-          <span className="text-cream font-mono">
+          <span className="text-accent font-mono">
             {'★'.repeat(existing.rating)}{'☆'.repeat(5 - existing.rating)}
           </span>{' '}
           — thanks, your review is live on{' '}
           <Link
             to={`/agents/${executorAddress}`}
-            className="text-cream hover:underline decoration-cream/30"
+            className="text-accent underline-offset-2 decoration-line-2 hover:underline"
           >
             {truncateAddress(executorAddress)}'s profile
           </Link>
@@ -93,7 +93,7 @@ export function RateAgent({
                 type="button"
                 aria-label={`Rate ${star} out of 5`}
                 onClick={() => setRating(star)}
-                className={`text-xl transition-colors ${star <= rating ? 'text-cream' : 'text-ink-3 hover:text-ink-2'}`}
+                className={`text-xl transition-colors ${star <= rating ? 'text-accent' : 'text-ink-3 hover:text-ink-2'}`}
               >
                 ★
               </button>
@@ -114,7 +114,7 @@ export function RateAgent({
             disabled={submitting}
             onClick={handleSubmit}
           />
-          {error && <p className="text-xs text-err mt-2 font-mono">{error}</p>}
+          <ErrorNotice error={error} title="Couldn't send your review" className="mt-2" />
         </>
       )}
     </Panel>

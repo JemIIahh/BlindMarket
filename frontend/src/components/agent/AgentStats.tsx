@@ -87,8 +87,8 @@ export function AgentStats({
 
       {/* ── Earned ────────────────────────────────────────────── */}
       {isOwner || servicesSold == null ? (
-        <div className="p-4 xl:p-5 min-w-0 overflow-hidden flex flex-col" style={{ background: 'rgba(16, 185, 129, 0.1)' }}>
-          <div className="flex items-center gap-1.5 text-ok mb-2">
+        <div className="rounded-2xl border border-[color:color-mix(in_srgb,var(--bb-ok)_26%,transparent)] bg-[color:color-mix(in_srgb,var(--bb-ok)_7%,transparent)] p-4 xl:p-5 min-w-0 overflow-hidden flex flex-col">
+          <div className="flex items-center gap-1.5 text-ink-3 mb-2">
             <Icon name="chart" size={12} className="text-ok" />
             <span className="text-[10px] font-mono font-semibold uppercase tracking-widest truncate">
               Earned
@@ -97,13 +97,13 @@ export function AgentStats({
           <div className="text-xl sm:text-[28px] md:text-[32px] font-mono font-bold text-ok leading-none tracking-tightest break-words">
             {earnedValue}
           </div>
-          <div className="mt-1.5 text-[11px] font-mono text-ok truncate">
+          <div className="mt-1.5 text-[11px] font-mono text-ink-3 truncate">
             lifetime
           </div>
         </div>
       ) : (
-        <div className="p-4 xl:p-5 min-w-0 overflow-hidden flex flex-col" style={{ background: 'rgba(16, 185, 129, 0.1)' }}>
-          <div className="flex items-center gap-1.5 text-ok mb-2">
+        <div className="rounded-2xl border border-[color:color-mix(in_srgb,var(--bb-ok)_26%,transparent)] bg-[color:color-mix(in_srgb,var(--bb-ok)_7%,transparent)] p-4 xl:p-5 min-w-0 overflow-hidden flex flex-col">
+          <div className="flex items-center gap-1.5 text-ink-3 mb-2">
             <Icon name="briefcase" size={12} className="text-ok" />
             <span className="text-[10px] font-mono font-semibold uppercase tracking-widest truncate">
               Services sold
@@ -112,7 +112,7 @@ export function AgentStats({
           <div className="text-xl sm:text-[28px] md:text-[32px] font-mono font-bold text-ok leading-none tracking-tightest break-words">
             {String(servicesSold)}
           </div>
-          <div className="mt-1.5 text-[11px] font-mono text-ok truncate">
+          <div className="mt-1.5 text-[11px] font-mono text-ink-3 truncate">
             {earnedValue} earned
           </div>
         </div>
@@ -121,14 +121,13 @@ export function AgentStats({
       {/* ── Wallet Balance / On-chain ─────────────────────────── */}
       {isOwner ? (
         <div
-          className="p-4 xl:p-5 min-w-0 overflow-hidden flex flex-col"
-          style={{
-            background: isLowGas
-              ? 'rgba(245, 158, 11, 0.1)'
-              : 'var(--bb-surface)',
-          }}
+          className={`p-4 xl:p-5 min-w-0 overflow-hidden flex flex-col ${
+            isLowGas
+              ? 'rounded-2xl border border-[color:color-mix(in_srgb,var(--bb-warn)_45%,transparent)] bg-[color:color-mix(in_srgb,var(--bb-warn)_7%,transparent)]'
+              : 'card-dark'
+          }`}
         >
-          <div className={`flex items-center gap-1.5 mb-2 ${isLowGas ? 'text-warn' : 'text-ink-3'}`}>
+          <div className="flex items-center gap-1.5 mb-2 text-ink-3">
             <Icon name="wallet" size={12} className={isLowGas ? 'text-warn' : 'text-ink-3'} />
             <span className="text-[10px] font-mono font-semibold uppercase tracking-widest truncate">
               Wallet
@@ -146,7 +145,7 @@ export function AgentStats({
                 variant="outline"
                 size="sm"
                 label="Fund"
-                className="!border-warn !text-warn hover:!bg-warn/10"
+                className="!border-warn !text-warn hover:!bg-[color:color-mix(in_srgb,var(--bb-warn)_10%,transparent)]"
                 onClick={onFund}
               />
             </div>

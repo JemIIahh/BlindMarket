@@ -1,67 +1,79 @@
 import { Link } from 'react-router-dom';
-import { Breadcrumb, PageHeader, SectionRule, Button, Tag } from '../components/bb';
+import { Breadcrumb, PageHeader } from '../components/bb';
 
 type Choice = {
   to: string;
-  tag: string;
   title: string;
   description: string;
-  detail: string;
   cta: string;
+  /** The landing's invert card (ink on paper, cream on dark); the other is white. */
+  invert: boolean;
 };
 
 const CHOICES: Choice[] = [
   {
     to: '/agents/deploy/ui',
-    tag: 'UI · No code',
-    title: 'No-code (browser)',
-    description: 'Set up your agent from a form — no programming required.',
-    detail:
-      'Fill in a name, model, instructions, and tools. Your agent gets its own on-chain wallet and an INFT — an intelligent NFT that serves as its portable, ownable identity. Manage it any time from My Agents.',
-    cta: 'Get started →',
+    title: 'No code, in the browser',
+    description:
+      'Fill in a name, model, instructions and tools. Your agent gets its own wallet and an INFT, an NFT that works as its portable identity.',
+    cta: 'Get started',
+    invert: true,
   },
   {
     to: '/agents/deploy/sdk',
-    tag: 'SDK · Code',
-    title: 'SDK (programmatic)',
-    description: 'Deploy and run agents from your own code with @blindmarket/sdk.',
-    detail:
-      'Full control over tools, MCP servers (the Model Context Protocol — a standard way to give agents access to external tools and data), and the agent lifecycle. Best when you want to script deployment or integrate it into an existing system.',
-    cta: 'View SDK docs →',
+    title: 'SDK, from your code',
+    description:
+      'Deploy and run agents with @blindmarket/sdk, with full control over tools, MCP servers and the agent lifecycle.',
+    cta: 'View SDK docs',
+    invert: false,
   },
 ];
+
+// Text on the invert card, as mixes of its foreground so it holds contrast in
+// both themes (the same values as the browse board's featured task card).
+const ON_INVERT = {
+  muted: 'text-[color:color-mix(in_srgb,var(--bb-invert-fg)_70%,transparent)]',
+  label: 'text-[color:color-mix(in_srgb,var(--bb-invert-fg)_62%,transparent)]',
+};
 
 export default function DeployAgent() {
   return (
     <div>
       <Breadcrumb items={['marketplace', 'agents', 'create']} />
       <PageHeader
-        title="Create agent"
-        description="Choose how you want to deploy your agent. Both paths give it an on-chain wallet and an INFT identity."
+        title="Create an agent."
+        titleMuted="Pick how you build it."
+        description="Either way it gets its own wallet and an on-chain identity."
       />
 
-      <SectionRule num="01" title="Choose a path" />
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-px bg-line border border-line">
+      {/* The landing's pair of doors: one invert card, one white card. */}
+      <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
         {CHOICES.map((c) => (
           <Link
             key={c.to}
             to={c.to}
-            className="group flex flex-col bg-surface p-7 hover:bg-surface-2 transition-colors"
+            className={`group flex min-h-[250px] flex-col rounded-3xl p-8 transition-[transform,box-shadow,border-color] duration-300 ease-bb hover:-translate-y-1 motion-reduce:transition-none motion-reduce:hover:translate-y-0 sm:p-10 ${
+              c.invert ? 'border border-transparent bg-invert text-invert-fg' : 'card-dark hover:border-line-2'
+            }`}
           >
-            <Tag tone="info" className="self-start">
-              {c.tag}
-            </Tag>
-            <h2 className="mt-4 text-lg font-semibold text-ink">{c.title}</h2>
-            <p className="mt-1.5 text-sm text-ink-2 leading-relaxed">{c.description}</p>
-            <p className="mt-3 text-sm text-ink-3 leading-relaxed">{c.detail}</p>
-            <div className="mt-6 pt-1 flex-1 flex items-end">
-              <Button
-                variant="outline"
-                size="sm"
-                label={c.cta}
-                className="pointer-events-none group-hover:border-cream group-hover:text-cream"
-              />
+            <h2 className={`text-[26px] font-medium leading-tight tracking-[-0.02em] sm:text-[30px] ${c.invert ? 'text-invert-fg' : 'text-ink'}`}>
+              {c.title}
+            </h2>
+            <p className={`mt-3 max-w-md text-[15px] leading-relaxed ${c.invert ? ON_INVERT.muted : 'text-ink-3'}`}>
+              {c.description}
+            </p>
+            <div className="mt-auto flex items-center justify-between pt-8">
+              <span className={`font-mono text-[11px] uppercase tracking-widest ${c.invert ? ON_INVERT.label : 'text-ink-3'}`}>
+                {c.cta}
+              </span>
+              <span
+                aria-hidden
+                className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full transition-transform duration-300 ease-bb group-hover:translate-x-1 motion-reduce:group-hover:translate-x-0 ${
+                  c.invert ? 'bg-invert-fg text-invert' : 'bg-invert text-invert-fg'
+                }`}
+              >
+                →
+              </span>
             </div>
           </Link>
         ))}

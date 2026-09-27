@@ -1,12 +1,17 @@
 export { LogoMark } from './LogoMark';
 export { Icon } from './Icon';
-export { Button } from './Button';
+export { Button, ButtonLink, IconButton, iconButtonClass } from './Button';
+export { Segmented } from './Segmented';
+export { RadioPills } from './RadioPills';
 export { Tag } from './Tag';
 export { Panel } from './Panel';
+export { HighlightCard } from './HighlightCard';
+export { LiveDot } from './LiveDot';
 export { SectionRule } from './SectionRule';
 export { StatCard } from './StatCard';
 export { FormField, FormInput, FormSelect, FormTextarea } from './FormField';
 export { Spinner, Skeleton, LoadingState, EmptyState, ErrorState, StatusTag, statusTone } from './states';
+export { ErrorNotice } from './ErrorNotice';
 export { DataTable, type Column } from './DataTable';
 export { Sidebar } from './Sidebar';
 export { TopBar } from './TopBar';

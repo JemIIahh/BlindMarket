@@ -2,11 +2,13 @@ import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { usePrivy } from '@privy-io/react-auth';
 import { useAccount, useChainId, useSwitchChain } from 'wagmi';
-import { Button } from './Button';
+import { iconButtonClass } from './Button';
 import { LogoMark } from './LogoMark';
 import { NotificationBell } from './NotificationBell';
 import { getStoredTheme } from '../ThemeSync';
+import { PosterAvatar } from '../avatar/PosterAvatar';
 import { useUsdcBalance } from '../../hooks/useChainWallet';
+import { useMyAvatar } from '../../hooks/useMyAvatar';
 import { arcChain } from '../../config/chains';
 import { isCctpUsable } from '../../config/constants';
 import { copyToClipboard } from '../../lib/utils';
@@ -18,6 +20,9 @@ interface TopBarProps {
   onMenuClick?: () => void;
 }
 
+// Dropdown panel under the account pill.
+const MENU = 'absolute right-0 top-full mt-2 min-w-[200px] overflow-hidden rounded-xl border border-line bg-surface text-[13px] shadow-[0_18px_40px_-20px_rgba(0,0,0,0.35)] z-50';
+
 function shortenAddress(addr: string) {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
@@ -28,6 +33,7 @@ function shortenAddress(addr: string) {
 export function TopBar({ onMenuClick }: TopBarProps = {}) {
   const [currentTheme, setCurrentTheme] = useState<'dark' | 'light'>(getStoredTheme);
   const { ready, authenticated, login, logout } = usePrivy();
+  const me = useMyAvatar();
   const { address } = useAccount();
   const chainId = useChainId();
   const { switchChain } = useSwitchChain();
@@ -83,7 +89,7 @@ export function TopBar({ onMenuClick }: TopBarProps = {}) {
   const refreshBalances = () => usdc.refresh();
 
   return (
-    <header className="h-14 w-full border-b border-line bg-surface flex items-center justify-between px-4">
+    <header className="bb-glass h-14 w-full border-b border-glass-line flex items-center justify-between px-4">
       {/* zone: brand */}
       <div className="flex items-center gap-2.5 min-w-0">
         {onMenuClick && (
@@ -106,73 +112,76 @@ export function TopBar({ onMenuClick }: TopBarProps = {}) {
       </div>
 
       {/* zone: controls */}
-      <div className="flex items-center gap-3 shrink-0">
+      <div className="flex items-center gap-2 shrink-0">
         {/* group: primary-action */}
-        <Link to="/tasks/new" className={authenticated ? 'hidden lg:block' : 'hidden sm:block'}>
-          <Button variant="outline" label="Post task" size="sm" className="h-8 rounded-md" />
+        <Link
+          to="/tasks/new"
+          className={`bb-btn bb-btn-primary h-9 px-4 text-[13px] ${authenticated ? 'hidden lg:inline-flex' : 'hidden sm:inline-flex'}`}
+        >
+          Post task
         </Link>
 
-        <span aria-hidden className={`${authenticated ? 'hidden lg:block' : 'hidden sm:block'} w-px h-5 bg-line`} />
-
         {/* group: utility */}
-        <div className="flex items-center gap-1">
-          <button
-            onClick={toggleTheme}
-            aria-label={currentTheme === 'light' ? 'switch to dark theme' : 'switch to light theme'}
-            title={currentTheme === 'light' ? 'Dark theme' : 'Light theme'}
-            className="hidden md:flex items-center justify-center h-8 w-8 rounded-md text-ink-2 hover:text-ink hover:bg-surface-2 transition-colors"
+        <button
+          onClick={toggleTheme}
+          aria-label={currentTheme === 'light' ? 'switch to dark theme' : 'switch to light theme'}
+          title={currentTheme === 'light' ? 'Dark theme' : 'Light theme'}
+          className={`${iconButtonClass('outline')} hidden md:inline-flex`}
+        >
+          {currentTheme === 'light' ? (
+            <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" />
+            </svg>
+          ) : (
+            <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <circle cx="12" cy="12" r="4" />
+              <path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+            </svg>
+          )}
+        </button>
+        <NotificationBell />
+
+        {/* The signed-in person's avatar; opens the editor in Settings.
+            Hidden on the narrowest phones, where Settings is in the menu. */}
+        {me.signedIn && (
+          <Link
+            to="/settings#avatar"
+            aria-label="Your avatar: edit it in Settings"
+            title="Your avatar"
+            className={`${iconButtonClass('outline')} hidden min-[420px]:inline-flex overflow-hidden`}
           >
-            {currentTheme === 'light' ? (
-              <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" />
-              </svg>
-            ) : (
-              <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                <circle cx="12" cy="12" r="4" />
-                <path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
-              </svg>
-            )}
-          </button>
-          <NotificationBell />
-        </div>
+            <PosterAvatar config={me.avatar} seed={me.seed} size={34} className="block h-full w-full rounded-full" />
+          </Link>
+        )}
 
-        <span aria-hidden className={`${authenticated ? 'hidden sm:block' : ''} w-px h-5 bg-line`} />
-
-        {/* group: account — ONE bordered box, segments joined by border-r */}
+        {/* group: account — one pill, segments joined by hairlines */}
         {!ready ? (
-          <div aria-hidden className="h-8 opacity-0 pointer-events-none select-none" />
+          <div aria-hidden className="h-9 opacity-0 pointer-events-none select-none" />
         ) : !authenticated ? (
-          <div className="flex items-center h-8 rounded-md border border-line text-[11px] font-mono">
-            <button
-              onClick={login}
-              className="flex items-center px-2.5 h-full rounded-md text-ink hover:bg-surface-2 transition-colors"
-            >
-              <span className="opacity-40">[</span>&nbsp;{address ? 'sign_in' : 'connect_wallet'}&nbsp;<span className="opacity-40">]</span>
-            </button>
-          </div>
+          <button onClick={login} className="bb-btn bb-btn-secondary h-9 px-4 text-[13px]">
+            {address ? 'Sign in' : 'Connect wallet'}
+          </button>
         ) : offSupported ? (
-          <div className="flex items-center h-8 rounded-md border border-line text-[11px] font-mono">
-            <button
-              onClick={() => switchChain({ chainId: arcChain.id })}
-              className="flex items-center px-2.5 h-full rounded-md text-err hover:bg-surface-2 transition-colors"
-            >
-              wrong_network
-            </button>
-          </div>
+          <button
+            onClick={() => switchChain({ chainId: arcChain.id })}
+            className="bb-btn bb-btn-secondary h-9 px-4 text-[13px] text-err"
+          >
+            Wrong network
+          </button>
         ) : (
-          <div ref={accountRef} className="relative flex items-center h-8 rounded-md border border-line text-[11px] font-mono">
+          <div ref={accountRef} className="relative flex items-center h-9 rounded-full border border-line bg-surface text-[12px]">
             {/* segment: network */}
-            <span className="hidden sm:flex md:hidden min-[800px]:flex items-center gap-1.5 px-2.5 h-full border-r border-line text-ink-2 whitespace-nowrap">
+            <span className="hidden sm:flex md:hidden min-[800px]:flex items-center gap-1.5 pl-3.5 pr-3 h-full border-r border-line text-ink-2 whitespace-nowrap">
               <span className="w-1.5 h-1.5 rounded-full bg-ok shrink-0" />
               {networkName}
             </span>
             {/* segment: address */}
-            <span className="flex items-center gap-1.5 px-2.5 h-full border-r border-line whitespace-nowrap">
+            <span className="flex items-center gap-1.5 pl-3.5 sm:pl-3 md:pl-3.5 min-[800px]:pl-3 pr-3 h-full border-r border-line whitespace-nowrap">
               <button
                 onClick={() => { setAssetMenuOpen(false); setAccountMenuOpen(o => !o); }}
                 aria-haspopup="menu"
                 aria-expanded={accountMenuOpen}
-                className="font-mono text-ink hover:text-cream transition-colors"
+                className="font-mono text-ink hover:text-ink-2 transition-colors"
               >
                 {address ? shortenAddress(address) : 'connected'}
               </button>
@@ -194,7 +203,7 @@ export function TopBar({ onMenuClick }: TopBarProps = {}) {
               aria-haspopup="menu"
               aria-expanded={assetMenuOpen}
               title="Switch asset"
-              className="flex items-center gap-1.5 px-2.5 h-full text-ink hover:bg-surface-2 rounded-r-md transition-colors whitespace-nowrap"
+              className="flex items-center gap-1.5 pl-3 pr-3.5 h-full text-ink hover:bg-surface-2 rounded-r-full transition-colors whitespace-nowrap"
             >
               <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${shownAsset.dot}`} />
               <span className="hidden min-[520px]:inline text-ink-2">{shownAsset.symbol}</span>
@@ -212,37 +221,37 @@ export function TopBar({ onMenuClick }: TopBarProps = {}) {
             </button>
 
             {accountMenuOpen && (
-              <div role="menu" className="absolute right-0 top-full mt-1 min-w-[180px] border border-line bg-surface text-[11px] font-mono z-50">
+              <div role="menu" className={MENU}>
                 {address && (
                   <button
                     onClick={() => { copyToClipboard(address); setAccountMenuOpen(false); }}
-                    className="block w-full text-left px-3 py-2 text-ink-2 hover:bg-surface-2 hover:text-ink transition-colors"
+                    className="block w-full text-left px-3.5 py-2.5 text-ink-2 hover:bg-surface-2 hover:text-ink transition-colors"
                   >
-                    copy_address
+                    Copy address
                   </button>
                 )}
                 <button
                   onClick={() => { logout(); setAccountMenuOpen(false); }}
-                  className={`block w-full text-left px-3 py-2 text-err hover:bg-surface-2 transition-colors ${address ? 'border-t border-line' : ''}`}
+                  className={`block w-full text-left px-3.5 py-2.5 text-err hover:bg-surface-2 transition-colors ${address ? 'border-t border-line' : ''}`}
                 >
-                  disconnect
+                  Disconnect
                 </button>
               </div>
             )}
 
             {assetMenuOpen && (
-              <div role="menu" aria-label="balance options" className="absolute right-0 top-full mt-1 min-w-[210px] border border-line bg-surface text-[11px] font-mono z-50">
-                <div className="flex w-full items-center gap-2 px-3 py-2 text-ink-2">
+              <div role="menu" aria-label="balance options" className={`${MENU} min-w-[230px]`}>
+                <div className="flex w-full items-center gap-2 px-3.5 py-2.5 text-ink-2">
                   <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-blue-500" />
                   <span>USDC</span>
                   <span className="text-ink-3">· {networkName}</span>
                   <span className="ml-auto font-mono">{usdc.formatted ?? '…'}</span>
-                  <span className="text-cream">✓</span>
+                  <span className="text-ink-3">✓</span>
                 </div>
                 {cctpEnabled && (
                   <button
                     onClick={() => { setAssetMenuOpen(false); setFundModalOpen(true); }}
-                    className="flex w-full items-center gap-2 px-3 py-2 border-t border-line text-ink-2 hover:bg-surface-2 hover:text-ink transition-colors"
+                    className="flex w-full items-center gap-2 px-3.5 py-2.5 border-t border-line text-ink-2 hover:bg-surface-2 hover:text-ink transition-colors"
                     title="Fund from another chain"
                   >
                     <span className="text-ink-3">+</span>
@@ -251,7 +260,7 @@ export function TopBar({ onMenuClick }: TopBarProps = {}) {
                 )}
                 <button
                   onClick={() => { setAssetMenuOpen(false); setWithdrawModalOpen(true); }}
-                  className="flex w-full items-center gap-2 px-3 py-2 border-t border-line text-ink-2 hover:bg-surface-2 hover:text-ink transition-colors"
+                  className="flex w-full items-center gap-2 px-3.5 py-2.5 border-t border-line text-ink-2 hover:bg-surface-2 hover:text-ink transition-colors"
                   title="Withdraw USDC to any address"
                 >
                   <span className="text-ink-3">→</span>
@@ -259,7 +268,7 @@ export function TopBar({ onMenuClick }: TopBarProps = {}) {
                 </button>
                 <button
                   onClick={() => { refreshBalances(); setAssetMenuOpen(false); }}
-                  className="flex w-full items-center gap-2 px-3 py-2 border-t border-line text-ink-3 hover:bg-surface-2 hover:text-ink transition-colors"
+                  className="flex w-full items-center gap-2 px-3.5 py-2.5 border-t border-line text-ink-3 hover:bg-surface-2 hover:text-ink transition-colors"
                 >
                   <svg
                     viewBox="0 0 16 16"

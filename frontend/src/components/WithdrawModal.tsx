@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { useSigners } from '@privy-io/react-auth';
 import { parseUnits, formatUnits, Interface, isAddress, getAddress, ZeroAddress, Contract, EventLog, type JsonRpcProvider } from 'ethers';
-import { Button, FormField, FormInput, Modal, Spinner } from './bb';
+import { Button, ErrorNotice, FormField, FormInput, Modal, Spinner } from './bb';
 import { useWallet } from '../context/WalletContext';
 import { useUsdcBalance } from '../hooks/useChainWallet';
 import { signAndSendTx, RelayError, providerFor, type SentTx } from '../lib/txSigner';
+import { UserFacingError, friendlyError } from '../lib/friendlyError';
 import { PRIVY_RELAY_SIGNER_ID } from '../config/constants';
 import { useSettlement } from '../config/settlement';
 
@@ -61,7 +62,7 @@ export function WithdrawModal({ onClose, onWithdrawn }: { onClose: () => void; o
   const [to, setTo] = useState('');
   const [amount, setAmount] = useState('');
   const [phase, setPhase] = useState<Phase>('input');
-  const [error, setError] = useState('');
+  const [error, setError] = useState<unknown>('');
   const [txHash, setTxHash] = useState<string | null>(null);
   const [needsRelay, setNeedsRelay] = useState(false);
   const relayGrantTried = useRef(false);
@@ -93,7 +94,7 @@ export function WithdrawModal({ onClose, onWithdrawn }: { onClose: () => void; o
     try {
       await addSigners({ address: embeddedAddress, signers: [{ signerId: PRIVY_RELAY_SIGNER_ID }] });
     } catch (err) {
-      setError((err as Error).message || 'Could not enable relay access.');
+      setError(err);
       setPhase('confirm');
       return;
     }
@@ -135,9 +136,21 @@ export function WithdrawModal({ onClose, onWithdrawn }: { onClose: () => void; o
         }
         return;
       }
-      setError(err instanceof RelayError
-        ? err.message || 'Withdrawal failed.'
-        : `${(err as Error).message || 'Withdrawal failed.'} We couldn't confirm whether it was sent — check your balance before trying again.`);
+      const f = friendlyError(err);
+      // The wallet broadcast it before the wait failed: it is on its way, or
+      // gone for good, but either way sending again could pay twice.
+      if (f.kind === 'maybeSent') {
+        if (f.txHash) setTxHash(f.txHash);
+        setPhase('pending');
+        onWithdrawn?.();
+        return;
+      }
+      // A cancel, a shortfall, a wrong network or a refused call sent nothing;
+      // anything else may have gone out before it failed.
+      const known = f.kind;
+      setError(err instanceof RelayError || ['cancelled', 'funds', 'chain', 'revert'].includes(known)
+        ? err
+        : new UserFacingError("We couldn't confirm whether it was sent. Check your balance before trying again.", { title: 'Withdrawal status unknown', cause: err }));
       setPhase('error');
       return;
     }
@@ -176,7 +189,7 @@ export function WithdrawModal({ onClose, onWithdrawn }: { onClose: () => void; o
               label="Your BlindMarket wallet"
               hint={embeddedAddress ? `${formatUnits(USDC_GAS_RESERVE_RAW, 6)} USDC stays behind to cover the network fee.` : 'Your BlindMarket wallet hasn\'t loaded yet.'}
             >
-              <div className="px-3 py-2.5 bg-surface-2 border border-line text-sm font-mono text-ink">
+              <div className="rounded-xl border border-line bg-surface-2 px-3.5 py-2.5 text-sm font-mono text-ink">
                 {!embeddedAddress ? '—' : balance === null ? 'Checking…' : `${parseFloat(formatUnits(balance, 6)).toFixed(4)} USDC`}
               </div>
             </FormField>
@@ -220,7 +233,7 @@ export function WithdrawModal({ onClose, onWithdrawn }: { onClose: () => void; o
 
         {phase === 'confirm' && (
           <div className="space-y-4">
-            <div className="text-sm text-ink-2 border border-line bg-surface-2 p-4 space-y-1.5">
+            <div className="rounded-2xl border border-line bg-surface-2 p-4 text-sm text-ink-2 space-y-1.5">
               <div>
                 Send <span className="font-mono text-ink">{amountRaw !== null ? formatUnits(amountRaw, 6) : amount} USDC</span> on{' '}
                 <span className="text-ink">{networkName}</span> to
@@ -232,12 +245,12 @@ export function WithdrawModal({ onClose, onWithdrawn }: { onClose: () => void; o
               </div>
             </div>
             {needsRelay && (
-              <div className="text-xs text-warn border border-warn/40 bg-warn/5 p-3">
+              <div className="rounded-xl border border-[color:color-mix(in_srgb,var(--bb-warn)_45%,transparent)] bg-[color:color-mix(in_srgb,var(--bb-warn)_6%,transparent)] p-3 text-xs text-ink-2 leading-relaxed">
                 One-time setup: this wallet needs to grant the platform relay access before it can sign gas-sponsored
                 transactions. You'll be asked to approve this in your wallet.
               </div>
             )}
-            {error && <div className="text-xs text-err break-words">{error}</div>}
+            <ErrorNotice error={error} title="Couldn't withdraw" />
             <div className="flex justify-end gap-2">
               <Button variant="ghost" size="sm" label="Back" onClick={() => { setError(''); setPhase('input'); }} />
               <Button
@@ -270,7 +283,7 @@ export function WithdrawModal({ onClose, onWithdrawn }: { onClose: () => void; o
 
         {phase === 'error' && (
           <div className="space-y-4">
-            <div className="text-xs text-err break-words">{error}</div>
+            <ErrorNotice error={error} title="Couldn't withdraw" />
             <div className="flex justify-end gap-2">
               <Button variant="ghost" size="sm" label="Close" onClick={onClose} />
               <Button variant="primary" size="sm" label="Try again" onClick={() => { setError(''); setPhase('input'); }} />

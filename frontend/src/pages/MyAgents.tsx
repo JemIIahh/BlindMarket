@@ -8,10 +8,10 @@ import {
   SectionRule,
   StatCard,
   StatusTag,
-  Button,
   LoadingState,
   EmptyState,
   ErrorState,
+  ErrorNotice,
   SignInGate,
   Pagination,
   CopyButton,
@@ -173,7 +173,7 @@ export default function MyAgents() {
             Restart
           </button>
         )}
-        <Link to={`/agents/${agent.id}`} className="inline-flex items-center px-2 py-1.5 min-h-[32px] text-cream hover:underline">
+        <Link to={`/agents/${agent.id}`} className="inline-flex items-center px-2 py-1.5 min-h-[32px] text-accent hover:underline">
           Logs
         </Link>
       </div>
@@ -187,30 +187,20 @@ export default function MyAgents() {
     <div>
       <Breadcrumb items={['marketplace', 'agents', 'mine']} />
       <PageHeader
-        title="My agents"
-        description="Manage your deployed agents and track their earnings."
+        title="My agents."
+        titleMuted="Run them and track what they earn."
         right={
-          <Link to="/agents/deploy">
-            <Button variant="primary" label="Deploy agent" />
+          <Link to="/agents/deploy" className="bb-btn bb-btn-primary h-10 px-5 text-[13.5px]">
+            Deploy agent
           </Link>
         }
       />
 
       {/* Stats */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-0 border border-line mb-8">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3 mb-8">
         <StatCard label="Agents" value={String(agents.length)} sub={`${running} running`} subColor={running > 0 ? 'ok' : undefined} />
-        <div className="border-t lg:border-t-0 lg:border-l border-line">
-          <StatCard
-            className="h-full"
-            label="Total earned"
-            value={totalEarned}
-            sub="All agents"
-            subColor="ok"
-          />
-        </div>
-        <div className="border-t lg:border-t-0 lg:border-l border-line">
-          <StatCard className="h-full" label="Tasks completed" value={String(tasksTotal)} sub="All time" />
-        </div>
+        <StatCard label="Total earned" value={totalEarned} sub="All agents" subColor="ok" />
+        <StatCard label="Tasks completed" value={String(tasksTotal)} sub="All time" />
       </div>
 
       {address && <SignInGate prompt="to manage your agents" />}
@@ -220,8 +210,8 @@ export default function MyAgents() {
           the per-row action buttons cleanly, because it wraps each row in a
           single <Link>; nested buttons inside an anchor are invalid and would
           trigger navigation. So we mirror its visual style here instead. */}
-      <div className="border border-line">
-        <SectionRule num="01" title="Deployed agents" side={`${totalAgents} total`} className="px-5 pt-5" />
+      <div className="card-dark overflow-hidden">
+        <SectionRule num="01" title="Deployed agents" side={`${totalAgents} total`} className="px-6 pt-6" />
 
         {!address ? (
           <EmptyState
@@ -239,8 +229,8 @@ export default function MyAgents() {
             title="No agents deployed yet"
             description="Deploy your first agent to start earning on tasks across the marketplace."
             action={
-              <Link to="/agents/deploy">
-                <Button variant="outline" label="Create agent" size="sm" />
+              <Link to="/agents/deploy" className="bb-btn bb-btn-secondary h-9 px-4 text-[13px]">
+                Create agent
               </Link>
             }
           />
@@ -266,7 +256,7 @@ export default function MyAgents() {
                     <div className={`grid ${COLS} gap-6 px-5 py-3.5 text-sm items-center`}>
                       <div className="min-w-0">
                         <div className="flex items-center gap-2">
-                          <Link to={`/agents/${agent.id}`} className="text-ink hover:text-cream transition-colors truncate">
+                          <Link to={`/agents/${agent.id}`} className="text-ink underline-offset-4 decoration-line-2 hover:underline truncate">
                             {agent.name}
                           </Link>
                           {agent.walletAddress && <GasChip agent={agent} />}
@@ -291,9 +281,7 @@ export default function MyAgents() {
                       </div>
                     </div>
                     {failed && (
-                      <div className="px-5 pb-3 text-[11px] font-mono text-err">
-                        {action.variables?.act} failed: {(action.error as Error).message}
-                      </div>
+                      <ErrorNotice error={action.error} title={`Couldn't ${action.variables?.act ?? 'update'} the agent`} compact className="px-5 pb-3" />
                     )}
                   </div>
                 );
@@ -311,7 +299,7 @@ export default function MyAgents() {
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2">
-                          <Link to={`/agents/${agent.id}`} className="text-sm text-ink hover:text-cream transition-colors truncate">
+                          <Link to={`/agents/${agent.id}`} className="text-sm text-ink underline-offset-4 decoration-line-2 hover:underline truncate">
                             {agent.name}
                           </Link>
                           {agent.walletAddress && <GasChip agent={agent} />}
@@ -352,9 +340,7 @@ export default function MyAgents() {
                     </div>
 
                     {failed && (
-                      <div className="text-[11px] font-mono text-err">
-                        {action.variables?.act} failed: {(action.error as Error).message}
-                      </div>
+                      <ErrorNotice error={action.error} title={`Couldn't ${action.variables?.act ?? 'update'} the agent`} compact />
                     )}
                   </div>
                 );

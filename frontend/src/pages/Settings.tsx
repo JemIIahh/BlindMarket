@@ -13,6 +13,7 @@ import {
   Modal,
   ConfirmDialog,
   Toggle,
+  ErrorNotice,
 } from '../components/bb';
 import { useReputation } from '../hooks/useReputation';
 import { useWallet } from '../context/WalletContext';
@@ -22,6 +23,7 @@ import {
 import { useSettlement } from '../config/settlement';
 import { authedGet, authedPost, authedDelete } from '../lib/api';
 import { copyToClipboard } from '../lib/utils';
+import { YourAvatarField } from '../components/avatar/AvatarEditor';
 
 const NOTIF_KEYS = {
   payout: 'bb.notify.payout',
@@ -49,6 +51,14 @@ function saveBool(key: string, v: boolean) {
   } catch {}
 }
 
+// The landing's shapes: each section is its own rounded card, values sit in
+// soft rounded panels, and lists get a rounded hairline frame.
+const CARD = 'card-dark rounded-3xl p-6 sm:p-7';
+const VALUE_BOX = 'rounded-xl border border-line bg-surface-2 px-3.5 py-2.5 text-sm';
+const LIST_BOX = 'overflow-hidden rounded-2xl border border-line divide-y divide-line';
+const DANGER_TEXT_BUTTON =
+  'shrink-0 rounded-full px-3 py-1 text-xs font-medium text-err transition-colors duration-200 hover:bg-[color:color-mix(in_srgb,var(--bb-err)_10%,transparent)]';
+
 export default function Settings() {
   const { isAuthenticated } = useAuth();
   const { address: evmAddress, isConnected: evmConnected } = useAccount();
@@ -63,7 +73,9 @@ export default function Settings() {
 
   const [relaySignerLoading, setRelaySignerLoading] = useState(false);
   const [relaySignerStatus, setRelaySignerStatus] = useState<'idle' | 'done' | 'error'>('idle');
+  const [relaySignerError, setRelaySignerError] = useState<unknown>(null);
   const [exporting, setExporting] = useState(false);
+  const [keyCopied, setKeyCopied] = useState(false);
 
   const handleExportWallet = async () => {
     if (!embeddedAddress) return;
@@ -89,6 +101,7 @@ export default function Settings() {
       setRelaySignerStatus('done');
     } catch (err) {
       console.error('Failed to add relay signer:', err);
+      setRelaySignerError(err);
       setRelaySignerStatus('error');
     } finally {
       setRelaySignerLoading(false);
@@ -206,17 +219,21 @@ export default function Settings() {
   return (
     <div>
       <Breadcrumb items={['account', 'settings']} />
-      <PageHeader title="Settings" description="Manage your identity, network, and notification preferences." />
+      <PageHeader title="Settings." titleMuted="Your identity, wallets and alerts." />
 
-      <div className="grid grid-cols-1 lg:grid-cols-[1fr_340px] gap-0 border border-line">
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_340px] gap-5 items-start">
         {/* Left column */}
-        <div className="p-6 space-y-10">
+        <div className="space-y-5 min-w-0">
           {/* Identity */}
-          <div className="space-y-5">
+          <section className={`${CARD} space-y-5`}>
             <SectionRule num="01" title="Identity" />
 
+            <FormField label="Your avatar">
+              <YourAvatarField />
+            </FormField>
+
             <FormField label="Wallet address">
-              <div className="px-3 py-2.5 bg-surface-2 border border-line text-sm flex items-center gap-2 flex-wrap">
+              <div className={`${VALUE_BOX} flex items-center gap-2 flex-wrap`}>
                 <span className="font-mono text-ink-2">{walletDisplay}</span>
                 {isConnected ? <Tag tone="ok">Connected</Tag> : <Tag tone="warn">Disconnected</Tag>}
               </div>
@@ -224,7 +241,7 @@ export default function Settings() {
 
             <FormField
               label="Export wallet"
-              hint="Reveals your BlindMarket wallet's private key / seed phrase in a Privy-hosted iframe this app can't read — for moving it into MetaMask or another wallet client."
+              hint="Opens your private key in a Privy window this app can't read, so you can move the wallet to MetaMask or another wallet."
             >
               <Button
                 variant="outline"
@@ -235,26 +252,26 @@ export default function Settings() {
               />
             </FormField>
 
-            <FormField label="Reputation" hint="Decayed on-chain + off-chain score">
-              <div className="px-3 py-2.5 bg-surface-2 border border-line text-sm font-mono text-ink-2">
-                {address ? reputationDisplay : 'Connect wallet to view reputation'}
+            <FormField label="Reputation" hint="On-chain and off-chain score, decaying over time.">
+              <div className={`${VALUE_BOX} font-mono text-ink-2`}>
+                {address ? reputationDisplay : 'Connect a wallet to see your reputation'}
               </div>
             </FormField>
 
-            <FormField label="Social verification" hint="Coming soon — link accounts for optional identity verification.">
+            <FormField label="Social verification" hint="Coming soon: link accounts to verify your identity.">
               <div className="flex gap-2 flex-wrap">
                 <Button variant="outline" label="GitHub (soon)" size="sm" disabled />
                 <Button variant="outline" label="Twitter (soon)" size="sm" disabled />
                 <Button variant="outline" label="Google (soon)" size="sm" disabled />
               </div>
             </FormField>
-          </div>
+          </section>
 
           {/* Linked Wallets */}
-          <div className="space-y-5">
-            <SectionRule num="02" title="Linked Wallets" side="All wallets in your Privy account" />
+          <section className={`${CARD} space-y-5`}>
+            <SectionRule num="02" title="Linked wallets" side="All wallets in your Privy account" />
 
-            <div className="border border-line divide-y divide-line">
+            <div className={LIST_BOX}>
               {linkedWallets.length === 0 ? (
                 <div className="px-4 py-6 text-center text-xs text-ink-3">No wallets linked yet.</div>
               ) : (
@@ -271,8 +288,9 @@ export default function Settings() {
                       </div>
                       {!isEmbedded && !isActive && (
                         <button
+                          type="button"
                           onClick={() => setUnlinkTarget(w.address)}
-                          className="text-[10px] uppercase tracking-wider text-err hover:text-err/80 transition-colors shrink-0"
+                          className={DANGER_TEXT_BUTTON}
                         >
                           Unlink
                         </button>
@@ -283,8 +301,8 @@ export default function Settings() {
               )}
             </div>
             <p className="text-xs text-ink-3 leading-relaxed">
-              Your BlindMarket wallet is managed for you — it pays for tasks and receives payouts. Link an external
-              wallet (e.g. MetaMask) if you want to bridge funds in from another chain.
+              Your BlindMarket wallet pays for tasks and receives payouts. Link an external wallet, like MetaMask, to
+              bridge funds in from another chain.
             </p>
 
             <Button
@@ -293,21 +311,21 @@ export default function Settings() {
               size="sm"
               onClick={() => linkWallet()}
             />
-          </div>
+          </section>
 
           {/* Network */}
-          <div className="space-y-5">
+          <section className={`${CARD} space-y-5`}>
             <SectionRule num="03" title="Network" />
 
             <FormField
               label="Settlement chain"
               hint={`New tasks are escrowed and paid in ${postingInfo.token.unit.symbol} on ${postingInfo.label}.`}
             >
-              <div className="px-3 py-2.5 bg-surface-2 border border-line text-sm flex items-center gap-2 flex-wrap">
+              <div className={`${VALUE_BOX} flex items-center gap-2 flex-wrap`}>
                 <Tag tone="ok">
                   {postingInfo.label} · <span className="font-mono">{postingInfo.chainId}</span>
                 </Tag>
-                <span className="ml-auto text-xs text-ok">{postingInfo.tier === 'mainnet' ? 'Mainnet' : 'Testnet'}</span>
+                <span className="ml-auto text-xs text-ink-2">{postingInfo.tier === 'mainnet' ? 'Mainnet' : 'Testnet'}</span>
               </div>
             </FormField>
 
@@ -315,7 +333,7 @@ export default function Settings() {
               label="Agent infra chain (0G)"
               hint="Agent identity and reputation live on 0G."
             >
-              <div className="px-3 py-2.5 bg-surface-2 border border-line text-sm flex items-center gap-2 flex-wrap">
+              <div className={`${VALUE_BOX} flex items-center gap-2 flex-wrap`}>
                 <Tag tone="neutral">
                   0G · <span className="font-mono">{OG_CHAIN_ID}</span>
                 </Tag>
@@ -325,10 +343,10 @@ export default function Settings() {
 
             <FormField
               label="Server relay access"
-              hint="One-time setup: allows the backend to sign transactions on your behalf."
+              hint="One-time setup that lets the backend sign transactions for you."
             >
               {relaySignerStatus === 'done' ? (
-                <div className="px-3 py-2.5 bg-surface-2 border border-line text-sm text-ok flex items-center gap-2">
+                <div className={`${VALUE_BOX} flex items-center gap-2`}>
                   <Tag tone="ok">Enabled</Tag>
                   <span className="text-xs text-ink-3">Relay signer added to your wallet.</span>
                 </div>
@@ -342,18 +360,18 @@ export default function Settings() {
                     disabled={relaySignerLoading || !embeddedAddress}
                   />
                   {relaySignerStatus === 'error' && (
-                    <span className="text-xs text-err">Failed. Try again.</span>
+                    <ErrorNotice error={relaySignerError ?? 'Failed. Try again.'} title="Couldn't enable relay access" compact />
                   )}
                 </div>
               )}
             </FormField>
-          </div>
+          </section>
 
           {/* API Keys */}
-          <div className="space-y-5">
-            <SectionRule num="04" title="API Keys" side="Revocable · stored as hash" />
+          <section className={`${CARD} space-y-5`}>
+            <SectionRule num="04" title="API keys" side="Revocable · stored as hash" />
 
-            <div className="border border-line divide-y divide-line">
+            <div className={LIST_BOX}>
               {loadingKeys ? (
                 <div className="px-4 py-6 text-center text-xs text-ink-3">Loading keys…</div>
               ) : keys.length === 0 ? (
@@ -372,8 +390,9 @@ export default function Settings() {
                           : 'Never used'}
                       </span>
                       <button
+                        type="button"
                         onClick={() => setRevokeTarget(k.id)}
-                        className="text-[10px] uppercase tracking-wider text-err hover:text-err/80 transition-colors"
+                        className={DANGER_TEXT_BUTTON}
                       >
                         Revoke
                       </button>
@@ -389,17 +408,17 @@ export default function Settings() {
               size="sm"
               onClick={() => setShowCreate(true)}
             />
-          </div>
+          </section>
 
           {/* Notifications */}
-          <div className="space-y-5">
+          <section className={`${CARD} space-y-5`}>
             <SectionRule num="05" title="Notifications" side="Saved to this browser" />
 
-            <div className="border border-line">
-              {notifications.map((toggle, i) => (
+            <div className={LIST_BOX}>
+              {notifications.map((toggle) => (
                 <div
                   key={toggle.label}
-                  className={`flex items-center justify-between gap-4 px-4 py-3.5 ${i > 0 ? 'border-t border-line' : ''}`}
+                  className="flex items-center justify-between gap-4 px-4 py-3.5"
                 >
                   <div className="min-w-0">
                     <div className="text-sm text-ink">{toggle.label}</div>
@@ -413,13 +432,13 @@ export default function Settings() {
                 </div>
               ))}
             </div>
-          </div>
+          </section>
         </div>
 
         {/* Right column */}
-        <div className="border-t lg:border-t-0 lg:border-l border-line p-6 space-y-8">
+        <div className="space-y-5 min-w-0">
           {/* Session state */}
-          <div className="space-y-4">
+          <section className={`${CARD} space-y-4`}>
             <SectionRule num="06" title="Session" />
 
             <div className="space-y-2">
@@ -457,12 +476,12 @@ export default function Settings() {
                 </div>
               ))}
             </div>
-          </div>
+          </section>
 
           {/* Privacy explainer */}
-          <div className="space-y-3">
+          <section className={`${CARD} space-y-3`}>
             <SectionRule num="07" title="Privacy" />
-            <div className="bg-surface-2 border border-line p-4 space-y-2.5">
+            <div className="rounded-2xl border border-line bg-surface-2 p-4 space-y-2.5">
               <p className="text-xs text-ink-3 leading-relaxed">
                 ECIES keys are generated in-browser and never transmitted.
               </p>
@@ -476,7 +495,7 @@ export default function Settings() {
                 The platform never sees plaintext instructions or evidence.
               </p>
             </div>
-          </div>
+          </section>
         </div>
       </div>
 
@@ -517,22 +536,23 @@ export default function Settings() {
 
       {/* ── Show new key once — deliberately not dismissable via backdrop:
             the key is shown exactly once, so closing must be explicit. ── */}
-      <Modal open={!!createdKey} onClose={() => setCreatedKey(null)} title="Key created" dismissable={false}>
+      <Modal open={!!createdKey} onClose={() => { setCreatedKey(null); setKeyCopied(false); }} title="Key created" dismissable={false}>
         <div className="space-y-4">
           <p className="text-xs text-ink-3 leading-relaxed">
             Copy this key now. For security reasons, it will not be shown again.
           </p>
-          <div className="flex items-center gap-2 bg-surface-2 border border-line px-3 py-2.5">
-            <code className="flex-1 text-xs font-mono text-cream break-all select-all">{createdKey}</code>
+          <div className="flex items-center gap-2 rounded-xl border border-line bg-surface-2 px-3.5 py-2.5">
+            <code className="flex-1 text-xs font-mono text-accent break-all select-all">{createdKey}</code>
             <button
-              onClick={() => { if (createdKey) copyToClipboard(createdKey); }}
-              className="text-[10px] uppercase tracking-wider text-ink-3 hover:text-ink shrink-0 transition-colors"
+              type="button"
+              onClick={async () => { if (createdKey) setKeyCopied(await copyToClipboard(createdKey)); }}
+              className="shrink-0 rounded-full border border-line px-3 py-1 text-xs text-ink-2 transition-colors duration-200 hover:border-accent hover:text-ink"
             >
-              Copy
+              {keyCopied ? 'Copied' : 'Copy'}
             </button>
           </div>
           <div className="flex justify-end">
-            <Button variant="outline" size="sm" label="Done" onClick={() => setCreatedKey(null)} />
+            <Button variant="outline" size="sm" label="Done" onClick={() => { setCreatedKey(null); setKeyCopied(false); }} />
           </div>
         </div>
       </Modal>

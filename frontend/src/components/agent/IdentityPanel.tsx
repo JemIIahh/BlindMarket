@@ -19,7 +19,7 @@ export function IdentityPanel({
   const disputes = agent.reputation?.disputes ?? 0;
 
   return (
-    <div className="border border-line rounded-lg px-4 py-3 overflow-x-auto">
+    <div className="card-dark px-5 py-3.5 overflow-x-auto">
       <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm text-ink-2 sm:flex-nowrap sm:min-w-max">
         {/* Owner */}
         <div className="flex items-center gap-1.5">
@@ -50,7 +50,7 @@ export function IdentityPanel({
           <div className="flex items-center gap-1.5">
             <Icon name="lock" size={14} className="text-ink-3" />
             <span className="text-ink-3 text-[12px]">INFT</span>
-            <span className="font-mono text-cream">#{agent.inftTokenId}</span>
+            <span className="font-mono text-accent">#{agent.inftTokenId}</span>
           </div>
         )}
 

@@ -26,6 +26,7 @@ import { validatorsRouter } from './routes/validators.js';
 import { statsRouter } from './routes/stats.js';
 import { analyticsRouter } from './routes/analytics.js';
 import { txRouter } from './routes/tx.js';
+import { profileRouter } from './routes/profile.js';
 import { getDb } from './services/database.js';
 
 // No-op without SENTRY_DSN.
@@ -67,6 +68,7 @@ app.use('/api/v1/validators', validatorsRouter);
 app.use('/api/v1/stats', statsRouter);
 app.use('/api/v1/analytics', analyticsRouter);
 app.use('/api/v1/tx', txRouter);
+app.use('/api/v1/profile', profileRouter);
 app.use('/a2a/v1', a2aProtocolRouter);
 
 // Flushes Sentry before responding — a serverless instance can freeze the

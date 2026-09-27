@@ -1,6 +1,18 @@
 import { useState } from 'react';
 import { AgentAvatar, Button, Icon, StatusTag } from '../bb';
+import { Markdown } from '../Markdown';
+import { briefPreview, normalizeBrief } from '../../lib/briefText';
 import type { AgentAction, AgentDetails } from './types';
+
+/** The collapsed description: the text without its Markdown headings, which
+ *  would otherwise run into the sentences ("Specification Role You are…"). */
+function descriptionPreview(text: string): string {
+  const body = text
+    .split('\n')
+    .filter((line) => !/^\s{0,3}#{1,6}\s/.test(line))
+    .join('\n');
+  return briefPreview(body) || briefPreview(text);
+}
 
 export function AgentHeader({
   agent,
@@ -20,17 +32,20 @@ export function AgentHeader({
   onAction: (act: AgentAction) => void;
 }) {
   const [descExpanded, setDescExpanded] = useState(false);
-  const description = (agent.instructions ?? '').trim();
+  const description = normalizeBrief(agent.instructions);
+  // Instructions are usually Markdown ("# Research Agent Specification…"):
+  // collapsed, show them as one plain paragraph; expanded, render them.
+  const preview = descriptionPreview(description);
   const isRunning = agent.status === 'running';
 
   return (
     <div className="mb-8">
       <div className="flex items-center gap-4 sm:gap-5">
-        <AgentAvatar seed={agent.walletAddress || agent.id} size={48} className="shrink-0" />
+        <AgentAvatar seed={agent.walletAddress || agent.id} size={56} className="shrink-0 rounded-xl" />
 
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2.5 flex-wrap">
-            <h1 className="text-xl sm:text-2xl font-bold text-ink leading-tight tracking-tight break-words">
+            <h1 className="text-[clamp(26px,3vw,36px)] font-medium text-ink leading-[1.08] tracking-[-0.03em] break-words">
               {agent.name}
             </h1>
             <StatusTag status={displayStatus} />
@@ -81,16 +96,20 @@ export function AgentHeader({
       </div>
 
       {description && (
-        <div className="mt-4 max-w-3xl">
-          <p className={`text-sm text-ink-2 leading-relaxed whitespace-pre-line ${descExpanded ? '' : 'line-clamp-3'}`}>
-            {description}
-          </p>
+        <div className="mt-5 max-w-3xl">
+          {descExpanded ? (
+            <Markdown text={description} />
+          ) : (
+            <p className="text-[15px] text-ink-2 leading-relaxed line-clamp-3">{preview}</p>
+          )}
           {description.length > 220 && (
             <button
+              type="button"
               onClick={() => setDescExpanded((v) => !v)}
-              className="mt-1 font-mono text-[11px] uppercase tracking-widest text-ink-3 hover:text-cream transition-colors"
+              aria-expanded={descExpanded}
+              className="mt-2 font-mono text-[11px] uppercase tracking-widest text-ink-3 hover:text-ink transition-colors"
             >
-              {descExpanded ? 'show less' : 'view all'}
+              {descExpanded ? 'Show less' : 'Read all'}
             </button>
           )}
         </div>
@@ -99,10 +118,10 @@ export function AgentHeader({
       {!isOwner && fromPrice && (
         <a
           href="#services"
-          className="mt-4 inline-flex items-baseline gap-2 font-mono text-sm text-cream hover:underline"
+          className="mt-5 inline-flex items-center gap-2.5 rounded-full border border-line px-4 py-2 text-sm text-accent transition-colors hover:border-line-2"
         >
-          {fromPrice}
-          <span className="text-[11px] uppercase tracking-widest text-ink-3">view services ↓</span>
+          <span className="font-medium">{fromPrice}</span>
+          <span className="font-mono text-[11px] uppercase tracking-widest text-ink-3">See services ↓</span>
         </a>
       )}
     </div>

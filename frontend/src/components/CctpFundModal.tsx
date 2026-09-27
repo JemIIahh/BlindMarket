@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
 import { useWallets, usePrivy } from '@privy-io/react-auth';
 import { parseUnits, formatUnits, JsonRpcProvider, BrowserProvider, Contract, Interface, ZeroAddress, zeroPadValue, id as keccakId } from 'ethers';
-import { Button, FormField, FormInput, FormSelect, Modal, Spinner } from './bb';
+import { Button, ErrorNotice, FormField, FormInput, FormSelect, Modal, Spinner } from './bb';
 import { get, authedPost, authedGet } from '../lib/api';
+import { UserFacingError } from '../lib/friendlyError';
 import { useWallet, switchWalletToChain, pauseWalletAutoSwitch, type AddEthereumChainParameter } from '../context/WalletContext';
 import { signAndSendDirect } from '../lib/directSigner';
 import { signAndSendTx } from '../lib/txSigner';
@@ -163,7 +164,7 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
   const [sourceChain, setSourceChain] = useState('');
   const [amount, setAmount] = useState('');
   const [phase, setPhase] = useState<Phase>('input');
-  const [error, setError] = useState('');
+  const [error, setError] = useState<unknown>(null);
   const [transferId, setTransferId] = useState<number | null>(null);
   const [mintTxHash, setMintTxHash] = useState<string | null>(null);
   // True while the in-flight flow relays the source-chain txs (USDC gas).
@@ -346,7 +347,10 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
         }
       } catch { /* transient — keep polling */ }
     }
-    setError('Still bridging after 10 minutes. It may complete shortly — check back, or contact support with the transfer id.');
+    setError(new UserFacingError(
+      'Still bridging after 10 minutes. It may complete shortly — check back, or contact support with the transfer id.',
+      { title: 'Still in progress', kind: 'maybeSent' },
+    ));
     setPhase('error');
   }
 
@@ -636,7 +640,10 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
         await new Promise((r) => setTimeout(r, 3000));
       }
       if (!confirmed) {
-        setError('Burn transaction is taking a while to confirm — it may still land. Check back shortly.');
+        setError(new UserFacingError(
+          'Burn transaction is taking a while to confirm — it may still land. Check back shortly.',
+          { title: 'Still in progress', kind: 'maybeSent' },
+        ));
         setPhase('error');
         return;
       }
@@ -644,7 +651,7 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
       setPhase('polling');
       await pollTransfer(activeTransferId);
     } catch (err) {
-      setError((err as Error).message || 'Bridge failed');
+      setError(err);
       setPhase('error');
     } finally {
       restoreWallet();
@@ -669,7 +676,7 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
         {(phase === 'input' || phase === 'error') && (
           <div className="space-y-4">
             {signerWallet && (
-              <div className="text-xs text-ink-3 border border-line bg-surface-2 p-3 flex flex-wrap items-center gap-x-2 gap-y-1">
+              <div className="rounded-xl border border-line bg-surface-2 p-3 text-xs text-ink-3 flex flex-wrap items-center gap-x-2 gap-y-1">
                 <span>
                   Signing from your <span className="text-ink">{externalSigner ? 'linked' : 'BlindMarket'} wallet</span>{' '}
                   <span className="font-mono">{signerWallet.address.slice(0, 6)}…{signerWallet.address.slice(-4)}</span>.
@@ -677,7 +684,7 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
                 {!externalSigner && (
                   <>
                     <span>USDC in another wallet?</span>
-                    <button type="button" className="underline text-ink hover:text-cream transition-colors" onClick={() => connectWallet()}>
+                    <button type="button" className="text-ink underline underline-offset-2 decoration-line-2 transition-colors hover:decoration-ink" onClick={() => connectWallet()}>
                       Link it
                     </button>
                   </>
@@ -685,7 +692,7 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
               </div>
             )}
             {!signerWallet && (
-              <div className="text-xs text-warn border border-line bg-surface-2 p-3">
+              <div className="rounded-xl border border-[color:color-mix(in_srgb,var(--bb-warn)_45%,transparent)] bg-[color:color-mix(in_srgb,var(--bb-warn)_6%,transparent)] p-3 text-xs text-ink-2 leading-relaxed">
                 Your wallet isn't ready yet. Sign in to bridge your USDC, or link an external wallet (e.g. MetaMask)
                 if your USDC is held there.
                 <div className="mt-2">
@@ -735,19 +742,24 @@ export function CctpFundModal({ onClose, onFunded }: { onClose: () => void; onFu
                 )}
               </div>
             </FormField>
-            <div className="text-xs text-ink-3 border border-line bg-surface-2 p-3">
+            <div className="rounded-xl border border-line bg-surface-2 p-3 text-xs text-ink-3 leading-relaxed">
               This burns USDC on the source chain and mints native USDC to your Arc wallet
               (<span className="font-mono">{baseAddress ? `${baseAddress.slice(0, 8)}…` : '—'}</span>) via Circle
               CCTP — usually a few minutes end to end. A small Circle fee is deducted on arrival.
             </div>
             {insufficientGas && (
-              <div className="text-xs text-warn border border-warn/40 bg-warn/5 p-3">
+              <div className="rounded-xl border border-[color:color-mix(in_srgb,var(--bb-warn)_45%,transparent)] bg-[color:color-mix(in_srgb,var(--bb-warn)_6%,transparent)] p-3 text-xs text-ink-2 leading-relaxed">
                 You need a little {nativeSymbol} on {selectedChain?.label ?? 'this chain'} to pay the network fee for the
                 approval and transfer — this wallet has {nativeShown} {nativeSymbol}.{' '}
                 {selectedChain?.isTestnet ? 'Get test ETH from a faucet, then try again.' : 'Add some, then try again.'}
               </div>
             )}
-            {error && <div className="text-xs text-err break-words">{error}</div>}
+            <ErrorNotice
+              error={error}
+              title="Couldn't bridge USDC"
+              network={selectedChain?.label}
+              gasToken={useRelayForGas ? undefined : nativeSymbol}
+            />
             <div className="flex justify-end gap-2">
               <Button variant="ghost" size="sm" label="Cancel" onClick={onClose} />
               <Button variant="primary" size="sm" label="Bridge USDC" onClick={handleFund} disabled={!signerWallet || chains.length === 0 || exceedsBalance || insufficientGas} />

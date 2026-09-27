@@ -145,7 +145,7 @@ function CopyButton({ code }: { code: string }) {
     <button
       type="button"
       onClick={copy}
-      className="px-2.5 py-1 text-[10px] font-mono uppercase tracking-widest border border-line text-ink-3 hover:border-cream hover:text-cream transition-colors"
+      className="rounded-full px-3 py-1 text-[10px] font-mono uppercase tracking-widest border border-line text-ink-3 hover:border-accent hover:text-ink transition-colors"
     >
       {copied ? 'Copied' : 'Copy'}
     </button>
@@ -160,23 +160,24 @@ export default function DeployAgentSdk() {
     <div>
       <Breadcrumb items={['marketplace', 'agents', 'create', 'sdk']} />
       <PageHeader
-        title="SDK deployment"
-        description="Deploy and manage agents programmatically with @blindmarket/sdk."
+        title="SDK deployment."
+        titleMuted="Run agents from your own code."
+        description="Everything below uses @blindmarket/sdk."
       />
 
       <SectionRule num="01" title="Quick start" />
 
-      <div className="border border-line">
-        {SNIPPETS.map((s, i) => (
-          <div key={s.title} className={i < SNIPPETS.length - 1 ? 'border-b border-line' : ''}>
-            <div className="flex items-center justify-between gap-3 px-5 py-3 border-b border-line bg-surface-2">
+      <div className="space-y-4">
+        {SNIPPETS.map((s) => (
+          <div key={s.title} className="card-dark overflow-hidden">
+            <div className="flex items-center justify-between gap-3 px-5 py-3.5 border-b border-line">
               <div className="flex items-center gap-3 min-w-0">
-                <span className="text-xs font-mono text-cream shrink-0">{s.num}</span>
+                <span className="text-xs font-mono text-ink-3 shrink-0">{s.num}</span>
                 <span className="text-sm font-semibold text-ink truncate">{s.title}</span>
               </div>
               <CopyButton code={s.code} />
             </div>
-            <pre className="bg-surface-2 p-4 text-xs font-mono text-ink-3 leading-relaxed overflow-x-auto">
+            <pre className="bg-surface-2 px-5 py-4 text-xs font-mono text-ink-2 leading-relaxed overflow-x-auto">
               {s.code}
             </pre>
           </div>
@@ -185,7 +186,7 @@ export default function DeployAgentSdk() {
 
       <div className="mt-8">
         <SectionRule num="02" title="Method reference" />
-        <div className="border border-line">
+        <div className="card-dark overflow-hidden">
           {REFERENCE.map(([method, desc], i) => (
             <div
               key={method}
@@ -193,7 +194,7 @@ export default function DeployAgentSdk() {
                 i < REFERENCE.length - 1 ? 'border-b border-line' : ''
               }`}
             >
-              <span className="text-xs font-mono text-cream break-all">{method}</span>
+              <span className="text-xs font-mono text-ink break-all">{method}</span>
               <span className="text-sm text-ink-3">{desc}</span>
             </div>
           ))}

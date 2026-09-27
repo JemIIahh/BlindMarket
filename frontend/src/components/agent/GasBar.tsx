@@ -1,5 +1,5 @@
 import { formatUnits } from 'ethers';
-import { Button, Icon, ConfirmDialog, CopyButton } from '../bb';
+import { Button, Icon, ConfirmDialog, CopyButton, ErrorNotice } from '../bb';
 
 /** How a withdraw receipt names the chain it swept (backend chain keys). */
 const CHAIN_LABEL: Record<string, string> = { arc: 'Arc', base: 'Base', '0g': '0G' };
@@ -54,9 +54,9 @@ export function GasBar({
   agentStatus: string;
   ownerLabel: string;
   topUpStatus: 'idle' | 'sending' | 'error';
-  topUpError: string;
+  topUpError: unknown;
   withdrawStatus: 'idle' | 'sending' | 'done' | 'error';
-  withdrawError: string;
+  withdrawError: unknown;
   withdrawInfo: Array<{ chain: string; asset: string; amount: string; txHash: string }> | null;
   confirmOpen: boolean;
   refreshing?: boolean;
@@ -71,7 +71,7 @@ export function GasBar({
   cctpDestChain: string;
   onCctpDestChainChange: (chainKey: string) => void;
   cctpStatus: 'idle' | 'sending' | 'polling' | 'done' | 'error';
-  cctpError: string;
+  cctpError: unknown;
   cctpTransfer: { stage: string; burnTxHash: string | null; mintTxHash: string | null } | null;
   onCctpWithdraw: () => void;
   // Fee preview — fetched from GET /api/v1/cctp/quote as soon as a
@@ -81,7 +81,7 @@ export function GasBar({
   cctpSymbol: string;
 }) {
   return (
-    <div className="border border-line px-5 py-4">
+    <div className="card-dark px-5 py-4 sm:px-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2.5 text-ink-2">
           <Icon name="bolt" size={16} className={isLowGas ? 'text-warn' : 'text-ink-3'} />
@@ -92,7 +92,7 @@ export function GasBar({
             disabled={refreshing}
             title="Refresh balance"
             aria-label="Refresh balance"
-            className="p-1.5 -m-1.5 text-ink-3 hover:text-cream transition-colors disabled:opacity-50"
+            className="p-1.5 -m-1.5 rounded-full text-ink-3 hover:text-ink transition-colors disabled:opacity-50"
           >
             <Icon name={refreshing ? 'clock' : 'search'} size={14} className={refreshing ? 'animate-spin' : ''} />
           </button>
@@ -139,7 +139,7 @@ export function GasBar({
                   value={cctpDestChain}
                   onChange={(e) => onCctpDestChainChange(e.target.value)}
                   disabled={cctpStatus === 'sending' || cctpStatus === 'polling'}
-                  className="border border-line bg-transparent px-2 py-1.5 text-xs text-ink-2 disabled:opacity-50"
+                  className="rounded-full border border-line bg-transparent px-3 py-1.5 text-xs text-ink-2 disabled:opacity-50"
                 >
                   {cctpChains.map((c) => (
                     <option key={c.chainKey} value={c.chainKey}>{c.label}</option>
@@ -192,7 +192,7 @@ export function GasBar({
         cctpStatus === 'error' ||
         (isLowGas && agentStatus !== 'stopped')) && (
         <div className="mt-3 space-y-1.5 text-xs">
-          {topUpStatus === 'error' && <div className="text-err break-all">{topUpError}</div>}
+          {topUpStatus === 'error' && <ErrorNotice error={topUpError} title="Couldn't top up" compact />}
           {withdrawStatus === 'done' && withdrawInfo && withdrawInfo.length > 0 && (
             <div className="text-ok space-y-0.5">
               {withdrawInfo.map((w) => (
@@ -204,7 +204,7 @@ export function GasBar({
               ))}
             </div>
           )}
-          {withdrawStatus === 'error' && <div className="text-err break-all">{withdrawError}</div>}
+          {withdrawStatus === 'error' && <ErrorNotice error={withdrawError} title="Couldn't withdraw" compact />}
           {cctpStatus === 'polling' && cctpTransfer && (
             <div className="text-ink-2">
               Bridging — {cctpTransfer.stage.replace(/_/g, ' ')}
@@ -216,7 +216,7 @@ export function GasBar({
               Bridge complete · mint tx <span className="font-mono">{cctpTransfer.mintTxHash.slice(0, 10)}…</span>
             </div>
           )}
-          {cctpStatus === 'error' && <div className="text-err break-all">{cctpError}</div>}
+          {cctpStatus === 'error' && <ErrorNotice error={cctpError} title="Couldn't bridge" compact />}
           {isLowGas && agentStatus !== 'stopped' && (
             <div className="text-warn">
               Agent will fail to submit evidence below <span className="font-mono">{lowGasThreshold} {symbol}</span>.

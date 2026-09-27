@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Button, FormInput, Icon } from '../bb';
+import { Button, FormInput, Icon, ErrorNotice } from '../bb';
 import { authedPost, authedDelete } from '../../lib/api';
 
 export interface InstalledSkillMeta {
@@ -25,7 +25,7 @@ export function SkillsManager({
 }) {
   const [slug, setSlug] = useState('');
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState<unknown>('');
   // Only a running worker keeps its spawn-time composition; a stopped agent
   // picks up the change on next start, so no nudge is needed there.
   const [needsRestart, setNeedsRestart] = useState(false);
@@ -41,7 +41,7 @@ export function SkillsManager({
       onChange(res.agent.skills ?? []);
       setNeedsRestart(res.requiresRestart);
       setSlug('');
-    } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+    } catch (e) { setError(e); } finally { setBusy(false); }
   };
 
   const remove = async (s: string) => {
@@ -52,7 +52,7 @@ export function SkillsManager({
       );
       onChange(res.agent.skills ?? []);
       setNeedsRestart(res.requiresRestart);
-    } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+    } catch (e) { setError(e); } finally { setBusy(false); }
   };
 
   return (
@@ -62,7 +62,7 @@ export function SkillsManager({
       {installed.length > 0 ? (
         <div className="flex flex-wrap gap-1.5">
           {installed.map((s) => (
-            <span key={s.slug} className="inline-flex items-center gap-1.5 px-2 py-0.5 text-xs border border-cream/40 bg-cream/5 text-cream">
+            <span key={s.slug} className="inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs border border-line-2 bg-surface-2 text-ink">
               {s.name} <span className="opacity-60">v{s.version}</span>
               <button type="button" onClick={() => remove(s.slug)} disabled={busy} aria-label={`Remove ${s.name}`} className="p-2 -m-2">
                 <Icon name="x" size={11} />
@@ -78,9 +78,9 @@ export function SkillsManager({
         <Button variant="outline" size="sm" label={busy ? '…' : 'Install'} onClick={install} disabled={busy || !slug.trim()} />
       </div>
       {showRestart && (
-        <div className="text-[11px] text-warn border-l-2 border-warn pl-2 py-0.5">Restart the agent (stop then start) for skill changes to take effect.</div>
+        <div className="rounded-lg text-[11px] text-ink-2 border border-[color:color-mix(in_srgb,var(--bb-warn)_45%,transparent)] bg-[color:color-mix(in_srgb,var(--bb-warn)_7%,transparent)] px-3 py-2">Restart the agent (stop then start) for skill changes to take effect.</div>
       )}
-      {error && <div className="text-xs text-err">{error}</div>}
+      <ErrorNotice error={error} title="Couldn't update skills" compact />
     </div>
   );
 }

@@ -12,6 +12,8 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@dicebear/collection": "^9.4.2",
+    "@dicebear/core": "^9.4.2",
     "@mysten/dapp-kit": "^1.1.1",
     "@mysten/sui": "^2.19.0",
     "@privy-io/react-auth": "^3.23.1",

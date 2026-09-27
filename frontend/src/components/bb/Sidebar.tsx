@@ -5,6 +5,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { useQuery } from '@tanstack/react-query';
 import { LogoMark } from './LogoMark';
 import { Icon } from './Icon';
+import { LiveDot } from './LiveDot';
 import { get, authedGet } from '../../lib/api';
 import { useSocket } from '../../hooks/useSocket';
 import { useAuth } from '../../context/AuthContext';
@@ -97,7 +98,7 @@ function SidebarToggle({ collapsed, onToggle }: { collapsed: boolean; onToggle: 
         aria-label={label}
         aria-expanded={!collapsed}
         aria-keyshortcuts={SIDEBAR_SHORTCUT_ARIA}
-        className="hidden md:flex shrink-0 w-8 h-8 items-center justify-center text-ink-3 hover:text-ink hover:bg-surface-2 transition-colors"
+        className="hidden md:flex shrink-0 w-8 h-8 items-center justify-center rounded-full text-ink-3 hover:text-ink hover:bg-[color-mix(in_srgb,var(--bb-ink)_6%,transparent)] transition-colors"
       >
         <Icon name="sidebar" size={18} />
       </button>
@@ -106,7 +107,7 @@ function SidebarToggle({ collapsed, onToggle }: { collapsed: boolean; onToggle: 
           <div
             role="tooltip"
             style={{ top: tip.top, left: tip.left }}
-            className="fixed z-50 pointer-events-none flex items-center gap-2 whitespace-nowrap bg-surface-2 border border-line px-2 py-1 text-xs text-ink shadow-lg"
+            className="fixed z-50 pointer-events-none flex items-center gap-2 whitespace-nowrap rounded-lg bg-surface-2 border border-line px-2 py-1 text-xs text-ink shadow-lg"
           >
             {label}
             <kbd className="font-mono text-[11px] text-ink-3">{SIDEBAR_SHORTCUT_LABEL}</kbd>
@@ -190,10 +191,10 @@ export function Sidebar({ open, onClose, collapsed, onToggleCollapse }: SidebarP
       </AnimatePresence>
 
       <aside
-        className={`w-[240px] ${collapsed ? 'md:w-16' : 'md:w-[240px]'} h-screen supports-[height:100dvh]:h-dvh fixed left-0 top-0 bg-surface border-r border-line flex flex-col z-40 overflow-x-hidden overflow-y-auto transition-[transform,width] duration-200 ease-out motion-reduce:transition-none md:translate-x-0 ${open ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}`}
+        className={`w-[240px] ${collapsed ? 'md:w-16' : 'md:w-[240px]'} h-screen supports-[height:100dvh]:h-dvh fixed left-0 top-0 bb-glass border-r border-glass-line flex flex-col z-40 overflow-x-hidden overflow-y-auto transition-[transform,width] duration-200 ease-out motion-reduce:transition-none md:translate-x-0 ${open ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}`}
       >
         {/* Brand */}
-        <div className="sticky top-0 z-10 bg-surface flex shrink-0 items-center gap-2 px-5 md:px-4 h-16 border-b border-line">
+        <div className="sticky top-0 z-10 bb-glass flex shrink-0 items-center gap-2 px-5 md:px-4 h-16 border-b border-glass-line">
           <SidebarToggle collapsed={collapsed} onToggle={onToggleCollapse} />
           <Link to="/" className={`flex items-center gap-2.5 ${collapsed ? 'md:hidden' : ''}`} onClick={onClose}>
             <LogoMark size={24} blade="var(--bb-ink)" slit="var(--bb-surface)" />
@@ -216,7 +217,7 @@ export function Sidebar({ open, onClose, collapsed, onToggleCollapse }: SidebarP
             <div key={group.label || `g${gi}`} className={group.label ? 'mb-1 mt-5 first:mt-0' : 'mb-1'}>
               {group.label && (
                 <>
-                  <div className={`px-5 mb-1.5 select-none cursor-default ${collapsed ? 'md:hidden' : ''}`}>
+                  <div className={`px-6 mb-1.5 select-none cursor-default ${collapsed ? 'md:hidden' : ''}`}>
                     <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-3">
                       {group.label}
                     </span>
@@ -233,36 +234,36 @@ export function Sidebar({ open, onClose, collapsed, onToggleCollapse }: SidebarP
                     onClick={onClose}
                     aria-current={active ? 'page' : undefined}
                     title={collapsed ? item.label : undefined}
-                    className={`relative flex items-center gap-3 px-5 py-2 text-sm transition-colors duration-150 ${collapsed ? 'md:px-0 md:justify-center' : ''} ${active ? 'text-ink font-medium' : 'text-ink-2 hover:text-ink hover:bg-surface-2'}`}
+                    className={`relative mx-3 flex items-center gap-3 rounded-xl px-3 py-2 text-sm transition-colors duration-150 ${collapsed ? 'md:mx-2 md:px-0 md:justify-center' : ''} ${active ? 'text-ink font-medium' : 'text-ink-2 hover:text-ink hover:bg-[color-mix(in_srgb,var(--bb-ink)_5%,transparent)]'}`}
                   >
                     {active && (
                       <motion.span
                         layoutId="sidebar-active"
-                        className="absolute inset-0 bg-surface-2 border-l-2 border-cream pointer-events-none"
+                        className="absolute inset-0 rounded-xl bg-[color-mix(in_srgb,var(--bb-ink)_8%,transparent)] pointer-events-none"
                         transition={{ type: 'spring', stiffness: 380, damping: 32 }}
                       />
                     )}
-                    <span className={`relative shrink-0 ${active ? 'text-cream' : 'text-ink-3'}`}>
+                    <span className={`relative shrink-0 ${active ? 'text-accent' : 'text-ink-3'}`}>
                       <Icon name={item.icon} size={17} />
                     </span>
                     <span className={`relative whitespace-nowrap ${collapsed ? 'md:hidden' : ''}`}>{item.label}</span>
                     {item.to === '/messages' && unreadCount > 0 && (
                       <>
-                        <span className={`relative ml-auto min-w-[18px] h-[18px] flex items-center justify-center rounded-full bg-cream text-bg text-[10px] font-semibold leading-none px-1 ${collapsed ? 'md:hidden' : ''}`}>
+                        <span className={`relative ml-auto min-w-[18px] h-[18px] flex items-center justify-center rounded-full bg-accent text-accent-ink text-[10px] font-semibold leading-none px-1 ${collapsed ? 'md:hidden' : ''}`}>
                           {unreadCount > 99 ? '99+' : unreadCount}
                         </span>
                         {collapsed && (
-                          <span className="hidden md:block absolute top-1.5 right-4 w-1.5 h-1.5 bg-cream" aria-hidden />
+                          <span className="hidden md:block absolute top-1.5 right-4 w-1.5 h-1.5 bg-accent" aria-hidden />
                         )}
                       </>
                     )}
                     {item.to === '/activity' && notifCount > 0 && (
                       <>
-                        <span className={`relative ml-auto min-w-[18px] h-[18px] flex items-center justify-center rounded-full bg-cream text-bg text-[10px] font-semibold leading-none px-1 ${collapsed ? 'md:hidden' : ''}`}>
+                        <span className={`relative ml-auto min-w-[18px] h-[18px] flex items-center justify-center rounded-full bg-accent text-accent-ink text-[10px] font-semibold leading-none px-1 ${collapsed ? 'md:hidden' : ''}`}>
                           {notifCount > 99 ? '99+' : notifCount}
                         </span>
                         {collapsed && (
-                          <span className="hidden md:block absolute top-1.5 right-4 w-1.5 h-1.5 bg-cream" aria-hidden />
+                          <span className="hidden md:block absolute top-1.5 right-4 w-1.5 h-1.5 bg-accent" aria-hidden />
                         )}
                       </>
                     )}
@@ -279,7 +280,7 @@ export function Sidebar({ open, onClose, collapsed, onToggleCollapse }: SidebarP
             consumers of the shared ['stats'] key). */}
         <div className={`px-5 py-4 border-t border-line ${collapsed ? 'md:hidden' : ''}`}>
           <div className="flex items-center gap-1.5 mb-2.5">
-            <span className="w-1.5 h-1.5 bg-ok inline-block animate-bb-pulse" />
+            <LiveDot />
             <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-3">Live platform</span>
           </div>
           <dl className="space-y-1.5">

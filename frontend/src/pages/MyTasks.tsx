@@ -10,13 +10,17 @@ import {
   StatusTag,
   Tag,
   Button,
+  ButtonLink,
   Icon,
   LoadingState,
   EmptyState,
   ErrorState,
+  ErrorNotice,
   FormInput,
   ConfirmDialog,
+  Segmented,
 } from '../components/bb';
+import { cardText } from '../components/task/format';
 import { TxPendingModal } from '../components/TxPendingModal';
 import { useRefundEscrow } from '../hooks/useRefundEscrow';
 import { isReclaimable, refundAction } from '../lib/refund';
@@ -41,6 +45,8 @@ interface PostedTask {
     rootHash?: string;
     privacy?: 'public';
     publicBrief?: string;
+    /** The poster's public one-liner, which titles a private task. */
+    routingSummary?: string;
   };
   state: {
     taskId: string;
@@ -280,100 +286,81 @@ export default function MyTasks() {
     <div>
       <Breadcrumb items={['tasks', 'mine']} />
       <PageHeader
-        title="My tasks"
-        description="Tasks you've posted — track status, assignments, completions, and inspect results."
+        title="My tasks."
+        titleMuted="Everything you've posted."
         right={
-          <Link to="/tasks/new">
-            <Button variant="primary" label="Post a task" />
-          </Link>
+          <ButtonLink to="/tasks/new" variant="primary" label="Post a task" />
         }
       />
 
-      <div className="grid grid-cols-2 xl:grid-cols-4 gap-0 border border-line mb-8">
-        <StatCard label="Open" value={String(openCount)} sub="Awaiting worker" />
-        <div className="border-l border-line"><StatCard className="h-full" label="Active" value={String(activeCount)} sub="In progress" subColor="warn" /></div>
-        <div className="border-t border-l-0 xl:border-t-0 xl:border-l border-line"><StatCard className="h-full" label="Completed" value={String(completedCount)} sub="All time" subColor="ok" /></div>
-        <div className="border-t border-l border-line xl:border-t-0"><StatCard className="h-full" label="Total spent" value={`${totalSpent.toLocaleString(undefined, { maximumFractionDigits: 4 })} USDC`} sub="Paid out on completed tasks" /></div>
+      <div className="grid grid-cols-2 xl:grid-cols-4 gap-4 mb-8">
+        <StatCard className="h-full" label="Open" value={String(openCount)} sub="Awaiting worker" />
+        <StatCard className="h-full" label="Active" value={String(activeCount)} sub="In progress" subColor="warn" />
+        <StatCard className="h-full" label="Completed" value={String(completedCount)} sub="All time" subColor="ok" />
+        <StatCard className="h-full" label="Total spent" value={`${totalSpent.toLocaleString(undefined, { maximumFractionDigits: 4 })} USDC`} sub="Paid out on completed tasks" />
       </div>
 
       {reclaimable.length > 0 && (
-        <div className="border border-warn/60 bg-warn/5 px-4 py-3 mb-8 flex items-start gap-3">
+        <div className="rounded-2xl border border-[color-mix(in_srgb,var(--bb-warn)_45%,transparent)] bg-[color-mix(in_srgb,var(--bb-warn)_6%,transparent)] px-5 py-4 mb-8 flex items-start gap-3">
           <Icon name="clock" size={16} className="text-warn shrink-0 mt-0.5" />
           <p className="text-sm text-ink leading-relaxed">
             {reclaimable.length === 1 ? '1 task' : `${reclaimable.length} tasks`} passed {reclaimable.length === 1 ? 'its' : 'their'} deadline
-            with <span className="font-mono text-cream">{reclaimableSummary}</span> still in escrow. It doesn't come back on its own:
-            use <span className="text-cream">Reclaim</span> on {reclaimable.length === 1 ? 'the task' : 'each task'} below.
+            with <span className="font-mono font-medium text-accent">{reclaimableSummary}</span> still in escrow. It doesn't come back on its own:
+            use <span className="font-medium text-accent">Reclaim</span> on {reclaimable.length === 1 ? 'the task' : 'each task'} below.
           </p>
         </div>
       )}
 
-      <div className="border border-line">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between bg-surface-2 px-4 pt-4 lg:pt-0">
-          <SectionRule num="01" title="Posted tasks" side={`${tasks.length} shown / ${totalTasks} total`} className="mb-0 flex-1 lg:py-4" />
-          <div className="flex flex-col sm:flex-row gap-3 pb-4 lg:pb-0 flex-1 lg:justify-end">
-            <div className="flex-1 min-w-[200px] max-w-md">
-              <FormInput
-                placeholder="Search task id or brief…"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                className="text-xs font-mono"
-              />
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {FILTERS.map(f => (
-                <button
-                  key={f.id}
-                  onClick={() => { setFilter(f.id); }}
-                  className={`text-[11px] px-2.5 py-1 border transition-colors ${
-                    filter === f.id ? 'bg-cream text-bg border-cream' : 'text-ink-3 border-line hover:border-cream/50'
-                  }`}
-                >
-                  {f.label}
-                </button>
-              ))}
-              <div className="hidden sm:block h-6 w-px bg-line mx-1" />
-              {SORTS.map(s => (
-                <button
-                  key={s.id}
-                  onClick={() => { setSort(s.id); }}
-                  className={`text-[11px] px-2.5 py-1 border transition-colors ${
-                    sort === s.id ? 'bg-cream text-bg border-cream' : 'text-ink-3 border-line hover:border-cream/50'
-                  }`}
-                >
-                  {s.label}
-                </button>
-              ))}
-            </div>
+      <div>
+        <SectionRule num="01" title="Posted tasks" side={`${tasks.length} shown / ${totalTasks} total`} />
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between mb-5">
+          <div className="w-full lg:max-w-sm">
+            <FormInput
+              placeholder="Search task id or brief…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="text-xs font-mono"
+            />
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Segmented options={FILTERS} value={filter} onChange={setFilter} label="Filter by status" />
+            <Segmented options={SORTS} value={sort} onChange={setSort} label="Sort order" />
           </div>
         </div>
 
         {!address ? (
-          <EmptyState
-            icon="wallet"
-            title="Connect your wallet"
-            description="Connect a wallet to see the tasks you've posted."
-          />
+          <div className="card-dark">
+            <EmptyState
+              icon="wallet"
+              title="Connect your wallet"
+              description="Connect a wallet to see the tasks you've posted."
+            />
+          </div>
         ) : isLoading ? (
-          <LoadingState label="Loading your tasks…" />
+          <div className="card-dark">
+            <LoadingState label="Loading your tasks…" />
+          </div>
         ) : isError ? (
-          <ErrorState title="Couldn't load your tasks" onRetry={() => refetch()} />
+          <div className="card-dark">
+            <ErrorState title="Couldn't load your tasks" onRetry={() => refetch()} />
+          </div>
         ) : tasks.length === 0 ? (
-          <EmptyState
-            icon="briefcase"
-            title={filter === 'all' && !search ? 'No tasks posted yet' : 'No tasks match'}
-            description={
-              filter === 'all' && !search
-                ? 'Post a task and it will show up here so you can track its status, assignment, and result.'
-                : 'Try a different filter or search term, or post a new task.'
-            }
-            action={
-              <Link to="/tasks/new">
-                <Button variant="outline" label="Post a task" size="sm" />
-              </Link>
-            }
-          />
+          <div className="card-dark">
+            <EmptyState
+              icon="briefcase"
+              title={filter === 'all' && !search ? 'No tasks posted yet' : 'No tasks match'}
+              description={
+                filter === 'all' && !search
+                  ? 'Tasks you post show up here with their status and result.'
+                  : 'Try a different filter or search term.'
+              }
+              action={
+                <ButtonLink to="/tasks/new" variant="outline" label="Post a task" size="sm" />
+              }
+            />
+          </div>
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-px bg-line border-t border-line">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             {sortedTasks.map(t => {
               const status = effectiveStatus(t);
               const statusLabel = t.onChain
@@ -395,19 +382,29 @@ export default function MyTasks() {
                 : 'Recover it from the device you posted from, or repost — it cannot be decrypted from here.';
               const taskUrl = `/tasks/${t.meta.taskId || t.onChain?.taskId}`;
               const worker = workerAddress(t);
-              const cardClass = `bg-bg p-5 flex flex-col gap-3 min-h-[200px] group hover:bg-surface-2 transition-colors cursor-pointer`;
+              const cardClass = `card-dark group flex flex-col gap-3 min-h-[220px] p-6 cursor-pointer transition-[transform,box-shadow,border-color] duration-300 ease-bb hover:-translate-y-1 hover:border-line-2 hover:shadow-[0_22px_44px_-28px_rgba(10,10,11,0.45)] motion-reduce:transition-none motion-reduce:hover:translate-y-0`;
+              // Public tasks title from their brief, private ones from the
+              // routing summary; a task with neither keeps its hash.
+              const text = cardText(t.meta);
+              const titled = (t.meta.privacy === 'public' && !!t.meta.publicBrief) || !!t.meta.routingSummary;
               const cardContent = (
                 <>
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-[11px] font-mono text-ink-3">{shortId(t)}</span>
                     <div className="flex items-center gap-1.5">
-                      {t.meta.privacy === 'public' && <Tag tone="neutral">public</Tag>}
+                      <Tag tone="neutral">
+                        {t.meta.privacy === 'public' ? 'Public' : <><Icon name="lock" size={10} />Private</>}
+                      </Tag>
                       <StatusTag status={statusLabel} />
                     </div>
                   </div>
-                  <div className="flex-1">
-                    <div className="text-sm font-mono text-ink break-all">{t.meta.taskId.slice(0, 18)}…</div>
-                    <div className="text-[11px] text-ink-3 mt-1 capitalize">
+                  <div className="flex-1 min-w-0">
+                    {titled ? (
+                      <h3 className="line-clamp-2 break-words text-[17px] font-medium leading-snug tracking-[-0.02em] text-ink">{text.title}</h3>
+                    ) : (
+                      <div className="text-sm font-mono text-ink break-all">{t.meta.taskId.slice(0, 18)}…</div>
+                    )}
+                    <div className="text-[12px] text-ink-3 mt-1.5 capitalize">
                       {t.meta.verificationMode} verify · {t.meta.targetExecutorType}
                     </div>
                     {failedReasons && (
@@ -435,12 +432,12 @@ export default function MyTasks() {
                       </div>
                     )}
                   </div>
-                  <div className="pt-3 border-t border-line flex items-end justify-between">
-                    <div>
-                      <div className="text-lg font-mono font-semibold text-cream leading-none">
+                  <div className="pt-4 border-t border-line flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-[17px] font-medium tabular-nums tracking-[-0.01em] text-ink leading-none">
                         {formatRewardForRow(t.onChain)}
                       </div>
-                      <div className="text-[11px] text-ink-3 mt-1.5">
+                      <div className="text-[12px] text-ink-3 mt-1.5 truncate">
                         {worker ? (
                           <>Worker <span className="font-mono">{worker}</span></>
                         ) : (
@@ -448,7 +445,13 @@ export default function MyTasks() {
                         )}
                       </div>
                     </div>
-                    <span className="text-[11px] text-ink-3 group-hover:text-cream transition-colors">View →</span>
+                    {/* The landing's round arrow. */}
+                    <span
+                      aria-hidden
+                      className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-invert text-invert-fg transition-transform duration-300 ease-bb group-hover:translate-x-1 motion-reduce:group-hover:translate-x-0"
+                    >
+                      →
+                    </span>
                   </div>
                   {reclaimableOf(t) && (
                     <div
@@ -472,8 +475,8 @@ export default function MyTasks() {
                           Posted from {truncateAddress(posterOf(t))}: connect that wallet to sign.
                         </span>
                       )}
-                      {refundFailedFor === t.meta.taskId && refund.error && (
-                        <span className="text-[11px] font-mono text-err break-words">{(refund.error as Error).message}</span>
+                      {refundFailedFor === t.meta.taskId && (
+                        <ErrorNotice error={refund.error} title="Couldn't reclaim the escrow" compact />
                       )}
                     </div>
                   )}
@@ -485,14 +488,14 @@ export default function MyTasks() {
                     >
                       <summary
                         onClick={e => { e.preventDefault(); e.stopPropagation(); toggleResult(t.meta.taskId); }}
-                        className="pt-3 flex items-center justify-between cursor-pointer text-[11px] text-ink-3 hover:text-cream transition-colors list-none"
+                        className="pt-3 flex items-center justify-between cursor-pointer text-[12px] text-ink-3 hover:text-accent transition-colors list-none"
                       >
                         <span>View result</span>
                         <span className="group-open/details:rotate-90 transition-transform">▸</span>
                       </summary>
                       <div onClick={e => { e.preventDefault(); e.stopPropagation(); }}>
                         {hasResult ? (
-                          <pre className="mt-3 max-h-72 overflow-auto bg-surface-2 border border-line p-3 text-[11px] font-mono text-ink leading-relaxed whitespace-pre-wrap break-words">
+                          <pre className="mt-3 max-h-72 overflow-auto rounded-lg bg-surface-2 border border-line p-3 text-[11px] font-mono text-ink leading-relaxed whitespace-pre-wrap break-words">
                             {JSON.stringify(t.state.resultData, null, 2)}
                           </pre>
                         ) : (

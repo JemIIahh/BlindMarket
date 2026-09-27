@@ -14,8 +14,10 @@ import {
   LoadingState,
   EmptyState,
   ErrorState,
+  ErrorNotice,
   Pagination,
   useTabParam,
+  RadioPills,
 } from '../components/bb';
 import {
   getPublicTemplates,
@@ -88,20 +90,20 @@ export default function TaskTemplates() {
     <div>
       <Breadcrumb items={['marketplace', 'tasks', 'templates']} />
       <PageHeader
-        title="Task templates"
-        description="Pre-built task briefs you can use to post tasks faster. Browse public templates or create your own."
+        title="Task templates."
+        titleMuted="Start from a ready brief."
       />
 
-      <div role="tablist" className="flex gap-6 border-b border-line mb-8">
+      <div role="tablist" className="flex gap-5 sm:gap-7 border-b border-line mb-8 overflow-x-auto">
         {TABS.map((t) => (
           <button
             key={t.id}
             role="tab"
             aria-selected={tab === t.id}
             onClick={() => setTab(t.id)}
-            className={`pb-3 -mb-px text-sm border-b-2 transition-colors ${
+            className={`pb-3 -mb-px text-[14px] sm:text-[15px] border-b-2 transition-colors whitespace-nowrap shrink-0 ${
               tab === t.id
-                ? 'text-ink font-medium border-cream'
+                ? 'text-ink font-medium border-ink'
                 : 'text-ink-3 border-transparent hover:text-ink-2'
             }`}
           >
@@ -113,31 +115,33 @@ export default function TaskTemplates() {
       {tab === 'browse' && (
         <div>
           {publicLoading ? (
-            <LoadingState label="Loading templates…" />
+            <div className="card-dark"><LoadingState label="Loading templates…" /></div>
           ) : publicError ? (
-            <ErrorState title="Couldn't load templates" onRetry={() => refetchPublic()} />
+            <div className="card-dark"><ErrorState title="Couldn't load templates" onRetry={() => refetchPublic()} /></div>
           ) : !publicData?.templates.length ? (
-            <EmptyState
-              icon="list"
-              title="No public templates yet"
-              description="Be the first to create a template and share it with the marketplace."
-              action={
-                <Button variant="outline" label="Create template" size="sm" onClick={() => setTab('create')} />
-              }
-            />
+            <div className="card-dark">
+              <EmptyState
+                icon="list"
+                title="No public templates yet"
+                description="Create one and share it with the marketplace."
+                action={
+                  <Button variant="outline" label="Create template" size="sm" onClick={() => setTab('create')} />
+                }
+              />
+            </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {publicData.templates.map((t) => (
                 <Panel key={t.id} padding="md">
                   <div className="flex items-start justify-between gap-3 mb-2">
                     <div className="min-w-0">
-                      <div className="text-sm font-medium text-ink truncate">{t.name}</div>
+                      <div className="text-[17px] font-medium leading-snug tracking-[-0.02em] text-ink truncate">{t.name}</div>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
                       <span className="text-[11px] text-ink-3 font-mono">{t.use_count} uses</span>
                     </div>
                   </div>
-                  <p className="text-xs text-ink-3 leading-relaxed line-clamp-3 mb-3">
+                  <p className="text-[13.5px] text-ink-3 leading-relaxed line-clamp-3 mb-4">
                     {t.description}
                   </p>
                   <div className="flex items-center justify-between text-xs text-ink-3">
@@ -164,28 +168,32 @@ export default function TaskTemplates() {
       {tab === 'mine' && (
         <div>
           {!address ? (
-            <EmptyState
-              icon="wallet"
-              title="Connect your wallet"
-              description="Sign in to see the templates you've created."
-            />
+            <div className="card-dark">
+              <EmptyState
+                icon="wallet"
+                title="Connect your wallet"
+                description="Sign in to see the templates you've created."
+              />
+            </div>
           ) : myLoading ? (
-            <LoadingState label="Loading your templates…" />
+            <div className="card-dark"><LoadingState label="Loading your templates…" /></div>
           ) : myError ? (
-            <ErrorState title="Couldn't load your templates" onRetry={() => refetchMine()} />
+            <div className="card-dark"><ErrorState title="Couldn't load your templates" onRetry={() => refetchMine()} /></div>
           ) : !myTemplates?.length ? (
-            <EmptyState
-              icon="list"
-              title="No templates yet"
-              description="Templates you create will appear here."
-              action={
-                <Button variant="outline" label="Create template" size="sm" onClick={() => setTab('create')} />
-              }
-            />
+            <div className="card-dark">
+              <EmptyState
+                icon="list"
+                title="No templates yet"
+                description="Templates you create will appear here."
+                action={
+                  <Button variant="outline" label="Create template" size="sm" onClick={() => setTab('create')} />
+                }
+              />
+            </div>
           ) : (
-            <div className="space-y-2">
+            <div className="space-y-3">
               {myTemplates.map((t) => (
-                <div key={t.id} className="flex items-center justify-between gap-3 border border-line px-4 py-3 text-sm">
+                <div key={t.id} className="card-dark flex items-center justify-between gap-3 px-5 py-4 text-sm">
                   <div className="min-w-0 flex-1">
                     <div className="text-ink font-medium truncate">{t.name}</div>
                     <div className="text-xs text-ink-3 mt-0.5">
@@ -201,7 +209,7 @@ export default function TaskTemplates() {
       )}
 
       {tab === 'create' && (
-        <div className="max-w-2xl space-y-5 border border-line p-6">
+        <div className="card-dark max-w-2xl space-y-5 p-7">
           <SectionRule num="01" title="New template" />
           <FormField label="Template name" required>
             <FormInput placeholder="e.g. Market research report" value={name} onChange={(e) => setName(e.target.value)} />
@@ -214,16 +222,12 @@ export default function TaskTemplates() {
               <FormInput className="font-mono" placeholder="50" value={suggestedReward} onChange={(e) => setSuggestedReward(e.target.value)} />
             </FormField>
             <FormField label="Visibility">
-              <div className="flex gap-2">
-                <button type="button"
-                  onClick={() => setIsPublic(true)}
-                  className={`px-3 py-1.5 text-xs border transition-colors ${isPublic ? 'bg-cream/10 border-cream/40 text-cream' : 'bg-surface-2 border-line text-ink-3'}`}
-                >Public</button>
-                <button type="button"
-                  onClick={() => setIsPublic(false)}
-                  className={`px-3 py-1.5 text-xs border transition-colors ${!isPublic ? 'bg-cream/10 border-cream/40 text-cream' : 'bg-surface-2 border-line text-ink-3'}`}
-                >Private</button>
-              </div>
+              <RadioPills
+                label="Visibility"
+                value={isPublic ? 'public' : 'private'}
+                options={[['public', 'Public'], ['private', 'Private']] as const}
+                onChange={(option) => setIsPublic(option === 'public')}
+              />
             </FormField>
           </div>
           <div className="flex items-center gap-3 pt-2">
@@ -233,9 +237,7 @@ export default function TaskTemplates() {
               disabled={!name.trim() || !description.trim() || createMut.isPending}
               onClick={() => createMut.mutate()}
             />
-            {createMut.isError && (
-              <span className="text-xs text-err">Failed: {(createMut.error as Error).message}</span>
-            )}
+            {createMut.isError && <ErrorNotice error={createMut.error} title="Couldn't create the template" compact />}
           </div>
         </div>
       )}

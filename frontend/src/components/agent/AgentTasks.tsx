@@ -45,7 +45,7 @@ export function AgentTasks({ agentWallet }: { agentWallet?: string }) {
   return (
     <div className="space-y-2">
       {sorted.map(e => (
-        <div key={e.meta.taskId} className="flex items-center justify-between gap-3 border border-line px-4 py-3 text-sm">
+        <div key={e.meta.taskId} className="card-dark flex items-center justify-between gap-3 px-4 py-3 text-sm">
           <span className="font-mono text-ink-3 shrink-0">{e.meta.taskId.slice(0, 10)}…</span>
           <span className="text-ink-2 truncate flex-1 text-center">{(e.meta.requiredCapabilities ?? []).join(', ') || '—'}</span>
           <span className="shrink-0"><StatusTag status={e.state.status} /></span>

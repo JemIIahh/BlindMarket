@@ -3,27 +3,52 @@
 @tailwind utilities;
 
 /* ── BlindMarket Design System Tokens ──────────────────────────── */
+/* BlindMarket's own colours, the same as the landing page: black and
+   cream on dark, ink on paper in light. No extra hues; the only colour is
+   the semantic ok / warn / err / info. Every text token clears 4.5:1 on
+   bg, surface and surface-2 in its theme. */
 
-/* Light theme (default) */
+/* Light theme — the landing's paper (identical to .mk-paper-scope) */
 :root {
-  --bb-bg:         #fafaf9;
+  --bb-bg:         #f4f4f2;
   --bb-surface:    #ffffff;
-  --bb-surface-2:  #f5f5f4;
-  --bb-line:       #d6d3d1;
-  --bb-line-2:     #a8a29e;
-  --bb-ink:        #09090b;
+  --bb-surface-2:  #ececea;
+  --bb-line:       #e3e3df;
+  --bb-line-2:     #c9c9c4;
+  --bb-ink:        #0a0a0b;
   --bb-ink-2:      #3f3f46;
-  --bb-ink-3:      #71717a;
-  --bb-invert:     #09090b;
+  --bb-ink-3:      #67676f;  /* the landing's #71717a, one step darker to clear 4.5:1 on paper */
+  --bb-invert:     #101013;
   --bb-invert-fg:  #fafaf9;
-  --bb-cream:      #b8860b;
+  --bb-cream:      #b8860b;  /* gold: small icons only on paper (3:1), never text */
   --bb-ok:         #047857;
-  --bb-warn:       #b45309;
+  --bb-warn:       #a84d08;  /* #b45309 one step darker: 4.25:1 on surface-2 before */
   --bb-err:        #b91c1c;
   --bb-info:       #1d4ed8;
+
+  /* Accent = the strongest neutral of the theme: ink on paper, cream on
+     dark. Primary buttons are the invert fill (the landing's black arrow
+     buttons on paper, its cream "Launch app" pill on dark). */
+  --bb-accent:      #0a0a0b;
+  --bb-accent-lift: #000000;
+  --bb-accent-deep: #e3e3df;
+  --bb-accent-ink:  #fafaf9;
+  --bb-accent-hi:   #0a0a0b;  /* shadow tint, never text */
+
+  --bb-glass:      rgba(255, 255, 255, 0.72);
+  --bb-glass-line: rgba(10, 10, 11, 0.07);
+  --bb-glow:       rgba(255, 255, 255, 0.7);  /* a barely lighter corner */
+
+  /* Cards: white on paper with the landing's hairline and a soft shadow. */
+  --bb-card-bg:     #ffffff;
+  --bb-card-line:   rgba(10, 10, 11, 0.07);
+  --bb-card-shadow: 0 1px 2px rgba(10, 10, 11, 0.04), 0 18px 40px -28px rgba(10, 10, 11, 0.28);
+  --bb-btn-shadow:  0 20px 44px -22px rgba(10, 10, 11, 0.7);
+
+  --bb-ease:       cubic-bezier(0.23, 1, 0.32, 1);
 }
 
-/* Dark theme */
+/* Dark theme — master's values, unchanged */
 html[data-theme="dark"] {
   --bb-bg:         #09090b;
   --bb-surface:    #0d0d0d;
@@ -40,15 +65,31 @@ html[data-theme="dark"] {
   --bb-warn:       #f59e0b;
   --bb-err:        #ef4444;
   --bb-info:       #3b82f6;
+
+  --bb-accent:      #f5efe0;
+  --bb-accent-lift: #ffffff;
+  --bb-accent-deep: #27272a;
+  --bb-accent-ink:  #09090b;
+  --bb-accent-hi:   #000000;
+
+  --bb-glass:      rgba(10, 10, 12, 0.72);
+  --bb-glass-line: rgba(255, 255, 255, 0.08);
+  --bb-glow:       rgba(245, 239, 224, 0.04);
+
+  /* Cards: surface-2 with a hairline, no shadow. */
+  --bb-card-bg:     #111113;
+  --bb-card-line:   #27272a;
+  --bb-card-shadow: none;
+  --bb-btn-shadow:  0 20px 44px -22px rgba(0, 0, 0, 0.85);
 }
 
 @layer base {
   body {
     @apply bg-bg text-ink-2 antialiased;
-    /* Readable sans-serif as default body font. Mono is preserved everywhere
-       components opt in via the `font-mono` utility (addresses, hashes, IDs,
-       code blocks, terminal prompts). */
-    font-family: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+    /* One family across the app and the landing. Mono is preserved
+       everywhere components opt in via `font-mono` (addresses, hashes, IDs,
+       amounts, letterspaced labels). */
+    font-family: 'Instrument Sans', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
     font-size: 16px;
     line-height: 1.55;
     letter-spacing: 0;
@@ -59,45 +100,59 @@ html[data-theme="dark"] {
   }
 
   h1, h2, h3, h4, h5, h6 {
-    font-family: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
-    letter-spacing: -0.01em;
+    font-family: 'Instrument Sans', system-ui, -apple-system, sans-serif;
+    letter-spacing: -0.02em;
   }
 
   ::selection {
-    background-color: var(--bb-cream);
-    color: var(--bb-surface);
+    background-color: color-mix(in srgb, var(--bb-accent) 22%, transparent);
+    color: var(--bb-ink);
   }
 
   /* Custom scrollbar */
   ::-webkit-scrollbar { width: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: var(--bb-line); }
+  ::-webkit-scrollbar-thumb { background: var(--bb-line); border-radius: 9999px; }
   ::-webkit-scrollbar-thumb:hover { background: var(--bb-line-2); }
 
-  /* All inputs: sharp corners, hairline border, cream focus */
+  /* All inputs: hairline border, accent focus. */
   input, textarea, select {
     @apply border border-line bg-surface text-ink;
-    border-radius: 0 !important;
-    caret-color: var(--bb-cream);
+    caret-color: var(--bb-accent);
     font-family: inherit; /* sans by default, but addresses/hashes can opt into mono per-field */
+    transition: border-color 240ms var(--bb-ease);
   }
+  /* 12px corners on text fields; :where keeps this at zero specificity so a
+     rounded-* utility on a field still wins. */
+  :where(input:not([type="checkbox"], [type="radio"]), textarea, select) {
+    border-radius: 12px;
+  }
+  :where(input[type="checkbox"]) { border-radius: 4px; }
+  :where(input[type="radio"]) { border-radius: 9999px; }
   input:focus, textarea:focus, select:focus {
-    border-color: var(--bb-cream) !important;
+    border-color: var(--bb-accent) !important;
     outline: none !important;
     box-shadow: none !important;
   }
 
-  /* Keyboard-only focus ring for interactive elements (inputs already show a
-     cream border on focus). :focus-visible keeps mouse/touch focus clean while
-     making keyboard navigation trackable app-wide. */
+  /* Keyboard-only focus ring for interactive elements (inputs already show an
+     accent border on focus). :focus-visible keeps mouse/touch focus clean
+     while making keyboard navigation trackable app-wide. */
   a:focus-visible,
   button:focus-visible,
   [role="button"]:focus-visible,
   [role="tab"]:focus-visible,
   [role="switch"]:focus-visible,
   [tabindex]:focus-visible {
-    outline: 2px solid var(--bb-cream);
+    outline: 2px solid var(--bb-accent);
     outline-offset: 2px;
+  }
+
+  /* The selected tab carries the accent underline app-wide. Pages build
+     their tab rows inline with border-cream; this retints every one of them
+     (the attribute pair outranks the single utility class). */
+  [role="tab"][aria-selected="true"] {
+    border-bottom-color: var(--bb-accent);
   }
 }
 
@@ -110,62 +165,268 @@ html[data-theme="dark"] {
 }
 
 @layer components {
-  /* ── Card — hairline border, sharp corners, no shadow ────────── */
+  /* ── Card — 20px corners; white + soft shadow on paper, surface-2 +
+        hairline on dark ────────────────────────────────────────── */
   .card-dark {
-    @apply bg-surface border border-line transition-colors duration-200;
+    @apply rounded-2xl border;
+    background-color: var(--bb-card-bg);
+    border-color: var(--bb-card-line);
+    box-shadow: var(--bb-card-shadow);
+    transition:
+      border-color 240ms var(--bb-ease),
+      background-color 240ms var(--bb-ease),
+      transform 240ms var(--bb-ease);
   }
 
-  /* ── Bracket button — terminal style [ label ] ───────────────── */
-  .btn-bracket {
-    @apply inline-flex items-center gap-1 px-5 py-2.5 border border-line text-ink font-mono text-xs font-semibold uppercase tracking-widest transition-colors duration-200;
+  /* ── Buttons — pills, the landing's shapes ───────────────────── */
+  .bb-btn {
+    @apply inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-full font-sans font-medium;
+    letter-spacing: -0.01em;
+    transition:
+      background-color 240ms var(--bb-ease),
+      border-color 240ms var(--bb-ease),
+      color 240ms var(--bb-ease),
+      box-shadow 240ms var(--bb-ease),
+      transform 240ms var(--bb-ease);
   }
-  .btn-bracket:hover {
-    border-color: var(--bb-cream);
-    color: var(--bb-cream);
+  .bb-btn:hover:not(:disabled) { transform: translateY(-2px); }
+  .bb-btn:active:not(:disabled) { transform: translateY(0) scale(0.98); }
+  .bb-btn:disabled { cursor: not-allowed; opacity: 0.45; }
+  @media (prefers-reduced-motion: reduce) {
+    .bb-btn:hover:not(:disabled),
+    .bb-btn:active:not(:disabled) { transform: none; }
   }
-  .btn-bracket-primary {
-    @apply inline-flex items-center gap-1 px-5 py-2.5 bg-invert text-invert-fg font-mono text-xs font-semibold uppercase tracking-widest transition-colors duration-200;
-    border: 1px solid var(--bb-invert);
+  /* Primary: the invert fill — cream on dark, near-black on paper. */
+  .bb-btn-primary {
+    background-color: var(--bb-invert);
+    color: var(--bb-invert-fg);
+    box-shadow: var(--bb-btn-shadow);
   }
-  .btn-bracket-primary:hover {
-    opacity: 0.9;
+  .bb-btn-primary:hover:not(:disabled) { background-color: var(--bb-accent-lift); }
+  .bb-btn-primary:disabled { box-shadow: none; }
+  /* Secondary: a hairline pill. */
+  .bb-btn-secondary {
+    border: 1px solid color-mix(in srgb, var(--bb-ink) 15%, transparent);
+    color: var(--bb-ink);
+  }
+  .bb-btn-secondary:hover:not(:disabled) {
+    border-color: color-mix(in srgb, var(--bb-ink) 40%, transparent);
+    background-color: color-mix(in srgb, var(--bb-ink) 4%, transparent);
+  }
+  /* Ghost: text only until hovered. */
+  .bb-btn-ghost { color: var(--bb-ink-2); }
+  .bb-btn-ghost:hover:not(:disabled) {
+    color: var(--bb-ink);
+    background-color: color-mix(in srgb, var(--bb-ink) 6%, transparent);
   }
 
-  /* ── Ghost button ────────────────────────────────────────────── */
-  .btn-ghost {
-    @apply px-4 py-2 border border-line text-ink-2 text-xs font-mono font-medium tracking-wide transition-colors duration-200;
+  /* ── Round icon button — the landing's circle arrow; also the bell,
+        theme toggle and avatar in the top bar ─────────────────── */
+  .bb-icon-btn {
+    @apply relative inline-flex shrink-0 items-center justify-center rounded-full;
+    transition:
+      background-color 240ms var(--bb-ease),
+      border-color 240ms var(--bb-ease),
+      color 240ms var(--bb-ease),
+      transform 240ms var(--bb-ease);
   }
-  .btn-ghost:hover {
-    @apply border-line-2 text-ink;
+  .bb-icon-btn-outline {
+    border: 1px solid color-mix(in srgb, var(--bb-ink) 12%, transparent);
+    color: var(--bb-ink-2);
+  }
+  .bb-icon-btn-outline:hover {
+    border-color: color-mix(in srgb, var(--bb-ink) 35%, transparent);
+    background-color: color-mix(in srgb, var(--bb-ink) 4%, transparent);
+    color: var(--bb-ink);
+  }
+  .bb-icon-btn-solid {
+    background-color: var(--bb-invert);
+    color: var(--bb-invert-fg);
+  }
+  .bb-icon-btn-solid:hover { background-color: var(--bb-accent-lift); transform: translateX(2px); }
+  .bb-icon-btn-ghost { color: var(--bb-ink-2); }
+  .bb-icon-btn-ghost:hover {
+    color: var(--bb-ink);
+    background-color: color-mix(in srgb, var(--bb-ink) 6%, transparent);
   }
 
-  /* ── Status chip — uppercase, tiny, semantic colors ──────────── */
+  /* ── Status chip — a pill with a coloured dot and ink text ───── */
+  /* Tone text stays ink-2 (not the tone colour): the semantic colours
+     fall under 4.5:1 inside their own tint on paper. The dot carries the
+     colour; graphics need 3:1. */
   .chip {
-    @apply inline-flex items-center gap-1 px-2 py-0.5 text-[9px] font-mono font-semibold uppercase tracking-wider border whitespace-nowrap;
+    @apply inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 font-mono text-[10px] font-medium uppercase whitespace-nowrap;
+    letter-spacing: 0.1em;
+  }
+  .chip-ok, .chip-err, .chip-info, .chip-warn, .chip-accent {
+    color: var(--bb-ink-2);
+  }
+  .chip-ok::before, .chip-err::before, .chip-info::before, .chip-warn::before, .chip-accent::before {
+    content: '';
+    width: 6px;
+    height: 6px;
+    flex-shrink: 0;
+    border-radius: 9999px;
+    background-color: currentColor;
   }
   .chip-ok {
-    background: rgba(16, 185, 129, 0.12);
-    color: var(--bb-ok);
-    border-color: rgba(16, 185, 129, 0.25);
+    background: color-mix(in srgb, var(--bb-ok) 8%, transparent);
+    border-color: color-mix(in srgb, var(--bb-ok) 28%, transparent);
   }
+  .chip-ok::before { background-color: var(--bb-ok); }
   .chip-err {
-    background: rgba(239, 68, 68, 0.12);
-    color: var(--bb-err);
-    border-color: rgba(239, 68, 68, 0.25);
+    background: color-mix(in srgb, var(--bb-err) 8%, transparent);
+    border-color: color-mix(in srgb, var(--bb-err) 28%, transparent);
   }
+  .chip-err::before { background-color: var(--bb-err); }
   .chip-info {
-    background: rgba(59, 130, 246, 0.12);
-    color: var(--bb-info);
-    border-color: rgba(59, 130, 246, 0.25);
+    background: color-mix(in srgb, var(--bb-info) 8%, transparent);
+    border-color: color-mix(in srgb, var(--bb-info) 28%, transparent);
   }
+  .chip-info::before { background-color: var(--bb-info); }
   .chip-warn {
-    background: rgba(217, 119, 6, 0.12);
-    color: var(--bb-warn);
-    border-color: rgba(217, 119, 6, 0.25);
+    background: color-mix(in srgb, var(--bb-warn) 8%, transparent);
+    border-color: color-mix(in srgb, var(--bb-warn) 28%, transparent);
   }
+  .chip-warn::before { background-color: var(--bb-warn); }
+  .chip-accent {
+    background: color-mix(in srgb, var(--bb-accent) 6%, transparent);
+    border-color: color-mix(in srgb, var(--bb-accent) 22%, transparent);
+  }
+  .chip-accent::before { background-color: var(--bb-accent); }
   .chip-neutral {
     @apply border-line text-ink-3 bg-transparent;
   }
+
+  /* ── App ambience — a barely-there neutral glow in one corner ── */
+  /* A fixed pseudo-element rather than background-attachment: fixed, which
+     repaints on every scroll. isolation keeps the z-index:-1 layer above the
+     element's own background and below its content. */
+  .bb-ambient {
+    position: relative;
+    isolation: isolate;
+    background-color: var(--bb-bg);
+  }
+  .bb-ambient::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background: radial-gradient(60rem 40rem at 100% -10%, var(--bb-glow), transparent 70%);
+  }
+
+  /* ── Glass — frosted chrome (top bar, sidebar) ───────────────── */
+  /* backdrop-filter makes this element the containing block for any
+     position:fixed descendant, so overlays inside glass chrome must portal
+     out (bb Modal already does). */
+  .bb-glass {
+    background-color: var(--bb-glass);
+    -webkit-backdrop-filter: blur(20px) saturate(140%);
+    backdrop-filter: blur(20px) saturate(140%);
+  }
+
+  /* ── Highlight — the invert card (the landing's black↔paper) ─── */
+  /* Near-black on paper, cream on dark. It re-points the ink, line and
+     accent tokens so token-coloured content inside reads on the invert
+     fill (every value measured at 6.7:1 or better). */
+  .bb-highlight {
+    --bb-ink:         var(--bb-invert-fg);
+    --bb-accent:      var(--bb-invert-fg);
+    --bb-accent-lift: var(--bb-invert-fg);
+    --bb-accent-ink:  var(--bb-invert);
+    --bb-ink-2:       #d4d4d8;
+    --bb-ink-3:       #a1a1aa;
+    --bb-line:        rgba(250, 250, 249, 0.14);
+    --bb-line-2:      rgba(250, 250, 249, 0.28);
+    --bb-surface-2:   #1c1c20;
+    position: relative;
+    overflow: hidden;
+    background-color: var(--bb-invert);
+    color: var(--bb-ink-2);
+  }
+  html[data-theme="dark"] .bb-highlight {
+    --bb-ink-2:       #3f3f46;
+    --bb-ink-3:       #52525b;
+    --bb-line:        rgba(9, 9, 11, 0.14);
+    --bb-line-2:      rgba(9, 9, 11, 0.28);
+    --bb-surface-2:   #ebe5d6;
+  }
+
+  /* ── Live dot — accent dot with a soft expanding ring ────────── */
+  .bb-live-dot {
+    position: relative;
+    display: inline-block;
+    flex-shrink: 0;
+    width: 6px;
+    height: 6px;
+    border-radius: 9999px;
+    background-color: var(--bb-accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--bb-accent) 18%, transparent);
+  }
+  .bb-live-dot::after {
+    content: '';
+    position: absolute;
+    inset: -3px;
+    border-radius: 9999px;
+    border: 1px solid color-mix(in srgb, var(--bb-accent) 60%, transparent);
+    animation: bbRing 1.8s var(--bb-ease) infinite;
+  }
+
+  /* ── Shimmer — skeleton blocks with a light sweep ────────────── */
+  .bb-shimmer {
+    background-color: var(--bb-surface-2);
+    background-image: linear-gradient(
+      90deg,
+      transparent 0%,
+      color-mix(in srgb, var(--bb-ink) 7%, transparent) 50%,
+      transparent 100%
+    );
+    background-size: 200% 100%;
+    background-repeat: no-repeat;
+    animation: bbShimmer 1.4s linear infinite;
+  }
+
+  /* ── Scan bar — indeterminate loader, an accent light on a hairline */
+  .bb-scan {
+    position: relative;
+    overflow: hidden;
+    height: 2px;
+    border-radius: 9999px;
+    background-color: var(--bb-line);
+  }
+  .bb-scan::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    width: 40%;
+    background: linear-gradient(90deg, transparent, var(--bb-accent), transparent);
+    animation: bbScan 1.3s var(--bb-ease) infinite;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .bb-live-dot::after,
+    .bb-shimmer,
+    .bb-scan::after {
+      animation: none;
+    }
+    .bb-scan::after {
+      left: 30%;
+    }
+  }
+}
+
+@keyframes bbRing {
+  0%   { transform: scale(0.6); opacity: 0.9; }
+  100% { transform: scale(1.9); opacity: 0; }
+}
+@keyframes bbShimmer {
+  from { background-position: 150% 0; }
+  to   { background-position: -50% 0; }
+}
+@keyframes bbScan {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(250%); }
 }
 
 @layer utilities {
@@ -188,14 +449,25 @@ html[data-theme="dark"] {
   --bb-line-2:     #c9c9c4;
   --bb-ink:        #0a0a0b;
   --bb-ink-2:      #3f3f46;
-  --bb-ink-3:      #71717a;
+  --bb-ink-3:      #67676f;
   --bb-invert:     #101013;
   --bb-invert-fg:  #fafaf9;
   --bb-cream:      #b8860b;
   --bb-ok:         #047857;
-  --bb-warn:       #b45309;
+  --bb-warn:       #a84d08;
   --bb-err:        #b91c1c;
   --bb-info:       #1d4ed8;
+  --bb-accent:      #0a0a0b;
+  --bb-accent-lift: #000000;
+  --bb-accent-deep: #e3e3df;
+  --bb-accent-ink:  #fafaf9;
+  --bb-accent-hi:   #0a0a0b;
+  --bb-glass:       rgba(255, 255, 255, 0.72);
+  --bb-glass-line:  rgba(10, 10, 11, 0.07);
+  --bb-card-bg:     #ffffff;
+  --bb-card-line:   rgba(10, 10, 11, 0.07);
+  --bb-card-shadow: 0 1px 2px rgba(10, 10, 11, 0.04), 0 18px 40px -28px rgba(10, 10, 11, 0.28);
+  --bb-btn-shadow:  0 20px 44px -22px rgba(10, 10, 11, 0.7);
 }
 
 /* ── Marketing (mk-) marquee — landing ticker band ─────────────── */

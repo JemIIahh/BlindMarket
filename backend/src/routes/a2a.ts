@@ -42,6 +42,7 @@ import { getTokenDecimals } from '../services/chain.js';
 import { isSafeRegexSource } from '../services/rubricEngine.js';
 import { callerWallets } from '../services/callerWallets.js';
 import { activeHostedVerifiers, hostedVerifierNotOptedIn, VERIFIER_NOT_OPTED_IN_MESSAGE } from '../services/verifierDuty.js';
+import { withPosterAvatars } from '../services/avatarStore.js';
 
 export const a2aRouter = Router();
 
@@ -369,7 +370,11 @@ a2aRouter.get('/tasks', async (req, res, next) => {
     // Public projection: this route has no auth, so key material (wrappedKeys,
     // keyCustodyBlob, rootHash) must never appear here — the accepting
     // executor gets its slice from the authenticated /accept response.
-    const tasks = matches.slice(offset, offset + limit).map(a2aStore.projectPublicEntry);
+    const page = matches.slice(offset, offset + limit).map(a2aStore.projectPublicEntry);
+    // Each poster's avatar, where they made one: keyed by the public
+    // posterAddress already on the meta (services/avatarStore.ts).
+    const metas = await withPosterAvatars(page.map((t) => t.meta));
+    const tasks = page.map((t, i) => ({ ...t, meta: metas[i] }));
 
     const body: ApiResponse = {
       success: true,

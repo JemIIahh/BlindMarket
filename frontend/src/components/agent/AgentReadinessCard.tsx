@@ -10,7 +10,7 @@ import { CopyButton, Icon } from '../bb';
  * color-mix gives the intended tint.
  */
 export const WARN_BOX =
-  'border border-[color:color-mix(in_srgb,var(--bb-warn)_55%,transparent)] bg-[color:color-mix(in_srgb,var(--bb-warn)_6%,transparent)]';
+  'rounded-2xl border border-[color:color-mix(in_srgb,var(--bb-warn)_55%,transparent)] bg-[color:color-mix(in_srgb,var(--bb-warn)_6%,transparent)]';
 
 /**
  * Owner-only: whether this agent is taking tasks, from its worker's last
@@ -32,8 +32,8 @@ export function AgentReadinessCard({ agentId, running, className = '' }: { agent
   if (view.kind === 'ready' || view.kind === 'checking') {
     const ready = view.kind === 'ready';
     return (
-      <div className={`border border-line px-5 py-3 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-sm ${className}`}>
-        <span className={`h-1.5 w-1.5 shrink-0 ${ready ? 'bg-ok' : 'bg-ink-3 animate-pulse'}`} aria-hidden />
+      <div className={`card-dark px-5 py-3.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-sm ${className}`}>
+        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${ready ? 'bg-ok' : 'bg-ink-3 animate-pulse'}`} aria-hidden />
         <span className="text-ink">{ready ? 'Taking tasks' : 'Checking its model'}</span>
         <span className="text-ink-3">
           {ready ? 'Its model answered the last check.' : 'It takes no task until the check passes.'}
@@ -54,7 +54,7 @@ export function AgentReadinessCard({ agentId, running, className = '' }: { agent
                 Send at least <span className="font-semibold text-ink">{view.send} 0G</span> on the 0G chain to its wallet.{' '}
                 {OG_COMPUTE_ACCOUNT_0G} 0G opens its 0G Compute account, which pays for its model calls; the rest covers gas.
               </p>
-              <div className="flex items-center justify-between gap-2 border border-line bg-surface-2 px-3 py-2">
+              <div className="flex items-center justify-between gap-2 rounded-lg border border-line bg-surface-2 px-3 py-2">
                 <span className="font-mono text-xs text-ink break-all">{view.address}</span>
                 <CopyButton text={view.address} />
               </div>

@@ -22,21 +22,24 @@ export function ChainBanner() {
   if (chainId == null) return null;
   if (isCorrectChain) return null;
 
+  // A floating rounded bar under the top bar, inset like the page content.
   return (
-    <div className="sticky top-0 z-40 flex items-center justify-between gap-4 border-b border-warn/40 bg-warn/10 px-6 py-2 text-sm text-ink backdrop-blur">
-      <div className="flex items-center gap-3">
-        <span className="inline-block h-2 w-2 bg-warn" aria-hidden />
-        <span>
-          Wrong network — you're on chain <span className="font-mono">{chainId}</span>. BlindMarket runs on {netName} ({targetChainId}).
-        </span>
+    <div className="sticky top-0 z-40 px-4 sm:px-6 md:px-8 pt-3">
+      <div className="flex items-center justify-between gap-3 rounded-2xl border border-[color-mix(in_srgb,var(--bb-warn)_40%,transparent)] bg-[color-mix(in_srgb,var(--bb-warn)_12%,var(--bb-surface))] px-4 py-2.5 text-sm text-ink shadow-[var(--bb-card-shadow)]">
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="inline-block h-2 w-2 shrink-0 rounded-full bg-warn" aria-hidden />
+          <span className="min-w-0">
+            Wrong network: you're on chain <span className="font-mono">{chainId}</span>. BlindMarket runs on {netName} ({targetChainId}).
+          </span>
+        </div>
+        <button
+          type="button"
+          onClick={() => switchChain(targetChainId)}
+          className="shrink-0 whitespace-nowrap rounded-full border border-[color-mix(in_srgb,var(--bb-warn)_60%,transparent)] bg-[color-mix(in_srgb,var(--bb-warn)_20%,transparent)] px-3.5 py-1.5 text-xs font-medium text-ink transition-colors duration-200 hover:bg-[color-mix(in_srgb,var(--bb-warn)_30%,transparent)]"
+        >
+          Switch to {netName}
+        </button>
       </div>
-      <button
-        type="button"
-        onClick={() => switchChain(targetChainId)}
-        className="border border-warn/60 bg-warn/20 px-3 py-1 text-xs font-medium text-ink hover:bg-warn/30 transition-colors whitespace-nowrap"
-      >
-        Switch to {netName}
-      </button>
     </div>
   );
 }

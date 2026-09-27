@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Button, Modal } from './bb';
+import { Button, Modal, RadioPills } from './bb';
 import { copyToClipboard } from '../lib/utils';
 import { formatPaymentAmount } from '../lib/paymentUnits';
 import { isWellFormedListing, plainLine } from '../lib/untrustedText';
@@ -325,28 +325,21 @@ export default function UseFromAgentModal({
     >
       <div className="space-y-4">
         <p className="text-xs text-ink-3 leading-relaxed">
-          Paste this into your own agent (Claude Code, OpenClaw, Codex, …) — it will rent
-          this service directly: encrypt your brief, escrow the payment from your wallet,
-          and return the provider agent's output. You'll need an API key from{' '}
-          <a href="/settings" className="text-cream hover:underline">Settings</a>, created
+          Paste this into your own agent (Claude Code, OpenClaw, Codex, …) and it rents this service
+          directly: it encrypts your brief, escrows the payment from your wallet and returns the
+          provider agent's output. You'll need an API key from{' '}
+          <a href="/settings" className="text-accent underline-offset-2 hover:underline">Settings</a>, created
           with the same wallet your agent pays from.
         </p>
 
-        <div className="flex flex-wrap items-center gap-1.5">
-          {([['private', 'Private (encrypted)'], ['public', 'Public']] as const).map(([mode, label]) => (
-            <button
-              key={mode}
-              type="button"
-              onClick={() => setPrivacy(mode)}
-              className={`px-2.5 py-1 text-xs border transition-colors ${privacy === mode
-                ? 'bg-cream/10 border-cream/40 text-cream'
-                : 'bg-surface-2 border-line text-ink-3 hover:text-ink-2'
-                }`}
-            >
-              {label}
-            </button>
-          ))}
-          <span className="text-[11px] text-ink-3 ml-1">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+          <RadioPills
+            label="Privacy"
+            value={privacy}
+            options={[['private', 'Private (encrypted)'], ['public', 'Public']] as const}
+            onChange={setPrivacy}
+          />
+          <span className="text-xs text-ink-3">
             {privacy === 'private' ? 'Brief encrypted end-to-end.' : 'Brief + result become public record.'}
           </span>
         </div>
@@ -363,7 +356,7 @@ export default function UseFromAgentModal({
               onClick={() => setTab(t.id)}
               className={`pb-2.5 -mb-px text-xs border-b-2 transition-colors ${
                 tab === t.id
-                  ? 'text-ink font-medium border-cream'
+                  ? 'text-ink font-medium border-accent'
                   : 'text-ink-3 border-transparent hover:text-ink-2'
               }`}
             >
@@ -373,11 +366,11 @@ export default function UseFromAgentModal({
         </div>
 
         {wellFormed ? (
-          <pre className="whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-ink-2 border border-line bg-surface-2 p-3 max-h-72 overflow-y-auto select-all">
+          <pre className="whitespace-pre-wrap break-words rounded-xl border border-line bg-surface-2 p-3.5 font-mono text-[11px] leading-relaxed text-ink-2 max-h-72 overflow-y-auto select-all">
             {active}
           </pre>
         ) : (
-          <p className="text-xs text-ink-2 border border-line bg-surface-2 p-3">
+          <p className="rounded-xl border border-line bg-surface-2 p-3.5 text-xs text-ink-2">
             This listing has malformed details, so no script can be generated for it.
           </p>
         )}

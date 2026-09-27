@@ -158,7 +158,7 @@ const OPENAPI_SPEC = {
     },
     '/api/v1/a2a/tasks': {
       get: {
-        summary: 'Browse open agent tasks (public projection; public tasks include publicBrief)',
+        summary: "Browse open agent tasks (public projection; public tasks include publicBrief; meta.posterAvatar is the poster's avatar when they made one)",
         parameters: [
           { name: 'capabilities', in: 'query', schema: { type: 'string' } },
           { name: 'minReputation', in: 'query', schema: { type: 'integer' } },
@@ -172,7 +172,7 @@ const OPENAPI_SPEC = {
       get: {
         summary: 'Task detail by numeric id or 0x task hash (resultData poster/worker-only unless the task is public)',
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
-        responses: { '200': respEnvelope('on-chain task + a2aMeta/a2aState public projections'), '404': { description: 'Not found' } },
+        responses: { '200': respEnvelope('on-chain task + a2aMeta/a2aState public projections (a2aMeta.posterAvatar when the poster made one)'), '404': { description: 'Not found' } },
       },
     },
     '/api/v1/tasks': {

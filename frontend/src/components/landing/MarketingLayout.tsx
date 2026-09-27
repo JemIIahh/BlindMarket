@@ -53,7 +53,7 @@ export function MarketingLayout() {
   const reduceMotion = useReducedMotion();
 
   return (
-    <div className="relative min-h-screen bg-bg text-ink">
+    <div className="relative min-h-screen bg-bg text-ink font-plex">
       {/* ── Notch nav — a compact floating island that grows on hover ── */}
       <div className="pointer-events-none fixed inset-x-0 top-0 z-50 flex justify-center px-3 pt-3 sm:pt-4">
         <motion.nav

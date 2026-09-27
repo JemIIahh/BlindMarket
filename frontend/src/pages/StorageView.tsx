@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { Breadcrumb, PageHeader, Panel, Button, LoadingState, ErrorState, EmptyState } from '../components/bb';
 import { authedGet } from '../lib/api';
+import { friendlyErrorText } from '../lib/friendlyError';
 import { useAuth } from '../context/AuthContext';
 
 function fromBase64(b64: string): Uint8Array {
@@ -39,7 +40,7 @@ export default function StorageView() {
         if (!cancelled) setBlobB64(d.blob);
       })
       .catch((e) => {
-        if (!cancelled) setError((e as Error).message || 'Download failed');
+        if (!cancelled) setError(friendlyErrorText(e ?? 'Download failed'));
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -109,27 +110,33 @@ export default function StorageView() {
       />
 
       {!isAuthenticated ? (
-        <EmptyState
-          icon="lock"
-          title="Sign in to view this blob"
-          description="Storage downloads require authentication — the endpoint returns UNAUTHORIZED without a signed-in wallet."
-        />
+        <div className="card-dark">
+          <EmptyState
+            icon="lock"
+            title="Sign in to view this blob"
+            description="Storage downloads need a signed-in wallet."
+          />
+        </div>
       ) : loading ? (
-        <LoadingState label="Downloading blob…" />
+        <div className="card-dark"><LoadingState label="Downloading blob…" /></div>
       ) : error ? (
-        <ErrorState
-          title="Couldn't load this blob"
-          description={error}
-          onRetry={() => window.location.reload()}
-        />
+        <div className="card-dark">
+          <ErrorState
+            title="Couldn't load this blob"
+            description={error}
+            onRetry={() => window.location.reload()}
+          />
+        </div>
       ) : !view ? (
-        <EmptyState icon="search" title="Empty blob" description="The storage node returned no data." />
+        <div className="card-dark">
+          <EmptyState icon="search" title="Empty blob" description="The storage node returned no data." />
+        </div>
       ) : (
         <Panel padding="md">
           {view.kind === 'image' ? (
-            <img src={view.url} alt={`storage blob ${rootHash}`} className="max-w-full border border-line" />
+            <img src={view.url} alt={`storage blob ${rootHash}`} className="max-w-full rounded-lg border border-line" />
           ) : view.kind === 'json' ? (
-            <pre className="text-xs font-mono text-ink bg-surface-2 border border-line p-4 overflow-x-auto whitespace-pre-wrap">
+            <pre className="rounded-lg text-xs font-mono text-ink bg-surface-2 border border-line p-4 overflow-x-auto whitespace-pre-wrap">
               {view.text}
             </pre>
           ) : view.kind === 'text' ? (
@@ -141,14 +148,14 @@ export default function StorageView() {
                   ? 'Encrypted or binary content — shown as hex. Only a keyholder can decrypt it.'
                   : 'Raw content:'}
               </p>
-              <pre className="text-xs font-mono text-ink bg-surface-2 border border-line p-4 overflow-x-auto whitespace-pre-wrap break-all">
+              <pre className="rounded-lg text-xs font-mono text-ink bg-surface-2 border border-line p-4 overflow-x-auto whitespace-pre-wrap break-all">
                 {view.text}
               </pre>
             </>
           )}
           <div className="mt-4 text-[11px] text-ink-3">
             Private task blobs are encrypted — readable only with the brief key.{' '}
-            <Link to="/a2a" className="text-cream hover:underline">
+            <Link to="/a2a" className="text-accent underline decoration-line-2 underline-offset-[3px] hover:decoration-accent">
               Back to marketplace
             </Link>
           </div>

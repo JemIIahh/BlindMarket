@@ -66,12 +66,12 @@ export class ErrorBoundary extends Component<Props, State> {
 
     const outage = chunk === 'failed';
     return (
-      <div className="min-h-screen flex items-center justify-center bg-surface px-6">
-        <div role="alert" className="max-w-md w-full border border-line bg-surface-2 p-6">
+      <div className="min-h-screen flex items-center justify-center bg-bg px-6">
+        <div role="alert" className="max-w-md w-full rounded-3xl border border-line bg-surface p-7">
           <div className="text-sm font-semibold text-ink mb-2">
             {outage ? "Couldn't load this page" : 'Something went wrong'}
           </div>
-          <p className="text-xs text-ink-3 mb-4 leading-relaxed">
+          <p className="text-xs text-ink-2 mb-4 leading-relaxed">
             {outage
               ? 'Part of the page failed to download. Check your connection, then reload.'
               : 'This page hit an unexpected error. Reloading usually fixes it.'}
@@ -87,7 +87,7 @@ export class ErrorBoundary extends Component<Props, State> {
           <button
             type="button"
             onClick={this.handleReload}
-            className="px-3 py-1.5 text-xs border border-line bg-surface hover:border-cream text-ink"
+            className="bb-btn bb-btn-primary h-9 px-4 text-[13px]"
           >
             Reload
           </button>

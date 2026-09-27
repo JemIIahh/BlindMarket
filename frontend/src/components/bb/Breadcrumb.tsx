@@ -18,7 +18,7 @@ export function Breadcrumb({ items }: BreadcrumbProps) {
         return (
           <Fragment key={`${item}-${i}`}>
             <span className={last ? 'text-ink-2' : ''}>{fmt(item)}</span>
-            {!last && <span className="text-ink-3/50">/</span>}
+            {!last && <span className="text-[color-mix(in_srgb,var(--bb-ink-3)_50%,transparent)]">/</span>}
           </Fragment>
         );
       })}

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Button, FormField, FormInput, LoadingState, EmptyState, ErrorState } from '../bb';
+import { Button, FormField, FormInput, LoadingState, EmptyState, ErrorState, ErrorNotice } from '../bb';
 import {
   getWebhooks,
   registerWebhook as apiRegisterWebhook,
@@ -15,7 +15,7 @@ export function WebhooksPanel({ agentId: _agentId }: { agentId: string }) {
   const [url, setUrl] = useState('');
   const [secret, setSecret] = useState('');
   const [creating, setCreating] = useState(false);
-  const [createError, setCreateError] = useState('');
+  const [createError, setCreateError] = useState<unknown>('');
 
   const loadHooks = useCallback(() => {
     setLoading(true);
@@ -50,7 +50,7 @@ export function WebhooksPanel({ agentId: _agentId }: { agentId: string }) {
       setSecret('');
       await loadHooks();
     } catch (err) {
-      setCreateError((err as Error).message);
+      setCreateError(err);
     } finally {
       setCreating(false);
     }
@@ -71,7 +71,7 @@ export function WebhooksPanel({ agentId: _agentId }: { agentId: string }) {
       ) : (
         <div className="space-y-2">
           {hooks.map((h) => (
-            <div key={h.id} className="flex items-center justify-between gap-3 border border-line px-4 py-3 text-sm">
+            <div key={h.id} className="card-dark flex items-center justify-between gap-3 px-5 py-3 text-sm">
               <div className="min-w-0 flex-1">
                 <div className="text-ink font-mono text-xs break-all truncate">{h.url}</div>
                 <div className="text-[11px] text-ink-3 mt-0.5">{h.events.join(', ')}</div>
@@ -84,7 +84,7 @@ export function WebhooksPanel({ agentId: _agentId }: { agentId: string }) {
                   } catch (err) {
                     // Surface instead of silently rejecting — the row staying
                     // put with no feedback reads as a dead button.
-                    setCreateError((err as Error).message || 'Delete failed');
+                    setCreateError(err);
                   }
                 }}
                 className="-mx-2 px-2 py-1.5 min-h-[32px] text-xs text-err hover:underline shrink-0"
@@ -97,7 +97,7 @@ export function WebhooksPanel({ agentId: _agentId }: { agentId: string }) {
       )}
 
       {/* Register new webhook */}
-      <div className="border border-line p-5">
+      <div className="card-dark p-5 sm:p-6">
         <div className="text-sm font-medium text-ink mb-3">Register webhook</div>
         <FormField label="URL" required>
           <FormInput className="font-mono" placeholder="https://your-service.com/webhook" value={url} onChange={(e) => setUrl(e.target.value)} />
@@ -113,7 +113,7 @@ export function WebhooksPanel({ agentId: _agentId }: { agentId: string }) {
             disabled={!url || creating}
             onClick={handleCreate}
           />
-          {createError && <span className="text-xs text-err">{createError}</span>}
+          <ErrorNotice error={createError} title="Couldn't update webhooks" compact />
         </div>
       </div>
     </div>

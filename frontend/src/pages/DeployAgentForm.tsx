@@ -13,6 +13,7 @@ import {
   FormSelect,
   ConfirmDialog,
   CopyButton,
+  ErrorNotice,
 } from '../components/bb';
 import { ToolManager, type AnyTool } from '../components/bb/ToolManager';
 import SkillPicker from '../components/bb/SkillPicker';
@@ -230,7 +231,7 @@ export default function DeployAgentForm() {
   const [status, setStatus] = useState<'idle' | 'confirming' | 'approving' | 'paying' | 'deploying' | 'done' | 'error'>('idle');
   const submittingRef = useRef(false);
   const confirmResolveRef = useRef<((approve: boolean) => void) | null>(null);
-  const [error, setError] = useState('');
+  const [error, setError] = useState<unknown>('');
   const [deployed, setDeployed] = useState<{
     id: string;
     started: boolean;
@@ -530,11 +531,7 @@ export default function DeployAgentForm() {
         writePendingFee(address, null);
         setPendingFee(null);
       }
-      setError(
-        err?.code === 'ACTION_REJECTED'
-          ? 'You declined the transaction in your wallet, so nothing was paid.'
-          : (err as Error).message,
-      );
+      setError(err);
       setErrorCode(typeof err?.code === 'string' ? err.code : null);
       setStatus('error');
     } finally {
@@ -547,7 +544,7 @@ export default function DeployAgentForm() {
     return (
       <div>
         <Breadcrumb items={['marketplace', 'agents', 'create', 'no-code']} />
-        <div className="border border-line p-10 text-center space-y-5 mt-8">
+        <div className="card-dark rounded-3xl p-10 text-center space-y-5 mt-8">
           <div className="flex items-center justify-center gap-2 text-ok">
             <Icon name="check" size={18} />
             <span className="text-sm font-semibold">Agent deployed</span>
@@ -583,7 +580,7 @@ export default function DeployAgentForm() {
                 Send at least <span className="font-semibold text-ink">{OG_COMPUTE_START_0G} 0G</span> on the 0G chain to the
                 agent's wallet. {OG_COMPUTE_ACCOUNT_0G} 0G opens its 0G Compute account; it takes no task until then.
               </p>
-              <div className="flex items-center justify-between gap-2 border border-line bg-surface-2 px-3 py-2">
+              <div className="flex items-center justify-between gap-2 rounded-lg border border-line bg-surface-2 px-3 py-2">
                 <span className="font-mono text-xs text-ink break-all">{deployed.ogFundAddress}</span>
                 <CopyButton text={deployed.ogFundAddress} />
               </div>
@@ -626,11 +623,11 @@ export default function DeployAgentForm() {
   return (
     <div>
       <Breadcrumb items={['marketplace', 'agents', 'create', 'no-code']} />
-      <PageHeader title="Create agent" description="Configure your agent — it will autonomously pick up and complete tasks." />
+      <PageHeader title="Create an agent." titleMuted="No code needed." description="Once running, it picks up and completes tasks on its own." />
 
-      <form onSubmit={handleSubmit} className="border border-line">
+      <form onSubmit={handleSubmit} className="space-y-4">
         {/* 01 — Identity */}
-        <div className="p-6 border-b border-line">
+        <div className="card-dark rounded-3xl p-6 sm:p-8">
           <SectionRule num="01" title="Identity" />
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
             <FormField label="Agent name" required className="min-w-0">
@@ -642,31 +639,32 @@ export default function DeployAgentForm() {
               />
             </FormField>
             <FormField label="Owner wallet" className="min-w-0">
-              <div className="w-full px-3 py-2.5 bg-surface-2 border border-line text-ink-3 text-sm font-mono truncate">
+              <div className="w-full rounded-lg px-3 py-2.5 bg-surface-2 border border-line text-ink-3 text-sm font-mono truncate">
                 {address ?? 'Connect wallet'}
               </div>
             </FormField>
           </div>
           <FormField label="Instructions" required className="mt-5">
-            <div className="border border-line divide-y divide-line">
+            <div className="rounded-lg border border-line divide-y divide-line focus-within:border-line-2 transition-colors">
               <div className="flex text-xs items-stretch">
                 <div className="relative ml-auto">
                   <button type="button" data-tmpl-btn onClick={() => setShowTemplateMenu(!showTemplateMenu)}
-                    className="px-3 py-1.5 text-ink-4 hover:text-ink transition-colors text-sm leading-none block">
+                    aria-label="Instruction templates"
+                    className="px-3 py-1.5 text-ink-3 hover:text-ink transition-colors text-sm leading-none block">
                     ☰
                   </button>
                   {showTemplateMenu && (
-                    <div className="absolute right-0 top-full z-10 w-48 border border-line bg-surface-2 shadow-lg">
-                      <div className="px-3 py-1.5 text-[11px] text-ink-4 border-b border-line">Templates</div>
+                    <div className="absolute right-0 top-full z-10 w-48 overflow-hidden rounded-xl border border-line bg-surface-2 shadow-lg">
+                      <div className="px-3 py-1.5 text-[11px] text-ink-3 border-b border-line">Templates</div>
                       {Object.entries(INSTRUCTION_TEMPLATES).map(([key, val]) => (
                         <button key={key} type="button" data-tmpl-btn onClick={() => { set('instructions', val); setShowTemplateMenu(false); }}
-                          className="block w-full text-left px-3 py-1.5 text-xs text-ink-2 hover:bg-surface-1 transition-colors">
+                          className="block w-full text-left px-3 py-1.5 text-xs text-ink-2 hover:bg-surface transition-colors">
                           {key.replace(/([A-Z])/g, ' $1').replace(/^./, s => s.toUpperCase())}
                         </button>
                       ))}
                       <div className="border-t border-line">
                         <button type="button" data-tmpl-btn onClick={() => { set('instructions', ''); setShowTemplateMenu(false); }}
-                          className="block w-full text-left px-3 py-1.5 text-xs text-err hover:bg-surface-1 transition-colors">
+                          className="block w-full text-left px-3 py-1.5 text-xs text-err hover:bg-surface transition-colors">
                           Clear
                         </button>
                       </div>
@@ -680,14 +678,14 @@ export default function DeployAgentForm() {
                 value={form.instructions}
                 onChange={e => set('instructions', e.target.value)}
                 placeholder="Describe what this agent does, how it should behave, and what tasks it should pick up."
-                className="w-full px-3 py-2.5 bg-surface-2 text-ink text-sm focus:border-cream resize-y leading-relaxed font-mono border-0 outline-none"
+                className="w-full rounded-b-lg px-3 py-2.5 bg-surface-2 text-ink text-sm resize-y leading-relaxed font-mono border-0 outline-none"
               />
             </div>
           </FormField>
         </div>
 
         {/* 02 — Model */}
-        <div className="p-6 border-b border-line">
+        <div className="card-dark rounded-3xl p-6 sm:p-8">
           <SectionRule num="02" title="Model" />
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-5">
             <FormField label="Provider">
@@ -743,7 +741,7 @@ export default function DeployAgentForm() {
               <span>
                 Output: <span className="font-mono text-ink">${priceOut.toFixed(2)}</span> / 1M tokens
               </span>
-              <span className="text-ink-4">
+              <span className="text-ink-3">
                 ~${((priceIn + priceOut) / 2).toFixed(2)} avg / 1M
               </span>
             </div>
@@ -754,8 +752,8 @@ export default function DeployAgentForm() {
           ) : null}
 
           {form.provider === '0g-compute' && (
-            <div className="mt-4 border border-cream/20 bg-cream/[0.03] px-4 py-3.5 text-[13px] leading-relaxed space-y-2">
-              <div className="flex items-center gap-2 font-semibold text-cream">
+            <div className="mt-4 rounded-xl border border-line-2 bg-surface-2 px-4 py-3.5 text-[13px] leading-relaxed space-y-2">
+              <div className="flex items-center gap-2 font-semibold text-ink">
                 <Icon name="bolt" size={14} />
                 <span>0G Compute — billed to agent wallet</span>
               </div>
@@ -768,7 +766,7 @@ export default function DeployAgentForm() {
               <div className="border-t border-line pt-2.5 space-y-1">
                 <div className="flex items-baseline justify-between gap-3">
                   <span className="text-ink">Fund before its first task</span>
-                  <span className="font-mono text-cream shrink-0">{OG_COMPUTE_START_0G} 0G</span>
+                  <span className="font-mono text-ink shrink-0">{OG_COMPUTE_START_0G} 0G</span>
                 </div>
                 <p className="text-ink-3 text-[12px]">
                   After you deploy, send it to the agent's wallet on the 0G chain: {OG_COMPUTE_ACCOUNT_0G} 0G opens
@@ -780,7 +778,7 @@ export default function DeployAgentForm() {
         </div>
 
         {/* 03 — Skills */}
-        <div className="p-6 border-b border-line">
+        <div className="card-dark rounded-3xl p-6 sm:p-8">
           <SectionRule num="03" title="Skills" side="Optional" />
           <FormField
             label="Install skills"
@@ -801,13 +799,13 @@ export default function DeployAgentForm() {
         </div>
 
         {/* 04 — Tools & MCP servers */}
-        <div className="p-6 border-b border-line">
+        <div className="card-dark rounded-3xl p-6 sm:p-8">
           <SectionRule num="04" title="Tools & MCP servers" side="Optional" />
           <ToolManager tools={tools} onChange={setTools} secrets={toolSecrets} onSecretsChange={setToolSecrets} />
         </div>
 
         {/* Deploy */}
-        <div className="p-6">
+        <div className="card-dark rounded-3xl p-6 sm:p-8">
           {!address ? (
             <p className="text-sm text-ink-3">Connect a wallet to deploy an agent.</p>
           ) : feeTermsError ? (
@@ -822,9 +820,9 @@ export default function DeployAgentForm() {
           ) : (
             <>
               {feeTerms.required && (
-                <div className="mb-4 border border-line bg-surface-2 px-4 py-3.5 space-y-2">
+                <div className="mb-4 rounded-xl border border-line bg-surface-2 px-4 py-3.5 space-y-2">
                   <div className="flex items-center gap-2 text-sm font-semibold text-ink">
-                    <Icon name="bolt" size={15} className="text-cream" />
+                    <Icon name="bolt" size={15} className="text-accent" />
                     <span>{feeTerms.method === 'transfer' ? 'Deployment uses 1 signature' : 'Deployment uses 2 signatures'}</span>
                   </div>
                   {feeTerms.method === 'transfer' ? (
@@ -871,7 +869,7 @@ export default function DeployAgentForm() {
               )}
 
               {!hasEnoughUsdc && usdcBalance !== null && (
-                <div className="mb-4 border border-err/40 bg-err/5 px-4 py-3.5 text-[13px] text-ink-2 leading-relaxed space-y-1.5">
+                <div className="mb-4 rounded-xl border border-[color:color-mix(in_srgb,var(--bb-err)_40%,transparent)] bg-[color:color-mix(in_srgb,var(--bb-err)_6%,transparent)] px-4 py-3.5 text-[13px] text-ink-2 leading-relaxed space-y-1.5">
                   <div className="flex items-center gap-2 font-semibold text-err">
                     <Icon name="bolt" size={15} />
                     <span>Not enough USDC to deploy</span>
@@ -905,7 +903,7 @@ export default function DeployAgentForm() {
               </div>
             </>
           )}
-          {status === 'error' && <p className="mt-3 text-sm text-err break-words">{error}</p>}
+          {status === 'error' && <ErrorNotice error={error} title="Couldn't deploy the agent" className="mt-3" />}
         </div>
       </form>
       <ConfirmDialog

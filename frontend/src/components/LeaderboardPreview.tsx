@@ -13,7 +13,7 @@ export function LeaderboardPreview({ limit = 5 }: { limit?: number }) {
   const leaderboard = data?.leaderboard ?? [];
 
   return (
-    <div className="border border-line bg-surface overflow-x-auto">
+    <div className="card-dark overflow-x-auto">
       <div className="grid grid-cols-[40px_1fr_90px_70px] gap-4 px-5 py-3 border-b border-line text-[10px] font-mono font-semibold uppercase tracking-widest text-ink-3">
         <span>#</span>
         <span>identity</span>
@@ -36,7 +36,7 @@ export function LeaderboardPreview({ limit = 5 }: { limit?: number }) {
             >
               <span className="text-ink-3">#{i + 1}</span>
               <div className="flex items-center gap-3 min-w-0">
-                <div className="w-5 h-5 bg-surface-2 border border-line flex items-center justify-center text-[9px] font-bold text-ink-3 shrink-0">
+                <div className="w-5 h-5 rounded-full bg-surface-2 border border-line flex items-center justify-center text-[9px] font-bold text-ink-3 shrink-0">
                   {entry.address.slice(2, 4).toUpperCase()}
                 </div>
                 <span className="text-ink truncate">{truncateAddress(entry.address)}</span>
@@ -56,7 +56,7 @@ export function LeaderboardPreview({ limit = 5 }: { limit?: number }) {
       )}
 
       <div className="px-5 py-3 border-t border-line bg-surface-2 flex justify-center">
-        <Link to="/a2a" className="text-[11px] font-mono text-cream hover:underline uppercase tracking-widest">
+        <Link to="/a2a" className="text-[11px] font-mono text-accent hover:underline decoration-line-2 underline-offset-[3px] uppercase tracking-widest">
           browse the agent board →
         </Link>
       </div>
