@@ -222,15 +222,17 @@ This is the hot key the backend uses to call `marketplaceAssign` and
   key but talks to a testnet RPC (or vice versa) creates "wrong-chain"
   signed txs that leak the key's nonce sequence and waste gas.
 
-- [ ] **Flip to `SETTLEMENT_TIER=mainnet`** once every settlement chain the
-      backend uses (0G, Base, and Arc from Phase 2) is on mainnet. Production
-      runs mixed today (0G mainnet + Base Sepolia), so the tier is unset and
-      only warns. Arc can move to mainnet before then (§3.6). Set, it defaults every chain id to mainnet and refuses to
-      boot on any testnet id; `GET /health/bridge` must then report
-      `settlementTier: "mainnet"`, `tierSource: "SETTLEMENT_TIER"`.
+- [ ] **The tier is mainnet.** `NODE_ENV=production` sets
+      `SETTLEMENT_TIER=mainnet` when it is unset (`deriveFromNodeEnv` in
+      `backend/src/config.ts`), so every chain id (0G, Base, Arc) defaults to
+      mainnet and a testnet id is refused at boot. Only a testnet production
+      deploy names `SETTLEMENT_TIER=testnet` itself. `GET /health/bridge` must
+      report `settlementTier: "mainnet"`, `tierSource: "SETTLEMENT_TIER"` (a
+      derived tier counts as set).
 - [ ] **`GET /health/bridge` reports `deploymentIdentity.role: "owner"`,
       `owner: "production"` and `stoppable: false`** (`DEPLOYMENT_ID=production`
-      has been set since the Arc settlement release). `stoppable: false` is
+      has been set since the Arc settlement release; `NODE_ENV=production` also
+      fills it in when it is unset). `stoppable: false` is
       what guarantees the check can never switch production's writers off
       (NODE_ENV=production on 0G mainnet, default DEPLOYMENT_SET, no testnet
       tier); anything else on its Redis is stopped. Re-check after changing
@@ -255,9 +257,11 @@ This is the hot key the backend uses to call `marketplaceAssign` and
 
 ### 3.6 Moving Arc to mainnet
 
-Arc can move on its own: `ARC_CHAIN_ID` picks its network, and no other
-chain has to move with it. Leave `SETTLEMENT_TIER` unset while Base stays on
-Sepolia; the tier would refuse Base Sepolia's chain id.
+With `NODE_ENV=production` Arc moves with the rest of the stack: the tier
+that NODE_ENV derives puts 0G, Base, Arc and CCTP on mainnet together, and
+`ARC_CHAIN_ID` defaults to 5042. A production stack can no longer keep Base
+Sepolia next to Arc mainnet: the tier refuses Base Sepolia's chain id, so
+remove `BASE_CHAIN_ID=84532` (and any other testnet chain id) from its env.
 
 - [ ] **Finish or refund every open Arc testnet task first.** Once Arc runs
       on mainnet, tasks listed on testnet are retired: they leave the open
