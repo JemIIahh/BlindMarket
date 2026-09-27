@@ -290,7 +290,7 @@ test('a fee saved on Arc Testnet is not offered to Arc mainnet: the deploy there
   assert.deepEqual(Object.values(state().pendingFees), [testnetFee], 'still saved for Arc Testnet');
 });
 
-test('with no BLINDMARKET_ARC_RPC_URL, post-task on Arc mainnet signs over https://arc-rpc.publicnode.com', async () => {
+test('with no BLINDMARKET_ARC_RPC_URL, post-task on Arc mainnet signs over https://rpc.mainnet.arc.io', async () => {
   // The SDK's ethers sends every RPC request through FetchRequest: note where
   // each one goes, and answer it from the stub node, so none leaves this machine.
   const { ethers: sdkEthers } = await import('@blindmarket/sdk');
@@ -305,7 +305,7 @@ test('with no BLINDMARKET_ARC_RPC_URL, post-task on Arc mainnet signs over https
   try {
     onMainnet();
     await blind('post-task', '--instructions', 'Summarise this paragraph in one sentence.', '--reward', '2.5', '--public', '--yes');
-    assert.deepEqual([...urls], ['https://arc-rpc.publicnode.com']);
+    assert.deepEqual([...urls], ['https://rpc.mainnet.arc.io']);
     assert.deepEqual(chain.sent.map((t) => [t.to, t.chainId]), [[USDC, BigInt(ARC_MAINNET_ID)], [ESCROW, BigInt(ARC_MAINNET_ID)]]);
   } finally {
     sdkEthers.FetchRequest.registerGetUrl(sdkEthers.FetchRequest.createGetUrlFunc());

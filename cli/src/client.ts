@@ -12,8 +12,8 @@ import { CliError } from './errors.js';
  * Testnet and Arc mainnet are both the chain `arc`: the id picks the RPC.
  */
 const PUBLIC_RPC: Readonly<Record<number, string>> = {
-  5042002: 'https://arc-testnet-rpc.publicnode.com',
-  5042: 'https://arc-rpc.publicnode.com',
+  5042002: 'https://rpc.testnet.arc.io',
+  5042: 'https://rpc.mainnet.arc.io',
   84532: 'https://base-sepolia-rpc.publicnode.com',
   8453: 'https://base-rpc.publicnode.com',
   16602: 'https://evmrpc-testnet.0g.ai',

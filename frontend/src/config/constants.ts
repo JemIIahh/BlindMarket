@@ -1,4 +1,5 @@
 import { CONTRACT_ADDRESSES } from './contractAddresses';
+import NETWORKS from './networks.json';
 
 export const API_BASE_URL = import.meta.env.VITE_API_URL || '';
 
@@ -48,7 +49,7 @@ export { isMainnet };
 
 export const OG_RPC_URL =
   import.meta.env.VITE_OG_RPC_URL ||
-  (networkIsMainnet ? 'https://0g-rpc.publicnode.com' : 'https://evmrpc-testnet.0g.ai');
+  (networkIsMainnet ? NETWORKS.networks.og.mainnet.rpcUrl : NETWORKS.networks.og.testnet.rpcUrl);
 
 export const BLIND_ESCROW_ADDRESS =
   import.meta.env.VITE_BLIND_ESCROW_ADDRESS || ADDR.blindEscrow;
@@ -89,7 +90,7 @@ export function isCctpUsable(cfg: { enabled: boolean; arcChainId?: number | null
 
 export const BASE_RPC_URL =
   import.meta.env.VITE_BASE_RPC_URL ||
-  (networkIsMainnet ? 'https://base-rpc.publicnode.com' : 'https://base-sepolia-rpc.publicnode.com');
+  (networkIsMainnet ? NETWORKS.networks.base.mainnet.rpcUrl : NETWORKS.networks.base.testnet.rpcUrl);
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 
@@ -104,23 +105,19 @@ export const BASE_ESCROW_ADDRESS = unsetIfZero(
 export const BASE_USDC_ADDRESS =
   import.meta.env.VITE_BASE_USDC_ADDRESS ||
   (isBaseMainnet
-    ? '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
-    : '0x036CbD53842c5426634e7929541eC2318f3dCF7e');
+    ? NETWORKS.networks.base.mainnet.usdc
+    : NETWORKS.networks.base.testnet.usdc);
 
 // ── Arc Chain (settlement — USDC payouts, gas in USDC) ───────────────────────
 
 export { ARC_CHAIN_ID };
 
 /**
- * Arc's public RPC for a chain id, PublicNode on both tiers (privacy
- * extensions block rpc.testnet.arc.io for some users —
- * net::ERR_BLOCKED_BY_CLIENT on every balance read — and the previous
- * testnet default, arc-testnet.drpc.org's free plan, rejects log scans over
- * 100 blocks). Text people copy (SDK samples, generated scripts) uses this,
- * never ARC_RPC_URL, which VITE_ARC_RPC_URL may point at a keyed URL.
+ * Arc's public RPC for a chain id. Reads from the shared network config
+ * (config/networks.json) so backend, CLI, and MCP see the same defaults.
  */
 export function arcPublicRpcUrl(chainId: number): string {
-  return chainId === 5042 ? 'https://arc-rpc.publicnode.com' : 'https://arc-testnet-rpc.publicnode.com';
+  return chainId === 5042 ? NETWORKS.networks.arc.mainnet.rpcUrl : NETWORKS.networks.arc.testnet.rpcUrl;
 }
 
 export const ARC_PUBLIC_RPC_URL = arcPublicRpcUrl(ARC_CHAIN_ID);
@@ -142,7 +139,7 @@ export const ARC_ESCROW_ADDRESS = unsetIfZero(
 // 6-dec ERC-20 at the precompile above any normal address. The escrow only ever
 // allowlists the ERC-20.
 export const ARC_USDC_ADDRESS =
-  import.meta.env.VITE_ARC_USDC_ADDRESS || ARC_ADDR?.USDC || '0x3600000000000000000000000000000000000000';
+  import.meta.env.VITE_ARC_USDC_ADDRESS || ARC_ADDR?.USDC || NETWORKS.networks.arc.mainnet.usdc;
 
 // The AgentFactory the deploy fee is paid to, from this Arc network's record:
 // none on Arc mainnet until its deploy is recorded, never the testnet one. The
@@ -175,31 +172,26 @@ export const FOUNDER_ADDRESSES: string[] = (import.meta.env.VITE_FOUNDER_ADDRESS
 
 export const OG_CHAIN_CONFIG = {
   chainId: `0x${OG_CHAIN_ID.toString(16)}`,
-  chainName: OG_CHAIN_ID === 16661 ? '0G Mainnet' : '0G Testnet',
-  nativeCurrency: { name: '0G', symbol: '0G', decimals: 18 },
+  chainName: networkIsMainnet ? NETWORKS.networks.og.mainnet.name : NETWORKS.networks.og.testnet.name,
+  nativeCurrency: networkIsMainnet ? NETWORKS.networks.og.mainnet.nativeCurrency : NETWORKS.networks.og.testnet.nativeCurrency,
   rpcUrls: [OG_RPC_URL],
-  // chainscan-newton was the old testnet's explorer and no longer resolves;
-  // Galileo (16602) lives at chainscan-galileo, as config/chains.ts already said.
-  blockExplorerUrls: [OG_CHAIN_ID === 16661 ? 'https://chainscan.0g.ai' : 'https://chainscan-galileo.0g.ai'],
+  blockExplorerUrls: [networkIsMainnet ? NETWORKS.networks.og.mainnet.blockExplorer : NETWORKS.networks.og.testnet.blockExplorer],
 } as const;
 
 export const BASE_CHAIN_CONFIG = {
   chainId: `0x${BASE_CHAIN_ID.toString(16)}`,
-  chainName: BASE_CHAIN_ID === 8453 ? 'Base' : 'Base Sepolia',
-  nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 },
+  chainName: networkIsMainnet ? NETWORKS.networks.base.mainnet.name : NETWORKS.networks.base.testnet.name,
+  nativeCurrency: networkIsMainnet ? NETWORKS.networks.base.mainnet.nativeCurrency : NETWORKS.networks.base.testnet.nativeCurrency,
   rpcUrls: [BASE_RPC_URL],
-  blockExplorerUrls: [BASE_CHAIN_ID === 8453 ? 'https://basescan.org' : 'https://sepolia.basescan.org'],
+  blockExplorerUrls: [networkIsMainnet ? NETWORKS.networks.base.mainnet.blockExplorer : NETWORKS.networks.base.testnet.blockExplorer],
 } as const;
 
 export const ARC_CHAIN_CONFIG = {
   chainId: `0x${ARC_CHAIN_ID.toString(16)}`,
-  chainName: isArcMainnet ? 'Arc' : 'Arc Testnet',
-  nativeCurrency: { name: 'USDC', symbol: 'USDC', decimals: 18 },
+  chainName: isArcMainnet ? NETWORKS.networks.arc.mainnet.name : NETWORKS.networks.arc.testnet.name,
+  nativeCurrency: isArcMainnet ? NETWORKS.networks.arc.mainnet.nativeCurrency : NETWORKS.networks.arc.testnet.nativeCurrency,
   rpcUrls: [ARC_RPC_URL],
-  // Arc mainnet's Blockscout is explorer.arc.io (its runtime config names
-  // network 5042; arcscan.app does not answer). testnet.arcscan.app redirects
-  // to explorer.testnet.arc.io and keeps the path.
-  blockExplorerUrls: [isArcMainnet ? 'https://explorer.arc.io' : 'https://testnet.arcscan.app'],
+  blockExplorerUrls: [isArcMainnet ? NETWORKS.networks.arc.mainnet.blockExplorer : NETWORKS.networks.arc.testnet.blockExplorer],
 } as const;
 
 // Single user-facing wallet chain: Arc (settlement). Base is legacy read-only

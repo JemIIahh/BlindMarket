@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { CONTRACT_ADDRESSES, DEPLOYMENT_BLOCKS } from './contractAddresses.js';
+import NETWORKS from './config/networks.json' with { type: 'json' };
 import { chainTier, readSettlementTier, tierMismatches, TIER_CHAIN_IDS } from './services/settlementTier.js';
 
 function required(key: string): string {
@@ -223,10 +224,11 @@ const OG_CHAIN_ID = parseInt(optional('OG_CHAIN_ID', tierChainId('0g', IS_PROD ?
 const OG_MAINNET = OG_CHAIN_ID === TIER_CHAIN_IDS['0g'].mainnet;
 
 // The settlement Base network's RPC and USDC. CCTP's Base leg reuses them when
-// it is the same network (see cctp below). PublicNode on both tiers: the
-// public base.org endpoints rate-limit log scans the indexers need.
-const BASE_RPC_URL = optional('BASE_RPC_URL', BASE_MAINNET ? 'https://base-rpc.publicnode.com' : 'https://base-sepolia-rpc.publicnode.com');
-const BASE_USDC_ADDRESS = optional('BASE_USDC_ADDRESS', BASE_MAINNET ? '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' : '0x036CbD53842c5426634e7929541eC2318f3dCF7e');
+// it is the same network (see cctp below). Defaults are sourced from
+// config/networks.json (the shared network config) so backend, frontend,
+// CLI, and MCP stay aligned.
+const BASE_RPC_URL = optional('BASE_RPC_URL', BASE_MAINNET ? NETWORKS.networks.base.mainnet.rpcUrl : NETWORKS.networks.base.testnet.rpcUrl);
+const BASE_USDC_ADDRESS = optional('BASE_USDC_ADDRESS', BASE_MAINNET ? NETWORKS.networks.base.mainnet.usdc : NETWORKS.networks.base.testnet.usdc);
 
 // Arc network tasks settle on. Unlike 0G and Base, its default does not follow
 // NODE_ENV: production has posted on Arc testnet since Arc became the posting
@@ -234,17 +236,16 @@ const BASE_USDC_ADDRESS = optional('BASE_USDC_ADDRESS', BASE_MAINNET ? '0x833589
 const ARC_CHAIN_ID = parseInt(optional('ARC_CHAIN_ID', tierChainId('arc', TIER_CHAIN_IDS.arc.testnet)), 10);
 const ARC_MAINNET = ARC_CHAIN_ID === TIER_CHAIN_IDS.arc.mainnet;
 
-/** PublicNode's Arc mainnet RPC. It answered chain 5042 on 2026-09-26. */
-export const ARC_MAINNET_PUBLIC_RPC_URL = 'https://arc-rpc.publicnode.com';
+/** Arc mainnet RPC, sourced from config/networks.json. */
+export const ARC_MAINNET_PUBLIC_RPC_URL = NETWORKS.networks.arc.mainnet.rpcUrl;
 /**
- * PublicNode on both tiers. The previous testnet default
- * (arc-testnet.drpc.org, free plan) rejects eth_getLogs spans over 100
- * blocks, which wedged the Arc indexer (500-block chunks); PublicNode
- * answered 10k-block spans cleanly on 2026-09-26.
+ * Arc RPC. Defaults are read from config/networks.json so all packages
+ * (backend, frontend, CLI, MCP) share the same endpoint table. Env vars
+ * still override per-deployment.
  */
-const ARC_RPC_URL = optional('ARC_RPC_URL', ARC_MAINNET ? ARC_MAINNET_PUBLIC_RPC_URL : 'https://arc-testnet-rpc.publicnode.com');
+const ARC_RPC_URL = optional('ARC_RPC_URL', ARC_MAINNET ? NETWORKS.networks.arc.mainnet.rpcUrl : NETWORKS.networks.arc.testnet.rpcUrl);
 // USDC's ERC-20 view has this address on Arc mainnet and testnet alike.
-const ARC_USDC_ADDRESS = optional('ARC_USDC_ADDRESS', '0x3600000000000000000000000000000000000000');
+const ARC_USDC_ADDRESS = optional('ARC_USDC_ADDRESS', NETWORKS.networks.arc.mainnet.usdc);
 
 // CCTP moves USDC into and out of the user's Arc wallet, so Arc is one leg of
 // every transfer and the CCTP tier is Arc's. It used to be Base's, from when
@@ -342,9 +343,9 @@ export const config = {
   // and production ignores the flag entirely. See services/verification.ts.
   allowInsecureLocalVerify: optional('ALLOW_INSECURE_LOCAL_VERIFY', 'false').toLowerCase() === 'true',
 
-  // 0G Chain (agent infra — TaskRegistry, Reputation, INFT). PublicNode serves
-  // mainnet only (verified 2026-09-26); testnet stays on the official endpoint.
-  ogRpcUrl: optional('OG_RPC_URL', OG_MAINNET ? 'https://0g-rpc.publicnode.com' : 'https://evmrpc-testnet.0g.ai'),
+  // 0G Chain (agent infra — TaskRegistry, Reputation, INFT). Defaults from
+  // config/networks.json (shared with frontend, CLI, MCP).
+  ogRpcUrl: optional('OG_RPC_URL', OG_MAINNET ? NETWORKS.networks.og.mainnet.rpcUrl : NETWORKS.networks.og.testnet.rpcUrl),
   ogChainId: OG_CHAIN_ID,
 
   // Base Chain (settlement — BlindEscrow, USDC payouts)
@@ -582,21 +583,21 @@ export const config = {
     // the CCTP tier, read through its own RPC.
     baseRpcUrl: optional('CCTP_BASE_RPC_URL', BASE_MAINNET === CCTP_MAINNET
       ? BASE_RPC_URL
-      : CCTP_MAINNET ? 'https://base-rpc.publicnode.com' : 'https://base-sepolia-rpc.publicnode.com'),
+      : (CCTP_MAINNET ? NETWORKS.networks.base.mainnet.rpcUrl : NETWORKS.networks.base.testnet.rpcUrl)),
     baseUsdcAddress: optional('CCTP_BASE_USDC_ADDRESS', BASE_MAINNET === CCTP_MAINNET
       ? BASE_USDC_ADDRESS
-      : CCTP_MAINNET ? '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' : '0x036CbD53842c5426634e7929541eC2318f3dCF7e'),
+      : (CCTP_MAINNET ? NETWORKS.networks.base.mainnet.usdc : NETWORKS.networks.base.testnet.usdc)),
     // Ethereum leg — Base already has baseRpcUrl/baseChainId/baseUsdcAddress
     // above; CCTP is the first feature needing a second EVM chain, so its
     // config lives here rather than growing the top-level config with an
     // ethereum* prefix used nowhere else.
     ethereumRpcUrl: optional('CCTP_ETHEREUM_RPC_URL', CCTP_MAINNET
-      ? 'https://ethereum-rpc.publicnode.com'
-      : 'https://ethereum-sepolia-rpc.publicnode.com'),
-    ethereumChainId: parseInt(optional('CCTP_ETHEREUM_CHAIN_ID', CCTP_MAINNET ? '1' : '11155111'), 10),
+      ? NETWORKS.cctp.ethereum.mainnet.rpcUrl
+      : NETWORKS.cctp.ethereum.testnet.rpcUrl),
+    ethereumChainId: parseInt(optional('CCTP_ETHEREUM_CHAIN_ID', CCTP_MAINNET ? String(NETWORKS.cctp.ethereum.mainnet.chainId) : String(NETWORKS.cctp.ethereum.testnet.chainId)), 10),
     ethereumUsdcAddress: optional('CCTP_ETHEREUM_USDC_ADDRESS', CCTP_MAINNET
-      ? '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'
-      : '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238'),
+      ? NETWORKS.cctp.ethereum.mainnet.usdc
+      : NETWORKS.cctp.ethereum.testnet.usdc),
     // Arbitrum and Optimism (OP Mainnet) — both Fast-Transfer-eligible per
     // Circle's domain table (domains 3 and 2 respectively), so they slot
     // into the same single code path as Base/Ethereum with no new
@@ -607,19 +608,19 @@ export const config = {
     // hand — a materially different (and much heavier) feature than "add a
     // chain config entry." Revisit only alongside a real automated relayer.
     arbitrumRpcUrl: optional('CCTP_ARBITRUM_RPC_URL', CCTP_MAINNET
-      ? 'https://arb1.arbitrum.io/rpc'
-      : 'https://sepolia-rollup.arbitrum.io/rpc'),
-    arbitrumChainId: parseInt(optional('CCTP_ARBITRUM_CHAIN_ID', CCTP_MAINNET ? '42161' : '421614'), 10),
+      ? NETWORKS.cctp.arbitrum.mainnet.rpcUrl
+      : NETWORKS.cctp.arbitrum.testnet.rpcUrl),
+    arbitrumChainId: parseInt(optional('CCTP_ARBITRUM_CHAIN_ID', CCTP_MAINNET ? String(NETWORKS.cctp.arbitrum.mainnet.chainId) : String(NETWORKS.cctp.arbitrum.testnet.chainId)), 10),
     arbitrumUsdcAddress: optional('CCTP_ARBITRUM_USDC_ADDRESS', CCTP_MAINNET
-      ? '0xaf88d065e77c8cC2239327C5EDb3A432268e5831'
-      : '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d'),
+      ? NETWORKS.cctp.arbitrum.mainnet.usdc
+      : NETWORKS.cctp.arbitrum.testnet.usdc),
     optimismRpcUrl: optional('CCTP_OPTIMISM_RPC_URL', CCTP_MAINNET
-      ? 'https://mainnet.optimism.io'
-      : 'https://sepolia.optimism.io'),
-    optimismChainId: parseInt(optional('CCTP_OPTIMISM_CHAIN_ID', CCTP_MAINNET ? '10' : '11155420'), 10),
+      ? NETWORKS.cctp.optimism.mainnet.rpcUrl
+      : NETWORKS.cctp.optimism.testnet.rpcUrl),
+    optimismChainId: parseInt(optional('CCTP_OPTIMISM_CHAIN_ID', CCTP_MAINNET ? String(NETWORKS.cctp.optimism.mainnet.chainId) : String(NETWORKS.cctp.optimism.testnet.chainId)), 10),
     optimismUsdcAddress: optional('CCTP_OPTIMISM_USDC_ADDRESS', CCTP_MAINNET
-      ? '0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85'
-      : '0x5fd84259d66Cd46123540766Be93DFE6D43130D7'),
+      ? NETWORKS.cctp.optimism.mainnet.usdc
+      : NETWORKS.cctp.optimism.testnet.usdc),
     // Polygon PoS (domain 7) — CCTP works on it, but Circle offers no Fast
     // Transfer / Forwarding Service there, so a burn to/from it does not
     // auto-complete the destination mint (operator self-relays). Marked

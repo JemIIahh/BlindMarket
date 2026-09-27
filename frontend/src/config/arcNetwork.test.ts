@@ -35,8 +35,8 @@ describe('Arc network', () => {
   it('is Arc testnet with no VITE_NETWORK, as a local testnet build', async () => {
     const c = await load();
     expect(c.ARC_CHAIN_ID).toBe(5042002);
-    expect(c.arcChain).toMatchObject({ id: 5042002, name: 'Arc Testnet', rpcUrls: { default: { http: ['https://arc-testnet-rpc.publicnode.com'] } } });
-    expect(c.ARC_RPC_URL).toBe('https://arc-testnet-rpc.publicnode.com');
+    expect(c.arcChain).toMatchObject({ id: 5042002, name: 'Arc Testnet', rpcUrls: { default: { http: ['https://rpc.testnet.arc.io'] } } });
+    expect(c.ARC_RPC_URL).toBe('https://rpc.testnet.arc.io');
     expect(c.SETTLEMENT_CCTP_CHAIN_KEY).toBe('arc-testnet');
     expect(c.ARC_CHAIN_CONFIG).toMatchObject({ chainId: '0x4cef52', chainName: 'Arc Testnet', blockExplorerUrls: ['https://testnet.arcscan.app'] });
     expect(c.ARC_AGENT_FACTORY_ADDRESS).toBe(TESTNET.agentFactory);
@@ -62,7 +62,7 @@ describe('Arc network', () => {
       id: 5042,
       name: 'Arc',
       nativeCurrency: { symbol: 'USDC', decimals: 18 },
-      rpcUrls: { default: { http: ['https://arc-rpc.publicnode.com'] } },
+      rpcUrls: { default: { http: ['https://rpc.mainnet.arc.io'] } },
       blockExplorers: { default: { url: 'https://explorer.arc.io' } },
     });
     expect(c.ARC_CHAIN_CONFIG).toMatchObject({ chainId: '0x13b2', chainName: 'Arc', blockExplorerUrls: ['https://explorer.arc.io'] });
@@ -76,8 +76,8 @@ describe('Arc network', () => {
     const c = await load({ VITE_ARC_RPC_URL: 'https://arc.example/v1/secret-key' });
     expect(c.ARC_RPC_URL).toBe('https://arc.example/v1/secret-key');
     expect(c.arcChain.rpcUrls.default.http).toEqual(['https://arc.example/v1/secret-key']);
-    expect(c.ARC_PUBLIC_RPC_URL).toBe('https://arc-testnet-rpc.publicnode.com');
-    expect(c.arcPublicRpcUrl(5042)).toBe('https://arc-rpc.publicnode.com');
-    expect(c.arcPublicRpcUrl(5042002)).toBe('https://arc-testnet-rpc.publicnode.com');
+    expect(c.ARC_PUBLIC_RPC_URL).toBe('https://rpc.testnet.arc.io');
+    expect(c.arcPublicRpcUrl(5042)).toBe('https://rpc.mainnet.arc.io');
+    expect(c.arcPublicRpcUrl(5042002)).toBe('https://rpc.testnet.arc.io');
   });
 });

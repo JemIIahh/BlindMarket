@@ -213,6 +213,18 @@ const TARGETS = [
   path.resolve(import.meta.dirname, "../../frontend/src/config/contractAddresses.ts"),
 ];
 
+/**
+ * Single source of truth for chain metadata, RPC endpoints, and contract addresses.
+ * Propagated to each consumer from config/networks.json. Backend and frontend Docker
+ * images do not ship with /config/ so the file is mirrored into their build trees
+ * here; contract addresses already follow the same pattern.
+ */
+const NETWORKS_SOURCE = path.resolve(import.meta.dirname, "../../config/networks.json");
+const NETWORKS_TARGETS = [
+  path.resolve(import.meta.dirname, "../../backend/src/config/networks.json"),
+  path.resolve(import.meta.dirname, "../../frontend/src/config/networks.json"),
+];
+
 export async function main() {
   const check = process.env.CHECK === "1";
   if (process.env.DEPLOYMENT_SET) {
@@ -228,6 +240,19 @@ export async function main() {
       fs.mkdirSync(path.dirname(target), { recursive: true });
       fs.writeFileSync(target, content);
       console.log("wrote", path.relative(process.cwd(), target));
+    }
+  }
+  if (fs.existsSync(NETWORKS_SOURCE)) {
+    const networksContent = fs.readFileSync(NETWORKS_SOURCE, "utf-8");
+    for (const target of NETWORKS_TARGETS) {
+      const existing = fs.existsSync(target) ? fs.readFileSync(target, "utf-8") : null;
+      if (check) {
+        if (existing !== networksContent) { console.error(`STALE: ${path.relative(process.cwd(), target)}`); stale = true; }
+      } else {
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.writeFileSync(target, networksContent);
+        console.log("wrote", path.relative(process.cwd(), target));
+      }
     }
   }
   if (check) {

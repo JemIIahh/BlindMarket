@@ -182,8 +182,8 @@ export const BASE_RPC: Readonly<Record<number, string>> = {
  *  Testnet share the chain key 'arc', so the id the backend names picks one. */
 export const PUBLIC_RPC: Readonly<Record<number, string>> = {
   ...BASE_RPC,
-  5042: 'https://arc-rpc.publicnode.com',
-  5042002: 'https://arc-testnet-rpc.publicnode.com',
+  5042: 'https://rpc.mainnet.arc.io',
+  5042002: 'https://rpc.testnet.arc.io',
 };
 
 /** How long a discovered mode is trusted before being re-asked. Short enough

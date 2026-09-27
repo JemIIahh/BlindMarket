@@ -149,10 +149,10 @@ test('a chain added later is paid through the relay once the backend describes i
     (e) => e.code === 'RPC_UNKNOWN' && /BLINDMARKET_ZETA_RPC_URL/.test(e.message),
   );
   // Arc testnet has a public RPC, keyed by the chain id the backend names.
-  assert.equal((await discoverSettlement({ ...backend(data), env: {} })).rpcUrl, 'https://arc-testnet-rpc.publicnode.com');
+  assert.equal((await discoverSettlement({ ...backend(data), env: {} })).rpcUrl, 'https://rpc.testnet.arc.io');
   // So does Arc mainnet, under the same chain key: only the id tells them apart.
   const mainnet = newBridge({ postingChain: 'arc', chains: [...chainsFixture().map((c) => ({ ...c, postable: false })), { ...arc, chainId: 5042, tier: 'mainnet' }] });
-  assert.equal((await discoverSettlement({ ...backend(mainnet), env: {} })).rpcUrl, 'https://arc-rpc.publicnode.com');
+  assert.equal((await discoverSettlement({ ...backend(mainnet), env: {} })).rpcUrl, 'https://rpc.mainnet.arc.io');
   const s = await discoverSettlement({ ...backend(data), env: { BLINDMARKET_ARC_RPC_URL: 'http://127.0.0.1:9' } });
   assert.equal(s.payment, 'relay-erc20');
   assert.equal(s.mode, 'arc');

@@ -104,7 +104,7 @@ describe('Arc follows ARC_CHAIN_ID, and CCTP follows Arc', () => {
   it('NODE_ENV=production moves Arc to mainnet by default; ARC_CHAIN_ID keeps testnet when set', async () => {
     // NODE_ENV=production now derives tier=mainnet, so Arc follows to mainnet.
     const { config } = await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '84532' });
-    expect(config).toMatchObject({ arcChainId: 5042, arcRpcUrl: 'https://arc-rpc.publicnode.com' });
+    expect(config).toMatchObject({ arcChainId: 5042, arcRpcUrl: 'https://rpc.mainnet.arc.io' });
     expect(config.cctp).toMatchObject({ mainnet: true, arcChainId: 5042 });
     // Explicit ARC_CHAIN_ID still wins for the mixed-shape legacy stacks.
     const testnet = await load({ NODE_ENV: 'production', BASE_CHAIN_ID: '84532', ARC_CHAIN_ID: '5042002' });
@@ -191,7 +191,7 @@ describe('Arc follows ARC_CHAIN_ID, and CCTP follows Arc', () => {
     // mainnet. A keyed URL silences the public-RPC warning.
     const env = { NODE_ENV: 'production', ARC_CHAIN_ID: '5042', ARC_ESCROW_ADDRESS: '0x1111111111111111111111111111111111111111' };
     (await load(env)).assertBootConfig();
-    expect(warned.join('\n')).toMatch(/Arc mainnet is read through the public RPC https:\/\/arc-rpc\.publicnode\.com, the default/);
+    expect(warned.join('\n')).toMatch(/Arc mainnet is read through the public RPC https:\/\/rpc\.mainnet\.arc\.io, the default/);
     warned.length = 0;
     (await load({ ...env, ARC_RPC_URL: 'https://arc-mainnet.example/key' })).assertBootConfig();
     expect(warned.join('\n')).not.toMatch(/public RPC/);

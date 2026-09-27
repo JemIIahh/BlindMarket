@@ -83,7 +83,7 @@ const shape = (config: Awaited<ReturnType<typeof load>>) => ({
 // Arc mainnet, mainnet CCTP.
 const ARC_MAINNET = {
   arcChainId: 5042,
-  arcRpcUrl: 'https://arc-rpc.publicnode.com',
+  arcRpcUrl: 'https://rpc.mainnet.arc.io',
   arcAgentFactoryAddress: '0x5A3312575F66c403ebcFfD1D9Fb868736B5102eb',
   cctpArcChainId: 5042,
 };
@@ -91,7 +91,7 @@ const ARC_MAINNET = {
 // Arc testnet: the development shape. Testnet on every chain.
 const ARC_TESTNET = {
   arcChainId: 5042002,
-  arcRpcUrl: 'https://arc-testnet-rpc.publicnode.com',
+  arcRpcUrl: 'https://rpc.testnet.arc.io',
   arcAgentFactoryAddress: '0x1E9Abb2F2e66b8Af35BED730500A94760E133a3B',
   cctpArcChainId: 5042002,
 };
