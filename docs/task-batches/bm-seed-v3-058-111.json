@@ -1,0 +1,1535 @@
+[
+  {
+    "idempotencyKey": "bm-seed-v3-058",
+    "title": "3 Product Descriptions",
+    "category": "Content & Marketing",
+    "instructions": "3 Product Descriptions\n\nWrite 60-word product descriptions for an Ankara tote bag, raw shea butter and a 20,000 mAh power bank.",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "shea",
+        "Ankara"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-059",
+    "title": "USDC on Arc for Merchants",
+    "category": "Tech",
+    "instructions": "USDC on Arc for Merchants\n\nWrite a 150-word pitch explaining to a Lagos merchant why accepting USDC on Arc can cost less than card payments.",
+    "privacy": "public",
+    "locationZone": "NG",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "USDC",
+        "merchant"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-060",
+    "title": "OpenAPI Spec for a Task API",
+    "category": "Software Services",
+    "instructions": "OpenAPI Spec for a Task API\n\nWrite an OpenAPI 3.1 YAML spec for GET /tasks, POST /tasks, GET /tasks/{id} and POST /tasks/{id}/accept under paths, with schemas and bearer auth.",
+    "privacy": "private",
+    "routingSummary": "OpenAPI Spec for a Task API\n\nAn OpenAPI 3.1 YAML spec for a four-endpoint task API with schemas and bearer auth.",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 172800,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 600,
+      "contains_keywords": [
+        "openapi",
+        "paths"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-061",
+    "title": "Line Icon Set",
+    "category": "Art & Motion",
+    "instructions": "Line Icon Set\n\nCreate 6 matching 24px line icons as SVG: wallet, lock, robot, clock, coins and a checkmark shield. Give each a 0 0 24 24 viewBox and stroke=\"currentColor\".",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 300,
+      "contains_keywords": [
+        "viewBox",
+        "currentColor"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-062",
+    "title": "Bakery Break-Even",
+    "category": "Finance",
+    "instructions": "Bakery Break-Even\n\nA bakery sells bread at 1,500 NGN with a variable cost of 850 NGN and fixed costs of 620,000 NGN a month. Find the monthly and daily (26 days) break-even volume.",
+    "privacy": "private",
+    "routingSummary": "Bakery Break-Even\n\nMonthly and daily break-even volume for a small bakery, from price and cost figures.",
+    "locationZone": "NG",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "break-even"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-063",
+    "title": "Smart Wallets Explained",
+    "category": "Crypto",
+    "instructions": "Smart Wallets Explained\n\nExplain account abstraction and smart wallets in under 150 words, with 3 benefits for everyday users, including how gas fees are handled.",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "smart wallet",
+        "gas"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-064",
+    "title": "Next FOMC: Market Odds",
+    "category": "Prediction Markets",
+    "instructions": "Next FOMC: Market Odds\n\nFind the prediction market odds for the next FOMC rate decision on Polymarket or Kalshi and compare them with CME FedWatch. Cite every source as a full URL (https://...).",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 300,
+      "contains_keywords": [
+        "FOMC",
+        "http"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-065",
+    "title": "0G Quiz",
+    "category": "Tech",
+    "instructions": "0G Quiz\n\nWrite a 10-question multiple-choice quiz about 0G with answers, based on the official docs.",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "0G",
+        "answer"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-066",
+    "title": "Football Academy Social Plan",
+    "category": "Sports",
+    "instructions": "Football Academy Social Plan\n\nCreate a 2-week social media plan for a football academy in Abuja: matchday posts, player spotlights and 3 sponsor posts.",
+    "privacy": "private",
+    "routingSummary": "Football Academy Social Plan\n\nA 2-week social media plan for a youth football academy: matchday, player and sponsor posts.",
+    "locationZone": "NG",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 300,
+      "contains_keywords": [
+        "matchday",
+        "post"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-067",
+    "title": "UK Visitor Visa Checklist",
+    "category": "Business",
+    "instructions": "UK Visitor Visa Checklist\n\nList the documents, fee and processing time for a UK Standard Visitor visa applied for from Nigeria, citing gov.uk.",
+    "privacy": "public",
+    "locationZone": "NG",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 300,
+      "contains_keywords": [
+        "gov.uk",
+        "fee"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-068",
+    "title": "2-Week Content Calendar",
+    "category": "Content & Marketing",
+    "instructions": "2-Week Content Calendar\n\nCreate a 14-day Instagram content plan for a skincare brand with post type (reel, carousel or story), topic and caption hook for each day.",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 300,
+      "contains_keywords": [
+        "reel",
+        "day"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-069",
+    "title": "Debug a Node.js Error",
+    "category": "Software Services",
+    "instructions": "Debug a Node.js Error\n\nFix \"TypeError: Cannot read properties of undefined (reading 'map')\" thrown by: const data = res.json(); render(data.tasks); Explain the cause and show the fixed code (it may need await).",
+    "privacy": "private",
+    "routingSummary": "Debug a Node.js Error\n\nFix a Node.js TypeError on reading .map of undefined after a fetch, and explain the cause.",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "await",
+        "json"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-070",
+    "title": "Stablecoin Supply Snapshot",
+    "category": "Crypto",
+    "instructions": "Stablecoin Supply Snapshot\n\nReport the current market cap of the top 5 stablecoins (such as USDT and USDC) and their 30-day change. Cite every source as a full URL (https://...).",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "USDT",
+        "USDC",
+        "http"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-071",
+    "title": "US Inflation Snapshot",
+    "category": "Finance",
+    "instructions": "US Inflation Snapshot\n\nSummarize the latest US CPI release: headline and core inflation, year-on-year and month-on-month, with the release date. Cite every source as a full URL (https://...).",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "CPI",
+        "http"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-072",
+    "title": "AI News This Week",
+    "category": "Tech",
+    "instructions": "AI News This Week\n\nSummarize the 5 biggest AI announcements this week (model releases, funding, policy), with dates. Cite every source as a full URL (https://...).",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 300,
+      "contains_keywords": [
+        "model",
+        "http"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-073",
+    "title": "Super Eagles Update",
+    "category": "Sports",
+    "instructions": "Super Eagles Update\n\nSummarize the latest results, next fixtures and squad news for the Super Eagles, Nigeria's national team. Cite every source as a full URL (https://...).",
+    "privacy": "public",
+    "locationZone": "NG",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 300,
+      "contains_keywords": [
+        "Nigeria",
+        "http"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-074",
+    "title": "Kalshi vs Polymarket",
+    "category": "Prediction Markets",
+    "instructions": "Kalshi vs Polymarket\n\nCompare Kalshi and Polymarket on regulation, fees, market types and who can use them. Cite every source as a full URL (https://...).",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 300,
+      "contains_keywords": [
+        "Kalshi",
+        "Polymarket",
+        "fee"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-075",
+    "title": "BlindMarket Logo Reveal",
+    "category": "Art & Motion",
+    "instructions": "BlindMarket Logo Reveal\n\nCreate a 3-second animated SVG logo reveal for the BlindMarket wordmark, with a lock opening into the name. Colours #09090b, #fafaf9 and #b8860b; font IBM Plex Sans. Deliver one inline <svg> animated with CSS @keyframes.",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 172800,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 600,
+      "contains_keywords": [
+        "<svg",
+        "@keyframes"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-076",
+    "title": "7-Day Budget Meal Plan",
+    "category": "Lifestyle",
+    "instructions": "7-Day Budget Meal Plan\n\nPlan 7 days of Nigerian meals (breakfast, lunch and dinner) for one person on 35,000 NGN, with a grocery list and estimated prices.",
+    "privacy": "public",
+    "locationZone": "NG",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 300,
+      "contains_keywords": [
+        "breakfast",
+        "grocery"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-077",
+    "title": "SQL Leaderboard Query",
+    "category": "Software Services",
+    "instructions": "SQL Leaderboard Query\n\nWrite a Postgres query (SELECT with GROUP BY) returning the top 10 agents by total USDC earned, from tasks(executor_id, reward_usdc, status) and agents(id, name), counting completed tasks only.",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "SELECT",
+        "GROUP BY"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-078",
+    "title": "x402 Payments Explained",
+    "category": "Tech",
+    "instructions": "x402 Payments Explained\n\nExplain the x402 payment protocol and how AI agents use it to pay for APIs, in under 200 words. Cite every source as a full URL (https://...).",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "x402",
+        "402"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-079",
+    "title": "Laundry Price List",
+    "category": "Business",
+    "instructions": "Laundry Price List\n\nCreate a laundry price list in NGN for 8 common items, plus an express surcharge.",
+    "privacy": "private",
+    "routingSummary": "Laundry Price List\n\nA laundry price list in NGN for 8 common items with an express surcharge.",
+    "locationZone": "NG",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "NGN",
+        "express"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-080",
+    "title": "PEPE Risk Profile",
+    "category": "Crypto",
+    "instructions": "PEPE Risk Profile\n\nGive a short risk profile of PEPE: holder concentration (the top holders' share), liquidity, contract permissions and exchange listings, with a 1-10 risk score. Cite every source as a full URL (https://...).",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 300,
+      "contains_keywords": [
+        "holders",
+        "liquidity",
+        "http"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-081",
+    "title": "Cold Email to Hotels",
+    "category": "Content & Marketing",
+    "instructions": "Cold Email to Hotels\n\nWrite a cold email under 120 words offering hotels a WhatsApp booking assistant, with a subject line.",
+    "privacy": "private",
+    "routingSummary": "Cold Email to Hotels\n\nA short cold email with a subject line, pitching a WhatsApp booking assistant to hotels.",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "subject"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-082",
+    "title": "Salon Service Pricing",
+    "category": "Finance",
+    "instructions": "Salon Service Pricing\n\nSet prices at a 60% margin for braids (cost 9,000), manicure (2,500), facial (6,000), wig install (8,000) and makeup (7,000) NGN, rounded to friendly numbers.",
+    "privacy": "private",
+    "routingSummary": "Salon Service Pricing\n\nSet salon service prices at a 60% margin from cost, rounded to friendly numbers.",
+    "locationZone": "NG",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "braids",
+        "price"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-083",
+    "title": "Premier League Attendance",
+    "category": "Sports",
+    "instructions": "Premier League Attendance\n\nList the 5 Premier League clubs with the highest average home attendance this season. Cite every source as a full URL (https://...).",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "attendance",
+        "http"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-084",
+    "title": "Agent Frameworks Compared",
+    "category": "Tech",
+    "instructions": "Agent Frameworks Compared\n\nCompare LangGraph, CrewAI, AutoGen and the OpenAI Agents SDK on language, multi-agent support and learning curve.",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 300,
+      "contains_keywords": [
+        "LangGraph",
+        "CrewAI"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-085",
+    "title": "ETH Staking Yields Compared",
+    "category": "Crypto",
+    "instructions": "ETH Staking Yields Compared\n\nList the current ETH staking APR on Lido, Rocket Pool, Coinbase and Binance, with lockup terms. Cite every source as a full URL (https://...).",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 300,
+      "contains_keywords": [
+        "staking",
+        "APR",
+        "http"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-086",
+    "title": "Bitcoin Price Market Read",
+    "category": "Prediction Markets",
+    "instructions": "Bitcoin Price Market Read\n\nPick an active Polymarket market on Bitcoin's month-end price. Report the YES odds and the current BTC price, and say whether the odds look high or low, with reasons. Cite every source as a full URL (https://...).",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 300,
+      "contains_keywords": [
+        "Bitcoin",
+        "YES",
+        "http"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-087",
+    "title": "Token-Bucket Rate Limiter",
+    "category": "Software Services",
+    "instructions": "Token-Bucket Rate Limiter\n\nImplement a token-bucket rate limiter in TypeScript with per-key buckets, a configurable capacity and refill rate, and a tryConsume() method, plus 4 tests.",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 300,
+      "contains_keywords": [
+        "capacity",
+        "refill"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-088",
+    "title": "SEO Keywords: Abuja Short-Lets",
+    "category": "Content & Marketing",
+    "instructions": "SEO Keywords: Abuja Short-Lets\n\nList 20 search keywords for short-let apartments in Abuja, grouped by search intent.",
+    "privacy": "public",
+    "locationZone": "NG",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "intent",
+        "Abuja"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-089",
+    "title": "Champions League Matchday Recap",
+    "category": "Sports",
+    "instructions": "Champions League Matchday Recap\n\nRecap the latest Champions League matchday: every result with its goalscorers, the top scorers and 3 key talking points.",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 300,
+      "contains_keywords": [
+        "goals",
+        "result"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-090",
+    "title": "Expense Categorization",
+    "category": "Finance",
+    "instructions": "Expense Categorization\n\nCategorize and total these expenses (NGN), using categories such as transport, groceries, bills and subscriptions: Uber 4,200; Shoprite 18,500; Netflix 4,400; Fuel 22,000; MTN data 5,000; Rent 120,000; Bolt 3,100; DSTV 9,300; Spar 14,700; Gym 15,000.",
+    "privacy": "private",
+    "routingSummary": "Expense Categorization\n\nCategorize and total a month of 10 personal expenses in NGN.",
+    "locationZone": "NG",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 300,
+      "contains_keywords": [
+        "total",
+        "transport"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-091",
+    "title": "0G Compute Quickstart",
+    "category": "Tech",
+    "instructions": "0G Compute Quickstart\n\nUsing 0G's docs, write a step-by-step guide to running AI inference on the 0G Compute Network, from choosing a provider to getting a response, with code snippets. Link the docs as full URLs (https://...).",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 172800,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 600,
+      "contains_keywords": [
+        "inference",
+        "provider",
+        "http"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-092",
+    "title": "Impermanent Loss Example",
+    "category": "Crypto",
+    "instructions": "Impermanent Loss Example\n\nCalculate the impermanent loss for a 50/50 ETH/USDC pool entered at ETH = 2,000 if ETH moves to 3,000, and compare it with simply holding.",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "impermanent loss",
+        "pool"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-093",
+    "title": "E-commerce Reply Templates",
+    "category": "Business",
+    "instructions": "E-commerce Reply Templates\n\nWrite reply templates for 5 common e-commerce questions: order status, delivery fee, refund, wrong item and out of stock.",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "refund",
+        "delivery"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-094",
+    "title": "Fintech Brand Palette",
+    "category": "Art & Motion",
+    "instructions": "Fintech Brand Palette\n\nCreate a 6-colour fintech brand palette with hex codes (#RRGGBB) and WCAG contrast ratios for the text colours.",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "#",
+        "contrast"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-095",
+    "title": "Bash Backup Script",
+    "category": "Software Services",
+    "instructions": "Bash Backup Script\n\nWrite a bash script that backs up a folder to a timestamped .tar.gz and keeps only the last 7 backups, plus a daily crontab line.",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "tar",
+        "crontab"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-096",
+    "title": "BTC Weekly Outlook",
+    "category": "Crypto",
+    "instructions": "BTC Weekly Outlook\n\nSummarize Bitcoin's past 7 days: price change, key support and resistance levels, and the 3 news events that moved it. Cite every source as a full URL (https://...).",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 300,
+      "contains_keywords": [
+        "Bitcoin",
+        "support",
+        "http"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-097",
+    "title": "Gifts Under 20,000 NGN",
+    "category": "Lifestyle",
+    "instructions": "Gifts Under 20,000 NGN\n\nSuggest 10 gifts under 20,000 NGN for colleagues, parents and friends, with where to buy each.",
+    "privacy": "public",
+    "locationZone": "NG",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "NGN"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-098",
+    "title": "Top Polymarket Markets",
+    "category": "Prediction Markets",
+    "instructions": "Top Polymarket Markets\n\nList the 5 highest-volume Polymarket markets right now with the current YES price, volume and resolution date. Cite every source as a full URL (https://...).",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 300,
+      "contains_keywords": [
+        "Polymarket",
+        "volume",
+        "http"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-099",
+    "title": "0G in 150 Words",
+    "category": "Tech",
+    "instructions": "0G in 150 Words\n\nExplain what 0G is and its main parts (chain, storage, compute, data availability) in under 150 words, citing the official docs.",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "0G",
+        "storage",
+        "compute"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-100",
+    "title": "Restaurant Instagram Captions",
+    "category": "Content & Marketing",
+    "instructions": "Restaurant Instagram Captions\n\nWrite 5 Instagram captions for a Lekki restaurant known for jollof and Friday live music, each under 40 words and with 2-3 hashtags (#).",
+    "privacy": "public",
+    "locationZone": "NG",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "jollof",
+        "#"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-101",
+    "title": "Loan Repayment Schedule",
+    "category": "Finance",
+    "instructions": "Loan Repayment Schedule\n\nCompute the monthly payment on a 5,000,000 NGN loan at 24% a year over 24 months, and show the first 6 rows of the repayment schedule with interest, principal and balance columns.",
+    "privacy": "private",
+    "routingSummary": "Loan Repayment Schedule\n\nMonthly payment and the first 6 rows of an amortization schedule for a 24-month loan.",
+    "locationZone": "NG",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 300,
+      "contains_keywords": [
+        "payment",
+        "interest",
+        "principal"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-102",
+    "title": "Expected Goals (xG) Explained",
+    "category": "Sports",
+    "instructions": "Expected Goals (xG) Explained\n\nExplain expected goals (xG) in under 150 words with a simple example, and why it predicts results better than shot counts.",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "xG"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-103",
+    "title": "README for a CLI Tool",
+    "category": "Software Services",
+    "instructions": "README for a CLI Tool\n\nWrite a README for \"linkbrief\", a Node.js CLI that summarizes any URL into 5 bullets using an LLM API key. Include install and usage sections.",
+    "privacy": "private",
+    "routingSummary": "README for a CLI Tool\n\nA README with install and usage sections for a small Node.js summarizer CLI.",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 300,
+      "contains_keywords": [
+        "install",
+        "usage"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-104",
+    "title": "Arc vs Base for Payments",
+    "category": "Tech",
+    "instructions": "Arc vs Base for Payments\n\nCompare Arc and Base for USDC payments on fees, finality, wallet support and ecosystem, in one table. Cite every source as a full URL (https://...).",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 300,
+      "contains_keywords": [
+        "Arc",
+        "Base",
+        "fee"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-105",
+    "title": "Meeting Notes to Minutes",
+    "category": "Business",
+    "instructions": "Meeting Notes to Minutes\n\nTurn these notes into minutes with action items, owners and dates: \"payments done, needs review (Kene). newsletter Friday (Bisi). raise basic plan to 5k? next call Tue 4pm.\"",
+    "privacy": "private",
+    "routingSummary": "Meeting Notes to Minutes\n\nTurn short meeting notes into minutes with action items, owners and dates.",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "action",
+        "owner"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-106",
+    "title": "Largest Bridge Hacks",
+    "category": "Crypto",
+    "instructions": "Largest Bridge Hacks\n\nList the 5 largest cross-chain bridge hacks with date, amount lost and attack method, plus 3 lessons for users. Cite every source as a full URL (https://...).",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 300,
+      "contains_keywords": [
+        "bridge",
+        "hack",
+        "http"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-107",
+    "title": "Feature Teaser Video",
+    "category": "Art & Motion",
+    "instructions": "Feature Teaser Video\n\nCreate a 20-second teaser for an unreleased feature where one AI agent splits a job and hires 3 others. Deliver Remotion source code (registered as a <Composition>) and a storyboard, ending on \"Coming soon\".",
+    "privacy": "private",
+    "routingSummary": "Feature Teaser Video\n\nA 20-second Remotion teaser video with a storyboard for an upcoming product feature.",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 172800,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 1000,
+      "contains_keywords": [
+        "Composition",
+        "storyboard"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-108",
+    "title": "Prediction Market Glossary",
+    "category": "Prediction Markets",
+    "instructions": "Prediction Market Glossary\n\nDefine 12 prediction market terms (YES/NO shares, liquidity, spread, resolution, oracle and more) in one line each.",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "liquidity",
+        "resolution"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-109",
+    "title": "Odds to Probability",
+    "category": "Sports",
+    "instructions": "Odds to Probability\n\nConvert decimal odds of home 2.10, draw 3.40 and away 3.60 into the implied probability of each outcome and calculate the bookmaker margin.",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "probability",
+        "margin"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-110",
+    "title": "USD/NGN Rate Update",
+    "category": "Finance",
+    "instructions": "USD/NGN Rate Update\n\nReport today's official USD/NGN rate and how much it has moved over the past month. Cite every source as a full URL (https://...).",
+    "privacy": "public",
+    "locationZone": "NG",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "NGN",
+        "USD",
+        "http"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-111",
+    "title": "0G Ecosystem Projects",
+    "category": "Tech",
+    "instructions": "0G Ecosystem Projects\n\nList 10 projects building on 0G, with a one-line description and a link for each as a full URL (https://...).",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 300,
+      "contains_keywords": [
+        "0G",
+        "http"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  }
+]
