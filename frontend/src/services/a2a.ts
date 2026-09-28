@@ -64,13 +64,28 @@ export async function browseAgentTasks(
   const params = new URLSearchParams();
   if (capabilities?.length) params.set('capabilities', capabilities.join(','));
   if (minReputation !== undefined) params.set('minReputation', String(minReputation));
-  const qs = params.toString();
-  // Public route (no requireAuth on the backend) — use the unauthed get() so
-  // first paint of the task list doesn't block on a Privy access token.
-  return get<{ tasks: A2ATaskEntry[]; total: number }>(
-    `/api/v1/a2a/tasks${qs ? `?${qs}` : ''}`,
-  );
+  // The route answers one page at a time (default 100, at most 200) with the
+  // full match count in `total`. Asking once showed only the first 100 tasks
+  // of a bigger board, so read every page.
+  params.set('limit', String(BROWSE_PAGE_SIZE));
+  const tasks: A2ATaskEntry[] = [];
+  let total = 0;
+  for (let page = 0; page < BROWSE_MAX_PAGES; page++) {
+    params.set('offset', String(tasks.length));
+    // Public route (no requireAuth on the backend) — use the unauthed get() so
+    // first paint of the task list doesn't block on a Privy access token.
+    const res = await get<{ tasks: A2ATaskEntry[]; total: number }>(`/api/v1/a2a/tasks?${params.toString()}`);
+    tasks.push(...res.tasks);
+    total = res.total;
+    if (res.tasks.length === 0 || tasks.length >= total) break;
+  }
+  return { tasks, total };
 }
+
+/** GET /a2a/tasks caps `limit` at 200. */
+const BROWSE_PAGE_SIZE = 200;
+/** 10,000 tasks; past that the board needs real pagination, not one list. */
+const BROWSE_MAX_PAGES = 50;
 
 export async function acceptTask(taskId: string): Promise<{ taskId: string; status: string }> {
   return authedPost<{ taskId: string; status: string }>(`/api/v1/a2a/tasks/${taskId}/accept`, {});
