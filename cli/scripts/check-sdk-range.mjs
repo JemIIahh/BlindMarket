@@ -1,10 +1,11 @@
 // Publish guard. This CLI calls SDK methods that first shipped in
-// @blindmarket/sdk 0.7.0 (postTask, deployAgent's payFee, reviewResult) and
-// reads RefundResult.outcome, new in 0.8.0. CI builds against the local sdk,
+// @blindmarket/sdk 0.7.0 (postTask, deployAgent's payFee, reviewResult),
+// reads RefundResult.outcome, new in 0.8.0, and `post-tasks` / `finish-posts`
+// call postTasks and indexTasks, new in 0.9.0. CI builds against the local sdk,
 // which hid a range left at ^0.7.0: the build failed against the published
 // SDK, and a range that allows an SDK without them is refused here. Raise
 // MIN_MINOR with the range (`npm i @blindmarket/sdk@^0.X.0`) once 0.X is on npm.
-const MIN_MINOR = 8;
+const MIN_MINOR = 9;
 import { readFileSync } from 'node:fs';
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf-8'));

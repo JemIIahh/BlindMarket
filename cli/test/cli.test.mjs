@@ -31,6 +31,9 @@ const FEE_TERMS = { ...JSON.parse(readFileSync(new URL('../../fixtures/prod/depl
 const ARC = SETTLEMENT.chains.find((c) => c.chain === 'arc');
 /** Arc mainnet: a backend with ARC_CHAIN_ID=5042 names it 'arc' too, with the same USDC address. */
 const ARC_MAINNET_ID = 5042;
+/** Arc mainnet's own escrow (contracts/deployments/arc-mainnet.json): the SDK funds only a pinned deployment. */
+const MAINNET_ESCROW = getAddress('0xd2B819B57a9568Cb6bFc98C687F9a851EC8330C4');
+const escrowNow = () => getAddress(settlement.chains.find((c) => c.chain === 'arc').escrowAddress);
 const ESCROW = getAddress(ARC.escrowAddress);
 const USDC = getAddress(ARC.token.address);
 const TREASURY = getAddress(FEE_TERMS.recipient);
@@ -48,6 +51,11 @@ const ESCROW_CALLS = new Interface([
   'function claimTimeout(uint256 taskId)',
 ]);
 const createTaskData = (b) => ESCROW_CALLS.encodeFunctionData('createTask', [b.taskHash, b.token, b.amount, 'general', b.locationZone, b.duration]);
+// An escrow with createTasks (docs/BULK-POSTING.md), as the backend builds it for POST /tasks/batch.
+const BATCH_CALLS = new Interface([
+  'function createTasks(address token, tuple(bytes32 taskHash, uint256 amount, string category, string locationZone, uint256 duration, address verifierAgent)[] tasks)',
+]);
+const createTasksData = (b) => BATCH_CALLS.encodeFunctionData('createTasks', [b.token, b.tasks.map((t) => [t.taskHash, t.amount, 'general', t.locationZone, t.duration, '0x' + '00'.repeat(20)])]);
 const cancelData = (id) => ESCROW_CALLS.encodeFunctionData('cancelTask', [BigInt(id)]);
 const claimData = (id) => ESCROW_CALLS.encodeFunctionData('claimTimeout', [BigInt(id)]);
 
@@ -61,6 +69,7 @@ before(async () => {
       const parsed = JSON.parse(body);
       const one = ({ id, method, params }) => {
         let result;
+        chain.rpcCalls.push(method);
         switch (method) {
           case 'eth_chainId': result = '0x' + chain.served.toString(16); break;
           case 'eth_blockNumber': result = '0x10'; break;
@@ -81,9 +90,15 @@ before(async () => {
             result = tx.hash;
             break;
           }
+          case 'eth_getTransactionByHash': {
+            // Known while sent here or waiting in the mempool; a dropped transaction is unknown.
+            const known = chain.sent.some((t) => t.hash === params[0]) || chain.mempool.has(params[0]);
+            result = known ? { hash: params[0] } : null;
+            break;
+          }
           case 'eth_getTransactionReceipt': {
             // Only for a transaction this node has: one sent to it, or one a test mined.
-            const status = chain.sent.some((t) => t.hash === params[0]) ? '0x1' : chain.mined.get(params[0]);
+            const status = chain.mined.has(params[0]) ? chain.mined.get(params[0]) : chain.sent.some((t) => t.hash === params[0]) ? '0x1' : undefined;
             result = status === undefined ? null : {
               transactionHash: params[0], transactionIndex: '0x0', blockHash: '0x' + 'b'.repeat(64), blockNumber: '0x10',
               from: OWNER.address, to: ESCROW, contractAddress: null, cumulativeGasUsed: '0x5208', gasUsed: '0x5208',
@@ -107,11 +122,14 @@ after(() => rpc.close());
 let calls;
 let answers;
 let whoami;
+/** Task hashes the backend knows on-chain (GET /api/v1/tasks/:hash). */
+let onChain;
 /** What /health/settlement and /deploy-fee answer: production's, unless a test moves the backend. */
 let settlement;
 let feeTerms;
 beforeEach(() => {
-  chain = { served: ARC.chainId, allowance: 0n, sent: [], mined: new Map() };
+  chain = { served: ARC.chainId, allowance: 0n, sent: [], mined: new Map(), mempool: new Set(), rpcCalls: [] };
+  onChain = new Set();
   calls = [];
   answers = {};
   whoami = OWNER.address;
@@ -134,10 +152,17 @@ globalThis.fetch = async (url, init = {}) => {
   if (path === '/api/v1/api-keys/whoami') return json({ address: whoami, addresses: [whoami] });
   if (path.startsWith('/api/v1/a2a/executors')) return json({ executors: [] });
   if (path === '/api/v1/storage/upload') return json({ rootHash: '0x' + 'cd'.repeat(32) });
-  if (path === '/api/v1/tasks') return json({ unsignedTx: { to: ESCROW, data: createTaskData(body), from: OWNER.address }, chain: 'arc', chainId: settlement.chains.find((c) => c.chain === 'arc').chainId });
+  if (path === '/api/v1/tasks') return json({ unsignedTx: { to: escrowNow(), data: createTaskData(body), from: OWNER.address }, chain: 'arc', chainId: settlement.chains.find((c) => c.chain === 'arc').chainId });
   if (path === '/api/v1/tasks/8/cancel') return json({ unsignedTx: { to: ESCROW, data: cancelData(8) }, chain: 'arc', chainId: ARC.chainId });
+  if (/^\/api\/v1\/tasks\/0x[0-9a-f]{64}$/.test(path)) {
+    const hash = path.split('/').pop();
+    return onChain.has(hash) ? json({ taskId: '77', chain: 'arc' }) : failWith(404, 'TASK_NOT_FOUND');
+  }
   if (path === '/api/v1/tasks/8/confirm-tx') return json({ confirmed: 1 });
   if (path === '/api/v1/a2a/tasks/index') return json({ taskHash: body.taskHash, onChainTaskId: '51', indexed: true });
+  if (path === '/api/v1/storage/upload-batch') return json({ results: body.items.map((_, k) => ({ rootHash: '0x' + (k + 1).toString(16).padStart(64, '0') })) });
+  if (path === '/api/v1/tasks/batch') return json({ unsignedTx: { to: escrowNow(), data: createTasksData(body) }, chain: 'arc', chainId: settlement.chains.find((c) => c.chain === 'arc').chainId });
+  if (path === '/api/v1/a2a/tasks/index-batch') return json({ results: body.tasks.map((t, k) => ({ taskHash: t.taskHash, onChainTaskId: String(60 + k), indexed: true })) });
   if (path === '/api/v1/agents/deploy-fee') return json(feeTerms);
   if (path === '/api/v1/agents/deploy/validate') return json({ valid: true });
   if (path === '/api/v1/agents/deploy') {
@@ -262,14 +287,14 @@ test('a deploy that fails after paying keeps the payment, and the retry pays not
 /** The backend (and the stub node) on Arc mainnet from here on: same key and USDC, another chain id. */
 function onMainnet() {
   chain.served = ARC_MAINNET_ID;
-  settlement = { ...SETTLEMENT, chains: SETTLEMENT.chains.map((c) => (c.chain === 'arc' ? { ...c, chainId: ARC_MAINNET_ID, tier: 'mainnet' } : c)) };
+  settlement = { ...SETTLEMENT, chains: SETTLEMENT.chains.map((c) => (c.chain === 'arc' ? { ...c, chainId: ARC_MAINNET_ID, tier: 'mainnet', escrowAddress: MAINNET_ESCROW } : c)) };
   feeTerms = { ...FEE_TERMS, chainId: ARC_MAINNET_ID };
 }
 
 test('post-task on Arc mainnet funds the escrow there', async () => {
   onMainnet();
   const text = await blind('post-task', '--instructions', 'Summarise this paragraph in one sentence.', '--reward', '2.5', '--public', '--yes');
-  assert.deepEqual(chain.sent.map((t) => [t.to, t.chainId]), [[USDC, BigInt(ARC_MAINNET_ID)], [ESCROW, BigInt(ARC_MAINNET_ID)]]);
+  assert.deepEqual(chain.sent.map((t) => [t.to, t.chainId]), [[USDC, BigInt(ARC_MAINNET_ID)], [MAINNET_ESCROW, BigInt(ARC_MAINNET_ID)]]);
   assert.match(text, /Posted public task on arc/);
 });
 
@@ -306,7 +331,7 @@ test('with no BLINDMARKET_ARC_RPC_URL, post-task on Arc mainnet signs over https
     onMainnet();
     await blind('post-task', '--instructions', 'Summarise this paragraph in one sentence.', '--reward', '2.5', '--public', '--yes');
     assert.deepEqual([...urls], ['https://rpc.mainnet.arc.io']);
-    assert.deepEqual(chain.sent.map((t) => [t.to, t.chainId]), [[USDC, BigInt(ARC_MAINNET_ID)], [ESCROW, BigInt(ARC_MAINNET_ID)]]);
+    assert.deepEqual(chain.sent.map((t) => [t.to, t.chainId]), [[USDC, BigInt(ARC_MAINNET_ID)], [MAINNET_ESCROW, BigInt(ARC_MAINNET_ID)]]);
   } finally {
     sdkEthers.FetchRequest.registerGetUrl(sdkEthers.FetchRequest.createGetUrlFunc());
     process.env.BLINDMARKET_ARC_RPC_URL = stub;
@@ -488,4 +513,378 @@ test('--version reports the package version', async () => {
     process.stdout.write = write;
   }
   assert.equal(writes.join('').trim(), pkg.version);
+});
+
+// ── post-tasks ───────────────────────────────────────────────────────────────
+
+const TASK_DIR = mkdtempSync(join(tmpdir(), 'blind-tasks-'));
+const taskFile = (name, content) => { const p = join(TASK_DIR, name); writeFileSync(p, content); return p; };
+const THREE = 'instructions,reward,privacy\nFirst task: summarise the paper.,1,public\nSecond task: translate the page.,2,public\nThird task: review the code.,3.5,public\n';
+/** The same backend once its escrow has createTasks. */
+const batchSettlement = (maxBatch = 50) => ({
+  ...SETTLEMENT,
+  chains: SETTLEMENT.chains.map((c) => (c.chain === 'arc' ? { ...c, batchCreate: { supported: true, maxBatch } } : c)),
+});
+const { parseCsv } = await import('../dist/rows.js');
+const resultRows = (path) => parseCsv(readFileSync(path, 'utf-8')).slice(1).map((r) => r.fields);
+const PAID_NOT_LISTED = 'paid, not listed: run `blind finish-posts`';
+const UNCONFIRMED = 'funded, unconfirmed: not paid again';
+const SENT_STATUS = 'funded, not listed yet: run this again or `blind finish-posts`';
+
+test('post-tasks posts every row of a CSV: one approve for the total, one createTask each, then the results file', async () => {
+  const file = taskFile('three.csv', THREE);
+  const text = await blind('post-tasks', '--file', file, '--yes');
+  assert.equal(chain.sent.length, 4);
+  const [approve, ...creates] = chain.sent;
+  assert.equal(approve.to, USDC);
+  assert.deepEqual(ERC20.decodeFunctionData('approve', approve.data).map(String), [ESCROW, '6500000'], '1 + 2 + 3.5 USDC, approved once');
+  assert.deepEqual(creates.map((t) => t.to), [ESCROW, ESCROW, ESCROW]);
+  assert.deepEqual(creates.map((t) => t.nonce), [approve.nonce + 1, approve.nonce + 2, approve.nonce + 3]);
+  assert.equal(posted('/api/v1/a2a/tasks/index').length, 3);
+  assert.match(text, /3 task\(s\) to post .* on arc \(chain 5042002\)/);
+  assert.match(text, /6\.5 USDC in total/);
+  assert.match(text, /up to 1 approve, then 3 createTask \(one per task\)/);
+  assert.match(text, /\[3\/3\] line 4: posted task 51/);
+  assert.match(text, /Posted 3 of 3 new task\(s\) on arc\./);
+  assert.match(text, /3 of 3 row\(s\) posted/);
+  const rows = resultRows(`${file}.results.csv`);
+  assert.deepEqual(rows.map((r) => [r[0], r[1], r[2], r[3]]), [['2', 'posted', '1.0 USDC', '51'], ['3', 'posted', '2.0 USDC', '51'], ['4', 'posted', '3.5 USDC', '51']]);
+  assert.deepEqual(state().pendingPosts, {}, 'nothing left pending');
+});
+
+test('post-tasks run again on the same file skips every row already funded from it', async () => {
+  const file = taskFile('again.csv', THREE);
+  await blind('post-tasks', '--file', file, '--yes');
+  const sent = chain.sent.length;
+  const text = await blind('post-tasks', '--file', file, '--yes');
+  assert.match(text, /Nothing new to post/);
+  assert.match(text, /already posted: 3 row\(s\)/);
+  assert.equal(chain.sent.length, sent, 'nothing paid again');
+  assert.deepEqual(resultRows(`${file}.results.csv`).map((r) => r[1]), ['already posted', 'already posted', 'already posted']);
+
+  // A new row in the file is the only one posted.
+  writeFileSync(file, `${THREE}Fourth task: write the tests.,4,public\n`);
+  const more = await blind('post-tasks', '--file', file, '--yes');
+  assert.match(more, /1 task\(s\) to post/);
+  assert.match(more, /already posted: 3 row\(s\)/);
+  assert.equal(chain.sent.filter((t) => t.to === ESCROW).length, 4);
+});
+
+test('post-tasks --dry-run checks the file and shows the total, and sends nothing', async () => {
+  const file = taskFile('dry.csv', THREE);
+  const text = await blind('post-tasks', '--file', file, '--dry-run');
+  assert.match(text, /6\.5 USDC in total/);
+  assert.match(text, /Dry run: nothing was sent/);
+  assert.equal(chain.sent.length, 0);
+  assert.equal(posted('/api/v1/storage/upload').length, 0);
+  assert.equal(existsSync(`${file}.results.csv`), false);
+});
+
+test('post-tasks names every bad row by line, and sends nothing', async () => {
+  const file = taskFile('bad.csv', 'instructions,reward\nGood row here.,1\n,2\nAnother good row.,1.1234567\n');
+  await assert.rejects(blind('post-tasks', '--file', file, '--yes'), (e) => e.code === 'INVALID_ROWS' && /line 3: has no instructions/.test(e.message) && /line 4: reward/.test(e.message));
+  assert.equal(chain.sent.length, 0);
+  assert.equal(posted('/api/v1/storage/upload').length, 0);
+});
+
+test("post-tasks names the row the SDK refuses (a target that is not registered), by line, and sends nothing", async () => {
+  const file = taskFile('target.csv', `instructions,reward,privacy,target\nPublic row.,1,public,\nPrivate row for one agent.,1,private,0x${'ee'.repeat(20)}\n`);
+  await assert.rejects(blind('post-tasks', '--file', file, '--yes'), (e) => e.code === 'INVALID_ROWS' && /line 3: 0x/.test(e.message));
+  assert.equal(chain.sent.length, 0);
+});
+
+test('post-tasks asks before spending, and without a terminal refuses unless --yes', async () => {
+  const file = taskFile('ask.csv', THREE);
+  await assert.rejects(blind('post-tasks', '--file', file), (e) => e.code === 'CONFIRM_REQUIRED');
+  assert.equal(chain.sent.length, 0);
+  assert.equal(posted('/api/v1/storage/upload').length, 0);
+});
+
+test('post-tasks on an escrow with createTasks funds several rows per transaction', async () => {
+  settlement = batchSettlement();
+  const file = taskFile('batch.csv', THREE);
+  const text = await blind('post-tasks', '--file', file, '--chunk', '2', '--yes');
+  assert.match(text, /up to 1 approve, then 2 createTasks \(up to 2 tasks each\)/);
+  // approve, createTasks(rows 1-2), createTask(row 3): a last single row goes alone
+  assert.equal(chain.sent.length, 3);
+  const [, batch, single] = chain.sent;
+  const [, tasks] = BATCH_CALLS.decodeFunctionData('createTasks', batch.data);
+  assert.deepEqual(tasks.map((t) => t[1]), [1_000_000n, 2_000_000n]);
+  assert.equal(batch.gasLimit, (0x30000n * 120n) / 100n, 'the local estimate plus a fifth');
+  assert.equal(single.data.slice(0, 10), ESCROW_CALLS.getFunction('createTask').selector);
+  assert.equal(posted('/api/v1/a2a/tasks/index-batch').length, 1);
+  assert.equal(posted('/api/v1/a2a/tasks/index-batch')[0].body.txHash, batch.hash);
+  assert.match(text, /Posted 3 of 3 new task\(s\) on arc \(several per transaction\)/);
+  assert.deepEqual(resultRows(`${file}.results.csv`).map((r) => r[3]), ['60', '61', '51']);
+});
+
+test('rows funded together but not listed are saved, and finish-posts lists them together without paying again', async () => {
+  settlement = batchSettlement();
+  answers['/api/v1/a2a/tasks/index-batch'] = [failWith(403, 'NOT_TASK_AGENT')];
+  const file = taskFile('unlisted.csv', 'instructions,reward,privacy\nOne.,1,public\nTwo.,2,public\n');
+  await assert.rejects(blind('post-tasks', '--file', file, '--yes'), (e) => e.code === 'NOT_ALL_POSTED' && /finish-posts/.test(e.message));
+  assert.equal(chain.sent.length, 2, 'the approve and one createTasks');
+  const pending = Object.values(state().pendingPosts);
+  assert.equal(pending.length, 2);
+  assert.ok(pending.every((p) => p.batch === true && p.txHash === chain.sent[1].hash));
+  assert.deepEqual(resultRows(`${file}.results.csv`).map((r) => r[1]), [PAID_NOT_LISTED, PAID_NOT_LISTED]);
+
+  const text = await blind('finish-posts');
+  const listed = posted('/api/v1/a2a/tasks/index-batch');
+  assert.equal(listed.length, 2, 'the failed listing, then one call for both');
+  assert.equal(listed[1].body.txHash, chain.sent[1].hash);
+  assert.equal(listed[1].body.tasks.length, 2);
+  assert.ok(listed[1].body.tasks.every((t) => !('batch' in t) && !('txHash' in t)));
+  assert.match(text, /Listed 0x[0-9a-f]{64} \(task id 60\)/);
+  assert.deepEqual(state().pendingPosts, {});
+  assert.equal(chain.sent.length, 2, 'nothing paid again');
+
+  // And a re-run of the file funds neither row again, and its results show them posted (D2).
+  const again = await blind('post-tasks', '--file', file, '--yes');
+  assert.match(again, /Nothing new to post/);
+  assert.match(again, /2 of 2 row\(s\) posted/);
+  assert.equal(chain.sent.length, 2);
+  assert.deepEqual(resultRows(`${file}.results.csv`).map((r) => [r[1], r[3]]), [['already posted', '60'], ['already posted', '61']]);
+});
+
+// ── post-tasks: resuming after a crash (D1-D3) ──────────────────────────────
+
+const escrowSends = () => chain.sent.filter((t) => t.to === ESCROW);
+/** Run `blind <args>` and keep what it printed whether it succeeds or not: { text, err }. */
+async function blindAll(...args) {
+  const lines = [];
+  const log = console.log;
+  console.log = (...a) => { lines.push(a.join(' ')); };
+  try {
+    await buildProgram().exitOverride().parseAsync(['node', 'blind', ...args]);
+    return { text: lines.join('\n'), err: undefined };
+  } catch (err) {
+    return { text: lines.join('\n'), err };
+  } finally {
+    console.log = log;
+  }
+}
+/** Post a file whose first listing fails: its first row is paid but not listed, the rest not started. */
+async function paidNotListed(name, content = THREE) {
+  const file = taskFile(name, content);
+  answers['/api/v1/a2a/tasks/index'] = [failWith(403, 'NOT_TASK_AGENT')];
+  const { text, err } = await blindAll('post-tasks', '--file', file, '--yes');
+  assert.equal(err?.code, 'NOT_ALL_POSTED');
+  assert.match(err.message, /finish-posts/);
+  return { file, text };
+}
+
+test('a stopped run names file lines, not SDK rows, and says the approval left over is used next time', async () => {
+  const file = taskFile('stopped-words.csv', THREE);
+  answers['/api/v1/a2a/tasks/index'] = [failWith(403, 'NOT_TASK_AGENT')];
+  const { text, err } = await blindAll('post-tasks', '--file', file, '--yes');
+  assert.equal(err?.code, 'NOT_ALL_POSTED');
+  assert.match(text, /\[1\/3\] line 2: PAID but not listed/);
+  assert.match(text, /\[2\/3\] line 3: not started \(stopped at line 2: /);
+  assert.match(text, /Stopped at line 2: NOT_TASK_AGENT/);
+  assert.match(text, /The unused part of this run's USDC approval stays in place for the escrow; running this again uses it/);
+  assert.doesNotMatch(text, /rows\[/);
+  assert.deepEqual(resultRows(`${file}.results.csv`).map((r) => r[1]), [PAID_NOT_LISTED, 'not started', 'not started']);
+});
+
+test('run again, it lists the rows paid earlier first, paying nothing, then posts the rest (D1)', async () => {
+  const { file } = await paidNotListed('resume-list.csv');
+  assert.equal(escrowSends().length, 1);
+  const text = await blind('post-tasks', '--file', file, '--yes');
+  assert.match(text, /listed now:\s+1 row\(s\) paid earlier, listed without paying again/);
+  assert.match(text, /2 task\(s\) to post/);
+  assert.match(text, /3 of 3 row\(s\) posted/);
+  assert.equal(escrowSends().length, 3, 'the paid row was not funded again');
+  assert.deepEqual(resultRows(`${file}.results.csv`).map((r) => [r[1], r[3]]), [['posted', '51'], ['posted', '51'], ['posted', '51']]);
+  assert.deepEqual(state().pendingPosts, {});
+});
+
+test('run again while the listing still fails: the paid row is named, never paid again, and the exit is not zero (D1)', async () => {
+  const { file } = await paidNotListed('resume-still.csv');
+  answers['/api/v1/a2a/tasks/index'] = [failWith(403, 'NOT_TASK_AGENT')]; // the re-listing fails again
+  const { text, err } = await blindAll('post-tasks', '--file', file, '--yes');
+  assert.equal(err?.code, 'NOT_ALL_POSTED');
+  assert.match(err.message, /blind finish-posts/);
+  assert.match(text, /paid, not listed: 1 row\(s\): the listing still fails; run `blind finish-posts`/);
+  assert.match(text, /2 of 3 row\(s\) posted; 1 paid, not listed \(run `blind finish-posts`\)/);
+  assert.equal(escrowSends().length, 3, 'the paid row was not funded again; the other two were posted');
+  const rows = resultRows(`${file}.results.csv`);
+  assert.deepEqual(rows.map((r) => r[1]), [PAID_NOT_LISTED, 'posted', 'posted']);
+  assert.match(rows[0][6], /NOT_TASK_AGENT|not the agent|NOT/);
+  assert.equal(Object.keys(state().pendingPosts).length, 1, 'still pending for finish-posts');
+});
+
+test('finish-posts marks the rows it lists in their file, so the next results show them posted (D2)', async () => {
+  const { file } = await paidNotListed('finish-marks.csv', 'instructions,reward,privacy\nOnly task: summarise this.,1,public\n');
+  const listed = await blind('finish-posts');
+  assert.match(listed, /Listed 0x[0-9a-f]{64} \(task id 51\)/);
+  const text = await blind('post-tasks', '--file', file, '--yes');
+  assert.match(text, /Nothing new to post/);
+  assert.deepEqual(resultRows(`${file}.results.csv`).map((r) => [r[1], r[3]]), [['already posted', '51']]);
+  assert.equal(escrowSends().length, 1);
+});
+
+const ONE = 'instructions,reward,privacy\nOnly task: summarise this.,1,public\n';
+
+test('a funding that never landed (another transaction used its nonce) frees the row: the re-run posts it (D3 dropped)', async () => {
+  const { file } = await paidNotListed('dropped.csv', ONE);
+  const funding = escrowSends()[0];
+  // The chain never kept it, and something else took its nonce.
+  chain.sent = chain.sent.filter((t) => t !== funding);
+  chain.sent.push({ hash: '0x' + 'dd'.repeat(32) });
+  const text = await blind('post-tasks', '--file', file, '--yes');
+  assert.match(text, /posted again:\s+1 row\(s\) whose funding never landed \(nothing was paid\)/);
+  assert.equal(escrowSends().length, 1, 'funded once: the first never landed');
+  assert.notEqual(escrowSends()[0].hash, funding.hash);
+  assert.deepEqual(resultRows(`${file}.results.csv`).map((r) => r[1]), ['posted']);
+  assert.deepEqual(state().pendingPosts, {});
+});
+
+test('a funding that reverted frees the row too: the re-run posts it (D3 reverted)', async () => {
+  const { file } = await paidNotListed('reverted.csv', ONE);
+  const funding = escrowSends()[0];
+  chain.sent = chain.sent.filter((t) => t !== funding);
+  chain.sent.push({ hash: '0x' + 'dd'.repeat(32) });
+  chain.mined.set(funding.hash, '0x0');
+  const text = await blind('post-tasks', '--file', file, '--yes');
+  assert.match(text, /posted again:\s+1 row\(s\)/);
+  assert.equal(escrowSends().length, 1);
+  assert.deepEqual(resultRows(`${file}.results.csv`).map((r) => r[1]), ['posted']);
+});
+
+test('a funding still in the mempool is left alone: never paid again, named as unconfirmed, and the exit is not zero (D3 pending)', async () => {
+  const { file } = await paidNotListed('pending.csv', ONE);
+  const funding = escrowSends()[0];
+  chain.sent = chain.sent.filter((t) => t !== funding);
+  chain.mempool.add(funding.hash);
+  const { text, err } = await blindAll('post-tasks', '--file', file, '--yes');
+  assert.equal(err?.code, 'NOT_ALL_POSTED');
+  assert.match(err.message, /checked again next time/);
+  assert.match(text, /unconfirmed:\s+1 row\(s\) whose funding may still land: not paid again/);
+  assert.match(text, /0 of 1 row\(s\) posted; 1 funded, unconfirmed/);
+  assert.equal(escrowSends().length, 0, 'nothing sent: the first funding may still land');
+  assert.deepEqual(resultRows(`${file}.results.csv`).map((r) => r[1]), [UNCONFIRMED]);
+
+  // finish-posts neither lists it (it would wait for a receipt) nor drops it.
+  const indexCalls = posted('/api/v1/a2a/tasks/index').length;
+  await assert.rejects(blind('finish-posts'), (e) => e.code === 'NOT_CONFIRMED');
+  assert.equal(posted('/api/v1/a2a/tasks/index').length, indexCalls);
+  assert.equal(Object.keys(state().pendingPosts).length, 1);
+});
+
+test('a funding that looks dropped but that the backend knows on-chain is never funded again (D3)', async () => {
+  const { file } = await paidNotListed('known.csv', ONE);
+  const funding = escrowSends()[0];
+  const taskHash = Object.keys(state().pendingPosts)[0];
+  chain.sent = chain.sent.filter((t) => t !== funding);
+  chain.sent.push({ hash: '0x' + 'dd'.repeat(32) });
+  onChain.add(taskHash); // another transaction funded the same task
+  await blind('post-tasks', '--file', file, '--yes');
+  assert.equal(escrowSends().length, 0, 'not funded again');
+});
+
+test('finish-posts drops a funding that never landed, without asking the backend to list it (D3)', async () => {
+  const { file } = await paidNotListed('finish-dropped.csv', ONE);
+  const funding = escrowSends()[0];
+  chain.sent = chain.sent.filter((t) => t !== funding);
+  chain.sent.push({ hash: '0x' + 'dd'.repeat(32) });
+  const indexCalls = posted('/api/v1/a2a/tasks/index').length;
+  const text = await blind('finish-posts');
+  assert.match(text, /Not funded: 0x[0-9a-f]{64}: its funding never landed/);
+  assert.equal(posted('/api/v1/a2a/tasks/index').length, indexCalls, 'no listing attempt');
+  assert.deepEqual(state().pendingPosts, {});
+  // And the file's next run posts the row.
+  await blind('post-tasks', '--file', file, '--yes');
+  assert.equal(escrowSends().length, 1);
+});
+
+test('a refusal the SDK words by row is shown by file line', async () => {
+  const file = taskFile('dup.csv', 'instructions,reward,privacy\nSame public brief.,1,public\nSame public brief.,2,public\n');
+  await assert.rejects(blind('post-tasks', '--file', file, '--yes'), (e) => e.code === 'INVALID_ROWS' && /line 3: the same public brief as line 2/.test(e.message) && !/rows\[/.test(e.message));
+  assert.equal(chain.sent.length, 0);
+});
+
+// ── only a known escrow is funded ───────────────────────────────────────────
+
+test('post-tasks refuses an escrow that is not a known deployment, and BLINDMARKET_TRUSTED_ESCROWS admits a local one', async () => {
+  const LOCAL = getAddress('0x' + 'a1'.repeat(20));
+  settlement = { ...SETTLEMENT, chains: SETTLEMENT.chains.map((c) => (c.chain === 'arc' ? { ...c, escrowAddress: LOCAL } : c)) };
+  const file = taskFile('local-escrow.csv', ONE);
+  await assert.rejects(blind('post-tasks', '--file', file, '--yes'), (e) => e.code === 'ESCROW_NOT_PINNED' && /BlindMarketConfig.trustedEscrows/.test(e.message));
+  assert.equal(chain.sent.length, 0);
+
+  process.env.BLINDMARKET_TRUSTED_ESCROWS = `${ARC.chainId}:${LOCAL}:${USDC}`;
+  try {
+    await blind('post-tasks', '--file', file, '--yes');
+    assert.deepEqual(chain.sent.map((t) => t.to), [USDC, LOCAL]);
+    process.env.BLINDMARKET_TRUSTED_ESCROWS = 'not-an-entry';
+    await assert.rejects(blind('post-tasks', '--file', taskFile('bad-env.csv', ONE), '--yes'), (e) => e.code === 'BAD_TRUSTED_ESCROWS');
+  } finally {
+    delete process.env.BLINDMARKET_TRUSTED_ESCROWS;
+  }
+});
+
+
+// ── re-sending a dropped funding; results always current; one check per funding ──
+
+test('a funding no node has, with its nonce unused, is re-sent as is by the re-run: funded once, then listed', async () => {
+  const { file } = await paidNotListed('resend.csv', ONE);
+  const funding = escrowSends()[0];
+  chain.sent = chain.sent.filter((t) => t !== funding); // dropped, and nothing has used its nonce
+  const builds = posted('/api/v1/tasks').length;
+  const { text, err } = await blindAll('post-tasks', '--file', file, '--yes');
+  assert.equal(err, undefined, err?.message);
+  assert.match(text, /Re-sent funding 0x[0-9a-f]{64} \(1 row\)/);
+  assert.match(text, /listed now:\s+1 row\(s\) paid earlier/);
+  assert.deepEqual(escrowSends().map((t) => t.hash), [funding.hash], 'the same transaction, landing once');
+  assert.equal(posted('/api/v1/tasks').length, builds, 'nothing built or paid again');
+  assert.deepEqual(resultRows(`${file}.results.csv`).map((r) => r[1]), ['posted']);
+  assert.deepEqual(state().pendingPosts, {});
+  assert.deepEqual(state().fundingRaw, {}, 'the saved transaction is let go once listed');
+});
+
+test('finish-posts re-sends such a funding too, and lists it', async () => {
+  const { file } = await paidNotListed('resend-finish.csv', ONE);
+  const funding = escrowSends()[0];
+  chain.sent = chain.sent.filter((t) => t !== funding);
+  const text = await blind('finish-posts');
+  assert.match(text, /Re-sent funding/);
+  assert.match(text, /Listed 0x[0-9a-f]{64}/);
+  assert.deepEqual(escrowSends().map((t) => t.hash), [funding.hash]);
+  // finish-posts rewrote the file's results.
+  assert.deepEqual(resultRows(`${file}.results.csv`).map((r) => [r[1], r[3]]), [['posted', '51']]);
+});
+
+test('the results file exists before anything is sent, and says a row is funded before its listing answers', async () => {
+  const file = taskFile('results-early.csv', ONE);
+  await assert.rejects(blind('post-tasks', '--file', file), (e) => e.code === 'CONFIRM_REQUIRED');
+  assert.deepEqual(resultRows(`${file}.results.csv`).map((r) => r[1]), ['pending'], 'written at the start of the run');
+
+  let during;
+  answers['/api/v1/a2a/tasks/index'] = [{
+    ok: true,
+    status: 200,
+    json: async () => {
+      during = resultRows(`${file}.results.csv`);
+      return { success: true, data: { taskHash: 'x', onChainTaskId: '51', indexed: true } };
+    },
+  }];
+  await blind('post-tasks', '--file', file, '--yes');
+  assert.equal(during[0][1], SENT_STATUS, 'funded, listing not answered yet');
+  assert.equal(during[0][5], escrowSends()[0].hash);
+  assert.deepEqual(resultRows(`${file}.results.csv`).map((r) => r[1]), ['posted']);
+});
+
+test('rows funded together are checked once, not once per row', async () => {
+  settlement = batchSettlement();
+  answers['/api/v1/a2a/tasks/index-batch'] = [failWith(403, 'NOT_TASK_AGENT')];
+  const file = taskFile('check-once.csv', 'instructions,reward,privacy\nOne.,1,public\nTwo.,2,public\nThree.,3,public\n');
+  await blindAll('post-tasks', '--file', file, '--chunk', '3', '--yes');
+  const funding = escrowSends()[0];
+  chain.sent = chain.sent.filter((t) => t !== funding);
+  chain.sent.push({ hash: '0x' + 'dd'.repeat(32) }); // its nonce used by another transaction
+  chain.rpcCalls = [];
+  await blindAll('post-tasks', '--file', file, '--chunk', '3', '--yes');
+  assert.equal(chain.rpcCalls.filter((m) => m === 'eth_getTransactionByHash').length, 1, 'one check for the three rows');
+  assert.equal(chain.rpcCalls.filter((m) => m === 'eth_getTransactionReceipt').length >= 2, true);
 });

@@ -68,8 +68,50 @@ export function saveConfig(cfg: Config): void {
 interface State {
   /** A deploy fee paid but not yet used, per backend, wallet and chain id. */
   pendingFees?: Record<string, string>;
-  /** Escrows funded but not yet listed, by task hash: the body POST /a2a/tasks/index needs. */
+  /**
+   * Escrows funded but not yet listed, by task hash: the body POST
+   * /a2a/tasks/index needs. `batch: true` marks a row that shares its funding
+   * transaction with others, which lists through /a2a/tasks/index-batch.
+   */
   pendingPosts?: Record<string, Record<string, unknown>>;
+  /** Rows of task files `post-tasks` funded, per backend, wallet, chain id and file, by row fingerprint. */
+  bulkPosts?: Record<string, Record<string, BulkRow>>;
+  /**
+   * The signed raw funding transactions of rows still funded and not listed,
+   * by hash: once per transaction, however many rows it funds. While its
+   * nonce is unused it is re-broadcast as is, so it can only ever land once.
+   */
+  fundingRaw?: Record<string, string>;
+  /** Where each task file's results go, and in what token, by the same key as bulkPosts. */
+  bulkFiles?: Record<string, BulkFile>;
+}
+
+/** What `finish-posts` needs to rewrite a task file's results. */
+export interface BulkFile {
+  file: string;
+  resultsPath: string;
+  symbol: string;
+  decimals: number;
+}
+
+/**
+ * A row of a task file that was funded: never fund it again, whatever
+ * happens to its listing, unless its funding transaction provably never
+ * landed (see funding.ts).
+ */
+export interface BulkRow {
+  /** 'funded' the moment its transaction is sent; 'posted' once listed. */
+  status: 'funded' | 'posted';
+  taskHash: string;
+  txHash?: string;
+  /** The funding transaction's nonce and sender, and the chain it was sent on. */
+  nonce?: number;
+  from?: string;
+  chain?: string;
+  chainId?: number;
+  taskId?: string;
+  line?: number;
+  at: string;
 }
 
 const loadState = () => readJson<State>('state.json', {});
@@ -102,4 +144,103 @@ export function setPendingPost(taskHash: string, indexParams: Record<string, unk
   if (indexParams) posts[taskHash] = indexParams;
   else delete posts[taskHash];
   saveState({ ...s, pendingPosts: posts });
+}
+
+/**
+ * Where a task file's funded rows are kept. The chain id is part of it for
+ * the reason fees keep theirs, and the file's full path is too, so another
+ * file's rows (or a copy of this one, to post it again) start fresh.
+ */
+export const bulkKey = (apiBase: string, address: string, chainId: number, file: string) =>
+  `${apiBase}|${address.toLowerCase()}|${chainId}|${file}`;
+
+export function bulkProgress(key: string): Record<string, BulkRow> {
+  return loadState().bulkPosts?.[key] ?? {};
+}
+
+export function setBulkRow(key: string, fingerprint: string, row: BulkRow | null): void {
+  const s = loadState();
+  const all = { ...(s.bulkPosts ?? {}) };
+  const rows = { ...(all[key] ?? {}) };
+  if (row) rows[fingerprint] = row;
+  else delete rows[fingerprint];
+  all[key] = rows;
+  saveState({ ...s, bulkPosts: all });
+}
+
+/** Keep only the raw transactions a funded, unlisted row still points at. */
+function pruneRaw(s: State): Record<string, string> {
+  const wanted = new Set<string>();
+  for (const rows of Object.values(s.bulkPosts ?? {})) {
+    for (const row of Object.values(rows)) if (row.status === 'funded' && row.txHash) wanted.add(row.txHash.toLowerCase());
+  }
+  return Object.fromEntries(Object.entries(s.fundingRaw ?? {}).filter(([hash]) => wanted.has(hash.toLowerCase())));
+}
+
+export function saveFundingRaw(txHash: string, raw: string): void {
+  const s = loadState();
+  saveState({ ...s, fundingRaw: { ...(s.fundingRaw ?? {}), [txHash.toLowerCase()]: raw } });
+}
+
+export function fundingRaw(txHash: string): string | undefined {
+  return loadState().fundingRaw?.[txHash.toLowerCase()];
+}
+
+export function setBulkFile(key: string, meta: BulkFile): void {
+  const s = loadState();
+  saveState({ ...s, bulkFiles: { ...(s.bulkFiles ?? {}), [key]: meta } });
+}
+
+export function bulkFile(key: string): BulkFile | undefined {
+  return loadState().bulkFiles?.[key];
+}
+
+/** The funded (not yet listed) row of any task file whose funding created `taskHash`, if one did. */
+export function fundedBulkRow(taskHash: string): { key: string; fingerprint: string; row: BulkRow } | undefined {
+  const all = loadState().bulkPosts ?? {};
+  for (const [key, rows] of Object.entries(all)) {
+    for (const [fingerprint, row] of Object.entries(rows)) {
+      if (row.status === 'funded' && row.taskHash.toLowerCase() === taskHash.toLowerCase()) return { key, fingerprint, row };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * A funded task is listed: its pending listing is done, and a task file's
+ * row for it becomes 'posted' with its task id, so the file's next results
+ * say so (finish-posts lists rows post-tasks funded).
+ */
+export function markListed(taskHash: string, taskId?: string): void {
+  const s = loadState();
+  const posts = { ...(s.pendingPosts ?? {}) };
+  delete posts[taskHash];
+  const all = { ...(s.bulkPosts ?? {}) };
+  for (const [key, rows] of Object.entries(all)) {
+    for (const [fingerprint, row] of Object.entries(rows)) {
+      if (row.status === 'funded' && row.taskHash.toLowerCase() === taskHash.toLowerCase()) {
+        all[key] = { ...all[key], [fingerprint]: { ...row, status: 'posted', ...(taskId ? { taskId } : {}), at: new Date().toISOString() } };
+      }
+    }
+  }
+  const next = { ...s, pendingPosts: posts, bulkPosts: all };
+  saveState({ ...next, fundingRaw: pruneRaw(next) });
+}
+
+/**
+ * A funding transaction that never landed (it reverted, or its nonce was used
+ * by another transaction): nothing was escrowed, so its pending listing is
+ * dropped and a task file's row for it is free to be posted again.
+ */
+export function forgetFunding(taskHash: string): void {
+  const s = loadState();
+  const posts = { ...(s.pendingPosts ?? {}) };
+  delete posts[taskHash];
+  const all = { ...(s.bulkPosts ?? {}) };
+  for (const [key, rows] of Object.entries(all)) {
+    const kept = Object.fromEntries(Object.entries(rows).filter(([, row]) => !(row.status === 'funded' && row.taskHash.toLowerCase() === taskHash.toLowerCase())));
+    all[key] = kept;
+  }
+  const next = { ...s, pendingPosts: posts, bulkPosts: all };
+  saveState({ ...next, fundingRaw: pruneRaw(next) });
 }

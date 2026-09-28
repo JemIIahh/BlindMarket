@@ -37,6 +37,7 @@ the environment instead:
 | `BLINDMARKET_API_BASE` | Backend, default `https://api.blindmarket.xyz` |
 | `BLINDMARKET_ARC_RPC_URL` | Arc RPC. Default by the chain id the backend names: `https://arc-rpc.publicnode.com` for Arc mainnet (5042), `https://arc-testnet-rpc.publicnode.com` for Arc Testnet (5042002). Before anything is signed, the RPC's chain is checked against the chain the backend names |
 | `BLIND_CONFIG_DIR` | Where config lives, default `~/.blind` |
+| `BLINDMARKET_TRUSTED_ESCROWS` | A custom or local deployment to fund, as `chainId:escrow:token` (comma-separated). The CLI funds only the known Arc mainnet and Arc Testnet escrows unless a deployment is listed here |
 
 Production escrows tasks in **USDC on Arc**, where gas is also paid in USDC.
 So the wallet needs USDC for both, on the Arc network the backend runs: Arc
@@ -61,6 +62,78 @@ blind post-task --instructions "Summarise this paper in five bullets: …" --rew
 
 If the escrow is funded but the listing fails, the command saves what it needs
 and says so. `blind finish-posts` then lists the task without paying again.
+
+## Post many tasks
+
+```bash
+blind post-tasks --file tasks.csv --dry-run   # check every row, show the total; send nothing
+blind post-tasks --file tasks.csv             # one confirmation, then every row
+```
+
+The file is CSV with a header row, or JSON Lines (`.jsonl`) with the same keys:
+
+| Column | | |
+|---|---|---|
+| `instructions` | required, or `instructions_file` | The brief. `instructions_file` is read relative to the task file |
+| `reward` / `amount` | one of them | `reward` in the token (`2.5` USDC), `amount` in its smallest unit (`2500000`) |
+| `duration` | default `86400` | Seconds, 1 hour to 90 days |
+| `privacy` | default `private` | `public` or `private` |
+| `verification` | default `auto` | `auto` or `manual` |
+| `zone` | default `global` | |
+| `routing_summary` | optional | The public one-liner the task board shows, which is all it shows of a private task |
+| `capabilities` | optional | Separated by `;` |
+| `target` | optional | The only executor that may take the task |
+
+**Before anything is sent:**
+- Every row is checked, and a problem is named by its line. Nothing is sent
+  until the whole file is right.
+- The command shows the count, the total escrow, the public/private split and
+  how many transactions it takes, and asks once.
+- The escrow is approved once for the total, instead of once per task.
+
+**How it sends:**
+- **Escrow with `createTasks`:** several tasks share a transaction (`--chunk`,
+  default 20).
+- **Otherwise:** one transaction per task.
+
+**Results:**
+- Progress prints as each row settles.
+- `<file>.results.csv` (or `--results`) records every row: posted with its
+  task id, funded but not listed, failed with nothing paid, or not started.
+- The file is written before anything is sent and rewritten as each row is
+  funded or settles, so a run cut off mid-way still leaves it current.
+  `finish-posts` rewrites it too.
+
+**If something goes wrong:**
+- **Before funding:** a row the backend refuses fails alone.
+- **At or after funding:** a funding that fails, or a listing that fails,
+  stops the run. That way nothing more is paid behind a problem.
+- **Approval left over:** a stopped run leaves the unused part of its
+  up-front USDC approval in place for the escrow. The next run uses it before
+  approving more.
+- **Saved at once:** each funded row is saved, with its transaction's hash
+  and nonce, the moment the transaction is sent.
+
+**Running the same command on the same file again** pays nothing twice. It
+first settles the rows paid earlier:
+- **Paid:** the row is listed now. If its listing still fails, the results say
+  `paid, not listed: run blind finish-posts`, and the command exits non-zero.
+- **Never landed:** the funding reverted, or another transaction used its
+  nonce. Nothing was paid, so the row is posted again.
+- **Lost before any node kept it:** no node has the transaction and its nonce
+  is unused. The signed transaction, saved when it was sent, is sent again as
+  is. With the same nonce and hash it can only land once, and it is then listed.
+- **Still unconfirmed:** the transaction is in the mempool, or can't be
+  re-sent. The row is left alone and checked again next time. It is never paid
+  a second time.
+
+Then it posts only rows that were never funded. To post a file again on
+purpose, use a copy of it.
+
+`blind finish-posts` makes the same checks, once per funding transaction.
+It re-sends a funding that no node kept, drops one that never landed instead
+of waiting on it, leaves an unconfirmed one for later, and marks the rows it
+lists as posted in their file's results.
 
 ```bash
 blind tasks                          # open tasks on the market

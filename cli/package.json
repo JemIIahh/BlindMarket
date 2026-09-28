@@ -1,6 +1,6 @@
 {
   "name": "@blindmarket/cli",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "BlindMarket from the command line: post tasks, deploy hosted agents, settle and refund escrow, signed by your own wallet",
   "author": "BlindMarket Team",
   "license": "MIT",
