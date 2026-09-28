@@ -19,13 +19,26 @@ import {
   ConfirmDialog,
   ErrorNotice,
   RadioPills,
+  ButtonLink,
 } from '../components/bb';
-import { aesEncrypt, eciesEncrypt, generateAesKey, sha256, toBase64, toBytes } from '../lib/crypto';
-import { stashAesKey } from '../lib/keyStash';
+import { eciesEncrypt } from '../lib/crypto';
 import { clearPendingIndex, listPendingIndex, savePendingIndex, type PendingIndex } from '../lib/pendingIndex';
-import { assertWalletOnChain, providerFor, signAndSendTx, type SentTx } from '../lib/txSigner';
+import { assertWalletOnChain, providerFor, signAndSendTx } from '../lib/txSigner';
 import { authedGet, authedPost } from '../lib/api';
-import { UserFacingError, friendlyError } from '../lib/friendlyError';
+import { UserFacingError } from '../lib/friendlyError';
+import {
+  bytesToHex,
+  fetchWrapTargets,
+  postingToken,
+  postWithRetry,
+  prepareBrief,
+  retryPendingListing,
+  sealToKeyCustody,
+  sendFunding,
+  uploadBrief,
+  wrapKeyToExecutors,
+  type Executor,
+} from '../lib/postTaskFlow';
 import { trackEvent } from '../hooks/useAnalytics';
 import { WORKER_SHARE_PCT, PLATFORM_FEE_PCT } from '../config/constants';
 import { gasIsSettlementToken, getMarketplaceTokenAddress, getPaymentDecimals, getPaymentSymbol, getPostingEscrowAddress, getSettlement, isSettlementChainKey, useSettlement } from '../config/settlement';
@@ -198,10 +211,7 @@ export default function PostTask() {
       // Prefer the identity token (has linked_accounts → backend can derive
       // the wallet address from did:privy claims); fall back to the access
       // token so unlinked sessions still work.
-      const idTok = await getIdentityToken();
-      const accTok = await getAccessToken();
-      const token = idTok || accTok;
-      if (!token) throw new Error('No authentication token available. Please try logging out and back in.');
+      const token = await postingToken();
 
       // 0. Handle Payment (Native token)
       const amountBase = parseUnits(form.amount, PAYMENT_DECIMALS);
@@ -211,15 +221,10 @@ export default function PostTask() {
 
       // 1. Discover eligible executors (private only — a public task needs no
       //    wrap targets; every agent can read it).
-      let executors: Array<{ address: string; publicKey: string; capabilities: string[]; reputation: number }> = [];
+      let executors: Executor[] = [];
       if (!isPublicTask) {
         console.log('[PostTask] Looking up matching executors...');
-        // authedGet unwraps to `body.data` (see api.ts:23), so T is the inner
-        // payload — not the {success, data} envelope.
-        const execResp = await authedGet<{
-          executors: Array<{ address: string; publicKey: string; capabilities: string[]; reputation: number }>;
-        }>(`/api/v1/a2a/executors`, token);
-        executors = execResp.executors ?? [];
+        executors = await fetchWrapTargets(token);
         console.log(`[PostTask] ${executors.length} matching executor(s) found at post time`);
       }
 
@@ -227,31 +232,14 @@ export default function PostTask() {
       //    ciphertext. Public: the poster opted out of blindness — the blob is
       //    the plaintext itself, hashed as-is (same commitment scheme, no key).
       setStatus('encrypting');
-      const plaintext = toBytes(form.instructions);
-      let blob: string;
-      let taskHash: string;
-      const key = generateAesKey(); // unused for public tasks
-      if (isPublicTask) {
-        console.log('[PostTask] Public task — posting plaintext brief (no encryption)...');
-        blob = toBase64(plaintext);
-        taskHash = '0x' + await sha256(plaintext);
-      } else {
-        console.log('[PostTask] Encrypting instructions...');
-        const ciphertext = await aesEncrypt(plaintext, key);
-        blob = toBase64(ciphertext);
-        taskHash = '0x' + await sha256(ciphertext);
-      }
+      console.log(isPublicTask ? '[PostTask] Public task — posting plaintext brief (no encryption)...' : '[PostTask] Encrypting instructions...');
+      // The key is unused for public tasks.
+      const { blob, taskHash, key } = await prepareBrief(form.instructions, isPublicTask);
 
       // 3. Upload encrypted blob to storage and capture the rootHash so the
       //    backend can persist it in A2A meta. Without rootHash the executor
       //    has no pointer to fetch the encrypted blob.
-      const uploadResp = await authedPost<{ rootHash: string; txHash?: string }>(
-        '/api/v1/storage/upload',
-        { data: blob, chainType: activeChain },
-        token,
-      );
-      const rootHash = uploadResp.rootHash;
-      if (!rootHash) throw new Error('Storage upload returned no rootHash');
+      const rootHash = await uploadBrief(blob, token, activeChain);
       console.log(`[PostTask] Encrypted blob uploaded — rootHash ${rootHash.slice(0, 12)}…`);
 
       // 4. ECIES-wrap the AES key to every currently-matching executor. The
@@ -266,18 +254,9 @@ export default function PostTask() {
       //    as a client-side fallback in case custody is unavailable.
       const wrappedKeys: Record<string, string> = {};
       if (!isPublicTask) {
-        stashAesKey(taskHash, key);
-        for (const exec of executors) {
-          try {
-            const wrappedBytes = await eciesEncrypt(key, exec.publicKey);
-            const wrappedHex = Array.from(wrappedBytes, (b) => b.toString(16).padStart(2, '0')).join('');
-            wrappedKeys[exec.address.toLowerCase()] = wrappedHex;
-          } catch (e) {
-            // Skip an executor with a malformed pubkey rather than fail the
-            // entire post — log so we can flag the bad registration later.
-            console.warn(`[PostTask] Skipped ${exec.address} (wrap failed):`, (e as Error).message);
-          }
-        }
+        // Skips an executor with a malformed pubkey rather than failing the
+        // entire post (logged, so the bad registration can be flagged).
+        Object.assign(wrappedKeys, await wrapKeyToExecutors(taskHash, key, executors));
         console.log(
           `[PostTask] AES key wrapped to ${Object.keys(wrappedKeys).length}/${executors.length} executor(s); ` +
           `stashed locally for post-hoc bidders`,
@@ -291,9 +270,7 @@ export default function PostTask() {
       //     Public tasks skip this — the verifier reads the plaintext brief.
       if (!isPublicTask && form.verificationMode === 'agent' && form.verifierPublicKey && form.verifierAddress) {
         try {
-          const wrappedBytes = await eciesEncrypt(key, form.verifierPublicKey);
-          wrappedKeys[form.verifierAddress.toLowerCase()] =
-            Array.from(wrappedBytes, (b) => b.toString(16).padStart(2, '0')).join('');
+          wrappedKeys[form.verifierAddress.toLowerCase()] = bytesToHex(await eciesEncrypt(key, form.verifierPublicKey));
           console.log(`[PostTask] AES key wrapped to verifier ${form.verifierAddress.slice(0, 10)}…`);
         } catch (e) {
           throw new Error(`Could not wrap the brief to the chosen verifier: ${(e as Error).message}`);
@@ -308,29 +285,9 @@ export default function PostTask() {
       //     block the post; the browser/agent wrap loops remain the fallback.
       //     When custody is off the endpoint returns { enabled:false } and we
       //     skip sealing entirely.
-      let keyCustodyBlob: { keyId: string; blob: string } | undefined;
-      try {
-        const custodyKey = isPublicTask
-          ? null // public task — there is no AES key to seal
-          : await authedGet<{
-              enabled: boolean;
-              keyId: string | null;
-              publicKey: string | null;
-              attestation: string | null;
-            }>('/api/v1/a2a/key-custody/pubkey', token);
-        if (custodyKey && custodyKey.enabled && custodyKey.keyId && custodyKey.publicKey) {
-          // The local (operator-trusted) backend returns attestation:null. When
-          // an attested backend (TDX / 0G oracle) ships, VERIFY
-          // custodyKey.attestation here before sealing — sealing to an
-          // unattested key in that mode would silently trust the operator.
-          const sealedBytes = await eciesEncrypt(key, custodyKey.publicKey);
-          const sealedHex = Array.from(sealedBytes, (b) => b.toString(16).padStart(2, '0')).join('');
-          keyCustodyBlob = { keyId: custodyKey.keyId, blob: sealedHex };
-          console.log('[PostTask] AES key sealed to key-custody — late joiners can pick up unattended');
-        }
-      } catch (e) {
-        console.warn('[PostTask] key-custody seal skipped:', (e as Error).message);
-      }
+      // A public task has no AES key to seal.
+      const keyCustodyBlob = isPublicTask ? undefined : await sealToKeyCustody(key, token);
+      if (keyCustodyBlob) console.log('[PostTask] AES key sealed to key-custody — late joiners can pick up unattended');
 
       // 5. Compute duration (seconds from now) from the chosen deadline.
       //    Re-evaluate at submit time so the value is accurate even if the
@@ -466,21 +423,12 @@ export default function PostTask() {
         }
       }
 
-      let sent: SentTx;
-      // Set when the wallet broadcast the escrow tx but the wait for it failed
-      // (ethers' post-broadcast NETWORK_ERROR / BAD_DATA): it may have funded
-      // the escrow, so the listing below goes ahead from that hash, and a
-      // failure leaves "Retry listing" instead of a prompt to post again.
-      let unconfirmed = false;
-      try {
-        sent = await signAndSendTx(signer, taskJson.unsignedTx, isNativeToken ? BigInt(amountBase) : undefined, { chain: taskJson.chain });
-      } catch (sendErr) {
-        const broadcast = friendlyError(sendErr).txHash;
-        if (!broadcast) throw sendErr;
-        console.warn(`[PostTask] Task TX broadcast (${broadcast}) but not confirmed:`, (sendErr as Error).message);
-        sent = { hash: broadcast, receipt: null };
-        unconfirmed = true;
-      }
+      // `unconfirmed`: the wallet broadcast the escrow tx but the wait for it
+      // failed (ethers' post-broadcast NETWORK_ERROR / BAD_DATA): it may have
+      // funded the escrow, so the listing below goes ahead from that hash, and
+      // a failure leaves "Retry listing" instead of a prompt to post again.
+      const { sent, unconfirmed } = await sendFunding(() =>
+        signAndSendTx(signer, taskJson.unsignedTx, isNativeToken ? BigInt(amountBase) : undefined, { chain: taskJson.chain }));
       const txHash = sent.hash;
       console.log(`[PostTask] Task TX submitted: hash=${txHash} userOp=${sent.userOp ?? false}`);
 
@@ -511,18 +459,7 @@ export default function PostTask() {
       // The escrow is funded from here on: keep the listing request so a
       // failure below can be retried instead of re-posted.
       if (address) savePendingIndex({ taskHash, txHash, poster: address, body: indexBody });
-      let indexResp: any = null;
-      let lastErr: any = null;
-      for (let i = 0; i < 3; i++) {
-        try {
-          indexResp = await authedPost<any>('/api/v1/a2a/tasks/index', indexBody, token);
-          break;
-        } catch (e) {
-          lastErr = e;
-          console.warn(`[PostTask] /tasks/index attempt ${i + 1} failed:`, (e as Error).message);
-          if (i < 2) await new Promise(r => setTimeout(r, 10000));
-        }
-      }
+      const { resp: indexResp, lastErr } = await postWithRetry<any>('/api/v1/a2a/tasks/index', indexBody, token);
       if (!indexResp) {
         if (address) setUnlisted(listPendingIndex(address));
         throw unconfirmed
@@ -566,7 +503,8 @@ export default function PostTask() {
     setRetryError(null);
     try {
       const token = (await getIdentityToken()) || (await getAccessToken()) || undefined;
-      const resp = await authedPost<{ onChainTaskId?: string | null }>('/api/v1/a2a/tasks/index', entry.body, token);
+      // A task funded by Post many's batch transaction lists through the batch route.
+      const resp = await retryPendingListing(entry, token);
       clearPendingIndex(entry.taskHash);
       setUnlisted(address ? listPendingIndex(address) : []);
       trackEvent('task_listing_retried', { taskId: resp.onChainTaskId ?? null });
@@ -591,7 +529,11 @@ export default function PostTask() {
     <>
     <div>
       <Breadcrumb items={['tasks', 'post']} />
-      <PageHeader title="Post a task." titleMuted="Escrow pays out when the work passes." />
+      <PageHeader
+        title="Post a task."
+        titleMuted="Escrow pays out when the work passes."
+        right={<ButtonLink to="/tasks/bulk" variant="outline" label="Post many" />}
+      />
 
       {status === 'done' ? (
         <div className="card-dark rounded-3xl overflow-hidden">

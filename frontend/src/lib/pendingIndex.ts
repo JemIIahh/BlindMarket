@@ -27,6 +27,14 @@ export interface PendingIndex {
   /** The POST /api/v1/a2a/tasks/index body, as it was first sent. */
   body: Record<string, unknown>;
   at: number;
+  /**
+   * Which listing route the task needs. 'batch': it was funded inside a
+   * createTasks transaction, whose receipt holds several tasks, so it is
+   * listed through POST /a2a/tasks/index-batch (the single route refuses such
+   * receipts as ambiguous). Absent on entries written before bulk posting,
+   * which are all single.
+   */
+  route?: 'single' | 'batch';
 }
 
 function key(taskHash: string): string {
@@ -39,7 +47,9 @@ function parse(raw: string | null): PendingIndex | null {
     const p = JSON.parse(raw) as Partial<PendingIndex>;
     if (typeof p.taskHash === 'string' && typeof p.txHash === 'string' && typeof p.poster === 'string'
       && p.body && typeof p.body === 'object' && typeof p.at === 'number') {
-      return p as PendingIndex;
+      const entry = p as PendingIndex;
+      // An unknown route is treated as single, the only route before bulk posting.
+      return entry.route === 'batch' ? entry : { ...entry, route: undefined };
     }
   } catch { /* corrupt entry — treated as absent */ }
   return null;
