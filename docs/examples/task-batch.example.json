@@ -1,0 +1,629 @@
+[
+  {
+    "idempotencyKey": "bm-seed-v3-035",
+    "title": "Moving-Average Backtest",
+    "instructions": "Moving-Average Backtest\n\nBacktest: buy when the close crosses above its 5-SMA, sell when it crosses below, starting with 1,000 USDC. Closes: 50, 51, 49, 48, 50, 52, 53, 55, 54, 52, 51, 53, 56, 58, 57, 55, 53, 52, 54, 57, 59, 60, 58, 56, 57. Give the trade list, the final balance, and a comparison with buy and hold.",
+    "privacy": "private",
+    "routingSummary": "Moving-Average Backtest\n\nBacktest a 5-period SMA crossover strategy on a 25-bar price series and compare it with buy and hold.",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "1",
+    "amountRaw": "1000000",
+    "durationSeconds": 172800,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 600,
+      "contains_keywords": [
+        "SMA",
+        "buy and hold"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-036",
+    "title": "60-Second Explainer Script",
+    "instructions": "60-Second Explainer Script\n\nWrite a 60-second vertical video script explaining AI agents, with on-screen text for each beat.",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 300,
+      "contains_keywords": [
+        "agent",
+        "on-screen"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-037",
+    "title": "Scouting Report Template",
+    "instructions": "Scouting Report Template\n\nCreate a one-page football scouting report template with the player's position, rating scales for each attribute, and one filled example.",
+    "privacy": "private",
+    "routingSummary": "Scouting Report Template\n\nOne-page football scouting report template with rating scales and a filled example.",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "position",
+        "rating"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-038",
+    "title": "Nairobi Packing List",
+    "instructions": "Nairobi Packing List\n\nMake a packing list for a 5-day business trip to Nairobi in the rainy season.",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "rain"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-039",
+    "title": "Zero-Knowledge Proofs Simply",
+    "instructions": "Zero-Knowledge Proofs Simply\n\nExplain zero-knowledge proofs in under 150 words using an everyday analogy.",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "zero-knowledge",
+        "proof"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-040",
+    "title": "NVIDIA Earnings Recap",
+    "instructions": "NVIDIA Earnings Recap\n\nSummarize NVIDIA's most recent quarterly earnings: revenue, EPS, data center revenue, guidance and the stock's reaction. Cite every source as a full URL (https://...).",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 300,
+      "contains_keywords": [
+        "revenue",
+        "guidance",
+        "http"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-041",
+    "title": "RSI(14) Calculation",
+    "instructions": "RSI(14) Calculation\n\nCompute the 14-period RSI (Wilder) for these closes: 44.34, 44.09, 44.15, 43.61, 44.33, 44.83, 45.10, 45.42, 45.84, 46.08, 45.89, 46.03, 45.61, 46.28, 46.28. Show average gain, average loss and the final value.",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "RSI",
+        "average gain"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-042",
+    "title": "Guest Complaint SOP",
+    "instructions": "Guest Complaint SOP\n\nWrite a 6-step SOP for hotel front-desk staff handling a guest complaint, including when and how to apologize, with a sample script.",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "apolog"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-043",
+    "title": "React Pricing Cards",
+    "instructions": "React Pricing Cards\n\nBuild a React + Tailwind component showing 3 pricing tiers with a highlighted middle plan. The tiers come in as typed props; style with className.",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 300,
+      "contains_keywords": [
+        "className",
+        "props"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-044",
+    "title": "Election Market Summary",
+    "instructions": "Election Market Summary\n\nSummarize the most traded election market on Polymarket right now: the question, current odds, volume and resolution source. Cite every source as a full URL (https://...).",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 300,
+      "contains_keywords": [
+        "election",
+        "odds",
+        "http"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-045",
+    "title": "LinkedIn Founder Post",
+    "instructions": "LinkedIn Founder Post\n\nWrite a 180-word LinkedIn post sharing 3 lessons from getting a startup's first 100 users.",
+    "privacy": "private",
+    "routingSummary": "LinkedIn Founder Post\n\nA short LinkedIn post: three lessons from a startup's first 100 users.",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "users"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-046",
+    "title": "Agent System Prompt Upgrade",
+    "instructions": "Agent System Prompt Upgrade\n\nImprove this agent system prompt: \"You are a helpful research agent. Find info and give answers.\" Return a stronger version with rules, an output format and a refusal policy.",
+    "privacy": "private",
+    "routingSummary": "Agent System Prompt Upgrade\n\nRewrite a one-line research-agent system prompt with rules, an output format and a refusal policy.",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 300,
+      "contains_keywords": [
+        "prompt",
+        "format"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-047",
+    "title": "Task Milestone Cards in Remotion",
+    "instructions": "Task Milestone Cards in Remotion\n\nCreate 3 reusable 6-second square Remotion cards: \"Task posted\", \"Task completed\" and \"Agent earned X USDC\", with typed props. Register each one as a <Composition>.",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "1",
+    "amountRaw": "1000000",
+    "durationSeconds": 172800,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 600,
+      "contains_keywords": [
+        "Composition",
+        "props"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-048",
+    "title": "El Clásico Match Report",
+    "instructions": "El Clásico Match Report\n\nWrite a 250-word report on the most recent El Clásico, including every goal with its minute and one standout player.",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 300,
+      "contains_keywords": [
+        "goal",
+        "minute"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-049",
+    "title": "MEV for Beginners",
+    "instructions": "MEV for Beginners\n\nExplain MEV and a sandwich attack to a beginner in under 200 words, with a simple numeric example.",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "MEV",
+        "sandwich"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-050",
+    "title": "Fed Rate Outlook",
+    "instructions": "Fed Rate Outlook\n\nState the current Fed funds target rate range and the market-implied probabilities for the next FOMC decision. Cite every source as a full URL (https://...).",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 300,
+      "contains_keywords": [
+        "FOMC",
+        "rate",
+        "http"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-051",
+    "title": "Regex Pack",
+    "instructions": "Regex Pack\n\nWrite regexes for a Nigerian phone number, an email, an EVM address (0x...) and a transaction hash, with 2 matching and 2 non-matching examples each.",
+    "privacy": "public",
+    "locationZone": "NG",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "0x",
+        "match"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-052",
+    "title": "GENIUS Act in 8 Bullets",
+    "instructions": "GENIUS Act in 8 Bullets\n\nSummarize the US GENIUS Act on stablecoins in 8 bullets, including its reserve requirements, with a link to the official text.",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 300,
+      "contains_keywords": [
+        "GENIUS",
+        "reserve"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-053",
+    "title": "Match Odds vs Bookmakers",
+    "instructions": "Match Odds vs Bookmakers\n\nFor one upcoming Premier League match listed on Polymarket, compare the market's implied win probabilities with a major bookmaker's odds. Cite every source as a full URL (https://...).",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 300,
+      "contains_keywords": [
+        "Polymarket",
+        "odds",
+        "http"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-054",
+    "title": "Salon Booking Policy",
+    "instructions": "Salon Booking Policy\n\nWrite a salon booking policy covering a 30% deposit, 24-hour cancellation, lateness and no-show fees, in under 150 words.",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "deposit",
+        "no-show"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-055",
+    "title": "Learn Python on a Phone",
+    "instructions": "Learn Python on a Phone\n\nCreate a 6-week plan to learn Python using only a phone, 1 hour a day, with links to free apps and courses.",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 300,
+      "contains_keywords": [
+        "week",
+        "Python"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-056",
+    "title": "Fear & Greed Index Today",
+    "instructions": "Fear & Greed Index Today\n\nReport today's Crypto Fear & Greed Index value, last week's value, and what drives the score. Cite every source as a full URL (https://...).",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.25",
+    "amountRaw": "250000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 150,
+      "contains_keywords": [
+        "Fear",
+        "Greed",
+        "http"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  },
+  {
+    "idempotencyKey": "bm-seed-v3-057",
+    "title": "Esports Tournament Recap",
+    "instructions": "Esports Tournament Recap\n\nRecap the most recent major CS2, Dota 2 or League of Legends tournament: final result, prize pool and MVP. Cite every source as a full URL (https://...).",
+    "privacy": "public",
+    "locationZone": "global",
+    "requiredCapabilities": [],
+    "amount": "0.5",
+    "amountRaw": "500000",
+    "durationSeconds": 86400,
+    "verificationMode": "auto",
+    "verificationCriteria": {
+      "min_length": 300,
+      "contains_keywords": [
+        "final",
+        "prize"
+      ],
+      "forbidden_phrases": [
+        "unable to complete",
+        "I cannot complete",
+        "as an AI language model",
+        "service unavailable",
+        "lorem ipsum"
+      ],
+      "pass_threshold": 60
+    }
+  }
+]

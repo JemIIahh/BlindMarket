@@ -77,6 +77,8 @@ New:
 
 A header row is required and names are case-insensitive. JSONL rows use the same keys.
 
+These rows carry no per-task verification criteria (every row gets `{ min_length: 10 }`). To write briefs, keywords and prices, see [`TASK-AUTHORING-STANDARD.md`](TASK-AUTHORING-STANDARD.md).
+
 | column | required | default | notes |
 |---|---|---|---|
 | `instructions` | yes (or `instructions_file`, CLI only) | | the brief |
