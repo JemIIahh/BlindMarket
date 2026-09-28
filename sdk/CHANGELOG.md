@@ -3,6 +3,89 @@
 This package is 0.x: a minor version may contain breaking changes. They are
 listed here with how to migrate.
 
+## 0.9.0
+
+### New
+
+- **`postTasks(rows, opts)` posts many tasks at once** (docs/BULK-POSTING.md).
+  Every row is checked and its brief sealed before anything is uploaded or
+  sent. A row the escrow or the backend would refuse throws 400
+  `INVALID_ROWS`, listing each one in `err.body.errors` (`{ index, code,
+  message }`), with nothing sent. Rows that are the same public brief count
+  as refused (`DUPLICATE_BRIEF`). The wallet must hold the total, and the
+  escrow is approved for it once, just before the first funding transaction,
+  instead of once per task.
+  - **Escrow with `createTasks`:** `GET /health/settlement` reports
+    `batchCreate.supported` for the chain. Up to `chunkSize` rows (default
+    20, at most the escrow's `maxBatch`) then share one transaction and one
+    listing call. The transaction's gas limit is estimated locally with 20%
+    headroom.
+  - **Otherwise:** each row is its own `createTask`, as `postTask()` sends it.
+  - **Safety:** every transaction is checked before signing, as `postTask()`
+    checks one. A `createTasks` must hold exactly these tasks, in this order,
+    for this token, escrow and chain.
+  - **Where the run stops:** a row the backend refuses before funding fails
+    alone and the run goes on. A funding that reverts or cannot be confirmed,
+    a listing that fails, or a backend that builds the wrong transaction or
+    stays unreachable stops the run there (`result.stopped`).
+  - **No double funding:** a funded row that is not listed comes back
+    `'unlisted'` with its `indexParams`, and nothing is funded twice.
+  - **Brief storage:** briefs are stored two per `upload-batch` request, one
+    request after another (0G stores a brief in 20–40 s, and production's
+    edge gives up at ~100 s).
+    - A pair that fails transiently is re-sent one brief per request, in
+      order, each with the backoff; a stored brief returns at once. Transient
+      means: a dropped connection, this client's own timeout, 429, 502, 503,
+      504, or Cloudflare's non-JSON 524.
+    - A refusal (400) or an answer that doesn't add up fails at once.
+    - A chunk is funded only after every one of its briefs is stored.
+  - **Options:** `onFunded` fires per row the moment its transaction is
+    broadcast, with `batch: true` when the row shares a transaction.
+    `onProgress` reports each row. `signal` stops before the next row.
+    `retry` sets the backoff for 429s, 5xx and network errors. A funding
+    transaction is never re-sent.
+- `indexTasks({ txHash, tasks })` lists every task one transaction funded
+  (`POST /a2a/tasks/index-batch`). Rows `postTasks()` left unlisted with
+  `batch: true` must be finished with it: the single index route refuses a
+  receipt that funded several tasks.
+- `createTasks({ token, tasks })` builds a `createTasks` transaction
+  (`POST /tasks/batch`). `uploadBlobs(data[])` uploads several blobs at once
+  (`POST /storage/upload-batch`).
+- `SettlementChainInfo.batchCreate?: { supported, maxBatch }`.
+- `onFunded` (in `postTask()` and `postTasks()`) now also gets the funding
+  transaction's `nonce`. Save it with the hash: if the transaction never shows
+  a receipt and the sender's confirmed nonce has moved past it, the
+  transaction can never land, and nothing was escrowed. With a local key,
+  the signed `raw` transaction comes too. While its nonce is unused it can be
+  re-broadcast as is, and it can only land once.
+- `PostTaskParams.routingSummary`: the public one-liner the task board shows
+  for a task, which is all a private task shows. It's sent with the listing
+  and checked for length (500) before anything is funded
+  (`INVALID_ROUTING_SUMMARY`).
+
+### Security
+
+- **Only a known escrow is funded.** `postTask()` and `postTasks()` approve
+  and fund only the escrow and settlement token pinned for the posting chain
+  (`SETTLEMENT_PINS`: Arc mainnet 5042 and Arc Testnet 5042002). Before, both
+  came from `/health/settlement`. Any other answer throws 409
+  `ESCROW_NOT_PINNED` with nothing approved or sent. For a custom or local
+  deployment, list it in `BlindMarketConfig.trustedEscrows`
+  (`{ chainId, escrow, token }`). `network/presets.ts` is unchanged.
+- **A local key signs, records, then broadcasts.** An ethers `Wallet` (a
+  signer holding its own key) is signed first, and `onSent` / `onFunded` get
+  the hash and nonce before the raw transaction goes out. A broadcast whose
+  answer is lost is `UnconfirmedTransactionError` (it may still land), never
+  "nothing sent". Browser wallets still sign and send in one step.
+- **The category is bound.** The calldata check requires `'general'`, the
+  category the backend builds, like every other argument of `createTask` and
+  `createTasks`.
+
+### Internal
+
+- `postTask()` and `postTasks()` share one set of row checks and brief
+  sealing (`src/posting.ts`). `postTask()` behaves exactly as before.
+
 ## 0.8.1
 
 ### Behaviour changes

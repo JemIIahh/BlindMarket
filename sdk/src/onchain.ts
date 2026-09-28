@@ -16,12 +16,16 @@ export const DEFAULT_CONFIRM_TIMEOUT_MS = 180_000;
 
 export interface SendOptions {
   /**
-   * Called with the hash as soon as the transaction is broadcast, before any
-   * wait, and again with the replacement's hash if the wallet re-prices it.
-   * Persist it there: a crash from then on cannot lose it. A throwing callback
-   * does not stop the send, which has already happened.
+   * Called with the hash and nonce as soon as the transaction is broadcast,
+   * before any wait, and again with the replacement's if the wallet re-prices
+   * it. Persist them there: a crash from then on cannot lose them, and the
+   * nonce tells later whether the transaction can still land (once the
+   * sender's confirmed nonce passes it with no receipt, it never will). A
+   * local key's signed raw transaction comes too: re-broadcast while its nonce
+   * is unused, it can only land once, with this hash. A throwing callback does
+   * not stop the send, which has already happened.
    */
-  onSent?: (hash: string) => void | Promise<void>;
+  onSent?: (hash: string, nonce: number, raw?: string) => void | Promise<void>;
   timeoutMs?: number;
   nonce?: number;
   value?: bigint;
@@ -38,10 +42,10 @@ export class UnconfirmedTransactionError extends Error {
   }
 }
 
-async function notify(onSent: SendOptions['onSent'], hash: string): Promise<void> {
+async function notify(onSent: SendOptions['onSent'], hash: string, nonce: number, raw?: string): Promise<void> {
   if (!onSent) return;
   try {
-    await onSent(hash);
+    await onSent(hash, nonce, raw);
   } catch {
     // The transaction is out whatever the callback did; the caller still gets the hash.
   }
@@ -58,14 +62,36 @@ export async function sendAndWait(
   tx: { to: string; data: string },
   opts: SendOptions = {},
 ): Promise<{ hash: string; nonce: number }> {
-  const sent = await signer.sendTransaction({
+  const request = {
     to: tx.to,
     data: tx.data,
     ...(opts.value !== undefined ? { value: opts.value } : {}),
     ...(opts.nonce !== undefined ? { nonce: opts.nonce } : {}),
     ...(opts.gasLimit !== undefined ? { gasLimit: opts.gasLimit } : {}),
-  });
-  await notify(opts.onSent, sent.hash);
+  };
+  let sent: ethers.TransactionResponse;
+  if (signsLocally(signer)) {
+    // Signed, and its hash and nonce handed to onSent, before it leaves this
+    // process: once the raw transaction is out, a lost reply cannot turn one
+    // that may land into "nothing was sent".
+    const populated = await signer.populateTransaction(request);
+    const raw = await signer.signTransaction(populated);
+    const hash = ethers.keccak256(raw);
+    await notify(opts.onSent, hash, Number(populated.nonce), raw);
+    try {
+      sent = await signer.provider.broadcastTransaction(raw);
+    } catch (err) {
+      const hint = opts.unconfirmedHint ? ` ${opts.unconfirmedHint(hash)}` : '';
+      throw new UnconfirmedTransactionError(
+        hash,
+        `Transaction ${hash} was signed and handed to the node, but no answer came back (${(err as Error).message}). It may still land.${hint}`,
+      );
+    }
+  } else {
+    // A wallet that signs out of reach (a browser extension) signs and sends in one step.
+    sent = await signer.sendTransaction(request);
+    await notify(opts.onSent, sent.hash, sent.nonce);
+  }
   try {
     const receipt = await sent.wait(1, opts.timeoutMs ?? DEFAULT_CONFIRM_TIMEOUT_MS);
     if (receipt && receipt.status === 0) throw new Error(`Transaction ${sent.hash} reverted, so nothing was paid.`);
@@ -75,7 +101,7 @@ export async function sendAndWait(
       if (err.cancelled) throw new Error(`Transaction ${sent.hash} was cancelled or replaced in the wallet, so nothing was paid.`);
       const replacement = err.replacement;
       if (err.receipt && err.receipt.status === 0) throw new Error(`Transaction ${replacement.hash} reverted, so nothing was paid.`);
-      await notify(opts.onSent, replacement.hash);
+      await notify(opts.onSent, replacement.hash, replacement.nonce);
       return { hash: replacement.hash, nonce: replacement.nonce };
     }
     if (ethers.isError(err, 'CALL_EXCEPTION')) throw new Error(`Transaction ${sent.hash} reverted, so nothing was paid.`);
@@ -86,6 +112,11 @@ export async function sendAndWait(
       `Transaction ${sent.hash} was sent but not confirmed (${(err as Error).message}).${hint}`,
     );
   }
+}
+
+/** A signer holding its own key, with a provider: its transactions can be signed, recorded, then broadcast. */
+function signsLocally(signer: ethers.Signer): signer is ethers.BaseWallet & { provider: ethers.Provider } {
+  return signer instanceof ethers.BaseWallet && !!signer.provider;
 }
 
 /**

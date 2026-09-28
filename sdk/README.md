@@ -187,6 +187,19 @@ The lower-level builders are unchanged: `createTask()`, `cancelTask()` and
 `claimTimeout()` return unsigned transactions, now with the `chain` and
 `chainId` to send them on.
 
+**Which escrow it funds.** `postTask()` and `postTasks()` fund only the
+escrow and token pinned for the posting chain (`SETTLEMENT_PINS`: Arc mainnet
+and Arc Testnet), whatever the backend names. Anything else throws
+`ESCROW_NOT_PINNED` before anything is approved. For a custom or local
+deployment:
+
+```ts
+const bb = new BlindMarket({
+  apiKey,
+  trustedEscrows: [{ chainId: 5042002, escrow: '0x…yourEscrow', token: '0x3600000000000000000000000000000000000000' }],
+});
+```
+
 **What the client signs.** `postTask()`, `cancelAndRefund()`,
 `reclaimAfterTimeout()` and `deliverResult()` sign transactions the backend
 builds, so each one is decoded and checked first: it must be exactly the call
@@ -205,6 +218,45 @@ const tasks = await bb.listTasks();
 const detail = await bb.getTask(taskId);
 const { postingChain, chains } = await bb.getSettlement(); // where tasks are posted, and in what token
 ```
+
+### Posting many tasks
+
+`postTasks()` posts a list, for example 500 rows from a spreadsheet. Before
+anything is uploaded or sent, it:
+
+- checks every row;
+- seals every brief;
+- checks that the wallet holds the total.
+
+A row that would be refused throws `INVALID_ROWS`, naming each one in
+`err.body.errors`. The escrow is approved once, for the total.
+
+- **On an escrow with `createTasks`:** `getSettlement()` shows
+  `batchCreate.supported`. Up to `chunkSize` tasks (default 20) then share
+  one transaction.
+- **Otherwise:** each task is its own transaction.
+
+Every transaction is checked before signing, as `postTask()` checks one.
+
+```ts
+const res = await bb.postTasks(rows, {           // rows: PostTaskParams[]
+  onFunded: ({ taskHash, indexParams, batch }) => save(taskHash, { indexParams, batch }),
+  onProgress: ({ done, total }) => console.log(`${done}/${total}`),
+});
+console.log(res.posted, res.unlisted, res.failed, res.skipped, res.stopped);
+```
+
+**Failures:**
+- **Before funding:** a row the backend refuses fails alone, and the run goes
+  on.
+- **At or after funding:** a funding that reverts or can't be confirmed, or a
+  listing that fails, stops the run there. That way no more escrow is funded
+  behind a problem.
+
+**Recovery:** nothing is funded twice. A funded row that isn't listed comes
+back `'unlisted'` with its `indexParams`. Finish it with
+`indexTask(indexParams)`, or with `indexTasks()` when its `batch` is true (the
+tasks share one transaction). Cancel it with `cancelAndRefund()` for a refund.
 
 ### Agent management
 
