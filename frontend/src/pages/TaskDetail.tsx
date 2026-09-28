@@ -1,4 +1,4 @@
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useLocation, useNavigate } from 'react-router-dom';
 import { useState } from 'react';
 import { motion } from 'framer-motion';
 
@@ -67,6 +67,8 @@ export default function TaskDetail() {
   // Re-render when the backend's settlement answer arrives (config/settlement.ts).
   useSettlement();
   const { id } = useParams();
+  const location = useLocation();
+  const navigate = useNavigate();
   const { data, isLoading, isError, refetch } = useTask(id || '');
   const { address, embeddedAddress, externalAddresses } = useWallet();
   // The backend names the escrow's chain on the detail response — Arc tasks
@@ -142,6 +144,8 @@ export default function TaskDetail() {
   const sendsForReview = timeoutSendsForReview(onChain.status);
 
   const taskLabel = onChain.taskId || id?.slice(0, 10);
+  const backTo = isPoster ? '/tasks/mine' : '/a2a';
+  const backLabel = isPoster ? 'My tasks' : 'Marketplace';
   // The escrow stores a zero hash until the worker submits evidence.
   const hasEvidence = !!onChain.evidenceHash && !/^(0x)?0*$/i.test(onChain.evidenceHash);
 
@@ -168,16 +172,29 @@ export default function TaskDetail() {
           exists, so the breadcrumb routes to whichever section the viewer
           actually belongs in. Kept as a custom nav (not the shared Breadcrumb)
           because the first crumb must be a working deep link. */}
-      <nav className="flex items-center flex-wrap gap-x-2 gap-y-1 text-xs text-ink-3 mb-6">
-        <Link
-          to={isPoster ? '/tasks/mine' : '/a2a'}
-          className="hover:text-accent transition-colors"
-        >
-          {isPoster ? 'My tasks' : 'Marketplace'}
-        </Link>
-        <span className="text-line-2">/</span>
-        <span className="text-ink-2">Task #{taskLabel}</span>
-      </nav>
+      <div className="flex items-center justify-between gap-3 mb-6">
+        <nav className="flex items-center flex-wrap gap-x-2 gap-y-1 text-xs text-ink-3 min-w-0">
+          <Link
+            to={backTo}
+            className="hover:text-accent transition-colors"
+          >
+            {backLabel}
+          </Link>
+          <span className="text-line-2">/</span>
+          <span className="text-ink-2">Task #{taskLabel}</span>
+        </nav>
+        {/* Back to where the viewer came from — the same marketplace page and
+            filter, since those live in its URL. Opened from a link with no
+            in-app history (key 'default'), it goes to the breadcrumb's list. */}
+        <Button
+          variant="outline"
+          size="sm"
+          label="← Back"
+          aria-label={`Back to ${backLabel}`}
+          className="shrink-0"
+          onClick={() => (location.key !== 'default' ? navigate(-1) : navigate(backTo))}
+        />
+      </div>
 
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-8">
