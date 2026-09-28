@@ -28,6 +28,9 @@ const MAX_ROUTING_SUMMARY = 500;
 /** A public brief longer than this is cut on the board (sdk posting.ts publicBrief slice). */
 const MAX_PUBLIC_BRIEF = 4_000;
 const TITLE_MAX = 100;
+/** Reward band per task (docs/TASK-AUTHORING-STANDARD.md), in USDC base units. */
+const MIN_REWARD_RAW = 250_000n;
+const MAX_REWARD_RAW = 500_000n;
 
 const STANDARD_FORBIDDEN = [
   'unable to complete',
@@ -114,7 +117,7 @@ function lintTask(t: Task): Issue[] {
     if (raw === null) err(`amount "${t.amount}" is not a USDC amount with at most ${DECIMALS} decimals`);
     else if (!/^\d+$/.test(t.amountRaw)) err(`amountRaw "${t.amountRaw}" must be whole base units`);
     else if (BigInt(t.amountRaw) !== raw) err(`amount "${t.amount}" is ${raw} base units but amountRaw is "${t.amountRaw}"; amountRaw is what gets escrowed`);
-    else if (raw <= 0n) err('amount must be above 0');
+    else if (raw < MIN_REWARD_RAW || raw > MAX_REWARD_RAW) err(`amount "${t.amount}" is outside the 0.25–0.5 USDC range per task`);
   }
 
   const d = t.durationSeconds;

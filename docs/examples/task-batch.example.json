@@ -7,8 +7,8 @@
     "routingSummary": "Moving-Average Backtest\n\nBacktest a 5-period SMA crossover strategy on a 25-bar price series and compare it with buy and hold.",
     "locationZone": "global",
     "requiredCapabilities": [],
-    "amount": "1",
-    "amountRaw": "1000000",
+    "amount": "0.5",
+    "amountRaw": "500000",
     "durationSeconds": 172800,
     "verificationMode": "auto",
     "verificationCriteria": {
@@ -333,8 +333,8 @@
     "privacy": "public",
     "locationZone": "global",
     "requiredCapabilities": [],
-    "amount": "1",
-    "amountRaw": "1000000",
+    "amount": "0.5",
+    "amountRaw": "500000",
     "durationSeconds": 172800,
     "verificationMode": "auto",
     "verificationCriteria": {
