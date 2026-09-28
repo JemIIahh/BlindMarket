@@ -18,7 +18,7 @@ import {
 import { useReputation } from '../hooks/useReputation';
 import { useWallet } from '../context/WalletContext';
 import {
-  isMainnet, OG_CHAIN_ID, OG_RPC_URL, PRIVY_RELAY_SIGNER_ID,
+  OG_CHAIN_ID, OG_RPC_URL, PRIVY_RELAY_SIGNER_ID, DISPLAY_MAINNET,
 } from '../config/constants';
 import { useSettlement } from '../config/settlement';
 import { authedGet, authedPost, authedDelete } from '../lib/api';
@@ -107,7 +107,7 @@ export default function Settings() {
       setRelaySignerLoading(false);
     }
   };
-  const chainLabel = `0G ${isMainnet ? 'Mainnet' : 'Testnet'}`;
+  const chainLabel = `0G ${DISPLAY_MAINNET ? 'Mainnet' : 'Testnet'}`;
   // Where new tasks are escrowed and paid, as the backend reports it.
   const settlement = useSettlement();
   const postingInfo = settlement.chains[settlement.postingChain];
@@ -325,7 +325,7 @@ export default function Settings() {
                 <Tag tone="ok">
                   {postingInfo.label} · <span className="font-mono">{postingInfo.chainId}</span>
                 </Tag>
-                <span className="ml-auto text-xs text-ink-2">{postingInfo.tier === 'mainnet' ? 'Mainnet' : 'Testnet'}</span>
+                <span className="ml-auto text-xs text-ink-2">{(postingInfo.tier === 'mainnet' || DISPLAY_MAINNET) ? 'Mainnet' : 'Testnet'}</span>
               </div>
             </FormField>
 

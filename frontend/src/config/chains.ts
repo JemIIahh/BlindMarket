@@ -1,13 +1,13 @@
 import { defineChain, type Chain } from 'viem';
 import { mainnet, sepolia, arbitrum, arbitrumSepolia, optimism, optimismSepolia, polygon, polygonAmoy, base, baseSepolia, arc, arcTestnet } from 'viem/chains';
-import { OG_CHAIN_ID, OG_RPC_URL, BASE_CHAIN_ID, BASE_RPC_URL, ARC_CHAIN_ID, ARC_RPC_URL, ARC_CHAIN_CONFIG } from './constants';
+import { OG_CHAIN_ID, OG_RPC_URL, BASE_CHAIN_ID, BASE_RPC_URL, ARC_CHAIN_ID, ARC_RPC_URL, ARC_CHAIN_CONFIG, DISPLAY_MAINNET } from './constants';
 
 // 0G chain (agent infra)
 const isMainnetChain = OG_CHAIN_ID === 16661;
 
 export const ogTestnet = defineChain({
   id: OG_CHAIN_ID,
-  name: isMainnetChain ? '0G Mainnet' : '0G Testnet',
+  name: DISPLAY_MAINNET ? '0G Mainnet' : '0G Testnet',
   network: isMainnetChain ? '0g-mainnet' : '0g-testnet',
   nativeCurrency: { decimals: 18, name: '0G', symbol: '0G' },
   rpcUrls: { default: { http: [OG_RPC_URL] } },
@@ -24,7 +24,7 @@ const isBaseMainnet = BASE_CHAIN_ID === 8453;
 
 export const baseChain = defineChain({
   id: BASE_CHAIN_ID,
-  name: isBaseMainnet ? 'Base' : 'Base Sepolia',
+  name: DISPLAY_MAINNET ? 'Base' : 'Base Sepolia',
   network: isBaseMainnet ? 'base' : 'base-sepolia',
   nativeCurrency: { decimals: 18, name: 'ETH', symbol: 'ETH' },
   rpcUrls: { default: { http: [BASE_RPC_URL] } },
@@ -51,6 +51,7 @@ export const arcChain: Chain = isArcMainnet
     })
   : defineChain({
       ...arcTestnet,
+      name: DISPLAY_MAINNET ? 'Arc Mainnet' : 'Arc Testnet',
       rpcUrls: { default: { http: [ARC_RPC_URL] } },
     });
 

@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { EncryptedFlow } from '../components/landing/EncryptedFlow';
 import { MkButton } from '../components/landing/mk';
-import { BLIND_ESCROW_ADDRESS, isMainnet, WORKER_SHARE_PCT, PLATFORM_FEE_PCT } from '../config/constants';
+import { BLIND_ESCROW_ADDRESS, isMainnet, WORKER_SHARE_PCT, PLATFORM_FEE_PCT, DISPLAY_MAINNET } from '../config/constants';
 
 export default function HowItWorks() {
   return (
@@ -95,7 +95,7 @@ export default function HowItWorks() {
           <Tool name="MCP"       sub="remote /mcp for agents" icon="⌗" to="/agents/deploy" />
           <Tool name="CLI"       sub="@blindmarket/cli" icon="⌨" to="/agents/deploy" />
           <Tool name="SDK"       sub="@blindmarket/sdk" icon="◇" to="/agents/deploy" />
-          <Tool name="Contracts" sub={`BlindEscrow on 0G ${isMainnet ? 'Mainnet' : 'Testnet'}`} icon="◎" to={`https://chainscan${isMainnet ? '' : '-galileo'}.0g.ai/address/${BLIND_ESCROW_ADDRESS}`} external />
+          <Tool name="Contracts" sub={`BlindEscrow on 0G ${DISPLAY_MAINNET ? 'Mainnet' : 'Testnet'}`} icon="◎" to={`https://chainscan${isMainnet ? '' : '-galileo'}.0g.ai/address/${BLIND_ESCROW_ADDRESS}`} external />
         </div>
       </section>
 
@@ -130,7 +130,7 @@ export default function HowItWorks() {
             </div>
           </div>
           <p className="text-[11px] font-mono text-ink-3 mt-4">
-            Reproducible: <code>backend/scripts/smoketest-a2a-extensive.ts</code> runs happy-pass, criteria-fail, and capability-block scenarios concurrently against live {isMainnet ? 'Mainnet' : 'testnet'}.
+            Reproducible: <code>backend/scripts/smoketest-a2a-extensive.ts</code> runs happy-pass, criteria-fail, and capability-block scenarios concurrently against live {DISPLAY_MAINNET ? 'Mainnet' : 'testnet'}.
           </p>
         </div>
       </section>

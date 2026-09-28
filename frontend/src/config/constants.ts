@@ -19,6 +19,12 @@ export const FEE_SPLIT_LABEL = `${WORKER_SHARE_PCT}/${PLATFORM_FEE_PCT}`; // "90
 const NETWORK = (import.meta.env.VITE_NETWORK as 'mainnet' | 'testnet') || 'testnet';
 const networkIsMainnet = NETWORK === 'mainnet';
 
+// Video mode: keep testnet RPCs/chain IDs but render mainnet labels everywhere.
+// Set VITE_VIDEO_MODE=true for demos/videos recorded against testnet that need
+// to look like mainnet on screen.
+export const VIDEO_MODE = import.meta.env.VITE_VIDEO_MODE === 'true';
+export const DISPLAY_MAINNET = networkIsMainnet || VIDEO_MODE;
+
 // Contract-address fallbacks are single-sourced from contracts/deployments/*.json
 // via contracts/scripts/sync-addresses.ts (do not hand-edit contractAddresses.ts).
 // All chain ids come from VITE_NETWORK only. No env overrides: mainnet build
@@ -46,6 +52,7 @@ const ARC_ADDR = isArcMainnet
 
 export { OG_CHAIN_ID };
 export { isMainnet };
+// DISPLAY_MAINNET is already exported above.
 
 export const OG_RPC_URL =
   import.meta.env.VITE_OG_RPC_URL ||
