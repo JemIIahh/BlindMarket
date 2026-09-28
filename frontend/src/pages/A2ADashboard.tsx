@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import {
   PageHeader,
   SectionRule,
@@ -14,6 +14,7 @@ import {
   ErrorNotice,
   LiveDot,
   Segmented,
+  Pagination,
   useTabParam,
 } from '../components/bb';
 import { TaskCard, TaskCardSkeleton, type BrowseTask } from '../components/task/TaskCard';
@@ -49,6 +50,9 @@ const PRIVACY_FILTERS: { id: PrivacyFilter; label: string }[] = [
 
 const isPublicTask = (t: BrowseTask) => t.meta.privacy === 'public';
 
+/** Cards per page: fills the 1-, 2- and 3-column grids evenly. */
+const PAGE_SIZE = 24;
+
 /**
  * Best-paying first, then the soonest deadline. The backend lists open tasks
  * in Redis set order, which isn't meaningful and can change between polls,
@@ -73,7 +77,11 @@ export default function A2ADashboard() {
   const [mcpEndpoint, setMcpEndpoint] = useState('');
   const [rate, setRate] = useState('');
   const [registerError, setRegisterError] = useState<unknown>(null);
-  const [privacyFilter, setPrivacyFilter] = useState<PrivacyFilter>('all');
+  // The page and the filter live in the URL (?page=, ?show=) so Back from a
+  // task returns to the same cards.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const showParam = searchParams.get('show');
+  const privacyFilter: PrivacyFilter = showParam === 'public' || showParam === 'private' ? showParam : 'all';
 
   const { isAuthenticated } = useAuth();
   const address = useChainAddress();
@@ -90,6 +98,28 @@ export default function A2ADashboard() {
     ? browseRows
     : browseRows.filter((t) => isPublicTask(t) === (privacyFilter === 'public'));
   const featured = topRewardIndex(visibleRows.map((t) => t.meta.reward));
+  const pageCount = Math.max(1, Math.ceil(visibleRows.length / PAGE_SIZE));
+  const page = Math.min(Math.max(parseInt(searchParams.get('page') ?? '', 10) || 1, 1), pageCount);
+  const pageStart = (page - 1) * PAGE_SIZE;
+  const pageRows = visibleRows.slice(pageStart, pageStart + PAGE_SIZE);
+  const goToPage = (next: number) => {
+    setSearchParams((prev) => {
+      const p = new URLSearchParams(prev);
+      if (next <= 1) p.delete('page');
+      else p.set('page', String(next));
+      return p;
+    });
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+  const changeFilter = (next: PrivacyFilter) => {
+    setSearchParams((prev) => {
+      const p = new URLSearchParams(prev);
+      p.delete('page');
+      if (next === 'all') p.delete('show');
+      else p.set('show', next);
+      return p;
+    }, { replace: true });
+  };
   const escrowTotal = sumRewards(browseRows.map((t) => t.meta.reward));
   const now = Date.now();
   const filterCount = (id: PrivacyFilter) =>
@@ -164,7 +194,7 @@ export default function A2ADashboard() {
                 <Segmented
                   label="Show tasks"
                   value={privacyFilter}
-                  onChange={setPrivacyFilter}
+                  onChange={changeFilter}
                   options={PRIVACY_FILTERS.map((f) => ({ ...f, count: filterCount(f.id) }))}
                   className="sm:ml-auto"
                 />
@@ -174,10 +204,18 @@ export default function A2ADashboard() {
             {/* Separate rounded cards, as on the landing page. Each card is a
                 single Link to the task detail. */}
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {visibleRows.map((t, i) => (
-                <TaskCard key={t.meta.taskId} task={t} now={now} featured={i === featured} />
+              {pageRows.map((t, i) => (
+                <TaskCard key={t.meta.taskId} task={t} now={now} featured={pageStart + i === featured} />
               ))}
             </div>
+            <Pagination
+              page={page}
+              totalPages={pageCount}
+              totalItems={visibleRows.length}
+              pageSize={PAGE_SIZE}
+              onPageChange={goToPage}
+              className="mt-6"
+            />
           </>
         )
       )}
