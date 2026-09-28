@@ -195,6 +195,8 @@ describe('POST /tasks claims the task hash for its poster', () => {
     expect(res.status).toBe(200);
     expect(hashClaim.claimTaskHash).toHaveBeenCalledTimes(1);
     expect(hashClaim.claimTaskHash.mock.calls[0][0]).toBe(TASK);
+    // Under a token of this request's own (a2aStore.claimTaskHash).
+    expect((hashClaim.claimTaskHash.mock.calls[0] as unknown[])[2]).toMatch(/^[0-9a-f-]{36}$/);
     expect(hashClaim.claimTaskHash.mock.invocationCallOrder[0]).toBeLessThan((chain.buildUnsignedTx as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]);
   });
 });

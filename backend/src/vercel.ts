@@ -7,7 +7,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import { config } from './config.js';
 import { serverlessErrorHandler, initSentry } from './middleware/errorHandler.js';
-import { createRateLimiter } from './middleware/rateLimit.js';
+import { createPostingAuthLimiter, createRateLimiter } from './middleware/rateLimit.js';
 import { requestLogger } from './middleware/requestLogger.js';
 import { healthRouter } from './routes/health.js';
 import { tasksRouter } from './routes/tasks.js';
@@ -41,6 +41,9 @@ app.use(cors({
   credentials: true,
 }));
 app.use(createRateLimiter());
+// Posting calls with credentials skip the limiter above; this keeps a per-IP
+// limit on the ones that fail to authenticate (middleware/rateLimit.ts).
+app.use(createPostingAuthLimiter());
 app.use(express.json({ limit: '15mb' }));
 app.use(requestLogger);
 

@@ -99,6 +99,92 @@ export async function buildCreateTaskOn(
   return buildUnsignedTx(escrow, 'createTask', [taskHash, token, amount, category, locationZone, duration], from, value);
 }
 
+/** One task of a createTasks batch: BlindEscrow.TaskInput. */
+export interface CreateTaskInput {
+  taskHash: string;
+  amount: bigint;
+  category: string;
+  locationZone: string;
+  duration: bigint;
+  /** The verifier committed on-chain for this task; unset or the zero address for none. */
+  verifierAgent?: string;
+}
+
+/** EIP-7825 (Osaka) caps one transaction at 2^24 gas, below the block gas limit. */
+export const TX_GAS_CAP = 16_777_216n;
+
+/** How long a build waits for the gas estimate before falling back to createTasksGasFallback. */
+const ESTIMATE_TIMEOUT_MS = 5_000;
+
+/** Storage words a string takes beyond its own slot: none up to 31 bytes, one per 32 bytes above that. */
+function extraStringWords(value: string): bigint {
+  const bytes = Buffer.byteLength(value, 'utf8');
+  return bytes > 31 ? BigInt(Math.ceil(bytes / 32)) : 0n;
+}
+
+/**
+ * The gas limit for createTasks of `inputs` when it can't be estimated.
+ * Measured on an escrow with no TaskRegistry (Base and Arc have none): about
+ * 202k per task plus 57k, with short strings and no verifier. That is rounded
+ * up to 210k and 100k; a category or locationZone longer than 31 bytes is
+ * stored in one more slot per 32 bytes (~22k each), and a verifier is one
+ * more slot and an event. A fifth goes on top, and the result never passes
+ * TX_GAS_CAP. Never a single task's limit: a batch reusing it runs out of gas.
+ */
+export function createTasksGasFallback(inputs: readonly CreateTaskInput[]): bigint {
+  let gas = 100_000n;
+  for (const input of inputs) {
+    gas += 210_000n + 25_000n * (extraStringWords(input.category) + extraStringWords(input.locationZone));
+    if (input.verifierAgent && input.verifierAgent !== ethers.ZeroAddress) gas += 30_000n;
+  }
+  const buffered = (gas * 120n) / 100n;
+  return buffered < TX_GAS_CAP ? buffered : TX_GAS_CAP;
+}
+
+/**
+ * Build an unsigned createTasks on `chain`: every input escrowed in one
+ * transaction, in `token` (an ERC-20; the escrow refuses address(0) and any
+ * value, so the tx carries none). The escrow checks each task as createTask
+ * does and reverts the whole batch if one fails.
+ *
+ * The tx carries a gasLimit: the escrow's estimate for `from` plus a fifth,
+ * or createTasksGasFallback when the estimate fails (the poster may approve
+ * the total after building) or is slow. Only `from`'s wallet can say which,
+ * so a revert here does not refuse the build.
+ */
+export async function buildCreateTasksOn(
+  chain: TaskChain,
+  from: string,
+  token: string,
+  inputs: readonly CreateTaskInput[],
+): Promise<ethers.TransactionRequest> {
+  const escrow = escrowFor(chain);
+  const tasks = inputs.map((input) => ({
+    taskHash: input.taskHash,
+    amount: input.amount,
+    category: input.category,
+    locationZone: input.locationZone,
+    duration: input.duration,
+    verifierAgent: input.verifierAgent || ethers.ZeroAddress,
+  }));
+  const tx = await buildUnsignedTx(escrow, 'createTasks', [token, tasks], from);
+  let gasLimit = createTasksGasFallback(inputs);
+  try {
+    const { provider } = chainRuntime(chain);
+    const estimate = await Promise.race([
+      provider.estimateGas({ from: tx.from, to: tx.to, data: tx.data }),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('estimate timed out')), ESTIMATE_TIMEOUT_MS).unref()),
+    ]);
+    const buffered = (estimate * 120n) / 100n;
+    gasLimit = buffered < TX_GAS_CAP ? buffered : TX_GAS_CAP;
+  } catch {
+    // Keep the fallback.
+  }
+  // A number (at most 2^24, so exact), as the web app's UnsignedTx types it;
+  // chainId pins the network as buildSubmitEvidenceOn does.
+  return { ...tx, gasLimit: Number(gasLimit), chainId: settlementChainConfig(chain).chainId };
+}
+
 /** Read a task from whichever chain holds it. */
 export async function getTaskOn(
   chain: TaskChain,

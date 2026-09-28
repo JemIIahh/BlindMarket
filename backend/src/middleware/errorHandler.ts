@@ -162,6 +162,12 @@ export class AppError extends Error {
     message: string,
     /** Machine-readable sub-reason for clients that must branch within one code. */
     public reason?: string,
+    /**
+     * Structured detail for clients, sent as `error.details`: the per-row
+     * errors of a batch route ({ errors: [{ index, code, message }] }).
+     * Server-written text only: never a secret or the raw input.
+     */
+    public details?: Record<string, unknown>,
   ) {
     super(message);
     this.name = 'AppError';
@@ -235,7 +241,15 @@ function classify(err: Error): Outcome {
   if (err instanceof AppError) {
     return {
       status: err.statusCode,
-      body: { success: false, error: { code: err.code, message: err.message, ...(err.reason ? { reason: err.reason } : {}) } },
+      body: {
+        success: false,
+        error: {
+          code: err.code,
+          message: err.message,
+          ...(err.reason ? { reason: err.reason } : {}),
+          ...(err.details ? { details: err.details } : {}),
+        },
+      },
       capture: err.statusCode >= 500,
     };
   }

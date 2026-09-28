@@ -54,20 +54,65 @@ export const HASH_CLAIM_TTL_SECONDS = 24 * 60 * 60;
  * hashes to be unique), so without a claim the first receipt to reach
  * /tasks/index — a front-runner's — would own the task and lock the real
  * poster out with TASK_HASH_TAKEN. The claim is taken before the poster's
- * tx exists, so it cannot be front-run. Returns who holds it.
+ * tx exists, so it cannot be front-run. Returns who holds it, and whether
+ * this call took it (`fresh`) rather than finding it already `poster`'s.
+ *
+ * `token` names the request: the claim records `<poster>|<token>`, and a
+ * request that finds the claim already `poster`'s tags it with its own token
+ * (renewing the 24 h expiry), since the tx it builds now rests on it. Only
+ * the last request to build on a claim can release it (releaseTaskHashClaim),
+ * so a failed batch can't drop a claim a concurrent retry built a tx on.
  */
-export async function claimTaskHash(taskHash: string, poster: string): Promise<{ poster: string; mine: boolean }> {
+export async function claimTaskHash(
+  taskHash: string,
+  poster: string,
+  token: string,
+): Promise<{ poster: string; mine: boolean; fresh: boolean }> {
   const addr = poster.toLowerCase();
-  const key = KEY.hashClaim(taskHash);
-  const set = await redis.set(key, addr, 'EX', HASH_CLAIM_TTL_SECONDS, 'NX');
-  if (set !== null) return { poster: addr, mine: true };
-  const holder = (await redis.get(key)) ?? addr;
-  return { poster: holder, mine: holder === addr };
+  const [outcome, holder] = (await redis.eval(
+    CLAIM_HASH_SCRIPT,
+    1,
+    KEY.hashClaim(taskHash),
+    addr,
+    token,
+    HASH_CLAIM_TTL_SECONDS,
+  )) as [string, string];
+  return { poster: holder, mine: outcome !== 'taken', fresh: outcome === 'fresh' };
 }
+
+// Claim, or re-tag a claim the poster already holds, in one step. A value
+// with no '|' is a claim from before tokens: all of it is the poster.
+const CLAIM_HASH_SCRIPT = `
+local current = redis.call('GET', KEYS[1])
+local holder = nil
+if current then holder = string.match(current, '^[^|]*') end
+if holder and holder ~= ARGV[1] then return {'taken', holder} end
+redis.call('SET', KEYS[1], ARGV[1] .. '|' .. ARGV[2], 'EX', ARGV[3])
+if holder then return {'mine', holder} end
+return {'fresh', ARGV[1]}
+`;
 
 /** The poster who claimed `taskHash` through POST /tasks, or null. */
 export async function getTaskHashClaim(taskHash: string): Promise<string | null> {
-  return redis.get(KEY.hashClaim(taskHash));
+  const value = await redis.get(KEY.hashClaim(taskHash));
+  return value === null ? null : value.split('|')[0];
+}
+
+/**
+ * Drop the claim on `taskHash` that `poster`'s request `token` holds, taken by
+ * a POST /tasks/batch that then failed, so the hash (a public brief's text) is
+ * free for anyone again. Compare-and-delete on the exact `<poster>|<token>`:
+ * a claim another poster holds, or one a later request of the same poster
+ * built on, is left in place. Returns whether a claim was dropped.
+ */
+export async function releaseTaskHashClaim(taskHash: string, poster: string, token: string): Promise<boolean> {
+  const dropped = await redis.eval(
+    "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0",
+    1,
+    KEY.hashClaim(taskHash),
+    `${poster.toLowerCase()}|${token}`,
+  );
+  return Number(dropped) === 1;
 }
 
 export async function setMeta(meta: A2ATaskMeta): Promise<void> {

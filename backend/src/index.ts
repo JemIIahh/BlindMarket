@@ -8,7 +8,7 @@ import helmet from 'helmet';
 import { config, assertBootConfig } from './config.js';
 import { embeddingsConfigured } from './services/embeddingService.js';
 import { globalErrorHandler, initSentry } from './middleware/errorHandler.js';
-import { createRateLimiter } from './middleware/rateLimit.js';
+import { createPostingAuthLimiter, createRateLimiter } from './middleware/rateLimit.js';
 import { requestLogger } from './middleware/requestLogger.js';
 import { initSocket } from './services/socket.js';
 import { healthRouter } from './routes/health.js';
@@ -95,6 +95,9 @@ app.use(cors({
   credentials: true,
 }));
 app.use(createRateLimiter());
+// Posting calls with credentials skip the limiter above; this keeps a per-IP
+// limit on the ones that fail to authenticate (middleware/rateLimit.ts).
+app.use(createPostingAuthLimiter());
 
 // Body parsing
 app.use(express.json({ limit: '2mb' }));

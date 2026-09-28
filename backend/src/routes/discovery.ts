@@ -106,6 +106,12 @@ wellKnownRouter.get('/agents/:address.json', async (req, res, next) => {
 // endpoints; a generator would drag internal routes into public view. Coarse
 // schemas — this is for agents (and custom GPT actions), not SDK codegen.
 
+// The posting routes' per-wallet budget (middleware/rateLimit.ts).
+const POSTING_BUDGET_429 = {
+  description:
+    'RATE_LIMIT: this wallet spent its budget on this family of posting routes (uploads, builds or listings): 120 items a minute, a batch counting one per item, refilling steadily. Retry-After says when.',
+};
+
 const respEnvelope = (dataDesc: string) => ({
   description: dataDesc,
   content: { 'application/json': { schema: { type: 'object', properties: { success: { type: 'boolean' }, data: { type: 'object' } } } } },
@@ -211,6 +217,44 @@ const OPENAPI_SPEC = {
           '200': respEnvelope("{ unsignedTx, chain, chainId }: send unsignedTx on chain chainId ('base' or '0g')"),
           '400': { description: "Invalid body, or TOKEN_NOT_SETTLEMENT: the token is not the posting chain's settlement token" },
           '401': { description: 'Missing/invalid API key' },
+          '429': POSTING_BUDGET_429,
+          '503': { description: 'CHAIN_NOT_CONFIGURED: this backend has no escrow on its posting chain' },
+        },
+      },
+    },
+    '/api/v1/tasks/batch': {
+      post: {
+        summary: 'Build one unsigned createTasks escrow tx for several tasks (bulk posting; sign + fund from YOUR wallet)',
+        description:
+          "Only when GET /api/v1/health/settlement reports batchCreate.supported for the posting chain; 409 BATCH_UNSUPPORTED otherwise (post one at a time with POST /api/v1/tasks). Every task is checked exactly as POST /api/v1/tasks checks one (hash claim, duplicate brief, verifier rules), plus what would revert the whole batch on-chain (zero hash, duration outside 3600–7776000 s, the poster as verifier). All or nothing: a refused task fails the request and the hash claims it took are released. Approve the escrow for the sum of the amounts first.",
+        security: [{ ApiKeyAuth: [] }, { BearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['token', 'tasks'],
+                properties: {
+                  token: { type: 'string', description: "The posting chain's settlement token (USDC), once for the whole batch" },
+                  tasks: {
+                    type: 'array',
+                    minItems: 1,
+                    maxItems: 50,
+                    description: 'POST /api/v1/tasks bodies without token; at most batchCreate.maxBatch, and one per taskHash',
+                    items: { type: 'object', required: ['taskHash', 'amount', 'locationZone', 'duration'] },
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': respEnvelope('{ unsignedTx, chain, chainId, taskHashes }: unsignedTx calls createTasks(token, TaskInput[]) with the tasks in the order sent (taskHashes), and carries a gasLimit (estimate plus a fifth, or a size-based fallback)'),
+          '400': { description: "INVALID_TASKS: error.message summarises, counting tasks from 1 ('2 of 5 tasks are invalid: task 2: <reason>; …'), and error.details.errors: [{ index, code, message }] names every refused task, index being its 0-based position in tasks (nothing was claimed or built). Also VALIDATION_ERROR, TOKEN_NOT_SETTLEMENT, BATCH_TOO_LARGE" },
+          '401': { description: 'Missing/invalid API key' },
+          '409': { description: "BATCH_UNSUPPORTED: the posting chain's escrow has no createTasks" },
+          '429': POSTING_BUDGET_429,
           '503': { description: 'CHAIN_NOT_CONFIGURED: this backend has no escrow on its posting chain' },
         },
       },
@@ -220,7 +264,45 @@ const OPENAPI_SPEC = {
         summary: 'Upload a brief blob (base64) to 0G Storage',
         security: [{ ApiKeyAuth: [] }, { BearerAuth: [] }],
         requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['data'], properties: { data: { type: 'string', description: 'base64 blob' } } } } } },
-        responses: { '200': respEnvelope('{ rootHash }') },
+        responses: {
+          '201': respEnvelope('{ rootHash, txHash }'),
+          '429': POSTING_BUDGET_429,
+          '503': { description: "STORAGE_UNAVAILABLE: 0G Storage couldn't store the blob (an upload answers within about 85 s). Upload before funding and nothing was paid: try again in a minute" },
+        },
+      },
+    },
+    '/api/v1/storage/upload-batch': {
+      post: {
+        summary: 'Upload several brief blobs (base64) in one request, in order',
+        description:
+          'Each item gets the checks of POST /api/v1/storage/upload, all before anything is stored; the whole body must fit the 2 MB JSON limit. A server storing on 0G takes at most 4 items per request (400 BATCH_TOO_LARGE otherwise): its uploads run one at a time, and a larger batch would outlast a proxy timeout. All or nothing: a failed item fails the request with its index (error.details.index) and no root hash is returned; storage is content-addressed, so sending the batch again gets the same root hashes.',
+        security: [{ ApiKeyAuth: [] }, { BearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['items'],
+                properties: {
+                  items: {
+                    type: 'array',
+                    minItems: 1,
+                    maxItems: 50,
+                    items: { type: 'object', required: ['data'], properties: { data: { type: 'string', description: 'base64 blob' } } },
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '201': respEnvelope('{ results: [{ rootHash, txHash }] } in input order'),
+          '400': { description: 'INVALID_ITEMS: items refused as by /storage/upload (MISSING_DATA, INVALID_DATA, EMPTY_DATA, DATA_TOO_LARGE), each in error.details.errors: [{ index, code, message }]. error.message counts briefs from 1; index is the 0-based position in items. BATCH_TOO_LARGE: more than 4 items on a 0G server. Also VALIDATION_ERROR' },
+          '429': POSTING_BUDGET_429,
+          '502': { description: 'UPLOAD_FAILED: an item could not be stored; error.details.index (0-based) names it' },
+          '503': { description: "STORAGE_UNAVAILABLE: 0G Storage couldn't store an item; error.details.index (0-based) names it. Nothing was paid: send the batch again in a minute. 0G uploads run one at a time per server, so a large batch can outlast a proxy's timeout: send a few briefs per request" },
+        },
       },
     },
     '/api/v1/a2a/tasks/index': {
@@ -251,7 +333,48 @@ const OPENAPI_SPEC = {
             },
           },
         },
-        responses: { '200': respEnvelope('{ taskHash, onChainTaskId, indexed: true }'), '403': { description: 'NOT_TASK_AGENT — API key owner ≠ funding wallet' } },
+        responses: {
+          '200': respEnvelope('{ taskHash, onChainTaskId, indexed: true }'),
+          '403': { description: 'NOT_TASK_AGENT — API key owner ≠ funding wallet' },
+          '409': { description: 'MULTIPLE_TASK_CREATED: the receipt funded several tasks; list them with /api/v1/a2a/tasks/index-batch' },
+          '429': POSTING_BUDGET_429,
+        },
+      },
+    },
+    '/api/v1/a2a/tasks/index-batch': {
+      post: {
+        summary: 'Index the tasks one confirmed transaction funded (a createTasks batch, or a single createTask)',
+        description:
+          'The receipt is read once; only TaskCreated events from the escrow count. Each listed task is matched to its event by taskHash and indexed with the checks of POST /api/v1/a2a/tasks/index: the caller must be its on-chain poster, and a re-index keeps the first poster and terms. Tasks the receipt funds but the request does not list are left alone.',
+        security: [{ ApiKeyAuth: [] }, { BearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['txHash', 'tasks'],
+                properties: {
+                  txHash: { type: 'string' },
+                  isUserOp: { type: 'boolean', description: 'txHash is an ERC-4337 user-op hash: find the transaction by the listed hashes' },
+                  tasks: {
+                    type: 'array',
+                    minItems: 1,
+                    maxItems: 50,
+                    description: 'POST /api/v1/a2a/tasks/index bodies without txHash',
+                    items: { type: 'object', required: ['taskHash'] },
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': respEnvelope('{ results: [{ taskHash, onChainTaskId, indexed: true } | { taskHash, error: { code, message } }] } in input order; NOT_IN_RECEIPT for a listed task the transaction did not fund'),
+          '404': { description: 'RECEIPT_NOT_FOUND: not visible to the RPC yet, retry' },
+          '409': { description: 'TX_REVERTED, or NO_TASK_CREATED: the receipt funded no task on the escrow' },
+          '429': POSTING_BUDGET_429,
+        },
       },
     },
     '/api/v1/a2a/tasks/posted': {
@@ -259,6 +382,14 @@ const OPENAPI_SPEC = {
         summary: "Caller's posted tasks with lifecycle state + deliverable (poll this for results)",
         security: [{ ApiKeyAuth: [] }, { BearerAuth: [] }],
         responses: { '200': respEnvelope('{ tasks: [{ meta, state, onChain }], total }') },
+      },
+    },
+    '/api/v1/health/settlement': {
+      get: {
+        summary: 'Settlement chains as data: the posting chain, and per chain its id, escrow, token, gas coin and batchCreate',
+        responses: {
+          '200': respEnvelope('{ postingChain, chains: [{ chain, chainId, tier, escrowAddress, token: { kind, address, symbol, decimals }, relayChain, gasSymbol, postable, batchCreate: { supported, maxBatch } }], settlementTier }. batchCreate.supported: the escrow has createTasks (POST /api/v1/tasks/batch), taking up to maxBatch tasks; read from its MAX_BATCH() and cached, false when unreadable'),
+        },
       },
     },
     '/api/v1/reputation/leaderboard': {

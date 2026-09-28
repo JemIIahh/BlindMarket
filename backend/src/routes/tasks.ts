@@ -26,6 +26,10 @@ import { rooms } from '../services/socket.js';
 import { isSafeRegexSource } from '../services/rubricEngine.js';
 import { hostedVerifierNotOptedIn, VERIFIER_NOT_OPTED_IN_MESSAGE } from '../services/verifierDuty.js';
 import { withPosterAvatars } from '../services/avatarStore.js';
+import { BATCH_UNSUPPORTED, batchCreateSupport } from '../services/batchSupport.js';
+import { MAX_BATCH_REQUEST, WALLET_POSTING_BUDGET_PER_MIN } from '../constants.js';
+import { batchWeight, createWalletBudget, postingIpBudget } from '../middleware/rateLimit.js';
+import { invalidRows, zodIssuesText, type RowError } from '../middleware/batchErrors.js';
 
 export const tasksRouter = Router();
 
@@ -350,116 +354,214 @@ function parseWholeNumber(value: string): bigint | null {
   return /^(?:\d+|0x[0-9a-fA-F]+)$/.test(value) ? BigInt(value) : null;
 }
 
-tasksRouter.post('/', requireAuth, async (req: AuthRequest, res, next) => {
+// ── The checks POST /tasks makes, one step each ──────────────────────────────
+//
+// POST /tasks runs them in this order for its one task, and POST /tasks/batch
+// runs the same ones for each of its tasks, so both refuse a task for the
+// same reasons, with the same codes and messages.
+
+/** A POST /tasks body without the token: one task of POST /tasks/batch. */
+const taskTermsSchema = createTaskSchema.omit({ token: true });
+type TaskTerms = z.infer<typeof taskTermsSchema>;
+
+/**
+ * The checks on a task's own terms, before anything is read or claimed: a
+ * verification mode the platform can settle, and a whole-number amount and
+ * duration. Returns the amount and duration the escrow call takes.
+ */
+function checkTaskTerms(data: TaskTerms): { amount: bigint; duration: bigint } {
+  if (data.verificationMode === 'oracle') {
+    throw new AppError(
+      400,
+      'VERIFICATION_MODE_UNSUPPORTED',
+      "verificationMode='oracle' is not supported — use 'manual', 'auto' or 'agent'",
+    );
+  }
+  if (data.verificationMode === 'auto' && !hasAutoCheck(data.verificationCriteria)) {
+    throw new AppError(
+      400,
+      'AUTO_CRITERIA_REQUIRED',
+      `verificationMode='auto' requires verificationCriteria with at least one of: ${AUTO_CHECK_KEYS.join(', ')}`,
+    );
+  }
+  // An auto task whose regex cannot run can never pass: autoVerify fails
+  // closed on a pattern that does not compile or is prone to catastrophic
+  // backtracking. Say so now, before the poster funds or lists it.
+  if (data.verificationMode === 'auto' && typeof data.verificationCriteria?.regex_pattern === 'string') {
+    const pattern = data.verificationCriteria.regex_pattern;
+    let usable = isSafeRegexSource(pattern);
+    if (usable) {
+      try {
+        new RegExp(pattern);
+      } catch {
+        usable = false;
+      }
+    }
+    if (!usable) {
+      throw new AppError(
+        400,
+        'REGEX_PATTERN_UNUSABLE',
+        'verificationCriteria.regex_pattern does not compile or can backtrack catastrophically (nested or stacked quantifiers) — simplify it',
+      );
+    }
+  }
+
+  // Checked before the hash is claimed below. BigInt() on "1.5" or "" throws
+  // a SyntaxError, which answered 500 and, for the duration, only after the
+  // hash was already claimed for this poster.
+  const amount = parseWholeNumber(data.amount);
+  if (amount === null || amount <= 0n) {
+    throw new AppError(
+      400,
+      'INVALID_AMOUNT',
+      "amount must be a whole number above 0, in the token's smallest unit (USDC has 6 decimals: '1500000' is 1.5 USDC)",
+    );
+  }
+  const duration = parseWholeNumber(data.duration);
+  if (duration === null || duration <= 0n) {
+    throw new AppError(400, 'INVALID_DURATION', 'duration must be a whole number of seconds above 0');
+  }
+  return { amount, duration };
+}
+
+/**
+ * The chain new tasks are funded on, in its settlement token: this
+ * deployment's posting chain (settlementChains.postingChain: Arc when it has
+ * an escrow, else Base). 503 when it has no escrow here.
+ */
+function postingTarget(): { chain: TaskChain; label: string; chainId: number; token: ReturnType<typeof settlementChainConfig>['token'] } {
+  const chain = postingChain();
+  const { label, escrowAddress, escrowEnv, chainId, token } = settlementChainConfig(chain);
+  if (!escrowAddress) {
+    throw new AppError(503, 'CHAIN_NOT_CONFIGURED', `This backend has no ${label} escrow to post tasks on (${escrowEnv})`);
+  }
+  return { chain, label, chainId, token };
+}
+
+/**
+ * Refuse a hash that already names a task, then claim it for `from` under
+ * this request's `token` (a2aStore.claimTaskHash). `fresh` is true when this
+ * call took the claim, false when `from` already held it (POST /tasks/batch
+ * releases only the claims it took, and only while they carry its token).
+ */
+async function claimNewTaskHash(taskHash: string, from: string, token: string): Promise<{ fresh: boolean }> {
+  await refuseHashInUse(taskHash);
+  // Claim the hash for this poster before the tx exists, so nobody who
+  // sees it on-chain can index it first (a2aStore.claimTaskHash). Refused
+  // here, before any gas is spent, when another poster already holds it.
+  const claim = await a2aStore.claimTaskHash(taskHash, from, token);
+  if (!claim.mine) {
+    throw new AppError(409, 'TASK_HASH_TAKEN', 'Another poster is already posting a task with this hash — post with a new brief');
+  }
+  return { fresh: claim.fresh === true };
+}
+
+/**
+ * A task is known off-chain by its hash, and a public task's hash is the
+ * hash of its brief's text: posting the same public brief again made a
+ * second escrow under a hash that already names a task. Its listing was
+ * then refused (or would have pointed at the first task), after the
+ * poster had paid. Refuse here, before anything is funded.
+ */
+async function refuseHashInUse(taskHash: string): Promise<void> {
+  const [listed, escrowed] = await Promise.all([
+    a2aStore.getMeta(taskHash),
+    resolveCachedTaskByHash(taskHash).catch(() => null),
+  ]);
+  if (listed || escrowed) {
+    throw new AppError(
+      409,
+      'TASK_HASH_IN_USE',
+      `A task with exactly this brief already exists${escrowed ? ` (${escrowed.chain} task ${escrowed.taskId})` : ''}. ` +
+        'A public task is identified by its text, so change the brief, even slightly, and post again. ' +
+        'If that task is one you just paid for, finish listing it instead. Nothing was charged.',
+    );
+  }
+}
+
+/**
+ * The posting chain's settlement token, spelled as the escrow call takes it.
+ * Any other token would revert TokenNotAllowed, or be refused later by
+ * /a2a/tasks/index, with the poster's gas spent.
+ */
+function settlementToken(
+  chain: TaskChain,
+  label: string,
+  token: ReturnType<typeof settlementChainConfig>['token'],
+  requested: string,
+): { tokenAddress: string; isNative: boolean } {
+  if (!token.address || !payoutCurrency(chain, requested)) {
+    throw new AppError(
+      400,
+      'TOKEN_NOT_SETTLEMENT',
+      `New tasks are escrowed in ${token.unit.symbol} on ${label} (token ${token.address ?? 'unset'}), not ${requested}`,
+    );
+  }
+  // The match above ignores letter case. Build with the registry's address,
+  // checksummed afresh: a mixed-case spelling with a bad checksum, in the
+  // request or in BASE_USDC_ADDRESS, would make ethers throw.
+  return { tokenAddress: ethers.getAddress(token.address.toLowerCase()), isNative: token.kind === 'native' };
+}
+
+/**
+ * Checked before the funding tx is built, so nothing is escrowed for a
+ * verifier that would never act (security audit run 1, C04).
+ */
+async function refuseOptedOutVerifier(data: TaskTerms): Promise<void> {
+  if (data.verificationMode === 'agent' && data.verifierAddress && await hostedVerifierNotOptedIn(data.verifierAddress)) {
+    throw new AppError(409, 'VERIFIER_NOT_OPTED_IN', VERIFIER_NOT_OPTED_IN_MESSAGE);
+  }
+}
+
+/** The verifier the escrow call commits on-chain for this task, if any. */
+function committedVerifier(data: TaskTerms): string | undefined {
+  return data.verificationMode === 'agent' ? data.verifierAddress : undefined;
+}
+
+/**
+ * Record the escrow_lock accounting event as PENDING (M5 audit): the route
+ * builds an unsigned tx, and nothing is funded until it broadcasts. The
+ * receipt-verified POST /a2a/tasks/index flips it to confirmed; an abandoned
+ * build stays visibly pending instead of masquerading as funded. A failed
+ * write is logged and never fails the build.
+ */
+async function recordPendingLock(
+  from: string,
+  taskHash: string,
+  amount: string,
+  tokenAddress: string,
+  chain: TaskChain,
+  unit: string,
+): Promise<void> {
+  try {
+    const decimals = await getTokenDecimals(tokenAddress, chain);
+    void Promise.resolve(accountingService.recordTransaction({
+      address: from,
+      role: 'agent',
+      taskId: taskHash,
+      type: 'escrow_lock',
+      amount: Number(amount) / (10 ** decimals),
+      unit,
+      status: 'pending',
+    })).catch((accErr) => console.warn('[tasks] Accounting record failed (non-blocking):', accErr));
+  } catch (accErr) {
+    console.warn('[tasks] Accounting record failed (non-blocking):', accErr);
+  }
+}
+
+/** Each wallet's task builds, POST /tasks and /tasks/batch together (middleware/rateLimit.ts). */
+const buildBudget = createWalletBudget({ name: 'task builds', perMinute: WALLET_POSTING_BUDGET_PER_MIN, weight: batchWeight('tasks') });
+
+tasksRouter.post('/', requireAuth, buildBudget, postingIpBudget, async (req: AuthRequest, res, next) => {
   try {
     const data = createTaskSchema.parse(req.body);
     const from = req.user!.address;
 
-    if (data.verificationMode === 'oracle') {
-      throw new AppError(
-        400,
-        'VERIFICATION_MODE_UNSUPPORTED',
-        "verificationMode='oracle' is not supported — use 'manual', 'auto' or 'agent'",
-      );
-    }
-    if (data.verificationMode === 'auto' && !hasAutoCheck(data.verificationCriteria)) {
-      throw new AppError(
-        400,
-        'AUTO_CRITERIA_REQUIRED',
-        `verificationMode='auto' requires verificationCriteria with at least one of: ${AUTO_CHECK_KEYS.join(', ')}`,
-      );
-    }
-    // An auto task whose regex cannot run can never pass: autoVerify fails
-    // closed on a pattern that does not compile or is prone to catastrophic
-    // backtracking. Say so now, before the poster funds or lists it.
-    if (data.verificationMode === 'auto' && typeof data.verificationCriteria?.regex_pattern === 'string') {
-      const pattern = data.verificationCriteria.regex_pattern;
-      let usable = isSafeRegexSource(pattern);
-      if (usable) {
-        try {
-          new RegExp(pattern);
-        } catch {
-          usable = false;
-        }
-      }
-      if (!usable) {
-        throw new AppError(
-          400,
-          'REGEX_PATTERN_UNUSABLE',
-          'verificationCriteria.regex_pattern does not compile or can backtrack catastrophically (nested or stacked quantifiers) — simplify it',
-        );
-      }
-    }
-
-    // Checked before the hash is claimed below. BigInt() on "1.5" or "" throws
-    // a SyntaxError, which answered 500 and, for the duration, only after the
-    // hash was already claimed for this poster.
-    const amountBigInt = parseWholeNumber(data.amount);
-    if (amountBigInt === null || amountBigInt <= 0n) {
-      throw new AppError(
-        400,
-        'INVALID_AMOUNT',
-        "amount must be a whole number above 0, in the token's smallest unit (USDC has 6 decimals: '1500000' is 1.5 USDC)",
-      );
-    }
-    const durationBigInt = parseWholeNumber(data.duration);
-    if (durationBigInt === null || durationBigInt <= 0n) {
-      throw new AppError(400, 'INVALID_DURATION', 'duration must be a whole number of seconds above 0');
-    }
-
-    // New tasks are funded on this deployment's posting chain (POSTING_CHAIN,
-    // else Base when it has an escrow, else 0G), in that chain's settlement
-    // token. Any other token would revert TokenNotAllowed, or be refused
-    // later by /a2a/tasks/index, with the poster's gas spent.
-    const chain = postingChain();
-    const { label, escrowAddress, escrowEnv, chainId, token } = settlementChainConfig(chain);
-    if (!escrowAddress) {
-      throw new AppError(503, 'CHAIN_NOT_CONFIGURED', `This backend has no ${label} escrow to post tasks on (${escrowEnv})`);
-    }
-    // A task is known off-chain by its hash, and a public task's hash is the
-    // hash of its brief's text: posting the same public brief again made a
-    // second escrow under a hash that already names a task. Its listing was
-    // then refused (or would have pointed at the first task), after the
-    // poster had paid. Refuse here, before anything is funded.
-    const [listed, escrowed] = await Promise.all([
-      a2aStore.getMeta(data.taskHash),
-      resolveCachedTaskByHash(data.taskHash).catch(() => null),
-    ]);
-    if (listed || escrowed) {
-      throw new AppError(
-        409,
-        'TASK_HASH_IN_USE',
-        `A task with exactly this brief already exists${escrowed ? ` (${escrowed.chain} task ${escrowed.taskId})` : ''}. ` +
-          'A public task is identified by its text, so change the brief, even slightly, and post again. ' +
-          'If that task is one you just paid for, finish listing it instead. Nothing was charged.',
-      );
-    }
-
-    // Claim the hash for this poster before the tx exists, so nobody who
-    // sees it on-chain can index it first (a2aStore.claimTaskHash). Refused
-    // here, before any gas is spent, when another poster already holds it.
-    const claim = await a2aStore.claimTaskHash(data.taskHash, from);
-    if (!claim.mine) {
-      throw new AppError(409, 'TASK_HASH_TAKEN', 'Another poster is already posting a task with this hash — post with a new brief');
-    }
-    if (!token.address || !payoutCurrency(chain, data.token)) {
-      throw new AppError(
-        400,
-        'TOKEN_NOT_SETTLEMENT',
-        `New tasks are escrowed in ${token.unit.symbol} on ${label} (token ${token.address ?? 'unset'}), not ${data.token}`,
-      );
-    }
-    // The match above ignores letter case. Build with the registry's address,
-    // checksummed afresh: a mixed-case spelling with a bad checksum, in the
-    // request or in BASE_USDC_ADDRESS, would make ethers throw.
-    const tokenAddress = ethers.getAddress(token.address.toLowerCase());
-    const isNative = token.kind === 'native';
-
-    // Checked before the funding tx is built, so nothing is escrowed for a
-    // verifier that would never act (security audit run 1, C04).
-    if (data.verificationMode === 'agent' && data.verifierAddress && await hostedVerifierNotOptedIn(data.verifierAddress)) {
-      throw new AppError(409, 'VERIFIER_NOT_OPTED_IN', VERIFIER_NOT_OPTED_IN_MESSAGE);
-    }
+    const { amount: amountBigInt, duration: durationBigInt } = checkTaskTerms(data);
+    const { chain, label, chainId, token } = postingTarget();
+    await claimNewTaskHash(data.taskHash, from, randomUUID());
+    const { tokenAddress, isNative } = settlementToken(chain, label, token, data.token);
+    await refuseOptedOutVerifier(data);
 
     const tx = await escrowService.buildCreateTaskOn(
       chain,
@@ -471,7 +573,7 @@ tasksRouter.post('/', requireAuth, async (req: AuthRequest, res, next) => {
       data.locationZone,
       durationBigInt,
       isNative ? amountBigInt : undefined,
-      data.verificationMode === 'agent' ? data.verifierAddress : undefined,
+      committedVerifier(data),
     );
 
     // Note: A2A meta is NOT written here. Doing so unconditionally produced
@@ -482,24 +584,7 @@ tasksRouter.post('/', requireAuth, async (req: AuthRequest, res, next) => {
     // endpoint verifies the receipt and the TaskCreated event before writing
     // anything. See routes/a2a.ts for the verified-write path.
 
-    // Record escrow_lock accounting event as PENDING (M5 audit): this handler
-    // builds an unsigned tx — nothing is funded until it broadcasts. The
-    // receipt-verified POST /a2a/tasks/index flips it to confirmed; an
-    // abandoned build stays visibly pending instead of masquerading as funded.
-    try {
-      const decimals = await getTokenDecimals(tokenAddress, chain);
-      accountingService.recordTransaction({
-        address: from,
-        role: 'agent',
-        taskId: data.taskHash,
-        type: 'escrow_lock',
-        amount: Number(data.amount) / (10 ** decimals),
-        unit: token.unit.symbol,
-        status: 'pending',
-      });
-    } catch (accErr) {
-      console.warn('[tasks] Accounting record failed (non-blocking):', accErr);
-    }
+    await recordPendingLock(from, data.taskHash, data.amount, tokenAddress, chain, token.unit.symbol);
 
     const body: ApiResponse = {
       success: true,
@@ -508,12 +593,228 @@ tasksRouter.post('/', requireAuth, async (req: AuthRequest, res, next) => {
     };
     rooms.tasks('task:created', { locationZone: data.locationZone, amount: data.amount });
     rooms.platform('stats:update', {});
-    
+
     // Custom replacer to handle BigInt serialization
     res.json(JSON.parse(JSON.stringify(body, (key, value) =>
       typeof value === 'bigint' ? value.toString() : value
     )));
   } catch (err) {
+    next(err);
+  }
+});
+
+const ZERO_HASH = '0x' + '0'.repeat(64);
+/** BlindEscrow.MIN_DEADLINE and MAX_DEADLINE. */
+const MIN_DURATION = 3_600n;
+const MAX_DURATION = 90n * 86_400n;
+const UINT256_LIMIT = 1n << 256n;
+
+/**
+ * What would make the escrow revert createTasks, and with it every task in
+ * the batch: POST /tasks leaves these to the one task's own transaction. A
+ * zero hash, a duration outside 1 hour to 90 days, an amount past uint256,
+ * and a verifier that is the poster (or not an EVM address). Also the index
+ * route's NO_VERIFIER: an agent-verified task without a verifier is funded
+ * and then can never be listed.
+ */
+function checkBatchedTask(data: TaskTerms, from: string, amount: bigint, duration: bigint): void {
+  if (data.taskHash.toLowerCase() === ZERO_HASH) {
+    throw new AppError(400, 'EMPTY_HASH', 'taskHash must not be zero: the escrow refuses it, and the whole batch with it');
+  }
+  if (amount >= UINT256_LIMIT) {
+    throw new AppError(400, 'INVALID_AMOUNT', 'amount is larger than the escrow can hold (2^256 - 1)');
+  }
+  if (duration < MIN_DURATION || duration > MAX_DURATION) {
+    throw new AppError(
+      400,
+      'INVALID_DURATION',
+      'duration must be 3600 to 7776000 seconds (1 hour to 90 days): the escrow refuses anything else, and the whole batch with it',
+    );
+  }
+  if (data.verificationMode === 'agent') {
+    if (!data.verifierAddress) {
+      throw new AppError(400, 'NO_VERIFIER', "verificationMode='agent' requires verifierAddress");
+    }
+    if (!ethers.isAddress(data.verifierAddress)) {
+      throw new AppError(400, 'INVALID_VERIFIER', 'verifierAddress must be a 20-byte EVM address');
+    }
+    if (data.verifierAddress.toLowerCase() === from.toLowerCase()) {
+      throw new AppError(400, 'INVALID_VERIFIER', 'The poster cannot be their own verifier');
+    }
+  }
+}
+
+/** A task's refusal as the batch reports it. Anything but a refusal (Redis, the database) fails the request. */
+function batchTaskError(index: number, err: unknown): RowError {
+  if (err instanceof AppError) return { index, code: err.code, message: err.message };
+  throw err;
+}
+
+/**
+ * Release the hash claims a failed batch took. Each is dropped only while it
+ * still carries this request's `token`: one a concurrent request of the same
+ * poster has since built on is left alone.
+ */
+async function releaseClaims(hashes: readonly string[], from: string, token: string): Promise<void> {
+  await Promise.all(hashes.map((hash) =>
+    a2aStore.releaseTaskHashClaim(hash, from, token).catch((err) =>
+      console.warn(`[tasks] batch: could not release the claim on ${hash.slice(0, 10)}…:`, (err as Error).message))));
+}
+
+const createTasksSchema = z.object({
+  token: createTaskSchema.shape.token,
+  tasks: z.array(z.unknown()).min(1).max(MAX_BATCH_REQUEST),
+});
+
+/**
+ * POST /api/v1/tasks/batch (docs/BULK-POSTING.md)
+ * Build one unsigned createTasks transaction for several tasks, on an escrow
+ * that has it. Body: { token, tasks: [<POST /tasks body without token>] },
+ * 1 to the posting chain's batchCreate.maxBatch tasks (GET /health/settlement).
+ *
+ * Each task gets every check POST /tasks makes, in its order, including the
+ * duplicate-brief check, the hash claim and the verifier rules, plus
+ * checkBatchedTask's, since one task the escrow refuses reverts them all. A
+ * hash may appear once per batch. All or nothing: any refused task fails the
+ * request with 400 INVALID_TASKS, a summary as the message and every refused
+ * task in error.details.errors: [{ index, code, message }]
+ * (middleware/batchErrors.ts), and the hash claims this request took are
+ * released. 409 BATCH_UNSUPPORTED when the posting chain's escrow has no
+ * createTasks (post one at a time).
+ *
+ * Returns { unsignedTx, chain, chainId, taskHashes }: taskHashes in the
+ * order the transaction escrows them, which is the order sent. The tx's
+ * gasLimit is its estimate plus a fifth, or a size-based fallback
+ * (escrow.createTasksGasFallback).
+ */
+tasksRouter.post('/batch', requireAuth, buildBudget, postingIpBudget, async (req: AuthRequest, res, next) => {
+  const from = req.user!.address;
+  // Hashes this request claimed, released if it fails after claiming, under
+  // a token of its own (a2aStore.claimTaskHash).
+  const claimed: string[] = [];
+  const claimToken = randomUUID();
+  try {
+    const request = createTasksSchema.safeParse(req.body);
+    if (!request.success) throw new AppError(400, 'VALIDATION_ERROR', zodIssuesText(request.error));
+    const { token: requestedToken, tasks } = request.data;
+    // The legacy AGENT_API_KEY principal has no wallet to fund from.
+    if (from === 'agent') {
+      throw new AppError(403, 'FORBIDDEN', 'Tasks are funded from a wallet: authenticate with a wallet-bound key or token');
+    }
+
+    const { chain, label, chainId, token } = postingTarget();
+    const { tokenAddress, isNative } = settlementToken(chain, label, token, requestedToken);
+    // createTasks takes an ERC-20 only.
+    const support = isNative ? BATCH_UNSUPPORTED : await batchCreateSupport(chain);
+    if (!support.supported) {
+      throw new AppError(
+        409,
+        'BATCH_UNSUPPORTED',
+        `The ${label} escrow can't create several tasks in one transaction (it has no createTasks). Post them one at a time with POST /tasks.`,
+      );
+    }
+    if (tasks.length > support.maxBatch) {
+      throw new AppError(400, 'BATCH_TOO_LARGE', `The ${label} escrow takes at most ${support.maxBatch} tasks per transaction; this batch has ${tasks.length}. Split it.`);
+    }
+
+    // Each task's own terms, and one task per hash.
+    const errors: RowError[] = [];
+    const checked: Array<{ index: number; data: TaskTerms; amount: bigint; duration: bigint }> = [];
+    const firstByHash = new Map<string, number>();
+    tasks.forEach((raw, index) => {
+      const parsed = taskTermsSchema.safeParse(raw);
+      if (!parsed.success) {
+        errors.push({ index, code: 'VALIDATION_ERROR', message: zodIssuesText(parsed.error) });
+        return;
+      }
+      const hash = parsed.data.taskHash.toLowerCase();
+      const first = firstByHash.get(hash);
+      if (first !== undefined) {
+        errors.push({
+          index,
+          code: 'DUPLICATE_TASK_HASH',
+          message: `Same taskHash as task ${first + 1}: a task is known by its hash, so a second escrow under it could never be listed. Drop one, or change its brief.`,
+        });
+        return;
+      }
+      firstByHash.set(hash, index);
+      try {
+        const { amount, duration } = checkTaskTerms(parsed.data);
+        checkBatchedTask(parsed.data, from, amount, duration);
+        checked.push({ index, data: parsed.data, amount, duration });
+      } catch (err) {
+        errors.push(batchTaskError(index, err));
+      }
+    });
+
+    // Shared state, read only, in POST /tasks' order: a hash already in use,
+    // a hash another poster claimed, a verifier that won't act. Every task is
+    // read, so one answer names every task that can't be posted.
+    const holder = from.toLowerCase();
+    await Promise.all(checked.map(async ({ index, data }) => {
+      try {
+        await refuseHashInUse(data.taskHash);
+        const claimedBy = await a2aStore.getTaskHashClaim(data.taskHash);
+        if (claimedBy && claimedBy !== holder) {
+          throw new AppError(409, 'TASK_HASH_TAKEN', 'Another poster is already posting a task with this hash — post with a new brief');
+        }
+        await refuseOptedOutVerifier(data);
+      } catch (err) {
+        errors.push(batchTaskError(index, err));
+      }
+    }));
+
+    // Then the claims, as POST /tasks takes them, once every task passed.
+    // Every claim settles before anything is released: a failure mid-way
+    // must not release while other claims are still being taken.
+    if (errors.length === 0) {
+      const outcomes = await Promise.allSettled(checked.map(({ data }) => claimNewTaskHash(data.taskHash, from, claimToken)));
+      let failure: unknown = null;
+      outcomes.forEach((outcome, i) => {
+        const { index, data } = checked[i];
+        if (outcome.status === 'fulfilled') {
+          if (outcome.value.fresh) claimed.push(data.taskHash);
+        } else if (outcome.reason instanceof AppError) {
+          errors.push(batchTaskError(index, outcome.reason));
+        } else {
+          failure ??= outcome.reason;
+        }
+      });
+      if (failure) throw failure;
+    }
+
+    if (errors.length > 0) throw invalidRows('INVALID_TASKS', 'task', tasks.length, errors);
+
+    const tx = await escrowService.buildCreateTasksOn(
+      chain,
+      from,
+      tokenAddress,
+      checked.map(({ data, amount, duration }) => ({
+        taskHash: data.taskHash,
+        amount,
+        category: 'general',
+        locationZone: data.locationZone,
+        duration,
+        verifierAgent: committedVerifier(data),
+      })),
+    );
+
+    // Pending until POST /a2a/tasks/index-batch sees the receipt (M5 audit).
+    await Promise.all(checked.map(({ data }) =>
+      recordPendingLock(from, data.taskHash, data.amount, tokenAddress, chain, token.unit.symbol)));
+
+    const body: ApiResponse = {
+      success: true,
+      // chain and chainId name where the tx must be sent.
+      data: { unsignedTx: tx, chain, chainId, taskHashes: checked.map(({ data }) => data.taskHash.toLowerCase()) },
+    };
+    rooms.tasks('task:created', { count: checked.length });
+    rooms.platform('stats:update', {});
+    res.json(JSON.parse(JSON.stringify(body, (key, value) =>
+      typeof value === 'bigint' ? value.toString() : value
+    )));
+  } catch (err) {
+    if (claimed.length > 0) await releaseClaims(claimed, from, claimToken);
     next(err);
   }
 });

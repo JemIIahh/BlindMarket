@@ -11,6 +11,7 @@ import {
   type SettlementChainKey,
 } from '../services/settlementChains.js';
 import { chainRuntime } from '../services/chainRuntime.js';
+import { batchCreateSupport } from '../services/batchSupport.js';
 import type { SettlementTier } from '../services/settlementTier.js';
 import { relayChainName } from '../services/relayChains.js';
 import { deploymentIdentityStatus } from '../services/deploymentIdentity.js';
@@ -237,20 +238,27 @@ function postingChainOrError(): { posting: SettlementChainKey | null; postingCha
 // GET /api/v1/health/settlement — the settlement chains as data, for clients
 // that build and price transactions: which chain new tasks post on, and for
 // every chain its id, tier, escrow, settlement token (address, symbol,
-// decimals), the `chain` name the relay takes, and the gas coin. Config only:
-// no RPC read, no Redis, so it answers in microseconds and can gate a page
-// load. Readiness (signers, verifier roles, indexers) is /health/bridge's job.
-// The web app reads this at boot instead of deciding the payment token by
-// "is a Base escrow configured?", which is the rule POST /tasks stopped
+// decimals), the `chain` name the relay takes, the gas coin, and
+// `batchCreate`: whether its escrow has createTasks and how many tasks one
+// takes (docs/BULK-POSTING.md). Config, plus that one read: MAX_BATCH() on
+// each escrow, cached (services/batchSupport.ts), so the route answers from
+// memory except on the first request after boot, which waits at most 2 s. No
+// Redis. Readiness (signers, verifier roles, indexers) is /health/bridge's
+// job. The web app reads this at boot instead of deciding the payment token
+// by "is a Base escrow configured?", which is the rule POST /tasks stopped
 // following in R12.
-healthRouter.get('/settlement', (_req, res) => {
+healthRouter.get('/settlement', async (_req, res) => {
   const entries = settlementChainConfigs();
   const { posting, postingChainError } = postingChainOrError();
+  // batchCreateSupport never throws: an unreadable escrow is unsupported.
+  const chains = await Promise.all(
+    entries.map(async (entry) => ({ ...chainFacts(entry, posting), batchCreate: await batchCreateSupport(entry.key) })),
+  );
   const body: ApiResponse = {
     success: true,
     data: {
       postingChain: posting,
-      chains: entries.map((entry) => chainFacts(entry, posting)),
+      chains,
       ...tierReport(entries, config.settlementTier),
       ...(postingChainError ? { postingChainError } : {}),
     },
