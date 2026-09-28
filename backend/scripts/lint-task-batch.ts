@@ -45,7 +45,10 @@ const REQUIRED_KEYS = [
   'amount', 'amountRaw', 'durationSeconds', 'verificationMode', 'verificationCriteria',
 ] as const;
 
-const KEY_ORDER = [...REQUIRED_KEYS.slice(0, 4), 'routingSummary', ...REQUIRED_KEYS.slice(4)];
+/** `category` is optional: the poster's own grouping, not sent to the platform. */
+const KEY_ORDER = [
+  ...REQUIRED_KEYS.slice(0, 2), 'category', ...REQUIRED_KEYS.slice(2, 4), 'routingSummary', ...REQUIRED_KEYS.slice(4),
+];
 
 const IDEMPOTENCY_KEY = /^bm-[a-z0-9]+(?:-[a-z0-9]+)*-\d{3,}$/;
 
@@ -78,6 +81,7 @@ function lintTask(t: Task): Issue[] {
     err(`idempotencyKey "${t.idempotencyKey}" should look like bm-<batch>-<NNN>, e.g. bm-seed-v3-035`);
   }
 
+  if (t.category !== undefined && (typeof t.category !== 'string' || !t.category.trim())) err('category, when given, must be text');
   if (!title) err('title is empty');
   else if (title.length > TITLE_MAX) err(`title is ${title.length} characters; the board treats more than ${TITLE_MAX} as a paragraph`);
   if (!instructions.trim()) err('instructions are empty');
@@ -156,7 +160,9 @@ function lintTask(t: Task): Issue[] {
   }
 
   const wordCap = /\bunder (\d+) words\b|\b(\d+)-word\b|\bin (\d+) words\b/i.exec(instructions);
-  if (wordCap && c.min_length) {
+  // "each under 40 words" caps one item of several, not the whole answer.
+  const perItem = wordCap && /\beach\s*$/i.test(instructions.slice(Math.max(0, wordCap.index - 6), wordCap.index));
+  if (wordCap && !perItem && c.min_length) {
     const words = Number(wordCap[1] ?? wordCap[2] ?? wordCap[3]);
     // ~5 characters a word, and leave room: the floor must sit well under the cap.
     if (c.min_length > words * 3) err(`min_length ${c.min_length} characters is too close to the ${words}-word limit (at most ${words * 3})`);
