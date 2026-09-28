@@ -27,6 +27,8 @@ const ESCROW = getAddress('0x' + 'a7'.repeat(20));
 const TOKEN = '0x3600000000000000000000000000000000000000';
 const BASE_ESCROW = getAddress('0x' + 'b5'.repeat(20));
 const BASE_USDC = '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
+// Stand-in escrows, not the pinned deployments: trusted the way a custom one is (pins.ts).
+process.env.BLINDMARKET_TRUSTED_ESCROWS = `5042002:${ESCROW}:${TOKEN},84532:${BASE_ESCROW}:${BASE_USDC}`;
 const HASH = '0x' + 'ee'.repeat(32);
 const OG_HASH = '0x' + '0e'.repeat(32);
 const ERC20 = new Interface([

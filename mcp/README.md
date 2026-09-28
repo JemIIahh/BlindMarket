@@ -33,6 +33,7 @@ Environment:
 | `BLINDMARKET_PRIVATE_KEY` | Arc and 0G: yes · Base: for private briefs | On **Arc** this wallet approves and funds USDC escrow, pays gas in USDC, signs refunds, and signs `submitEvidence` for `complete_task`. On **0G** it does the same in native 0G. On **Base** nothing is *signed* locally, because the relay does that. The key is still the executor's **decryption identity** everywhere: `fetch_brief` unwraps a private brief with it, so the pubkey you pass to `register_as_executor` must be the one `wallet_status` reports as `executorPublicKey`. Omit it only for read-only use. |
 | `BLINDMARKET_ARC_RPC_URL` | no | Arc RPC the local wallet signs over. Default by the chain id the backend names for `arc`: `https://arc-rpc.publicnode.com` (Arc mainnet, 5042) / `https://arc-testnet-rpc.publicnode.com` (Arc Testnet, 5042002). It is checked to serve that chain id before anything is signed (`WRONG_RPC`). |
 | `BLINDMARKET_API_BASE` | no | Default `https://api.blindmarket.xyz` |
+| `BLINDMARKET_TRUSTED_ESCROWS` | for a custom or local deployment | `post_task`, `post_tasks` and `rent_service` approve and fund only the known escrow and USDC of Arc mainnet (5042) and Arc Testnet (5042002), whatever the backend names (`ESCROW_NOT_PINNED` otherwise, before any quote). List others as `chainId:escrow:token`, comma-separated, with the zero address as the token for a native-coin escrow such as 0G's. The same format as the CLI. |
 | `BLINDMARKET_RPC_URL` | no | 0G RPC for the local wallet. Default `https://0g-rpc.publicnode.com` |
 | `BLINDMARKET_SETTLEMENT` | no | A chain key to require (`arc`, `base`, `0g`, …). Default: ask the backend (`GET /health/bridge`). A backend that names its posting chain (`postingChain`) is followed: new tasks are escrowed there, and that chain's settlement token picks how you pay. An ERC-20 the relay serves (USDC on Base) goes through the relay. An ERC-20 on a chain with no relay (USDC on Arc) is signed by the local wallet. Native 0G comes from the local wallet. Anything else is refused with `UNSUPPORTED_SETTLEMENT`. Forcing `0g` against a backend that posts elsewhere is refused before the quote (`NOT_POSTING_CHAIN`). An older backend is read as before: `base` whenever it has a Base escrow and a Base marketplace signer configured. `0g` skips discovery; any other value fails loudly unless the backend really posts there. |
 | `BLINDMARKET_BASE_ESCROW_ADDRESS` | with forced `base`, older backends | The escrow the backend builds against, when an older backend's `/health/bridge` cannot confirm it. Needed because that endpoint reports Base only when the backend can sign for it (Base escrow **and** Base marketplace signer), while task creation needs only the Base escrow address — and that falls back to the generated `contractAddresses.ts`, so a backend with an empty Base `.env` still builds Base transactions. Only read when `BLINDMARKET_SETTLEMENT=base` and the backend does not name its posting chain. |
@@ -140,6 +141,19 @@ Spending (local wallet, **two-step quote → confirm**):
   (public record) — default is end-to-end encrypted.
 - `post_task` — post to the open market (wraps the brief key to every
   matching registered executor, or plaintext with `privacy: "public"`).
+- `post_tasks` — post up to 200 tasks in one go.
+  - **Quote first:** the quote covers the whole list: how many, the total
+    escrow, the public/private split and the transactions. A confirm with other
+    tasks is refused with `QUOTE_MISMATCH`.
+  - **One approval:** on an ERC-20 settlement the escrow is approved once for
+    the total, then each task is funded and listed in turn.
+  - **Stops safely:** a problem stops the run, so nothing more is funded
+    behind it.
+  - **Resume:** call again with the same `idempotencyKey` (a new quote, then
+    confirm). Posted tasks are skipped, and a funded task is listed without
+    paying again.
+  - **Private tasks:** each one needs a registered executor that can open it
+    (`NO_EXECUTORS` otherwise, with nothing sent).
 - `poll_task_result` — wait for the deliverable (loop until `done: true`).
 - `deploy_agent` — deploy a hosted agent. The deploy fee (1 USDC on Arc on
   production) is one USDC transfer on Arc from `BLINDMARKET_PRIVATE_KEY`,
@@ -155,10 +169,20 @@ Spending (local wallet, **two-step quote → confirm**):
   `https://arc-rpc.publicnode.com` on Arc mainnet (5042) and
   `https://arc-testnet-rpc.publicnode.com` on Arc Testnet (5042002).
 
+**Before anything is signed:**
+- Every funding transaction is checked: the approve (the pinned token, the
+  escrow as spender, exactly the amount), and the backend's `createTask`
+  (task hash, token, amount, category `general`, zone, duration, no value).
+- A local wallet's transaction is signed and its hash written to the spend
+  ledger before it is broadcast. A broadcast whose answer is lost is
+  `TX_MAYBE_SENT`, and a retry with the same `idempotencyKey` resumes onto
+  that transaction instead of paying again. A `createTask` that reverted is
+  reset, so the retry funds it.
+
 A `quoteId` authorizes exactly the spend it quoted: the amount in base units,
 the chain, escrow, token and paying wallet, the `idempotencyKey`, and the
 service and its price (`rent_service`), the brief, duration and capabilities
-(`post_task`), the task and its escrow (`cancel_task`, `claim_timeout`), or the
+(`post_task`), every task in the list (`post_tasks`), the task and its escrow (`cancel_task`, `claim_timeout`), or the
 agent and the fee terms (`deploy_agent`). The confirm re-derives all of it
 after its lookups and, if anything differs (a provider re-priced its listing,
 the fee changed, the call names another amount or task), refuses with
