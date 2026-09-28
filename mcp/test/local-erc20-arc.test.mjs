@@ -28,7 +28,7 @@ const { registerRentTools } = await import('../dist/rent.js');
 const { registerWalletTools } = await import('../dist/wallet.js');
 const { registerMarketTools } = await import('../dist/tools.js');
 const { discoverSettlement } = await import('../dist/settlement.js');
-const { putSpend } = await import('../dist/state.js');
+const { putSpend, getSpend } = await import('../dist/state.js');
 
 const PROD_BRIDGE = JSON.parse(readFileSync(new URL('../../fixtures/prod/health-bridge.json', import.meta.url), 'utf-8'));
 const PROD_SETTLEMENT = JSON.parse(readFileSync(new URL('../../fixtures/prod/health-settlement.json', import.meta.url), 'utf-8'));
@@ -39,7 +39,8 @@ const USDC = getAddress(ARC.token.address);
 const ARC_ID = ARC.chainId;
 /** Arc mainnet (ARC_CHAIN_ID=5042): the same chain key and USDC address, its own escrow. */
 const ARC_MAINNET_ID = 5042;
-const MAINNET_ESCROW = getAddress('0x' + 'a5'.repeat(20));
+// Arc mainnet's own escrow (contracts/deployments/arc-mainnet.json): only a pinned escrow is funded.
+const MAINNET_ESCROW = getAddress('0xd2B819B57a9568Cb6bFc98C687F9a851EC8330C4');
 
 const OWNER = Wallet.createRandom();
 const HASH = '0x' + 'ee'.repeat(32);
@@ -118,6 +119,11 @@ before(async () => {
           case 'eth_sendRawTransaction': {
             const tx = Transaction.from(params[0]);
             chain.sent.push(tx);
+            // chain.loseCreateReply: the node takes the createTask, but its answer never comes back.
+            if (chain.loseCreateReply && callName(tx.data) === 'createTask') {
+              chain.loseCreateReply = false;
+              return { jsonrpc: '2.0', id, error: { code: -32000, message: 'upstream connection reset' } };
+            }
             if (tx.to.toLowerCase() === USDC.toLowerCase()) chain.allowance = ERC20.decodeFunctionData('approve', tx.data)[1];
             if (callName(tx.data) === 'cancelTask') chain.tasks[8] = 5;
             if (callName(tx.data) === 'submitEvidence') chain.tasks[9] = 2;
@@ -129,13 +135,17 @@ before(async () => {
             result = tx.hash;
             break;
           }
-          case 'eth_getTransactionReceipt':
+          case 'eth_getTransactionReceipt': {
+            // chain.revertCreates: every createTask reverts (nothing escrowed).
+            const tx = chain.sent.find((t) => t.hash === params[0]);
+            const reverted = chain.revertCreates && tx && callName(tx.data) === 'createTask';
             result = {
               transactionHash: params[0], transactionIndex: '0x0', blockHash: '0x' + 'b'.repeat(64), blockNumber: '0x10',
               from: OWNER.address, to: ESCROW, contractAddress: null, cumulativeGasUsed: '0x5208', gasUsed: '0x5208',
-              effectiveGasPrice: '0x1', logs: [], logsBloom: '0x' + '0'.repeat(512), status: '0x1', type: '0x2',
+              effectiveGasPrice: '0x1', logs: [], logsBloom: '0x' + '0'.repeat(512), status: reverted ? '0x0' : '0x1', type: '0x2',
             };
             break;
+          }
           default: throw new Error(`stub RPC: unexpected ${method}`);
         }
         return { jsonrpc: '2.0', id, result };
@@ -590,4 +600,176 @@ test('a refund recorded without its chain id still finishes once sent: it waits 
   assert.equal(done.outcome, 'refund');
   assert.equal(done.txHash, txHash);
   assert.equal(chain.sent.length, 0);
+});
+
+// ── post_tasks: many posts, one quote, one approval ─────────────────────────
+
+const THREE_TASKS = [
+  { instructions: 'First task: summarise this paragraph in one sentence.', amount: '1', privacy: 'public' },
+  { instructions: 'Second task: translate this paragraph into French.', amount: '2', privacy: 'public', routingSummary: 'French translation' },
+  { instructions: 'Third task: list three risks in this plan.', amount: '3.5', privacy: 'public' },
+];
+const creates = () => chain.sent.filter((t) => callName(t.data) === 'createTask');
+
+test('post_tasks: one quote for the list, then one approve for the total and a createTask per task', async () => {
+  const t = tools();
+  const args = { tasks: THREE_TASKS, idempotencyKey: 'arc-batch-1' };
+  const { quote } = parse(await t.post_tasks(args));
+  assert.equal(quote.tasks, 3);
+  assert.equal(quote.toPost, 3);
+  assert.equal(quote.escrow, '6.5');
+  assert.equal(quote.currency, 'USDC');
+  assert.deepEqual(quote.privacy, { public: 3, private: 0 });
+  assert.equal(quote.transactions, 'up to 1 approve, then 3 createTask');
+  assert.equal(chain.sent.length, 0, 'a quote sends nothing');
+
+  const done = parse(await t.post_tasks({ ...args, confirm: true, quoteId: quote.quoteId }));
+  assert.equal(done.posted, 3);
+  const [approve] = chain.sent;
+  assert.equal(chain.sent.length, 4);
+  assert.deepEqual(ERC20.decodeFunctionData('approve', approve.data).map(String), [ESCROW, '6500000'], 'approved once, for the total');
+  assert.deepEqual(creates().map((c) => c.nonce), [approve.nonce + 1, approve.nonce + 2, approve.nonce + 3], 'each pinned after the last');
+  const indexes = backendCalls.filter((c) => c.path === '/api/v1/a2a/tasks/index');
+  assert.equal(indexes.length, 3);
+  assert.equal(indexes[1].body.routingSummary, 'French translation');
+  assert.deepEqual(done.results.map((r) => [r.index, r.status]), [[0, 'posted'], [1, 'posted'], [2, 'posted']]);
+  assert.deepEqual(done.results.map((r) => r.txHash), creates().map((c) => c.hash));
+
+  // The same call again posts nothing.
+  const again = parse(await t.post_tasks(args));
+  assert.equal(again.resumed, true);
+  assert.equal(chain.sent.length, 4);
+});
+
+test('post_tasks: a confirm for other tasks than quoted is refused, and nothing is sent', async () => {
+  const t = tools();
+  const { quote } = parse(await t.post_tasks({ tasks: THREE_TASKS, idempotencyKey: 'arc-batch-2' }));
+  const changed = [THREE_TASKS[0], { ...THREE_TASKS[1], amount: '20' }, THREE_TASKS[2]];
+  assert.equal(errorOf(await t.post_tasks({ tasks: changed, idempotencyKey: 'arc-batch-2', confirm: true, quoteId: quote.quoteId })).code, 'QUOTE_MISMATCH');
+  assert.equal(chain.sent.length, 0);
+});
+
+test('post_tasks: bad tasks, the same public brief twice, or a private brief no executor can open: refused, nothing sent', async () => {
+  const t = tools();
+  const bad = errorOf(await t.post_tasks({ tasks: [THREE_TASKS[0], { ...THREE_TASKS[1], amount: '1.0000001' }, THREE_TASKS[0]], idempotencyKey: 'arc-batch-3' }));
+  assert.equal(bad.code, 'INVALID_ROWS');
+  assert.match(bad.message, /tasks\[1\].*6 decimals/);
+  assert.match(bad.message, /tasks\[2\]: the same public brief as tasks\[0\]/);
+
+  const sealed = errorOf(await t.post_tasks({ tasks: [{ instructions: 'A private brief nobody can open.', amount: '1' }], idempotencyKey: 'arc-batch-4' }));
+  assert.equal(sealed.code, 'NO_EXECUTORS');
+  assert.equal(chain.sent.length, 0);
+  assert.equal(backendCalls.filter((c) => c.path === '/api/v1/storage/upload').length, 0);
+});
+
+test('post_tasks: a listing that fails stops the run; the same key resumes, listing the funded task without paying again', async () => {
+  const t = tools();
+  const args = { tasks: THREE_TASKS, idempotencyKey: 'arc-batch-5' };
+  indexAnswers = [undefined, failWith(403, 'NOT_TASK_AGENT')]; // the first listing takes the default; the second fails
+  const first = parse(await t.post_tasks(args)).quote;
+  const stopped = await t.post_tasks({ ...args, confirm: true, quoteId: first.quoteId });
+  const out = JSON.parse(stopped.content[0].text);
+  assert.equal(stopped.isError, true);
+  assert.equal(out.error.code, 'NOT_TASK_AGENT');
+  assert.deepEqual(out.results.map((r) => r.status), ['posted', 'funded_not_listed', 'not_started']);
+  assert.equal(creates().length, 2);
+
+  // Resume: a new quote shows what is left, and the confirm funds only the third.
+  const { quote } = parse(await t.post_tasks(args));
+  assert.equal(quote.alreadyPosted, 1);
+  assert.equal(quote.fundedNotListed, 1);
+  assert.equal(quote.toPost, 2);
+  assert.equal(quote.escrow, '3.5', 'only the task not yet funded');
+  const done = parse(await t.post_tasks({ ...args, confirm: true, quoteId: quote.quoteId }));
+  assert.equal(done.posted, 3);
+  assert.equal(creates().length, 3, 'the funded task was listed, not funded again');
+  assert.equal(chain.sent.filter((c) => c.to.toLowerCase() === USDC.toLowerCase()).length, 1, 'the first approval still covered it');
+});
+
+test('post_task refuses a key that belongs to a post_tasks list', async () => {
+  const t = tools();
+  const { quote } = parse(await t.post_tasks({ tasks: [THREE_TASKS[0]], idempotencyKey: 'arc-batch-6' }));
+  parse(await t.post_tasks({ tasks: [THREE_TASKS[0]], idempotencyKey: 'arc-batch-6', confirm: true, quoteId: quote.quoteId }));
+  assert.equal(errorOf(await t.post_task({ ...THREE_TASKS[1], idempotencyKey: 'arc-batch-6' })).code, 'IDEMPOTENCY_KEY_IN_USE');
+});
+
+test('a createTask that reverts goes back to created: the retry funds it, and nothing was escrowed twice', async () => {
+  const t = tools();
+  chain.revertCreates = true;
+  const args = { instructions: 'Summarise this paragraph in one sentence, please.', amount: '2.5', idempotencyKey: 'arc-revert-1', privacy: 'public' };
+  const { quote } = parse(await t.post_task(args));
+  assert.equal(errorOf(await t.post_task({ ...args, confirm: true, quoteId: quote.quoteId })).code, 'TX_REVERTED');
+  chain.revertCreates = false;
+  const resumed = parse(await t.post_task(args));
+  assert.equal(resumed.resumed, true);
+  assert.equal(creates().length, 2, 'one reverted, one landed');
+  assert.equal(backendCalls.filter((c) => c.path === '/api/v1/a2a/tasks/index').at(-1).body.txHash, creates()[1].hash);
+});
+
+
+// ── only a known escrow is funded; every funding transaction checked; recorded before it leaves ──
+
+const bridgeWithArc = (patch) => ({
+  ...PROD_BRIDGE.data,
+  chains: PROD_BRIDGE.data.chains.map((c) => (c.chain === 'arc' ? { ...c, ...patch } : c)),
+});
+const CUSTOM_ESCROW = getAddress('0x' + 'c7'.repeat(20));
+const postArgs = (key) => ({ instructions: 'Summarise this paragraph in one sentence, please.', amount: '2.5', idempotencyKey: key, privacy: 'public' });
+
+test('an escrow the backend names that is not the pinned deployment is refused before any quote', async () => {
+  overrides['/health/bridge'] = () => bridgeWithArc({ escrowAddress: CUSTOM_ESCROW });
+  const t = tools();
+  const err = errorOf(await t.post_task(postArgs('pin-refused-1')));
+  assert.equal(err.code, 'ESCROW_NOT_PINNED');
+  assert.match(err.message, /BLINDMARKET_TRUSTED_ESCROWS/);
+  assert.equal(errorOf(await t.post_tasks({ tasks: [{ instructions: 'x y z', amount: '1', privacy: 'public' }], idempotencyKey: 'pin-refused-2' })).code, 'ESCROW_NOT_PINNED');
+  assert.equal(chain.sent.length, 0);
+});
+
+test('BLINDMARKET_TRUSTED_ESCROWS admits a custom deployment: approved and funded there', async () => {
+  overrides['/health/bridge'] = () => bridgeWithArc({ escrowAddress: CUSTOM_ESCROW });
+  overrides['/api/v1/tasks'] = (body) => ({ unsignedTx: { to: CUSTOM_ESCROW, data: createTaskData(body) }, chain: 'arc', chainId: ARC_ID });
+  process.env.BLINDMARKET_TRUSTED_ESCROWS = `${ARC_ID}:${CUSTOM_ESCROW}:${USDC}`;
+  try {
+    const t = tools();
+    const { quote } = parse(await t.post_task(postArgs('pin-trusted-1')));
+    parse(await t.post_task({ ...postArgs('pin-trusted-1'), confirm: true, quoteId: quote.quoteId }));
+    const [approve, create] = chain.sent;
+    assert.deepEqual(ERC20.decodeFunctionData('approve', approve.data).map(String), [CUSTOM_ESCROW, '2500000']);
+    assert.equal(create.to, CUSTOM_ESCROW);
+  } finally {
+    delete process.env.BLINDMARKET_TRUSTED_ESCROWS;
+  }
+});
+
+test('a createTask built with another category or amount is refused before it is signed', async () => {
+  for (const tamper of [
+    (b) => ESCROW_CALLS.encodeFunctionData('createTask', [b.taskHash, b.token, b.amount, 'lottery', b.locationZone, b.duration]),
+    (b) => ESCROW_CALLS.encodeFunctionData('createTask', [b.taskHash, b.token, '999000000', 'general', b.locationZone, b.duration]),
+  ]) {
+    resetChain();
+    overrides['/api/v1/tasks'] = (body) => ({ unsignedTx: { to: ESCROW, data: tamper(body) }, chain: 'arc', chainId: ARC_ID });
+    const t = tools();
+    const key = `tampered-${Math.random().toString(16).slice(2)}`;
+    const { quote } = parse(await t.post_task(postArgs(key)));
+    assert.equal(errorOf(await t.post_task({ ...postArgs(key), confirm: true, quoteId: quote.quoteId })).code, 'TX_MISMATCH');
+    assert.equal(chain.sent.filter((tx) => callName(tx.data) === 'createTask').length, 0, 'no createTask signed');
+  }
+});
+
+test('a funding whose broadcast answer is lost is recorded first: "may have been sent", and the retry never funds again', async () => {
+  chain.loseCreateReply = true;
+  const t = tools();
+  const { quote } = parse(await t.post_task(postArgs('lost-reply-1')));
+  const err = errorOf(await t.post_task({ ...postArgs('lost-reply-1'), confirm: true, quoteId: quote.quoteId }));
+  assert.equal(err.code, 'TX_MAYBE_SENT');
+  const create = chain.sent.find((tx) => callName(tx.data) === 'createTask');
+  const record = getSpend('lost-reply-1');
+  assert.equal(record.stage, 'funded', 'recorded before the broadcast');
+  assert.equal(record.txHash, create.hash);
+
+  const resumed = parse(await t.post_task(postArgs('lost-reply-1')));
+  assert.equal(resumed.resumed, true);
+  assert.equal(chain.sent.filter((tx) => callName(tx.data) === 'createTask').length, 1, 'never funded again');
+  assert.equal(backendCalls.filter((c) => c.path === '/api/v1/a2a/tasks/index').at(-1).body.txHash, create.hash);
 });

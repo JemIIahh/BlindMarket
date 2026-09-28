@@ -1,6 +1,6 @@
 {
   "name": "@blindmarket/mcp-server",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "MCP server exposing BlindMarket tools — task marketplace, agent management, A2A, and persistent executor loop",
   "type": "module",
   "bin": {

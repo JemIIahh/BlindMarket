@@ -71,7 +71,24 @@ export interface SettlementChainInfo {
    * agent pays gas and receives payouts in its EOA, so that is what to fund.
    */
   aa: boolean;
+  /**
+   * Whether the escrow can create many tasks in one transaction
+   * (`createTasks`, docs/BULK-POSTING.md), from GET /health/settlement.
+   * Absent until the backend says so: bulk posting then goes one task per
+   * transaction. Read it through batchSupport().
+   */
+  batchCreate?: BatchCreateSupport;
 }
+
+/** The escrow's batch-create capability on one chain. */
+export interface BatchCreateSupport {
+  supported: boolean;
+  /** Most tasks one createTasks call takes; 0 when unsupported. */
+  maxBatch: number;
+}
+
+/** The contract's hard cap (BlindEscrow.MAX_BATCH); a backend claim above it is not trusted. */
+export const MAX_BATCH_CAP = 50;
 
 export interface SettlementSnapshot {
   /** The chain new tasks are escrowed on. */
@@ -137,6 +154,8 @@ export interface BackendSettlementChain {
   relayChain: string | null;
   gasSymbol: string;
   postable: boolean;
+  /** Present once the backend detects `createTasks` support (docs/BULK-POSTING.md). */
+  batchCreate?: { supported: boolean; maxBatch: number };
 }
 
 export interface BackendSettlement {
@@ -181,6 +200,28 @@ function usableEntry(entry: unknown, defaults: SettlementSnapshot): entry is Bac
   return true;
 }
 
+const NO_BATCH: BatchCreateSupport = { supported: false, maxBatch: 0 };
+
+/**
+ * The backend's batch-create report, or "unsupported" for anything that isn't
+ * a well-formed yes: a malformed value, a missing one (an older backend), or
+ * a maxBatch outside 1..MAX_BATCH_CAP. Unsupported is always safe: bulk
+ * posting falls back to one task per transaction.
+ */
+export function parseBatchCreate(value: unknown): BatchCreateSupport {
+  if (!value || typeof value !== 'object') return NO_BATCH;
+  const v = value as { supported?: unknown; maxBatch?: unknown };
+  if (v.supported !== true) return NO_BATCH;
+  const max = v.maxBatch;
+  if (typeof max !== 'number' || !Number.isInteger(max) || max < 1 || max > MAX_BATCH_CAP) return NO_BATCH;
+  return { supported: true, maxBatch: max };
+}
+
+/** The batch-create capability of `chain` (the posting chain by default). */
+export function batchSupport(chain: SettlementChainKey = snapshot.postingChain): BatchCreateSupport {
+  return snapshot.chains[chain].batchCreate ?? NO_BATCH;
+}
+
 /**
  * The backend's answer laid over the table. Entries usableEntry() rejects are
  * ignored (this build cannot pay on them); a table chain the backend omits
@@ -215,6 +256,10 @@ export function mergeSettlement(defaults: SettlementSnapshot, backend: BackendSe
       relayChain: entry.relayChain ?? null,
       gasSymbol: typeof entry.gasSymbol === 'string' && entry.gasSymbol ? entry.gasSymbol : prev.gasSymbol,
     };
+    // Set only on a well-formed yes, so a backend that says nothing about it
+    // leaves the chain exactly as the build had it.
+    const batch = parseBatchCreate(entry.batchCreate);
+    if (batch.supported) chains[entry.chain].batchCreate = batch;
   }
   // A chain this app can post on after the merge: an entry the build accepted
   // (or never saw), with an escrow and a token. The fallback is held to the

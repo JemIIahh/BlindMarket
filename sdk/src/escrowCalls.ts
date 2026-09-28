@@ -1,7 +1,7 @@
 /**
  * The only transactions a backend may hand this client to sign.
  *
- * The backend builds createTask, submitEvidence, cancelTask and claimTimeout
+ * The backend builds createTask (or createTasks), submitEvidence, cancelTask and claimTimeout
  * for the client's own key to sign. Whoever answers at `apiBase` (a
  * compromised or malicious backend, an untrusted apiBase, a network attacker
  * on plain http) controls that JSON, so a client that signs it as given signs
@@ -22,12 +22,14 @@ import { ApiError } from './apiError.js';
 export const ESCROW_CALLS = new ethers.Interface([
   'function createTask(bytes32 taskHash, address token, uint256 amount, string category, string locationZone, uint256 duration)',
   'function createTaskWithVerifier(bytes32 taskHash, address token, uint256 amount, string category, string locationZone, uint256 duration, address verifierAgent)',
+  // Several tasks in one transaction, on an escrow that has it (docs/BULK-POSTING.md).
+  'function createTasks(address token, tuple(bytes32 taskHash, uint256 amount, string category, string locationZone, uint256 duration, address verifierAgent)[] tasks)',
   'function submitEvidence(uint256 taskId, bytes32 evidenceHash)',
   'function cancelTask(uint256 taskId)',
   'function claimTimeout(uint256 taskId)',
 ]);
 
-export type EscrowFunction = 'createTask' | 'createTaskWithVerifier' | 'submitEvidence' | 'cancelTask' | 'claimTimeout';
+export type EscrowFunction = 'createTask' | 'createTaskWithVerifier' | 'createTasks' | 'submitEvidence' | 'cancelTask' | 'claimTimeout';
 
 /**
  * The evidence hash the backend commits for a result: keccak256 of the UTF-8

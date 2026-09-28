@@ -60,6 +60,17 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         uint256 disputedAt;     // block.timestamp raiseDispute was called (0 = never disputed / pre-upgrade)
     }
 
+    /// One task of a createTasks batch: the createTask / createTaskWithVerifier
+    /// arguments minus the token, which the whole batch shares.
+    struct TaskInput {
+        bytes32 taskHash;
+        uint256 amount;
+        string category;
+        string locationZone;
+        uint256 duration;
+        address verifierAgent;  // address(0): no per-task verifier
+    }
+
     // ── Constants ──
 
     uint256 public constant MAX_FEE_BPS = 3000;      // 30% hard cap
@@ -68,6 +79,7 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
     uint256 public constant MAX_DEADLINE = 90 days;    // maximum task duration
     uint256 public constant DISPUTE_WINDOW = 14 days;  // time after a dispute is raised before claimTimeout can recover it (or, for escalated unjudged work, releaseUnjudgedWork)
     uint256 public constant APPEAL_WINDOW = 3 days;    // time after a failed verdict in which the worker may still raiseDispute, even past the deadline
+    uint256 public constant MAX_BATCH = 50;            // most tasks one createTasks call creates; clients read it to detect batch support
 
     // ── State ──
 
@@ -178,6 +190,8 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
     error EscalatedForAdjudication();
     error NotEscalated();
     error InvalidPauseStart();
+    error EmptyBatch();
+    error BatchTooLarge();
 
     // ── Modifiers ──
 
@@ -265,6 +279,47 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         return _createTask(taskHash, token, amount, category, locationZone, duration, verifierAgent);
     }
 
+    /**
+     * @notice Creates up to MAX_BATCH tasks in one transaction, all paid in the
+     *         same ERC-20 token, and pulls their combined amount in a single
+     *         transfer. Each task is validated and recorded exactly as
+     *         createTask / createTaskWithVerifier would record it (a non-zero
+     *         `verifierAgent` makes it an agent-verified task), and gets its
+     *         own TaskCreated (plus TaskVerifierSet) in input order. Task ids
+     *         are consecutive from the returned `firstTaskId`. Any invalid task
+     *         reverts the whole batch: nothing is recorded and nothing is paid.
+     * @dev ERC-20 only. A native-token batch would need msg.value to equal the
+     *      sum; the single-task path covers native tokens.
+     */
+    function createTasks(address token, TaskInput[] calldata tasks)
+        external
+        payable
+        nonReentrant
+        whenNotPaused
+        returns (uint256 firstTaskId)
+    {
+        uint256 count = tasks.length;
+        if (count == 0) revert EmptyBatch();
+        if (count > MAX_BATCH) revert BatchTooLarge();
+        if (token == address(0)) revert TokenNotAllowed();
+        // Same error the single path uses for value sent with an ERC-20 task.
+        if (msg.value != 0) revert ZeroAmount();
+
+        firstTaskId = nextTaskId;
+        uint256 total;
+        for (uint256 i; i < count; ++i) {
+            TaskInput calldata t = tasks[i];
+            (uint256 taskId, uint256 deadline) =
+                _recordTask(t.taskHash, token, t.amount, t.category, t.locationZone, t.duration, t.verifierAgent);
+            total += t.amount;
+            _announceTask(taskId, token, t.amount, t.taskHash, t.category, t.locationZone, deadline);
+        }
+
+        // Interactions last (CEI): one pull for the whole batch. A shortfall in
+        // allowance or balance reverts every task above.
+        IERC20(token).safeTransferFrom(msg.sender, address(this), total);
+    }
+
     function _createTask(
         bytes32 taskHash,
         address token,
@@ -274,13 +329,40 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         uint256 duration,
         address verifierAgent
     ) internal returns (uint256 taskId) {
+        uint256 deadline;
+        (taskId, deadline) = _recordTask(taskHash, token, amount, category, locationZone, duration, verifierAgent);
+
+        // Interactions last (CEI)
+        if (token == address(0)) {
+            if (msg.value != amount) revert ZeroAmount();
+        } else {
+            if (msg.value > 0) revert ZeroAmount();
+            IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+        }
+
+        _announceTask(taskId, token, amount, taskHash, category, locationZone, deadline);
+    }
+
+    /// Checks and effects of creating one task, shared by createTask,
+    /// createTaskWithVerifier and createTasks: validates it and records it
+    /// (task, pause accounting, per-task verifier). Moves no funds; the caller
+    /// pulls them, then calls _announceTask.
+    function _recordTask(
+        bytes32 taskHash,
+        address token,
+        uint256 amount,
+        string calldata category,
+        string calldata locationZone,
+        uint256 duration,
+        address verifierAgent
+    ) internal returns (uint256 taskId, uint256 deadline) {
         if (amount == 0) revert ZeroAmount();
         if (taskHash == bytes32(0)) revert EmptyHash();
         if (!allowedTokens[token]) revert TokenNotAllowed();
         if (duration < MIN_DEADLINE || duration > MAX_DEADLINE) revert InvalidDeadline();
 
         taskId = nextTaskId++;
-        uint256 deadline = block.timestamp + duration;
+        deadline = block.timestamp + duration;
 
         _tasks[taskId] = Task({
             agent: msg.sender,
@@ -297,8 +379,8 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
             submissionAttempts: 0,
             disputedAt: 0
         });
-        // createTask is whenNotPaused, so pausedSince is 0 here and pausedTotal
-        // is the whole paused time so far.
+        // Task creation is whenNotPaused, so pausedSince is 0 here and
+        // pausedTotal is the whole paused time so far.
         _pausedTotalAtCreate[taskId] = pausedTotal;
 
         if (verifierAgent != address(0)) {
@@ -307,17 +389,21 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
             taskVerifier[taskId] = verifierAgent;
             emit TaskVerifierSet(taskId, verifierAgent);
         }
+    }
 
-        // Interactions last (CEI)
-        if (token == address(0)) {
-            if (msg.value != amount) revert ZeroAmount();
-        } else {
-            if (msg.value > 0) revert ZeroAmount();
-            IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
-        }
-
+    /// The bookkeeping after a task is recorded: the optional TaskRegistry
+    /// publish, then TaskCreated.
+    function _announceTask(
+        uint256 taskId,
+        address token,
+        uint256 amount,
+        bytes32 taskHash,
+        string calldata category,
+        string calldata locationZone,
+        uint256 deadline
+    ) internal {
         // Publish to TaskRegistry if connected. Optional bookkeeping — a paused or
-        // reverting registry must not block task creation (funds are escrowed above).
+        // reverting registry must not block task creation.
         if (address(taskRegistry) != address(0)) {
             try taskRegistry.publishTask(taskId, msg.sender, category, locationZone, amount) {} catch {}
         }

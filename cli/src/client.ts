@@ -1,5 +1,5 @@
 import { readFileSync } from 'fs';
-import { BlindMarket, type SettlementChainInfo } from '@blindmarket/sdk';
+import { BlindMarket, type SettlementChainInfo, type SettlementPin } from '@blindmarket/sdk';
 import type { Wallet } from 'ethers';
 import { resolveConfig, type Config } from './config.js';
 import { loadSigner } from './keys.js';
@@ -64,10 +64,26 @@ export function assertSdk(bb: BlindMarket, version = sdkVersion()): void {
   }
 }
 
+/**
+ * Escrows to fund besides the SDK's pinned deployments (Arc mainnet and Arc
+ * Testnet), for a custom or local deployment: BLINDMARKET_TRUSTED_ESCROWS,
+ * comma-separated `chainId:escrow:token` entries. Without it the SDK refuses
+ * any other escrow the backend names (ESCROW_NOT_PINNED).
+ */
+export function trustedEscrows(env: NodeJS.ProcessEnv = process.env): SettlementPin[] {
+  const raw = env.BLINDMARKET_TRUSTED_ESCROWS?.trim();
+  if (!raw) return [];
+  return raw.split(',').map((entry) => {
+    const m = /^\s*(\d+):(0x[0-9a-fA-F]{40}):(0x[0-9a-fA-F]{40})\s*$/.exec(entry);
+    if (!m) throw new CliError('BAD_TRUSTED_ESCROWS', `BLINDMARKET_TRUSTED_ESCROWS entry "${entry.trim()}" is not chainId:escrow:token (e.g. 5042002:0x…:0x…).`);
+    return { chainId: Number(m[1]), escrow: m[2], token: m[3] };
+  });
+}
+
 /** A client that reads and calls the backend, and signs nothing. */
 export function client(): Client {
   const cfg = loggedIn();
-  const bb = new BlindMarket({ apiKey: cfg.apiKey!, apiBase: cfg.apiBase });
+  const bb = new BlindMarket({ apiKey: cfg.apiKey!, apiBase: cfg.apiBase, trustedEscrows: trustedEscrows() });
   assertSdk(bb);
   return { cfg, bb };
 }
@@ -84,6 +100,6 @@ export async function signingClient(): Promise<SigningClient> {
   const { postingChain, chains } = await reader.getSettlement();
   const rpcUrls: Record<string, string | undefined> = {};
   for (const c of chains) rpcUrls[c.chain] = rpcUrlFor(c.chain, c.chainId);
-  const bb = new BlindMarket({ apiKey: cfg.apiKey!, apiBase: cfg.apiBase, executor: { privateKey: signer.privateKey, rpcUrls } });
+  const bb = new BlindMarket({ apiKey: cfg.apiKey!, apiBase: cfg.apiBase, executor: { privateKey: signer.privateKey, rpcUrls }, trustedEscrows: trustedEscrows() });
   return { cfg, bb, signer, postingChain, chains };
 }

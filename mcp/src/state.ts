@@ -23,8 +23,10 @@ export type SpendStage = 'created' | 'approved' | 'funded' | 'indexed' | 'sent' 
 /** Every kind moves money and so carries an idempotencyKey: rent/post pay it
  *  out of the wallet, cancel/timeout pull it back, deploy pays the agent
  *  deploy fee (created → sent once the fee transaction is broadcast →
- *  confirmed once the agent exists). */
-export type SpendKind = 'rent' | 'post' | 'cancel' | 'timeout' | 'deploy';
+ *  confirmed once the agent exists). 'post-batch' is a post_tasks call: it
+ *  holds the one escrow approval for the rows still to fund, and each row is
+ *  its own 'post' spend under `<idempotencyKey>#<row fingerprint>`. */
+export type SpendKind = 'rent' | 'post' | 'post-batch' | 'cancel' | 'timeout' | 'deploy';
 
 export interface SpendRecord {
   idempotencyKey: string;
@@ -66,6 +68,8 @@ export interface SpendRecord {
   aesKeyHex?: string;
   wrappedKeys?: Record<string, string>;
   publicBrief?: string;
+  /** The public one-liner the task board shows (all it shows of a private task). */
+  routingSummary?: string;
   verificationMode?: string;
   verificationCriteria?: unknown;
   requiredCapabilities?: string[];

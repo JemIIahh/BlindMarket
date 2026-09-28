@@ -18,6 +18,8 @@ delete process.env.BLINDMARKET_SETTLEMENT;
 const { registerRentTools } = await import('../dist/rent.js');
 
 const OG_ESCROW = '0x037529B296a89E6Dd1abAF84D413cb2dD70C5be5';
+// A 0G escrow is no pinned deployment: trusted the way a custom one is (pins.ts).
+process.env.BLINDMARKET_TRUSTED_ESCROWS = `16602:${OG_ESCROW}:0x${'0'.repeat(40)}`;
 let builtChainId;
 let sent;
 

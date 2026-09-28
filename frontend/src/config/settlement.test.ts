@@ -7,6 +7,7 @@ import {
 } from './constants';
 import {
   agentFundingAddress,
+  batchSupport,
   defaultSettlement,
   explorerUrlFor,
   gasIsSettlementToken,
@@ -16,6 +17,7 @@ import {
   getPostingEscrowAddress,
   isNativePayment,
   mergeSettlement,
+  parseBatchCreate,
   relayChainFor,
   resetSettlement,
   setSettlement,
@@ -267,5 +269,38 @@ describe('gasIsSettlementToken', () => {
       chains: [{ chain: 'base', chainId: d.chains.base.chainId, tier: 'testnet', escrowAddress: d.chains.base.escrow || null, token: { kind: 'erc20', address: d.chains.base.token.address || null, symbol: 'USDC', decimals: 6 }, relayChain: 'base-sepolia', gasSymbol: 'USDC', postable: true }],
     }));
     expect(gasIsSettlementToken('base')).toBe(true);
+  });
+});
+
+describe('batch create (docs/BULK-POSTING.md)', () => {
+  it('is unsupported in the build-time table and for a backend that does not report it', () => {
+    expect(batchSupport('arc')).toEqual({ supported: false, maxBatch: 0 });
+    setSettlement(mergeSettlement(defaultSettlement(), backendArcPosting));
+    expect(batchSupport()).toEqual({ supported: false, maxBatch: 0 });
+  });
+
+  it("takes the backend's report for the posting chain", () => {
+    setSettlement(mergeSettlement(defaultSettlement(), {
+      ...backendArcPosting,
+      chains: [
+        backendArcPosting.chains[0],
+        { ...backendArcPosting.chains[1], batchCreate: { supported: true, maxBatch: 50 } },
+      ],
+    }));
+    expect(batchSupport()).toEqual({ supported: true, maxBatch: 50 });
+    expect(batchSupport('base')).toEqual({ supported: false, maxBatch: 0 });
+  });
+
+  it.each([
+    ['a missing value', undefined],
+    ['a non-object', 'yes'],
+    ['supported but no size', { supported: true }],
+    ['a size above the contract cap', { supported: true, maxBatch: 51 }],
+    ['a zero size', { supported: true, maxBatch: 0 }],
+    ['a fractional size', { supported: true, maxBatch: 2.5 }],
+    ['a truthy non-boolean', { supported: 'true', maxBatch: 20 }],
+    ['an explicit no', { supported: false, maxBatch: 50 }],
+  ])('reads %s as unsupported', (_label, value) => {
+    expect(parseBatchCreate(value)).toEqual({ supported: false, maxBatch: 0 });
   });
 });

@@ -3,8 +3,9 @@ import { z } from 'zod';
 import { storageIdSchema } from '../services/storageId.js';
 import { verificationCriteriaSchema } from '../services/verificationCriteriaSchema.js';
 import { requireAuth } from '../middleware/auth.js';
-import { createUserRateLimiter } from '../middleware/rateLimit.js';
-import { AppError } from '../middleware/errorHandler.js';
+import { batchWeight, createUserRateLimiter, createWalletBudget, postingIpBudget } from '../middleware/rateLimit.js';
+import { zodIssuesText } from '../middleware/batchErrors.js';
+import { AppError, clientErrorMessage } from '../middleware/errorHandler.js';
 import * as agentStore from '../services/agentStore.js';
 import * as a2aStore from '../services/a2aStore.js';
 import { loadAgentBySmartAccount, loadAgentByWallet } from '../services/deployedAgentStore.js';
@@ -26,13 +27,13 @@ import { demandFeed, MAX_DEMAND_LIMIT } from '../services/demandFeed.js';
 import { chainRuntime } from '../services/chainRuntime.js';
 import { postingChain, receiptSearchOrder, settlementChainConfig } from '../services/settlementChains.js';
 import { ethers } from 'ethers';
-import type { AuthRequest, ApiResponse, AgentCapability, A2ATaskMeta } from '../types.js';
+import type { AuthRequest, AuthUser, ApiResponse, AgentCapability, A2ATaskMeta } from '../types.js';
 import { AGENT_CAPABILITIES } from '../types.js';
 import { rankAgents, pickExplorationAgent, meetsRewardFloor } from '../services/agentScorer.js';
 import { supportsChain, supportsTaskChain } from '../services/executorChains.js';
 import { emitTaskOffer, emitTaskAvailable, hasAgentSocket } from '../services/socket.js';
 import { isAlive } from '../services/redis.js';
-import { EXPIRY_GRACE_SEC } from '../constants.js';
+import { EXPIRY_GRACE_SEC, MAX_BATCH_REQUEST, WALLET_POSTING_BUDGET_PER_MIN } from '../constants.js';
 import { config } from '../config.js';
 import * as serviceStore from '../services/serviceStore.js';
 import { consumePendingCost, getPendingCost } from '../services/railwaySandbox.js';
@@ -1312,201 +1313,775 @@ export function hasAutoCheck(criteria: z.infer<typeof indexTaskSchema>['verifica
   return false;
 }
 
-a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) => {
+// ── POST /tasks/index and /tasks/index-batch ─────────────────────────────────
+//
+// Both list tasks from a funded createTask(s) receipt. They share the receipt
+// search, the escrow-only log filter and, per task, indexTaskFromEvent: every
+// check and write the single route has always made once it holds the task's
+// TaskCreated event. The single route still refuses a receipt with several
+// TaskCreated events (MULTIPLE_TASK_CREATED), where it is ambiguous; the batch
+// route matches each listed task to its event by hash.
+
+const TASK_CREATED_TOPIC = ethers.id('TaskCreated(uint256,address,address,uint256,bytes32,string,string,uint256)');
+const TASK_VERIFIER_SET_TOPIC = ethers.id('TaskVerifierSet(uint256,address)');
+
+/** A chain the index routes look for a createTask receipt on. */
+interface ReceiptSource {
+  chain: TaskChain;
+  prov: ethers.JsonRpcProvider;
+  esc: ethers.Contract;
+  label: string;
+}
+
+/** Every chain this deployment has an escrow on, the posting chain first, since new tasks are funded there. */
+function receiptSources(): ReceiptSource[] {
+  const providers = receiptSearchOrder().flatMap((chain) => {
+    const { provider: prov, escrow: esc } = chainRuntime(chain);
+    return esc ? [{ chain, prov, esc, label: settlementChainConfig(chain).label }] : [];
+  });
+  if (providers.length === 0) {
+    throw new AppError(503, 'CHAIN_NOT_CONFIGURED', 'This backend has no settlement escrow to index tasks from');
+  }
+  return providers;
+}
+
+/**
+ * The receipt of the funding transaction `txHash`, and the chain it was found
+ * on. `taskHashes` are the tasks it should have funded: a user-op hash has no
+ * receipt of its own, so the escrows' recent TaskCreated logs are scanned for
+ * any one of them. 404 RECEIPT_NOT_FOUND when nothing turns up.
+ */
+async function findTaskReceipt(
+  txHash: string,
+  isUserOp: boolean,
+  taskHashes: ReadonlySet<string>,
+): Promise<{ receipt: ethers.TransactionReceipt; active: ReceiptSource }> {
+  // Poll for the receipt rather than taking a single shot. The createTask tx
+  // is already confirmed by the time the frontend calls us (its signer waited
+  // for the receipt before posting here), but 0G mainnet RPC is
+  // eventually-consistent: the replica the backend hits can lag the one the
+  // browser saw by a few blocks. A single getTransactionReceipt here would
+  // then 404 a tx that is genuinely on-chain — funding the escrow but leaving
+  // the task un-indexed (no rootHash/wrappedKeys meta → invisible to
+  // executors). Retry across ~24s to ride out that replica lag.
+  // Poll for the receipt on every chain this deployment has an escrow on,
+  // the posting chain first since new tasks are funded there.
+  // For ERC-4337 user-ops the relay returns a userOperationHash, not a tx hash.
+  // getTransactionReceipt(userOpHash) always returns null, so when the first
+  // attempt fails we fall back to scanning recent blocks for TaskCreated events
+  // matching the taskHash via eth_getLogs.
+  let receipt: ethers.TransactionReceipt | null = null;
+  const providers = receiptSources();
+  // The chain whose escrow the receipt came from.
+  let active: ReceiptSource | null = null;
+
+  // If no receipt found, this is likely a user-op hash. Accept an
+  // isUserOp flag from the frontend to skip the (always-failing)
+  // getTransactionReceipt loop and go straight to the logs scan.
+  if (isUserOp) {
+    console.log(`[tasks/index] isUserOp=true, skipping receipt poll — scanning logs`);
+  } else {
+    for (const source of providers) {
+      const { prov } = source;
+      receipt = await prov.getTransactionReceipt(txHash);
+      for (let i = 0; i < 3 && !receipt; i++) {
+        await new Promise((r) => setTimeout(r, 3000));
+        receipt = await prov.getTransactionReceipt(txHash);
+      }
+      if (receipt) {
+        active = source;
+        break;
+      }
+    }
+  }
+
+  // If no receipt found, this is likely a user-op hash. Scan recent blocks
+  // for TaskCreated events matching our taskHash.
+  if (!receipt) {
+    // Event: TaskCreated(uint256 indexed taskId, address indexed agent,
+    //   address token, uint256 amount, bytes32 taskHash, ...)
+    // Non-indexed data: [token, amount, taskHash, category, locationZone, deadline]
+    // taskHash is at data index 2 (after token and amount).
+    // Decode the non-indexed data and keep only OUR tasks' events. Other
+    // tasks' TaskCreated logs in the same page must not end the scan early.
+    const matchesOurHash = (l: ethers.Log): boolean => {
+      try {
+        const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
+          ['address', 'uint256', 'bytes32', 'string', 'string', 'uint256'],
+          l.data,
+        );
+        return taskHashes.has(String(decoded[2]).toLowerCase());
+      } catch { return false; }
+    };
+
+    // Scan BACKWARDS in pages, newest first, instead of one fixed "last 200
+    // blocks" window. 200 blocks is ~7 minutes on Base Sepolia, so any call
+    // to /index more than 7 minutes after the funding tx — a resumed spend
+    // after a crash, a client that timed out and re-called with the same
+    // idempotencyKey — could never see its own TaskCreated event and got
+    // RECEIPT_NOT_FOUND forever, with the escrow funded and the task
+    // unindexed. Observed twice from the MCP.
+    //
+    // Attempt order matters for the common case. The MCP calls /index the
+    // moment the relay returns a user-op hash, usually BEFORE the bundler
+    // has included it — so attempt 0 checks only the newest page (cheap),
+    // attempt 1 scans deep (this is the one that rescues a late retry), and
+    // later attempts go back to the newest page, since everything older was
+    // just covered. Measured: deep-first cost 38s to index a fresh op that
+    // landed one block after the deep scan's top; shallow-first makes that
+    // ~10s. Pages stay at 200 blocks (inside every RPC's getLogs limit).
+    const PAGE = 200;
+    const DEEP_PAGES = 30; // 6,000 blocks ≈ 3.3h on Base Sepolia (2s blocks)
+    const DEEP_ATTEMPT = 1;
+
+    // Retry loop — the bundler may take a few blocks to include the user-op.
+    for (let attempt = 0; attempt < 5 && !receipt; attempt++) {
+      if (attempt > 0) {
+        console.log(`[tasks/index] Retry ${attempt + 1}/5 — waiting 5s for inclusion...`);
+        await new Promise((r) => setTimeout(r, 5000));
+      }
+      const maxPages = attempt === DEEP_ATTEMPT ? DEEP_PAGES : 1;
+      for (const source of providers) {
+        const { prov, esc, label } = source;
+        try {
+          // Each provider is scanned against ITS OWN escrow. Previously the
+          // Base escrow address was used on the 0G provider too, which could
+          // never match anything there.
+          const escrowAddr = await esc.getAddress();
+          const blockNum = await prov.getBlockNumber();
+          let match: ethers.Log | undefined;
+          let scannedFrom = blockNum;
+          for (let page = 0; page < maxPages && !match; page++) {
+            const toBlock = blockNum - page * PAGE;
+            if (toBlock < 0) break;
+            const fromBlock = Math.max(0, toBlock - PAGE + 1);
+            scannedFrom = fromBlock;
+            const pageLogs = await prov.getLogs({
+              fromBlock,
+              toBlock,
+              address: escrowAddr,
+              topics: [TASK_CREATED_TOPIC],
+            });
+            match = pageLogs.find(matchesOurHash);
+            if (fromBlock === 0) break;
+          }
+          console.log(`[tasks/index] Scanned ${label} blocks ${scannedFrom}–${blockNum} for TaskCreated: ${match ? 'match' : 'no match'}`);
+          if (match) {
+            console.log(`[tasks/index] Match found! txHash=${match.transactionHash} block=${match.blockNumber}`);
+            receipt = await prov.getTransactionReceipt(match.transactionHash);
+            if (receipt) {
+              active = source;
+              console.log(`[tasks/index] Receipt confirmed at block ${receipt.blockNumber}`);
+              break;
+            }
+          }
+        } catch (e) {
+          console.error(`[tasks/index] getLogs scan failed on ${label}:`, (e as Error).message?.slice(0, 200));
+        }
+      }
+    }
+  }
+  if (!receipt || !active) {
+    throw new AppError(
+      404,
+      'RECEIPT_NOT_FOUND',
+      'Transaction receipt not yet visible to RPC — wait a couple of blocks and retry',
+    );
+  }
+  return { receipt, active };
+}
+
+/**
+ * The receipt's TaskCreated logs from the escrow on `source`'s chain, and no
+ * other. We don't trust a receipt that originated from some other contract —
+ * a malicious poster could otherwise pass a tx hash from a different escrow
+ * with a colliding taskHash.
+ */
+async function escrowTaskCreatedLogs(receipt: ethers.TransactionReceipt, source: ReceiptSource): Promise<ethers.Log[]> {
+  const escrowAddress = (await source.esc.getAddress()).toLowerCase();
+  return receipt.logs.filter(
+    (l) => l.address.toLowerCase() === escrowAddress && l.topics[0] === TASK_CREATED_TOPIC,
+  );
+}
+
+/**
+ * The per-task verifiers the receipt's transaction committed on `source`'s
+ * escrow, by task id, lowercased: its TaskVerifierSet events. The escrow sets
+ * taskVerifier only when it creates a task, and emits TaskVerifierSet each
+ * time it does, so the funding receipt names every task that has one. Only
+ * the escrow's own events count.
+ */
+async function escrowTaskVerifiers(receipt: ethers.TransactionReceipt, source: ReceiptSource): Promise<Map<string, string>> {
+  const escrowAddress = (await source.esc.getAddress()).toLowerCase();
+  const verifiers = new Map<string, string>();
+  for (const l of receipt.logs) {
+    if (l.address.toLowerCase() !== escrowAddress || l.topics[0] !== TASK_VERIFIER_SET_TOPIC || l.topics.length < 3) continue;
+    const verifier = ethers.getAddress(`0x${l.topics[2].slice(26)}`).toLowerCase();
+    if (verifier !== ethers.ZeroAddress) verifiers.set(BigInt(l.topics[1]).toString(), verifier);
+  }
+  return verifiers;
+}
+
+/** A TaskCreated event, decoded; the hash and addresses lowercased. */
+interface TaskCreatedEvent {
+  taskId: string;
+  taskHash: string;
+  agent: string;
+  deadline: number;
+  amount: string;
+  token: string;
+  /** The verifier the same transaction committed for this task (escrowTaskVerifiers), or null. */
+  verifier: string | null;
+}
+
+function decodeTaskCreated(esc: ethers.Contract, log: ethers.Log, verifiers: ReadonlyMap<string, string>): TaskCreatedEvent {
+  const parsed = esc.interface.parseLog({
+    topics: log.topics as string[],
+    data: log.data,
+  });
+  if (!parsed) {
+    throw new AppError(500, 'PARSE_FAILED', 'Failed to decode TaskCreated log');
+  }
+  const taskId = (parsed.args.taskId as bigint).toString();
+  return {
+    taskId,
+    taskHash: (parsed.args.taskHash as string).toLowerCase(),
+    agent: (parsed.args.agent as string).toLowerCase(),
+    deadline: Number(parsed.args.deadline),
+    amount: (parsed.args.amount as bigint).toString(),
+    token: (parsed.args.token as string).toLowerCase(),
+    verifier: verifiers.get(taskId) ?? null,
+  };
+}
+
+/** One task's listing terms: a POST /tasks/index body without the transaction. */
+type IndexTaskTerms = Omit<z.infer<typeof indexTaskSchema>, 'txHash' | 'isUserOp'>;
+
+/**
+ * Refuse modes no route can settle, before any chain read. 'oracle' is
+ * reserved/unwired (/verify needs 'manual', /verdict needs 'agent'), and
+ * 'auto' without a positive check degrades to "any non-empty output passes".
+ */
+function checkIndexTerms(data: IndexTaskTerms): void {
+  if (data.verificationMode === 'oracle') {
+    throw new AppError(
+      400,
+      'VERIFICATION_MODE_UNSUPPORTED',
+      "verificationMode='oracle' is not supported — use 'manual', 'auto' or 'agent'",
+    );
+  }
+  if (data.verificationMode === 'auto' && !hasAutoCheck(data.verificationCriteria)) {
+    throw new AppError(
+      400,
+      'AUTO_CRITERIA_REQUIRED',
+      `verificationMode='auto' requires verificationCriteria with at least one of: ${AUTO_CHECK_KEYS.join(', ')}`,
+    );
+  }
+  // An auto task whose regex cannot run can never pass: autoVerify fails
+  // closed on a pattern that does not compile or is prone to catastrophic
+  // backtracking. Say so now, before the poster funds or lists it.
+  if (data.verificationMode === 'auto' && typeof data.verificationCriteria?.regex_pattern === 'string') {
+    const pattern = data.verificationCriteria.regex_pattern;
+    let usable = isSafeRegexSource(pattern);
+    if (usable) {
+      try {
+        new RegExp(pattern);
+      } catch {
+        usable = false;
+      }
+    }
+    if (!usable) {
+      throw new AppError(
+        400,
+        'REGEX_PATTERN_UNUSABLE',
+        'verificationCriteria.regex_pattern does not compile or can backtrack catastrophically (nested or stacked quantifiers) — simplify it',
+      );
+    }
+  }
+}
+
+/**
+ * List one escrowed task from its TaskCreated event (on `taskChain`'s
+ * escrow): every check and write POST /tasks/index makes once it holds the
+ * event. The caller must be the event's agent, the poster; a hash already
+ * listed may be listed again only by the poster who listed it first, from the
+ * same escrow task, on the same terms. Then the meta is written and the task
+ * is offered to ranked agents or broadcast.
+ */
+async function indexTaskFromEvent(
+  user: AuthUser,
+  data: IndexTaskTerms,
+  taskChain: TaskChain,
+  event: TaskCreatedEvent,
+): Promise<{ taskHash: string; onChainTaskId: string }> {
+  const address = user.address;
+  const taskHash = data.taskHash.toLowerCase();
+  const {
+    taskId: onChainTaskId,
+    taskHash: onChainTaskHash,
+    agent: onChainAgent,
+    deadline: onChainDeadline,
+    amount: onChainAmount,
+    token: onChainToken,
+  } = event;
+
+  if (onChainTaskHash !== taskHash) {
+    throw new AppError(
+      409,
+      'HASH_MISMATCH',
+      `Claimed taskHash (${taskHash.slice(0, 10)}…) does not match on-chain TaskCreated.taskHash (${onChainTaskHash.slice(0, 10)}…)`,
+    );
+  }
+  const userAddresses = user.addresses?.map((a: string) => a.toLowerCase()) || [address.toLowerCase()];
+  const matchesOnChainAgent = userAddresses.includes(onChainAgent.toLowerCase());
+
+  if (!matchesOnChainAgent) {
+    throw new AppError(
+      403,
+      'NOT_TASK_AGENT',
+      'Authenticated caller is not the on-chain agent (creator) for this task',
+    );
+  }
+
+  // Anyone can escrow any hash, so only the poster who indexed a task first
+  // may index it again. Without this a stranger who funded the same hash
+  // could re-index the task as theirs, or, with the chain lock below, lock
+  // the real poster out. Checked before anything is written.
+  const existingMeta = await a2aStore.getMeta(taskHash);
+  const callerAddresses = new Set([...userAddresses, address.toLowerCase()]);
+  if (existingMeta?.posterAddress && !callerAddresses.has(existingMeta.posterAddress.toLowerCase())) {
+    throw new AppError(
+      409,
+      'TASK_HASH_TAKEN',
+      'Another poster already indexed a task with this hash — cancel your escrow to get it back, and post with a new brief',
+    );
+  }
+  // The poster who built the funding tx through POST /tasks claimed the
+  // hash then, before it was public. The escrow accepts duplicate hashes,
+  // so a front-runner can escrow the same hash and race the real poster's
+  // client to this route; the claim decides, not the race.
+  const claimedBy = await a2aStore.getTaskHashClaim(taskHash);
+  if (claimedBy && !callerAddresses.has(claimedBy)) {
+    throw new AppError(
+      409,
+      'TASK_HASH_TAKEN',
+      'Another poster claimed this hash when they built its funding transaction — cancel your escrow to get it back, and post with a new brief',
+    );
+  }
+
+  // The hash was listed on a network its chain has since moved off
+  // (chainScope.onCurrentNetwork). That listing resolves to no escrow task
+  // any more, so the check below cannot see it, but its off-chain state is
+  // keyed by the hash alone: a2a:state, and credited_payouts, which would
+  // take this task's credit as already paid. The same public brief posted
+  // again needs a new hash, as POST /tasks tells a poster before funding.
+  if (existingMeta && !onCurrentNetwork(existingMeta)) {
+    throw new AppError(
+      409,
+      'TASK_HASH_IN_USE',
+      `This brief's hash already belongs to a task listed on another ${existingMeta.chain} network, so this escrow (${taskChain} task ${onChainTaskId}) can't be listed under it. ` +
+        `Cancel task ${onChainTaskId} to get the payment back, then post again with the brief changed, even slightly: a public task is identified by its text.`,
+    );
+  }
+
+  // A task stays on the chain it was first indexed on. The poster picks the
+  // hash, so the same one can be escrowed on both chains; re-indexing it from
+  // the other chain's receipt would move the task (and its settlement) there.
+  // Checked before seedTaskId, so a refused re-index writes nothing.
+  if (existingMeta?.chain && existingMeta.chain !== taskChain) {
+    throw new AppError(
+      409,
+      'CHAIN_IMMUTABLE',
+      `This task was indexed on ${existingMeta.chain}; a receipt from ${taskChain} can't re-index it — cancel the ${taskChain} escrow to get it back`,
+    );
+  }
+
+  // The hash already names a different escrow task: the same public brief
+  // posted again (a public task's hash is its text), or a duplicate hash.
+  // The listing is that task's, and this escrow can't take it over. Say
+  // which task to cancel rather than blaming changed terms.
+  if (existingMeta) {
+    const indexed = await resolveCachedTaskByHash(taskHash).catch(() => null);
+    if (indexed && (indexed.chain !== taskChain || indexed.taskId !== onChainTaskId)) {
+      throw new AppError(
+        409,
+        'TASK_HASH_IN_USE',
+        `This brief's hash already belongs to ${indexed.chain} task ${indexed.taskId}, so this escrow (${taskChain} task ${onChainTaskId}) can't be listed under it. ` +
+          `Cancel task ${onChainTaskId} to get the payment back, then post again with the brief changed, even slightly: a public task is identified by its text.`,
+      );
+    }
+  }
+
+  // A re-index may retry a listing or add wrappedKeys, but it keeps the terms
+  // the task was first listed on. Otherwise a poster could switch an accepted
+  // auto task to manual, or swap its criteria, and reject work that met the
+  // original terms. Pinned from the first index rather than from acceptance:
+  // a state check here would race the accept compare-and-set.
+  if (existingMeta) {
+    const changed = changedTaskTerm(existingMeta, {
+      ...data,
+      requiredCapabilities: data.requiredCapabilities ?? [],
+    });
+    if (changed) {
+      throw new AppError(
+        409,
+        'TERMS_IMMUTABLE',
+        `This task's ${changed} was set when it was first listed and can't be changed — cancel the task and post a new one`,
+      );
+    }
+  }
+
+  // Only index tasks escrowed in the token this chain settles in, so every
+  // payout can be booked in a known unit. Refused before anything is
+  // written: an unindexed task is never offered, and the poster can still
+  // cancel it for a refund. (A native-0G task on a deployment that prices in
+  // USDC passes here; the "Use now" check below refuses it, and reward
+  // floors — written in the pricing unit — cannot be met by it, so only
+  // agents with no floor are offered it.)
+  const taskUnit = payoutCurrency(taskChain, onChainToken);
+  if (!taskUnit) {
+    throw new AppError(
+      409,
+      'TOKEN_NOT_SETTLEMENT',
+      `Task is escrowed in ${onChainToken}, which is not the settlement token on ${taskChain} — cancel it to get the escrow back`,
+    );
+  }
+
+  // Only a task's on-chain verifier can settle it once one is committed
+  // (BlindEscrow.completeVerification), so such an escrow can't be listed as
+  // auto or manual: that verifier, not autoVerify or the poster's review,
+  // would decide, and a poster who named their own second wallet could fail
+  // the work and reclaim the escrow. Agent mode checks the verifier below.
+  if (data.verificationMode !== 'agent' && event.verifier) {
+    throw new AppError(
+      409,
+      'VERIFIER_MODE_MISMATCH',
+      `This escrow names an on-chain verifier (${event.verifier}), and only it can settle the task, so it can't be listed with verificationMode '${data.verificationMode ?? 'manual'}'. ` +
+        `List it with verificationMode 'agent' and that verifierAddress, or cancel task ${onChainTaskId} to get the escrow back.`,
+    );
+  }
+
+  // All checks passed — eagerly seed the indexer mapping so /submit and
+  // /accept resolve the hash immediately without waiting for the
+  // forward-only event poller to catch up. Seeded in the namespace of the
+  // chain that actually holds the task, which is the only namespace
+  // resolveTaskByHash searches once meta.chain is written below (see
+  // taskChain.seedTaskId).
+  await seedTaskId(taskChain, taskHash, onChainTaskId);
+
+  const wrappedKeysNormalized = data.wrappedKeys
+    ? Object.fromEntries(
+        Object.entries(data.wrappedKeys).map(([addr, blob]) => [addr.toLowerCase(), blob]),
+      )
+    : undefined;
+
+  // Agent-verify integrity checks. A task in 'agent' mode is unjudgeable
+  // without a verifier, and a poster verifying their own task defeats the
+  // independent-judge premise (and would let a poster grief the worker).
+  if (data.verificationMode === 'agent') {
+    if (!data.verifierAddress) {
+      throw new AppError(400, 'NO_VERIFIER', "verificationMode='agent' requires verifierAddress");
+    }
+    if (data.verifierAddress.toLowerCase() === address.toLowerCase()) {
+      throw new AppError(400, 'INVALID_VERIFIER', 'The poster cannot be their own verifier');
+    }
+    // Public tasks skip this: the brief is plaintext, the verifier reads it
+    // like anyone else — there is no AES key to wrap.
+    if (data.privacy !== 'public' && !wrappedKeysNormalized?.[data.verifierAddress.toLowerCase()]) {
+      throw new AppError(
+        400,
+        'VERIFIER_NOT_WRAPPED',
+        'The brief AES key must be ECIES-wrapped to verifierAddress (include it in wrappedKeys) so the verifier can decrypt the task',
+      );
+    }
+    // The off-chain designation must match the ON-CHAIN settlement authority.
+    // completeVerification is gated on taskVerifier[taskId]; if the poster
+    // funded via plain createTask (taskVerifier = 0x0) or committed a
+    // different verifier, the designated agent's settlement tx reverts
+    // NotVerifier and the task sticks in awaiting_verification until
+    // claimTimeout. Refuse the index up front instead.
+    const onChainVerifier = await escrowService.getTaskVerifierOn(taskChain, Number(onChainTaskId));
+    if (onChainVerifier.toLowerCase() !== data.verifierAddress.toLowerCase()) {
+      throw new AppError(
+        409,
+        'VERIFIER_MISMATCH',
+        onChainVerifier === ethers.ZeroAddress
+          ? "On-chain taskVerifier is unset — agent-verify tasks must be funded via createTaskWithVerifier, not plain createTask"
+          : `On-chain taskVerifier (${onChainVerifier}) does not match the designated verifier (${data.verifierAddress})`,
+      );
+    }
+  }
+
+  const requiredCaps = (data.requiredCapabilities ?? []) as AgentCapability[];
+
+  // ── Per-task privacy ────────────────────────────────────────────────────
+  // A PUBLIC task must carry ZERO key material: its blob is plaintext, so a
+  // wrapped key or custody blob on the row would be incoherent (and would
+  // make the accept-gate/worker branch on inconsistent state). A PRIVATE
+  // task must never carry a plaintext display brief. Privacy is immutable
+  // across re-indexes — flipping private→public would publish the pointer
+  // to a brief the poster encrypted expecting blindness (and vice versa
+  // would strand executors mid-flight).
+  const isPublic = data.privacy === 'public';
+  if (isPublic) {
+    if (data.wrappedKeys && Object.keys(data.wrappedKeys).length > 0) {
+      throw new AppError(400, 'PUBLIC_TASK_HAS_KEYS', 'A public task must not carry wrappedKeys — post it unencrypted, or omit privacy for the encrypted flow');
+    }
+    if (data.keyCustodyBlob) {
+      throw new AppError(400, 'PUBLIC_TASK_HAS_CUSTODY', 'A public task must not carry a keyCustodyBlob');
+    }
+  } else if (data.publicBrief) {
+    throw new AppError(400, 'BRIEF_ON_PRIVATE_TASK', "publicBrief is only allowed when privacy='public' — a private brief must stay encrypted");
+  }
+  if (existingMeta && (existingMeta.privacy === 'public') !== isPublic) {
+    throw new AppError(409, 'PRIVACY_IMMUTABLE', 'A task\'s privacy mode cannot be changed after it is first indexed');
+  }
+  // Idempotent re-index: preserve wrappedKeys slices added since the first
+  // index (via /wrap-to or /accept self-heal) instead of overwriting them with
+  // only the original post-time set — otherwise a re-index strands late joiners
+  // back on NEEDS_WRAP. Existing meta (a superset) wins on key collisions.
+  // The meta is read again just before it is written (below), so slices
+  // merged while this request ran are kept too.
+  const mergedWrappedKeys = (existingMeta?.wrappedKeys || wrappedKeysNormalized)
+    ? { ...(wrappedKeysNormalized ?? {}), ...(existingMeta?.wrappedKeys ?? {}) }
+    : undefined;
+
+  // rent-your-agent Phase 2: a per-call "Use now" pins the task to one agent and
+  // links the agent_services row it rents. Validate the link so a later
+  // sold_count bump is trustworthy — the service must be active, its agent must
+  // be the pinned executor, and the escrow must cover the listed price.
+  const targetExecutor = data.targetExecutor?.toLowerCase();
+  if (data.serviceId !== undefined) {
+    if (!targetExecutor) {
+      throw new AppError(400, 'SERVICE_NO_TARGET', 'serviceId requires targetExecutor (the service agent)');
+    }
+    const svc = await serviceStore.getActiveService(data.serviceId);
+    if (!svc) {
+      throw new AppError(409, 'SERVICE_NOT_ACTIVE', 'No active service with that id');
+    }
+    if (svc.agent_address.toLowerCase() !== targetExecutor) {
+      throw new AppError(409, 'SERVICE_AGENT_MISMATCH', "targetExecutor does not match the service's agent");
+    }
+    // price_raw is in the deployment's pricing token. An amount in another
+    // token is not comparable: 1,000,000 wei of 0G would pass a 1 USDC price.
+    const pricing = pricingUnit();
+    if (!sameUnit(taskUnit, pricing)) {
+      throw new AppError(
+        409,
+        'SERVICE_TOKEN_MISMATCH',
+        `Services are priced in ${pricing.symbol}; this task is escrowed in ${taskUnit.symbol} on ${taskChain}`,
+      );
+    }
+    if (BigInt(onChainAmount) < BigInt(svc.price_raw)) {
+      throw new AppError(409, 'UNDERPAID', 'Escrow amount is below the service price');
+    }
+  }
+
+  // A pinned executor or a designated verifier that is registered but can't
+  // sign on this chain could never finish the task. Refused before the meta
+  // is written; the poster can cancel for a refund. An unregistered address
+  // is left alone, as before (it may register later).
+  if (targetExecutor) {
+    const target = await agentStore.getAgent(targetExecutor);
+    if (target && !supportsChain(target, taskChain)) {
+      throw new AppError(
+        409,
+        'TARGET_CHAIN_UNSUPPORTED',
+        `The pinned agent doesn't settle on ${taskChain} — cancel the task to get the escrow back`,
+      );
+    }
+    // A bare pin must meet the pinned agent's minimum reward; a rental
+    // ("Use now", serviceId) was checked against the service price above.
+    if (target && data.serviceId === undefined && !meetsRewardFloor(target, { amount: BigInt(onChainAmount), unit: taskUnit })) {
+      throw new AppError(
+        409,
+        'BELOW_MIN_REWARD',
+        "The escrow is below the pinned agent's minimum reward — cancel the task to get the escrow back",
+      );
+    }
+  }
+  if (data.verificationMode === 'agent' && data.verifierAddress) {
+    const verifier = await agentStore.getAgent(data.verifierAddress);
+    if (verifier && !supportsChain(verifier, taskChain)) {
+      throw new AppError(
+        409,
+        'VERIFIER_CHAIN_UNSUPPORTED',
+        `The designated verifier doesn't settle on ${taskChain} — cancel the task to get the escrow back`,
+      );
+    }
+    if (await hostedVerifierNotOptedIn(data.verifierAddress)) {
+      throw new AppError(409, 'VERIFIER_NOT_OPTED_IN', `${VERIFIER_NOT_OPTED_IN_MESSAGE} Cancel this task to get the escrow back.`);
+    }
+  }
+
+  const latestWrappedKeys = existingMeta ? (await a2aStore.getMeta(taskHash))?.wrappedKeys : undefined;
+  const finalWrappedKeys = latestWrappedKeys
+    ? { ...(mergedWrappedKeys ?? {}), ...latestWrappedKeys }
+    : mergedWrappedKeys;
+  await a2aStore.setMeta({
+    taskId: taskHash,
+    targetExecutorType: 'agent',
+    verificationMode: data.verificationMode ?? 'manual',
+    verificationCriteria: data.verificationCriteria,
+    requiredCapabilities: requiredCaps,
+    posterAddress: address,
+    chain: taskChain,
+    // The network, too: the chain key alone survives a move to another network (chainScope).
+    chainId: settlementChainConfig(taskChain).chainId,
+    verifierAddress: data.verifierAddress?.toLowerCase(),
+    rootHash: data.rootHash,
+    wrappedKeys: finalWrappedKeys,
+    keyCustodyBlob: data.keyCustodyBlob,
+    // Absolute on-chain deadline (epoch seconds) from the verified
+    // TaskCreated event — lets browse hide expired tasks, /accept refuse
+    // them pre-CAS, and the expiry sweep close them with no chain read.
+    deadline: onChainDeadline,
+    reward: { amount: onChainAmount, unit: taskUnit },
+    // rent-your-agent Phase 2: pin + service link (validated above).
+    targetExecutor,
+    serviceId: data.serviceId,
+    // Stored only when public — absent means private (back-compat with
+    // every pre-existing row).
+    privacy: isPublic ? 'public' : undefined,
+    publicBrief: isPublic ? data.publicBrief : undefined,
+    routingSummary: data.routingSummary,
+  });
+
+  // M5 (audit): the funding is receipt-verified at this point, so flip the
+  // build-time 'pending' escrow_lock row to confirmed. Fire-and-forget —
+  // indexing must not fail because the ledger write did.
+  void accountingService.confirmPendingTransactions(taskHash, ['escrow_lock'])
+    .catch((e) => console.warn(`[tasks/index] escrow_lock confirm failed for ${taskHash.slice(0, 10)}…:`, (e as Error).message));
+
+  // The meta slice both the shadow record and the routing decision read —
+  // built ONCE so the shadow log's routing text can never diverge from what
+  // the cascade actually ranked on.
+  const routingMeta: semanticMatch.RoutingMeta = {
+    requiredCapabilities: requiredCaps,
+    publicBrief: isPublic ? data.publicBrief : undefined,
+    routingSummary: data.routingSummary,
+    targetExecutor,
+    // Accept-gate mirror inputs: lets the semantic ranking skip agents whose
+    // /accept is guaranteed to 403 (poster, verifier, missing wrapped slice
+    // on a sealed no-custody task) instead of burning offer windows on them.
+    posterAddress: address,
+    verifierAddress: data.verifierAddress?.toLowerCase(),
+    wrappedKeys: finalWrappedKeys,
+    privacy: isPublic ? 'public' : undefined,
+    rootHash: data.rootHash,
+    skipKeyWrap: existingMeta?.skipKeyWrap,
+    keyCustodyBlob: data.keyCustodyBlob,
+    chain: taskChain,
+  };
+
+  // Semantic matching (Phase 1 SHADOW): embed the task's public routing text
+  // and record how semantic KNN would have ranked agents vs the live tag
+  // ranking. Pure measurement — fire-and-forget, never affects indexing.
+  void semanticMatch.recordMatchShadow({
+    ...routingMeta,
+    taskId: taskHash,
+    targetExecutorType: 'agent',
+    verificationMode: data.verificationMode ?? 'manual',
+  });
+
+  console.log(
+    `[a2a] indexed taskHash=${taskHash.slice(0, 10)}… → onChainId=${onChainTaskId} poster=${address}`,
+  );
+
+  // Score matching agents and start a cascade of exclusive offers to the
+  // best-fit agents (position 0 first, then position 1 after CASCADE_OFFER_MS,
+  // etc.). Only after ALL ranked agents have been given a chance (or scoring
+  // finds zero matches) does the task fall back to CAS-race broadcast.
+  // Non-blocking: if scoring fails, the task is already in a2a:open for
+  // CAS-race fallback.
+  // When CASCADE_ENABLED=false, skip straight to CAS-race broadcast.
+  //
+  // Phase 2 FLIP: a semantically-eligible task (flag on, not pinned, has
+  // public routing text) enters the cascade even with ZERO capability tags —
+  // the whole point of routing by meaning is that tags become optional.
+  //
+  // A pinned (targetExecutor) task never cascades AT ALL: every exclusive
+  // offer would go to an agent whose /accept 403s NOT_TARGET_EXECUTOR while
+  // the offer lock 409s the one agent actually allowed to accept. Broadcast
+  // reaches the pinned agent immediately and the accept gate keeps everyone
+  // else out. (Pinned+capped tasks previously entered the tag cascade —
+  // that was this same lockout.)
+  const semanticEligible = semanticMatch.semanticRoutingEligible(routingMeta);
+  if (!config.cascadeEnabled || targetExecutor || (requiredCaps.length === 0 && !semanticEligible)) {
+    emitTaskAvailable(taskHash, broadcastMeta(requiredCaps, taskChain));
+  } else {
+    // The reward carries its unit: an agent's floor is written in this
+    // deployment's pricing unit and cannot be compared with an amount in
+    // another one.
+    const taskReward: TaskReward = { amount: BigInt(onChainAmount), unit: taskUnit };
+    const broadcastAfter = (err: Error, stage: string) => {
+      console.error(`[a2a] ${stage} failed for ${taskHash.slice(0, 10)}…:`, err.message);
+      emitTaskAvailable(taskHash, broadcastMeta(requiredCaps, taskChain));
+    };
+
+    if (requiredCaps.length === 0) {
+      // Caps-less semantic path: skip the exploration slot. With no cap
+      // filter it would draw a random cold-start agent from the ENTIRE
+      // registry, and its pass/timeout path (advanceCascade with no cascade
+      // stored) broadcasts without semantic ranking ever running.
+      startRankedCascade(taskHash, requiredCaps, routingMeta, taskReward, taskChain)
+        .catch((err) => broadcastAfter(err as Error, 'semantic scoring/offer'));
+    } else {
+      // Cold-start: try the exploration slot first. If a new agent is picked,
+      // offer to them; if they pass or timeout, fall back to normal ranked flow.
+      const agentMode = existingMeta?.agentSelectionMode ?? 'merit';
+      pickExplorationAgent(requiredCaps, agentMode, taskReward, undefined, taskChain).then(async (explorationPick) => {
+        if (explorationPick && (await isLiveAgent(explorationPick.address))) {
+          console.log(`[a2a] exploration slot: offering to new agent ${explorationPick.address} (score=${explorationPick.score})`);
+          const deadline = Date.now() + a2aStore.CASCADE_OFFER_MS;
+          a2aStore.setOffer(taskHash, {
+            address: explorationPick.address,
+            score: explorationPick.score,
+            expiresAt: deadline,
+          }).catch(() => {});
+          emitTaskOffer(explorationPick.address, taskHash, offerMeta(requiredCaps, taskChain), explorationPick.score, deadline);
+          // Store the ranked queue behind the pick so a pass/timeout advances
+          // into the ranking (see a2aStore.withExplorationHead). Best-effort:
+          // if ranking fails the advance falls back to broadcast as before.
+          const pickEntry = { address: explorationPick.address, score: explorationPick.score, displayName: explorationPick.displayName };
+          return rankedEntries(taskHash, requiredCaps, routingMeta, taskReward)
+            .then(({ entries, semantic }) => {
+              if (config.semanticRoutingEnabled && semanticMatch.buildTaskRoutingText(routingMeta)) {
+                void semanticMatch.markShadowRoutedBy(taskHash, semantic ? 'semantic' : 'tag');
+              }
+              return a2aStore.setCascade(taskHash, a2aStore.withExplorationHead(pickEntry, entries));
+            })
+            .catch((err) => console.warn(`[a2a] exploration cascade store failed for ${taskHash.slice(0, 10)}…:`, (err as Error).message))
+            // The pick's window started when its offer went out; arm the advance
+            // for whatever is left of it so ranking time does not extend the window.
+            .then(() => { scheduleCascadeAdvance(taskHash, requiredCaps, taskChain, Math.max(0, deadline - Date.now())); });
+        }
+
+        // Normal ranked flow (semantic when flipped, tag fallback inside).
+        return startRankedCascade(taskHash, requiredCaps, routingMeta, taskReward, taskChain)
+          .catch((err) => broadcastAfter(err as Error, 'scoring/offer'));
+      }).catch((err) => {
+        console.error(`[a2a] exploration slot failed for ${taskHash.slice(0, 10)}…:`, (err as Error).message);
+        // Fallback: normal ranked flow
+        startRankedCascade(taskHash, requiredCaps, routingMeta, taskReward, taskChain)
+          .catch((fallbackErr) => broadcastAfter(fallbackErr as Error, 'fallback scoring/offer'));
+      });
+    }
+  }
+
+  return { taskHash, onChainTaskId };
+}
+
+/** Each wallet's listings, POST /tasks/index and /tasks/index-batch together (middleware/rateLimit.ts). */
+const indexBudget = createWalletBudget({ name: 'task listings', perMinute: WALLET_POSTING_BUDGET_PER_MIN, weight: batchWeight('tasks') });
+
+a2aRouter.post('/tasks/index', requireAuth, indexBudget, postingIpBudget, async (req: AuthRequest, res, next) => {
   try {
     const data = indexTaskSchema.parse(req.body);
-    const address = req.user!.address;
     const taskHash = data.taskHash.toLowerCase();
+    checkIndexTerms(data);
 
-    // Refuse modes no route can settle. 'oracle' is reserved/unwired (/verify
-    // needs 'manual', /verdict needs 'agent'), and 'auto' without a positive
-    // check degrades to "any non-empty output passes".
-    if (data.verificationMode === 'oracle') {
-      throw new AppError(
-        400,
-        'VERIFICATION_MODE_UNSUPPORTED',
-        "verificationMode='oracle' is not supported — use 'manual', 'auto' or 'agent'",
-      );
-    }
-    if (data.verificationMode === 'auto' && !hasAutoCheck(data.verificationCriteria)) {
-      throw new AppError(
-        400,
-        'AUTO_CRITERIA_REQUIRED',
-        `verificationMode='auto' requires verificationCriteria with at least one of: ${AUTO_CHECK_KEYS.join(', ')}`,
-      );
-    }
-    // An auto task whose regex cannot run can never pass: autoVerify fails
-    // closed on a pattern that does not compile or is prone to catastrophic
-    // backtracking. Say so now, before the poster funds or lists it.
-    if (data.verificationMode === 'auto' && typeof data.verificationCriteria?.regex_pattern === 'string') {
-      const pattern = data.verificationCriteria.regex_pattern;
-      let usable = isSafeRegexSource(pattern);
-      if (usable) {
-        try {
-          new RegExp(pattern);
-        } catch {
-          usable = false;
-        }
-      }
-      if (!usable) {
-        throw new AppError(
-          400,
-          'REGEX_PATTERN_UNUSABLE',
-          'verificationCriteria.regex_pattern does not compile or can backtrack catastrophically (nested or stacked quantifiers) — simplify it',
-        );
-      }
-    }
-
-    let onChainTaskId: string;
-    let onChainTaskHash: string;
-    let onChainAgent: string;
-    let onChainDeadline: number;
-    let onChainAmount: string;
-    let onChainToken: string;
-
-    // Poll for the receipt rather than taking a single shot. The createTask tx
-    // is already confirmed by the time the frontend calls us (its signer waited
-    // for the receipt before posting here), but 0G mainnet RPC is
-    // eventually-consistent: the replica the backend hits can lag the one the
-    // browser saw by a few blocks. A single getTransactionReceipt here would
-    // then 404 a tx that is genuinely on-chain — funding the escrow but leaving
-    // the task un-indexed (no rootHash/wrappedKeys meta → invisible to
-    // executors). Retry across ~24s to ride out that replica lag.
-    // Poll for the receipt on every chain this deployment has an escrow on,
-    // the posting chain first since new tasks are funded there.
-    // For ERC-4337 user-ops the relay returns a userOperationHash, not a tx hash.
-    // getTransactionReceipt(userOpHash) always returns null, so when the first
-    // attempt fails we fall back to scanning recent blocks for TaskCreated events
-    // matching the taskHash via eth_getLogs.
-    let receipt = null;
-    const taskCreatedTopic = ethers.id(
-      'TaskCreated(uint256,address,address,uint256,bytes32,string,string,uint256)',
-    );
-    const providers = receiptSearchOrder().flatMap((chain) => {
-      const { provider: prov, escrow: esc } = chainRuntime(chain);
-      return esc ? [{ chain, prov, esc, label: settlementChainConfig(chain).label }] : [];
-    });
-    if (providers.length === 0) {
-      throw new AppError(503, 'CHAIN_NOT_CONFIGURED', 'This backend has no settlement escrow to index tasks from');
-    }
-    // The chain whose escrow the receipt came from.
-    let active: (typeof providers)[number] | null = null;
-
-    // If no receipt found, this is likely a user-op hash. Accept an
-    // isUserOp flag from the frontend to skip the (always-failing)
-    // getTransactionReceipt loop and go straight to the logs scan.
-    const isUserOp = (data as any).isUserOp === true;
-    if (isUserOp) {
-      console.log(`[tasks/index] isUserOp=true, skipping receipt poll — scanning logs`);
-    } else {
-      for (const source of providers) {
-        const { prov } = source;
-        receipt = await prov.getTransactionReceipt(data.txHash);
-        for (let i = 0; i < 3 && !receipt; i++) {
-          await new Promise((r) => setTimeout(r, 3000));
-          receipt = await prov.getTransactionReceipt(data.txHash);
-        }
-        if (receipt) {
-          active = source;
-          break;
-        }
-      }
-    }
-
-    // If no receipt found, this is likely a user-op hash. Scan recent blocks
-    // for TaskCreated events matching our taskHash.
-    if (!receipt) {
-      // Event: TaskCreated(uint256 indexed taskId, address indexed agent,
-      //   address token, uint256 amount, bytes32 taskHash, ...)
-      // Non-indexed data: [token, amount, taskHash, category, locationZone, deadline]
-      // taskHash is at data index 2 (after token and amount).
-      // Decode the non-indexed data and keep only OUR task's event. Other
-      // tasks' TaskCreated logs in the same page must not end the scan early.
-      const matchesOurHash = (l: ethers.Log): boolean => {
-        try {
-          const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
-            ['address', 'uint256', 'bytes32', 'string', 'string', 'uint256'],
-            l.data,
-          );
-          return String(decoded[2]).toLowerCase() === taskHash;
-        } catch { return false; }
-      };
-
-      // Scan BACKWARDS in pages, newest first, instead of one fixed "last 200
-      // blocks" window. 200 blocks is ~7 minutes on Base Sepolia, so any call
-      // to /index more than 7 minutes after the funding tx — a resumed spend
-      // after a crash, a client that timed out and re-called with the same
-      // idempotencyKey — could never see its own TaskCreated event and got
-      // RECEIPT_NOT_FOUND forever, with the escrow funded and the task
-      // unindexed. Observed twice from the MCP.
-      //
-      // Attempt order matters for the common case. The MCP calls /index the
-      // moment the relay returns a user-op hash, usually BEFORE the bundler
-      // has included it — so attempt 0 checks only the newest page (cheap),
-      // attempt 1 scans deep (this is the one that rescues a late retry), and
-      // later attempts go back to the newest page, since everything older was
-      // just covered. Measured: deep-first cost 38s to index a fresh op that
-      // landed one block after the deep scan's top; shallow-first makes that
-      // ~10s. Pages stay at 200 blocks (inside every RPC's getLogs limit).
-      const PAGE = 200;
-      const DEEP_PAGES = 30; // 6,000 blocks ≈ 3.3h on Base Sepolia (2s blocks)
-      const DEEP_ATTEMPT = 1;
-
-      // Retry loop — the bundler may take a few blocks to include the user-op.
-      for (let attempt = 0; attempt < 5 && !receipt; attempt++) {
-        if (attempt > 0) {
-          console.log(`[tasks/index] Retry ${attempt + 1}/5 — waiting 5s for inclusion...`);
-          await new Promise((r) => setTimeout(r, 5000));
-        }
-        const maxPages = attempt === DEEP_ATTEMPT ? DEEP_PAGES : 1;
-        for (const source of providers) {
-          const { prov, esc, label } = source;
-          try {
-            // Each provider is scanned against ITS OWN escrow. Previously the
-            // Base escrow address was used on the 0G provider too, which could
-            // never match anything there.
-            const escrowAddr = await esc.getAddress();
-            const blockNum = await prov.getBlockNumber();
-            let match: ethers.Log | undefined;
-            let scannedFrom = blockNum;
-            for (let page = 0; page < maxPages && !match; page++) {
-              const toBlock = blockNum - page * PAGE;
-              if (toBlock < 0) break;
-              const fromBlock = Math.max(0, toBlock - PAGE + 1);
-              scannedFrom = fromBlock;
-              const pageLogs = await prov.getLogs({
-                fromBlock,
-                toBlock,
-                address: escrowAddr,
-                topics: [taskCreatedTopic],
-              });
-              match = pageLogs.find(matchesOurHash);
-              if (fromBlock === 0) break;
-            }
-            console.log(`[tasks/index] Scanned ${label} blocks ${scannedFrom}–${blockNum} for TaskCreated: ${match ? 'match' : 'no match'}`);
-            if (match) {
-              console.log(`[tasks/index] Match found! txHash=${match.transactionHash} block=${match.blockNumber}`);
-              receipt = await prov.getTransactionReceipt(match.transactionHash);
-              if (receipt) {
-                active = source;
-                console.log(`[tasks/index] Receipt confirmed at block ${receipt.blockNumber}`);
-                break;
-              }
-            }
-          } catch (e) {
-            console.error(`[tasks/index] getLogs scan failed on ${label}:`, (e as Error).message?.slice(0, 200));
-          }
-        }
-      }
-    }
-
-    if (!receipt || !active) {
-      throw new AppError(
-        404,
-        'RECEIPT_NOT_FOUND',
-        'Transaction receipt not yet visible to RPC — wait a couple of blocks and retry',
-      );
-    }
+    const { receipt, active } = await findTaskReceipt(data.txHash, data.isUserOp === true, new Set([taskHash]));
     if (receipt.status !== 1) {
       throw new AppError(
         409,
@@ -1515,15 +2090,7 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
       );
     }
 
-    // Parse logs from the active escrow address only. We don't trust a
-    // receipt that originated from some other contract — a malicious poster
-    // could otherwise pass a tx hash from a different escrow with a colliding
-    // taskHash.
-    const { esc: activeEscrow, chain: taskChain } = active;
-    const escrowAddress = (await activeEscrow.getAddress()).toLowerCase();
-    const matching = receipt.logs.filter(
-      (l) => l.address.toLowerCase() === escrowAddress && l.topics[0] === taskCreatedTopic,
-    );
+    const matching = await escrowTaskCreatedLogs(receipt, active);
     if (matching.length === 0) {
       throw new AppError(
         409,
@@ -1538,449 +2105,8 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
         'Receipt contains multiple TaskCreated events — ambiguous index target',
       );
     }
-    const parsed = activeEscrow.interface.parseLog({
-      topics: matching[0].topics as string[],
-      data: matching[0].data,
-    });
-    if (!parsed) {
-      throw new AppError(500, 'PARSE_FAILED', 'Failed to decode TaskCreated log');
-    }
-    onChainTaskId = (parsed.args.taskId as bigint).toString();
-    onChainTaskHash = (parsed.args.taskHash as string).toLowerCase();
-    onChainAgent = (parsed.args.agent as string).toLowerCase();
-    onChainDeadline = Number(parsed.args.deadline);
-    onChainAmount = (parsed.args.amount as bigint).toString();
-    onChainToken = (parsed.args.token as string).toLowerCase();
-
-    if (onChainTaskHash !== taskHash) {
-      throw new AppError(
-        409,
-        'HASH_MISMATCH',
-        `Claimed taskHash (${taskHash.slice(0, 10)}…) does not match on-chain TaskCreated.taskHash (${onChainTaskHash.slice(0, 10)}…)`,
-      );
-    }
-    const userAddresses = req.user!.addresses?.map((a: string) => a.toLowerCase()) || [address.toLowerCase()];
-    const matchesOnChainAgent = userAddresses.includes(onChainAgent.toLowerCase());
-
-    if (!matchesOnChainAgent) {
-      throw new AppError(
-        403,
-        'NOT_TASK_AGENT',
-        'Authenticated caller is not the on-chain agent (creator) for this task',
-      );
-    }
-
-    // Anyone can escrow any hash, so only the poster who indexed a task first
-    // may index it again. Without this a stranger who funded the same hash
-    // could re-index the task as theirs, or, with the chain lock below, lock
-    // the real poster out. Checked before anything is written.
-    const existingMeta = await a2aStore.getMeta(taskHash);
-    const callerAddresses = new Set([...userAddresses, address.toLowerCase()]);
-    if (existingMeta?.posterAddress && !callerAddresses.has(existingMeta.posterAddress.toLowerCase())) {
-      throw new AppError(
-        409,
-        'TASK_HASH_TAKEN',
-        'Another poster already indexed a task with this hash — cancel your escrow to get it back, and post with a new brief',
-      );
-    }
-    // The poster who built the funding tx through POST /tasks claimed the
-    // hash then, before it was public. The escrow accepts duplicate hashes,
-    // so a front-runner can escrow the same hash and race the real poster's
-    // client to this route; the claim decides, not the race.
-    const claimedBy = await a2aStore.getTaskHashClaim(taskHash);
-    if (claimedBy && !callerAddresses.has(claimedBy)) {
-      throw new AppError(
-        409,
-        'TASK_HASH_TAKEN',
-        'Another poster claimed this hash when they built its funding transaction — cancel your escrow to get it back, and post with a new brief',
-      );
-    }
-
-    // The hash was listed on a network its chain has since moved off
-    // (chainScope.onCurrentNetwork). That listing resolves to no escrow task
-    // any more, so the check below cannot see it, but its off-chain state is
-    // keyed by the hash alone: a2a:state, and credited_payouts, which would
-    // take this task's credit as already paid. The same public brief posted
-    // again needs a new hash, as POST /tasks tells a poster before funding.
-    if (existingMeta && !onCurrentNetwork(existingMeta)) {
-      throw new AppError(
-        409,
-        'TASK_HASH_IN_USE',
-        `This brief's hash already belongs to a task listed on another ${existingMeta.chain} network, so this escrow (${taskChain} task ${onChainTaskId}) can't be listed under it. ` +
-          `Cancel task ${onChainTaskId} to get the payment back, then post again with the brief changed, even slightly: a public task is identified by its text.`,
-      );
-    }
-
-    // A task stays on the chain it was first indexed on. The poster picks the
-    // hash, so the same one can be escrowed on both chains; re-indexing it from
-    // the other chain's receipt would move the task (and its settlement) there.
-    // Checked before seedTaskId, so a refused re-index writes nothing.
-    if (existingMeta?.chain && existingMeta.chain !== taskChain) {
-      throw new AppError(
-        409,
-        'CHAIN_IMMUTABLE',
-        `This task was indexed on ${existingMeta.chain}; a receipt from ${taskChain} can't re-index it — cancel the ${taskChain} escrow to get it back`,
-      );
-    }
-
-    // The hash already names a different escrow task: the same public brief
-    // posted again (a public task's hash is its text), or a duplicate hash.
-    // The listing is that task's, and this escrow can't take it over. Say
-    // which task to cancel rather than blaming changed terms.
-    if (existingMeta) {
-      const indexed = await resolveCachedTaskByHash(taskHash).catch(() => null);
-      if (indexed && (indexed.chain !== taskChain || indexed.taskId !== onChainTaskId)) {
-        throw new AppError(
-          409,
-          'TASK_HASH_IN_USE',
-          `This brief's hash already belongs to ${indexed.chain} task ${indexed.taskId}, so this escrow (${taskChain} task ${onChainTaskId}) can't be listed under it. ` +
-            `Cancel task ${onChainTaskId} to get the payment back, then post again with the brief changed, even slightly: a public task is identified by its text.`,
-        );
-      }
-    }
-
-    // A re-index may retry a listing or add wrappedKeys, but it keeps the terms
-    // the task was first listed on. Otherwise a poster could switch an accepted
-    // auto task to manual, or swap its criteria, and reject work that met the
-    // original terms. Pinned from the first index rather than from acceptance:
-    // a state check here would race the accept compare-and-set.
-    if (existingMeta) {
-      const changed = changedTaskTerm(existingMeta, {
-        ...data,
-        requiredCapabilities: data.requiredCapabilities ?? [],
-      });
-      if (changed) {
-        throw new AppError(
-          409,
-          'TERMS_IMMUTABLE',
-          `This task's ${changed} was set when it was first listed and can't be changed — cancel the task and post a new one`,
-        );
-      }
-    }
-
-    // Only index tasks escrowed in the token this chain settles in, so every
-    // payout can be booked in a known unit. Refused before anything is
-    // written: an unindexed task is never offered, and the poster can still
-    // cancel it for a refund. (A native-0G task on a deployment that prices in
-    // USDC passes here; the "Use now" check below refuses it, and reward
-    // floors — written in the pricing unit — cannot be met by it, so only
-    // agents with no floor are offered it.)
-    const taskUnit = payoutCurrency(taskChain, onChainToken);
-    if (!taskUnit) {
-      throw new AppError(
-        409,
-        'TOKEN_NOT_SETTLEMENT',
-        `Task is escrowed in ${onChainToken}, which is not the settlement token on ${taskChain} — cancel it to get the escrow back`,
-      );
-    }
-
-    // All checks passed — eagerly seed the indexer mapping so /submit and
-    // /accept resolve the hash immediately without waiting for the
-    // forward-only event poller to catch up. Seeded in the namespace of the
-    // chain that actually holds the task, which is the only namespace
-    // resolveTaskByHash searches once meta.chain is written below (see
-    // taskChain.seedTaskId).
-    await seedTaskId(taskChain, taskHash, onChainTaskId);
-
-    const wrappedKeysNormalized = data.wrappedKeys
-      ? Object.fromEntries(
-          Object.entries(data.wrappedKeys).map(([addr, blob]) => [addr.toLowerCase(), blob]),
-        )
-      : undefined;
-
-    // Agent-verify integrity checks. A task in 'agent' mode is unjudgeable
-    // without a verifier, and a poster verifying their own task defeats the
-    // independent-judge premise (and would let a poster grief the worker).
-    if (data.verificationMode === 'agent') {
-      if (!data.verifierAddress) {
-        throw new AppError(400, 'NO_VERIFIER', "verificationMode='agent' requires verifierAddress");
-      }
-      if (data.verifierAddress.toLowerCase() === address.toLowerCase()) {
-        throw new AppError(400, 'INVALID_VERIFIER', 'The poster cannot be their own verifier');
-      }
-      // Public tasks skip this: the brief is plaintext, the verifier reads it
-      // like anyone else — there is no AES key to wrap.
-      if (data.privacy !== 'public' && !wrappedKeysNormalized?.[data.verifierAddress.toLowerCase()]) {
-        throw new AppError(
-          400,
-          'VERIFIER_NOT_WRAPPED',
-          'The brief AES key must be ECIES-wrapped to verifierAddress (include it in wrappedKeys) so the verifier can decrypt the task',
-        );
-      }
-      // The off-chain designation must match the ON-CHAIN settlement authority.
-      // completeVerification is gated on taskVerifier[taskId]; if the poster
-      // funded via plain createTask (taskVerifier = 0x0) or committed a
-      // different verifier, the designated agent's settlement tx reverts
-      // NotVerifier and the task sticks in awaiting_verification until
-      // claimTimeout. Refuse the index up front instead.
-      const onChainVerifier = await escrowService.getTaskVerifierOn(taskChain, Number(onChainTaskId));
-      if (onChainVerifier.toLowerCase() !== data.verifierAddress.toLowerCase()) {
-        throw new AppError(
-          409,
-          'VERIFIER_MISMATCH',
-          onChainVerifier === ethers.ZeroAddress
-            ? "On-chain taskVerifier is unset — agent-verify tasks must be funded via createTaskWithVerifier, not plain createTask"
-            : `On-chain taskVerifier (${onChainVerifier}) does not match the designated verifier (${data.verifierAddress})`,
-        );
-      }
-    }
-
-    const requiredCaps = (data.requiredCapabilities ?? []) as AgentCapability[];
-
-    // ── Per-task privacy ────────────────────────────────────────────────────
-    // A PUBLIC task must carry ZERO key material: its blob is plaintext, so a
-    // wrapped key or custody blob on the row would be incoherent (and would
-    // make the accept-gate/worker branch on inconsistent state). A PRIVATE
-    // task must never carry a plaintext display brief. Privacy is immutable
-    // across re-indexes — flipping private→public would publish the pointer
-    // to a brief the poster encrypted expecting blindness (and vice versa
-    // would strand executors mid-flight).
-    const isPublic = data.privacy === 'public';
-    if (isPublic) {
-      if (data.wrappedKeys && Object.keys(data.wrappedKeys).length > 0) {
-        throw new AppError(400, 'PUBLIC_TASK_HAS_KEYS', 'A public task must not carry wrappedKeys — post it unencrypted, or omit privacy for the encrypted flow');
-      }
-      if (data.keyCustodyBlob) {
-        throw new AppError(400, 'PUBLIC_TASK_HAS_CUSTODY', 'A public task must not carry a keyCustodyBlob');
-      }
-    } else if (data.publicBrief) {
-      throw new AppError(400, 'BRIEF_ON_PRIVATE_TASK', "publicBrief is only allowed when privacy='public' — a private brief must stay encrypted");
-    }
-    if (existingMeta && (existingMeta.privacy === 'public') !== isPublic) {
-      throw new AppError(409, 'PRIVACY_IMMUTABLE', 'A task\'s privacy mode cannot be changed after it is first indexed');
-    }
-    // Idempotent re-index: preserve wrappedKeys slices added since the first
-    // index (via /wrap-to or /accept self-heal) instead of overwriting them with
-    // only the original post-time set — otherwise a re-index strands late joiners
-    // back on NEEDS_WRAP. Existing meta (a superset) wins on key collisions.
-    // The meta is read again just before it is written (below), so slices
-    // merged while this request ran are kept too.
-    const mergedWrappedKeys = (existingMeta?.wrappedKeys || wrappedKeysNormalized)
-      ? { ...(wrappedKeysNormalized ?? {}), ...(existingMeta?.wrappedKeys ?? {}) }
-      : undefined;
-
-    // rent-your-agent Phase 2: a per-call "Use now" pins the task to one agent and
-    // links the agent_services row it rents. Validate the link so a later
-    // sold_count bump is trustworthy — the service must be active, its agent must
-    // be the pinned executor, and the escrow must cover the listed price.
-    const targetExecutor = data.targetExecutor?.toLowerCase();
-    if (data.serviceId !== undefined) {
-      if (!targetExecutor) {
-        throw new AppError(400, 'SERVICE_NO_TARGET', 'serviceId requires targetExecutor (the service agent)');
-      }
-      const svc = await serviceStore.getActiveService(data.serviceId);
-      if (!svc) {
-        throw new AppError(409, 'SERVICE_NOT_ACTIVE', 'No active service with that id');
-      }
-      if (svc.agent_address.toLowerCase() !== targetExecutor) {
-        throw new AppError(409, 'SERVICE_AGENT_MISMATCH', "targetExecutor does not match the service's agent");
-      }
-      // price_raw is in the deployment's pricing token. An amount in another
-      // token is not comparable: 1,000,000 wei of 0G would pass a 1 USDC price.
-      const pricing = pricingUnit();
-      if (!sameUnit(taskUnit, pricing)) {
-        throw new AppError(
-          409,
-          'SERVICE_TOKEN_MISMATCH',
-          `Services are priced in ${pricing.symbol}; this task is escrowed in ${taskUnit.symbol} on ${taskChain}`,
-        );
-      }
-      if (BigInt(onChainAmount) < BigInt(svc.price_raw)) {
-        throw new AppError(409, 'UNDERPAID', 'Escrow amount is below the service price');
-      }
-    }
-
-    // A pinned executor or a designated verifier that is registered but can't
-    // sign on this chain could never finish the task. Refused before the meta
-    // is written; the poster can cancel for a refund. An unregistered address
-    // is left alone, as before (it may register later).
-    if (targetExecutor) {
-      const target = await agentStore.getAgent(targetExecutor);
-      if (target && !supportsChain(target, taskChain)) {
-        throw new AppError(
-          409,
-          'TARGET_CHAIN_UNSUPPORTED',
-          `The pinned agent doesn't settle on ${taskChain} — cancel the task to get the escrow back`,
-        );
-      }
-      // A bare pin must meet the pinned agent's minimum reward; a rental
-      // ("Use now", serviceId) was checked against the service price above.
-      if (target && data.serviceId === undefined && !meetsRewardFloor(target, { amount: BigInt(onChainAmount), unit: taskUnit })) {
-        throw new AppError(
-          409,
-          'BELOW_MIN_REWARD',
-          "The escrow is below the pinned agent's minimum reward — cancel the task to get the escrow back",
-        );
-      }
-    }
-    if (data.verificationMode === 'agent' && data.verifierAddress) {
-      const verifier = await agentStore.getAgent(data.verifierAddress);
-      if (verifier && !supportsChain(verifier, taskChain)) {
-        throw new AppError(
-          409,
-          'VERIFIER_CHAIN_UNSUPPORTED',
-          `The designated verifier doesn't settle on ${taskChain} — cancel the task to get the escrow back`,
-        );
-      }
-      if (await hostedVerifierNotOptedIn(data.verifierAddress)) {
-        throw new AppError(409, 'VERIFIER_NOT_OPTED_IN', `${VERIFIER_NOT_OPTED_IN_MESSAGE} Cancel this task to get the escrow back.`);
-      }
-    }
-
-    const latestWrappedKeys = existingMeta ? (await a2aStore.getMeta(taskHash))?.wrappedKeys : undefined;
-    const finalWrappedKeys = latestWrappedKeys
-      ? { ...(mergedWrappedKeys ?? {}), ...latestWrappedKeys }
-      : mergedWrappedKeys;
-    await a2aStore.setMeta({
-      taskId: taskHash,
-      targetExecutorType: 'agent',
-      verificationMode: data.verificationMode ?? 'manual',
-      verificationCriteria: data.verificationCriteria,
-      requiredCapabilities: requiredCaps,
-      posterAddress: address,
-      chain: taskChain,
-      // The network, too: the chain key alone survives a move to another network (chainScope).
-      chainId: settlementChainConfig(taskChain).chainId,
-      verifierAddress: data.verifierAddress?.toLowerCase(),
-      rootHash: data.rootHash,
-      wrappedKeys: finalWrappedKeys,
-      keyCustodyBlob: data.keyCustodyBlob,
-      // Absolute on-chain deadline (epoch seconds) from the verified
-      // TaskCreated event — lets browse hide expired tasks, /accept refuse
-      // them pre-CAS, and the expiry sweep close them with no chain read.
-      deadline: onChainDeadline,
-      reward: { amount: onChainAmount, unit: taskUnit },
-      // rent-your-agent Phase 2: pin + service link (validated above).
-      targetExecutor,
-      serviceId: data.serviceId,
-      // Stored only when public — absent means private (back-compat with
-      // every pre-existing row).
-      privacy: isPublic ? 'public' : undefined,
-      publicBrief: isPublic ? data.publicBrief : undefined,
-      routingSummary: data.routingSummary,
-    });
-
-    // M5 (audit): the funding is receipt-verified at this point, so flip the
-    // build-time 'pending' escrow_lock row to confirmed. Fire-and-forget —
-    // indexing must not fail because the ledger write did.
-    void accountingService.confirmPendingTransactions(taskHash, ['escrow_lock'])
-      .catch((e) => console.warn(`[tasks/index] escrow_lock confirm failed for ${taskHash.slice(0, 10)}…:`, (e as Error).message));
-
-    // The meta slice both the shadow record and the routing decision read —
-    // built ONCE so the shadow log's routing text can never diverge from what
-    // the cascade actually ranked on.
-    const routingMeta: semanticMatch.RoutingMeta = {
-      requiredCapabilities: requiredCaps,
-      publicBrief: isPublic ? data.publicBrief : undefined,
-      routingSummary: data.routingSummary,
-      targetExecutor,
-      // Accept-gate mirror inputs: lets the semantic ranking skip agents whose
-      // /accept is guaranteed to 403 (poster, verifier, missing wrapped slice
-      // on a sealed no-custody task) instead of burning offer windows on them.
-      posterAddress: address,
-      verifierAddress: data.verifierAddress?.toLowerCase(),
-      wrappedKeys: finalWrappedKeys,
-      privacy: isPublic ? 'public' : undefined,
-      rootHash: data.rootHash,
-      skipKeyWrap: existingMeta?.skipKeyWrap,
-      keyCustodyBlob: data.keyCustodyBlob,
-      chain: taskChain,
-    };
-
-    // Semantic matching (Phase 1 SHADOW): embed the task's public routing text
-    // and record how semantic KNN would have ranked agents vs the live tag
-    // ranking. Pure measurement — fire-and-forget, never affects indexing.
-    void semanticMatch.recordMatchShadow({
-      ...routingMeta,
-      taskId: taskHash,
-      targetExecutorType: 'agent',
-      verificationMode: data.verificationMode ?? 'manual',
-    });
-
-    console.log(
-      `[a2a] indexed taskHash=${taskHash.slice(0, 10)}… → onChainId=${onChainTaskId} poster=${address}`,
-    );
-
-    // Score matching agents and start a cascade of exclusive offers to the
-    // best-fit agents (position 0 first, then position 1 after CASCADE_OFFER_MS,
-    // etc.). Only after ALL ranked agents have been given a chance (or scoring
-    // finds zero matches) does the task fall back to CAS-race broadcast.
-    // Non-blocking: if scoring fails, the task is already in a2a:open for
-    // CAS-race fallback.
-    // When CASCADE_ENABLED=false, skip straight to CAS-race broadcast.
-    //
-    // Phase 2 FLIP: a semantically-eligible task (flag on, not pinned, has
-    // public routing text) enters the cascade even with ZERO capability tags —
-    // the whole point of routing by meaning is that tags become optional.
-    //
-    // A pinned (targetExecutor) task never cascades AT ALL: every exclusive
-    // offer would go to an agent whose /accept 403s NOT_TARGET_EXECUTOR while
-    // the offer lock 409s the one agent actually allowed to accept. Broadcast
-    // reaches the pinned agent immediately and the accept gate keeps everyone
-    // else out. (Pinned+capped tasks previously entered the tag cascade —
-    // that was this same lockout.)
-    const semanticEligible = semanticMatch.semanticRoutingEligible(routingMeta);
-    if (!config.cascadeEnabled || targetExecutor || (requiredCaps.length === 0 && !semanticEligible)) {
-      emitTaskAvailable(taskHash, broadcastMeta(requiredCaps, taskChain));
-    } else {
-      // The reward carries its unit: an agent's floor is written in this
-      // deployment's pricing unit and cannot be compared with an amount in
-      // another one.
-      const taskReward: TaskReward = { amount: BigInt(onChainAmount), unit: taskUnit };
-      const broadcastAfter = (err: Error, stage: string) => {
-        console.error(`[a2a] ${stage} failed for ${taskHash.slice(0, 10)}…:`, err.message);
-        emitTaskAvailable(taskHash, broadcastMeta(requiredCaps, taskChain));
-      };
-
-      if (requiredCaps.length === 0) {
-        // Caps-less semantic path: skip the exploration slot. With no cap
-        // filter it would draw a random cold-start agent from the ENTIRE
-        // registry, and its pass/timeout path (advanceCascade with no cascade
-        // stored) broadcasts without semantic ranking ever running.
-        startRankedCascade(taskHash, requiredCaps, routingMeta, taskReward, taskChain)
-          .catch((err) => broadcastAfter(err as Error, 'semantic scoring/offer'));
-      } else {
-        // Cold-start: try the exploration slot first. If a new agent is picked,
-        // offer to them; if they pass or timeout, fall back to normal ranked flow.
-        const agentMode = existingMeta?.agentSelectionMode ?? 'merit';
-        pickExplorationAgent(requiredCaps, agentMode, taskReward, undefined, taskChain).then(async (explorationPick) => {
-          if (explorationPick && (await isLiveAgent(explorationPick.address))) {
-            console.log(`[a2a] exploration slot: offering to new agent ${explorationPick.address} (score=${explorationPick.score})`);
-            const deadline = Date.now() + a2aStore.CASCADE_OFFER_MS;
-            a2aStore.setOffer(taskHash, {
-              address: explorationPick.address,
-              score: explorationPick.score,
-              expiresAt: deadline,
-            }).catch(() => {});
-            emitTaskOffer(explorationPick.address, taskHash, offerMeta(requiredCaps, taskChain), explorationPick.score, deadline);
-            // Store the ranked queue behind the pick so a pass/timeout advances
-            // into the ranking (see a2aStore.withExplorationHead). Best-effort:
-            // if ranking fails the advance falls back to broadcast as before.
-            const pickEntry = { address: explorationPick.address, score: explorationPick.score, displayName: explorationPick.displayName };
-            return rankedEntries(taskHash, requiredCaps, routingMeta, taskReward)
-              .then(({ entries, semantic }) => {
-                if (config.semanticRoutingEnabled && semanticMatch.buildTaskRoutingText(routingMeta)) {
-                  void semanticMatch.markShadowRoutedBy(taskHash, semantic ? 'semantic' : 'tag');
-                }
-                return a2aStore.setCascade(taskHash, a2aStore.withExplorationHead(pickEntry, entries));
-              })
-              .catch((err) => console.warn(`[a2a] exploration cascade store failed for ${taskHash.slice(0, 10)}…:`, (err as Error).message))
-              // The pick's window started when its offer went out; arm the advance
-              // for whatever is left of it so ranking time does not extend the window.
-              .then(() => { scheduleCascadeAdvance(taskHash, requiredCaps, taskChain, Math.max(0, deadline - Date.now())); });
-          }
-
-          // Normal ranked flow (semantic when flipped, tag fallback inside).
-          return startRankedCascade(taskHash, requiredCaps, routingMeta, taskReward, taskChain)
-            .catch((err) => broadcastAfter(err as Error, 'scoring/offer'));
-        }).catch((err) => {
-          console.error(`[a2a] exploration slot failed for ${taskHash.slice(0, 10)}…:`, (err as Error).message);
-          // Fallback: normal ranked flow
-          startRankedCascade(taskHash, requiredCaps, routingMeta, taskReward, taskChain)
-            .catch((fallbackErr) => broadcastAfter(fallbackErr as Error, 'fallback scoring/offer'));
-        });
-      }
-    }
+    const verifiers = await escrowTaskVerifiers(receipt, active);
+    const { onChainTaskId } = await indexTaskFromEvent(req.user!, data, active.chain, decodeTaskCreated(active.esc, matching[0], verifiers));
 
     const body: ApiResponse = {
       success: true,
@@ -1989,6 +2115,136 @@ a2aRouter.post('/tasks/index', requireAuth, async (req: AuthRequest, res, next) 
     res.json(body);
   } catch (err) {
     console.error(`[a2a] index failed:`, (err as Error).message);
+    next(err);
+  }
+});
+/** Tasks of one POST /tasks/index-batch listed at a time. */
+const INDEX_BATCH_CONCURRENCY = 5;
+
+const indexBatchSchema = z.object({
+  txHash: indexTaskSchema.shape.txHash,
+  isUserOp: z.boolean().optional(),
+  tasks: z.array(z.unknown()).min(1).max(MAX_BATCH_REQUEST),
+});
+const indexBatchTaskSchema = indexTaskSchema.omit({ txHash: true, isUserOp: true });
+
+type IndexBatchResult =
+  | { taskHash: string; onChainTaskId: string; indexed: true }
+  | { taskHash: string; error: { code: string; message: string } };
+
+/** A task's failure as index-batch reports it. Anything but an AppError is logged and reported without its text. */
+function indexBatchError(taskHash: string, err: unknown): IndexBatchResult {
+  if (err instanceof AppError) return { taskHash, error: { code: err.code, message: err.message } };
+  console.error(`[a2a] index-batch: ${taskHash.slice(0, 10)}… failed:`, err);
+  return { taskHash, error: { code: 'INDEX_FAILED', message: clientErrorMessage(err, 'Listing failed — retry this task') } };
+}
+
+/**
+ * POST /api/v1/a2a/tasks/index-batch (docs/BULK-POSTING.md)
+ * List the tasks one confirmed transaction funded, such as a createTasks
+ * batch. Body: { txHash, isUserOp?, tasks: [<POST /tasks/index body without
+ * txHash>] }, 1–50 tasks. It works for a receipt with one task too.
+ *
+ * The receipt is read once, and only TaskCreated events from the escrow of
+ * the chain it was found on count. Each listed task is matched to its event
+ * by taskHash, then listed by indexTaskFromEvent, POST /tasks/index's own
+ * checks and writes: the caller must be the task's on-chain poster, and a
+ * re-listing keeps its first poster, escrow task and terms. A listed task
+ * the receipt does not fund is NOT_IN_RECEIPT; tasks the receipt funds that
+ * are not listed are left alone (list them in a later call). A hash listed
+ * twice in one request is refused the second time.
+ *
+ * Returns { results: [{ taskHash, onChainTaskId, indexed: true } |
+ * { taskHash, error: { code, message } }] }, in input order. A receipt that
+ * can't be used at all (not found, reverted, no TaskCreated from the escrow)
+ * fails the whole request, with the single route's codes.
+ */
+a2aRouter.post('/tasks/index-batch', requireAuth, indexBudget, postingIpBudget, async (req: AuthRequest, res, next) => {
+  try {
+    const request = indexBatchSchema.safeParse(req.body);
+    if (!request.success) throw new AppError(400, 'VALIDATION_ERROR', zodIssuesText(request.error));
+    const { txHash, isUserOp, tasks } = request.data;
+    const user = req.user!;
+
+    const results: IndexBatchResult[] = new Array(tasks.length);
+    const listed: Array<{ index: number; taskHash: string; data: IndexTaskTerms }> = [];
+    const firstByHash = new Map<string, number>();
+    tasks.forEach((raw, index) => {
+      const parsed = indexBatchTaskSchema.safeParse(raw);
+      if (!parsed.success) {
+        // The hash is echoed only when it is one, so the answer carries no raw input.
+        const rawHash = (raw as { taskHash?: unknown } | null)?.taskHash;
+        const taskHash = typeof rawHash === 'string' && /^0x[0-9a-fA-F]{64}$/.test(rawHash) ? rawHash.toLowerCase() : '';
+        results[index] = { taskHash, error: { code: 'VALIDATION_ERROR', message: zodIssuesText(parsed.error) } };
+        return;
+      }
+      const taskHash = parsed.data.taskHash.toLowerCase();
+      const first = firstByHash.get(taskHash);
+      if (first !== undefined) {
+        results[index] = { taskHash, error: { code: 'DUPLICATE_TASK_HASH', message: `Task ${first + 1} lists the same taskHash; a task is listed once per request` } };
+        return;
+      }
+      firstByHash.set(taskHash, index);
+      try {
+        checkIndexTerms(parsed.data);
+        listed.push({ index, taskHash, data: parsed.data });
+      } catch (err) {
+        results[index] = indexBatchError(taskHash, err);
+      }
+    });
+
+    if (listed.length > 0) {
+      const { receipt, active } = await findTaskReceipt(txHash, isUserOp === true, new Set(listed.map((t) => t.taskHash)));
+      if (receipt.status !== 1) {
+        throw new AppError(409, 'TX_REVERTED', `The funding tx reverted (status=${receipt.status}) — nothing to index`);
+      }
+      const logs = await escrowTaskCreatedLogs(receipt, active);
+      if (logs.length === 0) {
+        throw new AppError(409, 'NO_TASK_CREATED', 'Receipt contains no TaskCreated event from the configured BlindEscrow address');
+      }
+      const verifiers = await escrowTaskVerifiers(receipt, active);
+      const eventsByHash = new Map<string, TaskCreatedEvent[]>();
+      for (const log of logs) {
+        const event = decodeTaskCreated(active.esc, log, verifiers);
+        eventsByHash.set(event.taskHash, [...(eventsByHash.get(event.taskHash) ?? []), event]);
+      }
+
+      let cursor = 0;
+      const worker = async () => {
+        while (cursor < listed.length) {
+          const { index, taskHash, data } = listed[cursor++];
+          const events = eventsByHash.get(taskHash) ?? [];
+          if (events.length === 0) {
+            results[index] = {
+              taskHash,
+              error: { code: 'NOT_IN_RECEIPT', message: `This transaction funded no task with this taskHash on the ${active.label} escrow` },
+            };
+            continue;
+          }
+          if (events.length > 1) {
+            results[index] = {
+              taskHash,
+              error: { code: 'MULTIPLE_TASK_CREATED', message: 'This transaction funded several tasks with this taskHash — ambiguous index target' },
+            };
+            continue;
+          }
+          try {
+            const { onChainTaskId } = await indexTaskFromEvent(user, data, active.chain, events[0]);
+            results[index] = { taskHash, onChainTaskId, indexed: true };
+          } catch (err) {
+            results[index] = indexBatchError(taskHash, err);
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(INDEX_BATCH_CONCURRENCY, listed.length) }, worker));
+    }
+
+    const indexed = results.filter((r) => 'indexed' in r).length;
+    console.log(`[a2a] index-batch ${txHash.slice(0, 10)}…: ${indexed}/${tasks.length} listed for ${user.address}`);
+    const body: ApiResponse = { success: true, data: { results } };
+    res.json(body);
+  } catch (err) {
+    console.error(`[a2a] index-batch failed:`, (err as Error).message);
     next(err);
   }
 });

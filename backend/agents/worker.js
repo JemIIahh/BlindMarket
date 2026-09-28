@@ -2593,6 +2593,71 @@ export function sealResultForStorage(output, { isPublicTask, wrappedKeyHex, priv
   return aesEncrypt(Buffer.from(output, 'utf8'), taskKey);
 }
 
+// A finished result the backend could not store is uploaded again, rather
+// than the task released and the work thrown away over a storage blip: after
+// 20 s, then after 40 s more (3 attempts in all).
+export const RESULT_UPLOAD_BACKOFF_MS = [20_000, 40_000];
+// A retry is made only while it leaves this long before the task's deadline:
+// one upload (the backend answers within about 85 s) and the submit after it.
+const RESULT_UPLOAD_ROOM_MS = 90_000 + 120_000;
+
+/**
+ * Whether a failed result upload is worth another try. Only storage or the
+ * way to it failing: 503 (the backend's STORAGE_UNAVAILABLE, or a restart),
+ * 502 and 504 (a proxy that got no answer, which is a network error by
+ * another name), and no response at all (`status` null: a network error or
+ * our own timeout). Never a 4xx, which is the request's fault, and never a
+ * 500, which another try would repeat.
+ */
+export function isRetryableUploadFailure(status) {
+  return status === null || status === 502 || status === 503 || status === 504;
+}
+
+/**
+ * Upload a finished result with `upload()` (a fetch of POST
+ * /api/v1/storage/upload), trying again after each of `backoffMs` when
+ * isRetryableUploadFailure says so and the retry would not run into
+ * `deadlineMs` (the task's on-chain deadline, epoch ms; null when unknown).
+ * Resolves to the stored result's rootHash, or null once it gives up.
+ */
+export async function uploadResultWithRetry(upload, {
+  deadlineMs = null,
+  backoffMs = RESULT_UPLOAD_BACKOFF_MS,
+  now = () => Date.now(),
+  sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+  log: say = (_message) => {},
+} = {}) {
+  for (let attempt = 1; ; attempt++) {
+    let status = null;
+    let why;
+    try {
+      const res = await upload();
+      status = res.status;
+      if (res.ok) {
+        const rootHash = (await res.json().catch(() => null))?.data?.rootHash;
+        if (rootHash) return rootHash;
+        why = `${res.status} with no rootHash`;
+      } else {
+        const code = errorCodeOf(await res.text().catch(() => ''));
+        why = `${res.status}${code ? ` ${code}` : ''}`;
+      }
+    } catch (err) {
+      why = `no response (${err.message})`;
+    }
+    const wait = backoffMs[attempt - 1];
+    if (wait === undefined || !isRetryableUploadFailure(status)) {
+      say(`0G Storage upload failed: ${why}`);
+      return null;
+    }
+    if (deadlineMs != null && now() + wait + RESULT_UPLOAD_ROOM_MS > deadlineMs) {
+      say(`0G Storage upload failed: ${why} — too close to the task deadline to try again`);
+      return null;
+    }
+    say(`0G Storage upload failed: ${why} — trying again in ${Math.round(wait / 1000)}s (attempt ${attempt + 1} of ${backoffMs.length + 1})`);
+    await sleep(wait);
+  }
+}
+
 // Fetch a PUBLIC task's brief: the blob at rootHash is plaintext utf-8 by
 // definition (privacy='public' rows can carry no key material — enforced at
 // /tasks/index), so no key and no decryption are involved.
@@ -3303,8 +3368,10 @@ async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrapp
     if (!storedOutput) {
       log(`no task key to seal the result of private task ${acceptedTaskHash.slice(0, 10)}… — not storing it`);
     } else {
-      try {
-        const upRes = await fetchWithTimeout(`${BACKEND_URL}/api/v1/storage/upload`, {
+      // A storage outage is retried (uploadResultWithRetry) rather than the
+      // finished work thrown away, never past the task's deadline.
+      rootHash = await uploadResultWithRetry(
+        () => fetchWithTimeout(`${BACKEND_URL}/api/v1/storage/upload`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -3314,17 +3381,10 @@ async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrapp
             data: storedOutput.toString('base64'),
             chainType: IS_EVM_AGENT ? 'evm' : 'sui',
           }),
-          }, 120_000);
-        if (upRes.ok) {
-          const upJson = await upRes.json();
-          rootHash = upJson.data?.rootHash || null;
-          if (rootHash) log(`output uploaded to 0G Storage${isPublicTask ? '' : ' (sealed with the task key)'}: rootHash=${rootHash.slice(0, 16)}…`);
-        } else {
-          log(`0G Storage upload failed: ${upRes.status}`);
-        }
-      } catch (upErr) {
-        log(`0G Storage upload error: ${upErr.message}`);
-      }
+        }, 120_000),
+        { deadlineMs: typeof taskMeta?.deadline === 'number' ? taskMeta.deadline * 1000 : null, log },
+      );
+      if (rootHash) log(`output uploaded to 0G Storage${isPublicTask ? '' : ' (sealed with the task key)'}: rootHash=${rootHash.slice(0, 16)}…`);
     }
     if (!rootHash) {
       log(`output upload failed — aborting submit for ${acceptedTaskHash.slice(0, 10)}…`);

@@ -3,8 +3,12 @@ import { ApiError } from './apiError.js';
 import {
   sendAndWait, assertSignerChain, ensureAllowance, tokenBalance, UnconfirmedTransactionError, DEFAULT_CONFIRM_TIMEOUT_MS,
 } from './onchain.js';
-import { generateAesKey, aesEncrypt, eciesEncrypt, sha256, bytesToHex } from './crypto/index.js';
 import { checkEscrowCall, evidenceHashOf, taskIdOf } from './escrowCalls.js';
+import { isPinnedSettlement, SETTLEMENT_PINS, type SettlementPin } from './settlementPins.js';
+import {
+  normalizePost, checkRowFields, sealBrief, createTaskBody, indexParamsFor, commitsVerifier,
+  type NormalizedPost, type SealedBrief, type ExecutorKey,
+} from './posting.js';
 import type {
   Address, Hex, RootHash, HealthStatus, PlatformStats, OpenTask, TaskDetail,
   CreateTaskTx, ExecutorProfile, RegisterExecutorInput,
@@ -28,6 +32,14 @@ export interface BlindMarketConfig {
    * never take a key as an argument. Stays in-process; never sent to the backend.
    */
   executor?: DeliverSigner;
+  /**
+   * Escrows postTask() and postTasks() may fund besides the known
+   * deployments (SETTLEMENT_PINS: Arc mainnet and Arc Testnet), for a custom
+   * or local deployment. Each names its chain id, escrow and settlement
+   * token; the backend's /health/settlement must name exactly one of them, or
+   * nothing is approved or funded (ESCROW_NOT_PINNED).
+   */
+  trustedEscrows?: SettlementPin[];
 }
 
 // ── Agent deployment params ─────────────────────────────────────────────────
@@ -148,6 +160,12 @@ export interface PostTaskParams {
   targetExecutor?: Address;
   /** Default 'global'. */
   locationZone?: string;
+  /**
+   * A public one-liner shown on the task board, at most 500 characters. A
+   * private task's brief is sealed, so this is what the board says it is
+   * about: keep secrets out of it.
+   */
+  routingSummary?: string;
 }
 
 export interface PostTaskOptions {
@@ -168,7 +186,7 @@ export interface PostTaskOptions {
    * before the task is listed, indexTask(indexParams) finishes it and the
    * escrow is not funded twice.
    */
-  onFunded?: (funding: { txHash: string; taskHash: string; indexParams: IndexTaskParams }) => void | Promise<void>;
+  onFunded?: (funding: { txHash: string; nonce: number; raw?: string; taskHash: string; indexParams: IndexTaskParams }) => void | Promise<void>;
   /** How long to wait for each transaction to confirm. Default 180000 ms. */
   confirmTimeoutMs?: number;
 }
@@ -206,6 +224,123 @@ export interface IndexTaskParams {
   verifierAddress?: Address;
   requiredCapabilities?: AgentCapability[];
   targetExecutor?: Address;
+  routingSummary?: string;
+}
+
+// ── Posting many tasks ──────────────────────────────────────────────────────
+
+export interface PostTasksOptions {
+  /** As postTask(): signs on the posting chain instead of the configured executor, and must be the API key's own wallet. */
+  signer?: ethers.Signer;
+  /**
+   * The most postTasks() will lock in escrow across every row, in the
+   * token's smallest unit. Refused with AMOUNT_ABOVE_MAX before anything is sent.
+   */
+  maxTotalRaw?: bigint | string;
+  /**
+   * Tasks per transaction on an escrow that has createTasks (SettlementChainInfo.batchCreate).
+   * Default 20, at most the chain's maxBatch and 50. On an escrow without
+   * it every task is its own transaction and this is ignored.
+   */
+  chunkSize?: number;
+  /** Called as each row settles: posted, unlisted, failed or skipped. A throwing callback does not stop the run. */
+  onProgress?: (progress: { done: number; total: number; result: PostTasksRowResult }) => void | Promise<void>;
+  /**
+   * Called the moment a funding transaction is broadcast, once for every row
+   * it funds. Persist `indexParams`: if this process dies before the row is
+   * listed, indexTask(indexParams) lists it without funding it again, or
+   * indexTasks() for rows whose `batch` is true, which share one transaction
+   * (the single index route refuses a receipt that funded several tasks).
+   */
+  onFunded?: (funding: { index: number; txHash: string; nonce: number; raw?: string; taskHash: string; batch: boolean; indexParams: IndexTaskParams }) => void | Promise<void>;
+  /** How long to wait for each transaction to confirm. Default 180000 ms. */
+  confirmTimeoutMs?: number;
+  /**
+   * Stops the run before the next row, or the next transaction of rows; a
+   * transaction already sent is always seen through to its listing. Rows not
+   * started come back 'skipped'.
+   */
+  signal?: AbortSignal;
+  /**
+   * Backoff for a rate limit (429), a 5xx or a network error on a read, an
+   * upload, a build or a listing: `attempts` tries in all (default 5), the
+   * wait doubling from `baseDelayMs` (default 2000). A funding transaction is
+   * never sent twice.
+   */
+  retry?: { attempts?: number; baseDelayMs?: number };
+}
+
+/** A row that cannot be posted as it is, from postTasks()' checks before anything is sent (ApiError INVALID_ROWS, `body.errors`). */
+export interface PostTasksRowError {
+  /** The row's position in the array passed to postTasks(). */
+  index: number;
+  code: string;
+  message: string;
+}
+
+/** What happened to one row of postTasks(), by its position in the input. */
+export type PostTasksRowResult =
+  /** Funded and listed. */
+  | { index: number; status: 'posted'; task: PostedTask }
+  /**
+   * Funded (or sent and maybe funded, with code UNCONFIRMED) but not listed.
+   * Do not post it again: list it with indexTask(indexParams), or with
+   * indexTasks() when `batch` is true, or cancel it for a refund.
+   */
+  | {
+    index: number; status: 'unlisted'; taskHash: string; txHash: string; batch: boolean;
+    indexParams: IndexTaskParams; aesKey?: string; error: { code?: string; message: string };
+  }
+  /** Nothing was funded for this row. */
+  | { index: number; status: 'failed'; error: { code?: string; message: string } }
+  /** Not started: the run was aborted, or stopped at an earlier row. */
+  | { index: number; status: 'skipped'; reason: string };
+
+export interface PostTasksResult {
+  chain: string;
+  chainId: number;
+  /** 'batch': createTasks, several tasks per transaction. 'single': one createTask per task. */
+  mode: 'batch' | 'single';
+  /** One per input row, in input order. */
+  results: PostTasksRowResult[];
+  posted: number;
+  unlisted: number;
+  failed: number;
+  skipped: number;
+  /**
+   * Why the run stopped before the last row, when it did: an on-chain or
+   * listing failure (so no further escrow is funded behind it), a backend
+   * that built the wrong transaction, one that stayed unreachable, or the abort signal.
+   */
+  stopped?: { index: number; code?: string; message: string };
+}
+
+/** POST /api/v1/tasks/batch: several posts built into one createTasks transaction. */
+export interface CreateTasksRequest {
+  token: Address;
+  tasks: Array<Omit<CreateTaskRequest, 'token'>>;
+}
+
+export interface CreateTasksTx {
+  unsignedTx: { to: Address; data: Hex; value?: string; from?: Address };
+  chain?: string;
+  chainId?: number;
+  /** The task hashes the transaction escrows, in order. */
+  taskHashes?: string[];
+}
+
+/** POST /api/v1/a2a/tasks/index-batch: list the tasks one transaction funded. */
+export interface IndexTasksParams {
+  txHash: string;
+  isUserOp?: boolean;
+  tasks: Array<Omit<IndexTaskParams, 'txHash'>>;
+}
+
+export interface IndexTasksResult {
+  results: Array<
+    | { taskHash: string; onChainTaskId?: string; indexed: true }
+    | { taskHash: string; error: { code?: string; message: string } }
+  >;
 }
 
 /** A refund the client signed and sent: cancelAndRefund() or reclaimAfterTimeout(). */
@@ -243,6 +378,12 @@ export interface SettlementChainInfo {
   relayChain?: string | null;
   gasSymbol?: string;
   postable?: boolean;
+  /**
+   * Whether this chain's escrow has createTasks (several tasks in one
+   * transaction), and how many one call takes. Absent from older backends,
+   * which is the same as unsupported.
+   */
+  batchCreate?: { supported: boolean; maxBatch: number };
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -255,17 +396,173 @@ export interface DeliverSigner {
   rpcUrls: Partial<Record<string, string | undefined>>;
 }
 
-/** A whole number of base units from a string or bigint; throws 400 INVALID_AMOUNT otherwise. */
-function wholeNumber(value: string | bigint, name: string): bigint {
-  if (typeof value === 'bigint') return value;
-  if (typeof value === 'string' && /^\d+$/.test(value)) return BigInt(value);
-  throw new ApiError(
+
+// ── Posting many tasks: internals ───────────────────────────────────────────
+
+/** Rows per postTasks() call: past this, split the list (each row is sealed in memory first). */
+const MAX_POST_TASKS_ROWS = 1000;
+/** Rows per createTasks transaction unless chunkSize says otherwise. */
+const DEFAULT_CHUNK_SIZE = 20;
+/** POST /storage/upload-batch and /a2a/tasks/index-batch take at most this many items. */
+const MAX_BATCH_REQUEST = 50;
+const MAX_RETRY_DELAY_MS = 30_000;
+/** The category the backend builds every task with (backend/src/routes/tasks.ts): bound in the calldata check like the rest. */
+const TASK_CATEGORY = 'general';
+/** A createTasks gas limit is its estimate plus a fifth. */
+const BATCH_GAS_HEADROOM_PCT = 120n;
+/**
+ * Briefs per /storage/upload-batch request. The backend stores briefs on 0G
+ * one at a time (20–40 s each) and answers within ~85 s, and production sits
+ * behind a ~100 s edge timeout (Cloudflare's 524), so a request carries two
+ * at most. The web app does the same (frontend/src/lib/postTaskFlow.ts).
+ */
+const UPLOAD_GROUP = 2;
+/** How long one upload request may take before it counts as timed out. */
+const UPLOAD_TIMEOUT_MS = 95_000;
+
+/** The posting chain, its escrow and token, and the signer checked against them. */
+interface PostingContext {
+  postingChain: string;
+  entry: SettlementChainInfo & { escrowAddress: string };
+  escrow: string;
+  token: string;
+  isNative: boolean;
+  signer: ethers.Signer;
+  poster: string;
+}
+
+interface RetryPolicy { attempts: number; baseDelayMs: number }
+
+/** One postTasks() run: the checked rows and their sealed briefs, and what has happened so far. */
+interface PostingRun {
+  ctx: PostingContext;
+  posts: NormalizedPost[];
+  sealed: SealedBrief[];
+  opts: PostTasksOptions;
+  retry: RetryPolicy;
+  timeoutMs: number;
+  /** Rows not yet settled: the approval covers exactly these. */
+  pending: Set<number>;
+  approved: boolean;
+  /** The next nonce, once a transaction of this run has confirmed (an RPC can answer from before it). */
+  nonce?: number;
+  settle: (result: PostTasksRowResult) => Promise<void>;
+}
+
+interface RunOutcome {
+  /** Stop here: nothing more is funded behind this row. */
+  halt?: { index: number; code?: string; message: string };
+  /** Rows to post one by one instead: the escrow refused createTasks. */
+  fallback?: number[];
+}
+
+function retryPolicy(retry: PostTasksOptions['retry']): RetryPolicy {
+  const attempts = retry?.attempts ?? 5;
+  const baseDelayMs = retry?.baseDelayMs ?? 2_000;
+  return {
+    attempts: Number.isInteger(attempts) && attempts >= 1 ? attempts : 5,
+    baseDelayMs: Number.isFinite(baseDelayMs) && baseDelayMs >= 0 ? baseDelayMs : 2_000,
+  };
+}
+
+/** A rate limit, a server error, a network failure, or a body that was not JSON (a proxy's error page): worth asking again. */
+function isTransient(err: unknown): boolean {
+  if (err instanceof ApiError) return err.status === 429 || err.status >= 500 || err.code === 'RATE_LIMIT' || err.code === 'TIMEOUT';
+  return err instanceof TypeError || err instanceof SyntaxError;
+}
+
+/**
+ * Storage busy or unreachable, as opposed to a brief the backend refused or
+ * an answer that does not add up: a dropped connection (fetch's TypeError),
+ * this client's own timeout, or a gateway giving up (502, 503, 504,
+ * Cloudflare's 524): the web app's isTransientUploadError. A rate limit
+ * (429) counts too: it asks to come back later, which the backoff does.
+ */
+function isTransientUpload(err: unknown): boolean {
+  if (err instanceof TypeError) return true;
+  if (!(err instanceof ApiError)) return false;
+  return err.code === 'TIMEOUT' || err.code === 'RATE_LIMIT' || [429, 502, 503, 504, 524].includes(err.status);
+}
+
+/**
+ * Failures before a row is funded that stop the whole run rather than that
+ * row: a backend that built the wrong transaction or moved chain, an auth
+ * failure, or one that stayed unreachable through every retry. Anything else
+ * (a brief the backend refuses, say) fails the row alone.
+ */
+const HALTING_CODES = new Set([
+  'ESCROW_MISMATCH', 'TX_MISMATCH', 'CHAIN_MISMATCH', 'POSTING_CHAIN_CHANGED', 'CHAIN_UNKNOWN',
+  'SETTLEMENT_NOT_POSTABLE', 'WRONG_CHAIN', 'OWNER_MISMATCH', 'UPLOAD_MISMATCH',
+]);
+function haltsBeforeFunding(err: unknown): boolean {
+  if (err instanceof ApiError && (HALTING_CODES.has(err.code ?? '') || err.status === 401 || err.status === 403)) return true;
+  // The escrow approve reverted or never confirmed: no row can be funded.
+  if (!(err instanceof ApiError)) return true;
+  return isTransient(err);
+}
+
+function errorInfo(err: unknown): { code?: string; message: string } {
+  const e = err as { code?: unknown; message?: unknown };
+  const code = err instanceof ApiError || err instanceof UnconfirmedTransactionError
+    ? (err as ApiError).code
+    : typeof e?.code === 'string' ? e.code : undefined;
+  return { ...(code ? { code } : {}), message: typeof e?.message === 'string' ? e.message : String(err) };
+}
+
+function haltAt(index: number, err: unknown, code?: string): { index: number; code?: string; message: string } {
+  const info = errorInfo(err);
+  const c = code ?? info.code;
+  return { index, ...(c ? { code: c } : {}), message: info.message };
+}
+
+function rowError(index: number, err: unknown): PostTasksRowError {
+  const info = errorInfo(err);
+  return { index, code: info.code ?? 'INVALID_ROW', message: info.message };
+}
+
+function invalidRows(errors: PostTasksRowError[], total: number): ApiError {
+  errors.sort((a, b) => a.index - b.index);
+  const shown = errors.slice(0, 3).map((e) => `rows[${e.index}]: ${e.message.replace(/\s*Nothing was sent\.?$/, '')}`).join('; ');
+  return new ApiError(
     400,
-    `${name} must be a whole number of the token's smallest unit (USDC has 6 decimals: '2500000' is 2.5 USDC), not ${JSON.stringify(value)}. Nothing was sent.`,
-    undefined,
-    'INVALID_AMOUNT',
+    `${errors.length} of ${total} rows cannot be posted as they are (${shown}${errors.length > 3 ? '; …' : ''}). Nothing was sent: fix them, or leave them out, and post again.`,
+    { errors },
+    'INVALID_ROWS',
   );
 }
+
+function failedRow(index: number, err: unknown): PostTasksRowResult {
+  return { index, status: 'failed', error: errorInfo(err) };
+}
+
+function unlistedRow(
+  index: number, txHash: string, batch: boolean, indexParams: IndexTaskParams, aesKey: string | undefined, error: { code?: string; message: string },
+): PostTasksRowResult {
+  return {
+    index, status: 'unlisted', taskHash: indexParams.taskHash, txHash, batch,
+    indexParams: { ...indexParams, txHash }, ...(aesKey ? { aesKey } : {}), error,
+  };
+}
+
+/**
+ * The rows an all-or-nothing POST /tasks/batch refused, by position in the
+ * request, when its 400 names them ({ errors: [{ index, code, message }] });
+ * null when it does not, so the whole call fails as it came back.
+ */
+function refusedRows(err: unknown, count: number): PostTasksRowError[] | null {
+  if (!(err instanceof ApiError) || err.status !== 400) return null;
+  const body = err.body as { errors?: unknown; error?: { errors?: unknown; details?: { errors?: unknown } } } | undefined;
+  const list = body?.error?.errors ?? body?.errors ?? body?.error?.details?.errors;
+  if (!Array.isArray(list)) return null;
+  const rows = list
+    .filter((e): e is { index: number; code?: unknown; message?: unknown } =>
+      !!e && typeof e === 'object' && Number.isInteger((e as { index?: unknown }).index)
+      && (e as { index: number }).index >= 0 && (e as { index: number }).index < count)
+    .map((e) => ({ index: e.index, code: typeof e.code === 'string' ? e.code : 'INVALID_ROW', message: typeof e.message === 'string' ? e.message : 'refused by the backend' }));
+  return rows.length > 0 ? rows : null;
+}
+
+const capsKey = (caps: readonly string[]) => [...caps].sort().join(',');
 
 // ── Main client ─────────────────────────────────────────────────────────────
 
@@ -293,11 +590,13 @@ export class BlindMarket {
   private apiBase: string;
   private apiKey: string;
   private executor?: DeliverSigner;
+  private trustedEscrows: SettlementPin[];
 
   constructor(config: BlindMarketConfig) {
     this.apiBase = config.apiBase ?? 'https://api.blindmarket.xyz';
     this.apiKey = config.apiKey;
     this.executor = config.executor;
+    this.trustedEscrows = config.trustedEscrows ?? [];
   }
 
   /** True when an executor signer was configured (see BlindMarketConfig.executor). */
@@ -334,16 +633,37 @@ export class BlindMarket {
    * ```
    */
 
-  private async req<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const res = await fetch(`${this.apiBase}${path}`, {
-      method,
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${this.apiKey}`,
-      },
-      body: body ? JSON.stringify(body) : undefined,
-    });
-    const json = await res.json() as { success: boolean; data?: T; error?: { code?: string; message: string; reason?: string } };
+  /**
+   * `timeoutMs` gives up on a request that has not answered (ApiError
+   * TIMEOUT). `strictBody` turns a reply that is not JSON (a gateway's error
+   * page, such as Cloudflare's 524) into an ApiError carrying its HTTP status,
+   * instead of the parser's SyntaxError.
+   */
+  private async req<T>(method: string, path: string, body?: unknown, opts: { timeoutMs?: number; strictBody?: boolean } = {}): Promise<T> {
+    let res: Response;
+    try {
+      res = await fetch(`${this.apiBase}${path}`, {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${this.apiKey}`,
+        },
+        body: body ? JSON.stringify(body) : undefined,
+        ...(opts.timeoutMs ? { signal: AbortSignal.timeout(opts.timeoutMs) } : {}),
+      });
+    } catch (err) {
+      if (opts.timeoutMs && (err as Error)?.name === 'TimeoutError') {
+        throw new ApiError(0, `${path} did not answer within ${Math.round(opts.timeoutMs / 1000)} s.`, undefined, 'TIMEOUT');
+      }
+      throw err;
+    }
+    let json: { success: boolean; data?: T; error?: { code?: string; message: string; reason?: string } };
+    try {
+      json = await res.json() as typeof json;
+    } catch (err) {
+      if (opts.strictBody) throw new ApiError(res.status, `${path} answered HTTP ${res.status} with a body that is not JSON.`, undefined, `HTTP_${res.status}`);
+      throw err;
+    }
     if (!json.success) {
       const err = new ApiError(res.status, json.error?.message ?? `HTTP ${res.status}`, json, json.error?.code);
       if (typeof json.error?.reason === 'string') err.reason = json.error.reason;
@@ -485,156 +805,30 @@ export class BlindMarket {
    * );
    */
   async postTask(params: PostTaskParams, opts: PostTaskOptions = {}): Promise<PostedTask> {
-    const amount = wholeNumber(params.amountRaw, 'amountRaw');
-    if (amount <= 0n) throw new ApiError(400, 'amountRaw must be above 0. Nothing was sent.', undefined, 'INVALID_AMOUNT');
-    if (opts.maxAmountRaw !== undefined && amount > BigInt(opts.maxAmountRaw)) {
-      throw new ApiError(402, `The escrow of ${amount} is above your limit of ${opts.maxAmountRaw}. Nothing was sent.`, undefined, 'AMOUNT_ABOVE_MAX');
-    }
-    const duration = params.durationSeconds ?? 86_400;
-    if (!Number.isInteger(duration) || duration < 3_600 || duration > 90 * 86_400) {
-      throw new ApiError(400, 'durationSeconds must be a whole number from 3600 (1 hour) to 7776000 (90 days): the escrow refuses anything else. Nothing was sent.', undefined, 'INVALID_DURATION');
-    }
-    const privacy = params.privacy ?? 'private';
-    const locationZone = params.locationZone ?? 'global';
-    const verificationMode = params.verificationMode ?? 'auto';
-    const verificationCriteria = params.verificationCriteria
-      ?? (verificationMode === 'auto' ? { min_length: 10, pass_threshold: 60 } : undefined);
-    const requiredCapabilities = params.requiredCapabilities ?? [];
-
-    // Where the escrow is funded, and in what.
-    const { postingChain, chains } = await this.getSettlement();
-    const entry = chains.find((c) => c.chain === postingChain);
-    if (!postingChain || !entry || !entry.escrowAddress || !entry.token.address) {
-      throw new ApiError(503, `The backend has no chain to post new tasks on right now (posting chain: ${postingChain ?? 'none'}). Nothing was sent.`, { postingChain, chains }, 'SETTLEMENT_NOT_POSTABLE');
-    }
-    const escrow = entry.escrowAddress;
-    const token = entry.token.address;
-    const isNative = entry.token.kind === 'native';
-
-    const signer = opts.signer ?? this.signerOn(postingChain, 'Funding the escrow');
-    const poster = await signer.getAddress();
-    await this.assertSpender(poster, 'A task', true);
-    await assertSignerChain(signer, entry.chainId, `Funding the escrow on ${postingChain}`);
-    if (!isNative) {
-      const balance = await tokenBalance(signer, token, poster);
-      if (balance < amount) {
-        const fmt = (v: bigint) => ethers.formatUnits(v, entry.token.decimals);
-        throw new ApiError(
-          402,
-          `${poster} holds ${fmt(balance)} ${entry.token.symbol} on ${postingChain}; the escrow needs ${fmt(amount)}. Nothing was sent.`,
-          undefined,
-          'INSUFFICIENT_BALANCE',
-        );
-      }
-    }
+    const post = normalizePost(params, opts.maxAmountRaw);
+    const ctx = await this.postingContext(opts.signer);
+    await this.assertCovers(ctx, post.amount);
 
     // The brief: plaintext, or encrypted to the executors that can take it.
-    const plaintext = new TextEncoder().encode(params.instructions);
-    let blob: Uint8Array;
-    let wrappedKeys: Record<string, string> | undefined;
-    let aesKey: string | undefined;
-    if (privacy === 'public') {
-      blob = plaintext;
-    } else {
-      const qs = new URLSearchParams({ capabilities: requiredCapabilities.join(','), chain: postingChain });
-      const { executors } = await this.req<{ executors: Array<{ address: string; publicKey?: string }> }>('GET', `/api/v1/a2a/executors?${qs}`);
-      let targets = executors.filter((e) => typeof e.publicKey === 'string' && e.publicKey.length > 0);
-      if (params.targetExecutor) {
-        const want = params.targetExecutor.toLowerCase();
-        targets = targets.filter((e) => e.address.toLowerCase() === want);
-        if (targets.length === 0) {
-          throw new ApiError(404, `${params.targetExecutor} is not a registered executor on ${postingChain} with a public key, so it could not read the brief. Nothing was sent.`, undefined, 'EXECUTOR_NOT_FOUND');
-        }
-      }
-      if (targets.length > 200) {
-        throw new ApiError(
-          409,
-          `${targets.length} executors match, more than the 200 a brief can be wrapped to. Narrow requiredCapabilities, name a targetExecutor, or post with privacy 'public'. Nothing was sent.`,
-          undefined,
-          'TOO_MANY_EXECUTORS',
-        );
-      }
-      const key = await generateAesKey();
-      blob = await aesEncrypt(plaintext, key);
-      wrappedKeys = {};
-      for (const e of targets) {
-        try {
-          wrappedKeys[e.address.toLowerCase()] = bytesToHex(await eciesEncrypt(key, e.publicKey!));
-        } catch { /* a malformed public key: that executor can't be wrapped to */ }
-      }
-      if (Object.keys(wrappedKeys).length === 0) {
-        throw new ApiError(
-          409,
-          `No executor on ${postingChain} can decrypt an encrypted brief right now, so no one could take the task. Post with privacy 'public', or wait for executors to register. Nothing was sent.`,
-          undefined,
-          'NO_EXECUTORS',
-        );
-      }
-      aesKey = bytesToHex(key);
-    }
-    const taskHash = `0x${bytesToHex(await sha256(blob))}`;
-    const { rootHash } = await this.uploadBlob(ethers.encodeBase64(blob));
+    const executors = post.privacy === 'public' ? [] : await this.postingExecutors(ctx.postingChain, post.requiredCapabilities);
+    const sealed = await sealBrief(post, executors, ctx.postingChain);
+    const { taskHash } = sealed;
+    const { rootHash } = await this.uploadBlob(ethers.encodeBase64(sealed.blob));
 
-    const built = await this.createTask({
-      taskHash: taskHash as Hex,
-      token: token as Address,
-      amount: amount.toString(),
-      locationZone,
-      duration: String(duration),
-      targetExecutorType: 'agent',
-      verificationMode,
-      ...(verificationCriteria ? { verificationCriteria } : {}),
-      ...(params.verifierAddress ? { verifierAddress: params.verifierAddress } : {}),
-      requiredCapabilities,
-      rootHash,
-      ...(wrappedKeys ? { wrappedKeys } : {}),
-    });
-    // The tx must go to the escrow and chain checked above: a backend whose
-    // posting chain moved in between would otherwise have it signed blind.
-    if ((built.chain !== undefined && built.chain !== postingChain) || (built.chainId !== undefined && Number(built.chainId) !== entry.chainId)) {
-      throw new ApiError(409, `The backend built this task for ${built.chain} (chain ${built.chainId}), not ${postingChain}: its posting chain changed. Nothing was sent; try again.`, undefined, 'POSTING_CHAIN_CHANGED');
-    }
-    // And it must be exactly this createTask: the escrow, the task hash, the
-    // token, the amount, the zone and the duration asked for (a verifier
-    // commits through createTaskWithVerifier). Only its to and data are signed;
-    // the value is the amount computed here.
-    const withVerifier = verificationMode === 'agent' && !!params.verifierAddress && params.verifierAddress.toLowerCase() !== ethers.ZeroAddress;
-    const createCall = checkEscrowCall(built.unsignedTx, {
-      escrow,
-      fn: withVerifier ? 'createTaskWithVerifier' : 'createTask',
-      args: (a) => String(a[0]).toLowerCase() === taskHash.toLowerCase()
-        && String(a[1]).toLowerCase() === token.toLowerCase()
-        && a[2] === amount
-        && a[4] === locationZone
-        && a[5] === BigInt(duration)
-        && (!withVerifier || String(a[6]).toLowerCase() === params.verifierAddress!.toLowerCase()),
-      value: isNative ? amount : 0n,
-      chainId: entry.chainId,
-    }, `Funding the escrow on ${postingChain}`);
+    const built = await this.createTask(createTaskBody(post, sealed, ctx.token, rootHash));
+    const createCall = this.checkedCreateCall(ctx, built, post, taskHash);
 
     const timeoutMs = opts.confirmTimeoutMs ?? DEFAULT_CONFIRM_TIMEOUT_MS;
     // createTask pulls an ERC-20 with transferFrom: approve the escrow first.
-    const nonce = isNative ? undefined : await ensureAllowance(signer, token, escrow, amount, { timeoutMs });
-    const indexParams: IndexTaskParams = {
-      txHash: '',
-      taskHash,
-      rootHash,
-      ...(wrappedKeys ? { wrappedKeys } : {}),
-      privacy,
-      ...(privacy === 'public' ? { publicBrief: params.instructions.slice(0, 4000) } : {}),
-      verificationMode,
-      ...(verificationCriteria ? { verificationCriteria } : {}),
-      ...(params.verifierAddress ? { verifierAddress: params.verifierAddress } : {}),
-      requiredCapabilities,
-      ...(params.targetExecutor ? { targetExecutor: params.targetExecutor } : {}),
-    };
+    const nonce = ctx.isNative ? undefined : await ensureAllowance(ctx.signer, ctx.token, ctx.escrow, post.amount, { timeoutMs });
+    const indexParams = indexParamsFor(post, sealed, rootHash);
     let txHash: string;
     try {
-      ({ hash: txHash } = await sendAndWait(signer, createCall, {
-        value: isNative ? amount : undefined,
+      ({ hash: txHash } = await sendAndWait(ctx.signer, createCall, {
+        value: ctx.isNative ? post.amount : undefined,
         nonce,
         timeoutMs,
-        onSent: (hash) => opts.onFunded?.({ txHash: hash, taskHash, indexParams: { ...indexParams, txHash: hash } }),
+        onSent: (hash, sentNonce, raw) => opts.onFunded?.({ txHash: hash, nonce: sentNonce, ...(raw ? { raw } : {}), taskHash, indexParams: { ...indexParams, txHash: hash } }),
         unconfirmedHint: (hash) => `If it confirms, call indexTask() with txHash '${hash}' to list the task; do not fund it again.`,
       }));
     } catch (err) {
@@ -661,17 +855,557 @@ export class BlindMarket {
       out.txHash = txHash;
       throw out;
     }
-    return {
-      taskHash,
-      ...(indexed.onChainTaskId !== undefined ? { taskId: String(indexed.onChainTaskId) } : {}),
-      txHash,
-      chain: postingChain,
-      chainId: entry.chainId,
-      rootHash,
-      privacy,
-      wrappedTo: wrappedKeys ? Object.keys(wrappedKeys).length : 0,
-      ...(aesKey ? { aesKey } : {}),
+    return this.postedTask(ctx, post, sealed, rootHash, txHash, indexed.onChainTaskId);
+  }
+
+  /**
+   * Post many tasks, from the API key's own wallet: postTask() for a list, in
+   * as few transactions as the posting chain's escrow allows.
+   *
+   * Every row is checked and its brief sealed before anything is uploaded or
+   * sent: a row the escrow or the backend would refuse throws 400
+   * INVALID_ROWS listing every such row (`err.body.errors`), with nothing
+   * sent. The wallet must hold the total, and the escrow is approved for it
+   * once, just before the first funding transaction.
+   *
+   * On an escrow with createTasks (SettlementChainInfo.batchCreate) up to
+   * `chunkSize` rows share one transaction and one listing call; otherwise
+   * each row is its own createTask, as postTask() sends it. The same checks
+   * guard every transaction: the backend's build must be exactly these tasks,
+   * for this escrow and chain, before a key signs it.
+   *
+   * A row the backend refuses before funding fails alone and the run goes on.
+   * A funding transaction that reverts or cannot be confirmed, a listing that
+   * fails, or a backend that builds the wrong transaction or stays
+   * unreachable stops the run there (`result.stopped`), so no further escrow
+   * is funded behind a problem. Nothing is ever funded twice: a funded row
+   * that is not listed comes back 'unlisted' with its `indexParams`.
+   *
+   * @example
+   * const res = await bb.postTasks(rows, {
+   *   onFunded: ({ taskHash, indexParams }) => save(taskHash, indexParams),
+   *   onProgress: ({ done, total }) => console.log(`${done}/${total}`),
+   * });
+   */
+  async postTasks(rows: PostTaskParams[], opts: PostTasksOptions = {}): Promise<PostTasksResult> {
+    if (!Array.isArray(rows) || rows.length === 0) {
+      throw new ApiError(400, 'postTasks() needs at least one row. Nothing was sent.', undefined, 'NO_ROWS');
+    }
+    if (rows.length > MAX_POST_TASKS_ROWS) {
+      throw new ApiError(400, `postTasks() takes at most ${MAX_POST_TASKS_ROWS} rows per call, not ${rows.length}: split the list. Nothing was sent.`, undefined, 'TOO_MANY_ROWS');
+    }
+    if (opts.chunkSize !== undefined && (!Number.isInteger(opts.chunkSize) || opts.chunkSize < 1)) {
+      throw new ApiError(400, `chunkSize must be a whole number of rows from 1, not ${opts.chunkSize}. Nothing was sent.`, undefined, 'INVALID_CHUNK_SIZE');
+    }
+
+    // 1. Each row's own fields, before any lookup.
+    const errors: PostTasksRowError[] = [];
+    const checked = rows.map((row, index) => {
+      try {
+        checkRowFields(row);
+        return normalizePost(row);
+      } catch (err) {
+        errors.push(rowError(index, err));
+        return undefined;
+      }
+    });
+    if (errors.length > 0) throw invalidRows(errors, rows.length);
+    const posts = checked as NormalizedPost[];
+    const total = posts.reduce((sum, p) => sum + p.amount, 0n);
+    if (opts.maxTotalRaw !== undefined && total > BigInt(opts.maxTotalRaw)) {
+      throw new ApiError(402, `The ${rows.length} escrows total ${total}, above your limit of ${opts.maxTotalRaw}. Nothing was sent.`, undefined, 'AMOUNT_ABOVE_MAX');
+    }
+
+    // 2. Where, and from which wallet: postTask()'s checks, for the total.
+    const retry = retryPolicy(opts.retry);
+    const ctx = await this.postingContext(opts.signer);
+    await this.assertCovers(ctx, total);
+
+    // 3. Every brief sealed, still before anything is sent. Executors are
+    //    asked for once per capability list.
+    const executors = new Map<string, ExecutorKey[]>();
+    for (const post of posts) {
+      if (post.privacy !== 'private') continue;
+      const key = capsKey(post.requiredCapabilities);
+      if (!executors.has(key)) executors.set(key, await this.retrying(() => this.postingExecutors(ctx.postingChain, post.requiredCapabilities), retry));
+    }
+    const sealed: SealedBrief[] = [];
+    for (let i = 0; i < posts.length; i++) {
+      try {
+        const post = posts[i];
+        sealed[i] = await sealBrief(post, post.privacy === 'private' ? executors.get(capsKey(post.requiredCapabilities))! : [], ctx.postingChain);
+      } catch (err) {
+        errors.push(rowError(i, err));
+      }
+    }
+    // A public brief's task hash is the brief's hash, and the market lists a hash once.
+    const firstWithHash = new Map<string, number>();
+    sealed.forEach((s, i) => {
+      if (!s) return;
+      const hash = s.taskHash.toLowerCase();
+      const first = firstWithHash.get(hash);
+      if (first === undefined) firstWithHash.set(hash, i);
+      else errors.push({ index: i, code: 'DUPLICATE_BRIEF', message: `rows[${i}] is the same public brief as rows[${first}], and the market lists a brief once. Nothing was sent.` });
+    });
+    if (errors.length > 0) throw invalidRows(errors, rows.length);
+
+    // 4. Fund and list, in as few transactions as the escrow allows.
+    const batch = ctx.entry.batchCreate;
+    const batchable = !ctx.isNative && batch?.supported === true && Number.isInteger(batch.maxBatch) && batch.maxBatch > 1;
+    const size = batchable ? Math.max(1, Math.min(opts.chunkSize ?? DEFAULT_CHUNK_SIZE, batch!.maxBatch, MAX_BATCH_REQUEST)) : 1;
+    let mode: PostTasksResult['mode'] = size > 1 ? 'batch' : 'single';
+    let units: number[][] = [];
+    for (let i = 0; i < posts.length; i += size) units.push(posts.slice(i, i + size).map((_, j) => i + j));
+
+    const results: PostTasksRowResult[] = new Array(rows.length);
+    const run: PostingRun = {
+      ctx, posts, sealed, opts, retry,
+      timeoutMs: opts.confirmTimeoutMs ?? DEFAULT_CONFIRM_TIMEOUT_MS,
+      pending: new Set(posts.map((_, i) => i)),
+      approved: ctx.isNative,
+      settle: async (result) => {
+        results[result.index] = result;
+        run.pending.delete(result.index);
+        try {
+          await opts.onProgress?.({ done: rows.length - run.pending.size, total: rows.length, result });
+        } catch { /* a progress callback never stops a run that is moving money */ }
+      },
     };
+    let stopped: PostTasksResult['stopped'];
+    for (let u = 0; u < units.length; u++) {
+      const unit = units[u];
+      if (!stopped && opts.signal?.aborted) {
+        stopped = { index: unit[0], code: 'ABORTED', message: 'The run was aborted before this row started.' };
+      }
+      if (stopped) {
+        const reason = stopped.code === 'ABORTED' ? 'aborted' : `stopped at rows[${stopped.index}]: ${stopped.message}`;
+        for (const i of unit) await run.settle({ index: i, status: 'skipped', reason });
+        continue;
+      }
+      const outcome = unit.length === 1 ? await this.postRow(run, unit[0]) : await this.postChunk(run, unit);
+      if (outcome.fallback && outcome.fallback.length > 0) {
+        // The escrow refused createTasks after all: the rest go one by one.
+        mode = 'single';
+        units = [...units.slice(0, u + 1), ...outcome.fallback.map((i) => [i]), ...units.slice(u + 1).flat().map((i) => [i])];
+      }
+      if (outcome.halt) stopped = outcome.halt;
+    }
+
+    const count = (status: PostTasksRowResult['status']) => results.filter((r) => r.status === status).length;
+    return {
+      chain: ctx.postingChain,
+      chainId: ctx.entry.chainId,
+      mode,
+      results,
+      posted: count('posted'),
+      unlisted: count('unlisted'),
+      failed: count('failed'),
+      skipped: count('skipped'),
+      ...(stopped ? { stopped } : {}),
+    };
+  }
+
+  /**
+   * Build and list several posts at once (POST /api/v1/tasks/batch): one
+   * unsigned createTasks transaction for the posting chain's escrow. Only an
+   * escrow with createTasks builds it (409 BATCH_UNSUPPORTED otherwise);
+   * postTasks() calls it, and checks the transaction before signing.
+   */
+  async createTasks(params: CreateTasksRequest): Promise<CreateTasksTx> {
+    return this.req<CreateTasksTx>('POST', '/api/v1/tasks/batch', params);
+  }
+
+  /**
+   * List every task one funding transaction created
+   * (POST /api/v1/a2a/tasks/index-batch). It works for a transaction that
+   * funded one task too. Each task comes back listed, or with its own error;
+   * a task the receipt does not hold is NOT_IN_RECEIPT. postTasks() calls it;
+   * call it yourself to finish rows it returned 'unlisted' with `batch` true.
+   */
+  async indexTasks(params: IndexTasksParams): Promise<IndexTasksResult> {
+    return this.req<IndexTasksResult>('POST', '/api/v1/a2a/tasks/index-batch', params);
+  }
+
+  /**
+   * Upload several blobs to 0G Storage in one call
+   * (POST /api/v1/storage/upload-batch). Each is base64, as uploadBlob()
+   * takes it; the results come back in the same order. All or nothing.
+   */
+  async uploadBlobs(data: string[]): Promise<Array<{ rootHash: string; txHash?: string }>> {
+    const { results } = await this.req<{ results: Array<{ rootHash: string; txHash?: string }> }>(
+      'POST', '/api/v1/storage/upload-batch', { items: data.map((d) => ({ data: d })) },
+    );
+    return results;
+  }
+
+  /** The posting chain, its escrow and token, and a signer checked to be the API key's own wallet on that chain. */
+  private async postingContext(signerOption?: ethers.Signer): Promise<PostingContext> {
+    const { postingChain, chains } = await this.getSettlement();
+    const entry = chains.find((c) => c.chain === postingChain);
+    if (!postingChain || !entry || !entry.escrowAddress || !entry.token.address) {
+      throw new ApiError(503, `The backend has no chain to post new tasks on right now (posting chain: ${postingChain ?? 'none'}). Nothing was sent.`, { postingChain, chains }, 'SETTLEMENT_NOT_POSTABLE');
+    }
+    // The escrow approved and funded, and its token, must be a known
+    // deployment (or one the caller trusts), not whatever the backend names.
+    if (!isPinnedSettlement(entry.chainId, entry.escrowAddress, entry.token.address, this.trustedEscrows)) {
+      const known = [...SETTLEMENT_PINS, ...this.trustedEscrows].filter((p) => p.chainId === entry.chainId);
+      throw new ApiError(
+        409,
+        `The backend names escrow ${entry.escrowAddress} and token ${entry.token.address} on ${postingChain} (chain ${entry.chainId}), which ${known.length ? `is not the known deployment (escrow ${known.map((p) => p.escrow).join(' or ')})` : 'has no known deployment'}. Nothing was approved or sent. For a custom or local deployment, list it in BlindMarketConfig.trustedEscrows.`,
+        undefined,
+        'ESCROW_NOT_PINNED',
+      );
+    }
+    const signer = signerOption ?? this.signerOn(postingChain, 'Funding the escrow');
+    const poster = await signer.getAddress();
+    await this.assertSpender(poster, 'A task', true);
+    await assertSignerChain(signer, entry.chainId, `Funding the escrow on ${postingChain}`);
+    return {
+      postingChain,
+      entry: entry as SettlementChainInfo & { escrowAddress: string },
+      escrow: entry.escrowAddress,
+      token: entry.token.address,
+      isNative: entry.token.kind === 'native',
+      signer,
+      poster,
+    };
+  }
+
+  /** Throws 402 INSUFFICIENT_BALANCE, with nothing sent, when the wallet holds less than `amount` of an ERC-20 settlement token. */
+  private async assertCovers(ctx: PostingContext, amount: bigint): Promise<void> {
+    if (ctx.isNative) return;
+    const balance = await tokenBalance(ctx.signer, ctx.token, ctx.poster);
+    if (balance < amount) {
+      const fmt = (v: bigint) => ethers.formatUnits(v, ctx.entry.token.decimals);
+      throw new ApiError(
+        402,
+        `${ctx.poster} holds ${fmt(balance)} ${ctx.entry.token.symbol} on ${ctx.postingChain}; the escrow needs ${fmt(amount)}. Nothing was sent.`,
+        undefined,
+        'INSUFFICIENT_BALANCE',
+      );
+    }
+  }
+
+  /** The executors on the posting chain a private brief can be wrapped to. */
+  private async postingExecutors(postingChain: string, capabilities: readonly string[]): Promise<ExecutorKey[]> {
+    const qs = new URLSearchParams({ capabilities: capabilities.join(','), chain: postingChain });
+    const { executors } = await this.req<{ executors: ExecutorKey[] }>('GET', `/api/v1/a2a/executors?${qs}`);
+    return executors;
+  }
+
+  /**
+   * The backend's createTask, checked to be exactly this post before a key
+   * signs it: the chain and escrow checked above, the task hash, the token,
+   * the amount, the zone and the duration (a verifier commits through
+   * createTaskWithVerifier). Only its to and data are signed; the value is
+   * the amount computed here.
+   */
+  private checkedCreateCall(ctx: PostingContext, built: CreateTaskTx, post: NormalizedPost, taskHash: string): { to: string; data: string } {
+    // A backend whose posting chain moved in between would otherwise have it signed blind.
+    if ((built.chain !== undefined && built.chain !== ctx.postingChain) || (built.chainId !== undefined && Number(built.chainId) !== ctx.entry.chainId)) {
+      throw new ApiError(409, `The backend built this task for ${built.chain} (chain ${built.chainId}), not ${ctx.postingChain}: its posting chain changed. Nothing was sent; try again.`, undefined, 'POSTING_CHAIN_CHANGED');
+    }
+    const withVerifier = commitsVerifier(post);
+    return checkEscrowCall(built.unsignedTx, {
+      escrow: ctx.escrow,
+      fn: withVerifier ? 'createTaskWithVerifier' : 'createTask',
+      args: (a) => String(a[0]).toLowerCase() === taskHash.toLowerCase()
+        && String(a[1]).toLowerCase() === ctx.token.toLowerCase()
+        && a[2] === post.amount
+        && a[3] === TASK_CATEGORY
+        && a[4] === post.locationZone
+        && a[5] === BigInt(post.duration)
+        && (!withVerifier || String(a[6]).toLowerCase() === post.verifierAddress!.toLowerCase()),
+      value: ctx.isNative ? post.amount : 0n,
+      chainId: ctx.entry.chainId,
+    }, `Funding the escrow on ${ctx.postingChain}`);
+  }
+
+  /** The backend's createTasks, checked to be exactly these posts, in this order, for this token, escrow and chain. */
+  private checkedCreateTasksCall(ctx: PostingContext, built: CreateTasksTx, rows: Array<{ post: NormalizedPost; taskHash: string }>): { to: string; data: string } {
+    if ((built.chain !== undefined && built.chain !== ctx.postingChain) || (built.chainId !== undefined && Number(built.chainId) !== ctx.entry.chainId)) {
+      throw new ApiError(409, `The backend built these tasks for ${built.chain} (chain ${built.chainId}), not ${ctx.postingChain}: its posting chain changed. Nothing was sent; try again.`, undefined, 'POSTING_CHAIN_CHANGED');
+    }
+    return checkEscrowCall(built.unsignedTx, {
+      escrow: ctx.escrow,
+      fn: 'createTasks',
+      args: (a) => {
+        if (String(a[0]).toLowerCase() !== ctx.token.toLowerCase()) return false;
+        const tasks = a[1] as ethers.Result;
+        if (tasks.length !== rows.length) return false;
+        return rows.every(({ post, taskHash }, j) => {
+          const t = tasks[j] as ethers.Result;
+          const verifier = commitsVerifier(post) ? post.verifierAddress!.toLowerCase() : ethers.ZeroAddress;
+          return String(t[0]).toLowerCase() === taskHash.toLowerCase()
+            && t[1] === post.amount
+            && t[2] === TASK_CATEGORY
+            && t[3] === post.locationZone
+            && t[4] === BigInt(post.duration)
+            && String(t[5]).toLowerCase() === verifier;
+        });
+      },
+      value: 0n,
+      chainId: ctx.entry.chainId,
+    }, `Funding ${rows.length} escrows on ${ctx.postingChain}`);
+  }
+
+  private postedTask(ctx: PostingContext, post: NormalizedPost, sealed: SealedBrief, rootHash: string, txHash: string, onChainTaskId?: string | number): PostedTask {
+    return {
+      taskHash: sealed.taskHash,
+      ...(onChainTaskId !== undefined ? { taskId: String(onChainTaskId) } : {}),
+      txHash,
+      chain: ctx.postingChain,
+      chainId: ctx.entry.chainId,
+      rootHash,
+      privacy: post.privacy,
+      wrappedTo: sealed.wrappedKeys ? Object.keys(sealed.wrappedKeys).length : 0,
+      ...(sealed.aesKey ? { aesKey: sealed.aesKey } : {}),
+    };
+  }
+
+  /**
+   * The escrow's ERC-20 allowance for every row still to fund, approved once,
+   * right before the first funding transaction (after that transaction's
+   * build has been checked, as postTask() approves).
+   */
+  private async approveRemaining(run: PostingRun): Promise<void> {
+    if (run.approved) return;
+    let remaining = 0n;
+    for (const i of run.pending) remaining += run.posts[i].amount;
+    const nonce = await ensureAllowance(run.ctx.signer, run.ctx.token, run.ctx.escrow, remaining, { timeoutMs: run.timeoutMs });
+    run.approved = true;
+    if (nonce !== undefined) run.nonce = nonce;
+  }
+
+  /** Every row a transaction funds, told its hash (again with a replacement's hash if the wallet re-priced it). */
+  private async notifyFunded(run: PostingRun, rows: Array<{ index: number; indexParams: IndexTaskParams }>, hash: string, nonce: number, batch: boolean, raw?: string): Promise<void> {
+    for (const { index, indexParams } of rows) {
+      try {
+        await run.opts.onFunded?.({ index, txHash: hash, nonce, ...(raw ? { raw } : {}), taskHash: indexParams.taskHash, batch, indexParams: { ...indexParams, txHash: hash } });
+      } catch { /* the transaction is out; one row's callback must not keep the others from hearing it */ }
+    }
+  }
+
+  /** One row as its own createTask, the way postTask() posts it. */
+  private async postRow(run: PostingRun, i: number): Promise<RunOutcome> {
+    const { ctx, retry } = run;
+    const post = run.posts[i];
+    const sealed = run.sealed[i];
+    let call: { to: string; data: string };
+    let rootHash: string;
+    try {
+      [rootHash] = await this.uploadBriefs([ethers.encodeBase64(sealed.blob)], retry, false);
+      const built = await this.retrying(() => this.createTask(createTaskBody(post, sealed, ctx.token, rootHash)), retry);
+      call = this.checkedCreateCall(ctx, built, post, sealed.taskHash);
+      await this.approveRemaining(run);
+    } catch (err) {
+      await run.settle(failedRow(i, err));
+      return haltsBeforeFunding(err) ? { halt: haltAt(i, err) } : {};
+    }
+
+    const indexParams = indexParamsFor(post, sealed, rootHash);
+    let txHash: string;
+    try {
+      const sent = await sendAndWait(ctx.signer, call, {
+        value: ctx.isNative ? post.amount : undefined,
+        nonce: run.nonce,
+        timeoutMs: run.timeoutMs,
+        onSent: (hash, nonce, raw) => this.notifyFunded(run, [{ index: i, indexParams }], hash, nonce, false, raw),
+        unconfirmedHint: (hash) => `If it confirms, call indexTask() with txHash '${hash}' to list the task; do not fund it again.`,
+      });
+      run.nonce = sent.nonce + 1;
+      txHash = sent.hash;
+    } catch (err) {
+      run.nonce = undefined;
+      if (err instanceof UnconfirmedTransactionError) {
+        await run.settle(unlistedRow(i, err.hash, false, indexParams, sealed.aesKey, { code: 'UNCONFIRMED', message: err.message }));
+        return { halt: haltAt(i, err, 'UNCONFIRMED') };
+      }
+      await run.settle(failedRow(i, err));
+      return { halt: haltAt(i, err) };
+    }
+
+    indexParams.txHash = txHash;
+    try {
+      const indexed = await this.retrying(() => this.indexTask(indexParams), retry, { receiptLag: true });
+      await run.settle({ index: i, status: 'posted', task: this.postedTask(ctx, post, sealed, rootHash, txHash, indexed.onChainTaskId) });
+      return {};
+    } catch (err) {
+      await run.settle(unlistedRow(i, txHash, false, indexParams, sealed.aesKey, errorInfo(err)));
+      return { halt: haltAt(i, err) };
+    }
+  }
+
+  /** Several rows in one createTasks transaction, listed with one call. */
+  private async postChunk(run: PostingRun, unit: number[]): Promise<RunOutcome> {
+    const { ctx, retry } = run;
+    let live = [...unit];
+    const rootHashes = new Map<number, string>();
+    let call: { to: string; data: string };
+    let gasLimit: bigint;
+    try {
+      // Every brief of the chunk is stored before anything of it is built or funded.
+      const roots = await this.uploadBriefs(live.map((i) => ethers.encodeBase64(run.sealed[i].blob)), retry, true);
+      live.forEach((i, j) => rootHashes.set(i, roots[j]));
+      const build = () => this.retrying(() => this.createTasks({
+        token: ctx.token as Address,
+        tasks: live.map((i) => {
+          const { token: _token, ...task } = createTaskBody(run.posts[i], run.sealed[i], ctx.token, rootHashes.get(i)!);
+          return task;
+        }),
+      }), retry);
+      let built: CreateTasksTx;
+      try {
+        built = await build();
+      } catch (err) {
+        // All or nothing: the rows the backend refused fail, and the rest are built again, once.
+        const refused = refusedRows(err, live.length);
+        if (!refused) throw err;
+        const bad = new Set(refused.map((r) => r.index));
+        for (const r of refused) await run.settle({ index: live[r.index], status: 'failed', error: { code: r.code, message: r.message } });
+        live = live.filter((_, j) => !bad.has(j));
+        if (live.length === 0) return {};
+        built = await build();
+      }
+      call = this.checkedCreateTasksCall(ctx, built, live.map((i) => ({ post: run.posts[i], taskHash: run.sealed[i].taskHash })));
+      await this.approveRemaining(run);
+      // A createTasks costs about 200k gas per task. The limit is estimated
+      // here, after the approve it depends on, with headroom; a backend's gas
+      // field is never forwarded (security audit run 1, C41). An estimate that
+      // fails is a revert predicted before anything is sent.
+      const estimate = await ctx.signer.estimateGas({ to: call.to, data: call.data, ...(run.nonce !== undefined ? { nonce: run.nonce } : {}) });
+      gasLimit = (estimate * BATCH_GAS_HEADROOM_PCT) / 100n;
+    } catch (err) {
+      // An escrow that refuses createTasks after all: these rows go one by one.
+      if (err instanceof ApiError && err.code === 'BATCH_UNSUPPORTED') return { fallback: live };
+      for (const i of live) await run.settle(failedRow(i, err));
+      return haltsBeforeFunding(err) ? { halt: haltAt(live[0], err) } : {};
+    }
+
+    const indexParams = new Map(live.map((i) => [i, indexParamsFor(run.posts[i], run.sealed[i], rootHashes.get(i)!)]));
+    const funded = live.map((i) => ({ index: i, indexParams: indexParams.get(i)! }));
+    let txHash: string;
+    try {
+      const sent = await sendAndWait(ctx.signer, call, {
+        nonce: run.nonce,
+        gasLimit,
+        timeoutMs: run.timeoutMs,
+        onSent: (hash, nonce, raw) => this.notifyFunded(run, funded, hash, nonce, true, raw),
+        unconfirmedHint: (hash) => `If it confirms, call indexTasks() with txHash '${hash}' to list these tasks; do not fund them again.`,
+      });
+      run.nonce = sent.nonce + 1;
+      txHash = sent.hash;
+    } catch (err) {
+      run.nonce = undefined;
+      if (err instanceof UnconfirmedTransactionError) {
+        for (const i of live) await run.settle(unlistedRow(i, err.hash, true, indexParams.get(i)!, run.sealed[i].aesKey, { code: 'UNCONFIRMED', message: err.message }));
+        return { halt: haltAt(live[0], err, 'UNCONFIRMED') };
+      }
+      for (const i of live) await run.settle(failedRow(i, err));
+      return { halt: haltAt(live[0], err) };
+    }
+
+    for (const params of indexParams.values()) params.txHash = txHash;
+    let listed: IndexTasksResult;
+    try {
+      listed = await this.retrying(() => this.indexTasks({
+        txHash,
+        tasks: live.map((i) => {
+          const { txHash: _tx, ...task } = indexParams.get(i)!;
+          return task;
+        }),
+      }), retry, { receiptLag: true });
+    } catch (err) {
+      for (const i of live) await run.settle(unlistedRow(i, txHash, true, indexParams.get(i)!, run.sealed[i].aesKey, errorInfo(err)));
+      return { halt: haltAt(live[0], err) };
+    }
+    const byHash = new Map((Array.isArray(listed?.results) ? listed.results : []).map((r) => [String(r?.taskHash).toLowerCase(), r]));
+    let firstUnlisted: { index: number; code?: string; message: string } | undefined;
+    for (const i of live) {
+      const sealed = run.sealed[i];
+      const r = byHash.get(sealed.taskHash.toLowerCase());
+      if (r && 'indexed' in r && r.indexed) {
+        await run.settle({ index: i, status: 'posted', task: this.postedTask(ctx, run.posts[i], sealed, rootHashes.get(i)!, txHash, r.onChainTaskId) });
+        continue;
+      }
+      const error = r && 'error' in r && r.error ? r.error : { code: 'NOT_LISTED', message: 'The backend did not say it listed this task.' };
+      await run.settle(unlistedRow(i, txHash, true, indexParams.get(i)!, sealed.aesKey, error));
+      firstUnlisted ??= { index: i, ...(error.code ? { code: error.code } : {}), message: `funded in ${txHash} but not listed: ${error.message}` };
+    }
+    return firstUnlisted ? { halt: firstUnlisted } : {};
+  }
+
+  /**
+   * Store briefs (base64) and return their root hashes, in order. Batched
+   * (upload-batch), they go UPLOAD_GROUP to a request, one request after the
+   * other; a group that fails transiently (isTransientUpload) is sent again
+   * one brief per request, each with the backoff, and a brief already stored
+   * comes back at once. Unbatched, each brief is one /storage/upload request
+   * with the backoff. A refusal (a 400) or an answer that does not add up
+   * fails at once.
+   */
+  private async uploadBriefs(blobs: string[], retry: RetryPolicy, batched: boolean): Promise<string[]> {
+    const one = (blob: string) => this.retrying(
+      () => (batched ? this.uploadBatchRequest([blob]) : this.uploadOneRequest(blob)),
+      retry,
+      { retryable: isTransientUpload },
+    );
+    const roots: string[] = [];
+    for (let i = 0; i < blobs.length; i += batched ? UPLOAD_GROUP : 1) {
+      const group = blobs.slice(i, i + (batched ? UPLOAD_GROUP : 1));
+      if (group.length === 1) {
+        roots.push(...(await one(group[0])));
+        continue;
+      }
+      try {
+        roots.push(...(await this.uploadBatchRequest(group)));
+      } catch (err) {
+        if (!isTransientUpload(err)) throw err;
+        // A slow storage node pushed the pair past the deadline: one at a time.
+        for (const blob of group) roots.push(...(await one(blob)));
+      }
+    }
+    return roots;
+  }
+
+  /** One /storage/upload-batch request, checked to answer one root hash per brief. */
+  private async uploadBatchRequest(blobs: string[]): Promise<string[]> {
+    const res = await this.req<{ results?: Array<{ rootHash?: unknown }> }>(
+      'POST', '/api/v1/storage/upload-batch', { items: blobs.map((data) => ({ data })) }, { timeoutMs: UPLOAD_TIMEOUT_MS, strictBody: true },
+    );
+    const results = Array.isArray(res?.results) ? res.results : [];
+    if (results.length !== blobs.length || results.some((r) => typeof r?.rootHash !== 'string' || !r.rootHash)) {
+      throw new ApiError(0, `The backend answered ${results.length} uploads for ${blobs.length} briefs. Nothing was sent.`, undefined, 'UPLOAD_MISMATCH');
+    }
+    return results.map((r) => r.rootHash as string);
+  }
+
+  /** One /storage/upload request, as postTask() stores a brief. */
+  private async uploadOneRequest(blob: string): Promise<string[]> {
+    const res = await this.req<{ rootHash?: unknown }>('POST', '/api/v1/storage/upload', { data: blob }, { timeoutMs: UPLOAD_TIMEOUT_MS, strictBody: true });
+    if (typeof res?.rootHash !== 'string' || !res.rootHash) {
+      throw new ApiError(0, 'The backend stored the brief but answered no root hash. Nothing was sent.', undefined, 'UPLOAD_MISMATCH');
+    }
+    return [res.rootHash];
+  }
+
+  /**
+   * `fn`, asked again after a rate limit, a 5xx or a network error (and, for
+   * a listing, while the backend's RPC has not seen the receipt), or after
+   * what `retryable` says is worth another try.
+   */
+  private async retrying<T>(fn: () => Promise<T>, policy: RetryPolicy, opts: { receiptLag?: boolean; retryable?: (err: unknown) => boolean } = {}): Promise<T> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await fn();
+      } catch (err) {
+        const again = opts.retryable
+          ? opts.retryable(err)
+          : isTransient(err) || (!!opts.receiptLag && err instanceof ApiError && err.code === 'RECEIPT_NOT_FOUND');
+        if (!again || attempt >= policy.attempts) throw err;
+        await new Promise((r) => setTimeout(r, Math.min(policy.baseDelayMs * 2 ** (attempt - 1), MAX_RETRY_DELAY_MS)));
+      }
+    }
   }
 
   /**
@@ -1741,6 +2475,8 @@ export class BlindMarket {
 
 export { ethers };
 export { ApiError };
+export { SETTLEMENT_PINS, isPinnedSettlement } from './settlementPins.js';
+export type { SettlementPin } from './settlementPins.js';
 export {
   tools,
   createBlindMarketTools, createTaskTools, createAgentManagementTools, createA2ATools,

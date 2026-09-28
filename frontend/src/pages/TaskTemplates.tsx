@@ -18,6 +18,7 @@ import {
   Pagination,
   useTabParam,
   RadioPills,
+  ButtonLink,
 } from '../components/bb';
 import {
   getPublicTemplates,
@@ -32,6 +33,9 @@ type Tab = 'browse' | 'mine' | 'create';
 
 /** The route hard-caps `limit` at 50 (marketplace.ts), so a page cannot exceed it. */
 const PAGE_SIZE = 24;
+
+/** Post many (pages/PostMany.tsx) with this template picked. */
+const postManyFrom = (id: number) => `/tasks/bulk?source=template&template=${id}`;
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'browse', label: 'Public templates' },
@@ -92,6 +96,7 @@ export default function TaskTemplates() {
       <PageHeader
         title="Task templates."
         titleMuted="Start from a ready brief."
+        right={<ButtonLink to="/tasks/bulk?source=template" variant="outline" label="Post many" />}
       />
 
       <div role="tablist" className="flex gap-5 sm:gap-7 border-b border-line mb-8 overflow-x-auto">
@@ -148,6 +153,9 @@ export default function TaskTemplates() {
                     <span className="font-mono">{truncateAddress(t.creator_address)}</span>
                     {t.suggested_reward && <span className="font-mono text-ink-2">{t.suggested_reward} {paymentSymbol}</span>}
                   </div>
+                  <div className="mt-4 pt-4 border-t border-line">
+                    <ButtonLink to={postManyFrom(t.id)} variant="ghost" size="sm" label="Post many from this" />
+                  </div>
                 </Panel>
               ))}
             </div>
@@ -201,6 +209,7 @@ export default function TaskTemplates() {
                     </div>
                   </div>
                   <Tag tone={t.is_public ? 'ok' : 'neutral'}>{t.is_public ? 'public' : 'private'}</Tag>
+                  <ButtonLink to={postManyFrom(t.id)} variant="ghost" size="sm" label="Post many" className="shrink-0" />
                 </div>
               ))}
             </div>

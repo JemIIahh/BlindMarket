@@ -49,3 +49,24 @@ export const RESTART_DELAY_MS = 3_000;
 
 /** Max restarts within window before giving up. */
 export const MAX_RESTARTS_IN_WINDOW = 5;
+
+// ── Bulk posting (docs/BULK-POSTING.md) ──────────────────────────────────────
+
+/**
+ * The most tasks POST /tasks/batch builds into one createTasks, and the most
+ * items POST /storage/upload-batch and /a2a/tasks/index-batch take. The batch
+ * size /health/settlement reports is the escrow's MAX_BATCH capped at this.
+ */
+export const MAX_BATCH_REQUEST = 50;
+
+/**
+ * Each wallet's budget, in tasks (or uploads) a minute, on each family of
+ * posting routes: uploads (/storage/upload, /upload-batch), builds (/tasks,
+ * /tasks/batch) and listings (/a2a/tasks/index, /index-batch). A batch
+ * spends one per item; the budget holds this many at once and refills at
+ * this rate (2 a second). A 500-task bulk run takes about four minutes of
+ * each, and a run posting one task per transaction is slower than that on
+ * its own. Per wallet, this sustains no more than the 100 requests a minute
+ * one IP had before, for each family.
+ */
+export const WALLET_POSTING_BUDGET_PER_MIN = 120;

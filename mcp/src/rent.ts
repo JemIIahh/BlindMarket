@@ -1,6 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { Contract, Interface, JsonRpcProvider, formatUnits, keccak256, parseUnits, toUtf8Bytes, type Result } from 'ethers';
+import { BaseWallet, Contract, Interface, JsonRpcProvider, formatUnits, keccak256, parseUnits, toUtf8Bytes, type Result, type Signer, type TransactionRequest, type TransactionResponse } from 'ethers';
 import type { McpConfig } from './config.js';
 import type { WalletCtx } from './wallet.js';
 import { aesDecrypt, aesEncrypt, derivePublicKeyHex, eciesDecrypt, eciesEncrypt, generateAesKey, sha256Hex } from './crypto.js';
@@ -12,6 +12,67 @@ import {
   createSettlementResolver, isErc20Settlement, rpcFor, rpcEnvName,
   type Erc20Settlement, type LocalErc20Settlement, type RelaySettlement, type Settlement,
 } from './settlement.js';
+import { isPinnedSettlement, SETTLEMENT_PINS, trustedEscrows, type PinError } from './pins.js';
+
+/** The category the backend builds every task with (backend/src/routes/tasks.ts): bound like every other createTask argument. */
+const TASK_CATEGORY = 'general';
+
+/**
+ * Why `s`'s escrow may not be funded, or null: only a pinned deployment or
+ * one BLINDMARKET_TRUSTED_ESCROWS names (pins.ts). A settlement that does
+ * not say its chain id or escrow cannot be checked, so it is refused too.
+ */
+function pinRefusal(s: Settlement): PinError | null {
+  let trusted;
+  try {
+    trusted = trustedEscrows();
+  } catch (err) {
+    return err as PinError;
+  }
+  const token = isErc20Settlement(s) ? s.token.address : '0x0000000000000000000000000000000000000000';
+  if (s.chainId !== undefined && s.escrowAddress && isPinnedSettlement(s.chainId, s.escrowAddress, token, trusted)) return null;
+  const known = [...SETTLEMENT_PINS, ...trusted].filter((p) => p.chainId === s.chainId);
+  const e: PinError = new Error(
+    `The backend names escrow ${s.escrowAddress ?? '(none)'} and token ${token} on ${s.mode} (chain ${s.chainId ?? 'unknown'}), which ${known.length ? `is not the known deployment (escrow ${known.map((p) => p.escrow).join(' or ')})` : 'has no known deployment'}. Nothing was approved or sent. For a custom or local deployment, set BLINDMARKET_TRUSTED_ESCROWS=chainId:escrow:token.`,
+  );
+  e.code = 'ESCROW_NOT_PINNED';
+  return e;
+}
+
+/**
+ * Sign locally, hand the hash and nonce to `recorded` (which writes them to
+ * the spend ledger) before anything leaves this process, then broadcast. A
+ * broadcast whose answer is lost is TX_MAYBE_SENT: the ledger already holds
+ * the hash, so a retry with the same idempotencyKey resumes onto it and never
+ * sends another.
+ */
+async function signRecordBroadcast(
+  wallet: Signer,
+  request: TransactionRequest,
+  recorded: (hash: string, nonce: number) => void,
+): Promise<{ hash: string; nonce: number; sent: TransactionResponse }> {
+  if (!(wallet instanceof BaseWallet) || !wallet.provider) {
+    // A signer without a key of its own signs and sends in one step.
+    const sent = await wallet.sendTransaction(request);
+    recorded(sent.hash, sent.nonce);
+    return { hash: sent.hash, nonce: sent.nonce, sent };
+  }
+  const populated = await wallet.populateTransaction(request);
+  const raw = await wallet.signTransaction(populated);
+  const hash = keccak256(raw);
+  const nonce = Number(populated.nonce);
+  recorded(hash, nonce);
+  try {
+    const sent = await wallet.provider!.broadcastTransaction(raw);
+    return { hash, nonce, sent };
+  } catch (err) {
+    const e: PinError = new Error(
+      `Transaction ${hash} was signed and handed to the node, but no answer came back (${(err as Error).message}). It may still land. Retry with the SAME idempotencyKey: it resumes onto this transaction and never pays again.`,
+    );
+    e.code = 'TX_MAYBE_SENT';
+    throw e;
+  }
+}
 
 // Read-only view of BlindEscrow.getTask, for reading a task's state directly
 // from the chain that holds it. Field order matches contracts/BlindEscrow.sol;
@@ -361,13 +422,38 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
   async function sendErc20(
     s: Erc20Settlement,
     tx: { to: string; data: string },
-    nonce?: number,
+    nonce: number | undefined,
+    recorded: (sent: { hash: string; isUserOp: boolean; gas?: GasMode }) => void,
   ): Promise<{ hash: string; isUserOp: boolean; gas?: GasMode; nonce?: number }> {
-    if (s.payment === 'relay-erc20') return relaySend(s, tx);
+    if (s.payment === 'relay-erc20') {
+      const relayed = await relaySend(s, tx);
+      recorded(relayed);
+      return relayed;
+    }
     // No gasLimit: estimation runs first, so a predictable revert (a stale
     // allowance, a passed deadline) fails here without being mined and paid for.
-    const sent = await localSigner(s).sendTransaction({ to: tx.to, data: tx.data, ...(nonce !== undefined ? { nonce } : {}) });
-    return { hash: sent.hash, isUserOp: false, nonce: sent.nonce };
+    // The hash is recorded before the transaction leaves (signRecordBroadcast).
+    const { hash, nonce: used } = await signRecordBroadcast(
+      localSigner(s),
+      { to: tx.to, data: tx.data, ...(nonce !== undefined ? { nonce } : {}) },
+      (h) => recorded({ hash: h, isUserOp: false }),
+    );
+    return { hash, isUserOp: false, nonce: used };
+  }
+
+  /** The approve this process built, checked before it is signed: the settlement's
+   *  (pinned) token, the escrow as spender, and exactly the amount needed. */
+  function assertApprove(s: Erc20Settlement, tx: { to: string; data: string }, need: bigint): void {
+    let ok = tx.to.toLowerCase() === s.token.address.toLowerCase();
+    try {
+      const [spender, amount] = ERC20.decodeFunctionData('approve', tx.data);
+      ok = ok && String(spender).toLowerCase() === s.escrowAddress.toLowerCase() && amount === need;
+    } catch { ok = false; }
+    if (!ok) {
+      const e: ApiError = new Error(`The approve built for this spend is not ${formatUnits(need, s.decimals)} ${s.symbol} to the escrow ${s.escrowAddress} on its token ${s.token.address}. Nothing was sent.`);
+      e.code = 'TX_MISMATCH';
+      throw e;
+    }
   }
 
   /** Wait for a relayed tx to land. A plain hash can be polled for its receipt;
@@ -404,13 +490,16 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     if ((await token.allowance(s.payFrom, s.escrowAddress)) >= need) return undefined;
     let nextNonce: number | undefined;
     const approve = async () => {
-      const data = ERC20.encodeFunctionData('approve', [s.escrowAddress, need]);
-      const { hash, nonce } = await sendErc20(s, { to: s.token.address, data });
+      const tx = { to: s.token.address, data: ERC20.encodeFunctionData('approve', [s.escrowAddress, need]) };
+      assertApprove(s, tx, need);
+      // Recorded before it leaves (a local send) or as the relay answers: a
+      // crash from here resumes into the poll below.
+      const { nonce } = await sendErc20(s, tx, undefined, ({ hash }) => {
+        updateSpend(record.idempotencyKey, { stage: 'approved', approveTxHash: hash });
+        record.stage = 'approved';
+        record.approveTxHash = hash;
+      });
       if (nonce !== undefined) nextNonce = nonce + 1;
-      // Persist BEFORE waiting: a crash here must resume into the poll below.
-      updateSpend(record.idempotencyKey, { stage: 'approved', approveTxHash: hash });
-      record.stage = 'approved';
-      record.approveTxHash = hash;
     };
     const settled = async () => {
       for (let i = 0; i < 30; i++) {
@@ -445,7 +534,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
    *           first (ensureAllowance), then the createTask the backend built,
    *           both through the Privy relay with no local signing at all. The
    *           backend picks the escrow; we only check it is the one we approved. */
-  async function fundAndIndex(record: SpendRecord): Promise<{ taskHash: string; txHash: string; gas?: GasMode }> {
+  async function fundAndIndex(record: SpendRecord, nonces?: { next?: number }): Promise<{ taskHash: string; txHash: string; gas?: GasMode }> {
     let { txHash } = record;
 
     // Nothing left to sign once the escrow is funded: /a2a/tasks/index finds
@@ -474,7 +563,12 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       }
       const refused = await notPostingChain(s);
       if (refused) throw refused;
-      const nonce = isErc20Settlement(s) ? await ensureAllowance(s, record) : undefined;
+      // Only a pinned (or trusted) escrow is approved or funded.
+      const unpinned = pinRefusal(s);
+      if (unpinned) throw unpinned;
+      // `nonces` carries the next nonce between the rows of one post_tasks
+      // call, when this spend sends no approve of its own.
+      const nonce = isErc20Settlement(s) ? (await ensureAllowance(s, record)) ?? nonces?.next : undefined;
 
       const { unsignedTx, chain: builtChain, chainId: builtChainId } = await api('POST', '/api/v1/tasks', {
         taskHash: record.taskHash,
@@ -512,32 +606,57 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
         String(a[0]).toLowerCase() === String(record.taskHash).toLowerCase()
         && String(a[1]).toLowerCase() === token.toLowerCase()
         && a[2] === amount
+        && a[3] === TASK_CATEGORY
         && a[4] === 'global'
         && a[5] === BigInt(record.durationSecs ?? 3600),
       'createTask', isErc20Settlement(s) ? 0n : amount);
 
       if (isErc20Settlement(s)) {
-        const { hash, isUserOp, gas } = await sendErc20(s, { to: unsignedTx.to, data: unsignedTx.data }, nonce);
-        // Persist BEFORE waiting, same reasoning as the 0G branch below.
-        updateSpend(record.idempotencyKey, { stage: 'funded', txHash: hash, isUserOp, gas });
-        record.gas = gas;
-        txHash = hash;
-        record.isUserOp = isUserOp;
-        await waitRelayed(s, hash, isUserOp);
+        const { hash, isUserOp, nonce: used } = await sendErc20(s, { to: unsignedTx.to, data: unsignedTx.data }, nonce, (sent) => {
+          // Recorded before the transaction leaves (a local send) or as the
+          // relay answers: a retry resumes onto it instead of funding again.
+          updateSpend(record.idempotencyKey, { stage: 'funded', txHash: sent.hash, isUserOp: sent.isUserOp, gas: sent.gas });
+          record.gas = sent.gas;
+          record.isUserOp = sent.isUserOp;
+          txHash = sent.hash;
+        });
+        if (nonces) nonces.next = used !== undefined ? used + 1 : undefined;
+        try {
+          await waitRelayed(s, hash, isUserOp);
+        } catch (err) {
+          // A createTask that reverted created no task and moved no escrow:
+          // back to 'created', so a retry funds it instead of trying forever
+          // to list a transaction that holds no TaskCreated.
+          if ((err as ApiError).code === 'TX_REVERTED') {
+            updateSpend(record.idempotencyKey, { stage: 'created', txHash: undefined, isUserOp: undefined });
+            record.stage = 'created';
+          }
+          throw err;
+        }
       } else {
-        const tx = await walletCtx!.wallet.sendTransaction({
+        const { sent } = await signRecordBroadcast(walletCtx!.wallet, {
           to: unsignedTx.to,
           data: unsignedTx.data,
           value: BigInt(record.amountWei!),
           gasLimit: GAS_LIMIT,
-          // ethers refuses to send when its provider is on another chain.
+          // ethers refuses to sign when its provider is on another chain.
           ...(s.chainId !== undefined ? { chainId: s.chainId } : {}),
+        }, (hash) => {
+          // Recorded before the transaction leaves: if we crash mid-confirmation
+          // the resume path re-runs /tasks/index with this hash instead of re-funding.
+          updateSpend(record.idempotencyKey, { stage: 'funded', txHash: hash });
+          txHash = hash;
         });
-        // Persist the tx hash BEFORE waiting: if we crash mid-confirmation the
-        // resume path re-runs /tasks/index with this hash instead of re-funding.
-        updateSpend(record.idempotencyKey, { stage: 'funded', txHash: tx.hash });
-        txHash = tx.hash;
-        await tx.wait();
+        try {
+          await sent.wait();
+        } catch (err) {
+          // Reverted: no task, no escrow. Back to 'created' so a retry funds it.
+          if ((err as { code?: string }).code === 'CALL_EXCEPTION') {
+            updateSpend(record.idempotencyKey, { stage: 'created', txHash: undefined });
+            record.stage = 'created';
+          }
+          throw err;
+        }
       }
     }
 
@@ -558,6 +677,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       serviceId: record.serviceId,
       privacy: record.privacy === 'public' ? 'public' : undefined,
       publicBrief: record.privacy === 'public' ? record.publicBrief : undefined,
+      routingSummary: record.routingSummary,
     });
     updateSpend(record.idempotencyKey, { stage: 'indexed' });
     return { taskHash: record.taskHash!, txHash: txHash!, gas: record.gas };
@@ -624,6 +744,9 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       const { s, payFrom } = f;
       const offPosting = await notPostingChain(s);
       if (offPosting) return fail(offPosting.code!, offPosting.message);
+      // Only a pinned (or trusted) escrow is quoted, approved or funded.
+      const unpinned = pinRefusal(s);
+      if (unpinned) return fail(unpinned.code!, unpinned.message);
 
       const service = await api<any>('GET', `/api/v1/marketplace/services/${serviceId}`);
       const isPublic = privacy === 'public';
@@ -742,6 +865,79 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     },
   );
 
+  /**
+   * A post's brief, sealed and uploaded, and its spend recorded at 'created':
+   * post_task's first half, shared with post_tasks. A private brief is
+   * encrypted here and its key wrapped to each executor registered for the
+   * capabilities (`executors` when the caller already asked, as post_tasks
+   * does once per list).
+   */
+  async function createPostRecord(o: {
+    idempotencyKey: string;
+    instructions: string;
+    isPublic: boolean;
+    capabilities: string[];
+    amountWei: bigint;
+    durationSecs: number;
+    s: Settlement;
+    executors?: Array<{ address: string; publicKey: string }>;
+    routingSummary?: string;
+  }): Promise<{ record: SpendRecord; wrappedTo: number }> {
+    const plaintext = Buffer.from(o.instructions, 'utf8');
+    let blobB64: string;
+    let taskHash: string;
+    let wrappedKeys: Record<string, string> | undefined;
+    let aesKeyHex: string | undefined;
+    if (o.isPublic) {
+      blobB64 = plaintext.toString('base64');
+      taskHash = '0x' + sha256Hex(plaintext);
+    } else {
+      // Wrap to every currently-registered matching executor — same as the
+      // PostTask UI. A late joiner relies on the platform's key custody (if
+      // enabled) or the poster re-wrapping; consider privacy=public for
+      // guaranteed pickup by anyone.
+      const executors = o.executors ?? (await api<{ executors: Array<{ address: string; publicKey: string }> }>(
+        'GET', `/api/v1/a2a/executors?capabilities=${encodeURIComponent(o.capabilities.join(','))}`,
+      )).executors;
+      const aesKey = generateAesKey();
+      const ciphertext = aesEncrypt(plaintext, aesKey);
+      blobB64 = ciphertext.toString('base64');
+      taskHash = '0x' + sha256Hex(ciphertext);
+      wrappedKeys = {};
+      for (const exec of executors) {
+        try {
+          wrappedKeys[exec.address.toLowerCase()] = eciesEncrypt(aesKey, exec.publicKey).toString('hex');
+        } catch { /* skip malformed pubkey */ }
+      }
+      aesKeyHex = aesKey.toString('hex');
+    }
+    const { rootHash } = await api<{ rootHash: string }>('POST', '/api/v1/storage/upload', { data: blobB64 });
+    const record: SpendRecord = {
+      idempotencyKey: o.idempotencyKey,
+      kind: 'post',
+      stage: 'created',
+      taskHash,
+      rootHash,
+      privacy: o.isPublic ? 'public' : 'private',
+      aesKeyHex,
+      wrappedKeys,
+      publicBrief: o.isPublic ? o.instructions.slice(0, 4000) : undefined,
+      ...(o.routingSummary ? { routingSummary: o.routingSummary } : {}),
+      verificationMode: 'auto',
+      verificationCriteria: { min_length: 10, pass_threshold: 60 },
+      requiredCapabilities: o.capabilities,
+      amountWei: o.amountWei.toString(),
+      settlement: o.s.mode,
+      chainId: o.s.chainId,
+      token: isErc20Settlement(o.s) ? o.s.token.address : ZERO_TOKEN,
+      durationSecs: o.durationSecs,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    putSpend(record);
+    return { record, wrappedTo: wrappedKeys ? Object.keys(wrappedKeys).length : 0 };
+  }
+
   // ── post_task ─────────────────────────────────────────────────────────────
 
   server.registerTool(
@@ -766,6 +962,9 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       // Checked before settlement: a funded spend finishes without it.
       const existing = getSpend(idempotencyKey);
       if (existing) {
+        if (existing.kind === 'post-batch') {
+          return fail('IDEMPOTENCY_KEY_IN_USE', `idempotencyKey ${idempotencyKey} belongs to a post_tasks call. Use a new key for this post, or post_tasks with that key to finish its rows.`);
+        }
         if (existing.stage === 'indexed') {
           return ok({ resumed: true, taskHash: existing.taskHash, txHash: existing.txHash, hint: 'Already posted — use poll_task_result to check on it.' });
         }
@@ -781,6 +980,9 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       const { s, payFrom } = f;
       const offPosting = await notPostingChain(s);
       if (offPosting) return fail(offPosting.code!, offPosting.message);
+      // Only a pinned (or trusted) escrow is quoted, approved or funded.
+      const unpinned = pinRefusal(s);
+      if (unpinned) return fail(unpinned.code!, unpinned.message);
 
       const isPublic = privacy === 'public';
       const amountStr = amount ?? amount0G;
@@ -825,65 +1027,14 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       if (!check.ok) return quoteRefused(check, 'post_task');
 
       try {
-        const plaintext = Buffer.from(instructions, 'utf8');
-        let blobB64: string;
-        let taskHash: string;
-        let wrappedKeys: Record<string, string> | undefined;
-        let aesKeyHex: string | undefined;
-        if (isPublic) {
-          blobB64 = plaintext.toString('base64');
-          taskHash = '0x' + sha256Hex(plaintext);
-        } else {
-          // Wrap to every currently-registered matching executor — same as the
-          // PostTask UI. A late joiner relies on the platform's key custody (if
-          // enabled) or the poster re-wrapping; consider privacy=public for
-          // guaranteed pickup by anyone.
-          const capsQS = encodeURIComponent((capabilities ?? []).join(','));
-          const { executors } = await api<{ executors: Array<{ address: string; publicKey: string }> }>(
-            'GET', `/api/v1/a2a/executors?capabilities=${capsQS}`,
-          );
-          const aesKey = generateAesKey();
-          const ciphertext = aesEncrypt(plaintext, aesKey);
-          blobB64 = ciphertext.toString('base64');
-          taskHash = '0x' + sha256Hex(ciphertext);
-          wrappedKeys = {};
-          for (const exec of executors) {
-            try {
-              wrappedKeys[exec.address.toLowerCase()] = eciesEncrypt(aesKey, exec.publicKey).toString('hex');
-            } catch { /* skip malformed pubkey */ }
-          }
-          aesKeyHex = aesKey.toString('hex');
-        }
-        const { rootHash } = await api<{ rootHash: string }>('POST', '/api/v1/storage/upload', { data: blobB64 });
-
-        const record: SpendRecord = {
-          idempotencyKey,
-          kind: 'post',
-          stage: 'created',
-          taskHash,
-          rootHash,
-          privacy: isPublic ? 'public' : 'private',
-          aesKeyHex,
-          wrappedKeys,
-          publicBrief: isPublic ? instructions.slice(0, 4000) : undefined,
-          verificationMode: 'auto',
-          verificationCriteria: { min_length: 10, pass_threshold: 60 },
-          requiredCapabilities: capabilities ?? [],
-          amountWei: amountWei.toString(),
-          settlement: s.mode,
-          chainId: s.chainId,
-          token: isErc20Settlement(s) ? s.token.address : ZERO_TOKEN,
-          durationSecs,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        };
-        putSpend(record);
-
+        const { record, wrappedTo } = await createPostRecord({
+          idempotencyKey, instructions, isPublic, capabilities: capabilities ?? [], amountWei, durationSecs, s,
+        });
         const done = await fundAndIndex(record);
         return ok({
           ...done,
           escrowed: { amount: formatUnits(amountWei, s.decimals), amountRaw: amountWei.toString(), currency: s.symbol },
-          wrappedTo: wrappedKeys ? Object.keys(wrappedKeys).length : 0,
+          wrappedTo,
           privacy: record.privacy,
           hint: 'Use poll_task_result to wait for the deliverable.',
         });
@@ -894,6 +1045,241 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
         }
         return fail(code ?? 'POST_FAILED', (err as Error).message);
       }
+    },
+  );
+
+  // ── post_tasks ────────────────────────────────────────────────────────────
+  //
+  // Many posts at once. One quote covers the whole list; the confirm approves
+  // the escrow ONCE for every task still to fund (on an ERC-20 settlement),
+  // then funds and lists each task through post_task's own path. Each task is
+  // its own 'post' spend under `<idempotencyKey>#<fingerprint of the task>`,
+  // so a retry with the same key, even with tasks added or removed, never
+  // funds a task twice: posted ones are skipped, a funded one is listed
+  // without paying again. A problem stops the run, so nothing more is funded
+  // behind it.
+
+  const MAX_POST_TASKS = 200;
+  const postTasksRow = z.object({
+    instructions: z.string().min(1).max(100_000).describe('The task brief'),
+    amount: z.string().regex(/^\d+(\.\d+)?$/).describe('Escrow in the settlement token (e.g. "2.5" USDC)'),
+    durationSeconds: z.number().int().min(3600).max(90 * 24 * 3600).optional().describe('Deadline seconds from now (default 86400 = 24h)'),
+    privacy: z.enum(['private', 'public']).optional().describe("Default 'private' (encrypted brief); 'public' posts it in plaintext"),
+    capabilities: z.array(z.string()).optional().describe('Optional capability tags to route to matching agents first'),
+    routingSummary: z.string().min(1).max(500).optional().describe('Public one-liner the task board shows (all it shows of a private task): no secrets'),
+  });
+
+  /** A stopped run: an error the caller must see, with every task's outcome. */
+  function stoppedRun(code: string, message: string, body: Record<string, unknown>) {
+    return { isError: true, content: [{ type: 'text' as const, text: JSON.stringify({ error: { code, message }, ...body }, null, 2) }] };
+  }
+
+  server.registerTool(
+    'post_tasks',
+    {
+      title: 'Post Many Tasks at Once',
+      description: `Post up to ${MAX_POST_TASKS} tasks in one go, paid the way post_task pays (see wallet_status). TWO-STEP quote/confirm like post_task: the quote covers the whole list (how many, the total escrow, the public/private split, the transactions); confirm with the SAME tasks and idempotencyKey, or it is refused with QUOTE_MISMATCH. On an ERC-20 settlement the escrow is approved ONCE for the total, then each task is funded and listed in turn. A problem stops the run so nothing more is funded behind it; re-call with the same idempotencyKey (new quote, then confirm) to resume: posted tasks are skipped, a funded one is listed without paying again. A private task needs a registered executor that can open it (NO_EXECUTORS otherwise, with nothing sent).`,
+      inputSchema: {
+        tasks: z.array(postTasksRow).min(1).max(MAX_POST_TASKS).describe('The tasks to post, in order'),
+        idempotencyKey: z.string().min(8).max(128).describe('Unique key for this list — reuse it to retry or resume'),
+        confirm: z.boolean().optional().describe('Set true (with quoteId) to execute the spend'),
+        quoteId: z.string().optional().describe('From the quote step'),
+      },
+      annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ tasks, idempotencyKey, confirm, quoteId }) => {
+      const existing = getSpend(idempotencyKey);
+      if (existing && existing.kind !== 'post-batch') {
+        return fail('IDEMPOTENCY_KEY_IN_USE', `idempotencyKey ${idempotencyKey} belongs to another spend (${existing.kind}). Use a new key for this list.`);
+      }
+      const f = await requireFunding();
+      if ('error' in f) return f.error;
+      const { s, payFrom } = f;
+      const offPosting = await notPostingChain(s);
+      if (offPosting) return fail(offPosting.code!, offPosting.message);
+      // Only a pinned (or trusted) escrow is quoted, approved or funded.
+      const unpinned = pinRefusal(s);
+      if (unpinned) return fail(unpinned.code!, unpinned.message);
+
+      // Every task checked before a quote, its escrow in the settlement token.
+      interface Row { index: number; instructions: string; isPublic: boolean; capabilities: string[]; amountWei: bigint; durationSecs: number; routingSummary?: string; key: string }
+      const rows: Row[] = [];
+      const bad: string[] = [];
+      const copies = new Map<string, number>();
+      const publicBriefs = new Map<string, number>();
+      tasks.forEach((t, index) => {
+        let amountWei: bigint;
+        try {
+          amountWei = parseUnits(t.amount, s.decimals);
+        } catch {
+          bad.push(`tasks[${index}]: "${t.amount}" is not a ${s.symbol} amount with at most ${s.decimals} decimals`);
+          return;
+        }
+        if (amountWei <= 0n) { bad.push(`tasks[${index}]: the escrow must be above 0`); return; }
+        const isPublic = t.privacy === 'public';
+        const briefHash = sha256Hex(Buffer.from(t.instructions, 'utf8'));
+        if (isPublic) {
+          const first = publicBriefs.get(briefHash);
+          if (first !== undefined) { bad.push(`tasks[${index}]: the same public brief as tasks[${first}], and the market lists a brief once`); return; }
+          publicBriefs.set(briefHash, index);
+        }
+        const capabilities = t.capabilities ?? [];
+        const durationSecs = t.durationSeconds ?? 86400;
+        const routingSummary = t.routingSummary?.trim() || undefined;
+        // The same task twice is two tasks: the nth copy has its own key.
+        const canonical = JSON.stringify([briefHash, amountWei.toString(), durationSecs, isPublic, [...capabilities].sort(), routingSummary ?? '']);
+        const copy = copies.get(canonical) ?? 0;
+        copies.set(canonical, copy + 1);
+        const fingerprint = sha256Hex(Buffer.from(`${canonical}#${copy}`, 'utf8'));
+        rows.push({ index, instructions: t.instructions, isPublic, capabilities, amountWei, durationSecs, routingSummary, key: `${idempotencyKey}#${fingerprint}` });
+      });
+      if (bad.length > 0) {
+        return fail('INVALID_ROWS', `${bad.length} of ${tasks.length} tasks cannot be posted as they are, so nothing was sent: ${bad.slice(0, 10).join('; ')}${bad.length > 10 ? '; …' : ''}`);
+      }
+
+      // What this key already did with each task.
+      const stageOf = (r: Row) => getSpend(r.key)?.stage;
+      const posted = rows.filter((r) => stageOf(r) === 'indexed');
+      const todo = rows.filter((r) => stageOf(r) !== 'indexed');
+      const toFund = todo.filter((r) => stageOf(r) !== 'funded');
+      const toFundRaw = toFund.reduce((sum, r) => sum + r.amountWei, 0n);
+      const postedResult = (r: Row) => {
+        const rec = getSpend(r.key)!;
+        return { index: r.index, status: 'posted', taskHash: rec.taskHash, txHash: rec.txHash, resumed: true };
+      };
+      if (todo.length === 0) {
+        return ok({ resumed: true, posted: posted.length, results: posted.map(postedResult), hint: 'Every task in this list is posted — use poll_task_result on each taskHash.' });
+      }
+
+      // A private brief no registered executor can open would be escrowed for no one.
+      const executorsByCaps = new Map<string, Array<{ address: string; publicKey: string }>>();
+      try {
+        for (const r of toFund) {
+          if (r.isPublic || getSpend(r.key)) continue; // a recorded task's brief is sealed already
+          const caps = [...r.capabilities].sort().join(',');
+          if (!executorsByCaps.has(caps)) {
+            const { executors } = await api<{ executors: Array<{ address: string; publicKey: string }> }>(
+              'GET', `/api/v1/a2a/executors?capabilities=${encodeURIComponent(r.capabilities.join(','))}`,
+            );
+            executorsByCaps.set(caps, executors.filter((e) => typeof e.publicKey === 'string' && e.publicKey.length > 0));
+          }
+          if (executorsByCaps.get(caps)!.length === 0) {
+            return fail('NO_EXECUTORS', `tasks[${r.index}] is private, but no executor${r.capabilities.length ? ` with ${r.capabilities.join(', ')}` : ''} is registered to open it, so nobody could take it. Nothing was sent: post it with privacy "public", or wait for executors to register.`);
+          }
+        }
+      } catch (err) {
+        return fail((err as ApiError).code ?? 'EXECUTORS_UNKNOWN', (err as Error).message);
+      }
+
+      // What this call would spend, bound into the quote (see rent_service).
+      const digest = (list: Row[]) => sha256Hex(Buffer.from(JSON.stringify(list.map((r) => r.key)), 'utf8'));
+      const spend: SpendFields = {
+        ...settlementFields(s, payFrom),
+        idempotencyKey,
+        tasks: rows.length,
+        toPost: todo.length,
+        toFundRaw: toFundRaw.toString(),
+        rows: digest(rows),
+        pending: digest(todo),
+      };
+      if (!confirm) {
+        const quote = createQuote('post-batch', { tasks: rows.length, escrow: formatUnits(toFundRaw, s.decimals), currency: s.symbol }, spend);
+        const publicCount = todo.filter((r) => r.isPublic).length;
+        const listing = todo.length - toFund.length;
+        return ok({
+          quote: {
+            tasks: rows.length,
+            alreadyPosted: posted.length,
+            ...(listing > 0 ? { fundedNotListed: listing } : {}),
+            toPost: todo.length,
+            escrow: formatUnits(toFundRaw, s.decimals),
+            currency: s.symbol,
+            settlement: s.mode,
+            payFrom,
+            walletBalance: await payFromBalance(s, payFrom),
+            privacy: { public: publicCount, private: todo.length - publicCount },
+            transactions: `${isErc20Settlement(s) && toFund.length > 0 ? 'up to 1 approve, then ' : ''}${toFund.length} createTask`,
+            quoteId: quote.quoteId,
+          },
+          next: `Re-call post_tasks with confirm=true, quoteId="${quote.quoteId}", the SAME idempotencyKey and the SAME tasks to execute this spend.`,
+        });
+      }
+      const check = consumeQuote(quoteId, 'post-batch', spend);
+      if (!check.ok) return quoteRefused(check, 'post_tasks');
+
+      // One approval for every task still to fund, recorded under the list's key.
+      const now = new Date().toISOString();
+      const nonces: { next?: number } = {};
+      try {
+        const batch: SpendRecord = {
+          idempotencyKey,
+          kind: 'post-batch',
+          stage: 'created',
+          amountWei: toFundRaw.toString(),
+          settlement: s.mode,
+          chainId: s.chainId,
+          token: isErc20Settlement(s) ? s.token.address : ZERO_TOKEN,
+          createdAt: existing?.createdAt ?? now,
+          updatedAt: now,
+        };
+        putSpend(batch);
+        if (isErc20Settlement(s) && toFundRaw > 0n) nonces.next = await ensureAllowance(s, batch);
+      } catch (err) {
+        return fail((err as ApiError).code ?? 'APPROVE_FAILED', `${(err as Error).message}. No task was funded.`);
+      }
+
+      const outcome = new Map<number, Record<string, unknown>>(posted.map((r) => [r.index, postedResult(r)]));
+      let stopped: { index: number; code?: string; message: string } | undefined;
+      for (const r of todo) {
+        if (stopped) { outcome.set(r.index, { index: r.index, status: 'not_started' }); continue; }
+        try {
+          const record = getSpend(r.key) ?? (await createPostRecord({
+            idempotencyKey: r.key,
+            instructions: r.instructions,
+            isPublic: r.isPublic,
+            capabilities: r.capabilities,
+            amountWei: r.amountWei,
+            durationSecs: r.durationSecs,
+            s,
+            ...(r.isPublic ? {} : { executors: executorsByCaps.get([...r.capabilities].sort().join(',')) }),
+            ...(r.routingSummary ? { routingSummary: r.routingSummary } : {}),
+          })).record;
+          const done = await fundAndIndex(record, nonces);
+          outcome.set(r.index, { index: r.index, status: 'posted', taskHash: done.taskHash, txHash: done.txHash });
+        } catch (err) {
+          nonces.next = undefined;
+          const rec = getSpend(r.key);
+          const funded = rec?.stage === 'funded';
+          const code = (err as ApiError).code;
+          const message = (err as Error).message;
+          outcome.set(r.index, {
+            index: r.index,
+            status: funded ? 'funded_not_listed' : 'failed',
+            ...(rec?.taskHash ? { taskHash: rec.taskHash } : {}),
+            ...(funded && rec?.txHash ? { txHash: rec.txHash } : {}),
+            error: { ...(code ? { code } : {}), message },
+          });
+          stopped = { index: r.index, ...(code ? { code } : {}), message };
+        }
+      }
+
+      const results = rows.map((r) => outcome.get(r.index)!);
+      const count = (status: string) => results.filter((x) => x.status === status).length;
+      const body = {
+        posted: count('posted'),
+        fundedNotListed: count('funded_not_listed'),
+        failed: count('failed'),
+        notStarted: count('not_started'),
+        results,
+      };
+      if (stopped) {
+        return stoppedRun(
+          stopped.code ?? 'POST_TASKS_STOPPED',
+          `Stopped at tasks[${stopped.index}]: ${stopped.message}. Nothing more was funded. Fix the cause, then call post_tasks again with the SAME idempotencyKey (a new quote, then confirm): posted tasks are skipped, and a funded one is listed without paying again.`,
+          body,
+        );
+      }
+      return ok({ ...body, hint: 'Use poll_task_result on each taskHash to wait for the deliverables.' });
     },
   );
 
@@ -1109,25 +1495,27 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       assertEscrowCall(unsignedTx, record.kind === 'cancel' ? 'cancelTask' : 'claimTimeout', (a) => a[0] === BigInt(taskId), `${route}Task`);
 
       if (isErc20Settlement(s)) {
-        const { hash, isUserOp, gas } = await sendErc20(s, { to: unsignedTx.to, data: unsignedTx.data });
-        // Persist BEFORE waiting, same reasoning as the 0G branch below.
-        updateSpend(record.idempotencyKey, { stage: 'sent', txHash: hash, isUserOp, gas });
-        record.gas = gas;
-        txHash = hash;
-        record.isUserOp = isUserOp;
+        const { hash, isUserOp } = await sendErc20(s, { to: unsignedTx.to, data: unsignedTx.data }, undefined, (sent) => {
+          // Recorded before it leaves (a local send) or as the relay answers.
+          updateSpend(record.idempotencyKey, { stage: 'sent', txHash: sent.hash, isUserOp: sent.isUserOp, gas: sent.gas });
+          record.gas = sent.gas;
+          txHash = sent.hash;
+          record.isUserOp = sent.isUserOp;
+        });
         await waitRelayed(s, hash, isUserOp);
       } else {
-        const tx = await walletCtx!.wallet.sendTransaction({
+        const { sent } = await signRecordBroadcast(walletCtx!.wallet, {
           to: unsignedTx.to,
           data: unsignedTx.data,
           gasLimit: GAS_LIMIT,
           ...(s.chainId !== undefined ? { chainId: s.chainId } : {}),
+        }, (hash) => {
+          // Recorded before it leaves, same reasoning as fundAndIndex: a crash
+          // mid-confirmation must resume onto THIS tx, not broadcast another.
+          updateSpend(record.idempotencyKey, { stage: 'sent', txHash: hash });
+          txHash = hash;
         });
-        // Persist the hash BEFORE waiting, same reasoning as fundAndIndex: a
-        // crash mid-confirmation must resume onto THIS tx, not broadcast another.
-        updateSpend(record.idempotencyKey, { stage: 'sent', txHash: tx.hash });
-        txHash = tx.hash;
-        await tx.wait();
+        await sent.wait();
       }
     } else if (txHash) {
       if (isErc20Settlement(s)) await waitRelayed(s, txHash, record.isUserOp ?? false);
@@ -1534,7 +1922,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
             if (tx.from && tx.from.toLowerCase() !== s.payFrom.toLowerCase()) {
               return fail('WALLET_MISMATCH', `The backend assigned this task to ${tx.from} (the wallet behind BLINDMARKET_API_KEY), but BLINDMARKET_PRIVATE_KEY is ${s.payFrom}. submitEvidence is worker-only — set the private key of ${tx.from}.`);
             }
-            const sent = await sendErc20(s, { to: tx.to, data: tx.data });
+            const sent = await sendErc20(s, { to: tx.to, data: tx.data }, undefined, () => { /* no spend ledger for a delivery */ });
             submitTxHash = sent.hash;
             await waitRelayed(s, sent.hash, false);
           } else {

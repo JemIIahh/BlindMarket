@@ -34,6 +34,7 @@ const RegisterAgent = lazy(() => import('./pages/RegisterAgent'));
 const DeployAgent = lazy(() => import('./pages/DeployAgent'));
 const AgentDetail = lazy(() => import('./pages/AgentDetail'));
 const PostTask = lazy(() => import('./pages/PostTask'));
+const PostMany = lazy(() => import('./pages/PostMany'));
 const MyTasks = lazy(() => import('./pages/MyTasks'));
 const DeployAgentForm = lazy(() => import('./pages/DeployAgentForm'));
 const DeployAgentSdk = lazy(() => import('./pages/DeployAgentSdk'));
@@ -125,6 +126,7 @@ export default function App() {
                       <Route path="/register/:token" element={<RegisterAgent />} />
                       <Route element={<DashboardLayout />}>
                         <Route path="/tasks/new" element={<PostTask />} />
+                        <Route path="/tasks/bulk" element={<PostMany />} />
                         <Route path="/tasks/mine" element={<MyTasks />} />
                         <Route path="/tasks/templates" element={<TaskTemplates />} />
                         <Route path="/tasks/:id" element={<TaskDetail />} />
