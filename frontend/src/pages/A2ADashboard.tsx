@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import {
   PageHeader,
@@ -14,7 +14,6 @@ import {
   ErrorNotice,
   LiveDot,
   Segmented,
-  Pagination,
   useTabParam,
 } from '../components/bb';
 import { TaskCard, TaskCardSkeleton, type BrowseTask } from '../components/task/TaskCard';
@@ -98,23 +97,32 @@ export default function A2ADashboard() {
     ? browseRows
     : browseRows.filter((t) => isPublicTask(t) === (privacyFilter === 'public'));
   const featured = topRewardIndex(visibleRows.map((t) => t.meta.reward));
-  const pageCount = Math.max(1, Math.ceil(visibleRows.length / PAGE_SIZE));
-  const page = Math.min(Math.max(parseInt(searchParams.get('page') ?? '', 10) || 1, 1), pageCount);
-  const pageStart = (page - 1) * PAGE_SIZE;
-  const pageRows = visibleRows.slice(pageStart, pageStart + PAGE_SIZE);
-  const goToPage = (next: number) => {
-    setSearchParams((prev) => {
-      const p = new URLSearchParams(prev);
-      if (next <= 1) p.delete('page');
-      else p.set('page', String(next));
-      return p;
-    });
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  };
+  // Infinite scroll over the loaded board: reveal PAGE_SIZE cards at a time
+  // as the sentinel enters the viewport. The board query already aggregates
+  // every API page, so this only controls how many sorted rows are mounted.
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  const shownRows = visibleRows.slice(0, visibleCount);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    setVisibleCount(PAGE_SIZE);
+  }, [privacyFilter]);
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el || visibleCount >= visibleRows.length) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting) {
+          setVisibleCount((count) => Math.min(count + PAGE_SIZE, visibleRows.length));
+        }
+      },
+      { rootMargin: '400px' },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [visibleCount, visibleRows.length]);
   const changeFilter = (next: PrivacyFilter) => {
     setSearchParams((prev) => {
       const p = new URLSearchParams(prev);
-      p.delete('page');
       if (next === 'all') p.delete('show');
       else p.set('show', next);
       return p;
@@ -204,18 +212,20 @@ export default function A2ADashboard() {
             {/* Separate rounded cards, as on the landing page. Each card is a
                 single Link to the task detail. */}
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {pageRows.map((t, i) => (
-                <TaskCard key={t.meta.taskId} task={t} now={now} featured={pageStart + i === featured} />
+              {shownRows.map((t, i) => (
+                <TaskCard key={t.meta.taskId} task={t} now={now} featured={i === featured} />
               ))}
             </div>
-            <Pagination
-              page={page}
-              totalPages={pageCount}
-              totalItems={visibleRows.length}
-              pageSize={PAGE_SIZE}
-              onPageChange={goToPage}
-              className="mt-6"
-            />
+            {visibleRows.length > PAGE_SIZE && (
+              <div className="mt-6 text-center text-xs text-ink-3" aria-live="polite">
+                {shownRows.length} of {visibleRows.length} shown
+              </div>
+            )}
+            {visibleCount < visibleRows.length && (
+              <div ref={sentinelRef} className="py-4 text-center text-xs text-ink-3">
+                Scroll for more
+              </div>
+            )}
           </>
         )
       )}
