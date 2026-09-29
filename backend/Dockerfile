@@ -23,4 +23,10 @@ COPY agents ./agents
 # deps only), so no other dist files need to follow them.
 COPY --from=builder /app/dist/services/crypto.js ./src/services/crypto.js
 COPY --from=builder /app/dist/services/egressGuard.js ./src/services/egressGuard.js
+# The worker also reads ../src/abi/BlindEscrow.json. Without it verifier duty
+# never settles ("signer/escrow not configured") and escrow reverts go undecoded.
+COPY src/abi/BlindEscrow.json ./src/abi/BlindEscrow.json
+# Fail the build, not every agent at runtime, if something the worker loads
+# from outside agents/ is missing: each ../ module it imports, and the ABI.
+RUN node --import tsx/esm --input-type=module -e "import { readFileSync } from 'node:fs'; import { pathToFileURL } from 'node:url'; const worker = pathToFileURL('agents/worker.js'); for (const [, spec] of readFileSync('agents/worker.js', 'utf8').matchAll(/from '(\.\.\/[^']+)'/g)) { await import(new URL(spec, worker)); console.log('[build] worker import resolves:', spec); } JSON.parse(readFileSync('src/abi/BlindEscrow.json', 'utf8')); console.log('[build] worker escrow ABI present');"
 CMD ["node", "dist/index.js"]
