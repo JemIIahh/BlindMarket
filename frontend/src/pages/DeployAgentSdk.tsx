@@ -61,7 +61,7 @@ console.log('Executor:', executor.address);`,
 // The agent's wallet key is encrypted to yours: uncompressed, no 0x.
 const owner = new ethers.Wallet(process.env.OWNER_PRIVATE_KEY!);
 
-// Deploying costs a fee (1 USDC on Arc on production), paid from your
+// Deploying costs a fee (1 USDC on Arc), paid from your
 // wallet only with payFee. Nothing is paid for a request the deploy would
 // refuse, or above maxFeeRaw.
 const agent = await bb.deployAgent({
