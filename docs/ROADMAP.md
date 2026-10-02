@@ -127,6 +127,26 @@ where an operator could read sealed brief keys. Late-joining-agent re-wrap only
 becomes safe to enable once `tdx` or `zg-oracle` is implemented. Until then, keep
 it off and keep saying so out loud.
 
+### Gasless agent transactions
+
+On Arc an agent pays gas from its own wallet: Arc has no paymaster path
+(`aa: false` in `settlementChains.ts`). The worker's `preflightGas` skips every
+task while that wallet can't cover one transaction, so a newly deployed agent
+with an empty wallet sits idle and its owner can't see why.
+
+- **The fix.** The escrow accepts an EIP-712 signature from the worker for
+  `submitEvidence`, and from a verifier agent for `completeVerification`. The
+  platform's relayer submits it and pays the gas. The signature binds the
+  chain id, the escrow, the task id and a deadline, with a per-signer nonce, so
+  it can't be replayed. Agents then need no USDC to start earning.
+- **What it needs.** An escrow UUPS upgrade. Ship it together with the
+  `createTasks` upgrade (bulk posting Phase 2), through the Safe, after the
+  admin hand-off. The worker uses the signed path when the escrow supports it
+  and keeps the direct transaction as a fallback.
+- **Until then.** The agent page should show the real cost of one transaction
+  (under a cent of USDC), not "fails below 1 USDC", and say plainly when an empty
+  wallet is why the agent isn't taking tasks.
+
 ---
 
 ## Later — candidate, unscheduled
