@@ -27,7 +27,7 @@ import { demandFeed, MAX_DEMAND_LIMIT } from '../services/demandFeed.js';
 import { chainRuntime } from '../services/chainRuntime.js';
 import { postingChain, receiptSearchOrder, settlementChainConfig } from '../services/settlementChains.js';
 import { ethers } from 'ethers';
-import type { AuthRequest, AuthUser, ApiResponse, AgentCapability, A2ATaskMeta } from '../types.js';
+import type { AuthRequest, AuthUser, ApiResponse, AgentCapability, A2ATaskMeta, DeployedAgent } from '../types.js';
 import { AGENT_CAPABILITIES } from '../types.js';
 import { rankAgents, pickExplorationAgent, meetsRewardFloor } from '../services/agentScorer.js';
 import { supportsChain, supportsTaskChain } from '../services/executorChains.js';
@@ -48,7 +48,7 @@ import { gasSponsorSettings } from '../services/gasSponsorConfig.js';
 import { sponsorHint } from '../services/gasSponsorEligibility.js';
 import { holdsReservation, releaseAcceptReservation, reserveForAccept, startReservationAfterAssign } from '../services/gasSponsorAccept.js';
 import type { Reservation as SponsorReservation } from '../services/gasSponsorStore.js';
-import { relaySponsoredCall } from '../services/gasSponsorRelayer.js';
+import { relaySponsoredCall, sponsoredCallStatus } from '../services/gasSponsorRelayer.js';
 import jwt from 'jsonwebtoken';
 import { withPosterAvatars } from '../services/avatarStore.js';
 
@@ -2569,15 +2569,21 @@ const sponsoredCallSchema = z.object({
  * nor a revoked or replaced platform token can spend sponsorship. Every
  * refusal sends nothing, and the worker falls back to its own gas.
  */
+/** The hosted agent behind the request, when it is the agent's own stored platform token. */
+async function sponsoredCaller(req: AuthRequest): Promise<DeployedAgent> {
+  const user = req.user!;
+  const agent = await loadAgentByWallet(user.address);
+  const storedJti = agent?.platformToken ? (jwt.decode(agent.platformToken) as { jti?: unknown } | null)?.jti : undefined;
+  if (user.typ !== 'agent-platform' || !agent || typeof storedJti !== 'string' || user.jti !== storedJti) {
+    throw new AppError(403, 'FORBIDDEN', "Only the agent's own platform token can request sponsored gas");
+  }
+  return agent;
+}
+
 a2aRouter.post('/tasks/:id/sponsored-call', requireAuth, async (req: AuthRequest, res, next) => {
   try {
     const taskHash = req.params.id as string;
-    const user = req.user!;
-    const agent = await loadAgentByWallet(user.address);
-    const storedJti = agent?.platformToken ? (jwt.decode(agent.platformToken) as { jti?: unknown } | null)?.jti : undefined;
-    if (user.typ !== 'agent-platform' || !agent || typeof storedJti !== 'string' || user.jti !== storedJti) {
-      throw new AppError(403, 'FORBIDDEN', "Only the agent's own platform token can request sponsored gas");
-    }
+    const agent = await sponsoredCaller(req);
     const parsed = sponsoredCallSchema.safeParse(req.body ?? {});
     if (!parsed.success) throw new AppError(400, 'VALIDATION_ERROR', zodIssuesText(parsed.error));
     const body = parsed.data;
@@ -2607,8 +2613,39 @@ a2aRouter.post('/tasks/:id/sponsored-call', requireAuth, async (req: AuthRequest
           }
         : {}),
     });
+    if (!result.ok && result.code === 'PENDING') {
+      // Sent, not final: the agent must neither pay its own gas for this call
+      // nor hand the task back while it is out (GET below says when it is final).
+      const pending: ApiResponse = { success: true, data: { status: 'pending', txHash: result.txHash ?? null } };
+      res.status(202).json(pending);
+      return;
+    }
     if (!result.ok) throw new AppError(result.status, result.code, result.message);
-    const out: ApiResponse = { success: true, data: { txHash: result.txHash, landedElsewhere: result.landedElsewhere === true } };
+    const out: ApiResponse = {
+      success: true,
+      data: { status: 'confirmed', txHash: result.txHash, landedElsewhere: result.landedElsewhere === true },
+    };
+    res.json(out);
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * GET /api/v1/a2a/tasks/:id/sponsored-call?kind=submit|release
+ *
+ * What became of the agent's sponsored call for this task: 'none' (nothing
+ * sent), 'pending' (out, may still land), 'confirmed', or 'failed' for good.
+ * Same caller rule as the POST.
+ */
+a2aRouter.get('/tasks/:id/sponsored-call', requireAuth, async (req: AuthRequest, res, next) => {
+  try {
+    const agent = await sponsoredCaller(req);
+    const kind = req.query.kind === 'release' ? 'release' : 'submit';
+    const resolved = await resolveTaskByHash(req.params.id as string);
+    if (!resolved || resolved.chain !== 'arc') throw new AppError(404, 'NOT_INDEXED', 'This task is not indexed on Arc');
+    const status = await sponsoredCallStatus(agent.walletAddress, BigInt(resolved.taskId), kind);
+    const out: ApiResponse = { success: true, data: status };
     res.json(out);
   } catch (err) {
     next(err);

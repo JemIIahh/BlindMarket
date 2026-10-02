@@ -907,9 +907,11 @@ const migrations: Array<{ id: number; name: string; sql: string; when?: () => bo
         cost_wei NUMERIC(78, 0),
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        UNIQUE (chain_id, sponsor, nonce),
         UNIQUE (tx_hash)
       );
+      -- One transaction per sponsor nonce; one the node rejected outright never
+      -- entered a pool, so its nonce is free again.
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_gas_sponsor_txs_nonce ON gas_sponsor_txs (chain_id, sponsor, nonce) WHERE status <> 'rejected';
       CREATE INDEX IF NOT EXISTS idx_gas_sponsor_txs_res ON gas_sponsor_txs (reservation_id);
       CREATE INDEX IF NOT EXISTS idx_gas_sponsor_txs_status ON gas_sponsor_txs (chain_id, status, created_at);
       CREATE TABLE IF NOT EXISTS gas_sponsor_strikes (

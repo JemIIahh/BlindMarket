@@ -22,7 +22,12 @@ import { getPool } from './neonDb.js';
 
 export type ReservationKind = 'submit' | 'release';
 export type ReservationStatus = 'reserved' | 'used' | 'released' | 'expired';
-export type SponsoredTxStatus = 'signed' | 'sent' | 'confirmed' | 'reverted' | 'noop' | 'dropped';
+/**
+ * signed → sent → confirmed | reverted | noop. dropped: its nonce went to a
+ * transaction that is not this one. rejected: the node refused the bytes
+ * outright, so they never entered a pool and the nonce is free again.
+ */
+export type SponsoredTxStatus = 'signed' | 'sent' | 'confirmed' | 'reverted' | 'noop' | 'dropped' | 'rejected';
 
 export interface Reservation {
   id: number;
@@ -52,6 +57,7 @@ export interface SponsoredTx {
   txHash: string;
   withAuthorization: boolean;
   status: SponsoredTxStatus;
+  createdAt: Date;
 }
 
 export interface SponsorCaps {
@@ -120,6 +126,7 @@ function toTx(r: Record<string, unknown>): SponsoredTx {
     txHash: String(r.tx_hash),
     withAuthorization: r.with_authorization === true,
     status: String(r.status) as SponsoredTxStatus,
+    createdAt: r.created_at instanceof Date ? r.created_at : new Date(String(r.created_at)),
   };
 }
 
@@ -319,7 +326,7 @@ export async function closeReservation(id: number, status: 'used' | 'released' |
 /** The lowest nonce the sponsor may sign next: past every nonce it has stored. */
 export async function nextStoredNonce(chainId: number, sponsor: string): Promise<number | null> {
   const { rows } = await (await pool()).query<{ n: string | null }>(
-    'SELECT MAX(nonce)::text AS n FROM gas_sponsor_txs WHERE chain_id = $1 AND sponsor = $2',
+    "SELECT MAX(nonce)::text AS n FROM gas_sponsor_txs WHERE chain_id = $1 AND sponsor = $2 AND status <> 'rejected'",
     [chainId, sponsor.toLowerCase()],
   );
   return rows[0]?.n == null ? null : Number(rows[0].n) + 1;
@@ -476,7 +483,7 @@ export async function usage(chainId: number): Promise<SponsorUsage> {
        (SELECT ${SPEND} FROM gas_sponsor_reservations WHERE chain_id = $1 AND created_at > NOW() - interval '24 hours') AS day,
        (SELECT COUNT(*)::text FROM gas_sponsor_txs WHERE chain_id = $1 AND created_at > NOW() - interval '24 hours') AS calls,
        (SELECT COUNT(*)::text FROM gas_sponsor_txs WHERE chain_id = $1 AND created_at > NOW() - interval '1 hour'
-          AND status IN ('reverted', 'noop', 'dropped')) AS failures,
+          AND status IN ('reverted', 'noop', 'dropped', 'rejected')) AS failures,
        (SELECT COUNT(*)::text FROM gas_sponsor_txs WHERE chain_id = $1 AND created_at > NOW() - interval '1 hour') AS sends`,
     [chainId],
   );

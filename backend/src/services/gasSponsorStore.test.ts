@@ -181,6 +181,23 @@ describe.skipIf(!url)('gasSponsorStore on Postgres', () => {
     expect((await store.usage(CHAIN)).failuresLastHour).toBe(1);
   });
 
+  it('frees the nonce of a transaction the node rejected outright, and only that one', async () => {
+    const r = await reserveOk();
+    const sponsor = '0x' + 'd'.repeat(40);
+    await store.recordSignedTx({ chainId: CHAIN, reservationId: r.id, sponsor, nonce: 7, rawTx: '0x02aa', txHash: '0x' + '07'.repeat(32), withAuthorization: false });
+    const [stored] = await store.unsettledTxs(CHAIN, sponsor);
+    expect(stored.createdAt).toBeInstanceOf(Date);
+    await store.setTxStatus('0x' + '07'.repeat(32), 'rejected');
+    expect(await store.nextStoredNonce(CHAIN, sponsor)).toBeNull();
+    await store.recordSignedTx({ chainId: CHAIN, reservationId: r.id, sponsor, nonce: 7, rawTx: '0x02bb', txHash: '0x' + '17'.repeat(32), withAuthorization: false });
+    expect(await store.nextStoredNonce(CHAIN, sponsor)).toBe(8);
+    // A dropped transaction's nonce was used on-chain: it stays taken.
+    await store.setTxStatus('0x' + '17'.repeat(32), 'dropped');
+    await expect(store.recordSignedTx({ chainId: CHAIN, reservationId: r.id, sponsor, nonce: 7, rawTx: '0x02cc', txHash: '0x' + '27'.repeat(32), withAuthorization: false }))
+      .rejects.toThrow();
+    expect((await store.usage(CHAIN)).failuresLastHour).toBe(2);
+  });
+
   it('logs key exports for good', async () => {
     const wallet = '0x' + 'F'.repeat(40);
     expect(await store.walletKeyExported(wallet)).toBe(false);

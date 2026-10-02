@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
+import { readFileSync } from 'fs';
 
 /**
  * The sponsored-gas relayer (gasSponsorRelayer.ts): the single writer, every
@@ -28,6 +29,7 @@ const settings = vi.hoisted(() => ({ current: null as any }));
 vi.mock('./gasSponsorConfig.js', async (orig) => ({
   ...(await orig<typeof import('./gasSponsorConfig.js')>()),
   runnableSettings: async () => (settings.current ? { ok: true, settings: settings.current } : { ok: false, reason: 'off' }),
+  gasSponsorSettings: () => settings.current ?? { enabled: false, reason: 'off', misconfigured: false },
 }));
 const elig = vi.hoisted(() => ({ agent: { ok: true, ownerDid: 'did:privy:abc' } as any, task: { ok: true } as any }));
 vi.mock('./gasSponsorEligibility.js', () => ({
@@ -76,7 +78,7 @@ vi.mock('./gasSponsorStore.js', () => ({
   nextStoredNonce: vi.fn(async () => (db.txs.length ? Math.max(...db.txs.map((t: Tx) => t.nonce)) + 1 : null)),
   recordSignedTx: vi.fn(async (tx: any) => {
     db.events.push(`signed:${tx.nonce}`);
-    const row = { id: db.txs.length + 1, ...tx, status: 'signed' };
+    const row = { id: db.txs.length + 1, ...tx, status: 'signed', createdAt: new Date() };
     db.txs.push(row);
     return row;
   }),
@@ -98,16 +100,31 @@ vi.mock('./gasSponsorStore.js', () => ({
 
 const chain = vi.hoisted(() => ({
   task: null as any, deadline: null as bigint | null, state: null as any,
+  // What a fresh eth_call of getTask sees, when it differs from the first read.
+  taskAfter: null as any, escalated: true,
   code: '0x', estimate: 120_000n, estimateError: null as any, baseFee: 20n * 10n ** 9n,
   sponsorNonce: 0, latestNonce: 0, mined: new Map<string, { status: number; logs: any[]; gasUsed: bigint; gasPrice: bigint }>(),
   sent: [] as string[], broadcastError: null as any, balance: 10n ** 19n, knownTx: new Set<string>(),
   onBroadcast: null as null | ((raw: string, hash: string) => void),
 }));
+const ESCROW_IFACE = new ethers.Interface(JSON.parse(readFileSync(new URL('../abi/BlindEscrow.json', import.meta.url), 'utf-8')));
+function ethCall(data: string): string {
+  const fn = ESCROW_IFACE.parseTransaction({ data })!;
+  if (fn.name === 'unjudgedEscalation') return ESCROW_IFACE.encodeFunctionResult(fn.name, [chain.escalated]);
+  const t = chain.taskAfter ?? chain.task;
+  return ESCROW_IFACE.encodeFunctionResult('getTask', [[
+    t.agent.length === 42 ? t.agent : ethers.ZeroAddress, t.worker, t.token, t.amount, t.taskHash, t.evidenceHash, t.status,
+    '', '', t.createdAt, t.deadline, t.submissionAttempts,
+  ]]);
+}
 const provider = {
   // ethers answers a repeat getCode within 250 ms from its cache: the relayer must read code with eth_getCode.
   getCode: vi.fn(async () => { throw new Error('read code with eth_getCode, not the cached getCode'); }),
   send: vi.fn(async (method: string, params: any[]) => {
     if (method === 'eth_getCode') return chain.code;
+    if (method === 'eth_call') return ethCall(params[0].data);
+    if (method === 'eth_getTransactionCount') return ethers.toQuantity(chain.latestNonce);
+    if (method === 'eth_getTransactionByHash') return chain.knownTx.has(params[0]) ? { hash: params[0], blockNumber: '0x9' } : null;
     if (method === 'eth_estimateGas') {
       if (chain.estimateError) throw chain.estimateError;
       return ethers.toQuantity(chain.estimate);
@@ -133,7 +150,7 @@ const provider = {
   getTransaction: vi.fn(async (hash: string) => (chain.knownTx.has(hash) ? { hash, blockNumber: 9 } : null)),
   getBalance: vi.fn(async () => chain.balance),
 };
-vi.mock('./chainRuntime.js', () => ({ chainRuntime: () => ({ provider }) }));
+vi.mock('./chainRuntime.js', () => ({ chainRuntime: () => ({ provider, escrow: { interface: ESCROW_IFACE } }) }));
 vi.mock('./escrow.js', () => ({
   getTaskOn: vi.fn(async () => chain.task),
   effectiveDeadlineOn: vi.fn(async () => chain.deadline),
@@ -177,7 +194,7 @@ function baseSettings() {
     enabled: true, chain: { key: 'arc', chainId: CHAIN_ID, gas: { workerTxGasLimit: 200_000n }, token: { address: '0x3600000000000000000000000000000000000000', unit: { decimals: 6 } } },
     chainId: CHAIN_ID, escrow: ESCROW, delegate: DELEGATE, sponsor: new ethers.Wallet(sponsorKey), maxGas: 200_000n, maxFeeWei: 100n * GWEI,
     minTaskRaw: 100_000n, caps: { perAgentDaily: 10, perUserDaily: 20, perPosterDaily: 10, hourlyBudgetWei: 10n ** 17n, dailyBudgetWei: 10n ** 18n, maxStrikes: 3 },
-    maxFailuresPerHour: 5,
+    maxFailuresPerHour: 5, stuckMs: 600_000,
   };
 }
 
@@ -234,7 +251,7 @@ beforeEach(async () => {
   Object.assign(chain, {
     task: { agent: '0xposter', worker: AGENT, token: '0x3600000000000000000000000000000000000000', amount: 1_000_000n, taskHash: TASK_HASH,
       evidenceHash: ethers.ZeroHash, status: 1, createdAt: 0n, deadline: BigInt(Math.floor(Date.now() / 1000) + 86_400), submissionAttempts: 0 },
-    deadline: null, state: { executorAddress: AGENT.toLowerCase(), assignTxHash: '0xassign', resultData: RESULT },
+    deadline: null, state: { executorAddress: AGENT.toLowerCase(), assignTxHash: '0xassign', resultData: RESULT }, taskAfter: null, escalated: true,
     code: '0x', estimate: 120_000n, estimateError: null, baseFee: 20n * GWEI, sponsorNonce: 3, latestNonce: 3, sent: [], broadcastError: null,
     balance: 10n ** 19n, onBroadcast: null,
   });
@@ -339,11 +356,12 @@ describe('a sponsored first submit', () => {
     expect(r.costWei).toBe(50_000n * 20n * GWEI);
   });
 
-  it('keeps the signed bytes when the broadcast fails', async () => {
+  it('keeps the signed bytes when the broadcast does not go through, and answers pending', async () => {
     await writer();
     holdReservation();
     chain.broadcastError = new Error('timeout');
-    expect(await relayer.relaySponsoredCall(await input({ authorization: auth() }))).toMatchObject({ ok: false, code: 'BROADCAST_FAILED' });
+    expect(await relayer.relaySponsoredCall(await input({ authorization: auth() })))
+      .toMatchObject({ ok: false, status: 202, code: 'PENDING', txHash: db.txs[0]?.txHash });
     expect(db.txs[0].status).toBe('signed');
   });
 
@@ -475,8 +493,8 @@ describe('what is checked before anything is sent', () => {
     const r = holdReservation();
     const iface = new ethers.Interface(['error InvalidNonce(uint256 current)']);
     chain.estimateError = Object.assign(new Error('execution reverted'), { data: iface.encodeErrorResult('InvalidNonce', [1n]) });
-    const getTask = (await import('./escrow.js')).getTaskOn as any;
-    getTask.mockImplementationOnce(async () => chain.task).mockImplementationOnce(async () => ({ ...chain.task, status: 2, evidenceHash: EVIDENCE }));
+    // Read fresh after the revert: the same signed call landed meanwhile.
+    chain.taskAfter = { ...chain.task, status: 2, evidenceHash: EVIDENCE };
     expect(await relayer.relaySponsoredCall(await input({ authorization: auth() }))).toEqual({ ok: true, txHash: null, landedElsewhere: true });
     expect(r.status).toBe('used');
     expect(chain.sent).toEqual([]);
@@ -552,9 +570,13 @@ describe('a sponsored releaseUnjudgedWork', () => {
     expect(db.reservations[0]).toMatchObject({ kind: 'release', status: 'used' });
   });
 
-  it('refuses a task that is not awaiting an unjudged release', async () => {
+  it('refuses a task that is not awaiting an unjudged release, or that the poster never escalated', async () => {
     await writer();
     expect(await relayer.relaySponsoredCall(await input({ kind: 'release', authorization: auth() }))).toMatchObject({ ok: false, code: 'NOT_RELEASABLE' });
+    chain.task.status = 6; // Disputed, but by a dispute rather than the poster's claimTimeout
+    chain.escalated = false;
+    expect(await relayer.relaySponsoredCall(await input({ kind: 'release', authorization: auth() }))).toMatchObject({ ok: false, code: 'NOT_RELEASABLE' });
+    expect(chain.sent).toEqual([]);
   });
 
   it('reserves nothing for a call that is refused before sending', async () => {
@@ -566,6 +588,104 @@ describe('a sponsored releaseUnjudgedWork', () => {
     await expect(relayer.relaySponsoredCall(await input({ kind: 'release', authorization: auth() })))
       .resolves.toMatchObject({ ok: false, code: 'SIMULATION_REVERTED' });
     expect(db.reservations).toEqual([]);
+  });
+});
+
+describe('a call that is out (pending blocks fallback)', () => {
+  const sendOut = async () => {
+    await writer();
+    const r = holdReservation();
+    chain.broadcastError = new Error('timeout');
+    await relayer.relaySponsoredCall(await input({ authorization: auth() }));
+    chain.broadcastError = null;
+    return r;
+  };
+
+  it('is pending while our transaction may still land, even once sponsorship is killed', async () => {
+    relayer._setReceiptTimeout(50);
+    await sendOut();
+    expect(await relayer.sponsoredCallStatus(AGENT, TASK_ID, 'submit')).toEqual({ status: 'pending', txHash: db.txs[0].txHash });
+    db.controls.killed = true;
+    // A repeat answers with the call already out rather than refusing as killed.
+    expect(await relayer.relaySponsoredCall(await input({ authorization: auth() }))).toMatchObject({ ok: false, code: 'PENDING', txHash: db.txs[0].txHash });
+    expect(new Set(chain.sent).size).toBe(0);
+    relayer._setReceiptTimeout(60_000);
+  });
+
+  it('is confirmed once it lands, and failed for good once the task moved on without it', async () => {
+    await sendOut();
+    chain.mined.set(db.txs[0].txHash, { status: 1, logs: [evidenceLog()], gasUsed: 150_000n, gasPrice: 20n * GWEI });
+    chain.code = DESIGNATOR;
+    expect(await relayer.sponsoredCallStatus(AGENT, TASK_ID, 'submit')).toEqual({ status: 'confirmed', txHash: db.txs[0].txHash });
+
+    db.reservations.length = 0;
+    db.txs.length = 0;
+    chain.mined.clear();
+    await sendOut();
+    chain.taskAfter = { ...chain.task, status: 5 }; // the poster reclaimed it
+    expect(await relayer.sponsoredCallStatus(AGENT, TASK_ID, 'submit')).toMatchObject({ status: 'failed', reason: 'task_moved' });
+  });
+
+  it('counts the same call landed by someone else as confirmed', async () => {
+    await sendOut();
+    chain.taskAfter = { ...chain.task, status: 2, evidenceHash: EVIDENCE };
+    expect(await relayer.sponsoredCallStatus(AGENT, TASK_ID, 'submit')).toEqual({ status: 'confirmed', txHash: null });
+    expect(db.reservations[0].status).toBe('used');
+  });
+
+  it('is none for another agent, or before anything was sent', async () => {
+    await sendOut();
+    expect(await relayer.sponsoredCallStatus('0x' + '12'.repeat(20), TASK_ID, 'submit')).toEqual({ status: 'none' });
+    expect(await relayer.sponsoredCallStatus(AGENT, TASK_ID, 'release')).toEqual({ status: 'none' });
+  });
+
+  it('counts our reverted transaction as success when the same call landed first (a lost race)', async () => {
+    await writer();
+    const r = holdReservation();
+    chain.onBroadcast = (_raw, hash) => {
+      chain.mined.set(hash, { status: 0, logs: [], gasUsed: 40_000n, gasPrice: 20n * GWEI });
+      chain.taskAfter = { ...chain.task, status: 2, evidenceHash: EVIDENCE };
+    };
+    expect(await relayer.relaySponsoredCall(await input({ authorization: auth() }))).toEqual({ ok: true, txHash: null, landedElsewhere: true });
+    expect(r.status).toBe('used');
+    expect(r.costWei).toBe(40_000n * 20n * GWEI); // our revert still costs, and counts
+  });
+});
+
+describe('a first broadcast the node refuses', () => {
+  it('"nonce too low" on fresh bytes means the key signs elsewhere: kill, and nothing is pending', async () => {
+    await writer();
+    holdReservation();
+    chain.broadcastError = Object.assign(new Error('nonce too low'), { code: 'NONCE_EXPIRED' });
+    expect(await relayer.relaySponsoredCall(await input({ authorization: auth() }))).toMatchObject({ ok: false, code: 'NOT_SENT' });
+    expect(db.txs[0].status).toBe('dropped');
+    expect(db.controls.killed).toBe(true);
+  });
+
+  it('an outright rejection pauses, and the call is final', async () => {
+    await writer();
+    holdReservation();
+    chain.broadcastError = Object.assign(new Error('insufficient funds for gas * price + value'), { code: 'INSUFFICIENT_FUNDS' });
+    expect(await relayer.relaySponsoredCall(await input({ authorization: auth() }))).toMatchObject({ ok: false, code: 'NOT_SENT' });
+    expect(db.txs[0].status).toBe('rejected');
+    expect(db.controls).toMatchObject({ paused: true, killed: false });
+    expect(await relayer.sponsoredCallStatus(AGENT, TASK_ID, 'submit')).toMatchObject({ status: 'failed', reason: 'rejected' });
+  });
+});
+
+describe('classifyBroadcastError', () => {
+  it.each([
+    [new Error('already known'), 'known'],
+    [Object.assign(new Error('x'), { code: 'NONCE_EXPIRED' }), 'nonce_low'],
+    [new Error('nonce too low: next nonce 9, tx nonce 3'), 'nonce_low'],
+    [new Error('replacement transaction underpriced'), 'transient'],
+    [new Error('max fee per gas less than block base fee'), 'transient'],
+    [Object.assign(new Error('request timeout'), { code: 'TIMEOUT' }), 'transient'],
+    [new TypeError('fetch failed'), 'transient'],
+    [Object.assign(new Error('insufficient funds'), { code: 'INSUFFICIENT_FUNDS' }), 'rejected'],
+    [new Error('invalid sender'), 'rejected'],
+  ])('%s → %s', (err, kind) => {
+    expect(relayer.classifyBroadcastError(err)).toBe(kind);
   });
 });
 
@@ -597,16 +717,82 @@ describe('recovery', () => {
     expect(r.status).toBe('used');
   });
 
-  it('marks one whose nonce went to another transaction as dropped, and sends nothing', async () => {
+  it('kills sponsorship when a stored nonce went to a transaction that is not ours, and sends nothing', async () => {
     await writer();
     holdReservation();
     chain.broadcastError = new Error('timeout');
     await relayer.relaySponsoredCall(await input({ authorization: auth() }));
     chain.broadcastError = null;
     chain.latestNonce = 9;
-    await relayer.recoverSponsorTxs(settings.current);
+    const t0 = Date.now();
+    await relayer.recoverSponsorTxs(settings.current, t0);
+    // One look is not enough: a lagging replica may not have our transaction yet.
+    expect(db.txs[0].status).toBe('signed');
+    expect(db.controls.killed).toBe(false);
+    await relayer.recoverSponsorTxs(settings.current, t0 + 30_000);
     expect(db.txs[0].status).toBe('dropped');
+    expect(db.controls).toMatchObject({ killed: true });
+    expect(db.setControlsCalls.at(-1).reason).toMatch(new RegExp(`nonce 3 was used by a transaction that is not ${db.txs[0].txHash}`));
     expect(chain.sent).toEqual([]);
+  });
+
+  it('leaves a passed nonce alone when our transaction did land there', async () => {
+    await writer();
+    holdReservation();
+    chain.broadcastError = new Error('timeout');
+    await relayer.relaySponsoredCall(await input({ authorization: auth() }));
+    chain.latestNonce = 9;
+    chain.knownTx.add(db.txs[0].txHash);
+    await relayer.recoverSponsorTxs(settings.current, Date.now());
+    await relayer.recoverSponsorTxs(settings.current, Date.now() + 60_000);
+    expect(db.txs[0].status).toBe('signed');
+    expect(db.controls.killed).toBe(false);
+  });
+
+  it('pauses, and alerts with the nonce and hash, when a stored transaction has not landed in time', async () => {
+    await writer();
+    holdReservation();
+    chain.broadcastError = new Error('timeout');
+    await relayer.relaySponsoredCall(await input({ authorization: auth() }));
+    chain.broadcastError = null;
+    chain.onBroadcast = null; // accepted, never mined
+    await relayer.recoverSponsorTxs(settings.current, Date.now() + 9 * 60_000);
+    expect(db.controls.paused).toBe(false);
+    await relayer.recoverSponsorTxs(settings.current, Date.now() + 10 * 60_000 + 1);
+    expect(db.controls.paused).toBe(true);
+    expect(db.setControlsCalls.at(-1).reason).toMatch(new RegExp(`${db.txs[0].txHash} \\(nonce 3\\) has not landed in 10 minutes`));
+    const report = await relayer.gasSponsorReport();
+    expect(report).toMatchObject({ lastTrip: { action: 'paused', nonce: 3, txHash: db.txs[0].txHash }, oldestPendingTx: { nonce: 3, txHash: db.txs[0].txHash } });
+    expect(chain.sent).toHaveLength(2); // the same bytes, twice
+    expect(new Set(chain.sent).size).toBe(1);
+  });
+
+  it('pauses on a non-transient rejection, and frees the nonce', async () => {
+    await writer();
+    holdReservation();
+    chain.broadcastError = new Error('timeout');
+    await relayer.relaySponsoredCall(await input({ authorization: auth() }));
+    chain.broadcastError = Object.assign(new Error('invalid sender'), { code: 'UNKNOWN_ERROR' });
+    await relayer.recoverSponsorTxs(settings.current);
+    expect(db.txs[0].status).toBe('rejected');
+    expect(db.controls).toMatchObject({ paused: true, killed: false });
+  });
+
+  it('on "nonce too low", settles ours if it landed, and kills if it did not', async () => {
+    await writer();
+    holdReservation();
+    chain.broadcastError = new Error('timeout');
+    await relayer.relaySponsoredCall(await input({ authorization: auth() }));
+    chain.broadcastError = Object.assign(new Error('nonce too low'), { code: 'NONCE_EXPIRED' });
+    chain.knownTx.add(db.txs[0].txHash);
+    await relayer.recoverSponsorTxs(settings.current);
+    expect(db.controls.killed).toBe(false);
+    chain.knownTx.clear();
+    const t0 = Date.now();
+    await relayer.recoverSponsorTxs(settings.current, t0);
+    await relayer.recoverSponsorTxs(settings.current, t0 + 30_000);
+    expect(db.txs[0].status).toBe('dropped');
+    expect(db.controls.killed).toBe(true);
   });
 });
 
@@ -632,16 +818,24 @@ describe('the reservation sweep', () => {
     expect(db.strikes).toEqual([]);
   });
 
-  it('releases without a strike an hour lost to our side: sponsorship killed, or our transaction still out', async () => {
+  it('releases without a strike an hour lost to our side: sponsorship killed, or a transaction of ours that failed', async () => {
     const a = holdReservation({ expiresAt: new Date(Date.now() - 1) });
     db.controls.killed = true;
     await relayer.sweepReservations(settings.current);
     expect(a.status).toBe('released');
     db.controls.killed = false;
     const b = holdReservation({ taskId: 42n, expiresAt: new Date(Date.now() - 1) });
-    db.txs.push({ id: 7, chainId: CHAIN_ID, reservationId: b.id, sponsor: SPONSOR, nonce: 3, rawTx: '0x', txHash: '0xout', withAuthorization: false, status: 'sent' });
+    db.txs.push({ id: 7, chainId: CHAIN_ID, reservationId: b.id, sponsor: SPONSOR, nonce: 3, rawTx: '0x', txHash: '0xfailed', withAuthorization: false, status: 'reverted' });
     await relayer.sweepReservations(settings.current);
     expect(b.status).toBe('released');
+    expect(db.strikes).toEqual([]);
+  });
+
+  it('keeps a reservation past its hour while our transaction for it is still out', async () => {
+    const r = holdReservation({ expiresAt: new Date(Date.now() - 1) });
+    db.txs.push({ id: 8, chainId: CHAIN_ID, reservationId: r.id, sponsor: SPONSOR, nonce: 3, rawTx: '0x', txHash: '0xout', withAuthorization: false, status: 'sent' });
+    await relayer.sweepReservations(settings.current);
+    expect(r.status).toBe('reserved');
     expect(db.strikes).toEqual([]);
   });
 

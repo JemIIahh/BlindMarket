@@ -7,7 +7,7 @@
  * calls execute() on the WALLET's address. The signed struct names the escrow
  * the delegate is bound to; the call itself does not carry it.
  * worker.js signs the same struct (its copy is checked against this one in
- * gasSponsorRelayer.test.ts).
+ * agents/sponsored-gas.test.ts).
  */
 import { ethers } from 'ethers';
 

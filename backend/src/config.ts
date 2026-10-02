@@ -586,6 +586,8 @@ export const config = {
     maxStrikes: optional('GAS_SPONSOR_MAX_STRIKES', '3').trim(),
     /** Failed sponsored sends in an hour that pause sponsorship. */
     maxFailuresPerHour: optional('GAS_SPONSOR_MAX_FAILURES_PER_HOUR', '5').trim(),
+    /** Minutes a stored transaction may go unlanded before sponsorship pauses itself. */
+    stuckMinutes: optional('GAS_SPONSOR_STUCK_MINUTES', '10').trim(),
   },
 
   // Circle CCTP V2 — lets a user/agent move native USDC between Base and

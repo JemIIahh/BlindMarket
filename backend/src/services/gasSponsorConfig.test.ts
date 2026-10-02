@@ -33,9 +33,16 @@ const arc = vi.hoisted(() => ({
   },
 }));
 vi.mock('./settlementChains.js', () => ({ settlementChainConfig: () => arc.entry }));
-const roles = vi.hoisted(() => ({ verifier: '0x' + '01'.repeat(20), treasury: '0x' + '02'.repeat(20), admin: '0x' + '03'.repeat(20), fail: false }));
+const roles = vi.hoisted(() => ({
+  verifier: '0x' + '01'.repeat(20), treasury: '0x' + '02'.repeat(20), admin: '0x' + '03'.repeat(20), fail: false,
+  delegateEscrow: '0x' + 'e5'.repeat(20) as string | null,
+}));
 vi.mock('./chainRuntime.js', () => ({
   chainRuntime: () => ({
+    provider: {
+      // The delegate's ESCROW(); null = no contract there.
+      call: async () => (roles.delegateEscrow ? ethers.AbiCoder.defaultAbiCoder().encode(['address'], [roles.delegateEscrow]) : '0x'),
+    },
     escrow: {
       verifier: async () => { if (roles.fail) throw new Error('rpc down'); return roles.verifier; },
       treasury: async () => roles.treasury,
@@ -52,7 +59,7 @@ function enable(o: Record<string, unknown> = {}) {
   cfg.gasSponsor = {
     enabled: true, privateKey: sponsorKey, maxGas: '200000', maxFeeGwei: '100', minTaskUsdc: '0.10',
     perAgentDaily: '10', perUserDaily: '20', perPosterDaily: '10', hourlyBudgetUsdc: '0.25', dailyBudgetUsdc: '1',
-    maxStrikes: '3', maxFailuresPerHour: '5', ...o,
+    maxStrikes: '3', maxFailuresPerHour: '5', stuckMinutes: '10', ...o,
   };
 }
 
@@ -60,7 +67,7 @@ beforeEach(() => {
   Object.assign(cfg, { databaseUrl: 'postgres://x', deploymentId: 'staging-arc', arcAgentDelegateAddress: DELEGATE, arcMarketplaceSignerPrivateKey: '', ogStoragePrivateKey: '' });
   cfg.gasSponsor = { enabled: false };
   arc.entry.escrowAddress = '0x' + 'e5'.repeat(20);
-  Object.assign(roles, { verifier: '0x' + '01'.repeat(20), treasury: '0x' + '02'.repeat(20), admin: '0x' + '03'.repeat(20), fail: false });
+  Object.assign(roles, { verifier: '0x' + '01'.repeat(20), treasury: '0x' + '02'.repeat(20), admin: '0x' + '03'.repeat(20), fail: false, delegateEscrow: '0x' + 'e5'.repeat(20) });
   identity.allowed = true;
   _resetSponsorRoles();
 });
@@ -77,6 +84,7 @@ describe('gasSponsorSettings', () => {
       minTaskRaw: 100_000n,
       caps: { perAgentDaily: 10, perUserDaily: 20, perPosterDaily: 10, hourlyBudgetWei: 25n * 10n ** 16n, dailyBudgetWei: 10n ** 18n, maxStrikes: 3 },
       maxFailuresPerHour: 5,
+      stuckMs: 600_000,
     });
   });
 
@@ -117,6 +125,15 @@ describe('runnableSettings', () => {
     enable();
     roles[role] = SPONSOR;
     expect(await runnableSettings('test')).toEqual({ ok: false, reason: expect.stringMatching(new RegExp(`escrow's ${role}`)) });
+  });
+
+  it('refuses a delegate bound to another escrow, or no delegate at the address', async () => {
+    enable();
+    roles.delegateEscrow = '0x' + 'e6'.repeat(20);
+    expect(await runnableSettings('test')).toEqual({ ok: false, reason: expect.stringMatching(/is bound to escrow 0x[eE]6/) });
+    _resetSponsorRoles();
+    roles.delegateEscrow = null;
+    expect(await runnableSettings('test')).toEqual({ ok: false, reason: expect.stringMatching(/could not read ESCROW\(\)/) });
   });
 
   it("stays off while a role can't be read, and on another deployment's Redis", async () => {

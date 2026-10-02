@@ -39,6 +39,7 @@ import {
   MAX_SETUP_ATTEMPTS,
   MIN_SECONDS_BEFORE_DEADLINE,
   RESERVATION_TTL_SECONDS,
+  gasSponsorSettings,
   runnableSettings,
   type GasSponsorSettings,
 } from './gasSponsorConfig.js';
@@ -62,6 +63,7 @@ import {
   usage,
   walletKeyExported,
   type Reservation,
+  type SponsoredTx as SponsoredTxRecord,
 } from './gasSponsorStore.js';
 import { authorizationSigner, authorizationToRpc, isDelegatedTo, signSetCodeTx, type Authorization } from './eip7702.js';
 import { callSigner, DelegateKind, delegateError, encodeExecute, receiptProvesCall } from './blindAgentDelegate.js';
@@ -69,7 +71,7 @@ import { callSigner, DelegateKind, delegateError, encodeExecute, receiptProvesCa
 type Enabled = Extract<GasSponsorSettings, { enabled: true }>;
 
 const RECEIPT_POLL_MS = 1_000;
-const RECEIPT_TIMEOUT_MS = 60_000;
+let receiptTimeoutMs = 60_000;
 const SWEEP_MS = 60_000;
 const WRITER_RETRY_MS = 30_000;
 
@@ -85,11 +87,26 @@ export interface SponsoredCallInput {
   authorization?: Authorization;
 }
 
+/**
+ * ok: the call landed (ours, or the same signed call sent by someone else).
+ * Otherwise a refusal, final unless code is PENDING (202): then our
+ * transaction is out and may still land, so the caller must not fall back
+ * to paying its own gas or hand the task back (sponsoredCallStatus says when
+ * it is final).
+ */
 export type RelayResult =
   | { ok: true; txHash: string | null; landedElsewhere?: boolean }
-  | { ok: false; status: number; code: string; message: string };
+  | { ok: false; status: number; code: string; message: string; txHash?: string };
+
+/** What became of an agent's sponsored call for a task (GET /a2a/tasks/:id/sponsored-call). */
+export type CallStatus =
+  | { status: 'none' }
+  | { status: 'pending'; txHash: string }
+  | { status: 'confirmed'; txHash: string | null }
+  | { status: 'failed'; txHash: string | null; reason: string };
 
 const refuse = (status: number, code: string, message: string): RelayResult => ({ ok: false, status, code, message });
+const pendingResult = (txHash: string, message: string): RelayResult => ({ ok: false, status: 202, code: 'PENDING', message, txHash });
 
 // ── The writer ───────────────────────────────────────────────────────────────
 
@@ -175,6 +192,96 @@ export async function reservationBudgetWei(settings: Enabled): Promise<bigint> {
   return (settings.maxGas * GAS_LIMIT_MARGIN_PERCENT * price) / 100n;
 }
 
+function escrowInterface(): ethers.Interface {
+  const escrow = chainRuntime('arc').escrow;
+  if (!escrow) throw new Error('there is no Arc escrow contract here');
+  return escrow.interface;
+}
+
+/** The escrow's task as of `block`, read straight from the node (no ethers cache). */
+async function taskAt(settings: Enabled, taskId: bigint, block = 'latest'): Promise<{ status: number; evidenceHash: string }> {
+  const iface = escrowInterface();
+  const raw = await provider().send('eth_call', [{ to: settings.escrow, data: iface.encodeFunctionData('getTask', [taskId]) }, block]);
+  const [t] = iface.decodeFunctionResult('getTask', raw);
+  return { status: Number(t.status), evidenceHash: String(t.evidenceHash) };
+}
+
+/** Whether the poster escalated the task's unjudged work (claimTimeout), the precondition of releaseUnjudgedWork. */
+async function escalated(settings: Enabled, taskId: bigint): Promise<boolean> {
+  const iface = escrowInterface();
+  const raw = await provider().send('eth_call', [{ to: settings.escrow, data: iface.encodeFunctionData('unjudgedEscalation', [taskId]) }, 'latest']);
+  return Boolean(iface.decodeFunctionResult('unjudgedEscalation', raw)[0]);
+}
+
+// ── Circuit breaker ──────────────────────────────────────────────────────────
+
+export interface BreakerTrip {
+  at: string;
+  action: 'paused' | 'killed';
+  reason: string;
+  nonce: number;
+  txHash: string;
+}
+
+let lastTrip: BreakerTrip | null = null;
+const stuckAlerted = new Set<string>();
+const lostSince = new Map<string, number>();
+// A transaction seen at a passed nonce with no record of it landing must look
+// lost on two passes this far apart before we call the nonce taken: an RPC
+// replica can lag on the transaction while it is ahead on the count.
+const LOST_CONFIRM_MS = 25_000;
+
+/**
+ * Pause new reservations (or stop every send) by itself, alert, and show the
+ * reason on /health/bridge. Only a person lifts it; nothing is re-signed.
+ */
+async function trip(settings: Enabled, action: 'paused' | 'killed', reason: string, tx: { nonce: number; txHash: string }): Promise<void> {
+  lastTrip = { at: new Date().toISOString(), action, reason, nonce: tx.nonce, txHash: tx.txHash };
+  await setControls(settings.chainId, action === 'killed' ? { killed: true } : { paused: true }, `auto: ${reason}`, 'auto');
+  console.error(`[gasSponsor] ⛔ ${action} automatically: ${reason}`);
+  Sentry.captureMessage(`gas sponsor ${action} automatically on ${settings.chainId}: ${reason}`, action === 'killed' ? 'fatal' : 'error');
+}
+
+/**
+ * What a failed eth_sendRawTransaction means for the stored bytes:
+ * - known: already in the pool;
+ * - nonce_low: the nonce is used (ours landed, or the key signed elsewhere);
+ * - transient: no answer, or fees moved; the same bytes can land later;
+ * - rejected: the node refused them outright and never will take them.
+ */
+export function classifyBroadcastError(err: unknown): 'known' | 'nonce_low' | 'transient' | 'rejected' {
+  const e = err as { code?: string; message?: string; shortMessage?: string; error?: { message?: string }; info?: { error?: { message?: string } } } | null;
+  const msg = [e?.message, e?.shortMessage, e?.error?.message, e?.info?.error?.message].filter(Boolean).join(' ');
+  if (/already known|known transaction|already imported/i.test(msg)) return 'known';
+  if (e?.code === 'NONCE_EXPIRED' || /nonce too low|nonce has already been used|nonce is too low/i.test(msg)) return 'nonce_low';
+  if (/underpriced|fee too low|fee cap|base fee|max fee per gas less than/i.test(msg)) return 'transient';
+  if (['NETWORK_ERROR', 'TIMEOUT', 'SERVER_ERROR'].includes(e?.code ?? '') || /fetch failed|ECONN|ETIMEDOUT|socket hang up|network|timed? ?out/i.test(msg)) {
+    return 'transient';
+  }
+  return 'rejected';
+}
+
+/**
+ * A stored transaction whose nonce the chain has passed: it landed (its
+ * receipt lags), or a transaction that is not ours took the nonce. The
+ * latter means the sponsor key signs somewhere else: stop every send.
+ * Returns true when it is settled as lost.
+ */
+async function nonceTaken(settings: Enabled, tx: SponsoredTxRecord, now: number, confirmAfterMs = LOST_CONFIRM_MS): Promise<boolean> {
+  const seen = (await provider().send('eth_getTransactionByHash', [tx.txHash]).catch(() => null)) as { blockNumber?: string | null } | null;
+  if (seen?.blockNumber) {
+    lostSince.delete(tx.txHash);
+    return false;
+  }
+  const first = lostSince.get(tx.txHash);
+  if (first === undefined) lostSince.set(tx.txHash, now);
+  if (first === undefined ? confirmAfterMs > 0 : now - first < confirmAfterMs) return false;
+  lostSince.delete(tx.txHash);
+  await setTxStatus(tx.txHash, 'dropped');
+  await trip(settings, 'killed', `the sponsor's nonce ${tx.nonce} was used by a transaction that is not ${tx.txHash}: the sponsor key is signing elsewhere`, tx);
+  return true;
+}
+
 /** Whether `taskHash` was assigned to `wallet` through our /accept (our marketplaceAssign). */
 async function assignedByUs(taskHash: string, wallet: string): Promise<boolean> {
   const state = await a2aStore.getState(taskHash);
@@ -204,15 +311,20 @@ export async function relaySponsoredCall(input: SponsoredCallInput): Promise<Rel
   const run = await runnableSettings('gas sponsor relay');
   if (!run.ok) return refuse(503, 'GAS_SPONSOR_OFF', `Sponsored gas is off here: ${run.reason}`);
   const settings = run.settings;
+  const wallet = ethers.getAddress(input.agent.walletAddress);
+  const kind = input.kind === 'submit' ? DelegateKind.SubmitEvidence : DelegateKind.ReleaseUnjudgedWork;
+  const held = await getReservation(settings.chainId, input.taskId, input.kind);
+  // A call of ours already out for this reservation: wait on it and answer
+  // with it, whatever changed since (a kill, an export). Never a second send.
+  if (held?.status === 'reserved' && held.agentWallet === wallet.toLowerCase()) {
+    const out = await inFlight(held.id);
+    if (out) return settle(settings, held, { wallet, kind, taskId: input.taskId }, out);
+  }
   if (!writer) return refuse(503, 'GAS_SPONSOR_OFF', 'This backend process is not the sponsor writer');
   const controls = await getControls(settings.chainId);
   if (controls.killed) return refuse(409, 'GAS_SPONSOR_KILLED', 'Sponsored gas is stopped');
 
-  const wallet = ethers.getAddress(input.agent.walletAddress);
-  const kind = input.kind === 'submit' ? DelegateKind.SubmitEvidence : DelegateKind.ReleaseUnjudgedWork;
-
   const eligible = await agentEligibility(settings, input.agent);
-  const held = await getReservation(settings.chainId, input.taskId, input.kind);
   if (!eligible.ok) {
     // An export between reservation and relay ends it.
     if (held?.status === 'reserved' && held.agentWallet === wallet.toLowerCase()) await closeReservation(held.id, 'released');
@@ -242,9 +354,6 @@ export async function relaySponsoredCall(input: SponsoredCallInput): Promise<Rel
       return refuse(409, 'NO_RESERVATION', 'No sponsored-gas reservation is held for this task by this agent');
     }
     reservation = ours;
-    // A repeat while our transaction is still out: wait for that one, never send a second.
-    const pending = await inFlight(reservation.id);
-    if (pending) return settle(settings, reservation, { wallet, kind, taskId: input.taskId }, pending);
     if (task.status !== TaskStatus.Assigned || task.submissionAttempts !== 0) {
       return refuse(409, 'NOT_FIRST_SUBMIT', 'Only the first submit of an Assigned task is sponsored');
     }
@@ -258,7 +367,12 @@ export async function relaySponsoredCall(input: SponsoredCallInput): Promise<Rel
       return refuse(409, 'EVIDENCE_MISMATCH', 'The signed evidence is not the result submitted for this task');
     }
   } else {
-    if (task.status !== TaskStatus.Disputed) return refuse(409, 'NOT_RELEASABLE', 'The task is not awaiting an unjudged release');
+    // releaseUnjudgedWork needs the poster's escalation (claimTimeout on
+    // delivered, unjudged work) and the dispute window passed; the window is
+    // left to the simulation below, which reverts inside it.
+    if (task.status !== TaskStatus.Disputed || !(await escalated(settings, input.taskId))) {
+      return refuse(409, 'NOT_RELEASABLE', 'The task is not escalated unjudged work awaiting release');
+    }
     const taskHash = task.taskHash.toLowerCase();
     if (!(await assignedByUs(taskHash, wallet))) return refuse(409, 'NOT_OURS', 'This task was not assigned through BlindMarket');
     const taskOk = await taskEligibility(settings, input.taskId, task, { verifier: false });
@@ -288,7 +402,7 @@ export async function relaySponsoredCall(input: SponsoredCallInput): Promise<Rel
   if (!simulated.ok) {
     if (simulated.error?.name === 'InvalidNonce' && kind === DelegateKind.SubmitEvidence && reservation) {
       // Someone else may have landed this signed call already.
-      const now = await getTaskOn('arc', Number(input.taskId));
+      const now = await taskAt(settings, input.taskId);
       if (now.status === TaskStatus.Submitted && now.evidenceHash.toLowerCase() === evidenceHash.toLowerCase()) {
         await markReservationUsed(reservation.id, null);
         report(settings, wallet, input.kind, input.taskId, 'landed_elsewhere');
@@ -320,8 +434,6 @@ export async function relaySponsoredCall(input: SponsoredCallInput): Promise<Rel
     );
     if (!reserved.ok) return refuse(409, 'GAS_SPONSOR_UNAVAILABLE', `No sponsor budget for this release (${reserved.refusal})`);
     reservation = reserved.reservation;
-    const pending = await inFlight(reservation.id);
-    if (pending) return settle(settings, reservation, { wallet, kind, taskId: input.taskId }, pending);
   }
 
   return send(settings, reservation, {
@@ -391,6 +503,7 @@ async function send(settings: Enabled, reservation: Reservation, tx: Prepared): 
     const sponsor = settings.sponsor;
     let raw: string;
     let hash: string;
+    let nonce: number;
     try {
       const stale = await recheckBeforeSend(settings, tx);
       if (stale) {
@@ -404,7 +517,7 @@ async function send(settings: Enabled, reservation: Reservation, tx: Prepared): 
         nextStoredNonce(settings.chainId, sponsor.address),
       ]);
       // Our own record wins over a lagging replica: never reuse a stored nonce.
-      const nonce = Math.max(pending, stored ?? 0);
+      nonce = Math.max(pending, stored ?? 0);
       if (tx.authorization) {
         ({ raw, hash } = signSetCodeTx(sponsor.signingKey, {
           chainId: BigInt(settings.chainId), nonce, maxPriorityFeePerGas: tx.maxPriorityFeePerGas, maxFeePerGas: tx.maxFeePerGas,
@@ -428,10 +541,26 @@ async function send(settings: Enabled, reservation: Reservation, tx: Prepared): 
     try {
       await provider().send('eth_sendRawTransaction', [raw]);
     } catch (err) {
-      // Maybe in a pool, maybe not: the bytes are stored and recover() re-sends them.
-      report(settings, tx.wallet, kindName, tx.taskId, 'broadcast_failed', { txHash: hash });
-      outcome = Promise.resolve(refuse(503, 'BROADCAST_FAILED', `Broadcast of ${hash} failed: ${(err as Error).message}`));
-      return null;
+      const why = classifyBroadcastError(err);
+      if (why !== 'known') {
+        report(settings, tx.wallet, kindName, tx.taskId, `broadcast_${why}`, { txHash: hash });
+        if (why === 'transient') {
+          // Maybe in a pool, maybe not: the bytes are stored and recover() re-sends them.
+          outcome = Promise.resolve(pendingResult(hash, `Broadcast of ${hash} did not go through yet; it is re-sent until it lands`));
+          return null;
+        }
+        // Final: these bytes can never land.
+        if (why === 'nonce_low') {
+          await setTxStatus(hash, 'dropped');
+          await trip(settings, 'killed', `the node says the sponsor's nonce ${nonce} is used, but not by ${hash}: the sponsor key is signing elsewhere`, { nonce, txHash: hash });
+        } else {
+          await setTxStatus(hash, 'rejected');
+          await trip(settings, 'paused', `the node rejected sponsored tx ${hash} (nonce ${nonce}): ${(err as Error).message}`, { nonce, txHash: hash });
+        }
+        if (tx.kind === DelegateKind.ReleaseUnjudgedWork) await closeReservation(reservation.id, 'released');
+        outcome = Promise.resolve(refuse(503, 'NOT_SENT', `Not sent: the node refused ${hash}`));
+        return null;
+      }
     }
     await setTxStatus(hash, 'sent');
     const settled = settle(settings, reservation, tx, hash);
@@ -442,7 +571,7 @@ async function send(settings: Enabled, reservation: Reservation, tx: Prepared): 
   return outcome;
 }
 
-async function pollReceipt(hash: string, timeoutMs = RECEIPT_TIMEOUT_MS): Promise<ethers.TransactionReceipt | null> {
+async function pollReceipt(hash: string, timeoutMs = receiptTimeoutMs): Promise<ethers.TransactionReceipt | null> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const receipt = await provider().getTransactionReceipt(hash).catch(() => null);
@@ -455,7 +584,7 @@ async function pollReceipt(hash: string, timeoutMs = RECEIPT_TIMEOUT_MS): Promis
 async function settle(settings: Enabled, reservation: Reservation, tx: Pick<Prepared, 'wallet' | 'kind' | 'taskId'>, hash: string): Promise<RelayResult> {
   const kindName = tx.kind === DelegateKind.SubmitEvidence ? 'submit' : 'release';
   const receipt = await pollReceipt(hash);
-  if (!receipt) return refuse(504, 'NOT_CONFIRMED', `Sent ${hash}; not confirmed yet`);
+  if (!receipt) return pendingResult(hash, `Sent ${hash}; not confirmed yet`);
   const cost = receipt.gasUsed * receipt.gasPrice;
   const proved = receipt.status === 1
     && receiptProvesCall(receipt.logs, settings.escrow, tx.kind, tx.taskId, tx.wallet)
@@ -467,6 +596,18 @@ async function settle(settings: Enabled, reservation: Reservation, tx: Pick<Prep
     await markReservationUsed(reservation.id, hash);
     return { ok: true, txHash: hash };
   }
+  if (tx.kind === DelegateKind.SubmitEvidence && reservation.status === 'reserved') {
+    // Lost the race: the same signed call landed first from someone else.
+    const [after, recorded] = await Promise.all([
+      taskAt(settings, tx.taskId, ethers.toQuantity(receipt.blockNumber)),
+      recordedEvidenceHash(reservation.taskHash),
+    ]);
+    if (after.status === TaskStatus.Submitted && recorded && after.evidenceHash.toLowerCase() === recorded.toLowerCase()) {
+      await markReservationUsed(reservation.id, null);
+      report(settings, tx.wallet, kindName, tx.taskId, 'landed_elsewhere', { txHash: hash });
+      return { ok: true, txHash: null, landedElsewhere: true };
+    }
+  }
   await maybeAutoPause(settings);
   if (status === 'noop') return refuse(409, 'SETUP_NOOP', 'The transaction ran but did nothing: the wallet is not delegated to the BlindMarket delegate');
   return refuse(409, 'REVERTED', `The sponsored transaction ${hash} reverted`);
@@ -476,45 +617,103 @@ async function settle(settings: Enabled, reservation: Reservation, tx: Pick<Prep
 
 /**
  * Settle or re-broadcast every stored transaction not known to be mined. The
- * same signed bytes go out again; nothing is ever signed twice.
+ * same signed bytes go out again; nothing is ever signed twice. Trips the
+ * breaker when a transaction can't land: its nonce taken by another
+ * transaction (kill), the node rejecting the bytes outright (pause), or no
+ * landing within GAS_SPONSOR_STUCK_MINUTES (pause).
  */
-export async function recoverSponsorTxs(settings: Enabled): Promise<void> {
+export async function recoverSponsorTxs(settings: Enabled, now = Date.now()): Promise<void> {
   if (!writer) return;
   const sponsor = settings.sponsor.address;
-  const latest = await provider().getTransactionCount(sponsor, 'latest');
+  const latest = Number(await provider().send('eth_getTransactionCount', [sponsor, 'latest']));
   for (const tx of await unsettledTxs(settings.chainId, sponsor)) {
     const receipt = await provider().getTransactionReceipt(tx.txHash).catch(() => null);
     if (receipt) {
-      // Every sponsored transaction is sent to the agent's own wallet.
-      const reservation = await getReservationById(tx.reservationId);
-      if (reservation) {
-        await settle(settings, reservation, {
-          wallet: ethers.getAddress(reservation.agentWallet),
-          kind: reservation.kind === 'submit' ? DelegateKind.SubmitEvidence : DelegateKind.ReleaseUnjudgedWork,
-          taskId: reservation.taskId,
-        }, tx.txHash);
-      }
+      lostSince.delete(tx.txHash);
+      await settleStored(settings, tx);
       continue;
     }
     if (tx.nonce < latest) {
-      // Its nonce is used. Mined but the receipt lags: leave it for the next
-      // pass. Not mined: another transaction took the nonce; these bytes can
-      // never land.
-      const seen = await provider().getTransaction(tx.txHash).catch(() => null);
-      if (!seen?.blockNumber) await setTxStatus(tx.txHash, 'dropped');
+      await nonceTaken(settings, tx, now);
       continue;
     }
     try {
       await provider().send('eth_sendRawTransaction', [tx.rawTx]);
       if (tx.status === 'signed') await setTxStatus(tx.txHash, 'sent');
     } catch (err) {
-      if (/already known|known transaction/i.test((err as Error).message)) {
+      const why = classifyBroadcastError(err);
+      if (why === 'known') {
         if (tx.status === 'signed') await setTxStatus(tx.txHash, 'sent');
+      } else if (why === 'nonce_low') {
+        await nonceTaken(settings, tx, now);
+        continue;
+      } else if (why === 'rejected') {
+        await setTxStatus(tx.txHash, 'rejected');
+        await trip(settings, 'paused', `the node rejected sponsored tx ${tx.txHash} (nonce ${tx.nonce}): ${(err as Error).message}`, tx);
+        continue;
       } else {
         console.warn(`[gasSponsor] re-broadcast of ${tx.txHash} failed: ${(err as Error).message}`);
       }
     }
+    if (now - tx.createdAt.getTime() >= settings.stuckMs && !stuckAlerted.has(tx.txHash)) {
+      stuckAlerted.add(tx.txHash);
+      await trip(settings, 'paused', `sponsored tx ${tx.txHash} (nonce ${tx.nonce}) has not landed in ${Math.round(settings.stuckMs / 60_000)} minutes`, tx);
+    }
   }
+}
+
+/** Settle a stored transaction that has a receipt, against its reservation. */
+async function settleStored(settings: Enabled, tx: SponsoredTxRecord): Promise<RelayResult | null> {
+  // Every sponsored transaction is sent to the agent's own wallet.
+  const reservation = await getReservationById(tx.reservationId);
+  if (!reservation) return null;
+  return settle(settings, reservation, {
+    wallet: ethers.getAddress(reservation.agentWallet),
+    kind: reservation.kind === 'submit' ? DelegateKind.SubmitEvidence : DelegateKind.ReleaseUnjudgedWork,
+    taskId: reservation.taskId,
+  }, tx.txHash);
+}
+
+// ── Call status ──────────────────────────────────────────────────────────────
+
+/**
+ * What became of the agent's sponsored call for a task: none sent; pending
+ * (out, may still land); confirmed (landed, ours or the same call from
+ * someone else); or failed for good (reverted, did nothing, its nonce went
+ * to another transaction, the node refused it, or the task moved on without
+ * it). While it is pending the worker neither pays its own gas for the call
+ * nor hands the task back.
+ */
+export async function sponsoredCallStatus(wallet: string, taskId: bigint, kind: 'submit' | 'release'): Promise<CallStatus> {
+  const s = gasSponsorSettings();
+  if (!s.enabled) return { status: 'none' };
+  const r = await getReservation(s.chainId, taskId, kind);
+  if (!r || r.agentWallet !== wallet.toLowerCase()) return { status: 'none' };
+  if (r.status === 'used') return { status: 'confirmed', txHash: r.txHash };
+  const txs = await txsForReservation(r.id);
+  const out = txs.find((t) => t.status === 'signed' || t.status === 'sent');
+  if (out) {
+    const receipt = await provider().getTransactionReceipt(out.txHash).catch(() => null);
+    if (receipt) {
+      const settled = await settleStored(s, out);
+      if (settled?.ok) return { status: 'confirmed', txHash: settled.txHash };
+      return { status: 'failed', txHash: out.txHash, reason: settled?.ok === false ? settled.code : 'settled' };
+    }
+    // Not mined: final once the task moved on without it (it can only revert now).
+    const task = await taskAt(s, taskId);
+    if (kind === 'submit' && task.status !== TaskStatus.Assigned) {
+      const recorded = await recordedEvidenceHash(r.taskHash);
+      if (task.status === TaskStatus.Submitted && recorded && task.evidenceHash.toLowerCase() === recorded.toLowerCase()) {
+        await markReservationUsed(r.id, null);
+        return { status: 'confirmed', txHash: null };
+      }
+      return { status: 'failed', txHash: out.txHash, reason: 'task_moved' };
+    }
+    if (kind === 'release' && task.status !== TaskStatus.Disputed) return { status: 'failed', txHash: out.txHash, reason: 'task_moved' };
+    return { status: 'pending', txHash: out.txHash };
+  }
+  const last = txs[txs.length - 1];
+  return last ? { status: 'failed', txHash: last.txHash, reason: last.status } : { status: 'none' };
 }
 
 // ── Sweep: reservations and auto-pause ──────────────────────────────────────
@@ -525,7 +724,8 @@ export async function recoverSponsorTxs(settings: Enabled): Promise<void> {
  * (released), or an hour passed since the assignment (expired, a strike).
  * The strike is for an agent that sat on its reservation, so an hour lost to
  * our side is released without one: sponsorship killed (the relay refuses
- * every call), or a transaction of ours still out for it.
+ * every call), or a transaction of ours sent for it that failed. One whose
+ * transaction is still out isn't swept at all until that transaction is final.
  */
 export async function sweepReservations(settings: Enabled, now = Date.now()): Promise<void> {
   const held = await heldReservations(settings.chainId);
@@ -533,6 +733,8 @@ export async function sweepReservations(settings: Enabled, now = Date.now()): Pr
   const killed = (await getControls(settings.chainId)).killed;
   for (const r of held) {
     try {
+      // Our transaction is still out: the reservation lives until it is final.
+      if ((await inFlight(r.id)) !== null) continue;
       const state = await a2aStore.getState(r.taskHash);
       if (r.kind === 'submit' && state?.executorAddress && state.executorAddress.toLowerCase() !== r.agentWallet) {
         await closeReservation(r.id, 'released');
@@ -613,10 +815,18 @@ export function startGasSponsor(): void {
   setInterval(() => { void tick(); }, Math.min(SWEEP_MS, WRITER_RETRY_MS)).unref();
 }
 
+/** Test hook: how long a relay waits for its receipt before answering pending. */
+export function _setReceiptTimeout(ms: number): void {
+  receiptTimeoutMs = ms;
+}
+
 /** Test hook. */
 export async function _resetGasSponsorRelayer(): Promise<void> {
   await releaseSponsorWriter();
   started = false;
+  lastTrip = null;
+  stuckAlerted.clear();
+  lostSince.clear();
 }
 
 // ── Status ───────────────────────────────────────────────────────────────────
@@ -634,6 +844,10 @@ export interface GasSponsorReport {
   controlReason?: string | null;
   /** Native USDC. */
   sponsorBalance?: string | null;
+  /** The last time the breaker paused or stopped sponsorship by itself, in this process. */
+  lastTrip?: BreakerTrip | null;
+  /** The oldest sponsored transaction not yet landed. */
+  oldestPendingTx?: { nonce: number; txHash: string; ageSeconds: number } | null;
   callsToday?: number;
   spentTodayUsdc?: string;
   budgetLeftTodayUsdc?: string;
@@ -646,11 +860,13 @@ export async function gasSponsorReport(): Promise<GasSponsorReport> {
     const run = await runnableSettings('gas sponsor report');
     if (!run.ok) return { enabled: false, reason: run.reason };
     const s = run.settings;
-    const [controls, used, balance] = await Promise.all([
+    const [controls, used, balance, open] = await Promise.all([
       getControls(s.chainId),
       usage(s.chainId),
       provider().getBalance(s.sponsor.address).catch(() => null),
+      unsettledTxs(s.chainId, s.sponsor.address),
     ]);
+    const oldest = open[0] ?? null;
     const left = s.caps.dailyBudgetWei > used.spentLastDayWei ? s.caps.dailyBudgetWei - used.spentLastDayWei : 0n;
     return {
       enabled: true,
@@ -666,6 +882,10 @@ export async function gasSponsorReport(): Promise<GasSponsorReport> {
       spentTodayUsdc: ethers.formatEther(used.spentLastDayWei),
       budgetLeftTodayUsdc: ethers.formatEther(left),
       spentLastHourUsdc: ethers.formatEther(used.spentLastHourWei),
+      lastTrip,
+      oldestPendingTx: oldest
+        ? { nonce: oldest.nonce, txHash: oldest.txHash, ageSeconds: Math.round((Date.now() - oldest.createdAt.getTime()) / 1000) }
+        : null,
     };
   } catch (err) {
     return { enabled: false, reason: `status unavailable: ${(err as Error).message}` };

@@ -19,6 +19,7 @@ import { config } from '../config.js';
 import { chainRuntime } from './chainRuntime.js';
 import { settlementChainConfig, type SettlementChainConfig } from './settlementChains.js';
 import { backgroundWritesAllowed } from './deploymentIdentity.js';
+import { delegateInterface } from './blindAgentDelegate.js';
 import type { SponsorCaps } from './gasSponsorStore.js';
 
 /** A reservation is held this long after the task's assignment, then expires. */
@@ -45,6 +46,8 @@ export type GasSponsorSettings =
       minTaskRaw: bigint;
       caps: SponsorCaps;
       maxFailuresPerHour: number;
+      /** How long a stored transaction may go unlanded before sponsorship pauses itself. */
+      stuckMs: number;
     };
 
 const off = (reason: string, misconfigured = true): GasSponsorSettings => ({ enabled: false, reason, misconfigured });
@@ -104,8 +107,9 @@ export function gasSponsorSettings(): GasSponsorSettings {
   const perPosterDaily = positiveInt(s.perPosterDaily);
   const maxStrikes = positiveInt(s.maxStrikes);
   const maxFailuresPerHour = positiveInt(s.maxFailuresPerHour);
-  if (!perAgentDaily || !perUserDaily || !perPosterDaily || !maxStrikes || !maxFailuresPerHour) {
-    return off('the GAS_SPONSOR_PER_*_DAILY, GAS_SPONSOR_MAX_STRIKES and GAS_SPONSOR_MAX_FAILURES_PER_HOUR caps must be whole numbers above 0');
+  const stuckMinutes = positiveInt(s.stuckMinutes);
+  if (!perAgentDaily || !perUserDaily || !perPosterDaily || !maxStrikes || !maxFailuresPerHour || !stuckMinutes) {
+    return off('the GAS_SPONSOR_PER_*_DAILY, GAS_SPONSOR_MAX_STRIKES, GAS_SPONSOR_MAX_FAILURES_PER_HOUR and GAS_SPONSOR_STUCK_MINUTES settings must be whole numbers above 0');
   }
 
   if (!s.privateKey) return off('GAS_SPONSOR_ENABLED is set but GAS_SPONSOR_PRIVATE_KEY is empty');
@@ -140,32 +144,47 @@ export function gasSponsorSettings(): GasSponsorSettings {
     minTaskRaw,
     caps: { perAgentDaily, perUserDaily, perPosterDaily, hourlyBudgetWei, dailyBudgetWei, maxStrikes },
     maxFailuresPerHour,
+    stuckMs: stuckMinutes * 60_000,
   };
 }
 
-let roles: { sponsor: string; problem: string | null } | null = null;
+let roles: { key: string; problem: string | null } | null = null;
 
 /**
  * Read the escrow's verifier, treasury and admin and refuse a sponsor that is
- * one of them. Run at boot; the result holds for the process (an unreadable
- * role is a problem too, and is retried on the next call).
+ * one of them, and refuse a delegate bound to another escrow (one delegate
+ * per escrow: its ESCROW() is fixed at deploy). Run at boot; the result holds
+ * for the process (an unreadable value is a problem too, and is retried on
+ * the next call).
  */
 export async function checkSponsorRoles(settings: Extract<GasSponsorSettings, { enabled: true }>): Promise<string | null> {
   const sponsor = settings.sponsor.address.toLowerCase();
-  if (roles?.sponsor === sponsor) return roles.problem;
-  const escrow = chainRuntime('arc').escrow;
+  const key = `${sponsor}:${settings.delegate}:${settings.escrow}`.toLowerCase();
+  if (roles?.key === key) return roles.problem;
+  const runtime = chainRuntime('arc');
+  const escrow = runtime.escrow;
   if (!escrow) return 'there is no Arc escrow contract here';
+  try {
+    const raw = await runtime.provider.call({ to: settings.delegate, data: delegateInterface.encodeFunctionData('ESCROW') });
+    const bound = String(delegateInterface.decodeFunctionResult('ESCROW', raw)[0]);
+    if (bound.toLowerCase() !== String(settings.escrow).toLowerCase()) {
+      roles = { key, problem: `the BlindAgentDelegate at ${settings.delegate} is bound to escrow ${bound}, not the Arc escrow ${settings.escrow}` };
+      return roles.problem;
+    }
+  } catch (e) {
+    return `could not read ESCROW() from the BlindAgentDelegate at ${settings.delegate}: ${(e as Error).message}`;
+  }
   for (const role of ['verifier', 'treasury', 'admin'] as const) {
     try {
       if (String(await escrow[role]()).toLowerCase() === sponsor) {
-        roles = { sponsor, problem: `the sponsor wallet ${settings.sponsor.address} is the Arc escrow's ${role}; give the sponsor a wallet of its own` };
+        roles = { key, problem: `the sponsor wallet ${settings.sponsor.address} is the Arc escrow's ${role}; give the sponsor a wallet of its own` };
         return roles.problem;
       }
     } catch (e) {
       return `could not read the Arc escrow's ${role} to check the sponsor wallet: ${(e as Error).message}`;
     }
   }
-  roles = { sponsor, problem: null };
+  roles = { key, problem: null };
   return null;
 }
 

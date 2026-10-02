@@ -79,6 +79,7 @@ const sponsor = vi.hoisted(() => ({
   holds: vi.fn(async () => false),
   hint: vi.fn(async () => true),
   relay: vi.fn(),
+  status: vi.fn(),
 }));
 vi.mock('../services/gasSponsorConfig.js', () => ({ gasSponsorSettings: () => (sponsor.enabled ? { enabled: true } : { enabled: false }) }));
 vi.mock('../services/gasSponsorEligibility.js', () => ({ sponsorHint: sponsor.hint }));
@@ -88,7 +89,7 @@ vi.mock('../services/gasSponsorAccept.js', () => ({
   startReservationAfterAssign: sponsor.start,
   holdsReservation: sponsor.holds,
 }));
-vi.mock('../services/gasSponsorRelayer.js', () => ({ relaySponsoredCall: sponsor.relay }));
+vi.mock('../services/gasSponsorRelayer.js', () => ({ relaySponsoredCall: sponsor.relay, sponsoredCallStatus: sponsor.status }));
 
 import { a2aRouter } from './a2a.js';
 import { globalErrorHandler } from '../middleware/errorHandler.js';
@@ -193,7 +194,7 @@ describe('/sponsored-call', () => {
     auth.user = { address: AGENT, typ: 'agent-platform', jti: 'jti-current' };
     const res = await call();
     expect(res.status).toBe(200);
-    expect(res.body.data).toEqual({ txHash: '0x' + '33'.repeat(32), landedElsewhere: false });
+    expect(res.body.data).toEqual({ status: 'confirmed', txHash: '0x' + '33'.repeat(32), landedElsewhere: false });
     expect(sponsor.relay).toHaveBeenCalledWith(expect.objectContaining({ kind: 'submit', taskId: 41n, nonce: 0n, deadline: 9999999999n }));
   });
 
@@ -215,6 +216,25 @@ describe('/sponsored-call', () => {
     const res = await call();
     expect(res.status).toBe(409);
     expect(res.body.error.code).toBe('NOT_DELEGATED');
+  });
+
+  it('answers 202 pending while our transaction is out, which the worker must not fall back from', async () => {
+    auth.user = { address: AGENT, typ: 'agent-platform', jti: 'jti-current' };
+    sponsor.relay.mockResolvedValue({ ok: false, status: 202, code: 'PENDING', message: 'not confirmed yet', txHash: '0x' + '44'.repeat(32) });
+    const res = await call();
+    expect(res.status).toBe(202);
+    expect(res.body.data).toEqual({ status: 'pending', txHash: '0x' + '44'.repeat(32) });
+  });
+
+  it("reports the call's status to the agent alone", async () => {
+    auth.user = { address: AGENT, typ: 'agent-platform', jti: 'jti-current' };
+    sponsor.status.mockResolvedValue({ status: 'pending', txHash: '0x' + '44'.repeat(32) });
+    const res = await request(app()).get(`/api/v1/a2a/tasks/${TASK}/sponsored-call?kind=release`);
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({ status: 'pending', txHash: '0x' + '44'.repeat(32) });
+    expect(sponsor.status).toHaveBeenCalledWith(AGENT, 41n, 'release');
+    auth.user = { address: AGENT, typ: 'agent-platform', jti: 'jti-old' };
+    expect((await request(app()).get(`/api/v1/a2a/tasks/${TASK}/sponsored-call`)).status).toBe(403);
   });
 
   it('validates the body, and passes a 7702 authorization through', async () => {
