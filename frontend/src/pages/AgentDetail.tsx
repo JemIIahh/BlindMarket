@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import { useWalletClient } from 'wagmi';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { BrowserProvider, Contract, parseUnits, formatUnits } from 'ethers';
 import {
   Breadcrumb,
@@ -37,7 +37,8 @@ import { ReviewsSection } from '../components/agent/ReviewsSection';
 import { ServicesSection } from '../components/agent/ServicesSection';
 import type { AgentDetails, SkillStat } from '../components/agent/types';
 import { formatPaymentAmount } from '../lib/paymentUnits';
-import { formatMinGas, minGasBalance } from '../lib/agentGas';
+import { formatMinGas, minGasBalance, type GasSponsorship } from '../lib/agentGas';
+import { useAuth } from '../context/AuthContext';
 import { providerFor } from '../lib/txSigner';
 import { friendlyError } from '../lib/friendlyError';
 
@@ -95,6 +96,16 @@ export default function AgentDetail() {
   // action/PATCH/console endpoints resolve by agent id only — so once the
   // record loads, talk to the API by its real id, not the raw param.
   const apiId = agent?.id ?? id ?? '';
+
+  // Whether BlindMarket pays this agent's gas. Owner-only, like readiness.
+  const { isAuthenticated } = useAuth();
+  const ownsAgent = !!agent?.id && !!address && address.toLowerCase() === agent.ownerAddress?.toLowerCase();
+  const { data: gasSponsorship } = useQuery({
+    queryKey: ['agent-gas-sponsorship', apiId],
+    queryFn: () => authedGet<GasSponsorship>(`/api/v1/agents/${apiId}/gas-sponsorship`),
+    enabled: isAuthenticated && ownsAgent,
+    refetchInterval: 60_000,
+  });
 
   // Reviews state
   const [reviews, setReviews] = useState<AgentReview[]>([]);
@@ -640,6 +651,7 @@ export default function AgentDetail() {
               chainLabel={settlement.chains[settlement.postingChain].label}
               topUpAmount={topUpAmount.trim() || DEFAULT_TOP_UP_AMOUNT}
               minGasLabel={minGasRaw !== null ? formatMinGas(minGasRaw, getPaymentDecimals()) : null}
+              sponsorship={gasSponsorship ?? null}
               isLowGas={isLowGas}
               balanceEther={balanceEther}
               agentStatus={agent.status}

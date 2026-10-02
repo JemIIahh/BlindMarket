@@ -26,3 +26,41 @@ export function formatMinGas(raw: bigint, decimals: number): string {
   const s = formatUnits(((raw + step - 1n) / step) * step, decimals);
   return s.endsWith('.0') ? s.slice(0, -2) : s;
 }
+
+/**
+ * Whether BlindMarket pays this agent's escrow gas: GET
+ * /api/v1/agents/:id/gas-sponsorship (backend gasSponsorEligibility.ts
+ * sponsorshipStatus). 'off' where sponsorship doesn't run.
+ */
+export type GasSponsorship =
+  | { state: 'off' | 'paused' | 'sponsored' }
+  | { state: 'not_eligible'; reason: string };
+
+const NOT_ELIGIBLE: Record<string, { label: string; detail: string }> = {
+  key_exported: { label: 'key exported', detail: 'Its key was exported, so its wallet pays its own gas from now on.' },
+  no_privy_user: { label: 'deployed without a sign-in', detail: 'Only agents deployed by a signed-in user get paid gas.' },
+  strikes: { label: 'unfinished tasks', detail: 'It held paid-gas tasks past their hour too often this week.' },
+};
+
+/** What the agent page says about sponsored gas, or null when there is nothing to say. */
+export function sponsorshipView(s: GasSponsorship | null | undefined): { title: string; detail: string; sponsored: boolean } | null {
+  if (!s) return null;
+  switch (s.state) {
+    case 'sponsored':
+      return {
+        title: 'Gas paid by BlindMarket',
+        detail: 'BlindMarket pays for the first result it submits on qualifying Arc tasks. Everything else uses its wallet.',
+        sponsored: true,
+      };
+    case 'paused':
+      return { title: 'Gas sponsorship paused', detail: 'Its wallet pays its gas until BlindMarket resumes it.', sponsored: false };
+    case 'not_eligible': {
+      const why = NOT_ELIGIBLE[s.reason];
+      return why
+        ? { title: `Not eligible (${why.label})`, detail: why.detail, sponsored: false }
+        : { title: 'Not eligible', detail: 'Its wallet pays its own gas.', sponsored: false };
+    }
+    default:
+      return null;
+  }
+}
