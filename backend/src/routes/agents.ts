@@ -22,7 +22,7 @@ import { REVOKED_JWT_TTL_S } from '../middleware/auth.js';
 import * as skillStore from '../services/skillStore.js';
 import * as agentEmbedding from '../services/agentEmbedding.js';
 import { buildInstalledSkill, assertComposedSizeOk } from '../services/skillComposer.js';
-import type { InstalledSkill, AgentCapability, LLMProvider } from '../types.js';
+import type { InstalledSkill, AgentCapability, LLMProvider, ModelInfo } from '../types.js';
 import { redis } from '../services/redis.js';
 import { ethers } from 'ethers';
 import { chainRuntime } from '../services/chainRuntime.js';
@@ -30,7 +30,7 @@ import { settlementChainConfigs, withdrawReserveWei, type SettlementChainKey } f
 import { config } from '../config.js';
 import { claimDeployCredit, markDeployCreditUsed, restoreDeployCredit } from '../services/agentFactoryListener.js';
 import { arcDeployFeeTerms, verifyArcDeployFee, claimArcDeployFee, markArcDeployFeeUsed, releaseArcDeployFee } from '../services/deployFee.js';
-import { discoverModels, ProviderModelsError } from '../services/providerModels.js';
+import { checkOgComputeModel, discoverModels, ProviderModelsError } from '../services/providerModels.js';
 import { eciesEncrypt } from '../services/crypto.js';
 import { callerWallets } from '../services/callerWallets.js';
 import { loadAgentReadiness } from '../services/agentReadiness.js';
@@ -245,13 +245,53 @@ function strip(agent: Awaited<ReturnType<typeof getAgent>>) {
   return stripAgentSecrets(agent);
 }
 
-// GET /api/v1/agents/providers
-agentsRouter.get('/providers', (_req, res) => {
+/**
+ * The refusal to send when a 0g-compute agent would run `model` and no 0G
+ * Compute provider serves it, or null. Its worker could never pay for a call
+ * and would never take a task (Oct 2026: agents deployed on the Router's
+ * deepseek-v4-flash sat "not taking tasks" for days).
+ */
+async function ogComputeModelRefusal(model: string): Promise<object | null> {
+  const { ok, models } = await checkOgComputeModel(model);
+  if (ok) return null;
+  return {
+    success: false,
+    error: {
+      code: 'MODEL_NOT_ON_0G_COMPUTE',
+      message: `No 0G Compute provider serves "${model}", so a 0g-compute agent can't pay for it. ` +
+        `Pick a model one does${models.length ? ` (${models.join(', ')})` : ''}, or a provider you have an API key for.`,
+      models,
+    },
+  };
+}
+
+/** `p`'s value, or null when it fails or takes longer than `ms`. */
+function within<T>(p: Promise<T>, ms: number): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    p.catch(() => null),
+    new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), ms); }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+// GET /api/v1/agents/providers — the catalog behind the deploy and edit forms.
+// 0g-compute's models are the ones 0G Compute serves now, when it answers in
+// time; the catalog's dated list otherwise.
+agentsRouter.get('/providers', async (_req, res) => {
+  const og = await within(discoverModels('0g-compute', ''), 3_000);
+  const live = og && og.length > 0 ? og : null;
   res.json({
     success: true,
     data: {
-      models: LLM_MODEL_IDS,     // flat string[] per provider (backward compat)
-      pricing: LLM_PROVIDER_MODELS, // full ModelInfo[] with costs
+      // flat string[] per provider (backward compat)
+      models: live ? { ...LLM_MODEL_IDS, '0g-compute': live.map((m) => m.id) } : LLM_MODEL_IDS,
+      // full ModelInfo[] with costs
+      pricing: live
+        ? {
+            ...LLM_PROVIDER_MODELS,
+            '0g-compute': live.filter((m): m is ModelInfo => m.inputCostPer1M !== undefined && m.outputCostPer1M !== undefined),
+          }
+        : LLM_PROVIDER_MODELS,
     },
   });
 });
@@ -338,6 +378,10 @@ async function prepareDeploy(body: unknown): Promise<
 > {
   const parsed = DeploySchema.safeParse(body);
   if (!parsed.success) return { ok: false, status: 400, body: { success: false, error: parsed.error.flatten() } };
+  if (parsed.data.provider === '0g-compute') {
+    const refusal = await ogComputeModelRefusal(parsed.data.model);
+    if (refusal) return { ok: false, status: 400, body: refusal };
+  }
 
   // Resolve skill slugs → frozen snapshots (server-side only). Only public
   // skills install at deploy; an owner adds their private skill afterwards
@@ -1097,6 +1141,17 @@ agentsRouter.patch('/:id', requireAuth, async (req: AuthRequest, res) => {
     return;
   }
   const { instructions, provider, model, apiKey, tools, capabilities, minReward } = parsed.data;
+  // Moving an agent onto 0g-compute, or to another model on it: the model must
+  // be one its account can pay for. The worker picks the provider again when
+  // it restarts with the new model. The edit form sends provider and model on
+  // every save, so an unchanged pair is not checked: an owner can still edit
+  // the instructions of an agent on a model that has since gone.
+  const nextProvider = provider ?? agent.provider;
+  const nextModel = model ?? agent.model;
+  if (nextProvider === '0g-compute' && (nextProvider !== agent.provider || nextModel !== agent.model)) {
+    const refusal = await ogComputeModelRefusal(nextModel);
+    if (refusal) { res.status(400).json(refusal); return; }
+  }
   const updated = await updateAgent(req.params.id, { instructions, provider: provider as any, model, apiKey, tools: tools as any, capabilities: capabilities as any, minReward });
   // Semantic matching (Phase 0): instructions/capabilities changed — re-embed.
   if (updated) agentEmbedding.recomputeForWalletBestEffort(updated.walletAddress);

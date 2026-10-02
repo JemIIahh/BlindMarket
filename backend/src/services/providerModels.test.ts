@@ -1,8 +1,13 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
+
+// 0g-compute's list is read from the chain; never from a test.
+vi.mock('./ogComputeCatalog.js', () => ({ readOgServices: vi.fn() }));
+
 import {
   discoverModels, mergeWithCatalog, ProviderModelsError,
-  openaiChatIds, geminiChatIds, groqChatIds, ogChatModels,
+  openaiChatIds, geminiChatIds, groqChatIds, ogOfferedModels, checkOgComputeModel,
 } from './providerModels.js';
+import { readOgServices, type OgService } from './ogComputeCatalog.js';
 import { LLM_PROVIDER_MODELS } from '../types.js';
 
 /**
@@ -54,19 +59,6 @@ describe('list shapes', () => {
     ] });
     expect(ids).toEqual(['openai/gpt-oss-120b', 'llama-3.3-70b-versatile']);
   });
-
-  it('0g: chatbot entries, router per-token USD → $/1M', () => {
-    const models = ogChatModels({ data: [
-      { id: 'deepseek-v4-flash', type: 'chatbot', pricing_usd: { prompt: '0.000000138', completion: '0.000000275' } },
-      { id: 'whisper-large-v3', type: 'speech-to-text', pricing_usd: { prompt: '0', completion: '0' } },
-      { id: 'z-image-turbo', type: 'text-to-image' },
-      { id: 'mystery-chat', type: 'chatbot' },
-    ] });
-    expect(models).toEqual([
-      { id: 'deepseek-v4-flash', inputCostPer1M: 0.138, outputCostPer1M: 0.275 },
-      { id: 'mystery-chat' },
-    ]);
-  });
 });
 
 describe('mergeWithCatalog', () => {
@@ -98,14 +90,6 @@ describe('discoverModels', () => {
     expect(headersOf(fetchMock)['x-goog-api-key']).toBe('AIza-test');
   });
 
-  it('0g-compute: keyless, router prices override the catalog', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => json({ data: [
-      { id: 'deepseek-v4-flash', type: 'chatbot', pricing_usd: { prompt: '0.0000002', completion: '0.0000004' } },
-    ] })));
-    const models = await discoverModels('0g-compute', '');
-    expect(models).toEqual([{ id: 'deepseek-v4-flash', inputCostPer1M: 0.2, outputCostPer1M: 0.4 }]);
-  });
-
   it('401 → PROVIDER_AUTH, message carries no key', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => json({ error: 'bad key' }, 401)));
     const err = await discoverModels('openai', 'sk-SECRET').catch((e: unknown) => e);
@@ -132,5 +116,101 @@ describe('discoverModels', () => {
     await expect(discoverModels('groq', 'gsk-x')).rejects.toMatchObject({ code: 'PROVIDER_UNAVAILABLE' });
     vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('fetch failed'); }));
     await expect(discoverModels('groq', 'gsk-x')).rejects.toMatchObject({ code: 'PROVIDER_UNAVAILABLE' });
+  });
+});
+
+// What 0G Compute's mainnet looked like on 2026-10-02 (InferenceServing plus the
+// status API), trimmed: the shapes the backend reads.
+const service = (provider: string, model: string, extra: Partial<OgService> = {}): OgService => ({
+  provider, model, serviceType: 'chatbot', url: `https://${provider.slice(2, 8)}.example`,
+  inputPrice: 5_000_000_000_000n, outputPrice: 20_000_000_000_000n, teeSignerAcknowledged: true,
+  formats: ['openai'], usdIn: 0.000001, usdOut: 0.000004, ...extra,
+});
+const MAINNET: OgService[] = [
+  service('0xd9966e13a6026Fcca4b13E7ff95c94DE268C471C', 'glm-5', { usdIn: 0.000000666667, usdOut: 0.000003 }),
+  service('0x36aCffCEa3CCe07cAdd1740Ad992dB16Ab324517', 'openai/whisper-large-v3', { serviceType: 'speech-to-text' }),
+  service('0xd3f02c1a04160389d98D2192AE2034159f731011', 'claude-opus-5', { formats: ['anthropic'] }),
+  service('0x1B3AAef3ae5050EEE04ea38cD4B087472BD85EB0', 'qwen3.7-plus', { usdIn: 0.000000291667, usdOut: 0.000001166667 }),
+  service('0x44ba5021daDa2eDc84b4f5FC170b85F7bC51ef64', 'openai/gpt-oss-20b', { teeSignerAcknowledged: false }),
+  // No status-API detail on it: no formats, no price.
+  service('0x25F8f01cA76060ea40895472b1b79f76613Ca497', 'openai/gpt-5.4-mini', { formats: undefined, usdIn: undefined, usdOut: undefined }),
+  service('0x7DCFe6AEa70350C2090041524c9B4A9262DCe87D', 'glm-5.3', {
+    inputPrice: 4_690_000_000_000n, outputPrice: 14_740_000_000_000n, formats: ['openai', 'anthropic'], usdIn: 0.0000014, usdOut: 0.0000044,
+  }),
+  service('0x6446fE523D8f3678185ed53e3ADEffB4d27475cC', 'glm-5.3', {
+    inputPrice: 7_140_000_000_000n, outputPrice: 22_450_000_000_000n, formats: ['openai', 'anthropic'], usdIn: 0.0000021, usdOut: 0.0000066,
+  }),
+];
+
+describe('0g-compute models: what an agent can pay a provider for', () => {
+  afterEach(() => { vi.mocked(readOgServices).mockReset(); });
+
+  it('one entry per on-chain chat model served over the OpenAI API, priced from the provider the worker picks', () => {
+    expect(ogOfferedModels(MAINNET)).toEqual([
+      { id: 'glm-5', inputCostPer1M: 0.667, outputCostPer1M: 3 },
+      { id: 'qwen3.7-plus', inputCostPer1M: 0.292, outputCostPer1M: 1.167 },
+      { id: 'openai/gpt-5.4-mini' },
+      // The cheaper of the two glm-5.3 providers.
+      { id: 'glm-5.3', inputCostPer1M: 1.4, outputCostPer1M: 4.4 },
+    ]);
+  });
+
+  it('discoverModels lists them from the chain, in catalog order, and never the Router catalog', async () => {
+    vi.mocked(readOgServices).mockResolvedValue(MAINNET);
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const models = await discoverModels('0g-compute', '');
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(models.map((m) => m.id)).toEqual(['glm-5', 'qwen3.7-plus', 'glm-5.3', 'openai/gpt-5.4-mini']);
+    expect(models.map((m) => m.id)).not.toContain('deepseek-v4-flash');
+    expect(models[0]).toEqual({ id: 'glm-5', inputCostPer1M: 0.667, outputCostPer1M: 3 });
+  });
+
+  it("discoverModels keeps the catalog's dated price when 0G's status API has none", async () => {
+    vi.mocked(readOgServices).mockResolvedValue([service('0xd9966e13a6026Fcca4b13E7ff95c94DE268C471C', 'glm-5', { formats: undefined, usdIn: undefined, usdOut: undefined })]);
+    const [glm5] = await discoverModels('0g-compute', '');
+    expect(glm5).toEqual(LLM_PROVIDER_MODELS['0g-compute'].find((m) => m.id === 'glm-5'));
+  });
+
+  it('discoverModels reports an unreadable chain as PROVIDER_UNAVAILABLE', async () => {
+    vi.mocked(readOgServices).mockRejectedValue(new Error('could not detect network'));
+    await expect(discoverModels('0g-compute', '')).rejects.toMatchObject({ code: 'PROVIDER_UNAVAILABLE' });
+  });
+
+  it('a chain read that hangs falls back to the catalog instead of holding a deploy', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(readOgServices).mockReturnValue(new Promise(() => {}));
+      const pending = checkOgComputeModel('glm-5');
+      await vi.advanceTimersByTimeAsync(12_000);
+      expect((await pending).ok).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('checkOgComputeModel refuses a Router-only model and names the ones that work', async () => {
+    vi.mocked(readOgServices).mockResolvedValue(MAINNET);
+    const check = await checkOgComputeModel('deepseek-v4-flash');
+    expect(check.ok).toBe(false);
+    expect(check.models).toEqual(['glm-5', 'qwen3.7-plus', 'openai/gpt-5.4-mini', 'glm-5.3']);
+  });
+
+  it('checkOgComputeModel accepts an on-chain model, matched the way the worker matches it', async () => {
+    vi.mocked(readOgServices).mockResolvedValue(MAINNET);
+    expect((await checkOgComputeModel('glm-5')).ok).toBe(true);
+    expect((await checkOgComputeModel('GLM-5.3')).ok).toBe(true);
+  });
+
+  it('checkOgComputeModel refuses a model served only over the Anthropic API, or only unacknowledged', async () => {
+    vi.mocked(readOgServices).mockResolvedValue(MAINNET);
+    expect((await checkOgComputeModel('claude-opus-5')).ok).toBe(false);
+    expect((await checkOgComputeModel('openai/gpt-oss-20b')).ok).toBe(false);
+  });
+
+  it('checkOgComputeModel falls back to the catalog when the chain cannot be read', async () => {
+    vi.mocked(readOgServices).mockRejectedValue(new Error('timeout'));
+    expect(await checkOgComputeModel('glm-5')).toEqual({ ok: true, models: LLM_PROVIDER_MODELS['0g-compute'].map((m) => m.id) });
+    expect((await checkOgComputeModel('deepseek-v4-flash')).ok).toBe(false);
   });
 });
