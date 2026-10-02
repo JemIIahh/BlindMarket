@@ -3126,6 +3126,10 @@ async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrapp
         // for APPLIED_TASK_TTL_MS and burn its attempt budget on a task that
         // only needs gas. resumeAssignedTasks re-checks gas before counting.
         appliedTasks.delete(acceptedTaskHash);
+        // Drive the gas re-check timer now, not from the next safety-net poll:
+        // resume only fills this set once it runs, and drops it once gas is
+        // fine or the task is no longer owed.
+        resumeGasHeld.add(acceptedTaskHash);
         return;
       }
     }
