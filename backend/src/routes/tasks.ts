@@ -25,6 +25,7 @@ import { config } from '../config.js';
 import { rooms } from '../services/socket.js';
 import { isSafeRegexSource } from '../services/rubricEngine.js';
 import { hostedVerifierNotOptedIn, VERIFIER_NOT_OPTED_IN_MESSAGE } from '../services/verifierDuty.js';
+import { refuseUnapprovedDelegation } from '../services/delegationGuard.js';
 import { withPosterAvatars } from '../services/avatarStore.js';
 import { BATCH_UNSUPPORTED, batchCreateSupport } from '../services/batchSupport.js';
 import { MAX_BATCH_REQUEST, WALLET_POSTING_BUDGET_PER_MIN } from '../constants.js';
@@ -556,6 +557,8 @@ tasksRouter.post('/', requireAuth, buildBudget, postingIpBudget, async (req: Aut
   try {
     const data = createTaskSchema.parse(req.body);
     const from = req.user!.address;
+    // A hosted agent funds a task only as a sub-task its owner allowed.
+    await refuseUnapprovedDelegation(from);
 
     const { amount: amountBigInt, duration: durationBigInt } = checkTaskTerms(data);
     const { chain, label, chainId, token } = postingTarget();
@@ -701,6 +704,7 @@ tasksRouter.post('/batch', requireAuth, buildBudget, postingIpBudget, async (req
     if (from === 'agent') {
       throw new AppError(403, 'FORBIDDEN', 'Tasks are funded from a wallet: authenticate with a wallet-bound key or token');
     }
+    await refuseUnapprovedDelegation(from);
 
     const { chain, label, chainId, token } = postingTarget();
     const { tokenAddress, isNative } = settlementToken(chain, label, token, requestedToken);

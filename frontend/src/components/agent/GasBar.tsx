@@ -14,7 +14,7 @@ export function GasBar({
   fundingAddress,
   chainLabel,
   topUpAmount,
-  lowGasThreshold,
+  minGasLabel,
   isLowGas,
   balanceEther,
   agentStatus,
@@ -48,7 +48,11 @@ export function GasBar({
   /** The posting chain's name, e.g. "Arc". */
   chainLabel: string;
   topUpAmount: string;
-  lowGasThreshold: number;
+  /**
+   * What one transaction can cost at current gas prices, formatted in
+   * `symbol`: below it the worker takes no task. Null where it is unknown.
+   */
+  minGasLabel: string | null;
   isLowGas: boolean;
   balanceEther: number;
   agentStatus: string;
@@ -219,7 +223,15 @@ export function GasBar({
           {cctpStatus === 'error' && <ErrorNotice error={cctpError} title="Couldn't bridge" compact />}
           {isLowGas && agentStatus !== 'stopped' && (
             <div className="text-warn">
-              Agent will fail to submit evidence below <span className="font-mono">{lowGasThreshold} {symbol}</span>.
+              {minGasLabel !== null ? (
+                <>
+                  It takes no tasks while its wallet holds less than{' '}
+                  <span className="font-mono">{minGasLabel} {symbol}</span>, what one transaction can cost at current gas
+                  prices. Top it up to resume; a submitted result usually costs under a cent.
+                </>
+              ) : (
+                <>Its wallet is empty, so it can't pay gas and takes no tasks until you top it up.</>
+              )}
             </div>
           )}
         </div>

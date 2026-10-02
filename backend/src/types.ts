@@ -9,6 +9,11 @@ export interface AuthUser {
   /** Agent owner address (from platform token JWT). */
   ownerAddress?: string;
   /**
+   * The Privy user id (a DID, the access token's `sub`), set only for a
+   * principal authenticated through Privy.
+   */
+  privyUserId?: string;
+  /**
    * Set when the principal was authenticated via an HS256 JWT
    * (verifyRegistrationToken), as opposed to Privy. 'agent-platform' =
    * server-minted at deploy (first-party worker); 'agent-registration' =
@@ -704,6 +709,15 @@ export interface DeployedAgent {
   // default: any poster could otherwise make it judge and settle tasks on the
   // owner's model and gas (security audit run 1, C04).
   verifierEnabled?: boolean;
+  // The owner lets this agent post paid sub-tasks (delegate_to_agent) from its
+  // wallet. Off by default: the task brief sits in the same prompt as the
+  // tool, so without consent any poster could steer the agent into paying a
+  // sub-task to the poster's own agent (services/delegationGuard.ts).
+  delegationEnabled?: boolean;
+  // The Privy user (DID, the access token's `sub`) who deployed this agent,
+  // when they signed in through Privy. Recorded for per-person limits; a
+  // wallet address is not a person (one user links several).
+  privyUserId?: string;
   // Per-tool secrets (API keys, tokens) — ECIES-encrypted at rest
   toolSecrets?: Record<string, string>;              // plaintext, only in worker env
   encryptedToolSecrets?: Record<string, string>;     // ECIES blobs encrypted to owner pubkey

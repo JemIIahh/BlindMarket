@@ -33,7 +33,8 @@ vi.mock('../services/agentRunner.js', () => ({
   addAuthorizedOwner: vi.fn(), getAgentStats: vi.fn(),
 }));
 vi.mock('../services/apiKeyStore.js', () => ({
-  lookupApiKey: vi.fn(async (c: string) => (c === 'sk_owner' ? { ownerAddress: OWNER } : null)),
+  lookupApiKey: vi.fn(async (c: string) =>
+    c === 'sk_owner' ? { ownerAddress: OWNER } : c === 'sk_other' ? { ownerAddress: '0x9999999999999999999999999999999999999999' } : null),
 }));
 vi.mock('../services/chain.js', () => ({ provider: {}, baseProvider: {} }));
 vi.mock('../services/redis.js', () => ({
@@ -128,6 +129,29 @@ describe('PATCH /agents/:id body validation (audit run 1, C22)', () => {
     for (const body of [{ provider: 'nope' }, { model: '' }, { minReward: '1.5' }]) {
       expect((await asOwner(request(app).patch('/api/v1/agents/agent-1')).send(body)).status).toBe(400);
     }
+    expect(updateAgent).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /agents/:id/delegation', () => {
+  it('lets the owner turn delegation on and off', async () => {
+    const on = await asOwner(request(app).post('/api/v1/agents/agent-1/delegation')).send({ enabled: true });
+    expect(on.status).toBe(200);
+    expect(on.body.data.delegationEnabled).toBe(true);
+    expect(updateAgent).toHaveBeenCalledWith('agent-1', { delegationEnabled: true });
+    const off = await asOwner(request(app).post('/api/v1/agents/agent-1/delegation')).send({ enabled: false });
+    expect(off.body.data.delegationEnabled).toBe(false);
+  });
+
+  it('refuses anything but a boolean', async () => {
+    const res = await asOwner(request(app).post('/api/v1/agents/agent-1/delegation')).send({ enabled: 'yes' });
+    expect(res.status).toBe(400);
+    expect(updateAgent).not.toHaveBeenCalled();
+  });
+
+  it('is the owner\'s alone', async () => {
+    const res = await request(app).post('/api/v1/agents/agent-1/delegation').set('X-API-Key', 'sk_other').send({ enabled: true });
+    expect(res.status).toBe(403);
     expect(updateAgent).not.toHaveBeenCalled();
   });
 });

@@ -26,7 +26,7 @@ import type { InstalledSkill, AgentCapability, LLMProvider } from '../types.js';
 import { redis } from '../services/redis.js';
 import { ethers } from 'ethers';
 import { chainRuntime } from '../services/chainRuntime.js';
-import { settlementChainConfigs, type SettlementChainKey } from '../services/settlementChains.js';
+import { settlementChainConfigs, withdrawReserveWei, type SettlementChainKey } from '../services/settlementChains.js';
 import { config } from '../config.js';
 import { claimDeployCredit, markDeployCreditUsed, restoreDeployCredit } from '../services/agentFactoryListener.js';
 import { arcDeployFeeTerms, verifyArcDeployFee, claimArcDeployFee, markArcDeployFeeUsed, releaseArcDeployFee } from '../services/deployFee.js';
@@ -461,6 +461,7 @@ agentsRouter.post('/deploy', requireAuth, deployLimiter, async (req: AuthRequest
         ownerAddress,
         capabilities,
         skills: skills.length ? skills : undefined,
+        privyUserId: req.user!.privyUserId,
       } as Parameters<typeof deployAgent>[0]);
     } catch (deployErr) {
       // No agent was created — give the paid fee back so the user can retry.
@@ -812,6 +813,9 @@ agentsRouter.post('/:id/withdraw', requireAuth, async (req: AuthRequest, res) =>
       const rpc = chainRuntime(chain).provider;
       const nativeLabel = gas.symbol;
       const wallet = new ethers.Wallet(pk, rpc);
+      // What stays behind for the agent's own gas: at least its gas gate at
+      // current fees, so a withdrawn agent still takes tasks.
+      const gasReserve = async () => withdrawReserveWei(gas, await rpc.getFeeData().catch(() => null));
 
       if (isNative) {
         // ── Native sweep (0G token or ETH depending on chain) ──────────
@@ -825,13 +829,13 @@ agentsRouter.post('/:id/withdraw', requireAuth, async (req: AuthRequest, res) =>
           });
           continue;
         }
-        const gasReserve = gas.withdrawReserveWei;
+        const reserve = await gasReserve();
         const balance = await rpc.getBalance(wallet.address);
-        if (balance <= gasReserve) {
+        if (balance <= reserve) {
           skipped.push({ chain, reason: `balance (${ethers.formatEther(balance)} ${nativeLabel}) is below the gas reserve required to sweep` });
           continue;
         }
-        const sendAmount = balance - gasReserve;
+        const sendAmount = balance - reserve;
         const tx = await wallet.sendTransaction({ to: agent.ownerAddress, value: sendAmount });
         const receipt = await tx.wait();
         swept.push({
@@ -868,7 +872,7 @@ agentsRouter.post('/:id/withdraw', requireAuth, async (req: AuthRequest, res) =>
         const isGasCoin = gas.nativeIsSettlementToken
           && settlementToken.address !== null
           && settlementToken.address.toLowerCase() === tokenAddress.toLowerCase();
-        const keep = isGasCoin ? nativeWeiToTokenUnits(gas.withdrawReserveWei, settlementToken.unit.decimals) : 0n;
+        const keep = isGasCoin ? nativeWeiToTokenUnits(await gasReserve(), settlementToken.unit.decimals) : 0n;
         if (balance <= keep) {
           skipped.push({ chain, reason: `balance is below the ${nativeLabel} gas reserve this chain keeps back` });
           continue;
@@ -1083,6 +1087,26 @@ agentsRouter.post('/:id/verifier', requireAuth, async (req: AuthRequest, res) =>
   res.json({
     success: true,
     data: { verifierEnabled: updated?.verifierEnabled === true, note: 'Restart the agent for the change to take effect.' },
+  });
+});
+
+// POST /api/v1/agents/:id/delegation — the owner lets this agent post paid
+// sub-tasks (delegate_to_agent) from its wallet, or stops it. Off by default:
+// the task brief is in the same prompt as the tool (services/delegationGuard.ts).
+// The backend checks it on every post; the worker reads it at start, so
+// restart the agent to give or take the tool.
+agentsRouter.post('/:id/delegation', requireAuth, async (req: AuthRequest, res) => {
+  const agent = await authorizeOwner(req, res, req.params.id);
+  if (!agent) return;
+  const parsed = z.object({ enabled: z.boolean() }).safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'enabled must be true or false' } });
+    return;
+  }
+  const updated = await updateAgent(req.params.id, { delegationEnabled: parsed.data.enabled });
+  res.json({
+    success: true,
+    data: { delegationEnabled: updated?.delegationEnabled === true, note: 'Restart the agent for the change to take effect.' },
   });
 });
 

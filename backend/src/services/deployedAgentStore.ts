@@ -33,6 +33,8 @@ function rowToAgent(row: Record<string, unknown>): DeployedAgent {
     inftTokenId: (row.inft_token_id as number) ?? undefined,
     minReward: (row.min_reward as string) ?? undefined,
     verifierEnabled: row.verifier_enabled === true || row.verifier_enabled === 1,
+    delegationEnabled: row.delegation_enabled === true || row.delegation_enabled === 1,
+    privyUserId: typeof row.privy_user_id === 'string' && row.privy_user_id ? row.privy_user_id : undefined,
     skills: safeJsonJson(row.skills) as InstalledSkill[] | undefined,
     // M2 (audit): these columns are new (migrations neonDb:29 / database:13) —
     // older rows read back as undefined, same as a deploy with no secrets.
@@ -101,6 +103,8 @@ function agentToRow(agent: DeployedAgent): Record<string, unknown> {
     inft_token_id: agent.inftTokenId ?? null,
     min_reward: agent.minReward ?? null,
     verifier_enabled: agent.verifierEnabled ? 1 : 0,
+    delegation_enabled: agent.delegationEnabled ? 1 : 0,
+    privy_user_id: agent.privyUserId ?? null,
     skills: JSON.stringify(agent.skills ?? []),
     tool_secrets: JSON.stringify(agent.toolSecrets ?? {}),
     encrypted_tool_secrets: JSON.stringify(agent.encryptedToolSecrets ?? {}),
@@ -108,7 +112,7 @@ function agentToRow(agent: DeployedAgent): Record<string, unknown> {
   };
 }
 
-const PG_COLS = 'id, owner_address, authorized_owners, name, instructions, provider, model, api_key, encrypted_api_key, capabilities, tools, status, deployed_at, last_active_at, storage_ref, platform_token, wallet_address, smart_account_address, public_key, encrypted_private_key, raw_private_key, inft_token_id, min_reward, skills, tool_secrets, encrypted_tool_secrets, verifier_enabled';
+const PG_COLS = 'id, owner_address, authorized_owners, name, instructions, provider, model, api_key, encrypted_api_key, capabilities, tools, status, deployed_at, last_active_at, storage_ref, platform_token, wallet_address, smart_account_address, public_key, encrypted_private_key, raw_private_key, inft_token_id, min_reward, skills, tool_secrets, encrypted_tool_secrets, verifier_enabled, delegation_enabled, privy_user_id';
 
 export async function saveAgent(agent: DeployedAgent): Promise<void> {
   if (usePg()) {
@@ -120,9 +124,10 @@ export async function saveAgent(agent: DeployedAgent): Promise<void> {
           tools, status, deployed_at, last_active_at, storage_ref,
           platform_token, wallet_address, smart_account_address, public_key,
           encrypted_private_key, raw_private_key, inft_token_id, min_reward,
-          skills, tool_secrets, encrypted_tool_secrets, verifier_enabled, updated_at)
+          skills, tool_secrets, encrypted_tool_secrets, verifier_enabled,
+          delegation_enabled, privy_user_id, updated_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-         $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, NOW())
+         $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, NOW())
        ON CONFLICT (id) DO UPDATE SET
          owner_address = EXCLUDED.owner_address,
          authorized_owners = EXCLUDED.authorized_owners,
@@ -149,6 +154,8 @@ export async function saveAgent(agent: DeployedAgent): Promise<void> {
          tool_secrets = EXCLUDED.tool_secrets,
          encrypted_tool_secrets = EXCLUDED.encrypted_tool_secrets,
          verifier_enabled = EXCLUDED.verifier_enabled,
+         delegation_enabled = EXCLUDED.delegation_enabled,
+         privy_user_id = EXCLUDED.privy_user_id,
          updated_at = NOW()`,
       [
         agent.id, agent.ownerAddress, agent.authorizedOwners ?? [],
@@ -164,6 +171,8 @@ export async function saveAgent(agent: DeployedAgent): Promise<void> {
         JSON.stringify(agent.toolSecrets ?? {}),
         JSON.stringify(agent.encryptedToolSecrets ?? {}),
         agent.verifierEnabled === true,
+        agent.delegationEnabled === true,
+        agent.privyUserId ?? null,
       ],
     );
     return;

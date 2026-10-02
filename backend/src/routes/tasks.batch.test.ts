@@ -31,6 +31,10 @@ vi.mock('../services/verifierDuty.js', () => ({
   hostedVerifierNotOptedIn: vi.fn(async () => verifierOptedOut.value),
   VERIFIER_NOT_OPTED_IN_MESSAGE: 'not opted in',
 }));
+// Whether a hosted agent may post is services/delegationGuard.ts's own test;
+// here every caller may, unless a test says otherwise.
+const { refuseUnapprovedDelegation } = vi.hoisted(() => ({ refuseUnapprovedDelegation: vi.fn(async (_poster: string) => {}) }));
+vi.mock('../services/delegationGuard.js', () => ({ refuseUnapprovedDelegation }));
 vi.mock('../config.js', async (importOriginal) => {
   const mod = await importOriginal<typeof import('../config.js')>();
   Object.assign(cfg, mod.config);
@@ -328,6 +332,17 @@ describe('POST /tasks/batch — what would revert the whole batch on-chain', () 
 });
 
 describe('POST /tasks/batch — the batch as a whole', () => {
+  it("refuses a hosted agent whose owner hasn't allowed delegation, before claiming anything", async () => {
+    const { AppError } = await import('../middleware/errorHandler.js');
+    refuseUnapprovedDelegation.mockRejectedValueOnce(new AppError(403, 'DELEGATION_DISABLED', 'not allowed'));
+    const res = await batch([task(0), task(1)]);
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe('DELEGATION_DISABLED');
+    expect(refuseUnapprovedDelegation).toHaveBeenCalledWith(POSTER);
+    expect(store.claimTaskHash).not.toHaveBeenCalled();
+    expect(chain.buildUnsignedTx).not.toHaveBeenCalled();
+  });
+
   it('409 BATCH_UNSUPPORTED when the escrow has no createTasks, before claiming anything', async () => {
     support.batchCreateSupport.mockResolvedValueOnce({ supported: false, maxBatch: 0 });
     const res = await batch([task(0), task(1)]);

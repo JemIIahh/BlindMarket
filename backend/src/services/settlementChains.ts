@@ -75,10 +75,19 @@ export interface SettlementChainConfig {
      * is a different asset (Base: ETH).
      */
     nativeIsSettlementToken: boolean;
-    /** Native balance a native withdraw leaves behind to pay its own gas. */
+    /**
+     * The least a withdraw leaves behind (withdrawReserveWei() raises it
+     * with the fees), so the agent can still pay its own gas.
+     */
     withdrawReserveWei: bigint;
     /** Native balance needed before an ERC-20 withdraw is attempted. */
     withdrawMinWei: bigint;
+    /**
+     * The gas budget of one hosted-worker transaction: before it accepts a
+     * task the worker requires this × maxFeePerGas in its wallet
+     * (worker.js preflightGas, which reads it from SETTLEMENT_CHAINS_JSON).
+     */
+    workerTxGasLimit: bigint;
   };
   /**
    * CAIP-2 id of this chain for the Privy relay, or null when the relay does
@@ -132,6 +141,7 @@ const BUILDERS: { readonly [K in SettlementChainKey]: () => SettlementChainConfi
         nativeIsSettlementToken: false,
         withdrawReserveWei: 300_000_000_000_000n, // 0.0003 ETH
         withdrawMinWei: 50_000_000_000_000n, // 0.00005 ETH
+        workerTxGasLimit: 300_000n,
       },
       relayCaip2: `eip155:${config.baseChainId}`,
       aa: true,
@@ -159,6 +169,9 @@ const BUILDERS: { readonly [K in SettlementChainKey]: () => SettlementChainConfi
         // Arc gas is USDC (18-dec native). Leave enough for a few settle txs.
         withdrawReserveWei: 10_000_000_000_000_000n, // 0.01 USDC (18 decimals)
         withdrawMinWei: 2_000_000_000_000_000n, // 0.002 USDC
+        // The largest worker tx measured on Arc mainnet is completeVerification
+        // at 154,491 gas (submitEvidence 94,101), so 200k leaves ~30% margin.
+        workerTxGasLimit: 200_000n,
       },
       relayCaip2: null,
       aa: false,
@@ -166,6 +179,36 @@ const BUILDERS: { readonly [K in SettlementChainKey]: () => SettlementChainConfi
     };
   },
 };
+
+/**
+ * Gas of the withdraw's own transfer, an upper bound: an Arc USDC transfer to
+ * a new address estimates at 74,8xx gas (Arc mainnet, 2026-10-02). It is paid
+ * from what the withdraw leaves behind wherever gas is the native coin swept
+ * or the settlement token kept.
+ */
+export const WITHDRAW_TX_GAS = 75_000n;
+
+/**
+ * What a withdraw leaves in an agent's wallet, in native wei: the chain's
+ * floor, or enough for the worker's gas gate with a 10% margin
+ * (workerTxGasLimit × maxFeePerGas × 1.1) once the withdraw has paid its own
+ * gas (WITHDRAW_TX_GAS at gasPrice), whichever is more. A fixed floor alone
+ * falls under the gate as fees rise: Arc's 0.01 USDC does above a ~25 gwei
+ * base fee, because ethers' maxFeePerGas is twice the base fee. An agent
+ * withdrawn below its gate takes no tasks. `fee` is null when the fees could
+ * not be read; the floor then stands.
+ */
+export function withdrawReserveWei(
+  gas: Pick<SettlementChainConfig['gas'], 'withdrawReserveWei' | 'workerTxGasLimit'>,
+  fee: { maxFeePerGas?: bigint | null; gasPrice?: bigint | null } | null,
+): bigint {
+  const maxFee = fee?.maxFeePerGas ?? fee?.gasPrice ?? null;
+  if (maxFee === null || maxFee <= 0n) return gas.withdrawReserveWei;
+  const price = fee?.gasPrice && fee.gasPrice > 0n ? fee.gasPrice : maxFee;
+  const gate = (gas.workerTxGasLimit * maxFee * 11n + 9n) / 10n;
+  const needed = gate + WITHDRAW_TX_GAS * price;
+  return needed > gas.withdrawReserveWei ? needed : gas.withdrawReserveWei;
+}
 
 export function isSettlementChainKey(value: unknown): value is SettlementChainKey {
   return typeof value === 'string' && (SETTLEMENT_CHAIN_KEYS as readonly string[]).includes(value);

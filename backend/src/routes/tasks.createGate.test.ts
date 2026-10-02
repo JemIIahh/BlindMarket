@@ -46,6 +46,7 @@ vi.mock('../services/a2aStore.js', () => ({
 }));
 vi.mock('../services/database.js', () => ({ getDb: vi.fn() }));
 vi.mock('../services/neonDb.js', () => ({ getPool: vi.fn() }));
+vi.mock('../services/delegationGuard.js', () => ({ refuseUnapprovedDelegation: vi.fn(async () => {}) }));
 
 import { tasksRouter } from './tasks.js';
 import { globalErrorHandler } from '../middleware/errorHandler.js';

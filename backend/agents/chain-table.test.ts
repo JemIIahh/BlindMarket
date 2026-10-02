@@ -226,7 +226,7 @@ describe('delegate_to_agent funds on the posting chain', () => {
   ]);
 
   /** A JSON-RPC node that records what was asked of it and what was broadcast. */
-  function stubNode(chainId: number, balances: { native: bigint; token: bigint }) {
+  function stubNode(chainId: number, balances: { native: bigint; token: bigint }, fees = { baseFee: 10n ** 9n, priorityFee: 10n ** 9n }) {
     const calls: string[] = [];
     const sent: Array<{ to: string; value: bigint; data: string }> = [];
     const server = createServer((req, res) => {
@@ -246,11 +246,11 @@ describe('delegate_to_agent funds on the posting chain', () => {
             case 'eth_getTransactionCount': return { id: rpc.id, jsonrpc: '2.0', result: '0x0' };
             case 'eth_estimateGas': return { id: rpc.id, jsonrpc: '2.0', result: '0x186a0' };
             case 'eth_gasPrice': return { id: rpc.id, jsonrpc: '2.0', result: '0x3b9aca00' };
-            case 'eth_maxPriorityFeePerGas': return { id: rpc.id, jsonrpc: '2.0', result: '0x3b9aca00' };
+            case 'eth_maxPriorityFeePerGas': return { id: rpc.id, jsonrpc: '2.0', result: '0x' + fees.priorityFee.toString(16) };
             case 'eth_blockNumber': return { id: rpc.id, jsonrpc: '2.0', result: '0x1' };
             case 'eth_getBlockByNumber': return {
               id: rpc.id, jsonrpc: '2.0',
-              result: { number: '0x1', hash: '0x' + '11'.repeat(32), parentHash: '0x' + '22'.repeat(32), timestamp: '0x1', baseFeePerGas: '0x3b9aca00', gasLimit: '0x1c9c380', gasUsed: '0x0', difficulty: '0x0', nonce: '0x0000000000000000', miner: ethers.ZeroAddress, extraData: '0x', transactions: [] },
+              result: { number: '0x1', hash: '0x' + '11'.repeat(32), parentHash: '0x' + '22'.repeat(32), timestamp: '0x1', baseFeePerGas: '0x' + fees.baseFee.toString(16), gasLimit: '0x1c9c380', gasUsed: '0x0', difficulty: '0x0', nonce: '0x0000000000000000', miner: ethers.ZeroAddress, extraData: '0x', transactions: [] },
             };
             case 'eth_sendRawTransaction': {
               const tx = ethers.Transaction.from(rpc.params[0] as string);
@@ -291,10 +291,10 @@ describe('delegate_to_agent funds on the posting chain', () => {
   async function delegateAgainstStub(
     table: typeof TABLE,
     balances: { native: bigint; token: bigint },
-    opts: { builtOn?: string; env?: Record<string, string> } = {},
+    opts: { builtOn?: string; env?: Record<string, string>; fees?: { baseFee: bigint; priorityFee: bigint } } = {},
   ) {
     const posting = table.find((c) => c.posting)!;
-    const node = stubNode(posting.chainId, balances);
+    const node = stubNode(posting.chainId, balances, opts.fees);
     await new Promise<void>((resolve) => node.server.listen(0, '127.0.0.1', resolve));
     const { port } = node.server.address() as { port: number };
     const url = `http://127.0.0.1:${port}`;
@@ -305,6 +305,8 @@ describe('delegate_to_agent funds on the posting chain', () => {
       const worker = await loadWorker({
         SETTLEMENT_CHAINS_JSON: JSON.stringify(table.map((c) => (c.posting ? { ...c, rpcUrl: url } : c))),
         BACKEND_URL: url,
+        // The owner turned delegation on; the default-off path is tested below.
+        AGENT_DELEGATION_ENABLED: 'true',
         ...(opts.env ?? {}),
       });
       const out = (await worker.buildTools().delegate_to_agent.execute(delegateArgs)) as string;
@@ -377,6 +379,28 @@ describe('delegate_to_agent funds on the posting chain', () => {
     });
   });
 
+  // On Arc at a 20 gwei base fee one gas budget (200k × 40 gwei max fee) is
+  // 0.008 USDC, more than the old 0.005 reserve: a delegation could leave the
+  // agent unable to pay for its own submitEvidence. It now keeps three
+  // budgets: the sub-task's approve and createTask, then one of its own.
+  describe('on Arc, it keeps enough gas for its own next transaction', () => {
+    const arcPosting = [{ ...TABLE[1], posting: false }, { ...ARC, preflightGasLimit: '200000' }];
+    const arcFees = { baseFee: 20n * 10n ** 9n, priorityFee: 0n };
+    const reward = ethers.parseUnits('0.01', 6);
+    const keep = ethers.parseUnits('0.024', 6); // 3 × 200k × 40 gwei
+
+    it('refuses a balance that covers the reward and the old 0.005 reserve but not three gas budgets', async () => {
+      const { out, sent } = await delegateAgainstStub(arcPosting, { native: 10n ** 16n, token: reward + keep - 1n }, { fees: arcFees });
+      expect(out).toMatch(/below the 0.01 USDC reward plus the 0.024 USDC gas reserve/);
+      expect(sent).toEqual([]);
+    });
+
+    it('funds once the balance covers the reward and three gas budgets', async () => {
+      const { sent } = await delegateAgainstStub(arcPosting, { native: 10n ** 16n, token: reward + keep }, { fees: arcFees });
+      expect(sent).toHaveLength(2);
+    });
+  });
+
   it("refuses up front for a smart-account agent on a Base-posting stack (the EOA holds nothing)", async () => {
     const { out, calls, sent } = await delegateAgainstStub(TABLE, { native: 10n ** 16n, token: 5_000_000n }, {
       env: { AGENT_SMART_ACCOUNT_ADDRESS: '0x3333333333333333333333333333333333333333', AA_ENTRY_POINT: '0x0000000071727De22E5E9d8BAf0edAc6f37da032' },
@@ -403,7 +427,7 @@ describe('delegate_to_agent funds on the posting chain', () => {
   });
 
   it('refuses when the posting chain has no signer', async () => {
-    const worker = await loadWorker({ SETTLEMENT_CHAINS_JSON: JSON.stringify(TABLE), AGENT_PRIVATE_KEY: '' });
+    const worker = await loadWorker({ SETTLEMENT_CHAINS_JSON: JSON.stringify(TABLE), AGENT_PRIVATE_KEY: '', AGENT_DELEGATION_ENABLED: 'true' });
     const out = (await worker.buildTools().delegate_to_agent.execute(delegateArgs)) as string;
     expect(out).toMatch(/cannot delegate/);
   });

@@ -48,6 +48,8 @@ export function settlementChainsJson(): string {
         token: { address: token.address, kind: token.kind, symbol: token.unit.symbol, decimals: token.unit.decimals },
         gasSymbol: gas.symbol,
         nativeIsSettlementToken: gas.nativeIsSettlementToken,
+        // The worker's gas gate for one tx here (worker.js preflightGasLimitFor).
+        preflightGasLimit: gas.workerTxGasLimit.toString(),
         aa,
         posting: key === posting,
       };
@@ -348,6 +350,8 @@ export async function deployAgent(params: {
   storageRef?: string;
   /** Frozen skill snapshots, resolved server-side from slugs in routes/agents.ts. */
   skills?: InstalledSkill[];
+  /** The deploying Privy user (AuthUser.privyUserId), when signed in through Privy. */
+  privyUserId?: string;
 }): Promise<DeployedAgent> {
   const { privateKey, publicKey } = generateKeyPair();
 
@@ -430,6 +434,7 @@ export async function deployAgent(params: {
     toolSecrets: Object.keys(toolSecrets).length > 0 ? toolSecrets : undefined,
     encryptedToolSecrets: Object.keys(encryptedToolSecrets).length > 0 ? encryptedToolSecrets : undefined,
     skills: params.skills?.length ? params.skills : undefined,
+    privyUserId: params.privyUserId,
   };
 
   // Deploy ERC-4337 smart account on Base (non-fatal if AA infra is unconfigured).
@@ -540,6 +545,8 @@ export async function startAgent(id: string, opts?: { skipResume?: boolean }): P
       AGENT_CAPABILITIES: JSON.stringify(agent.capabilities ?? []),
       AGENT_MIN_REWARD: agent.minReward ?? '',
       AGENT_VERIFIER_ENABLED: agent.verifierEnabled ? 'true' : 'false',
+      // delegate_to_agent is the owner's opt-in (services/delegationGuard.ts).
+      AGENT_DELEGATION_ENABLED: agent.delegationEnabled ? 'true' : 'false',
       AGENT_MEMORY_NS: `agent:${agent.id}`,
       AGENT_FILES_DIR: `/data/agents/${agent.id}`,
       // Set only on a post-crash auto-restart: the worker skips re-driving its
@@ -859,7 +866,7 @@ export async function listAgents(ownerAddress?: string): Promise<DeployedAgent[]
     : all;
 }
 
-export async function updateAgent(id: string, patch: Partial<Pick<DeployedAgent, 'instructions' | 'provider' | 'model' | 'apiKey' | 'tools' | 'capabilities' | 'minReward' | 'skills' | 'verifierEnabled'>>): Promise<DeployedAgent | undefined> {
+export async function updateAgent(id: string, patch: Partial<Pick<DeployedAgent, 'instructions' | 'provider' | 'model' | 'apiKey' | 'tools' | 'capabilities' | 'minReward' | 'skills' | 'verifierEnabled' | 'delegationEnabled'>>): Promise<DeployedAgent | undefined> {
   const agent = await loadAgent(id);
   if (!agent) return undefined;
   // Strip undefined values before merging.

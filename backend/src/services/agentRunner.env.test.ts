@@ -197,6 +197,20 @@ describe('startAgent forks workers with an allowlisted env, not the full process
     expect((forkMock.mock.calls.at(-1)![2].env as Record<string, string>).AGENT_VERIFIER_ENABLED).toBe('true');
   });
 
+  it('tells the worker whether its owner turned delegation on, off for a freshly deployed agent', async () => {
+    const { startAgent, stopAgent } = await import('./agentRunner.js');
+    const off = makeAgent('agent-env-delegation-off');
+    agentHolder.current = off;
+    await startAgent(off.id, { skipResume: true });
+    expect((forkMock.mock.calls.at(-1)![2].env as Record<string, string>).AGENT_DELEGATION_ENABLED).toBe('false');
+    await stopAgent(off.id);
+
+    const on = { ...makeAgent('agent-env-delegation-on'), delegationEnabled: true };
+    agentHolder.current = on;
+    await startAgent(on.id, { skipResume: true });
+    expect((forkMock.mock.calls.at(-1)![2].env as Record<string, string>).AGENT_DELEGATION_ENABLED).toBe('true');
+  });
+
   it('hands the worker every configured settlement chain as data', async () => {
     const agent = makeAgent('agent-env-chains');
     agentHolder.current = agent;
@@ -218,7 +232,10 @@ describe('startAgent forks workers with an allowlisted env, not the full process
     expect(table.find((c) => c.key === 'arc')).toMatchObject({
       token: { kind: 'erc20', symbol: 'USDC', decimals: 6 },
       posting: true,
+      // The worker's gas gate on Arc (settlementChains.ts workerTxGasLimit).
+      preflightGasLimit: '200000',
     });
+    expect(table.find((c) => c.key === 'base')).toMatchObject({ preflightGasLimit: '300000' });
     // Exactly one chain is the posting chain.
     expect(table.filter((c) => c.posting)).toHaveLength(1);
     // Each entry carries what a signer needs, and nothing secret.

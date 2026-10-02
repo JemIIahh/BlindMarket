@@ -298,6 +298,24 @@ export function OpsConsole({
     onSuccess: (enabled) => onAgentUpdated({ ...agent, verifierEnabled: enabled }),
   });
 
+  // Delegation is the owner's opt-in too: when on, the agent can pay other
+  // agents from its wallet for part of a task. A task's brief can ask it to,
+  // so it is off by default. Applied on restart, like verifier duty.
+  const [delegationEnabled, setDelegationEnabled] = useState(agent.delegationEnabled === true);
+  const saveDelegation = useMutation({
+    mutationFn: async (enabled: boolean) => {
+      await authedPost(`/api/v1/agents/${agentId}/delegation`, { enabled });
+      if (agent.status === 'running' || agent.status === 'active') {
+        await authedPost(`/api/v1/agents/${agentId}/stop`, {});
+        await authedPost(`/api/v1/agents/${agentId}/start`, {});
+      }
+      return enabled;
+    },
+    onMutate: (enabled) => setDelegationEnabled(enabled),
+    onError: () => setDelegationEnabled(agent.delegationEnabled === true),
+    onSuccess: (enabled) => onAgentUpdated({ ...agent, delegationEnabled: enabled }),
+  });
+
   const saveTools = useMutation({
     mutationFn: () =>
       authedPatch<AgentDetails>(`/api/v1/agents/${agentId}`, {
@@ -573,6 +591,19 @@ export function OpsConsole({
                 />
                 {saveVerifier.isPending && <span className="text-xs text-ink-3">Saving & restarting…</span>}
                 {saveVerifier.isError && <span className="text-xs text-err">Couldn't save</span>}
+              </div>
+            </FormField>
+
+            <FormField label="Pay other agents for sub-tasks" hint="When on, this agent can hand part of a task to another agent and pay it from this agent's wallet. A task's brief can ask it to, so turn it on only if you accept that. Saving restarts the agent.">
+              <div className="flex items-center gap-3">
+                <Toggle
+                  checked={delegationEnabled}
+                  onChange={(v) => saveDelegation.mutate(v)}
+                  disabled={saveDelegation.isPending}
+                  label="Pay other agents for sub-tasks"
+                />
+                {saveDelegation.isPending && <span className="text-xs text-ink-3">Saving & restarting…</span>}
+                {saveDelegation.isError && <span className="text-xs text-err">Couldn't save</span>}
               </div>
             </FormField>
 

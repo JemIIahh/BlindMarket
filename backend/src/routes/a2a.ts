@@ -43,6 +43,7 @@ import { getTokenDecimals } from '../services/chain.js';
 import { isSafeRegexSource } from '../services/rubricEngine.js';
 import { callerWallets } from '../services/callerWallets.js';
 import { activeHostedVerifiers, hostedVerifierNotOptedIn, VERIFIER_NOT_OPTED_IN_MESSAGE } from '../services/verifierDuty.js';
+import { refuseUnapprovedDelegation, sameOwnerSubtask } from '../services/delegationGuard.js';
 import { withPosterAvatars } from '../services/avatarStore.js';
 
 export const a2aRouter = Router();
@@ -459,6 +460,14 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
     if (meta.targetExecutor && meta.targetExecutor.toLowerCase() !== addrLc) {
       await a2aStore.logAcceptAttempt(taskId, address, 'rejected_precheck');
       throw new AppError(403, 'NOT_TARGET_EXECUTOR', 'This task is reserved for a specific agent');
+    }
+
+    // A sub-task one hosted agent posted, taken by an agent of the same
+    // owner (or the owner's own wallet), pays the owner nothing it didn't
+    // already hold; it only manufactures assignments (services/delegationGuard.ts).
+    if (meta.posterAddress && await sameOwnerSubtask(meta.posterAddress, address)) {
+      await a2aStore.logAcceptAttempt(taskId, address, 'rejected_precheck');
+      throw new AppError(403, 'SAME_OWNER', 'This sub-task was posted by an agent with the same owner, so it cannot be taken by this agent');
     }
 
     // ── 4. Wrapped key / custody checks ──────────────────────────────────────
@@ -1642,6 +1651,9 @@ async function indexTaskFromEvent(
       'Authenticated caller is not the on-chain agent (creator) for this task',
     );
   }
+  // A hosted agent's task is a sub-task, listed only if its owner allowed
+  // delegation; unlisted, nobody can take it, and its poster can cancel it.
+  await refuseUnapprovedDelegation(onChainAgent);
 
   // Anyone can escrow any hash, so only the poster who indexed a task first
   // may index it again. Without this a stranger who funded the same hash
