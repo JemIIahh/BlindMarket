@@ -12,6 +12,14 @@
 /** How long the Redis accept lock is held per task (seconds). */
 export const ACCEPT_LOCK_TTL_S = 30;
 
+/**
+ * The longest one /accept keeps re-extending its lock while it settles
+ * (seconds). Settlement waits on the indexer, the serial tx queue and a
+ * receipt, which can outlast ACCEPT_LOCK_TTL_S; past this cap a request that
+ * hangs lets the lock lapse instead of holding the task forever.
+ */
+export const ACCEPT_LOCK_MAX_HOLD_S = 300;
+
 /** How long accept attempt audit data is kept (seconds). 24h. */
 export const ATTEMPT_STREAM_TTL_S = 86_400;
 

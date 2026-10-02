@@ -239,6 +239,35 @@ export async function loadAgentBySmartAccount(smartAccountAddress: string): Prom
   return row ? rowToAgent(row) : null;
 }
 
+/**
+ * Wallet and smart-account addresses (lowercase) of every hosted agent that
+ * one of `owners` owns or is a linked owner of. One query whatever the number
+ * of agents, and it reads no key material.
+ */
+export async function walletsOfOwners(owners: readonly string[]): Promise<string[]> {
+  const want = [...new Set(owners.map((o) => o.toLowerCase()))];
+  if (want.length === 0) return [];
+  let rows: Record<string, unknown>[];
+  if (usePg()) {
+    const db = await getPool();
+    ({ rows } = await db.query<Record<string, unknown>>(
+      `SELECT wallet_address, smart_account_address FROM deployed_agents
+        WHERE LOWER(owner_address) = ANY($1::text[])
+           OR EXISTS (SELECT 1 FROM unnest(authorized_owners) AS o WHERE LOWER(o) = ANY($1::text[]))`,
+      [want],
+    ));
+  } else {
+    const db = getDb();
+    rows = (db.prepare('SELECT wallet_address, smart_account_address, owner_address, authorized_owners FROM deployed_agents').all() as Record<string, unknown>[])
+      .filter((r) => want.includes(String(r.owner_address).toLowerCase())
+        || safeJsonArray(r.authorized_owners).some((o) => want.includes(o.toLowerCase())));
+  }
+  return rows
+    .flatMap((r) => [r.wallet_address, r.smart_account_address])
+    .filter((a): a is string => typeof a === 'string' && a.length > 0)
+    .map((a) => a.toLowerCase());
+}
+
 export async function loadAllAgents(): Promise<DeployedAgent[]> {
   if (usePg()) {
     const db = await getPool();

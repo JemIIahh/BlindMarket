@@ -38,6 +38,8 @@ vi.mock('./agentScorer.js', () => ({
   },
   hasAllCapabilities: (a: { capabilities: string[] }, req: string[]) =>
     req.every((c) => a.capabilities.includes(c)),
+  barredFromTask: (m: { posterAddress?: string; verifierAddress?: string }) =>
+    new Set([m.posterAddress, m.verifierAddress].filter((a): a is string => !!a).map((a) => a.toLowerCase())),
 }));
 vi.mock('./agentStore.js', () => ({ getAgent: vi.fn() }));
 vi.mock('./agentEmbedding.js', () => ({ buildAgentDoc: vi.fn() }));
@@ -276,6 +278,12 @@ describe('semanticCascadeRanking (Phase 2 flip — cascade offer queue)', () => 
       verifierAddress: '0xbbb',
     });
     expect(out).toBeNull(); // both candidates gate-blocked → no usable queue
+  });
+
+  it("drops the caller's barred set (same-owner agents, resolved once per cascade build)", async () => {
+    arm();
+    const out = await semanticCascadeRanking(meta, undefined, new Set(['0xaaa']));
+    expect(out?.map((e) => e.address)).toEqual(['0xbbb']);
   });
 
   it('drops slice-less candidates on a sealed task with no custody blob (NEEDS_WRAP)', async () => {

@@ -1003,15 +1003,47 @@ const LOCK_KEY = {
   attempts: (taskId: string) => `a2a:accept_attempts:${taskId.toLowerCase()}`,
 };
 
-export async function acquireAcceptLock(taskId: string, agentAddress: string): Promise<boolean> {
+/** The accept lock records `<agent>|<token>`: who holds it, and the /accept
+ *  request (`token`) that took it, as the task-hash claims do. */
+function acceptLockValue(agentAddress: string, token: string): string {
+  return `${agentAddress.toLowerCase()}|${token}`;
+}
+
+/** Take the per-task accept lock for request `token` of `agentAddress`, for ACCEPT_LOCK_TTL_S. */
+export async function acquireAcceptLock(taskId: string, agentAddress: string, token: string): Promise<boolean> {
   const key = LOCK_KEY.accept(taskId);
-  const result = await redis.set(key, agentAddress, 'EX', ACCEPT_LOCK_TTL_S, 'NX');
+  const result = await redis.set(key, acceptLockValue(agentAddress, token), 'EX', ACCEPT_LOCK_TTL_S, 'NX');
   return result === 'OK';
 }
 
-export async function releaseAcceptLock(taskId: string): Promise<void> {
-  await redis.del(LOCK_KEY.accept(taskId));
+/**
+ * Release the accept lock request `token` holds: compare-and-delete on the
+ * exact value. A request that outlived its lock's TTL used to delete whatever
+ * lock was there, including the one a later accept had taken since. Returns
+ * whether this request's lock was dropped.
+ */
+export async function releaseAcceptLock(taskId: string, agentAddress: string, token: string): Promise<boolean> {
+  const dropped = await redis.eval(
+    "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0",
+    1,
+    LOCK_KEY.accept(taskId),
+    acceptLockValue(agentAddress, token),
+  );
+  return Number(dropped) === 1;
 }
+
+/** Push the accept lock request `token` holds out to a fresh ACCEPT_LOCK_TTL_S; false when it no longer holds it. */
+export async function extendAcceptLock(taskId: string, agentAddress: string, token: string): Promise<boolean> {
+  const extended = await redis.eval(
+    "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('EXPIRE', KEYS[1], ARGV[2]) end return 0",
+    1,
+    LOCK_KEY.accept(taskId),
+    acceptLockValue(agentAddress, token),
+    ACCEPT_LOCK_TTL_S,
+  );
+  return Number(extended) === 1;
+}
+
 
 export async function logAcceptAttempt(
   taskId: string,

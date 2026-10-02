@@ -1,6 +1,6 @@
 import type { DeployedAgent } from '../types.js';
 import { AppError } from '../middleware/errorHandler.js';
-import { loadAgentBySmartAccount, loadAgentByWallet } from './deployedAgentStore.js';
+import { loadAgentBySmartAccount, loadAgentByWallet, walletsOfOwners } from './deployedAgentStore.js';
 
 /**
  * Who may make a hosted agent pay for a sub-task.
@@ -38,6 +38,21 @@ function ownersOf(agent: DeployedAgent): Set<string> {
 }
 
 /**
+ * Every address that may not take a sub-task `poster` posted: when `poster`
+ * is a hosted agent, its owner and linked owners, and the wallet and smart
+ * account of every hosted agent one of them owns or is linked to (`poster`
+ * included). Empty for any other poster. Two queries however many agents are
+ * checked against it, so the cascade drops all of them in one go
+ * (agentScorer.barredFromTask) and /accept asks the same question.
+ */
+export async function sameOwnerAddresses(poster: string): Promise<Set<string>> {
+  const posting = await hostedAgent(poster);
+  if (!posting) return new Set();
+  const owners = ownersOf(posting);
+  return new Set([...owners, ...(await walletsOfOwners([...owners]))]);
+}
+
+/**
  * True when `poster` is a hosted agent (so the task is a sub-task) and
  * `executor` is an agent of the same owner, or the owner's own wallet. An
  * owner paying their own agent from another of their agents gains nothing
@@ -45,10 +60,5 @@ function ownersOf(agent: DeployedAgent): Set<string> {
  * second address gets past it, which is why delegation is opt-in.
  */
 export async function sameOwnerSubtask(poster: string, executor: string): Promise<boolean> {
-  const posting = await hostedAgent(poster);
-  if (!posting) return false;
-  const posterOwners = ownersOf(posting);
-  const executing = await hostedAgent(executor);
-  const executorOwners = executing ? ownersOf(executing) : new Set([executor.toLowerCase()]);
-  return [...executorOwners].some((owner) => posterOwners.has(owner));
+  return (await sameOwnerAddresses(poster)).has(executor.toLowerCase());
 }

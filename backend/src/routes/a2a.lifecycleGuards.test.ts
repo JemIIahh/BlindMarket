@@ -304,7 +304,20 @@ describe('return-to-open is announced', () => {
       executorAddress: EXEC, assignTxHash: undefined, status: 'accepted',
     });
     expect(a2aStore.releaseToOpen).not.toHaveBeenCalled();
-    expect(emitTaskAvailable).toHaveBeenCalledWith(TASK, { requiredCapabilities: ['coding'], chain: 'base' });
+    expect(emitTaskAvailable).toHaveBeenCalledWith(TASK, { requiredCapabilities: ['coding'], chain: 'base' }, undefined);
+  });
+
+  it('/release of a pinned task → announced to its target alone', async () => {
+    vi.mocked(a2aStore.getMeta).mockResolvedValue({
+      taskId: TASK, posterAddress: POSTER, requiredCapabilities: [], chain: 'arc', targetExecutor: EXEC,
+    } as any);
+    vi.mocked(a2aStore.getState).mockResolvedValue({ status: 'accepted', executorAddress: EXEC } as any);
+    vi.mocked(escrowService.getTaskOn).mockResolvedValue(onChainTask({ status: 0 }) as any);
+
+    const res = await post(`/tasks/${TASK}/release`, EXEC);
+
+    expect(res.status).toBe(200);
+    expect(emitTaskAvailable).toHaveBeenCalledWith(TASK, { chain: 'arc' }, EXEC);
   });
 
   it('/release passes the status and assign tx it read (submitted task, broadcast tx)', async () => {
@@ -363,7 +376,7 @@ describe('return-to-open is announced', () => {
     expect(a2aStore.tryReleaseAccepted).toHaveBeenCalledWith(TASK, { executorAddress: EXEC, assignTxHash: undefined });
     expect(a2aStore.releaseToOpen).not.toHaveBeenCalled();
     expect(res.body.error.message).toContain('Task released');
-    expect(emitTaskAvailable).toHaveBeenCalledWith(TASK, {});
+    expect(emitTaskAvailable).toHaveBeenCalledWith(TASK, {}, undefined);
   });
 
   it('/accept SETTLEMENT_FAILED after a reverted assign tx → compare-and-set names that tx', async () => {
