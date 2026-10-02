@@ -8,12 +8,18 @@
  * user just pasted into the form. It is forwarded once to that provider's
  * fixed models endpoint and dropped: never stored, never logged, never echoed
  * back in an error.
+ *
+ * 0g-compute needs no key: its models are the chat services registered on
+ * 0G Compute (ogComputeCatalog.ts), the only ones a 0g-compute agent's
+ * account can pay for.
  */
 import { LLM_PROVIDER_MODELS, type LLMProvider } from '../types.js';
+import { readOgServices, type OgService } from './ogComputeCatalog.js';
+import { matchOgService, ogChatServices } from './ogComputeModels.js';
 
 export interface DiscoveredModel {
   id: string;
-  /** USD per 1M tokens — present when the catalog (or, for 0G, the router) prices the model. */
+  /** USD per 1M tokens — present when the catalog (or, for 0G, 0G's status API) prices the model. */
   inputCostPer1M?: number;
   outputCostPer1M?: number;
 }
@@ -26,7 +32,6 @@ export class ProviderModelsError extends Error {
 }
 
 const FETCH_TIMEOUT_MS = 8_000;
-export const OG_ROUTER_MODELS_URL = 'https://router-api.0g.ai/v1/models';
 
 // ── Per-provider list shapes ─────────────────────────────────────────────────
 // Each provider's /models lists every modality it serves. These keep the
@@ -70,21 +75,69 @@ export function geminiChatIds(body: unknown): string[] {
     .filter((id) => !/(image|tts|live|embedding|transcribe|translate|omni|audio|computer-use)/.test(id));
 }
 
-/** 0G router: typed entries with per-token USD pricing. */
-export function ogChatModels(body: unknown): DiscoveredModel[] {
-  const data = (body as {
-    data?: Array<{ id?: unknown; type?: unknown; pricing_usd?: { prompt?: string; completion?: string } }>;
-  })?.data ?? [];
-  return data
-    .filter((m) => typeof m.id === 'string' && m.type === 'chatbot')
-    .map((m) => {
-      const id = m.id as string;
-      const inp = m.pricing_usd?.prompt !== undefined ? Number(m.pricing_usd.prompt) * 1e6 : NaN;
-      const out = m.pricing_usd?.completion !== undefined ? Number(m.pricing_usd.completion) * 1e6 : NaN;
-      return Number.isFinite(inp) && Number.isFinite(out)
-        ? { id, inputCostPer1M: round3(inp), outputCostPer1M: round3(out) }
-        : { id };
-    });
+/**
+ * 0G Compute services a 0g-compute agent can call: on-chain chat services
+ * (ogChatServices) that answer OpenAI chat completions, the only API the
+ * worker speaks to them. The status API lists the Claude providers as
+ * 'anthropic' only (Oct 2026), so they are left out; a service it has no
+ * detail on is kept, since 0G's serving broker is OpenAI-compatible.
+ */
+export function ogCallableServices(services: readonly OgService[]): OgService[] {
+  return ogChatServices(services).filter((s) => !s.formats || s.formats.includes('openai'));
+}
+
+/**
+ * One entry per model a 0g-compute agent can run, priced (USD per 1M tokens,
+ * from 0G's status API) from the provider the worker would pick for it.
+ */
+export function ogOfferedModels(services: readonly OgService[]): DiscoveredModel[] {
+  const callable = ogCallableServices(services);
+  const ids = [...new Set(callable.map((s) => s.model))];
+  return ids.map((id) => {
+    const s = matchOgService(callable, id)!;
+    return s.usdIn !== undefined && s.usdOut !== undefined
+      ? { id, inputCostPer1M: round3(s.usdIn * 1e6), outputCostPer1M: round3(s.usdOut * 1e6) }
+      : { id };
+  });
+}
+
+// The chain read has no timeout of its own; a deploy must not hang on it.
+const OG_READ_TIMEOUT_MS = 12_000;
+
+function readOgServicesWithin(ms = OG_READ_TIMEOUT_MS): Promise<OgService[]> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    readOgServices(),
+    new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('timed out')), ms); }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+async function readOgServicesOrThrow(): Promise<OgService[]> {
+  try {
+    return await readOgServicesWithin();
+  } catch (err) {
+    throw new ProviderModelsError('PROVIDER_UNAVAILABLE', `0g-compute services could not be read: ${(err as Error).message}`);
+  }
+}
+
+/**
+ * Whether a 0g-compute agent can run `model`: some provider on 0G Compute
+ * serves it (matched the way worker.js matches it). `models` is what can be
+ * run instead. When 0G Compute can't be read, the static catalog answers.
+ */
+export async function checkOgComputeModel(model: string): Promise<{ ok: boolean; models: string[] }> {
+  let services: OgService[] | null = null;
+  try {
+    services = await readOgServicesWithin();
+  } catch {
+    services = null;
+  }
+  if (services) {
+    const callable = ogCallableServices(services);
+    return { ok: matchOgService(callable, model) !== null, models: ogOfferedModels(services).map((m) => m.id) };
+  }
+  const models = LLM_PROVIDER_MODELS['0g-compute'].map((m) => m.id);
+  return { ok: models.some((id) => id.toLowerCase() === model.toLowerCase()), models };
 }
 
 function listIds(body: unknown): string[] {
@@ -167,10 +220,13 @@ export function mergeWithCatalog(provider: LLMProvider, liveIds: string[]): Disc
 
 export async function discoverModels(provider: LLMProvider, apiKey: string): Promise<DiscoveredModel[]> {
   if (provider === '0g-compute') {
-    const live = ogChatModels(await fetchJson(OG_ROUTER_MODELS_URL, {}, provider));
-    // Router prices are the authority for 0G; the catalog only sets the order.
+    const live = ogOfferedModels(await readOgServicesOrThrow());
+    // The catalog sets the order; 0G's prices win over its dated ones.
     const byId = new Map(live.map((m) => [m.id, m]));
-    return mergeWithCatalog(provider, live.map((m) => m.id)).map((m) => byId.get(m.id) ?? m);
+    return mergeWithCatalog(provider, live.map((m) => m.id)).map((m) => {
+      const fresh = byId.get(m.id);
+      return fresh && fresh.inputCostPer1M !== undefined ? fresh : m;
+    });
   }
   const spec = KEYED[provider];
   return mergeWithCatalog(provider, spec.ids(await fetchJson(spec.url, spec.headers(apiKey), provider)));

@@ -178,7 +178,7 @@ export default function DeployAgentForm() {
     anthropic: ['claude-fable-5-1', 'claude-fable-5', 'claude-opus-5', 'claude-opus-4-8', 'claude-opus-4-7', 'claude-sonnet-5', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
     groq: ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'llama-3.3-70b-versatile', 'llama-3.1-8b-instant'],
     gemini: ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-pro-preview', 'gemini-3.1-flash-lite', 'gemini-2.5-pro', 'gemini-2.5-flash'],
-    '0g-compute': ['deepseek-v4-flash', 'qwen3.8-flash', 'glm-5.3-flash', 'deepseek-v4-pro', 'kimi-k3', 'claude-sonnet-5', 'claude-opus-5', 'gpt-5.6-terra', '0gm-1.0-35b-a3b'],
+    '0g-compute': ['glm-5', 'qwen3.7-plus', 'glm-5.3', '0GM-1.0-35B-A3B', '0GM-1.0-35B-A3B-SIA'],
   });
   const [pricing, setPricing] = useState<PricingMap>({} as PricingMap);
 
@@ -186,7 +186,7 @@ export default function DeployAgentForm() {
     name: '',
     instructions: '',
     provider: '0g-compute' as Provider,
-    model: 'deepseek-v4-flash',
+    model: 'glm-5',
     apiKey: '',
   });
 
@@ -717,7 +717,7 @@ export default function DeployAgentForm() {
                 })}
               </FormSelect>
             </FormField>
-            <FormField label="API key" required={form.provider !== '0g-compute'} hint={form.provider === '0g-compute' ? 'No API key needed — billed to agent wallet via 0G Compute Router' : undefined}>
+            <FormField label="API key" required={form.provider !== '0g-compute'} hint={form.provider === '0g-compute' ? "No API key needed — the agent's wallet pays a 0G Compute provider" : undefined}>
               <FormInput
                 required={form.provider !== '0g-compute'}
                 type="password"

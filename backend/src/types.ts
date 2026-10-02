@@ -643,21 +643,21 @@ export const LLM_PROVIDER_MODELS: Record<LLMProvider, ModelInfo[]> = {
     { id: 'gemini-2.5-pro',         inputCostPer1M: 1.25,  outputCostPer1M: 10.00 },
     { id: 'gemini-2.5-flash',       inputCostPer1M: 0.30,  outputCostPer1M: 2.50  },
   ],
-  // No API key: inference is billed to the agent's own wallet through the 0G
-  // Compute Router, which now fronts frontier closed models as well as open
-  // ones. Prices are the router's pricing_usd × 1e6 as of 2026-09-09 — they
-  // drift day to day, so the live list (same endpoint, keyless) is the
-  // authority and overrides these whenever the form can reach it.
+  // No API key: the agent's own wallet pays a 0G Compute provider per call,
+  // from its 0G Compute account. Only models a provider registered on 0G
+  // Compute serves can be paid for that way — the 0G Compute Router's larger
+  // catalog bills a separate Router balance with its own API keys, which the
+  // agent's account doesn't fund. These are the OpenAI-compatible chat
+  // services on mainnet on 2026-10-02, priced from 0G's status API
+  // (pricing_usd × 1e6) that day; the live list (providerModels.ts, read from
+  // the chain) is the authority. glm-5 first, so the form's default: it takes
+  // tools and tool_choice and is TEE-verified.
   '0g-compute': [
-    { id: 'deepseek-v4-flash', inputCostPer1M: 0.138, outputCostPer1M: 0.275 },
-    { id: 'qwen3.8-flash',     inputCostPer1M: 0.113, outputCostPer1M: 0.382 },
-    { id: 'glm-5.3-flash',     inputCostPer1M: 0.111, outputCostPer1M: 0.389 },
-    { id: 'deepseek-v4-pro',   inputCostPer1M: 0.792, outputCostPer1M: 2.376 },
-    { id: 'kimi-k3',           inputCostPer1M: 3.00,  outputCostPer1M: 15.00 },
-    { id: 'claude-sonnet-5',   inputCostPer1M: 1.90,  outputCostPer1M: 9.50  },
-    { id: 'claude-opus-5',     inputCostPer1M: 5.00,  outputCostPer1M: 25.00 },
-    { id: 'gpt-5.6-terra',     inputCostPer1M: 2.00,  outputCostPer1M: 12.00 },
-    { id: '0gm-1.0-35b-a3b',   inputCostPer1M: 0.08,  outputCostPer1M: 0.48  },
+    { id: 'glm-5',               inputCostPer1M: 0.667, outputCostPer1M: 3.00  },
+    { id: 'qwen3.7-plus',        inputCostPer1M: 0.292, outputCostPer1M: 1.167 },
+    { id: 'glm-5.3',             inputCostPer1M: 1.40,  outputCostPer1M: 4.40  },
+    { id: '0GM-1.0-35B-A3B',     inputCostPer1M: 0.08,  outputCostPer1M: 0.48  },
+    { id: '0GM-1.0-35B-A3B-SIA', inputCostPer1M: 0.536, outputCostPer1M: 3.216 },
   ],
 };
 

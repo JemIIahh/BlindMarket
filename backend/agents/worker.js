@@ -39,6 +39,7 @@ import {
   generateAesKey,
 } from '../src/services/crypto.js';
 import { egressFetch, MAX_TOOL_RESPONSE_BYTES, readCappedText } from '../src/services/egressGuard.js';
+import { matchOgService, ogChatServices } from '../src/services/ogComputeModels.js';
 import {
   encodeExecuteCallData,
   buildUserOp,
@@ -412,13 +413,21 @@ export function delegationGasKeep(gateWei, reserveRaw, decimals) {
   return raw > reserveRaw ? raw : reserveRaw;
 }
 
-// 0G Compute Router — when no AGENT_API_KEY is set, the agent uses its own
-// wallet to pay for inference on the 0G Compute Network (decentralized AI).
-// The model set changes often (GET https://router-api.0g.ai/v1/models is the
-// authority; the deploy form reads it live). The agent wallet must hold 0G
-// tokens to cover per-call costs.
-const OG_COMPUTE_ENABLED = !AGENT_API_KEY && !!AGENT_PRIVATE_KEY;
-const OG_COMPUTE_ROUTER_BASE_URL = 'https://router-api.0g.ai/v1';
+// 0G Compute — a 0g-compute agent (or any agent with no AGENT_API_KEY) pays
+// for its model calls itself, from its own 0G Compute account: the ledger it
+// opens with 0G from its wallet, and a sub-account with the provider that
+// serves its model, funded from that ledger. It calls that provider's own
+// endpoint and signs each request with the agent wallet.
+//
+// Not the 0G Compute Router (router-api.0g.ai): the Router takes an API key
+// made on pc.0g.ai and bills a Router balance of its own, which this account
+// does not fund. The worker used to send every call there (401 invalid_auth)
+// with headers for whichever provider the chain listed first, so no
+// 0g-compute agent could answer a model call (Oct 2026).
+//
+// A 0g-compute agent keeps 0G Compute even when an API key from an earlier
+// provider is still on file (switching provider in the edit form keeps it).
+const OG_COMPUTE_ENABLED = !!AGENT_PRIVATE_KEY && (AGENT_PROVIDER === '0g-compute' || !AGENT_API_KEY);
 
 // The least a new 0G Compute account (ledger) can open with: the LedgerManager
 // contract's MIN_ACCOUNT_BALANCE, which @0gfoundation/0g-compute-ts-sdk checks
@@ -441,150 +450,376 @@ export function ogLedgerPlan(hasLedger, walletWei) {
   return { action: 'fund', needWei, shortfallWei: needWei - walletWei };
 }
 
-// 0G Compute broker + provider, created once. The account setup re-runs (at
-// most every OG_SETUP_RETRY_MS) until it succeeds, so topping up the agent
-// wallet fixes a failed setup without a restart.
-let _ogComputeBroker = null;
-let _ogComputeProvider = null;
-let _ogRpc = null;
-let _ogWallet = null;
-let _ogAccountReady = false;
-let _ogSetupProblem = null;
-// What the wallet must hold to open the account, while it can't: reported to
-// the owner through the heartbeat (readinessReport). Wei as strings.
-/** @type {{ chain: '0g', address: string, holdsWei: string, needWei: string, shortfallWei: string } | null} */
-let _ogFundNeed = null;
-let _ogSetupAttemptAt = 0;
-let _ogSetupInFlight = null;
+// A provider refuses a call unless the sub-account's locked balance covers the
+// call's fee plus 1 0G (the SDK's MIN_LOCKED_BALANCE); the SDK's auto-funding
+// keeps it at twice that. The ledger moves at least 1 0G per transfer (the
+// contract's MIN_TRANSFER_AMOUNT).
+export const OG_PROVIDER_FLOOR_WEI = 10n ** 18n;
+export const OG_PROVIDER_TARGET_WEI = 2n * OG_PROVIDER_FLOOR_WEI;
+export const OG_MIN_TRANSFER_WEI = 10n ** 18n;
+// A refund from a sub-account back to the ledger stays locked this long before
+// a second retrieve collects it (InferenceServing.lockTime: 86400 s on mainnet
+// on 2026-10-02).
+export const OG_REFUND_LOCK_MS = 24 * 60 * 60_000;
+// The least time between two refund transactions for one provider.
+const OG_REFUND_RETRY_MS = 60 * 60_000;
 const OG_SETUP_RETRY_MS = 5 * 60_000;
+// InferenceServing.getAllServices refuses a page over 50 (LimitTooLarge).
+const OG_SERVICE_PAGE = 50;
 
-async function ensureOgComputeBroker({ force = false } = {}) {
-  if (!OG_COMPUTE_ENABLED) return null;
-  if (_ogAccountReady) return _ogComputeBroker;
-  if (_ogSetupInFlight) return _ogSetupInFlight;
-  if (!force && _ogSetupAttemptAt && Date.now() - _ogSetupAttemptAt < OG_SETUP_RETRY_MS) return _ogComputeBroker;
-  _ogSetupAttemptAt = Date.now();
-  _ogSetupInFlight = setUpOgCompute().finally(() => { _ogSetupInFlight = null; });
-  return _ogSetupInFlight;
+/**
+ * How the agent's sub-account with its provider gets what a call needs: it
+ * has it ('ready'), the ledger moves `transferWei` into it ('transfer'), or
+ * the ledger can't ('short': the ledger needs `shortfallWei` more). `account`
+ * is the sub-account (null before it exists), `availableWei` the ledger's free
+ * balance. Exported for tests.
+ *
+ * @param {{ balance: bigint, pendingRefund: bigint } | null} account
+ * @param {bigint} availableWei
+ */
+export function ogProviderFundingPlan(account, availableWei) {
+  const locked = account ? account.balance - account.pendingRefund : 0n;
+  if (locked >= OG_PROVIDER_TARGET_WEI) return { action: 'ready' };
+  const deficit = OG_PROVIDER_TARGET_WEI - locked;
+  const transferWei = deficit > OG_MIN_TRANSFER_WEI ? deficit : OG_MIN_TRANSFER_WEI;
+  if (availableWei >= transferWei) return { action: 'transfer', transferWei };
+  // Short of the target but enough to clear the floor: take what there is.
+  if (availableWei >= OG_MIN_TRANSFER_WEI && locked + availableWei > OG_PROVIDER_FLOOR_WEI) {
+    return { action: 'transfer', transferWei: availableWei };
+  }
+  if (locked > OG_PROVIDER_FLOOR_WEI) return { action: 'ready' };
+  return { action: 'short', needWei: transferWei, shortfallWei: transferWei - availableWei };
 }
 
-async function setUpOgCompute() {
+/**
+ * What the wallet moves into the ledger to cover `shortfallWei`: rounded up to
+ * 0.001 0G, plus 0.001 because the SDK takes the amount as a float. Exported
+ * for tests.
+ */
+export function ogDepositWei(shortfallWei) {
+  const step = 10n ** 15n;
+  return ((shortfallWei + step - 1n) / step) * step + step;
+}
+
+/**
+ * What to do about a sub-account the agent no longer uses (its model changed)
+ * while its ledger is short: 'request' a refund of its free balance to the
+ * ledger, 'collect' a refund whose lock has passed, or nothing (null). At most
+ * one try per OG_REFUND_RETRY_MS. Exported for tests.
+ */
+export function ogRefundAction(account, nowMs, lastTriedMs) {
+  if (lastTriedMs !== undefined && nowMs - lastTriedMs < OG_REFUND_RETRY_MS) return null;
+  if (account.balance - account.pendingRefund > 0n) return 'request';
+  const matured = (account.refunds ?? []).some(
+    (r) => !r.processed && Number(r.createdAt) * 1000 + OG_REFUND_LOCK_MS <= nowMs,
+  );
+  return matured ? 'collect' : null;
+}
+
+/**
+ * A 0g-compute agent's side of 0G Compute, around one broker: it picks the
+ * provider that serves `model` (matchOgService, the rule the backend's deploy
+ * check uses), opens the account and funds that provider's sub-account, then
+ * makes the calls. ensure() re-runs the setup, at most every retryMs or at
+ * once with force, until it succeeds, so topping up the agent wallet fixes a
+ * failed setup without a restart. Exported for tests, which pass a mock
+ * broker.
+ *
+ * @param {{
+ *   enabled: boolean,
+ *   model: string,
+ *   wallet: () => any,
+ *   loadBroker: (wallet: any) => Promise<any>,
+ *   log: (msg: string) => void,
+ *   fetchImpl?: typeof globalThis.fetch,
+ *   now?: () => number,
+ *   retryMs?: number,
+ * }} opts
+ */
+export function createOgCompute({
+  enabled, model, wallet, loadBroker, log,
+  fetchImpl = (input, init) => globalThis.fetch(input, init),
+  now = () => Date.now(),
+  retryMs = OG_SETUP_RETRY_MS,
+}) {
   const fmt = (wei) => ethers.formatEther(wei);
-  try {
-    if (!_ogComputeBroker) {
-      const { createRequire } = await import('module');
-      const req = createRequire(import.meta.url);
-      const mod = req('@0gfoundation/0g-compute-ts-sdk');
-      _ogRpc = new ethers.JsonRpcProvider(OG_RPC_URL, OG_CHAIN_ID, { batchMaxCount: 1, staticNetwork: true });
-      _ogWallet = new ethers.Wallet(AGENT_PRIVATE_KEY, _ogRpc);
-      _ogComputeBroker = await mod.createZGComputeNetworkBroker(_ogWallet);
-    }
-    if (!_ogComputeProvider) {
-      const services = await _ogComputeBroker.inference.listService();
-      if (!services?.length) {
-        _ogSetupProblem = 'no 0G Compute inference provider is available right now';
-        log(`0G Compute: ${_ogSetupProblem}`);
-        return _ogComputeBroker;
-      }
-      _ogComputeProvider = services[0].provider || services[0].providerAddress;
-    }
+  const same = (a, b) => a.toLowerCase() === b.toLowerCase();
+  let broker = null;
+  /** @type {{ provider: string, endpoint: string, model: string } | null} */
+  let service = null;
+  /** @type {any[]} */
+  let chatServices = [];
+  let ready = false;
+  /** @type {string | null} */
+  let problem = null;
+  // What the wallet must hold to open the account, while it can't: reported to
+  // the owner through the heartbeat (readinessReport). Wei as strings.
+  /** @type {{ chain: '0g', address: string, holdsWei: string, needWei: string, shortfallWei: string } | null} */
+  let fundNeed = null;
+  let attemptAt = 0;
+  /** @type {Promise<any> | null} */
+  let inFlight = null;
+  /** @type {string | null} */
+  let lastChatID = null;
+  /** @type {Map<string, number>} */
+  const refundTriedAt = new Map();
 
-    // 1) The account (ledger): the wallet's prepaid inference balance, which
-    //    the provider sub-account is funded from. Opened only when there is
-    //    none: a deposit into an existing one (what the old code did on every
-    //    boot) just moves more of the wallet into it.
-    const hasLedger = await _ogComputeBroker.ledger.getLedger().then(() => true, () => false);
-    const walletWei = hasLedger ? 0n : await _ogRpc.getBalance(_ogWallet.address);
-    const plan = ogLedgerPlan(hasLedger, walletWei);
-    _ogFundNeed = plan.action === 'fund'
-      ? { chain: '0g', address: _ogWallet.address, holdsWei: String(walletWei), needWei: String(plan.needWei), shortfallWei: String(plan.shortfallWei) }
-      : null;
-    if (plan.action === 'fund') {
-      _ogSetupProblem =
-        `no 0G Compute account yet: the agent wallet ${_ogWallet.address} holds ${fmt(walletWei)} 0G on the 0G chain, ` +
-        `and opening one takes ${fmt(OG_LEDGER_OPEN_WEI)} 0G plus about ${fmt(OG_SETUP_GAS_RESERVE_WEI)} for gas. ` +
-        `Send it at least ${fmt(plan.shortfallWei)} more 0G`;
-      log(`0G Compute: ${_ogSetupProblem}`);
-      return _ogComputeBroker;
-    }
-    if (plan.action === 'open') {
-      log(`0G Compute: opening the account with a ${fmt(OG_LEDGER_OPEN_WEI)} 0G deposit...`);
-      try {
-        await _ogComputeBroker.ledger.addLedger(Number(fmt(OG_LEDGER_OPEN_WEI)));
-        log('0G Compute: account opened');
-      } catch (openErr) {
-        const m = (openErr?.message || '').toLowerCase();
-        if (!m.includes('ledgerexists') && !m.includes('already')) throw openErr;
-        log('0G Compute: account already open');
-      }
-    }
-
-    // 2) Provider sub-account — acknowledgeProviderSigner CREATES the per-provider
-    //    sub-account that getRequestHeaders needs; startAutoFunding keeps it
-    //    funded from the account above.
-    const p = _ogComputeProvider.slice(0, 10);
-    try {
-      const acked = await _ogComputeBroker.inference.userAcknowledged(_ogComputeProvider).catch(() => false);
-      if (!acked) {
-        log(`0G Compute: acknowledging provider ${p}…`);
-        await _ogComputeBroker.inference.acknowledgeProviderSigner(_ogComputeProvider);
-      }
-    } catch (ackErr) {
-      const m = (ackErr?.message || '').toLowerCase();
-      if (!m.includes('already') && !m.includes('acknowledged')) throw ackErr;
-    }
-    try {
-      await _ogComputeBroker.inference.startAutoFunding(_ogComputeProvider);
-    } catch (fundErr) {
-      log(`0G Compute: startAutoFunding failed — ${fundErr.message}`);
-    }
-    // 3) The sub-account is usable: only now can this agent pay for a call.
-    await _ogComputeBroker.inference.getAccount(_ogComputeProvider);
-    _ogAccountReady = true;
-    _ogSetupProblem = null;
-    log(`0G Compute: account and provider ${p}… ready ✓`);
-  } catch (e) {
-    _ogSetupProblem = `0G Compute setup failed: ${e.message}`;
-    log(`0G Compute: setup failed — ${e.message}`);
+  function ensure({ force = false } = {}) {
+    if (!enabled) return Promise.resolve(null);
+    if (ready) return Promise.resolve(broker);
+    if (inFlight) return inFlight;
+    if (!force && attemptAt && now() - attemptAt < retryMs) return Promise.resolve(broker);
+    attemptAt = now();
+    inFlight = setUp().finally(() => { inFlight = null; });
+    return inFlight;
   }
-  return _ogComputeBroker;
+
+  async function listServices() {
+    const all = [];
+    for (let page = 0; page < 20; page++) {
+      const rows = await broker.inference.listService(page * OG_SERVICE_PAGE, OG_SERVICE_PAGE, true);
+      all.push(...rows);
+      if (rows.length < OG_SERVICE_PAGE) break;
+    }
+    return all;
+  }
+
+  // The providers the account holds 0G with. None before the account exists.
+  async function providersWithBalance() {
+    try {
+      const rows = await broker.ledger.getProvidersWithBalance('inference');
+      return rows.map(([provider, balance, pendingRefund]) => ({ provider, balance, pendingRefund }));
+    } catch {
+      return [];
+    }
+  }
+
+  // Asks for the 0G on providers this agent no longer uses back in the ledger
+  // (ogRefundAction). Returns those providers' balances, for the reason.
+  async function refundUnusedProviders() {
+    const unused = (await providersWithBalance()).filter((f) => !same(f.provider, service.provider));
+    for (const f of unused) {
+      const account = await broker.inference.getAccount(f.provider).catch(() => null);
+      if (!account) continue;
+      const key = f.provider.toLowerCase();
+      const action = ogRefundAction(account, now(), refundTriedAt.get(key));
+      if (!action) continue;
+      refundTriedAt.set(key, now());
+      try {
+        log(`0G Compute: ${action === 'request' ? 'requesting a refund of' : 'collecting the refund of'} the 0G with provider ${f.provider.slice(0, 10)}…`);
+        await broker.ledger.retrieveFundFromProvider('inference', f.provider);
+      } catch (e) {
+        log(`0G Compute: refund from provider ${f.provider.slice(0, 10)}… failed — ${e.message}`);
+      }
+    }
+    return unused;
+  }
+
+  async function setUp() {
+    try {
+      const w = wallet();
+      if (!broker) broker = await loadBroker(w);
+
+      // 1) The provider: the on-chain chat service for this agent's model,
+      //    picked once (a model change restarts the worker).
+      if (!service) {
+        chatServices = ogChatServices(await listServices());
+        const funded = (await providersWithBalance())
+          .filter((f) => f.balance > f.pendingRefund)
+          .map((f) => f.provider);
+        const match = matchOgService(chatServices, model, funded);
+        if (!match) {
+          problem = `no 0G Compute provider serves the model ${model}, so this agent can't pay for a call. ` +
+            'Edit the agent and pick one of the 0G Compute models listed there, or a provider you have an API key for';
+          log(`0G Compute: ${problem}`);
+          return broker;
+        }
+        const meta = await broker.inference.getServiceMetadata(match.provider);
+        service = { provider: match.provider, endpoint: meta.endpoint, model: meta.model };
+        log(`0G Compute: ${model} is served by provider ${match.provider.slice(0, 10)}… at ${meta.endpoint}`);
+      }
+
+      // 2) The account (ledger): the wallet's prepaid inference balance, which
+      //    the provider sub-account is funded from. Opened only when there is
+      //    none: a deposit into an existing one (what the old code did on every
+      //    boot) just moves more of the wallet into it.
+      const hasLedger = await broker.ledger.getLedger().then(() => true, () => false);
+      const walletWei = hasLedger ? 0n : await w.provider.getBalance(w.address);
+      const ledgerPlan = ogLedgerPlan(hasLedger, walletWei);
+      fundNeed = ledgerPlan.action === 'fund'
+        ? { chain: '0g', address: w.address, holdsWei: String(walletWei), needWei: String(ledgerPlan.needWei), shortfallWei: String(ledgerPlan.shortfallWei) }
+        : null;
+      if (ledgerPlan.action === 'fund') {
+        problem =
+          `no 0G Compute account yet: the agent wallet ${w.address} holds ${fmt(walletWei)} 0G on the 0G chain, ` +
+          `and opening one takes ${fmt(OG_LEDGER_OPEN_WEI)} 0G plus about ${fmt(OG_SETUP_GAS_RESERVE_WEI)} for gas. ` +
+          `Send it at least ${fmt(ledgerPlan.shortfallWei)} more 0G`;
+        log(`0G Compute: ${problem}`);
+        return broker;
+      }
+      if (ledgerPlan.action === 'open') {
+        log(`0G Compute: opening the account with a ${fmt(OG_LEDGER_OPEN_WEI)} 0G deposit...`);
+        try {
+          await broker.ledger.addLedger(Number(fmt(OG_LEDGER_OPEN_WEI)));
+          log('0G Compute: account opened');
+        } catch (openErr) {
+          const m = (openErr?.message || '').toLowerCase();
+          if (!m.includes('ledgerexists') && !m.includes('already')) throw openErr;
+          log('0G Compute: account already open');
+        }
+      }
+
+      // 3) The sub-account with the provider, funded from the account.
+      const provider = service.provider;
+      const p = provider.slice(0, 10);
+      const account = await broker.inference.getAccount(provider).catch(() => null);
+      let available = (await broker.ledger.getLedger()).availableBalance;
+      let plan = ogProviderFundingPlan(account, available);
+      if (plan.action === 'short') {
+        // 0G the owner sent to the agent wallet goes into the account.
+        const depositWei = ogDepositWei(plan.shortfallWei);
+        if (await w.provider.getBalance(w.address) >= depositWei + OG_SETUP_GAS_RESERVE_WEI) {
+          log(`0G Compute: moving ${fmt(depositWei)} 0G from the wallet into the account...`);
+          await broker.ledger.depositFund(Number(fmt(depositWei)));
+          available += depositWei;
+          plan = ogProviderFundingPlan(account, available);
+        }
+      }
+      if (plan.action === 'short') {
+        const unused = await refundUnusedProviders();
+        const held = unused.reduce((t, f) => t + f.balance, 0n);
+        const heldModels = [...new Set(unused.map((f) => chatServices.find((s) => same(s.provider, f.provider))?.model ?? `provider ${f.provider.slice(0, 10)}…`))];
+        problem =
+          `paying the 0G Compute provider for ${service.model} takes ${fmt(plan.needWei)} 0G, and the agent's 0G Compute account has ${fmt(available)} 0G free. ` +
+          (held > 0n
+            ? `${fmt(held)} 0G is with the provider for ${heldModels.join(', ')}, which this agent no longer uses: switch the agent back to that model, or wait for that 0G to return to the account (a refund is held for 24 hours). `
+            : '') +
+          `Or send ${fmt(ogDepositWei(plan.shortfallWei) + OG_SETUP_GAS_RESERVE_WEI)} 0G to the agent wallet ${w.address} on the 0G chain, and the agent moves it into the account`;
+        log(`0G Compute: ${problem}`);
+        return broker;
+      }
+      if (plan.action === 'transfer') {
+        log(`0G Compute: funding provider ${p}… with ${fmt(plan.transferWei)} 0G from the account...`);
+        await broker.ledger.transferFund(provider, 'inference', plan.transferWei);
+      }
+      // getRequestHeaders signs only for a sub-account that acknowledged the
+      // provider's TEE signer.
+      if (!(await broker.inference.acknowledged(provider))) {
+        log(`0G Compute: acknowledging provider ${p}…`);
+        await broker.inference.acknowledgeProviderSigner(provider);
+      }
+      // Tops the sub-account up from the account as calls spend it.
+      try {
+        await broker.inference.startAutoFunding(provider);
+      } catch (fundErr) {
+        log(`0G Compute: startAutoFunding failed — ${fundErr.message}`);
+      }
+      // 4) The sub-account is usable: only now can this agent pay for a call.
+      await broker.inference.getAccount(provider);
+      ready = true;
+      problem = null;
+      log(`0G Compute: account and provider ${p}… ready ✓`);
+    } catch (e) {
+      problem = `0G Compute setup failed: ${e.message}`;
+      log(`0G Compute: setup failed — ${e.message}`);
+    }
+    return broker;
+  }
+
+  /**
+   * The model's fetch (createOpenAI({ fetch })): sends a call to the agent's
+   * provider with the per-request headers the broker signs with the agent
+   * wallet. Scoped to the model's own requests, with no global fetch
+   * mutation, so it is safe across overlapping poll ticks. Keeps the chat id
+   * (ZG-Res-Key) for the TEE attestation.
+   * @type {typeof globalThis.fetch}
+   */
+  const fetch = async (input, init) => {
+    if (!ready || !service) throw new Error(`0G Compute is not set up: ${problem ?? 'its setup has not finished'}`);
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    // The headers carry a session signed by the agent wallet: they go to the
+    // agent's provider and nowhere else.
+    if (!url.startsWith(`${service.endpoint}/`)) throw new Error('0G Compute: refusing to sign a request for another host');
+    // Set, not merged: they replace the OpenAI client's placeholder Authorization.
+    const headers = new Headers(init?.headers);
+    for (const [k, v] of Object.entries(await broker.inference.getRequestHeaders(service.provider))) {
+      if (v !== undefined && v !== null) headers.set(k, String(v));
+    }
+    const response = await fetchImpl(input, { ...init, headers });
+    const chatID = response.headers?.get?.('ZG-Res-Key') || null;
+    if (chatID) lastChatID = chatID;
+    if (response.ok) {
+      // processResponse caches the call's fee from its token usage: the SDK's
+      // auto-funding falls back on it for a provider that can't report what
+      // it is owed. The TEE check of a chat runs once per task (attest).
+      try {
+        const body = await response.clone().json();
+        if (!chatID && typeof body?.id === 'string') lastChatID = body.id;
+        if (body?.usage) await broker.inference.processResponse(service.provider, undefined, JSON.stringify(body.usage));
+      } catch (e) {
+        log(`0G Compute: processResponse failed — ${e.message}`);
+      }
+    }
+    return response;
+  };
+
+  /**
+   * The TEE attestation of the last call, for the task result: whether the
+   * provider's signature over it verifies (processResponse with its chat id)
+   * and the raw signature. Null when there was no call to attest.
+   */
+  async function attest() {
+    const chatID = lastChatID;
+    lastChatID = null;
+    if (!ready || !service || !chatID) return null;
+    const verified = await broker.inference.processResponse(service.provider, chatID);
+    const sigRes = await fetchImpl(
+      `${service.endpoint}/signature/${encodeURIComponent(chatID)}?model=${encodeURIComponent(service.model)}`,
+      { method: 'GET', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(15_000) },
+    );
+    if (!sigRes.ok) {
+      log(`TEE signature fetch failed: ${sigRes.status}`);
+      return null;
+    }
+    const sigData = await sigRes.json();
+    return {
+      signature: sigData.signature,
+      signer: sigData.signing_address || sigData.signer || '',
+      signedText: sigData.text || '',
+      chatID,
+      verified: verified === true,
+    };
+  }
+
+  return {
+    ensure,
+    fetch,
+    attest,
+    service: () => service,
+    ready: () => ready,
+    problem: () => problem,
+    fundNeed: () => fundNeed,
+  };
 }
 
-// Custom fetch for the 0G Compute Router model. The router authorises payment per
-// inference call via single-use headers the broker signs with the agent wallet;
-// the AI SDK exposes no per-call header hook, so we inject them here. Passed to
-// createOpenAI({ fetch }) so it scopes to that model's OWN requests — no global
-// fetch mutation, which keeps it concurrency-safe across overlapping poll ticks.
-// Passes the request through unauthenticated when the broker is unavailable.
-// Captures the ZG-Res-Key (chatID) from the response for TEE attestation.
-let _lastChatID = null;
-/** @type {typeof globalThis.fetch} */
-const ogComputeFetch = async (input, init) => {
-  const reqInit = { ...(init || {}) };
-  const broker = await ensureOgComputeBroker();
-  if (broker && _ogComputeProvider) {
-    let promptText = '';
-    try {
-      if (typeof reqInit.body === 'string') {
-        const parsed = JSON.parse(reqInit.body);
-        promptText = parsed?.messages?.map(m => m.content).join('\n') || reqInit.body;
-      }
-    } catch {}
-    try {
-      const headers = await broker.inference.getRequestHeaders(_ogComputeProvider, promptText || 'inference');
-      reqInit.headers = { ...reqInit.headers, ...headers };
-    } catch (hdrErr) {
-      log(`0G Compute: header generation failed — ${hdrErr.message}`);
+let _ogWallet = null;
+const ogCompute = createOgCompute({
+  enabled: OG_COMPUTE_ENABLED,
+  model: AGENT_MODEL,
+  wallet: () => {
+    if (!_ogWallet) {
+      const rpc = new ethers.JsonRpcProvider(OG_RPC_URL, OG_CHAIN_ID, { batchMaxCount: 1, staticNetwork: true });
+      _ogWallet = new ethers.Wallet(AGENT_PRIVATE_KEY, rpc);
     }
-  }
-  const response = await globalThis.fetch(input, reqInit);
-  // Capture the chatID for TEE attestation (clone so the original body is still readable)
-  try {
-    const chatID = response.headers?.get?.('ZG-Res-Key') || null;
-    if (chatID) _lastChatID = chatID;
-  } catch {}
-  return response;
-};
+    return _ogWallet;
+  },
+  loadBroker: async (w) => {
+    const { createRequire } = await import('module');
+    const req = createRequire(import.meta.url);
+    return req('@0gfoundation/0g-compute-ts-sdk').createZGComputeNetworkBroker(w);
+  },
+  log: (msg) => log(msg),
+});
 
 // ── Logging helpers ──────────────────────────────────────────────────────
 
@@ -1257,15 +1492,19 @@ try {
 
 function getModel() {
   if (OG_COMPUTE_ENABLED) {
-    // OpenAI-COMPATIBLE router: 0G serves models over /chat/completions. Use
-    // .chat() explicitly — the callable provider (@ai-sdk/openai v3) defaults to
-    // the OpenAI Responses API (/responses), which the router does not implement.
-    // ogComputeFetch injects the per-request wallet-auth headers for each call.
+    // The agent's 0G Compute provider, at its own OpenAI-compatible endpoint
+    // (getServiceMetadata) under the model id it registered. Use .chat()
+    // explicitly — the callable provider (@ai-sdk/openai v3) defaults to the
+    // OpenAI Responses API (/responses), which providers do not serve.
+    // ogCompute.fetch signs each request with the agent wallet. Only reached
+    // once the model check passed, so the provider is known; until then the
+    // base URL is one that cannot resolve, never api.openai.com's default.
+    const svc = ogCompute.service();
     return createOpenAI({
-      baseURL: OG_COMPUTE_ROUTER_BASE_URL,
+      baseURL: svc?.endpoint ?? 'https://0g-compute.invalid/v1/proxy',
       apiKey: '0g-compute',
-      fetch: ogComputeFetch,
-    }).chat(AGENT_MODEL);
+      fetch: ogCompute.fetch,
+    }).chat(svc?.model ?? AGENT_MODEL);
   }
   switch (AGENT_PROVIDER) {
     case 'anthropic': return createAnthropic({ apiKey: AGENT_API_KEY })(AGENT_MODEL);
@@ -1357,8 +1596,8 @@ function errorLine(e) {
 // the credit, the model id and (on 0g-compute) the 0G Compute account all work.
 async function probeInference() {
   if (OG_COMPUTE_ENABLED) {
-    await ensureOgComputeBroker({ force: true });
-    if (!_ogAccountReady) return _ogSetupProblem ?? '0G Compute is not set up';
+    await ogCompute.ensure({ force: true });
+    if (!ogCompute.ready()) return ogCompute.problem() ?? '0G Compute is not set up';
   }
   try {
     await raceWithTimeout(
@@ -1399,7 +1638,7 @@ export function readinessFrom(reason, fundNeed, accountReady) {
 }
 
 function readinessReport() {
-  return readinessFrom(inferenceGate.blocker(), _ogFundNeed, _ogAccountReady);
+  return readinessFrom(inferenceGate.blocker(), ogCompute.fundNeed(), ogCompute.ready());
 }
 
 // Declines an offer (or skips a broadcast) while the model check is failing.
@@ -3419,31 +3658,13 @@ async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrapp
     // After 0G Compute inference, capture the TEE signature that proves
     // the output was produced by a genuine 0G TEE enclave.
     let teeAttestation = null;
-    if (OG_COMPUTE_ENABLED && _ogComputeBroker && _ogComputeProvider && _lastChatID) {
+    if (OG_COMPUTE_ENABLED) {
       try {
-        const verified = await _ogComputeBroker.inference.processResponse(
-          _ogComputeProvider, _lastChatID,
-        );
-        // Fetch the raw TEE signature from the provider
-        const sigUrl = `${_ogComputeProvider}/v1/proxy/signature/${_lastChatID}`;
-        const sigRes = await fetchWithTimeout(sigUrl, { method: 'GET', headers: { 'Content-Type': 'application/json' } }, 15_000);
-        if (sigRes.ok) {
-          const sigData = await sigRes.json();
-          teeAttestation = {
-            signature: sigData.signature,
-            signer: sigData.signing_address || sigData.signer || '',
-            signedText: sigData.text || '',
-            chatID: _lastChatID,
-            verified: verified === true,
-          };
-          log(`TEE attestation captured: verified=${teeAttestation.verified}, chatID=${_lastChatID.slice(0, 16)}…`);
-        } else {
-          log(`TEE signature fetch failed: ${sigRes.status}`);
-        }
+        teeAttestation = await ogCompute.attest();
+        if (teeAttestation) log(`TEE attestation captured: verified=${teeAttestation.verified}, chatID=${teeAttestation.chatID.slice(0, 16)}…`);
       } catch (teeErr) {
         log(`TEE attestation capture failed: ${teeErr.message}`);
       }
-      _lastChatID = null;
     }
 
     // ── Upload output to 0G Storage (required before submit) ────────────────
