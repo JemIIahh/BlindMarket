@@ -60,8 +60,18 @@ async function getJWKS() {
   return remoteJWKSet;
 }
 
+/**
+ * The Privy user id in a verified Privy access token: its `sub`, a DID
+ * (did:privy:…). Undefined when `sub` is anything else, such as the wallet
+ * address extractAllWalletAddresses falls back to. Exported for tests.
+ */
+export function privyUserIdOf(payload: { sub?: unknown }): string | undefined {
+  const sub = payload.sub;
+  return typeof sub === 'string' && sub.startsWith('did:privy:') && sub.length <= 200 ? sub : undefined;
+}
+
 /** Verify a Privy JWT using jose */
-async function verifyPrivyToken(token: string, activeChain?: string): Promise<{ address: string; addresses?: string[] }> {
+async function verifyPrivyToken(token: string, activeChain?: string): Promise<{ address: string; addresses?: string[]; privyUserId?: string }> {
   const JWKS = await getJWKS();
   if (!JWKS) throw new Error('Privy not configured (missing PRIVY_APP_ID)');
 
@@ -83,7 +93,8 @@ async function verifyPrivyToken(token: string, activeChain?: string): Promise<{ 
       throw new Error('No wallet address in Privy token');
     }
 
-    return { address: primary, addresses: allAddresses };
+    const privyUserId = privyUserIdOf(payload);
+    return { address: primary, addresses: allAddresses, ...(privyUserId ? { privyUserId } : {}) };
   } catch (err: any) {
     throw err;
   }

@@ -461,6 +461,7 @@ agentsRouter.post('/deploy', requireAuth, deployLimiter, async (req: AuthRequest
         ownerAddress,
         capabilities,
         skills: skills.length ? skills : undefined,
+        privyUserId: req.user!.privyUserId,
       } as Parameters<typeof deployAgent>[0]);
     } catch (deployErr) {
       // No agent was created — give the paid fee back so the user can retry.

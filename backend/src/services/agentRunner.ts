@@ -350,6 +350,8 @@ export async function deployAgent(params: {
   storageRef?: string;
   /** Frozen skill snapshots, resolved server-side from slugs in routes/agents.ts. */
   skills?: InstalledSkill[];
+  /** The deploying Privy user (AuthUser.privyUserId), when signed in through Privy. */
+  privyUserId?: string;
 }): Promise<DeployedAgent> {
   const { privateKey, publicKey } = generateKeyPair();
 
@@ -432,6 +434,7 @@ export async function deployAgent(params: {
     toolSecrets: Object.keys(toolSecrets).length > 0 ? toolSecrets : undefined,
     encryptedToolSecrets: Object.keys(encryptedToolSecrets).length > 0 ? encryptedToolSecrets : undefined,
     skills: params.skills?.length ? params.skills : undefined,
+    privyUserId: params.privyUserId,
   };
 
   // Deploy ERC-4337 smart account on Base (non-fatal if AA infra is unconfigured).

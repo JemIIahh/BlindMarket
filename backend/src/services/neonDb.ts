@@ -855,6 +855,13 @@ const migrations: Array<{ id: number; name: string; sql: string; when?: () => bo
     // included (services/delegationGuard.ts).
     sql: `ALTER TABLE deployed_agents ADD COLUMN IF NOT EXISTS delegation_enabled BOOLEAN NOT NULL DEFAULT false;`,
   },
+  {
+    id: 42,
+    name: 'deployed_agents_privy_user_id',
+    // The Privy user who deployed the agent, for per-person limits. NULL for
+    // agents deployed before it, or through an API key or agent token.
+    sql: `ALTER TABLE deployed_agents ADD COLUMN IF NOT EXISTS privy_user_id TEXT;`,
+  },
 ];
 
 /**

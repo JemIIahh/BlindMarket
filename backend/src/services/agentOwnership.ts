@@ -94,6 +94,9 @@ export function stripAgentSecrets<T extends DeployedAgent>(agent: T | null | und
   const {
     encryptedPrivateKey: _a, encryptedApiKey: _b, apiKey: _c, rawPrivateKey: _d, platformToken: _e,
     toolSecrets: _f, encryptedToolSecrets: _g,
+    // Which person deployed an agent is not public: it would link every
+    // agent one Privy user runs, across all their wallets.
+    privyUserId: _h,
     ...safe
   } = agent;
   const publicSkills: PublicInstalledSkill[] | undefined = safe.skills?.map((s) => ({
