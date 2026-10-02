@@ -51,8 +51,17 @@ describe('shouldScanFeed — a connected agent still sweeps the board', () => {
 
 describe('feedScanCadence', () => {
   it('shortens the WS reconcile floor while tasks sit skipped for gas', () => {
-    expect(feedScanCadence(true, 300_000, 60_000)).toBe(60_000);
+    expect(feedScanCadence(true, 300_000, 60_000)).toBe(59_000);
     expect(feedScanCadence(false, 300_000, 60_000)).toBe(300_000);
+  });
+  it('lets every re-check tick scan, even one that fires a few ms early', () => {
+    // lastFeedScanAt is stamped just after the tick that scanned, so the next
+    // tick lands slightly under GAS_RECHECK_MS later (observed: half the ticks
+    // skipped, worst-case pickup 2 × GAS_RECHECK_MS).
+    for (const recheck of [2_000, 60_000]) {
+      const last = 1_000_000;
+      expect(shouldScanFeed(true, last + recheck - 15, last, feedScanCadence(true, 300_000, recheck))).toBe(true);
+    }
   });
   it('never lengthens a floor that is already shorter than the recheck', () => {
     expect(feedScanCadence(true, 30_000, 60_000)).toBe(30_000);
@@ -60,7 +69,7 @@ describe('feedScanCadence', () => {
 });
 
 describe('gasRecheckPollDue', () => {
-  it('polls on the gas re-check cadence only while tasks sit skipped for gas', () => {
+  it('polls on the gas re-check cadence only while tasks wait for gas (feed skips plus resume holds)', () => {
     expect(gasRecheckPollDue(1, false)).toBe(true);
     expect(gasRecheckPollDue(0, false)).toBe(false);
   });

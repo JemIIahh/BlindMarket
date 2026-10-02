@@ -273,19 +273,25 @@ export function shouldScanFeed(wsConnected, now, lastScanAt, reconcileMs = WS_RE
 // on a short cadence until the skipped set drains, then fall back to the
 // normal WS reconcile floor.
 const GAS_RECHECK_MS = envNumber(process.env.GAS_RECHECK_MS, 60_000, { min: 1_000 });
+// The re-check timer fires every GAS_RECHECK_MS, but lastFeedScanAt is stamped
+// a few ms after the tick that scanned, so a cadence of exactly GAS_RECHECK_MS
+// made about half the ticks fall just short and skip the scan (worst-case
+// pickup 2 × GAS_RECHECK_MS, observed). Shave a little slack off so every tick
+// scans.
 export function feedScanCadence(hasGasSkipped, reconcileMs = WS_RECONCILE_MS, recheckMs = GAS_RECHECK_MS) {
-  return hasGasSkipped ? Math.min(reconcileMs, recheckMs) : reconcileMs;
+  if (!hasGasSkipped) return reconcileMs;
+  return Math.min(reconcileMs, recheckMs - Math.min(1_000, Math.floor(recheckMs / 10)));
 }
 /**
  * Whether the gas re-check timer should poll now. The poll loop itself runs
  * only every max(POLL_INTERVAL_MS, 120s) while WS is up, so without this a
- * wallet funded after a skip (a top-up, or the gas stipend landing seconds
- * after start) waited up to two minutes for its skipped task, not
- * GAS_RECHECK_MS. Skipped while a poll is running: it would only log
- * "poll skipped".
+ * wallet funded after a skip waited up to two minutes, not GAS_RECHECK_MS.
+ * Counts both feed tasks skipped for gas and assigned tasks held for gas in
+ * resume: each poll re-runs resumeAssignedTasks before the feed scan. Skipped
+ * while a poll is running: it would only log "poll skipped".
  */
-export function gasRecheckPollDue(gasSkippedCount, working) {
-  return gasSkippedCount > 0 && !working;
+export function gasRecheckPollDue(gasWaitingCount, working) {
+  return gasWaitingCount > 0 && !working;
 }
 // Liveness heartbeat cadence — DECOUPLED from POLL_INTERVAL_MS. The parent
 // refreshes a Redis key with a 90s TTL on each heartbeat (see redis.ts
@@ -1069,6 +1075,9 @@ const chainSkipLogged = new Map();
 // Same idea for tasks resume is holding for gas: they are assigned to us, so
 // they never appear on the open board and must not share the board's prune.
 const resumeHoldLogged = new Map();
+// Assigned tasks resume is holding because the wallet can't pay gas. Drives the
+// gas re-check timer, like gasSkipLogged does for the feed.
+const resumeGasHeld = new Set();
 // taskHash → gas problem that last stopped a submitEvidence broadcast. Set by
 // broadcastEvmSubmitEvidence, cleared once the wallet can pay. Resume reads it
 // so a pass that only lacked gas is a hold, not a spent attempt: funding the
@@ -3858,6 +3867,7 @@ async function resumeAssignedTasks() {
     .filter((i) => ['accepted', 'in_progress', 'submitted'].includes(i?.state?.status))
     .map((i) => i?.meta?.taskId));
   for (const k of [...resumeHoldLogged.keys()]) if (!owed.has(k)) resumeHoldLogged.delete(k);
+  for (const k of [...resumeGasHeld]) if (!owed.has(k)) resumeGasHeld.delete(k);
   for (const k of [...submitGasShortfall.keys()]) if (!owed.has(k)) submitGasShortfall.delete(k);
   if (executions.length === 0) return;
 
@@ -3909,6 +3919,7 @@ async function resumeAssignedTasks() {
         ? await preflightGas(shortfall.chain, signerFor(shortfall.chain), shortfall.viaAA).catch(() => null)
         : await preflightGas(metaChain, signerFor(metaChain)).catch(() => null);
       if (gasProblem) {
+        resumeGasHeld.add(taskHash);
         if (resumeHoldLogged.get(taskHash) !== gasProblem) {
           resumeHoldLogged.set(taskHash, gasProblem);
           log(`resume: holding ${taskHash.slice(0, 10)}… (assigned to this wallet on ${shortfall?.chain ?? metaChain}): ${gasProblem}`);
@@ -3916,6 +3927,7 @@ async function resumeAssignedTasks() {
         continue;
       }
       resumeHoldLogged.delete(taskHash);
+      resumeGasHeld.delete(taskHash);
       submitGasShortfall.delete(taskHash);
     }
 
@@ -4656,9 +4668,9 @@ if (process.env.NODE_ENV !== 'test') {
     // full feed poll kicks back in automatically.
     const SAFETY_NET_MS = Math.max(POLL_INTERVAL_MS, 120_000);
     setInterval(() => { pollAndWork().catch(() => {}); }, SAFETY_NET_MS);
-    // While tasks sit skipped for lack of gas, poll on the gas re-check
-    // cadence too (feedScanCadence lets that poll scan the feed).
-    setInterval(() => { if (gasRecheckPollDue(gasSkipLogged.size, _working)) pollAndWork().catch(() => {}); }, GAS_RECHECK_MS);
+    // While tasks sit skipped or held for lack of gas, poll on the gas
+    // re-check cadence too (feedScanCadence lets that poll scan the feed).
+    setInterval(() => { if (gasRecheckPollDue(gasSkipLogged.size + resumeGasHeld.size, _working)) pollAndWork().catch(() => {}); }, GAS_RECHECK_MS);
     // Run initial poll to catch any tasks posted before WS connected
     pollAndWork().catch(() => {});
   })();
