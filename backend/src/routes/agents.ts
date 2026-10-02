@@ -34,6 +34,8 @@ import { discoverModels, ProviderModelsError } from '../services/providerModels.
 import { eciesEncrypt } from '../services/crypto.js';
 import { callerWallets } from '../services/callerWallets.js';
 import { loadAgentReadiness } from '../services/agentReadiness.js';
+import { sponsorshipStatus } from '../services/gasSponsorEligibility.js';
+import { recordKeyExport } from '../services/gasSponsorStore.js';
 import { nativeWeiToTokenUnits, normalizeSettlementAmount, pricingUnit } from '../services/settlementUnits.js';
 import { disconnectSocketsForToken } from '../services/socket.js';
 import { clientErrorMessage, safeErrorMessage } from '../middleware/errorHandler.js';
@@ -586,6 +588,17 @@ agentsRouter.get('/:id/readiness', requireAuth, async (req: AuthRequest, res) =>
   res.json({ success: true, data: { readiness: await loadAgentReadiness(agent.id) } });
 });
 
+// GET /api/v1/agents/:id/gas-sponsorship — whether BlindMarket pays this
+// agent's escrow gas (docs/AGENT-GAS-FUNDING.md): 'sponsored', 'paused',
+// 'not_eligible' with a reason (e.g. key_exported), or 'off' where it doesn't
+// run. Owner-only, like readiness.
+agentsRouter.get('/:id/gas-sponsorship', requireAuth, async (req: AuthRequest, res) => {
+  const agent = await authorizeOwner(req, res, req.params.id);
+  if (!agent) return;
+  const status = await sponsorshipStatus(agent).catch(() => ({ state: 'off' as const }));
+  res.json({ success: true, data: status });
+});
+
 // Usage telemetry (LLM tokens + estimated cost per model).
 const usageBodySchema = z.object({
   taskHash: z.string().optional(),
@@ -683,9 +696,23 @@ agentsRouter.get('/:id/wallet', async (req, res) => {
 //
 // Returns the encrypted private key for owner backup. Owner-only — gated by
 // requireAuth + authorizeOwner instead of the previous plaintext body claim.
+//
+// Every export is logged durably first (agent_key_exports): a wallet whose key
+// left the platform is never sponsored again (docs/AGENT-GAS-FUNDING.md). On
+// Postgres the export is refused when it can't be logged; without Postgres
+// sponsorship can't run, so there is nothing to protect.
 agentsRouter.post('/:id/export-key', requireAuth, async (req: AuthRequest, res) => {
   const agent = await authorizeOwner(req, res, req.params.id);
   if (!agent) return;
+  if (config.databaseUrl) {
+    try {
+      await recordKeyExport(agent.id, agent.walletAddress, req.user!.address);
+    } catch (err) {
+      console.error(`[agents] could not log the key export of ${agent.id}:`, (err as Error).message);
+      res.status(503).json({ success: false, error: { code: 'EXPORT_NOT_LOGGED', message: 'The key export could not be recorded, so it was refused. Try again shortly.' } });
+      return;
+    }
+  }
   res.json({ success: true, data: { agentId: agent.id, walletAddress: agent.walletAddress, encryptedPrivateKey: agent.encryptedPrivateKey } });
 });
 

@@ -5,6 +5,7 @@ import { resolveCachedTaskByHash, resolveTaskByHash } from './taskChain.js';
 import { chainRuntime } from './chainRuntime.js';
 import { loadAgentByWallet } from './deployedAgentStore.js';
 import { emitTaskAvailable } from './socket.js';
+import { sponsorHint } from './gasSponsorEligibility.js';
 import { notifyOnce } from './notificationStore.js';
 import { SWEEP_INTERVAL_MS, EXPIRY_GRACE_SEC } from '../constants.js';
 
@@ -304,6 +305,7 @@ async function announceReopened(taskId: string): Promise<void> {
     emitTaskAvailable(taskId, {
       ...(caps.length > 0 ? { requiredCapabilities: caps } : {}),
       ...(meta.chain ? { chain: meta.chain } : {}),
+      ...((await sponsorHint(meta)) ? { gasSponsored: true } : {}),
     });
   } catch (err) {
     console.warn(`[a2aExpirySweep] could not announce re-opened task ${taskId.slice(0, 10)}…:`, (err as Error).message);

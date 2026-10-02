@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { gasSponsorReport } from '../services/gasSponsorRelayer.js';
 import { formatEther, ZeroAddress } from 'ethers';
 import type { ApiResponse } from '../types.js';
 import { baseEscrow, baseMarketplaceSigner, baseProvider } from '../services/chain.js';
@@ -296,9 +297,10 @@ healthRouter.get('/bridge', async (_req, res, next) => {
     });
     const isReady = (key: SettlementChainKey) => readiness.some((r) => r.entry.key === key && r.configured);
 
-    const [base, chains] = await Promise.all([
+    const [base, chains, gasSponsor] = await Promise.all([
       isReady('base') ? baseBridge() : null,
       Promise.all(readiness.map(({ entry, configured, reason }) => chainReport(entry, configured, reason, posting))),
+      gasSponsorReport(),
     ]);
 
     const reasons = readiness.flatMap(({ entry, reason }) => (reason ? [`${entry.label}: ${reason}`] : []));
@@ -325,6 +327,9 @@ healthRouter.get('/bridge', async (_req, res, next) => {
         // this process's background writers run; null where the boot check
         // never ran (vercel.ts).
         deploymentIdentity: deploymentIdentityStatus(),
+        // Sponsored agent gas: whether it runs, the sponsor's balance, calls
+        // today and the budget left (docs/AGENT-GAS-FUNDING.md).
+        gasSponsor,
       },
     };
     res.json(body);

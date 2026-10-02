@@ -57,6 +57,7 @@ import { chainRuntime } from './services/chainRuntime.js';
 import { clientPricingWarnings } from './services/settlementUnits.js';
 import { logChainConfig } from './services/chainService.js';
 import { startZombieReaper } from './services/agentRunner.js';
+import { logGasSponsorConfig } from './services/gasSponsorConfig.js';
 import { startBackgroundWriters } from './services/backgroundWriters.js';
 import { checkDeploymentIdentity } from './services/deploymentIdentity.js';
 import { assertRpcChainIds, bootRpcEndpoints } from './services/rpcChainIds.js';
@@ -78,6 +79,7 @@ for (const warning of clientPricingWarnings()) {
 
 logChainConfig();
 console.log(`[chain] New tasks post on ${settlementChainConfig(postingChain()).label}`);
+logGasSponsorConfig();
 
 // Every provider takes its chain id on trust (staticNetwork), so ask each RPC
 // which chain it serves before serving requests (services/rpcChainIds.ts).

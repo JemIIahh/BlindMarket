@@ -16,6 +16,7 @@ import { startAgentFactoryListener } from './agentFactoryListener.js';
 import { startCctpAttestationPoller } from './cctpAttestationPoller.js';
 import { startExpirySweepLoop } from './a2aExpirySweep.js';
 import { reconcileAgents } from './agentRunner.js';
+import { startGasSponsor } from './gasSponsorRelayer.js';
 
 export interface BackgroundWriter {
   name: string;
@@ -70,6 +71,10 @@ export function backgroundWriters(env: NodeJS.ProcessEnv = process.env): Backgro
       // Proactively close open tasks whose on-chain deadline has passed,
       // instead of leaving them listed until some agent burns an /accept on them.
       { name: 'expiry sweep', start: startExpirySweepLoop },
+      // Sponsored agent gas: the single writer, its recovery, and the
+      // reservation sweep. A no-op unless GAS_SPONSOR_ENABLED (gasSponsorConfig.ts).
+      // In the API process: /accept reserves and /sponsored-call relays there.
+      { name: 'gas sponsor', start: startGasSponsor },
     );
   }
   // Re-fork agents that were 'running' before this restart — the in-memory

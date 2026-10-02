@@ -25,12 +25,13 @@ vi.mock('./agentFactoryListener.js', () => ({ startAgentFactoryListener: () => s
 vi.mock('./cctpAttestationPoller.js', () => ({ startCctpAttestationPoller: () => started.push('startCctpAttestationPoller') }));
 vi.mock('./a2aExpirySweep.js', () => ({ startExpirySweepLoop: () => started.push('startExpirySweepLoop') }));
 vi.mock('./agentRunner.js', () => ({ reconcileAgents: async () => { started.push('reconcileAgents'); } }));
+vi.mock('./gasSponsorRelayer.js', () => ({ startGasSponsor: () => started.push('startGasSponsor') }));
 
 import { backgroundWriters, startBackgroundWriters } from './backgroundWriters.js';
 
 const EVERY_WRITER = [
   'startBaseEscrowEventLoop', 'startArcEscrowEventLoop', 'startAgentFactoryListener',
-  'startCctpAttestationPoller', 'startExpirySweepLoop', 'reconcileAgents',
+  'startCctpAttestationPoller', 'startExpirySweepLoop', 'startGasSponsor', 'reconcileAgents',
 ];
 
 beforeEach(() => {
@@ -43,7 +44,7 @@ describe('startBackgroundWriters', () => {
     identity.status = { role: 'owner', writersAllowed: true };
     const { started: names } = await startBackgroundWriters(backgroundWriters({}));
     expect(started).toEqual(EVERY_WRITER);
-    expect(names).toEqual(['Base indexer', 'Arc indexer', 'AgentFactory listener', 'CCTP poller', 'expiry sweep', 'agent reconcile']);
+    expect(names).toEqual(['Base indexer', 'Arc indexer', 'AgentFactory listener', 'CCTP poller', 'expiry sweep', 'gas sponsor', 'agent reconcile']);
   });
 
   it('starts them after the first check whatever it said: each tick is gated, so a later "allowed" takes effect', async () => {
@@ -97,7 +98,7 @@ describe('startBackgroundWriters', () => {
     const cases = [
       {
         env: { RUN_MODE: 'api' },
-        expected: ['startCctpAttestationPoller', 'startExpirySweepLoop', 'reconcileAgents'],
+        expected: ['startCctpAttestationPoller', 'startExpirySweepLoop', 'startGasSponsor', 'reconcileAgents'],
       },
       {
         env: { RUN_MODE: 'indexer' },
