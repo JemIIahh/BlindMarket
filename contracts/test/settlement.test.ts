@@ -499,12 +499,22 @@ describe("Arc settlement tooling", function () {
       for (const [key, file] of [["arc", "arc-mainnet.json"], ["arcTestnet", "arc-testnet.json"]]) {
         const escrow = read(file);
         const factory = read(`agent-factory-${file}`);
+        // agent-delegate-<record>.json is the EIP-7702 delegate bound to that
+        // record's escrow (sponsored agent gas).
+        const delegateFile = `agent-delegate-${file}`;
+        const delegate = fs.existsSync(path.join(DEPLOYMENTS_ROOT, delegateFile)) ? read(delegateFile) : null;
+        if (delegate) expect(delegate.config.escrow.toLowerCase()).to.equal(escrow.contracts.BlindEscrow.toLowerCase());
         expect(addresses[key]).to.deep.equal({
           blindEscrow: escrow.contracts.BlindEscrow,
           agentFactory: factory.contracts.AgentFactory,
+          ...(delegate ? { blindAgentDelegate: delegate.contracts.BlindAgentDelegate } : {}),
           USDC: escrow.contracts.USDC,
         });
-        blocks[key] = { blindEscrow: escrow.blocks.BlindEscrow, agentFactory: factory.blocks.AgentFactory };
+        blocks[key] = {
+          blindEscrow: escrow.blocks.BlindEscrow,
+          agentFactory: factory.blocks.AgentFactory,
+          ...(delegate ? { blindAgentDelegate: delegate.blocks.BlindAgentDelegate } : {}),
+        };
       }
       expect(exported(committed, "DEPLOYMENT_BLOCKS")).to.deep.equal(blocks);
     });
@@ -596,6 +606,8 @@ describe("Arc settlement tooling", function () {
     });
 
     it("emits blindAgentDelegate only while its record is bound to the record's escrow", function () {
+      // Isolate the testnet record: the real mainnet delegate record emits too.
+      fs.rmSync(path.join(dir, "agent-delegate-arc-mainnet.json"), { force: true });
       const DELEGATE = "0x4444444444444444444444444444444444444444";
       const escrow = JSON.parse(fs.readFileSync(path.join(dir, "arc-testnet.json"), "utf-8")).contracts.BlindEscrow;
       put("agent-delegate-arc-testnet.json", {
@@ -617,7 +629,7 @@ describe("Arc settlement tooling", function () {
       // A record with no bound escrow never emits.
       edit("agent-delegate-arc-testnet.json", (r) => delete r.config);
       edit("arc-testnet.json", (r) => (r.contracts.BlindEscrow = escrow));
-      expect(render(dir) + renderAA(dir)).to.equal(committed);
+      expect(render(dir)).to.not.match(/blindAgentDelegate/);
     });
 
     it("still refuses a missing main record for the non-Arc networks", function () {
