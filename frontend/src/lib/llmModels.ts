@@ -18,6 +18,8 @@ export interface ModelOption {
   /** USD per 1M tokens, when the catalog or the provider's list prices it. */
   inputCostPer1M?: number;
   outputCostPer1M?: number;
+  /** The provider calls it preview or beta. */
+  preview?: boolean;
 }
 
 /** xAI's Grok and Groq are different companies: the labels say which is which. */
@@ -39,10 +41,10 @@ export function providerLabel(provider: string): string {
  * which GET /agents/providers replaces as soon as it answers.
  */
 export const FALLBACK_MODELS: Record<Provider, string[]> = {
-  openai: ['gpt-6.1-sol', 'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-4.1', 'gpt-4o', 'gpt-4o-mini'],
-  anthropic: ['claude-fable-5-1', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-fable-5', 'claude-opus-5', 'claude-sonnet-5', 'claude-opus-4-8', 'claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
+  openai: ['gpt-6.1-sol', 'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.5-pro', 'gpt-5.4', 'gpt-5.4-pro', 'gpt-5.4-mini', 'gpt-5.2', 'gpt-5.2-pro', 'gpt-4.1', 'gpt-4.1-mini', 'gpt-4o', 'gpt-4o-mini', 'chat-latest'],
+  anthropic: ['claude-fable-5-1', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-fable-5', 'claude-opus-5', 'claude-sonnet-5', 'claude-opus-4-8', 'claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-opus-4-5', 'claude-haiku-4-5'],
   groq: ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3.8-27b'],
-  gemini: ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-pro-preview', 'gemini-3.1-flash-lite', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'],
+  gemini: ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-pro-preview', 'gemini-3-flash-preview'],
   xai: ['grok-4.7', 'grok-4.6', 'grok-4.5', 'grok-4.3', 'grok-4.20-0309-reasoning', 'grok-4.20-0309-non-reasoning', 'grok-build-0.1'],
   '0g-compute': ['glm-5', 'qwen3.7-plus', 'glm-5.3', '0GM-1.0-35B-A3B', '0GM-1.0-35B-A3B-SIA'],
 };
@@ -86,11 +88,12 @@ export function usdPer1M(n: number): string {
   return `$${n >= 0.1 || n === 0 ? n.toFixed(2) : String(n)}`;
 }
 
-/** "grok-4.7 · $2.00 / $6.00 per 1M", or "grok-5 · price not listed". */
+/** "grok-4.7 · $2.00 / $6.00 per 1M", "qwen/qwen3.8-27b · preview · $0.80 / …", or "grok-5 · price not listed". */
 export function modelLabel(m: ModelOption): string {
+  const id = m.preview ? `${m.id} · preview` : m.id;
   return isPriced(m)
-    ? `${m.id} · ${usdPer1M(m.inputCostPer1M)} / ${usdPer1M(m.outputCostPer1M)} per 1M`
-    : `${m.id} · price not listed`;
+    ? `${id} · ${usdPer1M(m.inputCostPer1M)} / ${usdPer1M(m.outputCostPer1M)} per 1M`
+    : `${id} · price not listed`;
 }
 
 /**

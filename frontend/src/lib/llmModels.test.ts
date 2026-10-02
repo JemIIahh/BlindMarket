@@ -17,6 +17,8 @@ describe('providers', () => {
     expect(Object.keys(FALLBACK_MODELS).sort()).toEqual(Object.keys(PROVIDER_LABELS).sort());
     expect(FALLBACK_MODELS.xai[0]).toBe('grok-4.7');
     expect(FALLBACK_MODELS.anthropic).toContain('claude-opus-5-5');
+    expect(FALLBACK_MODELS.openai).toContain('gpt-5.5-pro');
+    expect(FALLBACK_MODELS.gemini).not.toContain('gemini-2.5-flash');
   });
 
   it('only 0G Compute goes without a key', () => {
@@ -53,6 +55,11 @@ describe('labels', () => {
     expect(modelLabel({ id: 'grok-4.7', inputCostPer1M: 2, outputCostPer1M: 6 })).toBe('grok-4.7 · $2.00 / $6.00 per 1M');
     expect(modelLabel({ id: 'openai/gpt-oss-20b', inputCostPer1M: 0.075, outputCostPer1M: 0.3 })).toBe('openai/gpt-oss-20b · $0.075 / $0.30 per 1M');
     expect(modelLabel({ id: 'grok-5' })).toBe('grok-5 · price not listed');
+  });
+
+  it('marks preview models', () => {
+    expect(modelLabel({ id: 'qwen/qwen3.8-27b', inputCostPer1M: 0.8, outputCostPer1M: 4, preview: true })).toBe('qwen/qwen3.8-27b · preview · $0.80 / $4.00 per 1M');
+    expect(modelLabel({ id: 'gemini-3-flash-preview', preview: true })).toBe('gemini-3-flash-preview · preview · price not listed');
   });
 
   it('formats sub-dime prices without rounding them away', () => {
