@@ -322,6 +322,12 @@ const migrations: Migration[] = [
       claimed_at INTEGER NOT NULL
     );`,
   },
+  {
+    // Mirror of Postgres migration 41.
+    id: 21,
+    name: 'deployed_agents_delegation_enabled',
+    sql: `ALTER TABLE deployed_agents ADD COLUMN delegation_enabled INTEGER NOT NULL DEFAULT 0;`,
+  },
 ];
 
 /** One migration's SQL, for tests of what a migration does to existing rows. */

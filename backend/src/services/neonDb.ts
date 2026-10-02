@@ -848,6 +848,13 @@ const migrations: Array<{ id: number; name: string; sql: string; when?: () => bo
         claimed_at BIGINT NOT NULL
       );`,
   },
+  {
+    id: 41,
+    name: 'deployed_agents_delegation_enabled',
+    // Owner opt-in for delegate_to_agent, off for every agent, existing ones
+    // included (services/delegationGuard.ts).
+    sql: `ALTER TABLE deployed_agents ADD COLUMN IF NOT EXISTS delegation_enabled BOOLEAN NOT NULL DEFAULT false;`,
+  },
 ];
 
 /**

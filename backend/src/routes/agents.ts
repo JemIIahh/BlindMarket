@@ -1089,6 +1089,26 @@ agentsRouter.post('/:id/verifier', requireAuth, async (req: AuthRequest, res) =>
   });
 });
 
+// POST /api/v1/agents/:id/delegation — the owner lets this agent post paid
+// sub-tasks (delegate_to_agent) from its wallet, or stops it. Off by default:
+// the task brief is in the same prompt as the tool (services/delegationGuard.ts).
+// The backend checks it on every post; the worker reads it at start, so
+// restart the agent to give or take the tool.
+agentsRouter.post('/:id/delegation', requireAuth, async (req: AuthRequest, res) => {
+  const agent = await authorizeOwner(req, res, req.params.id);
+  if (!agent) return;
+  const parsed = z.object({ enabled: z.boolean() }).safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'enabled must be true or false' } });
+    return;
+  }
+  const updated = await updateAgent(req.params.id, { delegationEnabled: parsed.data.enabled });
+  res.json({
+    success: true,
+    data: { delegationEnabled: updated?.delegationEnabled === true, note: 'Restart the agent for the change to take effect.' },
+  });
+});
+
 // ── Agent Services (rent-your-agent Phase 1) ────────────────────────────────
 // Owner-managed CRUD for an agent's priced service listings. Public browse/detail
 // live on the marketplace router. Every route is owner-gated via authorizeOwner;

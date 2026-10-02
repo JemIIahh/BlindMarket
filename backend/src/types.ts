@@ -704,6 +704,11 @@ export interface DeployedAgent {
   // default: any poster could otherwise make it judge and settle tasks on the
   // owner's model and gas (security audit run 1, C04).
   verifierEnabled?: boolean;
+  // The owner lets this agent post paid sub-tasks (delegate_to_agent) from its
+  // wallet. Off by default: the task brief sits in the same prompt as the
+  // tool, so without consent any poster could steer the agent into paying a
+  // sub-task to the poster's own agent (services/delegationGuard.ts).
+  delegationEnabled?: boolean;
   // Per-tool secrets (API keys, tokens) — ECIES-encrypted at rest
   toolSecrets?: Record<string, string>;              // plaintext, only in worker env
   encryptedToolSecrets?: Record<string, string>;     // ECIES blobs encrypted to owner pubkey

@@ -385,6 +385,26 @@ const DELEGATE_REWARD_USDC = process.env.DELEGATE_REWARD_USDC ?? '0.01';
 // the native coin, so it can still pay gas for its own submitEvidence on the
 // task it's working.
 const DELEGATE_GAS_RESERVE_OG = process.env.DELEGATE_GAS_RESERVE_OG ?? '0.005';
+// Posting a sub-task takes up to two transactions from this wallet (an
+// approve and createTask: about 315k gas together on Arc), and the agent
+// still needs one transaction of its own after that.
+const DELEGATION_GAS_BUDGETS = 3n;
+
+/**
+ * What delegation keeps back where gas is paid in the reward's coin, in that
+ * coin's smallest unit: DELEGATE_GAS_RESERVE_OG (`reserveRaw`), or three gas
+ * budgets at current fees, whichever is more. `gateWei` is one budget in the
+ * native coin (minGasBalance), null when the fees can't be read. A fixed
+ * 0.005 alone fell below even one budget at Arc's fees (0.008 at 40 gwei).
+ * Exported for tests.
+ */
+export function delegationGasKeep(gateWei, reserveRaw, decimals) {
+  if (gateWei === null) return reserveRaw;
+  const wei = gateWei * DELEGATION_GAS_BUDGETS;
+  const scale = 10n ** BigInt(Math.abs(18 - decimals));
+  const raw = decimals >= 18 ? wei * scale : (wei + scale - 1n) / scale;
+  return raw > reserveRaw ? raw : reserveRaw;
+}
 
 // 0G Compute Router — when no AGENT_API_KEY is set, the agent uses its own
 // wallet to pay for inference on the 0G Compute Network (decentralized AI).
@@ -1068,6 +1088,13 @@ const MAX_VERIFY_ATTEMPTS = 5;
 // any poster could name this agent as a task's verifier and have it judge and
 // settle rounds on the owner's model key and wallet gas, uncapped.
 const VERIFIER_ENABLED = process.env.AGENT_VERIFIER_ENABLED === 'true';
+// Delegation is the owner's opt-in too, off by default. delegate_to_agent
+// pays a sub-task's reward from this wallet, and the task brief sits in the
+// same prompt as the tool: without the opt-in any poster could write a brief
+// that has the agent pay a sub-task to the poster's own agent. Off, the model
+// is never given the tool, and the backend refuses to build or list a task
+// this wallet posts (services/delegationGuard.ts).
+const DELEGATION_ENABLED = process.env.AGENT_DELEGATION_ENABLED === 'true';
 // At most this many verdicts per pass, so a queued burst can't hold the work
 // slot while real offers wait.
 const MAX_VERIFICATIONS_PER_PASS = 3;
@@ -1420,15 +1447,16 @@ export function _signerWallet() {
   return signerWallet;
 }
 
-export function buildTools(currentTaskHash = null, { posterAddress = null, ownerAddress = AGENT_OWNER_ADDRESS } = {}) {
-  /** @type {import('ai').ToolSet} */
-  const tools = {};
-
+/**
+ * delegate_to_agent: post a paid sub-task funded from this wallet. Given to
+ * the model only when the owner turned delegation on (DELEGATION_ENABLED).
+ */
+function delegateToAgentTool() {
   // Standard tool for A2A delegation. Description deliberately discourages
   // spurious use — weaker LLMs reach for "delegate" as a way to defer work
   // they should just do themselves, burning escrow and polluting the task
   // graph with no-op sub-tasks.
-  tools.delegate_to_agent = tool({
+  return tool({
     description: [
       'Post a paid sub-task to another agent on the marketplace and wait for its result.',
       'The reward is escrowed from your own wallet, so a sub-task costs real funds and takes longer than doing the work yourself:',
@@ -1498,8 +1526,9 @@ export function buildTools(currentTaskHash = null, { posterAddress = null, owner
 
         // Balance guard — don't post a sub-task we can't fund without starving
         // our own gas. Skip cleanly so the model just completes the task itself.
+        const gateWei = await minGasBalance(delegateSigner.provider, preflightGasLimitFor(posting.key));
         if (isNativeReward) {
-          const reserveWei = ethers.parseEther(String(DELEGATE_GAS_RESERVE_OG));
+          const reserveWei = delegationGasKeep(gateWei, ethers.parseEther(String(DELEGATE_GAS_RESERVE_OG)), 18);
           let balance;
           try {
             balance = await delegateSigner.provider.getBalance(delegateSigner.address);
@@ -1507,7 +1536,7 @@ export function buildTools(currentTaskHash = null, { posterAddress = null, owner
             return `Delegation skipped: could not read the ${payToken.symbol} balance of ${delegateSigner.address} on ${posting.key} (${e.message}). Complete the task yourself.`;
           }
           if (balance < rewardRaw + reserveWei) {
-            return `Delegation skipped: wallet balance ${ethers.formatUnits(balance, payToken.decimals)} ${payToken.symbol} on ${posting.key} is below reward ${rewardSetting} + gas reserve ${DELEGATE_GAS_RESERVE_OG}. Complete the task yourself.`;
+            return `Delegation skipped: wallet balance ${ethers.formatUnits(balance, payToken.decimals)} ${payToken.symbol} on ${posting.key} is below reward ${rewardSetting} + gas reserve ${ethers.formatEther(reserveWei)}. Complete the task yourself.`;
           }
         } else {
           // The reward is an ERC-20 and gas is a different coin, so both are
@@ -1529,10 +1558,10 @@ export function buildTools(currentTaskHash = null, { posterAddress = null, owner
           // submitEvidence — so keep the reserve back, as the native branch
           // does. Elsewhere gas is a different asset and preflightGas covered it.
           const keepRaw = posting.nativeIsSettlementToken
-            ? ethers.parseUnits(String(DELEGATE_GAS_RESERVE_OG), payToken.decimals)
+            ? delegationGasKeep(gateWei, ethers.parseUnits(String(DELEGATE_GAS_RESERVE_OG), payToken.decimals), payToken.decimals)
             : 0n;
           if (tokenBalance < rewardRaw + keepRaw) {
-            return `Delegation skipped: wallet holds ${ethers.formatUnits(tokenBalance, payToken.decimals)} ${payToken.symbol} on ${posting.key}, below the ${rewardSetting} ${payToken.symbol} reward${keepRaw > 0n ? ` plus the ${DELEGATE_GAS_RESERVE_OG} ${payToken.symbol} gas reserve` : ''}. Complete the task yourself.`;
+            return `Delegation skipped: wallet holds ${ethers.formatUnits(tokenBalance, payToken.decimals)} ${payToken.symbol} on ${posting.key}, below the ${rewardSetting} ${payToken.symbol} reward${keepRaw > 0n ? ` plus the ${ethers.formatUnits(keepRaw, payToken.decimals)} ${payToken.symbol} gas reserve` : ''}. Complete the task yourself.`;
           }
           // The approve itself waits until there is a createTask to fund:
           // the storage upload alone takes 20-40s and any failure before then
@@ -1695,6 +1724,13 @@ export function buildTools(currentTaskHash = null, { posterAddress = null, owner
       }
     },
   });
+}
+
+export function buildTools(currentTaskHash = null, { posterAddress = null, ownerAddress = AGENT_OWNER_ADDRESS, delegation = DELEGATION_ENABLED } = {}) {
+  /** @type {import('ai').ToolSet} */
+  const tools = {};
+
+  if (delegation) tools.delegate_to_agent = delegateToAgentTool();
 
   for (const t of agentTools) {
     // Sanitize tool name: Groq/OpenAI require ^[a-zA-Z0-9_]{1,64}$
