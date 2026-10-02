@@ -16,13 +16,15 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --legacy-peer-deps
 COPY --from=builder /app/dist ./dist
 COPY agents ./agents
-# agents/worker.js (forked per deployed agent) imports ../src/services/crypto.js
-# and ../src/services/egressGuard.js. In dev tsx resolves those to the .ts
-# sources; the image ships no src/, so plant the compiled modules at the path
-# the worker expects. Both modules are self-contained (node builtins + prod
-# deps only), so no other dist files need to follow them.
+# agents/worker.js (forked per deployed agent) imports ../src/services/crypto.js,
+# ../src/services/egressGuard.js and ../src/services/ogComputeModels.js. In dev
+# tsx resolves those to the .ts sources; the image ships no src/, so plant the
+# compiled modules at the path the worker expects. All three are
+# self-contained (node builtins + prod deps only), so no other dist files need
+# to follow them.
 COPY --from=builder /app/dist/services/crypto.js ./src/services/crypto.js
 COPY --from=builder /app/dist/services/egressGuard.js ./src/services/egressGuard.js
+COPY --from=builder /app/dist/services/ogComputeModels.js ./src/services/ogComputeModels.js
 # The worker also reads ../src/abi/BlindEscrow.json. Without it verifier duty
 # never settles ("signer/escrow not configured") and escrow reverts go undecoded.
 COPY src/abi/BlindEscrow.json ./src/abi/BlindEscrow.json
