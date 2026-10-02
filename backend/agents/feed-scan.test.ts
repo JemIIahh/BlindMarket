@@ -7,7 +7,7 @@ vi.mock('@ai-sdk/groq', () => ({ createGroq: () => () => 'm' }));
 vi.mock('socket.io-client', () => ({ io: () => ({ on: vi.fn(), emit: vi.fn() }) }));
 
 // @ts-expect-error — plain-JS worker, no d.ts
-import { shouldScanFeed, feedScanCadence, WS_RECONCILE_MS } from './worker.js';
+import { shouldScanFeed, feedScanCadence, gasRecheckPollDue, WS_RECONCILE_MS } from './worker.js';
 
 /**
  * The stranding bug. The offer cascade lives in a setTimeout (routes/a2a.ts)
@@ -56,5 +56,16 @@ describe('feedScanCadence', () => {
   });
   it('never lengthens a floor that is already shorter than the recheck', () => {
     expect(feedScanCadence(true, 30_000, 60_000)).toBe(30_000);
+  });
+});
+
+describe('gasRecheckPollDue', () => {
+  it('polls on the gas re-check cadence only while tasks sit skipped for gas', () => {
+    expect(gasRecheckPollDue(1, false)).toBe(true);
+    expect(gasRecheckPollDue(0, false)).toBe(false);
+  });
+
+  it('leaves a running poll alone', () => {
+    expect(gasRecheckPollDue(3, true)).toBe(false);
   });
 });

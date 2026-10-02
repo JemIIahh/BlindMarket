@@ -276,6 +276,17 @@ const GAS_RECHECK_MS = envNumber(process.env.GAS_RECHECK_MS, 60_000, { min: 1_00
 export function feedScanCadence(hasGasSkipped, reconcileMs = WS_RECONCILE_MS, recheckMs = GAS_RECHECK_MS) {
   return hasGasSkipped ? Math.min(reconcileMs, recheckMs) : reconcileMs;
 }
+/**
+ * Whether the gas re-check timer should poll now. The poll loop itself runs
+ * only every max(POLL_INTERVAL_MS, 120s) while WS is up, so without this a
+ * wallet funded after a skip (a top-up, or the gas stipend landing seconds
+ * after start) waited up to two minutes for its skipped task, not
+ * GAS_RECHECK_MS. Skipped while a poll is running: it would only log
+ * "poll skipped".
+ */
+export function gasRecheckPollDue(gasSkippedCount, working) {
+  return gasSkippedCount > 0 && !working;
+}
 // Liveness heartbeat cadence — DECOUPLED from POLL_INTERVAL_MS. The parent
 // refreshes a Redis key with a 90s TTL on each heartbeat (see redis.ts
 // HEARTBEAT_TTL_S / isAgentLive); if liveness were tied to the poll loop, an
@@ -4593,6 +4604,9 @@ if (process.env.NODE_ENV !== 'test') {
     // full feed poll kicks back in automatically.
     const SAFETY_NET_MS = Math.max(POLL_INTERVAL_MS, 120_000);
     setInterval(() => { pollAndWork().catch(() => {}); }, SAFETY_NET_MS);
+    // While tasks sit skipped for lack of gas, poll on the gas re-check
+    // cadence too (feedScanCadence lets that poll scan the feed).
+    setInterval(() => { if (gasRecheckPollDue(gasSkipLogged.size, _working)) pollAndWork().catch(() => {}); }, GAS_RECHECK_MS);
     // Run initial poll to catch any tasks posted before WS connected
     pollAndWork().catch(() => {});
   })();
