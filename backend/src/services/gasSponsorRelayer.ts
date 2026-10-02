@@ -642,11 +642,12 @@ export async function recoverSponsorTxs(settings: Enabled, now = Date.now()): Pr
       if (tx.status === 'signed') await setTxStatus(tx.txHash, 'sent');
     } catch (err) {
       const why = classifyBroadcastError(err);
-      if (why === 'known') {
+      if (why === 'known' || why === 'nonce_low') {
+        // The chain has not passed this nonce (checked above), so "nonce too
+        // low" counts a pooled transaction at it — ours, as far as anything
+        // shows (Hardhat answers this way while automining). If another
+        // transaction mines there, the passed-nonce check above catches it.
         if (tx.status === 'signed') await setTxStatus(tx.txHash, 'sent');
-      } else if (why === 'nonce_low') {
-        await nonceTaken(settings, tx, now);
-        continue;
       } else if (why === 'rejected') {
         await setTxStatus(tx.txHash, 'rejected');
         await trip(settings, 'paused', `the node rejected sponsored tx ${tx.txHash} (nonce ${tx.nonce}): ${(err as Error).message}`, tx);
@@ -788,31 +789,34 @@ export async function maybeAutoPause(settings: Enabled): Promise<string | null> 
 let started = false;
 
 /**
- * Start the writer: take the lock (retrying while another process holds
- * it), recover stored transactions, then sweep every minute. A no-op when
- * sponsorship is off.
+ * One pass of the writer: take the lock if free, then — while holding it —
+ * settle or re-send every stored transaction (and trip the breaker on one
+ * that can't land), sweep reservations, and check the automatic pause.
+ * Exported for tests.
  */
+export async function gasSponsorTick(): Promise<void> {
+  const run = await runnableSettings('gas sponsor').catch((e) => ({ ok: false as const, reason: (e as Error).message }));
+  if (!run.ok) return;
+  try {
+    if (!writer && (await acquireSponsorWriter(run.settings))) {
+      console.log(`[gasSponsor] writer for Arc ${run.settings.chainId}, sponsor ${run.settings.sponsor.address}`);
+    }
+    if (writer) {
+      await recoverSponsorTxs(run.settings);
+      await sweepReservations(run.settings);
+      await maybeAutoPause(run.settings);
+    }
+  } catch (err) {
+    console.error(`[gasSponsor] tick failed: ${(err as Error).message}`);
+  }
+}
+
+/** Run gasSponsorTick now and every 30 s. A no-op when sponsorship is off. */
 export function startGasSponsor(): void {
   if (started) return;
   started = true;
-  const tick = async () => {
-    const run = await runnableSettings('gas sponsor').catch((e) => ({ ok: false as const, reason: (e as Error).message }));
-    if (!run.ok) return;
-    try {
-      if (!writer && (await acquireSponsorWriter(run.settings))) {
-        console.log(`[gasSponsor] writer for Arc ${run.settings.chainId}, sponsor ${run.settings.sponsor.address}`);
-        await recoverSponsorTxs(run.settings);
-      }
-      if (writer) {
-        await sweepReservations(run.settings);
-        await maybeAutoPause(run.settings);
-      }
-    } catch (err) {
-      console.error(`[gasSponsor] tick failed: ${(err as Error).message}`);
-    }
-  };
-  void tick();
-  setInterval(() => { void tick(); }, Math.min(SWEEP_MS, WRITER_RETRY_MS)).unref();
+  void gasSponsorTick();
+  setInterval(() => { void gasSponsorTick(); }, Math.min(SWEEP_MS, WRITER_RETRY_MS)).unref();
 }
 
 /** Test hook: how long a relay waits for its receipt before answering pending. */

@@ -705,6 +705,19 @@ describe('recovery', () => {
     expect(db.txs[0].status).toBe('sent');
   });
 
+  it('runs on every writer tick, not only when the lock is first taken', async () => {
+    holdReservation();
+    chain.broadcastError = new Error('timeout');
+    await writer();
+    await relayer.relaySponsoredCall(await input({ authorization: auth() }));
+    chain.broadcastError = null;
+    chain.onBroadcast = null;
+    await relayer.gasSponsorTick(); // already the writer
+    await relayer.gasSponsorTick();
+    expect(chain.sent).toHaveLength(2);
+    expect(new Set(chain.sent).size).toBe(1);
+  });
+
   it('settles a stored transaction that did land', async () => {
     await writer();
     const r = holdReservation();
@@ -778,21 +791,18 @@ describe('recovery', () => {
     expect(db.controls).toMatchObject({ paused: true, killed: false });
   });
 
-  it('on "nonce too low", settles ours if it landed, and kills if it did not', async () => {
+  it('reads "nonce too low" at a nonce the chain has not passed as our own pooled transaction, not a lost one', async () => {
     await writer();
     holdReservation();
     chain.broadcastError = new Error('timeout');
     await relayer.relaySponsoredCall(await input({ authorization: auth() }));
-    chain.broadcastError = Object.assign(new Error('nonce too low'), { code: 'NONCE_EXPIRED' });
-    chain.knownTx.add(db.txs[0].txHash);
-    await relayer.recoverSponsorTxs(settings.current);
-    expect(db.controls.killed).toBe(false);
-    chain.knownTx.clear();
+    // Hardhat, automining, answers a re-send of a pooled transaction this way.
+    chain.broadcastError = Object.assign(new Error('Nonce too low. Expected nonce to be 4 but got 3.'), { code: 'NONCE_EXPIRED' });
     const t0 = Date.now();
     await relayer.recoverSponsorTxs(settings.current, t0);
     await relayer.recoverSponsorTxs(settings.current, t0 + 30_000);
-    expect(db.txs[0].status).toBe('dropped');
-    expect(db.controls.killed).toBe(true);
+    expect(db.txs[0].status).toBe('sent');
+    expect(db.controls.killed).toBe(false);
   });
 });
 
