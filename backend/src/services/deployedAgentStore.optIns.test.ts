@@ -74,6 +74,7 @@ describe('deployed agent upsert (Postgres)', () => {
     expect(params).toHaveLength(highest);
     expect(params.slice(-2)).toEqual([true, 'did:privy:cm0abc123']);
     expect(sql).toMatch(/delegation_enabled = EXCLUDED\.delegation_enabled/);
-    expect(sql).toMatch(/privy_user_id = EXCLUDED\.privy_user_id/);
+    // Set once: a later save never clears or replaces it.
+    expect(sql).toMatch(/privy_user_id = COALESCE\(deployed_agents\.privy_user_id, EXCLUDED\.privy_user_id\)/);
   });
 });

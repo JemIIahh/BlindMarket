@@ -36,6 +36,7 @@ import { callerWallets } from '../services/callerWallets.js';
 import { loadAgentReadiness } from '../services/agentReadiness.js';
 import { sponsorshipStatus } from '../services/gasSponsorEligibility.js';
 import { recordKeyExport } from '../services/gasSponsorStore.js';
+import { backfillOwnerPrivyId } from '../services/privyBackfill.js';
 import { nativeWeiToTokenUnits, normalizeSettlementAmount, pricingUnit } from '../services/settlementUnits.js';
 import { disconnectSocketsForToken } from '../services/socket.js';
 import { clientErrorMessage, safeErrorMessage } from '../middleware/errorHandler.js';
@@ -55,6 +56,9 @@ export async function authorizeOwner(req: AuthRequest, res: import('express').Re
     res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Owner authentication required' } });
     return null;
   }
+  // A signed-in owner's agents deployed before the Privy user was stored get
+  // it now — before this one loads, so the route sees it.
+  await backfillOwnerPrivyId(req.user);
   const agent = await getAgent(agentId);
   if (!agent) {
     res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Agent not found' } });

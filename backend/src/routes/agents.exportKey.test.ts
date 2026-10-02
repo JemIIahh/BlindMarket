@@ -53,6 +53,8 @@ vi.mock('../services/skillComposer.js', () => ({ buildInstalledSkill: vi.fn(), a
 const sponsor = vi.hoisted(() => ({ record: vi.fn(async () => {}), status: vi.fn(async () => ({ state: 'sponsored' })) }));
 vi.mock('../services/gasSponsorStore.js', () => ({ recordKeyExport: sponsor.record }));
 vi.mock('../services/gasSponsorEligibility.js', () => ({ sponsorshipStatus: sponsor.status }));
+const backfill = vi.hoisted(() => vi.fn(async () => {}));
+vi.mock('../services/privyBackfill.js', () => ({ backfillOwnerPrivyId: backfill }));
 const cfg = vi.hoisted(() => ({ databaseUrl: 'postgres://x' }));
 vi.mock('../config.js', async (orig) => {
   const mod = await orig<typeof import('../config.js')>();
@@ -100,6 +102,14 @@ describe('POST /agents/:id/export-key', () => {
     cfg.databaseUrl = '';
     expect((await exportKey()).status).toBe(200);
     expect(sponsor.record).not.toHaveBeenCalled();
+  });
+});
+
+describe('owner routes', () => {
+  it('offer the signed-in user to the Privy backfill before the agent loads', async () => {
+    await exportKey();
+    expect(backfill).toHaveBeenCalledWith(expect.objectContaining({ address: OWNER }));
+    expect(backfill.mock.invocationCallOrder[0]).toBeLessThan(getAgent.mock.invocationCallOrder[0]);
   });
 });
 
