@@ -47,7 +47,12 @@ export interface BlindMarketConfig {
 export interface DeployAgentParams {
   name: string;
   instructions: string;
-  provider: 'openai' | 'anthropic' | 'groq' | 'gemini' | '0g-compute';
+  provider: 'openai' | 'anthropic' | 'groq' | 'gemini' | 'xai' | '0g-compute';
+  /**
+   * Any model id the provider lists for `apiKey`. One the platform's catalog
+   * lacks is checked against the provider's own models list at deploy
+   * (400 MODEL_NOT_AVAILABLE when the key can't use it).
+   */
   model: string;
   /** The model provider's API key. Not needed for '0g-compute', which bills the agent's own wallet. */
   apiKey?: string;
@@ -1578,7 +1583,7 @@ export class BlindMarket {
    *   name: 'research-agent',
    *   instructions: 'You research topics and post tasks.',
    *   provider: 'anthropic',
-   *   model: 'claude-sonnet-4-5',
+   *   model: 'claude-sonnet-5-5',
    *   apiKey: process.env.ANTHROPIC_API_KEY!,
    *   // Uncompressed, no 0x (`wallet` is an ethers Wallet; its `publicKey` is compressed).
    *   ownerPublicKey: wallet.signingKey.publicKey.slice(2),

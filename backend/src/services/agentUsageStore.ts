@@ -1,15 +1,17 @@
 import { getPool } from './neonDb.js';
 import { getDb } from './database.js';
 import { config } from '../config.js';
+import { LLM_PROVIDER_MODELS, type LLMProvider } from '../types.js';
 
 function usePg(): boolean {
   return Boolean(config.databaseUrl);
 }
 
 // ── Model prices (USD per 1M tokens) ─────────────────────────────────────────
-// Approximate list prices — spot-check against the provider's pricing page.
-// Override wholesale via MODEL_PRICES_JSON env (same shape). Models missing
-// from the table use FALLBACK_RATE and are flagged estimated:true.
+// The model catalog (LLM_PROVIDER_MODELS) prices the models agents deploy on.
+// STATIC_PRICES below covers older ids by name. Override wholesale via
+// MODEL_PRICES_JSON env (same shape), which wins over both. Models priced by
+// none of these use FALLBACK_RATE and are flagged estimated:true.
 const FALLBACK_RATE = { input: 1.0, output: 3.0 };
 
 const STATIC_PRICES: Record<string, { input: number; output: number }> = {
@@ -20,16 +22,31 @@ const STATIC_PRICES: Record<string, { input: number; output: number }> = {
   'claude-haiku': { input: 0.25, output: 1.25 },
   'llama-3.3-70b': { input: 0.35, output: 0.4 },
   'gemini-flash': { input: 0.1, output: 0.4 },
+  // Off the deploy catalog (deprecated, or closed to new users) but still
+  // served to agents already on them. Prices from the providers' pricing
+  // pages on 2026-10-02, the same reads as the catalog.
+  'gpt-5': { input: 1.25, output: 10.0 },
+  'gpt-5-mini': { input: 0.25, output: 2.0 },
+  'gpt-5-nano': { input: 0.05, output: 0.4 },
+  'gpt-5.1': { input: 1.25, output: 10.0 },
+  'gpt-5.4-nano': { input: 0.2, output: 1.25 },
+  'gpt-4.1-nano': { input: 0.1, output: 0.4 },
+  'o3': { input: 2.0, output: 8.0 },
+  'o4-mini': { input: 1.1, output: 4.4 },
+  'claude-sonnet-4-5': { input: 3.0, output: 15.0 },
+  'gemini-3.1-flash-lite': { input: 0.25, output: 1.5 },
+  'gemini-2.5-pro': { input: 1.25, output: 10.0 },
+  'gemini-2.5-flash': { input: 0.3, output: 2.5 },
+  'gemini-2.5-flash-lite': { input: 0.1, output: 0.4 },
 };
 
-function priceTable(): Record<string, { input: number; output: number }> {
+function overridePrices(): Record<string, { input: number; output: number }> {
   const raw = process.env.MODEL_PRICES_JSON;
-  if (!raw) return STATIC_PRICES;
+  if (!raw) return {};
   try {
-    const parsed = JSON.parse(raw) as Record<string, { input: number; output: number }>;
-    return { ...STATIC_PRICES, ...parsed };
+    return JSON.parse(raw) as Record<string, { input: number; output: number }>;
   } catch {
-    return STATIC_PRICES;
+    return {};
   }
 }
 
@@ -39,15 +56,30 @@ export function normalizeModel(model: string): string {
   return (parts[parts.length - 1] || model).toLowerCase();
 }
 
-export function priceFor(model: string): { input: number; output: number; estimated: boolean } {
-  const table = priceTable();
+function matchByName(table: Record<string, { input: number; output: number }>, model: string) {
   const key = normalizeModel(model);
   for (const [name, rate] of Object.entries(table)) {
-    if (key === name.toLowerCase() || key.endsWith('/' + name.toLowerCase())) {
-      return { ...rate, estimated: false };
-    }
+    if (key === name.toLowerCase() || key.endsWith('/' + name.toLowerCase())) return rate;
   }
-  return { ...FALLBACK_RATE, estimated: true };
+  return undefined;
+}
+
+/** The catalog price of `model`, on `provider` first, then on any provider. */
+function catalogPrice(model: string, provider?: string) {
+  const id = model.toLowerCase();
+  const lists = provider && provider in LLM_PROVIDER_MODELS
+    ? [LLM_PROVIDER_MODELS[provider as LLMProvider], ...Object.values(LLM_PROVIDER_MODELS)]
+    : Object.values(LLM_PROVIDER_MODELS);
+  for (const list of lists) {
+    const m = list.find((e) => e.id.toLowerCase() === id);
+    if (m) return { input: m.inputCostPer1M, output: m.outputCostPer1M };
+  }
+  return undefined;
+}
+
+export function priceFor(model: string, provider?: string): { input: number; output: number; estimated: boolean } {
+  const rate = matchByName(overridePrices(), model) ?? catalogPrice(model, provider) ?? matchByName(STATIC_PRICES, model);
+  return rate ? { ...rate, estimated: false } : { ...FALLBACK_RATE, estimated: true };
 }
 
 export interface UsageRow {
@@ -154,7 +186,7 @@ export async function getUsageSummary(agentId: string, windowDays = 30): Promise
     promptTokens += r.promptTokens;
     completionTokens += r.completionTokens;
     totalTokens += r.totalTokens;
-    const price = priceFor(r.model);
+    const price = priceFor(r.model, r.provider);
     const cost = (r.promptTokens / 1_000_000) * price.input + (r.completionTokens / 1_000_000) * price.output;
     costUsd += cost;
     if (price.estimated) estimatedCost = true;

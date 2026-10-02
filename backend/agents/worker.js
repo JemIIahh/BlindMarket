@@ -18,11 +18,12 @@
  *   8. Send heartbeat to parent process
  */
 
-import { generateText, generateObject, tool, stepCountIs } from 'ai';
+import { generateText, generateObject, tool, stepCountIs, wrapLanguageModel, defaultSettingsMiddleware } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { createGroq } from '@ai-sdk/groq';
+import { createXai } from '@ai-sdk/xai';
 import { z } from 'zod';
 import { createHash, randomBytes, createECDH, createCipheriv, createDecipheriv, hkdfSync } from 'crypto';
 import { readFileSync } from 'fs';
@@ -1490,7 +1491,23 @@ try {
   log(`failed to parse AGENT_TOOL_SECRETS: ${e.message}`);
 }
 
-function getModel() {
+/**
+ * xAI (Grok) over its Responses API: the API xAI documents for function
+ * calling with the AI SDK (docs.x.ai, Function Calling); its Chat Completions
+ * endpoint is legacy. store: false on every call, because Responses keeps each
+ * request and answer on xAI's servers for 30 days by default, and a brief or
+ * result has no business sitting there. The SDK then asks for the encrypted
+ * reasoning instead and hands it back on the next step of a tool loop, so a
+ * stateless call loses nothing. Exported for tests.
+ */
+export function xaiModel(apiKey, modelId) {
+  return wrapLanguageModel({
+    model: createXai({ apiKey }).responses(modelId),
+    middleware: defaultSettingsMiddleware({ settings: { providerOptions: { xai: { store: false } } } }),
+  });
+}
+
+export function getModel() {
   if (OG_COMPUTE_ENABLED) {
     // The agent's 0G Compute provider, at its own OpenAI-compatible endpoint
     // (getServiceMetadata) under the model id it registered. Use .chat()
@@ -1510,6 +1527,7 @@ function getModel() {
     case 'anthropic': return createAnthropic({ apiKey: AGENT_API_KEY })(AGENT_MODEL);
     case 'groq': return createGroq({ apiKey: AGENT_API_KEY })(AGENT_MODEL);
     case 'gemini': return createGoogleGenerativeAI({ apiKey: AGENT_API_KEY })(AGENT_MODEL);
+    case 'xai': return xaiModel(AGENT_API_KEY, AGENT_MODEL);
     default: return createOpenAI({ apiKey: AGENT_API_KEY })(AGENT_MODEL);
   }
 }

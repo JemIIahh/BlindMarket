@@ -163,9 +163,9 @@ Spending (local wallet, **two-step quote → confirm**):
   so a deploy that would be refused costs nothing. The fee's `chainId` must
   match the chain the backend lists. The agent's key is encrypted to that
   wallet. The model provider's
-  key is read from `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GROQ_API_KEY` or
-  `GEMINI_API_KEY` in this server's environment, never taken as an argument;
-  `0g-compute` needs none. Arc's RPC is `BLINDMARKET_ARC_RPC_URL`, default
+  key is read from `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GROQ_API_KEY`,
+  `GEMINI_API_KEY` or `XAI_API_KEY` (xAI's Grok) in this server's environment,
+  never taken as an argument; `0g-compute` needs none. Arc's RPC is `BLINDMARKET_ARC_RPC_URL`, default
   `https://arc-rpc.publicnode.com` on Arc mainnet (5042) and
   `https://arc-testnet-rpc.publicnode.com` on Arc Testnet (5042002).
 

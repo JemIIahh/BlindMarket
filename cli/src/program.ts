@@ -4,7 +4,7 @@ import { resolve } from 'path';
 import { JsonRpcProvider, Wallet, formatUnits, parseUnits } from 'ethers';
 import ora from 'ora';
 import { BlindMarket, ApiError } from '@blindmarket/sdk';
-import type { AgentCapability, PostTasksRowResult } from '@blindmarket/sdk';
+import type { AgentCapability, DeployAgentParams, PostTasksRowResult } from '@blindmarket/sdk';
 import {
   loadConfig, resolveConfig, saveConfig, DEFAULT_API_BASE,
   pendingFee, setPendingFee, pendingPosts, setPendingPost,
@@ -34,7 +34,9 @@ const PROVIDER_KEY_ENV: Record<string, string> = {
   anthropic: 'ANTHROPIC_API_KEY',
   groq: 'GROQ_API_KEY',
   gemini: 'GEMINI_API_KEY',
+  xai: 'XAI_API_KEY',
 };
+const PROVIDERS = ['openai', 'anthropic', 'groq', 'gemini', 'xai', '0g-compute'];
 const STATUS = ['Funded', 'Assigned', 'Submitted', 'Verified', 'Completed', 'Cancelled', 'Disputed'];
 
 function packageVersion(): string {
@@ -388,16 +390,18 @@ export function buildProgram(): Command {
     .requiredOption('--name <name>', 'Agent name')
     .option('--instructions <text>', "The agent's instructions")
     .option('--instructions-file <path>', 'Read the instructions from a file')
-    .requiredOption('--provider <provider>', 'openai | anthropic | groq | gemini | 0g-compute')
-    .requiredOption('--model <model>', 'Model id, e.g. gpt-4o-mini')
+    .requiredOption('--provider <provider>', `${PROVIDERS.join(' | ')} (xai is xAI's Grok, not Groq)`)
+    .requiredOption('--model <model>', 'Model id as the provider names it, e.g. gpt-6.1-sol or grok-4.7; one our catalog lacks is checked against your key\'s model list')
     .option('--skill <slug...>', 'Public skills to install')
     .option('--provider-key-env <name>', 'Environment variable holding the provider API key (default OPENAI_API_KEY etc.)')
     .option('--max-fee <amount>', 'Most you will pay, in USDC', '1')
     .option('--yes', 'Pay without asking')
     .action(async (opts: { name: string; instructions?: string; instructionsFile?: string; provider: string; model: string; skill?: string[]; providerKeyEnv?: string; maxFee: string; yes?: boolean }) => {
-      const provider = opts.provider as 'openai' | 'anthropic' | 'groq' | 'gemini' | '0g-compute';
-      if (!['openai', 'anthropic', 'groq', 'gemini', '0g-compute'].includes(provider)) {
-        throw new CliError('BAD_PROVIDER', `--provider must be one of openai, anthropic, groq, gemini, 0g-compute; got ${opts.provider}.`);
+      // Typed by the SDK; checked against PROVIDERS, which may name one an
+      // older SDK's type lacks (the SDK passes the field through).
+      const provider = opts.provider as DeployAgentParams['provider'];
+      if (!PROVIDERS.includes(provider)) {
+        throw new CliError('BAD_PROVIDER', `--provider must be one of ${PROVIDERS.join(', ')}; got ${opts.provider}.`);
       }
       // The provider key is read from the environment, never from argv: argv
       // lands in shell history and process lists.

@@ -14,7 +14,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "eval:match": "tsx eval/run.ts",
-    "migrate:redis": "tsx scripts/migrate-redis-to-redis.ts"
+    "migrate:redis": "tsx scripts/migrate-redis-to-redis.ts",
+    "check-model-catalog": "tsx scripts/check-model-catalog.ts"
   },
   "dependencies": {
     "@0gfoundation/0g-compute-ts-sdk": "^0.8.0",
@@ -23,6 +24,7 @@
     "@ai-sdk/google": "^3.0.64",
     "@ai-sdk/groq": "^3.0.35",
     "@ai-sdk/openai": "^3.0.53",
+    "@ai-sdk/xai": "^3.0.139",
     "@mastra/core": "^1.28.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@mysten/sui": "^2.19.0",

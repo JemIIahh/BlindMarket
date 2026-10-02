@@ -213,6 +213,22 @@ test('needs the provider key in the environment, except for 0g-compute', async (
   assert.equal(deploys()[0].body.apiKey, '');
 });
 
+test("an xai (Grok) agent's key comes from XAI_API_KEY", async () => {
+  const t = tools();
+  const missing = errorOf(await t.deploy_agent({ ...args, provider: 'xai', model: 'grok-4.7', idempotencyKey: 'deploy-key-xai-1' }));
+  assert.equal(missing.code, 'PROVIDER_KEY_MISSING');
+  assert.match(missing.message, /XAI_API_KEY/);
+  process.env.XAI_API_KEY = 'xai-test-key';
+  try {
+    const { quote } = parse(await t.deploy_agent({ ...args, provider: 'xai', model: 'grok-4.7', idempotencyKey: 'deploy-key-xai-2' }));
+    parse(await t.deploy_agent({ ...args, provider: 'xai', model: 'grok-4.7', idempotencyKey: 'deploy-key-xai-2', confirm: true, quoteId: quote.quoteId }));
+    assert.equal(deploys()[0].body.provider, 'xai');
+    assert.equal(deploys()[0].body.apiKey, 'xai-test-key');
+  } finally {
+    delete process.env.XAI_API_KEY;
+  }
+});
+
 test('refuses an RPC on another chain before paying', async () => {
   chainIdServed = 84532;
   const error = errorOf(await tools().deploy_agent({ ...args, idempotencyKey: 'deploy-rpc-1' }));

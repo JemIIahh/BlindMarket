@@ -1,13 +1,17 @@
 /**
- * Live model discovery for the deploy form.
+ * Live model discovery for the deploy and edit forms.
  *
  * LLM_PROVIDER_MODELS is a hand-edited table and it goes stale — its last
  * refresh before this was 2026-08-05, by which point every provider had
  * shipped a generation it didn't list. The platform holds no provider keys,
- * so the only key that can ask a provider "what can I use?" is the one the
- * user just pasted into the form. It is forwarded once to that provider's
- * fixed models endpoint and dropped: never stored, never logged, never echoed
- * back in an error.
+ * so the only key that can ask a provider "what can I use?" is the owner's:
+ * the one just pasted into the form, or the one an agent already runs on. It
+ * is sent once to that provider's fixed models endpoint and nowhere else:
+ * never logged, never echoed back in an error.
+ *
+ * The same list checks a model id the catalog doesn't know (checkKeyedModel),
+ * so an owner can run a model released today. Listing models is free; no
+ * model is called.
  *
  * 0g-compute needs no key: its models are the chat services registered on
  * 0G Compute (ogComputeCatalog.ts), the only ones a 0g-compute agent's
@@ -19,7 +23,24 @@ import { matchOgService, ogChatServices } from './ogComputeModels.js';
 
 export interface DiscoveredModel {
   id: string;
-  /** USD per 1M tokens — present when the catalog (or, for 0G, 0G's status API) prices the model. */
+  /** USD per 1M tokens — present when the catalog (or the provider's own list: xAI, 0G's status API) prices the model. */
+  inputCostPer1M?: number;
+  outputCostPer1M?: number;
+  /** The catalog marks it preview or beta. */
+  preview?: true;
+}
+
+/** The providers an owner brings an API key for. */
+export type KeyedProvider = Exclude<LLMProvider, '0g-compute'>;
+
+/** One chat model as a provider's models endpoint lists it. */
+export interface LiveModel {
+  id: string;
+  /** When the provider says the model was created, in Unix seconds. */
+  created?: number;
+  /** Other ids the provider takes for it in a request (xAI lists these). */
+  aliases?: string[];
+  /** USD per 1M tokens, when the provider's list carries prices (xAI). */
   inputCostPer1M?: number;
   outputCostPer1M?: number;
 }
@@ -37,10 +58,10 @@ const FETCH_TIMEOUT_MS = 8_000;
 // Each provider's /models lists every modality it serves. These keep the
 // chat-capable ids — the only ones worker.js can drive through generateText.
 
-/** OpenAI: drop embeddings/audio/image/etc. and dated snapshots (the alias suffices). */
+/** OpenAI: drop embeddings/audio/image/etc. and dated snapshots (the alias suffices). chat-latest is ChatGPT's Instant model. */
 export function openaiChatIds(body: unknown): string[] {
   return listIds(body)
-    .filter((id) => /^(gpt-|o\d|chatgpt-)/.test(id))
+    .filter((id) => /^(gpt-|o\d|chatgpt-|chat-latest$)/.test(id))
     .filter((id) => !/(embedding|tts|whisper|audio|realtime|transcribe|image|moderation|search|instruct|codex|computer-use|deep-research)/.test(id))
     .filter((id) => !/-\d{4}(-\d{2}-\d{2})?$/.test(id));
 }
@@ -72,7 +93,54 @@ export function geminiChatIds(body: unknown): string[] {
       && m.supportedGenerationMethods.includes('generateContent'))
     .map((m) => (m.name as string).replace(/^models\//, ''))
     .filter((id) => /^gemini-/.test(id))
-    .filter((id) => !/(image|tts|live|embedding|transcribe|translate|omni|audio|computer-use)/.test(id));
+    .filter((id) => !/(image|tts|live|embedding|transcribe|translate|omni|audio|computer-use|robotics)/.test(id));
+}
+
+/**
+ * xAI: GET /v1/language-models lists the chat and image-understanding models
+ * with their modalities, aliases and prices (USD cents per 100M tokens, so
+ * /10,000 gives USD per 1M). The multi-agent variants are left out: xAI
+ * documents no client-side function calling for them, and the worker's tools
+ * are client-side functions.
+ */
+export function xaiChatModels(body: unknown): LiveModel[] {
+  const models = (body as { models?: Array<Record<string, unknown>> })?.models ?? [];
+  const out: LiveModel[] = [];
+  for (const m of models) {
+    if (typeof m.id !== 'string' || !Array.isArray(m.output_modalities) || !m.output_modalities.includes('text')) continue;
+    const aliases = Array.isArray(m.aliases) ? m.aliases.filter((a): a is string => typeof a === 'string') : [];
+    if ([m.id, ...aliases].some((id) => /multi-agent/.test(id))) continue;
+    const input = xaiPrice(m.prompt_text_token_price);
+    const output = xaiPrice(m.completion_text_token_price);
+    out.push({
+      id: m.id,
+      ...(typeof m.created === 'number' ? { created: m.created } : {}),
+      ...(aliases.length > 0 ? { aliases } : {}),
+      ...(input !== undefined && output !== undefined ? { inputCostPer1M: input, outputCostPer1M: output } : {}),
+    });
+  }
+  return out;
+}
+
+function xaiPrice(centsPer100M: unknown): number | undefined {
+  return typeof centsPer100M === 'number' && centsPer100M > 0 ? round3(centsPer100M / 10_000) : undefined;
+}
+
+/**
+ * The ids, each with the creation time an OpenAI-shaped list gives it:
+ * `created` in Unix seconds (OpenAI, Groq) or `created_at` as RFC 3339
+ * (Anthropic). Gemini's list has neither.
+ */
+export function withCreated(body: unknown, ids: readonly string[]): LiveModel[] {
+  const data = (body as { data?: Array<{ id?: unknown; created?: unknown; created_at?: unknown }> })?.data ?? [];
+  const created = new Map<string, number>();
+  for (const m of data) {
+    if (typeof m.id !== 'string') continue;
+    const t = typeof m.created === 'number' ? m.created
+      : typeof m.created_at === 'string' ? Date.parse(m.created_at) / 1000 : NaN;
+    if (Number.isFinite(t)) created.set(m.id, t);
+  }
+  return ids.map((id) => (created.has(id) ? { id, created: created.get(id)! } : { id }));
 }
 
 /**
@@ -151,32 +219,38 @@ function round3(n: number): number {
 
 // ── Fetch ────────────────────────────────────────────────────────────────────
 
-const KEYED: Record<Exclude<LLMProvider, '0g-compute'>, {
+const KEYED: Record<KeyedProvider, {
   url: string;
   headers: (key: string) => Record<string, string>;
-  ids: (body: unknown) => string[];
+  models: (body: unknown) => LiveModel[];
 }> = {
   openai: {
     url: 'https://api.openai.com/v1/models',
     headers: (k) => ({ Authorization: `Bearer ${k}` }),
-    ids: openaiChatIds,
+    models: (b) => withCreated(b, openaiChatIds(b)),
   },
   anthropic: {
     url: 'https://api.anthropic.com/v1/models?limit=1000',
     headers: (k) => ({ 'x-api-key': k, 'anthropic-version': '2023-06-01' }),
-    ids: anthropicChatIds,
+    models: (b) => withCreated(b, anthropicChatIds(b)),
   },
   groq: {
     url: 'https://api.groq.com/openai/v1/models',
     headers: (k) => ({ Authorization: `Bearer ${k}` }),
-    ids: groqChatIds,
+    models: (b) => withCreated(b, groqChatIds(b)),
   },
   gemini: {
     // Key goes in a header, not the ?key= query string, so it never lands in
     // a URL anywhere (access logs, error messages).
     url: 'https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000',
     headers: (k) => ({ 'x-goog-api-key': k }),
-    ids: geminiChatIds,
+    models: (b) => withCreated(b, geminiChatIds(b)),
+  },
+  xai: {
+    // Not /v1/models: this one says which models are chat models, and prices them.
+    url: 'https://api.x.ai/v1/language-models',
+    headers: (k) => ({ Authorization: `Bearer ${k}` }),
+    models: xaiChatModels,
   },
 };
 
@@ -201,11 +275,18 @@ async function fetchJson(url: string, headers: Record<string, string>, provider:
   }
 }
 
+/** What `apiKey` can use on `provider`: its chat models, and every id the list named. */
+async function fetchLive(provider: KeyedProvider, apiKey: string): Promise<{ models: LiveModel[]; listed: string[] }> {
+  const spec = KEYED[provider];
+  const body = await fetchJson(spec.url, spec.headers(apiKey), provider);
+  return { models: spec.models(body), listed: listIds(body) };
+}
+
 /**
  * Catalog order first (it's curated newest-first and carries prices), then
  * whatever else the provider listed, newest-looking first. Catalog entries the
  * provider no longer lists are dropped — that's the retirement signal the
- * static table can't give.
+ * static table can't give. 0g-compute's list; keyed providers use mergeLive.
  */
 export function mergeWithCatalog(provider: LLMProvider, liveIds: string[]): DiscoveredModel[] {
   const live = new Set(liveIds);
@@ -218,6 +299,98 @@ export function mergeWithCatalog(provider: LLMProvider, liveIds: string[]): Disc
   return [...head, ...tail];
 }
 
+/** A dated snapshot's alias: claude-haiku-4-5-20251001 and gpt-4o-2024-08-06 → claude-haiku-4-5, gpt-4o. */
+function undated(id: string): string {
+  return id.replace(/-(\d{8}|\d{4}-\d{2}-\d{2})$/, '');
+}
+
+/** The catalog entry `liveId` is, directly or as a dated snapshot of it. */
+function catalogEntry(provider: LLMProvider, liveId: string) {
+  const catalog = LLM_PROVIDER_MODELS[provider] ?? [];
+  return catalog.find((m) => m.id === liveId) ?? catalog.find((m) => m.id === undated(liveId));
+}
+
+/** The version numbers in a model id, for ordering a list with no dates: gemini-3.8-flash → [3, 8]. */
+function versionOf(id: string): number[] {
+  const run = /\d+(?:[.-]\d+)*/.exec(id)?.[0] ?? '';
+  return run.split(/[.-]/).filter((p) => p !== '' && p.length < 6).map(Number);
+}
+
+function compareVersions(a: number[], b: number[]): number {
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const d = (a[i] ?? -1) - (b[i] ?? -1);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+
+/**
+ * Every chat model the provider listed, newest first, so a model released
+ * after the catalog was last edited sits at the top rather than under the
+ * models it replaced. Newest by the provider's own creation time; Gemini's
+ * list has none, so by the version in the id. A model the catalog knows,
+ * including as a dated snapshot, takes the catalog's id and price; a price
+ * in the provider's own list (xAI) wins over the catalog's dated one. A
+ * catalog entry the provider no longer lists is dropped: that's the
+ * retirement signal the static table can't give.
+ */
+export function mergeLive(provider: KeyedProvider, live: readonly LiveModel[]): DiscoveredModel[] {
+  const catalog = LLM_PROVIDER_MODELS[provider] ?? [];
+  const rows = new Map<string, { model: DiscoveredModel; created?: number; rank: number }>();
+  for (const m of live) {
+    const known = catalogEntry(provider, m.id);
+    const id = known?.id ?? m.id;
+    if (rows.has(id)) continue;
+    const model: DiscoveredModel = m.inputCostPer1M !== undefined && m.outputCostPer1M !== undefined
+      ? { id, inputCostPer1M: m.inputCostPer1M, outputCostPer1M: m.outputCostPer1M, ...(known?.preview ? { preview: true as const } : {}) }
+      : known ? { ...known } : { id };
+    rows.set(id, { model, created: m.created, rank: known ? catalog.indexOf(known) : catalog.length });
+  }
+  const list = [...rows.values()];
+  const dated = list.every((r) => r.created !== undefined);
+  return list
+    .sort((a, b) => (dated ? b.created! - a.created! : compareVersions(versionOf(b.model.id), versionOf(a.model.id)))
+      || a.rank - b.rank
+      || b.model.id.localeCompare(a.model.id, undefined, { numeric: true }))
+    .map((r) => r.model);
+}
+
+/**
+ * Whether `model` names one of the provider's chat models for this key: its
+ * id or an alias the provider gives, the alias of a dated snapshot it lists
+ * (claude-haiku-4-5), or a dated snapshot of a chat model it lists
+ * (gpt-5.5-2026-04-23, which the chat filter keeps only as gpt-5.5).
+ */
+export function listsModel(live: { models: readonly LiveModel[]; listed: readonly string[] }, model: string): boolean {
+  const chat = new Set(live.models.flatMap((m) => [m.id, ...(m.aliases ?? [])]));
+  if (chat.has(model)) return true;
+  if ([...chat].some((id) => undated(id) === model)) return true;
+  return model !== undated(model) && live.listed.includes(model) && chat.has(undated(model));
+}
+
+/**
+ * Whether an agent on `provider` with `apiKey` can run `model`, by the
+ * provider's own models list for that key (one request; no model is called).
+ * `models` is what it can run instead. Throws ProviderModelsError when the
+ * key is refused or the list can't be read: an unchecked model is not passed.
+ */
+export async function checkKeyedModel(provider: KeyedProvider, apiKey: string, model: string): Promise<{ ok: boolean; models: string[] }> {
+  const live = await fetchLive(provider, apiKey);
+  return { ok: listsModel(live, model), models: mergeLive(provider, live.models).map((m) => m.id) };
+}
+
+/**
+ * Whether deploy and edit should check `model` against the provider's list.
+ * Not for a catalog model: those are known, and a deploy on one never waits
+ * on the provider. Not for openai when OPENAI_BASE_URL points its agents at
+ * another endpoint (a self-hosted model, a proxy, the E2E stub): that
+ * endpoint serves models api.openai.com would not list.
+ */
+export function needsModelCheck(provider: KeyedProvider, model: string): boolean {
+  if ((LLM_PROVIDER_MODELS[provider] ?? []).some((m) => m.id === model)) return false;
+  return !(provider === 'openai' && process.env.OPENAI_BASE_URL);
+}
+
 export async function discoverModels(provider: LLMProvider, apiKey: string): Promise<DiscoveredModel[]> {
   if (provider === '0g-compute') {
     const live = ogOfferedModels(await readOgServicesOrThrow());
@@ -228,6 +401,5 @@ export async function discoverModels(provider: LLMProvider, apiKey: string): Pro
       return fresh && fresh.inputCostPer1M !== undefined ? fresh : m;
     });
   }
-  const spec = KEYED[provider];
-  return mergeWithCatalog(provider, spec.ids(await fetchJson(spec.url, spec.headers(apiKey), provider)));
+  return mergeLive(provider, (await fetchLive(provider, apiKey)).models);
 }

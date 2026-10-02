@@ -1990,6 +1990,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     anthropic: 'ANTHROPIC_API_KEY',
     groq: 'GROQ_API_KEY',
     gemini: 'GEMINI_API_KEY',
+    xai: 'XAI_API_KEY',
   };
   type TransferTerms = { required: true; method: 'transfer'; chain: string; chainId?: number; token: string; recipient: string; amountRaw: string; decimals: number };
   type FeeTerms = { required: false } | TransferTerms | { required: true; method: 'factory'; chain: string; factory: string | null };
@@ -2055,12 +2056,12 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     'deploy_agent',
     {
       title: 'Deploy a Hosted Agent',
-      description: "Deploy a hosted agent that runs on BlindMarket and takes tasks, owned by the API key's wallet. Deploying costs a fee (1 USDC on Arc on production), paid as one USDC transfer on Arc from the local wallet (BLINDMARKET_PRIVATE_KEY), which must be the API key's owner. The model provider's key is read from this server's environment (OPENAI_API_KEY, ANTHROPIC_API_KEY, GROQ_API_KEY or GEMINI_API_KEY; none for 0g-compute), never passed as an argument. TWO-STEP quote/confirm like post_task; requires a unique idempotencyKey, and a retry with the same key never pays twice.",
+      description: "Deploy a hosted agent that runs on BlindMarket and takes tasks, owned by the API key's wallet. Deploying costs a fee (1 USDC on Arc on production), paid as one USDC transfer on Arc from the local wallet (BLINDMARKET_PRIVATE_KEY), which must be the API key's owner. The model provider's key is read from this server's environment (OPENAI_API_KEY, ANTHROPIC_API_KEY, GROQ_API_KEY, GEMINI_API_KEY or XAI_API_KEY; none for 0g-compute), never passed as an argument. TWO-STEP quote/confirm like post_task; requires a unique idempotencyKey, and a retry with the same key never pays twice.",
       inputSchema: {
         name: z.string().min(1).max(80).describe('Agent name'),
         instructions: z.string().min(1).max(100_000).describe("The agent's instructions: what it does and how"),
-        provider: z.enum(['openai', 'anthropic', 'groq', 'gemini', '0g-compute']).describe("LLM provider. '0g-compute' needs no API key: inference is billed to the agent's own wallet"),
-        model: z.string().min(1).describe('Model id, e.g. gpt-4o-mini or claude-sonnet-4-5'),
+        provider: z.enum(['openai', 'anthropic', 'groq', 'gemini', 'xai', '0g-compute']).describe("LLM provider. 'xai' is xAI's Grok (not Groq). '0g-compute' needs no API key: inference is billed to the agent's own wallet"),
+        model: z.string().min(1).max(128).describe("Model id as the provider names it, e.g. gpt-6.1-sol, claude-opus-5-5 or grok-4.7. One the platform's catalog lacks is checked against the provider's model list for the key (MODEL_NOT_AVAILABLE if it isn't there)"),
         skillSlugs: z.array(z.string()).max(10).optional().describe('Public skills to install at deploy, by slug'),
         idempotencyKey: z.string().min(8).max(128).describe('Unique key for this deploy — reuse it on retries'),
         confirm: z.boolean().optional().describe('Set true (with quoteId) to pay the fee and deploy'),

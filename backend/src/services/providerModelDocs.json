@@ -1,0 +1,792 @@
+{
+  "recordedAt": "2026-10-02",
+  "providers": {
+    "openai": {
+      "source": "https://developers.openai.com/api/docs/pricing.md",
+      "models": [
+        {
+          "id": "gpt-6-astra",
+          "inputCostPer1M": 10,
+          "outputCostPer1M": 50
+        },
+        {
+          "id": "gpt-6.1-sol",
+          "inputCostPer1M": 2,
+          "outputCostPer1M": 10
+        },
+        {
+          "id": "gpt-6-luna",
+          "inputCostPer1M": 0.1,
+          "outputCostPer1M": 0.5
+        },
+        {
+          "id": "gpt-6-sol",
+          "inputCostPer1M": 2,
+          "outputCostPer1M": 10
+        },
+        {
+          "id": "gpt-5.6-sol",
+          "inputCostPer1M": 4,
+          "outputCostPer1M": 20
+        },
+        {
+          "id": "gpt-5.6-terra",
+          "inputCostPer1M": 2,
+          "outputCostPer1M": 12
+        },
+        {
+          "id": "gpt-5.6-luna",
+          "inputCostPer1M": 0.2,
+          "outputCostPer1M": 1.2
+        },
+        {
+          "id": "gpt-5.5",
+          "inputCostPer1M": 5,
+          "outputCostPer1M": 30
+        },
+        {
+          "id": "gpt-5.5-pro",
+          "inputCostPer1M": 30,
+          "outputCostPer1M": 180
+        },
+        {
+          "id": "gpt-5.4",
+          "inputCostPer1M": 2.5,
+          "outputCostPer1M": 15
+        },
+        {
+          "id": "gpt-5.4-mini",
+          "inputCostPer1M": 0.75,
+          "outputCostPer1M": 4.5
+        },
+        {
+          "id": "gpt-5.4-nano",
+          "inputCostPer1M": 0.2,
+          "outputCostPer1M": 1.25,
+          "status": "Deprecated"
+        },
+        {
+          "id": "gpt-5.4-pro",
+          "inputCostPer1M": 30,
+          "outputCostPer1M": 180
+        },
+        {
+          "id": "gpt-5.2",
+          "inputCostPer1M": 1.75,
+          "outputCostPer1M": 14
+        },
+        {
+          "id": "gpt-5.2-pro",
+          "inputCostPer1M": 21,
+          "outputCostPer1M": 168
+        },
+        {
+          "id": "gpt-5.1",
+          "inputCostPer1M": 1.25,
+          "outputCostPer1M": 10,
+          "status": "Deprecated"
+        },
+        {
+          "id": "gpt-5",
+          "inputCostPer1M": 1.25,
+          "outputCostPer1M": 10,
+          "status": "Deprecated"
+        },
+        {
+          "id": "gpt-5-mini",
+          "inputCostPer1M": 0.25,
+          "outputCostPer1M": 2,
+          "status": "Deprecated"
+        },
+        {
+          "id": "gpt-5-nano",
+          "inputCostPer1M": 0.05,
+          "outputCostPer1M": 0.4,
+          "status": "Deprecated"
+        },
+        {
+          "id": "gpt-5-pro",
+          "inputCostPer1M": 15,
+          "outputCostPer1M": 120,
+          "status": "Deprecated"
+        },
+        {
+          "id": "gpt-4.1",
+          "inputCostPer1M": 2,
+          "outputCostPer1M": 8
+        },
+        {
+          "id": "gpt-4.1-mini",
+          "inputCostPer1M": 0.4,
+          "outputCostPer1M": 1.6
+        },
+        {
+          "id": "gpt-4.1-nano",
+          "inputCostPer1M": 0.1,
+          "outputCostPer1M": 0.4,
+          "status": "Deprecated"
+        },
+        {
+          "id": "gpt-4o",
+          "inputCostPer1M": 2.5,
+          "outputCostPer1M": 10
+        },
+        {
+          "id": "gpt-4o-2024-05-13",
+          "inputCostPer1M": 5,
+          "outputCostPer1M": 15,
+          "status": "Deprecated"
+        },
+        {
+          "id": "gpt-4o-mini",
+          "inputCostPer1M": 0.15,
+          "outputCostPer1M": 0.6
+        },
+        {
+          "id": "o1",
+          "inputCostPer1M": 15,
+          "outputCostPer1M": 60,
+          "status": "Deprecated"
+        },
+        {
+          "id": "o1-pro",
+          "inputCostPer1M": 150,
+          "outputCostPer1M": 600,
+          "status": "Deprecated"
+        },
+        {
+          "id": "o3-pro",
+          "inputCostPer1M": 20,
+          "outputCostPer1M": 80,
+          "status": "Deprecated"
+        },
+        {
+          "id": "o3",
+          "inputCostPer1M": 2,
+          "outputCostPer1M": 8,
+          "status": "Deprecated"
+        },
+        {
+          "id": "o4-mini",
+          "inputCostPer1M": 1.1,
+          "outputCostPer1M": 4.4,
+          "status": "Deprecated"
+        },
+        {
+          "id": "o3-mini",
+          "inputCostPer1M": 1.1,
+          "outputCostPer1M": 4.4,
+          "status": "Deprecated"
+        },
+        {
+          "id": "gpt-4-turbo-2024-04-09",
+          "inputCostPer1M": 10,
+          "outputCostPer1M": 30,
+          "status": "Deprecated"
+        },
+        {
+          "id": "gpt-4-0613",
+          "inputCostPer1M": 30,
+          "outputCostPer1M": 60,
+          "status": "Deprecated"
+        },
+        {
+          "id": "gpt-3.5-turbo",
+          "inputCostPer1M": 0.5,
+          "outputCostPer1M": 1.5,
+          "status": "Deprecated"
+        },
+        {
+          "id": "gpt-3.5-turbo-0125",
+          "inputCostPer1M": 0.5,
+          "outputCostPer1M": 1.5,
+          "status": "Deprecated"
+        },
+        {
+          "id": "gpt-3.5-turbo-1106",
+          "inputCostPer1M": 1,
+          "outputCostPer1M": 2,
+          "status": "Deprecated"
+        },
+        {
+          "id": "gpt-3.5-turbo-instruct",
+          "inputCostPer1M": 1.5,
+          "outputCostPer1M": 2,
+          "status": "Deprecated"
+        },
+        {
+          "id": "davinci-002",
+          "inputCostPer1M": 2,
+          "outputCostPer1M": 2,
+          "status": "Deprecated"
+        },
+        {
+          "id": "babbage-002",
+          "inputCostPer1M": 0.4,
+          "outputCostPer1M": 0.4,
+          "status": "Deprecated"
+        },
+        {
+          "id": "gpt-5.6-cyber",
+          "inputCostPer1M": 12.5,
+          "outputCostPer1M": 75,
+          "status": "Limited"
+        },
+        {
+          "id": "gpt-5.5-cyber",
+          "inputCostPer1M": 12.5,
+          "outputCostPer1M": 75,
+          "status": "Limited"
+        },
+        {
+          "id": "gpt-image-2.5-sunburst",
+          "inputCostPer1M": 8,
+          "outputCostPer1M": 30
+        },
+        {
+          "id": "gpt-image-2.5-flare",
+          "inputCostPer1M": 8,
+          "outputCostPer1M": 30
+        },
+        {
+          "id": "gpt-image-2",
+          "inputCostPer1M": 8,
+          "outputCostPer1M": 30
+        },
+        {
+          "id": "gpt-image-1.5",
+          "inputCostPer1M": 8,
+          "outputCostPer1M": 32,
+          "status": "Deprecated"
+        },
+        {
+          "id": "gpt-image-1-mini",
+          "inputCostPer1M": 2.5,
+          "outputCostPer1M": 8,
+          "status": "Deprecated"
+        },
+        {
+          "id": "gpt-image-1",
+          "inputCostPer1M": 10,
+          "outputCostPer1M": 40,
+          "status": "Deprecated"
+        },
+        {
+          "id": "chatgpt-image-latest",
+          "inputCostPer1M": 8,
+          "outputCostPer1M": 32,
+          "status": "Deprecated"
+        },
+        {
+          "id": "gpt-realtime-translate"
+        },
+        {
+          "id": "gpt-live-transcribe"
+        },
+        {
+          "id": "gpt-realtime-whisper"
+        },
+        {
+          "id": "gpt-transcribe"
+        },
+        {
+          "id": "gpt-4o-transcribe",
+          "inputCostPer1M": 2.5,
+          "outputCostPer1M": 10,
+          "status": "Deprecated"
+        },
+        {
+          "id": "gpt-4o-mini-transcribe",
+          "inputCostPer1M": 1.25,
+          "outputCostPer1M": 5,
+          "status": "Deprecated"
+        },
+        {
+          "id": "gpt-4o-transcribe-diarize",
+          "inputCostPer1M": 2.5,
+          "outputCostPer1M": 10,
+          "status": "Deprecated"
+        },
+        {
+          "id": "chat-latest",
+          "inputCostPer1M": 5,
+          "outputCostPer1M": 30
+        },
+        {
+          "id": "gpt-5.3-codex",
+          "inputCostPer1M": 1.75,
+          "outputCostPer1M": 14,
+          "status": "Deprecated"
+        },
+        {
+          "id": "gpt-rosalind-research",
+          "inputCostPer1M": 5,
+          "outputCostPer1M": 25,
+          "status": "Limited"
+        },
+        {
+          "id": "gpt-5-search-api",
+          "inputCostPer1M": 1.25,
+          "outputCostPer1M": 10
+        },
+        {
+          "id": "text-embedding-3-small",
+          "inputCostPer1M": 0.02
+        },
+        {
+          "id": "text-embedding-3-large",
+          "inputCostPer1M": 0.13
+        },
+        {
+          "id": "text-embedding-ada-002",
+          "inputCostPer1M": 0.1
+        },
+        {
+          "id": "omni-moderation-latest"
+        },
+        {
+          "id": "o4-mini-2025-04-16",
+          "inputCostPer1M": 4,
+          "outputCostPer1M": 16,
+          "status": "Deprecated"
+        },
+        {
+          "id": "gpt-4.1-2025-04-14",
+          "inputCostPer1M": 3,
+          "outputCostPer1M": 12
+        },
+        {
+          "id": "gpt-4.1-mini-2025-04-14",
+          "inputCostPer1M": 0.8,
+          "outputCostPer1M": 3.2
+        },
+        {
+          "id": "gpt-4.1-nano-2025-04-14",
+          "inputCostPer1M": 0.2,
+          "outputCostPer1M": 0.8,
+          "status": "Deprecated"
+        },
+        {
+          "id": "gpt-4o-2024-08-06",
+          "inputCostPer1M": 3.75,
+          "outputCostPer1M": 15
+        },
+        {
+          "id": "gpt-4o-mini-2024-07-18",
+          "inputCostPer1M": 0.3,
+          "outputCostPer1M": 1.2
+        }
+      ]
+    },
+    "anthropic": {
+      "source": "https://platform.claude.com/docs/en/about-claude/model-deprecations.md",
+      "models": [
+        {
+          "id": "claude-fable-5-1",
+          "status": "Active",
+          "inputCostPer1M": 10,
+          "outputCostPer1M": 50
+        },
+        {
+          "id": "claude-mythos-5-1",
+          "status": "Limited",
+          "inputCostPer1M": 10,
+          "outputCostPer1M": 50
+        },
+        {
+          "id": "claude-fable-5",
+          "status": "Active",
+          "inputCostPer1M": 10,
+          "outputCostPer1M": 50
+        },
+        {
+          "id": "claude-mythos-5",
+          "status": "Limited",
+          "inputCostPer1M": 10,
+          "outputCostPer1M": 50
+        },
+        {
+          "id": "claude-mythos-preview",
+          "status": "Deprecated"
+        },
+        {
+          "id": "claude-opus-5-5",
+          "status": "Active",
+          "inputCostPer1M": 4,
+          "outputCostPer1M": 20
+        },
+        {
+          "id": "claude-opus-5",
+          "status": "Active",
+          "inputCostPer1M": 5,
+          "outputCostPer1M": 25
+        },
+        {
+          "id": "claude-opus-4-8",
+          "status": "Active",
+          "inputCostPer1M": 5,
+          "outputCostPer1M": 25
+        },
+        {
+          "id": "claude-opus-4-7",
+          "status": "Active",
+          "inputCostPer1M": 5,
+          "outputCostPer1M": 25
+        },
+        {
+          "id": "claude-opus-4-6",
+          "status": "Active",
+          "inputCostPer1M": 5,
+          "outputCostPer1M": 25
+        },
+        {
+          "id": "claude-opus-4-5-20251101",
+          "status": "Active",
+          "inputCostPer1M": 5,
+          "outputCostPer1M": 25
+        },
+        {
+          "id": "claude-opus-4-1-20250805",
+          "status": "Retired",
+          "inputCostPer1M": 15,
+          "outputCostPer1M": 75
+        },
+        {
+          "id": "claude-opus-4-20250514",
+          "status": "Retired",
+          "inputCostPer1M": 15,
+          "outputCostPer1M": 75
+        },
+        {
+          "id": "claude-sonnet-5-5",
+          "status": "Active",
+          "inputCostPer1M": 2,
+          "outputCostPer1M": 10
+        },
+        {
+          "id": "claude-sonnet-5",
+          "status": "Active",
+          "inputCostPer1M": 2,
+          "outputCostPer1M": 10
+        },
+        {
+          "id": "claude-sonnet-4-6",
+          "status": "Active",
+          "inputCostPer1M": 3,
+          "outputCostPer1M": 15
+        },
+        {
+          "id": "claude-sonnet-4-5-20250929",
+          "status": "Deprecated",
+          "inputCostPer1M": 3,
+          "outputCostPer1M": 15
+        },
+        {
+          "id": "claude-sonnet-4-20250514",
+          "status": "Retired",
+          "inputCostPer1M": 3,
+          "outputCostPer1M": 15
+        },
+        {
+          "id": "claude-3-7-sonnet-20250219",
+          "status": "Retired"
+        },
+        {
+          "id": "claude-haiku-4-5-20251001",
+          "status": "Active",
+          "inputCostPer1M": 1,
+          "outputCostPer1M": 5
+        },
+        {
+          "id": "claude-3-5-haiku-20241022",
+          "status": "Retired"
+        },
+        {
+          "id": "claude-3-haiku-20240307",
+          "status": "Retired"
+        }
+      ]
+    },
+    "groq": {
+      "source": "https://console.groq.com/docs/models.md",
+      "models": [
+        {
+          "id": "llama-3.1-8b-instant",
+          "status": "Enterprise"
+        },
+        {
+          "id": "llama-3.3-70b-versatile",
+          "status": "Enterprise"
+        },
+        {
+          "id": "openai/gpt-oss-120b",
+          "status": "Production",
+          "inputCostPer1M": 0.15,
+          "outputCostPer1M": 0.6
+        },
+        {
+          "id": "openai/gpt-oss-20b",
+          "status": "Production",
+          "inputCostPer1M": 0.075,
+          "outputCostPer1M": 0.3
+        },
+        {
+          "id": "whisper-large-v3",
+          "status": "Production"
+        },
+        {
+          "id": "whisper-large-v3-turbo",
+          "status": "Production"
+        },
+        {
+          "id": "canopylabs/orpheus-arabic-saudi",
+          "status": "Preview"
+        },
+        {
+          "id": "canopylabs/orpheus-v1-english",
+          "status": "Preview"
+        },
+        {
+          "id": "meta-llama/llama-prompt-guard-2-22m",
+          "status": "Preview",
+          "inputCostPer1M": 0.03,
+          "outputCostPer1M": 0.03
+        },
+        {
+          "id": "meta-llama/llama-prompt-guard-2-86m",
+          "status": "Preview",
+          "inputCostPer1M": 0.04,
+          "outputCostPer1M": 0.04
+        },
+        {
+          "id": "minimaxai/minimax-m2.7",
+          "status": "Enterprise"
+        },
+        {
+          "id": "openai/gpt-oss-safeguard-20b",
+          "status": "Preview",
+          "inputCostPer1M": 0.075,
+          "outputCostPer1M": 0.3
+        },
+        {
+          "id": "qwen/qwen3.8-27b",
+          "status": "Preview",
+          "inputCostPer1M": 0.8,
+          "outputCostPer1M": 4
+        }
+      ]
+    },
+    "gemini": {
+      "source": "https://ai.google.dev/gemini-api/docs/pricing.md.txt",
+      "models": [
+        {
+          "id": "gemini-3.8-flash",
+          "inputCostPer1M": 0.75,
+          "outputCostPer1M": 3.75
+        },
+        {
+          "id": "gemini-3.7-flash",
+          "inputCostPer1M": 0.75,
+          "outputCostPer1M": 3.75
+        },
+        {
+          "id": "gemini-3.6-flash",
+          "inputCostPer1M": 0.75,
+          "outputCostPer1M": 3.75
+        },
+        {
+          "id": "gemini-3.5-flash",
+          "inputCostPer1M": 1.5,
+          "outputCostPer1M": 9
+        },
+        {
+          "id": "gemini-3.8-live",
+          "inputCostPer1M": 0.75,
+          "outputCostPer1M": 4.5
+        },
+        {
+          "id": "gemini-3.5-live-translate-preview",
+          "inputCostPer1M": 3.5,
+          "outputCostPer1M": 21,
+          "status": "Preview"
+        },
+        {
+          "id": "gemini-3.5-transcribe-live",
+          "inputCostPer1M": 3.5,
+          "outputCostPer1M": 21
+        },
+        {
+          "id": "gemini-3.5-transcribe",
+          "inputCostPer1M": 2,
+          "outputCostPer1M": 12
+        },
+        {
+          "id": "gemini-3.5-flash-lite",
+          "inputCostPer1M": 0.3,
+          "outputCostPer1M": 2.5
+        },
+        {
+          "id": "gemini-3.1-flash-lite",
+          "inputCostPer1M": 0.25,
+          "outputCostPer1M": 1.5,
+          "status": "Deprecated"
+        },
+        {
+          "id": "gemini-omni-1.1-flash",
+          "inputCostPer1M": 1.5,
+          "outputCostPer1M": 9
+        },
+        {
+          "id": "gemini-omni-flash-preview",
+          "inputCostPer1M": 1.5,
+          "outputCostPer1M": 9,
+          "status": "Preview"
+        },
+        {
+          "id": "gemini-3.1-pro-preview",
+          "inputCostPer1M": 2,
+          "outputCostPer1M": 12,
+          "status": "Preview"
+        },
+        {
+          "id": "gemini-3.1-flash-image",
+          "inputCostPer1M": 0.5,
+          "outputCostPer1M": 3
+        },
+        {
+          "id": "gemini-3.1-flash-lite-image",
+          "inputCostPer1M": 0.25,
+          "outputCostPer1M": 1.5
+        },
+        {
+          "id": "gemini-3.8-flash-tts",
+          "inputCostPer1M": 0.5,
+          "outputCostPer1M": 9
+        },
+        {
+          "id": "gemini-3.8-flash-lite-tts",
+          "inputCostPer1M": 0.5,
+          "outputCostPer1M": 6
+        },
+        {
+          "id": "gemini-3.1-flash-tts-preview",
+          "inputCostPer1M": 1,
+          "outputCostPer1M": 20,
+          "status": "Preview"
+        },
+        {
+          "id": "gemini-3-flash-preview",
+          "inputCostPer1M": 0.5,
+          "outputCostPer1M": 3,
+          "status": "Preview"
+        },
+        {
+          "id": "gemini-3-pro-image",
+          "inputCostPer1M": 2,
+          "outputCostPer1M": 12
+        },
+        {
+          "id": "gemini-2.5-pro",
+          "inputCostPer1M": 1.25,
+          "outputCostPer1M": 10,
+          "status": "Limited"
+        },
+        {
+          "id": "gemini-2.5-flash",
+          "inputCostPer1M": 0.3,
+          "outputCostPer1M": 2.5,
+          "status": "Limited"
+        },
+        {
+          "id": "gemini-2.5-flash-lite",
+          "inputCostPer1M": 0.1,
+          "outputCostPer1M": 0.4,
+          "status": "Limited"
+        },
+        {
+          "id": "gemini-2.5-flash-native-audio-preview-12-2025",
+          "status": "Preview"
+        },
+        {
+          "id": "gemini-2.5-flash-image",
+          "inputCostPer1M": 0.3,
+          "outputCostPer1M": 0.039,
+          "status": "Deprecated"
+        },
+        {
+          "id": "gemini-2.5-flash-preview-tts",
+          "inputCostPer1M": 0.5,
+          "outputCostPer1M": 10,
+          "status": "Preview"
+        },
+        {
+          "id": "gemini-2.5-pro-preview-tts",
+          "inputCostPer1M": 1,
+          "outputCostPer1M": 20,
+          "status": "Preview"
+        },
+        {
+          "id": "gemini-embedding-2"
+        },
+        {
+          "id": "gemini-robotics-er-2-preview",
+          "inputCostPer1M": 1,
+          "outputCostPer1M": 5,
+          "status": "Preview"
+        },
+        {
+          "id": "gemini-robotics-er-2-streaming-preview",
+          "inputCostPer1M": 1,
+          "outputCostPer1M": 5,
+          "status": "Preview"
+        }
+      ]
+    },
+    "xai": {
+      "source": "https://docs.x.ai/developers/pricing.md",
+      "models": [
+        {
+          "id": "grok-4.7",
+          "inputCostPer1M": 2,
+          "outputCostPer1M": 6
+        },
+        {
+          "id": "grok-4.6",
+          "inputCostPer1M": 2,
+          "outputCostPer1M": 6
+        },
+        {
+          "id": "grok-4.5",
+          "inputCostPer1M": 2,
+          "outputCostPer1M": 6
+        },
+        {
+          "id": "grok-4.3",
+          "inputCostPer1M": 1.25,
+          "outputCostPer1M": 2.5
+        },
+        {
+          "id": "grok-4.20-0309-reasoning",
+          "inputCostPer1M": 1.25,
+          "outputCostPer1M": 2.5
+        },
+        {
+          "id": "grok-4.20-0309-non-reasoning",
+          "inputCostPer1M": 1.25,
+          "outputCostPer1M": 2.5
+        },
+        {
+          "id": "grok-build-0.1",
+          "inputCostPer1M": 1,
+          "outputCostPer1M": 2
+        },
+        {
+          "id": "grok-4.20-multi-agent-0309",
+          "inputCostPer1M": 1.25,
+          "outputCostPer1M": 2.5,
+          "status": "Beta"
+        }
+      ]
+    }
+  }
+}
