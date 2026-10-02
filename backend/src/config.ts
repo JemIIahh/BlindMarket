@@ -278,7 +278,7 @@ const BASE_ADDR = (BASE_MAINNET ? CONTRACT_ADDRESSES.base : CONTRACT_ADDRESSES.b
 
 /** A generated Arc record: its addresses, and the blocks they were deployed in. */
 export interface ArcGeneratedRecord {
-  addresses: { readonly blindEscrow?: string; readonly agentFactory?: string; readonly USDC?: string };
+  addresses: { readonly blindEscrow?: string; readonly agentFactory?: string; readonly USDC?: string; readonly blindAgentDelegate?: string };
   blocks: { readonly blindEscrow?: number; readonly agentFactory?: number };
 }
 
@@ -399,6 +399,10 @@ export const config = {
   // (The Base `agentFactoryAddress` above is legacy: the wallet is Arc-only
   // and nothing polls the Base factory anymore.)
   arcAgentFactoryAddress: unsetIfZero(recordAddress('ARC_AGENT_FACTORY_ADDRESS', ARC_ADDR?.agentFactory || '')),
+  // BlindAgentDelegate on Arc — the EIP-7702 delegate a sponsored agent wallet
+  // points at (docs/AGENT-GAS-FUNDING.md). The generated record for this Arc
+  // network; empty until it is deployed there, and sponsorship stays off.
+  arcAgentDelegateAddress: unsetIfZero(recordAddress('ARC_AGENT_DELEGATE_ADDRESS', ARC_ADDR?.blindAgentDelegate || '')),
 
   // ERC-4337 AA infrastructure (Base) — agents pay gas in USDC instead of ETH.
   usdcPaymasterAddress: unsetIfZero(recordAddress('USDC_PAYMASTER_ADDRESS', (BASE_ADDR as any)?.USDCPaymaster ?? '')),
@@ -555,6 +559,34 @@ export const config = {
   // Arc as a transfer to the escrow's treasury (services/deployFee.ts). 1 USDC,
   // the same as AgentFactory's on Base.
   deployFeeUsdcRaw: BigInt(optional('DEPLOY_FEE_USDC_RAW', '1000000')),
+
+  // Sponsored agent gas (docs/AGENT-GAS-FUNDING.md, services/gasSponsor*.ts):
+  // BlindMarket's relayer sends a hosted agent's first submitEvidence (and a
+  // releaseUnjudgedWork) through its EIP-7702 delegate and pays the gas. Off
+  // unless GAS_SPONSOR_ENABLED=true. Raw strings: gasSponsorConfig.ts
+  // validates them and keeps sponsorship off, with a warning, rather than
+  // stopping boot.
+  gasSponsor: {
+    enabled: optional('GAS_SPONSOR_ENABLED', 'false').trim().toLowerCase() === 'true',
+    privateKey: process.env.GAS_SPONSOR_PRIVATE_KEY || '',
+    /** Highest raw gas estimate the relayer sends; the gas limit is the estimate × 1.15. */
+    maxGas: optional('GAS_SPONSOR_MAX_GAS', '200000').trim(),
+    /** maxFeePerGas ceiling, in gwei. */
+    maxFeeGwei: optional('GAS_SPONSOR_MAX_FEE_GWEI', '100').trim(),
+    /** Smallest task reward that qualifies, in USDC. */
+    minTaskUsdc: optional('GAS_SPONSOR_MIN_TASK_USDC', '0.10').trim(),
+    /** Sponsored tasks per agent, Privy user and poster wallet, in any 24 hours. */
+    perAgentDaily: optional('GAS_SPONSOR_PER_AGENT_DAILY', '10').trim(),
+    perUserDaily: optional('GAS_SPONSOR_PER_USER_DAILY', '20').trim(),
+    perPosterDaily: optional('GAS_SPONSOR_PER_POSTER_DAILY', '10').trim(),
+    /** Global spend ceilings, in USDC. */
+    hourlyBudgetUsdc: optional('GAS_SPONSOR_HOURLY_BUDGET_USDC', '0.25').trim(),
+    dailyBudgetUsdc: optional('GAS_SPONSOR_DAILY_BUDGET_USDC', '1').trim(),
+    /** Expired reservations in 7 days that end sponsorship for an agent or user. */
+    maxStrikes: optional('GAS_SPONSOR_MAX_STRIKES', '3').trim(),
+    /** Failed sponsored sends in an hour that pause sponsorship. */
+    maxFailuresPerHour: optional('GAS_SPONSOR_MAX_FAILURES_PER_HOUR', '5').trim(),
+  },
 
   // Circle CCTP V2 — lets a user/agent move native USDC between Base and
   // another EVM chain (burn-and-mint, not a wrapped-asset bridge). See
