@@ -27,11 +27,13 @@ import { demandFeed, MAX_DEMAND_LIMIT } from '../services/demandFeed.js';
 import { chainRuntime } from '../services/chainRuntime.js';
 import { postingChain, receiptSearchOrder, settlementChainConfig } from '../services/settlementChains.js';
 import { ethers } from 'ethers';
+import { randomUUID } from 'crypto';
 import type { AuthRequest, AuthUser, ApiResponse, AgentCapability, AgentExecutor, A2ATaskMeta, A2ATaskState, DeployedAgent } from '../types.js';
 import { AGENT_CAPABILITIES } from '../types.js';
 import { rankAgents, pickExplorationAgent, meetsRewardFloor, barredFromTask } from '../services/agentScorer.js';
 import { supportsChain, supportsTaskChain } from '../services/executorChains.js';
 import { emitTaskOffer, emitTaskAvailable, hasAgentSocket } from '../services/socket.js';
+import { keepAcceptLock } from '../services/acceptLock.js';
 import { isAlive } from '../services/redis.js';
 import { EXPIRY_GRACE_SEC, MAX_BATCH_REQUEST, WALLET_POSTING_BUDGET_PER_MIN } from '../constants.js';
 import { config } from '../config.js';
@@ -447,6 +449,9 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
   const address = req.user!.address;
   const addrLc = address.toLowerCase();
   let lockAcquired = false;
+  // Names this request on the accept lock, so only it can release or extend it.
+  const lockToken = randomUUID();
+  let stopKeepingLock: (() => void) | null = null;
   // A sponsored-gas reservation this accept made (gasSponsorAccept.ts), and
   // whether to keep it when the accept ends: kept once the task is assigned,
   // or while its assignment is still confirming; given back otherwise.
@@ -590,11 +595,13 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
     // Whoever acquires it proceeds; everyone else is rejected immediately. Lock
     // is per task id, so agents racing for different tasks never block each
     // other.
-    lockAcquired = await a2aStore.acquireAcceptLock(taskId, address);
+    lockAcquired = await a2aStore.acquireAcceptLock(taskId, address, lockToken);
     if (!lockAcquired) {
       await a2aStore.logAcceptAttempt(taskId, address, 'rejected_locked');
       throw new AppError(409, 'ACCEPT_LOCKED', 'Another agent is currently accepting this task');
     }
+    // Settlement can outlast the lock's TTL; keep it ours until we're done.
+    stopKeepingLock = keepAcceptLock(taskId, address, lockToken);
 
     // ── 3. Lua CAS (durable state transition) ────────────────────────────────
     // Idempotent path: if the caller is already the recorded executor, skip CAS.
@@ -900,9 +907,11 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
     next(err);
   } finally {
     // Always release the Redis lock — TTL is the backstop for crashes, not
-    // the primary release mechanism.
+    // the primary release mechanism. Only this request's lock: if it lapsed
+    // and another accept took it, that one is left alone.
+    stopKeepingLock?.();
     if (lockAcquired) {
-      await a2aStore.releaseAcceptLock(taskId).catch(() => {});
+      await a2aStore.releaseAcceptLock(taskId, address, lockToken).catch(() => {});
     }
   }
 });

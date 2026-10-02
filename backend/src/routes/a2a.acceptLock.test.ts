@@ -31,18 +31,26 @@ vi.mock('../services/a2aStore.js', () => ({
   clearOffer: vi.fn(() => Promise.resolve()),
   clearCascade: vi.fn(() => Promise.resolve()),
   tryExpire: vi.fn(() => Promise.resolve({ ok: true })),
-  acquireAcceptLock: vi.fn(async (taskId: string, agent: string) => {
+  // SET NX, and a compare-and-delete on the holder's own value, as Redis runs them.
+  acquireAcceptLock: vi.fn(async (taskId: string, agent: string, token: string) => {
     if (lockStore.has(taskId)) return false;
-    lockStore.set(taskId, agent);
+    lockStore.set(taskId, `${agent.toLowerCase()}|${token}`);
     return true;
   }),
-  releaseAcceptLock: vi.fn(async (taskId: string) => { lockStore.delete(taskId); }),
+  releaseAcceptLock: vi.fn(async (taskId: string, agent: string, token: string) => {
+    if (lockStore.get(taskId) !== `${agent.toLowerCase()}|${token}`) return false;
+    lockStore.delete(taskId);
+    return true;
+  }),
+  extendAcceptLock: vi.fn(async () => true),
   logAcceptAttempt: vi.fn(() => Promise.resolve()),
   startSettlementDeadline: vi.fn(() => Promise.resolve()),
   clearSettlementDeadline: vi.fn(() => Promise.resolve()),
 }));
 
 vi.mock('../services/agentStore.js', () => ({ getAgent: vi.fn() }));
+const keepAlive = vi.hoisted(() => ({ stop: vi.fn() }));
+vi.mock('../services/acceptLock.js', () => ({ keepAcceptLock: vi.fn(() => keepAlive.stop) }));
 vi.mock('../services/delegationGuard.js', () => ({
   sameOwnerSubtask: vi.fn(async () => false),
   refuseUnapprovedDelegation: vi.fn(async () => {}),
@@ -80,6 +88,8 @@ import * as a2aStore from '../services/a2aStore.js';
 import * as agentStore from '../services/agentStore.js';
 import { pricingUnit } from '../services/settlementUnits.js';
 import { sameOwnerSubtask } from '../services/delegationGuard.js';
+import { settleAssignment } from '../services/a2aSettlement.js';
+import { keepAcceptLock } from '../services/acceptLock.js';
 
 const TARGET = '0xa000000000000000000000000000000000000001';
 const STRANGER = '0xb000000000000000000000000000000000000002';
@@ -188,6 +198,31 @@ describe('POST /accept — the executor gates and the lock', () => {
     expect(res.body.error.code).toBe('CHAIN_UNSUPPORTED');
     expect(a2aStore.tryAccept).not.toHaveBeenCalled();
     expect(lockStore.size).toBe(0);
+  });
+
+  it('an accept that outlived its lock leaves the newer holder\'s lock alone', async () => {
+    vi.mocked(a2aStore.getMeta).mockResolvedValue(openTask() as any);
+    // The on-chain assignment outlasts the TTL: the lock lapses and another
+    // request takes it before this one finishes.
+    vi.mocked(settleAssignment).mockImplementationOnce(async () => {
+      lockStore.set(TASK, `${TARGET}|newer-request`);
+      return { success: true, txHash: '0xtx' } as any;
+    });
+    const res = await accept(STRANGER);
+    expect(res.status).toBe(200);
+    await vi.waitFor(() => expect(a2aStore.releaseAcceptLock).toHaveBeenCalled());
+    expect(lockStore.get(TASK)).toBe(`${TARGET}|newer-request`);
+  });
+
+  it('keeps its own lock alive while it settles, and stops before giving it back', async () => {
+    vi.mocked(a2aStore.getMeta).mockResolvedValue(openTask() as any);
+    expect((await accept(STRANGER)).status).toBe(200);
+    await vi.waitFor(() => expect(a2aStore.releaseAcceptLock).toHaveBeenCalled());
+    const [, holder, token] = vi.mocked(a2aStore.acquireAcceptLock).mock.calls[0];
+    expect(keepAcceptLock).toHaveBeenCalledWith(TASK, holder, token);
+    expect(a2aStore.releaseAcceptLock).toHaveBeenCalledWith(TASK, holder, token);
+    expect(keepAlive.stop.mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(a2aStore.releaseAcceptLock).mock.invocationCallOrder[0]);
+    expect(vi.mocked(keepAcceptLock).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(settleAssignment).mock.invocationCallOrder[0]);
   });
 
   it('a lost compare-and-set still gives the lock back', async () => {
