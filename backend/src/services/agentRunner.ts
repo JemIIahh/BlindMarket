@@ -50,6 +50,9 @@ export function settlementChainsJson(): string {
         nativeIsSettlementToken: gas.nativeIsSettlementToken,
         // The worker's gas gate for one tx here (worker.js preflightGasLimitFor).
         preflightGasLimit: gas.workerTxGasLimit.toString(),
+        // The EIP-7702 delegate a sponsored submit is signed for
+        // (docs/AGENT-GAS-FUNDING.md); Arc only, null until one is recorded.
+        agentDelegate: key === 'arc' && config.arcAgentDelegateAddress ? config.arcAgentDelegateAddress : null,
         aa,
         posting: key === posting,
       };
