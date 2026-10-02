@@ -92,6 +92,9 @@ vi.mock('../services/semanticMatch.js', () => ({
   markShadowRoutedBy: vi.fn(() => Promise.resolve()),
 }));
 vi.mock('../services/chainRuntime.js', () => ({ chainRuntime: vi.fn() }));
+// Sponsored gas on, so every announcement carries the hint sponsorHint gives.
+vi.mock('../services/gasSponsorConfig.js', () => ({ gasSponsorSettings: () => ({ enabled: true }) }));
+vi.mock('../services/gasSponsorEligibility.js', () => ({ sponsorHint: vi.fn(async () => false) }));
 vi.mock('../services/settlementChains.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../services/settlementChains.js')>()),
   receiptSearchOrder: () => ['arc'],
@@ -108,6 +111,7 @@ import { chainRuntime } from '../services/chainRuntime.js';
 import { rankAgents, pickExplorationAgent } from '../services/agentScorer.js';
 import { emitTaskAvailable, emitTaskOffer } from '../services/socket.js';
 import { loadAgentByWallet, walletsOfOwners } from '../services/deployedAgentStore.js';
+import { sponsorHint } from '../services/gasSponsorEligibility.js';
 
 const POSTER = '0x9090000000000000000000000000000000000002';
 const OTHER = '0x0b0b000000000000000000000000000000000004';
@@ -216,9 +220,27 @@ describe('POST /tasks/index — cascade candidates', () => {
 });
 
 describe('POST /tasks/index — a pinned task', () => {
+  it("carries the sponsored-gas hint for its target, asked about that target", async () => {
+    // The meta the index writes is what the hint is computed from.
+    const saved = new Map<string, unknown>();
+    vi.mocked(a2aStore.setMeta).mockImplementation(async (m: any) => { saved.set(m.taskId, m); });
+    vi.mocked(a2aStore.getMeta).mockImplementation(async (id: string) => saved.get(id) as never);
+    vi.mocked(sponsorHint).mockResolvedValue(true);
+    try {
+      await index(body({ targetExecutor: TARGET }));
+      await vi.waitFor(() => expect(emitTaskAvailable).toHaveBeenCalled());
+      expect(emitTaskAvailable).toHaveBeenCalledWith(TASK, expect.objectContaining({ gasSponsored: true }), TARGET.toLowerCase());
+      expect(sponsorHint).toHaveBeenCalledWith(expect.objectContaining({ targetExecutor: TARGET.toLowerCase() }), TARGET.toLowerCase());
+    } finally {
+      vi.mocked(sponsorHint).mockResolvedValue(false);
+      vi.mocked(a2aStore.setMeta).mockImplementation(async () => {});
+    }
+  });
+
   it('is announced to its target alone, never broadcast or offered', async () => {
     const res = await index(body({ targetExecutor: TARGET }));
     expect(res.status).toBe(200);
+    await vi.waitFor(() => expect(emitTaskAvailable).toHaveBeenCalled());
     expect(emitTaskAvailable).toHaveBeenCalledTimes(1);
     expect(emitTaskAvailable).toHaveBeenCalledWith(TASK, { requiredCapabilities: ['summarization'], chain: 'arc' }, TARGET.toLowerCase());
     expect(emitTaskOffer).not.toHaveBeenCalled();

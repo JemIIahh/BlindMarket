@@ -59,6 +59,8 @@ vi.mock('./a2aStore.js', () => ({
 vi.mock('./socket.js', () => ({
   emitTaskAvailable: (...a: unknown[]) => emitTaskAvailable(...(a as [string, Record<string, unknown>, string | undefined])),
 }));
+const sponsorHint = vi.fn(async (_meta: unknown, _agent?: string) => false);
+vi.mock('./gasSponsorEligibility.js', () => ({ sponsorHint: (...a: unknown[]) => sponsorHint(...(a as [unknown, string | undefined])) }));
 vi.mock('./taskChain.js', () => ({
   resolveTaskByHash: (...a: unknown[]) => resolveTaskByHash(...(a as [string])),
   resolveCachedTaskByHash: async () => null,
@@ -159,13 +161,14 @@ describe('sweepGasLiveness with the deadline key gone', () => {
     expect(emitTaskAvailable).toHaveBeenCalledWith(TASK, { requiredCapabilities: ['research'], chain: 'base' }, undefined);
   });
 
-  it('announces a re-opened pinned task to its target alone', async () => {
-    getMeta.mockResolvedValueOnce({
-      taskId: TASK, targetExecutorType: 'agent', requiredCapabilities: [], chain: 'arc', targetExecutor: EXECUTOR,
-    });
+  it('announces a re-opened pinned task to its target alone, with the sponsorship hint for that target', async () => {
+    const pinned = { taskId: TASK, targetExecutorType: 'agent', requiredCapabilities: [], chain: 'arc', targetExecutor: EXECUTOR };
+    getMeta.mockResolvedValueOnce(pinned);
+    sponsorHint.mockResolvedValueOnce(true);
     accepted();
     await sweepGasLiveness();
-    expect(emitTaskAvailable).toHaveBeenCalledWith(TASK, { chain: 'arc' }, EXECUTOR);
+    expect(emitTaskAvailable).toHaveBeenCalledWith(TASK, { chain: 'arc', gasSponsored: true }, EXECUTOR);
+    expect(sponsorHint).toHaveBeenCalledWith(pinned, EXECUTOR);
   });
 
   it('does not announce when the compare-and-set lost', async () => {
