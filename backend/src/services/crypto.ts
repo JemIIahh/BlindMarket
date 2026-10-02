@@ -103,7 +103,10 @@ export function generateKeyPair(): { privateKey: string; publicKey: string } {
   const ecdh = createECDH('secp256k1');
   ecdh.generateKeys();
   return {
-    privateKey: ecdh.getPrivateKey('hex'),
+    // getPrivateKey drops leading zero bytes, so about 1 key in 256 came back
+    // 31 bytes long, and the deploy that used it failed on `new Wallet`.
+    // Always the full 32 bytes (64 hex).
+    privateKey: ecdh.getPrivateKey().toString('hex').padStart(64, '0'),
     publicKey: ecdh.getPublicKey('hex', 'uncompressed'),
   };
 }
