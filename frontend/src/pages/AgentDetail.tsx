@@ -18,7 +18,7 @@ import {
 import { get, authedGet, authedPost, ApiError } from '../lib/api';
 import { useChainAddress } from '../hooks/useChainWallet';
 import { SETTLEMENT_CCTP_CHAIN_KEY, isCctpUsable } from '../config/constants';
-import { agentFundingAddress, getMarketplaceTokenAddress, getPaymentSymbol, getPaymentDecimals, getPostingChain, isNativePayment, useSettlement } from '../config/settlement';
+import { agentFundingAddress, gasIsSettlementToken, getMarketplaceTokenAddress, getPaymentSymbol, getPaymentDecimals, getPostingChain, isNativePayment, useSettlement } from '../config/settlement';
 import {
   getAgentReviews,
   getAgentBadges,
@@ -37,17 +37,14 @@ import { ReviewsSection } from '../components/agent/ReviewsSection';
 import { ServicesSection } from '../components/agent/ServicesSection';
 import type { AgentDetails, SkillStat } from '../components/agent/types';
 import { formatPaymentAmount } from '../lib/paymentUnits';
+import { formatMinGas, minGasBalance } from '../lib/agentGas';
 import { providerFor } from '../lib/txSigner';
 import { friendlyError } from '../lib/friendlyError';
 
-// Default top-up suggestion in USDC. Covers ~100 task executions — the owner
+// Default top-up suggestion in USDC. Covers hundreds of submitted results on
+// Arc (a submitEvidence is ~94k gas, about 0.002 USDC at 20 gwei) — the owner
 // edits the amount in the fund dialog before confirming.
 const DEFAULT_TOP_UP_AMOUNT = '1';
-
-// Below this the agent can't reliably pay for operations. UI surfaces a
-// "Fund wallet" call to action when balance is under this. A function, not a
-// module constant: the payment unit is known once the backend has answered.
-const lowBalanceThreshold = () => parseUnits('1', getPaymentDecimals());
 
 const USDC_ABI = [
   'function balanceOf(address owner) view returns (uint256)',
@@ -141,9 +138,16 @@ export default function AgentDetail() {
   // USDC balance on the posting chain (read through its own RPC, below)
   const [usdcBalance, setUsdcBalance] = useState<bigint | null>(null);
 
+  // What the wallet must hold before the worker takes a task, at the posting
+  // chain's current fees (lib/agentGas.ts), in the payment token's units.
+  // Null where gas is not the payment token (Base pays it through the
+  // paymaster) or the fees could not be read.
+  const [minGasRaw, setMinGasRaw] = useState<bigint | null>(null);
+
   const balanceEther = usdcBalance !== null ? Number(formatUnits(usdcBalance, getPaymentDecimals())) : 0;
   const balanceSymbol = getPaymentSymbol();
-  const isLowGas = usdcBalance !== null && usdcBalance < lowBalanceThreshold();
+  // Without a minimum, only an empty wallet is known to be too low.
+  const isLowGas = usdcBalance !== null && (minGasRaw !== null ? usdcBalance < minGasRaw : usdcBalance === 0n);
 
   // The smart account only where the posting chain's escrow records one
   // (ERC-4337, gas paid in USDC via the paymaster); elsewhere (Arc) the EOA,
@@ -193,6 +197,20 @@ export default function AgentDetail() {
       .catch(() => { /* non-blocking */ });
     return () => { cancelled = true; };
   }, [fundingAddress, settlement]);
+
+  useEffect(() => {
+    const chain = settlement.postingChain;
+    setMinGasRaw(null);
+    if (!gasIsSettlementToken(chain)) return;
+    let cancelled = false;
+    providerFor(chain).getFeeData()
+      .then((fee) => {
+        const perGas = fee.maxFeePerGas ?? fee.gasPrice;
+        if (!cancelled && perGas) setMinGasRaw(minGasBalance(perGas, getPaymentDecimals()));
+      })
+      .catch(() => { /* non-blocking: falls back to the empty-wallet check */ });
+    return () => { cancelled = true; };
+  }, [settlement]);
 
   // Public service list — lifted out of the services section because the
   // header's from-price and the "services sold" stat read the same data.
@@ -621,7 +639,7 @@ export default function AgentDetail() {
               fundingAddress={fundingAddress}
               chainLabel={settlement.chains[settlement.postingChain].label}
               topUpAmount={topUpAmount.trim() || DEFAULT_TOP_UP_AMOUNT}
-              lowGasThreshold={1}
+              minGasLabel={minGasRaw !== null ? formatMinGas(minGasRaw, getPaymentDecimals()) : null}
               isLowGas={isLowGas}
               balanceEther={balanceEther}
               agentStatus={agent.status}
