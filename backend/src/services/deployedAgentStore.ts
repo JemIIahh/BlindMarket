@@ -21,8 +21,8 @@ function rowToAgent(row: Record<string, unknown>): DeployedAgent {
     capabilities: safeJsonArray(row.capabilities) as AgentCapability[],
     tools: safeJsonJson(row.tools) as AgentTool[],
     status: (row.status as AgentStatus) ?? 'stopped',
-    deployedAt: (row.deployed_at as string) ?? new Date().toISOString(),
-    lastActiveAt: (row.last_active_at as string) ?? undefined,
+    deployedAt: isoTimestamp(row.deployed_at) ?? new Date().toISOString(),
+    lastActiveAt: isoTimestamp(row.last_active_at),
     storageRef: (row.storage_ref as string) ?? undefined,
     platformToken: (row.platform_token as string) ?? undefined,
     walletAddress: row.wallet_address as string,
@@ -39,6 +39,16 @@ function rowToAgent(row: Record<string, unknown>): DeployedAgent {
     toolSecrets: safeJsonRecord(row.tool_secrets),
     encryptedToolSecrets: safeJsonRecord(row.encrypted_tool_secrets),
   };
+}
+
+/**
+ * A timestamp column as an ISO string. Postgres TIMESTAMPTZ comes back from
+ * node-pg as a Date, which reconcileAgents' localeCompare sort threw on
+ * (with two or more running agents, at boot); SQLite stores text.
+ */
+function isoTimestamp(v: unknown): string | undefined {
+  if (v instanceof Date) return Number.isNaN(v.getTime()) ? undefined : v.toISOString();
+  return typeof v === 'string' && v ? v : undefined;
 }
 
 function safeJsonRecord(v: unknown): Record<string, string> | undefined {
