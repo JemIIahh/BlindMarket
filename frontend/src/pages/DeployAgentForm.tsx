@@ -26,6 +26,11 @@ import { getOrCreateExecutorIdentity } from '../lib/executorIdentity';
 import { ARC_AGENT_FACTORY_ADDRESS, ARC_CHAIN_CONFIG, ARC_CHAIN_ID, ARC_USDC_ADDRESS } from '../config/constants';
 import { OG_COMPUTE_ACCOUNT_0G, OG_COMPUTE_START_0G } from '../lib/agentReadiness';
 import { WARN_BOX } from '../components/agent/AgentReadinessCard';
+import {
+  CUSTOM_MODEL, FALLBACK_MODELS, isKeyed, isPriced, liveListError, liveListRequest,
+  modelLabel, modelOptions as optionsFor, providerLabel, usdPer1M,
+  type ModelOption, type Provider,
+} from '../lib/llmModels';
 
 /**
  * What deploying charges (GET /api/v1/agents/deploy-fee). On a stack with an
@@ -91,12 +96,8 @@ function feeIsSpent(err: { code?: string; payload?: Record<string, unknown> }): 
 const shortHash = (hash: string) => `${hash.slice(0, 10)}…${hash.slice(-6)}`;
 const shortAddress = (address: string) => `${address.slice(0, 6)}…${address.slice(-4)}`;
 
-type Provider = 'openai' | 'anthropic' | 'groq' | 'gemini' | '0g-compute';
 type ProviderModels = Record<Provider, string[]>;
-interface ModelPricing { id: string; inputCostPer1M: number; outputCostPer1M: number; }
-type PricingMap = Record<Provider, ModelPricing[]>;
-/** A model the provider's own /models endpoint listed for the user's key. Priced only when our table knows it. */
-interface DiscoveredModel { id: string; inputCostPer1M?: number; outputCostPer1M?: number; }
+type PricingMap = Record<Provider, ModelOption[]>;
 
 /** snake_case capability id → human label ("web_research" → "Web research"). */
 const INSTRUCTION_TEMPLATES: Record<string, string> = {
@@ -171,15 +172,8 @@ export default function DeployAgentForm() {
   const { chainId: walletChainId, embeddedAddress, externalAddresses, switchChain } = useWallet();
   const navigate = useNavigate();
 
-  // Pre-fetch fallback — mirrors LLM_PROVIDER_MODELS in backend/src/types.ts,
-  // which /api/v1/agents/providers replaces as soon as it answers.
-  const [providers, setProviders] = useState<ProviderModels>({
-    openai: ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.4-nano', 'gpt-5', 'gpt-5-mini', 'gpt-5-nano', 'gpt-4.1', 'gpt-4o', 'gpt-4o-mini'],
-    anthropic: ['claude-fable-5-1', 'claude-fable-5', 'claude-opus-5', 'claude-opus-4-8', 'claude-opus-4-7', 'claude-sonnet-5', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
-    groq: ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'llama-3.3-70b-versatile', 'llama-3.1-8b-instant'],
-    gemini: ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-pro-preview', 'gemini-3.1-flash-lite', 'gemini-2.5-pro', 'gemini-2.5-flash'],
-    '0g-compute': ['glm-5', 'qwen3.7-plus', 'glm-5.3', '0GM-1.0-35B-A3B', '0GM-1.0-35B-A3B-SIA'],
-  });
+  // FALLBACK_MODELS until /api/v1/agents/providers answers.
+  const [providers, setProviders] = useState<ProviderModels>(FALLBACK_MODELS);
   const [pricing, setPricing] = useState<PricingMap>({} as PricingMap);
 
   const [form, setForm] = useState({
@@ -193,19 +187,23 @@ export default function DeployAgentForm() {
   // Live list from the selected provider's own /models endpoint, fetched with
   // the key the user pasted (keyless for 0G). Null until a key is present or
   // if the lookup failed — the static catalog stands in until then.
-  const [live, setLive] = useState<{ provider: Provider; models: DiscoveredModel[] } | null>(null);
+  const [live, setLive] = useState<{ provider: Provider; models: ModelOption[] } | null>(null);
   const [liveStatus, setLiveStatus] = useState<'idle' | 'loading' | 'ok' | 'error'>('idle');
   const [liveError, setLiveError] = useState('');
   // The key as last pasted or blurred. Discovery keys off this rather than
   // every keystroke, so a half-typed key is never relayed to the provider.
   const [committedKey, setCommittedKey] = useState('');
 
-  const modelOptions: DiscoveredModel[] = live && live.provider === form.provider
-    ? live.models
-    : (providers[form.provider] ?? []).map(id => pricing[form.provider]?.find(p => p.id === id) ?? { id });
-  const currentModelPricing = modelOptions.find(m => m.id === form.model);
-  const priceIn = currentModelPricing?.inputCostPer1M;
-  const priceOut = currentModelPricing?.outputCostPer1M;
+  // An id the owner types, for a model the list doesn't have yet. The backend
+  // checks it against the provider's list with the key before any fee.
+  const [customModel, setCustomModel] = useState(false);
+  // Read by the live lookup when it answers, which may be after a toggle.
+  const customModelRef = useRef(customModel);
+  customModelRef.current = customModel;
+
+  const modelOptions = optionsFor(form.provider, live, providers[form.provider] ?? [], pricing[form.provider]);
+  const currentModel = modelOptions.find(m => m.id === form.model.trim());
+  const providerName = providerLabel(form.provider);
 
   const [showTemplateMenu, setShowTemplateMenu] = useState(false);
 
@@ -228,7 +226,7 @@ export default function DeployAgentForm() {
   // screen for the owner to install from the agent's Skills panel instead.
   const [privateSkillSlugs, setPrivateSkillSlugs] = useState<string[]>([]);
 
-  const [status, setStatus] = useState<'idle' | 'confirming' | 'approving' | 'paying' | 'deploying' | 'done' | 'error'>('idle');
+  const [status, setStatus] = useState<'idle' | 'checking' | 'confirming' | 'approving' | 'paying' | 'deploying' | 'done' | 'error'>('idle');
   const submittingRef = useRef(false);
   const confirmResolveRef = useRef<((approve: boolean) => void) | null>(null);
   const [error, setError] = useState<unknown>('');
@@ -289,40 +287,36 @@ export default function DeployAgentForm() {
 
   const feeNeeded = feeRaw + ARC_GAS_MARGIN;
   const hasEnoughUsdc = !feeTerms?.required || !!pendingFee || (usdcBalance !== null && usdcBalance >= feeNeeded);
-  const busy = status === 'confirming' || status === 'approving' || status === 'paying' || status === 'deploying';
+  const busy = status === 'checking' || status === 'confirming' || status === 'approving' || status === 'paying' || status === 'deploying';
 
   useEffect(() => {
     if (!address) return; // the lookup is authenticated — deploy needs a session anyway
     const provider = form.provider;
-    const keyed = provider !== '0g-compute';
-    if (keyed && committedKey.length < 20) { setLive(null); setLiveStatus('idle'); return; }
+    const request = liveListRequest({ provider, newKey: committedKey });
+    if (!request) { setLive(null); setLiveStatus('idle'); return; }
     let cancelled = false;
     setLiveStatus('loading');
-    authedPost<{ provider: Provider; models: DiscoveredModel[] }>('/api/v1/agents/provider-models', { provider, apiKey: keyed ? committedKey : '' })
+    authedPost<{ provider: Provider; models: ModelOption[] }>(request.path, request.body)
       .then(d => {
         if (cancelled) return;
         if (d.models.length === 0) {
           setLive(null);
           setLiveStatus('error');
-          setLiveError(`${provider} listed no chat models for this key — showing our defaults`);
+          setLiveError(`${providerLabel(provider)} listed no chat models for this key — showing our defaults`);
           return;
         }
         setLive(d);
         setLiveStatus('ok');
         setLiveError('');
-        // A catalog pick the provider no longer lists → first live model.
-        setForm(f => (d.models.some(m => m.id === f.model) ? f : { ...f, model: d.models[0].id }));
+        // A catalog pick the provider no longer lists → its newest model. A
+        // typed id stays: the deploy checks it.
+        setForm(f => (customModelRef.current || d.models.some(m => m.id === f.model) ? f : { ...f, model: d.models[0].id }));
       })
       .catch((err: { code?: string; status?: number }) => {
         if (cancelled) return;
         setLive(null);
         setLiveStatus('error');
-        setLiveError(
-          err?.code === 'PROVIDER_AUTH' ? `${provider} rejected this API key`
-          : err?.code === 'RATE_LIMIT' ? 'Too many lookups — wait a minute and try again'
-          : err?.status === 401 ? 'Sign in to list the models your key can use'
-          : 'Could not list models from the provider — showing our defaults',
-        );
+        setLiveError(liveListError(provider, err));
       });
     return () => { cancelled = true; };
   }, [form.provider, committedKey, address]);
@@ -341,7 +335,7 @@ export default function DeployAgentForm() {
 
   function set(k: keyof typeof form, v: string) {
     // A key belongs to one provider — switching must never relay it to another.
-    if (k === 'provider') setCommittedKey('');
+    if (k === 'provider') { setCommittedKey(''); setCustomModel(false); }
     setForm(f => {
       const next = { ...f, [k]: v };
       if (k === 'provider') {
@@ -446,6 +440,35 @@ export default function DeployAgentForm() {
     // An Arc payment no deploy has used yet pays for this one.
     const savedFee = feeTerms.required && feeTerms.method === 'transfer' ? readPendingFee(address) : null;
 
+    const ownerIdentity = getOrCreateExecutorIdentity(address);
+    const deployBody = {
+      ownerPublicKey: ownerIdentity.publicKey,
+      name: form.name,
+      instructions: form.instructions,
+      provider: form.provider,
+      model: form.model.trim(),
+      apiKey: form.apiKey,
+      capabilities: [],
+      tools,
+      toolSecrets,
+      skillSlugs,
+    };
+
+    // Before anything is paid: the checks the deploy makes (a typed model id
+    // the key can't use, a bad key, …), so a refused deploy never costs a fee.
+    if (feeTerms.required && !savedFee) {
+      setStatus('checking');
+      try {
+        await authedPost('/api/v1/agents/deploy/validate', deployBody);
+      } catch (err: any) {
+        setError(err);
+        setErrorCode(typeof err?.code === 'string' ? err.code : null);
+        setStatus('error');
+        submittingRef.current = false;
+        return;
+      }
+    }
+
     if (feeTerms.required && !savedFee) {
       setStatus('idle'); // not a stale 'error' with the message cleared, while the wallet answers
       let unlinked: string | null;
@@ -483,20 +506,7 @@ export default function DeployAgentForm() {
 
       // Create the agent (the backend checks the fee, creates its wallet, starts it).
       setStatus('deploying');
-      const ownerIdentity = getOrCreateExecutorIdentity(address);
-      const deployBody = {
-        ownerPublicKey: ownerIdentity.publicKey,
-        name: form.name,
-        instructions: form.instructions,
-        provider: form.provider,
-        model: form.model,
-        apiKey: form.apiKey,
-        capabilities: [],
-        tools,
-        toolSecrets,
-        skillSlugs,
-        ...(feeTxHash ? { feeTxHash } : {}),
-      };
+      const body = { ...deployBody, ...(feeTxHash ? { feeTxHash } : {}) };
       // Factory: the AgentFactory listener polls every 15s, so the credit can lag
       // the payment by up to a minute. Arc: the backend already asks Arc for
       // the fee's receipt several times; a lagging RPC gets two more tries.
@@ -505,7 +515,7 @@ export default function DeployAgentForm() {
       let result: { id: string; started?: boolean; walletAddress?: string } | null = null;
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
         try {
-          result = await authedPost<{ id: string; started?: boolean; walletAddress?: string }>('/api/v1/agents/deploy', deployBody);
+          result = await authedPost<{ id: string; started?: boolean; walletAddress?: string }>('/api/v1/agents/deploy', body);
           break;
         } catch (err: any) {
           console.log(`[deploy] attempt ${attempt + 1}/${maxAttempts} failed:`, err.code, err.message);
@@ -690,32 +700,53 @@ export default function DeployAgentForm() {
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-5">
             <FormField label="Provider">
               <FormSelect value={form.provider} onChange={e => set('provider', e.target.value)}>
-                {Object.keys(providers).map(p => <option key={p} value={p}>{p}</option>)}
+                {Object.keys(providers).map(p => <option key={p} value={p}>{providerLabel(p)}</option>)}
               </FormSelect>
             </FormField>
             <FormField
               label="Model"
               hint={
-                liveStatus === 'loading' ? 'Checking which models this key can use…'
-                : liveStatus === 'ok' && live ? `Live from ${form.provider} · ${live.models.length} models`
+                customModel ? `Checked against ${providerName}'s model list with your key when you deploy, before any fee.`
+                : liveStatus === 'loading' ? 'Checking which models this key can use…'
+                : liveStatus === 'ok' && live ? `Live from ${providerName} · ${live.models.length} models, newest first`
                 : liveStatus === 'error' ? liveError
                 : form.provider === '0g-compute' ? undefined
                 : !address ? 'Connect a wallet to list the models your key can use.'
                 : 'Paste your API key to list every model it can use.'
               }
             >
-              <FormSelect value={form.model} onChange={e => set('model', e.target.value)} className="font-mono">
-                {modelOptions.map(m => {
-                  const cost = m.inputCostPer1M !== undefined && m.outputCostPer1M !== undefined
-                    ? (m.inputCostPer1M + m.outputCostPer1M) / 2
-                    : null;
-                  return (
-                    <option key={m.id} value={m.id}>
-                      {m.id}{cost !== null ? ` (~$${cost.toFixed(2)}/1M)` : ''}
-                    </option>
-                  );
-                })}
-              </FormSelect>
+              {customModel ? (
+                <div className="flex items-center gap-2">
+                  <FormInput
+                    required
+                    autoFocus
+                    value={form.model}
+                    onChange={e => set('model', e.target.value)}
+                    placeholder="Model id, exactly as the provider names it"
+                    className="font-mono"
+                    maxLength={128}
+                    aria-label="Custom model id"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => { setCustomModel(false); set('model', modelOptions[0]?.id ?? ''); }}
+                    className="shrink-0 text-xs text-ink-3 hover:text-ink"
+                  >
+                    List
+                  </button>
+                </div>
+              ) : (
+                <FormSelect
+                  value={form.model}
+                  onChange={e => {
+                    if (e.target.value === CUSTOM_MODEL) { setCustomModel(true); set('model', ''); } else set('model', e.target.value);
+                  }}
+                  className="font-mono"
+                >
+                  {modelOptions.map(m => <option key={m.id} value={m.id}>{modelLabel(m)}</option>)}
+                  {isKeyed(form.provider) && <option value={CUSTOM_MODEL}>Custom model id…</option>}
+                </FormSelect>
+              )}
             </FormField>
             <FormField label="API key" required={form.provider !== '0g-compute'} hint={form.provider === '0g-compute' ? "No API key needed — the agent's wallet pays a 0G Compute provider" : undefined}>
               <FormInput
@@ -733,21 +764,21 @@ export default function DeployAgentForm() {
           </div>
 
           {/* Model pricing display */}
-          {priceIn !== undefined && priceOut !== undefined ? (
+          {isPriced(currentModel) ? (
             <div className="mt-3 flex items-center gap-4 text-[12px] text-ink-3">
               <span>
-                Input: <span className="font-mono text-ink">${priceIn.toFixed(2)}</span> / 1M tokens
+                Input: <span className="font-mono text-ink">{usdPer1M(currentModel.inputCostPer1M)}</span> / 1M tokens
               </span>
               <span>
-                Output: <span className="font-mono text-ink">${priceOut.toFixed(2)}</span> / 1M tokens
+                Output: <span className="font-mono text-ink">{usdPer1M(currentModel.outputCostPer1M)}</span> / 1M tokens
               </span>
               <span className="text-ink-3">
-                ~${((priceIn + priceOut) / 2).toFixed(2)} avg / 1M
+                ~${((currentModel.inputCostPer1M + currentModel.outputCostPer1M) / 2).toFixed(2)} avg / 1M
               </span>
             </div>
-          ) : currentModelPricing && live && live.provider === form.provider ? (
+          ) : form.model.trim() && (customModel || (live && live.provider === form.provider)) ? (
             <div className="mt-3 text-[12px] text-ink-3">
-              No price on file for <span className="font-mono text-ink">{currentModelPricing.id}</span> — check {form.provider}'s pricing page.
+              Price not listed for <span className="font-mono text-ink">{form.model.trim()}</span> — check {providerName}'s pricing page.
             </div>
           ) : null}
 
@@ -887,7 +918,9 @@ export default function DeployAgentForm() {
                   variant="primary"
                   disabled={busy || !hasEnoughUsdc}
                   label={
-                    status === 'confirming'
+                    status === 'checking'
+                      ? 'Checking…'
+                      : status === 'confirming'
                       ? 'Confirm deploy…'
                       : status === 'approving'
                       ? 'Approving USDC…'

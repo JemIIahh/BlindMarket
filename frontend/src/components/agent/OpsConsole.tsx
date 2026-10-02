@@ -25,6 +25,10 @@ import { AgentTasks } from './AgentTasks';
 import { SkillsManager } from './SkillsManager';
 import { WebhooksPanel } from './WebhooksPanel';
 import type { AgentDetails, InstalledSkillMeta } from './types';
+import {
+  CUSTOM_MODEL, isKeyed, isPriced, liveListError, liveListRequest, modelLabel, modelOptions,
+  providerLabel, usdPer1M, withModel, type ModelOption,
+} from '../../lib/llmModels';
 
 type Tab = 'logs' | 'errors' | 'tasks' | 'tools' | 'webhooks' | 'edit' | 'metrics';
 
@@ -92,6 +96,17 @@ export function OpsConsole({
   const [editApiKey, setEditApiKey] = useState('');
   const [apiKeyVisible, setApiKeyVisible] = useState(false);
   const [providers, setProviders] = useState<Record<string, string[]>>({});
+  const [pricing, setPricing] = useState<Record<string, ModelOption[]>>({});
+  // The provider's own list: with a new key once one is pasted, else with the
+  // key the agent runs on. The catalog stands in until it answers.
+  const [live, setLive] = useState<{ provider: string; models: ModelOption[] } | null>(null);
+  const [liveStatus, setLiveStatus] = useState<'idle' | 'loading' | 'ok' | 'error'>('idle');
+  const [liveError, setLiveError] = useState('');
+  // The new key as last pasted or blurred: a half-typed key is never sent.
+  const [committedKey, setCommittedKey] = useState('');
+  // An id the owner types, for a model the list doesn't have yet. Saving
+  // checks it against the provider's list with the key.
+  const [customModel, setCustomModel] = useState(false);
   // Capabilities deprecated — semantic KNN is the primary routing signal.
   // Removed from save payload; capabilities still stored as metadata for embeddings.
   const [editMinReward, setEditMinReward] = useState(
@@ -108,10 +123,40 @@ export function OpsConsole({
   // Fetch available providers + models for the edit form (authed route).
   useEffect(() => {
     if (!isAuthenticated) return;
-    authedGet<{ models?: Record<string, string[]> }>('/api/v1/agents/providers')
-      .then(r => { if (r.models) setProviders(r.models); })
+    authedGet<{ models?: Record<string, string[]>; pricing?: Record<string, ModelOption[]> }>('/api/v1/agents/providers')
+      .then(r => {
+        if (r.models) setProviders(r.models);
+        if (r.pricing) setPricing(r.pricing);
+      })
       .catch(() => {});
   }, [isAuthenticated]);
+
+  // The live list, once the Edit tab is open (each lookup asks the provider).
+  useEffect(() => {
+    if (!isAuthenticated || tab !== 'edit') return;
+    const request = liveListRequest({ provider: editProvider, newKey: committedKey, agentId, agentProvider: agent.provider });
+    if (!request) { setLive(null); setLiveStatus('idle'); return; }
+    let cancelled = false;
+    setLiveStatus('loading');
+    authedPost<{ provider: string; models: ModelOption[] }>(request.path, request.body)
+      .then(d => {
+        if (cancelled) return;
+        setLive(d.models.length > 0 ? d : null);
+        setLiveStatus(d.models.length > 0 ? 'ok' : 'error');
+        setLiveError(d.models.length > 0 ? '' : `${providerLabel(editProvider)} listed no chat models for this key — showing our defaults`);
+      })
+      .catch((err: { code?: string; status?: number }) => {
+        if (cancelled) return;
+        setLive(null);
+        setLiveStatus('error');
+        setLiveError(liveListError(editProvider, err));
+      });
+    return () => { cancelled = true; };
+  }, [isAuthenticated, tab, editProvider, committedKey, agentId, agent.provider]);
+
+  // The agent's own model stays on the list even when the provider no longer lists it.
+  const editModelOptions = withModel(modelOptions(editProvider, live, providers[editProvider] ?? [], pricing[editProvider]), editModel);
+  const editModelPrice = editModelOptions.find(m => m.id === editModel.trim());
 
   // Log stream — a fetch-based SSE reader. The old browser SSE client could
   // not send an Authorization header, and the route is now owner-gated
@@ -264,7 +309,7 @@ export function OpsConsole({
       const data = await authedPatch<AgentDetails>(`/api/v1/agents/${agentId}`, {
         instructions: editInstructions,
         provider: editProvider,
-        model: editModel,
+        model: editModel.trim(),
         ...(editApiKey ? { apiKey: editApiKey } : {}),
         minReward: editMinReward.trim()
           ? parsePaymentAmount(editMinReward).toString()
@@ -523,11 +568,15 @@ export function OpsConsole({
                   <FormSelect value={editProvider} onChange={e => {
                     const p = e.target.value;
                     setEditProvider(p);
+                    // A key belongs to one provider: never send it to another.
+                    setEditApiKey('');
+                    setCommittedKey('');
+                    setCustomModel(false);
                     const models = providers[p];
                     if (models?.length) setEditModel(models[0]);
                   }}>
-                    {Object.keys(providers).length === 0 && <option value={editProvider}>{editProvider || 'Loading…'}</option>}
-                    {Object.keys(providers).map(p => <option key={p} value={p}>{p}</option>)}
+                    {Object.keys(providers).length === 0 && <option value={editProvider}>{editProvider ? providerLabel(editProvider) : 'Loading…'}</option>}
+                    {Object.keys(providers).map(p => <option key={p} value={p}>{providerLabel(p)}</option>)}
                   </FormSelect>
                   {editProvider === agent.provider && (
                     <span className="flex items-center gap-1 text-xs text-ok shrink-0">
@@ -537,13 +586,55 @@ export function OpsConsole({
                 </div>
               </FormField>
 
-              <FormField label="Model">
-                <FormSelect value={editModel} onChange={e => setEditModel(e.target.value)}>
-                  {(providers[editProvider] ?? []).map(m => <option key={m} value={m}>{m}</option>)}
-                  {editModel && !(providers[editProvider] ?? []).includes(editModel) && (
-                    <option value={editModel}>{editModel}</option>
-                  )}
-                </FormSelect>
+              <FormField
+                label="Model"
+                hint={
+                  customModel ? `Checked against ${providerLabel(editProvider)}'s model list with the key when you save.`
+                  : liveStatus === 'loading' ? 'Checking which models the key can use…'
+                  : liveStatus === 'ok' && live?.provider === editProvider ? `Live from ${providerLabel(editProvider)} · ${live.models.length} models, newest first`
+                  : liveStatus === 'error' ? liveError
+                  : isKeyed(editProvider) && editProvider !== agent.provider ? 'Enter the new API key to list every model it can use.'
+                  : undefined
+                }
+              >
+                {customModel ? (
+                  <div className="flex items-center gap-2">
+                    <FormInput
+                      autoFocus
+                      className="font-mono"
+                      value={editModel}
+                      onChange={e => setEditModel(e.target.value)}
+                      placeholder="Model id, exactly as the provider names it"
+                      maxLength={128}
+                      aria-label="Custom model id"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => { setCustomModel(false); setEditModel(editProvider === agent.provider ? agent.model ?? '' : editModelOptions[0]?.id ?? ''); }}
+                      className="shrink-0 text-xs text-ink-3 hover:text-ink"
+                    >
+                      List
+                    </button>
+                  </div>
+                ) : (
+                  <FormSelect
+                    className="font-mono"
+                    value={editModel}
+                    onChange={e => {
+                      if (e.target.value === CUSTOM_MODEL) { setCustomModel(true); setEditModel(''); } else setEditModel(e.target.value);
+                    }}
+                  >
+                    {editModelOptions.map(m => <option key={m.id} value={m.id}>{modelLabel(m)}</option>)}
+                    {isKeyed(editProvider) && <option value={CUSTOM_MODEL}>Custom model id…</option>}
+                  </FormSelect>
+                )}
+                {editModel.trim() && (
+                  <p className="text-xs text-ink-3 mt-1.5">
+                    {isPriced(editModelPrice)
+                      ? <>Input <span className="font-mono text-ink-2">{usdPer1M(editModelPrice.inputCostPer1M)}</span> · output <span className="font-mono text-ink-2">{usdPer1M(editModelPrice.outputCostPer1M)}</span> per 1M tokens</>
+                      : <>Price not listed — check {providerLabel(editProvider)}'s pricing page.</>}
+                  </p>
+                )}
               </FormField>
             </div>
 
@@ -573,6 +664,8 @@ export function OpsConsole({
                   placeholder={agent.apiKeyHint ? `Replace ${agent.apiKeyHint}…` : 'sk-…'}
                   value={editApiKey}
                   onChange={e => setEditApiKey(e.target.value)}
+                  onBlur={e => setCommittedKey(e.target.value.trim())}
+                  onPaste={e => { const el = e.currentTarget; setTimeout(() => setCommittedKey(el.value.trim()), 0); }}
                 />
               )}
             </FormField>
@@ -611,7 +704,7 @@ export function OpsConsole({
               <Button
                 variant="primary"
                 onClick={() => save.mutate()}
-                disabled={save.isPending || (editProvider !== agent.provider && !editApiKey)}
+                disabled={save.isPending || (editProvider !== agent.provider && !editApiKey) || !editModel.trim()}
                 label={save.isPending ? 'Saving & restarting…' : 'Save & restart'}
               />
               {editProvider !== agent.provider && !editApiKey && (
