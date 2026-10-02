@@ -3691,10 +3691,16 @@ async function sponsoredCall(taskHash, kind, onChainTaskId, evidenceHash = ether
   let setupRetried = false;
   for (let attempt = 1; attempt <= SPONSORED_CALL_ATTEMPTS; attempt++) {
     try {
-      const code = (await signer.provider.getCode(signer.address)).toLowerCase();
+      // Straight from the node: ethers answers a repeat read within 250 ms
+      // from its cache, and a retry must see what the last call changed.
+      const rpc = (method, params) => signer.provider.send(method, params);
+      const code = String(await rpc('eth_getCode', [signer.address, 'latest'])).toLowerCase();
       const delegated = code === `0xef0100${delegate.slice(2).toLowerCase()}`;
-      const nonce = delegated ? BigInt(await signer.provider.call({ to: signer.address, data: DELEGATE_NONCE_CALL })) : 0n;
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 600);
+      const nonce = delegated ? BigInt(await rpc('eth_call', [{ to: signer.address, data: DELEGATE_NONCE_CALL }, 'latest'])) : 0n;
+      // Ten minutes of the chain's own clock, not this host's.
+      const head = await rpc('eth_getBlockByNumber', ['latest', false]).catch(() => null);
+      const now = head?.timestamp ? BigInt(head.timestamp) : BigInt(Math.floor(Date.now() / 1000));
+      const deadline = now + 600n;
       const call = {
         kind: DELEGATE_KIND[kind], escrow: ethers.getAddress(escrowAddressFor('arc')), taskId: BigInt(onChainTaskId),
         evidenceHash: kind === 'submit' ? evidenceHash : ethers.ZeroHash, nonce, deadline,
@@ -3702,7 +3708,7 @@ async function sponsoredCall(taskHash, kind, onChainTaskId, evidenceHash = ether
       const signature = await signer.signTypedData(delegateCallDomain(arc.chainId, signer.address), DELEGATE_CALL_TYPES, call);
       let authorization;
       if (!delegated) {
-        const authNonce = await signer.provider.getTransactionCount(signer.address, 'pending');
+        const authNonce = BigInt(await rpc('eth_getTransactionCount', [signer.address, 'pending']));
         const a = signDelegateAuthorization(signer.signingKey, { chainId: arc.chainId, address: delegate, nonce: authNonce });
         authorization = { chainId: a.chainId.toString(), address: a.address, nonce: a.nonce.toString(), yParity: a.yParity, r: a.r, s: a.s };
       }
