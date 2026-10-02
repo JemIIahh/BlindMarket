@@ -104,8 +104,10 @@ const chain = vi.hoisted(() => ({
   onBroadcast: null as null | ((raw: string, hash: string) => void),
 }));
 const provider = {
-  getCode: vi.fn(async () => chain.code),
+  // ethers answers a repeat getCode within 250 ms from its cache: the relayer must read code with eth_getCode.
+  getCode: vi.fn(async () => { throw new Error('read code with eth_getCode, not the cached getCode'); }),
   send: vi.fn(async (method: string, params: any[]) => {
+    if (method === 'eth_getCode') return chain.code;
     if (method === 'eth_estimateGas') {
       if (chain.estimateError) throw chain.estimateError;
       return ethers.toQuantity(chain.estimate);
@@ -124,7 +126,10 @@ const provider = {
   getFeeData: vi.fn(async () => ({ maxFeePerGas: 2n * chain.baseFee, maxPriorityFeePerGas: 0n, gasPrice: chain.baseFee })),
   getBlock: vi.fn(async () => ({ baseFeePerGas: chain.baseFee })),
   getTransactionCount: vi.fn(async (_a: string, tag: string) => (tag === 'latest' ? chain.latestNonce : chain.sponsorNonce)),
-  getTransactionReceipt: vi.fn(async (hash: string) => chain.mined.get(hash) ?? null),
+  getTransactionReceipt: vi.fn(async (hash: string) => {
+    const r = chain.mined.get(hash);
+    return r ? { blockNumber: 9, ...r } : null;
+  }),
   getTransaction: vi.fn(async (hash: string) => (chain.knownTx.has(hash) ? { hash, blockNumber: 9 } : null)),
   getBalance: vi.fn(async () => chain.balance),
 };
@@ -283,6 +288,8 @@ describe('a sponsored first submit', () => {
     expect(r.costWei).toBe(150_000n * 20n * GWEI);
     expect(db.txs[0]).toMatchObject({ status: 'confirmed', withAuthorization: true });
     expect(recordEvent).toHaveBeenCalledWith(expect.objectContaining({ event: 'gas_sponsored', props: expect.objectContaining({ outcome: 'confirmed', kind: 'submit' }) }));
+    // The delegation is checked as of the receipt's block, read from the node.
+    expect(provider.send).toHaveBeenCalledWith('eth_getCode', [AGENT, '0x9']);
   });
 
   it('sends a plain type-2 transaction once the wallet is delegated, dropping a redundant authorization', async () => {
@@ -620,6 +627,19 @@ describe('the reservation sweep', () => {
     chain.task.status = 1;
     const b = holdReservation({ taskId: 42n });
     chain.state = { executorAddress: '0x' + '97'.repeat(20) };
+    await relayer.sweepReservations(settings.current);
+    expect(b.status).toBe('released');
+    expect(db.strikes).toEqual([]);
+  });
+
+  it('releases without a strike an hour lost to our side: sponsorship killed, or our transaction still out', async () => {
+    const a = holdReservation({ expiresAt: new Date(Date.now() - 1) });
+    db.controls.killed = true;
+    await relayer.sweepReservations(settings.current);
+    expect(a.status).toBe('released');
+    db.controls.killed = false;
+    const b = holdReservation({ taskId: 42n, expiresAt: new Date(Date.now() - 1) });
+    db.txs.push({ id: 7, chainId: CHAIN_ID, reservationId: b.id, sponsor: SPONSOR, nonce: 3, rawTx: '0x', txHash: '0xout', withAuthorization: false, status: 'sent' });
     await relayer.sweepReservations(settings.current);
     expect(b.status).toBe('released');
     expect(db.strikes).toEqual([]);

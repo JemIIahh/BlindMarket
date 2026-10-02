@@ -139,6 +139,17 @@ export async function releaseSponsorWriter(): Promise<void> {
 
 const provider = () => chainRuntime('arc').provider;
 
+/**
+ * The wallet's code, read straight from the node. ethers answers a repeat of
+ * the same getCode within 250 ms from its own cache, so the read right after
+ * a fast receipt returned the pre-send '0x' and a call that worked was
+ * counted as a no-op (seen in the local E2E). `block` pins the read to the
+ * receipt's block.
+ */
+async function codeAt(wallet: string, block: string = 'latest'): Promise<string> {
+  return String(await provider().send('eth_getCode', [wallet, block]));
+}
+
 function rpcErrorData(err: unknown): string | null {
   const e = err as { data?: unknown; info?: { error?: { data?: unknown } }; error?: { data?: unknown } } | null;
   const data = e?.data ?? e?.info?.error?.data ?? e?.error?.data;
@@ -254,7 +265,7 @@ export async function relaySponsoredCall(input: SponsoredCallInput): Promise<Rel
     if (!taskOk.ok) return refuse(409, 'GAS_SPONSOR_UNAVAILABLE', `This task does not qualify (${taskOk.reason})`);
   }
 
-  const code = await provider().getCode(wallet);
+  const code = await codeAt(wallet);
   const delegated = isDelegatedTo(code, settings.delegate);
   let authorization = input.authorization;
   if (delegated) {
@@ -448,7 +459,7 @@ async function settle(settings: Enabled, reservation: Reservation, tx: Pick<Prep
   const cost = receipt.gasUsed * receipt.gasPrice;
   const proved = receipt.status === 1
     && receiptProvesCall(receipt.logs, settings.escrow, tx.kind, tx.taskId, tx.wallet)
-    && isDelegatedTo(await provider().getCode(tx.wallet), settings.delegate);
+    && isDelegatedTo(await codeAt(tx.wallet, ethers.toQuantity(receipt.blockNumber)), settings.delegate);
   const status = receipt.status !== 1 ? 'reverted' : proved ? 'confirmed' : 'noop';
   await settleTx(hash, status, receipt.gasUsed, cost);
   report(settings, tx.wallet, kindName, tx.taskId, status, { txHash: hash, gasUsed: receipt.gasUsed.toString(), costWei: cost.toString() });
@@ -512,9 +523,15 @@ export async function recoverSponsorTxs(settings: Enabled): Promise<void> {
  * Close each held reservation at the first of: its call landed (closed when
  * it was sent), the task left Assigned or was handed back off-chain
  * (released), or an hour passed since the assignment (expired, a strike).
+ * The strike is for an agent that sat on its reservation, so an hour lost to
+ * our side is released without one: sponsorship killed (the relay refuses
+ * every call), or a transaction of ours still out for it.
  */
 export async function sweepReservations(settings: Enabled, now = Date.now()): Promise<void> {
-  for (const r of await heldReservations(settings.chainId)) {
+  const held = await heldReservations(settings.chainId);
+  if (held.length === 0) return;
+  const killed = (await getControls(settings.chainId)).killed;
+  for (const r of held) {
     try {
       const state = await a2aStore.getState(r.taskHash);
       if (r.kind === 'submit' && state?.executorAddress && state.executorAddress.toLowerCase() !== r.agentWallet) {
@@ -529,7 +546,9 @@ export async function sweepReservations(settings: Enabled, now = Date.now()): Pr
       }
       if (now >= r.expiresAt.getTime()) {
         const stillWaiting = r.kind === 'submit' && assignedToAgent && task.status === TaskStatus.Assigned;
-        await closeReservation(r.id, stillWaiting ? 'expired' : 'released', stillWaiting ? 'held an hour after assignment without a submit' : undefined);
+        const ourSide = killed || (await txsForReservation(r.id)).length > 0;
+        const strike = stillWaiting && !ourSide;
+        await closeReservation(r.id, strike ? 'expired' : 'released', strike ? 'held an hour after assignment without a submit' : undefined);
       }
     } catch (err) {
       console.warn(`[gasSponsor] sweep of reservation ${r.id} failed: ${(err as Error).message}`);
