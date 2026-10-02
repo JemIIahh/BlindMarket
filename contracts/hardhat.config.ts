@@ -32,6 +32,15 @@ export default defineConfig({
       chainType: "l1",
       gas: 12_000_000,
     },
+    // The same in-process chain pinned to Prague, the hardfork that brought
+    // EIP-7702. BlindAgentDelegate.test.ts sends its type-4 transactions
+    // here; `default` keeps Hardhat's latest stable hardfork.
+    prague: {
+      type: "edr-simulated",
+      chainType: "l1",
+      gas: 12_000_000,
+      hardfork: "prague",
+    },
     "0g-testnet": {
       type: "http",
       chainType: "l1",
