@@ -24,7 +24,7 @@ const getTransaction = vi.fn(async (_hash: string) => null as { nonce: number } 
 const getMeta = vi.fn(async (_taskId: string) => ({
   taskId: '', targetExecutorType: 'agent', requiredCapabilities: ['research'], chain: 'base',
 }) as Record<string, unknown> | undefined);
-const emitTaskAvailable = vi.fn((_taskId: string, _meta: Record<string, unknown>) => {});
+const emitTaskAvailable = vi.fn((_taskId: string, _meta: Record<string, unknown>, _pinnedTo?: string) => {});
 const listAcceptedTasks = vi.fn(async () => [] as Array<{ taskId: string; executorAddress: string }>);
 const getSettlementDeadlineTTL = vi.fn(async (_taskId: string) => -2);
 const resolveTaskByHash = vi.fn(async (_hash: string) => ({ taskId: '1', chain: 'base' as const }));
@@ -57,7 +57,7 @@ vi.mock('./a2aStore.js', () => ({
   getMeta: (...a: unknown[]) => getMeta(...(a as [string])),
 }));
 vi.mock('./socket.js', () => ({
-  emitTaskAvailable: (...a: unknown[]) => emitTaskAvailable(...(a as [string, Record<string, unknown>])),
+  emitTaskAvailable: (...a: unknown[]) => emitTaskAvailable(...(a as [string, Record<string, unknown>, string | undefined])),
 }));
 vi.mock('./taskChain.js', () => ({
   resolveTaskByHash: (...a: unknown[]) => resolveTaskByHash(...(a as [string])),
@@ -156,7 +156,16 @@ describe('sweepGasLiveness with the deadline key gone', () => {
   it('announces a re-opened task to connected agents', async () => {
     accepted();
     await sweepGasLiveness();
-    expect(emitTaskAvailable).toHaveBeenCalledWith(TASK, { requiredCapabilities: ['research'], chain: 'base' });
+    expect(emitTaskAvailable).toHaveBeenCalledWith(TASK, { requiredCapabilities: ['research'], chain: 'base' }, undefined);
+  });
+
+  it('announces a re-opened pinned task to its target alone', async () => {
+    getMeta.mockResolvedValueOnce({
+      taskId: TASK, targetExecutorType: 'agent', requiredCapabilities: [], chain: 'arc', targetExecutor: EXECUTOR,
+    });
+    accepted();
+    await sweepGasLiveness();
+    expect(emitTaskAvailable).toHaveBeenCalledWith(TASK, { chain: 'arc' }, EXECUTOR);
   });
 
   it('does not announce when the compare-and-set lost', async () => {
@@ -188,7 +197,7 @@ describe('sweepGasLiveness reconciling a broadcast assign tx', () => {
     expect(getTransactionReceipt).toHaveBeenCalledWith(TX);
     expect(getTransaction).toHaveBeenCalledWith(TX);
     expect(tryReleaseAccepted).toHaveBeenCalledWith(TASK, { executorAddress: EXECUTOR, assignTxHash: TX });
-    expect(emitTaskAvailable).toHaveBeenCalledWith(TASK, expect.any(Object));
+    expect(emitTaskAvailable).toHaveBeenCalledWith(TASK, expect.any(Object), undefined);
   });
 
   it('gives no verdict on a missing receipt until the tx is comfortably old', async () => {

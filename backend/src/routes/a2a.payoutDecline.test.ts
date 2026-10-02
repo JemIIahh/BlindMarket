@@ -163,7 +163,7 @@ describe('POST /decline', () => {
     vi.mocked(a2aStore.advanceCascade).mockResolvedValue(null);
     const res = await decline();
     expect(res.status).toBe(200);
-    expect(emitTaskAvailable).toHaveBeenCalledWith(TASK, expect.objectContaining({ chain: 'arc' }));
+    expect(emitTaskAvailable).toHaveBeenCalledWith(TASK, expect.objectContaining({ chain: 'arc' }), undefined);
   });
 
   it('refuses anyone but the current holder', async () => {

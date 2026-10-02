@@ -27,7 +27,7 @@ import { demandFeed, MAX_DEMAND_LIMIT } from '../services/demandFeed.js';
 import { chainRuntime } from '../services/chainRuntime.js';
 import { postingChain, receiptSearchOrder, settlementChainConfig } from '../services/settlementChains.js';
 import { ethers } from 'ethers';
-import type { AuthRequest, AuthUser, ApiResponse, AgentCapability, A2ATaskMeta, DeployedAgent } from '../types.js';
+import type { AuthRequest, AuthUser, ApiResponse, AgentCapability, AgentExecutor, A2ATaskMeta, A2ATaskState, DeployedAgent } from '../types.js';
 import { AGENT_CAPABILITIES } from '../types.js';
 import { rankAgents, pickExplorationAgent, meetsRewardFloor } from '../services/agentScorer.js';
 import { supportsChain, supportsTaskChain } from '../services/executorChains.js';
@@ -402,6 +402,42 @@ a2aRouter.get('/tasks', async (req, res, next) => {
 const ASSIGNMENT_PENDING_MESSAGE =
   'On-chain assignment is still confirming. The task stays assigned to you — retry /accept shortly to confirm it.';
 
+/** The executor already holds the task: it accepted it and hasn't let it go. */
+function holdsTask(state: A2ATaskState | undefined, addrLc: string): boolean {
+  return state?.executorAddress?.toLowerCase() === addrLc &&
+    (state.status === 'accepted' || state.status === 'in_progress');
+}
+
+/**
+ * The /accept gates on the executor itself: a chain it can sign on, and its
+ * minimum reward. An executor that already holds the task skips them so it
+ * can always re-confirm and finish. Read-only, so it runs before the lock.
+ */
+async function refuseUnfitExecutor(taskId: string, address: string, agent: AgentExecutor, meta: A2ATaskMeta): Promise<void> {
+  // Assignment is on-chain and can't be undone, so a worker that can't sign
+  // on this task's chain never takes it.
+  if (!supportsTaskChain(agent, meta.chain)) {
+    await a2aStore.logAcceptAttempt(taskId, address, 'rejected_precheck');
+    throw new AppError(409, 'CHAIN_UNSUPPORTED', chainUnsupportedMessage(meta.chain));
+  }
+
+  // The executor's minimum reward. It only ordered cascade offers, so a
+  // pinned, broadcast or feed task below it was still accepted and run on
+  // the owner's model and gas (security audit run 1, C05). A rental is
+  // exempt: its owner priced that service and /tasks/index checked it.
+  if (hasRewardFloor(agent) && meta.serviceId === undefined) {
+    const reward = await rewardForFloor(taskId, meta);
+    if (!reward) {
+      await a2aStore.logAcceptAttempt(taskId, address, 'error');
+      throw new AppError(503, 'REWARD_UNAVAILABLE', "Couldn't read this task's reward to check it against your minimum — retry shortly");
+    }
+    if (!meetsRewardFloor(agent, reward)) {
+      await a2aStore.logAcceptAttempt(taskId, address, 'rejected_precheck');
+      throw new AppError(403, 'BELOW_MIN_REWARD', "This task's reward is below your registered minimum reward");
+    }
+  }
+}
+
 /**
  * POST /api/v1/a2a/tasks/:id/accept
  * Accept a task (capability match + reputation gate).
@@ -419,17 +455,13 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
   console.log(`[a2a] POST /accept: taskId=${taskId}, executor=${address}`);
 
   try {
-    // ── 1. Redis lock (first gate — serialises concurrent /accept calls) ──────
-    // Whoever acquires the lock proceeds; everyone else is rejected immediately,
-    // before touching Postgres or doing capability checks. Lock is per-task_id
-    // so agents racing for different tasks never block each other.
-    lockAcquired = await a2aStore.acquireAcceptLock(taskId, address);
-    if (!lockAcquired) {
-      await a2aStore.logAcceptAttempt(taskId, address, 'rejected_locked');
-      throw new AppError(409, 'ACCEPT_LOCKED', 'Another agent is currently accepting this task');
-    }
-
-    // ── 2. Cheap identity checks (reordered — cheapest first) ────────────────
+    // ── 1. Prechecks, before the lock ────────────────────────────────────────
+    // A caller refused here never holds the lock, so it can't make an agent
+    // that may take the task wait out a 409 ACCEPT_LOCKED: a non-target's
+    // doomed accept on a pinned task used to lock out the target until its
+    // next feed scan, minutes later. These checks only read, except tryExpire
+    // on a long-expired task, a compare-and-set the expiry sweep also runs
+    // without this lock. The accept's own writes all happen under the lock.
     const meta = await a2aStore.getMeta(taskId);
     if (!meta) {
       await a2aStore.logAcceptAttempt(taskId, address, 'rejected_precheck');
@@ -486,7 +518,7 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
       throw new AppError(403, 'SAME_OWNER', 'This sub-task was posted by an agent with the same owner, so it cannot be taken by this agent');
     }
 
-    // ── 4. Wrapped key / custody checks ──────────────────────────────────────
+    // Wrapped key / custody checks.
     const hasOwnSlice = !!meta.wrappedKeys?.[addrLc];
     const custodySvc = keyCustody.getKeyCustodyService();
     let activeCustodyKeyId: string | null = null;
@@ -551,11 +583,23 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
       }
     }
 
-    // ── 5. Postgres/Lua CAS (durable state transition) ───────────────────────
+    const holdsTaskBeforeLock = holdsTask(await a2aStore.getState(taskId), addrLc);
+    if (!holdsTaskBeforeLock) await refuseUnfitExecutor(taskId, address, agent, meta);
+
+    // ── 2. Redis lock (serialises the accepts that passed the prechecks) ─────
+    // Whoever acquires it proceeds; everyone else is rejected immediately. Lock
+    // is per task id, so agents racing for different tasks never block each
+    // other.
+    lockAcquired = await a2aStore.acquireAcceptLock(taskId, address);
+    if (!lockAcquired) {
+      await a2aStore.logAcceptAttempt(taskId, address, 'rejected_locked');
+      throw new AppError(409, 'ACCEPT_LOCKED', 'Another agent is currently accepting this task');
+    }
+
+    // ── 3. Lua CAS (durable state transition) ────────────────────────────────
     // Idempotent path: if the caller is already the recorded executor, skip CAS.
     const currentState = await a2aStore.getState(taskId);
-    if (currentState?.executorAddress?.toLowerCase() === addrLc &&
-        (currentState.status === 'accepted' || currentState.status === 'in_progress')) {
+    if (holdsTask(currentState, addrLc)) {
       console.log(`[a2a] accept: already accepted by ${address} for ${taskId} — re-confirming on-chain assignment`);
       const reSettleResult = await settleAssignment(taskId, address);
       if (!reSettleResult.success) {
@@ -594,31 +638,9 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
       res.json(body);
       return;
     }
-
-    // Chain gate — before the CAS, so a worker that can't sign on this task's
-    // chain never takes it (assignment is on-chain and can't be undone). After
-    // the idempotent branch above, so an executor already assigned can still
-    // re-confirm and finish.
-    if (!supportsTaskChain(agent, meta.chain)) {
-      await a2aStore.logAcceptAttempt(taskId, address, 'rejected_precheck');
-      throw new AppError(409, 'CHAIN_UNSUPPORTED', chainUnsupportedMessage(meta.chain));
-    }
-
-    // The executor's minimum reward. It only ordered cascade offers, so a
-    // pinned, broadcast or feed task below it was still accepted and run on
-    // the owner's model and gas (security audit run 1, C05). A rental is
-    // exempt: its owner priced that service and /tasks/index checked it.
-    if (hasRewardFloor(agent) && meta.serviceId === undefined) {
-      const reward = await rewardForFloor(taskId, meta);
-      if (!reward) {
-        await a2aStore.logAcceptAttempt(taskId, address, 'error');
-        throw new AppError(503, 'REWARD_UNAVAILABLE', "Couldn't read this task's reward to check it against your minimum — retry shortly");
-      }
-      if (!meetsRewardFloor(agent, reward)) {
-        await a2aStore.logAcceptAttempt(taskId, address, 'rejected_precheck');
-        throw new AppError(403, 'BELOW_MIN_REWARD', "This task's reward is below your registered minimum reward");
-      }
-    }
+    // The precheck let this caller skip the executor gates because it held the
+    // task then; it was released since, so this is a fresh accept after all.
+    if (holdsTaskBeforeLock) await refuseUnfitExecutor(taskId, address, agent, meta);
 
     // Sponsored gas (docs/AGENT-GAS-FUNDING.md): a worker that took this task
     // on a gasSponsored hint asks for its submit to be sponsored. Reserve the
@@ -1136,11 +1158,12 @@ async function sponsorHintFields(taskHash: string, agent?: string): Promise<{ ga
   return meta && (await sponsorHint(meta, agent)) ? { gasSponsored: true } : {};
 }
 
-/** Broadcast that a task is available, with its gasSponsored hint. */
-function announceAvailable(taskHash: string, requiredCaps: string[], chain?: TaskChain): void {
-  void sponsorHintFields(taskHash)
+/** Announce that a task is available, with its gasSponsored hint: to every
+ *  agent, or, pinned (`pinnedTo`), to its target alone with the hint for it. */
+function announceAvailable(taskHash: string, requiredCaps: string[], chain: TaskChain | undefined, pinnedTo: string | undefined): void {
+  void sponsorHintFields(taskHash, pinnedTo)
     .catch(() => ({}))
-    .then((hint) => emitTaskAvailable(taskHash, { ...broadcastMeta(requiredCaps, chain), ...hint }));
+    .then((hint) => emitTaskAvailable(taskHash, { ...broadcastMeta(requiredCaps, chain), ...hint }, pinnedTo));
 }
 
 /** Offer a task to one agent, with the gasSponsored hint for that agent. */
@@ -1151,9 +1174,10 @@ function announceOffer(agent: string, taskHash: string, requiredCaps: string[], 
 }
 
 /** A task that went back to `open` is announced like a fresh broadcast —
- *  otherwise connected agents only rediscover it on their next reconnect. */
+ *  otherwise connected agents only rediscover it on their next reconnect.
+ *  A pinned task is announced to its target alone. */
 function announceReopened(taskId: string, meta: A2ATaskMeta): void {
-  announceAvailable(taskId, meta.requiredCapabilities ?? [], meta.chain);
+  announceAvailable(taskId, meta.requiredCapabilities ?? [], meta.chain, meta.targetExecutor);
 }
 
 /**
@@ -1218,7 +1242,8 @@ function scheduleCascadeAdvance(
 async function offerNextInCascade(taskHash: string, requiredCaps: string[], chain?: TaskChain): Promise<void> {
   const next = await a2aStore.advanceCascade(taskHash);
   if (!next) {
-    announceAvailable(taskHash, requiredCaps, chain);
+    // Not pinned: a pinned task never gets a cascade or an offer to decline.
+    announceAvailable(taskHash, requiredCaps, chain, undefined);
     return;
   }
 
@@ -1318,7 +1343,7 @@ async function startRankedCascade(
 ): Promise<void> {
   const { entries, semantic } = await rankedEntries(taskHash, requiredCaps, routingMeta, taskReward);
   if (entries.length === 0) {
-    announceAvailable(taskHash, requiredCaps, chain);
+    announceAvailable(taskHash, requiredCaps, chain, routingMeta.targetExecutor);
     return;
   }
 
@@ -2081,13 +2106,13 @@ async function indexTaskFromEvent(
   //
   // A pinned (targetExecutor) task never cascades AT ALL: every exclusive
   // offer would go to an agent whose /accept 403s NOT_TARGET_EXECUTOR while
-  // the offer lock 409s the one agent actually allowed to accept. Broadcast
-  // reaches the pinned agent immediately and the accept gate keeps everyone
-  // else out. (Pinned+capped tasks previously entered the tag cascade —
-  // that was this same lockout.)
+  // the offer lock 409s the one agent actually allowed to accept. It is
+  // announced to the pinned agent alone (emitTaskAvailable), and the accept
+  // gate keeps everyone else out. (Pinned+capped tasks previously entered the
+  // tag cascade — that was this same lockout.)
   const semanticEligible = semanticMatch.semanticRoutingEligible(routingMeta);
   if (!config.cascadeEnabled || targetExecutor || (requiredCaps.length === 0 && !semanticEligible)) {
-    announceAvailable(taskHash, requiredCaps, taskChain);
+    announceAvailable(taskHash, requiredCaps, taskChain, targetExecutor);
   } else {
     // The reward carries its unit: an agent's floor is written in this
     // deployment's pricing unit and cannot be compared with an amount in
@@ -2095,7 +2120,7 @@ async function indexTaskFromEvent(
     const taskReward: TaskReward = { amount: BigInt(onChainAmount), unit: taskUnit };
     const broadcastAfter = (err: Error, stage: string) => {
       console.error(`[a2a] ${stage} failed for ${taskHash.slice(0, 10)}…:`, err.message);
-      announceAvailable(taskHash, requiredCaps, taskChain);
+      announceAvailable(taskHash, requiredCaps, taskChain, targetExecutor);
     };
 
     if (requiredCaps.length === 0) {

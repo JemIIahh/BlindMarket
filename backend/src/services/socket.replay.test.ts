@@ -17,6 +17,7 @@ const entry = (taskId: string, caps: string[] = []) =>
   ({ meta: { taskId, requiredCapabilities: caps }, state: {} }) as never;
 
 const fakeSocket = () => ({ emit: vi.fn() });
+const JOINER = '0xjoiner';
 
 beforeEach(() => vi.mocked(a2aStore.browseAgentTasks).mockReset());
 
@@ -26,7 +27,7 @@ describe('replayOpenBoard — a joining agent is told what is already open', () 
       entry('0xaaa'), entry('0xbbb', ['code_review']),
     ]);
     const s = fakeSocket();
-    const n = await replayOpenBoard(s);
+    const n = await replayOpenBoard(s, JOINER);
 
     expect(n).toBe(2);
     expect(s.emit).toHaveBeenCalledWith('task:available', { taskId: '0xaaa', meta: {} });
@@ -40,14 +41,26 @@ describe('replayOpenBoard — a joining agent is told what is already open', () 
       { meta: { taskId: '0xccc', requiredCapabilities: [], chain: 'base' }, state: {} } as never,
     ]);
     const s = fakeSocket();
-    await replayOpenBoard(s);
+    await replayOpenBoard(s, JOINER);
     expect(s.emit).toHaveBeenCalledWith('task:available', { taskId: '0xccc', meta: { chain: 'base' } });
+  });
+
+  it('leaves out a task pinned to another agent, and keeps one pinned to the joiner', async () => {
+    vi.mocked(a2aStore.browseAgentTasks).mockResolvedValue([
+      { meta: { taskId: '0xmine', requiredCapabilities: [], targetExecutor: '0xJOINER' }, state: {} } as never,
+      { meta: { taskId: '0xtheirs', requiredCapabilities: [], targetExecutor: '0xother' }, state: {} } as never,
+      entry('0xopen'),
+    ]);
+    const s = fakeSocket();
+    expect(await replayOpenBoard(s, JOINER)).toBe(2);
+    const replayed = s.emit.mock.calls.map((c) => (c[1] as { taskId: string }).taskId);
+    expect(replayed).toEqual(['0xmine', '0xopen']);
   });
 
   it('emits nothing when the board is empty', async () => {
     vi.mocked(a2aStore.browseAgentTasks).mockResolvedValue([]);
     const s = fakeSocket();
-    expect(await replayOpenBoard(s)).toBe(0);
+    expect(await replayOpenBoard(s, JOINER)).toBe(0);
     expect(s.emit).not.toHaveBeenCalled();
   });
 
@@ -56,7 +69,7 @@ describe('replayOpenBoard — a joining agent is told what is already open', () 
       Array.from({ length: BACKLOG_REPLAY_LIMIT + 40 }, (_, i) => entry(`0x${i}`)),
     );
     const s = fakeSocket();
-    expect(await replayOpenBoard(s)).toBe(BACKLOG_REPLAY_LIMIT);
+    expect(await replayOpenBoard(s, JOINER)).toBe(BACKLOG_REPLAY_LIMIT);
     expect(s.emit).toHaveBeenCalledTimes(BACKLOG_REPLAY_LIMIT);
   });
 
@@ -68,7 +81,7 @@ describe('replayOpenBoard — a joining agent is told what is already open', () 
         }, state: {} } as never,
     ]);
     const s = fakeSocket();
-    await replayOpenBoard(s);
+    await replayOpenBoard(s, JOINER);
     const payload = JSON.stringify(s.emit.mock.calls[0]);
     expect(payload).not.toContain('SECRET');
     expect(payload).not.toContain('rootHash');
@@ -83,7 +96,7 @@ describe('replayOpenBoard — a joining agent is told what is already open', () 
     const s = {
       emit: vi.fn(() => { throw new Error('socket closed'); }),
     };
-    await expect(replayOpenBoard(s)).resolves.toBe(0);
+    await expect(replayOpenBoard(s, JOINER)).resolves.toBe(0);
   });
 });
 

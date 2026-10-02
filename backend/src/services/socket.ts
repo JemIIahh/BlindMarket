@@ -56,11 +56,14 @@ interface Emitter { emit(event: string, data: unknown): unknown }
  * browseAgentTasks() supplies the list, so the deadline filter and capability
  * shape match what the REST board would return — an expired task is not
  * replayed. The payload carries only requiredCapabilities, exactly as
- * emitTaskAvailable does; no key material crosses this channel.
+ * emitTaskAvailable does; no key material crosses this channel. A task pinned
+ * to another agent is left out, as emitTaskAvailable leaves it out.
  */
-export async function replayOpenBoard(socket: Emitter): Promise<number> {
+export async function replayOpenBoard(socket: Emitter, agentAddress: string): Promise<number> {
   try {
-    const open = await a2aStore.browseAgentTasks();
+    const joiner = agentAddress.toLowerCase();
+    const open = (await a2aStore.browseAgentTasks())
+      .filter(({ meta }) => !meta.targetExecutor || meta.targetExecutor.toLowerCase() === joiner);
     const slice = open.slice(0, BACKLOG_REPLAY_LIMIT);
     for (const { meta } of slice) {
       socket.emit('task:available', {
@@ -169,7 +172,7 @@ export function initSocket(httpServer: HttpServer, corsOptions: CorsOptions): So
         // (frontend/src/pages/MyTasks.tsx) but listens for other events and
         // would discard every replayed one.
         if (shouldReplayBacklog(room, agentAddress)) {
-          void replayOpenBoard(socket).then((n) => {
+          void replayOpenBoard(socket, agentAddress!).then((n) => {
             if (n > 0) console.log(`[socket] replayed ${n} open task(s) to agent ${agentAddress?.slice(0, 10)}…`);
           });
         }
@@ -225,7 +228,15 @@ export function emitTaskOffer(
   });
 }
 
-/** Broadcast that a task is available for CAS-race (fallback when no offer taker). */
-export function emitTaskAvailable(taskId: string, meta: Record<string, unknown>): void {
-  rooms.tasks('task:available', { taskId, meta });
+/**
+ * Announce that a task is available for CAS-race (fallback when no offer
+ * taker). A task pinned to one executor (`pinnedTo`, its meta.targetExecutor)
+ * goes to that agent's room only: /accept refuses everyone else, so a
+ * broadcast only drew accepts that could not succeed. Same event either way,
+ * so deployed workers need no change. `pinnedTo` is required, undefined
+ * included, so no caller broadcasts a pinned task by leaving it out.
+ */
+export function emitTaskAvailable(taskId: string, meta: Record<string, unknown>, pinnedTo: string | undefined): void {
+  if (pinnedTo) emit(`agent:${pinnedTo.toLowerCase()}`, 'task:available', { taskId, meta });
+  else rooms.tasks('task:available', { taskId, meta });
 }

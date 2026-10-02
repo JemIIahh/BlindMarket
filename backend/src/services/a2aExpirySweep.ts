@@ -296,7 +296,8 @@ const MAX_ASSIGN_RECONCILES_PER_TICK = 5;
 
 /** A task that went back to `open` is announced like a fresh broadcast —
  *  otherwise connected agents only rediscover it on their next reconnect.
- *  Same payload as routes/a2a.ts announceReopened. Best-effort. */
+ *  Same payload and routing as routes/a2a.ts announceReopened (a pinned task
+ *  goes to its target alone). Best-effort. */
 async function announceReopened(taskId: string): Promise<void> {
   try {
     const meta = await a2aStore.getMeta(taskId);
@@ -305,8 +306,8 @@ async function announceReopened(taskId: string): Promise<void> {
     emitTaskAvailable(taskId, {
       ...(caps.length > 0 ? { requiredCapabilities: caps } : {}),
       ...(meta.chain ? { chain: meta.chain } : {}),
-      ...((await sponsorHint(meta)) ? { gasSponsored: true } : {}),
-    });
+      ...((await sponsorHint(meta, meta.targetExecutor)) ? { gasSponsored: true } : {}),
+    }, meta.targetExecutor);
   } catch (err) {
     console.warn(`[a2aExpirySweep] could not announce re-opened task ${taskId.slice(0, 10)}…:`, (err as Error).message);
   }
