@@ -23,6 +23,11 @@
  * behind its own checkpoint:
  *
  *   arc:events:dispute-checkpoint  → last block scanned for DisputeResolved
+ *
+ * And it closes the listing of a task its poster cancelled on-chain
+ * (TaskCancelled, see refundedTasks.handleTaskCancelled), behind another:
+ *
+ *   arc:events:cancel-checkpoint   → last block scanned for TaskCancelled
  */
 
 import type { EventLog } from 'ethers';
@@ -43,6 +48,7 @@ const KEY = {
   id2hash: (taskId: bigint | string) => `${chainScope('arc')}:id2hash:${String(taskId)}`,
   get checkpoint() { return `${chainScope('arc')}:events:checkpoint`; },
   get disputeCheckpoint() { return `${chainScope('arc')}:events:dispute-checkpoint`; },
+  get cancelCheckpoint() { return `${chainScope('arc')}:events:cancel-checkpoint`; },
 };
 
 function isPrunedHistoryError(err: unknown): boolean {
@@ -101,13 +107,15 @@ const DISPUTE_CONFIRMATIONS = 5;
 
 let timer: NodeJS.Timeout | null = null;
 let inFlightPromise: Promise<number | null> | null = null;
-let disputesInFlight = false;
+// The dispute and cancel scans that follow a TaskCreated tick.
+let followUpsInFlight = false;
 let disputeCheckpointSeeded = false;
 let disputeCheckpointLost = false;
 let lastFailureSig: string | null = null;
 let consecutiveFailures = 0;
 let lastLagLogAt = 0;
 let lastDisputeFailure: string | null = null;
+let lastCancelFailure: string | null = null;
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
@@ -148,13 +156,14 @@ export function stopArcEscrowEventLoop(): void {
 
 export async function pollArcEscrowOnce(): Promise<void> {
   const indexedTo = await indexOnce();
-  if (indexedTo === null || disputesInFlight) return;
-  disputesInFlight = true;
+  if (indexedTo === null || followUpsInFlight) return;
+  followUpsInFlight = true;
   try {
     await indexDisputes(indexedTo);
     await retryParkedDisputes('arc');
+    await indexCancels(indexedTo);
   } finally {
-    disputesInFlight = false;
+    followUpsInFlight = false;
   }
 }
 
@@ -275,6 +284,44 @@ async function indexDisputes(indexedTo: number): Promise<void> {
     if (msg !== lastDisputeFailure) {
       console.error('[arcEscrowEvents] DisputeResolved tick failed:', msg);
       lastDisputeFailure = msg;
+    }
+  }
+}
+
+/**
+ * Close the listing of every task its poster cancelled on-chain. The CLI and
+ * web app report a cancel through POST /tasks/:id/confirm-tx, but a cancel
+ * sent from the SDK or straight to the escrow reported nothing, and the task
+ * stayed listed. A first scan starts at the indexed head. A failed event
+ * fails the scan, which retries from the same block next tick; closing is a
+ * compare-and-set, so the events it already closed change nothing.
+ */
+async function indexCancels(indexedTo: number): Promise<void> {
+  if (!arcEscrow) return;
+  try {
+    const checkpointRaw = await redis.get(KEY.cancelCheckpoint);
+    const from = checkpointRaw ? Number(checkpointRaw) + 1 : indexedTo;
+    const to = Math.min(indexedTo, from + MAX_BLOCKS_PER_TICK - 1);
+    if (from > to) return;
+
+    const events = await queryArcEscrowLogs(arcEscrow.filters.TaskCancelled(), from, to);
+    if (events.length > 0) {
+      // Imported at call time, like disputeListener's taskChain import:
+      // taskChain loads this indexer.
+      const { handleTaskCancelled } = await import('./refundedTasks.js');
+      for (const ev of events) {
+        const args = (ev as EventLog).args;
+        if (!args) continue;
+        await handleTaskCancelled('arc', args.taskId as bigint);
+      }
+    }
+    await redis.set(KEY.cancelCheckpoint, String(to));
+    lastCancelFailure = null;
+  } catch (err) {
+    const msg = (err as Error).message;
+    if (msg !== lastCancelFailure) {
+      console.error('[arcEscrowEvents] TaskCancelled tick failed:', msg);
+      lastCancelFailure = msg;
     }
   }
 }

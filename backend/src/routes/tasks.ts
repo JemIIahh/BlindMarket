@@ -27,6 +27,7 @@ import { isSafeRegexSource } from '../services/rubricEngine.js';
 import { hostedVerifierNotOptedIn, VERIFIER_NOT_OPTED_IN_MESSAGE } from '../services/verifierDuty.js';
 import { refuseUnapprovedDelegation } from '../services/delegationGuard.js';
 import { withPosterAvatars } from '../services/avatarStore.js';
+import { closeRefundedA2ATask } from '../services/refundedTasks.js';
 import { BATCH_UNSUPPORTED, batchCreateSupport } from '../services/batchSupport.js';
 import { MAX_BATCH_REQUEST, WALLET_POSTING_BUDGET_PER_MIN } from '../constants.js';
 import { batchWeight, createWalletBudget, postingIpBudget } from '../middleware/rateLimit.js';
@@ -1237,51 +1238,13 @@ tasksRouter.post('/:id/confirm-tx', requireAuth, async (req: AuthRequest, res, n
       );
     }
 
-    // The escrow is gone — close the off-chain A2A state too, whatever live
-    // status it is in. Left open it keeps listing in a2a:open; left
-    // accepted/submitted/awaiting_verification it keeps feeding worker resume
-    // loops and the verifier queue. CAS, so a terminal state is never
-    // rewritten. Best-effort: the refund confirmation below must not depend on
-    // Redis, and a repeat confirm-tx retries the close.
-    //
-    // A2A state is keyed by taskHash alone and the escrow does not enforce
-    // unique hashes, so owning SOME escrow task with this hash proves nothing
-    // about the A2A task: anyone can createTask with a victim's hash, cancel it
-    // for an instant refund and land here. Close only when the A2A task is this
-    // caller's (meta.posterAddress, set from the authenticated poster at index
-    // time — the check that matters) and the hash index does not name a
-    // different escrow task. The indexers keep the first writer (SET NX), but
-    // an entry can be missing, so the index is the secondary guard; no
-    // recorded poster means no close.
+    // The escrow is gone — close the off-chain A2A state too, only when it is
+    // the caller's (closeRefundedA2ATask, which the Arc indexer also runs on
+    // TaskCancelled). Best-effort: the refund confirmation below must not
+    // depend on Redis, and a repeat confirm-tx retries the close.
     try {
       const onChain = await escrowService.getTaskOn(chain, taskId);
-      const taskHash = onChain.taskHash;
-      if (taskHash && (await a2aStore.getState(taskHash))) {
-        const [a2aMeta, mapped] = await Promise.all([
-          a2aStore.getMeta(taskHash),
-          resolveCachedTaskByHash(taskHash).catch(() => null),
-        ]);
-        const posterMatches = a2aMeta?.posterAddress?.toLowerCase() === from.toLowerCase();
-        const sameEscrowTask = !mapped || (mapped.chain === chain && mapped.taskId === String(taskId));
-        if (!posterMatches || !sameEscrowTask) {
-          console.warn(
-            `[tasks] confirm-tx: NOT closing A2A state ${taskHash.slice(0, 10)}… for ${chain} task ${taskId} — ` +
-              (posterMatches
-                ? `the hash index names ${mapped!.chain} task ${mapped!.taskId}`
-                : `caller ${from} is not the A2A task's poster`) +
-              ' (duplicate taskHash on another escrow task)',
-          );
-        } else {
-          const closed = await a2aStore.tryCloseOnChainTerminal(taskHash, settled);
-          if (closed.ok) {
-            await Promise.all([
-              a2aStore.clearOffer(taskHash).catch(() => {}),
-              a2aStore.clearCascade(taskHash).catch(() => {}),
-            ]);
-            console.log(`[tasks] confirm-tx: closed A2A state for task ${taskId} (${closed.previousStatus} → failed/${settled})`);
-          }
-        }
-      }
+      await closeRefundedA2ATask(chain, String(taskId), onChain.taskHash, from, settled, '[tasks] confirm-tx');
     } catch (closeErr) {
       console.warn(`[tasks] confirm-tx: could not close A2A state for task ${taskId}:`, (closeErr as Error).message);
     }
