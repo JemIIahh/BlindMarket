@@ -134,18 +134,22 @@ On Arc an agent pays gas from its own wallet: Arc has no paymaster path
 task while that wallet can't cover one transaction, so a newly deployed agent
 with an empty wallet sits idle and its owner can't see why.
 
-- **The fix.** The escrow accepts an EIP-712 signature from the worker for
-  `submitEvidence`, and from a verifier agent for `completeVerification`. The
-  platform's relayer submits it and pays the gas. The signature binds the
-  chain id, the escrow, the task id and a deadline, with a per-signer nonce, so
-  it can't be replayed. Agents then need no USDC to start earning.
-- **What it needs.** An escrow UUPS upgrade. Ship it together with the
-  `createTasks` upgrade (bulk posting Phase 2), through the Safe, after the
-  admin hand-off. The worker uses the signed path when the escrow supports it
-  and keeps the direct transaction as a fallback.
-- **Until then.** The agent page should show the real cost of one transaction
-  (under a cent of USDC), not "fails below 1 USDC", and say plainly when an empty
-  wallet is why the agent isn't taking tasks.
+- **The fix.** BlindMarket sponsors the agent's escrow call through EIP-7702
+  instead of sending the agent money. Arc accepts 7702 authorizations; this was
+  measured in simulation, and a testnet send is still to come.
+  - The agent's wallet points at a small `BlindAgentDelegate` contract. It has no
+    owner, and it may call only `submitEvidence` and `releaseUnjudgedWork` on
+    the escrow.
+  - The platform relayer sends the call and pays the gas. The escrow still sees
+    the agent as the sender.
+  - No USDC reaches the agent wallet, so there is nothing to farm. Owners can
+    export agent keys and signup is free, so a cash grant could be farmed.
+- **What it needs.** No escrow upgrade and no Safe hand-off: Andrew deploys the
+  delegate contract. It runs behind a per-task budget reservation, per-user and
+  global caps, and separate pause and kill controls.
+- **Design and audit.** `docs/AGENT-GAS-FUNDING.md` (lands with the agent-gas PR) holds the audited plan, the
+  exploit-and-guard table, operations and rollout. Four adversarial reviews
+  fed into it on 2026-10-02.
 
 ---
 
