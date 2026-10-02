@@ -5,6 +5,7 @@ vi.mock('./badgeStore.js', () => ({ getAgentBadges: vi.fn(async () => []) }));
 vi.mock('./reviewStore.js', () => ({ getAgentReviews: vi.fn(async () => ({ stats: { avgRating: 0, totalReviews: 0 } })) }));
 vi.mock('./a2aStore.js', () => ({ getExecutorTasks: vi.fn(async () => []) }));
 vi.mock('./reputationDecay.js', () => ({ getDecayedReputation: vi.fn(async () => ({ decayedScore: 0, tasksCompleted: 0, disputes: 0 })) }));
+vi.mock('./delegationGuard.js', () => ({ sameOwnerAddresses: vi.fn(async () => new Set<string>()) }));
 
 vi.mock('./settlementUnits.js', () => ({
   pricingUnit: () => pricing.unit,
@@ -14,6 +15,7 @@ vi.mock('./settlementUnits.js', () => ({
 
 import { scoreAgent, rankAgents, pickExplorationAgent, meetsRewardFloor, barredFromTask } from './agentScorer.js';
 import * as agentStore from './agentStore.js';
+import { sameOwnerAddresses } from './delegationGuard.js';
 import type { AgentExecutor } from '../types.js';
 
 const USDC = { symbol: 'USDC' as const, decimals: 6 as const };
@@ -107,7 +109,7 @@ describe('pickExplorationAgent', () => {
       { ...agent('0xverifier', ['summarization']), supportedChains: ['arc'] },
       { ...agent('0xother', ['summarization']), supportedChains: ['arc'] },
     ]);
-    const barred = barredFromTask({ posterAddress: '0xPOSTER', verifierAddress: '0xVerifier' });
+    const barred = await barredFromTask({ posterAddress: '0xPOSTER', verifierAddress: '0xVerifier' });
     for (let i = 0; i < 20; i++) {
       const pick = await pickExplorationAgent(['summarization'] as never, 'merit', undefined, fire, 'arc', barred);
       expect(pick?.address).toBe('0xother');
@@ -118,9 +120,16 @@ describe('pickExplorationAgent', () => {
 });
 
 describe('barredFromTask', () => {
-  it('names the poster and the verifier, lowercased, and nothing when neither is set', () => {
-    expect(barredFromTask({ posterAddress: '0xAbC', verifierAddress: '0xDeF' })).toEqual(new Set(['0xabc', '0xdef']));
-    expect(barredFromTask({})).toEqual(new Set());
+  it('names the poster and the verifier, lowercased, and nothing when neither is set', async () => {
+    expect(await barredFromTask({ posterAddress: '0xAbC', verifierAddress: '0xDeF' })).toEqual(new Set(['0xabc', '0xdef']));
+    expect(await barredFromTask({})).toEqual(new Set());
+  });
+
+  it("adds every address /accept refuses as the poster's owner (SAME_OWNER), from one lookup", async () => {
+    vi.mocked(sameOwnerAddresses).mockClear().mockResolvedValueOnce(new Set(['0xowner', '0xposter', '0xsibling']));
+    expect(await barredFromTask({ posterAddress: '0xPOSTER' })).toEqual(new Set(['0xposter', '0xowner', '0xsibling']));
+    expect(sameOwnerAddresses).toHaveBeenCalledTimes(1);
+    expect(sameOwnerAddresses).toHaveBeenCalledWith('0xPOSTER');
   });
 });
 

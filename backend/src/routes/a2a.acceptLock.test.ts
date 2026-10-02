@@ -43,6 +43,10 @@ vi.mock('../services/a2aStore.js', () => ({
 }));
 
 vi.mock('../services/agentStore.js', () => ({ getAgent: vi.fn() }));
+vi.mock('../services/delegationGuard.js', () => ({
+  sameOwnerSubtask: vi.fn(async () => false),
+  refuseUnapprovedDelegation: vi.fn(async () => {}),
+}));
 vi.mock('../services/keyCustodyService.js', () => ({
   getKeyCustodyService: vi.fn(() => null),
   isKeyCustodyEnabled: vi.fn(() => false),
@@ -75,6 +79,7 @@ import { globalErrorHandler } from '../middleware/errorHandler.js';
 import * as a2aStore from '../services/a2aStore.js';
 import * as agentStore from '../services/agentStore.js';
 import { pricingUnit } from '../services/settlementUnits.js';
+import { sameOwnerSubtask } from '../services/delegationGuard.js';
 
 const TARGET = '0xa000000000000000000000000000000000000001';
 const STRANGER = '0xb000000000000000000000000000000000000002';
@@ -100,6 +105,7 @@ beforeEach(() => {
   vi.mocked(a2aStore.getState).mockResolvedValue({ taskId: TASK, status: 'open' } as any);
   vi.mocked(a2aStore.getOffer).mockResolvedValue(undefined);
   vi.mocked(a2aStore.tryAccept).mockResolvedValue({ ok: true, state: {} } as any);
+  vi.mocked(sameOwnerSubtask).mockResolvedValue(false);
 });
 
 describe('POST /accept — a refused precheck never takes the accept lock', () => {
@@ -114,6 +120,10 @@ describe('POST /accept — a refused precheck never takes the accept lock', () =
       vi.mocked(agentStore.getAgent).mockResolvedValue(undefined);
     }],
     ['NOT_TARGET_EXECUTOR', 403, () => vi.mocked(a2aStore.getMeta).mockResolvedValue(openTask({ targetExecutor: TARGET }) as any)],
+    ['SAME_OWNER', 403, () => {
+      vi.mocked(a2aStore.getMeta).mockResolvedValue(openTask({ posterAddress: TARGET }) as any);
+      vi.mocked(sameOwnerSubtask).mockResolvedValue(true);
+    }],
     ['NEEDS_WRAP', 403, () => vi.mocked(a2aStore.getMeta).mockResolvedValue(openTask({ privacy: undefined, rootHash: '0xroot', wrappedKeys: {} }) as any)],
     ['OFFER_HELD', 409, () => {
       vi.mocked(a2aStore.getMeta).mockResolvedValue(openTask() as any);

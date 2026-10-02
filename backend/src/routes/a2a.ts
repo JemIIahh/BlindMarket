@@ -1272,15 +1272,17 @@ async function offerNextInCascade(taskHash: string, requiredCaps: string[], chai
  * exactly as before the flip. Throws are handled by the caller (→ broadcast).
  */
 /** The offer queue: semantic ranking when eligible (tag ranking appended as
- *  the remainder), else the capability-tag ranking. Shared by the normal
- *  cascade start and the exploration branch, so both walk the same order. */
+ *  the remainder), else the capability-tag ranking, without the `barred`
+ *  agents /accept would refuse (barredFromTask). Shared by the normal cascade
+ *  start and the exploration branch, so both walk the same order. */
 async function rankedEntries(
   taskHash: string,
   requiredCaps: AgentCapability[],
   routingMeta: semanticMatch.RoutingMeta,
   taskReward: TaskReward,
+  barred: ReadonlySet<string>,
 ): Promise<{ entries: a2aStore.CascadeEntry[]; semantic: boolean }> {
-  const semantic = await semanticMatch.semanticCascadeRanking(routingMeta, taskReward);
+  const semantic = await semanticMatch.semanticCascadeRanking(routingMeta, taskReward, barred);
   const tagEntries = async () =>
     (await rankAgents(requiredCaps, taskReward, routingMeta.chain)).map((r) => ({
       address: r.address,
@@ -1304,9 +1306,8 @@ async function rankedEntries(
       console.warn(`[a2a] tag-remainder append failed for ${taskHash.slice(0, 10)}…:`, (err as Error).message);
     }
   }
-  // The tag ranking scores every registered agent, the poster and verifier
-  // included; drop them here so neither ranking can offer them the task.
-  const barred = barredFromTask(routingMeta);
+  // The tag ranking scores every registered agent, the barred ones included;
+  // drop them here so neither ranking can offer them the task.
   entries = entries.filter((e) => !barred.has(e.address.toLowerCase()));
   return { entries: await liveCascadeEntries(entries), semantic: !!semantic };
 }
@@ -1343,9 +1344,10 @@ async function startRankedCascade(
   requiredCaps: AgentCapability[],
   routingMeta: semanticMatch.RoutingMeta,
   taskReward: TaskReward,
+  barred: ReadonlySet<string>,
   chain?: TaskChain,
 ): Promise<void> {
-  const { entries, semantic } = await rankedEntries(taskHash, requiredCaps, routingMeta, taskReward);
+  const { entries, semantic } = await rankedEntries(taskHash, requiredCaps, routingMeta, taskReward, barred);
   if (entries.length === 0) {
     announceAvailable(taskHash, requiredCaps, chain, routingMeta.targetExecutor);
     return;
@@ -2126,19 +2128,23 @@ async function indexTaskFromEvent(
       console.error(`[a2a] ${stage} failed for ${taskHash.slice(0, 10)}…:`, err.message);
       announceAvailable(taskHash, requiredCaps, taskChain, targetExecutor);
     };
+    // Who /accept would refuse, resolved once for this cascade build and
+    // shared by every ranking below. If it can't be read, the task broadcasts.
+    const barredOnce = barredFromTask(routingMeta);
 
     if (requiredCaps.length === 0) {
       // Caps-less semantic path: skip the exploration slot. With no cap
       // filter it would draw a random cold-start agent from the ENTIRE
       // registry, and its pass/timeout path (advanceCascade with no cascade
       // stored) broadcasts without semantic ranking ever running.
-      startRankedCascade(taskHash, requiredCaps, routingMeta, taskReward, taskChain)
+      barredOnce.then((barred) => startRankedCascade(taskHash, requiredCaps, routingMeta, taskReward, barred, taskChain))
         .catch((err) => broadcastAfter(err as Error, 'semantic scoring/offer'));
     } else {
       // Cold-start: try the exploration slot first. If a new agent is picked,
       // offer to them; if they pass or timeout, fall back to normal ranked flow.
       const agentMode = existingMeta?.agentSelectionMode ?? 'merit';
-      pickExplorationAgent(requiredCaps, agentMode, taskReward, undefined, taskChain, barredFromTask(routingMeta)).then(async (explorationPick) => {
+      barredOnce.then((barred) => pickExplorationAgent(requiredCaps, agentMode, taskReward, undefined, taskChain, barred)).then(async (explorationPick) => {
+        const barred = await barredOnce;
         if (explorationPick && (await isLiveAgent(explorationPick.address))) {
           console.log(`[a2a] exploration slot: offering to new agent ${explorationPick.address} (score=${explorationPick.score})`);
           const deadline = Date.now() + a2aStore.CASCADE_OFFER_MS;
@@ -2152,7 +2158,7 @@ async function indexTaskFromEvent(
           // into the ranking (see a2aStore.withExplorationHead). Best-effort:
           // if ranking fails the advance falls back to broadcast as before.
           const pickEntry = { address: explorationPick.address, score: explorationPick.score, displayName: explorationPick.displayName };
-          return rankedEntries(taskHash, requiredCaps, routingMeta, taskReward)
+          return rankedEntries(taskHash, requiredCaps, routingMeta, taskReward, barred)
             .then(({ entries, semantic }) => {
               if (config.semanticRoutingEnabled && semanticMatch.buildTaskRoutingText(routingMeta)) {
                 void semanticMatch.markShadowRoutedBy(taskHash, semantic ? 'semantic' : 'tag');
@@ -2166,12 +2172,12 @@ async function indexTaskFromEvent(
         }
 
         // Normal ranked flow (semantic when flipped, tag fallback inside).
-        return startRankedCascade(taskHash, requiredCaps, routingMeta, taskReward, taskChain)
+        return startRankedCascade(taskHash, requiredCaps, routingMeta, taskReward, barred, taskChain)
           .catch((err) => broadcastAfter(err as Error, 'scoring/offer'));
       }).catch((err) => {
         console.error(`[a2a] exploration slot failed for ${taskHash.slice(0, 10)}…:`, (err as Error).message);
         // Fallback: normal ranked flow
-        startRankedCascade(taskHash, requiredCaps, routingMeta, taskReward, taskChain)
+        barredOnce.then((barred) => startRankedCascade(taskHash, requiredCaps, routingMeta, taskReward, barred, taskChain))
           .catch((fallbackErr) => broadcastAfter(fallbackErr as Error, 'fallback scoring/offer'));
       });
     }

@@ -9,7 +9,8 @@ import { ethers } from 'ethers';
  * - The capability-tag ranking scores every registered agent, the task's own
  *   poster included, so a sub-task an agent posted was offered first to that
  *   same agent (seen live: task:offer to the poster, score 4.17), spending an
- *   exclusive window on an accept that 403s SELF_ACCEPT.
+ *   exclusive window on an accept that 403s SELF_ACCEPT. Agents of the
+ *   posting agent's owner are dropped the same way (SAME_OWNER).
  * - A task pinned to one executor was broadcast to every agent; their doomed
  *   accepts held the accept lock and made the target wait out a 409.
  *
@@ -51,6 +52,7 @@ vi.mock('../services/redis.js', () => ({
 vi.mock('../services/deployedAgentStore.js', () => ({
   loadAgentBySmartAccount: vi.fn(() => Promise.resolve(null)),
   loadAgentByWallet: vi.fn(() => Promise.resolve(null)),
+  walletsOfOwners: vi.fn(() => Promise.resolve([])),
 }));
 vi.mock('../services/socket.js', () => ({
   emitTaskOffer: vi.fn(),
@@ -105,9 +107,12 @@ import * as a2aStore from '../services/a2aStore.js';
 import { chainRuntime } from '../services/chainRuntime.js';
 import { rankAgents, pickExplorationAgent } from '../services/agentScorer.js';
 import { emitTaskAvailable, emitTaskOffer } from '../services/socket.js';
+import { loadAgentByWallet, walletsOfOwners } from '../services/deployedAgentStore.js';
 
 const POSTER = '0x9090000000000000000000000000000000000002';
 const OTHER = '0x0b0b000000000000000000000000000000000004';
+const OWNER = '0x0000000000000000000000000000000000000a11';
+const SIBLING = '0x5150000000000000000000000000000000000005'; // another of OWNER's agents
 const TARGET = '0x5b1b000000000000000000000000000000000003';
 const ESCROW = '0x00000000000000000000000000000000000e5c00';
 const TASK = '0x' + 'ab'.repeat(32);
@@ -158,6 +163,8 @@ beforeEach(() => {
     },
   } as any);
   vi.mocked(a2aStore.getMeta).mockResolvedValue(undefined);
+  vi.mocked(loadAgentByWallet).mockResolvedValue(null);
+  vi.mocked(walletsOfOwners).mockResolvedValue([]);
   // The tag ranking puts the poster first, as it did live.
   vi.mocked(rankAgents).mockResolvedValue([scored(POSTER, 4.17), scored(OTHER, 3.6)]);
 });
@@ -180,6 +187,23 @@ describe('POST /tasks/index — cascade candidates', () => {
     await vi.waitFor(() => expect(pickExplorationAgent).toHaveBeenCalled());
     const barred = vi.mocked(pickExplorationAgent).mock.calls[0][5];
     expect(barred).toEqual(new Set([POSTER.toLowerCase()]));
+  });
+
+  it("on a hosted agent's sub-task, never offers it to another agent of the same owner", async () => {
+    // POSTER is a hosted agent of OWNER (delegation on, or the listing is refused); SIBLING is OWNER's too.
+    vi.mocked(loadAgentByWallet).mockImplementation(async (a: string) =>
+      a.toLowerCase() === POSTER ? ({ id: 'p', ownerAddress: OWNER, authorizedOwners: [], walletAddress: POSTER, delegationEnabled: true } as never) : null);
+    vi.mocked(walletsOfOwners).mockResolvedValue([POSTER, SIBLING]);
+    vi.mocked(rankAgents).mockResolvedValue([scored(POSTER, 4.17), scored(SIBLING, 4.0), scored(OTHER, 3.6)]);
+
+    expect((await index(body())).status).toBe(200);
+    await vi.waitFor(() => expect(emitTaskOffer).toHaveBeenCalled());
+    expect(emitTaskOffer).toHaveBeenCalledWith(OTHER, TASK, expect.any(Object), 3.6, expect.any(Number));
+    expect(vi.mocked(a2aStore.setCascade).mock.calls[0][1].map((e) => e.address)).toEqual([OTHER]);
+    expect(vi.mocked(pickExplorationAgent).mock.calls[0][5]).toEqual(new Set([POSTER, OWNER, SIBLING]));
+    // One owner lookup for the whole build, not one per candidate.
+    expect(walletsOfOwners).toHaveBeenCalledTimes(1);
+    expect(walletsOfOwners).toHaveBeenCalledWith([OWNER]);
   });
 
   it('broadcasts instead when the poster was the only candidate', async () => {

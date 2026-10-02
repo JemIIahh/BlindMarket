@@ -280,6 +280,12 @@ describe('semanticCascadeRanking (Phase 2 flip — cascade offer queue)', () => 
     expect(out).toBeNull(); // both candidates gate-blocked → no usable queue
   });
 
+  it("drops the caller's barred set (same-owner agents, resolved once per cascade build)", async () => {
+    arm();
+    const out = await semanticCascadeRanking(meta, undefined, new Set(['0xaaa']));
+    expect(out?.map((e) => e.address)).toEqual(['0xbbb']);
+  });
+
   it('drops slice-less candidates on a sealed task with no custody blob (NEEDS_WRAP)', async () => {
     arm();
     const out = await semanticCascadeRanking({

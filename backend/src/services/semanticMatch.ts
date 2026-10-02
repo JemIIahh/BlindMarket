@@ -197,6 +197,8 @@ function toCascadeScore(c: SemanticCandidate | RerankedCandidate): number {
  * — so dropping an untagged candidate would deny an offer to an agent that is
  * in fact allowed to take the task. Still dropped are: the
  * poster themselves (SELF_ACCEPT), the designated verifier (IS_VERIFIER),
+ * agents of a posting hosted agent's owner (SAME_OWNER) — together `barred`,
+ * agentScorer.barredFromTask, resolved here when the caller did not —
  * candidates who can't decrypt a sealed brief (NEEDS_WRAP: no wrapped slice,
  * and no usable custody self-heal — which needs both a custody blob and the
  * agent's registered publicKey to re-wrap to; a blob sealed to a since-rotated
@@ -213,6 +215,7 @@ function toCascadeScore(c: SemanticCandidate | RerankedCandidate): number {
 export async function semanticCascadeRanking(
   meta: RoutingMeta,
   taskReward?: TaskReward | null,
+  barred?: ReadonlySet<string>,
 ): Promise<CascadeEntry[] | null> {
   if (!semanticRoutingEligible(meta)) return null;
   try {
@@ -225,7 +228,7 @@ export async function semanticCascadeRanking(
     const agents = await Promise.all(
       ranked.map((c) => agentStore.getAgent(c.address).catch(() => undefined)),
     );
-    const barred = barredFromTask(meta);
+    const refused = barred ?? (await barredFromTask(meta));
     // A sealed brief is only acceptable to agents holding a wrapped slice, or
     // — when a custody blob exists — agents accept can re-wrap to, which
     // requires their registered publicKey. Everyone else 403s NEEDS_WRAP
@@ -236,7 +239,7 @@ export async function semanticCascadeRanking(
       const agent = agents[i];
       if (!agent) continue;
       const addrLc = ranked[i].address.toLowerCase();
-      if (barred.has(addrLc)) continue; // SELF_ACCEPT / IS_VERIFIER
+      if (refused.has(addrLc)) continue; // SELF_ACCEPT / IS_VERIFIER / SAME_OWNER
       if (sealed && !meta.wrappedKeys?.[addrLc] && (!meta.keyCustodyBlob || !agent.publicKey)) continue; // NEEDS_WRAP
       // Capability gate removed — semantic KNN is the primary routing signal.
       // Agents are ranked by embedding similarity, not declared capability tags.

@@ -48,6 +48,13 @@ const hosted = vi.hoisted(() => new Map<string, Record<string, unknown>>());
 vi.mock('../services/deployedAgentStore.js', () => ({
   loadAgentByWallet: vi.fn(async (a: string) => hosted.get(a.toLowerCase()) ?? null),
   loadAgentBySmartAccount: vi.fn(async () => null),
+  // Same rows, queried by owner as the real one does (owner or linked owner).
+  walletsOfOwners: vi.fn(async (owners: string[]) => {
+    const want = owners.map((o) => o.toLowerCase());
+    return [...hosted.values()]
+      .filter((a) => [a.ownerAddress, ...((a.authorizedOwners as string[] | undefined) ?? [])].some((o) => want.includes(String(o).toLowerCase())))
+      .map((a) => String(a.walletAddress).toLowerCase());
+  }),
 }));
 vi.mock('../services/socket.js', () => ({
   emitTaskOffer: vi.fn(),
