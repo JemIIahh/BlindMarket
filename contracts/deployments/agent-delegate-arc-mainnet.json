@@ -1,0 +1,16 @@
+{
+  "network": "arc-mainnet",
+  "chainId": 5042,
+  "deployer": "0x7820e786d9AaeBbEbdcE4b0CFaF0db092e34E5Aa",
+  "timestamp": "2026-10-02T15:55:53.284Z",
+  "note": "BlindAgentDelegate — EIP-7702 delegate for hosted agent wallets; the relayer pays their submitEvidence / releaseUnjudgedWork gas. No owner. Bound for good to config.escrow.",
+  "contracts": {
+    "BlindAgentDelegate": "0xF7b7C2e21385e59080862c7031ed568B561753a0"
+  },
+  "config": {
+    "escrow": "0xd2B819B57a9568Cb6bFc98C687F9a851EC8330C4"
+  },
+  "blocks": {
+    "BlindAgentDelegate": 23904004
+  }
+}
