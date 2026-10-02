@@ -12,7 +12,7 @@ vi.mock('./settlementUnits.js', () => ({
     a.symbol === b.symbol && a.decimals === b.decimals,
 }));
 
-import { scoreAgent, rankAgents, pickExplorationAgent, meetsRewardFloor } from './agentScorer.js';
+import { scoreAgent, rankAgents, pickExplorationAgent, meetsRewardFloor, barredFromTask } from './agentScorer.js';
 import * as agentStore from './agentStore.js';
 import type { AgentExecutor } from '../types.js';
 
@@ -99,6 +99,28 @@ describe('pickExplorationAgent', () => {
     }
     vi.mocked(agentStore.listAgents).mockResolvedValue([{ ...agent('0xbase', []), supportedChains: ['base'] }]);
     expect(await pickExplorationAgent([] as never, 'merit', undefined, fire, 'arc')).toBeNull();
+  });
+
+  it("never picks the task's poster or verifier (barredFromTask)", async () => {
+    vi.mocked(agentStore.listAgents).mockResolvedValue([
+      { ...agent('0xposter', ['summarization']), supportedChains: ['arc'] },
+      { ...agent('0xverifier', ['summarization']), supportedChains: ['arc'] },
+      { ...agent('0xother', ['summarization']), supportedChains: ['arc'] },
+    ]);
+    const barred = barredFromTask({ posterAddress: '0xPOSTER', verifierAddress: '0xVerifier' });
+    for (let i = 0; i < 20; i++) {
+      const pick = await pickExplorationAgent(['summarization'] as never, 'merit', undefined, fire, 'arc', barred);
+      expect(pick?.address).toBe('0xother');
+    }
+    vi.mocked(agentStore.listAgents).mockResolvedValue([{ ...agent('0xposter', ['summarization']), supportedChains: ['arc'] }]);
+    expect(await pickExplorationAgent(['summarization'] as never, 'merit', undefined, fire, 'arc', barred)).toBeNull();
+  });
+});
+
+describe('barredFromTask', () => {
+  it('names the poster and the verifier, lowercased, and nothing when neither is set', () => {
+    expect(barredFromTask({ posterAddress: '0xAbC', verifierAddress: '0xDeF' })).toEqual(new Set(['0xabc', '0xdef']));
+    expect(barredFromTask({})).toEqual(new Set());
   });
 });
 

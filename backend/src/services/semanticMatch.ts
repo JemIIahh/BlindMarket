@@ -1,7 +1,7 @@
 import { getPool } from './neonDb.js';
 import { config } from '../config.js';
 import { embed, toVectorLiteral, embeddingModelId, EMBED_FETCH_TIMEOUT_MS } from './embeddingService.js';
-import { rankAgents, meetsRewardFloor, dominanceMultiplier } from './agentScorer.js';
+import { rankAgents, meetsRewardFloor, dominanceMultiplier, barredFromTask } from './agentScorer.js';
 import type { TaskReward } from './settlementUnits.js';
 import { supportsChain } from './executorChains.js';
 import { buildAgentDoc } from './agentEmbedding.js';
@@ -225,8 +225,7 @@ export async function semanticCascadeRanking(
     const agents = await Promise.all(
       ranked.map((c) => agentStore.getAgent(c.address).catch(() => undefined)),
     );
-    const posterLc = meta.posterAddress?.toLowerCase();
-    const verifierLc = meta.verifierAddress?.toLowerCase();
+    const barred = barredFromTask(meta);
     // A sealed brief is only acceptable to agents holding a wrapped slice, or
     // — when a custody blob exists — agents accept can re-wrap to, which
     // requires their registered publicKey. Everyone else 403s NEEDS_WRAP
@@ -237,8 +236,7 @@ export async function semanticCascadeRanking(
       const agent = agents[i];
       if (!agent) continue;
       const addrLc = ranked[i].address.toLowerCase();
-      if (posterLc && addrLc === posterLc) continue;   // SELF_ACCEPT
-      if (verifierLc && addrLc === verifierLc) continue; // IS_VERIFIER
+      if (barred.has(addrLc)) continue; // SELF_ACCEPT / IS_VERIFIER
       if (sealed && !meta.wrappedKeys?.[addrLc] && (!meta.keyCustodyBlob || !agent.publicKey)) continue; // NEEDS_WRAP
       // Capability gate removed — semantic KNN is the primary routing signal.
       // Agents are ranked by embedding similarity, not declared capability tags.

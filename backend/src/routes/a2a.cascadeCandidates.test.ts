@@ -6,6 +6,10 @@ import { ethers } from 'ethers';
 /**
  * Who POST /a2a/tasks/index announces a new task to.
  *
+ * - The capability-tag ranking scores every registered agent, the task's own
+ *   poster included, so a sub-task an agent posted was offered first to that
+ *   same agent (seen live: task:offer to the poster, score 4.17), spending an
+ *   exclusive window on an accept that 403s SELF_ACCEPT.
  * - A task pinned to one executor was broadcast to every agent; their doomed
  *   accepts held the accept lock and made the target wait out a 409.
  *
@@ -156,6 +160,35 @@ beforeEach(() => {
   vi.mocked(a2aStore.getMeta).mockResolvedValue(undefined);
   // The tag ranking puts the poster first, as it did live.
   vi.mocked(rankAgents).mockResolvedValue([scored(POSTER, 4.17), scored(OTHER, 3.6)]);
+});
+
+describe('POST /tasks/index — cascade candidates', () => {
+  it("never offers the task to its own poster, and keeps it out of the stored queue", async () => {
+    const res = await index(body());
+    expect(res.status).toBe(200);
+
+    await vi.waitFor(() => expect(emitTaskOffer).toHaveBeenCalled());
+    expect(emitTaskOffer).toHaveBeenCalledWith(OTHER, TASK, expect.any(Object), 3.6, expect.any(Number));
+    expect(emitTaskOffer).not.toHaveBeenCalledWith(POSTER, expect.anything(), expect.anything(), expect.anything(), expect.anything());
+    expect(a2aStore.setOffer).toHaveBeenCalledWith(TASK, expect.objectContaining({ address: OTHER }));
+    const queue = vi.mocked(a2aStore.setCascade).mock.calls[0][1];
+    expect(queue.map((e) => e.address)).toEqual([OTHER]);
+  });
+
+  it('bars the poster from the exploration slot too', async () => {
+    await index(body());
+    await vi.waitFor(() => expect(pickExplorationAgent).toHaveBeenCalled());
+    const barred = vi.mocked(pickExplorationAgent).mock.calls[0][5];
+    expect(barred).toEqual(new Set([POSTER.toLowerCase()]));
+  });
+
+  it('broadcasts instead when the poster was the only candidate', async () => {
+    vi.mocked(rankAgents).mockResolvedValue([scored(POSTER, 4.17)]);
+    await index(body());
+    await vi.waitFor(() => expect(emitTaskAvailable).toHaveBeenCalled());
+    expect(emitTaskOffer).not.toHaveBeenCalled();
+    expect(emitTaskAvailable).toHaveBeenCalledWith(TASK, { requiredCapabilities: ['summarization'], chain: 'arc' }, undefined);
+  });
 });
 
 describe('POST /tasks/index — a pinned task', () => {

@@ -153,6 +153,19 @@ export function hasAllCapabilities(
 }
 
 /**
+ * Addresses /accept refuses on a task whatever else is true: its poster
+ * (SELF_ACCEPT) and its designated verifier (IS_VERIFIER). Every path that
+ * builds cascade candidates drops them, so no exclusive offer window is spent
+ * on an agent that can never take the task (seen live: a sub-task's cascade
+ * offered it first to the agent that posted it).
+ */
+export function barredFromTask(meta: { posterAddress?: string; verifierAddress?: string }): Set<string> {
+  return new Set(
+    [meta.posterAddress, meta.verifierAddress].filter((a): a is string => !!a).map((a) => a.toLowerCase()),
+  );
+}
+
+/**
  * Shared minReward floor check — the ONE definition of "is this task's reward
  * at or above the agent's declared floor". A malformed floor keeps the agent
  * (never exclude on bad data). Used by rankAgents, pickExplorationAgent, and
@@ -204,7 +217,7 @@ function randomPick<T>(arr: T[]): T {
 /**
  * Exploration slot: randomly select a new/small agent to receive a cascade
  * offer first, bypassing normal ranking. Returns null if no eligible agent
- * or exploration doesn't trigger.
+ * or exploration doesn't trigger. `barred` (barredFromTask) is never picked.
  */
 export async function pickExplorationAgent(
   requiredCapabilities: AgentCapability[],
@@ -212,6 +225,7 @@ export async function pickExplorationAgent(
   taskReward?: TaskReward | null,
   rng: () => number = Math.random,
   chain?: string,
+  barred: ReadonlySet<string> = new Set(),
 ): Promise<ScoredAgent | null> {
   const rate = mode === 'balanced' ? EXPLORATION_RATE_BALANCED : EXPLORATION_RATE;
   if (rng() >= rate) return null;
@@ -226,7 +240,8 @@ export async function pickExplorationAgent(
   // do it. (The ranked flow that follows scores overlap but does not filter
   // on it — capability tags are soft there; see semanticMatch.ts.)
   const eligible = agents.filter((a) =>
-    meetsRewardFloor(a, taskReward ?? null)
+    !barred.has(a.address.toLowerCase())
+    && meetsRewardFloor(a, taskReward ?? null)
     && hasAllCapabilities(a, requiredCapabilities)
     && supportsChain(a, chain),
   );

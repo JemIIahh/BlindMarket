@@ -38,6 +38,8 @@ vi.mock('./agentScorer.js', () => ({
   },
   hasAllCapabilities: (a: { capabilities: string[] }, req: string[]) =>
     req.every((c) => a.capabilities.includes(c)),
+  barredFromTask: (m: { posterAddress?: string; verifierAddress?: string }) =>
+    new Set([m.posterAddress, m.verifierAddress].filter((a): a is string => !!a).map((a) => a.toLowerCase())),
 }));
 vi.mock('./agentStore.js', () => ({ getAgent: vi.fn() }));
 vi.mock('./agentEmbedding.js', () => ({ buildAgentDoc: vi.fn() }));

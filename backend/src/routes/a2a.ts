@@ -29,7 +29,7 @@ import { postingChain, receiptSearchOrder, settlementChainConfig } from '../serv
 import { ethers } from 'ethers';
 import type { AuthRequest, AuthUser, ApiResponse, AgentCapability, AgentExecutor, A2ATaskMeta, A2ATaskState, DeployedAgent } from '../types.js';
 import { AGENT_CAPABILITIES } from '../types.js';
-import { rankAgents, pickExplorationAgent, meetsRewardFloor } from '../services/agentScorer.js';
+import { rankAgents, pickExplorationAgent, meetsRewardFloor, barredFromTask } from '../services/agentScorer.js';
 import { supportsChain, supportsTaskChain } from '../services/executorChains.js';
 import { emitTaskOffer, emitTaskAvailable, hasAgentSocket } from '../services/socket.js';
 import { isAlive } from '../services/redis.js';
@@ -1304,6 +1304,10 @@ async function rankedEntries(
       console.warn(`[a2a] tag-remainder append failed for ${taskHash.slice(0, 10)}…:`, (err as Error).message);
     }
   }
+  // The tag ranking scores every registered agent, the poster and verifier
+  // included; drop them here so neither ranking can offer them the task.
+  const barred = barredFromTask(routingMeta);
+  entries = entries.filter((e) => !barred.has(e.address.toLowerCase()));
   return { entries: await liveCascadeEntries(entries), semantic: !!semantic };
 }
 
@@ -2134,7 +2138,7 @@ async function indexTaskFromEvent(
       // Cold-start: try the exploration slot first. If a new agent is picked,
       // offer to them; if they pass or timeout, fall back to normal ranked flow.
       const agentMode = existingMeta?.agentSelectionMode ?? 'merit';
-      pickExplorationAgent(requiredCaps, agentMode, taskReward, undefined, taskChain).then(async (explorationPick) => {
+      pickExplorationAgent(requiredCaps, agentMode, taskReward, undefined, taskChain, barredFromTask(routingMeta)).then(async (explorationPick) => {
         if (explorationPick && (await isLiveAgent(explorationPick.address))) {
           console.log(`[a2a] exploration slot: offering to new agent ${explorationPick.address} (score=${explorationPick.score})`);
           const deadline = Date.now() + a2aStore.CASCADE_OFFER_MS;
