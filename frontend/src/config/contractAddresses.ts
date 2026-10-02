@@ -30,22 +30,26 @@ export const CONTRACT_ADDRESSES = {
   "arc": {
     "blindEscrow": "0xd2B819B57a9568Cb6bFc98C687F9a851EC8330C4",
     "agentFactory": "0x5A3312575F66c403ebcFfD1D9Fb868736B5102eb",
+    "blindAgentDelegate": "0xF7b7C2e21385e59080862c7031ed568B561753a0",
     "USDC": "0x3600000000000000000000000000000000000000"
   },
   "arcTestnet": {
     "blindEscrow": "0xaBf70843E0380F1e749d2b85C30dD6820Ff5C731",
     "agentFactory": "0x1E9Abb2F2e66b8Af35BED730500A94760E133a3B",
+    "blindAgentDelegate": "0x4AFf5FE7f19779EEfBA8515fB1BaE84A8F3a20B6",
     "USDC": "0x3600000000000000000000000000000000000000"
   }
 } as const;
 export const DEPLOYMENT_BLOCKS = {
   "arc": {
     "blindEscrow": 22772389,
-    "agentFactory": 22772454
+    "agentFactory": 22772454,
+    "blindAgentDelegate": 23904004
   },
   "arcTestnet": {
     "blindEscrow": 63235379,
-    "agentFactory": 63589837
+    "agentFactory": 63589837,
+    "blindAgentDelegate": 65139899
   }
 } as const;
 export const AA_ADDRESSES = {

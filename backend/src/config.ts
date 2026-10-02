@@ -570,7 +570,7 @@ export const config = {
     enabled: optional('GAS_SPONSOR_ENABLED', 'false').trim().toLowerCase() === 'true',
     privateKey: process.env.GAS_SPONSOR_PRIVATE_KEY || '',
     /** Highest raw gas estimate the relayer sends; the gas limit is the estimate × 1.15. */
-    maxGas: optional('GAS_SPONSOR_MAX_GAS', '200000').trim(),
+    maxGas: optional('GAS_SPONSOR_MAX_GAS', '185000').trim(),
     /** maxFeePerGas ceiling, in gwei. */
     maxFeeGwei: optional('GAS_SPONSOR_MAX_FEE_GWEI', '100').trim(),
     /** Smallest task reward that qualifies, in USDC. */

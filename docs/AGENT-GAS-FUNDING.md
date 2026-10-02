@@ -197,10 +197,10 @@ Every one of these must hold:
    equals wallet, status Assigned, the task was ours, and more than 60 s remain
    before the deadline. Then it:
    - simulates the exact transaction and refuses a raw estimate above the
-     ceiling. The ceiling starts at 200k. Locally on Hardhat, the real delegate
-     measured 150,669 gas for a first submit with the authorization, 108,593
-     for a later submit and 133,599 for a release. It is then set to the Arc
-     testnet first submit × 1.2;
+     ceiling, `GAS_SPONSOR_MAX_GAS`, which defaults to 185k. That is the Arc
+     testnet first submit (an estimate of 151,840, of which 150,659 was used)
+     × 1.2. Later submits measured 108,559 on Arc testnet. A release measured
+     94,599–133,599 locally and has not run on Arc;
    - sets the gas limit to estimate × 1.15;
    - caps `maxFeePerGas` at 100 gwei;
    - sends.
@@ -303,12 +303,23 @@ Each step must be **executed and observed**:
      an expired deadline, and a re-pointed wallet are all refused.
    - The ERC-1271 check works.
    - A stale authorization is detected as a no-op.
-2. **Arc testnet, real sends.**
-   - Authorization and a sponsored `submitEvidence` that settle and pay the
-     agent.
-   - ERC-20 and native transfers into a delegated wallet.
-   - Withdraw from a delegated wallet.
-   - A CCTP mint into one.
+2. **Arc testnet, real sends.** Done 2026-10-02 with delegate
+   `0x4AFf5FE7f19779EEfBA8515fB1BaE84A8F3a20B6`:
+   - A fresh agent wallet held 0 gas. A sponsored first submit carried the
+     authorization: 150,659 gas at 21.5 gwei, about 0.0032 USDC. The task was
+     Submitted with matching evidence, and the wallet's code became
+     `0xef0100‖delegate`.
+   - A later sponsored submit used 108,559 gas at 24.5 gwei, about
+     0.0027 USDC. The agent's balance was still 0.
+   - An ERC-20 USDC transfer into the delegated wallet arrived, and the
+     native balance reflects the same USDC. A native send with gas estimation
+     arrived (21,072 gas); one capped at 21,000 gas reverted, as expected.
+   - Not run on Arc yet: settlement payout via the escrow, withdraw, and a
+     CCTP mint into a delegated wallet. These were covered locally; the
+     ERC-20 credit above is the same mechanism a payout uses.
+   - Mainnet delegate: `0xF7b7C2e21385e59080862c7031ed568B561753a0`, bound to
+     escrow `0xd2B8…30C4`. Its code size, `ESCROW()`, domain and typehash
+     were checked on-chain.
 3. **Full hosted-agent E2E on the local harness.** An agent with a zero balance
    takes, submits and settles a task, with its balance at zero throughout.
    - Caps are exercised.
