@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '../../context/AuthContext';
 import { authedGet } from '../../lib/api';
-import { OG_COMPUTE_ACCOUNT_0G, readinessView, type AgentReadiness } from '../../lib/agentReadiness';
+import { OG_COMPUTE_ACCOUNT_0G, readinessView, type AgentReadiness, type GasState } from '../../lib/agentReadiness';
 import { CopyButton, Icon } from '../bb';
 
 /**
@@ -14,11 +14,13 @@ export const WARN_BOX =
 
 /**
  * Owner-only: whether this agent is taking tasks, from its worker's last
- * heartbeat. A running agent takes no task until its model answers a check;
- * a 0g-compute agent first needs 0G in its wallet to open its 0G Compute
- * account, and this says how much and where to send it.
+ * heartbeat and its gas. A running agent takes no task until its model
+ * answers a check; a 0g-compute agent first needs 0G in its wallet to open
+ * its 0G Compute account, and this says how much and where to send it. With
+ * its model fine, it still takes no task whose gas its wallet can't pay,
+ * unless BlindMarket pays it.
  */
-export function AgentReadinessCard({ agentId, running, className = '' }: { agentId: string; running: boolean; className?: string }) {
+export function AgentReadinessCard({ agentId, running, gas, className = '' }: { agentId: string; running: boolean; gas?: GasState; className?: string }) {
   const { isAuthenticated } = useAuth();
   const { data } = useQuery({
     queryKey: ['agent-readiness', agentId],
@@ -27,17 +29,24 @@ export function AgentReadinessCard({ agentId, running, className = '' }: { agent
     refetchInterval: 20_000,
   });
   if (!running) return null;
-  const view = readinessView(data?.readiness);
+  const view = readinessView(data?.readiness, gas);
 
-  if (view.kind === 'ready' || view.kind === 'checking') {
-    const ready = view.kind === 'ready';
+  if (view.kind === 'ready' || view.kind === 'checking' || view.kind === 'sponsored_only') {
+    const ready = view.kind !== 'checking';
+    const title = view.kind === 'sponsored_only' ? 'Taking tasks whose gas BlindMarket pays' : ready ? 'Taking tasks' : 'Checking its model';
+    const detail =
+      view.kind === 'sponsored_only'
+        ? `Its wallet holds less than ${view.minLabel ?? 'one transaction\'s gas'}${view.minLabel ? ` ${view.symbol}` : ''}, so it takes no other task. Top it up to take the rest.`
+        : view.kind === 'ready'
+          ? view.sponsored
+            ? 'Its model answered the last check. BlindMarket pays the gas of its first submit on qualifying tasks.'
+            : 'Its model answered the last check.'
+          : 'It takes no task until the check passes.';
     return (
       <div className={`card-dark px-5 py-3.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-sm ${className}`}>
         <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${ready ? 'bg-ok' : 'bg-ink-3 animate-pulse'}`} aria-hidden />
-        <span className="text-ink">{ready ? 'Taking tasks' : 'Checking its model'}</span>
-        <span className="text-ink-3">
-          {ready ? 'Its model answered the last check.' : 'It takes no task until the check passes.'}
-        </span>
+        <span className="text-ink">{title}</span>
+        <span className="text-ink-3">{detail}</span>
       </div>
     );
   }
@@ -60,6 +69,21 @@ export function AgentReadinessCard({ agentId, running, className = '' }: { agent
               </div>
               <p className="text-xs text-ink-3">
                 Holds {view.holds} 0G of the {view.need} 0G it needs. It checks again every 5 minutes, so no restart is needed.
+              </p>
+            </>
+          ) : view.kind === 'gas' ? (
+            <>
+              <div className="text-sm font-semibold text-ink">Not taking tasks</div>
+              <p className="text-sm text-ink-2 leading-relaxed">
+                {view.minLabel !== null ? (
+                  <>
+                    Its wallet holds less than <span className="font-mono">{view.minLabel} {view.symbol}</span>, what one
+                    transaction can cost at current gas prices.
+                  </>
+                ) : (
+                  <>Its wallet is empty, so it can't pay gas.</>
+                )}{' '}
+                {view.sponsorshipPaused ? 'Gas sponsorship is paused.' : 'Top it up below to resume.'}
               </p>
             </>
           ) : (

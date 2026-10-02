@@ -46,3 +46,28 @@ describe('readinessView', () => {
       .toEqual({ kind: 'blocked', reason: 'Its model check has not passed.' });
   });
 });
+
+describe('readinessView with the gas gate', () => {
+  const ready: AgentReadiness = { ready: true, reason: null, reportedAt: at };
+  const gas = (low: boolean, state?: 'sponsored' | 'paused' | 'off') => ({
+    low, minLabel: '0.0103', symbol: 'USDC', ...(state ? { sponsorship: { state } } : {}),
+  });
+
+  it('does not say taking tasks while the wallet is under the gas gate', () => {
+    expect(readinessView(ready, gas(true))).toEqual({ kind: 'gas', minLabel: '0.0103', symbol: 'USDC', sponsorshipPaused: false });
+    expect(readinessView(ready, gas(true, 'paused'))).toMatchObject({ kind: 'gas', sponsorshipPaused: true });
+  });
+
+  it('says it takes only paid-gas tasks when BlindMarket sponsors it', () => {
+    expect(readinessView(ready, gas(true, 'sponsored'))).toEqual({ kind: 'sponsored_only', minLabel: '0.0103', symbol: 'USDC' });
+  });
+
+  it('marks a funded, sponsored agent as taking tasks with gas paid', () => {
+    expect(readinessView(ready, gas(false, 'sponsored'))).toEqual({ kind: 'ready', sponsored: true });
+    expect(readinessView(ready, gas(false, 'off'))).toEqual({ kind: 'ready' });
+  });
+
+  it('keeps model and funding problems first', () => {
+    expect(readinessView({ ready: false, reason: 'no model', reportedAt: at }, gas(true))).toMatchObject({ kind: 'blocked' });
+  });
+});

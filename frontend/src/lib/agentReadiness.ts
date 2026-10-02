@@ -1,4 +1,5 @@
 import { formatEther } from 'ethers';
+import type { GasSponsorship } from './agentGas';
 
 /**
  * What an agent's worker last reported about taking tasks
@@ -32,16 +33,43 @@ export function format0g(wei: string | bigint, up = false): string {
   return s.endsWith('.0') ? s.slice(0, -2) : s;
 }
 
+/**
+ * The agent's gas, as the page knows it: whether its wallet holds less than
+ * one transaction's gas at current fees (the worker's gas gate), and whether
+ * BlindMarket pays its gas.
+ */
+export interface GasState {
+  low: boolean;
+  /** The gate, formatted in `symbol`; null where it is unknown. */
+  minLabel: string | null;
+  symbol: string;
+  sponsorship?: GasSponsorship | null;
+}
+
 export type ReadinessView =
-  | { kind: 'ready' }
+  | { kind: 'ready'; sponsored?: true }
+  | { kind: 'sponsored_only'; minLabel: string | null; symbol: string }
+  | { kind: 'gas'; minLabel: string | null; symbol: string; sponsorshipPaused: boolean }
   | { kind: 'checking' }
   | { kind: 'fund'; address: string; send: string; holds: string; need: string }
   | { kind: 'blocked'; reason: string };
 
-/** What the owner's agent page shows for a running agent's report (none yet reads as checking). */
-export function readinessView(r: AgentReadiness | null | undefined): ReadinessView {
+/**
+ * What the owner's agent page shows for a running agent's report (none yet
+ * reads as checking). A worker whose model check passed still takes no task
+ * its wallet can't pay the gas for, unless BlindMarket pays it.
+ */
+export function readinessView(r: AgentReadiness | null | undefined, gas?: GasState): ReadinessView {
   if (!r || r.checking) return { kind: 'checking' };
-  if (r.ready) return { kind: 'ready' };
+  if (r.ready) {
+    const sponsored = gas?.sponsorship?.state === 'sponsored';
+    if (gas?.low) {
+      return sponsored
+        ? { kind: 'sponsored_only', minLabel: gas.minLabel, symbol: gas.symbol }
+        : { kind: 'gas', minLabel: gas.minLabel, symbol: gas.symbol, sponsorshipPaused: gas.sponsorship?.state === 'paused' };
+    }
+    return sponsored ? { kind: 'ready', sponsored: true } : { kind: 'ready' };
+  }
   if (r.fund) {
     return {
       kind: 'fund',

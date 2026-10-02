@@ -643,7 +643,17 @@ export default function AgentDetail() {
         <div id="operations" className="mt-12 scroll-mt-6">
           <SectionRule num="03" title="Operations" />
           {/* Whether the running agent is taking tasks, and what it needs if not. */}
-          <AgentReadinessCard agentId={apiId} running={agent.status === 'running'} className="mb-4" />
+          <AgentReadinessCard
+            agentId={apiId}
+            running={agent.status === 'running'}
+            gas={{
+              low: isLowGas,
+              minLabel: minGasRaw !== null ? formatMinGas(minGasRaw, getPaymentDecimals()) : null,
+              symbol: balanceSymbol,
+              sponsorship: gasSponsorship ?? null,
+            }}
+            className="mb-4"
+          />
           {agent.walletAddress && (
             <GasBar
               symbol={balanceSymbol}
