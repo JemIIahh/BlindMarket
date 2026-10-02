@@ -33,8 +33,9 @@ describe('list shapes', () => {
       { id: 'gpt-5.6-sol' }, { id: 'gpt-5.5' }, { id: 'gpt-4o-2024-08-06' }, { id: 'gpt-4-0613' },
       { id: 'text-embedding-3-large' }, { id: 'gpt-4o-mini-tts' }, { id: 'whisper-1' }, { id: 'gpt-image-1' },
       { id: 'o3' }, { id: 'gpt-4o-realtime-preview' }, { id: 'dall-e-3' }, { id: 'omni-moderation-latest' },
+      { id: 'chat-latest' }, { id: 'gpt-5.5-pro' },
     ] });
-    expect(ids).toEqual(['gpt-5.6-sol', 'gpt-5.5', 'o3']);
+    expect(ids).toEqual(['gpt-5.6-sol', 'gpt-5.5', 'o3', 'chat-latest', 'gpt-5.5-pro']);
   });
 
   it('gemini: strips models/ and keeps generateContent text models', () => {
@@ -44,8 +45,10 @@ describe('list shapes', () => {
       { name: 'models/gemini-3.1-flash-image', supportedGenerationMethods: ['generateContent'] },
       { name: 'models/gemini-3.1-flash-tts-preview', supportedGenerationMethods: ['generateContent'] },
       { name: 'models/imagen-4', supportedGenerationMethods: ['predict'] },
+      { name: 'models/gemini-robotics-er-2-preview', supportedGenerationMethods: ['generateContent'] },
+      { name: 'models/gemini-3.1-pro-preview', supportedGenerationMethods: ['generateContent'] },
     ] });
-    expect(ids).toEqual(['gemini-3.8-flash']);
+    expect(ids).toEqual(['gemini-3.8-flash', 'gemini-3.1-pro-preview']);
   });
 
   it('groq: active chat models, no speech or guard models', () => {
@@ -153,6 +156,12 @@ describe('mergeLive', () => {
   it("a price in the provider's own list wins over the catalog's", () => {
     const [m] = mergeLive('xai', [{ id: 'grok-4.7', created: 1, inputCostPer1M: 3, outputCostPer1M: 9 }]);
     expect(m).toEqual({ id: 'grok-4.7', inputCostPer1M: 3, outputCostPer1M: 9 });
+  });
+
+  it('keeps the catalog\'s preview mark, whoever prices the model', () => {
+    expect(mergeLive('groq', [{ id: 'qwen/qwen3.8-27b', created: 1 }])[0]).toMatchObject({ id: 'qwen/qwen3.8-27b', preview: true });
+    expect(mergeLive('gemini', [{ id: 'gemini-3.1-pro-preview' }])[0]).toMatchObject({ preview: true });
+    expect(mergeLive('gemini', [{ id: 'gemini-3.8-flash' }])[0].preview).toBeUndefined();
   });
 });
 
@@ -323,9 +332,29 @@ describe('the catalog', () => {
     }
   });
 
-  it('keeps no model that Groq took off its developer tier, or that xAI gives no client tools', () => {
-    expect(LLM_PROVIDER_MODELS.groq.map((m) => m.id)).not.toContain('llama-3.3-70b-versatile');
-    expect(LLM_PROVIDER_MODELS.xai.map((m) => m.id).some((id) => id.includes('multi-agent'))).toBe(false);
+  it('offers every current tier: flagships, pro, mini, flash and preview models', () => {
+    const ids = (p: keyof typeof LLM_PROVIDER_MODELS) => LLM_PROVIDER_MODELS[p].map((m) => m.id);
+    expect(ids('openai')).toEqual(expect.arrayContaining(['gpt-5.5-pro', 'gpt-5.4-pro', 'gpt-5.2', 'gpt-5.2-pro', 'gpt-4.1-mini', 'chat-latest']));
+    expect(ids('anthropic')).toEqual(expect.arrayContaining(['claude-opus-4-5', 'claude-haiku-4-5']));
+    expect(ids('gemini')).toEqual(expect.arrayContaining(['gemini-3-flash-preview', 'gemini-3.1-pro-preview']));
+    expect(LLM_PROVIDER_MODELS.openai.find((m) => m.id === 'gpt-5.5-pro')).toEqual({ id: 'gpt-5.5-pro', inputCostPer1M: 30, outputCostPer1M: 180 });
+  });
+
+  it('keeps out models that are deprecated, closed to new users, or take no client tools', () => {
+    const all = Object.values(LLM_PROVIDER_MODELS).flat().map((m) => m.id);
+    for (const gone of [
+      'gpt-5', 'gpt-5-mini', 'gpt-5-nano', 'gpt-5.1', 'gpt-5.4-nano', 'o3', 'o4-mini', // deprecated
+      'gpt-5.6-cyber', 'gpt-daybreak-blue-latest', // approval only
+      'llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'minimaxai/minimax-m2.7', // Groq enterprise only
+      'gemini-3.1-flash-lite', 'gemini-2.5-pro', 'gemini-2.5-flash', // deprecated; past users only
+      'claude-sonnet-4-5', 'claude-mythos-5-1', // deprecated; invitation only
+      'grok-4.20-multi-agent-0309', // no client-side tools
+    ]) expect(all, gone).not.toContain(gone);
+  });
+
+  it('marks the preview models', () => {
+    const preview = Object.values(LLM_PROVIDER_MODELS).flat().filter((m) => m.preview).map((m) => m.id);
+    expect(preview.sort()).toEqual(['gemini-3-flash-preview', 'gemini-3.1-pro-preview', 'qwen/qwen3.8-27b']);
   });
 });
 

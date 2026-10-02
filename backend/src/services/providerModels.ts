@@ -26,6 +26,8 @@ export interface DiscoveredModel {
   /** USD per 1M tokens — present when the catalog (or the provider's own list: xAI, 0G's status API) prices the model. */
   inputCostPer1M?: number;
   outputCostPer1M?: number;
+  /** The catalog marks it preview or beta. */
+  preview?: true;
 }
 
 /** The providers an owner brings an API key for. */
@@ -56,10 +58,10 @@ const FETCH_TIMEOUT_MS = 8_000;
 // Each provider's /models lists every modality it serves. These keep the
 // chat-capable ids — the only ones worker.js can drive through generateText.
 
-/** OpenAI: drop embeddings/audio/image/etc. and dated snapshots (the alias suffices). */
+/** OpenAI: drop embeddings/audio/image/etc. and dated snapshots (the alias suffices). chat-latest is ChatGPT's Instant model. */
 export function openaiChatIds(body: unknown): string[] {
   return listIds(body)
-    .filter((id) => /^(gpt-|o\d|chatgpt-)/.test(id))
+    .filter((id) => /^(gpt-|o\d|chatgpt-|chat-latest$)/.test(id))
     .filter((id) => !/(embedding|tts|whisper|audio|realtime|transcribe|image|moderation|search|instruct|codex|computer-use|deep-research)/.test(id))
     .filter((id) => !/-\d{4}(-\d{2}-\d{2})?$/.test(id));
 }
@@ -91,7 +93,7 @@ export function geminiChatIds(body: unknown): string[] {
       && m.supportedGenerationMethods.includes('generateContent'))
     .map((m) => (m.name as string).replace(/^models\//, ''))
     .filter((id) => /^gemini-/.test(id))
-    .filter((id) => !/(image|tts|live|embedding|transcribe|translate|omni|audio|computer-use)/.test(id));
+    .filter((id) => !/(image|tts|live|embedding|transcribe|translate|omni|audio|computer-use|robotics)/.test(id));
 }
 
 /**
@@ -340,7 +342,7 @@ export function mergeLive(provider: KeyedProvider, live: readonly LiveModel[]): 
     const id = known?.id ?? m.id;
     if (rows.has(id)) continue;
     const model: DiscoveredModel = m.inputCostPer1M !== undefined && m.outputCostPer1M !== undefined
-      ? { id, inputCostPer1M: m.inputCostPer1M, outputCostPer1M: m.outputCostPer1M }
+      ? { id, inputCostPer1M: m.inputCostPer1M, outputCostPer1M: m.outputCostPer1M, ...(known?.preview ? { preview: true as const } : {}) }
       : known ? { ...known } : { id };
     rows.set(id, { model, created: m.created, rank: known ? catalog.indexOf(known) : catalog.length });
   }

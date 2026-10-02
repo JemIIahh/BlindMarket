@@ -17,6 +17,8 @@ describe('priceFor', () => {
 
   it('still prices the older ids the catalog dropped, by name', () => {
     expect(priceFor('claude-sonnet-4', 'anthropic')).toEqual({ input: 3, output: 15, estimated: false });
+    expect(priceFor('gemini-2.5-flash', 'gemini')).toEqual({ input: 0.3, output: 2.5, estimated: false });
+    expect(priceFor('gpt-5-mini', 'openai')).toEqual({ input: 0.25, output: 2, estimated: false });
   });
 
   it('flags a model nothing prices as estimated', () => {

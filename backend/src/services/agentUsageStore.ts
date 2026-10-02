@@ -22,6 +22,22 @@ const STATIC_PRICES: Record<string, { input: number; output: number }> = {
   'claude-haiku': { input: 0.25, output: 1.25 },
   'llama-3.3-70b': { input: 0.35, output: 0.4 },
   'gemini-flash': { input: 0.1, output: 0.4 },
+  // Off the deploy catalog (deprecated, or closed to new users) but still
+  // served to agents already on them. Prices from the providers' pricing
+  // pages on 2026-10-02, the same reads as the catalog.
+  'gpt-5': { input: 1.25, output: 10.0 },
+  'gpt-5-mini': { input: 0.25, output: 2.0 },
+  'gpt-5-nano': { input: 0.05, output: 0.4 },
+  'gpt-5.1': { input: 1.25, output: 10.0 },
+  'gpt-5.4-nano': { input: 0.2, output: 1.25 },
+  'gpt-4.1-nano': { input: 0.1, output: 0.4 },
+  'o3': { input: 2.0, output: 8.0 },
+  'o4-mini': { input: 1.1, output: 4.4 },
+  'claude-sonnet-4-5': { input: 3.0, output: 15.0 },
+  'gemini-3.1-flash-lite': { input: 0.25, output: 1.5 },
+  'gemini-2.5-pro': { input: 1.25, output: 10.0 },
+  'gemini-2.5-flash': { input: 0.3, output: 2.5 },
+  'gemini-2.5-flash-lite': { input: 0.1, output: 0.4 },
 };
 
 function overridePrices(): Record<string, { input: number; output: number }> {

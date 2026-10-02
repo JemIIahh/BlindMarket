@@ -5,9 +5,11 @@ import type { KeyedProvider } from './providerModels.js';
 
 /**
  * providerModelDocs.json is each provider's model list as its public docs
- * showed it (scripts/check-model-catalog.ts --record). A catalog id that isn't
- * there, or whose price differs, is a typo, an invented id or a stale price:
- * the kind of entry that put a bare 'gpt-oss-120b' in the groq list.
+ * showed it (scripts/check-model-catalog.ts --record), with the page's
+ * lifecycle word for each model. A catalog id that isn't there, or whose price
+ * differs, is a typo, an invented id or a stale price: the kind of entry that
+ * put a bare 'gpt-oss-120b' in the groq list. The catalog offers what anyone
+ * with a key can use now, and says which models are previews.
  */
 describe('the catalog against the recorded provider docs', () => {
   type DocModel = { id: string; inputCostPer1M?: number; outputCostPer1M?: number; status?: string };
@@ -18,12 +20,18 @@ describe('the catalog against the recorded provider docs', () => {
   const docFor = (provider: KeyedProvider, id: string) =>
     docs.providers[provider].models.find((m) => m.id === id || m.id.replace(/-\d{8}$/, '') === id);
 
-  it.each(keyed)('%s: every catalog id is on the provider\'s page, not retired or deprecated', (provider) => {
+  it.each(keyed)('%s: every catalog id is on the provider\'s page and open to anyone with a key', (provider) => {
     expect(docs.providers[provider]?.models.length, `no recorded list for ${provider}`).toBeGreaterThan(0);
     for (const m of LLM_PROVIDER_MODELS[provider]) {
       const doc = docFor(provider, m.id);
       expect(doc, `${provider} ${m.id} is not on ${docs.providers[provider].source}`).toBeDefined();
-      expect(doc!.status ?? 'Active', `${provider} ${m.id}`).not.toMatch(/Deprecated|Retired/);
+      expect(doc!.status ?? 'Active', `${provider} ${m.id}`).not.toMatch(/^(Deprecated|Retired|Limited|Enterprise)$/);
+    }
+  });
+
+  it.each(keyed)('%s: a catalog model is marked preview exactly when the page calls it preview or beta', (provider) => {
+    for (const m of LLM_PROVIDER_MODELS[provider]) {
+      expect(m.preview === true, `${provider} ${m.id}`).toBe(/^(Preview|Beta)$/.test(docFor(provider, m.id)?.status ?? ''));
     }
   });
 
