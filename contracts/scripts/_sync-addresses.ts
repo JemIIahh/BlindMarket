@@ -22,8 +22,9 @@
  * Arc (`arc`, `arcTestnet`) is emitted only once its default record exists,
  * and `DEPLOYMENT_BLOCKS` (each emitted contract's `blocks` entry) only once a
  * record has one. Until then the generated modules are byte-identical to the
- * pre-Arc output. Record fields other than `contracts` and `blocks` are
- * ignored.
+ * pre-Arc output. Likewise `blindAgentDelegate` only once an
+ * agent-delegate-<record>.json exists. Record fields other than `contracts`
+ * and `blocks` are ignored, save an agent-delegate record's `config.escrow`.
  */
 import * as fs from "fs";
 import * as path from "path";
@@ -36,6 +37,7 @@ const KEYS: Record<string, string> = {
   INFT: "inft",
   ValidatorPool: "validatorPool",
   AgentFactory: "agentFactory",
+  BlindAgentDelegate: "blindAgentDelegate",
   USDCPaymaster: "USDCPaymaster",
   BlindAccountFactory: "BlindAccountFactory",
   EntryPoint: "EntryPoint",
@@ -53,6 +55,7 @@ interface RecordFile {
   /** `contracts` with zero placeholders stripped. */
   contracts: Record<string, string>;
   blocks: Record<string, number>;
+  config: Record<string, unknown>;
 }
 
 /** A record's `contracts` map with placeholders stripped, plus its `blocks`.
@@ -70,7 +73,7 @@ interface RecordFile {
 function readRecordFile(dir: string, file: string, optional = false): RecordFile {
   const p = path.join(dir, file);
   if (!fs.existsSync(p)) {
-    if (optional) return { contracts: {}, blocks: {} };
+    if (optional) return { contracts: {}, blocks: {}, config: {} };
     throw new Error(`Deployment record not found: ${p}`);
   }
   const rec = JSON.parse(fs.readFileSync(p, "utf-8"));
@@ -82,7 +85,18 @@ function readRecordFile(dir: string, file: string, optional = false): RecordFile
   return {
     contracts: Object.fromEntries(Object.entries(raw).filter(([, v]) => v && v.toLowerCase() !== ZERO_ADDRESS)),
     blocks: blocks as Record<string, number>,
+    config: rec.config ?? {},
   };
+}
+
+/** deploy-agent-delegate.ts records the escrow a BlindAgentDelegate is bound
+ *  to (immutable, in its bytecode) under `config.escrow`. The delegate counts
+ *  only while that is still the main record's escrow: after an escrow
+ *  replacement it can only call the old one. */
+function boundToEscrow(delegate: RecordFile, main: RecordFile): boolean {
+  const bound = delegate.config.escrow;
+  const escrow = main.contracts.BlindEscrow;
+  return typeof bound === "string" && escrow !== undefined && bound.toLowerCase() === escrow.toLowerCase();
 }
 
 interface Loaded {
@@ -100,12 +114,15 @@ function load(dir: string, file: string): Loaded {
   // AgentFactory. Reading the companion record makes the mirror unnecessary:
   // the main record still wins where both carry a key, so an existing mirrored
   // value keeps working.
+  const main = readRecordFile(dir, file);
+  const delegate = readRecordFile(dir, `agent-delegate-${file}`, true);
   const records = [
-    readRecordFile(dir, file),
+    main,
     readRecordFile(dir, `aa-${file}`, true),
     readRecordFile(dir, `agent-factory-${file}`, true),
+    boundToEscrow(delegate, main) ? delegate : { contracts: {}, blocks: {}, config: {} },
   ];
-  const c = { ...records[2].contracts, ...records[1].contracts, ...records[0].contracts };
+  const c = { ...records[3].contracts, ...records[2].contracts, ...records[1].contracts, ...records[0].contracts };
   const addresses: Record<string, string> = {};
   const blocks: Record<string, number> = {};
   for (const [recKey, genKey] of Object.entries(KEYS)) {

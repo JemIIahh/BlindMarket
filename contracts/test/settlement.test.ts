@@ -595,6 +595,31 @@ describe("Arc settlement tooling", function () {
       }
     });
 
+    it("emits blindAgentDelegate only while its record is bound to the record's escrow", function () {
+      const DELEGATE = "0x4444444444444444444444444444444444444444";
+      const escrow = JSON.parse(fs.readFileSync(path.join(dir, "arc-testnet.json"), "utf-8")).contracts.BlindEscrow;
+      put("agent-delegate-arc-testnet.json", {
+        network: "arc-testnet",
+        chainId: ARC_TESTNET_CHAIN_ID,
+        contracts: { BlindAgentDelegate: DELEGATE },
+        config: { escrow: escrow.toLowerCase() },
+        blocks: { BlindAgentDelegate: 99 },
+      });
+      const out = render(dir);
+      expect(exported(out, "CONTRACT_ADDRESSES").arcTestnet.blindAgentDelegate).to.equal(DELEGATE);
+      expect(exported(out, "DEPLOYMENT_BLOCKS").arcTestnet.blindAgentDelegate).to.equal(99);
+      // No other network gains it.
+      expect(out.match(/blindAgentDelegate/g)).to.have.length(2);
+
+      // After an escrow replacement the delegate can only call the old escrow.
+      edit("arc-testnet.json", (r) => (r.contracts.BlindEscrow = ESCROW_X));
+      expect(render(dir)).to.not.match(/blindAgentDelegate/);
+      // A record with no bound escrow never emits.
+      edit("agent-delegate-arc-testnet.json", (r) => delete r.config);
+      edit("arc-testnet.json", (r) => (r.contracts.BlindEscrow = escrow));
+      expect(render(dir) + renderAA(dir)).to.equal(committed);
+    });
+
     it("still refuses a missing main record for the non-Arc networks", function () {
       fs.rmSync(path.join(dir, "base-sepolia.json"));
       expect(() => render(dir)).to.throw(/Deployment record not found/);
