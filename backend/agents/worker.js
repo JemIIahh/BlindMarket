@@ -4234,6 +4234,8 @@ async function resumeAssignedTasks() {
     // /executions marks a task whose submit holds a sponsor reservation: it
     // needs no gas of its own, so it is not held for funds.
     if (item.gasSponsored === true) sponsoredTasks.add(taskHash);
+    // Not held for gas, so it doesn't drive the gas re-check timer either.
+    if (sponsoredTasks.has(taskHash)) resumeGasHeld.delete(taskHash);
     const shortfall = sponsoredTasks.has(taskHash) ? null : submitGasShortfall.get(taskHash);
     if (shortfall || (!finalizeOnly && isSettlementChain(metaChain) && !sponsoredTasks.has(taskHash))) {
       const gasProblem = shortfall
