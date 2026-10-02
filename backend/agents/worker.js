@@ -858,7 +858,7 @@ export async function preflightGas(chain, signer, viaAA = canSubmitViaSmartAccou
   }
   // Dust passes a zero check and then fails at broadcast with an opaque
   // "insufficient funds". Refuse below one tx's worth at current fees.
-  const min = await minGasBalance(signer.provider);
+  const min = await minGasBalance(signer.provider, preflightGasLimitFor(chain));
   if (min !== null && balance < min) {
     return `wallet ${signer.address} holds ${ethers.formatEther(balance)} ${nativeSymbolFor(chain)} on ${pickChain(chain)} — below the ~${ethers.formatEther(min)} ${nativeSymbolFor(chain)} one tx needs at current gas, so it cannot broadcast. Fund it (a small top-up covers many txs).`;
   }
@@ -866,8 +866,24 @@ export async function preflightGas(chain, signer, viaAA = canSubmitViaSmartAccou
 }
 
 // Gas budget for one worker tx (submitEvidence, completeVerification, accept
-// paths all sit well under this). Exported for tests.
+// paths all sit well under this), where the chain table names none. Exported
+// for tests.
 export const PREFLIGHT_GAS_LIMIT = 300_000n;
+
+/**
+ * The gas budget of one worker tx on `chain`: the chain table's
+ * preflightGasLimit (backend settlementChains.ts gas.workerTxGasLimit; Arc's
+ * is 200k, sized to its largest worker tx), else PREFLIGHT_GAS_LIMIT.
+ * Exported for tests.
+ */
+export function preflightGasLimitFor(chain, table = CHAIN_TABLE) {
+  try {
+    const limit = BigInt(chainInfo(pickChain(chain), table)?.preflightGasLimit);
+    return limit > 0n ? limit : PREFLIGHT_GAS_LIMIT;
+  } catch {
+    return PREFLIGHT_GAS_LIMIT;
+  }
+}
 
 /**
  * The balance one tx needs at the chain's current fees (gasLimit ×

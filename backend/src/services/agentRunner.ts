@@ -48,6 +48,8 @@ export function settlementChainsJson(): string {
         token: { address: token.address, kind: token.kind, symbol: token.unit.symbol, decimals: token.unit.decimals },
         gasSymbol: gas.symbol,
         nativeIsSettlementToken: gas.nativeIsSettlementToken,
+        // The worker's gas gate for one tx here (worker.js preflightGasLimitFor).
+        preflightGasLimit: gas.workerTxGasLimit.toString(),
         aa,
         posting: key === posting,
       };

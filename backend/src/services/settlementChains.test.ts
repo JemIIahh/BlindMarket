@@ -47,6 +47,8 @@ Object.assign(cfg, PRODUCTION);
 const {
   SETTLEMENT_CHAIN_KEYS,
   settlementChainConfig,
+  withdrawReserveWei,
+  WITHDRAW_TX_GAS,
   settlementChainConfigs,
   configuredChainKeys,
   assertRegistryInvariants,
@@ -105,12 +107,47 @@ describe('entries with production config', () => {
       nativeIsSettlementToken: false,
       withdrawReserveWei: ethers.parseEther('0.0003'),
       withdrawMinWei: ethers.parseEther('0.00005'),
+      workerTxGasLimit: 300_000n,
     });
     expect(settlementChainConfig('arc').gas).toEqual({
       symbol: 'USDC',
       nativeIsSettlementToken: true,
       withdrawReserveWei: ethers.parseEther('0.01'),
       withdrawMinWei: ethers.parseEther('0.002'),
+      workerTxGasLimit: 200_000n,
+    });
+  });
+
+  describe("what an Arc withdraw leaves behind follows the worker's gas gate", () => {
+    const gwei = (n: number) => ethers.parseUnits(String(n), 'gwei');
+    // ethers' getFeeData on Arc: maxFeePerGas is twice the base fee, gasPrice
+    // the base fee (Arc mainnet read 2026-10-02: 20 gwei → 40 gwei max fee).
+    const fees = (base: number) => ({ maxFeePerGas: 2n * gwei(base), gasPrice: gwei(base) });
+    const arcGas = () => settlementChainConfig('arc').gas;
+    const gate = (base: number) => arcGas().workerTxGasLimit * 2n * gwei(base);
+
+    it.each([
+      [20, '0.0103'], // 0.0088 (gate × 1.1) + 0.0015 (the withdraw's own gas)
+      [25, '0.012875'],
+      [60, '0.0309'],
+    ])('at a %i gwei base fee it keeps %s USDC', (base, kept) => {
+      expect(ethers.formatEther(withdrawReserveWei(arcGas(), fees(base)))).toBe(kept);
+    });
+
+    it.each([20, 25, 60, 200])('leaves the gate covered after the withdraw pays its own gas at %i gwei', (base) => {
+      const left = withdrawReserveWei(arcGas(), fees(base)) - WITHDRAW_TX_GAS * gwei(base);
+      expect(left).toBeGreaterThanOrEqual(gate(base));
+    });
+
+    it('keeps the 0.01 USDC floor when fees are low or could not be read', () => {
+      expect(withdrawReserveWei(arcGas(), fees(1))).toBe(ethers.parseEther('0.01'));
+      expect(withdrawReserveWei(arcGas(), null)).toBe(ethers.parseEther('0.01'));
+      expect(withdrawReserveWei(arcGas(), { maxFeePerGas: null, gasPrice: null })).toBe(ethers.parseEther('0.01'));
+    });
+
+    it('prices the gate at gasPrice where the chain reports no max fee', () => {
+      expect(withdrawReserveWei(arcGas(), { maxFeePerGas: null, gasPrice: gwei(100) }))
+        .toBe((200_000n * gwei(100) * 11n) / 10n + WITHDRAW_TX_GAS * gwei(100));
     });
   });
 

@@ -26,7 +26,7 @@ import type { InstalledSkill, AgentCapability, LLMProvider } from '../types.js';
 import { redis } from '../services/redis.js';
 import { ethers } from 'ethers';
 import { chainRuntime } from '../services/chainRuntime.js';
-import { settlementChainConfigs, type SettlementChainKey } from '../services/settlementChains.js';
+import { settlementChainConfigs, withdrawReserveWei, type SettlementChainKey } from '../services/settlementChains.js';
 import { config } from '../config.js';
 import { claimDeployCredit, markDeployCreditUsed, restoreDeployCredit } from '../services/agentFactoryListener.js';
 import { arcDeployFeeTerms, verifyArcDeployFee, claimArcDeployFee, markArcDeployFeeUsed, releaseArcDeployFee } from '../services/deployFee.js';
@@ -812,6 +812,9 @@ agentsRouter.post('/:id/withdraw', requireAuth, async (req: AuthRequest, res) =>
       const rpc = chainRuntime(chain).provider;
       const nativeLabel = gas.symbol;
       const wallet = new ethers.Wallet(pk, rpc);
+      // What stays behind for the agent's own gas: at least its gas gate at
+      // current fees, so a withdrawn agent still takes tasks.
+      const gasReserve = async () => withdrawReserveWei(gas, await rpc.getFeeData().catch(() => null));
 
       if (isNative) {
         // ── Native sweep (0G token or ETH depending on chain) ──────────
@@ -825,13 +828,13 @@ agentsRouter.post('/:id/withdraw', requireAuth, async (req: AuthRequest, res) =>
           });
           continue;
         }
-        const gasReserve = gas.withdrawReserveWei;
+        const reserve = await gasReserve();
         const balance = await rpc.getBalance(wallet.address);
-        if (balance <= gasReserve) {
+        if (balance <= reserve) {
           skipped.push({ chain, reason: `balance (${ethers.formatEther(balance)} ${nativeLabel}) is below the gas reserve required to sweep` });
           continue;
         }
-        const sendAmount = balance - gasReserve;
+        const sendAmount = balance - reserve;
         const tx = await wallet.sendTransaction({ to: agent.ownerAddress, value: sendAmount });
         const receipt = await tx.wait();
         swept.push({
@@ -868,7 +871,7 @@ agentsRouter.post('/:id/withdraw', requireAuth, async (req: AuthRequest, res) =>
         const isGasCoin = gas.nativeIsSettlementToken
           && settlementToken.address !== null
           && settlementToken.address.toLowerCase() === tokenAddress.toLowerCase();
-        const keep = isGasCoin ? nativeWeiToTokenUnits(gas.withdrawReserveWei, settlementToken.unit.decimals) : 0n;
+        const keep = isGasCoin ? nativeWeiToTokenUnits(await gasReserve(), settlementToken.unit.decimals) : 0n;
         if (balance <= keep) {
           skipped.push({ chain, reason: `balance is below the ${nativeLabel} gas reserve this chain keeps back` });
           continue;

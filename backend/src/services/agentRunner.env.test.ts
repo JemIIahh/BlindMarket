@@ -218,7 +218,10 @@ describe('startAgent forks workers with an allowlisted env, not the full process
     expect(table.find((c) => c.key === 'arc')).toMatchObject({
       token: { kind: 'erc20', symbol: 'USDC', decimals: 6 },
       posting: true,
+      // The worker's gas gate on Arc (settlementChains.ts workerTxGasLimit).
+      preflightGasLimit: '200000',
     });
+    expect(table.find((c) => c.key === 'base')).toMatchObject({ preflightGasLimit: '300000' });
     // Exactly one chain is the posting chain.
     expect(table.filter((c) => c.posting)).toHaveLength(1);
     // Each entry carries what a signer needs, and nothing secret.
