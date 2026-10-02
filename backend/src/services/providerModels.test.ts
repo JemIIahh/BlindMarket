@@ -4,8 +4,9 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 vi.mock('./ogComputeCatalog.js', () => ({ readOgServices: vi.fn() }));
 
 import {
-  discoverModels, mergeWithCatalog, ProviderModelsError,
-  openaiChatIds, geminiChatIds, groqChatIds, ogOfferedModels, checkOgComputeModel,
+  discoverModels, mergeWithCatalog, mergeLive, ProviderModelsError, checkKeyedModel, needsModelCheck,
+  openaiChatIds, geminiChatIds, groqChatIds, xaiChatModels, ogOfferedModels, checkOgComputeModel,
+  type KeyedProvider,
 } from './providerModels.js';
 import { readOgServices, type OgService } from './ogComputeCatalog.js';
 import { LLM_PROVIDER_MODELS } from '../types.js';
@@ -61,25 +62,140 @@ describe('list shapes', () => {
   });
 });
 
-describe('mergeWithCatalog', () => {
+// GET https://api.x.ai/v1/language-models, shaped as docs.x.ai documents it
+// (developers/rest-api-reference/inference/models), trimmed to the fields read.
+const XAI_LANGUAGE_MODELS = { models: [
+  {
+    id: 'grok-4.7', created: 1789000000, object: 'model', owned_by: 'xai', version: '1.0',
+    input_modalities: ['text', 'image'], output_modalities: ['text'],
+    prompt_text_token_price: 20000, cached_prompt_text_token_price: 5000, completion_text_token_price: 60000,
+    aliases: [],
+  },
+  {
+    id: 'grok-4.20-0309-reasoning', created: 1773000000, object: 'model', owned_by: 'xai', version: '1.0',
+    input_modalities: ['text', 'image'], output_modalities: ['text'],
+    prompt_text_token_price: 12500, completion_text_token_price: 25000,
+    aliases: ['grok-4.20', 'grok-4.20-reasoning'],
+  },
+  {
+    // Client-side function calling isn't supported on the multi-agent variant.
+    id: 'grok-4.20-multi-agent-0309', created: 1773000000, object: 'model', owned_by: 'xai', version: '1.0',
+    input_modalities: ['text', 'image'], output_modalities: ['text'],
+    prompt_text_token_price: 12500, completion_text_token_price: 25000,
+    aliases: ['grok-4.20-multi-agent'],
+  },
+  {
+    // A model released after the catalog was written, unpriced in the list.
+    id: 'grok-5', created: 1790000000, object: 'model', owned_by: 'xai', version: '1.0',
+    input_modalities: ['text'], output_modalities: ['text'], aliases: ['grok-5-latest'],
+  },
+  {
+    id: 'grok-imagine-image', created: 1769472000, object: 'model', owned_by: 'xai', version: '1.0',
+    input_modalities: ['text'], output_modalities: ['image'], aliases: [],
+  },
+] };
+
+describe('xai list shape', () => {
+  it('chat models with their aliases and prices; no multi-agent, no image output', () => {
+    expect(xaiChatModels(XAI_LANGUAGE_MODELS)).toEqual([
+      { id: 'grok-4.7', created: 1789000000, inputCostPer1M: 2, outputCostPer1M: 6 },
+      { id: 'grok-4.20-0309-reasoning', created: 1773000000, aliases: ['grok-4.20', 'grok-4.20-reasoning'], inputCostPer1M: 1.25, outputCostPer1M: 2.5 },
+      { id: 'grok-5', created: 1790000000, aliases: ['grok-5-latest'] },
+    ]);
+  });
+
+  it('reads nothing from a body of another shape', () => {
+    expect(xaiChatModels({ data: [{ id: 'grok-4.7' }] })).toEqual([]);
+    expect(xaiChatModels(null)).toEqual([]);
+  });
+});
+
+describe('mergeWithCatalog (0g-compute)', () => {
   it('catalog order and prices first, retired catalog entries dropped, extras appended', () => {
-    const [newest, second] = LLM_PROVIDER_MODELS.anthropic;
-    const merged = mergeWithCatalog('anthropic', ['claude-brand-new', second.id, newest.id]);
-    expect(merged).toEqual([newest, second, { id: 'claude-brand-new' }]);
+    const [newest, second] = LLM_PROVIDER_MODELS['0g-compute'];
+    const merged = mergeWithCatalog('0g-compute', ['zz-brand-new', second.id, newest.id]);
+    expect(merged).toEqual([newest, second, { id: 'zz-brand-new' }]);
+  });
+});
+
+describe('mergeLive', () => {
+  const price = (provider: KeyedProvider, id: string) => LLM_PROVIDER_MODELS[provider].find((m) => m.id === id)!;
+
+  it('newest first by the provider\'s creation time, so a model the catalog lacks sits on top, unpriced', () => {
+    const merged = mergeLive('anthropic', [
+      { id: 'claude-opus-5-5', created: 300 },
+      { id: 'claude-haiku-4-5-20251001', created: 100 },
+      { id: 'claude-opus-6', created: 400 },
+      { id: 'claude-sonnet-5-5', created: 350 },
+    ]);
+    expect(merged).toEqual([
+      { id: 'claude-opus-6' },
+      price('anthropic', 'claude-sonnet-5-5'),
+      price('anthropic', 'claude-opus-5-5'),
+      // A dated snapshot takes its catalog alias and price.
+      price('anthropic', 'claude-haiku-4-5'),
+    ]);
+  });
+
+  it('drops catalog entries the provider no longer lists', () => {
+    const ids = mergeLive('groq', [{ id: 'openai/gpt-oss-20b', created: 1 }]).map((m) => m.id);
+    expect(ids).toEqual(['openai/gpt-oss-20b']);
+  });
+
+  it('by the version in the id when the list has no dates (Gemini)', () => {
+    const ids = mergeLive('gemini', [
+      { id: 'gemini-2.5-flash' }, { id: 'gemini-3.5-flash-lite' }, { id: 'gemini-3.9-pro' },
+      { id: 'gemini-3.5-flash' }, { id: 'gemini-3.8-flash' }, { id: 'gemini-flash-latest' },
+    ]).map((m) => m.id);
+    expect(ids).toEqual(['gemini-3.9-pro', 'gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash', 'gemini-flash-latest']);
+  });
+
+  it("a price in the provider's own list wins over the catalog's", () => {
+    const [m] = mergeLive('xai', [{ id: 'grok-4.7', created: 1, inputCostPer1M: 3, outputCostPer1M: 9 }]);
+    expect(m).toEqual({ id: 'grok-4.7', inputCostPer1M: 3, outputCostPer1M: 9 });
   });
 });
 
 describe('discoverModels', () => {
-  it('anthropic: key in x-api-key, never in the URL; catalog-first result', async () => {
-    const fetchMock = vi.fn(async () => json({ data: [{ id: 'claude-opus-5' }, { id: 'claude-fable-5-1' }, { id: 'claude-next' }] }));
+  it('anthropic: key in x-api-key, never in the URL; newest first by created_at', async () => {
+    const fetchMock = vi.fn(async () => json({ data: [
+      { id: 'claude-next', created_at: '2026-10-01T00:00:00Z' },
+      { id: 'claude-fable-5-1', created_at: '2026-09-01T00:00:00Z' },
+      { id: 'claude-opus-5', created_at: '2026-07-24T00:00:00Z' },
+    ] }));
     vi.stubGlobal('fetch', fetchMock);
     const models = await discoverModels('anthropic', 'sk-ant-test');
     expect(urlOf(fetchMock)).toMatch(/^https:\/\/api\.anthropic\.com\/v1\/models/);
     expect(urlOf(fetchMock)).not.toContain('sk-ant-test');
     expect(headersOf(fetchMock)['x-api-key']).toBe('sk-ant-test');
-    expect(models.map(m => m.id)).toEqual(['claude-fable-5-1', 'claude-opus-5', 'claude-next']);
-    expect(models[0]).toMatchObject({ inputCostPer1M: 10, outputCostPer1M: 50 });
-    expect(models[2]).toEqual({ id: 'claude-next' });
+    expect(models.map(m => m.id)).toEqual(['claude-next', 'claude-fable-5-1', 'claude-opus-5']);
+    expect(models[0]).toEqual({ id: 'claude-next' });
+    expect(models[1]).toMatchObject({ inputCostPer1M: 10, outputCostPer1M: 50 });
+  });
+
+  it('openai: a model newer than every catalog entry comes first', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => json({ data: [
+      { id: 'gpt-4o', created: 1715367049 },
+      { id: 'gpt-6.1-sol', created: 1788000000 },
+      { id: 'gpt-7', created: 1795000000 },
+      { id: 'text-embedding-3-large', created: 1705953180 },
+    ] })));
+    const models = await discoverModels('openai', 'sk-test');
+    expect(models.map(m => m.id)).toEqual(['gpt-7', 'gpt-6.1-sol', 'gpt-4o']);
+  });
+
+  it('xai: Bearer key to /v1/language-models, never in the URL; prices from the list', async () => {
+    const fetchMock = vi.fn(async () => json(XAI_LANGUAGE_MODELS));
+    vi.stubGlobal('fetch', fetchMock);
+    const models = await discoverModels('xai', 'xai-test-key');
+    expect(urlOf(fetchMock)).toBe('https://api.x.ai/v1/language-models');
+    expect(urlOf(fetchMock)).not.toContain('xai-test-key');
+    expect(headersOf(fetchMock).Authorization).toBe('Bearer xai-test-key');
+    expect(models).toEqual([
+      { id: 'grok-5' },
+      { id: 'grok-4.7', inputCostPer1M: 2, outputCostPer1M: 6 },
+      { id: 'grok-4.20-0309-reasoning', inputCostPer1M: 1.25, outputCostPer1M: 2.5 },
+    ]);
   });
 
   it('gemini: key in x-goog-api-key, never in the URL', async () => {
@@ -116,6 +232,100 @@ describe('discoverModels', () => {
     await expect(discoverModels('groq', 'gsk-x')).rejects.toMatchObject({ code: 'PROVIDER_UNAVAILABLE' });
     vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('fetch failed'); }));
     await expect(discoverModels('groq', 'gsk-x')).rejects.toMatchObject({ code: 'PROVIDER_UNAVAILABLE' });
+  });
+});
+
+describe('checkKeyedModel: a model id the catalog lacks, against the owner\'s own list', () => {
+  const list = (body: unknown, status = 200) => vi.stubGlobal('fetch', vi.fn(async () => json(body, status)));
+
+  it('accepts a model the provider lists for the key', async () => {
+    list(XAI_LANGUAGE_MODELS);
+    expect(await checkKeyedModel('xai', 'xai-k', 'grok-5')).toMatchObject({ ok: true });
+  });
+
+  it('accepts an alias the provider gives for one', async () => {
+    list(XAI_LANGUAGE_MODELS);
+    expect((await checkKeyedModel('xai', 'xai-k', 'grok-4.20')).ok).toBe(true);
+    expect((await checkKeyedModel('xai', 'xai-k', 'grok-5-latest')).ok).toBe(true);
+  });
+
+  it('refuses one it does not list, and names the ones it does', async () => {
+    list(XAI_LANGUAGE_MODELS);
+    expect(await checkKeyedModel('xai', 'xai-k', 'grok-9')).toEqual({ ok: false, models: ['grok-5', 'grok-4.7', 'grok-4.20-0309-reasoning'] });
+  });
+
+  it('refuses a model it lists that the worker cannot run (multi-agent, image-only)', async () => {
+    list(XAI_LANGUAGE_MODELS);
+    expect((await checkKeyedModel('xai', 'xai-k', 'grok-4.20-multi-agent-0309')).ok).toBe(false);
+    expect((await checkKeyedModel('xai', 'xai-k', 'grok-imagine-image')).ok).toBe(false);
+  });
+
+  it('accepts the alias of a dated snapshot, and a dated snapshot of a chat model', async () => {
+    list({ data: [{ id: 'claude-haiku-4-5-20251001', created_at: '2025-10-01T00:00:00Z' }] });
+    expect((await checkKeyedModel('anthropic', 'sk-ant', 'claude-haiku-4-5')).ok).toBe(true);
+    list({ data: [{ id: 'gpt-5.5', created: 2 }, { id: 'gpt-5.5-2026-04-23', created: 1 }, { id: 'text-embedding-3-large-2024-01-25', created: 1 }] });
+    expect((await checkKeyedModel('openai', 'sk', 'gpt-5.5-2026-04-23')).ok).toBe(true);
+    expect((await checkKeyedModel('openai', 'sk', 'text-embedding-3-large-2024-01-25')).ok).toBe(false);
+  });
+
+  it('is case-sensitive, like the providers', async () => {
+    list(XAI_LANGUAGE_MODELS);
+    expect((await checkKeyedModel('xai', 'xai-k', 'GROK-5')).ok).toBe(false);
+  });
+
+  it('throws PROVIDER_AUTH on a refused key, without the key in the message', async () => {
+    list({ error: 'Incorrect API key provided' }, 401);
+    const err = await checkKeyedModel('xai', 'xai-SECRET', 'grok-5').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ProviderModelsError);
+    expect((err as ProviderModelsError).code).toBe('PROVIDER_AUTH');
+    expect((err as Error).message).not.toContain('SECRET');
+  });
+
+  it('throws PROVIDER_UNAVAILABLE when the list cannot be read', async () => {
+    list({}, 503);
+    await expect(checkKeyedModel('groq', 'gsk', 'qwen/qwen3.9-32b')).rejects.toMatchObject({ code: 'PROVIDER_UNAVAILABLE' });
+  });
+});
+
+describe('needsModelCheck', () => {
+  afterEach(() => { vi.unstubAllEnvs(); });
+
+  it('skips catalog models and checks the rest', () => {
+    expect(needsModelCheck('anthropic', 'claude-opus-5-5')).toBe(false);
+    expect(needsModelCheck('xai', 'grok-4.7')).toBe(false);
+    expect(needsModelCheck('xai', 'grok-5')).toBe(true);
+    // The catalog of another provider is not this one's.
+    expect(needsModelCheck('groq', 'grok-4.7')).toBe(true);
+  });
+
+  it('skips openai when OPENAI_BASE_URL sends its agents elsewhere', () => {
+    vi.stubEnv('OPENAI_BASE_URL', 'http://127.0.0.1:4477/v1');
+    expect(needsModelCheck('openai', 'stub-model')).toBe(false);
+    expect(needsModelCheck('groq', 'stub-model')).toBe(true);
+  });
+});
+
+describe('the catalog', () => {
+  it('offers Claude Opus 5.5 and xAI Grok at their published prices', () => {
+    expect(LLM_PROVIDER_MODELS.anthropic.find((m) => m.id === 'claude-opus-5-5')).toEqual({ id: 'claude-opus-5-5', inputCostPer1M: 4, outputCostPer1M: 20 });
+    expect(LLM_PROVIDER_MODELS.anthropic.find((m) => m.id === 'claude-sonnet-5-5')).toEqual({ id: 'claude-sonnet-5-5', inputCostPer1M: 2, outputCostPer1M: 10 });
+    expect(LLM_PROVIDER_MODELS.xai[0]).toEqual({ id: 'grok-4.7', inputCostPer1M: 2, outputCostPer1M: 6 });
+    expect(LLM_PROVIDER_MODELS.openai[0]).toEqual({ id: 'gpt-6.1-sol', inputCostPer1M: 2, outputCostPer1M: 10 });
+  });
+
+  it('has no duplicate ids and no unpriced entries', () => {
+    for (const [provider, models] of Object.entries(LLM_PROVIDER_MODELS)) {
+      expect(new Set(models.map((m) => m.id)).size, provider).toBe(models.length);
+      for (const m of models) {
+        expect(m.inputCostPer1M, `${provider} ${m.id}`).toBeGreaterThan(0);
+        expect(m.outputCostPer1M, `${provider} ${m.id}`).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it('keeps no model that Groq took off its developer tier, or that xAI gives no client tools', () => {
+    expect(LLM_PROVIDER_MODELS.groq.map((m) => m.id)).not.toContain('llama-3.3-70b-versatile');
+    expect(LLM_PROVIDER_MODELS.xai.map((m) => m.id).some((id) => id.includes('multi-agent'))).toBe(false);
   });
 });
 

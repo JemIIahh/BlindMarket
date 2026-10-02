@@ -30,7 +30,7 @@ import { settlementChainConfigs, withdrawReserveWei, type SettlementChainKey } f
 import { config } from '../config.js';
 import { claimDeployCredit, markDeployCreditUsed, restoreDeployCredit } from '../services/agentFactoryListener.js';
 import { arcDeployFeeTerms, verifyArcDeployFee, claimArcDeployFee, markArcDeployFeeUsed, releaseArcDeployFee } from '../services/deployFee.js';
-import { checkOgComputeModel, discoverModels, ProviderModelsError } from '../services/providerModels.js';
+import { checkKeyedModel, checkOgComputeModel, discoverModels, needsModelCheck, ProviderModelsError, type KeyedProvider } from '../services/providerModels.js';
 import { eciesEncrypt } from '../services/crypto.js';
 import { callerWallets } from '../services/callerWallets.js';
 import { loadAgentReadiness } from '../services/agentReadiness.js';
@@ -225,7 +225,7 @@ const DeploySchema = z.object({
   name: z.string().min(1).max(80),
   instructions: z.string().min(1),
   provider: z.enum(PROVIDERS),
-  model: z.string().min(1),
+  model: z.string().trim().min(1).max(128),
   apiKey: z.string().optional().default(''),
   // Capabilities are deprecated — semantic KNN is the primary routing signal.
   // Kept as optional metadata that feeds into agent embeddings.
@@ -263,6 +263,37 @@ async function ogComputeModelRefusal(model: string): Promise<object | null> {
       models,
     },
   };
+}
+
+/**
+ * The refusal to send when an agent with an API key would run a model the
+ * catalog doesn't list and the provider doesn't list for that key, or null.
+ * An owner can name any model id, so one released today can be used before
+ * the catalog has it; it is checked against the provider's own models list,
+ * which costs nothing and calls no model. A key the provider refuses, or a
+ * list that can't be read, is refused too: an unchecked model never deploys.
+ */
+async function keyedModelRefusal(provider: KeyedProvider, model: string, apiKey: string): Promise<{ status: number; body: object } | null> {
+  if (!needsModelCheck(provider, model)) return null;
+  const refuse = (status: number, code: string, message: string, extra: object = {}) =>
+    ({ status, body: { success: false, error: { code, message, ...extra } } });
+  if (!apiKey) {
+    return refuse(400, 'API_KEY_REQUIRED', `"${model}" isn't in our ${provider} catalog, so it is checked against ${provider}'s model list with your API key. Add the key.`);
+  }
+  try {
+    const { ok, models } = await checkKeyedModel(provider, apiKey, model);
+    if (ok) return null;
+    const some = models.slice(0, 8).join(', ');
+    return refuse(400, 'MODEL_NOT_AVAILABLE',
+      `${provider} doesn't list "${model}" for this API key, so the agent couldn't run it. ` +
+      `Check the model id${some ? `, or pick one it lists (${some}${models.length > 8 ? ', …' : ''})` : ''}.`,
+      { models });
+  } catch (err) {
+    if (!(err instanceof ProviderModelsError)) throw err;
+    return err.code === 'PROVIDER_AUTH'
+      ? refuse(400, 'PROVIDER_AUTH', `${provider} rejected the API key, so "${model}" couldn't be checked.`)
+      : refuse(502, 'PROVIDER_UNAVAILABLE', `${provider}'s model list couldn't be read to check "${model}". Try again in a moment.`);
+  }
 }
 
 /** `p`'s value, or null when it fails or takes longer than `ms`. */
@@ -360,6 +391,30 @@ agentsRouter.post('/provider-models', requireAuth, providerModelsLimiter, async 
   }
 });
 
+// POST /api/v1/agents/:id/provider-models — the live model list for the edit
+// form, read with the key the agent already runs on, so the owner sees what it
+// can switch to without pasting the key again. Owner-only and limited like
+// /provider-models; the key never leaves the server.
+agentsRouter.post('/:id/provider-models', requireAuth, providerModelsLimiter, async (req: AuthRequest, res, next) => {
+  try {
+    const agent = await authorizeOwner(req, res, req.params.id);
+    if (!agent) return;
+    const provider = agent.provider;
+    if (provider !== '0g-compute' && !agent.apiKey) {
+      res.status(400).json({ success: false, error: { code: 'API_KEY_REQUIRED', message: `This agent has no ${provider} API key on file. Enter one to list its models.` } });
+      return;
+    }
+    const models = await discoverModels(provider, agent.apiKey ?? '');
+    res.json({ success: true, data: { provider, models } });
+  } catch (err) {
+    if (err instanceof ProviderModelsError) {
+      res.status(err.code === 'PROVIDER_AUTH' ? 400 : 502).json({ success: false, error: { code: err.code, message: err.message } });
+      return;
+    }
+    next(err);
+  }
+});
+
 // A deploy with an unconfirmed feeTxHash asks Arc for its receipt for up to
 // ~40s. 20/min still covers the Base path's retry loop (one POST per 5s).
 const deployLimiter = createUserRateLimiter(20);
@@ -381,6 +436,9 @@ async function prepareDeploy(body: unknown): Promise<
   if (parsed.data.provider === '0g-compute') {
     const refusal = await ogComputeModelRefusal(parsed.data.model);
     if (refusal) return { ok: false, status: 400, body: refusal };
+  } else {
+    const refusal = await keyedModelRefusal(parsed.data.provider as KeyedProvider, parsed.data.model, parsed.data.apiKey);
+    if (refusal) return { ok: false, ...refusal };
   }
 
   // Resolve skill slugs → frozen snapshots (server-side only). Only public
@@ -1122,7 +1180,7 @@ agentsRouter.post('/:id/link-owner', requireAuth, async (req: AuthRequest, res) 
 const AgentUpdateSchema = z.object({
   instructions: z.string().min(1).optional(),
   provider: z.enum(PROVIDERS).optional(),
-  model: z.string().min(1).optional(),
+  model: z.string().trim().min(1).max(128).optional(),
   apiKey: z.string().optional(),
   tools: z.array(
     z.object({ type: z.enum(['http', 'mcp', 'js', 'sandbox', 'tool']), name: z.string().min(1) }).passthrough(),
@@ -1143,14 +1201,22 @@ agentsRouter.patch('/:id', requireAuth, async (req: AuthRequest, res) => {
   const { instructions, provider, model, apiKey, tools, capabilities, minReward } = parsed.data;
   // Moving an agent onto 0g-compute, or to another model on it: the model must
   // be one its account can pay for. The worker picks the provider again when
-  // it restarts with the new model. The edit form sends provider and model on
-  // every save, so an unchanged pair is not checked: an owner can still edit
-  // the instructions of an agent on a model that has since gone.
+  // it restarts with the new model. On a provider with an API key, a model the
+  // catalog lacks must be one the provider lists for the key: the new one, else
+  // the one on file, which belongs to one provider and so never checks a model
+  // on another. The edit form sends provider and model on every save, so an
+  // unchanged pair is not checked: an owner can still edit the instructions of
+  // an agent on a model that has since gone.
   const nextProvider = provider ?? agent.provider;
   const nextModel = model ?? agent.model;
-  if (nextProvider === '0g-compute' && (nextProvider !== agent.provider || nextModel !== agent.model)) {
+  const modelChanged = nextProvider !== agent.provider || nextModel !== agent.model;
+  if (modelChanged && nextProvider === '0g-compute') {
     const refusal = await ogComputeModelRefusal(nextModel);
     if (refusal) { res.status(400).json(refusal); return; }
+  } else if (modelChanged) {
+    const key = apiKey || (nextProvider === agent.provider ? agent.apiKey : '');
+    const refusal = await keyedModelRefusal(nextProvider as KeyedProvider, nextModel, key ?? '');
+    if (refusal) { res.status(refusal.status).json(refusal.body); return; }
   }
   const updated = await updateAgent(req.params.id, { instructions, provider: provider as any, model, apiKey, tools: tools as any, capabilities: capabilities as any, minReward });
   // Semantic matching (Phase 0): instructions/capabilities changed — re-embed.

@@ -578,7 +578,7 @@ export type AgentTool = HttpAgentTool | McpAgentTool | JsAgentTool | SandboxAgen
 // ── Deployed Agent types ─────────────────────────────────────────────────────
 
 export type AgentStatus = 'stopped' | 'running' | 'paused';
-export type LLMProvider = 'openai' | 'anthropic' | 'groq' | 'gemini' | '0g-compute';
+export type LLMProvider = 'openai' | 'anthropic' | 'groq' | 'gemini' | 'xai' | '0g-compute';
 
 export interface ModelInfo {
   id: string;
@@ -587,49 +587,67 @@ export interface ModelInfo {
 }
 
 // Curated catalog behind the deploy form's dropdown and its price hints.
-// NOT an allowlist: DeploySchema takes any model string and worker.js hands it
-// straight to the provider SDK, so an agent on a model that has since dropped
-// off this list keeps running. POST /agents/provider-models supplements this
-// with a live list from the provider once the user has pasted a key — this
-// table is the no-key fallback and the source of the price hints.
+// NOT an allowlist: an agent on a model that has since dropped off this list
+// keeps running, and an owner can name a model that isn't on it, which deploy
+// and edit check against the provider's own /models list with the owner's key
+// (providerModels.ts, checkKeyedModel). POST /agents/provider-models replaces
+// this with that live list once there is a key — this table is the no-key
+// fallback and the source of the price hints.
 //
-// Prices are USD per 1M tokens, standard tier, checked against each provider's
-// pricing page on 2026-09-08 (Groq's llama rates carried from 2026-08-05).
-// Newest first: the form defaults to the first entry when a provider is picked.
+// Prices are USD per 1M tokens, standard tier, short-context rate, read from
+// each provider's own pricing page on 2026-10-02:
+//   openai     https://developers.openai.com/api/docs/pricing
+//   anthropic  https://platform.claude.com/docs/en/about-claude/pricing
+//   groq       https://console.groq.com/docs/models
+//   gemini     https://ai.google.dev/gemini-api/docs/pricing
+//   xai        https://docs.x.ai/developers/pricing
+// Deprecated models (a shutdown date announced) and retired ones are left out.
+// The form defaults to the first entry when a provider is picked.
+// backend/scripts/check-model-catalog.ts diffs this against those pages.
 export const LLM_PROVIDER_MODELS: Record<LLMProvider, ModelInfo[]> = {
   openai: [
+    // gpt-5.4-nano (shuts down 2027-04-01) and gpt-5 / -mini / -nano (their
+    // snapshots shut down 2026-12-11) are deprecated: developers.openai.com/api/docs/deprecations.
+    { id: 'gpt-6.1-sol',   inputCostPer1M: 2.00,  outputCostPer1M: 10.00 },
     { id: 'gpt-6-astra',   inputCostPer1M: 10.00, outputCostPer1M: 50.00 },
+    { id: 'gpt-6-sol',     inputCostPer1M: 2.00,  outputCostPer1M: 10.00 },
+    { id: 'gpt-6-luna',    inputCostPer1M: 0.10,  outputCostPer1M: 0.50  },
+    // Promotional price, "available at least through November 21, 2026".
     { id: 'gpt-5.6-sol',   inputCostPer1M: 4.00,  outputCostPer1M: 20.00 },
     { id: 'gpt-5.6-terra', inputCostPer1M: 2.00,  outputCostPer1M: 12.00 },
     { id: 'gpt-5.6-luna',  inputCostPer1M: 0.20,  outputCostPer1M: 1.20  },
     { id: 'gpt-5.5',       inputCostPer1M: 5.00,  outputCostPer1M: 30.00 },
     { id: 'gpt-5.4',       inputCostPer1M: 2.50,  outputCostPer1M: 15.00 },
     { id: 'gpt-5.4-mini',  inputCostPer1M: 0.75,  outputCostPer1M: 4.50  },
-    { id: 'gpt-5.4-nano',  inputCostPer1M: 0.20,  outputCostPer1M: 1.25  },
-    { id: 'gpt-5',         inputCostPer1M: 1.25,  outputCostPer1M: 10.00 },
-    { id: 'gpt-5-mini',    inputCostPer1M: 0.25,  outputCostPer1M: 2.00  },
-    { id: 'gpt-5-nano',    inputCostPer1M: 0.05,  outputCostPer1M: 0.40  },
     { id: 'gpt-4.1',       inputCostPer1M: 2.00,  outputCostPer1M: 8.00  },
     { id: 'gpt-4o',        inputCostPer1M: 2.50,  outputCostPer1M: 10.00 },
     { id: 'gpt-4o-mini',   inputCostPer1M: 0.15,  outputCostPer1M: 0.60  },
   ],
   anthropic: [
+    // Claude API ids, current lineup then the legacy models still served.
+    // Mythos is invitation-only, so not offered.
     { id: 'claude-fable-5-1',  inputCostPer1M: 10.00, outputCostPer1M: 50.00 },
+    { id: 'claude-opus-5-5',   inputCostPer1M: 4.00,  outputCostPer1M: 20.00 },
+    { id: 'claude-sonnet-5-5', inputCostPer1M: 2.00,  outputCostPer1M: 10.00 },
     { id: 'claude-fable-5',    inputCostPer1M: 10.00, outputCostPer1M: 50.00 },
     { id: 'claude-opus-5',     inputCostPer1M: 5.00,  outputCostPer1M: 25.00 },
+    { id: 'claude-sonnet-5',   inputCostPer1M: 2.00,  outputCostPer1M: 10.00 },
     { id: 'claude-opus-4-8',   inputCostPer1M: 5.00,  outputCostPer1M: 25.00 },
     { id: 'claude-opus-4-7',   inputCostPer1M: 5.00,  outputCostPer1M: 25.00 },
-    { id: 'claude-sonnet-5',   inputCostPer1M: 2.00,  outputCostPer1M: 10.00 },
+    { id: 'claude-opus-4-6',   inputCostPer1M: 5.00,  outputCostPer1M: 25.00 },
     { id: 'claude-sonnet-4-6', inputCostPer1M: 3.00,  outputCostPer1M: 15.00 },
+    // The alias: the Models API lists the dated claude-haiku-4-5-20251001.
     { id: 'claude-haiku-4-5',  inputCostPer1M: 1.00,  outputCostPer1M: 5.00  },
   ],
   groq: [
     // Groq namespaces the OSS GPT models — the bare 'gpt-oss-120b' this list
-    // used to carry is not a Groq model id.
-    { id: 'openai/gpt-oss-120b',     inputCostPer1M: 0.15,  outputCostPer1M: 0.60 },
-    { id: 'openai/gpt-oss-20b',      inputCostPer1M: 0.075, outputCostPer1M: 0.30 },
-    { id: 'llama-3.3-70b-versatile', inputCostPer1M: 0.59,  outputCostPer1M: 0.79 },
-    { id: 'llama-3.1-8b-instant',    inputCostPer1M: 0.05,  outputCostPer1M: 0.08 },
+    // used to carry is not a Groq model id. llama-3.3-70b-versatile and
+    // llama-3.1-8b-instant left the free and developer tiers on 2026-08-16
+    // (console.groq.com/docs/deprecations); Groq prices them for enterprise only.
+    { id: 'openai/gpt-oss-120b', inputCostPer1M: 0.15,  outputCostPer1M: 0.60 },
+    { id: 'openai/gpt-oss-20b',  inputCostPer1M: 0.075, outputCostPer1M: 0.30 },
+    // A Groq preview model: "may be discontinued at short notice".
+    { id: 'qwen/qwen3.8-27b',    inputCostPer1M: 0.80,  outputCostPer1M: 4.00 },
   ],
   gemini: [
     // 3.x Flash is $0.75/$3.75 through 2026-12-31, then $1.50/$7.50.
@@ -642,6 +660,19 @@ export const LLM_PROVIDER_MODELS: Record<LLMProvider, ModelInfo[]> = {
     { id: 'gemini-3.1-flash-lite',  inputCostPer1M: 0.25,  outputCostPer1M: 1.50  },
     { id: 'gemini-2.5-pro',         inputCostPer1M: 1.25,  outputCostPer1M: 10.00 },
     { id: 'gemini-2.5-flash',       inputCostPer1M: 0.30,  outputCostPer1M: 2.50  },
+    { id: 'gemini-2.5-flash-lite',  inputCostPer1M: 0.10,  outputCostPer1M: 0.40  },
+  ],
+  // xAI (Grok) — not Groq. Prompts of 200k tokens or more are billed at twice
+  // these rates. grok-4.20-multi-agent-0309 is left out: xAI documents no
+  // client-side function calling for it, and the worker's tools need that.
+  xai: [
+    { id: 'grok-4.7',                     inputCostPer1M: 2.00, outputCostPer1M: 6.00 },
+    { id: 'grok-4.6',                     inputCostPer1M: 2.00, outputCostPer1M: 6.00 },
+    { id: 'grok-4.5',                     inputCostPer1M: 2.00, outputCostPer1M: 6.00 },
+    { id: 'grok-4.3',                     inputCostPer1M: 1.25, outputCostPer1M: 2.50 },
+    { id: 'grok-4.20-0309-reasoning',     inputCostPer1M: 1.25, outputCostPer1M: 2.50 },
+    { id: 'grok-4.20-0309-non-reasoning', inputCostPer1M: 1.25, outputCostPer1M: 2.50 },
+    { id: 'grok-build-0.1',               inputCostPer1M: 1.00, outputCostPer1M: 2.00 },
   ],
   // No API key: the agent's own wallet pays a 0G Compute provider per call,
   // from its 0G Compute account. Only models a provider registered on 0G

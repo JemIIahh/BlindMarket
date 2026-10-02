@@ -110,7 +110,8 @@ describe('deploying a 0g-compute agent', () => {
   });
 
   it("leaves other providers' models alone", async () => {
-    const res = await validate({ provider: 'openai', model: 'deepseek-v4-flash', apiKey: 'sk-test' });
+    // A catalog model: one the catalog lacks is checked against the provider's own list (agents.keyedModel.test.ts).
+    const res = await validate({ provider: 'openai', model: 'gpt-5.4-mini', apiKey: 'sk-test' });
     expect(res.status).toBe(200);
     expect(readOgServices).not.toHaveBeenCalled();
   });
