@@ -1,5 +1,6 @@
 import { formatUnits } from 'ethers';
 import { Button, Icon, ConfirmDialog, CopyButton, ErrorNotice } from '../bb';
+import { sponsorshipView, type GasSponsorship } from '../../lib/agentGas';
 
 /** How a withdraw receipt names the chain it swept (backend chain keys). */
 const CHAIN_LABEL: Record<string, string> = { arc: 'Arc', base: 'Base', '0g': '0G' };
@@ -15,6 +16,7 @@ export function GasBar({
   chainLabel,
   topUpAmount,
   minGasLabel,
+  sponsorship,
   isLowGas,
   balanceEther,
   agentStatus,
@@ -53,6 +55,8 @@ export function GasBar({
    * `symbol`: below it the worker takes no task. Null where it is unknown.
    */
   minGasLabel: string | null;
+  /** Whether BlindMarket pays this agent's gas; null until known or where it doesn't run. */
+  sponsorship?: GasSponsorship | null;
   isLowGas: boolean;
   balanceEther: number;
   agentStatus: string;
@@ -84,6 +88,7 @@ export function GasBar({
   cctpQuoteLoading: boolean;
   cctpSymbol: string;
 }) {
+  const sponsor = sponsorshipView(sponsorship);
   return (
     <div className="card-dark px-5 py-4 sm:px-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -176,6 +181,14 @@ export function GasBar({
         </div>
       </div>
 
+      {sponsor && (
+        <div className="mt-3 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[12px]">
+          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${sponsor.sponsored ? 'bg-ok' : 'bg-ink-3'}`} aria-hidden />
+          <span className="text-ink">{sponsor.title}</span>
+          <span className="text-ink-3">{sponsor.detail}</span>
+        </div>
+      )}
+
       {/* The address itself, for funding from anywhere else: an exchange,
           another wallet, a bridge. "Fund wallet" only sends from the
           connected wallet. */}
@@ -225,10 +238,12 @@ export function GasBar({
             <div className="text-warn">
               {minGasLabel !== null ? (
                 <>
-                  It takes no tasks while its wallet holds less than{' '}
-                  <span className="font-mono">{minGasLabel} {symbol}</span>, what one transaction can cost at current gas
-                  prices. Top it up to resume; a submitted result usually costs under a cent.
+                  {sponsor?.sponsored ? 'It takes only tasks whose gas BlindMarket pays' : 'It takes no tasks'} while its
+                  wallet holds less than <span className="font-mono">{minGasLabel} {symbol}</span>, what one transaction
+                  can cost at current gas prices. Top it up to resume; a submitted result usually costs under a cent.
                 </>
+              ) : sponsor?.sponsored ? (
+                <>Its wallet is empty, so it takes only tasks whose gas BlindMarket pays until you top it up.</>
               ) : (
                 <>Its wallet is empty, so it can't pay gas and takes no tasks until you top it up.</>
               )}

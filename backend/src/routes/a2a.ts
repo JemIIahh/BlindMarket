@@ -27,7 +27,7 @@ import { demandFeed, MAX_DEMAND_LIMIT } from '../services/demandFeed.js';
 import { chainRuntime } from '../services/chainRuntime.js';
 import { postingChain, receiptSearchOrder, settlementChainConfig } from '../services/settlementChains.js';
 import { ethers } from 'ethers';
-import type { AuthRequest, AuthUser, ApiResponse, AgentCapability, A2ATaskMeta } from '../types.js';
+import type { AuthRequest, AuthUser, ApiResponse, AgentCapability, A2ATaskMeta, DeployedAgent } from '../types.js';
 import { AGENT_CAPABILITIES } from '../types.js';
 import { rankAgents, pickExplorationAgent, meetsRewardFloor } from '../services/agentScorer.js';
 import { supportsChain, supportsTaskChain } from '../services/executorChains.js';
@@ -44,6 +44,12 @@ import { isSafeRegexSource } from '../services/rubricEngine.js';
 import { callerWallets } from '../services/callerWallets.js';
 import { activeHostedVerifiers, hostedVerifierNotOptedIn, VERIFIER_NOT_OPTED_IN_MESSAGE } from '../services/verifierDuty.js';
 import { refuseUnapprovedDelegation, sameOwnerSubtask } from '../services/delegationGuard.js';
+import { gasSponsorSettings } from '../services/gasSponsorConfig.js';
+import { sponsorHint } from '../services/gasSponsorEligibility.js';
+import { holdsReservation, releaseAcceptReservation, reserveForAccept, startReservationAfterAssign } from '../services/gasSponsorAccept.js';
+import type { Reservation as SponsorReservation } from '../services/gasSponsorStore.js';
+import { relaySponsoredCall, sponsoredCallStatus } from '../services/gasSponsorRelayer.js';
+import jwt from 'jsonwebtoken';
 import { withPosterAvatars } from '../services/avatarStore.js';
 
 export const a2aRouter = Router();
@@ -376,7 +382,12 @@ a2aRouter.get('/tasks', async (req, res, next) => {
     // Each poster's avatar, where they made one: keyed by the public
     // posterAddress already on the meta (services/avatarStore.ts).
     const metas = await withPosterAvatars(page.map((t) => t.meta));
-    const tasks = page.map((t, i) => ({ ...t, meta: metas[i] }));
+    // The task-level gasSponsored hint (no agent named here): a worker that
+    // sees it may skip its own balance gate and ask /accept to reserve.
+    const hints = gasSponsorSettings().enabled
+      ? await Promise.all(page.map((t) => sponsorHint(t.meta)))
+      : page.map(() => false);
+    const tasks = page.map((t, i) => ({ ...t, meta: { ...metas[i], ...(hints[i] ? { gasSponsored: true } : {}) } }));
 
     const body: ApiResponse = {
       success: true,
@@ -400,6 +411,11 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
   const address = req.user!.address;
   const addrLc = address.toLowerCase();
   let lockAcquired = false;
+  // A sponsored-gas reservation this accept made (gasSponsorAccept.ts), and
+  // whether to keep it when the accept ends: kept once the task is assigned,
+  // or while its assignment is still confirming; given back otherwise.
+  let sponsorReservation: SponsorReservation | null = null;
+  let keepSponsorReservation = false;
   console.log(`[a2a] POST /accept: taskId=${taskId}, executor=${address}`);
 
   try {
@@ -570,6 +586,8 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
           chain: reSettleResult.chain ?? currentMeta?.chain,
           alreadySettled: reSettleResult.alreadySettled ?? true,
           assignTxHash: reSettleResult.txHash,
+          // Its submit is sponsored when it holds a reservation (a resume).
+          ...((await holdsReservation(taskId, address)) ? { gasSponsored: true } : {}),
         },
       };
       await a2aStore.logAcceptAttempt(taskId, address, 'won');
@@ -599,6 +617,20 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
       if (!meetsRewardFloor(agent, reward)) {
         await a2aStore.logAcceptAttempt(taskId, address, 'rejected_precheck');
         throw new AppError(403, 'BELOW_MIN_REWARD', "This task's reward is below your registered minimum reward");
+      }
+    }
+
+    // Sponsored gas (docs/AGENT-GAS-FUNDING.md): a worker that took this task
+    // on a gasSponsored hint asks for its submit to be sponsored. Reserve the
+    // budget BEFORE the compare-and-set: when nothing can be reserved it hears
+    // 409 GAS_SPONSOR_UNAVAILABLE with the transition unburned, and pays its
+    // own gas or declines.
+    if ((req.body as { sponsorGas?: unknown } | undefined)?.sponsorGas === true) {
+      try {
+        sponsorReservation = await reserveForAccept(taskId, meta, address);
+      } catch (err) {
+        await a2aStore.logAcceptAttempt(taskId, address, 'rejected_precheck');
+        throw err;
       }
     }
 
@@ -766,6 +798,7 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
       // caller's retry confirms via the idempotent branch above, and the expiry
       // sweep releases it if the tx was dropped.
       if (settleResult.pending) {
+        keepSponsorReservation = true;
         console.warn(`[a2a] accept: assignment for ${taskId} still confirming (tx=${settleResult.txHash}) — not releasing`);
         await a2aStore.logAcceptAttempt(taskId, address, 'error');
         throw new AppError(503, 'ASSIGNMENT_PENDING', ASSIGNMENT_PENDING_MESSAGE);
@@ -794,6 +827,10 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
     // on legacy tasks created before the encrypted-flow shipped — the worker
     // treats that as "no brief available, log and skip" rather than crashing.
     const wrappedKey = selfHealedSlice ?? meta.wrappedKeys?.[addrLc];
+    if (sponsorReservation) {
+      keepSponsorReservation = true;
+      await startReservationAfterAssign(sponsorReservation);
+    }
     const body: ApiResponse = {
       success: true,
       data: {
@@ -809,6 +846,9 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
         chain: settleResult.chain ?? meta.chain,
         alreadySettled: settleResult.alreadySettled,
         assignTxHash: settleResult.txHash,
+        // A reservation is held: sign the submit and send it to
+        // POST /tasks/:id/sponsored-call instead of paying gas.
+        ...(sponsorReservation ? { gasSponsored: true } : {}),
       },
     };
     res.json(body);
@@ -834,6 +874,7 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
     void notifyLifecycle(taskId, 'assigned');
   } catch (err) {
     console.error(`[a2a] accept failed for ${req.params.id}:`, (err as Error).message);
+    if (sponsorReservation && !keepSponsorReservation) await releaseAcceptReservation(sponsorReservation);
     next(err);
   } finally {
     // Always release the Redis lock — TTL is the backstop for crashes, not
@@ -1083,10 +1124,36 @@ function broadcastMeta(requiredCaps: string[], chain?: TaskChain): Record<string
   };
 }
 
+/**
+ * The gasSponsored hint for an offer to `agent`, or a broadcast to all:
+ * sponsorship would likely pay this task's submit, so the worker may skip its
+ * own balance gate and ask /accept to reserve (gasSponsorEligibility.ts). A
+ * hint only: /accept checks everything again.
+ */
+async function sponsorHintFields(taskHash: string, agent?: string): Promise<{ gasSponsored?: true }> {
+  if (!gasSponsorSettings().enabled) return {};
+  const meta = await a2aStore.getMeta(taskHash).catch(() => undefined);
+  return meta && (await sponsorHint(meta, agent)) ? { gasSponsored: true } : {};
+}
+
+/** Broadcast that a task is available, with its gasSponsored hint. */
+function announceAvailable(taskHash: string, requiredCaps: string[], chain?: TaskChain): void {
+  void sponsorHintFields(taskHash)
+    .catch(() => ({}))
+    .then((hint) => emitTaskAvailable(taskHash, { ...broadcastMeta(requiredCaps, chain), ...hint }));
+}
+
+/** Offer a task to one agent, with the gasSponsored hint for that agent. */
+function announceOffer(agent: string, taskHash: string, requiredCaps: string[], chain: TaskChain | undefined, score: number, deadline: number): void {
+  void sponsorHintFields(taskHash, agent)
+    .catch(() => ({}))
+    .then((hint) => emitTaskOffer(agent, taskHash, { ...offerMeta(requiredCaps, chain), ...hint }, score, deadline));
+}
+
 /** A task that went back to `open` is announced like a fresh broadcast —
  *  otherwise connected agents only rediscover it on their next reconnect. */
 function announceReopened(taskId: string, meta: A2ATaskMeta): void {
-  emitTaskAvailable(taskId, broadcastMeta(meta.requiredCapabilities ?? [], meta.chain));
+  announceAvailable(taskId, meta.requiredCapabilities ?? [], meta.chain);
 }
 
 /**
@@ -1151,7 +1218,7 @@ function scheduleCascadeAdvance(
 async function offerNextInCascade(taskHash: string, requiredCaps: string[], chain?: TaskChain): Promise<void> {
   const next = await a2aStore.advanceCascade(taskHash);
   if (!next) {
-    emitTaskAvailable(taskHash, broadcastMeta(requiredCaps, chain));
+    announceAvailable(taskHash, requiredCaps, chain);
     return;
   }
 
@@ -1165,7 +1232,7 @@ async function offerNextInCascade(taskHash: string, requiredCaps: string[], chai
   // unauthenticated, so a task:offer payload reaches anyone who joined the
   // room. The agent only needs the taskId to fire /accept, which returns
   // rootHash + its wrapped slice over the authenticated channel.
-  emitTaskOffer(next.address, taskHash, offerMeta(requiredCaps, chain), next.score, deadline);
+  announceOffer(next.address, taskHash, requiredCaps, chain, next.score, deadline);
 
   scheduleCascadeAdvance(taskHash, requiredCaps, chain, a2aStore.CASCADE_OFFER_MS, next.position);
 }
@@ -1251,7 +1318,7 @@ async function startRankedCascade(
 ): Promise<void> {
   const { entries, semantic } = await rankedEntries(taskHash, requiredCaps, routingMeta, taskReward);
   if (entries.length === 0) {
-    emitTaskAvailable(taskHash, broadcastMeta(requiredCaps, chain));
+    announceAvailable(taskHash, requiredCaps, chain);
     return;
   }
 
@@ -1275,7 +1342,7 @@ async function startRankedCascade(
   }).catch(() => {});
   // rootHash deliberately omitted — unauthenticated WS room, see
   // scheduleCascadeAdvance.
-  emitTaskOffer(best.address, taskHash, offerMeta(requiredCaps, chain), best.score, deadline);
+  announceOffer(best.address, taskHash, requiredCaps, chain, best.score, deadline);
   scheduleCascadeAdvance(taskHash, requiredCaps, chain);
 
   // Canary dial: which ranking produced the offers that were just emitted.
@@ -2020,7 +2087,7 @@ async function indexTaskFromEvent(
   // that was this same lockout.)
   const semanticEligible = semanticMatch.semanticRoutingEligible(routingMeta);
   if (!config.cascadeEnabled || targetExecutor || (requiredCaps.length === 0 && !semanticEligible)) {
-    emitTaskAvailable(taskHash, broadcastMeta(requiredCaps, taskChain));
+    announceAvailable(taskHash, requiredCaps, taskChain);
   } else {
     // The reward carries its unit: an agent's floor is written in this
     // deployment's pricing unit and cannot be compared with an amount in
@@ -2028,7 +2095,7 @@ async function indexTaskFromEvent(
     const taskReward: TaskReward = { amount: BigInt(onChainAmount), unit: taskUnit };
     const broadcastAfter = (err: Error, stage: string) => {
       console.error(`[a2a] ${stage} failed for ${taskHash.slice(0, 10)}…:`, err.message);
-      emitTaskAvailable(taskHash, broadcastMeta(requiredCaps, taskChain));
+      announceAvailable(taskHash, requiredCaps, taskChain);
     };
 
     if (requiredCaps.length === 0) {
@@ -2051,7 +2118,7 @@ async function indexTaskFromEvent(
             score: explorationPick.score,
             expiresAt: deadline,
           }).catch(() => {});
-          emitTaskOffer(explorationPick.address, taskHash, offerMeta(requiredCaps, taskChain), explorationPick.score, deadline);
+          announceOffer(explorationPick.address, taskHash, requiredCaps, taskChain, explorationPick.score, deadline);
           // Store the ranked queue behind the pick so a pass/timeout advances
           // into the ranking (see a2aStore.withExplorationHead). Best-effort:
           // if ranking fails the advance falls back to broadcast as before.
@@ -2466,6 +2533,121 @@ a2aRouter.post('/tasks/:id/submit', requireAuth, async (req: AuthRequest, res, n
     res.json(body);
   } catch (err) {
     console.error(`[a2a] submit failed for ${req.params.id}:`, (err as Error).message);
+    next(err);
+  }
+});
+
+const authorizationSchema = z.object({
+  chainId: z.union([z.string().regex(/^\d+$/), z.number().int().nonnegative()]),
+  address: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+  nonce: z.union([z.string().regex(/^\d+$/), z.number().int().nonnegative()]),
+  yParity: z.union([z.literal(0), z.literal(1)]),
+  r: z.string().regex(/^0x[0-9a-fA-F]{1,64}$/),
+  s: z.string().regex(/^0x[0-9a-fA-F]{1,64}$/),
+});
+const sponsoredCallSchema = z.object({
+  kind: z.enum(['submit', 'release']),
+  evidenceHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/).optional(),
+  nonce: z.string().regex(/^\d{1,78}$/),
+  deadline: z.string().regex(/^\d{1,20}$/),
+  signature: z.string().regex(/^0x[0-9a-fA-F]{130}$/),
+  authorization: authorizationSchema.optional(),
+});
+
+/**
+ * POST /api/v1/a2a/tasks/:id/sponsored-call (docs/AGENT-GAS-FUNDING.md)
+ *
+ * A hosted agent hands BlindMarket its signed escrow call and the relayer
+ * sends it through the agent's EIP-7702 delegate, paying the gas: the first
+ * submitEvidence of a task it holds a reservation for (from /accept), or a
+ * releaseUnjudgedWork. Body: { kind, evidenceHash (submit), nonce, deadline,
+ * signature, authorization? }, the call signed with the wallet's key over
+ * the delegate's EIP-712 domain, plus a 7702 authorization the first time.
+ *
+ * Only the agent's own platform token may call it: typ 'agent-platform' with
+ * the jti of the token stored for that agent, so neither a device-flow token
+ * nor a revoked or replaced platform token can spend sponsorship. Every
+ * refusal sends nothing, and the worker falls back to its own gas.
+ */
+/** The hosted agent behind the request, when it is the agent's own stored platform token. */
+async function sponsoredCaller(req: AuthRequest): Promise<DeployedAgent> {
+  const user = req.user!;
+  const agent = await loadAgentByWallet(user.address);
+  const storedJti = agent?.platformToken ? (jwt.decode(agent.platformToken) as { jti?: unknown } | null)?.jti : undefined;
+  if (user.typ !== 'agent-platform' || !agent || typeof storedJti !== 'string' || user.jti !== storedJti) {
+    throw new AppError(403, 'FORBIDDEN', "Only the agent's own platform token can request sponsored gas");
+  }
+  return agent;
+}
+
+a2aRouter.post('/tasks/:id/sponsored-call', requireAuth, async (req: AuthRequest, res, next) => {
+  try {
+    const taskHash = req.params.id as string;
+    const agent = await sponsoredCaller(req);
+    const parsed = sponsoredCallSchema.safeParse(req.body ?? {});
+    if (!parsed.success) throw new AppError(400, 'VALIDATION_ERROR', zodIssuesText(parsed.error));
+    const body = parsed.data;
+    if (body.kind === 'submit' && !body.evidenceHash) throw new AppError(400, 'VALIDATION_ERROR', 'evidenceHash is required for a submit');
+
+    const resolved = await resolveTaskByHash(taskHash);
+    if (!resolved || resolved.chain !== 'arc') throw new AppError(404, 'NOT_INDEXED', 'This task is not indexed on Arc');
+
+    const result = await relaySponsoredCall({
+      agent,
+      kind: body.kind,
+      taskId: BigInt(resolved.taskId),
+      evidenceHash: body.evidenceHash ?? ethers.ZeroHash,
+      nonce: BigInt(body.nonce),
+      deadline: BigInt(body.deadline),
+      signature: body.signature,
+      ...(body.authorization
+        ? {
+            authorization: {
+              chainId: BigInt(body.authorization.chainId),
+              address: body.authorization.address,
+              nonce: BigInt(body.authorization.nonce),
+              yParity: body.authorization.yParity,
+              r: ethers.zeroPadValue(body.authorization.r, 32),
+              s: ethers.zeroPadValue(body.authorization.s, 32),
+            },
+          }
+        : {}),
+    });
+    if (!result.ok && result.code === 'PENDING') {
+      // Sent, not final: the agent must neither pay its own gas for this call
+      // nor hand the task back while it is out (GET below says when it is final).
+      const pending: ApiResponse = { success: true, data: { status: 'pending', txHash: result.txHash ?? null } };
+      res.status(202).json(pending);
+      return;
+    }
+    if (!result.ok) throw new AppError(result.status, result.code, result.message);
+    const out: ApiResponse = {
+      success: true,
+      data: { status: 'confirmed', txHash: result.txHash, landedElsewhere: result.landedElsewhere === true },
+    };
+    res.json(out);
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * GET /api/v1/a2a/tasks/:id/sponsored-call?kind=submit|release
+ *
+ * What became of the agent's sponsored call for this task: 'none' (nothing
+ * sent), 'pending' (out, may still land), 'confirmed', or 'failed' for good.
+ * Same caller rule as the POST.
+ */
+a2aRouter.get('/tasks/:id/sponsored-call', requireAuth, async (req: AuthRequest, res, next) => {
+  try {
+    const agent = await sponsoredCaller(req);
+    const kind = req.query.kind === 'release' ? 'release' : 'submit';
+    const resolved = await resolveTaskByHash(req.params.id as string);
+    if (!resolved || resolved.chain !== 'arc') throw new AppError(404, 'NOT_INDEXED', 'This task is not indexed on Arc');
+    const status = await sponsoredCallStatus(agent.walletAddress, BigInt(resolved.taskId), kind);
+    const out: ApiResponse = { success: true, data: status };
+    res.json(out);
+  } catch (err) {
     next(err);
   }
 });
@@ -3536,10 +3718,14 @@ a2aRouter.get('/executions', requireAuth, async (req: AuthRequest, res, next) =>
     // The self view still hides the auto-verify answer key: the executor is
     // the one being checked against it.
     const executions = isSelf
-      ? tasks.map((t) => ({
+      ? await Promise.all(tasks.map(async (t) => ({
           ...t,
           meta: { ...t.meta, verificationCriteria: a2aStore.projectCriteria(t.meta.verificationCriteria) },
-        }))
+          // A task whose submit is sponsored: the worker's resume skips its
+          // own gas hold for it (gasSponsorAccept.holdsReservation).
+          ...(t.meta.chain === 'arc' && ['accepted', 'in_progress', 'submitted'].includes(t.state?.status ?? '')
+            && (await holdsReservation(t.meta.taskId, address)) ? { gasSponsored: true } : {}),
+        })))
       : tasks.map(a2aStore.projectPublicEntry);
 
     const body: ApiResponse = {

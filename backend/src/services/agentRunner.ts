@@ -50,6 +50,9 @@ export function settlementChainsJson(): string {
         nativeIsSettlementToken: gas.nativeIsSettlementToken,
         // The worker's gas gate for one tx here (worker.js preflightGasLimitFor).
         preflightGasLimit: gas.workerTxGasLimit.toString(),
+        // The EIP-7702 delegate a sponsored submit is signed for
+        // (docs/AGENT-GAS-FUNDING.md); Arc only, null until one is recorded.
+        agentDelegate: key === 'arc' && config.arcAgentDelegateAddress ? config.arcAgentDelegateAddress : null,
         aa,
         posting: key === posting,
       };
@@ -85,6 +88,8 @@ export const WORKER_ENV_PASSTHROUGH = [
   'POLL_INTERVAL_MS',
   'WS_RECONCILE_MS',
   'GAS_RECHECK_MS',
+  // How often a worker asks whether BlindMarket's transaction for its call landed.
+  'SPONSORED_POLL_MS',
   'LLM_TIMEOUT_MS',
   'RELEASE_COOLDOWN_MS',
   'SENTRY_DSN',

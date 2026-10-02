@@ -21,6 +21,8 @@ export interface AuthUser {
    * reject any principal carrying either — see middleware/auth.ts.
    */
   typ?: 'agent-registration' | 'agent-platform';
+  /** The HS256 token's id (verifyRegistrationToken), for revocation and token matching. */
+  jti?: string;
 }
 
 /** Express request with authenticated user */

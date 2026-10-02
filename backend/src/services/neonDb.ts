@@ -862,6 +862,86 @@ const migrations: Array<{ id: number; name: string; sql: string; when?: () => bo
     // agents deployed before it, or through an API key or agent token.
     sql: `ALTER TABLE deployed_agents ADD COLUMN IF NOT EXISTS privy_user_id TEXT;`,
   },
+  {
+    id: 43,
+    name: 'gas_sponsorship',
+    // Sponsored agent gas (docs/AGENT-GAS-FUNDING.md; services/gasSponsorStore.ts).
+    // Postgres only: there is no SQLite mirror, and sponsorship refuses to run
+    // without Postgres. One reservation per (chain, escrow task, kind); every
+    // sponsored transaction is written here, signed, before it is broadcast.
+    sql: `
+      CREATE TABLE IF NOT EXISTS gas_sponsor_reservations (
+        id BIGSERIAL PRIMARY KEY,
+        chain_id INTEGER NOT NULL,
+        task_id BIGINT NOT NULL,
+        kind TEXT NOT NULL,
+        task_hash TEXT NOT NULL,
+        agent_wallet TEXT NOT NULL,
+        owner_did TEXT NOT NULL,
+        poster TEXT NOT NULL,
+        status TEXT NOT NULL,
+        budget_wei NUMERIC(78, 0) NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        expires_at TIMESTAMPTZ NOT NULL,
+        settled_at TIMESTAMPTZ,
+        tx_hash TEXT,
+        gas_used BIGINT,
+        cost_wei NUMERIC(78, 0),
+        UNIQUE (chain_id, task_id, kind)
+      );
+      CREATE INDEX IF NOT EXISTS idx_gas_sponsor_res_created ON gas_sponsor_reservations (chain_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_gas_sponsor_res_agent ON gas_sponsor_reservations (chain_id, agent_wallet, status);
+      CREATE INDEX IF NOT EXISTS idx_gas_sponsor_res_owner ON gas_sponsor_reservations (chain_id, owner_did, created_at);
+      CREATE INDEX IF NOT EXISTS idx_gas_sponsor_res_poster ON gas_sponsor_reservations (chain_id, poster, created_at);
+      CREATE TABLE IF NOT EXISTS gas_sponsor_txs (
+        id BIGSERIAL PRIMARY KEY,
+        chain_id INTEGER NOT NULL,
+        reservation_id BIGINT NOT NULL REFERENCES gas_sponsor_reservations (id),
+        sponsor TEXT NOT NULL,
+        nonce BIGINT NOT NULL,
+        raw_tx TEXT NOT NULL,
+        tx_hash TEXT NOT NULL,
+        with_authorization BOOLEAN NOT NULL DEFAULT false,
+        status TEXT NOT NULL,
+        gas_used BIGINT,
+        cost_wei NUMERIC(78, 0),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (tx_hash)
+      );
+      -- One transaction per sponsor nonce; one the node rejected outright never
+      -- entered a pool, so its nonce is free again.
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_gas_sponsor_txs_nonce ON gas_sponsor_txs (chain_id, sponsor, nonce) WHERE status <> 'rejected';
+      CREATE INDEX IF NOT EXISTS idx_gas_sponsor_txs_res ON gas_sponsor_txs (reservation_id);
+      CREATE INDEX IF NOT EXISTS idx_gas_sponsor_txs_status ON gas_sponsor_txs (chain_id, status, created_at);
+      CREATE TABLE IF NOT EXISTS gas_sponsor_strikes (
+        id BIGSERIAL PRIMARY KEY,
+        chain_id INTEGER NOT NULL,
+        agent_wallet TEXT NOT NULL,
+        owner_did TEXT NOT NULL,
+        reservation_id BIGINT NOT NULL UNIQUE REFERENCES gas_sponsor_reservations (id),
+        reason TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_gas_sponsor_strikes_agent ON gas_sponsor_strikes (chain_id, agent_wallet, created_at);
+      CREATE INDEX IF NOT EXISTS idx_gas_sponsor_strikes_owner ON gas_sponsor_strikes (chain_id, owner_did, created_at);
+      CREATE TABLE IF NOT EXISTS agent_key_exports (
+        id BIGSERIAL PRIMARY KEY,
+        agent_id TEXT NOT NULL,
+        wallet TEXT NOT NULL,
+        requested_by TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_agent_key_exports_wallet ON agent_key_exports (wallet);
+      CREATE TABLE IF NOT EXISTS gas_sponsor_controls (
+        chain_id INTEGER PRIMARY KEY,
+        paused BOOLEAN NOT NULL DEFAULT false,
+        killed BOOLEAN NOT NULL DEFAULT false,
+        reason TEXT,
+        updated_by TEXT,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );`,
+  },
 ];
 
 /**

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatMinGas, minGasBalance } from './agentGas';
+import { formatMinGas, minGasBalance, sponsorshipView } from './agentGas';
 
 const GWEI = 10n ** 9n;
 
@@ -27,5 +27,24 @@ describe('formatMinGas', () => {
     expect(formatMinGas(13_500n, 6)).toBe('0.0135');
     expect(formatMinGas(12_001n, 6)).toBe('0.0121');
     expect(formatMinGas(1_000_000n, 6)).toBe('1');
+  });
+});
+
+describe('sponsorshipView', () => {
+  it('names each state the way the agent page shows it', () => {
+    expect(sponsorshipView({ state: 'sponsored' })).toMatchObject({ title: 'Gas paid by BlindMarket', sponsored: true });
+    expect(sponsorshipView({ state: 'paused' })).toMatchObject({ title: 'Gas sponsorship paused', sponsored: false });
+    expect(sponsorshipView({ state: 'not_eligible', reason: 'key_exported' })).toMatchObject({ title: 'Not eligible (key exported)', sponsored: false });
+  });
+
+  it('says nothing where sponsorship does not run, or before it loads', () => {
+    expect(sponsorshipView({ state: 'off' })).toBeNull();
+    expect(sponsorshipView(undefined)).toBeNull();
+  });
+
+  it('keeps an unknown reason plain', () => {
+    expect(sponsorshipView({ state: 'not_eligible', reason: 'key_mismatch' })).toEqual({
+      title: 'Not eligible', detail: 'Its wallet pays its own gas.', sponsored: false,
+    });
   });
 });

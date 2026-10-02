@@ -7,6 +7,11 @@ import { getPool } from '../services/neonDb.js';
 import { embeddingModelId, embeddingsConfigured } from '../services/embeddingService.js';
 import { diagnoseStuckTasks, forceReleaseTask, rewindSubmittedTask } from '../services/stuckTasks.js';
 import type { AuthRequest } from '../types.js';
+import { z } from 'zod';
+import { AppError } from '../middleware/errorHandler.js';
+import { gasSponsorSettings } from '../services/gasSponsorConfig.js';
+import { setControls } from '../services/gasSponsorStore.js';
+import { gasSponsorReport } from '../services/gasSponsorRelayer.js';
 
 export const adminRouter = Router();
 
@@ -151,4 +156,40 @@ adminRouter.post('/tasks/:id/rewind', requireAuth, requireFounder, async (req: A
     const result = await rewindSubmittedTask(req.params.id as string, req.user?.address ?? 'admin-route');
     res.json({ success: true, data: result });
   } catch (err) { next(err); }
+});
+
+// GET /api/v1/admin/gas-sponsor — sponsored agent gas at a glance: whether
+// it runs here (and why not), the pause/kill controls, the sponsor's balance
+// and what the last hour and day spent.
+adminRouter.get('/gas-sponsor', requireAuth, requireFounder, async (_req: AuthRequest, res, next) => {
+  try {
+    res.json({ success: true, data: await gasSponsorReport() });
+  } catch (err) {
+    next(err);
+  }
+});
+
+const sponsorControlsSchema = z.object({
+  paused: z.boolean().optional(),
+  killed: z.boolean().optional(),
+  reason: z.string().trim().min(1).max(500),
+}).refine((b) => b.paused !== undefined || b.killed !== undefined, { message: 'set paused or killed' });
+
+// POST /api/v1/admin/gas-sponsor/controls — pause or kill sponsored gas
+// without a restart (docs/AGENT-GAS-FUNDING.md). Pause stops new reservations;
+// tasks already reserved still get their submit sponsored. Kill stops every
+// send at once, reserved ones included. Body: { paused?, killed?, reason }.
+adminRouter.post('/gas-sponsor/controls', requireAuth, requireFounder, async (req: AuthRequest, res, next) => {
+  try {
+    const parsed = sponsorControlsSchema.safeParse(req.body ?? {});
+    if (!parsed.success) throw new AppError(400, 'VALIDATION_ERROR', parsed.error.issues.map((i) => i.message).join('; '));
+    const settings = gasSponsorSettings();
+    if (!settings.enabled) throw new AppError(409, 'GAS_SPONSOR_OFF', `Sponsored gas is off here: ${settings.reason}`);
+    const { paused, killed, reason } = parsed.data;
+    const controls = await setControls(settings.chainId, { paused, killed }, reason, req.user!.address);
+    console.warn(`[gasSponsor] controls set by ${req.user!.address}: paused=${controls.paused} killed=${controls.killed} (${reason})`);
+    res.json({ success: true, data: controls });
+  } catch (err) {
+    next(err);
+  }
 });

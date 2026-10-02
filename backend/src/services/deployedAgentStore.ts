@@ -155,7 +155,8 @@ export async function saveAgent(agent: DeployedAgent): Promise<void> {
          encrypted_tool_secrets = EXCLUDED.encrypted_tool_secrets,
          verifier_enabled = EXCLUDED.verifier_enabled,
          delegation_enabled = EXCLUDED.delegation_enabled,
-         privy_user_id = EXCLUDED.privy_user_id,
+         -- Set once: a save from a copy loaded before the backfill never clears it.
+         privy_user_id = COALESCE(deployed_agents.privy_user_id, EXCLUDED.privy_user_id),
          updated_at = NOW()`,
       [
         agent.id, agent.ownerAddress, agent.authorizedOwners ?? [],
@@ -183,7 +184,10 @@ export async function saveAgent(agent: DeployedAgent): Promise<void> {
   const db = getDb();
   const cols = Object.keys(r);
   const placeholders = cols.map(() => '?').join(', ');
-  const updates = cols.filter(c => c !== 'id').map(c => `${c} = excluded.${c}`).join(', ');
+  const updates = cols
+    .filter(c => c !== 'id')
+    .map(c => (c === 'privy_user_id' ? `${c} = COALESCE(deployed_agents.${c}, excluded.${c})` : `${c} = excluded.${c}`))
+    .join(', ');
   db.prepare(
     `INSERT INTO deployed_agents (${cols.join(', ')}) VALUES (${placeholders})
      ON CONFLICT(id) DO UPDATE SET ${updates}`,
@@ -256,4 +260,52 @@ export async function deleteAgent(id: string): Promise<void> {
   }
   const db = getDb();
   db.prepare('DELETE FROM deployed_agents WHERE id = ?').run(id);
+}
+
+/**
+ * Record `privyUserId` on the agents owned by any of `addresses` (owner or
+ * authorized owner) that have none yet: agents deployed before the id was
+ * stored at deploy (docs/AGENT-GAS-FUNDING.md, "Who is eligible"). Never
+ * overwrites an id already there; those that differ are returned so the
+ * caller can log them. The caller must pass a verified Privy identity and its
+ * own linked wallets.
+ */
+export async function backfillPrivyUserId(
+  privyUserId: string,
+  addresses: string[],
+): Promise<{ filled: string[]; mismatched: Array<{ id: string; privyUserId: string }> }> {
+  const owners = [...new Set(addresses.map((a) => a.toLowerCase()))].filter((a) => /^0x[0-9a-f]{40}$/.test(a));
+  if (!privyUserId || owners.length === 0) return { filled: [], mismatched: [] };
+  if (usePg()) {
+    const db = await getPool();
+    const { rows } = await db.query<{ id: string; privy_user_id: string | null }>(
+      `SELECT id, privy_user_id FROM deployed_agents
+       WHERE lower(owner_address) = ANY($1::text[])
+          OR EXISTS (SELECT 1 FROM unnest(authorized_owners) o WHERE lower(o) = ANY($1::text[]))`,
+      [owners],
+    );
+    const mismatched = rows
+      .filter((r) => r.privy_user_id != null && r.privy_user_id !== privyUserId)
+      .map((r) => ({ id: r.id, privyUserId: r.privy_user_id as string }));
+    const missing = rows.filter((r) => r.privy_user_id == null).map((r) => r.id);
+    if (missing.length === 0) return { filled: [], mismatched };
+    const updated = await db.query<{ id: string }>(
+      `UPDATE deployed_agents SET privy_user_id = $1, updated_at = NOW()
+       WHERE id = ANY($2::text[]) AND privy_user_id IS NULL RETURNING id`,
+      [privyUserId, missing],
+    );
+    return { filled: updated.rows.map((r) => r.id), mismatched };
+  }
+  const db = getDb();
+  const rows = db.prepare('SELECT id, owner_address, authorized_owners, privy_user_id FROM deployed_agents').all() as Array<{
+    id: string; owner_address: string; authorized_owners: unknown; privy_user_id: string | null;
+  }>;
+  const owned = rows.filter((r) =>
+    owners.includes(String(r.owner_address).toLowerCase()) || safeJsonArray(r.authorized_owners).some((o) => owners.includes(o.toLowerCase())));
+  const mismatched = owned
+    .filter((r) => r.privy_user_id != null && r.privy_user_id !== privyUserId)
+    .map((r) => ({ id: r.id, privyUserId: r.privy_user_id as string }));
+  const fill = db.prepare('UPDATE deployed_agents SET privy_user_id = ? WHERE id = ? AND privy_user_id IS NULL');
+  const filled = owned.filter((r) => r.privy_user_id == null && fill.run(privyUserId, r.id).changes > 0).map((r) => r.id);
+  return { filled, mismatched };
 }
