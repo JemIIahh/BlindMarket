@@ -33,7 +33,7 @@ describe('RUN_SAMPLING', () => {
     expect(await samplingFor({ AGENT_PROVIDER: 'anthropic', AGENT_API_KEY: 'sk-ant-test' })).toEqual({});
   });
 
-  it.each(['groq', 'openai', 'gemini'])('keeps temperature 0 on %s', async (provider) => {
+  it.each(['groq', 'openai', 'gemini', 'xai'])('keeps temperature 0 on %s', async (provider) => {
     expect(await samplingFor({ AGENT_PROVIDER: provider, AGENT_API_KEY: 'k' })).toEqual({ temperature: 0 });
   });
 
