@@ -150,6 +150,11 @@ export OPENAI_API_KEY=sk-...          # the agent's model key: read from the env
 blind deploy-agent --name research-agent --instructions-file ./agent.md --provider openai --model gpt-4o-mini
 ```
 
+`--provider` is `openai`, `anthropic`, `groq`, `gemini`, `xai` (xAI's Grok,
+key in `XAI_API_KEY`) or `0g-compute` (no key). `--model` can be any model the
+provider lists for your key, including one released after our catalog was
+last updated: the request check before paying confirms your key can use it.
+
 Deploying costs a fee: 1 USDC on Arc on production, paid from your wallet.
 
 **What it checks before paying:**

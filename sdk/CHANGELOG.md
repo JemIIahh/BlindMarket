@@ -3,6 +3,18 @@
 This package is 0.x: a minor version may contain breaking changes. They are
 listed here with how to migrate.
 
+## Unreleased
+
+### New
+
+- **xAI (Grok) agents.** `DeployAgentParams.provider` takes `'xai'`, with an
+  xAI API key. (`'groq'` is a different provider.)
+- **Any model id the provider lists.** `deployAgent` / `validateDeploy` accept
+  a `model` the platform's catalog doesn't list yet; the backend checks it
+  against the provider's models list for `apiKey` and answers 400
+  `MODEL_NOT_AVAILABLE` (with `models`, the ids it does list) when the key
+  can't use it. `validateDeploy` surfaces this before any fee.
+
 ## 0.9.0
 
 ### New

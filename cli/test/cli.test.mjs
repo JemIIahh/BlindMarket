@@ -427,6 +427,32 @@ test('deploy-agent needs the provider key in the environment, and never pays for
   assert.equal(chain.sent.length, 0);
 });
 
+test('deploy-agent --provider xai sends XAI_API_KEY, and a model the key cannot use pays nothing', async () => {
+  await assert.rejects(
+    blind('deploy-agent', '--name', 'a', '--instructions', 'x', '--provider', 'xai', '--model', 'grok-4.7', '--yes'),
+    (e) => e.code === 'PROVIDER_KEY_MISSING' && /XAI_API_KEY/.test(e.message),
+  );
+  process.env.XAI_API_KEY = 'xai-test-key';
+  try {
+    answers['/api/v1/agents/deploy/validate'] = [failWith(400, 'MODEL_NOT_AVAILABLE')];
+    await assert.rejects(
+      blind('deploy-agent', '--name', 'a', '--instructions', 'x', '--provider', 'xai', '--model', 'grok-9', '--yes'),
+      (e) => e.code === 'MODEL_NOT_AVAILABLE',
+    );
+    const checked = posted('/api/v1/agents/deploy/validate').at(-1).body;
+    assert.equal(checked.provider, 'xai');
+    assert.equal(checked.model, 'grok-9');
+    assert.equal(checked.apiKey, 'xai-test-key');
+    assert.equal(chain.sent.length, 0);
+  } finally {
+    delete process.env.XAI_API_KEY;
+  }
+  await assert.rejects(
+    blind('deploy-agent', '--name', 'a', '--instructions', 'x', '--provider', 'grok', '--model', 'grok-4.7', '--yes'),
+    (e) => e.code === 'BAD_PROVIDER' && /xai/.test(e.message),
+  );
+});
+
 test('a key that is not the API key owner\'s pays nothing', async () => {
   whoami = '0x' + 'e1'.repeat(20);
   await assert.rejects(

@@ -118,8 +118,8 @@ export function createBlindMarketTools(bb: BlindMarket): Tool[] {
     tool(bb, 'deploy_agent', "Deploy a new hosted AI agent on BlindMarket, owned by the API key's wallet. Deploying costs a fee that this tool never pays: pass feeTxHash, the transaction in which the owner paid it, or the call fails with DEPLOY_FEE_REQUIRED and says what to pay.", {
       name: str('Agent name'),
       instructions: str('System prompt / instructions'),
-      provider: str('LLM provider', ['openai', 'anthropic', 'groq', 'gemini', '0g-compute']),
-      model: str('Model name (e.g. gpt-4o-mini, claude-sonnet-4-5)'),
+      provider: str("LLM provider ('xai' is xAI's Grok, not Groq)", ['openai', 'anthropic', 'groq', 'gemini', 'xai', '0g-compute']),
+      model: str('Model id, as the provider names it (e.g. gpt-6.1-sol, claude-opus-5-5, grok-4.7)'),
       apiKey: str("Provider API key; not needed for 0g-compute, which bills the agent's own wallet"),
       ownerPublicKey: str("Owner's uncompressed secp256k1 public key: 130 hex chars starting 04, no 0x. The agent's private key is encrypted to it."),
       feeTxHash: str('The transaction that paid the deploy fee'),
