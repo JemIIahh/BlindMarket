@@ -8,7 +8,7 @@ vi.mock('@ai-sdk/groq', () => ({ createGroq: () => () => 'm' }));
 vi.mock('socket.io-client', () => ({ io: () => ({ on: vi.fn(), emit: vi.fn() }) }));
 
 // @ts-expect-error — plain-JS worker, no d.ts
-import { pickAffordable, DELEGATE_CALL_TYPES, DELEGATE_KIND, delegateCallDomain, signDelegateAuthorization } from './worker.js';
+import { pickAffordable, DELEGATE_CALL_TYPES, DELEGATE_KIND, delegateCallDomain, signDelegateAuthorization, awaitSponsoredOutcome, isSponsoredCallOut } from './worker.js';
 import { CALL_TYPES, DelegateKind, callDomain, callSigner } from '../src/services/blindAgentDelegate.js';
 import { signAuthorization, authorizationSigner } from '../src/services/eip7702.js';
 
@@ -74,5 +74,54 @@ describe('signDelegateAuthorization', () => {
 
   it('refuses chain id 0, which every chain would accept', () => {
     expect(() => signDelegateAuthorization(wallet.signingKey, { chainId: 0, address: DELEGATE, nonce: 0 })).toThrow(/chain-id-0/);
+  });
+});
+
+describe('a sponsored call that is out blocks fallback and release', () => {
+  const statuses = (...list: Array<string | Error>) => {
+    let i = 0;
+    return async () => {
+      const next = list[Math.min(i++, list.length - 1)];
+      if (next instanceof Error) throw next;
+      return { status: next };
+    };
+  };
+  const clock = (start = 1_000) => { let t = start; return { now: () => t, sleep: async (ms: number) => { t += ms; } }; };
+
+  it('holds the task while pending, and lets it go once the call lands', async () => {
+    const c = clock();
+    const out = await awaitSponsoredOutcome('0xt1', {
+      getStatus: statuses('pending', 'pending'), chainNowSec: async () => 100n, maxWaitMs: 30_000, pollMs: 10_000, sleepFn: c.sleep, nowMs: c.now,
+    });
+    expect(out).toBe('pending');
+    expect(isSponsoredCallOut('0xt1')).toBe(true); // releaseTask leaves it
+    expect(await awaitSponsoredOutcome('0xt1', { getStatus: statuses('confirmed'), chainNowSec: async () => 100n })).toBe('landed');
+    expect(isSponsoredCallOut('0xt1')).toBe(false);
+  });
+
+  it('waits through an unreadable status rather than falling back', async () => {
+    const c = clock();
+    const out = await awaitSponsoredOutcome('0xt2', {
+      getStatus: statuses(new Error('backend down'), 'pending', 'confirmed'), chainNowSec: async () => 100n, pollMs: 1_000, sleepFn: c.sleep, nowMs: c.now,
+    });
+    expect(out).toBe('landed');
+  });
+
+  it('stops waiting at the deadline margin, still holding', async () => {
+    let chain = 900n;
+    const c = clock();
+    const out = await awaitSponsoredOutcome('0xt3', {
+      getStatus: statuses('pending'), chainNowSec: async () => (chain += 50n), untilSec: 1_000n, pollMs: 1_000, sleepFn: c.sleep, nowMs: c.now,
+    });
+    expect(out).toBe('pending');
+    expect(isSponsoredCallOut('0xt3')).toBe(true);
+  });
+
+  it('releases the hold when the call failed for good, or nothing of ours is out', async () => {
+    await awaitSponsoredOutcome('0xt4', { getStatus: statuses('pending'), chainNowSec: async () => 0n, maxWaitMs: 0 });
+    expect(isSponsoredCallOut('0xt4')).toBe(true);
+    expect(await awaitSponsoredOutcome('0xt4', { getStatus: statuses('failed'), chainNowSec: async () => 0n })).toBe('failed');
+    expect(isSponsoredCallOut('0xt4')).toBe(false);
+    expect(await awaitSponsoredOutcome('0xt5', { getStatus: statuses('none'), chainNowSec: async () => 0n })).toBe('none');
   });
 });

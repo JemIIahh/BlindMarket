@@ -2307,6 +2307,10 @@ async function declineOffer(taskHash) {
 }
 
 async function releaseTask(taskHash) {
+  if (isSponsoredCallOut(taskHash)) {
+    log(`not releasing ${taskHash.slice(0, 10)}…: BlindMarket's transaction for it is still out and may land`);
+    return;
+  }
   const RELEASE_MAX_ATTEMPTS = 4;
   const RELEASE_RETRY_DELAY_MS = 8_000;
   for (let attempt = 1; attempt <= RELEASE_MAX_ATTEMPTS; attempt++) {
@@ -3671,16 +3675,60 @@ function submitEvidenceHashOf(unsigned) {
 // The relayer sent the call but has no receipt yet (or its broadcast failed
 // and it re-sends the stored bytes): asking again waits on that same
 // transaction, so the worker asks again instead of paying its own gas.
-const SPONSORED_STILL_OUT = new Set(['NOT_CONFIRMED', 'BROADCAST_FAILED']);
 const SPONSORED_CALL_ATTEMPTS = 5;
+// While BlindMarket's transaction for a call is out it may still land, so the
+// worker neither pays its own gas for that call nor hands the task back: it
+// asks GET /sponsored-call until the status is final. Each wait runs inline
+// for at most SPONSORED_WAIT_MS; a resume poll asks again after that, until
+// SPONSORED_DEADLINE_MARGIN_S before the task's deadline.
+const sponsoredPending = new Set();
+const SPONSORED_POLL_MS = envNumber(process.env.SPONSORED_POLL_MS, 10_000, { min: 500 });
+const SPONSORED_WAIT_MS = 5 * 60_000;
+const SPONSORED_DEADLINE_MARGIN_S = 120n;
+
+/** Whether BlindMarket's transaction for this task's call may still land. Exported for tests. */
+export function isSponsoredCallOut(taskHash) {
+  return sponsoredPending.has(taskHash);
+}
+
+/**
+ * Wait on a sponsored call that is out until its status is final:
+ * 'landed', 'failed' or 'none' (nothing of ours out any more), or 'pending'
+ * when the wait ends first (the chain clock reached `untilSec`, or
+ * `maxWaitMs` passed). An unreadable status counts as still out. While it
+ * is out the task is marked so releaseTask leaves it. Exported for tests.
+ */
+export async function awaitSponsoredOutcome(taskHash, {
+  getStatus, chainNowSec, untilSec = null, maxWaitMs = SPONSORED_WAIT_MS, pollMs = SPONSORED_POLL_MS, sleepFn = sleep, nowMs = Date.now,
+}) {
+  const startedAt = nowMs();
+  for (;;) {
+    const st = await getStatus().catch(() => null);
+    const status = st?.status ?? 'pending';
+    if (status === 'confirmed') {
+      sponsoredPending.delete(taskHash);
+      return 'landed';
+    }
+    if (status !== 'pending') {
+      sponsoredPending.delete(taskHash);
+      return status === 'failed' ? 'failed' : 'none';
+    }
+    sponsoredPending.add(taskHash);
+    const chainNow = await chainNowSec().catch(() => null);
+    if ((untilSec != null && chainNow != null && chainNow >= untilSec) || nowMs() - startedAt >= maxWaitMs) return 'pending';
+    await sleepFn(pollMs);
+  }
+}
 
 /**
  * Hand a signed escrow call to POST /a2a/tasks/:id/sponsored-call and wait
  * for the relayer. Signs a 7702 authorization the first time (the wallet is
  * not delegated yet), with the nonce read at 'pending'. A setup that ran
- * without effect is retried once with a fresh authorization; a call still
- * out is asked about again. Returns true once the relayer reports the call
- * landed; false on any refusal — the caller then pays its own gas.
+ * without effect is retried once with a fresh authorization. Returns true
+ * once the call landed; 'pending' while BlindMarket's transaction for it is
+ * still out (the caller must hold the task: no own-gas submit, no release);
+ * false on a refusal or a final failure, after which the caller pays its own
+ * gas.
  */
 async function sponsoredCall(taskHash, kind, onChainTaskId, evidenceHash = ethers.ZeroHash) {
   const short = taskHash.slice(0, 10);
@@ -3688,18 +3736,57 @@ async function sponsoredCall(taskHash, kind, onChainTaskId, evidenceHash = ether
   const signer = signerFor('arc');
   if (!arc?.agentDelegate || !signer || onChainTaskId == null) return false;
   const delegate = ethers.getAddress(arc.agentDelegate);
+  // Straight from the node: ethers answers a repeat read within 250 ms from
+  // its cache, and a retry must see what the last call changed.
+  const rpc = (method, params) => signer.provider.send(method, params);
+  const chainNowSec = async () => BigInt((await rpc('eth_getBlockByNumber', ['latest', false])).timestamp);
+  const getStatus = async () => {
+    const res = await fetchWithTimeout(`${BACKEND_URL}/api/v1/a2a/tasks/${taskHash}/sponsored-call?kind=${kind}`, {
+      headers: { 'Authorization': `Bearer ${AGENT_PLATFORM_TOKEN}` },
+    });
+    if (!res.ok) throw new Error(`status ${res.status}`);
+    return (await res.json()).data ?? null;
+  };
+  let untilSec = null;
+  if (kind === 'submit' && escrowIface) {
+    try {
+      const raw = await rpc('eth_call', [{ to: escrowAddressFor('arc'), data: escrowIface.encodeFunctionData('effectiveDeadline', [BigInt(onChainTaskId)]) }, 'latest']);
+      untilSec = BigInt(escrowIface.decodeFunctionResult('effectiveDeadline', raw)[0]) - SPONSORED_DEADLINE_MARGIN_S;
+    } catch {
+      // No deadline: only the inline wait bounds it.
+    }
+  }
+  const wait = async () => {
+    const outcome = await awaitSponsoredOutcome(taskHash, { getStatus, chainNowSec, untilSec });
+    if (outcome === 'landed') {
+      log(`sponsored ${kind} for ${short}… landed`);
+      return true;
+    }
+    if (outcome === 'pending') {
+      log(`sponsored ${kind} for ${short}…: BlindMarket's transaction is still out — holding the task, not paying gas or releasing it`);
+      return 'pending';
+    }
+    log(`sponsored ${kind} for ${short}… did not land (${outcome}); using this wallet's own gas`);
+    return false;
+  };
+
+  // A call of ours already out (an earlier attempt, a restart): settle that first.
+  const known = await getStatus().catch(() => null);
+  if (known?.status === 'confirmed') return true;
+  if (known?.status === 'pending' || (!known && sponsoredPending.has(taskHash))) {
+    const waited = await wait();
+    if (waited !== false) return waited;
+    return false;
+  }
+
   let setupRetried = false;
   for (let attempt = 1; attempt <= SPONSORED_CALL_ATTEMPTS; attempt++) {
     try {
-      // Straight from the node: ethers answers a repeat read within 250 ms
-      // from its cache, and a retry must see what the last call changed.
-      const rpc = (method, params) => signer.provider.send(method, params);
       const code = String(await rpc('eth_getCode', [signer.address, 'latest'])).toLowerCase();
       const delegated = code === `0xef0100${delegate.slice(2).toLowerCase()}`;
       const nonce = delegated ? BigInt(await rpc('eth_call', [{ to: signer.address, data: DELEGATE_NONCE_CALL }, 'latest'])) : 0n;
       // Ten minutes of the chain's own clock, not this host's.
-      const head = await rpc('eth_getBlockByNumber', ['latest', false]).catch(() => null);
-      const now = head?.timestamp ? BigInt(head.timestamp) : BigInt(Math.floor(Date.now() / 1000));
+      const now = await chainNowSec().catch(() => BigInt(Math.floor(Date.now() / 1000)));
       const deadline = now + 600n;
       const call = {
         kind: DELEGATE_KIND[kind], escrow: ethers.getAddress(escrowAddressFor('arc')), taskId: BigInt(onChainTaskId),
@@ -3724,8 +3811,13 @@ async function sponsoredCall(taskHash, kind, onChainTaskId, evidenceHash = ether
           ...(authorization ? { authorization } : {}),
         }),
       }, 120_000);
+      if (res.status === 202) {
+        sponsoredPending.add(taskHash);
+        return await wait();
+      }
       if (res.ok) {
         const data = (await res.json()).data ?? {};
+        sponsoredPending.delete(taskHash);
         log(`sponsored ${kind} for ${short}… sent by BlindMarket${data.txHash ? `: ${data.txHash}` : ' (already landed)'}`);
         return true;
       }
@@ -3736,19 +3828,17 @@ async function sponsoredCall(taskHash, kind, onChainTaskId, evidenceHash = ether
         log(`sponsored ${kind} for ${short}…: the wallet's setup did nothing — signing a fresh authorization once`);
         continue;
       }
-      if (SPONSORED_STILL_OUT.has(code2) && attempt < SPONSORED_CALL_ATTEMPTS) {
-        log(`sponsored ${kind} for ${short}… sent but not confirmed yet (${code2}); asking again`);
-        await sleep(5_000);
-        continue;
-      }
       log(`sponsored ${kind} for ${short}… refused: ${res.status} ${code2}${err.error?.message ? ` — ${err.error.message}` : ''}; using this wallet's own gas`);
       return false;
     } catch (e) {
-      // A timed-out request may still have been sent: ask again, which waits on it.
+      // No answer: the call may have been sent. Asking again answers with it.
       if (e.name === 'AbortError' && attempt < SPONSORED_CALL_ATTEMPTS) {
         log(`sponsored ${kind} for ${short}…: no answer in time; asking again`);
         continue;
       }
+      // Unknown outcome: hold rather than risk paying for the same call twice.
+      const st = await getStatus().catch(() => null);
+      if (st?.status === 'pending' || st?.status === 'confirmed') return await wait();
       log(`sponsored ${kind} for ${short}… failed: ${e.message}; using this wallet's own gas`);
       return false;
     }
@@ -3796,10 +3886,13 @@ async function releaseUnjudgedPass(now = Date.now()) {
         continue;
       }
       log(`releasing unjudged work on ${taskHash.slice(0, 10)}… (escalated, dispute window passed)`);
-      if (await sponsoredCall(taskHash, 'release', task.taskId)) {
+      const sponsored = await sponsoredCall(taskHash, 'release', task.taskId);
+      if (sponsored === true) {
         unjudgedReleased.add(taskHash);
         continue;
       }
+      if (sponsored === 'pending') continue; // ours is still out: never a second release
+
       const gasProblem = await preflightGas('arc', signer, false);
       if (gasProblem) {
         log(`cannot release ${taskHash.slice(0, 10)}… yet: ${gasProblem}`);
@@ -3827,13 +3920,18 @@ async function broadcastEvmSubmitEvidence(taskHash, unsignedSubmitEvidence, subm
   // through to this wallet's own gas below.
   if (sponsoredTasks.has(taskHash) && pickChain(submitChain) === 'arc') {
     const evidenceHash = submitEvidenceHashOf(unsignedSubmitEvidence);
-    if (evidenceHash && (await sponsoredCall(taskHash, 'submit', onChainTaskId, evidenceHash))) {
+    const sponsored = evidenceHash ? await sponsoredCall(taskHash, 'submit', onChainTaskId, evidenceHash) : false;
+    if (sponsored === true) {
       sponsoredTasks.delete(taskHash);
       submitGasShortfall.delete(taskHash);
       return true;
     }
+    // Still out: no own-gas submit (it would race ours), and releaseTask
+    // leaves the task; a resume poll asks again.
+    if (sponsored === 'pending') return false;
     sponsoredTasks.delete(taskHash);
   }
+  if (isSponsoredCallOut(taskHash)) return false;
   const submitSigner = signerFor(submitChain);
   // The contract's onlyWorker gate accepts evidence ONLY from the recorded
   // on-chain worker. AA agents assigned after the rollout name the smart
@@ -4185,7 +4283,12 @@ async function resumeAssignedTasks() {
         // then 409 INVALID_STATE at /submit ('submitted' is past that gate).
         log(`resuming submitted task ${taskHash.slice(0, 10)}… (finalize only, attempt ${attempts + 1}/${MAX_RESUME_ATTEMPTS})`);
         const result = await finalizeAcceptedTask(taskHash);
-        if (!result && submitGasShortfall.has(taskHash)) {
+        if (!result && isSponsoredCallOut(taskHash)) {
+          // BlindMarket's transaction for the evidence is still out: wait for
+          // it, without spending an attempt.
+          resumeFailures.set(taskHash, attempts);
+          log(`resume: holding ${taskHash.slice(0, 10)}… until BlindMarket's transaction lands or fails (attempt not counted)`);
+        } else if (!result && submitGasShortfall.has(taskHash)) {
           // Evidence never landed and the wallet can't pay to rebroadcast it:
           // a hold, not a failed attempt. The check above re-tests gas.
           resumeFailures.set(taskHash, attempts);

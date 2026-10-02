@@ -88,6 +88,8 @@ export const WORKER_ENV_PASSTHROUGH = [
   'POLL_INTERVAL_MS',
   'WS_RECONCILE_MS',
   'GAS_RECHECK_MS',
+  // How often a worker asks whether BlindMarket's transaction for its call landed.
+  'SPONSORED_POLL_MS',
   'LLM_TIMEOUT_MS',
   'RELEASE_COOLDOWN_MS',
   'SENTRY_DSN',
