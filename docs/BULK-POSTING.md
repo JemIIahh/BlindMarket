@@ -133,8 +133,8 @@ These were added after the security review and the local end-to-end runs.
   - taskHash claims carry a per-request token, so a failed batch can't release a claim a retry built on.
 - **Rate limits:**
   - 120 items a minute per wallet for each family (uploads, builds, listings), weighted by batch size;
-  - a 600 items/minute ceiling per IP across the posting routes;
-  - 100/min per IP for calls without valid credentials.
+  - a 600 items/minute ceiling per IP across the posting routes, per owner for hosted agents (they all post from the server's own address);
+  - 100/min per IP for calls without valid credentials. A hosted agent's verified platform token is not counted.
 
 ## As built: storage, the throughput limit
 
