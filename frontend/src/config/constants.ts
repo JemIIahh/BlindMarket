@@ -1,7 +1,10 @@
 import { CONTRACT_ADDRESSES } from './contractAddresses';
 import NETWORKS from './networks.json';
 
-export const API_BASE_URL = import.meta.env.VITE_API_URL || '';
+// Strip any trailing slash: a VITE_API_URL pasted with one ("https://host/")
+// would turn every `${API_BASE_URL}/api/...` into a double-slash path, which
+// some proxies silently 404.
+export const API_BASE_URL = (import.meta.env.VITE_API_URL || '').replace(/\/+$/, '');
 
 // Platform fee — DISPLAY values only. The authoritative feeBps lives on-chain
 // in BlindEscrow (read at settlement time; changed via

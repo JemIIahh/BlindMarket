@@ -1,7 +1,8 @@
 import { useEffect, useRef } from 'react';
 import { io, type Socket } from 'socket.io-client';
 
-const SOCKET_URL = import.meta.env.VITE_API_URL || '';
+// Same trailing-slash guard as API_BASE_URL (config/constants.ts).
+const SOCKET_URL = (import.meta.env.VITE_API_URL || '').replace(/\/+$/, '');
 
 let socket: Socket | null = null;
 
