@@ -4,7 +4,7 @@ import { resolve } from 'path';
 import { JsonRpcProvider, Wallet, formatUnits, parseUnits } from 'ethers';
 import ora from 'ora';
 import { BlindMarket, ApiError } from '@blindmarket/sdk';
-import type { AgentCapability, DeployAgentParams, PostTasksRowResult } from '@blindmarket/sdk';
+import type { AgentCapability, DeployAgentParams, DeployAgentsPlan, DeployAgentsResult, DeployFeeTerms, PostTasksRowResult } from '@blindmarket/sdk';
 import {
   loadConfig, resolveConfig, saveConfig, DEFAULT_API_BASE,
   pendingFee, setPendingFee, pendingPosts, setPendingPost,
@@ -276,6 +276,294 @@ async function earlierFeeOn(hash: string, chain: string, chainId: number): Promi
   }
 }
 
+/**
+ * A deploy fee an earlier attempt paid that no deploy has used yet, for this
+ * backend, wallet and fee chain. A payment is saved under the chain id it was
+ * made on; one an earlier version saved without it pays only if it is on
+ * that chain, and either way the unkeyed entry goes, so it is never offered
+ * blindly again.
+ */
+async function savedDeployFee(apiBase: string, address: string, terms: DeployFeeTerms): Promise<string | undefined> {
+  const feeChainId = terms.required ? terms.chainId : undefined;
+  const saved = pendingFee(apiBase, address, feeChainId);
+  const unkeyed = feeChainId !== undefined && !saved ? pendingFee(apiBase, address) : undefined;
+  if (unkeyed && terms.required && feeChainId !== undefined) {
+    const onChain = await step('Checking an earlier payment…', () => earlierFeeOn(unkeyed, terms.chain, feeChainId));
+    setPendingFee(apiBase, address, undefined, null);
+    if (onChain) {
+      setPendingFee(apiBase, address, feeChainId, unkeyed);
+      return unkeyed;
+    }
+    out(`The deploy fee an earlier version saved (${unkeyed}) is not on ${terms.chain} (chain ${feeChainId}), so it cannot pay for this deploy.`);
+  }
+  return saved;
+}
+
+/** What `deploy-agent` takes on the command line. */
+interface DeployAgentOpts {
+  name: string;
+  instructions?: string;
+  instructionsFile?: string;
+  provider: string;
+  model: string;
+  skill?: string[];
+  providerKeyEnv?: string;
+  maxFee: string;
+  count?: string;
+  startAt: string;
+  fund?: string;
+  results?: string;
+  yes?: boolean;
+}
+
+/** `--provider`, checked, and its API key, read from the environment. */
+function providerKey(opts: Pick<DeployAgentOpts, 'provider' | 'providerKeyEnv'>): { provider: DeployAgentParams['provider']; apiKey: string } {
+  // Typed by the SDK; checked against PROVIDERS, which may name one an
+  // older SDK's type lacks (the SDK passes the field through).
+  const provider = opts.provider as DeployAgentParams['provider'];
+  if (!PROVIDERS.includes(provider)) {
+    throw new CliError('BAD_PROVIDER', `--provider must be one of ${PROVIDERS.join(', ')}; got ${opts.provider}.`);
+  }
+  // The provider key is read from the environment, never from argv: argv
+  // lands in shell history and process lists.
+  let apiKey = '';
+  if (provider !== '0g-compute') {
+    const envName = opts.providerKeyEnv ?? PROVIDER_KEY_ENV[provider];
+    apiKey = process.env[envName] ?? '';
+    if (!apiKey) throw new CliError('PROVIDER_KEY_MISSING', `Set ${envName}: the agent calls ${provider} with it.`);
+  }
+  return { provider, apiKey };
+}
+
+/** Whether a failed deploy means its fee can never pay for one, so it is forgotten. */
+const feeSpent = (err: ApiError) => ['DEPLOY_FEE_ALREADY_USED', 'DEPLOY_FEE_REVERTED'].includes(err.code ?? '')
+  || (err.code === 'DEPLOY_FEE_NOT_PAID' && err.reason !== 'PAYER_NOT_LINKED');
+
+/** The most agents one `deploy-agent --count` run deploys (the SDK's MAX_DEPLOY_AGENTS). */
+const MAX_COUNT = 10;
+
+/** One agent of a `deploy-agent --count` run, as the table and the results file show it. */
+interface AgentRow {
+  index: number;
+  name: string;
+  status: 'pending' | 'deployed' | 'not started' | 'failed' | 'skipped';
+  agentId?: string;
+  walletAddress?: string;
+  feeTxHash?: string;
+  funding?: { txHash?: string; amount?: string; error?: string };
+  error?: string;
+}
+
+const short = (v?: string) => (v && v.length > 14 ? `${v.slice(0, 8)}…${v.slice(-4)}` : v ?? '');
+
+/** The results table: one line per agent, columns padded to fit. */
+function agentTable(rows: AgentRow[]): string {
+  const cells = rows.map((r) => [
+    String(r.index + 1), r.name, r.status, r.agentId ?? '', short(r.walletAddress), short(r.feeTxHash),
+    r.funding ? (r.funding.error ? `failed: ${r.funding.error}` : `${r.funding.amount} (${short(r.funding.txHash)})`) : '',
+    r.error ?? '',
+  ]);
+  const head = ['#', 'name', 'status', 'agent', 'wallet', 'fee tx', 'gas', 'error'];
+  // Columns no agent has anything in are left out.
+  const keep = head.map((_, c) => c).filter((c) => c < 3 || cells.some((row) => row[c]));
+  const width = keep.map((c) => Math.max(head[c].length, ...cells.map((row) => row[c].length)));
+  const line = (row: string[]) => keep.map((c, k) => row[c].padEnd(width[k])).join('  ').trimEnd();
+  return [line(head), ...cells.map(line)].join('\n');
+}
+
+/** A whole number from `min` to `max`, or a CliError naming the flag. */
+function wholeNumber(flag: string, raw: string, min: number, max = Number.MAX_SAFE_INTEGER): number {
+  const n = Number(raw);
+  if (!/^\d+$/.test(raw.trim()) || n < min || n > max) {
+    throw new CliError('INVALID_COUNT', `${flag} must be a whole number from ${min}${max < Number.MAX_SAFE_INTEGER ? ` to ${max}` : ''}; got ${raw}.`);
+  }
+  return n;
+}
+
+/** Whether BlindMarket pays hosted agents' gas on this backend now (/health/bridge gasSponsor). False when it cannot say. */
+async function gasSponsored(): Promise<boolean> {
+  try {
+    const bridge = await api.get<{ gasSponsor?: { enabled?: boolean; paused?: boolean; killed?: boolean } }>('/health/bridge');
+    const g = bridge?.gasSponsor;
+    return g?.enabled === true && g.paused !== true && g.killed !== true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * `deploy-agent --count n`: n agents from one set of flags, through the SDK's
+ * deployAgents(). Its checks run before anything is paid (the request once,
+ * the room to start them all, the fee and the wallet's balance); this shows
+ * the plan and asks once, then deploys one after another, printing each, and
+ * ends with a table (and --results, rewritten as each agent settles). A run
+ * that stops keeps what it deployed; a fee paid for an agent that did not
+ * deploy is saved like a single deploy's, and the next run's first agent
+ * uses it.
+ */
+async function deployMany(opts: DeployAgentOpts): Promise<void> {
+  const count = wholeNumber('--count', opts.count!, 1, MAX_COUNT);
+  const startAt = wholeNumber('--start-at', opts.startAt, 1);
+  const { provider, apiKey } = providerKey(opts);
+  const maxFeeRaw = parseUnits(opts.maxFee, 6);
+  const instructions = instructionsFrom(opts);
+  const { cfg, bb, signer, postingChain, chains } = await signingClient();
+  if (typeof (bb as { deployAgents?: unknown }).deployAgents !== 'function') {
+    throw new CliError('SDK_TOO_OLD', 'deploy-agent --count needs @blindmarket/sdk 0.10 or later. Reinstall @blindmarket/cli, or run `npm i @blindmarket/sdk@^0.10.0` beside it.');
+  }
+  let fund: { amountRaw: bigint } | undefined;
+  if (opts.fund !== undefined) {
+    const decimals = chains.find((c) => c.chain === postingChain)?.token.decimals ?? 6;
+    try {
+      fund = { amountRaw: parseUnits(opts.fund, decimals) };
+    } catch {
+      throw new CliError('INVALID_AMOUNT', `--fund ${opts.fund} is not a USDC amount with at most ${decimals} decimals.`);
+    }
+  }
+  const sponsored = fund ? await gasSponsored() : false;
+  const terms = await bb.getDeployFee();
+  const feeChainId = terms.required ? terms.chainId : undefined;
+  const saved = await savedDeployFee(cfg.apiBase, signer.address, terms);
+  const setFee = (hash: string | null) => setPendingFee(cfg.apiBase, signer.address, feeChainId, hash);
+
+  let rows: AgentRow[] = [];
+  const writeResults = (result?: DeployAgentsResult) => {
+    if (!opts.results) return;
+    const body = {
+      requested: result?.requested ?? rows.length,
+      deployed: rows.filter((r) => r.status === 'deployed' || r.status === 'not started').length,
+      ...(result?.stopped ? { stopped: result.stopped } : {}),
+      agents: rows,
+    };
+    writeFileSync(opts.results, `${JSON.stringify(body, null, 2)}\n`);
+  };
+
+  const describe = (plan: DeployAgentsPlan): void => {
+    const names = plan.names.length > 3 ? `${plan.names[0]}, ${plan.names[1]} … ${plan.names[plan.names.length - 1]}` : plan.names.join(', ');
+    out(`Deploy ${plan.count} agent${plan.count === 1 ? '' : 's'}: ${names}`);
+    out(`  model:    ${provider} ${opts.model}`);
+    if (plan.capacity) out(`  room:     ${freeSlots(plan.capacity)} can start now on this server (${plan.capacity.poolFree} free slots, ${plan.capacity.ownerFree} left of your ${plan.capacity.ownerMax})`);
+    if (plan.fee?.method === 'transfer') {
+      const each = formatUnits(BigInt(plan.fee.perAgentRaw), plan.fee.decimals).replace(/\.0$/, '');
+      const total = formatUnits(BigInt(plan.fee.totalRaw), plan.fee.decimals).replace(/\.0$/, '');
+      out(`  fee:      ${each} USDC each on ${plan.fee.chain}, ${total} USDC for ${plan.fee.paying} to ${plan.fee.recipient}${saved ? ` (the first uses ${saved}, already paid)` : ''}`);
+    } else if (plan.fee) {
+      out(`  fee:      one AgentFactory payment on ${plan.fee.chain} per agent (${plan.fee.paying})`);
+    } else {
+      out('  fee:      none');
+    }
+    if (plan.funding) {
+      const each = formatUnits(BigInt(plan.funding.perAgentRaw), plan.funding.decimals);
+      const total = formatUnits(BigInt(plan.funding.totalRaw), plan.funding.decimals);
+      out(`  gas:      ${each} ${plan.funding.symbol} to each agent's wallet on ${plan.funding.chain} once it runs, ${total} ${plan.funding.symbol} in all`);
+    }
+    out(`  from:     ${signer.address}`);
+    if (sponsored) out('  note:     BlindMarket pays gas for agents deployed from the web app while signed in. One deployed with an API key qualifies after you open it there signed in; until then its wallet pays its own gas.');
+    if (provider === '0g-compute') {
+      out(`  note:     each 0g-compute agent pays for its own inference: send each wallet about 3.1 0G on the 0G chain (3 0G opens its 0G Compute account) before it takes a task.`);
+    } else if (plan.count > 1) {
+      out(`  note:     all ${plan.count} agents call ${provider} with your one API key, so they share its rate limits and its bill.`);
+    }
+  };
+
+  const result = await bb.deployAgents(
+    {
+      name: opts.name,
+      instructions,
+      provider,
+      model: opts.model,
+      apiKey,
+      skillSlugs: opts.skill ?? [],
+      // Each agent's wallet key is encrypted to yours.
+      ownerPublicKey: publicKeyHex(signer),
+      ...(saved ? { feeTxHash: saved } : {}),
+    },
+    {
+      count,
+      startAt,
+      // Fewer than asked only with a yes from a person at a terminal (confirm below).
+      upToCapacity: true,
+      payFee: true,
+      maxFeeRaw,
+      ...(fund ? { fund } : {}),
+      // How long the first wait after a 429 is (it doubles from there); for tests.
+      ...(process.env.BLINDMARKET_DEPLOY_BACKOFF_MS ? { retry: { baseDelayMs: Number(process.env.BLINDMARKET_DEPLOY_BACKOFF_MS) } } : {}),
+      confirm: async (plan) => {
+        if (plan.count < plan.asked) {
+          const why = `Only ${plan.count} of the ${plan.asked} agents can start now (${plan.capacity?.poolFree ?? 0} free slots on the server, ${plan.capacity?.ownerFree ?? 0} left of your ${plan.capacity?.ownerMax ?? 0}).`;
+          if (opts.yes || !process.stdin.isTTY) throw new CliError('AGENT_CAPACITY', `${why} Nothing was deployed or paid. Run again with --count ${plan.count}.`);
+          out(why);
+        }
+        describe(plan);
+        rows = plan.names.map((name, index) => ({ index, name, status: 'pending' }));
+        writeResults();
+        await confirm(plan.count < plan.asked ? `Deploy these ${plan.count}?` : `Deploy ${plan.count === 1 ? 'it' : `all ${plan.count}`}?`, opts.yes);
+        return true;
+      },
+      onFeePaid: (hash) => setFee(hash),
+      onProgress: (e) => {
+        const at = `[${e.index + 1}/${rows.length}] ${e.name}`;
+        const row = rows[e.index];
+        switch (e.type) {
+          case 'deploying': process.stderr.write(`${at}: deploying…\n`); break;
+          case 'rate-limited': process.stderr.write(`${at}: the backend is busy (429), asking again in ${Math.round(e.waitMs / 1000)} s\n`); break;
+          case 'deployed':
+            // The fee in the saved slot, if any, has paid for this agent.
+            setFee(null);
+            Object.assign(row, {
+              status: e.agent.started === false ? 'not started' : 'deployed',
+              agentId: e.agent.id,
+              walletAddress: e.agent.walletAddress,
+              ...(e.agent.feeTxHash ? { feeTxHash: e.agent.feeTxHash } : {}),
+            });
+            process.stderr.write(`${at}: deployed ${e.agent.id} (wallet ${e.agent.walletAddress})${e.agent.started === false ? ', but it did not start' : ''}\n`);
+            writeResults();
+            break;
+          case 'funding': process.stderr.write(`${at}: sending gas to ${e.walletAddress}…\n`); break;
+          case 'funded':
+            row.funding = { txHash: e.txHash, amount: opts.fund };
+            process.stderr.write(`${at}: funded (${e.txHash})\n`);
+            writeResults();
+            break;
+          case 'failed':
+            // A fee it paid and could still use stays saved; one the backend calls spent goes.
+            setFee(e.feeTxHash ?? null);
+            Object.assign(row, { status: 'failed', error: `${e.error.code ? `${e.error.code}: ` : ''}${e.error.message}`, ...(e.feeTxHash ? { feeTxHash: e.feeTxHash } : {}) });
+            process.stderr.write(`${at}: failed: ${row.error}\n`);
+            writeResults();
+            break;
+        }
+      },
+    },
+  );
+
+  for (const r of result.results) {
+    const row = rows[r.index];
+    if (r.status === 'skipped') row.status = 'skipped';
+    if (r.status === 'deployed' && r.funding && 'error' in r.funding) {
+      row.funding = { ...(r.funding.txHash ? { txHash: r.funding.txHash } : {}), error: r.funding.error.message };
+    }
+  }
+  writeResults(result);
+  out('');
+  out(agentTable(rows));
+  if (opts.results) out(`\nResults: ${resolve(opts.results)}`);
+  if (result.stopped) {
+    const done = result.results.filter((r) => r.status === 'deployed').length;
+    const unspent = result.results.find((r) => r.status === 'failed' && r.feeTxHash);
+    const left = result.requested - done;
+    throw new CliError(
+      'NOT_ALL_DEPLOYED',
+      `Deployed ${done} of ${result.requested}; stopped at ${result.results[result.stopped.index].name}: ${result.stopped.message}` +
+        (unspent && unspent.status === 'failed' ? ` Its fee (${unspent.feeTxHash}) is saved, and the next run's first agent uses it.` : '') +
+        (left > 0 ? ` Once that is fixed, deploy the rest with --count ${left} --start-at ${startAt + done}.` : ''),
+    );
+  }
+}
+
+/** Agents that can start now, from the backend's capacity. */
+const freeSlots = (c: { poolFree: number; ownerFree: number }) => Math.max(0, Math.min(c.poolFree, c.ownerFree));
+
 export function buildProgram(): Command {
   const program = new Command();
   program
@@ -394,23 +682,21 @@ export function buildProgram(): Command {
     .requiredOption('--model <model>', 'Model id as the provider names it, e.g. gpt-6.1-sol or grok-4.7; one our catalog lacks is checked against your key\'s model list')
     .option('--skill <slug...>', 'Public skills to install')
     .option('--provider-key-env <name>', 'Environment variable holding the provider API key (default OPENAI_API_KEY etc.)')
-    .option('--max-fee <amount>', 'Most you will pay, in USDC', '1')
+    .option('--max-fee <amount>', 'Most you will pay per agent, in USDC', '1')
+    .option('--count <n>', `Deploy n agents from these settings, one after another (1–${MAX_COUNT}), named "<name> 1" … or with {n} in --name`)
+    .option('--start-at <n>', 'With --count: the first agent\'s number (to carry on after a run that stopped)', '1')
+    .option('--fund <amount>', 'With --count: send each agent\'s wallet this much USDC on Arc for gas, once it is deployed and running')
+    .option('--results <path>', 'With --count: write every agent\'s result to this JSON file')
     .option('--yes', 'Pay without asking')
-    .action(async (opts: { name: string; instructions?: string; instructionsFile?: string; provider: string; model: string; skill?: string[]; providerKeyEnv?: string; maxFee: string; yes?: boolean }) => {
-      // Typed by the SDK; checked against PROVIDERS, which may name one an
-      // older SDK's type lacks (the SDK passes the field through).
-      const provider = opts.provider as DeployAgentParams['provider'];
-      if (!PROVIDERS.includes(provider)) {
-        throw new CliError('BAD_PROVIDER', `--provider must be one of ${PROVIDERS.join(', ')}; got ${opts.provider}.`);
+    .action(async (opts: DeployAgentOpts) => {
+      if (opts.count !== undefined) {
+        await deployMany(opts);
+        return;
       }
-      // The provider key is read from the environment, never from argv: argv
-      // lands in shell history and process lists.
-      let apiKey = '';
-      if (provider !== '0g-compute') {
-        const envName = opts.providerKeyEnv ?? PROVIDER_KEY_ENV[provider];
-        apiKey = process.env[envName] ?? '';
-        if (!apiKey) throw new CliError('PROVIDER_KEY_MISSING', `Set ${envName}: the agent calls ${provider} with it.`);
+      if (opts.fund !== undefined || opts.results !== undefined) {
+        throw new CliError('COUNT_REQUIRED', '--fund and --results go with --count. For one agent, fund it from its page in the web app.');
       }
+      const { provider, apiKey } = providerKey(opts);
       const maxFeeRaw = parseUnits(opts.maxFee, 6);
       const { cfg, bb, signer } = await signingClient();
       const params = {
@@ -425,22 +711,8 @@ export function buildProgram(): Command {
       };
       await step('Checking the deploy…', () => bb.validateDeploy(params));
       const terms = await bb.getDeployFee();
-      // A payment is saved under the chain id it was made on. One an earlier
-      // version saved without it pays only if it is on that chain; either way
-      // the unkeyed entry goes, so it is never offered blindly again.
       const feeChainId = terms.required ? terms.chainId : undefined;
-      let saved = pendingFee(cfg.apiBase, signer.address, feeChainId);
-      const unkeyed = feeChainId !== undefined && !saved ? pendingFee(cfg.apiBase, signer.address) : undefined;
-      if (unkeyed && terms.required && feeChainId !== undefined) {
-        const onChain = await step('Checking an earlier payment…', () => earlierFeeOn(unkeyed, terms.chain, feeChainId));
-        setPendingFee(cfg.apiBase, signer.address, undefined, null);
-        if (onChain) {
-          setPendingFee(cfg.apiBase, signer.address, feeChainId, unkeyed);
-          saved = unkeyed;
-        } else {
-          out(`The deploy fee an earlier version saved (${unkeyed}) is not on ${terms.chain} (chain ${feeChainId}), so it cannot pay for this deploy.`);
-        }
-      }
+      const saved = await savedDeployFee(cfg.apiBase, signer.address, terms);
       if (saved) {
         out(`Using the deploy fee already paid in ${saved} (an earlier attempt), so nothing is paid again.`);
       } else if (terms.required && terms.method === 'transfer') {
@@ -458,9 +730,7 @@ export function buildProgram(): Command {
       } catch (e) {
         // A payment that can never pay for a deploy is forgotten, so the next attempt pays anew.
         const err = e as ApiError;
-        const spent = ['DEPLOY_FEE_ALREADY_USED', 'DEPLOY_FEE_REVERTED'].includes(err.code ?? '')
-          || (err.code === 'DEPLOY_FEE_NOT_PAID' && err.reason !== 'PAYER_NOT_LINKED');
-        if (spent) setPendingFee(cfg.apiBase, signer.address, feeChainId, null);
+        if (feeSpent(err)) setPendingFee(cfg.apiBase, signer.address, feeChainId, null);
         else if (err.feeTxHash) out(`The fee is paid (${err.feeTxHash}) and saved: run the same command again and it deploys without paying twice.`);
         throw e;
       }

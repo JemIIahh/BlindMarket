@@ -127,6 +127,10 @@ let onChain;
 /** What /health/settlement and /deploy-fee answer: production's, unless a test moves the backend. */
 let settlement;
 let feeTerms;
+/** GET /agents/capacity, /health/bridge, and how many agents the stub has created. */
+let capacity;
+let bridge;
+let agentsMade;
 beforeEach(() => {
   chain = { served: ARC.chainId, allowance: 0n, sent: [], mined: new Map(), mempool: new Set(), rpcCalls: [] };
   onChain = new Set();
@@ -135,6 +139,9 @@ beforeEach(() => {
   whoami = OWNER.address;
   settlement = SETTLEMENT;
   feeTerms = FEE_TERMS;
+  capacity = { poolMax: 10, poolFree: 10, ownerMax: 10, ownerFree: 10, canStart: true, scope: 'process' };
+  bridge = { gasSponsor: { enabled: false } };
+  agentsMade = 0;
   for (const f of ['state.json', 'config.json', 'keystore.json']) rmSync(join(process.env.BLIND_CONFIG_DIR, f), { force: true });
 });
 
@@ -167,11 +174,16 @@ globalThis.fetch = async (url, init = {}) => {
   if (path === '/api/v1/agents/deploy/validate') return json({ valid: true });
   if (path === '/api/v1/agents/deploy') {
     if (!body.feeTxHash) return failWith(402, 'NO_DEPLOY_CREDIT');
-    return json({ id: 'agent-7', name: body.name, walletAddress: '0x' + '44'.repeat(20), publicKey: '04ab', status: 'running', started: true });
+    const n = agentsMade++;
+    return json({ id: `agent-${7 + n}`, name: body.name, walletAddress: agentWallet(n), publicKey: '04ab', status: 'running', started: true });
   }
+  if (path === '/api/v1/agents/capacity') return json(capacity);
+  if (path === '/health/bridge') return json(bridge);
   if (path === '/api/v1/registration/session') return failWith(503, 'REGISTRATION_DISABLED');
   throw new Error('unexpected backend call ' + path);
 };
+/** The nth agent's wallet (0-based): the first is 0x4444…, as single deploys always got. */
+const agentWallet = (n) => getAddress('0x' + (0x44 + n).toString(16).repeat(20));
 const failWith = (status, code, extra = {}) => ({ ok: false, status, json: async () => ({ success: false, error: { code, message: code, ...extra } }) });
 const answer = (data) => ({ ok: true, status: 200, json: async () => ({ success: true, data }) });
 
@@ -282,6 +294,156 @@ test('a deploy that fails after paying keeps the payment, and the retry pays not
   assert.equal(chain.sent.length, 1, 'paid once');
   assert.equal(posted('/api/v1/agents/deploy').at(-1).body.feeTxHash, chain.sent[0].hash);
   assert.deepEqual(state().pendingFees, {});
+});
+
+// ── deploy-agent --count ─────────────────────────────────────────────────────
+
+const MANY = ['deploy-agent', '--name', 'scout', '--instructions', 'Research and cite.', '--provider', 'openai', '--model', 'gpt-4o-mini'];
+/** What each USDC transfer on the stub chain paid, and to whom. */
+const transfers = () => chain.sent.map((t) => ERC20.decodeFunctionData('transfer', t.data)).map(([to, amount]) => [getAddress(to), amount]);
+/** stderr while `fn` runs, as lines. */
+async function stderrOf(fn) {
+  const lines = [];
+  const write = process.stderr.write.bind(process.stderr);
+  process.stderr.write = (chunk, ...rest) => { lines.push(String(chunk)); return typeof rest.at(-1) === 'function' ? (rest.at(-1)(), true) : true; };
+  try {
+    return { value: await fn(), lines: lines.join('').split('\n').filter(Boolean) };
+  } catch (e) {
+    e.stderr = lines.join('');
+    throw e;
+  } finally {
+    process.stderr.write = write;
+  }
+}
+
+test('deploy-agent --count 3 checks once, pays one fee per agent, deploys each in turn and lists them', async () => {
+  const resultsPath = join(process.env.BLIND_CONFIG_DIR, 'agents.json');
+  const { value: text, lines } = await stderrOf(() => blind(...MANY, '--count', '3', '--results', resultsPath, '--yes'));
+  assert.equal(posted('/api/v1/agents/deploy/validate').length, 1, 'the request is checked once');
+  assert.match(posted('/api/v1/agents/deploy/validate')[0].body.name, /^scout [123]$/, 'with one of the names, all the same length');
+  assert.deepEqual(transfers(), [[TREASURY, 1_000_000n], [TREASURY, 1_000_000n], [TREASURY, 1_000_000n]]);
+  const named = posted('/api/v1/agents/deploy').filter((c) => c.body.feeTxHash).map((c) => [c.body.name, c.body.feeTxHash]);
+  assert.deepEqual(named, [['scout 1', chain.sent[0].hash], ['scout 2', chain.sent[1].hash], ['scout 3', chain.sent[2].hash]]);
+  assert.match(text, /Deploy 3 agents: scout 1, scout 2, scout 3/);
+  assert.match(text, /1 USDC each on arc, 3 USDC for 3/);
+  assert.match(text, /all 3 agents call openai with your one API key, so they share its rate limits and its bill/);
+  assert.match(text, /1\s+scout 1\s+deployed\s+agent-7/);
+  assert.match(text, /3\s+scout 3\s+deployed\s+agent-9/);
+  assert.ok(lines.some((l) => /\[2\/3\] scout 2: deployed agent-8/.test(l)));
+  const results = JSON.parse(readFileSync(resultsPath, 'utf-8'));
+  assert.equal(results.deployed, 3);
+  assert.deepEqual(results.agents.map((a) => [a.name, a.status, a.agentId, a.walletAddress, a.feeTxHash]), [
+    ['scout 1', 'deployed', 'agent-7', agentWallet(0), chain.sent[0].hash],
+    ['scout 2', 'deployed', 'agent-8', agentWallet(1), chain.sent[1].hash],
+    ['scout 3', 'deployed', 'agent-9', agentWallet(2), chain.sent[2].hash],
+  ]);
+  assert.deepEqual(state().pendingFees, {}, 'every fee was used');
+});
+
+test('deploy-agent --count names agents with {n} and carries on from --start-at', async () => {
+  await stderrOf(() => blind(...MANY.map((a) => (a === 'scout' ? 'scout-{n}-eu' : a)), '--count', '2', '--start-at', '4', '--yes'));
+  assert.deepEqual(posted('/api/v1/agents/deploy').filter((c) => c.body.feeTxHash).map((c) => c.body.name), ['scout-4-eu', 'scout-5-eu']);
+});
+
+test('deploy-agent --count past the free slots says how many can start, and deploys and pays nothing', async () => {
+  capacity = { ...capacity, poolFree: 2 };
+  await assert.rejects(
+    stderrOf(() => blind(...MANY, '--count', '3', '--yes')),
+    (e) => e.code === 'AGENT_CAPACITY' && /Only 2 of the 3 agents can start now/.test(e.message) && /--count 2/.test(e.message),
+  );
+  capacity = { ...capacity, poolFree: 0, canStart: false };
+  await assert.rejects(stderrOf(() => blind(...MANY, '--count', '1', '--yes')), (e) => e.code === 'AGENT_CAPACITY');
+  assert.equal(chain.sent.length, 0);
+  assert.equal(posted('/api/v1/agents/deploy').length, 0);
+});
+
+test('deploy-agent --count asks once before spending, and without a terminal refuses unless --yes', async () => {
+  await assert.rejects(stderrOf(() => blind(...MANY, '--count', '2')), (e) => e.code === 'CONFIRM_REQUIRED');
+  assert.equal(chain.sent.length, 0);
+  assert.equal(posted('/api/v1/agents/deploy').length, 0);
+});
+
+test('a 429 mid-run waits and asks again for the same agent, naming the fee it already paid', async () => {
+  process.env.BLINDMARKET_DEPLOY_BACKOFF_MS = '1';
+  try {
+    // scout 1: credit check (402), pays, then 429 twice before the deploy goes through.
+    answers['/api/v1/agents/deploy'] = [failWith(402, 'NO_DEPLOY_CREDIT'), failWith(429, 'RATE_LIMIT'), failWith(429, 'RATE_LIMIT')];
+    const { lines } = await stderrOf(() => blind(...MANY, '--count', '2', '--yes'));
+    assert.equal(transfers().length, 2, 'one fee per agent, none twice');
+    const first = posted('/api/v1/agents/deploy').filter((c) => c.body.name === 'scout 1').map((c) => c.body.feeTxHash ?? null);
+    assert.deepEqual(first, [null, chain.sent[0].hash, chain.sent[0].hash, chain.sent[0].hash]);
+    assert.equal(lines.filter((l) => /scout 1: the backend is busy \(429\)/.test(l)).length, 2);
+  } finally {
+    delete process.env.BLINDMARKET_DEPLOY_BACKOFF_MS;
+  }
+});
+
+test('a failure partway stops the run, keeps what deployed, saves the paid fee, and the next run spends it first', async () => {
+  const resultsPath = join(process.env.BLIND_CONFIG_DIR, 'stopped.json');
+  // scout 1 deploys; scout 2 pays, then the deploy fails.
+  answers['/api/v1/agents/deploy'] = [failWith(402, 'NO_DEPLOY_CREDIT'), answer({ id: 'agent-1', name: 'scout 1', walletAddress: agentWallet(0), publicKey: '04ab', status: 'running', started: true }), failWith(402, 'NO_DEPLOY_CREDIT'), failWith(500, 'INTERNAL_ERROR')];
+  const err = await stderrOf(() => blind(...MANY, '--count', '3', '--results', resultsPath, '--yes')).catch((e) => e);
+  assert.equal(err.code, 'NOT_ALL_DEPLOYED');
+  assert.match(err.message, /Deployed 1 of 3; stopped at scout 2/);
+  assert.match(err.message, /deploy the rest with --count 2 --start-at 2/);
+  assert.equal(transfers().length, 2);
+  const paidForScout2 = chain.sent[1].hash;
+  assert.deepEqual(Object.values(state().pendingFees), [paidForScout2]);
+  const results = JSON.parse(readFileSync(resultsPath, 'utf-8'));
+  assert.deepEqual(results.agents.map((a) => a.status), ['deployed', 'failed', 'skipped']);
+  assert.equal(results.agents[1].feeTxHash, paidForScout2);
+  assert.equal(results.stopped.index, 1);
+
+  const { value: text } = await stderrOf(() => blind(...MANY, '--count', '2', '--start-at', '2', '--yes'));
+  assert.match(text, /the first uses 0x[0-9a-f]{64}, already paid/);
+  assert.equal(transfers().length, 3, 'scout 2 used its saved fee; only scout 3 paid');
+  const named = posted('/api/v1/agents/deploy').filter((c) => c.body.feeTxHash).map((c) => [c.body.name, c.body.feeTxHash]).slice(-2);
+  assert.deepEqual(named, [['scout 2', paidForScout2], ['scout 3', chain.sent[2].hash]]);
+  assert.deepEqual(state().pendingFees, {});
+});
+
+test('a fee the backend says is spent is forgotten when the run stops there', async () => {
+  answers['/api/v1/agents/deploy'] = [failWith(402, 'NO_DEPLOY_CREDIT'), failWith(409, 'DEPLOY_FEE_ALREADY_USED')];
+  await assert.rejects(stderrOf(() => blind(...MANY, '--count', '2', '--yes')), (e) => e.code === 'NOT_ALL_DEPLOYED');
+  assert.deepEqual(state().pendingFees, {});
+});
+
+test('deploy-agent --count --fund sends each wallet its gas right after its agent deploys', async () => {
+  const { value: text } = await stderrOf(() => blind(...MANY, '--count', '2', '--fund', '0.05', '--yes'));
+  assert.deepEqual(transfers(), [[TREASURY, 1_000_000n], [agentWallet(0), 50_000n], [TREASURY, 1_000_000n], [agentWallet(1), 50_000n]]);
+  assert.ok(chain.sent.every((t) => t.to === USDC && t.chainId === BigInt(ARC.chainId)));
+  assert.match(text, /0\.05 USDC to each agent's wallet on arc once it runs, 0\.1 USDC in all/);
+  assert.match(text, /0\.05 \(0x/);
+});
+
+test('deploy-agent --count --fund funds no wallet whose agent did not deploy', async () => {
+  answers['/api/v1/agents/deploy'] = [failWith(402, 'NO_DEPLOY_CREDIT'), failWith(500, 'INTERNAL_ERROR')];
+  await assert.rejects(stderrOf(() => blind(...MANY, '--count', '2', '--fund', '0.05', '--yes')), (e) => e.code === 'NOT_ALL_DEPLOYED');
+  assert.deepEqual(transfers(), [[TREASURY, 1_000_000n]], 'the fee only: no gas for an agent that does not exist');
+});
+
+test('deploy-agent --count with sponsored gas says who qualifies, and still funds only when asked', async () => {
+  bridge = { gasSponsor: { enabled: true, paused: false, killed: false } };
+  const { value: text } = await stderrOf(() => blind(...MANY, '--count', '1', '--fund', '0.05', '--yes'));
+  assert.match(text, /One deployed with an API key qualifies after you open it there signed in/);
+  assert.equal(transfers().length, 2);
+});
+
+test('deploy-agent --count warns that each 0g-compute agent needs its own 0G', async () => {
+  const { value: text } = await stderrOf(() => blind('deploy-agent', '--name', 'og', '--instructions', 'x', '--provider', '0g-compute', '--model', 'glm-5', '--count', '2', '--yes'));
+  assert.match(text, /each 0g-compute agent pays for its own inference: send each wallet about 3\.1 0G/);
+  assert.doesNotMatch(text, /share its rate limits/);
+});
+
+test('deploy-agent refuses a bad --count, and --fund or --results without --count, before anything', async () => {
+  await assert.rejects(blind(...MANY, '--count', '11', '--yes'), (e) => e.code === 'INVALID_COUNT' && /1 to 10/.test(e.message));
+  await assert.rejects(blind(...MANY, '--count', '0', '--yes'), (e) => e.code === 'INVALID_COUNT');
+  await assert.rejects(blind(...MANY, '--count', '2', '--start-at', '0', '--yes'), (e) => e.code === 'INVALID_COUNT');
+  await assert.rejects(blind(...MANY, '--fund', '0.05', '--yes'), (e) => e.code === 'COUNT_REQUIRED');
+  await assert.rejects(blind(...MANY, '--results', 'x.json', '--yes'), (e) => e.code === 'COUNT_REQUIRED');
+  await assert.rejects(blind(...MANY, '--count', '2', '--fund', '0.0000001', '--yes'), (e) => e.code === 'INVALID_AMOUNT');
+  assert.equal(chain.sent.length, 0);
+  assert.equal(posted('/api/v1/agents/deploy').length, 0);
 });
 
 /** The backend (and the stub node) on Arc mainnet from here on: same key and USDC, another chain id. */
