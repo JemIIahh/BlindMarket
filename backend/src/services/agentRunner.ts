@@ -144,8 +144,11 @@ const restartTimes = new Map<string, number[]>();
 const intentionalStops = new WeakSet<ChildProcess>();
 
 // ── Resource limits ────────────────────────────────────────────────────────────
-// Max concurrent forked agent processes. On a 512 MB Render box each Node worker
-// needs ~50 MB baseline; cap at 5 to leave headroom for the API server + Redis.
+// Max concurrent forked agent processes. Measured in the production image
+// (docs/HOSTED-AGENT-CAPACITY.md): the API takes ~113 MB and each worker
+// ~105–110 MB once settled, ~140 MB while reconcile starts them all at once,
+// so 5 do not fit a 512 MB instance (OOM-killed at boot); set this per
+// instance size there. (The old ~50 MB figure was macOS RSS.)
 const MAX_CONCURRENT_AGENTS = Number(process.env.MAX_CONCURRENT_AGENTS ?? 5);
 // How many workers one owner may run at once, 10 unless MAX_AGENTS_PER_OWNER
 // says otherwise. It was one global pool with no per-owner limit, so one
@@ -170,13 +173,28 @@ function liveWorkersFor(owner: string): number {
   return n;
 }
 
+/**
+ * The worker slots on this process, and `ownerAddress`'s share of them: the
+ * numbers startRefusal decides with. Per process, like `processes`: another
+ * backend instance has its own pool. Counts only.
+ */
+export function agentCapacity(ownerAddress: string): { poolMax: number; poolFree: number; ownerMax: number; ownerFree: number } {
+  return {
+    poolMax: MAX_CONCURRENT_AGENTS,
+    poolFree: Math.max(0, MAX_CONCURRENT_AGENTS - processes.size),
+    ownerMax: MAX_AGENTS_PER_OWNER,
+    ownerFree: Math.max(0, MAX_AGENTS_PER_OWNER - liveWorkersFor(ownerAddress.toLowerCase())),
+  };
+}
+
 /** Why a new worker for `ownerAddress` can't start on this process now, or
  *  null when it can. Deploy checks it before taking the fee. */
 export function startRefusal(ownerAddress: string): string | null {
-  if (processes.size >= MAX_CONCURRENT_AGENTS) {
+  const { poolFree, ownerFree } = agentCapacity(ownerAddress);
+  if (poolFree === 0) {
     return `Max concurrent agents (${MAX_CONCURRENT_AGENTS}) reached — stop an agent first or increase MAX_CONCURRENT_AGENTS`;
   }
-  if (liveWorkersFor(ownerAddress.toLowerCase()) >= MAX_AGENTS_PER_OWNER) {
+  if (ownerFree === 0) {
     return `You already run ${MAX_AGENTS_PER_OWNER} agents, the most one owner can run here at once — stop one first`;
   }
   return null;
