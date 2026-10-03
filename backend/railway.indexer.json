@@ -1,0 +1,12 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": {
+    "builder": "DOCKERFILE",
+    "dockerfilePath": "Dockerfile",
+    "watchPatterns": ["/backend/**", "!/backend/**/*.test.ts", "!/backend/**/*.md"]
+  },
+  "deploy": {
+    "startCommand": "node dist/indexer.js",
+    "restartPolicyType": "ALWAYS"
+  }
+}
