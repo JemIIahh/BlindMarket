@@ -12,6 +12,11 @@ import request from 'supertest';
  * Run: npx vitest run src/middleware/rateLimit.walletBudget.test.ts
  */
 
+// The limiters read hosted-agent tokens through auth.js, whose imports
+// connect to Redis and the database on load.
+vi.mock('../services/redis.js', () => ({ redis: { get: vi.fn(async () => null) } }));
+vi.mock('../services/apiKeyStore.js', () => ({ lookupApiKey: vi.fn(async () => null) }));
+
 const {
   batchWeight,
   createPostingAuthLimiter,
