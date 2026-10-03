@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useWalletClient } from 'wagmi';
-import { BrowserProvider, Contract, Interface, formatUnits, type JsonRpcSigner } from 'ethers';
+import { BrowserProvider, Contract, Interface, formatUnits, parseUnits, type JsonRpcSigner } from 'ethers';
 import {
   Breadcrumb,
   PageHeader,
@@ -17,14 +17,23 @@ import {
 } from '../components/bb';
 import { ToolManager, type AnyTool } from '../components/bb/ToolManager';
 import SkillPicker from '../components/bb/SkillPicker';
-import { get, authedPost } from '../lib/api';
+import { get, authedGet, authedPost } from '../lib/api';
 import { providerFor, sendDirectPayment, signAndSendTx } from '../lib/txSigner';
 import { useWallet } from '../context/WalletContext';
+import { useAuth } from '../context/AuthContext';
 import { useChainAddress } from '../hooks/useChainWallet';
 import { unlinkedSignerError } from '../lib/accountWallet';
 import { getOrCreateExecutorIdentity } from '../lib/executorIdentity';
 import { ARC_AGENT_FACTORY_ADDRESS, ARC_CHAIN_CONFIG, ARC_CHAIN_ID, ARC_USDC_ADDRESS } from '../config/constants';
 import { OG_COMPUTE_ACCOUNT_0G, OG_COMPUTE_START_0G } from '../lib/agentReadiness';
+import { formatMinGas, minGasBalance } from '../lib/agentGas';
+import {
+  gasIsSettlementToken, getMarketplaceTokenAddress, getPaymentDecimals, getPaymentSymbol, isNativePayment, useSettlement,
+} from '../config/settlement';
+import {
+  agentNames, capacityCheck, freeSlots, maxDeployable, namesProblem, runDeploys,
+  type AgentCapacity, type AgentRun, type DeployedAgent,
+} from '../lib/bulkDeploy';
 import { WARN_BOX } from '../components/agent/AgentReadinessCard';
 import {
   CUSTOM_MODEL, FALLBACK_MODELS, isKeyed, isPriced, liveListError, liveListRequest,
@@ -86,15 +95,36 @@ function writePendingFee(owner: string, hash: string | null) {
   } catch { /* storage blocked: a failed deploy then needs a new payment */ }
 }
 
-/** Whether a failed deploy means the saved payment can never pay for one. */
-function feeIsSpent(err: { code?: string; payload?: Record<string, unknown> }): boolean {
-  if (['DEPLOY_FEE_ALREADY_USED', 'DEPLOY_FEE_REVERTED', 'TX_REVERTED', 'TX_CANCELLED'].includes(err.code ?? '')) return true;
-  // Paid from a wallet that isn't on the account: linking it makes the same payment count.
-  return err.code === 'DEPLOY_FEE_NOT_PAID' && err.payload?.reason !== 'PAYER_NOT_LINKED';
-}
-
 const shortHash = (hash: string) => `${hash.slice(0, 10)}…${hash.slice(-6)}`;
 const shortAddress = (address: string) => `${address.slice(0, 6)}…${address.slice(-4)}`;
+
+// What a funding transfer suggests per agent, in USDC: many transactions'
+// gas on Arc. The owner edits it before deploying.
+const DEFAULT_FUND_AMOUNT = '0.05';
+
+/**
+ * GET /api/v1/agents/capacity, or null when it can't be read (a backend
+ * without the route, or a network hiccup): then the deploy itself refuses an
+ * agent that can't start, before any fee.
+ */
+async function readCapacity(): Promise<AgentCapacity | null> {
+  try {
+    return await authedGet<AgentCapacity>('/api/v1/agents/capacity');
+  } catch {
+    return null;
+  }
+}
+
+/** What a run's progress row says about an agent. */
+const RUN_STATE_LABEL: Record<AgentRun['state'], string> = {
+  queued: 'Waiting',
+  paying: 'Paying deploy fee…',
+  deploying: 'Creating agent…',
+  funding: 'Funding wallet…',
+  done: 'Deployed',
+  failed: 'Failed',
+  skipped: 'Not deployed',
+};
 
 type ProviderModels = Record<Provider, string[]>;
 type PricingMap = Record<Provider, ModelOption[]>;
@@ -171,6 +201,10 @@ export default function DeployAgentForm() {
   // in its config (Arc), so it cannot tell a wallet sitting elsewhere.
   const { chainId: walletChainId, embeddedAddress, externalAddresses, switchChain } = useWallet();
   const navigate = useNavigate();
+  const { isAuthenticated } = useAuth();
+  // Re-render when the backend's settlement answer arrives (config/settlement.ts).
+  const settlement = useSettlement();
+  const posting = settlement.chains[settlement.postingChain];
 
   // FALLBACK_MODELS until /api/v1/agents/providers answers.
   const [providers, setProviders] = useState<ProviderModels>(FALLBACK_MODELS);
@@ -226,7 +260,7 @@ export default function DeployAgentForm() {
   // screen for the owner to install from the agent's Skills panel instead.
   const [privateSkillSlugs, setPrivateSkillSlugs] = useState<string[]>([]);
 
-  const [status, setStatus] = useState<'idle' | 'checking' | 'confirming' | 'approving' | 'paying' | 'deploying' | 'done' | 'error'>('idle');
+  const [status, setStatus] = useState<'idle' | 'checking' | 'confirming' | 'approving' | 'paying' | 'deploying' | 'funding' | 'done' | 'error'>('idle');
   const submittingRef = useRef(false);
   const confirmResolveRef = useRef<((approve: boolean) => void) | null>(null);
   const [error, setError] = useState<unknown>('');
@@ -236,7 +270,75 @@ export default function DeployAgentForm() {
     feeTx: string | null;
     /** Set for a 0g-compute agent: the wallet the owner funds with 0G next. */
     ogFundAddress: string | null;
+    /** The transfer that funded its wallet, when the owner asked for one. */
+    fundTx?: string;
+    fundError?: unknown;
   } | null>(null);
+
+  // How many agents to deploy, and every agent of the run in progress (or
+  // the one just finished) with what became of it.
+  const [count, setCount] = useState(1);
+  const [runs, setRuns] = useState<AgentRun[]>([]);
+  const [runAt, setRunAt] = useState(0);
+  // How many agents can start now, from the backend's worker limit. Null
+  // when it can't be read: the deploy then refuses one that can't start.
+  const [capacity, setCapacity] = useState<AgentCapacity | null>(null);
+  // Set when a run asked for more agents than can start: the number that can.
+  const [capacityOffer, setCapacityOffer] = useState<number | null>(null);
+  useEffect(() => {
+    if (!isAuthenticated || (status !== 'idle' && status !== 'done' && status !== 'error')) return;
+    let cancelled = false;
+    void readCapacity().then((c) => { if (!cancelled) setCapacity(c); });
+    return () => { cancelled = true; };
+  }, [isAuthenticated, address, status]);
+  const maxCount = maxDeployable(capacity);
+  // A lower limit read later pulls the number down with it.
+  useEffect(() => { setCount((c) => Math.min(c, Math.max(1, maxCount))); }, [maxCount]);
+  const free = freeSlots(capacity);
+  const names = agentNames(form.name, count);
+
+  // Funding each agent's wallet as it deploys: off unless asked for, and not
+  // offered where BlindMarket pays agents' gas or where gas isn't paid in an
+  // ERC-20 payment token this page can send.
+  const [gasSponsored, setGasSponsored] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    get<{ gasSponsor?: { enabled?: boolean; paused?: boolean; killed?: boolean } }>('/health/bridge')
+      .then((d) => {
+        const g = d.gasSponsor;
+        if (!cancelled) setGasSponsored(g?.enabled === true && g.paused !== true && g.killed !== true);
+      })
+      .catch(() => { /* unknown: the option stays offered */ });
+    return () => { cancelled = true; };
+  }, []);
+  const fundingOffered = !gasSponsored && !isNativePayment();
+  const [fundOn, setFundOn] = useState(false);
+  const [fundAmount, setFundAmount] = useState(DEFAULT_FUND_AMOUNT);
+  const funding = fundOn && fundingOffered;
+  const fundRaw = (() => {
+    if (!funding) return 0n;
+    try {
+      const raw = parseUnits(fundAmount.trim(), getPaymentDecimals());
+      return raw > 0n ? raw : null;
+    } catch {
+      return null;
+    }
+  })();
+  // What one worker transaction can cost at current fees (lib/agentGas.ts):
+  // below it an agent takes no task.
+  const [minGasRaw, setMinGasRaw] = useState<bigint | null>(null);
+  useEffect(() => {
+    setMinGasRaw(null);
+    if (!fundOn || !gasIsSettlementToken(posting.key)) return;
+    let cancelled = false;
+    providerFor(posting.key).getFeeData()
+      .then((fee) => {
+        const perGas = fee.maxFeePerGas ?? fee.gasPrice;
+        if (!cancelled && perGas) setMinGasRaw(minGasBalance(perGas, getPaymentDecimals()));
+      })
+      .catch(() => { /* the hint just stays off */ });
+    return () => { cancelled = true; };
+  }, [fundOn, posting.key]);
 
   // What deploying costs and where it is paid. Undefined while loading.
   const [feeTerms, setFeeTerms] = useState<DeployFeeTerms | undefined>(undefined);
@@ -253,8 +355,8 @@ export default function DeployAgentForm() {
   const feeToken = feeTerms?.required ? (feeTerms.method === 'transfer' ? feeTerms.token : ARC_USDC_ADDRESS) : null;
   const feeRaw = feeTerms?.required && feeTerms.method === 'transfer' ? BigInt(feeTerms.amountRaw) : DEPLOY_FEE_USDC;
   const factoryAddress = (feeTerms?.required && feeTerms.factory) || ARC_AGENT_FACTORY_ADDRESS;
-  // Arc has no relay: the wallet signs the fee transfer itself, so it must be on Arc.
-  const needsArcSwitch = feeMethod !== null && walletChainId !== null && walletChainId !== ARC_CHAIN_ID;
+  // Arc has no relay: the wallet signs the fee transfer (and any funding) itself, so it must be on Arc.
+  const needsArcSwitch = (feeMethod !== null || (funding && posting.key === 'arc')) && walletChainId !== null && walletChainId !== ARC_CHAIN_ID;
   // The wallets on this account. The backend counts a fee paid from these only.
   const accountWallets = [embeddedAddress, ...externalAddresses]
     .filter((a): a is string => !!a)
@@ -273,21 +375,26 @@ export default function DeployAgentForm() {
   // network. Polled so funding the wallet shows up without a reload.
   const payer = walletClient?.account?.address ?? address;
   const [usdcBalance, setUsdcBalance] = useState<bigint | null>(null);
+  // The fee's token, or the payment token when only funding spends.
+  const balanceToken = feeToken ?? (funding ? getMarketplaceTokenAddress() : null);
+  const balanceChain = feeToken ? 'arc' : posting.key;
   useEffect(() => {
-    if (!payer || !feeToken) { setUsdcBalance(null); return; }
+    if (!payer || !balanceToken) { setUsdcBalance(null); return; }
     let cancelled = false;
-    const token = new Contract(feeToken, USDC_ABI, providerFor('arc'));
+    const token = new Contract(balanceToken, USDC_ABI, providerFor(balanceChain));
     const read = () => token.balanceOf(payer)
       .then((b: bigint) => { if (!cancelled) setUsdcBalance(b); })
       .catch(() => { /* RPC hiccup: keep the last reading */ });
     read();
     const timer = setInterval(read, 15_000);
     return () => { cancelled = true; clearInterval(timer); };
-  }, [payer, feeToken, status]);
+  }, [payer, balanceToken, balanceChain, status]);
 
-  const feeNeeded = feeRaw + ARC_GAS_MARGIN;
-  const hasEnoughUsdc = !feeTerms?.required || !!pendingFee || (usdcBalance !== null && usdcBalance >= feeNeeded);
-  const busy = status === 'checking' || status === 'confirming' || status === 'approving' || status === 'paying' || status === 'deploying';
+  // Fees this run pays: one per agent, less one an earlier attempt already paid.
+  const feesToPay = !feeTerms?.required ? 0 : Math.max(0, count - (feeMethod === 'transfer' && pendingFee ? 1 : 0));
+  const feeNeeded = BigInt(feesToPay) * (feeRaw + ARC_GAS_MARGIN) + (funding && fundRaw ? BigInt(count) * (fundRaw + ARC_GAS_MARGIN) : 0n);
+  const hasEnoughUsdc = feeNeeded === 0n || (usdcBalance !== null && usdcBalance >= feeNeeded);
+  const busy = status === 'checking' || status === 'confirming' || status === 'approving' || status === 'paying' || status === 'deploying' || status === 'funding';
 
   useEffect(() => {
     if (!address) return; // the lookup is authenticated — deploy needs a session anyway
@@ -354,23 +461,28 @@ export default function DeployAgentForm() {
     return unlinkedSignerError(await signer.getAddress(), accountWallets, "a deploy fee paid from it wouldn't count");
   }
 
-  /** Pay the fee on Arc: one USDC transfer to the treasury, signed by the wallet. Returns its hash. */
-  async function payFeeOnArc(signer: JsonRpcSigner, terms: Extract<DeployFeeTerms, { method: 'transfer' }>, owner: string): Promise<string> {
+  /**
+   * Pay the fee on Arc: one USDC transfer to the treasury, signed by the
+   * wallet. `onBroadcast` gets its hash the moment the wallet broadcasts it,
+   * before any wait: lib/bulkDeploy saves it there, so no failure from then
+   * on (a closed tab included) costs a second fee. Returns its hash.
+   */
+  async function payFeeOnArc(signer: JsonRpcSigner, terms: Extract<DeployFeeTerms, { method: 'transfer' }>, onBroadcast: (hash: string) => void): Promise<string> {
     const unlinked = await unlinkedPayer(signer);
     if (unlinked) throw new Error(unlinked);
     setStatus('paying');
     const data = new Interface(USDC_ABI).encodeFunctionData('transfer', [terms.recipient, BigInt(terms.amountRaw)]);
-    // Saved the moment the wallet broadcasts it, before any wait, so no
-    // failure from here on (a closed tab included) costs a second fee.
-    const remember = (hash: string) => { writePendingFee(owner, hash); setPendingFee(hash); };
-    try {
-      const sent = await sendDirectPayment(signer, { to: terms.token, data }, 'arc', remember);
-      console.log(`[deploy] Arc fee paid hash=${sent.hash} confirmed=${!!sent.receipt}`);
-      return sent.hash;
-    } catch (err) {
-      if (feeIsSpent(err as { code?: string })) { writePendingFee(owner, null); setPendingFee(null); }
-      throw err;
-    }
+    const sent = await sendDirectPayment(signer, { to: terms.token, data }, 'arc', onBroadcast);
+    console.log(`[deploy] Arc fee paid hash=${sent.hash} confirmed=${!!sent.receipt}`);
+    return sent.hash;
+  }
+
+  /** Send `amount` of the payment token to an agent's wallet on the posting chain: the agent page's top-up. Returns its hash. */
+  async function fundWallet(signer: JsonRpcSigner, to: string, amount: bigint): Promise<string> {
+    const usdcToken = new Contract(getMarketplaceTokenAddress(), USDC_ABI, signer);
+    const tx = await usdcToken.transfer.populateTransaction(to, amount);
+    const sent = await signAndSendTx(signer, tx as never, undefined, { chain: posting.key });
+    return sent.hash;
   }
 
   /** Drop a saved payment that never confirmed, so the next deploy pays anew. */
@@ -436,14 +548,37 @@ export default function DeployAgentForm() {
     submittingRef.current = true;
     setError('');
     setErrorCode(null);
+    setCapacityOffer(null);
+    const refuse = (message: unknown, code: string | null = null) => {
+      setError(message);
+      setErrorCode(code);
+      setStatus('error');
+      submittingRef.current = false;
+    };
 
-    // An Arc payment no deploy has used yet pays for this one.
+    const runNames = agentNames(form.name, count);
+    const namesError = namesProblem(runNames);
+    if (namesError) { refuse(namesError); return; }
+    if (funding && fundRaw === null) { refuse(`Enter how much ${getPaymentSymbol()} to send each agent, e.g. ${DEFAULT_FUND_AMOUNT}.`); return; }
+
+    // Before anything is paid: how many agents can start now. Read again
+    // here, since other owners' agents may have taken slots since the page loaded.
+    const fresh = await readCapacity();
+    setCapacity(fresh);
+    const room = capacityCheck(runNames.length, fresh);
+    if (!room.ok) {
+      setCapacityOffer(room.free > 0 ? room.free : null);
+      refuse(room.message, 'AGENT_CAPACITY');
+      return;
+    }
+
+    // An Arc payment no deploy has used yet pays for the first agent.
     const savedFee = feeTerms.required && feeTerms.method === 'transfer' ? readPendingFee(address) : null;
+    const feeCount = feeTerms.required ? runNames.length - (savedFee ? 1 : 0) : 0;
 
     const ownerIdentity = getOrCreateExecutorIdentity(address);
     const deployBody = {
       ownerPublicKey: ownerIdentity.publicKey,
-      name: form.name,
       instructions: form.instructions,
       provider: form.provider,
       model: form.model.trim(),
@@ -456,20 +591,20 @@ export default function DeployAgentForm() {
 
     // Before anything is paid: the checks the deploy makes (a typed model id
     // the key can't use, a bad key, …), so a refused deploy never costs a fee.
-    if (feeTerms.required && !savedFee) {
+    // Once for a run of several: they differ only by name, and the longest
+    // name stands for the rest.
+    if ((feeTerms.required && !savedFee) || runNames.length > 1) {
       setStatus('checking');
+      const longest = runNames.reduce((a, b) => (b.length > a.length ? b : a));
       try {
-        await authedPost('/api/v1/agents/deploy/validate', deployBody);
+        await authedPost('/api/v1/agents/deploy/validate', { ...deployBody, name: longest });
       } catch (err: any) {
-        setError(err);
-        setErrorCode(typeof err?.code === 'string' ? err.code : null);
-        setStatus('error');
-        submittingRef.current = false;
+        refuse(err, typeof err?.code === 'string' ? err.code : null);
         return;
       }
     }
 
-    if (feeTerms.required && !savedFee) {
+    if (feeCount > 0) {
       setStatus('idle'); // not a stale 'error' with the message cleared, while the wallet answers
       let unlinked: string | null;
       try {
@@ -477,70 +612,67 @@ export default function DeployAgentForm() {
       } catch {
         unlinked = 'Your wallet is not ready. Reconnect it and try again.';
       }
-      if (unlinked) {
-        setError(unlinked);
-        setErrorCode(null);
-        setStatus('error');
-        submittingRef.current = false;
-        return;
-      }
+      if (unlinked) { refuse(unlinked); return; }
     }
 
     // Confirm before spending — not when nothing will be spent.
-    if (feeTerms.required && !savedFee) {
+    if (feeCount > 0 || funding) {
       setStatus('confirming');
       const approved = await new Promise<boolean>((resolve) => { confirmResolveRef.current = resolve; });
       if (!approved) { setStatus('idle'); submittingRef.current = false; return; }
     }
 
-    let feeTxHash: string | null = savedFee;
+    setRuns(runNames.map((name) => ({ name, state: 'queued' })));
+    setRunAt(0);
     try {
       const signer = await new BrowserProvider(walletClient.transport).getSigner();
-      let feeTx: string | null = savedFee;
-      if (feeTerms.required && feeTerms.method === 'transfer' && !feeTxHash) {
-        feeTxHash = await payFeeOnArc(signer, feeTerms, address);
-        feeTx = feeTxHash;
-      } else if (feeTerms.required && feeTerms.method === 'factory') {
-        feeTx = await payFeeViaFactory(signer, factoryAddress!);
-      }
-
-      // Create the agent (the backend checks the fee, creates its wallet, starts it).
-      setStatus('deploying');
-      const body = { ...deployBody, ...(feeTxHash ? { feeTxHash } : {}) };
-      // Factory: the AgentFactory listener polls every 15s, so the credit can lag
-      // the payment by up to a minute. Arc: the backend already asks Arc for
-      // the fee's receipt several times; a lagging RPC gets two more tries.
-      const maxAttempts = feeTxHash ? 3 : feeTerms.required ? 20 : 1;
-      const retryCode = feeTxHash ? 'DEPLOY_FEE_NOT_FOUND' : 'NO_DEPLOY_CREDIT';
-      let result: { id: string; started?: boolean; walletAddress?: string } | null = null;
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        try {
-          result = await authedPost<{ id: string; started?: boolean; walletAddress?: string }>('/api/v1/agents/deploy', body);
-          break;
-        } catch (err: any) {
-          console.log(`[deploy] attempt ${attempt + 1}/${maxAttempts} failed:`, err.code, err.message);
-          if (err.code === retryCode && attempt < maxAttempts - 1) {
-            await new Promise(r => setTimeout(r, 5000));
-            continue;
-          }
-          throw err;
-        }
-      }
-      if (!result) throw new Error('The deploy fee was not found after payment. Try again in a moment.');
-      if (feeTxHash) writePendingFee(address, null);
-      setPendingFee(null);
-      setDeployed({
-        id: result.id,
-        started: result.started === true,
-        feeTx,
-        ogFundAddress: form.provider === '0g-compute' ? result.walletAddress ?? null : null,
+      const amount = fundRaw ?? 0n;
+      const outcome = await runDeploys({
+        names: runNames,
+        body: deployBody,
+        fee: !feeTerms.required ? 'none' : feeTerms.method,
+        savedFee,
+        fundOn: funding ? posting : null,
+        free: freeSlots(fresh),
+      }, {
+        payTransfer: (onBroadcast) => payFeeOnArc(signer, feeTerms as Extract<DeployFeeTerms, { method: 'transfer' }>, onBroadcast),
+        payFactory: () => payFeeViaFactory(signer, factoryAddress!),
+        // The backend checks the fee, creates the agent's wallet and starts it.
+        deploy: (body) => authedPost<DeployedAgent>('/api/v1/agents/deploy', body),
+        fund: (to) => fundWallet(signer, to, amount),
+        savePendingFee: (hash) => { writePendingFee(address, hash); setPendingFee(hash); },
+        sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+        onUpdate: (i, agent) => {
+          setRuns((prev) => prev.map((r, j) => (j === i ? agent : r)));
+          setRunAt(i);
+          if (agent.state === 'deploying') setStatus('deploying');
+          else if (agent.state === 'funding') setStatus('funding');
+        },
       });
+      setRuns(outcome.agents);
+      const made = outcome.agents.filter((a) => a.id);
+      if (made.length === 0) {
+        // Nothing was created: back to the form with why.
+        const failed = outcome.agents.find((a) => a.state === 'failed');
+        const err = failed?.error as { code?: unknown } | undefined;
+        setError(failed?.error ?? 'The agent was not deployed.');
+        setErrorCode(typeof err?.code === 'string' ? err.code : null);
+        setStatus('error');
+        return;
+      }
+      if (runNames.length === 1) {
+        const [agent] = made;
+        setDeployed({
+          id: agent.id!,
+          started: agent.started === true,
+          feeTx: agent.feeTx ?? null,
+          ogFundAddress: form.provider === '0g-compute' ? agent.walletAddress ?? null : null,
+          ...(agent.fundTx ? { fundTx: agent.fundTx } : {}),
+          ...(agent.fundError ? { fundError: agent.fundError } : {}),
+        });
+      }
       setStatus('done');
     } catch (err: any) {
-      if (feeTxHash && feeIsSpent(err ?? {})) {
-        writePendingFee(address, null);
-        setPendingFee(null);
-      }
       setError(err);
       setErrorCode(typeof err?.code === 'string' ? err.code : null);
       setStatus('error');
@@ -578,7 +710,18 @@ export default function DeployAgentForm() {
                 ? 'Your agent is running.'
                 : 'Your agent was created but did not start — start it from My agents.'}
             </div>
+            {deployed.fundTx && (
+              <div className="text-xs text-ink-3">
+                Wallet funded with {fundAmount.trim()} {getPaymentSymbol()} · tx{' '}
+                <a href={`${posting.explorer}/tx/${deployed.fundTx}`} target="_blank" rel="noreferrer" className="font-mono text-ink-2 hover:text-ink">
+                  {shortHash(deployed.fundTx)}
+                </a>
+              </div>
+            )}
           </div>
+          {deployed.fundError != null && (
+            <ErrorNotice error={deployed.fundError} title="Couldn't fund its wallet" compact className="mx-auto max-w-md text-left" />
+          )}
 
           {deployed.ogFundAddress && (
             <div className={`mx-auto max-w-md text-left ${WARN_BOX} px-4 py-3.5 space-y-2.5`}>
@@ -622,13 +765,130 @@ export default function DeployAgentForm() {
             <Button
               variant="ghost"
               label="Deploy another"
-              onClick={() => { setStatus('idle'); setDeployed(null); setPrivateSkillSlugs([]); }}
+              onClick={() => { setStatus('idle'); setDeployed(null); setRuns([]); setPrivateSkillSlugs([]); }}
             />
           </div>
           </div>
         </div>
     );
   }
+
+  if (status === 'done' && runs.length > 1) {
+    const explorer = ARC_CHAIN_CONFIG.blockExplorerUrls[0];
+    const made = runs.filter((r) => r.id);
+    const ogWallets = form.provider === '0g-compute' ? made.filter((r) => r.walletAddress) : [];
+    return (
+      <div>
+        <Breadcrumb items={['marketplace', 'agents', 'create', 'no-code']} />
+        <div className="card-dark rounded-3xl p-6 sm:p-10 space-y-5 mt-8">
+          <div className="flex items-center justify-center gap-2 text-ok">
+            <Icon name="check" size={18} />
+            <span className="text-sm font-semibold">
+              {made.length === runs.length ? `${made.length} agents deployed` : `${made.length} of ${runs.length} agents deployed`}
+            </span>
+          </div>
+          {made.length < runs.length && (
+            <p className="text-center text-xs text-ink-3">The run stopped at the first problem. Agents already deployed stay; nothing more was paid.</p>
+          )}
+
+          <ul className="divide-y divide-line rounded-xl border border-line">
+            {runs.map((r) => (
+              <li key={r.name} className="px-4 py-3 space-y-1.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="min-w-0 truncate text-sm font-medium text-ink">{r.name}</span>
+                  {r.id ? (
+                    <Link to={`/agents/${r.id}`} className="text-xs text-ink-2 hover:text-ink">Open agent →</Link>
+                  ) : (
+                    <span className={`text-xs ${r.state === 'failed' ? 'text-err' : 'text-ink-3'}`}>{RUN_STATE_LABEL[r.state]}</span>
+                  )}
+                </div>
+                {r.id && (
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-ink-3">
+                    <span className={r.started ? 'text-ok' : 'text-warn'}>{r.started ? 'Running' : 'Created, not started — start it from My agents'}</span>
+                    {r.walletAddress && (
+                      <span className="flex items-center gap-1">
+                        <span className="font-mono text-ink-2">{shortAddress(r.walletAddress)}</span>
+                        <CopyButton text={r.walletAddress} what="wallet address" />
+                      </span>
+                    )}
+                    {r.feeTx && (
+                      <a href={`${explorer}/tx/${r.feeTx}`} target="_blank" rel="noreferrer" className="hover:text-ink">
+                        fee tx <span className="font-mono">{shortHash(r.feeTx)}</span>
+                      </a>
+                    )}
+                    {r.fundTx && (
+                      <a href={`${posting.explorer}/tx/${r.fundTx}`} target="_blank" rel="noreferrer" className="hover:text-ink">
+                        funded <span className="font-mono">{shortHash(r.fundTx)}</span>
+                      </a>
+                    )}
+                  </div>
+                )}
+                {r.state === 'failed' && r.error != null && <ErrorNotice error={r.error} title="Couldn't deploy this agent" compact />}
+                {r.fundError != null && <ErrorNotice error={r.fundError} title="Couldn't fund its wallet" compact />}
+              </li>
+            ))}
+          </ul>
+
+          {ogWallets.length > 0 && (
+            <div className={`text-left ${WARN_BOX} px-4 py-3.5 space-y-2.5`}>
+              <div className="flex items-center gap-2 text-sm font-semibold text-ink">
+                <Icon name="alert" size={14} className="text-warn" />
+                <span>One more step: fund each with 0G</span>
+              </div>
+              <p className="text-xs text-ink-2 leading-relaxed">
+                Send at least <span className="font-semibold text-ink">{OG_COMPUTE_START_0G} 0G</span> on the 0G chain to each
+                agent's wallet. {OG_COMPUTE_ACCOUNT_0G} 0G opens its 0G Compute account; it takes no task until then.
+              </p>
+              {ogWallets.map((r) => (
+                <div key={r.id} className="flex items-center justify-between gap-2 rounded-lg border border-line bg-surface-2 px-3 py-2">
+                  <span className="min-w-0 text-xs text-ink-3 truncate">{r.name}</span>
+                  <span className="flex items-center gap-1">
+                    <span className="font-mono text-xs text-ink break-all">{r.walletAddress}</span>
+                    <CopyButton text={r.walletAddress!} />
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="flex justify-center gap-3 flex-wrap pt-1">
+            <Button variant="primary" label="My agents" onClick={() => navigate('/agents/mine')} />
+            <Button
+              variant="ghost"
+              label="Deploy more"
+              onClick={() => { setStatus('idle'); setDeployed(null); setRuns([]); setPrivateSkillSlugs([]); }}
+            />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // A run of several, or one with its wallet funded, says what each step
+  // costs; a single deploy keeps the words it always had.
+  const plain = count === 1 && !funding;
+  const fundingChain = posting.key === 'arc' ? 'Arc' : posting.label;
+  const symbol = getPaymentSymbol();
+  const fundText = fundRaw ? formatUnits(fundRaw, getPaymentDecimals()) : fundAmount.trim();
+  const times = (n: number, each: string, total: string) => (n === 1 ? `${each} USDC` : `${n} × ${each} = ${total} USDC`);
+  const feeSignatures = !feeTerms?.required ? 0 : feeTerms.method === 'transfer' ? feesToPay : 2 * count;
+  const signatures = feeSignatures + (funding ? count : 0);
+  const signingSummary = plain
+    ? feeTerms?.required && feeTerms.method === 'transfer'
+      ? 'Your wallet signs one USDC transfer on Arc.'
+      : 'Your wallet signs two transactions on Arc: a USDC approval, then the deploy through AgentFactory.'
+    : `Your wallet signs ${signatures} transaction${signatures === 1 ? '' : 's'}: ${[
+      feeTerms?.required && feeTerms.method === 'transfer' && feesToPay > 0
+        ? `${feesToPay === 1 ? 'one deploy fee transfer' : `${feesToPay} deploy fee transfers, one per agent`} on Arc`
+        : null,
+      feeTerms?.required && feeTerms.method === 'factory'
+        ? `a USDC approval and an AgentFactory payment for ${count === 1 ? 'the agent' : 'each agent'} on Arc`
+        : null,
+      funding
+        ? `${count === 1 ? `one ${symbol} transfer to its wallet` : `${count} ${symbol} transfers, one to each agent's wallet`} on ${fundingChain}, after ${count === 1 ? 'it deploys' : 'that agent deploys'}`
+        : null,
+    ].filter(Boolean).join(', and ')}.`;
+  const runningLabel = count > 1 ? `Deploying ${Math.min(runAt + 1, count)} of ${count}…` : null;
 
   return (
     <div>
@@ -654,6 +914,38 @@ export default function DeployAgentForm() {
               </div>
             </FormField>
           </div>
+          <FormField
+            label="How many agents"
+            className="mt-5"
+            hint={free !== null
+              ? free === 0
+                ? 'No agent can start now. Stop one of your agents first.'
+                : `You can start ${free} now.`
+              : undefined}
+          >
+            <div className="w-28">
+              <FormInput
+                type="number"
+                inputMode="numeric"
+                min={1}
+                max={Math.max(1, maxCount)}
+                step={1}
+                value={count}
+                onChange={(e) => {
+                  const n = Math.floor(Number(e.target.value));
+                  setCount(Number.isFinite(n) ? Math.min(Math.max(1, maxCount), Math.max(1, n)) : 1);
+                }}
+                className="font-mono"
+                aria-label="How many agents"
+              />
+            </div>
+          </FormField>
+          {count > 1 && form.name.trim() && (
+            <p className="mt-2 text-xs text-ink-3 leading-relaxed">
+              Named <span className="font-mono text-ink-2">{names[0]}</span> to <span className="font-mono text-ink-2">{names[names.length - 1]}</span>.
+              {' '}Put <span className="font-mono">{'{n}'}</span> in the name to place the number.
+            </p>
+          )}
           <FormField label="Instructions" required className="mt-5">
             <div className="rounded-lg border border-line divide-y divide-line focus-within:border-line-2 transition-colors">
               <div className="flex text-xs items-stretch">
@@ -782,6 +1074,12 @@ export default function DeployAgentForm() {
             </div>
           ) : null}
 
+          {count > 1 && form.provider !== '0g-compute' && (
+            <p className="mt-3 text-[12px] text-ink-3">
+              All {count} agents use your one {providerName} key, so they share its rate limits and its bill.
+            </p>
+          )}
+
           {form.provider === '0g-compute' && (
             <div className="mt-4 rounded-xl border border-line-2 bg-surface-2 px-4 py-3.5 text-[13px] leading-relaxed space-y-2">
               <div className="flex items-center gap-2 font-semibold text-ink">
@@ -803,6 +1101,11 @@ export default function DeployAgentForm() {
                   After you deploy, send it to the agent's wallet on the 0G chain: {OG_COMPUTE_ACCOUNT_0G} 0G opens
                   its 0G Compute account and the rest pays gas. It won't take tasks until then.
                 </p>
+                {count > 1 && (
+                  <p className="text-ink-3 text-[12px]">
+                    Each of the {count} agents needs its own account: {OG_COMPUTE_START_0G} 0G to each wallet.
+                  </p>
+                )}
               </div>
             </div>
           )}
@@ -845,25 +1148,80 @@ export default function DeployAgentForm() {
             <p className="text-sm text-ink-3">Loading the deploy fee…</p>
           ) : needsArcSwitch ? (
             <div className="flex items-center gap-3 flex-wrap">
-              <p className="text-sm text-ink-3">The deploy fee is paid on Arc, and your wallet is on another network.</p>
+              <p className="text-sm text-ink-3">
+                {feeMethod !== null ? 'The deploy fee is paid on Arc' : 'Funding is sent on Arc'}, and your wallet is on another network.
+              </p>
               <Button type="button" variant="ghost" label="Switch to Arc" onClick={() => { void switchChain(ARC_CHAIN_ID); }} />
             </div>
           ) : (
             <>
+              {fundingOffered && (
+                <div className="mb-4 rounded-xl border border-line bg-surface-2 px-4 py-3.5 space-y-2">
+                  <label className="flex items-center gap-2.5 text-sm text-ink">
+                    <input
+                      type="checkbox"
+                      checked={fundOn}
+                      onChange={(e) => setFundOn(e.target.checked)}
+                      disabled={busy}
+                      className="w-3.5 h-3.5 accent-cream"
+                    />
+                    <span>{count === 1 ? "Fund the agent's wallet" : "Fund each agent's wallet"}</span>
+                  </label>
+                  {fundOn ? (
+                    <>
+                      <div className="flex flex-wrap items-center gap-2 text-[13px] text-ink-2">
+                        <span>Send</span>
+                        <div className="w-24">
+                          <FormInput
+                            value={fundAmount}
+                            onChange={(e) => setFundAmount(e.target.value)}
+                            inputMode="decimal"
+                            disabled={busy}
+                            className="font-mono"
+                            aria-label={`${symbol} to send each agent`}
+                          />
+                        </div>
+                        <span>{symbol} on {fundingChain} to {count === 1 ? 'it' : 'each one'} after it deploys.</span>
+                      </div>
+                      {fundRaw === null ? (
+                        <p className="text-[12px] text-err">Enter an amount above 0.</p>
+                      ) : minGasRaw !== null ? (
+                        <p className="text-[12px] text-ink-3">
+                          One transaction can cost up to {formatMinGas(minGasRaw, getPaymentDecimals())} {symbol} at current gas prices. An agent takes no task below that.
+                        </p>
+                      ) : null}
+                    </>
+                  ) : (
+                    <p className="text-[12px] text-ink-3">An agent pays its own gas. Fund it here as it deploys, or later from its page.</p>
+                  )}
+                </div>
+              )}
+
               {feeTerms.required && (
                 <div className="mb-4 rounded-xl border border-line bg-surface-2 px-4 py-3.5 space-y-2">
                   <div className="flex items-center gap-2 text-sm font-semibold text-ink">
                     <Icon name="bolt" size={15} className="text-accent" />
-                    <span>{feeTerms.method === 'transfer' ? 'Deployment uses 1 signature' : 'Deployment uses 2 signatures'}</span>
+                    <span>
+                      {plain
+                        ? feeTerms.method === 'transfer' ? 'Deployment uses 1 signature' : 'Deployment uses 2 signatures'
+                        : `Deployment uses ${signatures} signature${signatures === 1 ? '' : 's'}`}
+                    </span>
                   </div>
                   {feeTerms.method === 'transfer' ? (
                     <p className="text-[13px] text-ink-2 leading-relaxed">
-                      Sends the {usdc(feeRaw)} USDC deploy fee to the platform treasury on Arc. Gas is paid in USDC from the same balance.
+                      {count === 1
+                        ? `Sends the ${usdc(feeRaw)} USDC deploy fee to the platform treasury on Arc.`
+                        : `Sends the ${usdc(feeRaw)} USDC deploy fee for each agent to the platform treasury on Arc: ${times(feesToPay, usdc(feeRaw), usdc(feeRaw * BigInt(feesToPay)))}.`}
+                      {' '}Gas is paid in USDC from the same balance.
                     </p>
                   ) : (
                     <ol className="text-[13px] text-ink-2 leading-relaxed space-y-1 list-decimal list-inside">
                       <li>Approve USDC — allows AgentFactory to charge the deploy fee.</li>
-                      <li>Deploy agent — pays {usdc(feeRaw)} USDC, emits on-chain event.</li>
+                      <li>
+                        {count === 1
+                          ? `Deploy agent — pays ${usdc(feeRaw)} USDC, emits on-chain event.`
+                          : `Deploy each agent — pays ${usdc(feeRaw)} USDC, emits on-chain event: ${times(count, usdc(feeRaw), usdc(feeRaw * BigInt(count)))}.`}
+                      </li>
                     </ol>
                   )}
                   {pendingFee ? (
@@ -876,7 +1234,7 @@ export default function DeployAgentForm() {
                         className="font-mono text-ink-2 hover:text-ink"
                       >
                         {shortHash(pendingFee)}
-                      </a>) — deploying uses it, with no new charge.
+                      </a>) — {count === 1 ? 'deploying uses it' : 'the first agent uses it'}, with no new charge.
                       {errorCode === 'DEPLOY_FEE_NOT_FOUND' && (
                         <>
                           {' '}If the explorer never shows it,{' '}
@@ -907,7 +1265,12 @@ export default function DeployAgentForm() {
                   </div>
                   <p>
                     You need at least <span className="font-mono">{usdc(feeNeeded)} USDC</span>
-                    {` on Arc — the ${usdc(feeRaw)} USDC fee plus a little for gas.`}
+                    {plain
+                      ? ` on Arc — the ${usdc(feeRaw)} USDC fee plus a little for gas.`
+                      : ` on ${fundingChain}: ${[
+                        feesToPay > 0 ? `${times(feesToPay, usdc(feeRaw), usdc(feeRaw * BigInt(feesToPay)))} in deploy fees` : null,
+                        funding && fundRaw ? `${times(count, fundText, usdc(fundRaw * BigInt(count)))} for the agents' wallets` : null,
+                      ].filter(Boolean).join(' and ')}, plus a little for gas.`}
                   </p>
                 </div>
               )}
@@ -916,76 +1279,112 @@ export default function DeployAgentForm() {
                 <Button
                   type="submit"
                   variant="primary"
-                  disabled={busy || !hasEnoughUsdc}
+                  disabled={busy || !hasEnoughUsdc || (funding && fundRaw === null)}
                   label={
                     status === 'checking'
                       ? 'Checking…'
                       : status === 'confirming'
                       ? 'Confirm deploy…'
+                      : runningLabel && (status === 'approving' || status === 'paying' || status === 'deploying' || status === 'funding')
+                      ? runningLabel
                       : status === 'approving'
                       ? 'Approving USDC…'
                       : status === 'paying'
                       ? 'Paying deploy fee…'
                       : status === 'deploying'
                       ? 'Creating agent…'
+                      : status === 'funding'
+                      ? 'Funding wallet…'
+                      : count > 1
+                      ? feesToPay > 0
+                        ? `Deploy ${count} agents (${usdc(feeRaw * BigInt(feesToPay))} USDC) →`
+                        : `Deploy ${count} agents →`
                       : !feeTerms.required || pendingFee
                       ? 'Deploy agent →'
                       : `Deploy agent (${usdc(feeRaw)} USDC) →`
                   }
                 />
               </div>
+
+              {count > 1 && runs.length > 1 && busy && (
+                <ul className="mt-4 divide-y divide-line rounded-xl border border-line text-[13px]">
+                  {runs.map((r) => (
+                    <li key={r.name} className="flex items-center justify-between gap-3 px-4 py-2">
+                      <span className="min-w-0 truncate text-ink-2">{r.name}</span>
+                      <span className={`shrink-0 text-xs ${r.state === 'done' ? 'text-ok' : r.state === 'failed' ? 'text-err' : 'text-ink-3'}`}>
+                        {RUN_STATE_LABEL[r.state]}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </>
           )}
-          {status === 'error' && <ErrorNotice error={error} title="Couldn't deploy the agent" className="mt-3" />}
+          {status === 'error' && (
+            <>
+              <ErrorNotice error={error} title={count > 1 ? "Couldn't deploy the agents" : "Couldn't deploy the agent"} className="mt-3" />
+              {capacityOffer !== null && (
+                <div className="mt-3">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    label={capacityOffer === 1 ? 'Deploy 1 agent instead' : `Deploy ${capacityOffer} agents instead`}
+                    onClick={() => { setCount(capacityOffer); setCapacityOffer(null); setStatus('idle'); setError(''); }}
+                  />
+                </div>
+              )}
+            </>
+          )}
         </div>
       </form>
       <ConfirmDialog
         open={status === 'confirming'}
-        title="Deploy agent"
+        title={count === 1 ? 'Deploy agent' : `Deploy ${count} agents`}
         description={
           <div className="space-y-2">
             <p className="text-sm text-ink-2">Review before deploying:</p>
-            {feeTerms?.required && feeTerms.method === 'transfer' ? (
-              <>
-                <div className="rounded-lg bg-surface-2 p-3 space-y-1.5 font-mono text-xs">
-                  <div className="flex justify-between">
-                    <span className="text-ink-3">Deploy fee</span>
-                    <span>{usdc(feeRaw)} USDC</span>
-                  </div>
-                  <div className="flex justify-between gap-3">
-                    <span className="text-ink-3">Paid from</span>
-                    <span>{payer ? shortAddress(payer) : '…'}</span>
-                  </div>
-                  <div className="flex justify-between gap-3">
-                    <span className="text-ink-3">Paid to</span>
-                    <span>treasury {feeTerms.recipient.slice(0, 6)}…{feeTerms.recipient.slice(-4)}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-ink-3">Gas (paid in USDC)</span>
-                    <span>under 0.01 USDC</span>
-                  </div>
+            <div className="rounded-lg bg-surface-2 p-3 space-y-1.5 font-mono text-xs">
+              {count > 1 && (
+                <div className="flex justify-between gap-3">
+                  <span className="text-ink-3">Agents</span>
+                  <span>{count}</span>
                 </div>
-                <p className="text-xs text-ink-3">Your wallet signs one USDC transfer on Arc.</p>
-              </>
-            ) : (
-              <>
-                <div className="rounded-lg bg-surface-2 p-3 space-y-1.5 font-mono text-xs">
-                  <div className="flex justify-between">
-                    <span className="text-ink-3">Deploy fee</span>
-                    <span>{usdc(feeRaw)} USDC</span>
-                  </div>
-                  <div className="flex justify-between gap-3">
-                    <span className="text-ink-3">Paid from</span>
-                    <span>{payer ? shortAddress(payer) : '…'}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-ink-3">Gas (paid in USDC)</span>
-                    <span>under 0.01 USDC</span>
-                  </div>
+              )}
+              {feeTerms?.required && (
+                <div className="flex justify-between gap-3">
+                  <span className="text-ink-3">Deploy fee</span>
+                  <span className="text-right">
+                    {feesToPay === 0
+                      ? 'already paid'
+                      : times(feesToPay, usdc(feeRaw), usdc(feeRaw * BigInt(feesToPay)))}
+                    {feesToPay > 0 && feesToPay < count ? ' (one already paid)' : ''}
+                  </span>
                 </div>
-                <p className="text-xs text-ink-3">Your wallet signs two transactions on Arc: a USDC approval, then the deploy through AgentFactory.</p>
-              </>
-            )}
+              )}
+              {funding && fundRaw ? (
+                <div className="flex justify-between gap-3">
+                  <span className="text-ink-3">{count === 1 ? 'Wallet funding' : 'Funding, each wallet'}</span>
+                  <span className="text-right">
+                    {count === 1 ? `${fundText} ${symbol}` : `${count} × ${fundText} = ${formatUnits(fundRaw * BigInt(count), getPaymentDecimals())} ${symbol}`}
+                  </span>
+                </div>
+              ) : null}
+              <div className="flex justify-between gap-3">
+                <span className="text-ink-3">Paid from</span>
+                <span>{payer ? shortAddress(payer) : '…'}</span>
+              </div>
+              {feeTerms?.required && feeTerms.method === 'transfer' && feesToPay > 0 && (
+                <div className="flex justify-between gap-3">
+                  <span className="text-ink-3">Paid to</span>
+                  <span>treasury {feeTerms.recipient.slice(0, 6)}…{feeTerms.recipient.slice(-4)}</span>
+                </div>
+              )}
+              <div className="flex justify-between gap-3">
+                <span className="text-ink-3">Gas (paid in USDC)</span>
+                <span>{signatures > 1 && !plain ? 'under 0.01 USDC each' : 'under 0.01 USDC'}</span>
+              </div>
+            </div>
+            <p className="text-xs text-ink-3">{signingSummary}</p>
           </div>
         }
         confirmLabel="Confirm deploy"
