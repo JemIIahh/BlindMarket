@@ -1,6 +1,39 @@
 import rateLimit from 'express-rate-limit';
 import type { Request, RequestHandler } from 'express';
 import type { AuthRequest } from '../types.js';
+import { verifiedPlatformAgent } from './auth.js';
+
+// ── Hosted agents ───────────────────────────────────────────────────────────
+//
+// Every hosted agent is a worker this server forks, and it calls the API at
+// BACKEND_URL, which is localhost (services/agentRunner.ts). By IP they are
+// one client: all of them shared one 100/min bucket. A restart re-forks every
+// worker at once and each sends 4 requests as it boots, so from 26 agents
+// some were refused, among them executor registrations. So a request
+// carrying a verified agent platform token (hostedAgentOf) is limited per
+// agent, not per IP. Loopback is not exempted by address: behind a reverse
+// proxy on this box, outside traffic would look local too. Like every limit
+// here, the buckets are per process; a worker only calls the process that
+// forked it.
+
+/** Requests a minute one hosted agent may send, outside the posting routes. */
+export const AGENT_REQUESTS_PER_MIN = 300;
+
+const agentOfRequest = new WeakMap<Request, Promise<string | null>>();
+
+/**
+ * The hosted agent behind `req` (verifiedPlatformAgent), looked up once per
+ * request however many limiters ask. Null for anything else, a forged or
+ * revoked token included, so those stay limited by IP.
+ */
+export function hostedAgentOf(req: Request): Promise<string | null> {
+  let agent = agentOfRequest.get(req);
+  if (!agent) {
+    agent = verifiedPlatformAgent(req).catch(() => null);
+    agentOfRequest.set(req, agent);
+  }
+  return agent;
+}
 
 // ── Posting routes (docs/BULK-POSTING.md) ───────────────────────────────────
 //
@@ -12,11 +45,12 @@ import type { AuthRequest } from '../types.js';
 //   - createPostingAuthLimiter counts, per IP, the posting calls whose
 //     credentials fail, 100/min: unauthenticated callers keep the per-IP
 //     limit, and a flood of bad tokens can't reach requireAuth (a database
-//     lookup each) unlimited;
+//     lookup each) unlimited. A hosted agent's verified token is not one;
 //   - createWalletBudget, mounted after requireAuth on each posting route,
 //     limits the authenticated wallet, and postingIpBudget (600 items a
 //     minute per IP, across all six routes) caps what one address can send
-//     however many wallets it authenticates as.
+//     however many wallets it authenticates as. For hosted agents, which
+//     all share this server's address, it caps each owner instead.
 
 /** The posting routes, as full paths. */
 export const POSTING_ROUTES: ReadonlySet<string> = new Set([
@@ -47,26 +81,46 @@ export function isCredentialedPosting(req: Request): boolean {
   return POSTING_ROUTES.has(path) && presentsCredentials(req);
 }
 
-/** 100 requests per minute per IP, except posting calls that present credentials (see above). */
-export function createRateLimiter() {
-  return rateLimit({
+const RATE_LIMIT_MESSAGE = {
+  success: false,
+  error: { code: 'RATE_LIMIT', message: 'Too many requests, please try again later' },
+};
+
+/**
+ * 100 requests per minute per IP, and AGENT_REQUESTS_PER_MIN per hosted
+ * agent for requests carrying its verified platform token (see above), which
+ * then don't count toward their IP's 100. Posting calls that present
+ * credentials skip both (see above). Two limiters, one after the other: a
+ * request is counted by the one that applies to it.
+ */
+export function createRateLimiter(): RequestHandler {
+  const perIp = rateLimit({
     windowMs: 60 * 1000,
     max: 100,
     standardHeaders: true,
     legacyHeaders: false,
-    skip: isCredentialedPosting,
-    message: {
-      success: false,
-      error: { code: 'RATE_LIMIT', message: 'Too many requests, please try again later' },
-    },
+    skip: async (req) => isCredentialedPosting(req) || (await hostedAgentOf(req)) !== null,
+    message: RATE_LIMIT_MESSAGE,
   });
+  const perAgent = rateLimit({
+    windowMs: 60 * 1000,
+    max: AGENT_REQUESTS_PER_MIN,
+    standardHeaders: true,
+    legacyHeaders: false,
+    skip: async (req) => isCredentialedPosting(req) || (await hostedAgentOf(req)) === null,
+    keyGenerator: async (req) => `agent:${await hostedAgentOf(req)}`,
+    message: RATE_LIMIT_MESSAGE,
+  });
+  return (req, res, next) => perIp(req, res, (err?: unknown) => (err ? next(err) : perAgent(req, res, next)));
 }
 
 /**
  * 100 posting calls per minute per IP whose credentials fail. A call counts
  * when it arrives and stops counting once it has authenticated (req.user
- * set), so only unauthenticated calls use this limit. Mount right after
- * createRateLimiter(), before the body is parsed.
+ * set), so only unauthenticated calls use this limit. A hosted agent's call
+ * is not counted at all: its token is verified already (hostedAgentOf), and
+ * counted, every agent's in-flight uploads would share this server's 100.
+ * Mount right after createRateLimiter(), before the body is parsed.
  */
 export function createPostingAuthLimiter() {
   return rateLimit({
@@ -75,13 +129,10 @@ export function createPostingAuthLimiter() {
     // The wallet budget's headers describe these routes.
     standardHeaders: false,
     legacyHeaders: false,
-    skip: (req) => !isCredentialedPosting(req),
+    skip: async (req) => !isCredentialedPosting(req) || (await hostedAgentOf(req)) !== null,
     skipSuccessfulRequests: true,
     requestWasSuccessful: (req) => Boolean((req as AuthRequest).user),
-    message: {
-      success: false,
-      error: { code: 'RATE_LIMIT', message: 'Too many requests, please try again later' },
-    },
+    message: RATE_LIMIT_MESSAGE,
   });
 }
 
@@ -108,8 +159,8 @@ function createTokenBucket({
   perMinute: number;
   weight?: (req: Request) => number;
   key: (req: Request) => string;
-  /** The 429 message, given the seconds until the request would fit. */
-  refusal: (retryAfter: number) => string;
+  /** The 429 message, given the seconds until the request would fit and the bucket's key. */
+  refusal: (retryAfter: number, id: string) => string;
   maxBuckets?: number;
 }): RequestHandler {
   const capacity = perMinute;
@@ -145,7 +196,7 @@ function createTokenBucket({
       res.setHeader('RateLimit-Remaining', String(Math.floor(tokens)));
       res.setHeader('RateLimit-Reset', String(retryAfter));
       res.setHeader('Retry-After', String(retryAfter));
-      res.status(429).json({ success: false, error: { code: 'RATE_LIMIT', message: refusal(retryAfter) } });
+      res.status(429).json({ success: false, error: { code: 'RATE_LIMIT', message: refusal(retryAfter, id) } });
       return;
     }
     put(id, { tokens: tokens - cost, at: now });
@@ -209,6 +260,11 @@ export const IP_POSTING_BUDGET_PER_MIN = 600;
  * (`tasks` or `items`). Mount after requireAuth and the route's wallet
  * budget, so a wallet over its own budget is refused before it can drain the
  * budget it shares with the rest of its IP.
+ *
+ * A hosted agent (requireAuth's typ 'agent-platform') is capped by its owner
+ * instead: every hosted agent posts from this server, so per IP one owner's
+ * agents could spend the ceiling every other owner's agents need for their
+ * result uploads. The owner is what multiplies wallets here, one per agent.
  */
 export function createPostingIpBudget({ maxBuckets }: { maxBuckets?: number } = {}): RequestHandler {
   return createTokenBucket({
@@ -219,9 +275,14 @@ export function createPostingIpBudget({ maxBuckets }: { maxBuckets?: number } = 
       const list = Array.isArray(body?.tasks) ? body.tasks : Array.isArray(body?.items) ? body.items : null;
       return list ? list.length : 1;
     },
-    key: (req) => `ip:${req.ip ?? 'unknown'}`,
-    refusal: (retryAfter) =>
-      `Too many posting requests from this network address: at most ${IP_POSTING_BUDGET_PER_MIN} items a minute across uploads, builds and listings. Retry in ${retryAfter}s.`,
+    key: (req) => {
+      const user = (req as AuthRequest).user;
+      return user?.typ === 'agent-platform' && user.ownerAddress
+        ? `owner:${user.ownerAddress.toLowerCase()}`
+        : `ip:${req.ip ?? 'unknown'}`;
+    },
+    refusal: (retryAfter, id) =>
+      `Too many posting requests ${id.startsWith('owner:') ? "from this owner's hosted agents" : 'from this network address'}: at most ${IP_POSTING_BUDGET_PER_MIN} items a minute across uploads, builds and listings. Retry in ${retryAfter}s.`,
   });
 }
 

@@ -1,4 +1,4 @@
-import type { Response, NextFunction } from 'express';
+import type { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { timingSafeEqual } from 'crypto';
@@ -197,20 +197,26 @@ function tokenMinIat(name: string): number {
   return value;
 }
 
-export function verifyRegistrationToken(token: string): { address: string; ownerAddress?: string; typ: 'agent-registration' | 'agent-platform'; jti?: string } | null {
+export function verifyRegistrationToken(
+  token: string,
+  // quiet: log no rejection. The rate limiter checks the token of every
+  // request that claims to be a worker's, including the ones it refuses.
+  { quiet = false }: { quiet?: boolean } = {},
+): { address: string; ownerAddress?: string; typ: 'agent-registration' | 'agent-platform'; jti?: string } | null {
+  const warn = quiet ? () => {} : console.warn;
   if (!config.jwtSecret) {
-    console.warn('[Auth] Registration token rejected: JWT_SECRET not configured');
+    warn('[Auth] Registration token rejected: JWT_SECRET not configured');
     return null;
   }
   try {
     const payload = jwt.verify(token, config.jwtSecret, { algorithms: ['HS256'] });
     if (typeof payload === 'string' || !payload) {
-      console.warn('[Auth] Registration token rejected: Invalid payload type');
+      warn('[Auth] Registration token rejected: Invalid payload type');
       return null;
     }
     const claims = payload as Record<string, unknown>;
     if (typeof claims.address !== 'string' || typeof claims.ownerAddress !== 'string') {
-      console.warn('[Auth] Registration token rejected: Missing address or ownerAddress claims', Object.keys(claims));
+      warn('[Auth] Registration token rejected: Missing address or ownerAddress claims', Object.keys(claims));
       return null;
     }
     // M6 (audit): honor the minter's typ, allowlisted — server-minted worker
@@ -223,7 +229,7 @@ export function verifyRegistrationToken(token: string): { address: string; owner
     const cutoffName = typ === 'agent-platform' ? 'PLATFORM_TOKEN_MIN_IAT' : 'REGISTRATION_TOKEN_MIN_IAT';
     const minIat = tokenMinIat(cutoffName);
     if (minIat > 0 && (typeof claims.iat !== 'number' || claims.iat < minIat)) {
-      console.warn(`[Auth] Registration token rejected: issued before ${cutoffName}`);
+      warn(`[Auth] Registration token rejected: issued before ${cutoffName}`);
       return null;
     }
     return {
@@ -233,7 +239,7 @@ export function verifyRegistrationToken(token: string): { address: string; owner
       jti: typeof claims.jti === 'string' ? claims.jti : undefined,
     };
   } catch (err: any) {
-    console.debug('[Auth] Registration token check (not HS256 — trying Privy):', err.message);
+    if (!quiet) console.debug('[Auth] Registration token check (not HS256 — trying Privy):', err.message);
     return null;
   }
 }
@@ -263,6 +269,30 @@ export async function isJwtRevoked(jti: string | undefined): Promise<boolean> {
     console.warn('[Auth] revocation denylist unavailable — failing open');
     return false;
   }
+}
+
+/**
+ * The hosted agent whose platform token `req` carries, as its lowercased
+ * wallet address, or null. A platform token is the server-minted worker
+ * token (typ 'agent-platform'); it counts only when verifyRegistrationToken
+ * accepts it and it is not revoked, the checks requireAuth makes. Anything
+ * else is null: no Bearer token, a Privy token, an API key, a device-flow
+ * token, or a forged, expired or revoked one. Runs before any route's auth,
+ * for the rate limiter (middleware/rateLimit.ts).
+ */
+export async function verifiedPlatformAgent(req: Request): Promise<string | null> {
+  const authHeader = req.headers.authorization;
+  const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : '';
+  if (!token) return null;
+  // Only a token that says it is a worker's is checked, so other requests
+  // cost no verification. What it says is not trusted:
+  // verifyRegistrationToken checks the signature and sets typ itself.
+  const claimed = jwt.decode(token);
+  if (!claimed || typeof claimed !== 'object' || claimed.typ !== 'agent-platform') return null;
+  const principal = verifyRegistrationToken(token, { quiet: true });
+  if (principal?.typ !== 'agent-platform') return null;
+  if (await isJwtRevoked(principal.jti)) return null;
+  return principal.address.toLowerCase();
 }
 
 /**
