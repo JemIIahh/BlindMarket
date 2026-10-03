@@ -2882,6 +2882,7 @@ async function pollAndWork() {
     log(`error: ${err.message}`);
   } finally {
     _working = false;
+    drainDeferredAccepts();
   }
 }
 
@@ -5220,14 +5221,52 @@ async function attemptAccept(taskHash, { force = false, chainHint = null } = {})
   return { ok: false, status: acceptRes.status, code: err.error?.code || '' };
 }
 
+/**
+ * Task events that arrived while the worker was busy, oldest first, so they
+ * are tried once it frees up instead of being dropped. Several tasks posted at
+ * once reach every agent together: each agent races for the first, and the
+ * events for the rest used to be discarded by the busy guard — the losers then
+ * sat idle until the next feed reconcile (WS_RECONCILE_MS, 5 min). Bounded:
+ * the oldest entry goes first when full (the reconcile sweep still covers it).
+ * Exported for tests.
+ */
+export function createDeferredAccepts(limit = 200) {
+  const pending = new Map();
+  return {
+    add(taskHash, chain = null) {
+      if (!pending.has(taskHash) && pending.size >= limit) pending.delete(pending.keys().next().value);
+      pending.set(taskHash, chain);
+    },
+    next() {
+      const first = pending.entries().next();
+      if (first.done) return null;
+      pending.delete(first.value[0]);
+      return { taskHash: first.value[0], chain: first.value[1] };
+    },
+    get size() { return pending.size; },
+  };
+}
+
+const wsDeferred = createDeferredAccepts();
+
+// Called whenever _working clears: start the next deferred task event, if any.
+// Each accept clears _working in its own finally, which drains again, so the
+// queue empties one task at a time.
+function drainDeferredAccepts() {
+  if (_working) return;
+  const next = wsDeferred.next();
+  if (next) acceptFromWs(next.taskHash, next.chain).catch(() => {});
+}
+
 // WS-triggered accept with concurrency guard.
 async function acceptFromWs(taskHash, chain = null) {
   if (_working) {
-    log(`WS accept skipped for ${taskHash.slice(0, 10)}…: another task in progress`);
+    wsDeferred.add(taskHash, chain);
+    log(`WS accept deferred for ${taskHash.slice(0, 10)}…: another task in progress`);
     return;
   }
-  if (appliedTasks.has(taskHash) && !isAppliedTaskStale(taskHash)) return;
-  if (skipForReleaseCooldown(taskHash)) return;
+  if (appliedTasks.has(taskHash) && !isAppliedTaskStale(taskHash)) return drainDeferredAccepts();
+  if (skipForReleaseCooldown(taskHash)) return drainDeferredAccepts();
   appliedTasks.delete(taskHash);
   _working = true;
   try {
@@ -5236,6 +5275,7 @@ async function acceptFromWs(taskHash, chain = null) {
     log(`WS accept error for ${taskHash.slice(0, 10)}…: ${err.message}`);
   } finally {
     _working = false;
+    drainDeferredAccepts();
   }
 }
 

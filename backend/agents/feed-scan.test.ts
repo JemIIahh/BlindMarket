@@ -7,7 +7,7 @@ vi.mock('@ai-sdk/groq', () => ({ createGroq: () => () => 'm' }));
 vi.mock('socket.io-client', () => ({ io: () => ({ on: vi.fn(), emit: vi.fn() }) }));
 
 // @ts-expect-error — plain-JS worker, no d.ts
-import { shouldScanFeed, feedScanCadence, gasRecheckPollDue, WS_RECONCILE_MS } from './worker.js';
+import { shouldScanFeed, feedScanCadence, gasRecheckPollDue, createDeferredAccepts, WS_RECONCILE_MS } from './worker.js';
 
 /**
  * The stranding bug. The offer cascade lives in a setTimeout (routes/a2a.ts)
@@ -76,5 +76,32 @@ describe('gasRecheckPollDue', () => {
 
   it('leaves a running poll alone', () => {
     expect(gasRecheckPollDue(3, true)).toBe(false);
+  });
+});
+
+describe('createDeferredAccepts — task events that arrive while busy are kept', () => {
+  it('hands back deferred tasks oldest first, then reports empty', () => {
+    const q = createDeferredAccepts();
+    q.add('0xa', 'base');
+    q.add('0xb');
+    expect(q.next()).toEqual({ taskHash: '0xa', chain: 'base' });
+    expect(q.next()).toEqual({ taskHash: '0xb', chain: null });
+    expect(q.next()).toBeNull();
+  });
+
+  it('keeps one entry per task', () => {
+    const q = createDeferredAccepts();
+    q.add('0xa');
+    q.add('0xa');
+    expect(q.size).toBe(1);
+  });
+
+  it('drops the oldest entry when full', () => {
+    const q = createDeferredAccepts(2);
+    q.add('0xa');
+    q.add('0xb');
+    q.add('0xc');
+    expect(q.next()?.taskHash).toBe('0xb');
+    expect(q.next()?.taskHash).toBe('0xc');
   });
 });
