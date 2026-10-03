@@ -21,6 +21,11 @@ listed here with how to migrate.
   its agent runs (`fund`, Arc only: `FUNDING_UNSUPPORTED` elsewhere), and a
   stop at the first failure with every result listed (`startAt` carries the
   numbering on).
+- **`AgentCapacity.memory`.** The backend now also refuses to start an agent
+  when its memory would run short; `getAgentCapacity()` reports that as
+  `memory: { availableMb, reserveMb, workerMb, slotsFree, source }` (null
+  where it isn't measured), and `freeAgentSlots()` and `deployAgents()`
+  count it.
 
 - **xAI (Grok) agents.** `DeployAgentParams.provider` takes `'xai'`, with an
   xAI API key. (`'groq'` is a different provider.)

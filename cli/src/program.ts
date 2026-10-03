@@ -442,7 +442,7 @@ async function deployMany(opts: DeployAgentOpts): Promise<void> {
     const names = plan.names.length > 3 ? `${plan.names[0]}, ${plan.names[1]} … ${plan.names[plan.names.length - 1]}` : plan.names.join(', ');
     out(`Deploy ${plan.count} agent${plan.count === 1 ? '' : 's'}: ${names}`);
     out(`  model:    ${provider} ${opts.model}`);
-    if (plan.capacity) out(`  room:     ${freeSlots(plan.capacity)} can start now on this server (${plan.capacity.poolFree} free slots, ${plan.capacity.ownerFree} left of your ${plan.capacity.ownerMax})`);
+    if (plan.capacity) out(`  room:     ${freeSlots(plan.capacity)} can start now on this server (${roomText(plan.capacity)})`);
     if (plan.fee?.method === 'transfer') {
       const each = formatUnits(BigInt(plan.fee.perAgentRaw), plan.fee.decimals).replace(/\.0$/, '');
       const total = formatUnits(BigInt(plan.fee.totalRaw), plan.fee.decimals).replace(/\.0$/, '');
@@ -490,7 +490,7 @@ async function deployMany(opts: DeployAgentOpts): Promise<void> {
       ...(process.env.BLINDMARKET_DEPLOY_BACKOFF_MS ? { retry: { baseDelayMs: Number(process.env.BLINDMARKET_DEPLOY_BACKOFF_MS) } } : {}),
       confirm: async (plan) => {
         if (plan.count < plan.asked) {
-          const why = `Only ${plan.count} of the ${plan.asked} agents can start now (${plan.capacity?.poolFree ?? 0} free slots on the server, ${plan.capacity?.ownerFree ?? 0} left of your ${plan.capacity?.ownerMax ?? 0}).`;
+          const why = `Only ${plan.count} of the ${plan.asked} agents can start now (${plan.capacity ? roomText(plan.capacity) : 'the server said so'}).`;
           if (opts.yes || !process.stdin.isTTY) throw new CliError('AGENT_CAPACITY', `${why} Nothing was deployed or paid. Run again with --count ${plan.count}.`);
           out(why);
         }
@@ -562,7 +562,12 @@ async function deployMany(opts: DeployAgentOpts): Promise<void> {
 }
 
 /** Agents that can start now, from the backend's capacity. */
-const freeSlots = (c: { poolFree: number; ownerFree: number }) => Math.max(0, Math.min(c.poolFree, c.ownerFree));
+const freeSlots = (c: { poolFree: number; ownerFree: number; memory?: { slotsFree: number } | null }) =>
+  Math.max(0, Math.min(c.poolFree, c.ownerFree, c.memory?.slotsFree ?? Number.POSITIVE_INFINITY));
+
+/** What limits the room: the server's free slots, the owner's share, and what its memory allows when it says. */
+const roomText = (c: { poolFree: number; ownerFree: number; ownerMax: number; memory?: { slotsFree: number } | null }) =>
+  `${c.poolFree} free slots on the server, ${c.ownerFree} left of your ${c.ownerMax}${c.memory ? `, memory for ${c.memory.slotsFree} more` : ''}`;
 
 export function buildProgram(): Command {
   const program = new Command();

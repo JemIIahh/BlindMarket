@@ -145,13 +145,19 @@ export const MAX_AGENT_NAME = 80;
 /**
  * How many more agents the API key's owner can start now, from GET
  * /api/v1/agents/capacity: the free worker slots on the backend (shared by
- * every owner) and the owner's own share of them. A deploy needs one of each.
+ * every owner), the owner's own share of them, and how many more the
+ * server's memory allows. A deploy needs one of each.
  */
 export interface AgentCapacity {
   poolMax: number;
   poolFree: number;
   ownerMax: number;
   ownerFree: number;
+  /**
+   * What memory allows: free memory less a reserve, in steps of one worker.
+   * Null where the backend doesn't measure it; absent from older backends.
+   */
+  memory?: { availableMb: number; reserveMb: number; workerMb: number; slotsFree: number; source: string } | null;
   canStart: boolean;
   /**
    * 'process': the counts are those of the backend process that answered.
@@ -161,8 +167,9 @@ export interface AgentCapacity {
   scope?: string;
 }
 
-/** Agents that can start now: one free slot and one of the owner's share each. */
-export const freeAgentSlots = (c: Pick<AgentCapacity, 'poolFree' | 'ownerFree'>) => Math.max(0, Math.min(c.poolFree, c.ownerFree));
+/** Agents that can start now: one free slot, one of the owner's share and room in memory each. */
+export const freeAgentSlots = (c: Pick<AgentCapacity, 'poolFree' | 'ownerFree' | 'memory'>) =>
+  Math.max(0, Math.min(c.poolFree, c.ownerFree, c.memory?.slotsFree ?? Number.POSITIVE_INFINITY));
 
 /**
  * The names deployAgents() gives `count` agents: every `{n}` in `name`
@@ -1950,9 +1957,11 @@ export class BlindMarket {
       const free = freeAgentSlots(capacity);
       if (free < asked) {
         if (!upToCapacity || free === 0) {
-          const why = capacity.poolFree <= capacity.ownerFree
-            ? `the server has ${capacity.poolFree} free worker slot${capacity.poolFree === 1 ? '' : 's'} of ${capacity.poolMax}`
-            : `you run ${capacity.ownerMax - capacity.ownerFree} of the ${capacity.ownerMax} agents one owner may run at once`;
+          const why = capacity.memory && capacity.memory.slotsFree === free && free < Math.min(capacity.poolFree, capacity.ownerFree)
+            ? `the server's memory allows ${free} more`
+            : capacity.poolFree <= capacity.ownerFree
+              ? `the server has ${capacity.poolFree} free worker slot${capacity.poolFree === 1 ? '' : 's'} of ${capacity.poolMax}`
+              : `you run ${capacity.ownerMax - capacity.ownerFree} of the ${capacity.ownerMax} agents one owner may run at once`;
           throw new ApiError(
             503,
             `Only ${free} of the ${asked} agents can start now: ${why}. Nothing was deployed or paid.${free > 0 ? ` Deploy ${free}, or pass upToCapacity.` : ''}`,

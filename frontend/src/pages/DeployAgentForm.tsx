@@ -919,7 +919,9 @@ export default function DeployAgentForm() {
             className="mt-5"
             hint={free !== null
               ? free === 0
-                ? 'No agent can start now. Stop one of your agents first.'
+                ? capacity?.memory?.slotsFree === 0 && capacity.poolFree > 0 && capacity.ownerFree > 0
+                  ? 'No agent can start now: the server is low on memory. Try again later.'
+                  : 'No agent can start now. Stop one of your agents first.'
                 : `You can start ${free} now.`
               : undefined}
           >

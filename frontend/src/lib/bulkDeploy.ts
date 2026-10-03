@@ -54,12 +54,17 @@ export function namesProblem(names: string[]): string | null {
   return null;
 }
 
-/** GET /api/v1/agents/capacity: worker slots on the backend process that answered. */
+/**
+ * GET /api/v1/agents/capacity: worker slots on the backend process that
+ * answered, the owner's share of them, and how many more its memory allows
+ * (null where it isn't measured; absent from older backends).
+ */
 export interface AgentCapacity {
   poolMax: number;
   poolFree: number;
   ownerMax: number;
   ownerFree: number;
+  memory?: { availableMb: number; reserveMb: number; workerMb: number; slotsFree: number; source: string } | null;
   canStart: boolean;
   scope?: string;
 }
@@ -67,7 +72,7 @@ export interface AgentCapacity {
 /** How many more agents this owner can start now, or null when unknown. */
 export function freeSlots(capacity: AgentCapacity | null | undefined): number | null {
   if (!capacity) return null;
-  return Math.max(0, Math.min(capacity.poolFree, capacity.ownerFree));
+  return Math.max(0, Math.min(capacity.poolFree, capacity.ownerFree, capacity.memory?.slotsFree ?? Number.POSITIVE_INFINITY));
 }
 
 /** The most agents the form offers: the run limit, capped by the free slots when known. */
@@ -85,9 +90,12 @@ export function capacityCheck(requested: number, capacity: AgentCapacity | null 
   | { ok: false; free: number; message: string } {
   const free = freeSlots(capacity);
   if (free === null || requested <= free) return { ok: true };
-  const why = capacity!.poolFree < capacity!.ownerFree
-    ? 'the server has no more free worker slots'
-    : `you can run ${capacity!.ownerMax} agents at once`;
+  const c = capacity!;
+  const why = c.memory && c.memory.slotsFree === free && free < Math.min(c.poolFree, c.ownerFree)
+    ? 'the server is low on memory'
+    : c.poolFree < c.ownerFree
+      ? 'the server has no more free worker slots'
+      : `you can run ${c.ownerMax} agents at once`;
   return {
     ok: false,
     free,

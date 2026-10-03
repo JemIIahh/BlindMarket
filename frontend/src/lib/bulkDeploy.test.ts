@@ -105,6 +105,17 @@ describe('capacity', () => {
     expect(maxDeployable(capacity({ poolFree: 50, ownerFree: 50 }))).toBe(MAX_AGENTS_PER_RUN);
   });
 
+  it('counts what the server\'s memory allows, and says when that is what binds', () => {
+    const memory = (slotsFree: number) => ({ availableMb: 2400, reserveMb: 2048, workerMb: 150, slotsFree, source: 'os' });
+    expect(freeSlots(capacity({ poolFree: 9, ownerFree: 9, memory: memory(2) }))).toBe(2);
+    expect(freeSlots(capacity({ poolFree: 1, ownerFree: 9, memory: memory(2) }))).toBe(1);
+    expect(freeSlots(capacity({ poolFree: 9, ownerFree: 9, memory: null }))).toBe(9);
+    expect(maxDeployable(capacity({ poolFree: 9, ownerFree: 9, memory: memory(2) }))).toBe(2);
+    const short = capacityCheck(3, capacity({ poolFree: 9, ownerFree: 9, memory: memory(2) }));
+    expect(short).toMatchObject({ ok: false, free: 2 });
+    expect(short.ok === false && short.message).toContain('Only 2 of 3 agents can start now: the server is low on memory');
+  });
+
   it('says up front how many can start, and offers that number', () => {
     expect(capacityCheck(3, capacity({ poolFree: 3 }))).toEqual({ ok: true });
     expect(capacityCheck(3, null)).toEqual({ ok: true });

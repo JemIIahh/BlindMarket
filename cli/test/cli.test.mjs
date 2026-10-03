@@ -357,6 +357,18 @@ test('deploy-agent --count past the free slots says how many can start, and depl
   assert.equal(posted('/api/v1/agents/deploy').length, 0);
 });
 
+test('deploy-agent --count counts what the server\'s memory allows, and refuses past it', async () => {
+  capacity = { ...capacity, memory: { availableMb: 2500, reserveMb: 2048, workerMb: 150, slotsFree: 2, source: 'os' } };
+  await assert.rejects(
+    stderrOf(() => blind(...MANY, '--count', '3', '--yes')),
+    (e) => e.code === 'AGENT_CAPACITY' && /Only 2 of the 3 agents can start now \(10 free slots on the server, 10 left of your 10, memory for 2 more\)/.test(e.message),
+  );
+  assert.equal(chain.sent.length, 0);
+  assert.equal(posted('/api/v1/agents/deploy').length, 0);
+  const { value: text } = await stderrOf(() => blind(...MANY, '--count', '2', '--yes'));
+  assert.match(text, /room:\s+2 can start now on this server \(10 free slots on the server, 10 left of your 10, memory for 2 more\)/);
+});
+
 test('deploy-agent --count asks once before spending, and without a terminal refuses unless --yes', async () => {
   await assert.rejects(stderrOf(() => blind(...MANY, '--count', '2')), (e) => e.code === 'CONFIRM_REQUIRED');
   assert.equal(chain.sent.length, 0);

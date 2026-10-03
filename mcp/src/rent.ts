@@ -2366,11 +2366,12 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     return code === 'RATE_LIMIT' || /failed: 429\b/.test(message);
   }
 
-  /** GET /agents/capacity, with `free` = what the caller can start now; null for a backend without the route. */
-  async function readCapacity(): Promise<{ poolMax: number; poolFree: number; ownerMax: number; ownerFree: number; free: number } | null> {
+  /** GET /agents/capacity, with `free` = what the caller can start now (slots, the owner's share and, when the backend measures it, memory); null for a backend without the route. */
+  async function readCapacity(): Promise<{ poolMax: number; poolFree: number; ownerMax: number; ownerFree: number; memorySlots: number | null; free: number } | null> {
     try {
-      const c = await api<{ poolMax: number; poolFree: number; ownerMax: number; ownerFree: number }>('GET', '/api/v1/agents/capacity');
-      return { ...c, free: Math.max(0, Math.min(Number(c.poolFree), Number(c.ownerFree))) };
+      const c = await api<{ poolMax: number; poolFree: number; ownerMax: number; ownerFree: number; memory?: { slotsFree: number } | null }>('GET', '/api/v1/agents/capacity');
+      const memorySlots = c.memory ? Number(c.memory.slotsFree) : null;
+      return { ...c, memorySlots, free: Math.max(0, Math.min(Number(c.poolFree), Number(c.ownerFree), memorySlots ?? Number.POSITIVE_INFINITY)) };
     } catch (err) {
       if ((err as ApiError).status === 404) return null;
       throw err;
@@ -2478,11 +2479,11 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
         }
         if (!capacity) return { free: null };
         if (todo.length <= capacity.free) return { free: capacity.free };
-        const { free, poolFree, ownerFree, ownerMax } = capacity;
+        const { free, poolFree, ownerFree, ownerMax, memorySlots } = capacity;
         return {
           refused: fail(
             'AGENT_CAPACITY',
-            `Only ${free} more agent${free === 1 ? '' : 's'} can start now (${poolFree} free on the server, ${ownerFree} left of the ${ownerMax} one owner may run), and ${todo.length} ${todo.length === 1 ? 'is' : 'are'} still to deploy. ` +
+            `Only ${free} more agent${free === 1 ? '' : 's'} can start now (${poolFree} free on the server, ${ownerFree} left of the ${ownerMax} one owner may run${memorySlots === null ? '' : `, memory for ${memorySlots} more`}), and ${todo.length} ${todo.length === 1 ? 'is' : 'are'} still to deploy. ` +
             (free > 0
               ? `Re-call deploy_agents with count=${done.length + free} to deploy only those (a new quote). `
               : 'Stop one of your agents, or wait for a slot, then quote again. ') +

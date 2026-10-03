@@ -189,6 +189,18 @@ test('a list past the free capacity is refused whole at the quote, with how many
   assert.match(failure(await tools().deploy_agents({ ...args, count: 1, idempotencyKey: 'agents-cap-2' })).error.message, /Stop one of your agents/);
 });
 
+test('what the server\'s memory allows counts too: a list past it is refused at the quote', async () => {
+  capacity = () => json({ ...FREE, memory: { availableMb: 2400, reserveMb: 2048, workerMb: 150, slotsFree: 2, source: 'os' } });
+  const { error } = failure(await tools().deploy_agents({ ...args, count: 3, idempotencyKey: 'agents-mem-1' }));
+  assert.equal(error.code, 'AGENT_CAPACITY');
+  assert.match(error.message, /Only 2 more agents can start now \(5 free on the server, 10 left of the 10 one owner may run, memory for 2 more\)/);
+  assert.match(error.message, /count=2/);
+  assert.equal(sent.length, 0);
+  assert.equal(deploys().length, 0);
+  const { quote } = parse(await tools().deploy_agents({ ...args, count: 2, idempotencyKey: 'agents-mem-2' }));
+  assert.deepEqual(quote.capacity, { free: 2, scope: 'process' });
+});
+
 test('a backend without the capacity route is not checked here (its deploy refuses before taking a fee)', async () => {
   capacity = () => ({ ok: false, status: 404, json: async () => { throw new SyntaxError('Unexpected token <'); } });
   const done = parse(await run(tools(), { ...args, count: 2, idempotencyKey: 'agents-oldcap-1' }));

@@ -118,10 +118,14 @@ describe('agentNames', () => {
     expect(agentNames('scout', 2, 4)).toEqual(['scout 4', 'scout 5']);
     expect(agentNames('scout', 1, 4)).toEqual(['scout 4']);
   });
-  it('counts free slots as the smaller of the pool and the owner\'s share', () => {
+  it('counts free slots as the smallest of the pool, the owner\'s share and what memory allows', () => {
     expect(freeAgentSlots({ poolFree: 2, ownerFree: 7 })).toBe(2);
     expect(freeAgentSlots({ poolFree: 9, ownerFree: 3 })).toBe(3);
     expect(freeAgentSlots({ poolFree: -1, ownerFree: 3 })).toBe(0);
+    const memory = (slotsFree: number) => ({ availableMb: 0, reserveMb: 0, workerMb: 150, slotsFree, source: 'os' });
+    expect(freeAgentSlots({ poolFree: 9, ownerFree: 7, memory: memory(4) })).toBe(4);
+    expect(freeAgentSlots({ poolFree: 2, ownerFree: 7, memory: memory(4) })).toBe(2);
+    expect(freeAgentSlots({ poolFree: 9, ownerFree: 7, memory: null })).toBe(7);
   });
 });
 
@@ -156,6 +160,14 @@ describe('BlindMarket.deployAgents — before anything is deployed', () => {
     expect(err.message).toContain('Only 2 of the 3');
     expect(posts(fn, '/api/v1/agents/deploy')).toHaveLength(0);
     expect(p.sent).toHaveLength(0);
+  });
+
+  it('says the server\'s memory is what binds when it allows fewer than the slots', async () => {
+    const fn = stub({ capacity: { ...ROOM, memory: { availableMb: 2500, reserveMb: 2048, workerMb: 150, slotsFree: 3, source: 'os' } } });
+    const err = await bb().deployAgents(template, { ...fast, count: 4 }).catch((e) => e);
+    expect(err).toMatchObject({ code: 'AGENT_CAPACITY', body: { free: 3 } });
+    expect(err.message).toContain("Only 3 of the 4 agents can start now: the server's memory allows 3 more");
+    expect(posts(fn, '/api/v1/agents/deploy')).toHaveLength(0);
   });
 
   it('names the owner\'s own limit when that is what binds', async () => {
