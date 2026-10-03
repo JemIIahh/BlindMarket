@@ -135,6 +135,159 @@ export interface DeployedAgent {
   alreadyDeployed?: boolean;
 }
 
+// ── Deploying several agents ────────────────────────────────────────────────
+
+/** The most agents deployAgents() deploys in one call. */
+export const MAX_DEPLOY_AGENTS = 10;
+/** The longest agent name the backend takes (POST /agents/deploy). */
+export const MAX_AGENT_NAME = 80;
+
+/**
+ * How many more agents the API key's owner can start now, from GET
+ * /api/v1/agents/capacity: the free worker slots on the backend (shared by
+ * every owner), the owner's own share of them, and how many more the
+ * server's memory allows. A deploy needs one of each.
+ */
+export interface AgentCapacity {
+  poolMax: number;
+  poolFree: number;
+  ownerMax: number;
+  ownerFree: number;
+  /**
+   * What memory allows: free memory less a reserve, in steps of one worker.
+   * Null where the backend doesn't measure it; absent from older backends.
+   */
+  memory?: { availableMb: number; reserveMb: number; workerMb: number; slotsFree: number; source: string } | null;
+  canStart: boolean;
+  /**
+   * 'process': the counts are those of the backend process that answered.
+   * Behind several instances each has its own pool, so they are not a
+   * cluster-wide total.
+   */
+  scope?: string;
+}
+
+/** Agents that can start now: one free slot, one of the owner's share and room in memory each. */
+export const freeAgentSlots = (c: Pick<AgentCapacity, 'poolFree' | 'ownerFree' | 'memory'>) =>
+  Math.max(0, Math.min(c.poolFree, c.ownerFree, c.memory?.slotsFree ?? Number.POSITIVE_INFINITY));
+
+/**
+ * The names deployAgents() gives `count` agents: every `{n}` in `name`
+ * becomes the agent's number, else the number follows the name ("scout 1",
+ * "scout 2"). One agent numbered 1 keeps `name` as it is. Numbers start at
+ * `startAt` (default 1), so a later run can carry on where one stopped.
+ */
+export function agentNames(name: string, count: number, startAt = 1): string[] {
+  const base = name.trim();
+  return Array.from({ length: count }, (_, i) => {
+    const n = startAt + i;
+    if (base.includes('{n}')) return base.split('{n}').join(String(n));
+    return count === 1 && startAt === 1 ? base : `${base} ${n}`;
+  });
+}
+
+/** What deployAgents() is doing, as it happens. */
+export type DeployAgentsProgress =
+  | { type: 'deploying'; index: number; name: string }
+  /** The backend answered 429; the same agent is asked for again after `waitMs`, with any fee it already paid. */
+  | { type: 'rate-limited'; index: number; name: string; attempt: number; waitMs: number }
+  | { type: 'deployed'; index: number; name: string; agent: DeployedAgent }
+  | { type: 'funding'; index: number; name: string; walletAddress: string; amountRaw: string }
+  | { type: 'funded'; index: number; name: string; txHash: string }
+  | { type: 'failed'; index: number; name: string; error: { code?: string; message: string }; feeTxHash?: string };
+
+/** Gas for each agent's wallet, sent after that agent is deployed and running. */
+export interface DeployAgentsFunding {
+  /** Per agent, in the posting chain's settlement token's smallest unit (USDC: 6 decimals). */
+  amountRaw: bigint | string;
+  /**
+   * Signs the transfers on the posting chain instead of the configured
+   * executor (BlindMarketConfig.executor, whose rpcUrls must name that chain).
+   */
+  signer?: ethers.Signer;
+}
+
+export interface DeployAgentsOptions extends Omit<DeployAgentOptions, 'onFeePaid'> {
+  /** How many agents, 1 to MAX_DEPLOY_AGENTS. */
+  count: number;
+  /** The first agent's number in its name (agentNames). Default 1. */
+  startAt?: number;
+  /**
+   * When fewer than `count` agents can start now, deploy that many instead
+   * of refusing with AGENT_CAPACITY. Never more than can start.
+   */
+  upToCapacity?: boolean;
+  /**
+   * Called with each agent's deploy fee the moment it is broadcast, and the
+   * agent's index. Persist it: if the run stops before that agent exists,
+   * pass it back as the template's `feeTxHash` and the next run's first
+   * agent deploys with it, paying nothing.
+   */
+  onFeePaid?: (feeTxHash: string, index: number) => void | Promise<void>;
+  onProgress?: (event: DeployAgentsProgress) => void;
+  /** Stops the run before the next agent. An agent already being deployed or funded is seen through. */
+  signal?: AbortSignal;
+  /**
+   * Backoff for a rate limit (429) on a deploy: `attempts` tries per agent in
+   * all (default 6), the wait doubling from `baseDelayMs` (default 2000):
+   * 2, 4, 8, 16 and 32 s, past the backend's one-minute window. A 429 is
+   * refused before the deploy runs, so nothing was created, and a fee the
+   * agent already paid is named again rather than paid twice.
+   */
+  retry?: { attempts?: number; baseDelayMs?: number };
+  /** Optional gas for each agent's wallet, never sent before that agent is deployed. */
+  fund?: DeployAgentsFunding;
+  /**
+   * Called once every check has passed, with what the run will deploy and
+   * spend, before anything is: return false to cancel (CANCELLED, nothing
+   * deployed or paid), or throw to refuse with your own error.
+   */
+  confirm?: (plan: DeployAgentsPlan) => boolean | Promise<boolean>;
+}
+
+/** What a deployAgents() run will deploy and spend, for its `confirm`. */
+export interface DeployAgentsPlan {
+  /** The count asked for. */
+  asked: number;
+  /** Agents this run deploys: `asked`, or fewer with upToCapacity. */
+  count: number;
+  names: string[];
+  /** Null when the backend could not say. */
+  capacity: AgentCapacity | null;
+  /**
+   * The deploy fee, when the backend charges one. `paying` is how many
+   * agents pay it now: one fewer when the template names a fee already paid.
+   */
+  fee:
+    | { method: 'transfer'; chain: string; chainId?: number; token: string; recipient: string; perAgentRaw: string; decimals: number; paying: number; totalRaw: string }
+    | { method: 'factory'; chain: string; paying: number }
+    | null;
+  /** Gas for each wallet, when asked for. */
+  funding: { chain: string; token: string; symbol: string; decimals: number; perAgentRaw: string; totalRaw: string } | null;
+}
+
+/** What became of one agent of deployAgents(), by its position. */
+export type DeployAgentsItem =
+  /**
+   * Deployed. `agent.started` false means it was created but did not start,
+   * which stops the run. `funding` is there when gas was asked for: the
+   * transfer, or why it failed (which stops the run too).
+   */
+  | { index: number; name: string; status: 'deployed'; agent: DeployedAgent; funding?: { txHash: string; amountRaw: string } | { error: { code?: string; message: string }; txHash?: string } }
+  /** Not deployed. `feeTxHash` is a fee already paid for it: the next run's template.feeTxHash. */
+  | { index: number; name: string; status: 'failed'; error: { code?: string; message: string }; feeTxHash?: string }
+  /** Not tried: the run stopped before it. */
+  | { index: number; name: string; status: 'skipped' };
+
+export interface DeployAgentsResult {
+  /** Agents asked for after any upToCapacity cut. */
+  requested: number;
+  deployed: number;
+  results: DeployAgentsItem[];
+  /** Where and why the run stopped early, when it did. */
+  stopped?: { index: number; code?: string; message: string };
+}
+
 // ── Task posting ────────────────────────────────────────────────────────────
 
 export interface PostTaskParams {
@@ -468,6 +621,38 @@ function retryPolicy(retry: PostTasksOptions['retry']): RetryPolicy {
     attempts: Number.isInteger(attempts) && attempts >= 1 ? attempts : 5,
     baseDelayMs: Number.isFinite(baseDelayMs) && baseDelayMs >= 0 ? baseDelayMs : 2_000,
   };
+}
+
+/**
+ * A rate limit (429): the backend's limiter refused the request before the
+ * route ran, so it created nothing and took no fee. Asking again is safe.
+ */
+function isRateLimited(err: unknown): boolean {
+  return err instanceof ApiError && (err.status === 429 || err.code === 'RATE_LIMIT');
+}
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+const ERC20_TRANSFER = new ethers.Interface(['function transfer(address to, uint256 amount) returns (bool)']);
+
+/**
+ * Wait, up to about 10 s, until the signer's RPC counts every transaction
+ * this run sent from it (`next` is the nonce after the last one), so the
+ * next transaction is not given a nonce already used: a load-balanced RPC
+ * can answer from a node a block behind the one that confirmed. Best effort:
+ * an RPC that cannot say is not waited for.
+ */
+async function settleNonce(signer: ethers.Signer, next: number | undefined): Promise<void> {
+  if (next === undefined || !signer.provider) return;
+  const address = await signer.getAddress();
+  for (let i = 0; i < 20; i++) {
+    try {
+      if ((await signer.provider.getTransactionCount(address, 'pending')) >= next) return;
+    } catch {
+      return;
+    }
+    await sleep(500);
+  }
 }
 
 /** A rate limit, a server error, a network failure, or a body that was not JSON (a proxy's error page): worth asking again. */
@@ -1546,6 +1731,21 @@ export class BlindMarket {
   }
 
   /**
+   * How many more agents the API key's owner can start now
+   * (GET /api/v1/agents/capacity). Null when the backend predates the route
+   * and could not say: its deploy still refuses, before any fee, when there
+   * is no free slot (503 AGENT_CAPACITY).
+   */
+  async getAgentCapacity(): Promise<AgentCapacity | null> {
+    try {
+      return await this.req<AgentCapacity>('GET', '/api/v1/agents/capacity');
+    } catch (err) {
+      if (err instanceof SyntaxError || (err instanceof ApiError && err.status === 404)) return null;
+      throw err;
+    }
+  }
+
+  /**
    * Run every check POST /deploy makes before it takes a fee, with nothing
    * paid or saved. Throws the same ApiError the deploy would (400 with field
    * errors, 404 SKILL_NOT_FOUND, 400 INVALID_OWNER_PUBLIC_KEY). Returns false
@@ -1691,6 +1891,293 @@ export class BlindMarket {
         err instanceof ApiError ? err.body : undefined,
         e.code,
       );
+    }
+  }
+
+  /**
+   * Deploy several hosted agents from one template, one after another, each
+   * through deployAgent(): the same checks, fee and limits as deploying them
+   * one at a time. Names come from agentNames() ("scout 1" … "scout N", or
+   * `{n}` in the name).
+   *
+   * Before anything is paid or deployed: every name fits, the request passes
+   * the deploy's own checks (once, with the longest name), there is room for
+   * `count` agents to start (GET /agents/capacity; AGENT_CAPACITY says how
+   * many can, or pass `upToCapacity`), a fee the backend charges is agreed to
+   * (`payFee`), and with `fund`, the posting chain takes gas in its token and
+   * the wallets paying hold everything the run spends.
+   *
+   * Each agent pays its own fee, exactly as deployAgent() does, and a fee is
+   * never paid twice: `onFeePaid` gets each one as it is broadcast, a 429 asks
+   * again naming the fee already paid, and a failed agent's result carries
+   * its unspent fee for the next run (template.feeTxHash pays for that run's
+   * first agent). The run stops at the first agent that fails, does not
+   * start, or cannot be funded; agents already deployed stay and are listed.
+   *
+   * @example
+   * const run = await bb.deployAgents(
+   *   { name: 'scout', instructions, provider: 'anthropic', model: 'claude-sonnet-5-5', apiKey, ownerPublicKey },
+   *   { count: 3, payFee: true, onProgress: (e) => console.log(e.type, e.name) },
+   * );
+   * for (const r of run.results) console.log(r.name, r.status);
+   */
+  async deployAgents(template: DeployAgentParams, opts: DeployAgentsOptions): Promise<DeployAgentsResult> {
+    const { count: asked, startAt = 1, upToCapacity, onFeePaid, onProgress, signal, retry, fund, confirm, ...deployOpts } = opts;
+    const { feeTxHash: carried, ownerAddress: _ignored, ...rest } = template;
+    if (!Number.isInteger(asked) || asked < 1 || asked > MAX_DEPLOY_AGENTS) {
+      throw new ApiError(400, `count must be a whole number from 1 to ${MAX_DEPLOY_AGENTS}; got ${asked}. Nothing was deployed.`, undefined, 'INVALID_COUNT');
+    }
+    if (!Number.isInteger(startAt) || startAt < 1) {
+      throw new ApiError(400, `startAt must be a whole number from 1; got ${startAt}. Nothing was deployed.`, undefined, 'INVALID_COUNT');
+    }
+    const tooLong = agentNames(rest.name, asked, startAt).find((n) => n.length < 1 || n.length > MAX_AGENT_NAME);
+    if (tooLong !== undefined) {
+      throw new ApiError(400, `The agent name "${tooLong}" is ${tooLong.length ? `${tooLong.length} characters, over the ${MAX_AGENT_NAME} allowed` : 'empty'}. Nothing was deployed.`, undefined, 'INVALID_NAME');
+    }
+    const policy = retryPolicy({ attempts: retry?.attempts ?? 6, baseDelayMs: retry?.baseDelayMs });
+    const backoff = async <T>(fn: () => Promise<T>): Promise<T> => {
+      for (let attempt = 1; ; attempt++) {
+        try {
+          return await fn();
+        } catch (err) {
+          if (!isRateLimited(err) || attempt >= policy.attempts) throw err;
+          await sleep(policy.baseDelayMs * 2 ** (attempt - 1));
+        }
+      }
+    };
+
+    // The deploy's own checks, once: the agents differ only in their names.
+    const longest = agentNames(rest.name, asked, startAt).reduce((a, b) => (b.length > a.length ? b : a));
+    await backoff(() => this.validateDeploy({ ...rest, name: longest }));
+
+    // Room for every agent, or a smaller run the caller agreed to.
+    let count = asked;
+    const capacity = await backoff(() => this.getAgentCapacity());
+    if (capacity) {
+      const free = freeAgentSlots(capacity);
+      if (free < asked) {
+        if (!upToCapacity || free === 0) {
+          const why = capacity.memory && capacity.memory.slotsFree === free && free < Math.min(capacity.poolFree, capacity.ownerFree)
+            ? `the server's memory allows ${free} more`
+            : capacity.poolFree <= capacity.ownerFree
+              ? `the server has ${capacity.poolFree} free worker slot${capacity.poolFree === 1 ? '' : 's'} of ${capacity.poolMax}`
+              : `you run ${capacity.ownerMax - capacity.ownerFree} of the ${capacity.ownerMax} agents one owner may run at once`;
+          throw new ApiError(
+            503,
+            `Only ${free} of the ${asked} agents can start now: ${why}. Nothing was deployed or paid.${free > 0 ? ` Deploy ${free}, or pass upToCapacity.` : ''}`,
+            { requested: asked, free, capacity },
+            'AGENT_CAPACITY',
+          );
+        }
+        count = free;
+      }
+    }
+    const names = agentNames(rest.name, count, startAt);
+
+    // A fee the backend charges is paid per agent, so it must be agreed to up front.
+    let terms: DeployFeeTerms | null = null;
+    try {
+      terms = await this.getDeployFee();
+    } catch (err) {
+      if (!(err instanceof SyntaxError || (err instanceof ApiError && err.status === 404))) throw err;
+    }
+    const feeEach = terms?.required ? terms : null;
+    if (feeEach && !deployOpts.payFee) {
+      const cost = feeEach.method === 'transfer' ? `${ethers.formatUnits(BigInt(feeEach.amountRaw), feeEach.decimals).replace(/\.0$/, '')} USDC` : 'a fee through AgentFactory';
+      throw new ApiError(402, `Each agent costs ${cost} on ${feeEach.chain} to deploy. Pass { payFee: true } to pay it for each of the ${count}. Nothing was paid.`, { terms }, 'DEPLOY_FEE_REQUIRED');
+    }
+    const paying = carried ? count - 1 : count;
+    if (feeEach?.method === 'transfer' && paying > 0) this.assertFeeCeiling(BigInt(feeEach.amountRaw), BigInt(deployOpts.maxFeeRaw ?? 1_000_000n), feeEach.decimals);
+    // One signer per role for the whole run, so their nonces follow each other.
+    const payer = feeEach && deployOpts.payFee ? deployOpts.payer ?? this.signerOn(feeEach.chain, 'Paying the deploy fee') : undefined;
+    const funding = fund ? await this.fundingPlan(fund) : null;
+    await this.assertRunAffordable(feeEach, payer, paying, funding, count);
+    if (confirm) {
+      const plan: DeployAgentsPlan = {
+        asked,
+        count,
+        names,
+        capacity,
+        fee: !feeEach ? null
+          : feeEach.method === 'transfer'
+            ? {
+              method: 'transfer', chain: feeEach.chain, ...(feeEach.chainId !== undefined ? { chainId: feeEach.chainId } : {}),
+              token: feeEach.token, recipient: feeEach.recipient, perAgentRaw: feeEach.amountRaw, decimals: feeEach.decimals,
+              paying, totalRaw: (BigInt(feeEach.amountRaw) * BigInt(paying)).toString(),
+            }
+            : { method: 'factory', chain: feeEach.chain, paying },
+        funding: funding
+          ? { chain: funding.chain, token: funding.token, symbol: funding.symbol, decimals: funding.decimals, perAgentRaw: funding.amountRaw.toString(), totalRaw: (funding.amountRaw * BigInt(count)).toString() }
+          : null,
+      };
+      if (!(await confirm(plan))) throw new ApiError(0, 'Cancelled. Nothing was deployed or paid.', undefined, 'CANCELLED');
+    }
+
+    const nonces = new Map<string, number>();
+    const sent = (address: string, nonce: number) => nonces.set(address.toLowerCase(), Math.max(nonce + 1, nonces.get(address.toLowerCase()) ?? 0));
+    const payerAddress = payer ? await payer.getAddress() : undefined;
+    const fundAddress = funding ? await funding.signer.getAddress() : undefined;
+
+    const results: DeployAgentsItem[] = names.map((name, index) => ({ index, name, status: 'skipped' }));
+    let stopped: DeployAgentsResult['stopped'];
+    for (let index = 0; index < count && !stopped; index++) {
+      const name = names[index];
+      if (signal?.aborted) {
+        stopped = { index, code: 'ABORTED', message: 'Stopped before this agent: the run was aborted.' };
+        break;
+      }
+      onProgress?.({ type: 'deploying', index, name });
+      // The template's fee, from an earlier attempt, pays for the first agent only.
+      let feeTxHash = index === 0 ? carried : undefined;
+      let agent: DeployedAgent;
+      try {
+        if (payer && payerAddress) await settleNonce(payer, nonces.get(payerAddress.toLowerCase()));
+        for (let attempt = 1; ; attempt++) {
+          try {
+            agent = await this.deployAgent(
+              { ...rest, name, ...(feeTxHash ? { feeTxHash } : {}) },
+              {
+                ...deployOpts,
+                ...(payer ? { payer } : {}),
+                // deployAgent hands this to sendAndWait as onSent, which also passes the nonce.
+                onFeePaid: async (hash: string, nonce?: number) => {
+                  feeTxHash = hash;
+                  if (payerAddress && typeof nonce === 'number') sent(payerAddress, nonce);
+                  await onFeePaid?.(hash, index);
+                },
+              },
+            );
+            break;
+          } catch (err) {
+            if (err instanceof ApiError && err.feeTxHash) feeTxHash = err.feeTxHash;
+            if (!isRateLimited(err) || attempt >= policy.attempts) throw err;
+            const waitMs = policy.baseDelayMs * 2 ** (attempt - 1);
+            onProgress?.({ type: 'rate-limited', index, name, attempt, waitMs });
+            await sleep(waitMs);
+          }
+        }
+      } catch (err) {
+        const error = errorInfo(err);
+        // A fee the backend says can never pay for a deploy is not carried forward.
+        const spent = err instanceof ApiError && (['DEPLOY_FEE_ALREADY_USED', 'DEPLOY_FEE_REVERTED'].includes(err.code ?? '')
+          || (err.code === 'DEPLOY_FEE_NOT_PAID' && err.reason !== 'PAYER_NOT_LINKED'));
+        const unspent = feeTxHash && !spent ? feeTxHash : undefined;
+        results[index] = { index, name, status: 'failed', error, ...(unspent ? { feeTxHash: unspent } : {}) };
+        onProgress?.({ type: 'failed', index, name, error, ...(unspent ? { feeTxHash: unspent } : {}) });
+        stopped = { index, ...error };
+        break;
+      }
+      const item: Extract<DeployAgentsItem, { status: 'deployed' }> = { index, name, status: 'deployed', agent };
+      results[index] = item;
+      onProgress?.({ type: 'deployed', index, name, agent });
+      if (agent.started === false) {
+        stopped = { index, code: 'NOT_STARTED', message: `Agent ${agent.id} was created but did not start, so the run stopped there. Start it from the web app${funding ? '; its wallet was not funded' : ''}.` };
+        break;
+      }
+      if (funding && fundAddress) {
+        const amountRaw = funding.amountRaw.toString();
+        onProgress?.({ type: 'funding', index, name, walletAddress: agent.walletAddress, amountRaw });
+        let fundTx: string | undefined;
+        try {
+          await settleNonce(funding.signer, nonces.get(fundAddress.toLowerCase()));
+          const { hash, nonce } = await sendAndWait(funding.signer, {
+            to: funding.token,
+            data: ERC20_TRANSFER.encodeFunctionData('transfer', [agent.walletAddress, funding.amountRaw]),
+          }, {
+            timeoutMs: deployOpts.confirmTimeoutMs,
+            onSent: (h, n) => { fundTx = h; sent(fundAddress, n); },
+          });
+          sent(fundAddress, nonce);
+          item.funding = { txHash: hash, amountRaw };
+          onProgress?.({ type: 'funded', index, name, txHash: hash });
+        } catch (err) {
+          const error = errorInfo(err);
+          item.funding = { error, ...(fundTx ? { txHash: fundTx } : {}) };
+          stopped = { index, code: error.code ?? 'FUNDING_FAILED', message: `Agent ${agent.id} is deployed, but funding its wallet failed: ${error.message}` };
+        }
+      }
+    }
+    return { requested: count, deployed: results.filter((r) => r.status === 'deployed').length, results, ...(stopped ? { stopped } : {}) };
+  }
+
+  /**
+   * Gas for each agent's wallet: on the posting chain, in its settlement
+   * token, which must also be its gas (Arc). Elsewhere gas is paid another
+   * way (Base's paymaster), and a transfer to the wallet would not help it.
+   * Checked before anything is deployed.
+   */
+  private async fundingPlan(fund: DeployAgentsFunding): Promise<{ signer: ethers.Signer; token: string; amountRaw: bigint; chain: string; chainId: number; decimals: number; symbol: string }> {
+    let amountRaw: bigint;
+    try {
+      amountRaw = BigInt(fund.amountRaw);
+    } catch {
+      throw new ApiError(400, `fund.amountRaw "${fund.amountRaw}" is not a whole number of the token's smallest unit. Nothing was deployed.`, undefined, 'INVALID_AMOUNT');
+    }
+    if (amountRaw <= 0n) throw new ApiError(400, 'fund.amountRaw must be above 0. Nothing was deployed.', undefined, 'INVALID_AMOUNT');
+    const { postingChain, chains } = await this.getSettlement();
+    const entry = chains.find((c) => c.chain === postingChain);
+    if (!postingChain || !entry?.token.address || entry.token.kind !== 'erc20' || entry.gasSymbol !== entry.token.symbol) {
+      throw new ApiError(
+        409,
+        `Funding agent wallets here works only where gas is paid in the settlement token (Arc). ${postingChain ? `The posting chain, ${postingChain}, pays gas in ${entry?.gasSymbol ?? 'another coin'}.` : 'The backend names no posting chain.'} Nothing was deployed.`,
+        { postingChain },
+        'FUNDING_UNSUPPORTED',
+      );
+    }
+    // The token sent is a known deployment's (or a trusted one's), not whatever the backend names.
+    if (!entry.escrowAddress || !isPinnedSettlement(entry.chainId, entry.escrowAddress, entry.token.address, this.trustedEscrows)) {
+      throw new ApiError(
+        409,
+        `The backend names token ${entry.token.address} on ${postingChain} (chain ${entry.chainId}), which is not a known deployment, so no agent wallet is funded with it. Nothing was deployed. For a custom or local deployment, list it in BlindMarketConfig.trustedEscrows.`,
+        undefined,
+        'ESCROW_NOT_PINNED',
+      );
+    }
+    const signer = fund.signer ?? this.signerOn(postingChain, 'Funding agent wallets');
+    await assertSignerChain(signer, entry.chainId, `Funding agent wallets on ${postingChain}`);
+    return { signer, token: entry.token.address, amountRaw, chain: postingChain, chainId: entry.chainId, decimals: entry.token.decimals, symbol: entry.token.symbol };
+  }
+
+  /**
+   * Before the first agent: the wallets paying hold what the whole run
+   * spends, so it never stops partway for lack of funds. Fees paid by
+   * transfer (`paying` of them) and gas for `count` wallets; when one wallet
+   * pays both in one token, the sum. A factory fee is not counted here (its
+   * price is read on-chain when paid).
+   */
+  private async assertRunAffordable(
+    feeTerms: Exclude<DeployFeeTerms, { required: false }> | null,
+    payer: ethers.Signer | undefined,
+    paying: number,
+    funding: { signer: ethers.Signer; token: string; amountRaw: bigint; chainId: number; decimals: number; symbol: string } | null,
+    count: number,
+  ): Promise<void> {
+    const needs = new Map<string, { signer: ethers.Signer; token: string; raw: bigint; decimals: number; what: string[] }>();
+    const add = async (signer: ethers.Signer, token: string, raw: bigint, decimals: number, what: string) => {
+      const key = `${(await signer.getAddress()).toLowerCase()}|${token.toLowerCase()}`;
+      const n = needs.get(key) ?? { signer, token, raw: 0n, decimals, what: [] };
+      n.raw += raw;
+      n.what.push(what);
+      needs.set(key, n);
+    };
+    if (feeTerms?.method === 'transfer' && payer && paying > 0) {
+      await this.assertFeePayer(await payer.getAddress());
+      if (feeTerms.chainId !== undefined) await assertSignerChain(payer, feeTerms.chainId, 'The deploy fee');
+      await add(payer, feeTerms.token, BigInt(feeTerms.amountRaw) * BigInt(paying), feeTerms.decimals, `${paying} deploy fee${paying === 1 ? '' : 's'}`);
+    }
+    if (funding) await add(funding.signer, funding.token, funding.amountRaw * BigInt(count), funding.decimals, `gas for ${count} agent wallet${count === 1 ? '' : 's'}`);
+    for (const n of needs.values()) {
+      const holder = await n.signer.getAddress();
+      const balance = await tokenBalance(n.signer, n.token, holder);
+      if (balance < n.raw) {
+        const fmt = (v: bigint) => ethers.formatUnits(v, n.decimals).replace(/\.0$/, '');
+        throw new ApiError(
+          402,
+          `${holder} holds ${fmt(balance)} of token ${n.token}, and this run needs ${fmt(n.raw)} (${n.what.join(' and ')}), plus a little for gas. Nothing was deployed or paid.`,
+          { holder, token: n.token, balanceRaw: balance.toString(), neededRaw: n.raw.toString() },
+          'INSUFFICIENT_FUNDS',
+        );
+      }
     }
   }
 

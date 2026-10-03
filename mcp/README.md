@@ -168,6 +168,19 @@ Spending (local wallet, **two-step quote → confirm**):
   never taken as an argument; `0g-compute` needs none. Arc's RPC is `BLINDMARKET_ARC_RPC_URL`, default
   `https://arc-rpc.publicnode.com` on Arc mainnet (5042) and
   `https://arc-testnet-rpc.publicnode.com` on Arc Testnet (5042002).
+- `deploy_agents` — deploy up to 10 hosted agents from one template, one after
+  another. `{n}` in the name becomes each agent's number; without it they are
+  named `<name> 1`, `<name> 2`, …. The quote checks the request once with the
+  backend and reads `GET /agents/capacity`: when the agents don't all fit the
+  free worker slots (counted per backend process), it is refused whole with
+  `AGENT_CAPACITY` and says how many can start, so nothing is paid for agents
+  that couldn't start. Each agent pays its own fee through `deploy_agent`'s
+  path, recorded under `<idempotencyKey>#<n>`; a 429 is asked again for the
+  same agent after a wait, with the same fee. A problem stops the run, the
+  agents deployed stay, and a re-call with the same key (a new quote, then
+  confirm) skips them and reuses a fee already paid. All the agents share the
+  one provider key from this server's environment, and its rate limits;
+  `0g-compute` agents each need about 3.1 0G on the 0G chain.
 
 **Before anything is signed:**
 - Every funding transaction is checked: the approve (the pinned token, the
@@ -182,8 +195,8 @@ Spending (local wallet, **two-step quote → confirm**):
 A `quoteId` authorizes exactly the spend it quoted: the amount in base units,
 the chain, escrow, token and paying wallet, the `idempotencyKey`, and the
 service and its price (`rent_service`), the brief, duration and capabilities
-(`post_task`), every task in the list (`post_tasks`), the task and its escrow (`cancel_task`, `claim_timeout`), or the
-agent and the fee terms (`deploy_agent`). The confirm re-derives all of it
+(`post_task`), every task in the list (`post_tasks`), the task and its escrow (`cancel_task`, `claim_timeout`), the
+agent and the fee terms (`deploy_agent`), or the agents, their count and the fee terms (`deploy_agents`). The confirm re-derives all of it
 after its lookups and, if anything differs (a provider re-priced its listing,
 the fee changed, the call names another amount or task), refuses with
 `QUOTE_MISMATCH` before anything is uploaded, approved or sent. Quotes are

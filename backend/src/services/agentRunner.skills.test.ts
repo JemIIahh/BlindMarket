@@ -13,6 +13,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const forkMock = vi.hoisted(() => vi.fn());
 
+// Memory is not what this file is about (agentRunner.memoryGuard.test.ts is):
+// nothing measured, and no worker pid written to /proc.
+vi.mock('./memoryHeadroom.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./memoryHeadroom.js')>()),
+  readMemory: () => null,
+  preferWorkerForOom: vi.fn(),
+}));
 vi.mock('child_process', () => ({
   fork: forkMock,
 }));

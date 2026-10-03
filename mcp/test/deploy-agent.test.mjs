@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Interface, Wallet } from 'ethers';
+import { Interface, Transaction, Wallet } from 'ethers';
 
 /**
  * deploy_agent: a hosted agent costs a deploy fee, paid as one USDC transfer
@@ -33,6 +33,8 @@ let rpcUrl;
 let chainIdServed;
 /** Transactions the stub node has mined, by hash: their receipt status. */
 let mined;
+/** Raw transactions a real wallet handed the stub node. */
+let broadcasts = [];
 before(async () => {
   rpc = createServer((req, res) => {
     let raw = '';
@@ -42,6 +44,17 @@ before(async () => {
         let result;
         if (method === 'eth_chainId') result = '0x' + chainIdServed.toString(16);
         else if (method === 'eth_call') result = ERC20.encodeFunctionResult('balanceOf', [12_500_000n]);
+        // A real wallet's populate and broadcast (the lost-answer test below).
+        else if (method === 'eth_getTransactionCount') result = '0x' + broadcasts.length.toString(16);
+        else if (method === 'eth_estimateGas') result = '0xc350';
+        else if (method === 'eth_blockNumber') result = '0x10';
+        else if (method === 'eth_maxPriorityFeePerGas' || method === 'eth_gasPrice') result = '0x3b9aca00';
+        else if (method === 'eth_getBlockByNumber') result = { number: '0x10', hash: '0x' + '0b'.repeat(32), parentHash: '0x' + '0a'.repeat(32), timestamp: '0x1', gasLimit: '0x1c9c380', gasUsed: '0x0', baseFeePerGas: '0x3b9aca00', miner: '0x' + '00'.repeat(20), extraData: '0x', difficulty: '0x0', nonce: '0x0000000000000000', transactions: [] };
+        else if (method === 'eth_sendRawTransaction') {
+          // The node takes it, and the answer never comes back.
+          broadcasts.push(Transaction.from(params[0]));
+          return { jsonrpc: '2.0', id, error: { code: -32000, message: 'upstream timed out' } };
+        }
         else if (method === 'eth_getTransactionReceipt') {
           result = mined.has(params[0]) ? {
             transactionHash: params[0], transactionIndex: '0x0', blockHash: '0x' + 'b'.repeat(64), blockNumber: '0x10',
@@ -82,6 +95,7 @@ beforeEach(() => {
   bridgeChainId = 5042002;
   mined = new Map();
   validateAnswer = null;
+  broadcasts = [];
 });
 
 const realFetch = globalThis.fetch;
@@ -185,6 +199,27 @@ test('a deploy that fails after paying resumes with the same payment', async () 
   assert.equal(done.agentId, 'agent-1');
   assert.equal(sent.length, 1, 'paid once');
   assert.equal(deploys()[1].body.feeTxHash, FEE_TX);
+});
+
+test('a fee whose broadcast answer is lost is recorded first, and the retry deploys with it instead of paying again', async () => {
+  const handlers = {};
+  const server = { registerTool: (name, _def, handler) => { handlers[name] = handler; } };
+  // The real wallet signs: its hash is recorded before the raw transaction leaves.
+  registerRentTools(server, { apiKey: 'sk_test', apiBase: 'https://backend.test', authenticated: true }, { chainId: 5042002, rpcUrl, provider: {}, wallet: new Wallet(OWNER_KEY.privateKey) });
+  const { quote } = parse(await handlers.deploy_agent({ ...args, idempotencyKey: 'deploy-lost-1' }));
+  const error = errorOf(await handlers.deploy_agent({ ...args, idempotencyKey: 'deploy-lost-1', confirm: true, quoteId: quote.quoteId }));
+  assert.equal(error.code, 'TX_MAYBE_SENT');
+  assert.equal(broadcasts.length, 1);
+  const paid = broadcasts[0].hash;
+  assert.deepEqual(ERC20.decodeFunctionData('transfer', broadcasts[0].data).map(String), [TREASURY, '1000000']);
+  assert.equal(getSpend('deploy-lost-1').stage, 'sent');
+  assert.equal(getSpend('deploy-lost-1').txHash, paid);
+  assert.equal(deploys().length, 0);
+
+  const done = parse(await handlers.deploy_agent({ ...args, idempotencyKey: 'deploy-lost-1' }));
+  assert.equal(done.resumed, true);
+  assert.equal(broadcasts.length, 1, 'paid once');
+  assert.equal(deploys()[0].body.feeTxHash, paid);
 });
 
 test("refuses to pay from a wallet that is not the API key's owner", async () => {

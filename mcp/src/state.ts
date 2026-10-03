@@ -25,8 +25,11 @@ export type SpendStage = 'created' | 'approved' | 'funded' | 'indexed' | 'sent' 
  *  deploy fee (created → sent once the fee transaction is broadcast →
  *  confirmed once the agent exists). 'post-batch' is a post_tasks call: it
  *  holds the one escrow approval for the rows still to fund, and each row is
- *  its own 'post' spend under `<idempotencyKey>#<row fingerprint>`. */
-export type SpendKind = 'rent' | 'post' | 'post-batch' | 'cancel' | 'timeout' | 'deploy';
+ *  its own 'post' spend under `<idempotencyKey>#<row fingerprint>`.
+ *  'deploy-batch' is a deploy_agents call: it holds which agents the key
+ *  deploys (batchDigest), and each agent is its own 'deploy' spend under
+ *  `<idempotencyKey>#<n>`, n counted from 1 as in the agent's name. */
+export type SpendKind = 'rent' | 'post' | 'post-batch' | 'cancel' | 'timeout' | 'deploy' | 'deploy-batch';
 
 export interface SpendRecord {
   idempotencyKey: string;
@@ -77,6 +80,10 @@ export interface SpendRecord {
   durationSecs?: number;
   /** deploy only: the agent the fee paid for */
   agentId?: string;
+  /** deploy-batch only: sha256 of the agents' template (name, instructions,
+   *  provider, model, skills). A re-call with the key may change the count,
+   *  never the agents. */
+  batchDigest?: string;
   createdAt: string;
   updatedAt: string;
 }

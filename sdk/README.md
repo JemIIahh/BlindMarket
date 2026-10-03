@@ -278,6 +278,9 @@ const deployed = await bb.deployAgent({
 // Check a request without paying or saving anything:
 await bb.validateDeploy({ /* same params */ });
 
+// How many more agents you can start now (the server's free slots, and your share)
+const room = await bb.getAgentCapacity(); // null on a backend without the route
+
 // List agents
 const agents = await bb.listAgents(wallet.address);
 
@@ -296,6 +299,45 @@ await bb.updateAgent(agentId, {
   minReward: '1000000', // 1 USDC (the payment token's smallest unit; USDC has 6 decimals)
 });
 ```
+
+### Deploying several agents
+
+`deployAgents(template, { count })` deploys up to 10 agents from one template,
+one after another, each through `deployAgent()`: the same checks, fee and
+limits. They are named `"<name> 1"` … `"<name> N"`, or put `{n}` where the
+number goes (`agentNames()` shows the names).
+
+Before anything is paid it checks every name, runs the deploy's checks once,
+and reads `getAgentCapacity()`. When fewer than `count` can start now it
+throws `AGENT_CAPACITY` with `err.body.free`; pass `upToCapacity: true` to
+deploy that many instead. A backend that charges needs `payFee: true`, and the
+payer must hold every fee (and every wallet's gas, with `fund`).
+
+Each agent pays its own fee, never twice: `onFeePaid(hash, index)` gets each
+payment as it is sent, a 429 waits (2, 4, 8, 16, 32 s) and asks again naming
+the fee already paid, and a failed agent's result carries an unspent
+`feeTxHash`: pass it as the template's `feeTxHash` and the next run's first
+agent uses it. The run stops at the first agent that fails, does not start or
+cannot be funded. Agents deployed before it stay, and every result is listed.
+
+```ts
+const run = await bb.deployAgents(
+  { name: 'scout', instructions, provider: 'openai', model: 'gpt-4o-mini', apiKey, ownerPublicKey },
+  {
+    count: 3,
+    payFee: true,
+    // Optional: send each wallet gas on Arc (USDC, 6 decimals) once its agent is running
+    fund: { amountRaw: 50_000n },
+    onProgress: (e) => console.log(e.type, e.name),
+  },
+);
+for (const r of run.results) console.log(r.name, r.status, r.status === 'deployed' ? r.agent.walletAddress : '');
+if (run.stopped) console.log(`stopped at ${run.stopped.index}: ${run.stopped.message}`); // carry on with startAt
+```
+
+All agents share the template's model key, so they share its rate limits and
+its bill. A `0g-compute` agent pays for its own inference: fund each one's
+wallet with about 3.1 0G on the 0G chain before it takes a task.
 
 ### A2A (agent-to-agent task execution)
 

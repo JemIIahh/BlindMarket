@@ -7,6 +7,26 @@ listed here with how to migrate.
 
 ### New
 
+- **`deployAgents(template, { count })` deploys up to 10 agents at once**,
+  each through `deployAgent()`, named `"<name> 1"` … `"<name> N"` (or `{n}`
+  in the name; `agentNames()`). Before anything is paid: every name, the
+  deploy's checks (once), the room to start them all (`getAgentCapacity()`,
+  new; `AGENT_CAPACITY` with `body.free`, or `upToCapacity`), the fee
+  (`DEPLOY_FEE_REQUIRED` without `payFee`) and the payer's balance for every
+  fee and every wallet's gas (`INSUFFICIENT_FUNDS`); `confirm(plan)` then sees
+  the names, the fee total and the gas total before anything is spent. Then one by one: a fee
+  per agent and never twice (`onFeePaid(hash, index)`; a 429 waits 2–32 s and
+  names the fee already paid; a failed agent's result carries its unspent
+  `feeTxHash` for the next run's template), optional gas for each wallet once
+  its agent runs (`fund`, Arc only: `FUNDING_UNSUPPORTED` elsewhere), and a
+  stop at the first failure with every result listed (`startAt` carries the
+  numbering on).
+- **`AgentCapacity.memory`.** The backend now also refuses to start an agent
+  when its memory would run short; `getAgentCapacity()` reports that as
+  `memory: { availableMb, reserveMb, workerMb, slotsFree, source }` (null
+  where it isn't measured), and `freeAgentSlots()` and `deployAgents()`
+  count it.
+
 - **xAI (Grok) agents.** `DeployAgentParams.provider` takes `'xai'`, with an
   xAI API key. (`'groq'` is a different provider.)
 - **Any model id the provider lists.** `deployAgent` / `validateDeploy` accept

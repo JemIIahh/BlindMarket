@@ -20,6 +20,7 @@ import { saveAgent, loadAgent, loadAllAgents } from './deployedAgentStore.js';
 import { notify } from './notificationStore.js';
 import { parseReadiness, saveAgentReadiness } from './agentReadiness.js';
 import { composeAgentRuntime } from './skillComposer.js';
+import { memoryReserveMb, preferWorkerForOom, readMemory } from './memoryHeadroom.js';
 import type { DeployedAgent, AgentCapability, LLMProvider, AgentTool, InstalledSkill } from '../types.js';
 
 /**
@@ -144,9 +145,24 @@ const restartTimes = new Map<string, number[]>();
 const intentionalStops = new WeakSet<ChildProcess>();
 
 // ── Resource limits ────────────────────────────────────────────────────────────
-// Max concurrent forked agent processes. On a 512 MB Render box each Node worker
-// needs ~50 MB baseline; cap at 5 to leave headroom for the API server + Redis.
+// Max concurrent forked agent processes: a hard cap, set per host. Measured in
+// the production image (docs/HOSTED-AGENT-CAPACITY.md): the API takes ~113 MB
+// and each worker ~105–110 MB once settled, ~140 MB while reconcile starts
+// them all at once. The default of 5 is for a small host; a larger one raises
+// it and leaves running out of memory to the memory check below.
 const MAX_CONCURRENT_AGENTS = Number(process.env.MAX_CONCURRENT_AGENTS ?? 5);
+// What one more worker is counted at when deciding whether memory allows it:
+// the ~140 MB a worker reaches while it starts, rounded up.
+export const WORKER_MEMORY_MB = 150;
+// A worker forked this recently may not show in the memory readings yet, so
+// it is counted at WORKER_MEMORY_MB on top of them: reconcile forks every
+// saved agent in one loop, faster than their memory grows.
+const RECENT_START_MS = 30_000;
+const recentStarts: number[] = [];
+function recentStartCount(now = Date.now()): number {
+  while (recentStarts.length > 0 && now - recentStarts[0] >= RECENT_START_MS) recentStarts.shift();
+  return recentStarts.length;
+}
 // How many workers one owner may run at once, 10 unless MAX_AGENTS_PER_OWNER
 // says otherwise. It was one global pool with no per-owner limit, so one
 // owner's agents could hold every slot and every other owner's paid deploys
@@ -170,14 +186,64 @@ function liveWorkersFor(owner: string): number {
   return n;
 }
 
+/**
+ * How many more workers memory allows: what is free (memoryHeadroom.ts), less
+ * workers forked in the last RECENT_START_MS and the reserve, in
+ * WORKER_MEMORY_MB steps. Null where memory isn't measured (not Linux).
+ */
+export interface MemoryCapacity {
+  availableMb: number;
+  reserveMb: number;
+  workerMb: number;
+  slotsFree: number;
+  source: 'cgroup' | 'os';
+}
+function memoryCapacity(): MemoryCapacity | null {
+  const reading = readMemory();
+  if (!reading) return null;
+  const reserveMb = memoryReserveMb(reading.totalMb);
+  const headroom = reading.availableMb - recentStartCount() * WORKER_MEMORY_MB - reserveMb;
+  return {
+    availableMb: Math.round(reading.availableMb),
+    reserveMb,
+    workerMb: WORKER_MEMORY_MB,
+    slotsFree: Math.max(0, Math.floor(headroom / WORKER_MEMORY_MB)),
+    source: reading.source,
+  };
+}
+
+/**
+ * The worker slots on this process, `ownerAddress`'s share of them, and how
+ * many more memory allows: the numbers startRefusal decides with. Per
+ * process, like `processes`: another backend instance has its own pool.
+ * Counts only.
+ */
+export function agentCapacity(ownerAddress: string): {
+  poolMax: number; poolFree: number; ownerMax: number; ownerFree: number; memory: MemoryCapacity | null;
+} {
+  return {
+    poolMax: MAX_CONCURRENT_AGENTS,
+    poolFree: Math.max(0, MAX_CONCURRENT_AGENTS - processes.size),
+    ownerMax: MAX_AGENTS_PER_OWNER,
+    ownerFree: Math.max(0, MAX_AGENTS_PER_OWNER - liveWorkersFor(ownerAddress.toLowerCase())),
+    memory: memoryCapacity(),
+  };
+}
+
 /** Why a new worker for `ownerAddress` can't start on this process now, or
  *  null when it can. Deploy checks it before taking the fee. */
 export function startRefusal(ownerAddress: string): string | null {
-  if (processes.size >= MAX_CONCURRENT_AGENTS) {
+  const { poolFree, ownerFree, memory } = agentCapacity(ownerAddress);
+  if (poolFree === 0) {
     return `Max concurrent agents (${MAX_CONCURRENT_AGENTS}) reached — stop an agent first or increase MAX_CONCURRENT_AGENTS`;
   }
-  if (liveWorkersFor(ownerAddress.toLowerCase()) >= MAX_AGENTS_PER_OWNER) {
+  if (ownerFree === 0) {
     return `You already run ${MAX_AGENTS_PER_OWNER} agents, the most one owner can run here at once — stop one first`;
+  }
+  // Below the reserve, one more worker could run the box out of memory, and
+  // the OOM killer may take the API down with every agent.
+  if (memory && memory.slotsFree === 0) {
+    return 'The server is low on memory — stop an agent or try again later';
   }
   return null;
 }
@@ -496,9 +562,11 @@ export async function startAgent(id: string, opts?: { skipResume?: boolean }): P
     console.log(`[agentRunner] Generated missing platform token for agent ${id}`);
   }
 
-  // Cap each agent worker at 128 MB so a leaky LLM call never OOMs the backend
-  // or other agents. Without this the forked child inherits the parent's default
-  // 2 GB heap limit, which on a 512 MB Render box means 9 agents = guaranteed OOM.
+  // Cap each agent worker's old-space heap at 128 MB so a leaky LLM call never
+  // OOMs the backend or other agents: past it V8 ends that worker (~225 MB in
+  // all, docs/HOSTED-AGENT-CAPACITY.md) and the crash restart below takes over.
+  // Without it the child inherits Node's default heap limit, sized from the
+  // host's memory, and one runaway worker could exhaust the whole box.
   // Compose installed skills into the two env surfaces the worker consumes.
   // With zero skills this is an exact passthrough (see skillComposer.ts) —
   // the worker itself is skill-agnostic.
@@ -697,6 +765,8 @@ export async function startAgent(id: string, opts?: { skipResume?: boolean }): P
   }
   processes.set(id, child);
   processOwners.set(id, agent.ownerAddress.toLowerCase());
+  recentStarts.push(Date.now());
+  preferWorkerForOom(child.pid);
   agent.status = 'running';
   await saveAgent(agent);
 }

@@ -10,7 +10,7 @@ import {
   deployAgent, startAgent, pauseAgent, stopAgent, resumeAgent,
   getAgent, listAgents, getAgentLogs, subscribeAgentLogs, updateAgent,
   addAuthorizedOwner, getAgentStats,
-  startRefusal,
+  startRefusal, agentCapacity,
 } from '../services/agentRunner.js';
 import * as reputationService from '../services/reputation.js';
 import * as reputationDecay from '../services/reputationDecay.js';
@@ -349,6 +349,33 @@ agentsRouter.get('/deploy-fee', async (_req, res, next) => {
   } catch (err) {
     next(err);
   }
+});
+
+// GET /api/v1/agents/capacity — how many more agents the caller can start
+// now: the free worker slots on this process (the pool every owner shares),
+// the caller's own share of them, and how many more memory allows
+// (`memory`, null where it isn't measured), from the numbers POST /deploy
+// refuses with (startRefusal). A client deploying several agents reads it
+// first, so it never deploys past the limit. Per backend process, like the
+// pool: with several instances each has its own, and this answers for the
+// one serving the request (`scope: 'process'`). Counts only, nothing about
+// other owners.
+agentsRouter.get('/capacity', requireAuth, (req: AuthRequest, res) => {
+  // The legacy shared AGENT_API_KEY collapses every holder into one 'agent'
+  // principal, which owns no agents.
+  if (!req.user?.address || req.user.address === 'agent') {
+    res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Owner authentication required' } });
+    return;
+  }
+  const capacity = agentCapacity(req.user.address);
+  res.json({
+    success: true,
+    data: {
+      ...capacity,
+      canStart: capacity.poolFree > 0 && capacity.ownerFree > 0 && (capacity.memory === null || capacity.memory.slotsFree > 0),
+      scope: 'process',
+    },
+  });
 });
 
 // POST /api/v1/agents/provider-models — live model list for the deploy form.
