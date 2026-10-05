@@ -48,6 +48,7 @@ import {
   getPrefs,
   isTypeEnabled,
   linkChat,
+  peekLinkNonce,
   setPrefs,
   unlinkChat,
   unlinkWallets,
@@ -74,6 +75,13 @@ describe('link nonce', () => {
     const second = await createLinkNonce([A]);
     expect(await consumeLinkNonce(first)).toBeNull();
     expect(await consumeLinkNonce(second)).toEqual([A]);
+  });
+
+  it('can be peeked without being consumed', async () => {
+    const nonce = await createLinkNonce([A]);
+    expect(await peekLinkNonce(nonce)).toEqual([A]);
+    expect(await consumeLinkNonce(nonce)).toEqual([A]);
+    expect(await peekLinkNonce(nonce)).toBeNull();
   });
 
   it('rejects malformed nonces without touching redis', async () => {
@@ -120,6 +128,15 @@ describe('links', () => {
     expect(await getLink(A)).toBeNull();
     expect(await getLink(B)).toBeNull();
     expect(await getPrefs('111')).toEqual({});
+  });
+
+  it('unlinking a stale chat leaves a wallet that has since moved to another chat', async () => {
+    // A race left the wallet in both chats' sets; its link points at 222.
+    await linkChat('111', [A]);
+    await linkChat('222', [A]);
+    mem.sets.set('tg:chat:111', new Set([A]));
+    await unlinkChat('111');
+    expect((await getLink(A))?.chatId).toBe('222');
   });
 
   it('unlinkWallets unlinks the chats those wallets are on, once each', async () => {

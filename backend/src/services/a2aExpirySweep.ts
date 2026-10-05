@@ -6,7 +6,7 @@ import { chainRuntime } from './chainRuntime.js';
 import { loadAgentByWallet } from './deployedAgentStore.js';
 import { emitTaskAvailable } from './socket.js';
 import { sponsorHint } from './gasSponsorEligibility.js';
-import { notifyOnce } from './notificationStore.js';
+import { firstSeenAt, notifyOnce } from './notificationStore.js';
 import { dueReminderWindow, reminderCopy, reminderKind } from './deadlineReminders.js';
 import { SWEEP_INTERVAL_MS, EXPIRY_GRACE_SEC } from '../constants.js';
 
@@ -65,7 +65,10 @@ async function remindIfDue(
   status: string,
 ): Promise<void> {
   if (!posterAddress) return;
-  const window = dueReminderWindow(nowSec, deadline);
+  // Kept a day past the deadline: long enough to outlive every window.
+  const seen = await firstSeenAt(`remind:${tid}`, nowSec, deadline - nowSec + 86_400);
+  if (seen === null) return;
+  const window = dueReminderWindow(nowSec, deadline, seen);
   if (window === null) return;
   const { title, body } = reminderCopy(reminderKind(status), deadline - nowSec);
   await notifyOnce(`remind:${tid}:${window}`, posterAddress, { type: 'deadline_soon', title, body, taskId: tid });

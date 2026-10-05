@@ -32,6 +32,7 @@ vi.mock('./redis.js', () => {
         return l.slice(s, end);
       },
       llen: async (k: string) => (lists.get(k) ?? []).length,
+      get: async (k: string) => mem.keys.get(k) ?? null,
       // SET key value EX s NX: null when the key already exists.
       set: async (k: string, v: string, ...args: unknown[]) => {
         if (args.includes('NX') && mem.keys.has(k)) return null;
@@ -56,7 +57,7 @@ vi.mock('./a2aStore.js', () => ({
   getState: vi.fn(async () => ({ executorAddress: EXEC })),
 }));
 
-import { notify, notifyOnce, listNotifications, markRead, markAllRead, notifyLifecycle } from './notificationStore.js';
+import { notify, notifyOnce, firstSeenAt, listNotifications, markRead, markAllRead, notifyLifecycle } from './notificationStore.js';
 
 beforeEach(() => {
   mem.lists.clear();
@@ -126,5 +127,13 @@ describe('notifyOnce', () => {
     const page = await listNotifications(POSTER);
     expect(page.notifications).toHaveLength(1);
     expect(page.notifications[0]).toMatchObject({ type: 'expired', taskId: HASH });
+  });
+});
+
+describe('firstSeenAt', () => {
+  it('records the first time and returns it after that', async () => {
+    expect(await firstSeenAt('remind:0xabc', 1000, 3600)).toBe(1000);
+    expect(await firstSeenAt('remind:0xabc', 2000, 3600)).toBe(1000);
+    expect(await firstSeenAt('remind:0xdef', 2000, 3600)).toBe(2000);
   });
 });

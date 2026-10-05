@@ -6,12 +6,16 @@
  * (task, window), so a reminder goes out once per window however many ticks,
  * restarts or API replicas see it.
  *
- * A window only fires while the task is FRESHLY inside it: remaining time in
- * (sec - graceSec, sec]. A task posted with 20 minutes to go is already past
- * the 24 h and 1 h marks; telling its poster "24 hours left" would be wrong, so
- * it gets no reminder for them. The cost is that a sweep outage longer than
- * graceSec around the mark skips that reminder, which is better than a late,
- * misleading one.
+ * A window fires only for a mark the task actually lived through: the sweep
+ * must have seen the task before the mark (firstSeenSec < deadline - sec). A
+ * task posted with the default 24 h deadline is already inside the 24 h window
+ * the moment it is listed; reminding its poster then would be noise. The sweep
+ * sees a new task within a tick of it being listed, so "first seen" stands in
+ * for "posted".
+ *
+ * And it fires only while the task is FRESHLY inside the window: remaining time
+ * in (sec - graceSec, sec]. A sweep outage longer than graceSec around the mark
+ * skips that reminder, which is better than a late, misleading one.
  */
 
 export interface ReminderWindow {
@@ -26,16 +30,23 @@ export const REMINDER_WINDOWS: readonly ReminderWindow[] = [
   { sec: 3600, graceSec: 15 * 60 },
 ];
 
-/** The window a task is freshly inside right now, or null. */
+/**
+ * The window a task is freshly inside right now, or null. `firstSeenSec` is
+ * when the sweep first saw the task: a mark that had already passed by then is
+ * never reminded.
+ */
 export function dueReminderWindow(
   nowSec: number,
   deadlineSec: number,
+  firstSeenSec: number,
   windows: readonly ReminderWindow[] = REMINDER_WINDOWS,
 ): number | null {
   const remaining = deadlineSec - nowSec;
   if (remaining <= 0) return null;
   for (const w of windows) {
-    if (remaining <= w.sec && remaining > w.sec - w.graceSec) return w.sec;
+    if (remaining <= w.sec && remaining > w.sec - w.graceSec) {
+      return firstSeenSec < deadlineSec - w.sec ? w.sec : null;
+    }
   }
   return null;
 }

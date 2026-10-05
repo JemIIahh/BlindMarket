@@ -33,8 +33,8 @@ function secretsMatch(a: string, b: string): boolean {
  * POST /api/v1/telegram/webhook
  * Telegram's callback. Authenticated by the secret token Telegram echoes in a
  * header (set with setWebhook's secret_token); there is no user session here.
- * Answers 200 once the secret checks out, even if handling failed, so Telegram
- * does not retry into a loop.
+ * Answers 200 once the secret checks out, before handling, so a slow reply
+ * cannot make Telegram time out and redeliver.
  */
 telegramRouter.post('/webhook', async (req, res) => {
   if (!telegramWebhookReady()) return disabled(res);
@@ -43,8 +43,10 @@ telegramRouter.post('/webhook', async (req, res) => {
     res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Bad webhook secret' } });
     return;
   }
-  await handleTelegramUpdate(req.body);
+  // Answer first: replies to the chat can take seconds (retries), and Telegram
+  // would time out and redeliver. handleTelegramUpdate never throws.
   res.json({ success: true, data: {} } as ApiResponse);
+  void handleTelegramUpdate(req.body);
 });
 
 function sessionWallets(req: AuthRequest): string[] {

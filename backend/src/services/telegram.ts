@@ -23,6 +23,7 @@ import {
   isTelegramType,
   isTypeEnabled,
   linkChat,
+  peekLinkNonce,
   unlinkChat,
   walletsOfChat,
 } from './telegramStore.js';
@@ -157,6 +158,17 @@ export async function handleTelegramUpdate(update: unknown): Promise<void> {
     const [, command, arg] = m;
 
     if (command === 'start' && arg) {
+      // A chat already connected to other wallets is not switched by a link:
+      // someone could send this user their own link and take over their alerts.
+      const incoming = await peekLinkNonce(arg);
+      const current = await walletsOfChat(chat);
+      if (incoming && current.some((w) => !incoming.includes(w))) {
+        await sendTelegram(
+          chat,
+          `This chat is already connected to ${current.map(short).join(', ')}. To connect a different wallet, send /stop first, then open the link again.`,
+        );
+        return;
+      }
       const wallets = await consumeLinkNonce(arg);
       if (!wallets) {
         await sendTelegram(chat, 'That link has expired or was already used. Open Settings in BlindMarket and press "Connect Telegram" again.');

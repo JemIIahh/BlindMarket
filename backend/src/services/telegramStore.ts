@@ -89,6 +89,19 @@ export async function consumeLinkNonce(nonce: string): Promise<string[] | null> 
   }
 }
 
+/** The wallets a nonce was minted for, without consuming it. */
+export async function peekLinkNonce(nonce: string): Promise<string[] | null> {
+  if (!NONCE_RE.test(nonce)) return null;
+  const raw = await redis.get(KEY.nonce(nonce));
+  if (!raw) return null;
+  try {
+    const addrs = normalise(JSON.parse(raw) as string[]);
+    return addrs.length > 0 ? addrs : null;
+  } catch {
+    return null;
+  }
+}
+
 function parseLink(raw: string | null): TelegramLink | null {
   if (!raw) return null;
   try {
@@ -137,7 +150,11 @@ export async function linkChat(chatId: string, addresses: string[]): Promise<str
 /** Remove every link for a chat, and its preferences. Returns how many wallets were unlinked. */
 export async function unlinkChat(chatId: string): Promise<number> {
   const wallets = await walletsOfChat(chatId);
-  for (const a of wallets) await redis.del(KEY.link(a));
+  // Only links that still point here: a wallet re-linked to another chat
+  // since keeps that link.
+  for (const a of wallets) {
+    if ((await getLink(a))?.chatId === chatId) await redis.del(KEY.link(a));
+  }
   await redis.del(KEY.chat(chatId));
   await redis.del(KEY.prefs(chatId));
   return wallets.length;

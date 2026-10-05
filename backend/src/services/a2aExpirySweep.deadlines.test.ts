@@ -21,6 +21,8 @@ const tryExpire = vi.fn(async () => ({ ok: true }));
 const resolveCachedTaskByHash = vi.fn(async (_hash: string) => ({ taskId: '1', chain: 'arc' }) as { taskId: string; chain: string } | null);
 const getTaskOn = vi.fn(async (_chain: string, _id: number) => ({ taskHash: TASK, status: 1 }) as { taskHash: string; status: number });
 const notifyOnce = vi.fn(async (_key: string, _to: string, _input: Record<string, unknown>) => true);
+// When the sweep first saw a task: a week before "now" unless a test says otherwise.
+const firstSeenAt = vi.fn(async (_key: string, nowSec: number, _ttl: number) => nowSec - 7 * 86_400 as number | null);
 
 vi.mock('./deploymentIdentity.js', () => ({ backgroundWritesAllowed: () => true }));
 vi.mock('./a2aStore.js', () => ({
@@ -40,6 +42,7 @@ vi.mock('./taskChain.js', () => ({
 vi.mock('./escrow.js', () => ({ getTaskOn: (chain: string, id: number) => getTaskOn(chain, id) }));
 vi.mock('./notificationStore.js', () => ({
   notifyOnce: (key: string, to: string, input: Record<string, unknown>) => notifyOnce(key, to, input),
+  firstSeenAt: (key: string, nowSec: number, ttl: number) => firstSeenAt(key, nowSec, ttl),
 }));
 vi.mock('./socket.js', () => ({ emitTaskAvailable: () => {} }));
 vi.mock('./chainRuntime.js', () => ({ chainRuntime: () => ({}) }));
@@ -58,6 +61,7 @@ beforeEach(() => {
   resolveCachedTaskByHash.mockResolvedValue({ taskId: '1', chain: 'arc' });
   getTaskOn.mockResolvedValue({ taskHash: TASK, status: 1 });
   notifyOnce.mockResolvedValue(true);
+  firstSeenAt.mockImplementation(async (_key: string, nowSec: number) => nowSec - 7 * 86_400);
 });
 
 describe('sweepMissedDeadlines', () => {
@@ -159,6 +163,22 @@ describe('deadline reminders', () => {
 
   it('does not tell a task posted with minutes left that it has 24h', async () => {
     inProgress(Math.floor(NOW / 1000) + 20 * 60);
+    await sweepMissedDeadlines(NOW);
+    expect(reminders()).toHaveLength(0);
+  });
+
+  it('does not remind a task the sweep is seeing for the first time inside a window', async () => {
+    // Just posted with the default ~24h deadline.
+    firstSeenAt.mockImplementation(async (_key: string, nowSec: number) => nowSec);
+    inProgress(Math.floor(NOW / 1000) + 23 * H);
+    await sweepMissedDeadlines(NOW);
+    expect(reminders()).toHaveLength(0);
+    expect(firstSeenAt).toHaveBeenCalledWith(`remind:${TASK}`, Math.floor(NOW / 1000), expect.any(Number));
+  });
+
+  it('sends nothing when the first-seen time cannot be read', async () => {
+    firstSeenAt.mockResolvedValue(null);
+    inProgress(Math.floor(NOW / 1000) + 50 * 60);
     await sweepMissedDeadlines(NOW);
     expect(reminders()).toHaveLength(0);
   });

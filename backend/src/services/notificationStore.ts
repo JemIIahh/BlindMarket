@@ -165,6 +165,23 @@ export async function notifyOnce(
 }
 
 /**
+ * When `key` was first recorded (unix seconds): stores `nowSec` the first time,
+ * returns the stored value after that. Kept for `ttlSec`. null if Redis fails,
+ * so a caller can skip rather than guess.
+ */
+export async function firstSeenAt(key: string, nowSec: number, ttlSec: number): Promise<number | null> {
+  try {
+    const k = `notif:seen:${key}`;
+    if ((await redis.set(k, String(nowSec), 'EX', Math.max(60, Math.ceil(ttlSec)), 'NX')) !== null) return nowSec;
+    const stored = Number(await redis.get(k));
+    return Number.isFinite(stored) && stored > 0 ? stored : null;
+  } catch (err) {
+    console.warn('[notif] firstSeenAt failed (non-fatal):', (err as Error).message);
+    return null;
+  }
+}
+
+/**
  * One-liner for route handlers: resolves poster + executor from the A2A
  * store and fans out the right copy to each. Never throws — failures log
  * and the settlement response proceeds.

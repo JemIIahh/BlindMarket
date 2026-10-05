@@ -18,11 +18,14 @@ Telegram. Treat the "Setup" and "Verify" steps below as the first real test.
 | Task accepted / result submitted / completed / verification failed / dispute | As they happen | existing `notifyLifecycle` |
 
 Reminders are once per task per window (`notifyOnce` keys `remind:<task>:<seconds>`),
-so restarts and API replicas cannot double-send. A reminder only fires while a
-task is *freshly* inside its window (see `deadlineReminders.ts`): a task posted
-with 20 minutes left does not get a "24 hours left" message. A sweep outage
-longer than the window's grace (3 h for the 24 h mark, 15 min for the 1 h mark)
-skips that reminder rather than sending a late one.
+so restarts and API replicas cannot double-send. A reminder only fires for a
+mark the task lived through: the sweep records when it first saw each task
+(`notif:seen:remind:<task>`) and skips a mark that had already passed by then.
+So a task posted with the default 24 h deadline gets no "24 hours left" message
+right after posting, only the 1 h one later. A reminder also only fires while the
+task is freshly inside its window; a sweep outage longer than the window's grace
+(3 h for the 24 h mark, 15 min for the 1 h mark) skips that reminder rather than
+sending a late one.
 
 Not built yet: submission counts and "winner selected" alerts. They belong to
 open-submission tasks (`docs/OPEN-SUBMISSION-TASKS.md`), which do not exist yet.
@@ -53,6 +56,9 @@ and why it can be removed from either side.
 2. They open it and press **Start**. Telegram calls the webhook with `/start <nonce>`;
    the server consumes the nonce and links that chat to those wallets.
 3. Only a **private chat** can link (a group would show alerts to everyone in it).
+   A chat already connected to other wallets is not switched by a new link: the
+   user must send `/stop` first. Otherwise anyone could send someone their own
+   link and take over that person's alerts.
 4. **Disconnect** in Settings, or `/stop` in the chat, removes the link and the
    chat's preferences. A chat that blocks the bot is unlinked automatically.
 
@@ -94,8 +100,8 @@ the webhook answers 503. With a token but no secret, the webhook answers 503.
 - [ ] Settings shows **Connect Telegram**; pressing it opens the bot; **Start**
       makes the page switch to the toggles on its own.
 - [ ] `/status` in the chat lists your shortened wallet.
-- [ ] Post a task with a deadline about 1 hour out: a "Deadline approaching"
-      message arrives within a few minutes, and only once.
+- [ ] Post a task with a deadline about 2 hours out: no reminder right away;
+      a "Deadline approaching" message arrives once, at about 1 hour left.
 - [ ] Toggle "Deadline approaching" off: the next reminder does not arrive.
 - [ ] **Disconnect Telegram** (or `/stop`): nothing further is sent.
 - [ ] Read a received message end to end: it must contain no brief, title or

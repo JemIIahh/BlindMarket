@@ -259,6 +259,27 @@ describe('handleTelegramUpdate', () => {
     expect(await consumeLinkNonce(nonce)).toBeNull();
   });
 
+  it("does not let someone else's link take over a chat that is already connected", async () => {
+    const OTHER = '0x' + 'c'.repeat(40);
+    await linkChat('42', [WALLET]);
+    const theirs = await createLinkNonce([OTHER]);
+    await handleTelegramUpdate(update(1, `/start ${theirs}`));
+    expect((await getLink(WALLET))?.chatId).toBe('42');
+    expect(await getLink(OTHER)).toBeNull();
+    expect(sent()[0].body.text).toMatch(/already connected to 0xaaaa…aaaa/);
+    // Not consumed: the owner of that link can still use it in their own chat.
+    expect(await consumeLinkNonce(theirs)).toEqual([OTHER]);
+  });
+
+  it('lets the same account connect again, also with an extra wallet', async () => {
+    const EXTRA = '0x' + 'd'.repeat(40);
+    await linkChat('42', [WALLET]);
+    const nonce = await createLinkNonce([WALLET, EXTRA]);
+    await handleTelegramUpdate(update(1, `/start ${nonce}`));
+    expect((await getLink(EXTRA))?.chatId).toBe('42');
+    expect(sent()[0].body.text).toMatch(/^Connected to/);
+  });
+
   it('refuses an unknown, used or expired nonce and links nothing', async () => {
     await handleTelegramUpdate(update(1, `/start ${'0'.repeat(32)}`));
     expect(await getLink(WALLET)).toBeNull();

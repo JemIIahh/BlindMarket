@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../../context/AuthContext';
 import { Button, ErrorNotice, Toggle } from '../bb';
@@ -23,20 +23,23 @@ const KEY = ['telegram', 'status'] as const;
 export function TelegramAlerts() {
   const { isAuthenticated } = useAuth();
   const qc = useQueryClient();
-  // After opening the link, poll until the chat has pressed Start.
-  const [waiting, setWaiting] = useState(false);
+  // The link just minted, until the chat presses Start or the link expires.
+  // While set, poll so the card switches to the toggles on its own.
+  const [pending, setPending] = useState<{ url: string; until: number } | null>(null);
 
   const status = useQuery({
     queryKey: KEY,
     queryFn: telegramStatus,
     enabled: isAuthenticated,
-    refetchInterval: (q) => (waiting && !q.state.data?.linked ? 3_000 : false),
+    refetchInterval: (q) => (pending && !q.state.data?.linked && Date.now() < pending.until ? 3_000 : false),
   });
 
   const connect = useMutation({
     mutationFn: telegramLink,
-    onSuccess: ({ url }) => {
-      setWaiting(true);
+    onSuccess: ({ url, expiresInSec }) => {
+      setPending({ url, until: Date.now() + expiresInSec * 1000 });
+      // Browsers that block a window opened after a request (Safari) still
+      // get the visible link below.
       window.open(url, '_blank', 'noopener,noreferrer');
     },
   });
@@ -47,15 +50,27 @@ export function TelegramAlerts() {
   const disconnect = useMutation({
     mutationFn: telegramUnlink,
     onSuccess: () => {
-      setWaiting(false);
+      setPending(null);
       qc.invalidateQueries({ queryKey: KEY });
     },
   });
 
+  const linkedNow = status.data?.linked === true;
+  // Stop waiting once the chat is connected, or when the link expires.
+  useEffect(() => {
+    if (!pending) return;
+    if (linkedNow) {
+      setPending(null);
+      return;
+    }
+    const t = setTimeout(() => setPending(null), Math.max(0, pending.until - Date.now()));
+    return () => clearTimeout(t);
+  }, [pending, linkedNow]);
+
   const data = status.data;
   if (!isAuthenticated || !data?.enabled) return null;
   const linked = data.linked;
-  const showWaiting = waiting && !linked;
+  const showWaiting = pending !== null && !linked;
 
   return (
     <div className="space-y-4 pt-5 border-t border-line">
@@ -72,13 +87,16 @@ export function TelegramAlerts() {
           <Button
             variant="outline"
             size="sm"
-            label={connect.isPending ? 'Opening…' : showWaiting ? 'Open Telegram again' : 'Connect Telegram'}
+            label={connect.isPending ? 'Opening…' : showWaiting ? 'New link' : 'Connect Telegram'}
             disabled={connect.isPending}
             onClick={() => connect.mutate()}
           />
-          {showWaiting && (
+          {showWaiting && pending && (
             <div className="text-xs text-ink-3 leading-relaxed">
-              Press <span className="text-ink-2">Start</span> in Telegram. This page connects on its own once you do. The link works for 10 minutes.
+              <a href={pending.url} target="_blank" rel="noopener noreferrer" className="text-ink underline">
+                Open Telegram
+              </a>{' '}
+              and press <span className="text-ink-2">Start</span>. This page connects on its own once you do. The link works for 10 minutes.
             </div>
           )}
           {connect.error && <ErrorNotice error={connect.error} title="Couldn't start Telegram connect" />}
