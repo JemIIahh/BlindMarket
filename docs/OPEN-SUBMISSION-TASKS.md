@@ -94,7 +94,7 @@ per-submission cost off the hot paths:
 - **Spam without a cap.** One submission per agent, registered agents only,
   and the existing same-owner guard (`sameOwnerSubtask`) re-applied at submit
   time. A per-agent rate limit and a *refundable* submission bond are options
-  (section 7, open question 3); neither is a cap.
+  (section 8, question 3); neither is a cap.
 - **Storage:** the backend submission store grows with N. Paginate every read
   and list endpoint; index by task.
 
@@ -165,7 +165,7 @@ assigned or cancelled out from under submitters):
 - `cancelTask`: revert for an open task once `submissionCount > 0`.
 - `assignWorker`, `marketplaceAssign`: revert for open tasks.
 - `claimTimeout`, `raiseDispute`, `resolveDispute`: define behaviour for open
-  tasks (section 7, open question 4).
+  tasks (section 7).
 
 Do not copy the payout block a fifth time. The worker/treasury split via
 `_transferPayout` plus the reputation hook is repeated inline today in
@@ -379,17 +379,34 @@ so it is stale here and should be corrected separately.
 Pricing/auction mechanics, multi-winner payouts, and rewriting reputation. The
 legacy `apply`/`assign` routes are unaffected unless deleted separately.
 
-## 7. Open questions
+## 7. Decisions (2026-10-05)
 
-1. **Losers.** Winner-take-all, or an optional creator-set participation fee
-   for runners-up? (A fee improves entry quality at the creator's cost.)
-2. **Pick window.** Default length and bounds.
+- **Winner-take-all.** No participation fee; one winner per task.
+- **Pick window is chosen per task.** *Agent-managed*: the verifier picks from the
+  deadline onward and the creator is told. *Creator-review*: the creator gets a
+  window first (default 24 h), then the verifier.
+- **If the verifier never acts:** creators are notified (deadline reminders and
+  status alerts, including Telegram; see `docs/TELEGRAM-BOT.md`), **and** the
+  contract has a terminal path: task verifier, then the platform's backup judge
+  (the global `verifier` role), then admin adjudication. Funds are never stuck,
+  and the creator cannot refund after submissions exist.
+- **Upgrade `BlindEscrow`**, testnets first; live proxies only with explicit
+  sign-off.
+- **Build order:** Telegram and deadline notifications first (done, see
+  `docs/TELEGRAM-BOT.md`), then open submission on testnet, then live networks,
+  then private tasks.
+- **No cap** on public submissions.
+
+Still to confirm: the verifier and backup-judge window lengths (proposed 48 h
+each).
+
+## 8. Open questions (remaining)
+
+1. ~~Losers~~ decided: winner-take-all.
+2. ~~Pick window~~ decided: per task (section 7); bounds still to set.
 3. **Spam control at scale.** With no cap, do we add a refundable submission
    bond, a per-agent rate limit, both, or neither at launch?
-4. **If the verifier never acts.** Backstop options: escalate to admin
-   adjudication (like the existing unjudged-work escalation), or a refund after
-   a further grace period. The latter reopens the free-work hole after the
-   verifier fails.
+4. ~~If the verifier never acts~~ decided: backup judge, then admin (section 7).
 5. **Does an open-task winner earn a reputation rating**, given the current
    `_earnsRating` rule?
 6. **Private shortlist size `K`** and whether the creator can override the
