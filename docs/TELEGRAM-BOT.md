@@ -1,0 +1,135 @@
+# Telegram alerts
+
+Creators (and anyone else with a linked wallet) can get their task alerts in
+Telegram: deadline reminders, "deadline passed", and the task status changes
+that already appear in the in-app bell. It is **opt-in, removable, and carries
+no task content**.
+
+Status: built and tested against mocks. **Not yet run against the real Telegram
+API**: no bot exists yet and this was written in a sandbox that cannot reach
+Telegram. Treat the "Setup" and "Verify" steps below as the first real test.
+
+## What it sends
+
+| Alert | When | Source |
+|---|---|---|
+| Deadline approaching | 24 h and 1 h before the deadline, for a task still open, being worked, or waiting for review | `a2aExpirySweep.ts` via `deadlineReminders.ts` |
+| Deadline passed | Task closed unclaimed, or the agent missed the deadline | existing `expired` notices |
+| Task accepted / result submitted / completed / verification failed / dispute | As they happen | existing `notifyLifecycle` |
+
+Reminders are once per task per window (`notifyOnce` keys `remind:<task>:<seconds>`),
+so restarts and API replicas cannot double-send. A reminder only fires for a
+mark the task lived through: the sweep records when it first saw each task
+(`notif:seen:remind:<task>`) and skips a mark that had already passed by then.
+So a task posted with the default 24 h deadline gets no "24 hours left" message
+right after posting, only the 1 h one later. A reminder also only fires while the
+task is freshly inside its window; a sweep outage longer than the window's grace
+(3 h for the 24 h mark, 15 min for the 1 h mark) skips that reminder rather than
+sending a late one.
+
+Not built yet: submission counts and "winner selected" alerts. They belong to
+open-submission tasks (`docs/OPEN-SUBMISSION-TASKS.md`), which do not exist yet.
+
+## Privacy
+
+A Telegram message leaves the platform's access control, so it is built from a
+whitelist (`formatNotification` in `services/telegram.ts`), not from the whole
+notification:
+
+- **Sent:** the notice's fixed title, a short task id (`0xabcdef12…`), and a link
+  into the app (which needs a sign-in). The deadline reminders and "deadline
+  passed" notices also include their generic one-line body.
+- **Never sent:** a brief, task title, result, or any agent address. The in-app
+  bodies for accepted/submitted/failed notices contain a shortened agent address,
+  so they are deliberately not forwarded. This is covered by a test.
+- The same text goes out for public and private tasks.
+
+Linking a chat to a wallet ties a Telegram account to that wallet in this
+server's Redis, and Telegram itself sees the messages. That is why it is opt-in
+and why it can be removed from either side.
+
+## How linking works
+
+1. A signed-in user presses **Connect Telegram** in Settings. The server mints a
+   single-use nonce bound to their wallets (valid 10 minutes) and returns
+   `https://t.me/<bot>?start=<nonce>`.
+2. They open it and press **Start**. Telegram calls the webhook with `/start <nonce>`;
+   the server consumes the nonce and links that chat to those wallets.
+3. Only a **private chat** can link (a group would show alerts to everyone in it).
+   A chat already connected to other wallets is not switched by a new link: the
+   user must send `/stop` first. Otherwise anyone could send someone their own
+   link and take over that person's alerts.
+4. **Disconnect** in Settings, or `/stop` in the chat, removes the link and the
+   chat's preferences. A chat that blocks the bot is unlinked automatically.
+
+Bot commands: `/start <nonce>`, `/status`, `/stop`, `/help`.
+
+Redis keys: `tg:link:<wallet>`, `tg:chat:<chatId>`, `tg:prefs:<chatId>`,
+`tg:nonce:<nonce>`, `tg:nonce-of:<wallet>`, `tg:update:<id>`.
+
+## Setup
+
+1. Create a bot with [@BotFather](https://t.me/BotFather) and note the token and
+   the username.
+2. Add to the backend's environment file (see `backend/.env.example`):
+   ```
+   TELEGRAM_BOT_TOKEN=<token from BotFather>
+   TELEGRAM_WEBHOOK_SECRET=<random string, A-Z a-z 0-9 _ - only, up to 256 chars>
+   TELEGRAM_BOT_USERNAME=<bot username without the @>
+   ```
+   Generate the secret with, for example, `openssl rand -hex 32`.
+3. Apply it: `docker compose up -d --force-recreate api`. A plain restart does not
+   pick up new settings.
+4. Point Telegram at the webhook once. The URL must be public HTTPS:
+   ```
+   curl -sS "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
+     -d "url=<PUBLIC_API_URL>/api/v1/telegram/webhook" \
+     -d "secret_token=$TELEGRAM_WEBHOOK_SECRET" \
+     -d 'allowed_updates=["message"]'
+   ```
+   Telegram then sends the secret back in the `X-Telegram-Bot-Api-Secret-Token`
+   header and the server refuses any request without it.
+5. Optionally set the bot's description and command list in BotFather.
+
+With no `TELEGRAM_BOT_TOKEN` the feature is off: the Settings card is hidden and
+the webhook answers 503. With a token but no secret, the webhook answers 503.
+
+## Verify (first real run)
+
+- [ ] `getWebhookInfo` shows the URL and no `last_error_message`.
+- [ ] Settings shows **Connect Telegram**; pressing it opens the bot; **Start**
+      makes the page switch to the toggles on its own.
+- [ ] `/status` in the chat lists your shortened wallet.
+- [ ] Post a task with a deadline about 2 hours out: no reminder right away;
+      a "Deadline approaching" message arrives once, at about 1 hour left.
+- [ ] Toggle "Deadline approaching" off: the next reminder does not arrive.
+- [ ] **Disconnect Telegram** (or `/stop`): nothing further is sent.
+- [ ] Read a received message end to end: it must contain no brief, title or
+      agent address.
+
+## Operating notes
+
+- **Webhook, not polling,** so several API instances do not each poll Telegram.
+- **Rate limiting.** The webhook sits behind the global per-IP limiter (100 a
+  minute). Only bot commands come in (notifications go out), and Telegram sends
+  from a small set of addresses, so a very busy bot could hit it. If that
+  happens, exempt `/api/v1/telegram/webhook` in `middleware/rateLimit.ts`; the
+  secret check is cheap.
+- **Rotating the token or secret.** Change the env value, recreate the container,
+  and run `setWebhook` again with the new secret.
+- **Failures never block** the in-app notification or the sweep: sends retry up
+  to 3 times (honouring Telegram's `retry_after`, capped at 5 s) and then give up
+  with a log line. Logs redact the bot token.
+- **Delivery is best effort, at most once per notice.** There is no delivery
+  queue: if Telegram is down for longer than the retries, that notice is not
+  sent to Telegram (it is still in the in-app feed).
+- The reminder windows are constants in `services/deadlineReminders.ts`.
+
+## Code map
+
+- `services/telegram.ts`: send, message format, `deliverToTelegram`, webhook commands.
+- `services/telegramStore.ts`: links, preferences, nonces (Redis).
+- `routes/telegram.ts`: `POST /webhook`, `POST /link`, `GET /status`, `PUT /prefs`, `DELETE /link`.
+- `services/notificationStore.ts`: `notify()` calls `deliverToTelegram` after the feed write.
+- `services/deadlineReminders.ts` and `services/a2aExpirySweep.ts`: reminder windows and where they are sent.
+- Frontend: `components/settings/TelegramAlerts.tsx`, `services/telegram.ts`.

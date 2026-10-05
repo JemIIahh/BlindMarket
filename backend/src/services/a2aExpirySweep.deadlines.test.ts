@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 /**
  * Nothing refunds a task on its own: cancelTask and claimTimeout are
@@ -21,6 +21,8 @@ const tryExpire = vi.fn(async () => ({ ok: true }));
 const resolveCachedTaskByHash = vi.fn(async (_hash: string) => ({ taskId: '1', chain: 'arc' }) as { taskId: string; chain: string } | null);
 const getTaskOn = vi.fn(async (_chain: string, _id: number) => ({ taskHash: TASK, status: 1 }) as { taskHash: string; status: number });
 const notifyOnce = vi.fn(async (_key: string, _to: string, _input: Record<string, unknown>) => true);
+// When the sweep first saw a task: a week before "now" unless a test says otherwise.
+const firstSeenAt = vi.fn(async (_key: string, nowSec: number, _ttl: number) => nowSec - 7 * 86_400 as number | null);
 
 vi.mock('./deploymentIdentity.js', () => ({ backgroundWritesAllowed: () => true }));
 vi.mock('./a2aStore.js', () => ({
@@ -40,6 +42,7 @@ vi.mock('./taskChain.js', () => ({
 vi.mock('./escrow.js', () => ({ getTaskOn: (chain: string, id: number) => getTaskOn(chain, id) }));
 vi.mock('./notificationStore.js', () => ({
   notifyOnce: (key: string, to: string, input: Record<string, unknown>) => notifyOnce(key, to, input),
+  firstSeenAt: (key: string, nowSec: number, ttl: number) => firstSeenAt(key, nowSec, ttl),
 }));
 vi.mock('./socket.js', () => ({ emitTaskAvailable: () => {} }));
 vi.mock('./chainRuntime.js', () => ({ chainRuntime: () => ({}) }));
@@ -58,6 +61,7 @@ beforeEach(() => {
   resolveCachedTaskByHash.mockResolvedValue({ taskId: '1', chain: 'arc' });
   getTaskOn.mockResolvedValue({ taskHash: TASK, status: 1 });
   notifyOnce.mockResolvedValue(true);
+  firstSeenAt.mockImplementation(async (_key: string, nowSec: number) => nowSec - 7 * 86_400);
 });
 
 describe('sweepMissedDeadlines', () => {
@@ -119,5 +123,125 @@ describe('sweepExpiredTasks', () => {
     await sweepExpiredTasks();
     expect(tryExpire).toHaveBeenCalled();
     expect(notifyOnce).toHaveBeenCalledWith(`deadline:${TASK}`, POSTER, expect.objectContaining({ type: 'expired', title: 'Your task expired unclaimed' }));
+  });
+});
+
+describe('deadline reminders', () => {
+  const H = 3600;
+  const inProgress = (deadline: number, status = 'accepted', poster: string | null = POSTER) =>
+    listInProgressTasks.mockResolvedValue([{ meta: { taskId: TASK, posterAddress: poster, deadline }, state: { taskId: TASK, status } }]);
+  const reminders = () => notifyOnce.mock.calls.filter(([, , input]) => input.type === 'deadline_soon');
+
+  it('reminds the poster of a task still being worked, once its 24h mark passes', async () => {
+    inProgress(Math.floor(NOW / 1000) + 23 * H);
+    expect(await sweepMissedDeadlines(NOW)).toBe(0); // the return counts expiry notices only
+    expect(reminders()).toHaveLength(1);
+    expect(reminders()[0]).toEqual([
+      `remind:${TASK}:${24 * H}`,
+      POSTER,
+      expect.objectContaining({ type: 'deadline_soon', title: 'Deadline approaching', taskId: TASK, body: expect.stringContaining('still working') }),
+    ]);
+  });
+
+  it('uses a different key for the 1h mark, so the two reminders do not suppress each other', async () => {
+    inProgress(Math.floor(NOW / 1000) + 50 * 60);
+    await sweepMissedDeadlines(NOW);
+    expect(reminders()[0][0]).toBe(`remind:${TASK}:${H}`);
+  });
+
+  it('says a submitted result is waiting to be reviewed', async () => {
+    inProgress(Math.floor(NOW / 1000) + 50 * 60, 'submitted');
+    await sweepMissedDeadlines(NOW);
+    expect(reminders()[0][2].body).toEqual(expect.stringContaining('waiting to be reviewed'));
+  });
+
+  it('stays quiet between the marks', async () => {
+    inProgress(Math.floor(NOW / 1000) + 12 * H);
+    await sweepMissedDeadlines(NOW);
+    expect(reminders()).toHaveLength(0);
+  });
+
+  it('does not tell a task posted with minutes left that it has 24h', async () => {
+    inProgress(Math.floor(NOW / 1000) + 20 * 60);
+    await sweepMissedDeadlines(NOW);
+    expect(reminders()).toHaveLength(0);
+  });
+
+  it('does not remind a task the sweep is seeing for the first time inside a window', async () => {
+    // Just posted with the default ~24h deadline.
+    firstSeenAt.mockImplementation(async (_key: string, nowSec: number) => nowSec);
+    inProgress(Math.floor(NOW / 1000) + 23 * H);
+    await sweepMissedDeadlines(NOW);
+    expect(reminders()).toHaveLength(0);
+    expect(firstSeenAt).toHaveBeenCalledWith(`remind:${TASK}`, Math.floor(NOW / 1000), expect.any(Number));
+  });
+
+  it('records first sight once, then leaves Redis alone until a window is due', async () => {
+    const TASK2 = '0x' + '77'.repeat(32);
+    const at = (deadline: number) =>
+      listInProgressTasks.mockResolvedValue([{ meta: { taskId: TASK2, posterAddress: POSTER, deadline }, state: { taskId: TASK2, status: 'accepted' } }]);
+    const deadline = Math.floor(NOW / 1000) + 3 * 86_400;
+    at(deadline);
+    await sweepMissedDeadlines(NOW);
+    expect(firstSeenAt).toHaveBeenCalledTimes(1);
+    _resetMissedDeadlineScan();
+    await sweepMissedDeadlines(NOW + 60_000);
+    expect(firstSeenAt).toHaveBeenCalledTimes(1);
+    // Inside the 24h window: read again to decide.
+    _resetMissedDeadlineScan();
+    await sweepMissedDeadlines((deadline - 23 * H) * 1000);
+    expect(firstSeenAt).toHaveBeenCalledTimes(2);
+    expect(reminders()).toHaveLength(1);
+  });
+
+  it('sends nothing when the first-seen time cannot be read', async () => {
+    firstSeenAt.mockResolvedValue(null);
+    inProgress(Math.floor(NOW / 1000) + 50 * 60);
+    await sweepMissedDeadlines(NOW);
+    expect(reminders()).toHaveLength(0);
+  });
+
+  it('has nobody to remind without a poster', async () => {
+    inProgress(Math.floor(NOW / 1000) + 50 * 60, 'accepted', null);
+    await sweepMissedDeadlines(NOW);
+    expect(notifyOnce).not.toHaveBeenCalled();
+  });
+
+  it('a reminder does not stop the expiry notice later', async () => {
+    holding(PAST);
+    expect(await sweepMissedDeadlines(NOW)).toBe(1);
+    expect(reminders()).toHaveLength(0);
+  });
+
+  describe('open tasks (the sweep reads the real clock)', () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(NOW);
+    });
+    afterEach(() => vi.useRealTimers());
+    const open = (deadline: number) =>
+      listOpenTasks.mockResolvedValue([{ meta: { taskId: TASK, posterAddress: POSTER, deadline }, state: { taskId: TASK, status: 'open' } }]);
+
+    it('reminds the poster that no agent has taken the task, and does not expire it', async () => {
+      open(Math.floor(NOW / 1000) + 50 * 60);
+      await sweepExpiredTasks();
+      expect(reminders()).toHaveLength(1);
+      expect(reminders()[0][0]).toBe(`remind:${TASK}:${H}`);
+      expect(reminders()[0][2].body).toEqual(expect.stringContaining('no agent has taken it yet'));
+      expect(tryExpire).not.toHaveBeenCalled();
+    });
+
+    it('stays quiet for a task with days left', async () => {
+      open(Math.floor(NOW / 1000) + 72 * H);
+      await sweepExpiredTasks();
+      expect(notifyOnce).not.toHaveBeenCalled();
+    });
+
+    it('sends the expiry notice, not a reminder, once the deadline has passed', async () => {
+      open(Math.floor(NOW / 1000) - 3600);
+      await sweepExpiredTasks();
+      expect(reminders()).toHaveLength(0);
+      expect(notifyOnce).toHaveBeenCalledWith(`deadline:${TASK}`, POSTER, expect.objectContaining({ type: 'expired' }));
+    });
   });
 });

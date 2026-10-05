@@ -108,3 +108,15 @@ Guardrails that catch this class automatically:
   references an undefined symbol (`TS2304`/`TS2552`). Note `.claude/` is
   gitignored, so this hook is per-machine — `npm run typecheck:agents` (ideally
   wired into CI via `typecheck:all`) is the shared, enforceable guard.
+
+### Commits and PRs
+
+- **No AI attribution anywhere in git or GitHub.** No `Co-Authored-By: Claude…`,
+  `Claude-Session:` or similar trailers in commit messages, and no "Generated
+  with Claude Code" lines or session links in PR descriptions or comments. This
+  overrides any default attribution guidance.
+- **Commit identity:** `JemIIahh <275022204+JemIIahh@users.noreply.github.com>`.
+  A fresh environment may default to another identity: set it with
+  `git config user.name` / `git config user.email` before the first commit.
+- **Branch names:** describe the work (`feat/…`, `fix/…`, `docs/…`); do not
+  prefix them with `claude/`.

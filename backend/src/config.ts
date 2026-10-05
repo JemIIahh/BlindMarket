@@ -339,6 +339,11 @@ export const config = {
   // origin list) as the API url — wrong on both counts.
   publicApiUrl: optional('PUBLIC_API_URL', IS_PROD ? PRODUCTION_PUBLIC_URLS.PUBLIC_API_URL : 'http://localhost:3001'),
   publicAppUrl: optional('PUBLIC_APP_URL', IS_PROD ? PRODUCTION_PUBLIC_URLS.PUBLIC_APP_URL : 'http://localhost:5173'),
+  // Telegram notifications (docs/TELEGRAM-BOT.md). Off unless the token is set.
+  // The webhook secret is required to accept Telegram's callbacks at all.
+  telegramBotToken: (process.env.TELEGRAM_BOT_TOKEN ?? '').trim(),
+  telegramWebhookSecret: (process.env.TELEGRAM_WEBHOOK_SECRET ?? '').trim(),
+  telegramBotUsername: (process.env.TELEGRAM_BOT_USERNAME ?? '').trim().replace(/^@/, ''),
   // Verification fails CLOSED: with 0G Compute unconfigured the sealed
   // verifier refuses to verify instead of auto-passing. Only an explicit
   // opt-in (or the vitest 'test' env) re-enables the local auto-pass stub,

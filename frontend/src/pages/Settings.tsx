@@ -24,6 +24,7 @@ import { useSettlement } from '../config/settlement';
 import { authedGet, authedPost, authedDelete } from '../lib/api';
 import { copyToClipboard } from '../lib/utils';
 import { YourAvatarField } from '../components/avatar/AvatarEditor';
+import { TelegramAlerts } from '../components/settings/TelegramAlerts';
 
 const NOTIF_KEYS = {
   payout: 'bb.notify.payout',
@@ -432,6 +433,8 @@ export default function Settings() {
                 </div>
               ))}
             </div>
+
+            <TelegramAlerts />
           </section>
         </div>
 
