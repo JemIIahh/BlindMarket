@@ -92,7 +92,7 @@ export async function sendTelegram(
         await sleep(500 * attempt * attempt);
         continue;
       }
-      console.warn(`[telegram] send failed: ${redact((err as Error).message)}`);
+      console.warn(`[telegram] send failed: ${redact(String((err as Error)?.message ?? err))}`);
       return 'failed';
     }
   }
@@ -124,7 +124,7 @@ export async function deliverToTelegram(address: string, n: Notification): Promi
       console.log('[telegram] chat unreachable — unlinked');
     }
   } catch (err) {
-    console.warn(`[telegram] delivery failed (non-fatal): ${redact((err as Error).message)}`);
+    console.warn(`[telegram] delivery failed (non-fatal): ${redact(String((err as Error)?.message ?? err))}`);
   }
 }
 
@@ -192,6 +192,6 @@ export async function handleTelegramUpdate(update: unknown): Promise<void> {
       );
     }
   } catch (err) {
-    console.warn(`[telegram] update handling failed (non-fatal): ${redact((err as Error).message)}`);
+    console.warn(`[telegram] update handling failed (non-fatal): ${redact(String((err as Error)?.message ?? err))}`);
   }
 }

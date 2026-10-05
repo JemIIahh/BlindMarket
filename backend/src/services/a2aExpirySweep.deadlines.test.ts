@@ -176,6 +176,24 @@ describe('deadline reminders', () => {
     expect(firstSeenAt).toHaveBeenCalledWith(`remind:${TASK}`, Math.floor(NOW / 1000), expect.any(Number));
   });
 
+  it('records first sight once, then leaves Redis alone until a window is due', async () => {
+    const TASK2 = '0x' + '77'.repeat(32);
+    const at = (deadline: number) =>
+      listInProgressTasks.mockResolvedValue([{ meta: { taskId: TASK2, posterAddress: POSTER, deadline }, state: { taskId: TASK2, status: 'accepted' } }]);
+    const deadline = Math.floor(NOW / 1000) + 3 * 86_400;
+    at(deadline);
+    await sweepMissedDeadlines(NOW);
+    expect(firstSeenAt).toHaveBeenCalledTimes(1);
+    _resetMissedDeadlineScan();
+    await sweepMissedDeadlines(NOW + 60_000);
+    expect(firstSeenAt).toHaveBeenCalledTimes(1);
+    // Inside the 24h window: read again to decide.
+    _resetMissedDeadlineScan();
+    await sweepMissedDeadlines((deadline - 23 * H) * 1000);
+    expect(firstSeenAt).toHaveBeenCalledTimes(2);
+    expect(reminders()).toHaveLength(1);
+  });
+
   it('sends nothing when the first-seen time cannot be read', async () => {
     firstSeenAt.mockResolvedValue(null);
     inProgress(Math.floor(NOW / 1000) + 50 * 60);

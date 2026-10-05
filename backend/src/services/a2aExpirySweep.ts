@@ -53,6 +53,9 @@ const heavyResolveAttempted = new Set<string>();
 let timer: NodeJS.Timeout | null = null;
 let inFlight = false;
 
+/** Tasks whose first sight this process has already recorded in Redis. */
+const firstSeenRecorded = new Set<string>();
+
 /**
  * Tell the poster their deadline is close, once per reminder window (see
  * deadlineReminders.ts). Only called for a task whose deadline is still ahead.
@@ -65,9 +68,18 @@ async function remindIfDue(
   status: string,
 ): Promise<void> {
   if (!posterAddress) return;
+  // Redis is remote (hundreds of ms a round trip) and this runs for every
+  // open task every tick, so touch it only when needed: once per task per
+  // process to record first sight, and again only while a window is due.
+  const due = dueReminderWindow(nowSec, deadline, -Infinity);
+  if (due === null && firstSeenRecorded.has(tid)) return;
   // Kept a day past the deadline: long enough to outlive every window.
   const seen = await firstSeenAt(`remind:${tid}`, nowSec, deadline - nowSec + 86_400);
   if (seen === null) return;
+  // Bounded: forgetting only costs one more SET NX for each task.
+  if (firstSeenRecorded.size >= 50_000) firstSeenRecorded.clear();
+  firstSeenRecorded.add(tid);
+  if (due === null) return;
   const window = dueReminderWindow(nowSec, deadline, seen);
   if (window === null) return;
   const { title, body } = reminderCopy(reminderKind(status), deadline - nowSec);
