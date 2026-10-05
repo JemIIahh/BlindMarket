@@ -7,6 +7,7 @@ import { loadAgentByWallet } from './deployedAgentStore.js';
 import { emitTaskAvailable } from './socket.js';
 import { sponsorHint } from './gasSponsorEligibility.js';
 import { notifyOnce } from './notificationStore.js';
+import { dueReminderWindow, reminderCopy, reminderKind } from './deadlineReminders.js';
 import { SWEEP_INTERVAL_MS, EXPIRY_GRACE_SEC } from '../constants.js';
 
 // Re-export for any callers that import from here (backward compat)
@@ -51,6 +52,24 @@ const heavyResolveAttempted = new Set<string>();
 
 let timer: NodeJS.Timeout | null = null;
 let inFlight = false;
+
+/**
+ * Tell the poster their deadline is close, once per reminder window (see
+ * deadlineReminders.ts). Only called for a task whose deadline is still ahead.
+ */
+async function remindIfDue(
+  posterAddress: string | undefined,
+  tid: string,
+  deadline: number,
+  nowSec: number,
+  status: string,
+): Promise<void> {
+  if (!posterAddress) return;
+  const window = dueReminderWindow(nowSec, deadline);
+  if (window === null) return;
+  const { title, body } = reminderCopy(reminderKind(status), deadline - nowSec);
+  await notifyOnce(`remind:${tid}:${window}`, posterAddress, { type: 'deadline_soon', title, body, taskId: tid });
+}
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -167,6 +186,9 @@ export async function sweepExpiredTasks(): Promise<void> {
         }
       }
 
+      // Still open with time left: warn the poster when the deadline nears.
+      if (nowSec < deadline) await remindIfDue(meta.posterAddress, tid, deadline, nowSec, 'open');
+
       if (nowSec < deadline + EXPIRY_GRACE_SEC) continue;
 
       const result = await a2aStore.tryExpire(tid, 'expired');
@@ -226,11 +248,15 @@ export async function sweepMissedDeadlines(now = Date.now()): Promise<number> {
   let notified = 0;
   try {
     const nowSec = Math.floor(now / 1000);
-    for (const { meta } of await a2aStore.listInProgressTasks()) {
+    for (const { meta, state } of await a2aStore.listInProgressTasks()) {
       const tid = meta.taskId.toLowerCase();
       if (!meta.posterAddress) continue;
       const deadline = meta.deadline ?? (await a2aStore.getCachedDeadline(tid).catch(() => null));
-      if (!deadline || nowSec < deadline + EXPIRY_GRACE_SEC) continue;
+      if (!deadline) continue;
+      // Taken but not finished, with time left: warn the poster when it nears.
+      // This scan runs every few minutes, well inside the reminder grace.
+      if (nowSec < deadline) await remindIfDue(meta.posterAddress, tid, deadline, nowSec, state.status);
+      if (nowSec < deadline + EXPIRY_GRACE_SEC) continue;
       const resolved = await resolveCachedTaskByHash(tid).catch(() => null);
       if (!resolved) continue;
       const task = await escrowService.getTaskOn(resolved.chain, Number(resolved.taskId)).catch(() => null);

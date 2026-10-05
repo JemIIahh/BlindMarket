@@ -14,6 +14,7 @@
 import { randomBytes } from 'crypto';
 import { redis } from './redis.js';
 import * as a2aStore from './a2aStore.js';
+import { deliverToTelegram } from './telegram.js';
 
 export type NotificationType =
   | 'assigned'
@@ -24,6 +25,8 @@ export type NotificationType =
   | 'review_received'
   /** A task's deadline passed with its escrow still held: the poster can reclaim it. */
   | 'expired'
+  /** A task's deadline is close and it is still waiting on an agent, its work or a verdict. */
+  | 'deadline_soon'
   /** A hosted agent was left stopped (not restarted with the server): its owner can start it again. */
   | 'agent_stopped';
 
@@ -70,6 +73,8 @@ export async function notify(
     pipe.ltrim(key, 0, FEED_CAP - 1);
     pipe.expire(key, FEED_TTL_S);
     await pipe.exec();
+    // Telegram is an extra channel: fire and forget, it never blocks the feed.
+    void deliverToTelegram(toAddress, notif);
     return notif;
   } catch (err) {
     console.warn('[notifications] push failed:', (err as Error).message);

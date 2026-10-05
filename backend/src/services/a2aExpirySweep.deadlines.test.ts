@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 /**
  * Nothing refunds a task on its own: cancelTask and claimTimeout are
@@ -119,5 +119,91 @@ describe('sweepExpiredTasks', () => {
     await sweepExpiredTasks();
     expect(tryExpire).toHaveBeenCalled();
     expect(notifyOnce).toHaveBeenCalledWith(`deadline:${TASK}`, POSTER, expect.objectContaining({ type: 'expired', title: 'Your task expired unclaimed' }));
+  });
+});
+
+describe('deadline reminders', () => {
+  const H = 3600;
+  const inProgress = (deadline: number, status = 'accepted', poster: string | null = POSTER) =>
+    listInProgressTasks.mockResolvedValue([{ meta: { taskId: TASK, posterAddress: poster, deadline }, state: { taskId: TASK, status } }]);
+  const reminders = () => notifyOnce.mock.calls.filter(([, , input]) => input.type === 'deadline_soon');
+
+  it('reminds the poster of a task still being worked, once its 24h mark passes', async () => {
+    inProgress(Math.floor(NOW / 1000) + 23 * H);
+    expect(await sweepMissedDeadlines(NOW)).toBe(0); // the return counts expiry notices only
+    expect(reminders()).toHaveLength(1);
+    expect(reminders()[0]).toEqual([
+      `remind:${TASK}:${24 * H}`,
+      POSTER,
+      expect.objectContaining({ type: 'deadline_soon', title: 'Deadline approaching', taskId: TASK, body: expect.stringContaining('still working') }),
+    ]);
+  });
+
+  it('uses a different key for the 1h mark, so the two reminders do not suppress each other', async () => {
+    inProgress(Math.floor(NOW / 1000) + 50 * 60);
+    await sweepMissedDeadlines(NOW);
+    expect(reminders()[0][0]).toBe(`remind:${TASK}:${H}`);
+  });
+
+  it('says a submitted result is waiting to be reviewed', async () => {
+    inProgress(Math.floor(NOW / 1000) + 50 * 60, 'submitted');
+    await sweepMissedDeadlines(NOW);
+    expect(reminders()[0][2].body).toEqual(expect.stringContaining('waiting to be reviewed'));
+  });
+
+  it('stays quiet between the marks', async () => {
+    inProgress(Math.floor(NOW / 1000) + 12 * H);
+    await sweepMissedDeadlines(NOW);
+    expect(reminders()).toHaveLength(0);
+  });
+
+  it('does not tell a task posted with minutes left that it has 24h', async () => {
+    inProgress(Math.floor(NOW / 1000) + 20 * 60);
+    await sweepMissedDeadlines(NOW);
+    expect(reminders()).toHaveLength(0);
+  });
+
+  it('has nobody to remind without a poster', async () => {
+    inProgress(Math.floor(NOW / 1000) + 50 * 60, 'accepted', null);
+    await sweepMissedDeadlines(NOW);
+    expect(notifyOnce).not.toHaveBeenCalled();
+  });
+
+  it('a reminder does not stop the expiry notice later', async () => {
+    holding(PAST);
+    expect(await sweepMissedDeadlines(NOW)).toBe(1);
+    expect(reminders()).toHaveLength(0);
+  });
+
+  describe('open tasks (the sweep reads the real clock)', () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(NOW);
+    });
+    afterEach(() => vi.useRealTimers());
+    const open = (deadline: number) =>
+      listOpenTasks.mockResolvedValue([{ meta: { taskId: TASK, posterAddress: POSTER, deadline }, state: { taskId: TASK, status: 'open' } }]);
+
+    it('reminds the poster that no agent has taken the task, and does not expire it', async () => {
+      open(Math.floor(NOW / 1000) + 50 * 60);
+      await sweepExpiredTasks();
+      expect(reminders()).toHaveLength(1);
+      expect(reminders()[0][0]).toBe(`remind:${TASK}:${H}`);
+      expect(reminders()[0][2].body).toEqual(expect.stringContaining('no agent has taken it yet'));
+      expect(tryExpire).not.toHaveBeenCalled();
+    });
+
+    it('stays quiet for a task with days left', async () => {
+      open(Math.floor(NOW / 1000) + 72 * H);
+      await sweepExpiredTasks();
+      expect(notifyOnce).not.toHaveBeenCalled();
+    });
+
+    it('sends the expiry notice, not a reminder, once the deadline has passed', async () => {
+      open(Math.floor(NOW / 1000) - 3600);
+      await sweepExpiredTasks();
+      expect(reminders()).toHaveLength(0);
+      expect(notifyOnce).toHaveBeenCalledWith(`deadline:${TASK}`, POSTER, expect.objectContaining({ type: 'expired' }));
+    });
   });
 });
