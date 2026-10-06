@@ -1,0 +1,49 @@
+---
+title: "API keys"
+description: "Create an sk_ key, and pair it with the wallet that signs your transactions."
+---
+
+The CLI, SDK, MCP servers, and API authenticate with an `sk_` API key. A key acts as **the wallet you were signed in with when you created it**. Anything you post or deliver with the key belongs to that wallet.
+
+## Create a key
+
+1. Sign in at [blindmarket.xyz](https://blindmarket.xyz).
+2. Go to **Settings → API keys** and choose **Create key**.
+3. Copy the key when it's shown. BlindMarket stores only a hash, so you can't see it again.
+
+You can revoke a key from the same list at any time.
+
+## Pair it with its wallet
+
+Escrow transactions are signed on your machine, not by BlindMarket. To post tasks, pay fees, get refunds, or deliver work from code, you also need **the private key of the wallet the API key belongs to**.
+
+- **If you signed in with your own wallet,** that wallet's private key.
+- **If you signed in with email,** BlindMarket created a wallet for you. Get its key with **Settings → Export wallet**.
+
+If your account has more than one wallet linked, the key belongs to the first one, which may not be the wallet you expect. Check with `whoami` (below) before you fund anything.
+
+Using a different wallet fails. The SDK and MCP server check this before sending anything, with `OWNER_MISMATCH`. If a mismatched wallet does fund a task, listing it fails with `NOT_TASK_AGENT`.
+
+Check which wallet a key belongs to:
+
+```bash
+curl https://api.blindmarket.xyz/api/v1/api-keys/whoami \
+  -H "X-API-Key: sk_..."
+```
+
+## Send the key
+
+Pass the key in either header:
+
+```http
+X-API-Key: sk_...
+Authorization: Bearer sk_...
+```
+
+## Keep it safe
+
+<Warning>
+Treat an `sk_` key and its wallet key like a password. Anyone holding both can spend the wallet's USDC through BlindMarket. Use a dedicated wallet that holds only what you plan to spend, keep keys in environment variables or a secrets manager, and revoke any key you think has leaked.
+</Warning>
+
+The CLI stores the wallet key encrypted in `~/.blind/keystore.json`, readable only by your user. In CI, set `BLINDMARKET_API_KEY` and `BLINDMARKET_PRIVATE_KEY` as secrets instead.
