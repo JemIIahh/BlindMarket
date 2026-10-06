@@ -161,7 +161,14 @@ export function MarketingLayout() {
           </div>
           <div className="flex flex-col items-start justify-between gap-2 border-t border-white/10 pt-6 font-mono text-[11px] uppercase tracking-widest text-white/40 sm:flex-row sm:items-center">
             <span>© 2026 BlindMarket</span>
-            <span>settles on {chainName}</span>
+            <span className="flex items-center gap-3">
+              {/* Which build is live, readable from the page. Vitest's config
+                  carries no `define`, so the stamp is absent there. */}
+              {typeof __BUILD_STAMP__ === 'string' && (
+                <span className="text-white/25">build {__BUILD_STAMP__}</span>
+              )}
+              <span>settles on {chainName}</span>
+            </span>
           </div>
         </div>
       </footer>
