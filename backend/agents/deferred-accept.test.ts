@@ -66,14 +66,14 @@ const json = (status: number, body: unknown) => new Response(JSON.stringify(body
  * The backend the worker talks to. Records every call; /accept succeeds (a
  * task with no brief, which the worker hands straight back via /release),
  * can be held open so the worker stays busy while events queue up, or can
- * first answer OFFER_HELD. The feed lists `feed`.
+ * first answer OFFER_HELD. The feed lists `feed`; an accepted task leaves it.
  */
 function fakeBackend() {
   const calls: Array<{ method: string; path: string; body: any }> = [];
   const held = new Map<string, () => void>();
   const holdAccept = new Set<string>();
   const offerHeldOnce = new Set<string>();
-  const feed: unknown[] = [];
+  const feed: Array<{ meta: { taskId: string; chain: string; gasSponsored?: boolean } }> = [];
   const hooks = { onRelease: (_id: string) => {} };
   const fetch = vi.fn(async (url: string, init: RequestInit = {}) => {
     const path = new URL(url).pathname;
@@ -82,7 +82,11 @@ function fakeBackend() {
     const m = path.match(/^\/api\/v1\/a2a\/tasks\/(0x[0-9a-f]{64})\/(accept|release)$/);
     if (m?.[2] === 'accept') {
       if (offerHeldOnce.delete(m[1])) return json(409, { error: { code: 'OFFER_HELD', message: 'offered to another agent' } });
-      const answer = () => json(200, { data: { chain: 'arc', gasSponsored: body?.sponsorGas === true } });
+      const answer = () => {
+        const i = feed.findIndex((e) => e.meta.taskId === m[1]);
+        if (i >= 0) feed.splice(i, 1);
+        return json(200, { data: { chain: 'arc', gasSponsored: body?.sponsorGas === true } });
+      };
       if (!holdAccept.has(m[1])) return answer();
       return new Promise<Response>((resolve) => held.set(m[1], () => resolve(answer())));
     }
@@ -105,10 +109,12 @@ function fakeBackend() {
     finishAccept: (id: string) => held.get(id)!(),
     accepts: () => calls.filter((c) => c.path.endsWith('/accept')).map((c) => c.path.split('/')[5]),
     released: (id: string) => calls.some((c) => c.path === `/api/v1/a2a/tasks/${id}/release`),
+    scans: () => calls.filter((c) => c.path === '/api/v1/a2a/tasks').length,
   };
 }
 
 const event = (taskId: string, sponsored = false) => ({ taskId, meta: { chain: 'arc', ...(sponsored ? { gasSponsored: true } : {}) } });
+const feedEntry = (taskId: string, sponsored = false) => ({ meta: { taskId, chain: 'arc', ...(sponsored ? { gasSponsored: true } : {}) } });
 
 let be: ReturnType<typeof fakeBackend>;
 let logs: string[];
@@ -238,5 +244,41 @@ describe("an accept retried after another agent's offer window", () => {
     expect(be.calls.filter((c) => c.path.endsWith(`${S}/accept`)).map((c) => c.body)).toEqual([{ sponsorGas: true }, { sponsorGas: true }]);
     expect(logged(new RegExp(`not working on ${short(S)}… yet`))).toBe(false);
     expect(be.released(S)).toBe(true);
+  });
+});
+
+describe('tasks skipped for gas, once the wallet is funded', () => {
+  // The feed scan runs on the WS reconcile floor (5 min) while the socket is
+  // up, and on the gas re-check cadence (GAS_RECHECK_MS, 60 s) while tasks
+  // wait for gas. The clock is fixed so each poll below is one re-check tick.
+  const T = Date.UTC(2026, 9, 6, 12);
+  const at = (seconds: number) => vi.setSystemTime(T + seconds * 1000);
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    at(0);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('are all taken on the gas cadence, one per scan, and then the cadence relaxes', async () => {
+    const w = await loadWorker();
+    sock.handlers.connect(undefined);
+    balances = [DUST];
+    be.feed.push(feedEntry(A), feedEntry(B), feedEntry(C));
+    await w.pollAndWork();
+    expect(be.accepts()).toEqual([]);
+
+    balances = [FUNDED];
+    for (const [seconds, taken] of [[60, [A]], [120, [A, B]], [180, [A, B, C]]] as Array<[number, string[]]>) {
+      at(seconds);
+      await w.pollAndWork();
+      expect(be.accepts()).toEqual(taken);
+    }
+    // Nothing waits for gas any more: the next tick does not scan.
+    const scans = be.scans();
+    at(240);
+    await w.pollAndWork();
+    expect(be.scans()).toBe(scans);
   });
 });

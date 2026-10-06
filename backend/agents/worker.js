@@ -1310,7 +1310,10 @@ const resumeFailures = new Map();
 // taskHash → last gas-skip reason logged, so a wallet that stays unfunded
 // logs each skipped task once per reason instead of once per poll. A non-empty
 // map speeds up the feed scan, since funding the wallet makes the tasks
-// acceptable.
+// acceptable. The feed scan accepts one task per scan, so a skipped task that
+// has become affordable stays here (reason null) until it is accepted or can no
+// longer be tried: the rest of a funded backlog is taken on the gas cadence,
+// not one per WS reconcile.
 const gasSkipLogged = new Map();
 // Sponsored gas (docs/AGENT-GAS-FUNDING.md). sponsorHints: tasks an offer, a
 // broadcast or the feed marked gasSponsored — /accept is asked to reserve
@@ -2698,7 +2701,6 @@ export async function pollAndWork() {
     // Tasks that left the board (taken, expired, cancelled) no longer need
     // the fast gas re-check; drop them so the cadence and the map both relax.
     const onBoard = new Set(entries.map(e => e.meta.taskId));
-    for (const k of [...gasSkipLogged.keys()]) if (!onBoard.has(k)) gasSkipLogged.delete(k);
     for (const k of [...chainSkipLogged.keys()]) if (!onBoard.has(k)) chainSkipLogged.delete(k);
     for (const k of [...transientRefusalLogged.keys()]) if (!onBoard.has(k)) transientRefusalLogged.delete(k);
 
@@ -2711,6 +2713,10 @@ export async function pollAndWork() {
       }
       return false;
     });
+    // Same for a task still on the board that this poll will not try (refused
+    // for good, or cooling down after a release).
+    const availableIds = new Set(available.map(e => e.meta.taskId));
+    for (const k of [...gasSkipLogged.keys()]) if (!availableIds.has(k)) gasSkipLogged.delete(k);
     if (available.length === 0) {
       log(`found ${entries.length} open tasks, but already touched all of them`);
       return;
@@ -2738,7 +2744,9 @@ export async function pollAndWork() {
       logged.set(sk.taskHash, sk.reason);
       log(`skipping task ${sk.taskHash.slice(0, 10)}… on ${sk.chain}: ${sk.reason}`);
     }
-    for (const e of affordable) gasSkipLogged.delete(e.meta.taskId);
+    // Affordable now, but only one is accepted below: the others stay on the
+    // gas cadence (see gasSkipLogged), with no skip reason logged.
+    for (const e of affordable) if (gasSkipLogged.has(e.meta.taskId)) gasSkipLogged.set(e.meta.taskId, null);
     if (affordable.length === 0) {
       return;
     }
@@ -2879,6 +2887,7 @@ export async function pollAndWork() {
       log(`could not accept any of the ${available.length} available tasks`);
       return;
     }
+    gasSkipLogged.delete(acceptedTaskHash);
 
     // /accept now awaits on-chain settlement, so the assignment is confirmed
     // before the HTTP response returns. No sleep needed.
@@ -5179,6 +5188,7 @@ async function attemptAccept(taskHash, { force = false, chainHint = null } = {})
 
   if (acceptRes.ok) {
     appliedTasks.set(taskHash, Date.now());
+    gasSkipLogged.delete(taskHash);
     let rootHash = null;
     let wrappedKey = null;
     let privacy = null;
