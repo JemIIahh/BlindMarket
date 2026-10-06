@@ -53,7 +53,16 @@ vi.mock('./redis.js', () => ({
 }));
 
 import type { Notification } from './notificationStore.js';
-import { deliverToTelegram, formatNotification, handleTelegramUpdate, sendTelegram, telegramEnabled, telegramWebhookReady } from './telegram.js';
+import {
+  _outboxesIdle,
+  _setOutboxTiming,
+  deliverToTelegram,
+  formatNotification,
+  handleTelegramUpdate,
+  sendTelegram,
+  telegramEnabled,
+  telegramWebhookReady,
+} from './telegram.js';
 import { consumeLinkNonce, createLinkNonce, getLink, linkChat, setPrefs } from './telegramStore.js';
 
 const WALLET = '0x' + 'a'.repeat(40);
@@ -66,6 +75,11 @@ const note = (over: Partial<Notification> = {}): Notification => ({
 });
 
 const ok = () => new Response('{}', { status: 200 });
+/** Queue an alert and wait until its outbox has been sent. */
+async function deliver(address: string, n: Notification) {
+  await deliverToTelegram(address, n);
+  await _outboxesIdle();
+}
 const fail = (status: number, body: unknown = {}) => new Response(JSON.stringify(body), { status });
 const noSleep = async () => {};
 
@@ -85,6 +99,7 @@ beforeEach(() => {
   egressFetch.mockImplementation(async () => ok());
   cfg.telegramBotToken = '123:SECRET-TOKEN';
   cfg.telegramWebhookSecret = 'whsec';
+  _setOutboxTiming({ quietMs: 0, maxWaitMs: 1_000, chatGapMs: 0, globalGapMs: 0, retrySleep: noSleep });
 });
 
 describe('enablement', () => {
@@ -162,6 +177,13 @@ describe('sendTelegram', () => {
     expect(sleep).toHaveBeenCalledWith(5000);
   });
 
+  it('waits out a longer retry_after when the caller allows it', async () => {
+    const sleep = vi.fn(async () => {});
+    egressFetch.mockImplementationOnce(async () => fail(429, { parameters: { retry_after: 30 } })).mockImplementation(async () => ok());
+    await sendTelegram('42', 'hi', { sleep, maxRetryAfterSec: 60 });
+    expect(sleep).toHaveBeenCalledWith(30_000);
+  });
+
   it('retries a server error twice then gives up', async () => {
     egressFetch.mockImplementation(async () => fail(502));
     expect(await sendTelegram('42', 'hi', { sleep: noSleep })).toBe('failed');
@@ -184,48 +206,48 @@ describe('deliverToTelegram', () => {
   it('does nothing when Telegram is not configured', async () => {
     cfg.telegramBotToken = '';
     await linkChat('42', [WALLET]);
-    await deliverToTelegram(WALLET, note());
+    await deliver(WALLET, note());
     expect(egressFetch).not.toHaveBeenCalled();
   });
 
   it('does nothing for a wallet that is not linked', async () => {
-    await deliverToTelegram(WALLET, note());
+    await deliver(WALLET, note());
     expect(egressFetch).not.toHaveBeenCalled();
   });
 
   it('sends to the linked chat', async () => {
     await linkChat('42', [WALLET]);
-    await deliverToTelegram(WALLET, note());
+    await deliver(WALLET, note());
     expect(sent()).toHaveLength(1);
     expect(sent()[0].body.chat_id).toBe('42');
   });
 
   it('matches the wallet case-insensitively', async () => {
     await linkChat('42', [WALLET]);
-    await deliverToTelegram(WALLET.toUpperCase().replace('0X', '0x'), note());
+    await deliver(WALLET.toUpperCase().replace('0X', '0x'), note());
     expect(sent()).toHaveLength(1);
   });
 
   it('respects a switched-off type, and still sends the others', async () => {
     await linkChat('42', [WALLET]);
     await setPrefs('42', { deadline_soon: false });
-    await deliverToTelegram(WALLET, note({ type: 'deadline_soon', title: 'Deadline approaching' }));
+    await deliver(WALLET, note({ type: 'deadline_soon', title: 'Deadline approaching' }));
     expect(egressFetch).not.toHaveBeenCalled();
-    await deliverToTelegram(WALLET, note({ type: 'completed', title: 'Task completed — escrow released' }));
+    await deliver(WALLET, note({ type: 'completed', title: 'Task completed — escrow released' }));
     expect(sent()).toHaveLength(1);
   });
 
   it('skips types that are not for Telegram', async () => {
     await linkChat('42', [WALLET]);
-    await deliverToTelegram(WALLET, note({ type: 'review_received' }));
-    await deliverToTelegram(WALLET, note({ type: 'agent_stopped' }));
+    await deliver(WALLET, note({ type: 'review_received' }));
+    await deliver(WALLET, note({ type: 'agent_stopped' }));
     expect(egressFetch).not.toHaveBeenCalled();
   });
 
   it('unlinks a chat that can no longer be reached', async () => {
     await linkChat('42', [WALLET]);
     egressFetch.mockImplementation(async () => fail(403));
-    await deliverToTelegram(WALLET, note());
+    await deliver(WALLET, note());
     expect(await getLink(WALLET)).toBeNull();
   });
 
@@ -233,7 +255,7 @@ describe('deliverToTelegram', () => {
     await linkChat('42', [WALLET]);
     egressFetch.mockImplementation(async () => fail(500));
     vi.spyOn(console, 'warn').mockImplementation(() => {});
-    await deliverToTelegram(WALLET, note());
+    await deliver(WALLET, note());
     expect(await getLink(WALLET)).not.toBeNull();
   });
 
@@ -241,6 +263,156 @@ describe('deliverToTelegram', () => {
     mem.failGet = true;
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     await expect(deliverToTelegram(WALLET, note())).resolves.toBeUndefined();
+  });
+});
+
+describe('outbox: bursts and pacing', () => {
+  const taskId = (i: number) => '0x' + i.toString(16).padStart(64, '0');
+  const reminder = (i: number, body = 'Your task closes in about an hour and no agent has taken it yet.') =>
+    note({ id: `r${i}`, type: 'deadline_soon', title: 'Deadline approaching', body, taskId: taskId(i) });
+
+  /** Send times, as Date.now() at each call. */
+  function recordTimes(): number[] {
+    const times: number[] = [];
+    egressFetch.mockImplementation(async () => {
+      times.push(Date.now());
+      return ok();
+    });
+    return times;
+  }
+
+  it('sends a burst of reminders for one chat as one message (tg-2)', async () => {
+    _setOutboxTiming({ quietMs: 30 });
+    await linkChat('42', [WALLET]);
+    // Bulk-posted tasks share a deadline: every reminder falls due in one tick.
+    await Promise.all(Array.from({ length: 20 }, (_, i) => deliverToTelegram(WALLET, reminder(i))));
+    await _outboxesIdle();
+    expect(sent()).toHaveLength(1);
+    const text = sent()[0].body.text;
+    expect(text).toContain('Deadline approaching (20 tasks)');
+    expect(text).toContain('Your task closes in about an hour');
+    for (let i = 0; i < 10; i++) expect(text).toContain(`https://app.example/tasks/${taskId(i)}`);
+    expect(text).not.toContain(taskId(10));
+    expect(text).toContain('…and 10 more');
+  });
+
+  it('sends a lone alert exactly as before', async () => {
+    await linkChat('42', [WALLET]);
+    await deliver(WALLET, note());
+    expect(sent().map((c) => c.body.text)).toEqual([formatNotification(note())]);
+  });
+
+  it('sends the same alert once when two wallets of a chat both get it', async () => {
+    _setOutboxTiming({ quietMs: 30 });
+    const other = '0x' + 'b'.repeat(40);
+    await linkChat('42', [WALLET, other]);
+    const ruling = note({ type: 'disputed', title: 'Dispute ruled — escrow refunded' });
+    await Promise.all([deliverToTelegram(WALLET, ruling), deliverToTelegram(other, ruling)]);
+    await _outboxesIdle();
+    expect(sent().map((c) => c.body.text)).toEqual([formatNotification(ruling)]);
+  });
+
+  it('keeps different notices apart, in arrival order, and drops a body that differs within a group', async () => {
+    await linkChat('42', [WALLET]);
+    _setOutboxTiming({ quietMs: 30 });
+    await Promise.all([
+      deliverToTelegram(WALLET, reminder(1, 'Your task closes in about 2 hours and no agent has taken it yet.')),
+      deliverToTelegram(WALLET, note({ type: 'completed', title: 'Payout credited', taskId: taskId(9) })),
+      deliverToTelegram(WALLET, reminder(2, "Your task's deadline is in about 2 hours. The assigned agent is still working on it.")),
+    ]);
+    await _outboxesIdle();
+    const texts = sent().map((c) => c.body.text);
+    expect(texts).toHaveLength(2);
+    expect(texts[0]).toMatch(/^Deadline approaching \(2 tasks\)\n\n/);
+    expect(texts[0]).not.toContain('Your task');
+    expect(texts[1]).toBe(formatNotification(note({ type: 'completed', title: 'Payout credited', taskId: taskId(9) })));
+  });
+
+  it('never puts an agent address or a non-generic body into a merged message', async () => {
+    await linkChat('42', [WALLET]);
+    _setOutboxTiming({ quietMs: 30 });
+    await Promise.all([1, 2, 3].map((i) => deliverToTelegram(WALLET, note({ taskId: taskId(i) }))));
+    await _outboxesIdle();
+    const [{ body }] = sent();
+    expect(body.text).toContain('Task accepted (3 tasks)');
+    expect(body.text).not.toContain(AGENT.slice(0, 6));
+    expect(body.text).not.toContain('accepted your task');
+  });
+
+  it('spaces messages to one chat by the chat gap', async () => {
+    _setOutboxTiming({ chatGapMs: 60 });
+    await linkChat('42', [WALLET]);
+    const times = recordTimes();
+    await deliverToTelegram(WALLET, note({ type: 'completed', title: 'Payout credited' }));
+    await deliverToTelegram(WALLET, note({ type: 'failed', title: "Submission didn't pass" }));
+    await deliverToTelegram(WALLET, reminder(1));
+    await _outboxesIdle();
+    expect(times).toHaveLength(3);
+    expect(times[1] - times[0]).toBeGreaterThanOrEqual(55);
+    expect(times[2] - times[1]).toBeGreaterThanOrEqual(55);
+  });
+
+  it('spaces sends across chats by the global gap, one message per chat', async () => {
+    _setOutboxTiming({ quietMs: 20, globalGapMs: 40 });
+    const wallets = [1, 2, 3].map((i) => '0x' + String(i).repeat(40));
+    for (const [i, w] of wallets.entries()) await linkChat(String(100 + i), [w]);
+    const times = recordTimes();
+    await Promise.all(wallets.flatMap((w) => [1, 2, 3].map((i) => deliverToTelegram(w, reminder(i)))));
+    await _outboxesIdle();
+    expect(new Set(sent().map((c) => c.body.chat_id))).toEqual(new Set(['100', '101', '102']));
+    expect(sent()).toHaveLength(3);
+    times.sort((a, b) => a - b);
+    expect(times[1] - times[0]).toBeGreaterThanOrEqual(35);
+    expect(times[2] - times[1]).toBeGreaterThanOrEqual(35);
+  });
+
+  it('does not hold a steady stream back past the maximum wait', async () => {
+    _setOutboxTiming({ quietMs: 50, maxWaitMs: 120 });
+    await linkChat('42', [WALLET]);
+    const times = recordTimes();
+    const start = Date.now();
+    // An alert every 20 ms for 400 ms never leaves a 50 ms quiet gap.
+    for (let i = 0; i < 20; i++) {
+      await deliverToTelegram(WALLET, reminder(i));
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    await _outboxesIdle();
+    expect(times[0] - start).toBeLessThan(300);
+    const counted = sent().reduce((n, c) => n + Number(/\((\d+) tasks\)/.exec(c.body.text)?.[1] ?? 1), 0);
+    expect(counted).toBe(20);
+  });
+
+  it('waits out a long retry_after instead of dropping the alert', async () => {
+    const retrySleep = vi.fn(async () => {});
+    _setOutboxTiming({ retrySleep });
+    await linkChat('42', [WALLET]);
+    egressFetch.mockImplementationOnce(async () => fail(429, { parameters: { retry_after: 30 } })).mockImplementation(async () => ok());
+    await deliver(WALLET, reminder(1));
+    expect(retrySleep).toHaveBeenCalledWith(30_000);
+    expect(egressFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('stops sending to a chat that blocked the bot, and unlinks it', async () => {
+    _setOutboxTiming({ chatGapMs: 10 });
+    await linkChat('42', [WALLET]);
+    egressFetch.mockImplementation(async () => fail(403));
+    await deliverToTelegram(WALLET, note({ type: 'completed', title: 'Payout credited' }));
+    await deliverToTelegram(WALLET, note({ type: 'failed', title: "Submission didn't pass" }));
+    await _outboxesIdle();
+    expect(egressFetch).toHaveBeenCalledTimes(1);
+    expect(await getLink(WALLET)).toBeNull();
+  });
+
+  it('counts a very large burst exactly while listing only ten', async () => {
+    _setOutboxTiming({ quietMs: 50 });
+    await linkChat('42', [WALLET]);
+    await Promise.all(Array.from({ length: 1_200 }, (_, i) => deliverToTelegram(WALLET, reminder(i))));
+    await _outboxesIdle();
+    expect(sent()).toHaveLength(1);
+    const text = sent()[0].body.text;
+    expect(text).toContain('Deadline approaching (1200 tasks)');
+    expect(text).toContain('…and 1190 more');
+    expect(text.length).toBeLessThan(4096);
   });
 });
 

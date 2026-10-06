@@ -9,7 +9,9 @@
  * same text goes out for public and private tasks.
  *
  * All sends are best-effort: a Telegram failure must never block the in-app
- * notification or the sweep that triggered it.
+ * notification or the sweep that triggered it. Alerts go out through a
+ * per-chat outbox that merges a burst into one message and paces sends (see
+ * "Outbox" below).
  */
 
 import { config } from '../config.js';
@@ -59,9 +61,10 @@ const MAX_ATTEMPTS = 3;
 export async function sendTelegram(
   chatId: string,
   text: string,
-  opts: { sleep?: (ms: number) => Promise<void> } = {},
+  opts: { sleep?: (ms: number) => Promise<void>; maxRetryAfterSec?: number } = {},
 ): Promise<SendResult> {
   const sleep = opts.sleep ?? defaultSleep;
+  const maxRetryAfterSec = opts.maxRetryAfterSec ?? 5;
   const url = `https://api.telegram.org/bot${config.telegramBotToken}/sendMessage`;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
@@ -78,7 +81,7 @@ export async function sendTelegram(
       const body = (await res.json().catch(() => ({}))) as { parameters?: { retry_after?: number } };
       if (res.status === 403 || res.status === 400) return 'blocked';
       if (res.status === 429 && attempt < MAX_ATTEMPTS) {
-        await sleep(Math.min(5, body.parameters?.retry_after ?? 1) * 1000);
+        await sleep(Math.min(maxRetryAfterSec, body.parameters?.retry_after ?? 1) * 1000);
         continue;
       }
       if (res.status >= 500 && attempt < MAX_ATTEMPTS) {
@@ -111,18 +114,177 @@ export function formatNotification(n: Pick<Notification, 'type' | 'title' | 'bod
   return lines.join('\n');
 }
 
-/** Called by notify() for every notification. Never throws. */
+// ── Outbox ───────────────────────────────────────────────────────────────────
+//
+// Telegram takes about one message a second per chat and about 30 a second per
+// bot, and answers more with 429 and a retry_after. Bursts are normal here:
+// bulk-posted tasks share a deadline, so their reminders and expiry notices
+// fall due in the same sweep tick. Sent one by one, with a 429 wait capped at
+// 5 s, most of such a burst was dropped (delta audit 2026-10-06, tg-2).
+//
+// So a chat's alerts wait in an outbox until the burst stops arriving (a quiet
+// gap of quietMs, at most maxWaitMs after the first), then go out as one
+// message per (type, title): a lone alert reads as before, several become one
+// message listing their tasks. Messages to a chat are chatGapMs apart, sends
+// from this process globalGapMs apart, and a 429 is waited out for up to
+// maxRetryAfterSec.
+//
+// The outbox lives in memory, so delivery stays best effort and at most once:
+// a restart drops what is waiting (at most maxWaitMs of alerts), and the in-app
+// feed still has every notice. Each process (api, indexer) paces its own
+// sends; Telegram's retry_after covers the overlap.
+
+/** A wait that does not hold the process open: at exit, waiting alerts are dropped anyway. */
+const idleSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms).unref());
+
+const timing = {
+  quietMs: 5_000,
+  maxWaitMs: 30_000,
+  chatGapMs: 1_100,
+  globalGapMs: 40,
+  maxRetryAfterSec: 60,
+  /** Waits between retries of one message. */
+  retrySleep: idleSleep,
+};
+
+/** Tests: shorten the outbox timings. */
+export function _setOutboxTiming(t: Partial<typeof timing>): void {
+  Object.assign(timing, t);
+}
+
+/** Tasks a merged message lists; the rest are counted. */
+const LISTED_MAX = 10;
+/** Task ids remembered per group, so a repeat is not counted twice. */
+const TRACKED_MAX = 500;
+
+/** Alerts with the same type and title, waiting to go out as one message. */
+interface Group {
+  type: Notification['type'];
+  title: string;
+  body?: string;
+  /** False once two alerts in the group had different bodies. */
+  sameBody: boolean;
+  taskIds: Set<string>;
+  /** Alerts with no task id, or past TRACKED_MAX. */
+  untracked: number;
+}
+
+interface Outbox {
+  /** Insertion order is send order. */
+  groups: Map<string, Group>;
+  firstAt: number;
+  lastAt: number;
+  lastSentAt: number;
+  done: Promise<void> | null;
+}
+
+const outboxes = new Map<string, Outbox>();
+let nextGlobalSlot = 0;
+
+function enqueue(chatId: string, n: Notification): void {
+  let box = outboxes.get(chatId);
+  if (!box) {
+    box = { groups: new Map(), firstAt: 0, lastAt: 0, lastSentAt: 0, done: null };
+    outboxes.set(chatId, box);
+  }
+  const now = Date.now();
+  if (box.groups.size === 0) box.firstAt = now;
+  box.lastAt = now;
+
+  const key = `${n.type}\n${n.title}`;
+  let g = box.groups.get(key);
+  if (!g) {
+    g = { type: n.type, title: n.title, body: n.body, sameBody: true, taskIds: new Set(), untracked: 0 };
+    box.groups.set(key, g);
+  } else if (g.body !== n.body) {
+    g.sameBody = false;
+  }
+  if (n.taskId && (g.taskIds.has(n.taskId) || g.taskIds.size < TRACKED_MAX)) g.taskIds.add(n.taskId);
+  else g.untracked++;
+
+  if (!box.done) box.done = drain(chatId, box);
+}
+
+/** Wait for this process's next send slot. */
+async function globalSlot(): Promise<void> {
+  const now = Date.now();
+  const at = Math.max(now, nextGlobalSlot);
+  nextGlobalSlot = at + timing.globalGapMs;
+  if (at > now) await idleSleep(at - now);
+}
+
+async function drain(chatId: string, box: Outbox): Promise<void> {
+  try {
+    while (box.groups.size > 0) {
+      // Let the burst finish arriving.
+      for (;;) {
+        const wait = Math.min(box.lastAt + timing.quietMs, box.firstAt + timing.maxWaitMs) - Date.now();
+        if (wait <= 0) break;
+        await idleSleep(wait);
+      }
+      const groups = [...box.groups.values()];
+      box.groups.clear();
+      for (const g of groups) {
+        const gap = box.lastSentAt + timing.chatGapMs - Date.now();
+        if (gap > 0) await idleSleep(gap);
+        await globalSlot();
+        const result = await sendTelegram(chatId, formatGroup(g), {
+          sleep: timing.retrySleep,
+          maxRetryAfterSec: timing.maxRetryAfterSec,
+        });
+        box.lastSentAt = Date.now();
+        if (result === 'blocked') {
+          await unlinkChat(chatId);
+          console.log('[telegram] chat unreachable — unlinked');
+          return;
+        }
+      }
+    }
+  } catch (err) {
+    console.warn(`[telegram] delivery failed (non-fatal): ${redact(String((err as Error)?.message ?? err))}`);
+  } finally {
+    // Empty after a normal run. After an unlink or an error, what arrived in
+    // the meantime is for a chat that is gone or failing: drop it.
+    box.groups.clear();
+    box.done = null;
+    // The chat's next outbox waits quietMs (more than chatGapMs) before its
+    // first send, which also spaces it from this one's last.
+    if (outboxes.get(chatId) === box) outboxes.delete(chatId);
+  }
+}
+
+/** One message for a group: the usual text for a lone alert, a task list for several. */
+function formatGroup(g: Group): string {
+  const ids = [...g.taskIds];
+  const count = ids.length + g.untracked;
+  if (count === 1) return formatNotification({ type: g.type, title: g.title, body: g.body, taskId: ids[0] });
+  const lines = [`${g.title} (${count} tasks)`];
+  if (g.body && g.sameBody && BODY_TYPES.has(g.type)) lines.push(g.body);
+  lines.push('');
+  const listed = ids.slice(0, LISTED_MAX);
+  for (const id of listed) lines.push(`Task ${id.slice(0, 10)}… ${config.publicAppUrl}/tasks/${id}`);
+  if (count > listed.length) {
+    lines.push(`…and ${count - listed.length} more. All of them are in your BlindMarket notifications: ${config.publicAppUrl}`);
+  }
+  return lines.join('\n');
+}
+
+/** Tests: resolves once every outbox has been sent. */
+export async function _outboxesIdle(): Promise<void> {
+  while (outboxes.size > 0) await Promise.all([...outboxes.values()].map((b) => b.done));
+}
+
+/**
+ * Called by notify() for every notification. Queues the alert in its chat's
+ * outbox; resolves before it is sent. Never throws.
+ */
 export async function deliverToTelegram(address: string, n: Notification): Promise<void> {
   if (!telegramEnabled() || !isTelegramType(n.type)) return;
   try {
     const link = await getLink(address);
     if (!link) return;
     if (!isTypeEnabled(await getPrefs(link.chatId), n.type)) return;
-    const result = await sendTelegram(link.chatId, formatNotification(n));
-    if (result === 'blocked') {
-      await unlinkChat(link.chatId);
-      console.log('[telegram] chat unreachable — unlinked');
-    }
+    enqueue(link.chatId, n);
   } catch (err) {
     console.warn(`[telegram] delivery failed (non-fatal): ${redact(String((err as Error)?.message ?? err))}`);
   }
