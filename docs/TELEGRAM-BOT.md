@@ -132,8 +132,9 @@ the webhook answers 503. With a token but no secret, the webhook answers 503.
   alert reads as before. Several become "Deadline approaching (20 tasks)" with
   up to 10 task links and a count of the rest. A repeat for the same task is
   sent once.
-- **Waiting never overrides consent.** Just before each message, the chat's
-  linked wallets and preferences are read again:
+- **Waiting never overrides consent.** Before each message, and again before
+  each retry after a 429, the chat's linked wallets and preferences are read
+  again:
   - after `/stop` or **Disconnect**, nothing that was still waiting goes out;
   - a type switched off is skipped;
   - a wallet moved to another chat is no longer reported to the old one.

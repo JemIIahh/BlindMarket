@@ -63,7 +63,7 @@ import {
   telegramEnabled,
   telegramWebhookReady,
 } from './telegram.js';
-import { consumeLinkNonce, createLinkNonce, getLink, linkChat, setPrefs } from './telegramStore.js';
+import { consumeLinkNonce, createLinkNonce, getLink, linkChat, setPrefs, unlinkChat } from './telegramStore.js';
 
 const WALLET = '0x' + 'a'.repeat(40);
 const AGENT = '0x' + '9'.repeat(40);
@@ -390,6 +390,22 @@ describe('outbox: bursts and pacing', () => {
     await deliver(WALLET, reminder(1));
     expect(retrySleep).toHaveBeenCalledWith(30_000);
     expect(egressFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('drops an alert when the chat disconnects during a 429 wait', async () => {
+    await linkChat('42', [WALLET]);
+    _setOutboxTiming({ retrySleep: async () => { await unlinkChat('42'); } });
+    egressFetch.mockImplementationOnce(async () => fail(429, { parameters: { retry_after: 30 } })).mockImplementation(async () => ok());
+    await deliver(WALLET, reminder(1));
+    expect(egressFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops an alert whose type is switched off during a 429 wait', async () => {
+    await linkChat('42', [WALLET]);
+    _setOutboxTiming({ retrySleep: async () => { await setPrefs('42', { deadline_soon: false }); } });
+    egressFetch.mockImplementationOnce(async () => fail(429, { parameters: { retry_after: 30 } })).mockImplementation(async () => ok());
+    await deliver(WALLET, reminder(1));
+    expect(egressFetch).toHaveBeenCalledTimes(1);
   });
 
   it('stops sending to a chat that blocked the bot, and unlinks it', async () => {

@@ -58,16 +58,28 @@ const MAX_ATTEMPTS = 3;
  * Send a plain-text message (no parse mode, so nothing needs escaping).
  * 'blocked' means the chat can no longer be reached (the user blocked the bot
  * or deleted the chat): the caller should unlink it.
+ *
+ * `refresh` runs before each retry and returns the text to send now, or null
+ * to drop the message: a retry can come a minute later.
  */
 export async function sendTelegram(
   chatId: string,
   text: string,
-  opts: { sleep?: (ms: number) => Promise<void>; maxRetryAfterSec?: number } = {},
+  opts: {
+    sleep?: (ms: number) => Promise<void>;
+    maxRetryAfterSec?: number;
+    refresh?: () => Promise<string | null>;
+  } = {},
 ): Promise<SendResult> {
   const sleep = opts.sleep ?? defaultSleep;
   const maxRetryAfterSec = opts.maxRetryAfterSec ?? 5;
   const url = `https://api.telegram.org/bot${config.telegramBotToken}/sendMessage`;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    if (attempt > 1 && opts.refresh) {
+      const current = await opts.refresh();
+      if (current === null) return 'failed';
+      text = current;
+    }
     try {
       const res = await egressFetch(url, {
         method: 'POST',
@@ -252,15 +264,12 @@ async function drain(chatId: string, box: Outbox): Promise<void> {
         const gap = box.lastSentAt + timing.chatGapMs - clock();
         if (gap > 0) await idleSleep(gap);
         await globalSlot();
-        // Consent may have changed while this waited (see above).
-        const linked = new Set(await walletsOfChat(chatId));
-        if (linked.size === 0) return;
-        if (!isTypeEnabled(await getPrefs(chatId), g.type)) continue;
-        const text = formatGroup(g, linked);
+        const text = await consentedText(chatId, g);
         if (text === null) continue;
         const result = await sendTelegram(chatId, text, {
           sleep: timing.retrySleep,
           maxRetryAfterSec: timing.maxRetryAfterSec,
+          refresh: () => consentedText(chatId, g),
         });
         box.lastSentAt = clock();
         if (result === 'blocked') {
@@ -281,6 +290,17 @@ async function drain(chatId: string, box: Outbox): Promise<void> {
     // first send, which also spaces it from this one's last.
     if (outboxes.get(chatId) === box) outboxes.delete(chatId);
   }
+}
+
+/**
+ * The group's message as the chat's consent stands now (see above): null
+ * after /stop, for a type switched off, or when none of its wallets is still
+ * linked here. Read before the first try and before every retry.
+ */
+async function consentedText(chatId: string, g: Group): Promise<string | null> {
+  const linked = new Set(await walletsOfChat(chatId));
+  if (linked.size === 0 || !isTypeEnabled(await getPrefs(chatId), g.type)) return null;
+  return formatGroup(g, linked);
 }
 
 /**
