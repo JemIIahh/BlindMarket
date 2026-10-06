@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { getVersion } from "@openzeppelin/upgrades-core";
 import type { ContractTransactionResponse } from "ethers";
-import { ethers, time } from "../lib/hh.js";
+import { ethers, time, upgrades } from "../lib/hh.js";
 
 /**
  * BlindEscrowArcDeployed (contracts/mocks) is BlindEscrow.sol as of 882acaf:
@@ -259,5 +259,139 @@ describe("BlindEscrow payouts match the deployed implementation", function () {
     expect(current.balances).to.deep.equal(deployed.balances);
     expect(current.tasks).to.deep.equal(deployed.tasks);
     expect(current.reputation).to.deep.equal(deployed.reputation);
+  });
+});
+
+describe("Upgrading a proxy of the deployed implementation to the current BlindEscrow", function () {
+  const AMOUNT = ethers.parseUnits("100", 6);
+  const FEE = AMOUNT / 10n;
+  const EVIDENCE = ethers.keccak256(ethers.toUtf8Bytes("evidence"));
+  const HOUR = 3600;
+  const DAY = 24 * HOUR;
+  const IMPLEMENTATION_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
+
+  it("validates as a safe UUPS upgrade of BlindEscrowArcDeployed", async function () {
+    await upgrades.validateUpgrade(
+      await ethers.getContractFactory("BlindEscrowArcDeployed"),
+      await ethers.getContractFactory("BlindEscrow"),
+      { kind: "uups" },
+    );
+  });
+
+  it("keeps every task, balance and setting, and every in-flight task finishes as it would have", async function () {
+    const [admin, agent, worker, verifier, treasury, stranger, s1, s2] = await ethers.getSigners();
+    const token: any = await (await ethers.getContractFactory("MockERC20")).deploy("Mock USDC", "MUSDC", 6);
+    const t = await token.getAddress();
+    await token.mint(agent.address, ethers.parseUnits("10000", 6));
+    const proxy: any = await upgrades.deployProxy(await ethers.getContractFactory("BlindEscrowArcDeployed"), [treasury.address, verifier.address], {
+      kind: "uups",
+    });
+    const e = await proxy.getAddress();
+    await proxy.connect(admin).allowToken(t);
+    await proxy.connect(admin).setMinRatedAmount(t, 5n);
+    await proxy.connect(admin).setTeeSigner(stranger.address);
+    await token.connect(agent).approve(e, ethers.MaxUint256);
+    // A completed pause, so pausedTotal is non-zero.
+    await proxy.connect(admin).pause();
+    await time.increase(HOUR);
+    await proxy.connect(admin).unpause();
+
+    const create = async (perTaskVerifier?: string, duration = DAY) => {
+      const hash = ethers.keccak256(ethers.toUtf8Bytes(`task ${await proxy.nextTaskId()}`));
+      if (perTaskVerifier) await proxy.connect(agent).createTaskWithVerifier(hash, t, AMOUNT, "c", "z", duration, perTaskVerifier);
+      else await proxy.connect(agent).createTask(hash, t, AMOUNT, "c", "z", duration);
+      return (await proxy.nextTaskId()) - 1n;
+    };
+    // One task in every state the deployed code can leave one in.
+    const funded = await create();
+    const assigned = await create();
+    await proxy.connect(verifier).marketplaceAssign(assigned, worker.address);
+    const submitted = await create(s1.address);
+    await proxy.connect(agent).assignWorker(submitted, worker.address);
+    await proxy.connect(worker).submitEvidence(submitted, EVIDENCE);
+    const failed = await create();
+    await proxy.connect(verifier).marketplaceAssign(failed, worker.address);
+    await proxy.connect(worker).submitEvidence(failed, EVIDENCE);
+    await proxy.connect(verifier).completeVerification(failed, false);
+    const disputed = await create();
+    await proxy.connect(verifier).marketplaceAssign(disputed, worker.address);
+    await proxy.connect(worker).submitEvidence(disputed, EVIDENCE);
+    await proxy.connect(agent).raiseDispute(disputed);
+    const escalated = await create(undefined, HOUR);
+    await proxy.connect(verifier).marketplaceAssign(escalated, worker.address);
+    await proxy.connect(worker).submitEvidence(escalated, EVIDENCE);
+    await time.increase(HOUR);
+    await proxy.connect(agent).claimTimeout(escalated);
+    const completed = await create();
+    await proxy.connect(verifier).marketplaceAssign(completed, worker.address);
+    await proxy.connect(worker).submitEvidence(completed, EVIDENCE);
+    await proxy.connect(verifier).completeVerification(completed, true);
+    const cancelled = await create();
+    await proxy.connect(agent).cancelTask(cancelled);
+    const ids = [funded, assigned, submitted, failed, disputed, escalated, completed, cancelled];
+
+    const plain = (v: unknown) => JSON.parse(JSON.stringify(v, (_k, x) => (typeof x === "bigint" ? x.toString() : x)));
+    const snapshotState = async (c: any) => ({
+      settings: plain(
+        await Promise.all([
+          c.admin(), c.pendingAdmin(), c.treasury(), c.verifier(), c.feeBps(), c.allowedTokens(t), c.reputationContract(),
+          c.taskRegistry(), c.teeSigner(), c.pausedTotal(), c.pausedSince(), c.minRatedAmount(t), c.nextTaskId(), c.paused(),
+        ]),
+      ),
+      tasks: plain(
+        await Promise.all(
+          ids.map(async (id) => [
+            await c.getTask(id), await c.taskVerifier(id), await c.failedVerdictAt(id), await c.unjudgedEscalation(id), await c.effectiveDeadline(id),
+          ]),
+        ),
+      ),
+      balance: String(await token.balanceOf(e)),
+    });
+    const before = await snapshotState(proxy);
+    const implBefore = await ethers.provider.getStorage(e, IMPLEMENTATION_SLOT);
+    expect(before.balance).to.equal(String(6n * AMOUNT)); // funded, assigned, submitted, failed, disputed, escalated
+
+    const upgraded: any = await upgrades.upgradeProxy(e, await ethers.getContractFactory("BlindEscrow"), { kind: "uups" });
+    expect(await upgraded.getAddress()).to.equal(e);
+    expect(await ethers.provider.getStorage(e, IMPLEMENTATION_SLOT)).to.not.equal(implBefore);
+    expect(await snapshotState(upgraded)).to.deep.equal(before);
+    for (const id of ids) {
+      expect((await upgraded.getOpenTask(id)).open).to.equal(false);
+      expect(await upgraded.submissionCount(id)).to.equal(0);
+    }
+
+    // Every in-flight task carries on under the new code.
+    const paid = async (send: () => Promise<unknown>, to: string, amount: bigint) => {
+      const b = await token.balanceOf(to);
+      await send();
+      expect(await token.balanceOf(to)).to.equal(b + amount);
+    };
+    await paid(() => upgraded.connect(agent).cancelTask(funded), agent.address, AMOUNT);
+    await upgraded.connect(worker).submitEvidence(assigned, EVIDENCE);
+    await paid(() => upgraded.connect(verifier).completeVerification(assigned, true), worker.address, AMOUNT - FEE);
+    await paid(() => upgraded.connect(s1).completeVerification(submitted, true), worker.address, AMOUNT - FEE);
+    await upgraded.connect(worker).submitEvidence(failed, EVIDENCE); // a retry after the failed verdict
+    expect((await upgraded.getTask(failed)).submissionAttempts).to.equal(2);
+    await paid(() => upgraded.connect(verifier).completeVerification(failed, true), worker.address, AMOUNT - FEE);
+    await paid(() => upgraded.connect(admin).resolveDispute(disputed, true), worker.address, AMOUNT - FEE);
+    await expect(upgraded.connect(worker).releaseUnjudgedWork(escalated)).to.be.revertedWithCustomError(upgraded, "DisputeWindowActive");
+    await time.increase(14 * DAY);
+    await paid(() => upgraded.connect(worker).releaseUnjudgedWork(escalated), worker.address, AMOUNT - FEE);
+    expect(await token.balanceOf(e)).to.equal(0);
+    expect(await token.balanceOf(treasury.address)).to.equal(6n * FEE); // completed before the upgrade, five after
+
+    // And the new code's features work on the upgraded proxy.
+    await upgraded.connect(agent).createTaskOpen(ethers.id("open"), t, AMOUNT, "c", "z", DAY, stranger.address, 0, 0);
+    const open = (await upgraded.nextTaskId()) - 1n;
+    await upgraded.connect(s1).submitOpen(open, EVIDENCE);
+    await upgraded.connect(s2).submitOpen(open, ethers.id("other"));
+    await expect(upgraded.connect(agent).cancelTask(open)).to.be.revertedWithCustomError(upgraded, "HasSubmissions");
+    await time.increaseTo(await upgraded.effectiveDeadline(open));
+    await paid(() => upgraded.connect(stranger).selectWinnerByVerifier(open, s2.address, ethers.id("scorecard")), s2.address, AMOUNT - FEE);
+    await upgraded.connect(agent).createTasks(t, [
+      { taskHash: ethers.id("batch 1"), amount: AMOUNT, category: "c", locationZone: "z", duration: DAY, verifierAgent: ethers.ZeroAddress },
+      { taskHash: ethers.id("batch 2"), amount: AMOUNT, category: "c", locationZone: "z", duration: DAY, verifierAgent: stranger.address },
+    ]);
+    expect(await token.balanceOf(e)).to.equal(2n * AMOUNT);
   });
 });
