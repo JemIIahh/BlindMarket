@@ -12,6 +12,10 @@ import { ethers } from 'ethers';
  *
  * Draining also left no gap between tasks, so the poll loop (resume, verifier
  * duty, unjudged payouts) never ran while the queue had entries.
+ *
+ * Tasks skipped for gas are re-checked on the gas cadence: once the wallet is
+ * funded the whole backlog is taken on that cadence, and a refused
+ * sponsorship counts as a gas skip rather than a refusal of the task.
  */
 
 const sock = vi.hoisted(() => ({ handlers: {} as Record<string, (data: unknown) => Promise<void>> }));
@@ -65,14 +69,16 @@ const json = (status: number, body: unknown) => new Response(JSON.stringify(body
 /**
  * The backend the worker talks to. Records every call; /accept succeeds (a
  * task with no brief, which the worker hands straight back via /release),
- * can be held open so the worker stays busy while events queue up, or can
- * first answer OFFER_HELD. The feed lists `feed`; an accepted task leaves it.
+ * can be held open so the worker stays busy while events queue up, can first
+ * answer OFFER_HELD, or can refuse a sponsored submit (GAS_SPONSOR_UNAVAILABLE).
+ * The feed lists `feed`; an accepted task leaves it.
  */
 function fakeBackend() {
   const calls: Array<{ method: string; path: string; body: any }> = [];
   const held = new Map<string, () => void>();
   const holdAccept = new Set<string>();
   const offerHeldOnce = new Set<string>();
+  const refuseSponsor = new Set<string>();
   const feed: Array<{ meta: { taskId: string; chain: string; gasSponsored?: boolean } }> = [];
   const hooks = { onRelease: (_id: string) => {} };
   const fetch = vi.fn(async (url: string, init: RequestInit = {}) => {
@@ -82,6 +88,7 @@ function fakeBackend() {
     const m = path.match(/^\/api\/v1\/a2a\/tasks\/(0x[0-9a-f]{64})\/(accept|release)$/);
     if (m?.[2] === 'accept') {
       if (offerHeldOnce.delete(m[1])) return json(409, { error: { code: 'OFFER_HELD', message: 'offered to another agent' } });
+      if (body?.sponsorGas === true && refuseSponsor.has(m[1])) return json(409, { error: { code: 'GAS_SPONSOR_UNAVAILABLE', message: 'no sponsor budget (daily_cap)' } });
       const answer = () => {
         const i = feed.findIndex((e) => e.meta.taskId === m[1]);
         if (i >= 0) feed.splice(i, 1);
@@ -105,10 +112,12 @@ function fakeBackend() {
     hooks,
     holdAccept,
     offerHeldOnce,
+    refuseSponsor,
     feed,
     finishAccept: (id: string) => held.get(id)!(),
     accepts: () => calls.filter((c) => c.path.endsWith('/accept')).map((c) => c.path.split('/')[5]),
     released: (id: string) => calls.some((c) => c.path === `/api/v1/a2a/tasks/${id}/release`),
+    acceptBodies: (id: string) => calls.filter((c) => c.path.endsWith(`${id}/accept`)).map((c) => c.body),
     scans: () => calls.filter((c) => c.path === '/api/v1/a2a/tasks').length,
   };
 }
@@ -247,12 +256,12 @@ describe("an accept retried after another agent's offer window", () => {
   });
 });
 
-describe('tasks skipped for gas, once the wallet is funded', () => {
-  // The feed scan runs on the WS reconcile floor (5 min) while the socket is
-  // up, and on the gas re-check cadence (GAS_RECHECK_MS, 60 s) while tasks
-  // wait for gas. The clock is fixed so each poll below is one re-check tick.
-  const T = Date.UTC(2026, 9, 6, 12);
-  const at = (seconds: number) => vi.setSystemTime(T + seconds * 1000);
+// The feed scan runs on the WS reconcile floor (5 min) while the socket is up,
+// and on the gas re-check cadence (GAS_RECHECK_MS, 60 s) while tasks wait for
+// gas. These tests fix the clock so that each poll is one re-check tick.
+const T = Date.UTC(2026, 9, 6, 12);
+const at = (seconds: number) => vi.setSystemTime(T + seconds * 1000);
+function fixedClock() {
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ['Date'] });
     at(0);
@@ -260,6 +269,10 @@ describe('tasks skipped for gas, once the wallet is funded', () => {
   afterEach(() => {
     vi.useRealTimers();
   });
+}
+
+describe('tasks skipped for gas, once the wallet is funded', () => {
+  fixedClock();
 
   it('are all taken on the gas cadence, one per scan, and then the cadence relaxes', async () => {
     const w = await loadWorker();
@@ -280,5 +293,57 @@ describe('tasks skipped for gas, once the wallet is funded', () => {
     at(240);
     await w.pollAndWork();
     expect(be.scans()).toBe(scans);
+  });
+});
+
+describe('a refused sponsorship (GAS_SPONSOR_UNAVAILABLE) is a gas skip', () => {
+  fixedClock();
+
+  it('leaves no applied mark: the feed task is taken on its own gas at the next re-check once funded', async () => {
+    const w = await loadWorker();
+    sock.handlers.connect(undefined);
+    balances = [DUST];
+    be.feed.push(feedEntry(S, true));
+    be.refuseSponsor.add(S);
+    await w.pollAndWork();
+    expect(be.acceptBodies(S)).toEqual([{ sponsorGas: true }]);
+
+    balances = [FUNDED];
+    at(60);
+    await w.pollAndWork();
+    expect(be.acceptBodies(S)).toEqual([{ sponsorGas: true }, {}]);
+    expect(be.released(S)).toBe(true);
+  });
+
+  it('re-checks own gas on every tick but asks for sponsorship again only after a back-off', async () => {
+    const w = await loadWorker();
+    sock.handlers.connect(undefined);
+    balances = [DUST];
+    be.feed.push(feedEntry(S, true));
+    be.refuseSponsor.add(S);
+    await w.pollAndWork();
+    const balanceReads = vi.mocked(ethers.JsonRpcProvider.prototype.getBalance).mock.calls.length;
+    for (const seconds of [60, 120, 180, 240]) {
+      at(seconds);
+      await w.pollAndWork();
+    }
+    expect(be.acceptBodies(S)).toEqual([{ sponsorGas: true }]);
+    expect(vi.mocked(ethers.JsonRpcProvider.prototype.getBalance).mock.calls.length).toBeGreaterThanOrEqual(balanceReads + 4);
+    at(300);
+    await w.pollAndWork();
+    expect(be.acceptBodies(S)).toEqual([{ sponsorGas: true }, { sponsorGas: true }]);
+  });
+
+  it('leaves no applied mark on the WS path either: a later event is taken on own gas', async () => {
+    await loadWorker();
+    balances = [DUST];
+    be.refuseSponsor.add(S);
+    await sock.handlers['task:available'](event(S, true));
+    await waitFor(() => expect(logged(new RegExp(`accept failed for ${short(S)}…: 409 GAS_SPONSOR_UNAVAILABLE`))).toBe(true));
+
+    balances = [FUNDED];
+    await sock.handlers['task:available'](event(S, true));
+    await waitFor(() => expect(be.released(S)).toBe(true));
+    expect(be.acceptBodies(S)).toEqual([{ sponsorGas: true }, {}]);
   });
 });
