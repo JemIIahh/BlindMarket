@@ -2614,7 +2614,9 @@ async function releaseTask(taskHash) {
   }
 }
 
-async function pollAndWork() {
+// One poll cycle: resume owed work, judge verifications, collect unjudged
+// payouts, then scan the feed when due. Exported for tests.
+export async function pollAndWork() {
   if (_working) {
     log('poll skipped: another task is in progress');
     return;
@@ -5029,7 +5031,34 @@ async function ensureRegisteredAsA2AExecutor() {
 let wsClient = null;
 let wsConnected = false;
 
-function connectWebSocket() {
+// Same gas gate as the feed scan, for both push paths: accepting assigns
+// the task on-chain, so refuse up front when the event names a chain this
+// wallet cannot pay on. An exclusive offer declined this way lets the
+// cascade move to the next agent after its window instead of locking the
+// task to an unfunded one. A chain this worker cannot sign for is declined
+// the same way. Events without a chain (older backend) fall through to the
+// post-accept check in runAcceptedTask. An exclusive offer is handed back
+// via /decline so the cascade moves on now, not after the whole window.
+// A gasSponsored hint skips the gas check: /accept reserves the submit (or
+// refuses, and postAccept then checks this wallet's own gas). Runs again
+// when a deferred event is taken from the queue (acceptFromWs). A refused
+// task gets no applied mark: it stays on the board for the gas re-check and
+// the feed reconcile.
+async function gasGateBroadcast(taskId, chain, exclusive = false, sponsored = false) {
+  if (sponsored) sponsorHints.add(taskId);
+  const blocker = await acceptBlocker(chain, (c) => (sponsored ? null : preflightGas(c, signerFor(c)).catch(() => null)));
+  if (!blocker) return false;
+  const logged = blocker.unsupported ? chainSkipLogged : gasSkipLogged;
+  if (logged.get(taskId) !== blocker.reason) {
+    logged.set(taskId, blocker.reason);
+    log(`skipping task ${taskId.slice(0, 10)}… on ${chain}: ${blocker.reason}`);
+  }
+  if (exclusive) await declineOffer(taskId);
+  return true;
+}
+
+// Exported for tests, which drive the task event handlers it registers.
+export function connectWebSocket() {
   const socketUrl = BACKEND_URL.replace(/^http/, 'ws');
   wsClient = socketClient(socketUrl, {
     transports: ['websocket'],
@@ -5049,43 +5078,22 @@ function connectWebSocket() {
     wsClient.emit('join', 'tasks');
   });
 
-  // Same gas gate as the feed scan, for both push paths: accepting assigns
-  // the task on-chain, so refuse up front when the event names a chain this
-  // wallet cannot pay on. An exclusive offer declined this way lets the
-  // cascade move to the next agent after its window instead of locking the
-  // task to an unfunded one. A chain this worker cannot sign for is declined
-  // the same way. Events without a chain (older backend) fall through to the
-  // post-accept check in runAcceptedTask. An exclusive offer is handed back
-  // via /decline so the cascade moves on now, not after the whole window.
-  // A gasSponsored hint skips the gas check: /accept reserves the submit (or
-  // refuses, and postAccept then checks this wallet's own gas).
-  const gasGateBroadcast = async (taskId, chain, exclusive = false, sponsored = false) => {
-    if (sponsored) sponsorHints.add(taskId);
-    const blocker = await acceptBlocker(chain, (c) => (sponsored ? null : preflightGas(c, signerFor(c)).catch(() => null)));
-    if (!blocker) return false;
-    const logged = blocker.unsupported ? chainSkipLogged : gasSkipLogged;
-    if (logged.get(taskId) !== blocker.reason) {
-      logged.set(taskId, blocker.reason);
-      log(`skipping task ${taskId.slice(0, 10)}… on ${chain}: ${blocker.reason}`);
-    }
-    if (exclusive) await declineOffer(taskId);
-    return true;
-  };
-
   wsClient.on('task:offer', async (data) => {
     log(`WS received task:offer for ${data.taskId?.slice(0, 10) || 'unknown'}… (score=${data.score})`);
     if (!data.taskId) return;
+    const sponsored = data.meta?.gasSponsored === true;
     if (await inferenceGateOffer(data.taskId, true)) return;
-    if (await gasGateBroadcast(data.taskId, data.meta?.chain, true, data.meta?.gasSponsored === true)) return;
-    acceptFromWs(data.taskId, data.meta?.chain);
+    if (await gasGateBroadcast(data.taskId, data.meta?.chain, true, sponsored)) return;
+    acceptFromWs(data.taskId, data.meta?.chain, sponsored);
   });
 
   wsClient.on('task:available', async (data) => {
     log(`WS received task:available for ${data.taskId?.slice(0, 10) || 'unknown'}…`);
     if (!data.taskId) return;
+    const sponsored = data.meta?.gasSponsored === true;
     if (await inferenceGateOffer(data.taskId)) return;
-    if (await gasGateBroadcast(data.taskId, data.meta?.chain, false, data.meta?.gasSponsored === true)) return;
-    acceptFromWs(data.taskId, data.meta?.chain);
+    if (await gasGateBroadcast(data.taskId, data.meta?.chain, false, sponsored)) return;
+    acceptFromWs(data.taskId, data.meta?.chain, sponsored);
   });
 
   wsClient.on('disconnect', (reason) => {
@@ -5228,20 +5236,22 @@ async function attemptAccept(taskHash, { force = false, chainHint = null } = {})
  * events for the rest used to be discarded by the busy guard — the losers then
  * sat idle until the next feed reconcile (WS_RECONCILE_MS, 5 min). Bounded:
  * the oldest entry goes first when full (the reconcile sweep still covers it).
- * Exported for tests.
+ * Each entry keeps the event's gasSponsored hint, so the gas check at drain
+ * time skips exactly the tasks the arrival check skipped. Exported for tests.
  */
 export function createDeferredAccepts(limit = 200) {
   const pending = new Map();
   return {
-    add(taskHash, chain = null) {
+    add(taskHash, chain = null, sponsored = false) {
       if (!pending.has(taskHash) && pending.size >= limit) pending.delete(pending.keys().next().value);
-      pending.set(taskHash, chain);
+      pending.set(taskHash, { chain, sponsored });
     },
     next() {
       const first = pending.entries().next();
       if (first.done) return null;
-      pending.delete(first.value[0]);
-      return { taskHash: first.value[0], chain: first.value[1] };
+      const [taskHash, { chain, sponsored }] = first.value;
+      pending.delete(taskHash);
+      return { taskHash, chain, sponsored };
     },
     get size() { return pending.size; },
   };
@@ -5249,19 +5259,25 @@ export function createDeferredAccepts(limit = 200) {
 
 const wsDeferred = createDeferredAccepts();
 
-// Called whenever _working clears: start the next deferred task event, if any.
-// Each accept clears _working in its own finally, which drains again, so the
-// queue empties one task at a time.
+// Called whenever _working clears. The queue waits while a task assigned to
+// us is held for gas (resumeGasHeld): the wallet is known to be short, and the
+// gas check lets a failed balance read through. The feed reconcile still
+// covers what waits here. Otherwise start the next deferred task event, if
+// any. Each accept clears _working in its own finally, which drains again, so
+// the queue empties one task at a time.
 function drainDeferredAccepts() {
   if (_working) return;
+  if (resumeGasHeld.size > 0) return;
   const next = wsDeferred.next();
-  if (next) acceptFromWs(next.taskHash, next.chain).catch(() => {});
+  if (next) acceptFromWs(next.taskHash, next.chain, next.sponsored, true).catch(() => {});
 }
 
-// WS-triggered accept with concurrency guard.
-async function acceptFromWs(taskHash, chain = null) {
+// WS-triggered accept with concurrency guard. `deferred`: taken from the
+// queue, so the gas check made on arrival is stale (the task that kept us
+// busy spent gas) and runs again before accept assigns the task on-chain.
+async function acceptFromWs(taskHash, chain = null, sponsored = false, deferred = false) {
   if (_working) {
-    wsDeferred.add(taskHash, chain);
+    wsDeferred.add(taskHash, chain, sponsored);
     log(`WS accept deferred for ${taskHash.slice(0, 10)}…: another task in progress`);
     return;
   }
@@ -5270,6 +5286,7 @@ async function acceptFromWs(taskHash, chain = null) {
   appliedTasks.delete(taskHash);
   _working = true;
   try {
+    if (deferred && await gasGateBroadcast(taskHash, chain, false, sponsored)) return;
     await tryAcceptTask(taskHash, { chainHint: chain });
   } catch (err) {
     log(`WS accept error for ${taskHash.slice(0, 10)}…: ${err.message}`);

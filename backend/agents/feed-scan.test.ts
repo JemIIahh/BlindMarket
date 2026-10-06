@@ -84,9 +84,15 @@ describe('createDeferredAccepts — task events that arrive while busy are kept'
     const q = createDeferredAccepts();
     q.add('0xa', 'base');
     q.add('0xb');
-    expect(q.next()).toEqual({ taskHash: '0xa', chain: 'base' });
-    expect(q.next()).toEqual({ taskHash: '0xb', chain: null });
+    expect(q.next()).toEqual({ taskHash: '0xa', chain: 'base', sponsored: false });
+    expect(q.next()).toEqual({ taskHash: '0xb', chain: null, sponsored: false });
     expect(q.next()).toBeNull();
+  });
+
+  it("keeps the event's sponsor hint, which the gas check at drain time reads", () => {
+    const q = createDeferredAccepts();
+    q.add('0xa', 'arc', true);
+    expect(q.next()).toEqual({ taskHash: '0xa', chain: 'arc', sponsored: true });
   });
 
   it('keeps one entry per task', () => {
