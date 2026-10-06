@@ -702,6 +702,33 @@ describe("BlindEscrow open submission", function () {
       expect(await ratings(s1.address)).to.equal(1);
     });
 
+    it("asks the reputation contract for a rating only when one is earned, never with a score of 0", async function () {
+      const recorder: any = await (await ethers.getContractFactory("RecordingReputation")).deploy();
+      await escrow.connect(admin).setReputationContract(await recorder.getAddress());
+      const rateCalls = async (send: () => Promise<unknown>) => {
+        const from = await ethers.provider.getBlockNumber();
+        await send();
+        const logs = await recorder.queryFilter(recorder.filters.RateCalled(), from + 1);
+        return logs.map((l: any) => Number(l.args.score));
+      };
+      expect(await rateCalls(() => openPayout(AMOUNT, Judge.Creator))).to.deep.equal([]);
+      expect(await rateCalls(() => openPayout(AMOUNT, Judge.TaskVerifier))).to.deep.equal([]);
+      expect(await rateCalls(() => openPayout(9n, Judge.Backup))).to.deep.equal([]);
+      expect(await rateCalls(() => openPayout(AMOUNT, Judge.Backup))).to.deep.equal([5]);
+      expect(await rateCalls(() => openPayout(AMOUNT, Judge.Admin))).to.deep.equal([5]);
+      expect(await rateCalls(() => singlePayout(AMOUNT))).to.deep.equal([5]);
+
+      // Delivered work nobody judged, released to the worker: paid, never rated.
+      await escrow.connect(agent).createTask(TASK_HASH, tokenAddress, AMOUNT, "c", "z", HOUR);
+      const id = (await escrow.nextTaskId()) - 1n;
+      await escrow.connect(verifier).marketplaceAssign(id, worker.address);
+      await escrow.connect(worker).submitEvidence(id, E1);
+      await time.increase(HOUR);
+      await escrow.connect(agent).claimTimeout(id);
+      await time.increase(14 * DAY);
+      expect(await rateCalls(() => escrow.connect(worker).releaseUnjudgedWork(id))).to.deep.equal([]);
+    });
+
     it("leaves single-worker ratings as they were (control)", async function () {
       await singlePayout(AMOUNT);
       expect(await ratings(worker.address)).to.equal(1);
