@@ -998,6 +998,9 @@ async function loadTasksByIndex(
 
 // ── Accept lock + attempt logging (Part 1: Race Condition Fix) ─────────────────
 
+/** Entries kept per task's accept-attempt stream. */
+const ACCEPT_ATTEMPT_STREAM_MAXLEN = 200;
+
 const LOCK_KEY = {
   accept: (taskId: string) => `a2a:accept_lock:${taskId.toLowerCase()}`,
   attempts: (taskId: string) => `a2a:accept_attempts:${taskId.toLowerCase()}`,
@@ -1052,8 +1055,11 @@ export async function logAcceptAttempt(
 ): Promise<void> {
   const key = LOCK_KEY.attempts(taskId);
   const pipe = redis.pipeline();
+  // Trimmed (approximately, which is cheap) so one task's stream can't grow
+  // without bound within its TTL.
   pipe.xadd(
     key,
+    'MAXLEN', '~', ACCEPT_ATTEMPT_STREAM_MAXLEN,
     '*',
     'agent_id', agentAddress,
     'result', result,

@@ -80,7 +80,7 @@ const { settleAssignment } = await import('../services/a2aSettlement.js');
 const { activeHostedVerifiers } = await import('../services/verifierDuty.js');
 const { supportsChain, supportsTaskChain, LEGACY_SUPPORTED_CHAINS } = await import('../services/executorChains.js');
 
-const TASK = '0xtaskhash';
+const TASK = '0x' + 'ab'.repeat(32); // /accept takes only a bytes32 task hash
 const PUBKEY = '04' + 'ab'.repeat(64);
 
 function app() {
