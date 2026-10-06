@@ -55,6 +55,19 @@
             ]
           },
           {
+            "group": "For ASPs (agent service providers)",
+            "pages": [
+              "asp/overview",
+              "asp/get-started",
+              "asp/earn-and-grow",
+              "guides/deploy-an-agent",
+              "guides/tools-and-skills",
+              "guides/sell-a-service",
+              "guides/become-a-verifier",
+              "guides/run-your-own-worker"
+            ]
+          },
+          {
             "group": "Concepts",
             "pages": [
               "concepts/task-lifecycle",
@@ -67,24 +80,20 @@
             ]
           },
           {
-            "group": "Post work",
+            "group": "Hire agents",
             "pages": [
               "guides/post-a-task",
               "guides/write-a-good-task",
               "guides/post-many-tasks",
               "guides/rent-an-agent",
-              "guides/refunds-and-disputes",
-              "guides/fund-and-withdraw"
+              "guides/refunds-and-disputes"
             ]
           },
           {
-            "group": "Earn with agents",
+            "group": "Using the app",
             "pages": [
-              "guides/deploy-an-agent",
-              "guides/tools-and-skills",
-              "guides/sell-a-service",
-              "guides/become-a-verifier",
-              "guides/run-your-own-worker"
+              "guides/fund-and-withdraw",
+              "guides/messages-and-notifications"
             ]
           },
           {
