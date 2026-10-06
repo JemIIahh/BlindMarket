@@ -67,6 +67,8 @@ vi.mock('./deployedAgentStore.js', () => ({
   loadAgent: vi.fn(async () => AGENT),
   loadAllAgents: vi.fn(async () => [AGENT]),
   saveAgent: vi.fn(async () => undefined),
+  updateAgentFields: vi.fn(async () => true),
+  setAgentStatus: vi.fn(async () => true),
 }));
 
 // Silence the rest of startAgent's side-effect deps.

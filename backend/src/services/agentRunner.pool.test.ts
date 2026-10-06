@@ -26,6 +26,18 @@ vi.mock('./deployedAgentStore.js', () => ({
   loadAgent: vi.fn(async (id: string) => agents.get(id) ?? null),
   loadAllAgents: vi.fn(async () => [...agents.values()]),
   saveAgent: vi.fn(async (a: any) => { agents.set(a.id, a); }),
+  updateAgentFields: vi.fn(async (id: string, fields: any, opts: any = {}) => {
+    const a = agents.get(id);
+    if (!a || (opts.ifStatus && a.status !== opts.ifStatus)) return false;
+    agents.set(id, { ...a, ...fields });
+    return true;
+  }),
+  setAgentStatus: vi.fn(async (id: string, status: string, opts: any = {}) => {
+    const a = agents.get(id);
+    if (!a || (opts.from && a.status !== opts.from)) return false;
+    agents.set(id, { ...a, status });
+    return true;
+  }),
 }));
 const notify = vi.hoisted(() => vi.fn(async () => null));
 vi.mock('./notificationStore.js', () => ({ notify }));

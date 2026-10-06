@@ -16,7 +16,7 @@ import {
   appendLog, getLogs, subscribeAgentLogs as redisSubscribe,
   touchHeartbeat, isAlive, getHeartbeat,
 } from './redis.js';
-import { saveAgent, loadAgent, loadAllAgents } from './deployedAgentStore.js';
+import { saveAgent, loadAgent, loadAllAgents, setAgentStatus, updateAgentFields } from './deployedAgentStore.js';
 import { notify } from './notificationStore.js';
 import { parseReadiness, saveAgentReadiness } from './agentReadiness.js';
 import { composeAgentRuntime } from './skillComposer.js';
@@ -274,14 +274,10 @@ export function startZombieReaper(): void {
       try {
         if (!(await isAlive(id))) {
           console.warn(`[agentRunner] reaper: agent ${id} heartbeat expired — killing stale process`);
-          const a = await loadAgent(id);
           intentionalStops.add(child);
           child.kill('SIGTERM');
           processes.delete(id);
-          if (a && a.status === 'running') {
-            a.status = 'stopped';
-            await saveAgent(a);
-          }
+          await setAgentStatus(id, 'stopped', { from: 'running' });
         }
       } catch {
         try {
@@ -387,8 +383,7 @@ async function autoRestart(id: string): Promise<void> {
     await startAgent(id, { skipResume: true });
   } catch (e) {
     appendLog(id, `[agentRunner] auto-restart failed: ${(e as Error).message}`);
-    const a2 = await loadAgent(id);
-    if (a2 && a2.status === 'running') { a2.status = 'stopped'; await saveAgent(a2); }
+    await setAgentStatus(id, 'stopped', { from: 'running' });
   }
 }
 
@@ -558,7 +553,7 @@ export async function startAgent(id: string, opts?: { skipResume?: boolean }): P
       config.jwtSecret,
       { algorithm: 'HS256', expiresIn: '365d' } as jwt.SignOptions,
     );
-    await saveAgent(agent);
+    await updateAgentFields(id, { platformToken: agent.platformToken });
     console.log(`[agentRunner] Generated missing platform token for agent ${id}`);
   }
 
@@ -676,11 +671,9 @@ export async function startAgent(id: string, opts?: { skipResume?: boolean }): P
       // Whether the worker is taking tasks, for the owner (GET /agents/:id/readiness).
       const readiness = processes.get(id) === child ? parseReadiness(m.readiness) : null;
       if (readiness) await saveAgentReadiness(id, readiness).catch(() => {});
-      const a = await loadAgent(id);
-      if (a) {
-        a.lastActiveAt = new Date().toISOString();
-        await saveAgent(a);
-      }
+      // last_active_at alone: a whole-row save from a copy loaded here undid
+      // whatever the owner changed meanwhile (delegation, a Stop).
+      await updateAgentFields(id, { lastActiveAt: new Date().toISOString() });
     }
   });
 
@@ -694,8 +687,7 @@ export async function startAgent(id: string, opts?: { skipResume?: boolean }): P
     if (processes.get(id) !== child) return;
     appendLog(id, `[agentRunner] worker failed to start: ${err.message}`);
     processes.delete(id);
-    const a = await loadAgent(id);
-    if (a && a.status === 'running') { a.status = 'stopped'; await saveAgent(a); }
+    await setAgentStatus(id, 'stopped', { from: 'running' });
   });
 
   child.on('exit', async (code, signal) => {
@@ -738,8 +730,7 @@ export async function startAgent(id: string, opts?: { skipResume?: boolean }): P
       }
       appendLog(id, `[agentRunner] ALERT: worker crash-looped (≥${MAX_RESTARTS_IN_WINDOW} restarts within ${RESTART_WINDOW_MS / 60000}min) — auto-restart disabled. Fix the cause, then click Start to relaunch.`);
       restartTimes.delete(id);
-      a.status = 'stopped';
-      await saveAgent(a);
+      await setAgentStatus(id, 'stopped', { from: 'running' });
       return;
     }
 
@@ -751,8 +742,7 @@ export async function startAgent(id: string, opts?: { skipResume?: boolean }): P
       appendLog(id, `[agentRunner] worker terminated by signal ${signal} — agent stopped`);
     }
     if (a && a.status === 'running') {
-      a.status = 'stopped';
-      await saveAgent(a);
+      await setAgentStatus(id, 'stopped', { from: 'running' });
     }
   });
 
@@ -767,16 +757,14 @@ export async function startAgent(id: string, opts?: { skipResume?: boolean }): P
   processOwners.set(id, agent.ownerAddress.toLowerCase());
   recentStarts.push(Date.now());
   preferWorkerForOom(child.pid);
-  agent.status = 'running';
-  await saveAgent(agent);
+  await setAgentStatus(id, 'running');
 }
 
 export async function pauseAgent(id: string): Promise<void> {
   const child = processes.get(id);
   if (!child) throw new Error(`Agent ${id} is not running`);
   child.kill('SIGSTOP');
-  const agent = await loadAgent(id);
-  if (agent) { agent.status = 'paused'; await saveAgent(agent); }
+  await setAgentStatus(id, 'paused');
 }
 
 export async function stopAgent(id: string): Promise<void> {
@@ -793,16 +781,14 @@ export async function stopAgent(id: string): Promise<void> {
     child.kill('SIGTERM');
     processes.delete(id);
   }
-  const agent = await loadAgent(id);
-  if (agent) { agent.status = 'stopped'; await saveAgent(agent); }
+  await setAgentStatus(id, 'stopped');
 }
 
 export async function resumeAgent(id: string): Promise<void> {
   const child = processes.get(id);
   if (!child) throw new Error(`Agent ${id} is not running`);
   child.kill('SIGCONT');
-  const agent = await loadAgent(id);
-  if (agent) { agent.status = 'running'; await saveAgent(agent); }
+  await setAgentStatus(id, 'running');
 }
 
 /**
@@ -915,11 +901,7 @@ export async function reconcileAgents(): Promise<void> {
 async function markNotRestarted(a: DeployedAgent, reason: string): Promise<void> {
   try {
     appendLog(a.id, `[agentRunner] not restarted after the server restarted: ${reason}. Start it again from My Agents.`);
-    const current = await loadAgent(a.id);
-    if (current && current.status === 'running' && !processes.has(a.id)) {
-      current.status = 'stopped';
-      await saveAgent(current);
-    }
+    if (!processes.has(a.id)) await setAgentStatus(a.id, 'stopped', { from: 'running' });
     await notify(a.ownerAddress, {
       type: 'agent_stopped',
       title: `${a.name} is stopped`,
@@ -957,9 +939,10 @@ export async function updateAgent(id: string, patch: Partial<Pick<DeployedAgent,
     ).toString('hex');
     (cleanPatch as Record<string, unknown>).encryptedApiKey = encryptedApiKey;
   }
-  const updated = { ...agent, ...cleanPatch };
-  await saveAgent(updated);
-  return updated;
+  // Only the patched columns: a whole-row save from this copy would undo a
+  // Stop or another setting that landed since it was loaded.
+  await updateAgentFields(id, cleanPatch);
+  return { ...agent, ...cleanPatch };
 }
 
 /**
@@ -978,7 +961,7 @@ export async function addAuthorizedOwner(id: string, address: string): Promise<D
     (agent.authorizedOwners ?? []).some((a) => a.toLowerCase() === lower);
   if (!already) {
     agent.authorizedOwners = [...(agent.authorizedOwners ?? []), lower];
-    await saveAgent(agent);
+    await updateAgentFields(id, { authorizedOwners: agent.authorizedOwners });
   }
   return agent;
 }
