@@ -1,16 +1,28 @@
 import { expect } from "chai";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import hre from "hardhat";
 import { getVersion } from "@openzeppelin/upgrades-core";
-import type { ContractTransactionResponse } from "ethers";
-import { ethers, time, upgrades } from "../lib/hh.js";
+import type { ContractFactory, ContractTransactionResponse } from "ethers";
+import { ethers, time } from "../lib/hh.js";
 
 /**
- * BlindEscrowArcDeployed (contracts/mocks) is BlindEscrow.sol as of 882acaf:
- * the implementation both Arc proxies run. These tests pin that, then hold
- * the current BlindEscrow to it: every settlement the deployed code can make
- * must pay, rate and log exactly as it did.
+ * test/fixtures/BlindEscrow-882acaf.json is the implementation both Arc
+ * proxies run: BlindEscrow.sol as of 882acaf, compiled (see its _note for why
+ * it is bytecode and not a source under contracts/). These tests pin that,
+ * then hold the current BlindEscrow to it: every settlement the deployed code
+ * can make must pay, rate and log exactly as it did, and a proxy of it must
+ * upgrade to the current code with its state intact.
  */
+
+const DEPLOYED = JSON.parse(readFileSync(new URL("./fixtures/BlindEscrow-882acaf.json", import.meta.url), "utf8")) as {
+  abi: unknown[];
+  bytecode: string;
+};
+const deployedFactory = async (): Promise<ContractFactory> => {
+  const [admin] = await ethers.getSigners();
+  return new ethers.ContractFactory(DEPLOYED.abi as never, DEPLOYED.bytecode, admin);
+};
 
 const MANIFESTS = [
   { chain: "Arc testnet", path: ".openzeppelin/unknown-5042002.json" },
@@ -35,13 +47,22 @@ const PROXY = JSON.parse(
   ),
 ) as { abi: unknown[]; bytecode: string };
 
-describe("BlindEscrowArcDeployed is the implementation the Arc proxies run", function () {
+describe("The deployed-implementation fixture is what the Arc proxies run", function () {
   for (const m of MANIFESTS) {
-    it(`compiles to the ${m.chain} implementation recorded in ${m.path}`, async function () {
-      const Fixture = await ethers.getContractFactory("BlindEscrowArcDeployed");
-      expect(getVersion(Fixture.bytecode).linkedWithoutMetadata).to.equal(deployedVersion(m.path));
+    it(`has the version of the ${m.chain} implementation recorded in ${m.path}`, function () {
+      expect(getVersion(DEPLOYED.bytecode).linkedWithoutMetadata).to.equal(deployedVersion(m.path));
     });
   }
+
+  it("is not in the build, so the OpenZeppelin plugin cannot match it to those manifests", async function () {
+    const versions: string[] = [];
+    for (const name of await hre.artifacts.getAllFullyQualifiedNames()) {
+      const { bytecode } = await hre.artifacts.readArtifact(name);
+      if (bytecode.length > 2) versions.push(getVersion(bytecode).linkedWithoutMetadata);
+    }
+    expect(versions.length).to.be.greaterThan(10);
+    expect(versions).to.not.include(deployedVersion(MANIFESTS[0].path));
+  });
 });
 
 type Logged = [address: string, topics: string[], data: string];
@@ -68,7 +89,7 @@ describe("BlindEscrow payouts match the deployed implementation", function () {
    * state. From the same snapshot, both implementations make the same
    * deployments at the same nonces, so the same addresses.
    */
-  async function run(impl: "BlindEscrowArcDeployed" | "BlindEscrow"): Promise<Run> {
+  async function run(impl: "deployed" | "current"): Promise<Run> {
     const [admin, agent, worker, verifier, treasury, stranger] = await ethers.getSigners();
     const trace: Run["trace"] = [];
     let clock = (await time.latest()) + 1000;
@@ -76,20 +97,20 @@ describe("BlindEscrow payouts match the deployed implementation", function () {
       clock += seconds;
       await time.setNextBlockTimestamp(clock);
     };
-    const deploy = async (name: string, ...args: unknown[]) => {
+    const deploy = async (factory: ContractFactory, ...args: unknown[]) => {
       await tick();
-      const c = await (await ethers.getContractFactory(name)).deploy(...args);
+      const c = await factory.deploy(...args);
       await c.waitForDeployment();
       return c;
     };
-    const proxy = async (name: string, init: unknown[]) => {
-      const implementation = await deploy(name);
+    const proxy = async (factory: ContractFactory, init: unknown[]) => {
+      const implementation = await deploy(factory);
       const data = implementation.interface.encodeFunctionData("initialize", init);
       await tick();
       const Proxy = new ethers.ContractFactory(PROXY.abi as never, PROXY.bytecode, admin);
       const p = await Proxy.deploy(await implementation.getAddress(), data);
       await p.waitForDeployment();
-      return (await ethers.getContractFactory(name)).attach(await p.getAddress()) as any;
+      return factory.attach(await p.getAddress()) as any;
     };
     /** One scenario transaction, logged. `watch` records those native balance changes over it. */
     const step = async (label: string, send: () => Promise<ContractTransactionResponse>, watch: string[] = []) => {
@@ -104,10 +125,11 @@ describe("BlindEscrow payouts match the deployed implementation", function () {
       });
     };
 
-    const token: any = await deploy("MockERC20", "Mock USDC", "MUSDC", 6);
-    const reputation = await proxy("BlindReputation", []);
-    const registry = await proxy("TaskRegistry", []);
-    const escrow = await proxy(impl, [treasury.address, verifier.address]);
+    const token: any = await deploy(await ethers.getContractFactory("MockERC20"), "Mock USDC", "MUSDC", 6);
+    const reputation = await proxy(await ethers.getContractFactory("BlindReputation"), []);
+    const registry = await proxy(await ethers.getContractFactory("TaskRegistry"), []);
+    const escrowFactory = impl === "deployed" ? await deployedFactory() : await ethers.getContractFactory("BlindEscrow");
+    const escrow = await proxy(escrowFactory, [treasury.address, verifier.address]);
     const t = await token.getAddress();
     const e = await escrow.getAddress();
     const NATIVE = ethers.ZeroAddress;
@@ -231,9 +253,9 @@ describe("BlindEscrow payouts match the deployed implementation", function () {
 
   it("pays, rates and logs every settlement exactly as the deployed implementation", async function () {
     const snapshot = await ethers.provider.send("evm_snapshot", []);
-    const deployed = await run("BlindEscrowArcDeployed");
+    const deployed = await run("deployed");
     await ethers.provider.send("evm_revert", [snapshot]);
-    const current = await run("BlindEscrow");
+    const current = await run("current");
 
     // Not vacuous: the deployed run paid, rated and refunded.
     const iface = (await ethers.getContractFactory("BlindEscrow")).interface;
@@ -262,6 +284,9 @@ describe("BlindEscrow payouts match the deployed implementation", function () {
   });
 });
 
+// The storage-layout side of this upgrade (OpenZeppelin's report against the
+// manifests' deployed layout) is escrowLayout.test.ts; on the live proxies it
+// is scripts/validate-escrow-upgrade.ts.
 describe("Upgrading a proxy of the deployed implementation to the current BlindEscrow", function () {
   const AMOUNT = ethers.parseUnits("100", 6);
   const FEE = AMOUNT / 10n;
@@ -270,23 +295,20 @@ describe("Upgrading a proxy of the deployed implementation to the current BlindE
   const DAY = 24 * HOUR;
   const IMPLEMENTATION_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
 
-  it("validates as a safe UUPS upgrade of BlindEscrowArcDeployed", async function () {
-    await upgrades.validateUpgrade(
-      await ethers.getContractFactory("BlindEscrowArcDeployed"),
-      await ethers.getContractFactory("BlindEscrow"),
-      { kind: "uups" },
-    );
-  });
-
   it("keeps every task, balance and setting, and every in-flight task finishes as it would have", async function () {
     const [admin, agent, worker, verifier, treasury, stranger, s1, s2] = await ethers.getSigners();
     const token: any = await (await ethers.getContractFactory("MockERC20")).deploy("Mock USDC", "MUSDC", 6);
     const t = await token.getAddress();
     await token.mint(agent.address, ethers.parseUnits("10000", 6));
-    const proxy: any = await upgrades.deployProxy(await ethers.getContractFactory("BlindEscrowArcDeployed"), [treasury.address, verifier.address], {
-      kind: "uups",
-    });
-    const e = await proxy.getAddress();
+    // An ERC1967 proxy of the deployed implementation, initialized as deploy-base.ts does.
+    const Deployed = await deployedFactory();
+    const v1 = await Deployed.deploy();
+    await v1.waitForDeployment();
+    const init = Deployed.interface.encodeFunctionData("initialize", [treasury.address, verifier.address]);
+    const erc1967 = await new ethers.ContractFactory(PROXY.abi as never, PROXY.bytecode, admin).deploy(await v1.getAddress(), init);
+    await erc1967.waitForDeployment();
+    const e = await erc1967.getAddress();
+    const proxy: any = Deployed.attach(e);
     await proxy.connect(admin).allowToken(t);
     await proxy.connect(admin).setMinRatedAmount(t, 5n);
     await proxy.connect(admin).setTeeSigner(stranger.address);
@@ -351,9 +373,15 @@ describe("Upgrading a proxy of the deployed implementation to the current BlindE
     const implBefore = await ethers.provider.getStorage(e, IMPLEMENTATION_SLOT);
     expect(before.balance).to.equal(String(6n * AMOUNT)); // funded, assigned, submitted, failed, disputed, escalated
 
-    const upgraded: any = await upgrades.upgradeProxy(e, await ethers.getContractFactory("BlindEscrow"), { kind: "uups" });
-    expect(await upgraded.getAddress()).to.equal(e);
+    // The upgrade itself, as the admin sends it: deploy the implementation, then upgradeToAndCall with no call.
+    const Current = await ethers.getContractFactory("BlindEscrow");
+    const v2 = await Current.deploy();
+    await v2.waitForDeployment();
+    await expect(proxy.connect(stranger).upgradeToAndCall(await v2.getAddress(), "0x")).to.be.revertedWithCustomError(proxy, "NotAdmin");
+    await proxy.connect(admin).upgradeToAndCall(await v2.getAddress(), "0x");
+    const upgraded: any = Current.attach(e);
     expect(await ethers.provider.getStorage(e, IMPLEMENTATION_SLOT)).to.not.equal(implBefore);
+    expect(ethers.getAddress("0x" + (await ethers.provider.getStorage(e, IMPLEMENTATION_SLOT)).slice(-40))).to.equal(await v2.getAddress());
     expect(await snapshotState(upgraded)).to.deep.equal(before);
     for (const id of ids) {
       expect((await upgraded.getOpenTask(id)).open).to.equal(false);
