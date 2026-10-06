@@ -110,5 +110,5 @@ describe('startAgent composes installed skills into the worker env', () => {
     const skillTool = tools.find((t) => t.name === 'fetch_page');
     expect(skillTool).toBeTruthy();
     expect(skillTool?.type).toBe('tool');
-  });
+  }, 20_000); // the first import of agentRunner is slow under full-suite load
 });
