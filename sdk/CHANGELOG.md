@@ -3,7 +3,7 @@
 This package is 0.x: a minor version may contain breaking changes. They are
 listed here with how to migrate.
 
-## Unreleased
+## 0.10.0
 
 ### New
 
