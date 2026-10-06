@@ -206,10 +206,11 @@ describe('BlindMarket.deployAgent — paying by transfer', () => {
   it('pays by transfer from the owner wallet, reports the hash at once, and names the payment', async () => {
     const fn = stub(TRANSFER_TERMS, [noCredit()]);
     const p = payer();
-    const seen: string[] = [];
-    const agent = await bb().deployAgent(params, { ...fast, payFee: true, payer: p.signer, onFeePaid: (h) => { seen.push(h); } });
+    const seen: Array<[string, number | undefined]> = [];
+    const agent = await bb().deployAgent(params, { ...fast, payFee: true, payer: p.signer, onFeePaid: (h, n) => { seen.push([h, n]); } });
     expect(agent).toMatchObject({ id: 'agent-1', feeTxHash: PAID });
-    expect(seen).toEqual([PAID]);
+    // With its nonce: whether a fee that never reached the backend can still land.
+    expect(seen).toEqual([[PAID, 7]]);
     expect(p.sent).toHaveLength(1);
     expect(p.sent[0].to).toBe(USDC);
     const [to, amount] = new ethers.Interface(['function transfer(address,uint256)']).decodeFunctionData('transfer', p.sent[0].data);

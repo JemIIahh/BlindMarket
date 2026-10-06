@@ -17,6 +17,7 @@ import {
 import { authedDelete, authedGet, authedPatch, authedPost, getAuthHeaders } from '../../lib/api';
 import { API_BASE_URL } from '../../config/constants';
 import { getPaymentSymbol } from '../../config/settlement';
+import { restartAgent, saveOwnerToggle } from '../../lib/ownerToggle';
 import { formatPaymentAmount, parsePaymentAmount } from '../../lib/paymentUnits';
 import { ToolManager, type AnyTool } from '../bb/ToolManager';
 import AgentMetricsPanel from '../AgentMetricsPanel';
@@ -303,7 +304,11 @@ export function OpsConsole({
   // authedPatch so the Privy JWT flows to the backend, where requireAuth +
   // authorizeOwner verify the caller (no more plaintext ownerAddress claim).
   // After saving, auto-restart the agent so instruction/provider/model changes
-  // take effect immediately (the running worker holds spawn-time config).
+  // take effect immediately (the running worker holds spawn-time config). A
+  // restart that fails after the save is reported as that, never as a failed
+  // save (lib/ownerToggle.ts), and the page shows what was saved.
+  const agentRunning = agent.status === 'running' || agent.status === 'active';
+  const [saveRestartError, setSaveRestartError] = useState<unknown>(null);
   const save = useMutation({
     mutationFn: async () => {
       const data = await authedPatch<AgentDetails>(`/api/v1/agents/${agentId}`, {
@@ -316,49 +321,50 @@ export function OpsConsole({
           : undefined,
       });
       // Auto-restart if agent is running so changes take effect.
-      if (agent.status === 'running' || agent.status === 'active') {
-        await authedPost(`/api/v1/agents/${agentId}/stop`, {});
-        await authedPost(`/api/v1/agents/${agentId}/start`, {});
-      }
-      return data;
+      if (!agentRunning) return { data, restartError: null };
+      const restarted = await restartAgent<AgentDetails>(authedPost, agentId);
+      return { data: restarted.agent ?? data, restartError: restarted.restartError };
     },
-    onSuccess: (data) => { onAgentUpdated(data); setTab('logs'); },
+    onMutate: () => setSaveRestartError(null),
+    onSuccess: ({ data, restartError }) => {
+      onAgentUpdated(data);
+      if (restartError) setSaveRestartError(restartError);
+      else setTab('logs');
+    },
   });
 
   // Verifier duty is the owner's opt-in: when on, posters may name this agent
   // as a task's verifier, and it judges and settles those rounds on this
   // agent's model and gas. Applied on restart, like the settings above.
+  // The switch shows what the server stored; a restart that fails after the
+  // save is reported as that, never as a failed save (lib/ownerToggle.ts).
   const [verifierEnabled, setVerifierEnabled] = useState(agent.verifierEnabled === true);
+  const [verifierRestartError, setVerifierRestartError] = useState<unknown>(null);
   const saveVerifier = useMutation({
-    mutationFn: async (enabled: boolean) => {
-      await authedPost(`/api/v1/agents/${agentId}/verifier`, { enabled });
-      if (agent.status === 'running' || agent.status === 'active') {
-        await authedPost(`/api/v1/agents/${agentId}/stop`, {});
-        await authedPost(`/api/v1/agents/${agentId}/start`, {});
-      }
-      return enabled;
-    },
-    onMutate: (enabled) => setVerifierEnabled(enabled),
+    mutationFn: (enabled: boolean) => saveOwnerToggle<AgentDetails>(authedPost, agentId, 'verifier', enabled, agentRunning),
+    onMutate: (enabled) => { setVerifierEnabled(enabled); setVerifierRestartError(null); },
     onError: () => setVerifierEnabled(agent.verifierEnabled === true),
-    onSuccess: (enabled) => onAgentUpdated({ ...agent, verifierEnabled: enabled }),
+    onSuccess: ({ enabled, agent: latest, restartError }) => {
+      setVerifierEnabled(enabled);
+      setVerifierRestartError(restartError);
+      onAgentUpdated({ ...agent, ...latest, verifierEnabled: enabled });
+    },
   });
 
   // Delegation is the owner's opt-in too: when on, the agent can pay other
   // agents from its wallet for part of a task. A task's brief can ask it to,
   // so it is off by default. Applied on restart, like verifier duty.
   const [delegationEnabled, setDelegationEnabled] = useState(agent.delegationEnabled === true);
+  const [delegationRestartError, setDelegationRestartError] = useState<unknown>(null);
   const saveDelegation = useMutation({
-    mutationFn: async (enabled: boolean) => {
-      await authedPost(`/api/v1/agents/${agentId}/delegation`, { enabled });
-      if (agent.status === 'running' || agent.status === 'active') {
-        await authedPost(`/api/v1/agents/${agentId}/stop`, {});
-        await authedPost(`/api/v1/agents/${agentId}/start`, {});
-      }
-      return enabled;
-    },
-    onMutate: (enabled) => setDelegationEnabled(enabled),
+    mutationFn: (enabled: boolean) => saveOwnerToggle<AgentDetails>(authedPost, agentId, 'delegation', enabled, agentRunning),
+    onMutate: (enabled) => { setDelegationEnabled(enabled); setDelegationRestartError(null); },
     onError: () => setDelegationEnabled(agent.delegationEnabled === true),
-    onSuccess: (enabled) => onAgentUpdated({ ...agent, delegationEnabled: enabled }),
+    onSuccess: ({ enabled, agent: latest, restartError }) => {
+      setDelegationEnabled(enabled);
+      setDelegationRestartError(restartError);
+      onAgentUpdated({ ...agent, ...latest, delegationEnabled: enabled });
+    },
   });
 
   const saveTools = useMutation({
@@ -685,6 +691,7 @@ export function OpsConsole({
                 {saveVerifier.isPending && <span className="text-xs text-ink-3">Saving & restarting…</span>}
                 {saveVerifier.isError && <span className="text-xs text-err">Couldn't save</span>}
               </div>
+              {verifierRestartError != null && <ErrorNotice error={verifierRestartError} compact className="mt-2" />}
             </FormField>
 
             <FormField label="Pay other agents for sub-tasks" hint="When on, this agent can hand part of a task to another agent and pay it from this agent's wallet. A task's brief can ask it to, so turn it on only if you accept that. Saving restarts the agent.">
@@ -698,6 +705,7 @@ export function OpsConsole({
                 {saveDelegation.isPending && <span className="text-xs text-ink-3">Saving & restarting…</span>}
                 {saveDelegation.isError && <span className="text-xs text-err">Couldn't save</span>}
               </div>
+              {delegationRestartError != null && <ErrorNotice error={delegationRestartError} compact className="mt-2" />}
             </FormField>
 
             <div className="flex items-center gap-3 flex-wrap">
@@ -711,6 +719,7 @@ export function OpsConsole({
                 <span className="text-xs text-ink-3">Enter a new API key to save provider change</span>
               )}
               {save.isError && <ErrorNotice error={save.error ?? 'Save failed.'} title="Save failed" compact />}
+              {saveRestartError != null && <ErrorNotice error={saveRestartError} compact />}
             </div>
 
             {/* Skills — installed as frozen snapshots; managed via the

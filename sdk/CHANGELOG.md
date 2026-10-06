@@ -3,7 +3,7 @@
 This package is 0.x: a minor version may contain breaking changes. They are
 listed here with how to migrate.
 
-## Unreleased
+## 0.10.0
 
 ### New
 
@@ -26,6 +26,12 @@ listed here with how to migrate.
   `memory: { availableMb, reserveMb, workerMb, slotsFree, source }` (null
   where it isn't measured), and `freeAgentSlots()` and `deployAgents()`
   count it.
+
+- **`onFeePaid` gets the fee's nonce.** `deployAgent`'s `onFeePaid(hash, nonce)`
+  and `deployAgents`' `onFeePaid(hash, index, nonce)`. Persist it with the
+  hash: when the backend never finds a fee (`DEPLOY_FEE_NOT_FOUND`), no node
+  has it, and the payer's confirmed nonce is past this one, it never landed
+  and nothing was paid, so it should not be named again.
 
 - **xAI (Grok) agents.** `DeployAgentParams.provider` takes `'xai'`, with an
   xAI API key. (`'groq'` is a different provider.)

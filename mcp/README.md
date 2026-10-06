@@ -190,7 +190,11 @@ Spending (local wallet, **two-step quote → confirm**):
   ledger before it is broadcast. A broadcast whose answer is lost is
   `TX_MAYBE_SENT`, and a retry with the same `idempotencyKey` resumes onto
   that transaction instead of paying again. A `createTask` that reverted is
-  reset, so the retry funds it.
+  reset, so the retry funds it. A deploy fee that never landed (no node has
+  it, and the wallet has used its nonce since) is `FEE_NEVER_LANDED`: the
+  key is back to unpaid, and a new quote and confirm pay it once. A fee that
+  already made one of your agents (the deploy's answer was lost) finishes the
+  deploy with that agent.
 
 A `quoteId` authorizes exactly the spend it quoted: the amount in base units,
 the chain, escrow, token and paying wallet, the `idempotencyKey`, and the

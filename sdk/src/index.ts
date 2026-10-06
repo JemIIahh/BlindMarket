@@ -97,8 +97,11 @@ export interface DeployAgentOptions {
    * any wait. Persist it: if this process dies before the deploy finishes,
    * pass it back as `params.feeTxHash` and nothing is paid twice. Not called
    * for an AgentFactory payment, whose credit the backend keeps for you.
+   * `nonce` is the transaction's: persist it too. When the backend never
+   * finds the fee (DEPLOY_FEE_NOT_FOUND), no node has it, and the payer's
+   * confirmed nonce is past this one, it can never land: nothing was paid.
    */
-  onFeePaid?: (feeTxHash: string) => void | Promise<void>;
+  onFeePaid?: (feeTxHash: string, nonce?: number) => void | Promise<void>;
   /** How long to wait between checks while the backend confirms the payment. Default 5000 ms. */
   pollIntervalMs?: number;
   /** How long to wait for a payment to confirm on-chain. Default 180000 ms. */
@@ -218,12 +221,13 @@ export interface DeployAgentsOptions extends Omit<DeployAgentOptions, 'onFeePaid
    */
   upToCapacity?: boolean;
   /**
-   * Called with each agent's deploy fee the moment it is broadcast, and the
-   * agent's index. Persist it: if the run stops before that agent exists,
-   * pass it back as the template's `feeTxHash` and the next run's first
-   * agent deploys with it, paying nothing.
+   * Called with each agent's deploy fee the moment it is broadcast, the
+   * agent's index, and the fee's nonce (see DeployAgentOptions.onFeePaid).
+   * Persist it: if the run stops before that agent exists, pass it back as
+   * the template's `feeTxHash` and the next run's first agent deploys with
+   * it, paying nothing.
    */
-  onFeePaid?: (feeTxHash: string, index: number) => void | Promise<void>;
+  onFeePaid?: (feeTxHash: string, index: number, nonce?: number) => void | Promise<void>;
   onProgress?: (event: DeployAgentsProgress) => void;
   /** Stops the run before the next agent. An agent already being deployed or funded is seen through. */
   signal?: AbortSignal;
@@ -2039,11 +2043,10 @@ export class BlindMarket {
               {
                 ...deployOpts,
                 ...(payer ? { payer } : {}),
-                // deployAgent hands this to sendAndWait as onSent, which also passes the nonce.
                 onFeePaid: async (hash: string, nonce?: number) => {
                   feeTxHash = hash;
                   if (payerAddress && typeof nonce === 'number') sent(payerAddress, nonce);
-                  await onFeePaid?.(hash, index);
+                  await onFeePaid?.(hash, index, nonce);
                 },
               },
             );

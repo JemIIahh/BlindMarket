@@ -35,6 +35,8 @@ let chainIdServed;
 let mined;
 /** Raw transactions a real wallet handed the stub node. */
 let broadcasts = [];
+/** The wallet's confirmed nonce, when a test sets it; else one past each broadcast. */
+let confirmedNonce;
 before(async () => {
   rpc = createServer((req, res) => {
     let raw = '';
@@ -45,7 +47,9 @@ before(async () => {
         if (method === 'eth_chainId') result = '0x' + chainIdServed.toString(16);
         else if (method === 'eth_call') result = ERC20.encodeFunctionResult('balanceOf', [12_500_000n]);
         // A real wallet's populate and broadcast (the lost-answer test below).
-        else if (method === 'eth_getTransactionCount') result = '0x' + broadcasts.length.toString(16);
+        else if (method === 'eth_getTransactionCount') result = '0x' + (confirmedNonce ?? broadcasts.length).toString(16);
+        // No transaction is pending on the stub node.
+        else if (method === 'eth_getTransactionByHash') result = null;
         else if (method === 'eth_estimateGas') result = '0xc350';
         else if (method === 'eth_blockNumber') result = '0x10';
         else if (method === 'eth_maxPriorityFeePerGas' || method === 'eth_gasPrice') result = '0x3b9aca00';
@@ -82,6 +86,8 @@ let calls;
 let sent;
 let waitResult;
 let validateAnswer;
+/** GET /agents/:id answers, by id. */
+let agentsById;
 /** The chain id /health/bridge lists for arc: 5042002 (Arc Testnet) until a test moves it. */
 let bridgeChainId;
 beforeEach(() => {
@@ -96,6 +102,8 @@ beforeEach(() => {
   mined = new Map();
   validateAnswer = null;
   broadcasts = [];
+  confirmedNonce = undefined;
+  agentsById = {};
 });
 
 const realFetch = globalThis.fetch;
@@ -110,6 +118,8 @@ globalThis.fetch = async (url, init = {}) => {
   if (path === '/api/v1/agents/deploy-fee') return json(terms);
   if (path === '/api/v1/agents/deploy/validate') return validateAnswer ?? json({ valid: true });
   if (path === '/api/v1/api-keys/whoami') return json({ address: owner.toLowerCase() });
+  const byId = path.match(/^\/api\/v1\/agents\/([^/]+)$/);
+  if (byId && agentsById[byId[1]]) return json(agentsById[byId[1]]);
   if (path === '/api/v1/agents/deploy') {
     const next = deployAnswers.shift();
     if (next) return next;
@@ -417,4 +427,126 @@ test('a fee recorded without its chain that is on the fee chain takes its chain 
   assert.equal(done.resumed, true);
   assert.equal(deploys().at(-1).body.feeTxHash, hash);
   assert.equal(sent.length, 0, 'nothing paid');
+});
+
+// ── A fee that never landed, and one that already made the agent ───────────
+//
+// A record at 'sent' resumes with its fee. A fee no node has, whose nonce the
+// wallet has since used, can never land: the record goes back to unpaid, or
+// every retry would ask the backend for it forever. A fee that already paid
+// for one of the caller's agents (its answer was lost) is that deploy, done.
+
+/** A deploy record whose fee was sent on Arc Testnet, with `nonce` when given. */
+function sentRecord(idempotencyKey, txHash, nonce) {
+  const now = new Date().toISOString();
+  putSpend({
+    idempotencyKey, kind: 'deploy', stage: 'sent', settlement: 'arc', chainId: 5042002, token: USDC, amountWei: '1000000', txHash,
+    ...(nonce !== undefined ? { nonce } : {}), createdAt: now, updatedAt: now,
+  });
+}
+
+test('the fee transfer\'s nonce is recorded with its hash', async () => {
+  const handlers = {};
+  const server = { registerTool: (name, _def, handler) => { handlers[name] = handler; } };
+  registerRentTools(server, { apiKey: 'sk_test', apiBase: 'https://backend.test', authenticated: true }, { chainId: 5042002, rpcUrl, provider: {}, wallet: new Wallet(OWNER_KEY.privateKey) });
+  const { quote } = parse(await handlers.deploy_agent({ ...args, idempotencyKey: 'deploy-nonce-1' }));
+  assert.equal(errorOf(await handlers.deploy_agent({ ...args, idempotencyKey: 'deploy-nonce-1', confirm: true, quoteId: quote.quoteId })).code, 'TX_MAYBE_SENT');
+  assert.equal(getSpend('deploy-nonce-1').txHash, broadcasts[0].hash);
+  assert.equal(getSpend('deploy-nonce-1').nonce, broadcasts[0].nonce);
+});
+
+test('a fee no node has, whose nonce the wallet has used since, is unpaid: the same key quotes and pays again', async () => {
+  terms = { ...TRANSFER_TERMS, chainId: 5042002 };
+  const lost = '0x' + 'b1'.repeat(32);
+  sentRecord('deploy-dropped-1', lost, 3);
+  confirmedNonce = 4;
+  deployAnswers = NOT_FOUND();
+  const t = tools();
+  const error = errorOf(await t.deploy_agent({ ...args, idempotencyKey: 'deploy-dropped-1' }));
+  assert.equal(error.code, 'FEE_NEVER_LANDED');
+  assert.match(error.message, new RegExp(lost));
+  assert.match(error.message, /nothing was paid/i);
+  assert.doesNotMatch(error.message, /fee is paid/i);
+  const rec = getSpend('deploy-dropped-1');
+  assert.equal(rec.stage, 'created');
+  assert.equal(rec.txHash, undefined);
+  assert.equal(rec.nonce, undefined);
+
+  // The same key: a new quote, then one payment, and the deploy uses it.
+  const { quote } = parse(await t.deploy_agent({ ...args, idempotencyKey: 'deploy-dropped-1' }));
+  const done = parse(await t.deploy_agent({ ...args, idempotencyKey: 'deploy-dropped-1', confirm: true, quoteId: quote.quoteId }));
+  assert.equal(done.feeTxHash, FEE_TX);
+  assert.equal(sent.length, 1);
+  assert.equal(deploys().at(-1).body.feeTxHash, FEE_TX);
+});
+
+test('a fee whose nonce is still unused may land, so it stays the paid fee', async () => {
+  terms = { ...TRANSFER_TERMS, chainId: 5042002 };
+  sentRecord('deploy-unmined-1', '0x' + 'b2'.repeat(32), 3);
+  confirmedNonce = 3;
+  deployAnswers = NOT_FOUND();
+  const error = errorOf(await tools().deploy_agent({ ...args, idempotencyKey: 'deploy-unmined-1' }));
+  assert.equal(error.code, 'DEPLOY_FEE_NOT_FOUND');
+  assert.equal(getSpend('deploy-unmined-1').stage, 'sent');
+  assert.equal(sent.length, 0);
+});
+
+test('a fee that has a receipt stays the paid fee, whatever the nonce', async () => {
+  terms = { ...TRANSFER_TERMS, chainId: 5042002 };
+  const hash = '0x' + 'b3'.repeat(32);
+  sentRecord('deploy-mined-1', hash, 3);
+  mined.set(hash, '0x1');
+  confirmedNonce = 9;
+  deployAnswers = NOT_FOUND();
+  assert.equal(errorOf(await tools().deploy_agent({ ...args, idempotencyKey: 'deploy-mined-1' })).code, 'DEPLOY_FEE_NOT_FOUND');
+  assert.equal(getSpend('deploy-mined-1').stage, 'sent');
+});
+
+test('a record without a nonce is not freed', async () => {
+  terms = { ...TRANSFER_TERMS, chainId: 5042002 };
+  sentRecord('deploy-no-nonce-1', '0x' + 'b4'.repeat(32));
+  confirmedNonce = 9;
+  deployAnswers = NOT_FOUND();
+  assert.equal(errorOf(await tools().deploy_agent({ ...args, idempotencyKey: 'deploy-no-nonce-1' })).code, 'DEPLOY_FEE_NOT_FOUND');
+  assert.equal(getSpend('deploy-no-nonce-1').stage, 'sent');
+});
+
+const alreadyUsed = (agentId) => ({
+  ok: false,
+  status: 409,
+  json: async () => ({ success: false, error: { code: 'DEPLOY_FEE_ALREADY_USED', message: `That fee transaction already paid for agent ${agentId}. Each agent needs its own fee payment.`, agentId } }),
+});
+
+test('a fee that already paid for one of your agents (a lost answer) finishes the deploy with that agent', async () => {
+  terms = { ...TRANSFER_TERMS, chainId: 5042002 };
+  const hash = '0x' + 'c1'.repeat(32);
+  sentRecord('deploy-used-1', hash, 0);
+  deployAnswers = [alreadyUsed('agent-7')];
+  agentsById['agent-7'] = { id: 'agent-7', name: 'research-agent', walletAddress: '0x' + '77'.repeat(20), ownerAddress: OWNER, status: 'running' };
+  const t = tools();
+  const done = parse(await t.deploy_agent({ ...args, idempotencyKey: 'deploy-used-1' }));
+  assert.equal(done.resumed, true);
+  assert.equal(done.agentId, 'agent-7');
+  assert.equal(done.walletAddress, '0x' + '77'.repeat(20));
+  assert.equal(done.started, true);
+  assert.equal(done.feeTxHash, hash);
+  const rec = getSpend('deploy-used-1');
+  assert.equal(rec.stage, 'confirmed');
+  assert.equal(rec.agentId, 'agent-7');
+
+  // Done: the same key answers from the record.
+  const again = parse(await t.deploy_agent({ ...args, idempotencyKey: 'deploy-used-1' }));
+  assert.equal(again.agentId, 'agent-7');
+  assert.equal(deploys().length, 1);
+  assert.equal(sent.length, 0);
+});
+
+test("a fee that paid for someone else's agent is not taken as this deploy", async () => {
+  terms = { ...TRANSFER_TERMS, chainId: 5042002 };
+  sentRecord('deploy-used-2', '0x' + 'c2'.repeat(32), 0);
+  deployAnswers = [alreadyUsed('agent-8')];
+  agentsById['agent-8'] = { id: 'agent-8', name: 'other', walletAddress: '0x' + '88'.repeat(20), ownerAddress: '0x' + 'e1'.repeat(20), status: 'running' };
+  const error = errorOf(await tools().deploy_agent({ ...args, idempotencyKey: 'deploy-used-2' }));
+  assert.equal(error.code, 'DEPLOY_FEE_ALREADY_USED');
+  assert.notEqual(getSpend('deploy-used-2').stage, 'confirmed');
 });

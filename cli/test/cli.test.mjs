@@ -296,6 +296,96 @@ test('a deploy that fails after paying keeps the payment, and the retry pays not
   assert.deepEqual(state().pendingFees, {});
 });
 
+// ── a saved deploy fee that never landed ─────────────────────────────────────
+//
+// A fee is saved the moment it is broadcast, so a failed deploy never pays
+// twice. One that never lands (the node refused it, or another transaction
+// took its nonce) used to stay "already paid" forever: every run named it,
+// the backend never found it, and nothing told the owner it had not paid.
+
+const DEPLOY_ONE = ['deploy-agent', '--name', 'a', '--instructions', 'Research and cite.', '--provider', 'openai', '--model', 'gpt-4o-mini', '--yes'];
+const FEE_KEY = `https://backend.test|${OWNER.address.toLowerCase()}|${FEE_TERMS.chainId}`;
+const notFound = (n) => Array.from({ length: n }, () => failWith(409, 'DEPLOY_FEE_NOT_FOUND'));
+/** A fee saved with `nonce`, that no node has. `nonceUsed`: another transaction from the wallet has used that nonce since. */
+function savedLostFee(hash, nonce, nonceUsed) {
+  writeState({ pendingFees: { [FEE_KEY]: hash }, feeNonces: { [hash]: nonce } });
+  if (nonceUsed) chain.sent.push({ hash: '0x' + '99'.repeat(32) });
+}
+
+test('a saved deploy fee keeps the nonce it was sent with', async () => {
+  answers['/api/v1/agents/deploy'] = [failWith(402, 'NO_DEPLOY_CREDIT'), failWith(500, 'INTERNAL_ERROR')];
+  await assert.rejects(blind(...DEPLOY_ONE), (e) => e.code === 'INTERNAL_ERROR');
+  const [pay] = chain.sent;
+  assert.deepEqual(state().pendingFees, { [FEE_KEY]: pay.hash });
+  assert.equal(state().feeNonces[pay.hash], pay.nonce);
+});
+
+test('a saved fee no node has, whose nonce is used, is forgotten: nothing was paid, and the next run pays once', async () => {
+  process.env.BLINDMARKET_DEPLOY_POLL_MS = '0';
+  try {
+    const lost = '0x' + '6a'.repeat(32);
+    savedLostFee(lost, 0, true);
+    answers['/api/v1/agents/deploy'] = notFound(4);
+    const err = await blind(...DEPLOY_ONE).catch((e) => e);
+    assert.equal(err.code, 'FEE_NEVER_LANDED');
+    assert.match(err.message, new RegExp(lost));
+    assert.match(err.message, /nothing was paid/i);
+    assert.deepEqual(state().pendingFees, {});
+    assert.deepEqual(state().feeNonces, {});
+
+    const text = await blind(...DEPLOY_ONE);
+    assert.doesNotMatch(text, /already paid/);
+    const paid = chain.sent.at(-1);
+    assert.equal(paid.to, USDC);
+    assert.equal(posted('/api/v1/agents/deploy').at(-1).body.feeTxHash, paid.hash);
+  } finally {
+    delete process.env.BLINDMARKET_DEPLOY_POLL_MS;
+  }
+});
+
+test('a saved fee whose nonce is still unused may land, so it stays saved', async () => {
+  process.env.BLINDMARKET_DEPLOY_POLL_MS = '0';
+  try {
+    const lost = '0x' + '6b'.repeat(32);
+    savedLostFee(lost, 0, false);
+    answers['/api/v1/agents/deploy'] = notFound(4);
+    const err = await blind(...DEPLOY_ONE).catch((e) => e);
+    assert.equal(err.code, 'DEPLOY_FEE_NOT_FOUND');
+    assert.deepEqual(state().pendingFees, { [FEE_KEY]: lost });
+    assert.equal(chain.sent.length, 0);
+  } finally {
+    delete process.env.BLINDMARKET_DEPLOY_POLL_MS;
+  }
+});
+
+test('deploy-agent --count forgets a saved fee that never landed when its first agent stops on it', async () => {
+  process.env.BLINDMARKET_DEPLOY_POLL_MS = '0';
+  try {
+    const lost = '0x' + '6c'.repeat(32);
+    savedLostFee(lost, 0, true);
+    answers['/api/v1/agents/deploy'] = notFound(4);
+    const err = await stderrOf(() => blind('deploy-agent', '--name', 'scout', '--instructions', 'Research and cite.', '--provider', 'openai', '--model', 'gpt-4o-mini', '--count', '2', '--yes')).catch((e) => e);
+    assert.equal(err.code, 'NOT_ALL_DEPLOYED');
+    assert.match(err.message, new RegExp(`${lost} never landed`));
+    assert.doesNotMatch(err.message, /is saved/);
+    assert.deepEqual(state().pendingFees, {});
+  } finally {
+    delete process.env.BLINDMARKET_DEPLOY_POLL_MS;
+  }
+});
+
+test('deploy-agent --forget-fee drops a saved fee instead of using it, and pays a new one', async () => {
+  const saved = '0x' + '6d'.repeat(32);
+  savedLostFee(saved, 0, false);
+  const text = await blind(...DEPLOY_ONE, '--forget-fee');
+  assert.match(text, new RegExp(`Forgot the deploy fee .*${saved}`));
+  assert.doesNotMatch(text, /already paid/);
+  const paid = chain.sent.at(-1);
+  assert.equal(paid.to, USDC);
+  assert.deepEqual(posted('/api/v1/agents/deploy').filter((c) => c.body.feeTxHash).map((c) => c.body.feeTxHash), [paid.hash]);
+  assert.deepEqual(state().pendingFees, {});
+});
+
 // ── deploy-agent --count ─────────────────────────────────────────────────────
 
 const MANY = ['deploy-agent', '--name', 'scout', '--instructions', 'Research and cite.', '--provider', 'openai', '--model', 'gpt-4o-mini'];

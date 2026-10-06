@@ -7,7 +7,7 @@ import { BlindMarket, ApiError } from '@blindmarket/sdk';
 import type { AgentCapability, DeployAgentParams, DeployAgentsPlan, DeployAgentsResult, DeployFeeTerms, PostTasksRowResult } from '@blindmarket/sdk';
 import {
   loadConfig, resolveConfig, saveConfig, DEFAULT_API_BASE,
-  pendingFee, setPendingFee, pendingPosts, setPendingPost,
+  pendingFee, setPendingFee, pendingFeeNonce, pendingPosts, setPendingPost,
   bulkKey, bulkProgress, setBulkRow, fundedBulkRow, markListed, forgetFunding, type BulkRow,
   saveFundingRaw, fundingRaw, setBulkFile, bulkFile,
 } from './config.js';
@@ -299,6 +299,33 @@ async function savedDeployFee(apiBase: string, address: string, terms: DeployFee
   return saved;
 }
 
+/**
+ * Whether the deploy fee `hash` the backend cannot find never paid: no node
+ * has it and `from` has used the nonce it was sent with since, or it
+ * reverted (funding.ts). A fee saved without a nonce, or one the fee chain's
+ * RPC cannot tell, is not proof: null, and it stays saved.
+ */
+async function feeNeverPaid(hash: string, from: string, terms: DeployFeeTerms): Promise<string | null> {
+  const nonce = pendingFeeNonce(hash);
+  if (nonce === undefined || !terms.required || terms.chainId === undefined) return null;
+  const rpc = await chainReader(terms.chain, terms.chainId);
+  const state = rpc ? await fundingState(rpc, { txHash: hash, nonce, from }) : 'unknown';
+  if (state === 'reverted') return `The deploy fee ${hash} reverted, so nothing was paid, and it is forgotten.`;
+  if (state === 'dropped') return `The deploy fee ${hash} never landed: no node has it, and ${from} has used its nonce ${nonce} since. Nothing was paid, and it is forgotten.`;
+  return null;
+}
+
+/** `--forget-fee`: drop the fee an earlier attempt saved for this backend, wallet and fee chain, so this deploy pays anew. */
+function forgetSavedFee(apiBase: string, address: string, terms: DeployFeeTerms): void {
+  const feeChainId = terms.required ? terms.chainId : undefined;
+  const saved = [pendingFee(apiBase, address, feeChainId), feeChainId !== undefined ? pendingFee(apiBase, address) : undefined].filter(Boolean);
+  setPendingFee(apiBase, address, feeChainId, null);
+  if (feeChainId !== undefined) setPendingFee(apiBase, address, undefined, null);
+  out(saved.length
+    ? `Forgot the deploy fee saved by an earlier attempt (${saved.join(', ')}): this deploy pays a new one. If it lands after all, it pays for no deploy.`
+    : 'No deploy fee was saved by an earlier attempt.');
+}
+
 /** What `deploy-agent` takes on the command line. */
 interface DeployAgentOpts {
   name: string;
@@ -313,6 +340,7 @@ interface DeployAgentOpts {
   startAt: string;
   fund?: string;
   results?: string;
+  forgetFee?: boolean;
   yes?: boolean;
 }
 
@@ -334,6 +362,9 @@ function providerKey(opts: Pick<DeployAgentOpts, 'provider' | 'providerKeyEnv'>)
   }
   return { provider, apiKey };
 }
+
+/** How long the SDK waits between asking the backend again for a fee it has not seen yet (BLINDMARKET_DEPLOY_POLL_MS); for tests. */
+const deployPoll = () => (process.env.BLINDMARKET_DEPLOY_POLL_MS ? { pollIntervalMs: Number(process.env.BLINDMARKET_DEPLOY_POLL_MS) } : {});
 
 /** Whether a failed deploy means its fee can never pay for one, so it is forgotten. */
 const feeSpent = (err: ApiError) => ['DEPLOY_FEE_ALREADY_USED', 'DEPLOY_FEE_REVERTED'].includes(err.code ?? '')
@@ -423,8 +454,9 @@ async function deployMany(opts: DeployAgentOpts): Promise<void> {
   const sponsored = fund ? await gasSponsored() : false;
   const terms = await bb.getDeployFee();
   const feeChainId = terms.required ? terms.chainId : undefined;
+  if (opts.forgetFee) forgetSavedFee(cfg.apiBase, signer.address, terms);
   const saved = await savedDeployFee(cfg.apiBase, signer.address, terms);
-  const setFee = (hash: string | null) => setPendingFee(cfg.apiBase, signer.address, feeChainId, hash);
+  const setFee = (hash: string | null, nonce?: number) => setPendingFee(cfg.apiBase, signer.address, feeChainId, hash, nonce);
 
   let rows: AgentRow[] = [];
   const writeResults = (result?: DeployAgentsResult) => {
@@ -485,6 +517,7 @@ async function deployMany(opts: DeployAgentOpts): Promise<void> {
       upToCapacity: true,
       payFee: true,
       maxFeeRaw,
+      ...deployPoll(),
       ...(fund ? { fund } : {}),
       // How long the first wait after a 429 is (it doubles from there); for tests.
       ...(process.env.BLINDMARKET_DEPLOY_BACKOFF_MS ? { retry: { baseDelayMs: Number(process.env.BLINDMARKET_DEPLOY_BACKOFF_MS) } } : {}),
@@ -500,7 +533,7 @@ async function deployMany(opts: DeployAgentOpts): Promise<void> {
         await confirm(plan.count < plan.asked ? `Deploy these ${plan.count}?` : `Deploy ${plan.count === 1 ? 'it' : `all ${plan.count}`}?`, opts.yes);
         return true;
       },
-      onFeePaid: (hash) => setFee(hash),
+      onFeePaid: (hash, _index, nonce) => setFee(hash, nonce),
       onProgress: (e) => {
         const at = `[${e.index + 1}/${rows.length}] ${e.name}`;
         const row = rows[e.index];
@@ -551,11 +584,17 @@ async function deployMany(opts: DeployAgentOpts): Promise<void> {
   if (result.stopped) {
     const done = result.results.filter((r) => r.status === 'deployed').length;
     const unspent = result.results.find((r) => r.status === 'failed' && r.feeTxHash);
+    // A fee the backend never found, that never paid: forgotten, not carried to the next run.
+    const neverPaid = unspent?.status === 'failed' && unspent.error.code === 'DEPLOY_FEE_NOT_FOUND'
+      ? await feeNeverPaid(unspent.feeTxHash!, signer.address, terms)
+      : null;
+    if (neverPaid) setFee(null);
     const left = result.requested - done;
     throw new CliError(
       'NOT_ALL_DEPLOYED',
       `Deployed ${done} of ${result.requested}; stopped at ${result.results[result.stopped.index].name}: ${result.stopped.message}` +
-        (unspent && unspent.status === 'failed' ? ` Its fee (${unspent.feeTxHash}) is saved, and the next run's first agent uses it.` : '') +
+        (neverPaid ? ` ${neverPaid} The next run pays a new one.`
+          : unspent && unspent.status === 'failed' ? ` Its fee (${unspent.feeTxHash}) is saved, and the next run's first agent uses it.` : '') +
         (left > 0 ? ` Once that is fixed, deploy the rest with --count ${left} --start-at ${startAt + done}.` : ''),
     );
   }
@@ -692,6 +731,7 @@ export function buildProgram(): Command {
     .option('--start-at <n>', 'With --count: the first agent\'s number (to carry on after a run that stopped)', '1')
     .option('--fund <amount>', 'With --count: send each agent\'s wallet this much USDC on Arc for gas, once it is deployed and running')
     .option('--results <path>', 'With --count: write every agent\'s result to this JSON file')
+    .option('--forget-fee', 'Forget a deploy fee an earlier attempt saved instead of using it, and pay a new one (only for a fee you know never landed)')
     .option('--yes', 'Pay without asking')
     .action(async (opts: DeployAgentOpts) => {
       if (opts.count !== undefined) {
@@ -717,6 +757,7 @@ export function buildProgram(): Command {
       await step('Checking the deploy…', () => bb.validateDeploy(params));
       const terms = await bb.getDeployFee();
       const feeChainId = terms.required ? terms.chainId : undefined;
+      if (opts.forgetFee) forgetSavedFee(cfg.apiBase, signer.address, terms);
       const saved = await savedDeployFee(cfg.apiBase, signer.address, terms);
       if (saved) {
         out(`Using the deploy fee already paid in ${saved} (an earlier attempt), so nothing is paid again.`);
@@ -730,11 +771,16 @@ export function buildProgram(): Command {
       try {
         agent = await step('Deploying…', () => bb.deployAgent(
           { ...params, ...(saved ? { feeTxHash: saved } : {}) },
-          { payFee: true, maxFeeRaw, onFeePaid: (hash) => setPendingFee(cfg.apiBase, signer.address, feeChainId, hash) },
+          { payFee: true, maxFeeRaw, ...deployPoll(), onFeePaid: (hash, nonce) => setPendingFee(cfg.apiBase, signer.address, feeChainId, hash, nonce) },
         ));
       } catch (e) {
         // A payment that can never pay for a deploy is forgotten, so the next attempt pays anew.
         const err = e as ApiError;
+        const neverPaid = err.code === 'DEPLOY_FEE_NOT_FOUND' && err.feeTxHash ? await feeNeverPaid(err.feeTxHash, signer.address, terms) : null;
+        if (neverPaid) {
+          setPendingFee(cfg.apiBase, signer.address, feeChainId, null);
+          throw new CliError('FEE_NEVER_LANDED', `${neverPaid} Run the same command again to pay it once.`);
+        }
         if (feeSpent(err)) setPendingFee(cfg.apiBase, signer.address, feeChainId, null);
         else if (err.feeTxHash) out(`The fee is paid (${err.feeTxHash}) and saved: run the same command again and it deploys without paying twice.`);
         throw e;
