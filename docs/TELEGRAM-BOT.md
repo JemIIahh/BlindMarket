@@ -125,17 +125,39 @@ the webhook answers 503. With a token but no secret, the webhook answers 503.
 - **Rotating the token or secret.** Change the env value, recreate both
   services (`docker compose up -d --force-recreate api indexer`), and run
   `setWebhook` again with the new secret.
-- **Failures never block** the in-app notification or the sweep: sends retry up
-  to 3 times (honouring Telegram's `retry_after`, capped at 5 s) and then give up
+- **Bursts become one message.** Bulk-posted tasks share a deadline, so their
+  reminders and expiry notices fall due together. Each chat has an in-memory
+  outbox. Alerts wait until none has arrived for 5 s, or for at most 30 s
+  after the first, and then go out as one message per kind of notice. One
+  alert reads as before. Several become "Deadline approaching (20 tasks)" with
+  up to 10 task links and a count of the rest. A repeat for the same task is
+  sent once.
+- **Waiting never overrides consent.** Before each message, and again before
+  each retry after a 429, the chat's linked wallets and preferences are read
+  again:
+  - after `/stop` or **Disconnect**, nothing that was still waiting goes out;
+  - a type switched off is skipped;
+  - a wallet moved to another chat is no longer reported to the old one.
+- **Order.** A newer alert for the same task and wallet replaces a waiting one
+  of another kind, so "Payout credited" is never followed by a stale
+  "Submission didn't pass".
+- **Pacing.** Messages to one chat are at least 1.1 s apart, and sends from
+  one process at least 40 ms apart. That stays under Telegram's limits of
+  about 1 a second per chat and 30 a second per bot. The API and the indexer
+  each pace their own sends.
+- **Failures never block** the in-app notification or the sweep. A send is
+  tried up to 3 times. An alert waits out Telegram's `retry_after` for up to
+  60 s; a bot-command reply waits at most 5 s. After the last try it gives up
   with a log line. Logs redact the bot token.
-- **Delivery is best effort, at most once per notice.** There is no delivery
-  queue: if Telegram is down for longer than the retries, that notice is not
-  sent to Telegram (it is still in the in-app feed).
+- **Delivery is best effort, at most once per notice.** The outbox lives in
+  memory. A restart drops whatever is waiting, which is at most 30 s of
+  alerts. If Telegram is down for longer than the retries, that alert is not
+  sent. Either way, the notice is still in the in-app feed.
 - The reminder windows are constants in `services/deadlineReminders.ts`.
 
 ## Code map
 
-- `services/telegram.ts`: send, message format, `deliverToTelegram`, webhook commands.
+- `services/telegram.ts`: send, message format, the per-chat outbox (`deliverToTelegram`), webhook commands.
 - `services/telegramStore.ts`: links, preferences, nonces (Redis).
 - `routes/telegram.ts`: `POST /webhook`, `POST /link`, `GET /status`, `PUT /prefs`, `DELETE /link`.
 - `services/notificationStore.ts`: `notify()` calls `deliverToTelegram` after the feed write.
