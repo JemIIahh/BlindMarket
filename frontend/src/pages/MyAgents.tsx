@@ -130,7 +130,6 @@ export default function MyAgents() {
   const running = agents.filter((a) => a.status === 'running').length;
   const tasksTotal = agents.reduce((s, a) => s + (a.tasksCompleted ?? 0), 0);
 
-  // Reputation decay → directional arrow + tone.
   function RowActions({ agent }: { agent: Agent }) {
     const isActing = action.isPending && action.variables?.id === agent.id;
     const disabled = isActing || !isAuthenticated;
