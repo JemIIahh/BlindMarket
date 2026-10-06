@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { friendlyError } from './friendlyError';
-import { saveOwnerToggle, type OwnerToggle } from './ownerToggle';
+import { restartAgent, saveOwnerToggle, type OwnerToggle } from './ownerToggle';
 
 /** An API error the way lib/api.ts throws one. */
 const apiError = (code: string, status: number, message = code) => Object.assign(new Error(message), { code, status });
@@ -65,5 +65,22 @@ describe('saveOwnerToggle', () => {
     const { post, calls } = backend('delegation', { fail: { delegation: apiError('FORBIDDEN', 403) } });
     await expect(saveOwnerToggle(post, 'agent-1', 'delegation', true, true)).rejects.toMatchObject({ code: 'FORBIDDEN' });
     expect(calls).toEqual(['delegation']);
+  });
+});
+
+describe('restartAgent', () => {
+  it('answers with the agent as start returned it', async () => {
+    const { post, calls } = backend('delegation');
+    expect(await restartAgent(post, 'agent-1')).toEqual({ agent: { id: 'agent-1', status: 'running' }, restartError: null });
+    expect(calls).toEqual(['stop', 'start']);
+  });
+
+  it('never throws: a failed stop is a restart error that says the save stands', async () => {
+    const { post, calls } = backend('delegation', { fail: { stop: apiError('AGENT_ACTION_FAILED', 400, 'not running') } });
+    const out = await restartAgent(post, 'agent-1');
+    expect(calls).toEqual(['stop']);
+    expect(out.agent).toBeNull();
+    expect(friendlyError(out.restartError)).toMatchObject({ title: 'Restart failed' });
+    expect(friendlyError(out.restartError).message).toMatch(/^Saved/);
   });
 });

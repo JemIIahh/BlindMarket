@@ -17,7 +17,7 @@ import {
 import { authedDelete, authedGet, authedPatch, authedPost, getAuthHeaders } from '../../lib/api';
 import { API_BASE_URL } from '../../config/constants';
 import { getPaymentSymbol } from '../../config/settlement';
-import { saveOwnerToggle } from '../../lib/ownerToggle';
+import { restartAgent, saveOwnerToggle } from '../../lib/ownerToggle';
 import { formatPaymentAmount, parsePaymentAmount } from '../../lib/paymentUnits';
 import { ToolManager, type AnyTool } from '../bb/ToolManager';
 import AgentMetricsPanel from '../AgentMetricsPanel';
@@ -304,7 +304,11 @@ export function OpsConsole({
   // authedPatch so the Privy JWT flows to the backend, where requireAuth +
   // authorizeOwner verify the caller (no more plaintext ownerAddress claim).
   // After saving, auto-restart the agent so instruction/provider/model changes
-  // take effect immediately (the running worker holds spawn-time config).
+  // take effect immediately (the running worker holds spawn-time config). A
+  // restart that fails after the save is reported as that, never as a failed
+  // save (lib/ownerToggle.ts), and the page shows what was saved.
+  const agentRunning = agent.status === 'running' || agent.status === 'active';
+  const [saveRestartError, setSaveRestartError] = useState<unknown>(null);
   const save = useMutation({
     mutationFn: async () => {
       const data = await authedPatch<AgentDetails>(`/api/v1/agents/${agentId}`, {
@@ -317,13 +321,16 @@ export function OpsConsole({
           : undefined,
       });
       // Auto-restart if agent is running so changes take effect.
-      if (agent.status === 'running' || agent.status === 'active') {
-        await authedPost(`/api/v1/agents/${agentId}/stop`, {});
-        await authedPost(`/api/v1/agents/${agentId}/start`, {});
-      }
-      return data;
+      if (!agentRunning) return { data, restartError: null };
+      const restarted = await restartAgent<AgentDetails>(authedPost, agentId);
+      return { data: restarted.agent ?? data, restartError: restarted.restartError };
     },
-    onSuccess: (data) => { onAgentUpdated(data); setTab('logs'); },
+    onMutate: () => setSaveRestartError(null),
+    onSuccess: ({ data, restartError }) => {
+      onAgentUpdated(data);
+      if (restartError) setSaveRestartError(restartError);
+      else setTab('logs');
+    },
   });
 
   // Verifier duty is the owner's opt-in: when on, posters may name this agent
@@ -331,7 +338,6 @@ export function OpsConsole({
   // agent's model and gas. Applied on restart, like the settings above.
   // The switch shows what the server stored; a restart that fails after the
   // save is reported as that, never as a failed save (lib/ownerToggle.ts).
-  const agentRunning = agent.status === 'running' || agent.status === 'active';
   const [verifierEnabled, setVerifierEnabled] = useState(agent.verifierEnabled === true);
   const [verifierRestartError, setVerifierRestartError] = useState<unknown>(null);
   const saveVerifier = useMutation({
@@ -713,6 +719,7 @@ export function OpsConsole({
                 <span className="text-xs text-ink-3">Enter a new API key to save provider change</span>
               )}
               {save.isError && <ErrorNotice error={save.error ?? 'Save failed.'} title="Save failed" compact />}
+              {saveRestartError != null && <ErrorNotice error={saveRestartError} compact />}
             </div>
 
             {/* Skills — installed as frozen snapshots; managed via the
