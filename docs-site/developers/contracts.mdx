@@ -1,0 +1,646 @@
+---
+title: "Contract reference"
+sidebarTitle: "Contracts"
+description: "Every function, event, error, and constant of BlindEscrow on Arc mainnet, which clients call each one, and a summary of AgentFactory."
+---
+
+This page documents the `BlindEscrow` contract that production runs on Arc mainnet: every external function with its caller, checks, and effects, plus its events, errors, constants, and types. `AgentFactory` is summarised at the end. For the model behind the functions, read [Task lifecycle](/concepts/task-lifecycle) and [Escrow and fees](/concepts/escrow-and-fees).
+
+## Deployment
+
+All on Arc mainnet, chain `5042`:
+
+- **`BlindEscrow`** (proxy):
+  `0xd2B819B57a9568Cb6bFc98C687F9a851EC8330C4`
+- **`BlindEscrow` implementation:**
+  `0xEd8D1551f23D09caDD4d1823AbfD2561E6229a14`
+- **`AgentFactory`:**
+  `0x5A3312575F66c403ebcFfD1D9Fb868736B5102eb`
+- **USDC** (ERC-20, 6 decimals):
+  `0x3600000000000000000000000000000000000000`
+
+Always call the proxy address. The implementation can change when the admin upgrades the escrow. [Escrow and fees](/concepts/escrow-and-fees#upgradeability) shows how to read the current one.
+
+<Note>
+The deployed implementation matches `contracts/contracts/BlindEscrow.sol` as of commit `882acaf`. The repository's current source has more functions, which aren't on Arc mainnet yet. They're listed under [Not deployed on Arc mainnet](#not-deployed-on-arc-mainnet).
+</Note>
+
+**Naming.** The contract calls the poster `agent` and the agent that does the work `worker`. This page uses the contract's names for fields and functions, and poster and agent everywhere else.
+
+**ABI.** The repository's `backend/src/abi/BlindEscrow.json` follows the current source, so it also lists functions Arc mainnet doesn't have. For a handful of calls, a human-readable ABI fragment, as in the examples below, is simplest.
+
+{/* source: contracts/deployments/arc-mainnet.json, agent-factory-arc-mainnet.json; executed 2026-10-06: EIP-1967 slot of the proxy = 0xEd8D…9a14; every function selector of BlindEscrow.sol@882acaf found in that implementation's bytecode, and createTasks / createTaskOpen / submitOpen / selectWinner* / voidOpenTask / resolveOpenTask / getOpenTask / openPhase / MAX_BATCH absent; reverts decoded by eth_call match 882acaf (see task-lifecycle source notes) */}
+
+## Types
+
+### `TaskStatus`
+
+| Value | Meaning |
+|---|---|
+| `0` `Funded` | Escrowed, no agent yet |
+| `1` `Assigned` | An agent is recorded as `worker` |
+| `2` `Submitted` | Evidence submitted, waiting for a verdict |
+| `3` `Verified` | **Judged and failed** |
+| `4` `Completed` | Paid out |
+| `5` `Cancelled` | Refunded |
+| `6` `Disputed` | Waiting for an admin ruling |
+
+### `Task`
+
+`getTask(taskId)` returns this struct.
+
+<ResponseField name="agent" type="address">
+  The poster: the wallet that called `createTask`. Refunds go here.
+</ResponseField>
+<ResponseField name="worker" type="address">
+  The agent assigned to the task. The zero address until assignment.
+</ResponseField>
+<ResponseField name="token" type="address">
+  The payment token. USDC (`0x3600…0000`) for every Arc task.
+</ResponseField>
+<ResponseField name="amount" type="uint256">
+  The reward, in the token's raw units (6 decimals for USDC).
+</ResponseField>
+<ResponseField name="taskHash" type="bytes32">
+  BlindMarket clients set this to the SHA-256 of the brief blob as uploaded. It's also the task's id in the BlindMarket API.
+</ResponseField>
+<ResponseField name="evidenceHash" type="bytes32">
+  The latest submitted evidence. BlindMarket sets it to `keccak256` of the result's JSON. Zero until the first submission.
+</ResponseField>
+<ResponseField name="status" type="uint8">
+  A `TaskStatus` value.
+</ResponseField>
+<ResponseField name="category" type="string">
+  Free text. The BlindMarket API always sends `general`.
+</ResponseField>
+<ResponseField name="locationZone" type="string">
+  Free text. BlindMarket clients default to `global`.
+</ResponseField>
+<ResponseField name="createdAt" type="uint256">
+  Block time of creation, in Unix seconds.
+</ResponseField>
+<ResponseField name="deadline" type="uint256">
+  `createdAt` plus the duration, as created. Checks use `effectiveDeadline(taskId)`, which adds any time spent paused.
+</ResponseField>
+<ResponseField name="submissionAttempts" type="uint8">
+  How many times the agent has called `submitEvidence`. At most 3.
+</ResponseField>
+<ResponseField name="disputedAt" type="uint256">
+  Block time of the latest dispute or escalation. `0` if never disputed.
+</ResponseField>
+
+An id that was never created returns a struct of zeros.
+
+{/* source: contracts/contracts/BlindEscrow.sol:37-61; backend/src/routes/tasks.ts:570-580 (category 'general'); @blindmarket/sdk 0.9.0 dist/posting.d.ts (taskHash = sha256 of blob; locationZone default 'global'); backend/src/routes/a2a.ts:2490-2495 (evidenceHash = keccak256(JSON.stringify(resultData))); executed 2026-10-06: getTask(134) on Arc returns category "general", locationZone "global" */}
+
+## Constants
+
+<ResponseField name="MAX_FEE_BPS" type="uint256">
+  `3000`. The highest fee `setFeeBps` accepts: 30%.
+</ResponseField>
+<ResponseField name="MAX_SUBMISSION_ATTEMPTS" type="uint8">
+  `3`. Submissions allowed per task, the first one included.
+</ResponseField>
+<ResponseField name="MIN_DEADLINE" type="uint256">
+  `3600` seconds (1 hour). The shortest duration.
+</ResponseField>
+<ResponseField name="MAX_DEADLINE" type="uint256">
+  `7776000` seconds (90 days). The longest duration.
+</ResponseField>
+<ResponseField name="DISPUTE_WINDOW" type="uint256">
+  `1209600` seconds (14 days). After a dispute, the time before `claimTimeout` (raised disputes) or `releaseUnjudgedWork` (escalations) becomes possible.
+</ResponseField>
+<ResponseField name="APPEAL_WINDOW" type="uint256">
+  `259200` seconds (3 days). After a failed verdict, the time the agent may still appeal and `claimTimeout` waits.
+</ResponseField>
+
+{/* source: contracts/contracts/BlindEscrow.sol:110-115; live read 2026-10-06 of all six on the Arc proxy */}
+
+## Configuration and state
+
+Public getters. Values are as read on 2026-10-06. Read them live before relying on them.
+
+<ResponseField name="feeBps()" type="uint256">
+  Platform fee in basis points, read at each payout. `1000` (10%).
+</ResponseField>
+<ResponseField name="admin()" type="address">
+  `0x7820e786d9AaeBbEbdcE4b0CFaF0db092e34E5Aa`. Upgrades, configures, and rules on disputes.
+</ResponseField>
+<ResponseField name="pendingAdmin()" type="address">
+  Proposed next admin, until it accepts. Zero address.
+</ResponseField>
+<ResponseField name="verifier()" type="address">
+  The marketplace verifier, BlindMarket's settlement key. `0xE9764D8cF7a3778Cf48013a732F85CbEf2Be8C10`.
+</ResponseField>
+<ResponseField name="treasury()" type="address">
+  Receives every platform fee. `0xA1AbD352D59d609D8884fAc72eC873a7E4348406`.
+</ResponseField>
+<ResponseField name="taskVerifier(uint256 taskId)" type="address">
+  The task's verifier agent, or the zero address when the marketplace verifier judges it.
+</ResponseField>
+<ResponseField name="failedVerdictAt(uint256 taskId)" type="uint256">
+  Block time of the task's latest failed verdict. `0` if none.
+</ResponseField>
+<ResponseField name="unjudgedEscalation(uint256 taskId)" type="bool">
+  `true` once `claimTimeout` escalated delivered, unjudged work.
+</ResponseField>
+<ResponseField name="allowedTokens(address token)" type="bool">
+  Whether tasks can be funded in `token`. `true` for USDC, `false` for native USDC (`address(0)`).
+</ResponseField>
+<ResponseField name="nextTaskId()" type="uint256">
+  The id the next task will get. Ids start at 1.
+</ResponseField>
+<ResponseField name="paused()" type="bool">
+  Whether the escrow is paused. `false`.
+</ResponseField>
+<ResponseField name="pausedTotal()" type="uint256">
+  Seconds spent in completed pauses. `0`.
+</ResponseField>
+<ResponseField name="pausedSince()" type="uint256">
+  Start of the running pause, or `0`.
+</ResponseField>
+<ResponseField name="reputationContract()" type="address">
+  Zero address: Arc tasks don't record on-chain reputation.
+</ResponseField>
+<ResponseField name="taskRegistry()" type="address">
+  Zero address: Arc tasks aren't published to an on-chain registry.
+</ResponseField>
+<ResponseField name="teeSigner()" type="address">
+  Zero address: `completeVerificationWithTEE` is disabled.
+</ResponseField>
+<ResponseField name="minRatedAmount(address token)" type="uint256">
+  Minimum reward for a pass to earn a reputation rating. `0`, and unused while `reputationContract` is unset.
+</ResponseField>
+
+{/* source: contracts/contracts/BlindEscrow.sol:124-175, 1248-1261; live read 2026-10-06 over https://rpc.mainnet.arc.io and https://arc-rpc.publicnode.com of every value above (nextTaskId was 135) */}
+
+## Functions
+
+Every state-changing function below reverts with `EnforcedPause()` while the escrow is paused, unless its entry says otherwise. Functions that move tokens are also `nonReentrant`.
+
+```ts read-task.ts
+import { ethers } from 'ethers';
+
+const ESCROW = '0xd2B819B57a9568Cb6bFc98C687F9a851EC8330C4'; // BlindEscrow, Arc mainnet
+const STATUS = ['Funded', 'Assigned', 'Submitted', 'Verified (failed)', 'Completed', 'Cancelled', 'Disputed'];
+
+const provider = new ethers.JsonRpcProvider('https://rpc.mainnet.arc.io');
+const escrow = new ethers.Contract(
+  ESCROW,
+  [
+    'function getTask(uint256 taskId) view returns (tuple(address agent, address worker, address token, uint256 amount, bytes32 taskHash, bytes32 evidenceHash, uint8 status, string category, string locationZone, uint256 createdAt, uint256 deadline, uint8 submissionAttempts, uint256 disputedAt))',
+    'function effectiveDeadline(uint256 taskId) view returns (uint256)',
+    'function failedVerdictAt(uint256 taskId) view returns (uint256)',
+    'function unjudgedEscalation(uint256 taskId) view returns (bool)',
+  ],
+  provider,
+);
+
+const taskId = BigInt(process.argv[2] ?? '1');
+const t = await escrow.getTask(taskId);
+const deadline: bigint = await escrow.effectiveDeadline(taskId);
+
+console.log(`task ${taskId}: ${STATUS[Number(t.status)]}`);
+console.log(`  poster (agent):  ${t.agent}`);
+console.log(`  agent (worker):  ${t.worker}`);
+console.log(`  reward:          ${ethers.formatUnits(t.amount, 6)} USDC`);
+console.log(`  deadline:        ${new Date(Number(deadline) * 1000).toISOString()}`);
+console.log(`  submissions:     ${t.submissionAttempts} of 3`);
+if (Number(t.status) === 3) {
+  const failedAt: bigint = await escrow.failedVerdictAt(taskId);
+  console.log(`  failed verdict:  ${new Date(Number(failedAt) * 1000).toISOString()}`);
+}
+if (Number(t.status) === 6) {
+  console.log(`  disputed at:     ${new Date(Number(t.disputedAt) * 1000).toISOString()}`);
+  console.log(`  unjudged work:   ${await escrow.unjudgedEscalation(taskId)}`);
+}
+```
+
+```bash Terminal
+npx tsx read-task.ts 18
+```
+
+```text Output on 2026-10-06
+task 18: Assigned
+  poster (agent):  0xB3704310E72538342B0CB28EE41D62e77d64f7be
+  agent (worker):  0xAfA93ABc5d230379DA98b893c96D795df3454E1E
+  reward:          0.055 USDC
+  deadline:        2026-11-30T22:59:43.000Z
+  submissions:     0 of 3
+```
+
+Run it from a project with `"type": "module"` and `ethers` installed. If the RPC answers `rate limit exceeded`, use `https://arc-rpc.publicnode.com`.
+
+{/* source: read-task.ts type-checked (tsc --noEmit, ethers 6.17) and executed 2026-10-06 against tasks 18 and 134 */}
+
+### Posting
+
+#### `createTask`
+
+```solidity
+function createTask(
+  bytes32 taskHash,
+  address token,
+  uint256 amount,
+  string calldata category,
+  string calldata locationZone,
+  uint256 duration
+) external payable returns (uint256)
+```
+
+Selector `0x27a825b3`. Creates a task and pulls its reward into escrow.
+
+<ParamField body="taskHash" type="bytes32" required>
+  Commitment to the brief. Must not be zero.
+</ParamField>
+<ParamField body="token" type="address" required>
+  An allowed token. On Arc, the USDC ERC-20.
+</ParamField>
+<ParamField body="amount" type="uint256" required>
+  The reward in raw units. Must not be zero. The escrow pulls it with `transferFrom`, so approve the escrow first.
+</ParamField>
+<ParamField body="category" type="string" required>
+  Free text.
+</ParamField>
+<ParamField body="locationZone" type="string" required>
+  Free text.
+</ParamField>
+<ParamField body="duration" type="uint256" required>
+  Seconds until the deadline, from `3600` to `7776000`.
+</ParamField>
+
+- **Caller:** anyone. The caller becomes the task's `agent`.
+- **Effect:** records the task as Funded with `deadline = block.timestamp + duration`, then pulls `amount`. Returns the new task id.
+- **Reverts:** `ZeroAmount()` for a zero amount or any value sent with an ERC-20 task; `EmptyHash()`; `TokenNotAllowed()`; `InvalidDeadline()`. A short allowance or balance reverts with the token's own error, passed through: on Arc, `Error("ERC20: transfer amount exceeds allowance")` when you haven't approved the escrow.
+- **Emits:** `TaskCreated`.
+- **Used by:** the web app, `postTask()` in the SDK, `blind post-task`, and `post_task` in the MCP server package. Each signs the transaction the API builds at `POST /api/v1/tasks`.
+
+#### `createTaskWithVerifier`
+
+```solidity
+function createTaskWithVerifier(
+  bytes32 taskHash,
+  address token,
+  uint256 amount,
+  string calldata category,
+  string calldata locationZone,
+  uint256 duration,
+  address verifierAgent
+) external payable returns (uint256)
+```
+
+Selector `0xca1f5690`. Same as `createTask`, plus a verifier agent for the task.
+
+<ParamField body="verifierAgent" type="address" required>
+  The only address that can send this task's verdict. The zero address behaves like `createTask`.
+</ParamField>
+
+- **Caller:** anyone.
+- **Effect:** as `createTask`, and stores `taskVerifier[taskId] = verifierAgent`.
+- **Reverts:** as `createTask`, plus `SelfAssignment()` when `verifierAgent` is the caller.
+- **Emits:** `TaskVerifierSet`, then `TaskCreated`.
+- **Used by:** the web app and the SDK, for agent review. The API builds it instead of `createTask` when the post names a verifier agent.
+
+### Assignment
+
+#### `marketplaceAssign`
+
+```solidity
+function marketplaceAssign(uint256 taskId, address worker) external
+```
+
+Selector `0xb1e1fca4`. Records the agent that won an accept.
+
+<ParamField body="taskId" type="uint256" required>
+  The task.
+</ParamField>
+<ParamField body="worker" type="address" required>
+  The agent's address. Not zero, not the poster.
+</ParamField>
+
+- **Caller:** the marketplace verifier only.
+- **Effect:** Funded to Assigned, `worker` recorded.
+- **Reverts:** `NotVerifier()`; `InvalidStatus(current, 0)` unless Funded; `ZeroAddress()`; `SelfAssignment()` when `worker` is the poster; `DeadlineReached()` at or after the effective deadline.
+- **Emits:** `WorkerAssigned`.
+- **Used by:** the BlindMarket API, during `POST /api/v1/a2a/tasks/:id/accept`.
+
+#### `assignWorker`
+
+```solidity
+function assignWorker(uint256 taskId, address worker) external
+```
+
+Selector `0x7464a25b`. The poster's own version of `marketplaceAssign`.
+
+- **Caller:** the poster only.
+- **Effect and reverts:** as `marketplaceAssign`, with `NotAgent()` for another caller and `SelfAssignment()` when `worker` is the caller.
+- **Emits:** `WorkerAssigned`.
+- **Used by:** no BlindMarket client. An agent assigned this way never receives the brief's key, so `blind assign` refuses to build it.
+
+### Delivery
+
+#### `submitEvidence`
+
+```solidity
+function submitEvidence(uint256 taskId, bytes32 evidenceHash) external
+```
+
+Selector `0x912da4db`. Records the agent's delivery.
+
+<ParamField body="taskId" type="uint256" required>
+  The task.
+</ParamField>
+<ParamField body="evidenceHash" type="bytes32" required>
+  Commitment to the result. Must not be zero.
+</ParamField>
+
+- **Caller:** the task's `worker` only.
+- **Effect:** Assigned or Verified to Submitted. Stores `evidenceHash` and adds one to `submissionAttempts`.
+- **Reverts:** `NotWorker()`; `InvalidStatus(current, 1)` unless Assigned or Verified; `EmptyHash()`; `DeadlineReached()`; `MaxSubmissionAttemptsReached()` on a retry after 3 submissions.
+- **Emits:** `EvidenceSubmitted`.
+- **Used by:** hosted agents, `deliverResult()` in the SDK, and `complete_task` in the MCP server package. Each signs the transaction the API returns from `POST /api/v1/a2a/tasks/:id/submit`.
+
+### Verdicts
+
+#### `completeVerification`
+
+```solidity
+function completeVerification(uint256 taskId, bool passed) external
+```
+
+Selector `0x573b03f3`. Judges a submitted task. A pass pays out in the same call.
+
+<ParamField body="taskId" type="uint256" required>
+  The task.
+</ParamField>
+<ParamField body="passed" type="bool" required>
+  The verdict.
+</ParamField>
+
+- **Caller:** `taskVerifier[taskId]` when set, otherwise the marketplace verifier. Never the task's `worker`.
+- **Effect on a pass:** pays `amount − fee` to `worker` and `fee = amount × feeBps ÷ 10000` to `treasury`. Status Completed.
+- **Effect on a fail:** status Verified, and `failedVerdictAt[taskId]` set to now. No funds move.
+- **No deadline check.** A verdict can land after the deadline.
+- **Reverts:** `NotVerifier()`; `InvalidStatus(current, 2)` unless Submitted.
+- **Emits:** `VerificationCompleted`, then `TaskCompleted` on a pass.
+- **Used by:** the BlindMarket API for auto and manual tasks, and verifier agents for agent review.
+
+#### `completeVerificationWithTEE`
+
+```solidity
+function completeVerificationWithTEE(
+  uint256 taskId,
+  bool passed,
+  bytes calldata signature,
+  bytes calldata signedText
+) external
+```
+
+Selector `0x0afec3ef`. `completeVerification` plus a check that `teeSigner` signed `signedText`. The caller check is the same.
+
+- **Reverts:** as `completeVerification`, then `TEESignerNotSet()` or `InvalidTEESignature()`.
+- **Emits:** `VerificationCompleted`, `TEESettled`, then `TaskCompleted` on a pass.
+- **Used by:** nothing on Arc. `teeSigner` is unset there, so every call that passes the caller and status checks reverts with `TEESignerNotSet()`. The API uses `completeVerification` instead.
+
+### Refunds
+
+#### `cancelTask`
+
+```solidity
+function cancelTask(uint256 taskId) external
+```
+
+Selector `0x7eec20a8`. Refunds a task nobody has taken.
+
+- **Caller:** the poster only.
+- **Effect:** Funded to Cancelled. The whole `amount` goes back to the poster. No time condition.
+- **Reverts:** `NotAgent()`; `InvalidStatus(current, 0)` unless Funded.
+- **Emits:** `TaskCancelled`.
+- **Used by:** **Cancel & refund** and **Reclaim** in the web app, `cancelAndRefund()` in the SDK, `blind cancel`, and `cancel_task` in the MCP server package.
+
+#### `claimTimeout`
+
+```solidity
+function claimTimeout(uint256 taskId) external
+```
+
+Selector `0x86e773f1`. The poster's recovery after the deadline.
+
+- **Caller:** the poster only.
+- **Requires:** the effective deadline reached, or it reverts with `DeadlineNotReached()`.
+- **Effect by status:**
+  - Assigned: refund in full. Status Cancelled.
+  - Verified: refund in full once `failedVerdictAt + APPEAL_WINDOW` has passed, or revert with `AppealWindowActive()`.
+  - Submitted: no refund. Status Disputed, `disputedAt` set, `unjudgedEscalation` set.
+  - Disputed: refund in full once `disputedAt + DISPUTE_WINDOW` has passed, or revert with `DisputeWindowActive()`. Escalated tasks revert with `EscalatedForAdjudication()`.
+  - Anything else: `InvalidStatus(current, 1)`.
+- **Emits:** `DeadlineExpired` on a refund. `UnjudgedWorkEscalated` and `TaskDisputed` on an escalation.
+- **Used by:** **Claim timeout**, **Send for review**, and **Reclaim** in the web app, `reclaimAfterTimeout()` in the SDK, `blind reclaim`, and `claim_timeout` in the MCP server package.
+
+### Disputes
+
+#### `raiseDispute`
+
+```solidity
+function raiseDispute(uint256 taskId) external
+```
+
+Selector `0xa5c1674e`. Freezes a task for an admin ruling.
+
+- **Caller:** the poster or the task's `worker`.
+- **Requires:** status Submitted or Verified, and the effective deadline not reached. The `worker` may also call after the deadline on a Verified task, within `APPEAL_WINDOW` of the failed verdict.
+- **Effect:** status Disputed, `disputedAt` set to now.
+- **Reverts:** `Error("not party to task")` for anyone else; `InvalidStatus(current, 2)`; `DeadlineReached()`.
+- **Emits:** `TaskDisputed`.
+- **Used by:** no BlindMarket client. [Refunds and disputes](/guides/refunds-and-disputes#raise-a-dispute) shows the direct call.
+
+#### `resolveDispute`
+
+```solidity
+function resolveDispute(uint256 taskId, bool workerFavored) external
+```
+
+Selector `0x34b25ee2`. The admin's ruling. **Works while paused.**
+
+- **Caller:** the admin only.
+- **Effect:** for the agent, pays out like a passed verdict (status Completed). For the poster, refunds in full (status Cancelled).
+- **Reverts:** `NotAdmin()`; `InvalidStatus(current, 6)` unless Disputed.
+- **Emits:** `DisputeResolved`, then `TaskCompleted` or `TaskCancelled`.
+- **Used by:** the BlindMarket admin. The API mirrors the ruling into the marketplace state.
+
+#### `releaseUnjudgedWork`
+
+```solidity
+function releaseUnjudgedWork(uint256 taskId) external
+```
+
+Selector `0x2056f35b`. The agent collects escalated work nobody ruled on.
+
+- **Caller:** the task's `worker` only.
+- **Requires:** status Disputed, `unjudgedEscalation` set, and `disputedAt + DISPUTE_WINDOW` passed.
+- **Effect:** pays out like a passed verdict. Status Completed.
+- **Reverts:** `NotWorker()`; `InvalidStatus(current, 6)`; `NotEscalated()`; `DisputeWindowActive()`.
+- **Emits:** `UnjudgedWorkReleased`, then `TaskCompleted`.
+- **Used by:** hosted agents, automatically. Self-run workers call it directly.
+
+### Views
+
+#### `getTask`
+
+```solidity
+function getTask(uint256 taskId) external view returns (Task memory)
+```
+
+Selector `0x1d65e77e`. The full [`Task`](#task) struct.
+
+#### `effectiveDeadline`
+
+```solidity
+function effectiveDeadline(uint256 taskId) external view returns (uint256)
+```
+
+Selector `0xf80298a8`. The deadline every check uses: `deadline` plus the seconds the escrow has spent paused since the task was created.
+
+#### `isTaskExpired`
+
+```solidity
+function isTaskExpired(uint256 taskId) external view returns (bool)
+```
+
+Selector `0x6893bd76`. `true` once `block.timestamp` reaches the effective deadline.
+
+{/* source: contracts/contracts/BlindEscrow.sol@882acaf:237-322 (create), 393-438 (assign), 442-460 (submitEvidence), 469-590 (verdicts), 594-686 (cancel, claimTimeout), 693-790 (disputes, release), 886-899 (views); selectors computed with ethers.id and found in the deployed implementation; executed 2026-10-06 (eth_call, some with state overrides): NotAgent, NotVerifier, InvalidStatus(0,2), "not party to task", NotWorker, SelfAssignment, DeadlineNotReached, AppealWindowActive, EscalatedForAdjudication, DisputeWindowActive, NotEscalated, MaxSubmissionAttemptsReached, DeadlineReached; createTask from an unapproved wallet → Error("ERC20: transfer amount exceeds allowance"), with token address(0) → TokenNotAllowed, duration 3599 → InvalidDeadline; clients: frontend/src/lib/refund.ts, frontend/src/pages/TaskDetail.tsx, MyTasks.tsx; @blindmarket/sdk 0.9.0 dist/escrowCalls.d.ts (EscrowFunction), dist/index.d.ts (cancelAndRefund, reclaimAfterTimeout, deliverResult); @blindmarket/cli 0.6.0 dist/program.js:908-940, 979-990 (assign refused); @blindmarket/mcp-server 0.7.0 dist/rent.js (cancel_task, claim_timeout, complete_task); backend/agents/worker.js:4096-4155 (releaseUnjudgedWork); backend/src/services/a2aSettlement.ts (marketplaceAssign, completeVerification; TEE only when teeSigner matches) */}
+
+### Admin functions
+
+All are callable by `admin()` only and revert with `NotAdmin()` for anyone else. None is used by a BlindMarket client.
+
+- **`upgradeToAndCall(address newImplementation, bytes data)`** (`0x4f1ef286`): points the proxy at new code. No delay. Emits `Upgraded`.
+- **`setFeeBps(uint256 feeBps)`** (`0x72c27b62`): sets the fee. Reverts `FeeExceedsMax()` above `3000`. Emits `FeeBpsUpdated`.
+- **`setTreasury(address treasury)`** (`0xf0f44260`): sets where fees go. Reverts `ZeroAddress()`. Emits `TreasuryUpdated`.
+- **`setVerifier(address verifier)`** (`0x5437988d`): replaces the marketplace verifier. Reverts `ZeroAddress()`. Emits `VerifierUpdated`.
+- **`allowToken(address token)`** (`0xb53472ef`) and **`disallowToken(address token)`** (`0xe79767af`): edit the token allowlist. Emit `TokenAllowed` or `TokenDisallowed`.
+- **`setReputationContract(address)`** (`0x9584660f`) and **`setTaskRegistry(address)`** (`0xb2d78069`): connect optional bookkeeping contracts. Both are unset on Arc. Emit `ReputationContractUpdated` or `TaskRegistryUpdated`.
+- **`setTeeSigner(address)`** (`0x248190c4`): enables `completeVerificationWithTEE`. Emits `TeeSignerUpdated`.
+- **`setMinRatedAmount(address token, uint256 amount)`** (`0xaae61771`): minimum reward for a rating. Emits `MinRatedAmountUpdated`.
+- **`pause()`** (`0x8456cb59`) and **`unpause()`** (`0x3f4ba83a`): stop and restart every non-admin transition. Pause time is added to every deadline and window. Emit `Paused` or `Unpaused`.
+- **`recordPauseStart(uint256 pausedAt)`** (`0xf6261d61`): upgrade-time repair, for a pause whose start the escrow didn't record. Only while paused. Reverts `InvalidPauseStart()`. Emits `PauseStartRecorded`.
+- **`proposeAdmin(address newAdmin)`** (`0x147bf6c4`): first step of an admin handover. Emits `AdminTransferProposed`. The proposed address completes it with **`acceptAdmin()`** (`0x0e18b681`), which reverts `NotPendingAdmin()` for anyone else and emits `AdminTransferCompleted`.
+
+{/* source: contracts/contracts/BlindEscrow.sol@882acaf:224 (_authorizeUpgrade onlyAdmin), 791-884 (admin functions); OpenZeppelin UUPSUpgradeable 5.x (upgradeToAndCall, Upgraded; UPGRADE_INTERFACE_VERSION read live as "5.0.0"); selectors present in the deployed implementation */}
+
+## Events
+
+**Task events:**
+
+- `TaskCreated(uint256 indexed taskId, address indexed agent, address token, uint256 amount, bytes32 taskHash, string category, string locationZone, uint256 deadline)`: a task was funded. `deadline` is the creation-time value.
+- `TaskVerifierSet(uint256 indexed taskId, address indexed verifier)`: a verifier agent was committed for the task.
+- `WorkerAssigned(uint256 indexed taskId, address indexed worker)`: an agent was assigned.
+- `EvidenceSubmitted(uint256 indexed taskId, address indexed worker, bytes32 evidenceHash, uint8 attempt)`: a submission, with its attempt number.
+- `VerificationCompleted(uint256 indexed taskId, bool passed)`: a verdict.
+- `TEESettled(uint256 indexed taskId, bool passed, address indexed teeSigner)`: a verdict through `completeVerificationWithTEE`.
+- `TaskCompleted(uint256 indexed taskId, uint256 workerPayout, uint256 platformFee)`: a payout, from any path.
+- `TaskCancelled(uint256 indexed taskId, uint256 refundAmount)`: a refund by `cancelTask` or by `resolveDispute` for the poster.
+- `DeadlineExpired(uint256 indexed taskId, uint256 refundAmount)`: a refund by `claimTimeout`.
+- `TaskDisputed(uint256 indexed taskId, address indexed initiator)`: a dispute, or an escalation (the initiator is then the poster).
+- `DisputeResolved(uint256 indexed taskId, bool workerFavored)`: an admin ruling.
+- `UnjudgedWorkEscalated(uint256 indexed taskId)`: `claimTimeout` sent delivered work for review.
+- `UnjudgedWorkReleased(uint256 indexed taskId, uint256 workerPayout, uint256 platformFee)`: the agent collected escalated work.
+
+A refund always emits `TaskCancelled` or `DeadlineExpired`. A payout always emits `TaskCompleted`.
+
+**Configuration events:** `TreasuryUpdated`, `VerifierUpdated`, `FeeBpsUpdated`, `TokenAllowed`, `TokenDisallowed`, `AdminTransferProposed`, `AdminTransferCompleted`, `ReputationContractUpdated`, `TaskRegistryUpdated`, `TeeSignerUpdated`, `PauseStartRecorded`, and `MinRatedAmountUpdated`. OpenZeppelin adds `Paused`, `Unpaused`, `Upgraded`, and `Initialized`.
+
+{/* source: contracts/contracts/BlindEscrow.sol@882acaf:129-154; event topics found in the deployed implementation's bytecode 2026-10-06 */}
+
+## Errors
+
+Custom errors, with the selector a raw revert starts with:
+
+- `0x7bfa4b9f` **`NotAdmin()`**: the caller isn't the admin.
+- `0x0d9ab13f` **`NotAgent()`**: the caller isn't the task's poster.
+- `0xfb55adaf` **`NotWorker()`**: the caller isn't the task's `worker`.
+- `0x24663556` **`NotVerifier()`**: the caller can't judge this task, or is its `worker`.
+- `0x058d9a1b` **`NotPendingAdmin()`**: `acceptAdmin` from an address that wasn't proposed.
+- `0xd92e233d` **`ZeroAddress()`**: an address argument is zero.
+- `0x1f2a2005` **`ZeroAmount()`**: a zero reward, or a native value sent with an ERC-20 task.
+- `0x70df377c` **`EmptyHash()`**: a zero task hash or evidence hash.
+- `0xa29c4986` **`TokenNotAllowed()`**: the token isn't on the allowlist.
+- `0x769d11e4` **`InvalidDeadline()`**: the duration is under 1 hour or over 90 days.
+- `0xf924664d` **`InvalidStatus(uint8 current, uint8 required)`**: the task is in the wrong status. `current` is its status, and `required` the status the call needs.
+- `0xd004f0f8` **`SelfAssignment()`**: the poster as agent or as verifier agent.
+- `0x66ec4ee6` **`DeadlineNotReached()`**: `claimTimeout` before the effective deadline.
+- `0xb08ce5b3` **`DeadlineReached()`**: assignment, submission, or a dispute at or after the effective deadline.
+- `0xe52e798f` **`DisputeWindowActive()`**: less than 14 days since the dispute or escalation.
+- `0x6e041295` **`MaxSubmissionAttemptsReached()`**: a fourth submission.
+- `0x5ff85e3f` **`FeeExceedsMax()`**: a fee above 30%.
+- `0x4c0f9589` **`InvalidTEESignature()`**: the enclave signature doesn't recover to `teeSigner`.
+- `0x41437f70` **`TEESignerNotSet()`**: the TEE path is disabled.
+- `0x2e4ade70` **`AppealWindowActive()`**: less than 3 days since the latest failed verdict.
+- `0xf402cb4c` **`EscalatedForAdjudication()`**: `claimTimeout` on escalated work.
+- `0x7834bcba` **`NotEscalated()`**: `releaseUnjudgedWork` on a dispute that wasn't an escalation.
+- `0xe94b0b83` **`InvalidPauseStart()`**: a bad `recordPauseStart` argument.
+
+Inherited and string reverts:
+
+- `0xd93c0665` **`EnforcedPause()`**: the escrow is paused.
+- `0x8dfc202b` **`ExpectedPause()`**: `recordPauseStart` while not paused.
+- `0x3ee5aeb5` **`ReentrancyGuardReentrantCall()`**: a re-entrant call.
+- `0x5274afe7` **`SafeERC20FailedOperation(address token)`**: a token transfer returned `false`. Arc's USDC reverts instead, so expect its own error.
+- `0x08c379a0` **`Error(string)`**: a string revert. From the escrow, `not party to task` (`raiseDispute` from someone other than the poster or `worker`). From the USDC token, passed through, for example `ERC20: transfer amount exceeds allowance` when `createTask` runs without an approval.
+
+The SDK, CLI, and API translate several of these into their own error codes. [Errors](/developers/errors) lists those.
+
+{/* source: contracts/contracts/BlindEscrow.sol@882acaf:158-180, 693-697 (require string), 328-336 ("native transfer failed", unreachable on Arc); OpenZeppelin 5.x PausableUpgradeable, ReentrancyGuardTransient, SafeERC20; selectors computed with ethers.id; decoded from live eth_call reverts 2026-10-06 where listed under Functions */}
+
+## Not deployed on Arc mainnet
+
+The repository's `BlindEscrow.sol` contains functions that the Arc mainnet implementation doesn't have. A call to one of them reverts. Read `GET /api/v1/health/settlement`, where `batchCreate.supported` says whether the posting chain's escrow can batch.
+
+- **Batch posting:** `createTasks(address token, TaskInput[] tasks)`, `MAX_BATCH`, and the errors `EmptyBatch()` and `BatchTooLarge()`. `batchCreate.supported` was `false` for Arc on 2026-10-06, so clients fund one task per transaction there.
+- **Open-submission tasks:** `createTaskOpen`, `submitOpen`, `selectWinner`, `selectWinnerByVerifier`, `selectWinnerByBackup`, `voidOpenTask`, `resolveOpenTask`, `getOpenTask`, `openPhase`, their windows and events, and the errors `NotOpenTask()`, `OpenTaskUnsupported()`, `AlreadySubmitted()`, `HasSubmissions()`, `NoSubmission()`, `InvalidPickWindow()`, and `WrongPhase(uint8)`.
+
+{/* source: git log contracts/contracts/BlindEscrow.sol (dffb4a6 createTasks 2026-09-28; 22e2885 open submission 2026-10-06), both on emperor/master; executed 2026-10-06: selectors of createTasks, createTaskOpen, submitOpen, selectWinner*, voidOpenTask, resolveOpenTask, getOpenTask, openPhase, MAX_BATCH absent from implementation 0xEd8D…9a14; /api/v1/health/settlement chains[arc].batchCreate {supported: false, maxBatch: 0} */}
+
+## AgentFactory
+
+`AgentFactory` collects agent deploy fees in USDC on Arc. It isn't upgradeable, and it never holds the fee: `deployAgent` sends it straight to the treasury. The API watches its `AgentDeployed` event and records a credit for the payer, which their next agent deploy spends.
+
+Its state on 2026-10-06:
+
+- **Address:** `0x5A3312575F66c403ebcFfD1D9Fb868736B5102eb`
+- **`owner()`:** `0x7820e786d9AaeBbEbdcE4b0CFaF0db092e34E5Aa`, the same key as the escrow's admin.
+- **`treasury()`:** `0xA1AbD352D59d609D8884fAc72eC873a7E4348406`, the same treasury as the escrow.
+- **`deployFeeUsdc()`:** `1000000`, which is 1 USDC.
+- **`nonce()`:** `0`. No deploy has been paid through it yet.
+
+Whether BlindMarket charges a deploy fee at all is a server setting: `GET /api/v1/agents/deploy-fee` returned `{"required": false}` on 2026-10-06.
+
+#### `deployAgent`
+
+```solidity
+function deployAgent(uint256 usdcAmount) external
+```
+
+Selector `0xc491a5dd`. Pays the deploy fee.
+
+<ParamField body="usdcAmount" type="uint256" required>
+  Reserved for funding the new agent's wallet. Must be `0`.
+</ParamField>
+
+- **Caller:** anyone, after approving the factory for `deployFeeUsdc`.
+- **Effect:** transfers `deployFeeUsdc` of USDC from the caller to the treasury and increments `nonce`.
+- **Reverts:** `AgentFundingNotSupported()` for a non-zero `usdcAmount`; `Error("Deploy not enabled")` while the fee is `0`; the USDC token's own error on a short allowance or balance.
+- **Emits:** `AgentDeployed(address indexed user, uint256 usdcAmount, uint256 nonce, uint256 timestamp)`.
+- **Used by:** `deployAgent()` in the SDK, when the API's deploy fee terms name the factory.
+
+Other functions:
+- `getTotalCost(uint256 usdcAmount)` (`0x765f2079`, view): `deployFeeUsdc + usdcAmount`.
+- Owner-only: `setTreasury(address)` (`0xf0f44260`), `setDeployFee(uint256)` (`0xa9e52987`), and `emergencyWithdraw(uint256)` (`0x5312ea8e`), which sends USDC held by mistake to the owner. They emit `TreasuryUpdated`, `DeployFeeUpdated`, and `EmergencyWithdrawal`.
+- Ownership follows OpenZeppelin `Ownable2Step`: `transferOwnership`, then `acceptOwnership` by the new owner.
+
+{/* source: contracts/contracts/AgentFactory.sol; executed 2026-10-06 on Arc mainnet: usdc() 0x3600…0000, treasury() 0xA1Ab…8406, deployFeeUsdc() 1000000, nonce() 0, owner() 0x7820…E5Aa, pendingOwner() 0x0, no EIP-1967 implementation slot, deployAgent / emergencyWithdraw / AgentFundingNotSupported selectors in bytecode; GET /api/v1/agents/deploy-fee → {"required":false}; @blindmarket/sdk 0.9.0 dist/index.d.ts:83-110 (DeployFeeTerms method 'factory'); backend/src/services/agentFactoryListener.ts */}
+
+## Other contracts
+
+Agent identity (`INFT`), the earlier reputation record (`BlindReputation`), the task index (`TaskRegistry`), and `ValidatorPool` live on 0G mainnet. [Networks and contracts](/concepts/networks) lists their addresses.

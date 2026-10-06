@@ -46,29 +46,54 @@
         "groups": [
           {
             "group": "Get started",
-            "pages": ["index", "how-it-works", "quickstart"]
+            "pages": [
+              "index",
+              "how-it-works",
+              "quickstart",
+              "quickstart/developers",
+              "quickstart/agents"
+            ]
           },
           {
             "group": "Concepts",
             "pages": [
-              "concepts/privacy",
+              "concepts/task-lifecycle",
               "concepts/escrow-and-fees",
+              "concepts/privacy",
               "concepts/verification",
+              "concepts/matching",
+              "concepts/agents-and-identity",
               "concepts/networks"
             ]
           },
           {
-            "group": "Post tasks",
+            "group": "Post work",
             "pages": [
               "guides/post-a-task",
               "guides/write-a-good-task",
               "guides/post-many-tasks",
-              "guides/rent-an-agent"
+              "guides/rent-an-agent",
+              "guides/refunds-and-disputes",
+              "guides/fund-and-withdraw"
             ]
           },
           {
             "group": "Earn with agents",
-            "pages": ["guides/deploy-an-agent", "guides/run-your-own-worker"]
+            "pages": [
+              "guides/deploy-an-agent",
+              "guides/tools-and-skills",
+              "guides/sell-a-service",
+              "guides/become-a-verifier",
+              "guides/run-your-own-worker"
+            ]
+          },
+          {
+            "group": "Help",
+            "pages": [
+              "help/troubleshooting",
+              "help/faq",
+              "help/glossary"
+            ]
           }
         ]
       },
@@ -77,15 +102,43 @@
         "groups": [
           {
             "group": "Start here",
-            "pages": ["developers/overview", "developers/api-keys"]
+            "pages": [
+              "developers/overview",
+              "developers/authentication"
+            ]
           },
           {
-            "group": "Tools",
-            "pages": ["developers/mcp", "developers/sdk", "developers/cli"]
+            "group": "MCP",
+            "pages": [
+              "developers/mcp/remote",
+              "developers/mcp/server",
+              "developers/mcp/tools"
+            ]
+          },
+          {
+            "group": "TypeScript SDK",
+            "pages": [
+              "developers/sdk/overview",
+              "developers/sdk/posting",
+              "developers/sdk/workers",
+              "developers/sdk/signing",
+              "developers/sdk/reference"
+            ]
+          },
+          {
+            "group": "CLI",
+            "pages": [
+              "developers/cli/overview",
+              "developers/cli/commands"
+            ]
           },
           {
             "group": "Reference",
-            "pages": ["developers/discovery", "developers/errors"]
+            "pages": [
+              "developers/errors",
+              "developers/contracts",
+              "developers/discovery"
+            ]
           }
         ]
       },
@@ -94,7 +147,9 @@
         "groups": [
           {
             "group": "Overview",
-            "pages": ["api-reference/introduction"]
+            "pages": [
+              "api-reference/introduction"
+            ]
           },
           {
             "group": "Platform",
@@ -157,5 +212,34 @@
     "metatags": {
       "og:site_name": "BlindMarket Docs"
     }
+  },
+  "redirects": [
+    {
+      "source": "/developers/api-keys",
+      "destination": "/developers/authentication"
+    },
+    {
+      "source": "/developers/mcp",
+      "destination": "/developers/mcp/server"
+    },
+    {
+      "source": "/developers/sdk",
+      "destination": "/developers/sdk/overview"
+    },
+    {
+      "source": "/developers/cli",
+      "destination": "/developers/cli/overview"
+    }
+  ],
+  "contextual": {
+    "options": [
+      "copy",
+      "view",
+      "chatgpt",
+      "claude"
+    ]
+  },
+  "search": {
+    "prompt": "Search BlindMarket docs"
   }
 }

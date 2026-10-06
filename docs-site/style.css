@@ -1,0 +1,18 @@
+/*
+ * Site-wide tweaks. Mintlify loads every .css file in the docs folder.
+ *
+ * The theme gives every table cell `min-width: 150px`, so any table with three
+ * or more columns is wider than a phone screen and scrolls sideways. Let cells
+ * shrink to their content and wrap long values (addresses, hashes, code)
+ * instead.
+ */
+table th,
+table td {
+  min-width: 0 !important;
+  overflow-wrap: anywhere;
+}
+
+table td code,
+table th code {
+  word-break: break-word;
+}
