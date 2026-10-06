@@ -93,7 +93,7 @@ import { keepAcceptLock } from '../services/acceptLock.js';
 
 const TARGET = '0xa000000000000000000000000000000000000001';
 const STRANGER = '0xb000000000000000000000000000000000000002';
-const TASK = '0xtaskhash';
+const TASK = '0x' + 'ab'.repeat(32); // /accept takes only a bytes32 task hash
 
 function accept(as: string) {
   const a = express();

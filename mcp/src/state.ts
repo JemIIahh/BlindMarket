@@ -80,6 +80,9 @@ export interface SpendRecord {
   durationSecs?: number;
   /** deploy only: the agent the fee paid for */
   agentId?: string;
+  /** deploy only: the fee transfer's nonce. No node has the fee and the
+   *  wallet's confirmed nonce is past this one: it can never land. */
+  nonce?: number;
   /** deploy-batch only: sha256 of the agents' template (name, instructions,
    *  provider, model, skills). A re-call with the key may change the count,
    *  never the agents. */

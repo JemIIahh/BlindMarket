@@ -23,7 +23,7 @@ const { ethers, networkHelpers } = connection;
 const upgrades = await createUpgrades(hre, connection);
 const time = networkHelpers.time;
 
-const Kind = { SubmitEvidence: 0, ReleaseUnjudgedWork: 1 } as const;
+const Kind = { SubmitEvidence: 0, ReleaseUnjudgedWork: 1, SubmitOpen: 2 } as const;
 
 /** The EIP-712 type the wallet signs. `escrow` is not in the calldata: the
  *  delegate fills it from its immutable ESCROW. */
@@ -368,7 +368,7 @@ describe("BlindAgentDelegate (EIP-7702, Prague)", function () {
     });
 
     it("an unknown kind", async function () {
-      const call = { ...(await submitCall(taskId)), kind: 2 };
+      const call = { ...(await submitCall(taskId)), kind: 3 }; // 2 is SubmitOpen from version 2
       // Validly signed, so only the enum check can stop it: the ABI decoder
       // rejects an out-of-range enum before any code runs.
       await expect(sponsored(agent.address, call, await sign(agent, call))).to.be.revertedWithoutReason(ethers);
@@ -405,6 +405,94 @@ describe("BlindAgentDelegate (EIP-7702, Prague)", function () {
         .to.be.revertedWithCustomError(escrow, "InvalidStatus")
         .withArgs(2, 1);
       expect(await walletAt(agent.address).nonce()).to.equal(1n);
+    });
+  });
+
+  describe("version 2: sponsored submitOpen", function () {
+    /** The poster funds an open task (CreatorReview, one-hour window) judged by `funder`. */
+    async function postOpen(duration = ONE_HOUR): Promise<bigint> {
+      const taskId = await escrow.nextTaskId();
+      await escrow.connect(poster).createTaskOpen(TASK_HASH, await usdc.getAddress(), AMOUNT, "test", "global", duration, funder.address, 1, ONE_HOUR);
+      return taskId;
+    }
+
+    async function openCall(taskId: bigint, nonce = 0n, evidenceHash = EVIDENCE): Promise<Call> {
+      return { kind: Kind.SubmitOpen, taskId, evidenceHash, nonce, deadline: await deadlineIn() };
+    }
+
+    it("reports version 2", async function () {
+      expect(await delegate.DELEGATE_VERSION()).to.equal(2n);
+    });
+
+    it("submits to an open task as the agent, which never holds gas, and the agent can win it", async function () {
+      const taskId = await postOpen();
+      const call = await openCall(taskId);
+      const tx = await sponsored(agent.address, call, await sign(agent, call), await authorize(agent));
+      await expect(tx).to.emit(escrow, "OpenSubmission").withArgs(taskId, agent.address, EVIDENCE, 1);
+      await expect(tx).to.emit(walletAt(agent.address), "SponsoredCall").withArgs(Kind.SubmitOpen, taskId, 0);
+      expect(await escrow.submissionOf(taskId, agent.address)).to.equal(EVIDENCE);
+      expect(await ethers.provider.getBalance(agent.address)).to.equal(0n);
+      expect(await walletAt(agent.address).nonce()).to.equal(1n);
+
+      await time.increaseTo(await escrow.effectiveDeadline(taskId));
+      await expect(escrow.connect(poster).selectWinner(taskId, agent.address, ethers.ZeroHash)).to.emit(escrow, "TaskCompleted");
+      expect(await usdc.balanceOf(agent.address)).to.equal(PAYOUT);
+    });
+
+    it("bubbles up the escrow's refusals: a second submission, and a task that is not open", async function () {
+      const taskId = await postOpen();
+      const c0 = await openCall(taskId, 0n);
+      await sponsored(agent.address, c0, await sign(agent, c0), await authorize(agent));
+      const c1 = await openCall(taskId, 1n, ethers.keccak256(ethers.toUtf8Bytes("another result")));
+      await expect(sponsored(agent.address, c1, await sign(agent, c1))).to.be.revertedWithCustomError(escrow, "AlreadySubmitted");
+      const single = await postAndAssign(agent.address);
+      const c2 = await openCall(single, 1n);
+      await expect(sponsored(agent.address, c2, await sign(agent, c2))).to.be.revertedWithCustomError(escrow, "NotOpenTask");
+      expect(await walletAt(agent.address).nonce()).to.equal(1n);
+    });
+
+    it("never turns a submitEvidence signature into a submitOpen: the kind is signed", async function () {
+      const taskId = await postOpen();
+      const asEvidence = await openCall(taskId);
+      const signature = await sign(agent, { ...asEvidence, kind: Kind.SubmitEvidence });
+      await expect(sponsored(agent.address, asEvidence, signature, await authorize(agent))).to.be.revertedWithCustomError(delegate, "InvalidSignature");
+    });
+  });
+
+  describe("version 1, the deployed delegate, next to version 2", function () {
+    let v1Addr: string;
+
+    beforeEach(async function () {
+      const V1 = await ethers.getContractFactory("BlindAgentDelegateV1");
+      const v1 = await V1.deploy(escrowAddr);
+      await v1.waitForDeployment();
+      v1Addr = await v1.getAddress();
+    });
+
+    it("has no DELEGATE_VERSION: the call reverts without data, which callers read as version 1", async function () {
+      const data = delegate.interface.encodeFunctionData("DELEGATE_VERSION");
+      await expect(ethers.provider.call({ to: v1Addr, data })).to.be.rejected;
+      expect(await ethers.provider.call({ to: delegateAddr, data })).to.equal(ethers.toBeHex(2, 32));
+    });
+
+    it("rejects a SubmitOpen call before any code runs, and leaves the nonce", async function () {
+      const taskId = await escrow.nextTaskId();
+      await escrow.connect(poster).createTaskOpen(TASK_HASH, await usdc.getAddress(), AMOUNT, "test", "global", ONE_HOUR, funder.address, 0, 0);
+      const call = { kind: Kind.SubmitOpen, taskId, evidenceHash: EVIDENCE, nonce: 0n, deadline: await deadlineIn() };
+      await expect(sponsored(agent.address, call, await sign(agent, call), await authorize(agent, v1Addr))).to.be.revertedWithoutReason(ethers);
+      expect(await escrow.submissionCount(taskId)).to.equal(0n);
+    });
+
+    it("shares the wallet's nonce with version 2: a call made under one cannot be replayed under the other", async function () {
+      const first = await postAndAssign(agent.address);
+      const call = await submitCall(first, 0n);
+      const signature = await sign(agent, call);
+      await sponsored(agent.address, call, signature, await authorize(agent, v1Addr));
+      expect(await walletAt(agent.address).nonce()).to.equal(1n);
+      // Re-pointed to version 2: the nonce carries over, the old signature is spent.
+      await (await sponsor.sendTransaction({ to: sponsor.address, authorizationList: [await authorize(agent, delegateAddr)] })).wait();
+      expect(await ethers.provider.getCode(agent.address)).to.equal(designator(delegateAddr));
+      await expect(sponsored(agent.address, call, signature)).to.be.revertedWithCustomError(delegate, "InvalidNonce").withArgs(1n);
     });
   });
 
@@ -574,10 +662,15 @@ describe("BlindAgentDelegate (EIP-7702, Prague)", function () {
       const c1 = await submitCall(later, 1n);
       await measure("later sponsored submitEvidence", agent.address, c1, await sign(agent, c1));
 
+      const open = await escrow.nextTaskId();
+      await escrow.connect(poster).createTaskOpen(TASK_HASH, await usdc.getAddress(), AMOUNT, "test", "global", ONE_WEEK, funder.address, 0, 0);
+      const c3 = { kind: Kind.SubmitOpen, taskId: open, evidenceHash: EVIDENCE, nonce: 2n, deadline: await deadlineIn() };
+      await measure("later sponsored submitOpen (version 2)", agent.address, c3, await sign(agent, c3));
+
       await time.increase(ONE_HOUR + 1);
       await escrow.connect(poster).claimTimeout(first);
       await time.increase(Number(await escrow.DISPUTE_WINDOW()));
-      const c2 = await releaseCall(first, 2n);
+      const c2 = await releaseCall(first, 3n);
       await measure("sponsored releaseUnjudgedWork", agent.address, c2, await sign(agent, c2));
     });
 

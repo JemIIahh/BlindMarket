@@ -69,6 +69,11 @@ interface State {
   /** A deploy fee paid but not yet used, per backend, wallet and chain id. */
   pendingFees?: Record<string, string>;
   /**
+   * The nonce each saved deploy fee was sent with, by its hash. A fee no node
+   * has, whose sender's confirmed nonce is past this one, never landed.
+   */
+  feeNonces?: Record<string, number>;
+  /**
    * Escrows funded but not yet listed, by task hash: the body POST
    * /a2a/tasks/index needs. `batch: true` marks a row that shares its funding
    * transaction with others, which lists through /a2a/tasks/index-batch.
@@ -126,12 +131,24 @@ export function pendingFee(apiBase: string, address: string, chainId?: number): 
   return loadState().pendingFees?.[feeKey(apiBase, address, chainId)];
 }
 
-export function setPendingFee(apiBase: string, address: string, chainId: number | undefined, hash: string | null): void {
+/** Save (or, with null, clear) the deploy fee in this slot, with the nonce it was sent with when known. */
+export function setPendingFee(apiBase: string, address: string, chainId: number | undefined, hash: string | null, nonce?: number): void {
   const s = loadState();
+  const key = feeKey(apiBase, address, chainId);
   const fees = { ...(s.pendingFees ?? {}) };
-  if (hash) fees[feeKey(apiBase, address, chainId)] = hash;
-  else delete fees[feeKey(apiBase, address, chainId)];
-  saveState({ ...s, pendingFees: fees });
+  const nonces = { ...(s.feeNonces ?? {}) };
+  const before = fees[key];
+  if (hash) fees[key] = hash;
+  else delete fees[key];
+  // A nonce belongs to its hash, and goes with it.
+  if (before && before.toLowerCase() !== hash?.toLowerCase()) delete nonces[before.toLowerCase()];
+  if (hash && nonce !== undefined) nonces[hash.toLowerCase()] = nonce;
+  saveState({ ...s, pendingFees: fees, feeNonces: nonces });
+}
+
+/** The nonce the saved deploy fee `hash` was sent with, when it was saved with one. */
+export function pendingFeeNonce(hash: string): number | undefined {
+  return loadState().feeNonces?.[hash.toLowerCase()];
 }
 
 export function pendingPosts(): Record<string, Record<string, unknown>> {

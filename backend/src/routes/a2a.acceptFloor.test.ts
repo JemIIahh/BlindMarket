@@ -108,7 +108,7 @@ import { pricingUnit, payoutCurrency } from '../services/settlementUnits.js';
 import { settlementChainConfig } from '../services/settlementChains.js';
 
 const AGENT = '0xagent0000000000000000000000000000000001';
-const TASK = '0xtaskhash';
+const TASK = '0x' + 'ab'.repeat(32); // /accept takes only a bytes32 task hash
 
 function accept() {
   const a = express();

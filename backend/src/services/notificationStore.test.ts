@@ -32,6 +32,7 @@ vi.mock('./redis.js', () => {
         return l.slice(s, end);
       },
       llen: async (k: string) => (lists.get(k) ?? []).length,
+      get: async (k: string) => mem.keys.get(k) ?? null,
       // SET key value EX s NX: null when the key already exists.
       set: async (k: string, v: string, ...args: unknown[]) => {
         if (args.includes('NX') && mem.keys.has(k)) return null;
@@ -56,7 +57,7 @@ vi.mock('./a2aStore.js', () => ({
   getState: vi.fn(async () => ({ executorAddress: EXEC })),
 }));
 
-import { notify, notifyOnce, listNotifications, markRead, markAllRead, notifyLifecycle } from './notificationStore.js';
+import { notify, notifyOnce, firstSeenAt, listNotifications, markRead, markAllRead, notifyLifecycle } from './notificationStore.js';
 
 beforeEach(() => {
   mem.lists.clear();
@@ -116,6 +117,19 @@ describe('notifyLifecycle fan-out', () => {
     expect((await listNotifications(POSTER)).total).toBe(2);
     expect((await listNotifications(EXEC)).total).toBe(2);
   });
+
+  // Only disputeListener sends 'disputed', once a ruling has refunded the
+  // poster (delta audit 2026-10-06, tg-4): the copy must not say a ruling is
+  // still to come.
+  it('disputed tells both sides the ruling refunded the poster', async () => {
+    await notifyLifecycle(HASH, 'disputed');
+    for (const who of [POSTER, EXEC]) {
+      const [n] = (await listNotifications(who)).notifications;
+      expect(n.title).toMatch(/ruled/i);
+      expect(n.body).toMatch(/refunded/i);
+      expect(`${n.title} ${n.body}`).not.toMatch(/will rule|under dispute/i);
+    }
+  });
 });
 
 describe('notifyOnce', () => {
@@ -126,5 +140,13 @@ describe('notifyOnce', () => {
     const page = await listNotifications(POSTER);
     expect(page.notifications).toHaveLength(1);
     expect(page.notifications[0]).toMatchObject({ type: 'expired', taskId: HASH });
+  });
+});
+
+describe('firstSeenAt', () => {
+  it('records the first time and returns it after that', async () => {
+    expect(await firstSeenAt('remind:0xabc', 1000, 3600)).toBe(1000);
+    expect(await firstSeenAt('remind:0xabc', 2000, 3600)).toBe(1000);
+    expect(await firstSeenAt('remind:0xdef', 2000, 3600)).toBe(2000);
   });
 });

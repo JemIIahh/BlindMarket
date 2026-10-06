@@ -1069,15 +1069,16 @@ export async function acceptBlocker(chain, problemFor) {
 /**
  * Partition open tasks by `acceptBlocker`. `problemFor` is memoised per poll
  * so a page of N Base tasks costs one balance read. A task the backend hinted
- * as gasSponsored skips the gas gate: /accept reserves its sponsored submit,
- * or refuses (and the worker then checks its own gas before trying again).
+ * as gasSponsored (`hinted`) skips the gas gate: /accept reserves its
+ * sponsored submit, or refuses (and the worker then checks its own gas before
+ * trying again).
  */
-export async function pickAffordable(entries, problemFor) {
+export async function pickAffordable(entries, problemFor, hinted = (e) => e?.meta?.gasSponsored === true) {
   const affordable = [];
   const skipped = [];
   for (const e of entries) {
     const chain = e?.meta?.chain;
-    const sponsored = e?.meta?.gasSponsored === true;
+    const sponsored = hinted(e);
     const blocker = await acceptBlocker(chain, sponsored ? async () => null : problemFor);
     if (blocker) skipped.push({ taskHash: e.meta.taskId, chain, ...blocker });
     else affordable.push(e);
@@ -1296,6 +1297,11 @@ const MAX_NEEDS_WRAP_POLLS = 20;
 // Guard against concurrent task execution — WS events and poll fallback
 // must not overlap (both use the same wallet for tx signing).
 let _working = false;
+// A poll came due (safety net, disconnect) while _working was set. The
+// deferred-accept queue hands _working from one task to the next with no gap,
+// so without this resume, verifier duty and unjudged payouts never ran while
+// it had entries. drainDeferredAccepts runs the poll before the next task.
+let pollDue = false;
 // Tasks currently being re-driven by resumeAssignedTasks(), so overlapping poll
 // cycles never double-run the same one. resumeFailures caps wasted retries on a
 // task that can't finalize (e.g. past its on-chain deadline) so it can't burn
@@ -1305,7 +1311,10 @@ const resumeFailures = new Map();
 // taskHash → last gas-skip reason logged, so a wallet that stays unfunded
 // logs each skipped task once per reason instead of once per poll. A non-empty
 // map speeds up the feed scan, since funding the wallet makes the tasks
-// acceptable.
+// acceptable. The feed scan accepts one task per scan, so a skipped task that
+// has become affordable stays here (reason null) until it is accepted or can no
+// longer be tried: the rest of a funded backlog is taken on the gas cadence,
+// not one per WS reconcile.
 const gasSkipLogged = new Map();
 // Sponsored gas (docs/AGENT-GAS-FUNDING.md). sponsorHints: tasks an offer, a
 // broadcast or the feed marked gasSponsored — /accept is asked to reserve
@@ -1313,6 +1322,26 @@ const gasSkipLogged = new Map();
 // says hold a reservation — their submit goes to /sponsored-call first.
 const sponsorHints = new Set();
 const sponsoredTasks = new Set();
+// taskHash → when /accept last refused to sponsor its submit (409
+// GAS_SPONSOR_UNAVAILABLE). That is a gas skip, not a refusal of the task:
+// for SPONSOR_RETRY_MS the task's gasSponsored hint is ignored, so it is gated
+// on this wallet's own gas on the gas cadence (a balance read) and taken on
+// that gas once the wallet can pay; sponsorship is asked for again after that.
+// Feed and broadcast hints are not per agent, so without the wait an agent the
+// sponsor turns down would ask again on every gas tick, and each refusal costs
+// the backend an eligibility lookup and an on-chain read.
+const sponsorRefusedAt = new Map();
+const SPONSOR_RETRY_MS = 5 * 60 * 1000;
+function sponsorHinted(taskHash, hint) {
+  if (hint !== true) return false;
+  const refusedAt = sponsorRefusedAt.get(taskHash);
+  return refusedAt === undefined || Date.now() - refusedAt >= SPONSOR_RETRY_MS;
+}
+// A 409 GAS_SPONSOR_UNAVAILABLE that postAccept let stand: it found no gas of
+// this wallet's own either, and logged the task as a gas skip.
+function isSponsorRefusal(status, code) {
+  return status === 409 && code === 'GAS_SPONSOR_UNAVAILABLE';
+}
 // Same, for tasks on a chain this worker cannot sign for. Kept apart because
 // nothing the operator does short of updating the agent changes the answer,
 // so these must not speed up the feed scan.
@@ -2614,12 +2643,16 @@ async function releaseTask(taskHash) {
   }
 }
 
-async function pollAndWork() {
+// One poll cycle: resume owed work, judge verifications, collect unjudged
+// payouts, then scan the feed when due. Exported for tests.
+export async function pollAndWork() {
   if (_working) {
+    pollDue = true; // runs when the current task ends (drainDeferredAccepts)
     log('poll skipped: another task is in progress');
     return;
   }
   _working = true;
+  pollDue = false;
   try {
     // Re-check a model that failed its check (at most every few minutes, so
     // topping up a wallet or fixing a key needs no restart). Free once passed.
@@ -2682,6 +2715,9 @@ async function pollAndWork() {
       if (page.length < PAGE || entries.length >= total) break;
     }
     if (entries.length === 0) {
+      // Nothing is open, so nothing waits for gas: let the cadence relax
+      // (the prune below never runs on an empty board).
+      gasSkipLogged.clear();
       log('no open A2A tasks');
       return;
     }
@@ -2689,9 +2725,9 @@ async function pollAndWork() {
     // Tasks that left the board (taken, expired, cancelled) no longer need
     // the fast gas re-check; drop them so the cadence and the map both relax.
     const onBoard = new Set(entries.map(e => e.meta.taskId));
-    for (const k of [...gasSkipLogged.keys()]) if (!onBoard.has(k)) gasSkipLogged.delete(k);
     for (const k of [...chainSkipLogged.keys()]) if (!onBoard.has(k)) chainSkipLogged.delete(k);
     for (const k of [...transientRefusalLogged.keys()]) if (!onBoard.has(k)) transientRefusalLogged.delete(k);
+    for (const k of [...sponsorRefusedAt.keys()]) if (!onBoard.has(k)) sponsorRefusedAt.delete(k);
 
     const available = entries.filter(e => {
       if (skipForReleaseCooldown(e.meta.taskId)) return false;
@@ -2702,6 +2738,10 @@ async function pollAndWork() {
       }
       return false;
     });
+    // Same for a task still on the board that this poll will not try (refused
+    // for good, or cooling down after a release).
+    const availableIds = new Set(available.map(e => e.meta.taskId));
+    for (const k of [...gasSkipLogged.keys()]) if (!availableIds.has(k)) gasSkipLogged.delete(k);
     if (available.length === 0) {
       log(`found ${entries.length} open tasks, but already touched all of them`);
       return;
@@ -2721,15 +2761,18 @@ async function pollAndWork() {
       if (!(chain in gasProblemCache)) gasProblemCache[chain] = await preflightGas(chain, signerFor(chain));
       return gasProblemCache[chain];
     };
-    for (const e of available) if (e.meta?.gasSponsored === true) sponsorHints.add(e.meta.taskId);
-    const { affordable, skipped } = await pickAffordable(available, problemFor);
+    const hinted = (e) => sponsorHinted(e.meta.taskId, e.meta?.gasSponsored);
+    for (const e of available) if (hinted(e)) sponsorHints.add(e.meta.taskId);
+    const { affordable, skipped } = await pickAffordable(available, problemFor, hinted);
     for (const sk of skipped) {
       const logged = sk.unsupported ? chainSkipLogged : gasSkipLogged;
       if (logged.get(sk.taskHash) === sk.reason) continue;
       logged.set(sk.taskHash, sk.reason);
       log(`skipping task ${sk.taskHash.slice(0, 10)}… on ${sk.chain}: ${sk.reason}`);
     }
-    for (const e of affordable) gasSkipLogged.delete(e.meta.taskId);
+    // Affordable now, but only one is accepted below: the others stay on the
+    // gas cadence (see gasSkipLogged), with no skip reason logged.
+    for (const e of affordable) if (gasSkipLogged.has(e.meta.taskId)) gasSkipLogged.set(e.meta.taskId, null);
     if (affordable.length === 0) {
       return;
     }
@@ -2823,18 +2866,16 @@ async function pollAndWork() {
         const RETRY_DELAY = 15_000; // CASCADE_OFFER_MS (12s) + margin
         log(`offer held for ${taskHash.slice(0, 10)}… — waiting ${RETRY_DELAY / 1000}s then retrying`);
         await sleep(RETRY_DELAY);
-        const retryRes = await fetchWithTimeout(`${BACKEND_URL}/api/v1/a2a/tasks/${taskHash}/accept`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${AGENT_PLATFORM_TOKEN}`,
-          },
-        });
+        // Through postAccept like the first try: a sponsor-hinted task skipped
+        // the gas gate, so a bare retry took it on this wallet's own gas
+        // unchecked.
+        const retryRes = await postAccept(taskHash, entry.meta?.chain);
         if (retryRes.ok) {
           appliedTasks.set(taskHash, Date.now());
           acceptedTaskHash = taskHash;
           try {
             const acceptJson = await retryRes.json();
+            if (acceptJson.data?.gasSponsored === true) sponsoredTasks.add(taskHash);
             acceptedRootHash = acceptJson.data?.rootHash ?? null;
             acceptedWrappedKey = acceptJson.data?.wrappedKey ?? null;
             acceptedPrivacy = acceptJson.data?.privacy ?? null;
@@ -2851,6 +2892,7 @@ async function pollAndWork() {
           noteTransientRefusal(taskHash, retryErr.error.code);
           continue;
         }
+        if (isSponsorRefusal(retryRes.status, retryErr.error?.code)) continue;
         // Terminal (ASSIGNED_ELSEWHERE, TASK_CANCELLED, etc.) — skip
         log(`offer-held retry failed for ${taskHash.slice(0, 10)}…: ${retryRes.status} ${retryErr.error?.code || ''}`);
         appliedTasks.set(taskHash, Date.now());
@@ -2861,6 +2903,8 @@ async function pollAndWork() {
         noteTransientRefusal(taskHash, err.error.code);
         continue;
       }
+      // A gas skip (postAccept logged it), re-checked on the gas cadence.
+      if (isSponsorRefusal(acceptRes.status, err.error?.code)) continue;
       if (acceptRes.status === 403 || acceptRes.status === 409) {
         appliedTasks.set(taskHash, Date.now());
         continue;
@@ -2872,6 +2916,7 @@ async function pollAndWork() {
       log(`could not accept any of the ${available.length} available tasks`);
       return;
     }
+    gasSkipLogged.delete(acceptedTaskHash);
 
     // /accept now awaits on-chain settlement, so the assignment is confirmed
     // before the HTTP response returns. No sleep needed.
@@ -5029,7 +5074,36 @@ async function ensureRegisteredAsA2AExecutor() {
 let wsClient = null;
 let wsConnected = false;
 
-function connectWebSocket() {
+// Same gas gate as the feed scan, for both push paths: accepting assigns
+// the task on-chain, so refuse up front when the event names a chain this
+// wallet cannot pay on. An exclusive offer declined this way lets the
+// cascade move to the next agent after its window instead of locking the
+// task to an unfunded one. A chain this worker cannot sign for is declined
+// the same way. Events without a chain (older backend) fall through to the
+// post-accept check in runAcceptedTask. An exclusive offer is handed back
+// via /decline so the cascade moves on now, not after the whole window.
+// A gasSponsored hint skips the gas check: /accept reserves the submit (or
+// refuses, and postAccept then checks this wallet's own gas), unless the
+// sponsor refused this task lately (sponsorHinted). Runs again when a
+// deferred event is taken from the queue (acceptFromWs). A refused task gets
+// no applied mark: it stays on the board for the gas re-check and the feed
+// reconcile.
+async function gasGateBroadcast(taskId, chain, exclusive = false, hint = false) {
+  const sponsored = sponsorHinted(taskId, hint);
+  if (sponsored) sponsorHints.add(taskId);
+  const blocker = await acceptBlocker(chain, (c) => (sponsored ? null : preflightGas(c, signerFor(c)).catch(() => null)));
+  if (!blocker) return false;
+  const logged = blocker.unsupported ? chainSkipLogged : gasSkipLogged;
+  if (logged.get(taskId) !== blocker.reason) {
+    logged.set(taskId, blocker.reason);
+    log(`skipping task ${taskId.slice(0, 10)}… on ${chain}: ${blocker.reason}`);
+  }
+  if (exclusive) await declineOffer(taskId);
+  return true;
+}
+
+// Exported for tests, which drive the task event handlers it registers.
+export function connectWebSocket() {
   const socketUrl = BACKEND_URL.replace(/^http/, 'ws');
   wsClient = socketClient(socketUrl, {
     transports: ['websocket'],
@@ -5049,43 +5123,22 @@ function connectWebSocket() {
     wsClient.emit('join', 'tasks');
   });
 
-  // Same gas gate as the feed scan, for both push paths: accepting assigns
-  // the task on-chain, so refuse up front when the event names a chain this
-  // wallet cannot pay on. An exclusive offer declined this way lets the
-  // cascade move to the next agent after its window instead of locking the
-  // task to an unfunded one. A chain this worker cannot sign for is declined
-  // the same way. Events without a chain (older backend) fall through to the
-  // post-accept check in runAcceptedTask. An exclusive offer is handed back
-  // via /decline so the cascade moves on now, not after the whole window.
-  // A gasSponsored hint skips the gas check: /accept reserves the submit (or
-  // refuses, and postAccept then checks this wallet's own gas).
-  const gasGateBroadcast = async (taskId, chain, exclusive = false, sponsored = false) => {
-    if (sponsored) sponsorHints.add(taskId);
-    const blocker = await acceptBlocker(chain, (c) => (sponsored ? null : preflightGas(c, signerFor(c)).catch(() => null)));
-    if (!blocker) return false;
-    const logged = blocker.unsupported ? chainSkipLogged : gasSkipLogged;
-    if (logged.get(taskId) !== blocker.reason) {
-      logged.set(taskId, blocker.reason);
-      log(`skipping task ${taskId.slice(0, 10)}… on ${chain}: ${blocker.reason}`);
-    }
-    if (exclusive) await declineOffer(taskId);
-    return true;
-  };
-
   wsClient.on('task:offer', async (data) => {
     log(`WS received task:offer for ${data.taskId?.slice(0, 10) || 'unknown'}… (score=${data.score})`);
     if (!data.taskId) return;
+    const sponsored = data.meta?.gasSponsored === true;
     if (await inferenceGateOffer(data.taskId, true)) return;
-    if (await gasGateBroadcast(data.taskId, data.meta?.chain, true, data.meta?.gasSponsored === true)) return;
-    acceptFromWs(data.taskId, data.meta?.chain);
+    if (await gasGateBroadcast(data.taskId, data.meta?.chain, true, sponsored)) return;
+    acceptFromWs(data.taskId, data.meta?.chain, sponsored);
   });
 
   wsClient.on('task:available', async (data) => {
     log(`WS received task:available for ${data.taskId?.slice(0, 10) || 'unknown'}…`);
     if (!data.taskId) return;
+    const sponsored = data.meta?.gasSponsored === true;
     if (await inferenceGateOffer(data.taskId)) return;
-    if (await gasGateBroadcast(data.taskId, data.meta?.chain, false, data.meta?.gasSponsored === true)) return;
-    acceptFromWs(data.taskId, data.meta?.chain);
+    if (await gasGateBroadcast(data.taskId, data.meta?.chain, false, sponsored)) return;
+    acceptFromWs(data.taskId, data.meta?.chain, sponsored);
   });
 
   wsClient.on('disconnect', (reason) => {
@@ -5116,7 +5169,8 @@ function deriveAddressFromPubkey(pubkeyHex) {
  * gasSponsored. A refused reservation (409 GAS_SPONSOR_UNAVAILABLE) is never
  * a dead end: when this wallet can pay its own gas on the task's chain the
  * accept is sent again without the request; otherwise the 409 stands and the
- * task is skipped like any gas skip (re-checked on the gas cadence).
+ * task is skipped like any gas skip (re-checked on the gas cadence, with no
+ * applied mark). Either way the hint is set aside for a while (sponsorHinted).
  */
 async function postAccept(taskHash, chain) {
   const send = (body) => fetchWithTimeout(`${BACKEND_URL}/api/v1/a2a/tasks/${taskHash}/accept`, {
@@ -5133,6 +5187,7 @@ async function postAccept(taskHash, chain) {
   const err = await res.clone().json().catch(() => ({}));
   if (err.error?.code !== 'GAS_SPONSOR_UNAVAILABLE') return res;
   sponsorHints.delete(taskHash);
+  sponsorRefusedAt.set(taskHash, Date.now());
   const gasProblem = isSettlementChain(chain) ? await preflightGas(chain, signerFor(chain)).catch(() => null) : null;
   if (!gasProblem) {
     log(`no sponsored gas for ${taskHash.slice(0, 10)}… (${err.error?.message ?? 'refused'}) — accepting on this wallet's own gas`);
@@ -5166,6 +5221,7 @@ async function attemptAccept(taskHash, { force = false, chainHint = null } = {})
 
   if (acceptRes.ok) {
     appliedTasks.set(taskHash, Date.now());
+    gasSkipLogged.delete(taskHash);
     let rootHash = null;
     let wrappedKey = null;
     let privacy = null;
@@ -5215,7 +5271,8 @@ async function attemptAccept(taskHash, { force = false, chainHint = null } = {})
     // if the other agent's accept falls through the task reopens and this
     // agent should still be willing to take it (the poll loop retries it).
     noteTransientRefusal(taskHash, err.error.code);
-  } else if (acceptRes.status === 403 || acceptRes.status === 409) {
+  } else if ((acceptRes.status === 403 || acceptRes.status === 409) && !isSponsorRefusal(acceptRes.status, err.error?.code)) {
+    // A refused sponsorship is a gas skip (postAccept), re-checked on the gas cadence.
     appliedTasks.set(taskHash, Date.now());
   }
   return { ok: false, status: acceptRes.status, code: err.error?.code || '' };
@@ -5228,20 +5285,22 @@ async function attemptAccept(taskHash, { force = false, chainHint = null } = {})
  * events for the rest used to be discarded by the busy guard — the losers then
  * sat idle until the next feed reconcile (WS_RECONCILE_MS, 5 min). Bounded:
  * the oldest entry goes first when full (the reconcile sweep still covers it).
- * Exported for tests.
+ * Each entry keeps the event's gasSponsored hint, so the gas check at drain
+ * time skips exactly the tasks the arrival check skipped. Exported for tests.
  */
 export function createDeferredAccepts(limit = 200) {
   const pending = new Map();
   return {
-    add(taskHash, chain = null) {
+    add(taskHash, chain = null, sponsored = false) {
       if (!pending.has(taskHash) && pending.size >= limit) pending.delete(pending.keys().next().value);
-      pending.set(taskHash, chain);
+      pending.set(taskHash, { chain, sponsored });
     },
     next() {
       const first = pending.entries().next();
       if (first.done) return null;
-      pending.delete(first.value[0]);
-      return { taskHash: first.value[0], chain: first.value[1] };
+      const [taskHash, { chain, sponsored }] = first.value;
+      pending.delete(taskHash);
+      return { taskHash, chain, sponsored };
     },
     get size() { return pending.size; },
   };
@@ -5249,19 +5308,30 @@ export function createDeferredAccepts(limit = 200) {
 
 const wsDeferred = createDeferredAccepts();
 
-// Called whenever _working clears: start the next deferred task event, if any.
-// Each accept clears _working in its own finally, which drains again, so the
-// queue empties one task at a time.
+// Called whenever _working clears. A poll that came due while busy runs
+// first; pollAndWork drains again in its own finally. The queue then waits
+// while a task assigned to us is held for gas (resumeGasHeld): the wallet is
+// known to be short, and the gas check lets a failed balance read through.
+// The feed reconcile still covers what waits here. Otherwise start the next
+// deferred task event, if any. Each accept clears _working in its own
+// finally, which drains again, so the queue empties one task at a time.
 function drainDeferredAccepts() {
   if (_working) return;
+  if (pollDue) {
+    pollAndWork().catch(() => {});
+    return;
+  }
+  if (resumeGasHeld.size > 0) return;
   const next = wsDeferred.next();
-  if (next) acceptFromWs(next.taskHash, next.chain).catch(() => {});
+  if (next) acceptFromWs(next.taskHash, next.chain, next.sponsored, true).catch(() => {});
 }
 
-// WS-triggered accept with concurrency guard.
-async function acceptFromWs(taskHash, chain = null) {
+// WS-triggered accept with concurrency guard. `deferred`: taken from the
+// queue, so the gas check made on arrival is stale (the task that kept us
+// busy spent gas) and runs again before accept assigns the task on-chain.
+async function acceptFromWs(taskHash, chain = null, sponsored = false, deferred = false) {
   if (_working) {
-    wsDeferred.add(taskHash, chain);
+    wsDeferred.add(taskHash, chain, sponsored);
     log(`WS accept deferred for ${taskHash.slice(0, 10)}…: another task in progress`);
     return;
   }
@@ -5270,6 +5340,7 @@ async function acceptFromWs(taskHash, chain = null) {
   appliedTasks.delete(taskHash);
   _working = true;
   try {
+    if (deferred && await gasGateBroadcast(taskHash, chain, false, sponsored)) return;
     await tryAcceptTask(taskHash, { chainHint: chain });
   } catch (err) {
     log(`WS accept error for ${taskHash.slice(0, 10)}…: ${err.message}`);

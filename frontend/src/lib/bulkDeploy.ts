@@ -9,10 +9,11 @@
  * - nothing starts past the worker limit: a run asking for more agents than
  *   GET /agents/capacity has free is refused before anything is paid;
  * - each agent pays its own deploy fee, once. A transfer is saved to the
- *   pending-fee slot the moment the wallet broadcasts it and cleared when
- *   that agent exists, so a failure (a closed tab included) never makes the
- *   next attempt pay again; a payment saved by an earlier attempt pays for
- *   the first agent of this run;
+ *   pending fees the moment the wallet broadcasts it, and that hash alone is
+ *   cleared when its agent exists, so a failure (a closed tab included) never
+ *   makes the next attempt pay again and another tab's saved fee is never
+ *   touched (lib/pendingFees.ts); a payment saved by an earlier attempt pays
+ *   for the first agent of this run;
  * - a 429 is refused by the rate limiter before the route runs: nothing was
  *   created and nothing was claimed, so the same request, with the fee that
  *   agent already paid, is sent again after a wait (2, 4, 8, 16, 32 s);
@@ -166,8 +167,10 @@ export interface DeployDeps {
   deploy: (body: Record<string, unknown>) => Promise<DeployedAgent>;
   /** Send `to` the funding amount. Returns the transaction hash. */
   fund: (to: string) => Promise<string>;
-  /** Save (or, with null, clear) the transfer no deploy has used yet. */
-  savePendingFee: (hash: string | null) => void;
+  /** Save a transfer no deploy has used yet, the moment the wallet broadcasts it. */
+  savePendingFee: (hash: string) => void;
+  /** Forget this saved transfer and no other: a deploy used it, or it can never pay for one. */
+  clearPendingFee: (hash: string) => void;
   sleep: (ms: number) => Promise<void>;
   /** Called with every change to an agent of the run. */
   onUpdate?: (index: number, agent: AgentRun) => void;
@@ -259,7 +262,7 @@ export async function runDeploys(run: DeployRun, deps: DeployDeps): Promise<Depl
       const body = { ...run.body, name: agents[i].name, ...(run.fee === 'transfer' && feeTx ? { feeTxHash: feeTx } : {}) };
       const agent = await deployWithRetries(deps, body, run.fee);
       // The payment made this agent: it can never pay for another.
-      if (run.fee === 'transfer') deps.savePendingFee(null);
+      if (run.fee === 'transfer' && feeTx) deps.clearPendingFee(feeTx);
       const started = agent.started === true;
       update(i, { state: 'done', id: agent.id, walletAddress: agent.walletAddress, started });
       // Created but not running: the next ones would likely not start either.
@@ -278,7 +281,7 @@ export async function runDeploys(run: DeployRun, deps: DeployDeps): Promise<Depl
       }
     } catch (err) {
       // A payment that can never pay for a deploy is forgotten, so the next attempt pays anew.
-      if (run.fee === 'transfer' && feeTx && feeIsSpent((err ?? {}) as { code?: string })) deps.savePendingFee(null);
+      if (run.fee === 'transfer' && feeTx && feeIsSpent((err ?? {}) as { code?: string })) deps.clearPendingFee(feeTx);
       update(i, { state: 'failed', error: err, ...(feeTx ? { feeTx } : {}) });
       return finish(agents, i);
     }

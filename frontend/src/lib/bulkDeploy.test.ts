@@ -28,7 +28,8 @@ function makeDeps(over: Partial<Omit<DeployDeps, 'deploy'>> & {
   const calls: string[] = [];
   const bodies: Record<string, unknown>[] = [];
   const sleeps: number[] = [];
-  const slot: Array<string | null> = [];
+  const slot: string[] = [];
+  const cleared: string[] = [];
   let fees = 0;
   let funds = 0;
   let agentsMade = 0;
@@ -56,11 +57,12 @@ function makeDeps(over: Partial<Omit<DeployDeps, 'deploy'>> & {
       calls.push(`fund ${to.slice(-2)}`);
       return TX(200 + ++funds);
     },
-    savePendingFee: (hash) => { slot.push(hash); calls.push(`slot ${hash ? hash.slice(-2) : 'clear'}`); },
+    savePendingFee: (hash) => { slot.push(hash); calls.push(`slot ${hash.slice(-2)}`); },
+    clearPendingFee: (hash) => { cleared.push(hash); calls.push(`clear ${hash.slice(-2)}`); },
     sleep: async (ms) => { sleeps.push(ms); },
     ...rest,
   };
-  return { deps, calls, bodies, sleeps, slot, counts: () => ({ fees, funds, agentsMade }) };
+  return { deps, calls, bodies, sleeps, slot, cleared, counts: () => ({ fees, funds, agentsMade }) };
 }
 
 const run = (over: Partial<DeployRun> = {}): DeployRun => ({
@@ -147,13 +149,13 @@ describe('runDeploys', () => {
     ]);
   });
 
-  it('pays one transfer per agent, saved the moment it is broadcast and cleared once that agent exists', async () => {
+  it('pays one transfer per agent, saved the moment it is broadcast and cleared, by its hash, once that agent exists', async () => {
     const { deps, calls, counts } = makeDeps();
     const out = await runDeploys(run({ fee: 'transfer' }), deps);
     expect(calls).toEqual([
-      'pay 01', 'slot 01', 'deploy bot 1 fee 01', 'slot clear',
-      'pay 02', 'slot 02', 'deploy bot 2 fee 02', 'slot clear',
-      'pay 03', 'slot 03', 'deploy bot 3 fee 03', 'slot clear',
+      'pay 01', 'slot 01', 'deploy bot 1 fee 01', 'clear 01',
+      'pay 02', 'slot 02', 'deploy bot 2 fee 02', 'clear 02',
+      'pay 03', 'slot 03', 'deploy bot 3 fee 03', 'clear 03',
     ]);
     expect(counts().fees).toBe(3);
     expect(out.agents.map((a) => a.feeTx)).toEqual([TX(1), TX(2), TX(3)]);
@@ -162,7 +164,7 @@ describe('runDeploys', () => {
   it('uses a payment an earlier attempt saved for the first agent only, never paying for it again', async () => {
     const { deps, calls, counts } = makeDeps();
     const out = await runDeploys(run({ fee: 'transfer', savedFee: TX(0xee) }), deps);
-    expect(calls.slice(0, 2)).toEqual(['deploy bot 1 fee ee', 'slot clear']);
+    expect(calls.slice(0, 2)).toEqual(['deploy bot 1 fee ee', 'clear ee']);
     expect(calls.filter((c) => c.startsWith('pay'))).toEqual(['pay 01', 'pay 02']);
     expect(counts().fees).toBe(2);
     expect(out.agents[0].feeTx).toBe(TX(0xee));
@@ -195,7 +197,7 @@ describe('runDeploys', () => {
 
   it('gives up after six rate-limited attempts and stops, the fee still saved for the next attempt', async () => {
     let tries = 0;
-    const { deps, sleeps, slot, counts } = makeDeps({
+    const { deps, sleeps, slot, cleared, counts } = makeDeps({
       deploy: async () => { tries++; throw apiError('RATE_LIMIT', 429); },
     });
     const out = await runDeploys(run({ fee: 'transfer' }), deps);
@@ -203,6 +205,7 @@ describe('runDeploys', () => {
     expect(sleeps).toEqual(RATE_LIMIT_BACKOFF_MS);
     expect(counts().fees).toBe(1);
     expect(slot).toEqual([TX(1)]);
+    expect(cleared).toEqual([]);
     expect(out.agents.map((a) => a.state)).toEqual(['failed', 'skipped', 'skipped']);
     expect(out.agents[0].feeTx).toBe(TX(1));
   });
@@ -240,23 +243,32 @@ describe('runDeploys', () => {
     const kept = makeDeps({ deploy: async () => { throw apiError('INTERNAL', 500); } });
     await runDeploys(run({ fee: 'transfer' }), kept.deps);
     expect(kept.slot).toEqual([TX(1)]);
+    expect(kept.cleared).toEqual([]);
 
     const spent = makeDeps({ deploy: async () => { throw apiError('DEPLOY_FEE_ALREADY_USED', 409); } });
     await runDeploys(run({ fee: 'transfer' }), spent.deps);
-    expect(spent.slot).toEqual([TX(1), null]);
+    expect(spent.slot).toEqual([TX(1)]);
+    expect(spent.cleared).toEqual([TX(1)]);
+
+    // A saved fee that can never pay is forgotten by its own hash.
+    const spentSaved = makeDeps({ deploy: async () => { throw apiError('DEPLOY_FEE_ALREADY_USED', 409); } });
+    await runDeploys(run({ fee: 'transfer', savedFee: TX(0xee) }), spentSaved.deps);
+    expect(spentSaved.cleared).toEqual([TX(0xee)]);
 
     // Paid from a wallet not on the account: linking it makes the same payment count.
     const unlinked = makeDeps({ deploy: async () => { throw apiError('DEPLOY_FEE_NOT_PAID', 402, { reason: 'PAYER_NOT_LINKED' }); } });
     await runDeploys(run({ fee: 'transfer' }), unlinked.deps);
     expect(unlinked.slot).toEqual([TX(1)]);
+    expect(unlinked.cleared).toEqual([]);
   });
 
   it('forgets a transfer that reverted after the wallet broadcast it', async () => {
-    const { deps, slot, calls } = makeDeps({
+    const { deps, slot, cleared, calls } = makeDeps({
       payTransfer: async (onBroadcast) => { onBroadcast(TX(9)); throw apiError('TX_REVERTED', 0); },
     });
     const out = await runDeploys(run({ fee: 'transfer' }), deps);
-    expect(slot).toEqual([TX(9), null]);
+    expect(slot).toEqual([TX(9)]);
+    expect(cleared).toEqual([TX(9)]);
     expect(calls.some((c) => c.startsWith('deploy'))).toBe(false);
     expect(out.agents.map((a) => a.state)).toEqual(['failed', 'skipped', 'skipped']);
   });

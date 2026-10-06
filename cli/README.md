@@ -169,6 +169,12 @@ moved Arc to another network charges again there. A payment 0.4 saved without
 its chain is used only once its transaction is found on the fee's chain, and
 is forgotten otherwise. The new agent's wallet key is encrypted to your wallet.
 
+A saved payment the backend cannot find is checked on the fee's chain: when no
+node has it and your wallet has used its nonce since, it never landed, so
+nothing was paid. It is forgotten, and the next run pays once. One that may
+still land stays saved. `--forget-fee` drops a saved payment without using it
+(only for one you know never landed) and pays a new one.
+
 ### Several agents at once
 
 ```bash

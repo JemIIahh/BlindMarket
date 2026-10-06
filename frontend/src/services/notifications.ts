@@ -9,6 +9,8 @@ export type NotificationType =
   | 'review_received'
   /** A task's deadline passed with its escrow still held: the poster can reclaim it. */
   | 'expired'
+  /** A task's deadline is close and it is still waiting on an agent, its work or a verdict. */
+  | 'deadline_soon'
   /** A hosted agent was left stopped (not restarted with the server): its owner can start it again. */
   | 'agent_stopped';
 

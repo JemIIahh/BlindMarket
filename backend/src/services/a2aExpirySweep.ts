@@ -6,7 +6,8 @@ import { chainRuntime } from './chainRuntime.js';
 import { loadAgentByWallet } from './deployedAgentStore.js';
 import { emitTaskAvailable } from './socket.js';
 import { sponsorHint } from './gasSponsorEligibility.js';
-import { notifyOnce } from './notificationStore.js';
+import { firstSeenAt, notifyOnce } from './notificationStore.js';
+import { dueReminderWindow, reminderCopy, reminderKind, REMINDER_PULL_AHEAD_SEC, REMINDER_WINDOWS } from './deadlineReminders.js';
 import { SWEEP_INTERVAL_MS, EXPIRY_GRACE_SEC } from '../constants.js';
 
 // Re-export for any callers that import from here (backward compat)
@@ -52,6 +53,93 @@ const heavyResolveAttempted = new Set<string>();
 let timer: NodeJS.Timeout | null = null;
 let inFlight = false;
 
+/** When each task was first seen (unix seconds), as Redis recorded it. The
+ *  value never changes once recorded (SET NX), so this process reads it once. */
+const firstSeenCache = new Map<string, number>();
+const FIRST_SEEN_CACHE_MAX = 50_000;
+
+/** Tests: forget the cached first sightings. */
+export function _resetReminderCache(): void {
+  firstSeenCache.clear();
+}
+
+/** A task with time left, as the reminder pass sees it. */
+interface ReminderCandidate {
+  poster: string;
+  tid: string;
+  deadline: number;
+  status: string;
+  /** When the sweep first saw the task (unix seconds). */
+  seen: number;
+}
+
+/**
+ * A task whose poster may be reminded of its deadline (see deadlineReminders.ts),
+ * or null when there is no poster or its first sight cannot be read. Only
+ * called for a task whose deadline is still ahead.
+ */
+async function reminderCandidate(
+  posterAddress: string | undefined,
+  tid: string,
+  deadline: number,
+  nowSec: number,
+  status: string,
+): Promise<ReminderCandidate | null> {
+  if (!posterAddress) return null;
+  // Redis is remote (hundreds of ms a round trip) and this runs for every
+  // open task every tick, so first sight is read from Redis once per task per
+  // process and decided from memory after that. Re-reading it while a window
+  // looked due cost a SET NX and a GET per task per tick for the first 3 h of
+  // every task posted with the default 24 h deadline, which never fires
+  // (delta audit 2026-10-06, tg-3).
+  let seen = firstSeenCache.get(tid);
+  if (seen === undefined) {
+    // Kept a day past the deadline: long enough to outlive every window.
+    const stored = await firstSeenAt(`remind:${tid}`, nowSec, deadline - nowSec + 86_400);
+    if (stored === null) return null;
+    // Bounded: forgetting only costs one more read for each task.
+    if (firstSeenCache.size >= FIRST_SEEN_CACHE_MAX) firstSeenCache.clear();
+    firstSeenCache.set(tid, stored);
+    seen = stored;
+  }
+  return { poster: posterAddress, tid, deadline, status, seen };
+}
+
+/**
+ * Remind each poster of the deadlines that are due, once per window. A poster
+ * reminded now of a mark also gets, in the same burst, the reminders of their
+ * tasks whose SAME mark is within REMINDER_PULL_AHEAD_SEC, so one-by-one posts
+ * reach Telegram as one message (deadlineReminders.ts). Same mark only: a 1 h
+ * reminder never carries a 24 h one along, whose different copy would drop the
+ * time left from the merged message. Pulled only alongside a reminder that
+ * went out now: a task posted later is never reminded early on its own.
+ */
+async function sendReminders(candidates: ReminderCandidate[], nowSec: number): Promise<void> {
+  const remind = (c: ReminderCandidate, window: number) => {
+    const { title, body } = reminderCopy(reminderKind(c.status), c.deadline - nowSec);
+    return notifyOnce(`remind:${c.tid}:${window}`, c.poster, { type: 'deadline_soon', title, body, taskId: c.tid });
+  };
+  /** Poster → the marks they were reminded of on this call. */
+  const remindedNow = new Map<string, Set<number>>();
+  const notDue: ReminderCandidate[] = [];
+  for (const c of candidates) {
+    const window = dueReminderWindow(nowSec, c.deadline, c.seen);
+    if (window === null) {
+      notDue.push(c);
+    } else if (await remind(c, window)) {
+      const poster = c.poster.toLowerCase();
+      remindedNow.set(poster, (remindedNow.get(poster) ?? new Set<number>()).add(window));
+    }
+  }
+  for (const c of notDue) {
+    const marks = remindedNow.get(c.poster.toLowerCase());
+    if (!marks) continue;
+    const sameMark = REMINDER_WINDOWS.filter((w) => marks.has(w.sec));
+    const window = dueReminderWindow(nowSec, c.deadline, c.seen, sameMark, REMINDER_PULL_AHEAD_SEC);
+    if (window !== null) await remind(c, window);
+  }
+}
+
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const t = setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms);
@@ -84,6 +172,8 @@ export async function sweepExpiredTasks(): Promise<void> {
   if (!backgroundWritesAllowed('expiry sweep')) return;
   if (inFlight) return;
   inFlight = true;
+  // Sent from finally: a task that throws later in the tick does not hold back the ones before it.
+  const reminders: ReminderCandidate[] = [];
   try {
     // Repair the open index before sweeping so tasks stranded from a2a:open
     // are re-discovered (and can be expired if past deadline).
@@ -167,6 +257,12 @@ export async function sweepExpiredTasks(): Promise<void> {
         }
       }
 
+      // Still open with time left: warn the poster when the deadline nears.
+      if (nowSec < deadline) {
+        const candidate = await reminderCandidate(meta.posterAddress, tid, deadline, nowSec, 'open');
+        if (candidate) reminders.push(candidate);
+      }
+
       if (nowSec < deadline + EXPIRY_GRACE_SEC) continue;
 
       const result = await a2aStore.tryExpire(tid, 'expired');
@@ -201,6 +297,9 @@ export async function sweepExpiredTasks(): Promise<void> {
   } catch (err) {
     console.error('[a2aExpirySweep] sweep failed (non-fatal):', (err as Error).message);
   } finally {
+    await sendReminders(reminders, Math.floor(Date.now() / 1000)).catch((err) =>
+      console.error('[a2aExpirySweep] reminders failed (non-fatal):', (err as Error).message),
+    );
     inFlight = false;
   }
 }
@@ -224,13 +323,22 @@ export async function sweepMissedDeadlines(now = Date.now()): Promise<number> {
   missedDeadlineInFlight = true;
   lastMissedDeadlineScan = now;
   let notified = 0;
+  // Sent from finally: a task that throws later in the scan does not hold back the ones before it.
+  const reminders: ReminderCandidate[] = [];
   try {
     const nowSec = Math.floor(now / 1000);
-    for (const { meta } of await a2aStore.listInProgressTasks()) {
+    for (const { meta, state } of await a2aStore.listInProgressTasks()) {
       const tid = meta.taskId.toLowerCase();
       if (!meta.posterAddress) continue;
       const deadline = meta.deadline ?? (await a2aStore.getCachedDeadline(tid).catch(() => null));
-      if (!deadline || nowSec < deadline + EXPIRY_GRACE_SEC) continue;
+      if (!deadline) continue;
+      // Taken but not finished, with time left: warn the poster when it nears.
+      // This scan runs every few minutes, well inside the reminder grace.
+      if (nowSec < deadline) {
+        const candidate = await reminderCandidate(meta.posterAddress, tid, deadline, nowSec, state.status);
+        if (candidate) reminders.push(candidate);
+      }
+      if (nowSec < deadline + EXPIRY_GRACE_SEC) continue;
       const resolved = await resolveCachedTaskByHash(tid).catch(() => null);
       if (!resolved) continue;
       const task = await escrowService.getTaskOn(resolved.chain, Number(resolved.taskId)).catch(() => null);
@@ -250,6 +358,9 @@ export async function sweepMissedDeadlines(now = Date.now()): Promise<number> {
   } catch (err) {
     console.error('[a2aExpirySweep] missed-deadline scan failed (non-fatal):', (err as Error).message);
   } finally {
+    await sendReminders(reminders, Math.floor(now / 1000)).catch((err) =>
+      console.error('[a2aExpirySweep] reminders failed (non-fatal):', (err as Error).message),
+    );
     missedDeadlineInFlight = false;
   }
   return notified;

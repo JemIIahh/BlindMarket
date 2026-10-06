@@ -111,6 +111,8 @@ describe('REVERT_SELECTORS', () => {
       'InvalidStatus(uint8,uint8)', 'SelfAssignment()', 'DeadlineReached()', 'DeadlineNotReached()',
       'DisputeWindowActive()', 'AppealWindowActive()', 'EscalatedForAdjudication()', 'NotEscalated()',
       'MaxSubmissionAttemptsReached()', 'TokenNotAllowed()', 'InvalidDeadline()', 'ZeroAmount()', 'EmptyHash()',
+      'InvalidPickWindow()', 'NotOpenTask()', 'OpenTaskUnsupported()', 'AlreadySubmitted()', 'HasSubmissions()',
+      'NoSubmission()', 'WrongPhase(uint8)',
       'InvalidTEESignature()', 'TEESignerNotSet()', 'EnforcedPause()', 'AgentFundingNotSupported()',
       'ERC20InsufficientBalance(address,uint256,uint256)', 'InsufficientUSDC()',
       'ERC20InsufficientAllowance(address,uint256,uint256)', 'SafeERC20FailedOperation(address)',
@@ -129,6 +131,9 @@ describe('friendlyError: contract reverts', () => {
     expect(friendlyError(revert(selector('NotAgent()')))).toMatchObject({ kind: 'revert', title: 'Not your task', message: 'Only the wallet that posted this task can do this.' });
     expect(friendlyError(revert(selector('DeadlineReached()')))).toMatchObject({ title: 'Deadline passed' });
     expect(friendlyError(revert(selector('SelfAssignment()'))).message).toMatch(/poster can't also work on it/);
+    expect(friendlyError(revert(selector('HasSubmissions()')))).toMatchObject({ title: 'Has submissions' });
+    expect(friendlyError(revert(selector('WrongPhase(uint8)') + word(1))).message).toMatch(/in the poster's review/);
+    expect(friendlyError(revert(selector('WrongPhase(uint8)') + word(9))).message).toMatch(/state has changed/);
     expect(friendlyError(revert(selector('NotVerifier()'))).title).toBe('Not the verifier');
   });
 

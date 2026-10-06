@@ -26,6 +26,18 @@ const DEPLOYED = [
   { chain: "Arc testnet", manifest: ".openzeppelin/unknown-5042002.json", proxy: "0xaBf70843E0380F1e749d2b85C30dD6820Ff5C731" },
 ];
 
+/**
+ * State this BlindEscrow appends after the deployed implementations' last
+ * variable (minRatedAmount, slot 17): open submission. Append-only, so the
+ * deployed variables keep their slots and these take the next ones.
+ */
+const APPENDED = [
+  "18:0:_openTasks:t_mapping(t_uint256,t_struct(OpenTask)_storage)",
+  "19:0:submissionCount:t_mapping(t_uint256,t_uint256)",
+  "20:0:submissionOf:t_mapping(t_uint256,t_mapping(t_address,t_bytes32))",
+  "21:0:scorecardOf:t_mapping(t_uint256,t_bytes32)",
+];
+
 type Manifest = {
   proxies: Array<{ address: string; kind: string }>;
   impls: Record<string, { address: string; layout: StorageLayout; txHash?: string }>;
@@ -75,7 +87,7 @@ describe("BlindEscrow storage layout vs the deployed implementations", function 
 
     it(`keeps every ${target.chain} state variable, and the Task struct, in the same slot, offset and type`, function () {
       const { layout } = deployedLayout(target.manifest);
-      expect(shape(updated)).to.deep.equal(shape(layout));
+      expect(shape(updated)).to.deep.equal([...shape(layout), ...APPENDED]);
       expect(taskMembers(updated)).to.deep.equal(taskMembers(layout));
       expect(Object.keys(updated.namespaces ?? {}).sort()).to.deep.equal(Object.keys(layout.namespaces ?? {}).sort());
     });

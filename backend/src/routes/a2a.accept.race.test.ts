@@ -25,7 +25,7 @@ vi.mock('../middleware/auth.js', () => ({
 
 vi.mock('../services/a2aStore.js', () => {
   const getMeta = vi.fn(async (taskId: string) => {
-    if (taskId.toLowerCase() === 'race-task') {
+    if (taskId.toLowerCase() === '0x' + 'ac'.repeat(32)) {
       return {
         taskId,
         rootHash: '0g:race-brief',
@@ -164,7 +164,7 @@ import { a2aRouter } from './a2a.js';
 
 // ── Config ─────────────────────────────────────────────────────────────────────
 
-const TASK_ID = 'race-task';
+const TASK_ID = '0x' + 'ac'.repeat(32); // /accept takes only a bytes32 task hash
 const NUM_AGENTS = 10;
 const TRIALS = 100;
 

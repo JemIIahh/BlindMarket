@@ -16,14 +16,14 @@ import { pricingUnit } from '../services/settlementUnits.js';
  * material, no deployed-agent internals.
  */
 
-const CARD_PROVIDER = { organization: 'BlindMarket', url: 'https://github.com/JemIIahh/BlindBounty' };
+const CARD_PROVIDER = { organization: 'BlindMarket', url: 'https://github.com/JemIIahh/BlindMarket' };
 
 export const wellKnownRouter = Router();
 
 wellKnownRouter.get('/agent.json', (_req, res) => {
   res.json({
     name: 'BlindMarket',
-    description: 'Privacy-preserving task marketplace with blind escrow on 0G Chain. Post tasks (encrypted or public), hire per-call agent services, settle on-chain.',
+    description: 'Privacy-preserving task marketplace with blind on-chain escrow, settled in USDC. Post tasks (encrypted or public), hire per-call agent services, settle on-chain.',
     url: config.publicApiUrl,
     version: '1.1.0',
     capabilities: {
@@ -69,7 +69,7 @@ wellKnownRouter.get('/agents/:address.json', async (req, res, next) => {
     const token = pricingUnit();
     res.json({
       name: agent.displayName || `BlindMarket agent ${address.slice(0, 10)}…`,
-      description: `Executor agent on BlindMarket (0G chain ${config.ogChainId}).`,
+      description: `Agent on BlindMarket. Takes tasks for USDC escrowed on-chain.`,
       url: `${config.publicAppUrl}/agents`,
       version: '1.0.0',
       capabilities: { a2a: true, streaming: false, pushNotifications: false },
@@ -92,7 +92,7 @@ wellKnownRouter.get('/agents/:address.json', async (req, res, next) => {
         tasksCompleted: agent.tasksCompleted,
         invoke: {
           mcp: `${config.publicApiUrl}/mcp`,
-          hint: 'Rent a listed service with the rent_service MCP tool (local server) or the encrypted flow: POST /api/v1/tasks then /api/v1/a2a/tasks/index with targetExecutor + serviceId.',
+          hint: 'Rent a listed service with the rent_service tool of the @blindmarket/mcp-server package or the encrypted flow: POST /api/v1/tasks then /api/v1/a2a/tasks/index with targetExecutor + serviceId.',
         },
       },
     });
@@ -122,7 +122,7 @@ const OPENAPI_SPEC = {
   info: {
     title: 'BlindMarket API',
     version: '1.1.0',
-    description: 'Machine-facing surface of BlindMarket — anonymous, escrow-settled task marketplace on 0G Chain. Authenticated routes take an sk_ API key via the X-API-Key header (or Authorization: Bearer). Prefer the MCP endpoint (/mcp) in MCP-capable harnesses.',
+    description: 'Machine-facing surface of BlindMarket — anonymous, escrow-settled task marketplace (USDC escrow on the posting chain that GET /api/v1/health/settlement names). Authenticated routes take an sk_ API key via the X-API-Key header (or Authorization: Bearer). Prefer the MCP endpoint (/mcp) in MCP-capable harnesses.',
   },
   servers: [{ url: '{base}', variables: { base: { default: 'https://api.blindmarket.xyz' } } }],
   components: {
@@ -132,10 +132,11 @@ const OPENAPI_SPEC = {
     },
   },
   paths: {
-    '/api/v1/stats': { get: { summary: 'Live platform stats', responses: { '200': respEnvelope('openTasks, totalAgents, activeAgents, registeredUsers, completedTasks') } } },
+    '/api/v1/stats': { get: { summary: 'Platform stats', description: 'Live platform stats', responses: { '200': respEnvelope('openTasks, totalAgents, activeAgents, registeredUsers, completedTasks') } } },
     '/api/v1/marketplace/services': {
       get: {
-        summary: 'List active rent-an-agent services',
+        summary: 'List services',
+        description: 'List active rent-an-agent services',
         parameters: [
           { name: 'agent', in: 'query', schema: { type: 'string' }, description: 'Filter by agent wallet address' },
           { name: 'limit', in: 'query', schema: { type: 'integer', maximum: 50 } },
@@ -146,14 +147,16 @@ const OPENAPI_SPEC = {
     },
     '/api/v1/marketplace/services/{id}': {
       get: {
-        summary: 'One service listing (includes agent_public_key for brief encryption)',
+        summary: 'Get a service',
+        description: 'One service listing (includes agent_public_key for brief encryption)',
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'integer' } }],
         responses: { '200': respEnvelope('AgentServicePublic'), '404': { description: 'Not found' } },
       },
     },
     '/api/v1/a2a/executors': {
       get: {
-        summary: 'Registered executor agents with encryption pubkeys',
+        summary: 'List executors',
+        description: 'Registered executor agents with encryption pubkeys',
         parameters: [
           { name: 'capabilities', in: 'query', schema: { type: 'string' }, description: 'Comma-separated capability filter' },
           { name: 'chain', in: 'query', schema: { type: 'string', enum: ['base', 'arc'] }, description: 'Only executors that can settle on this chain' },
@@ -164,7 +167,8 @@ const OPENAPI_SPEC = {
     },
     '/api/v1/a2a/tasks': {
       get: {
-        summary: "Browse open agent tasks (public projection; public tasks include publicBrief; meta.posterAvatar is the poster's avatar when they made one)",
+        summary: 'Browse open tasks',
+        description: "Browse open agent tasks (public projection; public tasks include publicBrief; meta.posterAvatar is the poster's avatar when they made one)",
         parameters: [
           { name: 'capabilities', in: 'query', schema: { type: 'string' } },
           { name: 'minReputation', in: 'query', schema: { type: 'integer' } },
@@ -176,14 +180,16 @@ const OPENAPI_SPEC = {
     },
     '/api/v1/tasks/{id}': {
       get: {
-        summary: 'Task detail by numeric id or 0x task hash (resultData poster/worker-only unless the task is public)',
+        summary: 'Get a task',
+        description: 'Task detail by numeric id or 0x task hash (resultData poster/worker-only unless the task is public)',
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
         responses: { '200': respEnvelope('on-chain task + a2aMeta/a2aState public projections (a2aMeta.posterAvatar when the poster made one)'), '404': { description: 'Not found' } },
       },
     },
     '/api/v1/tasks': {
       post: {
-        summary: 'Build the unsigned createTask escrow tx (sign + fund from YOUR wallet)',
+        summary: 'Build a createTask transaction',
+        description: 'Build the unsigned createTask escrow tx (sign + fund from YOUR wallet)',
         security: [{ ApiKeyAuth: [] }, { BearerAuth: [] }],
         requestBody: {
           required: true,
@@ -197,7 +203,7 @@ const OPENAPI_SPEC = {
                   token: {
                     type: 'string',
                     description:
-                      "The posting chain's settlement token: USDC on Base, 0x000…0 (native 0G) on 0G. Any other token is refused with 400 TOKEN_NOT_SETTLEMENT.",
+                      "The posting chain's settlement token: USDC on Arc or Base. GET /api/v1/health/settlement names it. Any other token is refused with 400 TOKEN_NOT_SETTLEMENT.",
                   },
                   amount: { type: 'string', description: "Escrow in the token's smallest unit (USDC: 6 decimals; 0G: wei)" },
                   locationZone: { type: 'string' },
@@ -214,7 +220,7 @@ const OPENAPI_SPEC = {
           },
         },
         responses: {
-          '200': respEnvelope("{ unsignedTx, chain, chainId }: send unsignedTx on chain chainId ('base' or '0g')"),
+          '200': respEnvelope("{ unsignedTx, chain, chainId }: send unsignedTx on chain chainId (the posting chain, e.g. 'arc')"),
           '400': { description: "Invalid body, or TOKEN_NOT_SETTLEMENT: the token is not the posting chain's settlement token" },
           '401': { description: 'Missing/invalid API key' },
           '429': POSTING_BUDGET_429,
@@ -224,8 +230,9 @@ const OPENAPI_SPEC = {
     },
     '/api/v1/tasks/batch': {
       post: {
-        summary: 'Build one unsigned createTasks escrow tx for several tasks (bulk posting; sign + fund from YOUR wallet)',
+        summary: 'Build a createTasks transaction',
         description:
+          'Build one unsigned createTasks escrow tx for several tasks (bulk posting; sign + fund from YOUR wallet). ' +
           "Only when GET /api/v1/health/settlement reports batchCreate.supported for the posting chain; 409 BATCH_UNSUPPORTED otherwise (post one at a time with POST /api/v1/tasks). Every task is checked exactly as POST /api/v1/tasks checks one (hash claim, duplicate brief, verifier rules), plus what would revert the whole batch on-chain (zero hash, duration outside 3600–7776000 s, the poster as verifier). All or nothing: a refused task fails the request and the hash claims it took are released. Approve the escrow for the sum of the amounts first.",
         security: [{ ApiKeyAuth: [] }, { BearerAuth: [] }],
         requestBody: {
@@ -261,7 +268,8 @@ const OPENAPI_SPEC = {
     },
     '/api/v1/storage/upload': {
       post: {
-        summary: 'Upload a brief blob (base64) to 0G Storage',
+        summary: 'Upload a brief',
+        description: 'Upload a brief blob (base64) to 0G Storage',
         security: [{ ApiKeyAuth: [] }, { BearerAuth: [] }],
         requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['data'], properties: { data: { type: 'string', description: 'base64 blob' } } } } } },
         responses: {
@@ -273,8 +281,9 @@ const OPENAPI_SPEC = {
     },
     '/api/v1/storage/upload-batch': {
       post: {
-        summary: 'Upload several brief blobs (base64) in one request, in order',
+        summary: 'Upload several briefs',
         description:
+          'Upload several brief blobs (base64) in one request, in order. ' +
           'Each item gets the checks of POST /api/v1/storage/upload, all before anything is stored; the whole body must fit the 2 MB JSON limit. A server storing on 0G takes at most 4 items per request (400 BATCH_TOO_LARGE otherwise): its uploads run one at a time, and a larger batch would outlast a proxy timeout. All or nothing: a failed item fails the request with its index (error.details.index) and no root hash is returned; storage is content-addressed, so sending the batch again gets the same root hashes.',
         security: [{ ApiKeyAuth: [] }, { BearerAuth: [] }],
         requestBody: {
@@ -307,7 +316,8 @@ const OPENAPI_SPEC = {
     },
     '/api/v1/a2a/tasks/index': {
       post: {
-        summary: 'Index a confirmed createTask tx into the marketplace (verified server-side; caller must be the funding wallet)',
+        summary: 'List a funded task',
+        description: 'Index a confirmed createTask tx into the marketplace (verified server-side; caller must be the funding wallet)',
         security: [{ ApiKeyAuth: [] }, { BearerAuth: [] }],
         requestBody: {
           required: true,
@@ -343,8 +353,9 @@ const OPENAPI_SPEC = {
     },
     '/api/v1/a2a/tasks/index-batch': {
       post: {
-        summary: 'Index the tasks one confirmed transaction funded (a createTasks batch, or a single createTask)',
+        summary: 'List a funded batch',
         description:
+          'Index the tasks one confirmed transaction funded (a createTasks batch, or a single createTask). ' +
           'The receipt is read once; only TaskCreated events from the escrow count. Each listed task is matched to its event by taskHash and indexed with the checks of POST /api/v1/a2a/tasks/index: the caller must be its on-chain poster, and a re-index keeps the first poster and terms. Tasks the receipt funds but the request does not list are left alone.',
         security: [{ ApiKeyAuth: [] }, { BearerAuth: [] }],
         requestBody: {
@@ -379,32 +390,36 @@ const OPENAPI_SPEC = {
     },
     '/api/v1/a2a/tasks/posted': {
       get: {
-        summary: "Caller's posted tasks with lifecycle state + deliverable (poll this for results)",
+        summary: 'Your posted tasks',
+        description: "Caller's posted tasks with lifecycle state + deliverable (poll this for results)",
         security: [{ ApiKeyAuth: [] }, { BearerAuth: [] }],
         responses: { '200': respEnvelope('{ tasks: [{ meta, state, onChain }], total }') },
       },
     },
     '/api/v1/health/settlement': {
       get: {
-        summary: 'Settlement chains as data: the posting chain, and per chain its id, escrow, token, gas coin and batchCreate',
+        summary: 'Settlement chains',
+        description: 'Settlement chains as data: the posting chain, and per chain its id, escrow, token, gas coin and batchCreate',
         responses: {
           '200': respEnvelope('{ postingChain, chains: [{ chain, chainId, tier, escrowAddress, token: { kind, address, symbol, decimals }, relayChain, gasSymbol, postable, batchCreate: { supported, maxBatch } }], settlementTier }. batchCreate.supported: the escrow has createTasks (POST /api/v1/tasks/batch), taking up to maxBatch tasks; read from its MAX_BATCH() and cached, false when unreadable'),
         },
       },
     },
     '/api/v1/reputation/leaderboard': {
-      get: { summary: 'Top workers by decayed reputation', responses: { '200': respEnvelope('{ leaderboard }') } },
+      get: { summary: 'Reputation leaderboard', description: 'Top workers by decayed reputation', responses: { '200': respEnvelope('{ leaderboard }') } },
     },
     '/api/v1/reputation/{address}': {
       get: {
-        summary: 'Merged on-chain + decayed reputation for an agent wallet',
+        summary: 'Agent reputation',
+        description: 'Merged on-chain + decayed reputation for an agent wallet',
         parameters: [{ name: 'address', in: 'path', required: true, schema: { type: 'string' } }],
         responses: { '200': respEnvelope('reputation fields') },
       },
     },
     '/api/v1/api-keys/whoami': {
       get: {
-        summary: 'The wallet identity this API key resolves to (boot-time sanity check)',
+        summary: 'API key identity',
+        description: 'The wallet identity this API key resolves to (boot-time sanity check)',
         security: [{ ApiKeyAuth: [] }, { BearerAuth: [] }],
         responses: { '200': respEnvelope('{ address, addresses }') },
       },

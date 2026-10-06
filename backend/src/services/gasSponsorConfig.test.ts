@@ -5,7 +5,8 @@ import { ethers } from 'ethers';
  * Where sponsored gas may run (gasSponsorConfig.ts): off by default; never on
  * SQLite; only with a DEPLOYMENT_ID, an Arc escrow, a delegate recorded for
  * the Arc chain id, and a sponsor key of its own — none of the backend's
- * signing keys and not the escrow's verifier, treasury or admin.
+ * signing keys and not the escrow's verifier, treasury or admin. Sponsored
+ * submitOpen only with a version-2 delegate.
  */
 
 const sponsorKey = ethers.Wallet.createRandom().privateKey;
@@ -36,15 +37,31 @@ vi.mock('./settlementChains.js', () => ({ settlementChainConfig: () => arc.entry
 const roles = vi.hoisted(() => ({
   verifier: '0x' + '01'.repeat(20), treasury: '0x' + '02'.repeat(20), admin: '0x' + '03'.repeat(20), fail: false,
   delegateEscrow: '0x' + 'e5'.repeat(20) as string | null,
+  // The delegate's DELEGATE_VERSION(): a number, 'revert' (version 1 has no
+  // such function), or 'down' (the RPC fails).
+  version: 2 as number | 'revert' | 'down',
+  versionCalls: 0,
+  // What the delegate's ESCROW() read, or a failing role read, throws instead.
+  escrowCallError: null as Error | null,
+  roleError: null as Error | null,
 }));
 vi.mock('./chainRuntime.js', () => ({
   chainRuntime: () => ({
     provider: {
-      // The delegate's ESCROW(); null = no contract there.
-      call: async () => (roles.delegateEscrow ? ethers.AbiCoder.defaultAbiCoder().encode(['address'], [roles.delegateEscrow]) : '0x'),
+      call: async (tx: { data: string }) => {
+        if (tx.data === ethers.id('DELEGATE_VERSION()').slice(0, 10)) {
+          roles.versionCalls++;
+          if (roles.version === 'revert') throw ethers.makeError('missing revert data', 'CALL_EXCEPTION', { action: 'call', data: null, reason: null, transaction: { to: null, data: tx.data }, invocation: null, revert: null });
+          if (roles.version === 'down') throw ethers.makeError('timeout', 'TIMEOUT', { operation: 'call' });
+          return ethers.AbiCoder.defaultAbiCoder().encode(['uint256'], [roles.version]);
+        }
+        // The delegate's ESCROW(); null = no contract there.
+        if (roles.escrowCallError) throw roles.escrowCallError;
+        return roles.delegateEscrow ? ethers.AbiCoder.defaultAbiCoder().encode(['address'], [roles.delegateEscrow]) : '0x';
+      },
     },
     escrow: {
-      verifier: async () => { if (roles.fail) throw new Error('rpc down'); return roles.verifier; },
+      verifier: async () => { if (roles.fail) throw roles.roleError ?? new Error('rpc down'); return roles.verifier; },
       treasury: async () => roles.treasury,
       admin: async () => roles.admin,
     },
@@ -53,7 +70,7 @@ vi.mock('./chainRuntime.js', () => ({
 const identity = vi.hoisted(() => ({ allowed: true }));
 vi.mock('./deploymentIdentity.js', () => ({ backgroundWritesAllowed: () => identity.allowed }));
 
-const { gasSponsorSettings, runnableSettings, _resetSponsorRoles } = await import('./gasSponsorConfig.js');
+const { gasSponsorSettings, runnableSettings, sponsorsSubmitOpen, _resetSponsorRoles } = await import('./gasSponsorConfig.js');
 
 function enable(o: Record<string, unknown> = {}) {
   cfg.gasSponsor = {
@@ -67,7 +84,7 @@ beforeEach(() => {
   Object.assign(cfg, { databaseUrl: 'postgres://x', deploymentId: 'staging-arc', arcAgentDelegateAddress: DELEGATE, arcMarketplaceSignerPrivateKey: '', ogStoragePrivateKey: '' });
   cfg.gasSponsor = { enabled: false };
   arc.entry.escrowAddress = '0x' + 'e5'.repeat(20);
-  Object.assign(roles, { verifier: '0x' + '01'.repeat(20), treasury: '0x' + '02'.repeat(20), admin: '0x' + '03'.repeat(20), fail: false, delegateEscrow: '0x' + 'e5'.repeat(20) });
+  Object.assign(roles, { verifier: '0x' + '01'.repeat(20), treasury: '0x' + '02'.repeat(20), admin: '0x' + '03'.repeat(20), fail: false, delegateEscrow: '0x' + 'e5'.repeat(20), version: 2, versionCalls: 0, escrowCallError: null, roleError: null });
   identity.allowed = true;
   _resetSponsorRoles();
 });
@@ -143,5 +160,68 @@ describe('runnableSettings', () => {
     roles.fail = false;
     identity.allowed = false;
     expect(await runnableSettings('test')).toEqual({ ok: false, reason: expect.stringMatching(/another deployment's Redis/) });
+  });
+});
+
+describe('a reason that repeats an RPC failure (delta audit 2026-10-06, gas-2)', () => {
+  // ethers puts the request into the message, and the RPC URL can carry a
+  // provider key. /health/bridge and /accept repeat this reason unauthenticated.
+  const rpcError = () => Object.assign(
+    new Error('server response 401 Unauthorized (request={ }, response={ }, error=null, info={ "requestUrl": "https://arc.example/v2/SECRET-KEY" }, code=SERVER_ERROR, version=6.13.1)'),
+    { shortMessage: 'server response 401 Unauthorized', code: 'SERVER_ERROR' },
+  );
+
+  it("keeps the short message and drops the request, from the delegate's ESCROW() and from an escrow role", async () => {
+    enable();
+    roles.escrowCallError = rpcError();
+    const delegate = await runnableSettings('test');
+    expect(delegate).toEqual({ ok: false, reason: expect.stringMatching(/could not read ESCROW\(\).*server response 401 Unauthorized \[SERVER_ERROR\]$/) });
+    expect(JSON.stringify(delegate)).not.toMatch(/SECRET-KEY|requestUrl|https?:/);
+
+    roles.escrowCallError = null;
+    _resetSponsorRoles();
+    roles.fail = true;
+    roles.roleError = rpcError();
+    const role = await runnableSettings('test');
+    expect(role).toEqual({ ok: false, reason: expect.stringMatching(/could not read the Arc escrow's verifier.*server response 401 Unauthorized/) });
+    expect(JSON.stringify(role)).not.toMatch(/SECRET-KEY|requestUrl|https?:/);
+  });
+});
+
+describe('sponsorsSubmitOpen', () => {
+  async function enabled() {
+    enable();
+    const r = await runnableSettings('test');
+    if (!r.ok) throw new Error(r.reason);
+    return r.settings;
+  }
+
+  it('is on for a version-2 delegate, and asks it once', async () => {
+    const settings = await enabled();
+    expect(await sponsorsSubmitOpen(settings)).toBe(true);
+    expect(await sponsorsSubmitOpen(settings)).toBe(true);
+    expect(roles.versionCalls).toBe(1);
+  });
+
+  it('is off for the deployed version-1 delegates, whose DELEGATE_VERSION() reverts', async () => {
+    roles.version = 'revert';
+    expect(await sponsorsSubmitOpen(await enabled())).toBe(false);
+  });
+
+  it('is off while the version cannot be read, and asks again next time', async () => {
+    const settings = await enabled();
+    roles.version = 'down';
+    expect(await sponsorsSubmitOpen(settings)).toBe(false);
+    roles.version = 2;
+    expect(await sponsorsSubmitOpen(settings)).toBe(true);
+    expect(roles.versionCalls).toBe(2);
+  });
+
+  it('asks again when the configured delegate changes', async () => {
+    roles.version = 'revert';
+    expect(await sponsorsSubmitOpen(await enabled())).toBe(false);
+    cfg.arcAgentDelegateAddress = '0x' + 'df'.repeat(20);
+    roles.version = 2;
+    expect(await sponsorsSubmitOpen(await enabled())).toBe(true);
   });
 });

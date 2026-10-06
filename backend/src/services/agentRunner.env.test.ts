@@ -58,6 +58,18 @@ vi.mock('./deployedAgentStore.js', () => ({
   loadAgent: vi.fn(async () => agentHolder.current),
   loadAllAgents: vi.fn(async () => (agentHolder.current ? [agentHolder.current] : [])),
   saveAgent: vi.fn(async () => undefined),
+  // Write through to the held agent, as the store would.
+  updateAgentFields: vi.fn(async (id: string, fields: object) => {
+    if (agentHolder.current?.id !== id) return false;
+    Object.assign(agentHolder.current, fields);
+    return true;
+  }),
+  setAgentStatus: vi.fn(async (id: string, status: string, opts: { from?: string } = {}) => {
+    const a = agentHolder.current;
+    if (a?.id !== id || (opts.from && a.status !== opts.from)) return false;
+    a.status = status;
+    return true;
+  }),
 }));
 
 vi.mock('./redis.js', () => ({
@@ -423,6 +435,7 @@ describe('when writes turn off after boot (deploymentIdentity)', () => {
     agentHolder.current = { ...makeAgent('agent-killed-on-stop'), status: 'running' };
     await startAgent('agent-killed-on-stop', { skipResume: true });
     vi.mocked(store.saveAgent).mockClear();
+    vi.mocked(store.setAgentStatus).mockClear();
 
     expect(gate.onStopped.length).toBeGreaterThan(0);
     for (const listener of gate.onStopped) listener();
@@ -432,6 +445,7 @@ describe('when writes turn off after boot (deploymentIdentity)', () => {
 
     expect(stopLocalWorkers()).toBe(0);
     expect(store.saveAgent).not.toHaveBeenCalled();
+    expect(store.setAgentStatus).not.toHaveBeenCalled();
   });
 
   it('a crash restart due after writes turned off does not restart, and keeps the saved status', async () => {
@@ -452,9 +466,11 @@ describe('when writes turn off after boot (deploymentIdentity)', () => {
       gate.allowed = false; // then this process learns it is on another deployment's Redis
       forkMock.mockClear();
       vi.mocked(store.saveAgent).mockClear();
+      vi.mocked(store.setAgentStatus).mockClear();
       await vi.advanceTimersByTimeAsync(5_000);
       expect(forkMock).not.toHaveBeenCalled();
       expect(store.saveAgent).not.toHaveBeenCalled();
+      expect(store.setAgentStatus).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
       gate.allowed = true;
@@ -497,12 +513,14 @@ describe('when writes turn off after boot (deploymentIdentity)', () => {
     stopLocalWorkers();
     agentHolder.current = { ...makeAgent('agent-forking-at-stop'), status: 'running' };
     vi.mocked(store.saveAgent).mockClear();
+    vi.mocked(store.setAgentStatus).mockClear();
     try {
       await expect(startAgent('agent-forking-at-stop', { skipResume: true })).rejects.toThrow(/another deployment's Redis/);
       expect(kill).toHaveBeenCalledWith('SIGTERM');
       await handlers.exit(null, 'SIGTERM');
       expect(stopLocalWorkers()).toBe(0);
       expect(store.saveAgent).not.toHaveBeenCalled();
+      expect(store.setAgentStatus).not.toHaveBeenCalled();
     } finally {
       gate.allowed = true;
     }

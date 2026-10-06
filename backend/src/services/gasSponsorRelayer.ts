@@ -33,6 +33,7 @@ import { getPool } from './neonDb.js';
 import { createSerialTxQueue } from './serialTxQueue.js';
 import { getTaskOn, effectiveDeadlineOn } from './escrow.js';
 import { recordEvent } from './analyticsService.js';
+import { safeErrorMessage } from '../middleware/errorHandler.js';
 import * as a2aStore from './a2aStore.js';
 import {
   GAS_LIMIT_MARGIN_PERCENT,
@@ -136,9 +137,14 @@ export async function acquireSponsorWriter(settings: Enabled): Promise<boolean> 
     client.release();
     throw err;
   }
-  // A dropped connection releases the lock server-side: stop writing.
-  client.on('error', () => {
-    if (writer?.client === client) writer = null;
+  // A dropped connection releases the lock server-side: stop writing, and
+  // release the client with the error so the pool destroys it and its slot
+  // comes back. Only while it is still ours: once released, the pool owns it,
+  // and a second release throws.
+  client.on('error', (err) => {
+    if (writer?.client !== client) return;
+    writer = null;
+    client.release(err);
   });
   writer = { client, key };
   return true;
@@ -242,23 +248,27 @@ async function trip(settings: Enabled, action: 'paused' | 'killed', reason: stri
   Sentry.captureMessage(`gas sponsor ${action} automatically on ${settings.chainId}: ${reason}`, action === 'killed' ? 'fatal' : 'error');
 }
 
+// The node's own refusals of the bytes (txpool validation): they never
+// entered a pool and never will.
+const REFUSED = /insufficient funds|invalid sender|invalid signature|intrinsic gas too low|exceeds block gas limit|(tx|transaction) type not supported|invalid chain ?id|oversized data|higher than max fee per gas|exceeds the configured cap|empty auth(orization)? list/i;
+
 /**
  * What a failed eth_sendRawTransaction means for the stored bytes:
  * - known: already in the pool;
  * - nonce_low: the nonce is used (ours landed, or the key signed elsewhere);
- * - transient: no answer, or fees moved; the same bytes can land later;
- * - rejected: the node refused them outright and never will take them.
+ * - rejected: the node refused them outright and never will take them;
+ * - transient: anything else (no answer, fees moved, an error not recognised
+ *   above): the same bytes may be in a pool or land later, so they are kept
+ *   and re-sent. Freeing the nonce of bytes that did reach a pool would put
+ *   a second transaction at it.
  */
 export function classifyBroadcastError(err: unknown): 'known' | 'nonce_low' | 'transient' | 'rejected' {
   const e = err as { code?: string; message?: string; shortMessage?: string; error?: { message?: string }; info?: { error?: { message?: string } } } | null;
   const msg = [e?.message, e?.shortMessage, e?.error?.message, e?.info?.error?.message].filter(Boolean).join(' ');
   if (/already known|known transaction|already imported/i.test(msg)) return 'known';
   if (e?.code === 'NONCE_EXPIRED' || /nonce too low|nonce has already been used|nonce is too low/i.test(msg)) return 'nonce_low';
-  if (/underpriced|fee too low|fee cap|base fee|max fee per gas less than/i.test(msg)) return 'transient';
-  if (['NETWORK_ERROR', 'TIMEOUT', 'SERVER_ERROR'].includes(e?.code ?? '') || /fetch failed|ECONN|ETIMEDOUT|socket hang up|network|timed? ?out/i.test(msg)) {
-    return 'transient';
-  }
-  return 'rejected';
+  if (e?.code === 'INSUFFICIENT_FUNDS' || REFUSED.test(msg)) return 'rejected';
+  return 'transient';
 }
 
 /**
@@ -268,7 +278,13 @@ export function classifyBroadcastError(err: unknown): 'known' | 'nonce_low' | 't
  * Returns true when it is settled as lost.
  */
 async function nonceTaken(settings: Enabled, tx: SponsoredTxRecord, now: number, confirmAfterMs = LOST_CONFIRM_MS): Promise<boolean> {
-  const seen = (await provider().send('eth_getTransactionByHash', [tx.txHash]).catch(() => null)) as { blockNumber?: string | null } | null;
+  let seen: { blockNumber?: string | null } | null;
+  try {
+    seen = await provider().send('eth_getTransactionByHash', [tx.txHash]);
+  } catch {
+    // No answer is not "not found": the clock below neither starts nor runs.
+    return false;
+  }
   if (seen?.blockNumber) {
     lostSince.delete(tx.txHash);
     return false;
@@ -326,9 +342,17 @@ export async function relaySponsoredCall(input: SponsoredCallInput): Promise<Rel
 
   const eligible = await agentEligibility(settings, input.agent);
   if (!eligible.ok) {
-    // An export between reservation and relay ends it.
-    if (held?.status === 'reserved' && held.agentWallet === wallet.toLowerCase()) await closeReservation(held.id, 'released');
-    return refuse(403, 'GAS_SPONSOR_INELIGIBLE', `This agent is not eligible for sponsored gas (${eligible.reason})`);
+    const holds = held?.status === 'reserved' && held.agentWallet === wallet.toLowerCase();
+    // An export, or a stored key that no longer derives the wallet, between
+    // reservation and relay ends it.
+    if (held && holds && (eligible.reason === 'key_exported' || eligible.reason === 'key_mismatch')) {
+      await closeReservation(held.id, 'released');
+    }
+    // Strikes gate new reservations only, as a pause does: a reservation
+    // already held is still served (delta audit 2026-10-06, gas-1).
+    if (!(holds && eligible.reason === 'strikes')) {
+      return refuse(403, 'GAS_SPONSOR_INELIGIBLE', `This agent is not eligible for sponsored gas (${eligible.reason})`);
+    }
   }
 
   const task = await getTaskOn('arc', Number(input.taskId));
@@ -424,6 +448,9 @@ export async function relaySponsoredCall(input: SponsoredCallInput): Promise<Rel
   const gasLimit = (estimate * GAS_LIMIT_MARGIN_PERCENT + 99n) / 100n;
 
   if (!reservation) {
+    // A new reservation: only for an eligible agent (one with strikes got
+    // past the check above only on a reservation it already holds).
+    if (!eligible.ok) return refuse(403, 'GAS_SPONSOR_INELIGIBLE', `This agent is not eligible for sponsored gas (${eligible.reason})`);
     const reserved = await reserve(
       {
         chainId: settings.chainId, taskId: input.taskId, kind: 'release', taskHash: task.taskHash.toLowerCase(), agentWallet: wallet,
@@ -505,6 +532,21 @@ async function send(settings: Enabled, reservation: Reservation, tx: Prepared): 
     let hash: string;
     let nonce: number;
     try {
+      // A repeat of this call (a worker asking again after its request timed
+      // out) can queue behind it, having passed the entry check before
+      // anything was recorded: send only what the reservation still owes.
+      const fresh = await getReservationById(reservation.id);
+      if (fresh?.status !== 'reserved') {
+        outcome = Promise.resolve(fresh?.status === 'used'
+          ? { ok: true, txHash: fresh.txHash }
+          : refuse(409, 'NO_RESERVATION', 'The sponsored-gas reservation for this call is no longer held'));
+        return null;
+      }
+      const out = await inFlight(reservation.id);
+      if (out) {
+        outcome = settle(settings, fresh, tx, out);
+        return null;
+      }
       const stale = await recheckBeforeSend(settings, tx);
       if (stale) {
         if (stale.ok === false && stale.code === 'GAS_SPONSOR_INELIGIBLE') await closeReservation(reservation.id, 'released');
@@ -535,7 +577,7 @@ async function send(settings: Enabled, reservation: Reservation, tx: Prepared): 
         withAuthorization: !!tx.authorization,
       });
     } catch (err) {
-      outcome = Promise.resolve(refuse(503, 'NOT_SENT', `Not sent: ${(err as Error).message}`));
+      outcome = Promise.resolve(refuse(503, 'NOT_SENT', `Not sent: ${safeErrorMessage(err)}`));
       return null;
     }
     try {
@@ -555,7 +597,7 @@ async function send(settings: Enabled, reservation: Reservation, tx: Prepared): 
           await trip(settings, 'killed', `the node says the sponsor's nonce ${nonce} is used, but not by ${hash}: the sponsor key is signing elsewhere`, { nonce, txHash: hash });
         } else {
           await setTxStatus(hash, 'rejected');
-          await trip(settings, 'paused', `the node rejected sponsored tx ${hash} (nonce ${nonce}): ${(err as Error).message}`, { nonce, txHash: hash });
+          await trip(settings, 'paused', `the node rejected sponsored tx ${hash} (nonce ${nonce}): ${safeErrorMessage(err)}`, { nonce, txHash: hash });
         }
         if (tx.kind === DelegateKind.ReleaseUnjudgedWork) await closeReservation(reservation.id, 'released');
         outcome = Promise.resolve(refuse(503, 'NOT_SENT', `Not sent: the node refused ${hash}`));
@@ -627,7 +669,15 @@ export async function recoverSponsorTxs(settings: Enabled, now = Date.now()): Pr
   const sponsor = settings.sponsor.address;
   const latest = Number(await provider().send('eth_getTransactionCount', [sponsor, 'latest']));
   for (const tx of await unsettledTxs(settings.chainId, sponsor)) {
-    const receipt = await provider().getTransactionReceipt(tx.txHash).catch(() => null);
+    // A read that fails is no answer: leave this transaction for the next
+    // tick. Only a node that answers "no receipt" counts it as not mined.
+    let receipt: ethers.TransactionReceipt | null;
+    try {
+      receipt = await provider().getTransactionReceipt(tx.txHash);
+    } catch (err) {
+      console.warn(`[gasSponsor] could not read the receipt of ${tx.txHash}: ${(err as Error).message}`);
+      continue;
+    }
     if (receipt) {
       lostSince.delete(tx.txHash);
       await settleStored(settings, tx);
@@ -650,7 +700,7 @@ export async function recoverSponsorTxs(settings: Enabled, now = Date.now()): Pr
         if (tx.status === 'signed') await setTxStatus(tx.txHash, 'sent');
       } else if (why === 'rejected') {
         await setTxStatus(tx.txHash, 'rejected');
-        await trip(settings, 'paused', `the node rejected sponsored tx ${tx.txHash} (nonce ${tx.nonce}): ${(err as Error).message}`, tx);
+        await trip(settings, 'paused', `the node rejected sponsored tx ${tx.txHash} (nonce ${tx.nonce}): ${safeErrorMessage(err)}`, tx);
         continue;
       } else {
         console.warn(`[gasSponsor] re-broadcast of ${tx.txHash} failed: ${(err as Error).message}`);
@@ -725,8 +775,10 @@ export async function sponsoredCallStatus(wallet: string, taskId: bigint, kind: 
  * (released), or an hour passed since the assignment (expired, a strike).
  * The strike is for an agent that sat on its reservation, so an hour lost to
  * our side is released without one: sponsorship killed (the relay refuses
- * every call), or a transaction of ours sent for it that failed. One whose
- * transaction is still out isn't swept at all until that transaction is final.
+ * every call), or a transaction of ours sent for it that failed. So is one
+ * whose agent handed the task back (returnedAt): it failed at the task, and
+ * a poster can cause that. One whose transaction is still out isn't swept at
+ * all until that transaction is final.
  */
 export async function sweepReservations(settings: Enabled, now = Date.now()): Promise<void> {
   const held = await heldReservations(settings.chainId);
@@ -750,7 +802,7 @@ export async function sweepReservations(settings: Enabled, now = Date.now()): Pr
       if (now >= r.expiresAt.getTime()) {
         const stillWaiting = r.kind === 'submit' && assignedToAgent && task.status === TaskStatus.Assigned;
         const ourSide = killed || (await txsForReservation(r.id)).length > 0;
-        const strike = stillWaiting && !ourSide;
+        const strike = stillWaiting && !ourSide && r.returnedAt === null;
         await closeReservation(r.id, strike ? 'expired' : 'released', strike ? 'held an hour after assignment without a submit' : undefined);
       }
     } catch (err) {
@@ -858,7 +910,11 @@ export interface GasSponsorReport {
   spentLastHourUsdc?: string;
 }
 
-/** Sponsored gas at a glance, for /health/bridge and the founder route. Never throws. */
+/**
+ * Sponsored gas at a glance, for /health/bridge and the founder route. Never
+ * throws. /health/bridge is unauthenticated: an error appears here only as
+ * safeErrorMessage gives it (no request detail, RPC URLs masked).
+ */
 export async function gasSponsorReport(): Promise<GasSponsorReport> {
   try {
     const run = await runnableSettings('gas sponsor report');
@@ -892,6 +948,6 @@ export async function gasSponsorReport(): Promise<GasSponsorReport> {
         : null,
     };
   } catch (err) {
-    return { enabled: false, reason: `status unavailable: ${(err as Error).message}` };
+    return { enabled: false, reason: `status unavailable: ${safeErrorMessage(err)}` };
   }
 }

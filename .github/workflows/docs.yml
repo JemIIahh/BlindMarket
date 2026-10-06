@@ -1,0 +1,33 @@
+name: Docs
+
+# The public docs site (docs-site/, deployed by Mintlify from master) has no
+# build step of its own in this repo, so a broken page or a dead link would
+# only show up after it went live. This job runs Mintlify's own strict checks
+# on any change to the site. The mint version is pinned so a CLI release can't
+# change what passes; bump it deliberately.
+
+on:
+  push:
+    branches: [master]
+    paths: ['docs-site/**', '.github/workflows/docs.yml']
+  pull_request:
+    paths: ['docs-site/**', '.github/workflows/docs.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: docs-site
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - run: npx -y mint@4.2.988 validate
+      - run: npx -y mint@4.2.988 broken-links

@@ -14,6 +14,7 @@
 import { randomBytes } from 'crypto';
 import { redis } from './redis.js';
 import * as a2aStore from './a2aStore.js';
+import { deliverToTelegram } from './telegram.js';
 
 export type NotificationType =
   | 'assigned'
@@ -24,6 +25,8 @@ export type NotificationType =
   | 'review_received'
   /** A task's deadline passed with its escrow still held: the poster can reclaim it. */
   | 'expired'
+  /** A task's deadline is close and it is still waiting on an agent, its work or a verdict. */
+  | 'deadline_soon'
   /** A hosted agent was left stopped (not restarted with the server): its owner can start it again. */
   | 'agent_stopped';
 
@@ -70,6 +73,8 @@ export async function notify(
     pipe.ltrim(key, 0, FEED_CAP - 1);
     pipe.expire(key, FEED_TTL_S);
     await pipe.exec();
+    // Telegram is an extra channel: fire and forget, it never blocks the feed.
+    void deliverToTelegram(toAddress, notif);
     return notif;
   } catch (err) {
     console.warn('[notifications] push failed:', (err as Error).message);
@@ -160,6 +165,23 @@ export async function notifyOnce(
 }
 
 /**
+ * When `key` was first recorded (unix seconds): stores `nowSec` the first time,
+ * returns the stored value after that. Kept for `ttlSec`. null if Redis fails,
+ * so a caller can skip rather than guess.
+ */
+export async function firstSeenAt(key: string, nowSec: number, ttlSec: number): Promise<number | null> {
+  try {
+    const k = `notif:seen:${key}`;
+    if ((await redis.set(k, String(nowSec), 'EX', Math.max(60, Math.ceil(ttlSec)), 'NX')) !== null) return nowSec;
+    const stored = Number(await redis.get(k));
+    return Number.isFinite(stored) && stored > 0 ? stored : null;
+  } catch (err) {
+    console.warn('[notif] firstSeenAt failed (non-fatal):', (err as Error).message);
+    return null;
+  }
+}
+
+/**
  * One-liner for route handlers: resolves poster + executor from the A2A
  * store and fans out the right copy to each. Never throws — failures log
  * and the settlement response proceeds.
@@ -227,10 +249,12 @@ export async function notifyLifecycle(
         });
       }
     } else if (event === 'disputed') {
+      // Sent once a ruling has refunded the poster (disputeListener.ts); a
+      // ruling for the worker is announced as 'completed'.
       const payload = {
         type: 'disputed' as const,
-        title: 'Task under dispute',
-        body: 'ValidatorPool will rule on this task.',
+        title: 'Dispute ruled — escrow refunded',
+        body: 'The ruling went to the poster, so the escrow was refunded to them.',
         taskId: normHash,
       };
       if (poster) await notify(poster, payload);

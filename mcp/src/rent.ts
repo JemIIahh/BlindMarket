@@ -104,8 +104,10 @@ const ZERO_TOKEN = '0x0000000000000000000000000000000000000000';
 
 // The only calls the backend builds for this process to sign or relay:
 // backend/src/services/escrow.ts (createTask, cancelTask, claimTimeout,
-// submitEvidence). verifyTarget checks where a transaction goes, but the
-// escrow address comes from the same backend, so a hostile answer could name
+// submitEvidence), and for open-submission tasks createTaskOpen, submitOpen,
+// selectWinner and voidOpenTask (docs/OPEN-SUBMISSION-TASKS.md; the same set
+// as sdk/src/escrowCalls.ts). verifyTarget checks where a transaction goes,
+// but the escrow address comes from the same backend, so a hostile answer could name
 // the token as the escrow and hand over an approve; the call, its arguments
 // and its value are what bound it (security audit run 1, C41).
 const ESCROW_CALLS = new Interface([
@@ -113,7 +115,12 @@ const ESCROW_CALLS = new Interface([
   'function submitEvidence(uint256 taskId, bytes32 evidenceHash)',
   'function cancelTask(uint256 taskId)',
   'function claimTimeout(uint256 taskId)',
+  'function createTaskOpen(bytes32 taskHash, address token, uint256 amount, string category, string locationZone, uint256 duration, address verifierAgent, uint8 mode, uint256 creatorWindow)',
+  'function submitOpen(uint256 taskId, bytes32 evidenceHash)',
+  'function selectWinner(uint256 taskId, address winner, bytes32 scorecardHash)',
+  'function voidOpenTask(uint256 taskId, bytes32 scorecardHash)',
 ]);
+type EscrowCall = 'createTask' | 'submitEvidence' | 'cancelTask' | 'claimTimeout' | 'createTaskOpen' | 'submitOpen' | 'selectWinner' | 'voidOpenTask';
 const GAS_LIMIT = 1000000n; // matches the canonical rent script
 // Auto-verify releases the payment, so the bar can't be "one character" — but
 // 40 made a correct 30-character URL unpayable. 20 is the platform floor
@@ -134,7 +141,7 @@ function fail(code: string, message: string) {
   return { isError: true, content: [{ type: 'text' as const, text: JSON.stringify({ error: { code, message } }) }] };
 }
 
-interface ApiError extends Error { code?: string; status?: number }
+interface ApiError extends Error { code?: string; status?: number; agentId?: string }
 
 /**
  * Throw TX_MISMATCH, before anything is signed or relayed, unless the
@@ -145,7 +152,7 @@ interface ApiError extends Error { code?: string; status?: number }
  */
 function assertEscrowCall(
   tx: { data?: unknown; value?: unknown },
-  fn: 'createTask' | 'submitEvidence' | 'cancelTask' | 'claimTimeout',
+  fn: EscrowCall,
   argsOk: (args: Result) => boolean,
   what: string,
   value = 0n,
@@ -250,6 +257,8 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       const err: ApiError = new Error(`${path} failed: ${json.error?.message || res.status}`);
       err.code = json.error?.code;
       err.status = res.status;
+      // DEPLOY_FEE_ALREADY_USED names the agent the fee paid for.
+      if (typeof json.error?.agentId === 'string') err.agentId = json.error.agentId;
       throw err;
     }
     return json.data as T;
@@ -2105,6 +2114,39 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     }
   }
 
+  /**
+   * Whether the fee `record` sent can never land: the wallet's confirmed
+   * nonce is past the fee's, and no node has the fee. The nonce is read
+   * first, as a receipt served after it is final, and the receipt once more
+   * after a pause, so one lagging read cannot free a fee that landed. A read
+   * that fails says it may still land.
+   */
+  async function feeNeverLanded(record: SpendRecord & { txHash: string }): Promise<boolean> {
+    if (record.nonce === undefined || record.chainId === undefined || !record.settlement) return false;
+    try {
+      const w = await walletOn(record.settlement, record.chainId);
+      const provider = w.provider!;
+      if ((await provider.getTransactionCount(walletCtx!.wallet.address, 'latest')) <= record.nonce) return false;
+      if (await provider.getTransactionReceipt(record.txHash)) return false;
+      if (await provider.getTransaction(record.txHash)) return false;
+      await new Promise((r) => setTimeout(r, Number(process.env.BLINDMARKET_DEPLOY_POLL_MS ?? 5000)));
+      return !(await provider.getTransactionReceipt(record.txHash));
+    } catch {
+      return false;
+    }
+  }
+
+  /** `agentId` as a deployed agent when the API key's owner owns it, else null (the SDK's ownAgent). */
+  async function ownAgent(agentId: string): Promise<DeployedAgent | null> {
+    const [agent, who] = await Promise.all([
+      api<{ id: string; name: string; walletAddress: string; ownerAddress?: string; status?: string }>('GET', `/api/v1/agents/${encodeURIComponent(agentId)}`),
+      api<{ address: string; addresses?: string[] }>('GET', '/api/v1/api-keys/whoami'),
+    ]);
+    const mine = new Set([who.address, ...(who.addresses ?? [])].map((a) => String(a).toLowerCase()));
+    if (!agent?.ownerAddress || !mine.has(agent.ownerAddress.toLowerCase())) return null;
+    return { id: agent.id, name: agent.name, walletAddress: agent.walletAddress, started: agent.status === 'running' };
+  }
+
   function paidNote(idempotencyKey: string): string {
     const rec = getSpend(idempotencyKey);
     return rec?.stage === 'sent' && rec.txHash
@@ -2138,6 +2180,28 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       const code = (err as ApiError).code;
       if (code === 'DEPLOY_FEE_NOT_FOUND' && record.chainId === undefined) {
         return { refused: await unchainedFeeNotFound(idempotencyKey, record.txHash, currentFee) };
+      }
+      // The backend never sees a fee that never landed: every retry with it
+      // would ask again forever. Back to unpaid, so the key pays once more.
+      if (code === 'DEPLOY_FEE_NOT_FOUND' && await feeNeverLanded(record)) {
+        updateSpend(idempotencyKey, { stage: 'created', txHash: undefined, nonce: undefined });
+        return {
+          refused: fail(
+            'FEE_NEVER_LANDED',
+            `The deploy fee ${record.txHash} never landed: no node has it, and the wallet has used its nonce ${record.nonce} since. Nothing was paid. ` +
+            'This key is back to unpaid: get a new quote and confirm it with the same idempotencyKey to pay the fee once.',
+          ),
+        };
+      }
+      // This fee already made an agent: the answer to an earlier deploy was
+      // lost. The caller's own agent is that deploy, done.
+      const agentId = (err as ApiError).agentId;
+      if (code === 'DEPLOY_FEE_ALREADY_USED' && agentId) {
+        const agent = await ownAgent(agentId).catch(() => null);
+        if (agent) {
+          updateSpend(idempotencyKey, { stage: 'confirmed', agentId: agent.id });
+          return { agent };
+        }
       }
       return { refused: fail(code ?? 'DEPLOY_FAILED', `${(err as Error).message}.${paidNote(idempotencyKey)}`) };
     }
@@ -2175,14 +2239,14 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
         // Recorded before it leaves this process (signRecordBroadcast): a retry
         // resumes from here and never pays twice, even when the node took the
         // transaction and its answer was lost (TX_MAYBE_SENT).
-        const { sent: tx } = await signRecordBroadcast(w, { to: fee.token, data }, (hash) => {
-          updateSpend(idempotencyKey, { stage: 'sent', txHash: hash });
+        const { sent: tx } = await signRecordBroadcast(w, { to: fee.token, data }, (hash, nonce) => {
+          updateSpend(idempotencyKey, { stage: 'sent', txHash: hash, nonce });
         });
         try {
           await tx.wait();
         } catch (err) {
           if ((err as ApiError).code === 'CALL_EXCEPTION') {
-            updateSpend(idempotencyKey, { stage: 'created', txHash: undefined });
+            updateSpend(idempotencyKey, { stage: 'created', txHash: undefined, nonce: undefined });
             return { refused: fail('FEE_REVERTED', `The fee transfer ${tx.hash} reverted, so nothing was paid. Check the wallet's USDC on ${fee.chain} and retry.`) };
           }
           // Not confirmed yet: the backend waits for the receipt itself.

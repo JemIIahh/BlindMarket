@@ -34,6 +34,9 @@ import {
   agentNames, capacityCheck, freeSlots, maxDeployable, namesProblem, runDeploys,
   type AgentCapacity, type AgentRun, type DeployedAgent,
 } from '../lib/bulkDeploy';
+import {
+  FEE_HEARTBEAT_MS, addFee, browserFeeStorage, claimFee, dropFee, freeFees, releaseFees, touchFees,
+} from '../lib/pendingFees';
 import { WARN_BOX } from '../components/agent/AgentReadinessCard';
 import {
   CUSTOM_MODEL, FALLBACK_MODELS, isKeyed, isPriced, liveListError, liveListRequest,
@@ -77,23 +80,11 @@ const ARC_GAS_MARGIN = 10_000n; // 0.01 USDC
 const usdc = (raw: bigint) => String(Number(formatUnits(raw, 6)));
 
 // A fee paid on Arc but not yet used for a deploy (the deploy failed, or the
-// tab closed after paying). Kept per owner so the retry uses it instead of
-// charging again; the backend accepts each payment for one deploy only.
-const pendingFeeKey = (owner: string) => `bb.deployFeeTx.${owner.toLowerCase()}`;
-function readPendingFee(owner: string): string | null {
-  try {
-    const hash = localStorage.getItem(pendingFeeKey(owner));
-    return hash && /^0x[0-9a-fA-F]{64}$/.test(hash) ? hash : null;
-  } catch {
-    return null;
-  }
-}
-function writePendingFee(owner: string, hash: string | null) {
-  try {
-    if (hash) localStorage.setItem(pendingFeeKey(owner), hash);
-    else localStorage.removeItem(pendingFeeKey(owner));
-  } catch { /* storage blocked: a failed deploy then needs a new payment */ }
-}
+// tab closed after paying), kept per owner so the retry uses it instead of
+// charging again. Every tab shares them: a run takes only one no other live
+// run holds (lib/pendingFees.ts).
+const firstFreeFee = (owner: string): string | null => freeFees(browserFeeStorage, owner, Date.now())[0]?.hash ?? null;
+const newRunId = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
 const shortHash = (hash: string) => `${hash.slice(0, 10)}…${hash.slice(-6)}`;
 const shortAddress = (address: string) => `${address.slice(0, 6)}…${address.slice(-4)}`;
@@ -367,7 +358,9 @@ export default function DeployAgentForm() {
   // An Arc payment from an earlier attempt that no deploy has used yet.
   const [pendingFee, setPendingFee] = useState<string | null>(null);
   useEffect(() => {
-    setPendingFee(address && feeMethod === 'transfer' ? readPendingFee(address) : null);
+    // A run in progress shows the fee it took instead (handleSubmit).
+    if (submittingRef.current) return;
+    setPendingFee(address && feeMethod === 'transfer' ? firstFreeFee(address) : null);
   }, [address, feeMethod, status]);
 
   // The balance of the wallet that pays, in the fee's token on the fee's
@@ -487,8 +480,8 @@ export default function DeployAgentForm() {
 
   /** Drop a saved payment that never confirmed, so the next deploy pays anew. */
   function forgetPendingFee() {
-    if (address) writePendingFee(address, null);
-    setPendingFee(null);
+    if (address && pendingFee) dropFee(browserFeeStorage, address, pendingFee);
+    setPendingFee(address ? firstFreeFee(address) : null);
     setErrorCode(null);
     setError('');
   }
@@ -549,7 +542,10 @@ export default function DeployAgentForm() {
     setError('');
     setErrorCode(null);
     setCapacityOffer(null);
+    // Frees the saved fees this run holds that no deploy used, however it ends.
+    let endRun = () => {};
     const refuse = (message: unknown, code: string | null = null) => {
+      endRun();
       setError(message);
       setErrorCode(code);
       setStatus('error');
@@ -572,8 +568,20 @@ export default function DeployAgentForm() {
       return;
     }
 
-    // An Arc payment no deploy has used yet pays for the first agent.
-    const savedFee = feeTerms.required && feeTerms.method === 'transfer' ? readPendingFee(address) : null;
+    // An Arc payment no deploy has used yet, that no other tab's run holds,
+    // pays for the first agent. This run holds it, and every fee it pays,
+    // until it ends.
+    const runId = newRunId();
+    const transferFee = feeTerms.required && feeTerms.method === 'transfer';
+    const savedFee = transferFee ? claimFee(browserFeeStorage, address, runId, Date.now()) : null;
+    setPendingFee(savedFee);
+    const heartbeat = transferFee ? setInterval(() => touchFees(browserFeeStorage, address, runId, Date.now()), FEE_HEARTBEAT_MS) : undefined;
+    endRun = () => {
+      endRun = () => {};
+      clearInterval(heartbeat);
+      releaseFees(browserFeeStorage, address, runId);
+      setPendingFee(transferFee ? firstFreeFee(address) : null);
+    };
     const feeCount = feeTerms.required ? runNames.length - (savedFee ? 1 : 0) : 0;
 
     const ownerIdentity = getOrCreateExecutorIdentity(address);
@@ -619,7 +627,7 @@ export default function DeployAgentForm() {
     if (feeCount > 0 || funding) {
       setStatus('confirming');
       const approved = await new Promise<boolean>((resolve) => { confirmResolveRef.current = resolve; });
-      if (!approved) { setStatus('idle'); submittingRef.current = false; return; }
+      if (!approved) { endRun(); setStatus('idle'); submittingRef.current = false; return; }
     }
 
     setRuns(runNames.map((name) => ({ name, state: 'queued' })));
@@ -640,7 +648,8 @@ export default function DeployAgentForm() {
         // The backend checks the fee, creates the agent's wallet and starts it.
         deploy: (body) => authedPost<DeployedAgent>('/api/v1/agents/deploy', body),
         fund: (to) => fundWallet(signer, to, amount),
-        savePendingFee: (hash) => { writePendingFee(address, hash); setPendingFee(hash); },
+        savePendingFee: (hash) => addFee(browserFeeStorage, address, hash, runId, Date.now()),
+        clearPendingFee: (hash) => dropFee(browserFeeStorage, address, hash),
         sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
         onUpdate: (i, agent) => {
           setRuns((prev) => prev.map((r, j) => (j === i ? agent : r)));
@@ -677,6 +686,7 @@ export default function DeployAgentForm() {
       setErrorCode(typeof err?.code === 'string' ? err.code : null);
       setStatus('error');
     } finally {
+      endRun();
       submittingRef.current = false;
     }
   }
@@ -821,6 +831,14 @@ export default function DeployAgentForm() {
                         funded <span className="font-mono">{shortHash(r.fundTx)}</span>
                       </a>
                     )}
+                  </div>
+                )}
+                {/* The fee this agent paid before it failed: the next deploy uses it if it can still pay. */}
+                {!r.id && r.feeTx && (
+                  <div className="text-xs text-ink-3">
+                    <a href={`${explorer}/tx/${r.feeTx}`} target="_blank" rel="noreferrer" className="hover:text-ink">
+                      fee tx <span className="font-mono">{shortHash(r.feeTx)}</span>
+                    </a>
                   </div>
                 )}
                 {r.state === 'failed' && r.error != null && <ErrorNotice error={r.error} title="Couldn't deploy this agent" compact />}

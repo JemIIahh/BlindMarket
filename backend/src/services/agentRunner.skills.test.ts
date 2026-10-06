@@ -67,6 +67,8 @@ vi.mock('./deployedAgentStore.js', () => ({
   loadAgent: vi.fn(async () => AGENT),
   loadAllAgents: vi.fn(async () => [AGENT]),
   saveAgent: vi.fn(async () => undefined),
+  updateAgentFields: vi.fn(async () => true),
+  setAgentStatus: vi.fn(async () => true),
 }));
 
 // Silence the rest of startAgent's side-effect deps.
@@ -108,5 +110,5 @@ describe('startAgent composes installed skills into the worker env', () => {
     const skillTool = tools.find((t) => t.name === 'fetch_page');
     expect(skillTool).toBeTruthy();
     expect(skillTool?.type).toBe('tool');
-  });
+  }, 20_000); // the first import of agentRunner is slow under full-suite load
 });

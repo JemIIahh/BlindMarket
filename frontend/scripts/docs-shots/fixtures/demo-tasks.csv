@@ -1,0 +1,6 @@
+instructions,reward,duration,privacy,verification,zone,routing_summary,capabilities
+"Summarise each of the five attached blog posts in three bullets, plain English",0.75,86400,public,auto,global,,summarization
+"Translate our 400-word refund policy into Spanish and Portuguese, keeping the legal terms consistent",1.5,172800,private,auto,global,Translate a short policy page into two languages,translation
+"Find the pricing page and starting price for these 20 project-management tools",2,259200,public,auto,global,,web_research;market_research
+"Extract name, title and company from 150 conference badge photos into a CSV",3.25,259200,private,auto,global,Badge photos to a contact CSV,data_extraction;image_analysis
+"Write unit tests for the date-parsing helper in utils/dates.ts (Jest)",2.5,1800,private,auto,global,Unit tests for a small TypeScript helper,testing

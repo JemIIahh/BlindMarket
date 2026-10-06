@@ -48,7 +48,9 @@ import { activeHostedVerifiers, hostedVerifierNotOptedIn, VERIFIER_NOT_OPTED_IN_
 import { refuseUnapprovedDelegation, sameOwnerSubtask } from '../services/delegationGuard.js';
 import { gasSponsorSettings } from '../services/gasSponsorConfig.js';
 import { sponsorHint } from '../services/gasSponsorEligibility.js';
-import { holdsReservation, releaseAcceptReservation, reserveForAccept, startReservationAfterAssign } from '../services/gasSponsorAccept.js';
+import {
+  holdsReservation, markHandedBack, releaseAcceptReservation, releaseOnReopen, reserveForAccept, startReservationAfterAssign,
+} from '../services/gasSponsorAccept.js';
 import type { Reservation as SponsorReservation } from '../services/gasSponsorStore.js';
 import { relaySponsoredCall, sponsoredCallStatus } from '../services/gasSponsorRelayer.js';
 import jwt from 'jsonwebtoken';
@@ -94,6 +96,9 @@ const registerSchema = z.object({
     .transform((keys) => [...new Set(keys.map((k) => k.toLowerCase()))])
     .optional(),
 });
+
+/** A task id: the bytes32 task hash, any case (older keys are mixed-case). */
+const TASK_HASH_RE = /^0x[0-9a-fA-F]{64}$/;
 
 function chainUnsupportedMessage(chain: string | undefined): string {
   return chain
@@ -446,6 +451,13 @@ async function refuseUnfitExecutor(taskId: string, address: string, agent: Agent
  */
 a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, next) => {
   const taskId = req.params.id as string;
+  // A task's id is its bytes32 hash. Checked before anything is logged or
+  // stored under it: a refusal below appends to an attempt stream keyed by
+  // this id (delta audit 2026-10-06, accept-3).
+  if (!TASK_HASH_RE.test(taskId)) {
+    next(new AppError(400, 'VALIDATION_ERROR', 'Task id must be a 0x-prefixed 32-byte hex task hash'));
+    return;
+  }
   const address = req.user!.address;
   const addrLc = address.toLowerCase();
   let lockAcquired = false;
@@ -469,7 +481,8 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
     // without this lock. The accept's own writes all happen under the lock.
     const meta = await a2aStore.getMeta(taskId);
     if (!meta) {
-      await a2aStore.logAcceptAttempt(taskId, address, 'rejected_precheck');
+      // No attempt logged: the id names no task, and a stream per unknown
+      // well-formed hash is still a key per request.
       throw new AppError(404, 'NOT_FOUND', 'Task not found or not A2A-enabled');
     }
 
@@ -2861,6 +2874,10 @@ a2aRouter.post('/tasks/:id/release', requireAuth, async (req: AuthRequest, res, 
         );
       }
       if (onChainStatus !== 0) {
+        // The task stays the executor's, and so does its sponsored-gas
+        // reservation (a resume may still use it), but if it runs out its
+        // hour that is no strike (delta audit 2026-10-06, gas-1).
+        if (isExecutor) await markHandedBack(taskHash, address);
         throw new AppError(
           409,
           'ON_CHAIN_LOCKED',
@@ -2891,6 +2908,9 @@ a2aRouter.post('/tasks/:id/release', requireAuth, async (req: AuthRequest, res, 
       );
     }
     console.log(`[a2a] release: ${taskHash} reverted to open by ${address}`);
+    // The old executor's reservation would otherwise hold the task's row for
+    // its hour, and the next taker's reservation be refused as taken.
+    if (state.executorAddress) await releaseOnReopen(taskHash, state.executorAddress);
 
     const body: ApiResponse = {
       success: true,
