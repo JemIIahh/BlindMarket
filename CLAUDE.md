@@ -6,34 +6,44 @@ escrow settlement. It is **not** a hackathon project — do not frame work
 around the 0G APAC Hackathon, "Track 3", or any submission deadline. That era
 is over.
 
-BlindMarket runs a **two-chain architecture**, in transition as of Sep 2026:
+BlindMarket runs a **two-chain architecture**:
 
-- **Base** — settlement layer (user-facing). Agents get paid in USDC and users
-  can withdraw their money easily. `BlindEscrow` + `AgentFactory` live here.
-- **0G** — agent infrastructure. Agent identity, reputation, encrypted task
-  storage, and TEE-attested verification live here.
+- **Arc: payments (user-facing).** Production posts and settles every new
+  task in USDC on **Arc mainnet** (chain 5042). Arc is Circle's own L1, and
+  USDC is also its gas token. `BlindEscrow` and `AgentFactory` live here
+  (`contracts/deployments/arc-mainnet.json`, `agent-factory-arc-mainnet.json`).
+  Arc Testnet (5042002) is the staging chain.
+- **0G: agent infrastructure.** This covers agent identity NFTs (`INFT`),
+  0G Storage for encrypted briefs, and 0G Compute. The 0G mainnet escrow still
+  holds the tasks settled there before the move.
+  - The Arc escrow's `reputationContract` and `taskRegistry` are `0x0`.
+    Tasks settled on Arc do not update `BlindReputation` or `TaskRegistry`.
 
-Why split: **0G has no native USDC, and Circle CCTP does not support 0G**, so
-there was no clean way to pay agents in USDC or let users cash out while
-staying single-chain on 0G. Moving settlement to Base — which has both —
-removes that liquidity barrier and reaches a much larger audience than a
-0G-native payment token could.
+Why settlement left 0G:
+- 0G has no Circle-issued USDC and no CCTP. It does have bridged USDC.e via
+  Chainlink CCIP, so never say "0G has no USDC".
+- Arc has native USDC, pays gas in it, and supports CCTP. Production has CCTP
+  on, moving USDC from Base, Ethereum, Arbitrum and Polygon PoS onto Arc.
 
-**Base Mainnet is not deployed yet** (Base Sepolia testnet is). Don't state or
-code against a live Base Mainnet contract address until
-`contracts/deployments/base-mainnet.json` holds a real, non-zero address —
-that generated file (via `contracts/scripts/sync-addresses.ts`) is the source
-of truth, not README prose, which has previously gone stale here.
+Settlement was first planned for Base (Sep 2026). Production moved to Arc
+instead: Arc became the posting chain in PR #73 (Sep 22), and the mainnet
+contracts were deployed on Sep 26.
 
-**Arc (Circle's own L1, `docs.arc.io`) is a possible future settlement layer,
-not a current one.** Today Arc is wired only as a CCTP bridge chain
-(`backend/src/config.ts`, testnet-only, `arc-testnet`) — USDC is its native
-gas token, transfers to/from it complete via CCTP the same as any other
-supported chain. `BlindEscrow`/`AgentFactory` are not deployed on Arc, and no
-settlement code targets it yet. Treat "Arc settlement" as exploratory
-direction (see branch `feat/arc-settlement-layer`) until contracts actually
-deploy there — verify against `contracts/deployments/` before claiming
-otherwise, same as the Base Mainnet rule above.
+**Base Mainnet is not deployed.** Base Sepolia holds legacy tasks only, and
+`/health/bridge` reports Base as not configured. Don't state or code against a
+live Base Mainnet contract address until
+`contracts/deployments/base-mainnet.json` holds a real, non-zero address. That
+generated file (via `contracts/scripts/sync-addresses.ts`) is the source of
+truth.
+
+**Snapshot, 2026-10-06** (re-read it, don't quote it):
+- **Arc mainnet escrow:** 134 tasks: 129 Funded, 1 Assigned, 4 Cancelled,
+  0 Completed.
+- **0G mainnet escrow:** 52 tasks, 23 of them Completed.
+
+This section was itself wrong for weeks. It called Arc "a possible future
+settlement layer" while production was already settling there. Check the live
+system before trusting it (see "Docs go stale" below).
 
 ## Working rules
 
@@ -56,6 +66,32 @@ as fact.
 > Why this rule exists: memory and prior context are point-in-time snapshots and
 > go stale (e.g. files get moved or deleted). Confirming against live source is
 > the safeguard against acting on outdated or hallucinated assumptions.
+
+#### Docs go stale; check the running system
+
+Every `.md` here is a snapshot someone wrote on one day: the README, `docs/`,
+package READMEs, this file, and Claude's memory. They have been wrong in ways
+that mattered:
+- This file called Arc a future settlement layer while production had 130+
+  tasks on Arc mainnet.
+- The README says the platform never sees plaintext. Production runs
+  operator-held key custody and stores results in readable form.
+
+When a `.md` disagrees with the code or the live system, the system wins. Fix
+the `.md` in the same pass.
+
+Before you state what is live (which chain, which address, what's deployed,
+what a fee or limit is, whether a flow works), check it:
+
+| Question | Where to look |
+|---|---|
+| Which chain new tasks post on, and which escrows are configured | `curl -s https://api.blindmarket.xyz/health/bridge` (`postingChain`, `settlementTier`, `chains[]`) |
+| Settlement tokens and batch support | `curl -s https://api.blindmarket.xyz/api/v1/health/settlement` |
+| Contract addresses | `contracts/deployments/*.json`, then confirm the address has code on-chain |
+| Contract values: fee, deadlines, task counts and statuses | Read the contract with ethers from `backend/node_modules`, over `https://arc-rpc.publicnode.com` or `https://0g-rpc.publicnode.com`, with the ABI in `backend/src/abi/` |
+| What production runs | Prod builds from `emperor/master` (`git fetch emperor && git log emperor/master`). Confirm a change is live with a marker you can see on the API. |
+| What users install | The published npm version (`npm view @blindmarket/sdk version`, `npx -y @blindmarket/cli@<v> --help`), not `sdk/src` |
+| Whether something works | Run it: a curl, a testnet script, or the published CLI or MCP server |
 
 #### "Verified" is a claim about evidence you hold, not a tone
 
