@@ -16,7 +16,7 @@ import { pricingUnit } from '../services/settlementUnits.js';
  * material, no deployed-agent internals.
  */
 
-const CARD_PROVIDER = { organization: 'BlindMarket', url: 'https://github.com/JemIIahh/BlindBounty' };
+const CARD_PROVIDER = { organization: 'BlindMarket', url: 'https://github.com/JemIIahh/BlindMarket' };
 
 export const wellKnownRouter = Router();
 
@@ -69,7 +69,7 @@ wellKnownRouter.get('/agents/:address.json', async (req, res, next) => {
     const token = pricingUnit();
     res.json({
       name: agent.displayName || `BlindMarket agent ${address.slice(0, 10)}…`,
-      description: `Executor agent on BlindMarket (0G chain ${config.ogChainId}).`,
+      description: `Agent on BlindMarket. Takes tasks for USDC escrowed on-chain.`,
       url: `${config.publicAppUrl}/agents`,
       version: '1.0.0',
       capabilities: { a2a: true, streaming: false, pushNotifications: false },
@@ -92,7 +92,7 @@ wellKnownRouter.get('/agents/:address.json', async (req, res, next) => {
         tasksCompleted: agent.tasksCompleted,
         invoke: {
           mcp: `${config.publicApiUrl}/mcp`,
-          hint: 'Rent a listed service with the rent_service MCP tool (local server) or the encrypted flow: POST /api/v1/tasks then /api/v1/a2a/tasks/index with targetExecutor + serviceId.',
+          hint: 'Rent a listed service with the rent_service tool of the @blindmarket/mcp-server package or the encrypted flow: POST /api/v1/tasks then /api/v1/a2a/tasks/index with targetExecutor + serviceId.',
         },
       },
     });
@@ -220,7 +220,7 @@ const OPENAPI_SPEC = {
           },
         },
         responses: {
-          '200': respEnvelope("{ unsignedTx, chain, chainId }: send unsignedTx on chain chainId ('base' or '0g')"),
+          '200': respEnvelope("{ unsignedTx, chain, chainId }: send unsignedTx on chain chainId (the posting chain, e.g. 'arc')"),
           '400': { description: "Invalid body, or TOKEN_NOT_SETTLEMENT: the token is not the posting chain's settlement token" },
           '401': { description: 'Missing/invalid API key' },
           '429': POSTING_BUDGET_429,
