@@ -521,6 +521,21 @@ async function send(settings: Enabled, reservation: Reservation, tx: Prepared): 
     let hash: string;
     let nonce: number;
     try {
+      // A repeat of this call (a worker asking again after its request timed
+      // out) can queue behind it, having passed the entry check before
+      // anything was recorded: send only what the reservation still owes.
+      const fresh = await getReservationById(reservation.id);
+      if (fresh?.status !== 'reserved') {
+        outcome = Promise.resolve(fresh?.status === 'used'
+          ? { ok: true, txHash: fresh.txHash }
+          : refuse(409, 'NO_RESERVATION', 'The sponsored-gas reservation for this call is no longer held'));
+        return null;
+      }
+      const out = await inFlight(reservation.id);
+      if (out) {
+        outcome = settle(settings, fresh, tx, out);
+        return null;
+      }
       const stale = await recheckBeforeSend(settings, tx);
       if (stale) {
         if (stale.ok === false && stale.code === 'GAS_SPONSOR_INELIGIBLE') await closeReservation(reservation.id, 'released');

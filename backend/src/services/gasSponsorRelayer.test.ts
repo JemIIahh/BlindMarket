@@ -587,6 +587,68 @@ describe('what is checked again at the front of the queue', () => {
   });
 });
 
+describe('a repeat of a call that queued behind it (delta audit 2026-10-06, gas-4)', () => {
+  // A worker whose request timed out (120 s) asks again while its first call
+  // still waits in the queue: both pass the entry check, as nothing is
+  // recorded for the reservation yet, and both queue.
+  const NEXT = TASK_ID + 1n;
+  async function twiceBehindAnother(o: { landsAtOnce?: boolean; beforeTheyRun?: () => void } = {}) {
+    await writer();
+    holdReservation();
+    const r = holdReservation({ taskId: NEXT, taskHash: '0x' + '7b'.repeat(32) });
+    let mineFirst!: () => void;
+    chain.onBroadcast = (_raw, hash) => {
+      chain.onBroadcast = null; // only the first send mines, when the test says so
+      chain.code = DESIGNATOR;
+      new Promise<void>((res) => { mineFirst = res; }).then(() => {
+        chain.mined.set(hash, { status: 1, logs: [evidenceLog()], gasUsed: 150_000n, gasPrice: 20n * GWEI });
+      });
+    };
+    const first = relayer.relaySponsoredCall(await input({ authorization: auth() }));
+    await vi.waitFor(() => expect(chain.sent).toHaveLength(1));
+    relayer._setReceiptTimeout(50);
+    // This reservation's call: never mined in these tests, or mined at once.
+    if (o.landsAtOnce) {
+      chain.onBroadcast = (_raw, hash) => chain.mined.set(hash, { status: 1, logs: [evidenceLog(NEXT)], gasUsed: 150_000n, gasPrice: 20n * GWEI });
+    }
+    const a = relayer.relaySponsoredCall(await input({ nonce: 1n, taskId: NEXT }));
+    const b = relayer.relaySponsoredCall(await input({ nonce: 1n, taskId: NEXT }));
+    await new Promise((res) => setTimeout(res, 20));
+    o.beforeTheyRun?.();
+    mineFirst();
+    const out = { first: await first, a: await a, b: await b, reservation: r };
+    relayer._setReceiptTimeout(60_000);
+    return out;
+  }
+
+  it('settles on the transaction already out for the reservation instead of sending a second', async () => {
+    const { a, b, reservation } = await twiceBehindAnother();
+    expect(chain.sent).toHaveLength(2); // the other task's, and one for this reservation
+    const ours = db.txs.filter((t: Tx) => t.reservationId === reservation.id);
+    expect(ours).toHaveLength(1);
+    expect(a).toMatchObject({ ok: false, code: 'PENDING', txHash: ours[0].txHash });
+    expect(b).toMatchObject({ ok: false, code: 'PENDING', txHash: ours[0].txHash });
+  });
+
+  it('answers with the landed call once the reservation is used', async () => {
+    const { a, b, reservation } = await twiceBehindAnother({ landsAtOnce: true });
+    const ours = db.txs.filter((t: Tx) => t.reservationId === reservation.id);
+    expect(ours).toHaveLength(1);
+    expect(a).toEqual({ ok: true, txHash: ours[0].txHash });
+    expect(b).toEqual({ ok: true, txHash: ours[0].txHash });
+    expect(chain.sent).toHaveLength(2);
+  });
+
+  it('sends nothing for a reservation closed while the call waited', async () => {
+    // Handed back, say, or swept.
+    const { a, b, reservation } = await twiceBehindAnother({ beforeTheyRun: () => { db.reservations.find((x: Res) => x.taskId === NEXT)!.status = 'released'; } });
+    expect(a).toMatchObject({ ok: false, code: 'NO_RESERVATION' });
+    expect(b).toMatchObject({ ok: false, code: 'NO_RESERVATION' });
+    expect(chain.sent).toHaveLength(1);
+    expect(db.txs.filter((t: Tx) => t.reservationId === reservation.id)).toEqual([]);
+  });
+});
+
 describe('a sponsored releaseUnjudgedWork', () => {
   it('reserves its own budget and sends, once the task is disputed and escalated', async () => {
     await writer();
