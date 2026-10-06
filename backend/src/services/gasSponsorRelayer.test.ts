@@ -38,7 +38,7 @@ vi.mock('./gasSponsorEligibility.js', () => ({
 }));
 
 type Res = { id: number; chainId: number; taskId: bigint; kind: 'submit' | 'release'; taskHash: string; agentWallet: string; ownerDid: string; poster: string;
-  status: string; budgetWei: bigint; createdAt: Date; expiresAt: Date; txHash: string | null; gasUsed: bigint | null; costWei: bigint | null };
+  status: string; budgetWei: bigint; createdAt: Date; expiresAt: Date; txHash: string | null; gasUsed: bigint | null; costWei: bigint | null; returnedAt: Date | null };
 type Tx = { id: number; chainId: number; reservationId: number; sponsor: string; nonce: number; rawTx: string; txHash: string; withAuthorization: boolean;
   status: string; gasUsed?: bigint; costWei?: bigint };
 const db = vi.hoisted(() => ({
@@ -64,6 +64,12 @@ vi.mock('./gasSponsorStore.js', () => ({
     if (status === 'expired') db.strikes.push(id);
     return true;
   }),
+  markReservationReturned: vi.fn(async (id: number) => {
+    const r = db.reservations.find((x: Res) => x.id === id);
+    if (!r || r.status !== 'reserved') return false;
+    r.returnedAt ??= new Date();
+    return true;
+  }),
   markReservationUsed: vi.fn(async (id: number, txHash: string | null) => {
     const r = db.reservations.find((x: Res) => x.id === id);
     r.status = 'used';
@@ -71,7 +77,7 @@ vi.mock('./gasSponsorStore.js', () => ({
   }),
   reserve: vi.fn(async (input: any) => {
     const r = { id: db.reservations.length + 1, ...input, agentWallet: input.agentWallet.toLowerCase(), status: 'reserved', createdAt: new Date(),
-      expiresAt: new Date(Date.now() + 3_600_000), txHash: null, gasUsed: null, costWei: null };
+      expiresAt: new Date(Date.now() + 3_600_000), txHash: null, gasUsed: null, costWei: null, returnedAt: null };
     db.reservations.push(r);
     return { ok: true, reservation: r, existing: false };
   }),
@@ -91,7 +97,7 @@ vi.mock('./gasSponsorStore.js', () => ({
     r.gasUsed = (r.gasUsed ?? 0n) + gasUsed;
     r.costWei = (r.costWei ?? 0n) + costWei;
   }),
-  setupAttempts: vi.fn(async () => db.txs.filter((t: Tx) => t.withAuthorization && t.status !== 'dropped').length),
+  setupAttempts: vi.fn(async () => db.txs.filter((t: Tx) => t.withAuthorization && t.status !== 'dropped' && t.status !== 'rejected').length),
   unsettledTxs: vi.fn(async () => db.txs.filter((t: Tx) => t.status === 'signed' || t.status === 'sent')),
   txsForReservation: vi.fn(async (id: number) => db.txs.filter((t: Tx) => t.reservationId === id)),
   usage: vi.fn(async () => db.usage),
@@ -106,6 +112,8 @@ const chain = vi.hoisted(() => ({
   sponsorNonce: 0, latestNonce: 0, mined: new Map<string, { status: number; logs: any[]; gasUsed: bigint; gasPrice: bigint }>(),
   sent: [] as string[], broadcastError: null as any, balance: 10n ** 19n, knownTx: new Set<string>(),
   onBroadcast: null as null | ((raw: string, hash: string) => void),
+  // Reads of a transaction (receipt, by hash) fail with this: an RPC outage.
+  txReadError: null as any,
 }));
 const ESCROW_IFACE = new ethers.Interface(JSON.parse(readFileSync(new URL('../abi/BlindEscrow.json', import.meta.url), 'utf-8')));
 function ethCall(data: string): string {
@@ -124,7 +132,10 @@ const provider = {
     if (method === 'eth_getCode') return chain.code;
     if (method === 'eth_call') return ethCall(params[0].data);
     if (method === 'eth_getTransactionCount') return ethers.toQuantity(chain.latestNonce);
-    if (method === 'eth_getTransactionByHash') return chain.knownTx.has(params[0]) ? { hash: params[0], blockNumber: '0x9' } : null;
+    if (method === 'eth_getTransactionByHash') {
+      if (chain.txReadError) throw chain.txReadError;
+      return chain.knownTx.has(params[0]) ? { hash: params[0], blockNumber: '0x9' } : null;
+    }
     if (method === 'eth_estimateGas') {
       if (chain.estimateError) throw chain.estimateError;
       return ethers.toQuantity(chain.estimate);
@@ -144,6 +155,7 @@ const provider = {
   getBlock: vi.fn(async () => ({ baseFeePerGas: chain.baseFee })),
   getTransactionCount: vi.fn(async (_a: string, tag: string) => (tag === 'latest' ? chain.latestNonce : chain.sponsorNonce)),
   getTransactionReceipt: vi.fn(async (hash: string) => {
+    if (chain.txReadError) throw chain.txReadError;
     const r = chain.mined.get(hash);
     return r ? { blockNumber: 9, ...r } : null;
   }),
@@ -156,22 +168,32 @@ vi.mock('./escrow.js', () => ({
   effectiveDeadlineOn: vi.fn(async () => chain.deadline),
 }));
 vi.mock('./a2aStore.js', () => ({ getState: vi.fn(async () => chain.state) }));
-const lock = vi.hoisted(() => ({ held: false }));
+// For gasSponsorAccept's /release hand-back, which the sweep and relay meet below.
+vi.mock('./taskChain.js', () => ({ resolveTaskByHash: vi.fn(async () => ({ taskId: String(TASK_ID), chain: 'arc' })) }));
+vi.mock('./deployedAgentStore.js', () => ({ loadAgentByWallet: vi.fn(async () => null) }));
+type FakeClient = { released: unknown[]; listeners: Record<string, Array<(err: Error) => void>> };
+const lock = vi.hoisted(() => ({ held: false, clients: [] as FakeClient[] }));
 vi.mock('./neonDb.js', () => ({
   getPool: async () => ({
-    connect: async () => ({
-      query: async (sql: string) => {
-        if (/pg_try_advisory_lock/.test(sql)) {
-          const got = !lock.held;
-          lock.held = true;
-          return { rows: [{ locked: got }] };
-        }
-        if (/pg_advisory_unlock/.test(sql)) lock.held = false;
-        return { rows: [] };
-      },
-      release: () => {},
-      on: () => {},
-    }),
+    connect: async () => {
+      const client = {
+        released: [] as unknown[],
+        listeners: {} as Record<string, Array<(err: Error) => void>>,
+        query: async (sql: string) => {
+          if (/pg_try_advisory_lock/.test(sql)) {
+            const got = !lock.held;
+            lock.held = true;
+            return { rows: [{ locked: got }] };
+          }
+          if (/pg_advisory_unlock/.test(sql)) lock.held = false;
+          return { rows: [] };
+        },
+        release: (err?: Error) => { client.released.push(err ?? null); },
+        on: (event: string, fn: (err: Error) => void) => { (client.listeners[event] ??= []).push(fn); },
+      };
+      lock.clients.push(client);
+      return client;
+    },
   }),
 }));
 const recordEvent = vi.hoisted(() => vi.fn(async () => {}));
@@ -179,6 +201,7 @@ vi.mock('./analyticsService.js', () => ({ recordEvent }));
 vi.mock('@sentry/node', () => ({ captureMessage: vi.fn() }));
 
 const relayer = await import('./gasSponsorRelayer.js');
+const { markHandedBack } = await import('./gasSponsorAccept.js');
 const { CALL_TYPES, callDomain, DelegateKind } = await import('./blindAgentDelegate.js');
 const { signAuthorization } = await import('./eip7702.js');
 
@@ -228,7 +251,7 @@ function holdReservation(o: Partial<Res> = {}): Res {
   const r: Res = {
     id: db.reservations.length + 1, chainId: CHAIN_ID, taskId: TASK_ID, kind: 'submit', taskHash: TASK_HASH, agentWallet: AGENT.toLowerCase(),
     ownerDid: 'did:privy:abc', poster: '0xposter', status: 'reserved', budgetWei: 10n ** 16n, createdAt: new Date(), expiresAt: new Date(Date.now() + 3_600_000),
-    txHash: null, gasUsed: null, costWei: null, ...o,
+    txHash: null, gasUsed: null, costWei: null, returnedAt: null, ...o,
   };
   db.reservations.push(r);
   return r;
@@ -237,6 +260,7 @@ function holdReservation(o: Partial<Res> = {}): Res {
 beforeEach(async () => {
   await relayer._resetGasSponsorRelayer();
   lock.held = false;
+  lock.clients.length = 0;
   settings.current = baseSettings();
   elig.agent = { ok: true, ownerDid: 'did:privy:abc' };
   elig.task = { ok: true };
@@ -253,7 +277,7 @@ beforeEach(async () => {
       evidenceHash: ethers.ZeroHash, status: 1, createdAt: 0n, deadline: BigInt(Math.floor(Date.now() / 1000) + 86_400), submissionAttempts: 0 },
     deadline: null, state: { executorAddress: AGENT.toLowerCase(), assignTxHash: '0xassign', resultData: RESULT }, taskAfter: null, escalated: true,
     code: '0x', estimate: 120_000n, estimateError: null, baseFee: 20n * GWEI, sponsorNonce: 3, latestNonce: 3, sent: [], broadcastError: null,
-    balance: 10n ** 19n, onBroadcast: null,
+    balance: 10n ** 19n, onBroadcast: null, txReadError: null,
   });
   chain.mined.clear();
   chain.knownTx.clear();
@@ -276,6 +300,23 @@ describe('the single writer', () => {
     lock.held = true;
     await relayer.releaseSponsorWriter();
     expect(lock.held).toBe(false);
+  });
+
+  it('gives the pool slot back when the writer connection drops (delta audit 2026-10-06, ops-1)', async () => {
+    await writer();
+    const client = lock.clients.at(-1)!;
+    const dropped = new Error('Connection terminated unexpectedly');
+    client.listeners.error.forEach((fn) => fn(dropped));
+    expect(relayer.isSponsorWriter()).toBe(false);
+    // Released with the error, which makes the pool destroy the client.
+    expect(client.released).toEqual([dropped]);
+    // A later error on it is not ours to release again (the pool throws on a double release).
+    client.listeners.error.forEach((fn) => fn(dropped));
+    expect(client.released).toEqual([dropped]);
+    // Postgres freed the lock with the connection; the next tick takes it on a fresh one.
+    lock.held = false;
+    await writer();
+    expect(lock.clients).toHaveLength(2);
   });
 
   it('refuses when sponsorship is off', async () => {
@@ -419,6 +460,32 @@ describe('what is checked before anything is sent', () => {
     expect(r.status).toBe('released');
   });
 
+  it('a held submit is still served for an agent with strikes: strikes gate new reservations only (delta audit 2026-10-06, gas-1)', async () => {
+    const r = holdReservation();
+    elig.agent = { ok: false, reason: 'strikes' };
+    expect(await relayer.relaySponsoredCall(await input({ authorization: auth() }))).toMatchObject({ ok: true });
+    expect(r.status).toBe('used');
+  });
+
+  it('strikes refuse a call that needs a new reservation, and close nothing (delta audit 2026-10-06, gas-1)', async () => {
+    elig.agent = { ok: false, reason: 'strikes' };
+    chain.task.status = 6;
+    await refused('GAS_SPONSOR_INELIGIBLE', await input({ kind: 'release', authorization: auth() }));
+    expect(db.reservations).toEqual([]);
+    chain.task.status = 1;
+    await refused('GAS_SPONSOR_INELIGIBLE'); // a submit with no reservation held
+  });
+
+  it('a key that no longer derives the wallet ends a held reservation; other reasons refuse and leave it (delta audit 2026-10-06, gas-1)', async () => {
+    const r = holdReservation();
+    elig.agent = { ok: false, reason: 'no_privy_user' };
+    await refused('GAS_SPONSOR_INELIGIBLE');
+    expect(r.status).toBe('reserved');
+    elig.agent = { ok: false, reason: 'key_mismatch' };
+    await refused('GAS_SPONSOR_INELIGIBLE');
+    expect(r.status).toBe('released');
+  });
+
   it('refuses a task the escrow does not assign to this wallet', async () => {
     holdReservation();
     chain.task.worker = '0x' + '99'.repeat(20);
@@ -556,6 +623,68 @@ describe('what is checked again at the front of the queue', () => {
   });
 });
 
+describe('a repeat of a call that queued behind it (delta audit 2026-10-06, gas-4)', () => {
+  // A worker whose request timed out (120 s) asks again while its first call
+  // still waits in the queue: both pass the entry check, as nothing is
+  // recorded for the reservation yet, and both queue.
+  const NEXT = TASK_ID + 1n;
+  async function twiceBehindAnother(o: { landsAtOnce?: boolean; beforeTheyRun?: () => void } = {}) {
+    await writer();
+    holdReservation();
+    const r = holdReservation({ taskId: NEXT, taskHash: '0x' + '7b'.repeat(32) });
+    let mineFirst!: () => void;
+    chain.onBroadcast = (_raw, hash) => {
+      chain.onBroadcast = null; // only the first send mines, when the test says so
+      chain.code = DESIGNATOR;
+      new Promise<void>((res) => { mineFirst = res; }).then(() => {
+        chain.mined.set(hash, { status: 1, logs: [evidenceLog()], gasUsed: 150_000n, gasPrice: 20n * GWEI });
+      });
+    };
+    const first = relayer.relaySponsoredCall(await input({ authorization: auth() }));
+    await vi.waitFor(() => expect(chain.sent).toHaveLength(1));
+    relayer._setReceiptTimeout(50);
+    // This reservation's call: never mined in these tests, or mined at once.
+    if (o.landsAtOnce) {
+      chain.onBroadcast = (_raw, hash) => chain.mined.set(hash, { status: 1, logs: [evidenceLog(NEXT)], gasUsed: 150_000n, gasPrice: 20n * GWEI });
+    }
+    const a = relayer.relaySponsoredCall(await input({ nonce: 1n, taskId: NEXT }));
+    const b = relayer.relaySponsoredCall(await input({ nonce: 1n, taskId: NEXT }));
+    await new Promise((res) => setTimeout(res, 20));
+    o.beforeTheyRun?.();
+    mineFirst();
+    const out = { first: await first, a: await a, b: await b, reservation: r };
+    relayer._setReceiptTimeout(60_000);
+    return out;
+  }
+
+  it('settles on the transaction already out for the reservation instead of sending a second', async () => {
+    const { a, b, reservation } = await twiceBehindAnother();
+    expect(chain.sent).toHaveLength(2); // the other task's, and one for this reservation
+    const ours = db.txs.filter((t: Tx) => t.reservationId === reservation.id);
+    expect(ours).toHaveLength(1);
+    expect(a).toMatchObject({ ok: false, code: 'PENDING', txHash: ours[0].txHash });
+    expect(b).toMatchObject({ ok: false, code: 'PENDING', txHash: ours[0].txHash });
+  });
+
+  it('answers with the landed call once the reservation is used', async () => {
+    const { a, b, reservation } = await twiceBehindAnother({ landsAtOnce: true });
+    const ours = db.txs.filter((t: Tx) => t.reservationId === reservation.id);
+    expect(ours).toHaveLength(1);
+    expect(a).toEqual({ ok: true, txHash: ours[0].txHash });
+    expect(b).toEqual({ ok: true, txHash: ours[0].txHash });
+    expect(chain.sent).toHaveLength(2);
+  });
+
+  it('sends nothing for a reservation closed while the call waited', async () => {
+    // Handed back, say, or swept.
+    const { a, b, reservation } = await twiceBehindAnother({ beforeTheyRun: () => { db.reservations.find((x: Res) => x.taskId === NEXT)!.status = 'released'; } });
+    expect(a).toMatchObject({ ok: false, code: 'NO_RESERVATION' });
+    expect(b).toMatchObject({ ok: false, code: 'NO_RESERVATION' });
+    expect(chain.sent).toHaveLength(1);
+    expect(db.txs.filter((t: Tx) => t.reservationId === reservation.id)).toEqual([]);
+  });
+});
+
 describe('a sponsored releaseUnjudgedWork', () => {
   it('reserves its own budget and sends, once the task is disputed and escalated', async () => {
     await writer();
@@ -662,6 +791,15 @@ describe('a first broadcast the node refuses', () => {
     expect(db.controls.killed).toBe(true);
   });
 
+  it('an error it does not recognise keeps the bytes and answers pending, without a pause (delta audit 2026-10-06, ops-2)', async () => {
+    await writer();
+    holdReservation();
+    chain.broadcastError = Object.assign(new Error('could not coalesce error'), { code: 'UNKNOWN_ERROR' });
+    expect(await relayer.relaySponsoredCall(await input({ authorization: auth() }))).toMatchObject({ ok: false, code: 'PENDING' });
+    expect(db.txs[0].status).toBe('signed');
+    expect(db.controls).toMatchObject({ paused: false, killed: false });
+  });
+
   it('an outright rejection pauses, and the call is final', async () => {
     await writer();
     holdReservation();
@@ -684,6 +822,11 @@ describe('classifyBroadcastError', () => {
     [new TypeError('fetch failed'), 'transient'],
     [Object.assign(new Error('insufficient funds'), { code: 'INSUFFICIENT_FUNDS' }), 'rejected'],
     [new Error('invalid sender'), 'rejected'],
+    [new Error('intrinsic gas too low'), 'rejected'],
+    [new Error('max priority fee per gas higher than max fee per gas'), 'rejected'],
+    // Unrecognised: maybe in a pool, so the stored bytes are kept and re-sent (delta audit 2026-10-06, ops-2).
+    [Object.assign(new Error('could not coalesce error'), { code: 'UNKNOWN_ERROR' }), 'transient'],
+    [new Error('internal error'), 'transient'],
   ])('%s → %s', (err, kind) => {
     expect(relayer.classifyBroadcastError(err)).toBe(kind);
   });
@@ -791,6 +934,27 @@ describe('recovery', () => {
     expect(db.controls).toMatchObject({ paused: true, killed: false });
   });
 
+  it('skips a transaction it cannot read this tick, and never counts a failed read as "not found" (delta audit 2026-10-06, ops-2)', async () => {
+    await writer();
+    holdReservation();
+    chain.broadcastError = new Error('timeout');
+    await relayer.relaySponsoredCall(await input({ authorization: auth() }));
+    chain.broadcastError = null;
+    chain.latestNonce = 9; // the chain is past our nonce
+    chain.txReadError = Object.assign(new Error('server response 503'), { code: 'SERVER_ERROR' });
+    const t0 = Date.now();
+    for (let i = 0; i < 3; i++) await relayer.recoverSponsorTxs(settings.current, t0 + i * 30_000);
+    expect(db.txs[0].status).toBe('signed');
+    expect(db.controls.killed).toBe(false);
+    // Reads answer again: two answers of "not found", far enough apart, are still needed.
+    chain.txReadError = null;
+    await relayer.recoverSponsorTxs(settings.current, t0 + 90_000);
+    expect(db.controls.killed).toBe(false);
+    await relayer.recoverSponsorTxs(settings.current, t0 + 120_000);
+    expect(db.txs[0].status).toBe('dropped');
+    expect(db.controls.killed).toBe(true);
+  });
+
   it('reads "nonce too low" at a nonce the chain has not passed as our own pooled transaction, not a lost one', async () => {
     await writer();
     holdReservation();
@@ -853,6 +1017,78 @@ describe('the reservation sweep', () => {
     const r = holdReservation();
     await relayer.sweepReservations(settings.current);
     expect(r.status).toBe('reserved');
+  });
+});
+
+describe('what /health/bridge and a relay reply repeat of an RPC failure (delta audit 2026-10-06, gas-2)', () => {
+  const rpcError = (code: string, short: string) => Object.assign(
+    new Error(`${short} (request={ }, response={ }, error=null, info={ "requestUrl": "https://arc.example/v2/SECRET-KEY" }, code=${code}, version=6.13.1)`),
+    { shortMessage: short, code },
+  );
+  const leaks = (v: unknown) => /SECRET-KEY|requestUrl|https?:/.test(JSON.stringify(v, (_k, x) => (typeof x === 'bigint' ? x.toString() : x)));
+
+  it('a report that fails says why without the request', async () => {
+    const usage = (await import('./gasSponsorStore.js')).usage as unknown as ReturnType<typeof vi.fn>;
+    usage.mockRejectedValueOnce(rpcError('SERVER_ERROR', 'server response 503 Service Unavailable'));
+    const report = await relayer.gasSponsorReport();
+    expect(report).toMatchObject({ enabled: false, reason: 'status unavailable: server response 503 Service Unavailable [SERVER_ERROR]' });
+    expect(leaks(report)).toBe(false);
+  });
+
+  it('a breaker trip on a rejected broadcast keeps the request out of the reason it shows', async () => {
+    await writer();
+    holdReservation();
+    chain.broadcastError = rpcError('INSUFFICIENT_FUNDS', 'insufficient funds for intrinsic transaction cost');
+    expect(await relayer.relaySponsoredCall(await input({ authorization: auth() }))).toMatchObject({ ok: false, code: 'NOT_SENT' });
+    const report = await relayer.gasSponsorReport();
+    expect(report.lastTrip?.reason).toMatch(/insufficient funds for intrinsic transaction cost \[INSUFFICIENT_FUNDS\]$/);
+    expect(db.setControlsCalls.at(-1).reason).toMatch(/insufficient funds/);
+    expect(leaks(report)).toBe(false);
+    expect(leaks(db.setControlsCalls)).toBe(false);
+  });
+
+  it('a call that could not be prepared says why without the request', async () => {
+    await writer();
+    holdReservation();
+    provider.getTransactionCount.mockRejectedValueOnce(rpcError('TIMEOUT', 'request timeout'));
+    const result = await relayer.relaySponsoredCall(await input({ authorization: auth() }));
+    expect(result).toMatchObject({ ok: false, code: 'NOT_SENT', message: 'Not sent: request timeout [TIMEOUT]' });
+  });
+});
+
+describe('a task handed back while the escrow names the agent (delta audit 2026-10-06, gas-1)', () => {
+  // POST /release answers ON_CHAIN_LOCKED to the executor and calls
+  // markHandedBack (a2a.gasSponsor.test.ts checks that wiring).
+  it('the attack: a pinned task whose brief the agent cannot decrypt is handed back, and its hour ends with no strike', async () => {
+    const r = holdReservation();
+    await markHandedBack(TASK_HASH, AGENT);
+    expect(r.status).toBe('reserved'); // still held: a resume may use it
+    r.expiresAt = new Date(Date.now() - 1);
+    await relayer.sweepReservations(settings.current);
+    expect(r.status).toBe('released');
+    expect(db.strikes).toEqual([]);
+  });
+
+  it('a passing failure: the resume after the hand-back is still sponsored, on the same reservation', async () => {
+    await writer();
+    const r = holdReservation();
+    await markHandedBack(TASK_HASH, AGENT);
+    expect(await relayer.relaySponsoredCall(await input({ authorization: auth() }))).toMatchObject({ ok: true });
+    expect(db.reservations).toHaveLength(1);
+    expect(r).toMatchObject({ status: 'used', txHash: db.txs[0].txHash });
+  });
+
+  it('an idle holder that never hands back is still struck', async () => {
+    const r = holdReservation({ expiresAt: new Date(Date.now() - 1) });
+    await relayer.sweepReservations(settings.current);
+    expect(r.status).toBe('expired');
+    expect(db.strikes).toEqual([r.id]);
+  });
+
+  it("a hand-back marks only the caller's own held reservation", async () => {
+    const other = holdReservation({ agentWallet: '0x' + '98'.repeat(20) });
+    await markHandedBack(TASK_HASH, AGENT);
+    expect(other.returnedAt).toBeNull();
   });
 });
 

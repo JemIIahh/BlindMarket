@@ -173,13 +173,21 @@ Every one of these must hold:
    - If nothing can be reserved, the worker keeps today's behaviour and declines
      unless it can pay. A task is never assigned to an agent that can't submit.
    - A reservation is released at the first of: the submit lands (it is used),
-     the task leaves Assigned, or **one hour after assignment**. A hosted run is
+     the task leaves Assigned, the task re-opens (`/release`), or **one hour
+     after assignment**. A hosted run is
      capped at 600 s and its transaction wait at 300 s
      (`worker.js:362,365`). A task deadline can be 90 days, so waiting for it
      would let idle accepts hold the budget.
    - Each agent holds at most one reservation (the worker runs one task at a
      time), and each Privy user a few. An expired reservation is a strike
-     against that agent and user; repeated strikes end sponsorship for them.
+     against that agent and user; repeated strikes refuse them new
+     reservations. A reservation already held is still served.
+   - The worker hands back a task it can't finish (`/release`). When the
+     escrow already names it, the route answers `ON_CHAIN_LOCKED` and the task
+     stays its own. The reservation is kept, so a resume after a passing
+     failure is still sponsored, and marked (`returned_at`): at its hour it is
+     released without a strike. Only the worker holds an eligible agent's
+     credentials, so an owner can't hand back to dodge a strike.
 2. **Setup.**
    - The worker signs a 7702 authorization to `BlindAgentDelegate`.
    - The chain id is pinned to 5042 (5042002 on testnet), never 0. A chain-id-0
@@ -243,8 +251,9 @@ Every one of these must hold:
 | Replay a signature or authorization | Nonce, deadline and chain id are pinned to Arc. |
 | Self-post tasks so we pay submit gas | We pay the assign (92.7k) plus one submit (~126–151k), about 218–244k gas per task. The attacker pays `createTask` (269k) and locks at least 0.10 USDC until the task ends. That is roughly 1:1, and they keep nothing. Global caps bound it. |
 | Accept and never submit, to hold the budget | Costs the attacker nothing, but each agent holds one reservation, which expires after an hour and counts as a strike. |
+| Pin tasks an agent can't work (a brief it can't decrypt) so its owner is struck | The worker hands each one back, which marks its reservation: at its hour it is released without a strike. Strikes only refuse new reservations, never end a held one. |
 | Use fake identities to beat caps | Per-user and per-poster caps slow it down; free signup means the global cap is the real bound. Spending the budget only pauses sponsorship. It can't strand tasks, because of the reservation. |
-| Run a second stack with the key | The sender runs only when `DEPLOYMENT_ID=production`, Postgres is in use, the chain id is Arc mainnet and `backgroundWritesAllowed()` is true. |
+| Run a second stack with the key | The sender runs only when a `DEPLOYMENT_ID` is set (any value: Arc testnet staging may run it), Postgres is in use, and `backgroundWritesAllowed()` is true, meaning this stack owns its Redis. Within a stack, one process sends, holding a Postgres advisory lock keyed by chain id and sponsor address. Neither check stops a stack on its own Redis and its own database, so the sponsor key must never appear in another stack's env. [src] |
 
 **Cost per sponsored task:** about 0.0025–0.006 USDC, depending on the delegate
 and first-time setup. The 10% fee on a 0.10 USDC task is 0.01 USDC.
@@ -259,6 +268,9 @@ and first-time setup. The 10% fee on a 0.10 USDC task is 0.01 USDC.
     the worst case.
   - A copy of the key is held off-Render so the float can be swept as a hard
     stop.
+  - The key is set in one stack's env only, never in another stack's
+    (staging, a local harness): nothing in the code stops a second stack
+    that has its own Redis and database from sending with it.
 - **Sending.**
   - One writer, behind a Postgres advisory lock.
   - Serialized through `createSerialTxQueue`.

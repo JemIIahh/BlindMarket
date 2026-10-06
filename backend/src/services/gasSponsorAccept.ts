@@ -14,7 +14,9 @@ import { getTaskOn } from './escrow.js';
 import { resolveTaskByHash } from './taskChain.js';
 import { RESERVATION_TTL_SECONDS, gasSponsorSettings, runnableSettings } from './gasSponsorConfig.js';
 import { agentEligibility, taskEligibility } from './gasSponsorEligibility.js';
-import { closeReservation, getReservation, reserve, startReservationClock, type Reservation } from './gasSponsorStore.js';
+import {
+  closeReservation, getReservation, markReservationReturned, reserve, startReservationClock, txsForReservation, type Reservation,
+} from './gasSponsorStore.js';
 import { isSponsorWriter, reservationBudgetWei } from './gasSponsorRelayer.js';
 
 const unavailable = (reason: string, message: string) =>
@@ -76,5 +78,52 @@ export async function holdsReservation(taskHash: string, executor: string): Prom
     return r?.status === 'reserved' && r.agentWallet === executor.toLowerCase();
   } catch {
     return false;
+  }
+}
+
+/** The submit reservation `executor` holds for `taskHash`, if it holds one. */
+async function heldSubmit(taskHash: string, executor: string): Promise<Reservation | null> {
+  const settings = gasSponsorSettings();
+  if (!settings.enabled) return null;
+  const resolved = await resolveTaskByHash(taskHash);
+  if (!resolved || resolved.chain !== 'arc') return null;
+  const r = await getReservation(settings.chainId, BigInt(resolved.taskId), 'submit');
+  return r?.status === 'reserved' && r.agentWallet === executor.toLowerCase() ? r : null;
+}
+
+/**
+ * `executor` handed back `taskHash` while the escrow still names it as
+ * worker (POST /release refused ON_CHAIN_LOCKED). The worker does this on a
+ * failure, often a passing one it resumes from, so the reservation stays
+ * held and a resume is still sponsored; it is only marked, and at its hour
+ * the sweep releases it without a strike. Otherwise a poster pinning tasks
+ * the agent can't work (a brief it can't decrypt) turned each into a strike
+ * against the owner, and three ended sponsorship for the owner's whole
+ * fleet. Only the worker holds an eligible agent's credentials, so an owner
+ * can't call /release to dodge a strike. Never throws.
+ */
+export async function markHandedBack(taskHash: string, executor: string): Promise<void> {
+  try {
+    const r = await heldSubmit(taskHash, executor);
+    if (r) await markReservationReturned(r.id);
+  } catch (e) {
+    console.error(`[gasSponsor] could not mark the reservation for ${taskHash} as handed back: ${(e as Error).message}`);
+  }
+}
+
+/**
+ * `taskHash` re-opened (POST /release) with `executor` no longer on it: give
+ * back the submit reservation that executor held. Otherwise it held the
+ * task's row for its hour, and the next taker's reservation was refused as
+ * taken. Left alone while a transaction of ours for it is out. Never throws.
+ */
+export async function releaseOnReopen(taskHash: string, executor: string): Promise<void> {
+  try {
+    const r = await heldSubmit(taskHash, executor);
+    if (!r) return;
+    if ((await txsForReservation(r.id)).some((t) => t.status === 'signed' || t.status === 'sent')) return;
+    await closeReservation(r.id, 'released');
+  } catch (e) {
+    console.error(`[gasSponsor] could not give back the reservation for ${taskHash}: ${(e as Error).message}`);
   }
 }
