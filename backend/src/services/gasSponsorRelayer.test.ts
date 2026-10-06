@@ -162,22 +162,29 @@ vi.mock('./escrow.js', () => ({
   effectiveDeadlineOn: vi.fn(async () => chain.deadline),
 }));
 vi.mock('./a2aStore.js', () => ({ getState: vi.fn(async () => chain.state) }));
-const lock = vi.hoisted(() => ({ held: false }));
+type FakeClient = { released: unknown[]; listeners: Record<string, Array<(err: Error) => void>> };
+const lock = vi.hoisted(() => ({ held: false, clients: [] as FakeClient[] }));
 vi.mock('./neonDb.js', () => ({
   getPool: async () => ({
-    connect: async () => ({
-      query: async (sql: string) => {
-        if (/pg_try_advisory_lock/.test(sql)) {
-          const got = !lock.held;
-          lock.held = true;
-          return { rows: [{ locked: got }] };
-        }
-        if (/pg_advisory_unlock/.test(sql)) lock.held = false;
-        return { rows: [] };
-      },
-      release: () => {},
-      on: () => {},
-    }),
+    connect: async () => {
+      const client = {
+        released: [] as unknown[],
+        listeners: {} as Record<string, Array<(err: Error) => void>>,
+        query: async (sql: string) => {
+          if (/pg_try_advisory_lock/.test(sql)) {
+            const got = !lock.held;
+            lock.held = true;
+            return { rows: [{ locked: got }] };
+          }
+          if (/pg_advisory_unlock/.test(sql)) lock.held = false;
+          return { rows: [] };
+        },
+        release: (err?: Error) => { client.released.push(err ?? null); },
+        on: (event: string, fn: (err: Error) => void) => { (client.listeners[event] ??= []).push(fn); },
+      };
+      lock.clients.push(client);
+      return client;
+    },
   }),
 }));
 const recordEvent = vi.hoisted(() => vi.fn(async () => {}));
@@ -243,6 +250,7 @@ function holdReservation(o: Partial<Res> = {}): Res {
 beforeEach(async () => {
   await relayer._resetGasSponsorRelayer();
   lock.held = false;
+  lock.clients.length = 0;
   settings.current = baseSettings();
   elig.agent = { ok: true, ownerDid: 'did:privy:abc' };
   elig.task = { ok: true };
@@ -282,6 +290,23 @@ describe('the single writer', () => {
     lock.held = true;
     await relayer.releaseSponsorWriter();
     expect(lock.held).toBe(false);
+  });
+
+  it('gives the pool slot back when the writer connection drops (delta audit 2026-10-06, ops-1)', async () => {
+    await writer();
+    const client = lock.clients.at(-1)!;
+    const dropped = new Error('Connection terminated unexpectedly');
+    client.listeners.error.forEach((fn) => fn(dropped));
+    expect(relayer.isSponsorWriter()).toBe(false);
+    // Released with the error, which makes the pool destroy the client.
+    expect(client.released).toEqual([dropped]);
+    // A later error on it is not ours to release again (the pool throws on a double release).
+    client.listeners.error.forEach((fn) => fn(dropped));
+    expect(client.released).toEqual([dropped]);
+    // Postgres freed the lock with the connection; the next tick takes it on a fresh one.
+    lock.held = false;
+    await writer();
+    expect(lock.clients).toHaveLength(2);
   });
 
   it('refuses when sponsorship is off', async () => {

@@ -7,6 +7,8 @@ import { Redis } from 'ioredis';
 const { Pool } = pg;
 
 let pool: pg.Pool | null = null;
+const POOL_MAX = 10;
+const POOL_CONNECT_TIMEOUT_MS = 10_000;
 // Cached so migrations run exactly once per process. Cleared on failure so a
 // transient error doesn't leave the schema permanently uninitialised.
 let migrationPromise: Promise<void> | null = null;
@@ -55,7 +57,17 @@ export async function getPool(): Promise<pg.Pool> {
     pool = new Pool({
       connectionString: config.databaseUrl,
       ssl: sslDisabled ? false : { rejectUnauthorized: false },
+      // pg's default size, made explicit. Without a connect timeout, connect()
+      // waited forever once every client was checked out, so one leaked client
+      // per dropped connection hung every request after the tenth instead of
+      // failing it (delta audit 2026-10-06, ops-1).
+      max: POOL_MAX,
+      connectionTimeoutMillis: POOL_CONNECT_TIMEOUT_MS,
     });
+    // An idle client whose connection drops (a Postgres restart, an idle
+    // timeout on the server) is removed by the pool, which then emits 'error'.
+    // With no listener that is an uncaught exception and the process exits.
+    pool.on('error', (err) => console.error('[neonDb] idle Postgres client dropped:', err.message));
   }
 
   // Ensure the schema exists before the first query. Previously migrations were

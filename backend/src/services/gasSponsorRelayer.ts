@@ -136,9 +136,14 @@ export async function acquireSponsorWriter(settings: Enabled): Promise<boolean> 
     client.release();
     throw err;
   }
-  // A dropped connection releases the lock server-side: stop writing.
-  client.on('error', () => {
-    if (writer?.client === client) writer = null;
+  // A dropped connection releases the lock server-side: stop writing, and
+  // release the client with the error so the pool destroys it and its slot
+  // comes back. Only while it is still ours: once released, the pool owns it,
+  // and a second release throws.
+  client.on('error', (err) => {
+    if (writer?.client !== client) return;
+    writer = null;
+    client.release(err);
   });
   writer = { client, key };
   return true;
