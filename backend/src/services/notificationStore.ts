@@ -249,10 +249,12 @@ export async function notifyLifecycle(
         });
       }
     } else if (event === 'disputed') {
+      // Sent once a ruling has refunded the poster (disputeListener.ts); a
+      // ruling for the worker is announced as 'completed'.
       const payload = {
         type: 'disputed' as const,
-        title: 'Task under dispute',
-        body: 'ValidatorPool will rule on this task.',
+        title: 'Dispute ruled — escrow refunded',
+        body: 'The ruling went to the poster, so the escrow was refunded to them.',
         taskId: normHash,
       };
       if (poster) await notify(poster, payload);

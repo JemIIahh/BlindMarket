@@ -15,7 +15,8 @@ Telegram. Treat the "Setup" and "Verify" steps below as the first real test.
 |---|---|---|
 | Deadline approaching | 24 h and 1 h before the deadline, for a task still open, being worked, or waiting for review | `a2aExpirySweep.ts` via `deadlineReminders.ts` |
 | Deadline passed | Task closed unclaimed, or the agent missed the deadline | existing `expired` notices |
-| Task accepted / result submitted / completed / verification failed / dispute | As they happen | existing `notifyLifecycle` |
+| Task accepted / result submitted / completed / verification failed | As they happen | existing `notifyLifecycle` |
+| Dispute ruled | When a dispute ruling refunds the poster (a ruling for the worker arrives as "completed") | `notifyLifecycle` from `disputeListener.ts`, in the `indexer` process |
 
 Reminders are once per task per window (`notifyOnce` keys `remind:<task>:<seconds>`),
 so restarts and API replicas cannot double-send. A reminder only fires for a
@@ -78,8 +79,14 @@ Redis keys: `tg:link:<wallet>`, `tg:chat:<chatId>`, `tg:prefs:<chatId>`,
    TELEGRAM_BOT_USERNAME=<bot username without the @>
    ```
    Generate the secret with, for example, `openssl rand -hex 32`.
-3. Apply it: `docker compose up -d --force-recreate api`. A plain restart does not
-   pick up new settings.
+3. Apply it to both backend services, which share that file:
+   ```
+   docker compose up -d --force-recreate api indexer
+   ```
+   `api` serves the webhook and sends most alerts. `indexer` runs the chain
+   event loops, which send the dispute-ruling alerts; recreating only `api`
+   leaves it without the token, so those alerts never reach Telegram. A plain
+   restart does not pick up new settings.
 4. Point Telegram at the webhook once. The URL must be public HTTPS:
    ```
    curl -sS "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
@@ -115,8 +122,9 @@ the webhook answers 503. With a token but no secret, the webhook answers 503.
   from a small set of addresses, so a very busy bot could hit it. If that
   happens, exempt `/api/v1/telegram/webhook` in `middleware/rateLimit.ts`; the
   secret check is cheap.
-- **Rotating the token or secret.** Change the env value, recreate the container,
-  and run `setWebhook` again with the new secret.
+- **Rotating the token or secret.** Change the env value, recreate both
+  services (`docker compose up -d --force-recreate api indexer`), and run
+  `setWebhook` again with the new secret.
 - **Failures never block** the in-app notification or the sweep: sends retry up
   to 3 times (honouring Telegram's `retry_after`, capped at 5 s) and then give up
   with a log line. Logs redact the bot token.

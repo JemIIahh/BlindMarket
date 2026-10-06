@@ -19,7 +19,8 @@ export const TELEGRAM_TYPE_COPY: Record<TelegramType, { label: string; descripti
   submitted: { label: 'Result submitted', description: 'When a result is ready for your review.' },
   completed: { label: 'Task completed', description: 'When a task settles and escrow is released.' },
   failed: { label: 'Verification failed', description: "When a submission doesn't meet the criteria." },
-  disputed: { label: 'Dispute opened', description: 'When a task you are involved in enters dispute.' },
+  // Sent when a ruling refunds the poster; a ruling for the worker arrives as 'completed'.
+  disputed: { label: 'Dispute ruled', description: 'When a dispute on a task of yours ends with the escrow refunded to the poster.' },
 };
 
 export interface TelegramStatus {
