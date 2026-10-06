@@ -242,23 +242,27 @@ async function trip(settings: Enabled, action: 'paused' | 'killed', reason: stri
   Sentry.captureMessage(`gas sponsor ${action} automatically on ${settings.chainId}: ${reason}`, action === 'killed' ? 'fatal' : 'error');
 }
 
+// The node's own refusals of the bytes (txpool validation): they never
+// entered a pool and never will.
+const REFUSED = /insufficient funds|invalid sender|invalid signature|intrinsic gas too low|exceeds block gas limit|(tx|transaction) type not supported|invalid chain ?id|oversized data|higher than max fee per gas|exceeds the configured cap|empty auth(orization)? list/i;
+
 /**
  * What a failed eth_sendRawTransaction means for the stored bytes:
  * - known: already in the pool;
  * - nonce_low: the nonce is used (ours landed, or the key signed elsewhere);
- * - transient: no answer, or fees moved; the same bytes can land later;
- * - rejected: the node refused them outright and never will take them.
+ * - rejected: the node refused them outright and never will take them;
+ * - transient: anything else (no answer, fees moved, an error not recognised
+ *   above): the same bytes may be in a pool or land later, so they are kept
+ *   and re-sent. Freeing the nonce of bytes that did reach a pool would put
+ *   a second transaction at it.
  */
 export function classifyBroadcastError(err: unknown): 'known' | 'nonce_low' | 'transient' | 'rejected' {
   const e = err as { code?: string; message?: string; shortMessage?: string; error?: { message?: string }; info?: { error?: { message?: string } } } | null;
   const msg = [e?.message, e?.shortMessage, e?.error?.message, e?.info?.error?.message].filter(Boolean).join(' ');
   if (/already known|known transaction|already imported/i.test(msg)) return 'known';
   if (e?.code === 'NONCE_EXPIRED' || /nonce too low|nonce has already been used|nonce is too low/i.test(msg)) return 'nonce_low';
-  if (/underpriced|fee too low|fee cap|base fee|max fee per gas less than/i.test(msg)) return 'transient';
-  if (['NETWORK_ERROR', 'TIMEOUT', 'SERVER_ERROR'].includes(e?.code ?? '') || /fetch failed|ECONN|ETIMEDOUT|socket hang up|network|timed? ?out/i.test(msg)) {
-    return 'transient';
-  }
-  return 'rejected';
+  if (e?.code === 'INSUFFICIENT_FUNDS' || REFUSED.test(msg)) return 'rejected';
+  return 'transient';
 }
 
 /**
@@ -268,7 +272,13 @@ export function classifyBroadcastError(err: unknown): 'known' | 'nonce_low' | 't
  * Returns true when it is settled as lost.
  */
 async function nonceTaken(settings: Enabled, tx: SponsoredTxRecord, now: number, confirmAfterMs = LOST_CONFIRM_MS): Promise<boolean> {
-  const seen = (await provider().send('eth_getTransactionByHash', [tx.txHash]).catch(() => null)) as { blockNumber?: string | null } | null;
+  let seen: { blockNumber?: string | null } | null;
+  try {
+    seen = await provider().send('eth_getTransactionByHash', [tx.txHash]);
+  } catch {
+    // No answer is not "not found": the clock below neither starts nor runs.
+    return false;
+  }
   if (seen?.blockNumber) {
     lostSince.delete(tx.txHash);
     return false;
@@ -627,7 +637,15 @@ export async function recoverSponsorTxs(settings: Enabled, now = Date.now()): Pr
   const sponsor = settings.sponsor.address;
   const latest = Number(await provider().send('eth_getTransactionCount', [sponsor, 'latest']));
   for (const tx of await unsettledTxs(settings.chainId, sponsor)) {
-    const receipt = await provider().getTransactionReceipt(tx.txHash).catch(() => null);
+    // A read that fails is no answer: leave this transaction for the next
+    // tick. Only a node that answers "no receipt" counts it as not mined.
+    let receipt: ethers.TransactionReceipt | null;
+    try {
+      receipt = await provider().getTransactionReceipt(tx.txHash);
+    } catch (err) {
+      console.warn(`[gasSponsor] could not read the receipt of ${tx.txHash}: ${(err as Error).message}`);
+      continue;
+    }
     if (receipt) {
       lostSince.delete(tx.txHash);
       await settleStored(settings, tx);

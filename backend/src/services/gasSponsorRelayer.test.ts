@@ -106,6 +106,8 @@ const chain = vi.hoisted(() => ({
   sponsorNonce: 0, latestNonce: 0, mined: new Map<string, { status: number; logs: any[]; gasUsed: bigint; gasPrice: bigint }>(),
   sent: [] as string[], broadcastError: null as any, balance: 10n ** 19n, knownTx: new Set<string>(),
   onBroadcast: null as null | ((raw: string, hash: string) => void),
+  // Reads of a transaction (receipt, by hash) fail with this: an RPC outage.
+  txReadError: null as any,
 }));
 const ESCROW_IFACE = new ethers.Interface(JSON.parse(readFileSync(new URL('../abi/BlindEscrow.json', import.meta.url), 'utf-8')));
 function ethCall(data: string): string {
@@ -124,7 +126,10 @@ const provider = {
     if (method === 'eth_getCode') return chain.code;
     if (method === 'eth_call') return ethCall(params[0].data);
     if (method === 'eth_getTransactionCount') return ethers.toQuantity(chain.latestNonce);
-    if (method === 'eth_getTransactionByHash') return chain.knownTx.has(params[0]) ? { hash: params[0], blockNumber: '0x9' } : null;
+    if (method === 'eth_getTransactionByHash') {
+      if (chain.txReadError) throw chain.txReadError;
+      return chain.knownTx.has(params[0]) ? { hash: params[0], blockNumber: '0x9' } : null;
+    }
     if (method === 'eth_estimateGas') {
       if (chain.estimateError) throw chain.estimateError;
       return ethers.toQuantity(chain.estimate);
@@ -144,6 +149,7 @@ const provider = {
   getBlock: vi.fn(async () => ({ baseFeePerGas: chain.baseFee })),
   getTransactionCount: vi.fn(async (_a: string, tag: string) => (tag === 'latest' ? chain.latestNonce : chain.sponsorNonce)),
   getTransactionReceipt: vi.fn(async (hash: string) => {
+    if (chain.txReadError) throw chain.txReadError;
     const r = chain.mined.get(hash);
     return r ? { blockNumber: 9, ...r } : null;
   }),
@@ -253,7 +259,7 @@ beforeEach(async () => {
       evidenceHash: ethers.ZeroHash, status: 1, createdAt: 0n, deadline: BigInt(Math.floor(Date.now() / 1000) + 86_400), submissionAttempts: 0 },
     deadline: null, state: { executorAddress: AGENT.toLowerCase(), assignTxHash: '0xassign', resultData: RESULT }, taskAfter: null, escalated: true,
     code: '0x', estimate: 120_000n, estimateError: null, baseFee: 20n * GWEI, sponsorNonce: 3, latestNonce: 3, sent: [], broadcastError: null,
-    balance: 10n ** 19n, onBroadcast: null,
+    balance: 10n ** 19n, onBroadcast: null, txReadError: null,
   });
   chain.mined.clear();
   chain.knownTx.clear();
@@ -662,6 +668,15 @@ describe('a first broadcast the node refuses', () => {
     expect(db.controls.killed).toBe(true);
   });
 
+  it('an error it does not recognise keeps the bytes and answers pending, without a pause (delta audit 2026-10-06, ops-2)', async () => {
+    await writer();
+    holdReservation();
+    chain.broadcastError = Object.assign(new Error('could not coalesce error'), { code: 'UNKNOWN_ERROR' });
+    expect(await relayer.relaySponsoredCall(await input({ authorization: auth() }))).toMatchObject({ ok: false, code: 'PENDING' });
+    expect(db.txs[0].status).toBe('signed');
+    expect(db.controls).toMatchObject({ paused: false, killed: false });
+  });
+
   it('an outright rejection pauses, and the call is final', async () => {
     await writer();
     holdReservation();
@@ -684,6 +699,11 @@ describe('classifyBroadcastError', () => {
     [new TypeError('fetch failed'), 'transient'],
     [Object.assign(new Error('insufficient funds'), { code: 'INSUFFICIENT_FUNDS' }), 'rejected'],
     [new Error('invalid sender'), 'rejected'],
+    [new Error('intrinsic gas too low'), 'rejected'],
+    [new Error('max priority fee per gas higher than max fee per gas'), 'rejected'],
+    // Unrecognised: maybe in a pool, so the stored bytes are kept and re-sent (delta audit 2026-10-06, ops-2).
+    [Object.assign(new Error('could not coalesce error'), { code: 'UNKNOWN_ERROR' }), 'transient'],
+    [new Error('internal error'), 'transient'],
   ])('%s → %s', (err, kind) => {
     expect(relayer.classifyBroadcastError(err)).toBe(kind);
   });
@@ -789,6 +809,27 @@ describe('recovery', () => {
     await relayer.recoverSponsorTxs(settings.current);
     expect(db.txs[0].status).toBe('rejected');
     expect(db.controls).toMatchObject({ paused: true, killed: false });
+  });
+
+  it('skips a transaction it cannot read this tick, and never counts a failed read as "not found" (delta audit 2026-10-06, ops-2)', async () => {
+    await writer();
+    holdReservation();
+    chain.broadcastError = new Error('timeout');
+    await relayer.relaySponsoredCall(await input({ authorization: auth() }));
+    chain.broadcastError = null;
+    chain.latestNonce = 9; // the chain is past our nonce
+    chain.txReadError = Object.assign(new Error('server response 503'), { code: 'SERVER_ERROR' });
+    const t0 = Date.now();
+    for (let i = 0; i < 3; i++) await relayer.recoverSponsorTxs(settings.current, t0 + i * 30_000);
+    expect(db.txs[0].status).toBe('signed');
+    expect(db.controls.killed).toBe(false);
+    // Reads answer again: two answers of "not found", far enough apart, are still needed.
+    chain.txReadError = null;
+    await relayer.recoverSponsorTxs(settings.current, t0 + 90_000);
+    expect(db.controls.killed).toBe(false);
+    await relayer.recoverSponsorTxs(settings.current, t0 + 120_000);
+    expect(db.txs[0].status).toBe('dropped');
+    expect(db.controls.killed).toBe(true);
   });
 
   it('reads "nonce too low" at a nonce the chain has not passed as our own pooled transaction, not a lost one', async () => {
