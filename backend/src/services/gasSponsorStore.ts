@@ -45,6 +45,8 @@ export interface Reservation {
   txHash: string | null;
   gasUsed: bigint | null;
   costWei: bigint | null;
+  /** When the agent handed the task back while the escrow still named it (markReservationReturned). */
+  returnedAt: Date | null;
 }
 
 export interface SponsoredTx {
@@ -112,6 +114,7 @@ function toReservation(r: Record<string, unknown>): Reservation {
     txHash: r.tx_hash == null ? null : String(r.tx_hash),
     gasUsed: big(r.gas_used),
     costWei: big(r.cost_wei),
+    returnedAt: r.returned_at == null ? null : new Date(r.returned_at as string),
   };
 }
 
@@ -232,7 +235,7 @@ export async function reserve(
       ? await client.query(
           `UPDATE gas_sponsor_reservations SET task_hash = $4, agent_wallet = $5, owner_did = $6, poster = $7,
              status = 'reserved', budget_wei = $8, created_at = NOW(), expires_at = NOW() + make_interval(secs => $9),
-             settled_at = NULL
+             settled_at = NULL, returned_at = NULL
            WHERE chain_id = $1 AND task_id = $2 AND kind = $3 RETURNING *`,
           values,
         )
@@ -289,6 +292,21 @@ export async function startReservationClock(id: number, ttlSeconds: number): Pro
     `UPDATE gas_sponsor_reservations SET expires_at = NOW() + make_interval(secs => $2) WHERE id = $1 AND status = 'reserved'`,
     [id, ttlSeconds],
   );
+}
+
+/**
+ * Record that the agent handed the task back while the escrow still names it
+ * as worker: it said it won't submit, but it may still resume. The
+ * reservation stays held (a resume is still sponsored); at its hour it is
+ * released without a strike. Keeps the first time. False when it was no
+ * longer held.
+ */
+export async function markReservationReturned(id: number): Promise<boolean> {
+  const { rowCount } = await (await pool()).query(
+    `UPDATE gas_sponsor_reservations SET returned_at = COALESCE(returned_at, NOW()) WHERE id = $1 AND status = 'reserved'`,
+    [id],
+  );
+  return (rowCount ?? 0) > 0;
 }
 
 /**

@@ -48,7 +48,9 @@ import { activeHostedVerifiers, hostedVerifierNotOptedIn, VERIFIER_NOT_OPTED_IN_
 import { refuseUnapprovedDelegation, sameOwnerSubtask } from '../services/delegationGuard.js';
 import { gasSponsorSettings } from '../services/gasSponsorConfig.js';
 import { sponsorHint } from '../services/gasSponsorEligibility.js';
-import { holdsReservation, releaseAcceptReservation, reserveForAccept, startReservationAfterAssign } from '../services/gasSponsorAccept.js';
+import {
+  holdsReservation, markHandedBack, releaseAcceptReservation, releaseOnReopen, reserveForAccept, startReservationAfterAssign,
+} from '../services/gasSponsorAccept.js';
 import type { Reservation as SponsorReservation } from '../services/gasSponsorStore.js';
 import { relaySponsoredCall, sponsoredCallStatus } from '../services/gasSponsorRelayer.js';
 import jwt from 'jsonwebtoken';
@@ -2872,6 +2874,10 @@ a2aRouter.post('/tasks/:id/release', requireAuth, async (req: AuthRequest, res, 
         );
       }
       if (onChainStatus !== 0) {
+        // The task stays the executor's, and so does its sponsored-gas
+        // reservation (a resume may still use it), but if it runs out its
+        // hour that is no strike (delta audit 2026-10-06, gas-1).
+        if (isExecutor) await markHandedBack(taskHash, address);
         throw new AppError(
           409,
           'ON_CHAIN_LOCKED',
@@ -2902,6 +2908,9 @@ a2aRouter.post('/tasks/:id/release', requireAuth, async (req: AuthRequest, res, 
       );
     }
     console.log(`[a2a] release: ${taskHash} reverted to open by ${address}`);
+    // The old executor's reservation would otherwise hold the task's row for
+    // its hour, and the next taker's reservation be refused as taken.
+    if (state.executorAddress) await releaseOnReopen(taskHash, state.executorAddress);
 
     const body: ApiResponse = {
       success: true,

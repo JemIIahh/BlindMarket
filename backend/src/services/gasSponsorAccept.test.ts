@@ -21,10 +21,13 @@ vi.mock('./escrow.js', () => ({ getTaskOn: async () => task.value }));
 vi.mock('./deployedAgentStore.js', () => ({ loadAgentByWallet: async () => ({ walletAddress: '0xagent' }) }));
 const elig = vi.hoisted(() => ({ agent: { ok: true, ownerDid: 'did:privy:abc' } as any, task: { ok: true } as any }));
 vi.mock('./gasSponsorEligibility.js', () => ({ agentEligibility: async () => elig.agent, taskEligibility: async () => elig.task }));
-const store = vi.hoisted(() => ({ reserve: vi.fn(), getReservation: vi.fn(), closeReservation: vi.fn(), startReservationClock: vi.fn() }));
+const store = vi.hoisted(() => ({
+  reserve: vi.fn(), getReservation: vi.fn(), closeReservation: vi.fn(), startReservationClock: vi.fn(), txsForReservation: vi.fn(async () => [] as any[]),
+  markReservationReturned: vi.fn(),
+}));
 vi.mock('./gasSponsorStore.js', () => store);
 
-const { reserveForAccept, holdsReservation } = await import('./gasSponsorAccept.js');
+const { reserveForAccept, holdsReservation, markHandedBack, releaseOnReopen } = await import('./gasSponsorAccept.js');
 const meta = { taskId: '0xhash', chain: 'arc' } as any;
 
 beforeEach(() => {
@@ -76,5 +79,53 @@ describe('holdsReservation', () => {
     expect(await holdsReservation('0xhash', '0xother')).toBe(false);
     store.getReservation.mockResolvedValue({ status: 'used', agentWallet: '0xagent' });
     expect(await holdsReservation('0xhash', '0xagent')).toBe(false);
+  });
+});
+
+describe('a hand-back at /release (delta audit 2026-10-06, gas-1)', () => {
+  beforeEach(() => {
+    store.closeReservation.mockReset();
+    store.markReservationReturned.mockReset();
+    store.txsForReservation.mockReset();
+    store.txsForReservation.mockResolvedValue([]);
+  });
+
+  it("markHandedBack marks the executor's held submit reservation, and keeps it held", async () => {
+    store.getReservation.mockResolvedValue({ id: 9, status: 'reserved', agentWallet: '0xagent' });
+    await markHandedBack('0xhash', '0xAGENT');
+    expect(store.getReservation).toHaveBeenCalledWith(5042002, 41n, 'submit');
+    expect(store.markReservationReturned).toHaveBeenCalledWith(9);
+    expect(store.closeReservation).not.toHaveBeenCalled();
+  });
+
+  it("releaseOnReopen gives back the old executor's reservation, unless a transaction of ours for it is out", async () => {
+    store.getReservation.mockResolvedValue({ id: 9, status: 'reserved', agentWallet: '0xagent' });
+    store.txsForReservation.mockResolvedValue([{ status: 'sent' }]);
+    await releaseOnReopen('0xhash', '0xagent');
+    expect(store.closeReservation).not.toHaveBeenCalled();
+    store.txsForReservation.mockResolvedValue([{ status: 'reverted' }]);
+    await releaseOnReopen('0xhash', '0xagent');
+    expect(store.closeReservation).toHaveBeenCalledWith(9, 'released');
+  });
+
+  it("touches neither another agent's reservation, one no longer held, nor one off Arc", async () => {
+    store.getReservation.mockResolvedValue({ id: 9, status: 'reserved', agentWallet: '0xother' });
+    await markHandedBack('0xhash', '0xagent');
+    await releaseOnReopen('0xhash', '0xagent');
+    store.getReservation.mockResolvedValue({ id: 9, status: 'used', agentWallet: '0xagent' });
+    await markHandedBack('0xhash', '0xagent');
+    await releaseOnReopen('0xhash', '0xagent');
+    store.getReservation.mockResolvedValue({ id: 9, status: 'reserved', agentWallet: '0xagent' });
+    resolved.value = { taskId: '41', chain: 'base' };
+    await markHandedBack('0xhash', '0xagent');
+    await releaseOnReopen('0xhash', '0xagent');
+    expect(store.markReservationReturned).not.toHaveBeenCalled();
+    expect(store.closeReservation).not.toHaveBeenCalled();
+  });
+
+  it('never throws', async () => {
+    store.getReservation.mockRejectedValue(new Error('db down'));
+    await expect(markHandedBack('0xhash', '0xagent')).resolves.toBeUndefined();
+    await expect(releaseOnReopen('0xhash', '0xagent')).resolves.toBeUndefined();
   });
 });

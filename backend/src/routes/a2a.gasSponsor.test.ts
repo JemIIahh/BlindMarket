@@ -77,6 +77,8 @@ const sponsor = vi.hoisted(() => ({
   release: vi.fn(async () => {}),
   start: vi.fn(async () => {}),
   holds: vi.fn(async () => false),
+  markHandedBack: vi.fn(async () => {}),
+  releaseOnReopen: vi.fn(async () => {}),
   hint: vi.fn(async () => true),
   relay: vi.fn(),
   status: vi.fn(),
@@ -88,6 +90,8 @@ vi.mock('../services/gasSponsorAccept.js', () => ({
   releaseAcceptReservation: sponsor.release,
   startReservationAfterAssign: sponsor.start,
   holdsReservation: sponsor.holds,
+  markHandedBack: sponsor.markHandedBack,
+  releaseOnReopen: sponsor.releaseOnReopen,
 }));
 vi.mock('../services/gasSponsorRelayer.js', () => ({ relaySponsoredCall: sponsor.relay, sponsoredCallStatus: sponsor.status }));
 
@@ -96,6 +100,7 @@ import { globalErrorHandler } from '../middleware/errorHandler.js';
 import { AppError } from '../middleware/errorHandler.js';
 import * as a2aStore from '../services/a2aStore.js';
 import { settleAssignment } from '../services/a2aSettlement.js';
+import { getTaskOn } from '../services/escrow.js';
 
 function app() {
   const a = express();
@@ -264,5 +269,38 @@ describe('the feed hint', () => {
     const res = await request(app()).get('/api/v1/a2a/tasks');
     expect(res.body.data.tasks[0].meta.gasSponsored).toBeUndefined();
     expect(sponsor.hint).not.toHaveBeenCalled();
+  });
+});
+
+describe('/release and a held sponsored-submit reservation (delta audit 2026-10-06, gas-1)', () => {
+  const POSTER = '0x' + '22'.repeat(20);
+  const release = (as: string) => request(app()).post(`/api/v1/a2a/tasks/${TASK}/release`).set('x-test-address', as).send({});
+  beforeEach(() => {
+    vi.mocked(a2aStore.getState).mockResolvedValue({ taskId: TASK, status: 'accepted', executorAddress: AGENT, assignTxHash: '0xassign' } as any);
+  });
+
+  it("marks the executor's reservation as handed back, and keeps it, when the escrow already assigns it the task", async () => {
+    vi.mocked(getTaskOn).mockResolvedValue({ status: 1 } as any);
+    const res = await release(AGENT);
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('ON_CHAIN_LOCKED');
+    expect(sponsor.markHandedBack).toHaveBeenCalledWith(TASK, AGENT);
+    expect(sponsor.releaseOnReopen).not.toHaveBeenCalled();
+  });
+
+  it("leaves it when the poster is the one refused", async () => {
+    vi.mocked(getTaskOn).mockResolvedValue({ status: 1 } as any);
+    expect((await release(POSTER)).status).toBe(409);
+    expect(sponsor.markHandedBack).not.toHaveBeenCalled();
+    expect(sponsor.releaseOnReopen).not.toHaveBeenCalled();
+  });
+
+  it('gives it back when the task re-opens, so the next taker can be sponsored', async () => {
+    vi.mocked(getTaskOn).mockResolvedValue({ status: 0 } as any);
+    const res = await release(POSTER);
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe('open');
+    expect(sponsor.releaseOnReopen).toHaveBeenCalledWith(TASK, AGENT);
+    expect(sponsor.markHandedBack).not.toHaveBeenCalled();
   });
 });

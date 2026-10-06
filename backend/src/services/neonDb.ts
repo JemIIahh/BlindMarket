@@ -954,6 +954,15 @@ const migrations: Array<{ id: number; name: string; sql: string; when?: () => bo
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );`,
   },
+  {
+    id: 44,
+    name: 'gas_sponsor_reservations_returned_at',
+    // When the agent handed back a task the escrow already assigns it (POST
+    // /release refused ON_CHAIN_LOCKED). The reservation stays held, so a
+    // resume is still sponsored, and at its hour it is released without a
+    // strike (gasSponsorRelayer.sweepReservations). Postgres only, like 43.
+    sql: `ALTER TABLE gas_sponsor_reservations ADD COLUMN IF NOT EXISTS returned_at TIMESTAMPTZ;`,
+  },
 ];
 
 /**

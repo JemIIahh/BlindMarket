@@ -342,9 +342,17 @@ export async function relaySponsoredCall(input: SponsoredCallInput): Promise<Rel
 
   const eligible = await agentEligibility(settings, input.agent);
   if (!eligible.ok) {
-    // An export between reservation and relay ends it.
-    if (held?.status === 'reserved' && held.agentWallet === wallet.toLowerCase()) await closeReservation(held.id, 'released');
-    return refuse(403, 'GAS_SPONSOR_INELIGIBLE', `This agent is not eligible for sponsored gas (${eligible.reason})`);
+    const holds = held?.status === 'reserved' && held.agentWallet === wallet.toLowerCase();
+    // An export, or a stored key that no longer derives the wallet, between
+    // reservation and relay ends it.
+    if (held && holds && (eligible.reason === 'key_exported' || eligible.reason === 'key_mismatch')) {
+      await closeReservation(held.id, 'released');
+    }
+    // Strikes gate new reservations only, as a pause does: a reservation
+    // already held is still served (delta audit 2026-10-06, gas-1).
+    if (!(holds && eligible.reason === 'strikes')) {
+      return refuse(403, 'GAS_SPONSOR_INELIGIBLE', `This agent is not eligible for sponsored gas (${eligible.reason})`);
+    }
   }
 
   const task = await getTaskOn('arc', Number(input.taskId));
@@ -440,6 +448,9 @@ export async function relaySponsoredCall(input: SponsoredCallInput): Promise<Rel
   const gasLimit = (estimate * GAS_LIMIT_MARGIN_PERCENT + 99n) / 100n;
 
   if (!reservation) {
+    // A new reservation: only for an eligible agent (one with strikes got
+    // past the check above only on a reservation it already holds).
+    if (!eligible.ok) return refuse(403, 'GAS_SPONSOR_INELIGIBLE', `This agent is not eligible for sponsored gas (${eligible.reason})`);
     const reserved = await reserve(
       {
         chainId: settings.chainId, taskId: input.taskId, kind: 'release', taskHash: task.taskHash.toLowerCase(), agentWallet: wallet,
@@ -764,8 +775,10 @@ export async function sponsoredCallStatus(wallet: string, taskId: bigint, kind: 
  * (released), or an hour passed since the assignment (expired, a strike).
  * The strike is for an agent that sat on its reservation, so an hour lost to
  * our side is released without one: sponsorship killed (the relay refuses
- * every call), or a transaction of ours sent for it that failed. One whose
- * transaction is still out isn't swept at all until that transaction is final.
+ * every call), or a transaction of ours sent for it that failed. So is one
+ * whose agent handed the task back (returnedAt): it failed at the task, and
+ * a poster can cause that. One whose transaction is still out isn't swept at
+ * all until that transaction is final.
  */
 export async function sweepReservations(settings: Enabled, now = Date.now()): Promise<void> {
   const held = await heldReservations(settings.chainId);
@@ -789,7 +802,7 @@ export async function sweepReservations(settings: Enabled, now = Date.now()): Pr
       if (now >= r.expiresAt.getTime()) {
         const stillWaiting = r.kind === 'submit' && assignedToAgent && task.status === TaskStatus.Assigned;
         const ourSide = killed || (await txsForReservation(r.id)).length > 0;
-        const strike = stillWaiting && !ourSide;
+        const strike = stillWaiting && !ourSide && r.returnedAt === null;
         await closeReservation(r.id, strike ? 'expired' : 'released', strike ? 'held an hour after assignment without a submit' : undefined);
       }
     } catch (err) {

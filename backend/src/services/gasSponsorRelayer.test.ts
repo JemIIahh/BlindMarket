@@ -38,7 +38,7 @@ vi.mock('./gasSponsorEligibility.js', () => ({
 }));
 
 type Res = { id: number; chainId: number; taskId: bigint; kind: 'submit' | 'release'; taskHash: string; agentWallet: string; ownerDid: string; poster: string;
-  status: string; budgetWei: bigint; createdAt: Date; expiresAt: Date; txHash: string | null; gasUsed: bigint | null; costWei: bigint | null };
+  status: string; budgetWei: bigint; createdAt: Date; expiresAt: Date; txHash: string | null; gasUsed: bigint | null; costWei: bigint | null; returnedAt: Date | null };
 type Tx = { id: number; chainId: number; reservationId: number; sponsor: string; nonce: number; rawTx: string; txHash: string; withAuthorization: boolean;
   status: string; gasUsed?: bigint; costWei?: bigint };
 const db = vi.hoisted(() => ({
@@ -64,6 +64,12 @@ vi.mock('./gasSponsorStore.js', () => ({
     if (status === 'expired') db.strikes.push(id);
     return true;
   }),
+  markReservationReturned: vi.fn(async (id: number) => {
+    const r = db.reservations.find((x: Res) => x.id === id);
+    if (!r || r.status !== 'reserved') return false;
+    r.returnedAt ??= new Date();
+    return true;
+  }),
   markReservationUsed: vi.fn(async (id: number, txHash: string | null) => {
     const r = db.reservations.find((x: Res) => x.id === id);
     r.status = 'used';
@@ -71,7 +77,7 @@ vi.mock('./gasSponsorStore.js', () => ({
   }),
   reserve: vi.fn(async (input: any) => {
     const r = { id: db.reservations.length + 1, ...input, agentWallet: input.agentWallet.toLowerCase(), status: 'reserved', createdAt: new Date(),
-      expiresAt: new Date(Date.now() + 3_600_000), txHash: null, gasUsed: null, costWei: null };
+      expiresAt: new Date(Date.now() + 3_600_000), txHash: null, gasUsed: null, costWei: null, returnedAt: null };
     db.reservations.push(r);
     return { ok: true, reservation: r, existing: false };
   }),
@@ -162,6 +168,9 @@ vi.mock('./escrow.js', () => ({
   effectiveDeadlineOn: vi.fn(async () => chain.deadline),
 }));
 vi.mock('./a2aStore.js', () => ({ getState: vi.fn(async () => chain.state) }));
+// For gasSponsorAccept's /release hand-back, which the sweep and relay meet below.
+vi.mock('./taskChain.js', () => ({ resolveTaskByHash: vi.fn(async () => ({ taskId: String(TASK_ID), chain: 'arc' })) }));
+vi.mock('./deployedAgentStore.js', () => ({ loadAgentByWallet: vi.fn(async () => null) }));
 type FakeClient = { released: unknown[]; listeners: Record<string, Array<(err: Error) => void>> };
 const lock = vi.hoisted(() => ({ held: false, clients: [] as FakeClient[] }));
 vi.mock('./neonDb.js', () => ({
@@ -192,6 +201,7 @@ vi.mock('./analyticsService.js', () => ({ recordEvent }));
 vi.mock('@sentry/node', () => ({ captureMessage: vi.fn() }));
 
 const relayer = await import('./gasSponsorRelayer.js');
+const { markHandedBack } = await import('./gasSponsorAccept.js');
 const { CALL_TYPES, callDomain, DelegateKind } = await import('./blindAgentDelegate.js');
 const { signAuthorization } = await import('./eip7702.js');
 
@@ -241,7 +251,7 @@ function holdReservation(o: Partial<Res> = {}): Res {
   const r: Res = {
     id: db.reservations.length + 1, chainId: CHAIN_ID, taskId: TASK_ID, kind: 'submit', taskHash: TASK_HASH, agentWallet: AGENT.toLowerCase(),
     ownerDid: 'did:privy:abc', poster: '0xposter', status: 'reserved', budgetWei: 10n ** 16n, createdAt: new Date(), expiresAt: new Date(Date.now() + 3_600_000),
-    txHash: null, gasUsed: null, costWei: null, ...o,
+    txHash: null, gasUsed: null, costWei: null, returnedAt: null, ...o,
   };
   db.reservations.push(r);
   return r;
@@ -446,6 +456,32 @@ describe('what is checked before anything is sent', () => {
   it('an export between reservation and relay is refused, and ends the reservation', async () => {
     const r = holdReservation();
     elig.agent = { ok: false, reason: 'key_exported' };
+    await refused('GAS_SPONSOR_INELIGIBLE');
+    expect(r.status).toBe('released');
+  });
+
+  it('a held submit is still served for an agent with strikes: strikes gate new reservations only (delta audit 2026-10-06, gas-1)', async () => {
+    const r = holdReservation();
+    elig.agent = { ok: false, reason: 'strikes' };
+    expect(await relayer.relaySponsoredCall(await input({ authorization: auth() }))).toMatchObject({ ok: true });
+    expect(r.status).toBe('used');
+  });
+
+  it('strikes refuse a call that needs a new reservation, and close nothing (delta audit 2026-10-06, gas-1)', async () => {
+    elig.agent = { ok: false, reason: 'strikes' };
+    chain.task.status = 6;
+    await refused('GAS_SPONSOR_INELIGIBLE', await input({ kind: 'release', authorization: auth() }));
+    expect(db.reservations).toEqual([]);
+    chain.task.status = 1;
+    await refused('GAS_SPONSOR_INELIGIBLE'); // a submit with no reservation held
+  });
+
+  it('a key that no longer derives the wallet ends a held reservation; other reasons refuse and leave it (delta audit 2026-10-06, gas-1)', async () => {
+    const r = holdReservation();
+    elig.agent = { ok: false, reason: 'no_privy_user' };
+    await refused('GAS_SPONSOR_INELIGIBLE');
+    expect(r.status).toBe('reserved');
+    elig.agent = { ok: false, reason: 'key_mismatch' };
     await refused('GAS_SPONSOR_INELIGIBLE');
     expect(r.status).toBe('released');
   });
@@ -1017,6 +1053,42 @@ describe('what /health/bridge and a relay reply repeat of an RPC failure (delta 
     provider.getTransactionCount.mockRejectedValueOnce(rpcError('TIMEOUT', 'request timeout'));
     const result = await relayer.relaySponsoredCall(await input({ authorization: auth() }));
     expect(result).toMatchObject({ ok: false, code: 'NOT_SENT', message: 'Not sent: request timeout [TIMEOUT]' });
+  });
+});
+
+describe('a task handed back while the escrow names the agent (delta audit 2026-10-06, gas-1)', () => {
+  // POST /release answers ON_CHAIN_LOCKED to the executor and calls
+  // markHandedBack (a2a.gasSponsor.test.ts checks that wiring).
+  it('the attack: a pinned task whose brief the agent cannot decrypt is handed back, and its hour ends with no strike', async () => {
+    const r = holdReservation();
+    await markHandedBack(TASK_HASH, AGENT);
+    expect(r.status).toBe('reserved'); // still held: a resume may use it
+    r.expiresAt = new Date(Date.now() - 1);
+    await relayer.sweepReservations(settings.current);
+    expect(r.status).toBe('released');
+    expect(db.strikes).toEqual([]);
+  });
+
+  it('a passing failure: the resume after the hand-back is still sponsored, on the same reservation', async () => {
+    await writer();
+    const r = holdReservation();
+    await markHandedBack(TASK_HASH, AGENT);
+    expect(await relayer.relaySponsoredCall(await input({ authorization: auth() }))).toMatchObject({ ok: true });
+    expect(db.reservations).toHaveLength(1);
+    expect(r).toMatchObject({ status: 'used', txHash: db.txs[0].txHash });
+  });
+
+  it('an idle holder that never hands back is still struck', async () => {
+    const r = holdReservation({ expiresAt: new Date(Date.now() - 1) });
+    await relayer.sweepReservations(settings.current);
+    expect(r.status).toBe('expired');
+    expect(db.strikes).toEqual([r.id]);
+  });
+
+  it("a hand-back marks only the caller's own held reservation", async () => {
+    const other = holdReservation({ agentWallet: '0x' + '98'.repeat(20) });
+    await markHandedBack(TASK_HASH, AGENT);
+    expect(other.returnedAt).toBeNull();
   });
 });
 

@@ -57,6 +57,7 @@ describe.skipIf(!url)('gasSponsorStore on Postgres', () => {
     const pg = (await import('pg')).default;
     pool.current = new pg.Pool({ connectionString: url, ssl: /[?&]sslmode=disable\b/.test(url) ? false : { rejectUnauthorized: false } });
     await pool.current.query(migrationSql(43)!);
+    await pool.current.query(migrationSql(44)!);
   });
   afterAll(async () => {
     await pool.current?.end();
@@ -92,6 +93,25 @@ describe.skipIf(!url)('gasSponsorStore on Postgres', () => {
     // Not one that expired (a strike) or was used.
     await store.closeReservation(other.id, 'expired');
     expect(await store.reserve(input({ taskId: 8n }), caps)).toEqual({ ok: false, refusal: 'taken' });
+  });
+
+  it('marks a held reservation as handed back, once, and a re-take starts unmarked (delta audit 2026-10-06, gas-1)', async () => {
+    const r = await reserveOk({ taskId: 9n });
+    expect(r.returnedAt).toBeNull();
+    expect(await store.markReservationReturned(r.id)).toBe(true);
+    const first = (await store.getReservationById(r.id))!;
+    expect(first).toMatchObject({ status: 'reserved' });
+    expect(first.returnedAt).toBeInstanceOf(Date);
+    await pool.current!.query(`UPDATE gas_sponsor_reservations SET returned_at = returned_at - interval '1 minute' WHERE id = $1`, [r.id]);
+    const earlier = (await store.getReservationById(r.id))!.returnedAt!;
+    expect(await store.markReservationReturned(r.id)).toBe(true);
+    expect((await store.getReservationById(r.id))!.returnedAt).toEqual(earlier); // keeps the first time
+    expect((await store.heldReservations(CHAIN)).find((h) => h.id === r.id)?.returnedAt).toEqual(earlier);
+    // Only a held reservation is marked; one given back and taken again starts clean.
+    await store.closeReservation(r.id, 'released');
+    expect(await store.markReservationReturned(r.id)).toBe(false);
+    const again = await reserveOk({ taskId: 9n, agentWallet: '0x' + '2'.repeat(40) });
+    expect(again).toMatchObject({ id: r.id, status: 'reserved', returnedAt: null });
   });
 
   it('holds one reservation per agent at a time', async () => {
