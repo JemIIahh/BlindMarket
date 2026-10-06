@@ -91,7 +91,7 @@ vi.mock('./gasSponsorStore.js', () => ({
     r.gasUsed = (r.gasUsed ?? 0n) + gasUsed;
     r.costWei = (r.costWei ?? 0n) + costWei;
   }),
-  setupAttempts: vi.fn(async () => db.txs.filter((t: Tx) => t.withAuthorization && t.status !== 'dropped').length),
+  setupAttempts: vi.fn(async () => db.txs.filter((t: Tx) => t.withAuthorization && t.status !== 'dropped' && t.status !== 'rejected').length),
   unsettledTxs: vi.fn(async () => db.txs.filter((t: Tx) => t.status === 'signed' || t.status === 'sent')),
   txsForReservation: vi.fn(async (id: number) => db.txs.filter((t: Tx) => t.reservationId === id)),
   usage: vi.fn(async () => db.usage),

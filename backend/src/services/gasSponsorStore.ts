@@ -405,11 +405,14 @@ export async function txsForReservation(reservationId: number): Promise<Sponsore
   return rows.map(toTx);
 }
 
-/** Setup transactions (ones carrying a 7702 authorization) sent for a wallet, in any outcome but dropped. */
+/**
+ * Setup transactions (ones carrying a 7702 authorization) sent for a wallet,
+ * in any outcome but dropped or rejected: neither ever ran on-chain.
+ */
 export async function setupAttempts(chainId: number, wallet: string): Promise<number> {
   const { rows } = await (await pool()).query<{ n: string }>(
     `SELECT COUNT(*)::text AS n FROM gas_sponsor_txs t JOIN gas_sponsor_reservations r ON r.id = t.reservation_id
-     WHERE t.chain_id = $1 AND r.agent_wallet = $2 AND t.with_authorization AND t.status <> 'dropped'`,
+     WHERE t.chain_id = $1 AND r.agent_wallet = $2 AND t.with_authorization AND t.status NOT IN ('dropped', 'rejected')`,
     [chainId, wallet.toLowerCase()],
   );
   return Number(rows[0]?.n ?? 0);

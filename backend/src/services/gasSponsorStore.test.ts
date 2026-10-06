@@ -198,6 +198,22 @@ describe.skipIf(!url)('gasSponsorStore on Postgres', () => {
     expect((await store.usage(CHAIN)).failuresLastHour).toBe(2);
   });
 
+  it('counts a setup the node refused outright, or whose nonce went elsewhere, as no attempt (delta audit 2026-10-06, gas-3)', async () => {
+    const r = await reserveOk();
+    const sponsor = '0x' + 'c'.repeat(40);
+    const setup = (nonce: number, hash: string) =>
+      store.recordSignedTx({ chainId: CHAIN, reservationId: r.id, sponsor, nonce, rawTx: '0x04aa', txHash: hash, withAuthorization: true });
+    await setup(1, '0x' + '31'.repeat(32));
+    await store.setTxStatus('0x' + '31'.repeat(32), 'rejected');
+    await setup(2, '0x' + '32'.repeat(32));
+    await store.setTxStatus('0x' + '32'.repeat(32), 'dropped');
+    expect(await store.setupAttempts(CHAIN, r.agentWallet)).toBe(0);
+    // One that ran (here, without effect) is an attempt.
+    await setup(3, '0x' + '33'.repeat(32));
+    await store.settleTx('0x' + '33'.repeat(32), 'noop', 30_000n, 1n);
+    expect(await store.setupAttempts(CHAIN, r.agentWallet)).toBe(1);
+  });
+
   it('logs key exports for good', async () => {
     const wallet = '0x' + 'F'.repeat(40);
     expect(await store.walletKeyExported(wallet)).toBe(false);
