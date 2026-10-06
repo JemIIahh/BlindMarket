@@ -6,7 +6,7 @@ import { isSidebarShortcut } from '../../lib/sidebarShortcut';
 import { Sidebar } from './Sidebar';
 import { TopBar } from './TopBar';
 
-// Same localStorage-boolean pattern as Settings' bb.notify.* prefs.
+// A boolean in localStorage; access is guarded because blocked storage throws.
 const COLLAPSED_KEY = 'bb.sidebar.collapsed';
 function loadBool(key: string, fallback: boolean): boolean {
   try {
