@@ -8,6 +8,12 @@
  * the delegate is bound to; the call itself does not carry it.
  * worker.js signs the same struct (its copy is checked against this one in
  * agents/sponsored-gas.test.ts).
+ *
+ * Versions: a version-2 delegate (DELEGATE_VERSION() = 2) also relays
+ * submitOpen for open-submission tasks. The delegates deployed on Arc testnet
+ * and mainnet as of 2026-10 are version 1, which has no DELEGATE_VERSION and
+ * relays submitEvidence and releaseUnjudgedWork only; delegateVersion() tells
+ * them apart. The signed struct and domain are the same under both.
  */
 import { ethers } from 'ethers';
 
@@ -15,6 +21,7 @@ export const DELEGATE_ABI = [
   'function execute((uint8 kind, uint256 taskId, bytes32 evidenceHash, uint256 nonce, uint256 deadline) c, bytes signature)',
   'function nonce() view returns (uint256)',
   'function ESCROW() view returns (address)',
+  'function DELEGATE_VERSION() view returns (uint256)',
   'event SponsoredCall(uint8 kind, uint256 taskId, uint256 nonce)',
   'error ZeroAddress()',
   'error Expired()',
@@ -25,10 +32,34 @@ export const DELEGATE_ABI = [
 
 export const delegateInterface = new ethers.Interface(DELEGATE_ABI);
 
-/** BlindAgentDelegate.Kind. */
+/** BlindAgentDelegate.Kind. SubmitOpen needs a version-2 delegate (SUBMIT_OPEN_DELEGATE_VERSION). */
 export enum DelegateKind {
   SubmitEvidence = 0,
   ReleaseUnjudgedWork = 1,
+  SubmitOpen = 2,
+}
+
+/** The first BlindAgentDelegate version that relays DelegateKind.SubmitOpen. */
+export const SUBMIT_OPEN_DELEGATE_VERSION = 2n;
+
+/**
+ * The delegate's version: DELEGATE_VERSION(), or 1 when that call reverts,
+ * as it does on version 1, which has no such function. Null when the answer
+ * is unknown (the RPC failed, or nothing sensible came back): a caller must
+ * then not offer anything a later version adds.
+ */
+export async function delegateVersion(provider: Pick<ethers.Provider, 'call'>, delegate: string): Promise<bigint | null> {
+  let raw: string;
+  try {
+    raw = await provider.call({ to: delegate, data: delegateInterface.encodeFunctionData('DELEGATE_VERSION') });
+  } catch (e) {
+    return ethers.isError(e, 'CALL_EXCEPTION') ? 1n : null;
+  }
+  try {
+    return BigInt(delegateInterface.decodeFunctionResult('DELEGATE_VERSION', raw)[0]);
+  } catch {
+    return null;
+  }
 }
 
 export interface DelegateCall {
@@ -90,13 +121,20 @@ export function delegateError(data: string | null | undefined): ethers.ErrorDesc
 const ESCROW_EVENTS = new ethers.Interface([
   'event EvidenceSubmitted(uint256 indexed taskId, address indexed worker, bytes32 evidenceHash, uint8 attempt)',
   'event UnjudgedWorkReleased(uint256 indexed taskId, uint256 workerPayout, uint256 platformFee)',
+  'event OpenSubmission(uint256 indexed taskId, address indexed submitter, bytes32 evidenceHash, uint256 count)',
 ]);
+
+const PROOF_EVENT: Record<DelegateKind, string> = {
+  [DelegateKind.SubmitEvidence]: 'EvidenceSubmitted',
+  [DelegateKind.ReleaseUnjudgedWork]: 'UnjudgedWorkReleased',
+  [DelegateKind.SubmitOpen]: 'OpenSubmission',
+};
 
 /**
  * Whether a receipt holds the escrow event a sponsored call of `kind` must
- * produce for `taskId`: EvidenceSubmitted by `wallet`, or
- * UnjudgedWorkReleased. A stale or foreign 7702 authorization leaves a
- * successful receipt with neither.
+ * produce for `taskId`: EvidenceSubmitted by `wallet`, UnjudgedWorkReleased,
+ * or OpenSubmission by `wallet`. A stale or foreign 7702 authorization leaves
+ * a successful receipt with none of them.
  */
 export function receiptProvesCall(
   logs: ReadonlyArray<{ address: string; topics: ReadonlyArray<string>; data: string }>,
@@ -105,7 +143,7 @@ export function receiptProvesCall(
   taskId: bigint,
   wallet: string,
 ): boolean {
-  const want = kind === DelegateKind.SubmitEvidence ? 'EvidenceSubmitted' : 'UnjudgedWorkReleased';
+  const want = PROOF_EVENT[kind];
   return logs.some((log) => {
     if (log.address.toLowerCase() !== escrow.toLowerCase()) return false;
     let parsed: ethers.LogDescription | null = null;
@@ -115,6 +153,8 @@ export function receiptProvesCall(
       return false;
     }
     if (!parsed || parsed.name !== want || BigInt(parsed.args.taskId) !== taskId) return false;
-    return want !== 'EvidenceSubmitted' || String(parsed.args.worker).toLowerCase() === wallet.toLowerCase();
+    if (want === 'EvidenceSubmitted') return String(parsed.args.worker).toLowerCase() === wallet.toLowerCase();
+    if (want === 'OpenSubmission') return String(parsed.args.submitter).toLowerCase() === wallet.toLowerCase();
+    return true;
   });
 }

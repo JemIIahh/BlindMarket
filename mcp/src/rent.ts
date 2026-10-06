@@ -104,8 +104,10 @@ const ZERO_TOKEN = '0x0000000000000000000000000000000000000000';
 
 // The only calls the backend builds for this process to sign or relay:
 // backend/src/services/escrow.ts (createTask, cancelTask, claimTimeout,
-// submitEvidence). verifyTarget checks where a transaction goes, but the
-// escrow address comes from the same backend, so a hostile answer could name
+// submitEvidence), and for open-submission tasks createTaskOpen, submitOpen,
+// selectWinner and voidOpenTask (docs/OPEN-SUBMISSION-TASKS.md; the same set
+// as sdk/src/escrowCalls.ts). verifyTarget checks where a transaction goes,
+// but the escrow address comes from the same backend, so a hostile answer could name
 // the token as the escrow and hand over an approve; the call, its arguments
 // and its value are what bound it (security audit run 1, C41).
 const ESCROW_CALLS = new Interface([
@@ -113,7 +115,12 @@ const ESCROW_CALLS = new Interface([
   'function submitEvidence(uint256 taskId, bytes32 evidenceHash)',
   'function cancelTask(uint256 taskId)',
   'function claimTimeout(uint256 taskId)',
+  'function createTaskOpen(bytes32 taskHash, address token, uint256 amount, string category, string locationZone, uint256 duration, address verifierAgent, uint8 mode, uint256 creatorWindow)',
+  'function submitOpen(uint256 taskId, bytes32 evidenceHash)',
+  'function selectWinner(uint256 taskId, address winner, bytes32 scorecardHash)',
+  'function voidOpenTask(uint256 taskId, bytes32 scorecardHash)',
 ]);
+type EscrowCall = 'createTask' | 'submitEvidence' | 'cancelTask' | 'claimTimeout' | 'createTaskOpen' | 'submitOpen' | 'selectWinner' | 'voidOpenTask';
 const GAS_LIMIT = 1000000n; // matches the canonical rent script
 // Auto-verify releases the payment, so the bar can't be "one character" — but
 // 40 made a correct 30-character URL unpayable. 20 is the platform floor
@@ -145,7 +152,7 @@ interface ApiError extends Error { code?: string; status?: number }
  */
 function assertEscrowCall(
   tx: { data?: unknown; value?: unknown },
-  fn: 'createTask' | 'submitEvidence' | 'cancelTask' | 'claimTimeout',
+  fn: EscrowCall,
   argsOk: (args: Result) => boolean,
   what: string,
   value = 0n,

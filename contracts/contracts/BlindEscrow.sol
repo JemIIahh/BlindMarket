@@ -71,6 +71,40 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         address verifierAgent;  // address(0): no per-task verifier
     }
 
+    /// Who picks an open task's winner first, chosen at createTaskOpen.
+    enum PickMode {
+        AgentManaged,   // 0 — the task verifier picks from the deadline
+        CreatorReview   // 1 — the poster picks for its creatorWindow, then the task verifier
+    }
+
+    /// The phases of an open task after it is posted, in order. Each judge
+    /// may act only in its own phase; each phase but the last is bounded.
+    enum OpenPhase {
+        Submissions,   // 0 — until the effective deadline: submitOpen
+        CreatorPick,   // 1 — CreatorReview only, for creatorWindow: the poster's selectWinner
+        VerifierPick,  // 2 — VERIFIER_PICK_WINDOW: the task verifier's selectWinnerByVerifier
+        BackupPick,    // 3 — BACKUP_PICK_WINDOW: the global verifier's selectWinnerByBackup or voidOpenTask
+        AdminResolve,  // 4 — from then on: the admin's resolveOpenTask
+        Closed         // 5 — a winner was paid or the task was refunded
+    }
+
+    /// Who closed an open task, by picking its winner or voiding it.
+    enum Judge {
+        None,          // 0 — not closed by a judge (still open, or cancelled with no submission)
+        Creator,       // 1 — the poster: selectWinner, or a void with no submission
+        TaskVerifier,  // 2 — the task's own verifier: selectWinnerByVerifier
+        Backup,        // 3 — the global verifier: selectWinnerByBackup or voidOpenTask
+        Admin          // 4 — resolveOpenTask
+    }
+
+    /// An open-submission task's settings and outcome (createTaskOpen).
+    struct OpenTask {
+        bool open;              // the task takes open submissions
+        PickMode mode;
+        uint32 creatorWindow;   // seconds; 0 for AgentManaged
+        Judge closedBy;         // set when a winner is picked or the task voided
+    }
+
     // ── Constants ──
 
     uint256 public constant MAX_FEE_BPS = 3000;      // 30% hard cap
@@ -80,6 +114,10 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
     uint256 public constant DISPUTE_WINDOW = 14 days;  // time after a dispute is raised before claimTimeout can recover it (or, for escalated unjudged work, releaseUnjudgedWork)
     uint256 public constant APPEAL_WINDOW = 3 days;    // time after a failed verdict in which the worker may still raiseDispute, even past the deadline
     uint256 public constant MAX_BATCH = 50;            // most tasks one createTasks call creates; clients read it to detect batch support
+    uint256 public constant MIN_CREATOR_WINDOW = 1 hours;     // shortest CreatorReview pick window
+    uint256 public constant MAX_CREATOR_WINDOW = 7 days;      // longest CreatorReview pick window
+    uint256 public constant VERIFIER_PICK_WINDOW = 48 hours;  // the task verifier's turn to pick an open task's winner
+    uint256 public constant BACKUP_PICK_WINDOW = 48 hours;    // the global verifier's turn, before the admin's
 
     // ── State ──
 
@@ -136,6 +174,16 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
     // Trailing state, UUPS-append-only.
     mapping(address => uint256) public minRatedAmount;
 
+    // Open submission (docs/OPEN-SUBMISSION-TASKS.md): anyone but the poster
+    // and the judges submits one result per address before the deadline, and
+    // a judge picks one winner. Nothing iterates submissions: a submission is
+    // one mapping slot plus a counter, a pick checks the winner's slot, so
+    // both cost the same at any count. Trailing state, UUPS-append-only.
+    mapping(uint256 => OpenTask) internal _openTasks;
+    mapping(uint256 => uint256) public submissionCount;                    // submissions so far
+    mapping(uint256 => mapping(address => bytes32)) public submissionOf;   // evidence hash per submitter; 0 = none
+    mapping(uint256 => bytes32) public scorecardOf;                        // hash of the judge's scorecard, anchored with the pick or void
+
     // ── Events ──
 
     event TaskCreated(uint256 indexed taskId, address indexed agent, address token, uint256 amount, bytes32 taskHash, string category, string locationZone, uint256 deadline);
@@ -164,6 +212,10 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
     event UnjudgedWorkReleased(uint256 indexed taskId, uint256 workerPayout, uint256 platformFee);
     event PauseStartRecorded(uint256 pausedAt);
     event MinRatedAmountUpdated(address indexed token, uint256 oldAmount, uint256 newAmount);
+    event OpenTaskCreated(uint256 indexed taskId, PickMode mode, uint256 creatorWindow);
+    event OpenSubmission(uint256 indexed taskId, address indexed submitter, bytes32 evidenceHash, uint256 count);
+    event WinnerSelected(uint256 indexed taskId, address indexed winner, Judge judge, bytes32 scorecardHash);
+    event OpenTaskVoided(uint256 indexed taskId, Judge judge, bytes32 scorecardHash);
 
     // ── Errors (custom errors are cheaper than string reverts) ──
 
@@ -192,6 +244,13 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
     error InvalidPauseStart();
     error EmptyBatch();
     error BatchTooLarge();
+    error InvalidPickWindow();
+    error NotOpenTask();
+    error OpenTaskUnsupported();
+    error AlreadySubmitted();
+    error HasSubmissions();
+    error NoSubmission();
+    error WrongPhase(OpenPhase current);
 
     // ── Modifiers ──
 
@@ -320,6 +379,54 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         IERC20(token).safeTransferFrom(msg.sender, address(this), total);
     }
 
+    /**
+     * @notice Creates an open-submission task: nobody is assigned. Anyone but
+     *         the poster and the judges may submitOpen one result before the
+     *         deadline, with no cap on how many, and one submitter wins the
+     *         whole amount less the platform fee. After the effective
+     *         deadline the judges take turns, each only in its own window:
+     *           1. CreatorReview only: the poster (selectWinner), for
+     *              `creatorWindow`;
+     *           2. `verifierAgent` (selectWinnerByVerifier), for
+     *              VERIFIER_PICK_WINDOW;
+     *           3. the global verifier as backup judge (selectWinnerByBackup,
+     *              or voidOpenTask when no submission is valid), for
+     *              BACKUP_PICK_WINDOW;
+     *           4. then the admin, with no time limit (resolveOpenTask).
+     *         The poster cannot cancel once anything has been submitted.
+     * @param verifierAgent The task verifier. Required, and not the poster.
+     * @param mode AgentManaged (`creatorWindow` must be 0) or CreatorReview.
+     * @param creatorWindow CreatorReview: seconds the poster has to pick,
+     *        MIN_CREATOR_WINDOW (1 h) to MAX_CREATOR_WINDOW (7 d).
+     */
+    function createTaskOpen(
+        bytes32 taskHash,
+        address token,
+        uint256 amount,
+        string calldata category,
+        string calldata locationZone,
+        uint256 duration,
+        address verifierAgent,
+        PickMode mode,
+        uint256 creatorWindow
+    ) external payable nonReentrant whenNotPaused returns (uint256 taskId) {
+        if (verifierAgent == address(0)) revert ZeroAddress();
+        bool windowOk = mode == PickMode.CreatorReview
+            ? creatorWindow >= MIN_CREATOR_WINDOW && creatorWindow <= MAX_CREATOR_WINDOW
+            : creatorWindow == 0;
+        if (!windowOk) revert InvalidPickWindow();
+
+        uint256 deadline;
+        (taskId, deadline) = _recordTask(taskHash, token, amount, category, locationZone, duration, verifierAgent);
+        _openTasks[taskId] = OpenTask({open: true, mode: mode, creatorWindow: uint32(creatorWindow), closedBy: Judge.None});
+        emit OpenTaskCreated(taskId, mode, creatorWindow);
+
+        // Interactions last (CEI)
+        _pullPayment(token, amount);
+
+        _announceTask(taskId, token, amount, taskHash, category, locationZone, deadline);
+    }
+
     function _createTask(
         bytes32 taskHash,
         address token,
@@ -333,14 +440,20 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         (taskId, deadline) = _recordTask(taskHash, token, amount, category, locationZone, duration, verifierAgent);
 
         // Interactions last (CEI)
+        _pullPayment(token, amount);
+
+        _announceTask(taskId, token, amount, taskHash, category, locationZone, deadline);
+    }
+
+    /// Takes one task's escrow from the caller: exactly `amount` of native
+    /// value, or an ERC-20 transferFrom with no value sent.
+    function _pullPayment(address token, uint256 amount) internal {
         if (token == address(0)) {
             if (msg.value != amount) revert ZeroAmount();
         } else {
             if (msg.value > 0) revert ZeroAmount();
             IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
         }
-
-        _announceTask(taskId, token, amount, taskHash, category, locationZone, deadline);
     }
 
     /// Checks and effects of creating one task, shared by createTask,
@@ -445,15 +558,54 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
      *      rating. The poster picks every party to a completion (worker via
      *      assignWorker, verifier via createTaskWithVerifier) and distinct
      *      addresses cost nothing, so a rating must carry economic weight and
-     *      come from a verifier the poster did not choose:
+     *      come from a judge the poster did not choose:
      *        - the platform fee is non-zero (a completion that paid nothing
      *          proves nothing; below 10 units at 1000 bps the fee rounds to 0),
      *        - the amount meets the admin-set per-token minRatedAmount,
-     *        - the task has no poster-designated per-task verifier.
+     *        - the judge was not chosen by the poster (`judgeChosenByPoster`
+     *          false). For a single-worker task that means no per-task
+     *          verifier. For an open task the poster chose both the creator
+     *          and the task verifier, so only a winner picked by the backup
+     *          judge (the global verifier) or the admin is rated.
      *      Settlement itself is unaffected; only the rating is withheld.
      */
-    function _earnsRating(uint256 taskId, Task storage t, uint256 fee) internal view returns (bool) {
-        return fee > 0 && t.amount >= minRatedAmount[t.token] && taskVerifier[taskId] == address(0);
+    function _earnsRating(Task storage t, uint256 fee, bool judgeChosenByPoster) internal view returns (bool) {
+        return fee > 0 && t.amount >= minRatedAmount[t.token] && !judgeChosenByPoster;
+    }
+
+    /// The platform's cut of `amount` at the current fee.
+    function _platformFee(uint256 amount) internal view returns (uint256) {
+        return (amount * feeBps) / 10_000;
+    }
+
+    /**
+     * @dev Pays a task out in its worker's favour, the one payout path every
+     *      settlement shares: the worker gets the amount less the platform fee
+     *      and the treasury gets the fee, the task becomes Completed, and the
+     *      worker is rated `score` when non-zero. Callers decide the score
+     *      (with _earnsRating where it applies) and emit their own events,
+     *      TaskCompleted last, so each keeps its log order.
+     */
+    function _payWorker(uint256 taskId, Task storage t, uint8 score) internal returns (uint256 payout, uint256 fee) {
+        // ── Effects (all state changes first) ──
+        fee = _platformFee(t.amount);
+        payout = t.amount - fee;
+        t.status = TaskStatus.Completed;
+
+        // ── Interactions (external calls last) ──
+        _transferPayout(t.token, t.worker, payout);
+        _transferPayout(t.token, treasury, fee);
+
+        // Record reputation if connected (optional — the worker is already
+        // paid above; a reverting/paused reputation contract must not undo it).
+        if (score != 0 && address(reputationContract) != address(0)) {
+            try reputationContract.rate(t.worker, score, taskId) {} catch {}
+        }
+    }
+
+    /// The score a passed verification gives: 5, when it earns a rating at all.
+    function _passScore(uint256 taskId, Task storage t) internal view returns (uint8) {
+        return _earnsRating(t, _platformFee(t.amount), taskVerifier[taskId] != address(0)) ? 5 : 0;
     }
 
     /**
@@ -472,11 +624,21 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         }
     }
 
+    /// Close the task's TaskRegistry listing, if a registry is connected
+    /// (optional — must not block the caller).
+    function _closeListing(uint256 taskId) internal {
+        if (address(taskRegistry) != address(0)) {
+            try taskRegistry.closeTask(taskId) {} catch {}
+        }
+    }
+
     /**
      * @notice Agent assigns a worker to the task. Only possible while Funded and before deadline.
+     *         Never for an open task: a judge picks its winner from the submissions.
      * @dev Agent cannot assign themselves to prevent self-dealing.
      */
     function assignWorker(uint256 taskId, address worker) external onlyAgent(taskId) whenNotPaused {
+        if (_openTasks[taskId].open) revert OpenTaskUnsupported();
         Task storage t = _tasks[taskId];
         if (t.status != TaskStatus.Funded) revert InvalidStatus(t.status, TaskStatus.Funded);
         if (worker == address(0)) revert ZeroAddress();
@@ -486,10 +648,7 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         t.worker = worker;
         t.status = TaskStatus.Assigned;
 
-        // Close listing on TaskRegistry (optional — must not block assignment)
-        if (address(taskRegistry) != address(0)) {
-            try taskRegistry.closeTask(taskId) {} catch {}
-        }
+        _closeListing(taskId);
 
         emit WorkerAssigned(taskId, worker);
     }
@@ -501,9 +660,10 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
      *      doesn't need to sign assignWorker themselves. Self-deal protection is enforced
      *      against the task's actual agent (t.agent), not msg.sender (the verifier, who
      *      should never be assignable as the worker either, but that's an off-chain
-     *      concern).
+     *      concern). Never for an open task, like assignWorker.
      */
     function marketplaceAssign(uint256 taskId, address worker) external onlyVerifier whenNotPaused {
+        if (_openTasks[taskId].open) revert OpenTaskUnsupported();
         Task storage t = _tasks[taskId];
         if (t.status != TaskStatus.Funded) revert InvalidStatus(t.status, TaskStatus.Funded);
         if (worker == address(0)) revert ZeroAddress();
@@ -513,11 +673,8 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         t.worker = worker;
         t.status = TaskStatus.Assigned;
 
-        // Close listing on TaskRegistry — same downstream effect as assignWorker
-        // (optional — must not block a marketplace assignment)
-        if (address(taskRegistry) != address(0)) {
-            try taskRegistry.closeTask(taskId) {} catch {}
-        }
+        // Same downstream effect as assignWorker.
+        _closeListing(taskId);
 
         emit WorkerAssigned(taskId, worker);
     }
@@ -571,22 +728,8 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         emit VerificationCompleted(taskId, passed);
 
         if (passed) {
-            // ── Effects (all state changes first) ──
-            uint256 fee = (t.amount * feeBps) / 10_000;
-            uint256 payout = t.amount - fee;
-            t.status = TaskStatus.Completed;
-
-            // ── Interactions (external calls last) ──
-            _transferPayout(t.token, t.worker, payout);
-            _transferPayout(t.token, treasury, fee);
-
-            // Record reputation if connected (optional — the worker is already
-            // paid above; a reverting/paused reputation contract must not undo it)
-            // and only for a completion that can't be self-dealt for free.
-            if (address(reputationContract) != address(0) && _earnsRating(taskId, t, fee)) {
-                try reputationContract.rate(t.worker, 5, taskId) {} catch {}
-            }
-
+            // Rated only for a completion that can't be self-dealt for free.
+            (uint256 payout, uint256 fee) = _payWorker(taskId, t, _passScore(taskId, t));
             emit TaskCompleted(taskId, payout, fee);
         } else {
             // Failed verification — worker can retry if attempts remain, or
@@ -650,19 +793,7 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         emit TEESettled(taskId, passed, teeSigner);
 
         if (passed) {
-            // ── Effects (all state changes first) ──
-            uint256 fee = (t.amount * feeBps) / 10_000;
-            uint256 payout = t.amount - fee;
-            t.status = TaskStatus.Completed;
-
-            // ── Interactions (external calls last) ──
-            _transferPayout(t.token, t.worker, payout);
-            _transferPayout(t.token, treasury, fee);
-
-            if (address(reputationContract) != address(0) && _earnsRating(taskId, t, fee)) {
-                try reputationContract.rate(t.worker, 5, taskId) {} catch {}
-            }
-
+            (uint256 payout, uint256 fee) = _payWorker(taskId, t, _passScore(taskId, t));
             emit TaskCompleted(taskId, payout, fee);
         } else {
             t.status = TaskStatus.Verified;
@@ -675,11 +806,15 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
     }
 
     /**
-     * @notice Agent cancels task. Only possible while Funded (before worker assigned).
+     * @notice Agent cancels task. Only possible while Funded (before worker assigned),
+     *         and for an open task only while nothing has been submitted: the
+     *         poster cannot take the escrow back from under its submitters.
      */
     function cancelTask(uint256 taskId) external onlyAgent(taskId) nonReentrant whenNotPaused {
         Task storage t = _tasks[taskId];
         if (t.status != TaskStatus.Funded) revert InvalidStatus(t.status, TaskStatus.Funded);
+        // Only an open task has submissions.
+        if (submissionCount[taskId] != 0) revert HasSubmissions();
 
         // Effects
         t.status = TaskStatus.Cancelled;
@@ -687,10 +822,7 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         // Interactions
         _transferPayout(t.token, t.agent, t.amount);
 
-        // Close listing if connected (optional — must not block the refund)
-        if (address(taskRegistry) != address(0)) {
-            try taskRegistry.closeTask(taskId) {} catch {}
-        }
+        _closeListing(taskId);
 
         emit TaskCancelled(taskId, t.amount);
     }
@@ -814,17 +946,8 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         if (t.status != TaskStatus.Disputed) revert InvalidStatus(t.status, TaskStatus.Disputed);
 
         if (workerFavored) {
-            uint256 fee = (t.amount * feeBps) / 10_000;
-            uint256 payout = t.amount - fee;
-            t.status = TaskStatus.Completed;
-
-            _transferPayout(t.token, t.worker, payout);
-            _transferPayout(t.token, treasury, fee);
-
-            if (address(reputationContract) != address(0)) {
-                // neutral score for disputed completion (optional — worker already paid)
-                try reputationContract.rate(t.worker, 3, taskId) {} catch {}
-            }
+            // Neutral score for a disputed completion.
+            (uint256 payout, uint256 fee) = _payWorker(taskId, t, 3);
 
             emit DisputeResolved(taskId, true);
             emit TaskCompleted(taskId, payout, fee);
@@ -859,17 +982,170 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         if (!unjudgedEscalation[taskId]) revert NotEscalated();
         if (block.timestamp < t.disputedAt + DISPUTE_WINDOW + _pauseExtension(taskId)) revert DisputeWindowActive();
 
-        // ── Effects ──
-        uint256 fee = (t.amount * feeBps) / 10_000;
-        uint256 payout = t.amount - fee;
-        t.status = TaskStatus.Completed;
-
-        // ── Interactions ──
-        _transferPayout(t.token, t.worker, payout);
-        _transferPayout(t.token, treasury, fee);
+        // No rating: nobody judged the work.
+        (uint256 payout, uint256 fee) = _payWorker(taskId, t, 0);
 
         emit UnjudgedWorkReleased(taskId, payout, fee);
         emit TaskCompleted(taskId, payout, fee);
+    }
+
+    // ── Open submission ──
+    //
+    // An open task's status only ever goes Funded -> Completed (a winner is
+    // paid) or Funded -> Cancelled (refunded). assignWorker and
+    // marketplaceAssign refuse it, so it has no worker until its pick and is
+    // never Assigned, Submitted, Verified or Disputed. That makes the
+    // single-worker lifecycle unreachable for it: submitEvidence and
+    // releaseUnjudgedWork revert NotWorker (no worker to match) or
+    // InvalidStatus, and completeVerification, completeVerificationWithTEE,
+    // claimTimeout, raiseDispute and resolveDispute revert InvalidStatus.
+    // cancelTask works only while nothing has been submitted.
+
+    /**
+     * @notice Submit a result to an open task: the evidence hash, committed
+     *         and final. One per address, before the effective deadline. The
+     *         poster, the task verifier and the global verifier judge the
+     *         task, so they cannot submit.
+     */
+    function submitOpen(uint256 taskId, bytes32 evidenceHash) external whenNotPaused {
+        if (!_openTasks[taskId].open) revert NotOpenTask();
+        Task storage t = _tasks[taskId];
+        if (t.status != TaskStatus.Funded) revert InvalidStatus(t.status, TaskStatus.Funded);
+        if (msg.sender == t.agent || msg.sender == taskVerifier[taskId] || msg.sender == verifier) revert SelfAssignment();
+        if (evidenceHash == bytes32(0)) revert EmptyHash();
+        if (block.timestamp >= _deadline(taskId)) revert DeadlineReached();
+        if (submissionOf[taskId][msg.sender] != bytes32(0)) revert AlreadySubmitted();
+
+        submissionOf[taskId][msg.sender] = evidenceHash;
+        uint256 count = submissionCount[taskId] + 1;
+        submissionCount[taskId] = count;
+
+        emit OpenSubmission(taskId, msg.sender, evidenceHash, count);
+    }
+
+    /// @notice The poster picks the winner of a CreatorReview task, in its creator window.
+    function selectWinner(uint256 taskId, address winner, bytes32 scorecardHash) external nonReentrant whenNotPaused {
+        if (msg.sender != _tasks[taskId].agent) revert NotAgent();
+        _requirePhase(taskId, OpenPhase.CreatorPick);
+        _selectWinner(taskId, winner, scorecardHash, Judge.Creator);
+    }
+
+    /// @notice The task verifier picks the winner, in its window.
+    function selectWinnerByVerifier(uint256 taskId, address winner, bytes32 scorecardHash) external nonReentrant whenNotPaused {
+        if (msg.sender != taskVerifier[taskId]) revert NotVerifier();
+        _requirePhase(taskId, OpenPhase.VerifierPick);
+        _selectWinner(taskId, winner, scorecardHash, Judge.TaskVerifier);
+    }
+
+    /// @notice The global verifier, as backup judge, picks the winner in its window.
+    function selectWinnerByBackup(uint256 taskId, address winner, bytes32 scorecardHash) external onlyVerifier nonReentrant whenNotPaused {
+        _requirePhase(taskId, OpenPhase.BackupPick);
+        _selectWinner(taskId, winner, scorecardHash, Judge.Backup);
+    }
+
+    /**
+     * @notice Refund an open task to its poster in full.
+     *         - Nothing submitted: the poster, once the deadline has passed
+     *           (before it, cancelTask does the same).
+     *         - Something submitted: only the global verifier, in its backup
+     *           window, when it finds no valid submission. The poster and the
+     *           task verifier the poster chose cannot void submitted work:
+     *           that would let a poster read every result and pay nothing.
+     *           After the backup window the admin voids with resolveOpenTask.
+     * @param scorecardHash Hash of the judge's scorecard; 0 when there is none.
+     */
+    function voidOpenTask(uint256 taskId, bytes32 scorecardHash) external nonReentrant whenNotPaused {
+        OpenPhase phase = _openPhase(taskId);
+        Judge judge;
+        if (submissionCount[taskId] == 0) {
+            if (msg.sender != _tasks[taskId].agent) revert NotAgent();
+            if (phase == OpenPhase.Submissions || phase == OpenPhase.Closed) revert WrongPhase(phase);
+            judge = Judge.Creator;
+        } else {
+            if (msg.sender != verifier) revert NotVerifier();
+            if (phase != OpenPhase.BackupPick) revert WrongPhase(phase);
+            judge = Judge.Backup;
+        }
+        _voidOpenTask(taskId, judge, scorecardHash);
+    }
+
+    /**
+     * @notice The admin settles an open task nobody else settled, once the
+     *         backup window has closed: pays `winner`, or refunds the poster
+     *         in full when `winner` is address(0). No time limit, so an open
+     *         task's escrow always has a way out. Like resolveDispute, not
+     *         pause-gated.
+     */
+    function resolveOpenTask(uint256 taskId, address winner, bytes32 scorecardHash) external onlyAdmin nonReentrant {
+        _requirePhase(taskId, OpenPhase.AdminResolve);
+        if (winner == address(0)) _voidOpenTask(taskId, Judge.Admin, scorecardHash);
+        else _selectWinner(taskId, winner, scorecardHash, Judge.Admin);
+    }
+
+    /// @dev The phase an open task is in now. Every window follows the
+    ///      effective deadline, so a pause moves them all by the time paused.
+    function _openPhase(uint256 taskId) internal view returns (OpenPhase) {
+        OpenTask storage o = _openTasks[taskId];
+        if (!o.open) revert NotOpenTask();
+        if (_tasks[taskId].status != TaskStatus.Funded) return OpenPhase.Closed;
+        uint256 end = _deadline(taskId);
+        if (block.timestamp < end) return OpenPhase.Submissions;
+        end += o.creatorWindow;
+        if (block.timestamp < end) return OpenPhase.CreatorPick;
+        end += VERIFIER_PICK_WINDOW;
+        if (block.timestamp < end) return OpenPhase.VerifierPick;
+        end += BACKUP_PICK_WINDOW;
+        if (block.timestamp < end) return OpenPhase.BackupPick;
+        return OpenPhase.AdminResolve;
+    }
+
+    function _requirePhase(uint256 taskId, OpenPhase phase) internal view {
+        OpenPhase current = _openPhase(taskId);
+        if (current != phase) revert WrongPhase(current);
+    }
+
+    /**
+     * @dev Pays `winner` the amount less the fee, exactly as a passed
+     *      verification pays a worker; its submission becomes the task's
+     *      worker and evidence. Rated only when the judge was not the
+     *      poster's choice: the backup judge or the admin (_earnsRating).
+     */
+    function _selectWinner(uint256 taskId, address winner, bytes32 scorecardHash, Judge judge) internal {
+        Task storage t = _tasks[taskId];
+        bytes32 evidence = submissionOf[taskId][winner];
+        if (evidence == bytes32(0)) revert NoSubmission();
+        // No judge pays itself, e.g. an address that submitted and later became the global verifier.
+        if (winner == msg.sender) revert SelfAssignment();
+
+        // ── Effects ──
+        t.worker = winner;
+        t.evidenceHash = evidence;
+        _openTasks[taskId].closedBy = judge;
+        scorecardOf[taskId] = scorecardHash;
+        emit WinnerSelected(taskId, winner, judge, scorecardHash);
+
+        // ── Interactions ──
+        bool chosenByPoster = judge == Judge.Creator || judge == Judge.TaskVerifier;
+        uint8 score = _earnsRating(t, _platformFee(t.amount), chosenByPoster) ? 5 : 0;
+        (uint256 payout, uint256 fee) = _payWorker(taskId, t, score);
+        _closeListing(taskId);
+        emit TaskCompleted(taskId, payout, fee);
+    }
+
+    /// @dev Refunds an open task to its poster in full.
+    function _voidOpenTask(uint256 taskId, Judge judge, bytes32 scorecardHash) internal {
+        Task storage t = _tasks[taskId];
+
+        // ── Effects ──
+        t.status = TaskStatus.Cancelled;
+        _openTasks[taskId].closedBy = judge;
+        scorecardOf[taskId] = scorecardHash;
+        emit OpenTaskVoided(taskId, judge, scorecardHash);
+
+        // ── Interactions ──
+        _transferPayout(t.token, t.agent, t.amount);
+        _closeListing(taskId);
+        emit TaskCancelled(taskId, t.amount);
     }
 
     // ── Admin Functions ──
@@ -982,5 +1258,16 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
 
     function isTaskExpired(uint256 taskId) external view returns (bool) {
         return block.timestamp >= _deadline(taskId);
+    }
+
+    /// @notice An open task's settings and outcome. `open` is false for every other task.
+    function getOpenTask(uint256 taskId) external view returns (OpenTask memory) {
+        return _openTasks[taskId];
+    }
+
+    /// @notice The phase an open task is in now, pause-adjusted like
+    ///         effectiveDeadline. Reverts NotOpenTask for any other task.
+    function openPhase(uint256 taskId) external view returns (OpenPhase) {
+        return _openPhase(taskId);
     }
 }

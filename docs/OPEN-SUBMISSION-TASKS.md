@@ -1,6 +1,8 @@
 # Open-submission tasks — design
 
-**Status:** proposal, not implemented. Nothing here is deployed or coded.
+**Status:** the contract side (section 9) is built on branch
+`feat/open-submission-contract`, tested locally, and deployed nowhere. The
+backend, worker, verifier agent, clients and private tasks are not built.
 **Scope:** change how work is selected on BlindMarket. Today a task has one
 executor, fixed by a first-come accept. This design lets **many agents do the
 same task and submit**, and the creator (or a verifier) **picks the best one**.
@@ -397,8 +399,8 @@ legacy `apply`/`assign` routes are unaffected unless deleted separately.
   then private tasks.
 - **No cap** on public submissions.
 
-Still to confirm: the verifier and backup-judge window lengths (proposed 48 h
-each).
+Window lengths: 48 h each for the task verifier and the backup judge,
+contract constants (section 9).
 
 ## 8. Open questions (remaining)
 
@@ -407,11 +409,55 @@ each).
 3. **Spam control at scale.** With no cap, do we add a refundable submission
    bond, a per-agent rate limit, both, or neither at launch?
 4. ~~If the verifier never acts~~ decided: backup judge, then admin (section 7).
-5. **Does an open-task winner earn a reputation rating**, given the current
-   `_earnsRating` rule?
+5. ~~Rating~~ decided: only a winner picked by the backup judge or the admin is
+   rated (section 9).
 6. **Private shortlist size `K`** and whether the creator can override the
    automatic shortlist. (`K` is a secrecy control for private tasks only, not a
    cap on public submissions.)
 7. **Who may be the judge/verifier** by default: a named agent, the platform's
    marketplace verifier, or both.
-8. **Contract size**: does the new logic fit in `BlindEscrow` or go in a module?
+8. ~~Contract size~~ decided: it fits in `BlindEscrow` (section 9).
+
+## 9. As built: the contract (2026-10-06)
+
+`BlindEscrow` with open submission, on branch `feat/open-submission-contract`.
+Not deployed. **[source]** for what the code says; the tests named are
+**executed** on a local Hardhat chain.
+
+- **Create.** `createTaskOpen(taskHash, token, amount, category, zone,
+  duration, verifierAgent, mode, creatorWindow)`. The verifier is required and
+  is not the poster. `mode` is `AgentManaged` (creatorWindow must be 0) or
+  `CreatorReview` (creatorWindow 1 h to 7 d).
+- **Submit.** `submitOpen(taskId, evidenceHash)`: one per address, before the
+  pause-adjusted deadline, not by the poster, the task verifier or the global
+  verifier. No cap; one mapping slot and a counter, so gas is flat (500
+  submitters: every submit after the first and every pick cost the same gas
+  as at one).
+- **Pick, each judge only in its own window after the deadline:** the poster
+  (`selectWinner`, CreatorReview only, creatorWindow), the task verifier
+  (`selectWinnerByVerifier`, 48 h), the global verifier as backup judge
+  (`selectWinnerByBackup`, 48 h), then the admin with no time limit
+  (`resolveOpenTask(taskId, winner or 0, scorecardHash)`, not pause-gated).
+  `openPhase(taskId)` says whose turn it is. A pick needs the winner's
+  submission, records a scorecard hash, and pays as `completeVerification`
+  does.
+- **Void (full refund to the poster).** `voidOpenTask(taskId, scorecardHash)`:
+  by the poster when nothing was submitted, after the deadline; with
+  submissions only by the global verifier in its window, or the admin after it
+  (`resolveOpenTask` with no winner). The task verifier cannot void submitted
+  work: the poster chose it, and a void would let the poster read every result
+  and pay nothing.
+- **Existing functions.** `cancelTask` reverts once anything is submitted.
+  `assignWorker` and `marketplaceAssign` refuse every open task. An open task
+  is only ever Funded, Completed or Cancelled, so the single-worker functions
+  cannot reach it.
+- **Rating.** Only a winner picked by the backup judge or the admin, under the
+  existing fee and `minRatedAmount` conditions.
+- **Upgrade.** Storage appended after `minRatedAmount` (slots 18 to 21). The
+  live Arc testnet and Arc mainnet proxies validate as a safe upgrade
+  (read-only). Deployed size 19,545 bytes, 5,031 under the EIP-170 limit.
+- **Sponsored submits.** `BlindAgentDelegate` version 2 adds a `SubmitOpen`
+  kind and `DELEGATE_VERSION()`. The delegates deployed on Arc are version 1;
+  the backend offers a sponsored `submitOpen` only through a version-2
+  delegate (`sponsorsSubmitOpen`).
+

@@ -19,7 +19,7 @@ import { config } from '../config.js';
 import { chainRuntime } from './chainRuntime.js';
 import { settlementChainConfig, type SettlementChainConfig } from './settlementChains.js';
 import { backgroundWritesAllowed } from './deploymentIdentity.js';
-import { delegateInterface } from './blindAgentDelegate.js';
+import { delegateInterface, delegateVersion, SUBMIT_OPEN_DELEGATE_VERSION } from './blindAgentDelegate.js';
 import type { SponsorCaps } from './gasSponsorStore.js';
 
 /** A reservation is held this long after the task's assignment, then expires. */
@@ -203,9 +203,29 @@ export async function runnableSettings(writer: string): Promise<
   return { ok: true, settings };
 }
 
+let submitOpenSupport: { delegate: string; supported: boolean } | null = null;
+
+/**
+ * Whether a sponsored submitOpen (open-submission tasks) may be offered: only
+ * when the configured delegate is version 2 or later. The version-1 delegates
+ * deployed on Arc relay submitEvidence and releaseUnjudgedWork only, and
+ * reject a SubmitOpen call. Asks the delegate's DELEGATE_VERSION() once per
+ * delegate address (its code never changes); an unknown answer (RPC failure)
+ * is false and asked again next time. Callers check runnableSettings first.
+ */
+export async function sponsorsSubmitOpen(settings: Extract<GasSponsorSettings, { enabled: true }>): Promise<boolean> {
+  const delegate = settings.delegate.toLowerCase();
+  if (submitOpenSupport?.delegate === delegate) return submitOpenSupport.supported;
+  const version = await delegateVersion(chainRuntime('arc').provider, settings.delegate);
+  if (version === null) return false;
+  submitOpenSupport = { delegate, supported: version >= SUBMIT_OPEN_DELEGATE_VERSION };
+  return submitOpenSupport.supported;
+}
+
 /** Test hook. */
 export function _resetSponsorRoles(): void {
   roles = null;
+  submitOpenSupport = null;
 }
 
 /** One boot line on whether sponsored gas runs, and the sponsor-role check. */

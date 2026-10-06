@@ -143,6 +143,16 @@ function collect(err: unknown): Facts {
 
 const TASK_STATUS = ['open', 'assigned', 'submitted', 'marked as failed', 'completed', 'cancelled', 'in dispute'];
 
+/** BlindEscrow.OpenPhase, as words. */
+const OPEN_PHASE = [
+  'still taking submissions',
+  "in the poster's review",
+  "in its verifier's review",
+  'in the backup review',
+  'waiting for an admin',
+  'closed',
+];
+
 interface RevertWords { title: string; message: string; kind?: FriendlyErrorKind }
 
 const FUNDS: RevertWords = {
@@ -175,6 +185,21 @@ const REVERTS: Record<string, RevertWords | ((data: string) => RevertWords)> = {
   EscalatedForAdjudication: { title: 'Waiting on a ruling', message: 'This task is waiting for an admin to rule on it.' },
   NotEscalated: { title: 'Not escalated', message: "This task hasn't been sent for a ruling." },
   MaxSubmissionAttemptsReached: { title: 'No attempts left', message: 'This task has used all of its submission attempts.' },
+  InvalidPickWindow: { title: 'Review window out of range', message: 'Pick a review window between 1 hour and 7 days and try again.' },
+  NotOpenTask: { title: 'Not an open task', message: "This task doesn't take open submissions." },
+  OpenTaskUnsupported: { title: 'Open task', message: "Agents submit to this task directly, so it can't be assigned to one." },
+  AlreadySubmitted: { title: 'Already submitted', message: 'This wallet has already submitted to this task.' },
+  HasSubmissions: { title: 'Has submissions', message: "Agents have already submitted to this task, so it can't be cancelled." },
+  NoSubmission: { title: 'No submission', message: "That wallet hasn't submitted to this task." },
+  WrongPhase: (data) => {
+    const phase = OPEN_PHASE[Number.parseInt(data.slice(10, 74), 16)];
+    return {
+      title: 'Not now',
+      message: phase
+        ? `This task is ${phase}, so this can't be done now. Refresh to see its latest state.`
+        : "This task's state has changed, so this can't be done now. Refresh to see its latest state.",
+    };
+  },
   TokenNotAllowed: { title: 'Token not accepted', message: "This token can't be used for payment here. Pay in USDC." },
   InvalidDeadline: { title: 'Deadline out of range', message: 'Pick a deadline inside the allowed range and try again.' },
   ZeroAmount: { title: 'Amount missing', message: "The payment amount is missing or doesn't match. Check it and try again." },
@@ -206,6 +231,13 @@ export const REVERT_SELECTORS: Record<string, string> = {
   '0xf402cb4c': 'EscalatedForAdjudication', // EscalatedForAdjudication()
   '0x7834bcba': 'NotEscalated', // NotEscalated()
   '0x6e041295': 'MaxSubmissionAttemptsReached', // MaxSubmissionAttemptsReached()
+  '0xc0cfac98': 'InvalidPickWindow', // InvalidPickWindow()
+  '0x6c8a0fce': 'NotOpenTask', // NotOpenTask()
+  '0x2e25e010': 'OpenTaskUnsupported', // OpenTaskUnsupported()
+  '0x9fbfc589': 'AlreadySubmitted', // AlreadySubmitted()
+  '0x4826444b': 'HasSubmissions', // HasSubmissions()
+  '0x64db9073': 'NoSubmission', // NoSubmission()
+  '0x96fe8cdd': 'WrongPhase', // WrongPhase(uint8)
   '0xa29c4986': 'TokenNotAllowed', // TokenNotAllowed()
   '0x769d11e4': 'InvalidDeadline', // InvalidDeadline()
   '0x1f2a2005': 'ZeroAmount', // ZeroAmount()
