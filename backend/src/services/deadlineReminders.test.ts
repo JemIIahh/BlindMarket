@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { dueReminderWindow, humanRemaining, reminderCopy, reminderKind, REMINDER_WINDOWS } from './deadlineReminders.js';
+import { dueReminderWindow, humanRemaining, reminderCopy, reminderKind, REMINDER_PULL_AHEAD_SEC, REMINDER_WINDOWS } from './deadlineReminders.js';
 
 const H = 3600;
 const DEADLINE = 1_800_000_000;
@@ -8,6 +8,26 @@ const at = (remainingSec: number) => DEADLINE - remainingSec;
 const SEEN = DEADLINE - 7 * 24 * H;
 
 describe('dueReminderWindow', () => {
+  it('with aheadSec, also counts a mark at most that far away, and no further', () => {
+    const ahead = REMINDER_PULL_AHEAD_SEC;
+    expect(dueReminderWindow(at(H + 10 * 60), DEADLINE, SEEN, REMINDER_WINDOWS, ahead)).toBe(H);
+    expect(dueReminderWindow(at(H + ahead), DEADLINE, SEEN, REMINDER_WINDOWS, ahead)).toBe(H);
+    expect(dueReminderWindow(at(H + ahead + 1), DEADLINE, SEEN, REMINDER_WINDOWS, ahead)).toBeNull();
+    expect(dueReminderWindow(at(24 * H + 10 * 60), DEADLINE, SEEN, REMINDER_WINDOWS, ahead)).toBe(24 * H);
+    // Without it, the mark must have passed.
+    expect(dueReminderWindow(at(H + 10 * 60), DEADLINE, SEEN)).toBeNull();
+  });
+
+  it('with aheadSec, still never reminds a mark the task was first seen inside', () => {
+    // First seen 50 min before the deadline: the 1 h mark had already passed.
+    expect(dueReminderWindow(at(H + 10 * 60), DEADLINE, DEADLINE - 50 * 60, REMINDER_WINDOWS, REMINDER_PULL_AHEAD_SEC)).toBeNull();
+  });
+
+  it('a pulled-in reminder still reads "about an hour" or "about 24 hours"', () => {
+    expect(reminderCopy('open', H + REMINDER_PULL_AHEAD_SEC).body).toContain('about an hour');
+    expect(reminderCopy('open', 24 * H + REMINDER_PULL_AHEAD_SEC).body).toContain('about 24 hours');
+  });
+
   it('fires the 24h window when freshly inside it', () => {
     expect(dueReminderWindow(at(24 * H), DEADLINE, SEEN)).toBe(24 * H);
     expect(dueReminderWindow(at(23 * H), DEADLINE, SEEN)).toBe(24 * H);
