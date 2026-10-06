@@ -117,6 +117,19 @@ describe('notifyLifecycle fan-out', () => {
     expect((await listNotifications(POSTER)).total).toBe(2);
     expect((await listNotifications(EXEC)).total).toBe(2);
   });
+
+  // Only disputeListener sends 'disputed', once a ruling has refunded the
+  // poster (delta audit 2026-10-06, tg-4): the copy must not say a ruling is
+  // still to come.
+  it('disputed tells both sides the ruling refunded the poster', async () => {
+    await notifyLifecycle(HASH, 'disputed');
+    for (const who of [POSTER, EXEC]) {
+      const [n] = (await listNotifications(who)).notifications;
+      expect(n.title).toMatch(/ruled/i);
+      expect(n.body).toMatch(/refunded/i);
+      expect(`${n.title} ${n.body}`).not.toMatch(/will rule|under dispute/i);
+    }
+  });
 });
 
 describe('notifyOnce', () => {

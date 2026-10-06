@@ -17,7 +17,7 @@ import * as reputationDecay from '../services/reputationDecay.js';
 import * as agentStore from '../services/agentStore.js';
 import * as serviceStore from '../services/serviceStore.js';
 import { isAgentOwner, stripAgentSecrets } from '../services/agentOwnership.js';
-import { saveAgent } from '../services/deployedAgentStore.js';
+import { updateAgentFields } from '../services/deployedAgentStore.js';
 import { REVOKED_JWT_TTL_S } from '../middleware/auth.js';
 import * as skillStore from '../services/skillStore.js';
 import * as agentEmbedding from '../services/agentEmbedding.js';
@@ -893,7 +893,7 @@ agentsRouter.post('/:id/revoke-token', requireAuth, async (req: AuthRequest, res
     config.jwtSecret,
     { algorithm: 'HS256', expiresIn: '365d' } as jwt.SignOptions,
   );
-  await saveAgent({ ...agent, platformToken });
+  await updateAgentFields(agent.id, { platformToken });
   res.json({
     success: true,
     data: {

@@ -53,8 +53,15 @@ const heavyResolveAttempted = new Set<string>();
 let timer: NodeJS.Timeout | null = null;
 let inFlight = false;
 
-/** Tasks whose first sight this process has already recorded in Redis. */
-const firstSeenRecorded = new Set<string>();
+/** When each task was first seen (unix seconds), as Redis recorded it. The
+ *  value never changes once recorded (SET NX), so this process reads it once. */
+const firstSeenCache = new Map<string, number>();
+const FIRST_SEEN_CACHE_MAX = 50_000;
+
+/** Tests: forget the cached first sightings. */
+export function _resetReminderCache(): void {
+  firstSeenCache.clear();
+}
 
 /**
  * Tell the poster their deadline is close, once per reminder window (see
@@ -69,17 +76,21 @@ async function remindIfDue(
 ): Promise<void> {
   if (!posterAddress) return;
   // Redis is remote (hundreds of ms a round trip) and this runs for every
-  // open task every tick, so touch it only when needed: once per task per
-  // process to record first sight, and again only while a window is due.
-  const due = dueReminderWindow(nowSec, deadline, -Infinity);
-  if (due === null && firstSeenRecorded.has(tid)) return;
-  // Kept a day past the deadline: long enough to outlive every window.
-  const seen = await firstSeenAt(`remind:${tid}`, nowSec, deadline - nowSec + 86_400);
-  if (seen === null) return;
-  // Bounded: forgetting only costs one more SET NX for each task.
-  if (firstSeenRecorded.size >= 50_000) firstSeenRecorded.clear();
-  firstSeenRecorded.add(tid);
-  if (due === null) return;
+  // open task every tick, so first sight is read from Redis once per task per
+  // process and decided from memory after that. Re-reading it while a window
+  // looked due cost a SET NX and a GET per task per tick for the first 3 h of
+  // every task posted with the default 24 h deadline, which never fires
+  // (delta audit 2026-10-06, tg-3).
+  let seen = firstSeenCache.get(tid);
+  if (seen === undefined) {
+    // Kept a day past the deadline: long enough to outlive every window.
+    const stored = await firstSeenAt(`remind:${tid}`, nowSec, deadline - nowSec + 86_400);
+    if (stored === null) return;
+    // Bounded: forgetting only costs one more read for each task.
+    if (firstSeenCache.size >= FIRST_SEEN_CACHE_MAX) firstSeenCache.clear();
+    firstSeenCache.set(tid, stored);
+    seen = stored;
+  }
   const window = dueReminderWindow(nowSec, deadline, seen);
   if (window === null) return;
   const { title, body } = reminderCopy(reminderKind(status), deadline - nowSec);

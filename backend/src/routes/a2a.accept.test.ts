@@ -121,7 +121,7 @@ import { emitTaskAvailable } from '../services/socket.js';
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
 const AGENT = '0xagent0000000000000000000000000000000001'; // lowercase: matches addrLc lookups
-const TASK = '0xtaskhash';
+const TASK = '0x' + 'ab'.repeat(32); // /accept takes only a bytes32 task hash
 const PUBKEY = '04' + 'ab'.repeat(64); // 130-char uncompressed secp256k1 hex
 const ROOT = '0xroot';
 

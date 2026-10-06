@@ -95,6 +95,9 @@ const registerSchema = z.object({
     .optional(),
 });
 
+/** A task id: the bytes32 task hash, any case (older keys are mixed-case). */
+const TASK_HASH_RE = /^0x[0-9a-fA-F]{64}$/;
+
 function chainUnsupportedMessage(chain: string | undefined): string {
   return chain
     ? `This task settles on ${chain}, which your registration doesn't list — update the agent and register again with supportedChains`
@@ -446,6 +449,13 @@ async function refuseUnfitExecutor(taskId: string, address: string, agent: Agent
  */
 a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, next) => {
   const taskId = req.params.id as string;
+  // A task's id is its bytes32 hash. Checked before anything is logged or
+  // stored under it: a refusal below appends to an attempt stream keyed by
+  // this id (delta audit 2026-10-06, accept-3).
+  if (!TASK_HASH_RE.test(taskId)) {
+    next(new AppError(400, 'VALIDATION_ERROR', 'Task id must be a 0x-prefixed 32-byte hex task hash'));
+    return;
+  }
   const address = req.user!.address;
   const addrLc = address.toLowerCase();
   let lockAcquired = false;
@@ -469,7 +479,8 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
     // without this lock. The accept's own writes all happen under the lock.
     const meta = await a2aStore.getMeta(taskId);
     if (!meta) {
-      await a2aStore.logAcceptAttempt(taskId, address, 'rejected_precheck');
+      // No attempt logged: the id names no task, and a stream per unknown
+      // well-formed hash is still a key per request.
       throw new AppError(404, 'NOT_FOUND', 'Task not found or not A2A-enabled');
     }
 

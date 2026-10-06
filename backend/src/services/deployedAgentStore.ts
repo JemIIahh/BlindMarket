@@ -194,6 +194,76 @@ export async function saveAgent(agent: DeployedAgent): Promise<void> {
   ).run(...Object.values(r));
 }
 
+/** The fields of an existing agent that change after deploy. */
+export type AgentFieldPatch = Partial<Pick<DeployedAgent,
+  'instructions' | 'provider' | 'model' | 'apiKey' | 'encryptedApiKey' | 'tools' | 'capabilities' | 'minReward'
+  | 'skills' | 'verifierEnabled' | 'delegationEnabled' | 'status' | 'lastActiveAt' | 'platformToken' | 'authorizedOwners'>>;
+
+// Column and bound value per field, for Postgres and SQLite: the same
+// encodings saveAgent uses for each column.
+const FIELD_COLUMNS: { [K in keyof Required<AgentFieldPatch>]: { col: string; pg: (v: NonNullable<AgentFieldPatch[K]>) => unknown; sqlite: (v: NonNullable<AgentFieldPatch[K]>) => unknown } } = {
+  instructions: { col: 'instructions', pg: (v) => v, sqlite: (v) => v },
+  provider: { col: 'provider', pg: (v) => v, sqlite: (v) => v },
+  model: { col: 'model', pg: (v) => v, sqlite: (v) => v },
+  apiKey: { col: 'api_key', pg: (v) => v, sqlite: (v) => v },
+  encryptedApiKey: { col: 'encrypted_api_key', pg: (v) => v, sqlite: (v) => v },
+  tools: { col: 'tools', pg: (v) => JSON.stringify(v), sqlite: (v) => JSON.stringify(v) },
+  capabilities: { col: 'capabilities', pg: (v) => v, sqlite: (v) => JSON.stringify(v) },
+  minReward: { col: 'min_reward', pg: (v) => v, sqlite: (v) => v },
+  skills: { col: 'skills', pg: (v) => JSON.stringify(v), sqlite: (v) => JSON.stringify(v) },
+  verifierEnabled: { col: 'verifier_enabled', pg: (v) => v === true, sqlite: (v) => (v ? 1 : 0) },
+  delegationEnabled: { col: 'delegation_enabled', pg: (v) => v === true, sqlite: (v) => (v ? 1 : 0) },
+  status: { col: 'status', pg: (v) => v, sqlite: (v) => v },
+  lastActiveAt: { col: 'last_active_at', pg: (v) => v, sqlite: (v) => v },
+  platformToken: { col: 'platform_token', pg: (v) => v, sqlite: (v) => v },
+  authorizedOwners: { col: 'authorized_owners', pg: (v) => v, sqlite: (v) => JSON.stringify(v) },
+};
+
+/**
+ * Write only the given fields of an existing agent; every other column keeps
+ * whatever it holds now. saveAgent rewrites the whole row from the caller's
+ * copy, so a copy loaded before someone else's change undid it: the worker
+ * heartbeat reverted an owner's delegation opt-out, and a Stop back to
+ * 'running' (delta audit 2026-10-06, deploy-2). With `ifStatus`, the write
+ * happens only while the agent's status is still that. Returns whether a row
+ * was written; an unknown id writes nothing.
+ */
+export async function updateAgentFields(
+  id: string,
+  fields: AgentFieldPatch,
+  opts: { ifStatus?: AgentStatus } = {},
+): Promise<boolean> {
+  const entries = (Object.keys(fields) as Array<keyof AgentFieldPatch>)
+    .filter((k) => fields[k] !== undefined && FIELD_COLUMNS[k]);
+  if (entries.length === 0) return false;
+  if (usePg()) {
+    const db = await getPool();
+    const params: unknown[] = [id];
+    const sets = entries.map((k) => {
+      params.push((FIELD_COLUMNS[k].pg as (v: unknown) => unknown)(fields[k]));
+      return `${FIELD_COLUMNS[k].col} = $${params.length}`;
+    });
+    let where = 'id = $1';
+    if (opts.ifStatus) { params.push(opts.ifStatus); where += ` AND status = $${params.length}`; }
+    const res = await db.query(`UPDATE deployed_agents SET ${sets.join(', ')}, updated_at = NOW() WHERE ${where}`, params);
+    return (res.rowCount ?? 0) > 0;
+  }
+  const db = getDb();
+  const sets = entries.map((k) => `${FIELD_COLUMNS[k].col} = ?`);
+  const values = entries.map((k) => (FIELD_COLUMNS[k].sqlite as (v: unknown) => unknown)(fields[k]));
+  let where = 'id = ?';
+  const whereValues: unknown[] = [id];
+  if (opts.ifStatus) { where += ' AND status = ?'; whereValues.push(opts.ifStatus); }
+  const info = db.prepare(`UPDATE deployed_agents SET ${sets.join(', ')}, updated_at = ? WHERE ${where}`)
+    .run(...values, new Date().toISOString(), ...whereValues);
+  return info.changes > 0;
+}
+
+/** Set an agent's status alone; with `from`, only while it is still that. */
+export function setAgentStatus(id: string, status: AgentStatus, opts: { from?: AgentStatus } = {}): Promise<boolean> {
+  return updateAgentFields(id, { status }, { ifStatus: opts.from });
+}
+
 export async function loadAgent(id: string): Promise<DeployedAgent | null> {
   if (usePg()) {
     const db = await getPool();
