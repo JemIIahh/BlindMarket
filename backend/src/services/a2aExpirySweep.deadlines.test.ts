@@ -49,7 +49,7 @@ vi.mock('./chainRuntime.js', () => ({ chainRuntime: () => ({}) }));
 vi.mock('./deployedAgentStore.js', () => ({ loadAgentByWallet: async () => null }));
 vi.mock('../constants.js', () => ({ SWEEP_INTERVAL_MS: 60_000, EXPIRY_GRACE_SEC: 60 }));
 
-const { sweepMissedDeadlines, sweepExpiredTasks, _resetMissedDeadlineScan, MISSED_DEADLINE_SCAN_MS } = await import('./a2aExpirySweep.js');
+const { sweepMissedDeadlines, sweepExpiredTasks, _resetMissedDeadlineScan, _resetReminderCache, MISSED_DEADLINE_SCAN_MS } = await import('./a2aExpirySweep.js');
 
 function holding(deadline: number, status = 'accepted') {
   listInProgressTasks.mockResolvedValue([{ meta: { taskId: TASK, posterAddress: POSTER, deadline }, state: { taskId: TASK, status } }]);
@@ -58,6 +58,7 @@ function holding(deadline: number, status = 'accepted') {
 beforeEach(() => {
   vi.clearAllMocks();
   _resetMissedDeadlineScan();
+  _resetReminderCache();
   resolveCachedTaskByHash.mockResolvedValue({ taskId: '1', chain: 'arc' });
   getTaskOn.mockResolvedValue({ taskHash: TASK, status: 1 });
   notifyOnce.mockResolvedValue(true);
@@ -176,7 +177,7 @@ describe('deadline reminders', () => {
     expect(firstSeenAt).toHaveBeenCalledWith(`remind:${TASK}`, Math.floor(NOW / 1000), expect.any(Number));
   });
 
-  it('records first sight once, then leaves Redis alone until a window is due', async () => {
+  it('records first sight once, and decides every later window from memory', async () => {
     const TASK2 = '0x' + '77'.repeat(32);
     const at = (deadline: number) =>
       listInProgressTasks.mockResolvedValue([{ meta: { taskId: TASK2, posterAddress: POSTER, deadline }, state: { taskId: TASK2, status: 'accepted' } }]);
@@ -187,10 +188,10 @@ describe('deadline reminders', () => {
     _resetMissedDeadlineScan();
     await sweepMissedDeadlines(NOW + 60_000);
     expect(firstSeenAt).toHaveBeenCalledTimes(1);
-    // Inside the 24h window: read again to decide.
+    // Inside the 24h window: decided from the first sight already read.
     _resetMissedDeadlineScan();
     await sweepMissedDeadlines((deadline - 23 * H) * 1000);
-    expect(firstSeenAt).toHaveBeenCalledTimes(2);
+    expect(firstSeenAt).toHaveBeenCalledTimes(1);
     expect(reminders()).toHaveLength(1);
   });
 
@@ -234,6 +235,28 @@ describe('deadline reminders', () => {
     it('stays quiet for a task with days left', async () => {
       open(Math.floor(NOW / 1000) + 72 * H);
       await sweepExpiredTasks();
+      expect(notifyOnce).not.toHaveBeenCalled();
+    });
+
+    // tg-3 (delta audit 2026-10-06): a task posted with the default 24h
+    // deadline is "inside" the 24h window for its first 3h but never reminded,
+    // and the sweep used to re-read its first sight from Redis (SET NX + GET)
+    // on every tick of those 3h.
+    it('makes no reminder calls on the next tick for tasks just posted with a 24h deadline', async () => {
+      firstSeenAt.mockImplementation(async (_key: string, nowSec: number) => nowSec); // first sight: now
+      const deadline = Math.floor(NOW / 1000) + 24 * H;
+      listOpenTasks.mockResolvedValue(Array.from({ length: 100 }, (_, i) => {
+        const tid = '0x' + (i + 1).toString(16).padStart(64, 'f');
+        return { meta: { taskId: tid, posterAddress: POSTER, deadline }, state: { taskId: tid, status: 'open' } };
+      }));
+      await sweepExpiredTasks();
+      expect(firstSeenAt).toHaveBeenCalledTimes(100);
+      expect(notifyOnce).not.toHaveBeenCalled();
+
+      firstSeenAt.mockClear();
+      vi.setSystemTime(NOW + 60_000);
+      await sweepExpiredTasks();
+      expect(firstSeenAt).not.toHaveBeenCalled();
       expect(notifyOnce).not.toHaveBeenCalled();
     });
 
