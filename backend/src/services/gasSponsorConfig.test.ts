@@ -41,6 +41,9 @@ const roles = vi.hoisted(() => ({
   // such function), or 'down' (the RPC fails).
   version: 2 as number | 'revert' | 'down',
   versionCalls: 0,
+  // What the delegate's ESCROW() read, or a failing role read, throws instead.
+  escrowCallError: null as Error | null,
+  roleError: null as Error | null,
 }));
 vi.mock('./chainRuntime.js', () => ({
   chainRuntime: () => ({
@@ -53,11 +56,12 @@ vi.mock('./chainRuntime.js', () => ({
           return ethers.AbiCoder.defaultAbiCoder().encode(['uint256'], [roles.version]);
         }
         // The delegate's ESCROW(); null = no contract there.
+        if (roles.escrowCallError) throw roles.escrowCallError;
         return roles.delegateEscrow ? ethers.AbiCoder.defaultAbiCoder().encode(['address'], [roles.delegateEscrow]) : '0x';
       },
     },
     escrow: {
-      verifier: async () => { if (roles.fail) throw new Error('rpc down'); return roles.verifier; },
+      verifier: async () => { if (roles.fail) throw roles.roleError ?? new Error('rpc down'); return roles.verifier; },
       treasury: async () => roles.treasury,
       admin: async () => roles.admin,
     },
@@ -80,7 +84,7 @@ beforeEach(() => {
   Object.assign(cfg, { databaseUrl: 'postgres://x', deploymentId: 'staging-arc', arcAgentDelegateAddress: DELEGATE, arcMarketplaceSignerPrivateKey: '', ogStoragePrivateKey: '' });
   cfg.gasSponsor = { enabled: false };
   arc.entry.escrowAddress = '0x' + 'e5'.repeat(20);
-  Object.assign(roles, { verifier: '0x' + '01'.repeat(20), treasury: '0x' + '02'.repeat(20), admin: '0x' + '03'.repeat(20), fail: false, delegateEscrow: '0x' + 'e5'.repeat(20), version: 2, versionCalls: 0 });
+  Object.assign(roles, { verifier: '0x' + '01'.repeat(20), treasury: '0x' + '02'.repeat(20), admin: '0x' + '03'.repeat(20), fail: false, delegateEscrow: '0x' + 'e5'.repeat(20), version: 2, versionCalls: 0, escrowCallError: null, roleError: null });
   identity.allowed = true;
   _resetSponsorRoles();
 });
@@ -156,6 +160,31 @@ describe('runnableSettings', () => {
     roles.fail = false;
     identity.allowed = false;
     expect(await runnableSettings('test')).toEqual({ ok: false, reason: expect.stringMatching(/another deployment's Redis/) });
+  });
+});
+
+describe('a reason that repeats an RPC failure (delta audit 2026-10-06, gas-2)', () => {
+  // ethers puts the request into the message, and the RPC URL can carry a
+  // provider key. /health/bridge and /accept repeat this reason unauthenticated.
+  const rpcError = () => Object.assign(
+    new Error('server response 401 Unauthorized (request={ }, response={ }, error=null, info={ "requestUrl": "https://arc.example/v2/SECRET-KEY" }, code=SERVER_ERROR, version=6.13.1)'),
+    { shortMessage: 'server response 401 Unauthorized', code: 'SERVER_ERROR' },
+  );
+
+  it("keeps the short message and drops the request, from the delegate's ESCROW() and from an escrow role", async () => {
+    enable();
+    roles.escrowCallError = rpcError();
+    const delegate = await runnableSettings('test');
+    expect(delegate).toEqual({ ok: false, reason: expect.stringMatching(/could not read ESCROW\(\).*server response 401 Unauthorized \[SERVER_ERROR\]$/) });
+    expect(JSON.stringify(delegate)).not.toMatch(/SECRET-KEY|requestUrl|https?:/);
+
+    roles.escrowCallError = null;
+    _resetSponsorRoles();
+    roles.fail = true;
+    roles.roleError = rpcError();
+    const role = await runnableSettings('test');
+    expect(role).toEqual({ ok: false, reason: expect.stringMatching(/could not read the Arc escrow's verifier.*server response 401 Unauthorized/) });
+    expect(JSON.stringify(role)).not.toMatch(/SECRET-KEY|requestUrl|https?:/);
   });
 });
 

@@ -19,6 +19,7 @@ import { config } from '../config.js';
 import { chainRuntime } from './chainRuntime.js';
 import { settlementChainConfig, type SettlementChainConfig } from './settlementChains.js';
 import { backgroundWritesAllowed } from './deploymentIdentity.js';
+import { safeErrorMessage } from '../middleware/errorHandler.js';
 import { delegateInterface, delegateVersion, SUBMIT_OPEN_DELEGATE_VERSION } from './blindAgentDelegate.js';
 import type { SponsorCaps } from './gasSponsorStore.js';
 
@@ -155,7 +156,8 @@ let roles: { key: string; problem: string | null } | null = null;
  * one of them, and refuse a delegate bound to another escrow (one delegate
  * per escrow: its ESCROW() is fixed at deploy). Run at boot; the result holds
  * for the process (an unreadable value is a problem too, and is retried on
- * the next call).
+ * the next call). The problem is shown unauthenticated (/health/bridge, an
+ * /accept refusal), so a read error appears only as safeErrorMessage gives it.
  */
 export async function checkSponsorRoles(settings: Extract<GasSponsorSettings, { enabled: true }>): Promise<string | null> {
   const sponsor = settings.sponsor.address.toLowerCase();
@@ -172,7 +174,7 @@ export async function checkSponsorRoles(settings: Extract<GasSponsorSettings, { 
       return roles.problem;
     }
   } catch (e) {
-    return `could not read ESCROW() from the BlindAgentDelegate at ${settings.delegate}: ${(e as Error).message}`;
+    return `could not read ESCROW() from the BlindAgentDelegate at ${settings.delegate}: ${safeErrorMessage(e)}`;
   }
   for (const role of ['verifier', 'treasury', 'admin'] as const) {
     try {
@@ -181,7 +183,7 @@ export async function checkSponsorRoles(settings: Extract<GasSponsorSettings, { 
         return roles.problem;
       }
     } catch (e) {
-      return `could not read the Arc escrow's ${role} to check the sponsor wallet: ${(e as Error).message}`;
+      return `could not read the Arc escrow's ${role} to check the sponsor wallet: ${safeErrorMessage(e)}`;
     }
   }
   roles = { key, problem: null };

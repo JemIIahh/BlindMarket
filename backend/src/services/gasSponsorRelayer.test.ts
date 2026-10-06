@@ -922,6 +922,42 @@ describe('the reservation sweep', () => {
   });
 });
 
+describe('what /health/bridge and a relay reply repeat of an RPC failure (delta audit 2026-10-06, gas-2)', () => {
+  const rpcError = (code: string, short: string) => Object.assign(
+    new Error(`${short} (request={ }, response={ }, error=null, info={ "requestUrl": "https://arc.example/v2/SECRET-KEY" }, code=${code}, version=6.13.1)`),
+    { shortMessage: short, code },
+  );
+  const leaks = (v: unknown) => /SECRET-KEY|requestUrl|https?:/.test(JSON.stringify(v, (_k, x) => (typeof x === 'bigint' ? x.toString() : x)));
+
+  it('a report that fails says why without the request', async () => {
+    const usage = (await import('./gasSponsorStore.js')).usage as unknown as ReturnType<typeof vi.fn>;
+    usage.mockRejectedValueOnce(rpcError('SERVER_ERROR', 'server response 503 Service Unavailable'));
+    const report = await relayer.gasSponsorReport();
+    expect(report).toMatchObject({ enabled: false, reason: 'status unavailable: server response 503 Service Unavailable [SERVER_ERROR]' });
+    expect(leaks(report)).toBe(false);
+  });
+
+  it('a breaker trip on a rejected broadcast keeps the request out of the reason it shows', async () => {
+    await writer();
+    holdReservation();
+    chain.broadcastError = rpcError('INSUFFICIENT_FUNDS', 'insufficient funds for intrinsic transaction cost');
+    expect(await relayer.relaySponsoredCall(await input({ authorization: auth() }))).toMatchObject({ ok: false, code: 'NOT_SENT' });
+    const report = await relayer.gasSponsorReport();
+    expect(report.lastTrip?.reason).toMatch(/insufficient funds for intrinsic transaction cost \[INSUFFICIENT_FUNDS\]$/);
+    expect(db.setControlsCalls.at(-1).reason).toMatch(/insufficient funds/);
+    expect(leaks(report)).toBe(false);
+    expect(leaks(db.setControlsCalls)).toBe(false);
+  });
+
+  it('a call that could not be prepared says why without the request', async () => {
+    await writer();
+    holdReservation();
+    provider.getTransactionCount.mockRejectedValueOnce(rpcError('TIMEOUT', 'request timeout'));
+    const result = await relayer.relaySponsoredCall(await input({ authorization: auth() }));
+    expect(result).toMatchObject({ ok: false, code: 'NOT_SENT', message: 'Not sent: request timeout [TIMEOUT]' });
+  });
+});
+
 describe('automatic pause', () => {
   it('pauses when sends fail too often, the hour overspent, or the sponsor holds less than a day of budget', async () => {
     db.usage.failuresLastHour = 5;

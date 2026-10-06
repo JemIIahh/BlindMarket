@@ -33,6 +33,7 @@ import { getPool } from './neonDb.js';
 import { createSerialTxQueue } from './serialTxQueue.js';
 import { getTaskOn, effectiveDeadlineOn } from './escrow.js';
 import { recordEvent } from './analyticsService.js';
+import { safeErrorMessage } from '../middleware/errorHandler.js';
 import * as a2aStore from './a2aStore.js';
 import {
   GAS_LIMIT_MARGIN_PERCENT,
@@ -550,7 +551,7 @@ async function send(settings: Enabled, reservation: Reservation, tx: Prepared): 
         withAuthorization: !!tx.authorization,
       });
     } catch (err) {
-      outcome = Promise.resolve(refuse(503, 'NOT_SENT', `Not sent: ${(err as Error).message}`));
+      outcome = Promise.resolve(refuse(503, 'NOT_SENT', `Not sent: ${safeErrorMessage(err)}`));
       return null;
     }
     try {
@@ -570,7 +571,7 @@ async function send(settings: Enabled, reservation: Reservation, tx: Prepared): 
           await trip(settings, 'killed', `the node says the sponsor's nonce ${nonce} is used, but not by ${hash}: the sponsor key is signing elsewhere`, { nonce, txHash: hash });
         } else {
           await setTxStatus(hash, 'rejected');
-          await trip(settings, 'paused', `the node rejected sponsored tx ${hash} (nonce ${nonce}): ${(err as Error).message}`, { nonce, txHash: hash });
+          await trip(settings, 'paused', `the node rejected sponsored tx ${hash} (nonce ${nonce}): ${safeErrorMessage(err)}`, { nonce, txHash: hash });
         }
         if (tx.kind === DelegateKind.ReleaseUnjudgedWork) await closeReservation(reservation.id, 'released');
         outcome = Promise.resolve(refuse(503, 'NOT_SENT', `Not sent: the node refused ${hash}`));
@@ -673,7 +674,7 @@ export async function recoverSponsorTxs(settings: Enabled, now = Date.now()): Pr
         if (tx.status === 'signed') await setTxStatus(tx.txHash, 'sent');
       } else if (why === 'rejected') {
         await setTxStatus(tx.txHash, 'rejected');
-        await trip(settings, 'paused', `the node rejected sponsored tx ${tx.txHash} (nonce ${tx.nonce}): ${(err as Error).message}`, tx);
+        await trip(settings, 'paused', `the node rejected sponsored tx ${tx.txHash} (nonce ${tx.nonce}): ${safeErrorMessage(err)}`, tx);
         continue;
       } else {
         console.warn(`[gasSponsor] re-broadcast of ${tx.txHash} failed: ${(err as Error).message}`);
@@ -881,7 +882,11 @@ export interface GasSponsorReport {
   spentLastHourUsdc?: string;
 }
 
-/** Sponsored gas at a glance, for /health/bridge and the founder route. Never throws. */
+/**
+ * Sponsored gas at a glance, for /health/bridge and the founder route. Never
+ * throws. /health/bridge is unauthenticated: an error appears here only as
+ * safeErrorMessage gives it (no request detail, RPC URLs masked).
+ */
 export async function gasSponsorReport(): Promise<GasSponsorReport> {
   try {
     const run = await runnableSettings('gas sponsor report');
@@ -915,6 +920,6 @@ export async function gasSponsorReport(): Promise<GasSponsorReport> {
         : null,
     };
   } catch (err) {
-    return { enabled: false, reason: `status unavailable: ${(err as Error).message}` };
+    return { enabled: false, reason: `status unavailable: ${safeErrorMessage(err)}` };
   }
 }
