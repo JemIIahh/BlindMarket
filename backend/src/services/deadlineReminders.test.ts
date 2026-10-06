@@ -18,9 +18,9 @@ describe('dueReminderWindow', () => {
     expect(dueReminderWindow(at(H + 10 * 60), DEADLINE, SEEN)).toBeNull();
   });
 
-  it('with aheadSec, still never reminds a mark the task was first seen inside', () => {
-    // First seen 50 min before the deadline: the 1 h mark had already passed.
-    expect(dueReminderWindow(at(H + 10 * 60), DEADLINE, DEADLINE - 50 * 60, REMINDER_WINDOWS, REMINDER_PULL_AHEAD_SEC)).toBeNull();
+  it('with aheadSec, still never reminds a mark the task was first seen past', () => {
+    // First seen with 55 min left, now 50 min left: the 1 h mark had passed before the sweep saw it.
+    expect(dueReminderWindow(at(50 * 60), DEADLINE, DEADLINE - 55 * 60, REMINDER_WINDOWS, REMINDER_PULL_AHEAD_SEC)).toBeNull();
   });
 
   it('a pulled-in reminder still reads "about an hour" or "about 24 hours"', () => {

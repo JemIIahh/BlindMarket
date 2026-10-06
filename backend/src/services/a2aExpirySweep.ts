@@ -107,26 +107,35 @@ async function reminderCandidate(
 
 /**
  * Remind each poster of the deadlines that are due, once per window. A poster
- * reminded now also gets, in the same burst, the reminders of their tasks due
- * within REMINDER_PULL_AHEAD_SEC, so one-by-one posts reach Telegram as one
- * message (deadlineReminders.ts). Pulled only alongside a reminder that went
- * out now: a task posted later is never reminded early on its own.
+ * reminded now of a mark also gets, in the same burst, the reminders of their
+ * tasks whose SAME mark is within REMINDER_PULL_AHEAD_SEC, so one-by-one posts
+ * reach Telegram as one message (deadlineReminders.ts). Same mark only: a 1 h
+ * reminder never carries a 24 h one along, whose different copy would drop the
+ * time left from the merged message. Pulled only alongside a reminder that
+ * went out now: a task posted later is never reminded early on its own.
  */
 async function sendReminders(candidates: ReminderCandidate[], nowSec: number): Promise<void> {
   const remind = (c: ReminderCandidate, window: number) => {
     const { title, body } = reminderCopy(reminderKind(c.status), c.deadline - nowSec);
     return notifyOnce(`remind:${c.tid}:${window}`, c.poster, { type: 'deadline_soon', title, body, taskId: c.tid });
   };
-  const remindedNow = new Set<string>();
+  /** Poster → the marks they were reminded of on this call. */
+  const remindedNow = new Map<string, Set<number>>();
   const notDue: ReminderCandidate[] = [];
   for (const c of candidates) {
     const window = dueReminderWindow(nowSec, c.deadline, c.seen);
-    if (window === null) notDue.push(c);
-    else if (await remind(c, window)) remindedNow.add(c.poster.toLowerCase());
+    if (window === null) {
+      notDue.push(c);
+    } else if (await remind(c, window)) {
+      const poster = c.poster.toLowerCase();
+      remindedNow.set(poster, (remindedNow.get(poster) ?? new Set<number>()).add(window));
+    }
   }
   for (const c of notDue) {
-    if (!remindedNow.has(c.poster.toLowerCase())) continue;
-    const window = dueReminderWindow(nowSec, c.deadline, c.seen, REMINDER_WINDOWS, REMINDER_PULL_AHEAD_SEC);
+    const marks = remindedNow.get(c.poster.toLowerCase());
+    if (!marks) continue;
+    const sameMark = REMINDER_WINDOWS.filter((w) => marks.has(w.sec));
+    const window = dueReminderWindow(nowSec, c.deadline, c.seen, sameMark, REMINDER_PULL_AHEAD_SEC);
     if (window !== null) await remind(c, window);
   }
 }
@@ -163,6 +172,8 @@ export async function sweepExpiredTasks(): Promise<void> {
   if (!backgroundWritesAllowed('expiry sweep')) return;
   if (inFlight) return;
   inFlight = true;
+  // Sent from finally: a task that throws later in the tick does not hold back the ones before it.
+  const reminders: ReminderCandidate[] = [];
   try {
     // Repair the open index before sweeping so tasks stranded from a2a:open
     // are re-discovered (and can be expired if past deadline).
@@ -179,7 +190,6 @@ export async function sweepExpiredTasks(): Promise<void> {
     // At most ONE heavyweight resolution per tick, so a backlog of phantom
     // tasks can't stack 30s timeouts inside a single 60s interval.
     let heavyUsedThisTick = false;
-    const reminders: ReminderCandidate[] = [];
 
     for (const { meta } of open) {
       const tid = meta.taskId.toLowerCase();
@@ -279,8 +289,6 @@ export async function sweepExpiredTasks(): Promise<void> {
       }
     }
 
-    await sendReminders(reminders, nowSec);
-
     if (closed > 0 || backfilled > 0) {
       console.log(
         `[a2aExpirySweep] tick: ${open.length} open task(s), ${backfilled} deadline(s) backfilled, ${closed} task(s) closed`,
@@ -289,6 +297,9 @@ export async function sweepExpiredTasks(): Promise<void> {
   } catch (err) {
     console.error('[a2aExpirySweep] sweep failed (non-fatal):', (err as Error).message);
   } finally {
+    await sendReminders(reminders, Math.floor(Date.now() / 1000)).catch((err) =>
+      console.error('[a2aExpirySweep] reminders failed (non-fatal):', (err as Error).message),
+    );
     inFlight = false;
   }
 }
@@ -312,9 +323,10 @@ export async function sweepMissedDeadlines(now = Date.now()): Promise<number> {
   missedDeadlineInFlight = true;
   lastMissedDeadlineScan = now;
   let notified = 0;
+  // Sent from finally: a task that throws later in the scan does not hold back the ones before it.
+  const reminders: ReminderCandidate[] = [];
   try {
     const nowSec = Math.floor(now / 1000);
-    const reminders: ReminderCandidate[] = [];
     for (const { meta, state } of await a2aStore.listInProgressTasks()) {
       const tid = meta.taskId.toLowerCase();
       if (!meta.posterAddress) continue;
@@ -342,11 +354,13 @@ export async function sweepMissedDeadlines(now = Date.now()): Promise<number> {
       });
       if (sent) notified++;
     }
-    await sendReminders(reminders, nowSec);
     if (notified > 0) console.log(`[a2aExpirySweep] missed deadlines: told ${notified} poster(s) their escrow can be reclaimed`);
   } catch (err) {
     console.error('[a2aExpirySweep] missed-deadline scan failed (non-fatal):', (err as Error).message);
   } finally {
+    await sendReminders(reminders, Math.floor(now / 1000)).catch((err) =>
+      console.error('[a2aExpirySweep] reminders failed (non-fatal):', (err as Error).message),
+    );
     missedDeadlineInFlight = false;
   }
   return notified;

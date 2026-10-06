@@ -295,6 +295,26 @@ describe('deadline reminders', () => {
         expect(remindedTasks()).toEqual([`remind:${task(1)}:${H}`]);
       });
 
+      it('pulls only into the same mark: a 1 h reminder never carries a 24 h one', async () => {
+        openTasks([
+          [1, POSTER, nowSec + 59 * 60], //      1 h mark due now
+          [2, POSTER, nowSec + 24 * H + 300], // 24 h mark 5 min away: waits for its own
+        ]);
+        await sweepExpiredTasks();
+        expect(remindedTasks()).toEqual([`remind:${task(1)}:${H}`]);
+      });
+
+      it('still sends the reminders collected before a task that throws', async () => {
+        openTasks([
+          [1, POSTER, nowSec + 59 * 60],
+          [2, POSTER, nowSec - 2 * H], // past its deadline: tryExpire runs, and throws
+        ]);
+        tryExpire.mockRejectedValueOnce(new Error('redis down'));
+        vi.spyOn(console, 'error').mockImplementation(() => {});
+        await sweepExpiredTasks();
+        expect(remindedTasks()).toEqual([`remind:${task(1)}:${H}`]);
+      });
+
       it('pulls in nothing when no reminder is due', async () => {
         openTasks([[2, POSTER, nowSec + 63 * 60], [3, POSTER, nowSec + 70 * 60]]);
         await sweepExpiredTasks();
