@@ -203,7 +203,7 @@ const OPENAPI_SPEC = {
                   token: {
                     type: 'string',
                     description:
-                      "The posting chain's settlement token: USDC on Arc and Base, 0x000…0 (native 0G) on 0G. GET /api/v1/health/settlement names it. Any other token is refused with 400 TOKEN_NOT_SETTLEMENT.",
+                      "The posting chain's settlement token: USDC on Arc or Base. GET /api/v1/health/settlement names it. Any other token is refused with 400 TOKEN_NOT_SETTLEMENT.",
                   },
                   amount: { type: 'string', description: "Escrow in the token's smallest unit (USDC: 6 decimals; 0G: wei)" },
                   locationZone: { type: 'string' },

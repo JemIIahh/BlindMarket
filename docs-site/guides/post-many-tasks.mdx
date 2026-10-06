@@ -1,12 +1,12 @@
 ---
 title: "Post many tasks"
-description: "Post hundreds of tasks from a spreadsheet with one confirmation and one USDC approval."
+description: "Post hundreds of tasks from a spreadsheet, with every row checked first and one USDC approval."
 ---
 
 Posting tasks one at a time is slow when you have a spreadsheet of them. Every bulk tool works the same way:
 
 1. It checks every row before anything is sent, and names any problem by its row.
-2. It shows the count, the total escrow, and the public/private split, then asks once.
+2. It shows the count, the total escrow, and the public/private split, then asks you to confirm.
 3. It approves USDC to the escrow **once**, for the total.
 4. It funds and lists each task, saving its progress as it goes.
 
@@ -37,7 +37,7 @@ instructions,reward,duration,privacy,routing_summary
 Unknown columns are refused, so a typo can't be silently ignored.
 
 <Warning>
-CSV and JSONL rows use the default check (a 10-character minimum). To give each task its own keywords and length rules, post with the SDK's `postTasks()`, which keeps per-task `verificationCriteria`.
+CSV and JSONL rows get only the basic content check, with no keywords or length rules of your own. To give each task its own rules, post with the SDK's `postTasks()`, which keeps per-task `verificationCriteria`.
 </Warning>
 
 ## Post it
@@ -45,6 +45,8 @@ CSV and JSONL rows use the default check (a 10-character minimum). To give each 
 <Tabs>
   <Tab title="Web app">
     Go to **Tasks → Post a task** and choose **Post many**. Upload or paste the file (up to 1,000 rows), review the totals, and confirm. When the run finishes, download the results CSV.
+
+    If you signed in with an external wallet, it may ask you to confirm each task's transaction separately.
   </Tab>
   <Tab title="CLI">
     ```bash
@@ -52,7 +54,7 @@ CSV and JSONL rows use the default check (a 10-character minimum). To give each 
     blind post-tasks --file tasks.csv             # one confirmation, then every row
     ```
 
-    Results go to `tasks.results.csv`: each row posted with its task ID, funded but not listed, failed with nothing paid, or not started. The file is updated as each row settles, so it stays current even if the run is cut off.
+    Results go to `tasks.csv.results.csv`, or the path you pass to `--results`: each row posted with its task ID, funded but not listed, failed with nothing paid, or not started. The file is updated as each row settles, so it stays current even if the run is cut off.
 
     Running the same command on the same file again only finishes rows that were paid and posts rows that never were. To post a file a second time on purpose, use a copy.
   </Tab>
@@ -69,7 +71,7 @@ CSV and JSONL rows use the default check (a 10-character minimum). To give each 
     A row that was funded but not listed comes back as `unlisted`, with the `indexParams` you need to finish it with `bm.indexTask()`.
   </Tab>
   <Tab title="MCP">
-    `post_tasks` takes up to 200 tasks. The quote covers the whole list, and you confirm it once. To resume after a stop, call it again with the same `idempotencyKey`.
+    `post_tasks` takes up to 200 tasks. The quote covers the whole list, and you confirm it once. It sends one transaction per task. To resume after a stop, call it again with the same `idempotencyKey`.
   </Tab>
 </Tabs>
 
@@ -82,4 +84,4 @@ CSV and JSONL rows use the default check (a 10-character minimum). To give each 
 
 ## One transaction or many
 
-When the escrow supports batches, several tasks share one transaction (20 by default). Otherwise each task is its own transaction, after the single approval. Clients check this automatically. You can see it yourself in `batchCreate.supported` from `GET /api/v1/health/settlement`.
+When the escrow supports batches, the SDK and CLI put several tasks in one transaction (20 by default). Otherwise each task is its own transaction, after the single approval. They check this automatically. You can see it yourself in `batchCreate.supported` from `GET /api/v1/health/settlement`.

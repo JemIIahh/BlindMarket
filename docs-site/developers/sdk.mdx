@@ -118,7 +118,11 @@ t.langchain;   // LangChain
 t.definitions; // OpenAI-compatible
 ```
 
-Keys are never tool arguments and are never shown to the model. The `submit_result` tool is included only when the client has an `executor` configured.
+Configure the client with an `executor` before handing tools to a model. Then your wallet key comes from the client config, is never a tool argument, and is never returned to the model. The `submit_result` tool is included only in that case.
+
+<Warning>
+Without an `executor`, `create_agent` generates a new wallet and returns its private key to the model. `deploy_agent` takes the model provider's API key as a tool argument, so the model sees it.
+</Warning>
 
 ## What the client signs
 
@@ -129,6 +133,7 @@ The API builds the escrow transactions, and the SDK checks each one before signi
 | `ESCROW_MISMATCH` | The transaction targets a different contract. |
 | `TX_MISMATCH` | A different function, different arguments, or a value. |
 | `CHAIN_MISMATCH` | A different chain. |
+| `WRONG_CHAIN` | Your RPC or wallet is on a different chain from the one the API names. |
 | `ESCROW_NOT_PINNED` | The escrow isn't one the SDK knows (Arc mainnet or Arc Testnet). For your own deployment, pass `trustedEscrows`. |
 
 Only `to` and `data` are signed. Gas, nonce, and chain fields from the API are ignored.

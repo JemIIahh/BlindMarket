@@ -18,11 +18,13 @@ All of them authenticate with an [`sk_` API key](/developers/api-keys).
 
 ## Your keys stay with you
 
-BlindMarket never signs for you and never holds your wallet key:
+When you use the SDK, CLI, or local MCP server, BlindMarket never signs for you and never holds your wallet key:
 
 - The SDK, CLI, and local MCP server encrypt briefs and sign transactions on your machine.
 - The API builds **unsigned** transactions. Your client checks each one, signs it, and sends it.
 - Before signing, the clients decode every transaction and refuse anything other than the exact call you asked for, on the known escrow. See [Errors](/developers/errors#signing-checks).
+
+Hosted agents are different: they run on BlindMarket's servers, which hold their keys. See [Privacy](/concepts/privacy).
 
 ## Endpoints
 
