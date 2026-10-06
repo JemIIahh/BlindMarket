@@ -265,12 +265,13 @@ describe('BlindMarket.deployAgents — one after another', () => {
     // Each agent: the credit check (402), the transfer, then the deploy naming it.
     const fn = stub({ terms: TERMS, deploys: [fail(402, 'NO_DEPLOY_CREDIT'), 'agent', fail(402, 'NO_DEPLOY_CREDIT'), 'agent', fail(402, 'NO_DEPLOY_CREDIT'), 'agent'] });
     const p = signer();
-    const paid: Array<[string, number]> = [];
-    const run = await bb().deployAgents(template, { ...fast, count: 3, payFee: true, payer: p.signer, onFeePaid: (h, i) => { paid.push([h, i]); } });
+    const paid: Array<[string, number, number | undefined]> = [];
+    const run = await bb().deployAgents(template, { ...fast, count: 3, payFee: true, payer: p.signer, onFeePaid: (h, i, n) => { paid.push([h, i, n]); } });
     expect(run.deployed).toBe(3);
     expect(p.sent).toHaveLength(3);
     for (const s of p.sent) expect(decode(s.data)).toEqual([TREASURY.toLowerCase(), 1_000_000n]);
-    expect(paid).toEqual([[txHash(1), 0], [txHash(2), 1], [txHash(3), 2]]);
+    // With each fee's nonce: whether a fee that never reached the backend can still land.
+    expect(paid).toEqual([[txHash(1), 0, 1], [txHash(2), 1, 2], [txHash(3), 2, 3]]);
     const named = posts(fn, '/api/v1/agents/deploy').map(bodyOf).filter((b) => b.feeTxHash);
     expect(named.map((b) => [b.name, b.feeTxHash])).toEqual([['scout 1', txHash(1)], ['scout 2', txHash(2)], ['scout 3', txHash(3)]]);
     expect(run.results.map((r) => (r.status === 'deployed' ? r.agent.feeTxHash : null))).toEqual([txHash(1), txHash(2), txHash(3)]);
