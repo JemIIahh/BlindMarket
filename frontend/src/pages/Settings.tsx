@@ -12,7 +12,6 @@ import {
   FormInput,
   Modal,
   ConfirmDialog,
-  Toggle,
   ErrorNotice,
 } from '../components/bb';
 import { useReputation } from '../hooks/useReputation';
@@ -25,32 +24,6 @@ import { authedGet, authedPost, authedDelete } from '../lib/api';
 import { copyToClipboard } from '../lib/utils';
 import { YourAvatarField } from '../components/avatar/AvatarEditor';
 import { TelegramAlerts } from '../components/settings/TelegramAlerts';
-
-const NOTIF_KEYS = {
-  payout: 'bb.notify.payout',
-  assignment: 'bb.notify.assignment',
-  dispute: 'bb.notify.dispute',
-} as const;
-
-// try/catch: with storage fully blocked (Safari "Block All Cookies",
-// locked-down webviews) ANY localStorage access throws — and loadBool runs
-// inside a useState initializer, so an unguarded throw kills the whole page.
-function loadBool(key: string, fallback: boolean): boolean {
-  if (typeof window === 'undefined') return fallback;
-  try {
-    const v = window.localStorage.getItem(key);
-    return v == null ? fallback : v === '1';
-  } catch {
-    return fallback;
-  }
-}
-
-function saveBool(key: string, v: boolean) {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.setItem(key, v ? '1' : '0');
-  } catch {}
-}
 
 // The landing's shapes: each section is its own rounded card, values sit in
 // soft rounded panels, and lists get a rounded hairline frame.
@@ -113,14 +86,6 @@ export default function Settings() {
   const settlement = useSettlement();
   const postingInfo = settlement.chains[settlement.postingChain];
   const ogRpcDisplay = OG_RPC_URL.replace(/^https?:\/\//, '');
-
-  const [notifyPayouts, setNotifyPayouts] = useState(() => loadBool(NOTIF_KEYS.payout, true));
-  const [notifyAssignments, setNotifyAssignments] = useState(() => loadBool(NOTIF_KEYS.assignment, true));
-  const [notifyDisputes, setNotifyDisputes] = useState(() => loadBool(NOTIF_KEYS.dispute, false));
-
-  useEffect(() => saveBool(NOTIF_KEYS.payout, notifyPayouts), [notifyPayouts]);
-  useEffect(() => saveBool(NOTIF_KEYS.assignment, notifyAssignments), [notifyAssignments]);
-  useEffect(() => saveBool(NOTIF_KEYS.dispute, notifyDisputes), [notifyDisputes]);
 
   const linkedWallets = ((user as any)?.linkedAccounts ?? (user as any)?.linked_accounts ?? []).filter(
     (a: any) => a.type === 'wallet' && a.chainType === 'ethereum' && a.address?.startsWith('0x'),
@@ -210,12 +175,6 @@ export default function Settings() {
   const reputationDisplay = reputation
     ? `${reputation.decayedScore.toFixed(1)} · ${reputation.tasksCompleted} tasks · ${reputation.disputes} disputes`
     : 'No reputation yet';
-
-  const notifications: { label: string; description: string; value: boolean; set: (v: boolean) => void }[] = [
-    { label: 'Payout received', description: 'When escrow settles a task in your favour.', value: notifyPayouts, set: setNotifyPayouts },
-    { label: 'Task assigned', description: 'When one of your agents is matched to a task.', value: notifyAssignments, set: setNotifyAssignments },
-    { label: 'Dispute opened', description: 'When a task you are involved in enters dispute.', value: notifyDisputes, set: setNotifyDisputes },
-  ];
 
   return (
     <div>
@@ -413,26 +372,7 @@ export default function Settings() {
 
           {/* Notifications */}
           <section className={`${CARD} space-y-5`}>
-            <SectionRule num="05" title="Notifications" side="Saved to this browser" />
-
-            <div className={LIST_BOX}>
-              {notifications.map((toggle) => (
-                <div
-                  key={toggle.label}
-                  className="flex items-center justify-between gap-4 px-4 py-3.5"
-                >
-                  <div className="min-w-0">
-                    <div className="text-sm text-ink">{toggle.label}</div>
-                    <div className="text-xs text-ink-3 mt-0.5 leading-relaxed">{toggle.description}</div>
-                  </div>
-                  <Toggle
-                    checked={toggle.value}
-                    onChange={toggle.set}
-                    label={toggle.label}
-                  />
-                </div>
-              ))}
-            </div>
+            <SectionRule num="05" title="Notifications" />
 
             <TelegramAlerts />
           </section>
