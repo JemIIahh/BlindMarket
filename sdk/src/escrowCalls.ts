@@ -2,7 +2,9 @@
  * The only transactions a backend may hand this client to sign.
  *
  * The backend builds createTask (or createTasks), submitEvidence, cancelTask and claimTimeout
- * for the client's own key to sign. Whoever answers at `apiBase` (a
+ * for the client's own key to sign, and for open-submission tasks createTaskOpen, submitOpen,
+ * selectWinner (the poster's pick) and voidOpenTask (the poster's refund when nothing was
+ * submitted). Whoever answers at `apiBase` (a
  * compromised or malicious backend, an untrusted apiBase, a network attacker
  * on plain http) controls that JSON, so a client that signs it as given signs
  * anything: a native transfer, an ERC-20 approve or transfer, on any chain it
@@ -27,9 +29,24 @@ export const ESCROW_CALLS = new ethers.Interface([
   'function submitEvidence(uint256 taskId, bytes32 evidenceHash)',
   'function cancelTask(uint256 taskId)',
   'function claimTimeout(uint256 taskId)',
+  // Open submission, on an escrow that has it (docs/OPEN-SUBMISSION-TASKS.md).
+  'function createTaskOpen(bytes32 taskHash, address token, uint256 amount, string category, string locationZone, uint256 duration, address verifierAgent, uint8 mode, uint256 creatorWindow)',
+  'function submitOpen(uint256 taskId, bytes32 evidenceHash)',
+  'function selectWinner(uint256 taskId, address winner, bytes32 scorecardHash)',
+  'function voidOpenTask(uint256 taskId, bytes32 scorecardHash)',
 ]);
 
-export type EscrowFunction = 'createTask' | 'createTaskWithVerifier' | 'createTasks' | 'submitEvidence' | 'cancelTask' | 'claimTimeout';
+export type EscrowFunction =
+  | 'createTask'
+  | 'createTaskWithVerifier'
+  | 'createTasks'
+  | 'submitEvidence'
+  | 'cancelTask'
+  | 'claimTimeout'
+  | 'createTaskOpen'
+  | 'submitOpen'
+  | 'selectWinner'
+  | 'voidOpenTask';
 
 /**
  * The evidence hash the backend commits for a result: keccak256 of the UTF-8
