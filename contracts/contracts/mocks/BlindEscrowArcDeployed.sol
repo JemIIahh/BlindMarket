@@ -1,4 +1,14 @@
 // SPDX-License-Identifier: MIT
+//
+// FROZEN TEST FIXTURE — do not edit. BlindEscrow.sol exactly as of commit
+// 882acaf, renamed. It compiles (hardhat.config.ts settings) to the
+// implementation both Arc proxies run as of 2026-10-06: OpenZeppelin version
+// 940c7f867f6844ba9f4b3166f1c84fb3364321960dd1b0088aa011428056d45b, the last
+// impl in .openzeppelin/unknown-5042002.json (Arc testnet) and
+// unknown-5042.json (Arc mainnet). test/escrowUpgrade.test.ts checks that
+// hash, upgrades a proxy of this contract to the current BlindEscrow, and
+// compares the payouts of both. Only the contract name and the interface
+// import path differ from the original; neither changes the bytecode.
 pragma solidity ^0.8.24;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -10,8 +20,8 @@ import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 
-import "./interfaces/IBlindReputation.sol";
-import "./interfaces/ITaskRegistry.sol";
+import "../interfaces/IBlindReputation.sol";
+import "../interfaces/ITaskRegistry.sol";
 
 /**
  * @title BlindEscrow
@@ -29,7 +39,7 @@ import "./interfaces/ITaskRegistry.sol";
  *      - Deadline enforcement to prevent indefinite fund locking
  *      - On-chain integration with TaskRegistry + BlindReputation
  */
-contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgradeable, UUPSUpgradeable {
+contract BlindEscrowArcDeployed is Initializable, ReentrancyGuardTransient, PausableUpgradeable, UUPSUpgradeable {
     using SafeERC20 for IERC20;
 
     // ── Types ──
@@ -60,17 +70,6 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         uint256 disputedAt;     // block.timestamp raiseDispute was called (0 = never disputed / pre-upgrade)
     }
 
-    /// One task of a createTasks batch: the createTask / createTaskWithVerifier
-    /// arguments minus the token, which the whole batch shares.
-    struct TaskInput {
-        bytes32 taskHash;
-        uint256 amount;
-        string category;
-        string locationZone;
-        uint256 duration;
-        address verifierAgent;  // address(0): no per-task verifier
-    }
-
     // ── Constants ──
 
     uint256 public constant MAX_FEE_BPS = 3000;      // 30% hard cap
@@ -79,7 +78,6 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
     uint256 public constant MAX_DEADLINE = 90 days;    // maximum task duration
     uint256 public constant DISPUTE_WINDOW = 14 days;  // time after a dispute is raised before claimTimeout can recover it (or, for escalated unjudged work, releaseUnjudgedWork)
     uint256 public constant APPEAL_WINDOW = 3 days;    // time after a failed verdict in which the worker may still raiseDispute, even past the deadline
-    uint256 public constant MAX_BATCH = 50;            // most tasks one createTasks call creates; clients read it to detect batch support
 
     // ── State ──
 
@@ -190,8 +188,6 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
     error EscalatedForAdjudication();
     error NotEscalated();
     error InvalidPauseStart();
-    error EmptyBatch();
-    error BatchTooLarge();
 
     // ── Modifiers ──
 
@@ -279,47 +275,6 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         return _createTask(taskHash, token, amount, category, locationZone, duration, verifierAgent);
     }
 
-    /**
-     * @notice Creates up to MAX_BATCH tasks in one transaction, all paid in the
-     *         same ERC-20 token, and pulls their combined amount in a single
-     *         transfer. Each task is validated and recorded exactly as
-     *         createTask / createTaskWithVerifier would record it (a non-zero
-     *         `verifierAgent` makes it an agent-verified task), and gets its
-     *         own TaskCreated (plus TaskVerifierSet) in input order. Task ids
-     *         are consecutive from the returned `firstTaskId`. Any invalid task
-     *         reverts the whole batch: nothing is recorded and nothing is paid.
-     * @dev ERC-20 only. A native-token batch would need msg.value to equal the
-     *      sum; the single-task path covers native tokens.
-     */
-    function createTasks(address token, TaskInput[] calldata tasks)
-        external
-        payable
-        nonReentrant
-        whenNotPaused
-        returns (uint256 firstTaskId)
-    {
-        uint256 count = tasks.length;
-        if (count == 0) revert EmptyBatch();
-        if (count > MAX_BATCH) revert BatchTooLarge();
-        if (token == address(0)) revert TokenNotAllowed();
-        // Same error the single path uses for value sent with an ERC-20 task.
-        if (msg.value != 0) revert ZeroAmount();
-
-        firstTaskId = nextTaskId;
-        uint256 total;
-        for (uint256 i; i < count; ++i) {
-            TaskInput calldata t = tasks[i];
-            (uint256 taskId, uint256 deadline) =
-                _recordTask(t.taskHash, token, t.amount, t.category, t.locationZone, t.duration, t.verifierAgent);
-            total += t.amount;
-            _announceTask(taskId, token, t.amount, t.taskHash, t.category, t.locationZone, deadline);
-        }
-
-        // Interactions last (CEI): one pull for the whole batch. A shortfall in
-        // allowance or balance reverts every task above.
-        IERC20(token).safeTransferFrom(msg.sender, address(this), total);
-    }
-
     function _createTask(
         bytes32 taskHash,
         address token,
@@ -329,46 +284,13 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         uint256 duration,
         address verifierAgent
     ) internal returns (uint256 taskId) {
-        uint256 deadline;
-        (taskId, deadline) = _recordTask(taskHash, token, amount, category, locationZone, duration, verifierAgent);
-
-        // Interactions last (CEI)
-        _pullPayment(token, amount);
-
-        _announceTask(taskId, token, amount, taskHash, category, locationZone, deadline);
-    }
-
-    /// Takes one task's escrow from the caller: exactly `amount` of native
-    /// value, or an ERC-20 transferFrom with no value sent.
-    function _pullPayment(address token, uint256 amount) internal {
-        if (token == address(0)) {
-            if (msg.value != amount) revert ZeroAmount();
-        } else {
-            if (msg.value > 0) revert ZeroAmount();
-            IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
-        }
-    }
-
-    /// Checks and effects of creating one task, shared by createTask,
-    /// createTaskWithVerifier and createTasks: validates it and records it
-    /// (task, pause accounting, per-task verifier). Moves no funds; the caller
-    /// pulls them, then calls _announceTask.
-    function _recordTask(
-        bytes32 taskHash,
-        address token,
-        uint256 amount,
-        string calldata category,
-        string calldata locationZone,
-        uint256 duration,
-        address verifierAgent
-    ) internal returns (uint256 taskId, uint256 deadline) {
         if (amount == 0) revert ZeroAmount();
         if (taskHash == bytes32(0)) revert EmptyHash();
         if (!allowedTokens[token]) revert TokenNotAllowed();
         if (duration < MIN_DEADLINE || duration > MAX_DEADLINE) revert InvalidDeadline();
 
         taskId = nextTaskId++;
-        deadline = block.timestamp + duration;
+        uint256 deadline = block.timestamp + duration;
 
         _tasks[taskId] = Task({
             agent: msg.sender,
@@ -385,8 +307,8 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
             submissionAttempts: 0,
             disputedAt: 0
         });
-        // Task creation is whenNotPaused, so pausedSince is 0 here and
-        // pausedTotal is the whole paused time so far.
+        // createTask is whenNotPaused, so pausedSince is 0 here and pausedTotal
+        // is the whole paused time so far.
         _pausedTotalAtCreate[taskId] = pausedTotal;
 
         if (verifierAgent != address(0)) {
@@ -395,21 +317,17 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
             taskVerifier[taskId] = verifierAgent;
             emit TaskVerifierSet(taskId, verifierAgent);
         }
-    }
 
-    /// The bookkeeping after a task is recorded: the optional TaskRegistry
-    /// publish, then TaskCreated.
-    function _announceTask(
-        uint256 taskId,
-        address token,
-        uint256 amount,
-        bytes32 taskHash,
-        string calldata category,
-        string calldata locationZone,
-        uint256 deadline
-    ) internal {
+        // Interactions last (CEI)
+        if (token == address(0)) {
+            if (msg.value != amount) revert ZeroAmount();
+        } else {
+            if (msg.value > 0) revert ZeroAmount();
+            IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+        }
+
         // Publish to TaskRegistry if connected. Optional bookkeeping — a paused or
-        // reverting registry must not block task creation.
+        // reverting registry must not block task creation (funds are escrowed above).
         if (address(taskRegistry) != address(0)) {
             try taskRegistry.publishTask(taskId, msg.sender, category, locationZone, amount) {} catch {}
         }
@@ -451,54 +369,15 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
      *      rating. The poster picks every party to a completion (worker via
      *      assignWorker, verifier via createTaskWithVerifier) and distinct
      *      addresses cost nothing, so a rating must carry economic weight and
-     *      come from a judge the poster did not choose:
+     *      come from a verifier the poster did not choose:
      *        - the platform fee is non-zero (a completion that paid nothing
      *          proves nothing; below 10 units at 1000 bps the fee rounds to 0),
      *        - the amount meets the admin-set per-token minRatedAmount,
-     *        - the judge was not chosen by the poster (`judgeChosenByPoster`
-     *          false). For a single-worker task that means no per-task
-     *          verifier. For an open task the poster chose both the creator
-     *          and the task verifier, so only a winner picked by the backup
-     *          judge (the global verifier) or the admin is rated.
+     *        - the task has no poster-designated per-task verifier.
      *      Settlement itself is unaffected; only the rating is withheld.
      */
-    function _earnsRating(Task storage t, uint256 fee, bool judgeChosenByPoster) internal view returns (bool) {
-        return fee > 0 && t.amount >= minRatedAmount[t.token] && !judgeChosenByPoster;
-    }
-
-    /// The platform's cut of `amount` at the current fee.
-    function _platformFee(uint256 amount) internal view returns (uint256) {
-        return (amount * feeBps) / 10_000;
-    }
-
-    /**
-     * @dev Pays a task out in its worker's favour, the one payout path every
-     *      settlement shares: the worker gets the amount less the platform fee
-     *      and the treasury gets the fee, the task becomes Completed, and the
-     *      worker is rated `score` when non-zero. Callers decide the score
-     *      (with _earnsRating where it applies) and emit their own events,
-     *      TaskCompleted last, so each keeps its log order.
-     */
-    function _payWorker(uint256 taskId, Task storage t, uint8 score) internal returns (uint256 payout, uint256 fee) {
-        // ── Effects (all state changes first) ──
-        fee = _platformFee(t.amount);
-        payout = t.amount - fee;
-        t.status = TaskStatus.Completed;
-
-        // ── Interactions (external calls last) ──
-        _transferPayout(t.token, t.worker, payout);
-        _transferPayout(t.token, treasury, fee);
-
-        // Record reputation if connected (optional — the worker is already
-        // paid above; a reverting/paused reputation contract must not undo it).
-        if (score != 0 && address(reputationContract) != address(0)) {
-            try reputationContract.rate(t.worker, score, taskId) {} catch {}
-        }
-    }
-
-    /// The score a passed verification gives: 5, when it earns a rating at all.
-    function _passScore(uint256 taskId, Task storage t) internal view returns (uint8) {
-        return _earnsRating(t, _platformFee(t.amount), taskVerifier[taskId] != address(0)) ? 5 : 0;
+    function _earnsRating(uint256 taskId, Task storage t, uint256 fee) internal view returns (bool) {
+        return fee > 0 && t.amount >= minRatedAmount[t.token] && taskVerifier[taskId] == address(0);
     }
 
     /**
@@ -616,8 +495,22 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         emit VerificationCompleted(taskId, passed);
 
         if (passed) {
-            // Rated only for a completion that can't be self-dealt for free.
-            (uint256 payout, uint256 fee) = _payWorker(taskId, t, _passScore(taskId, t));
+            // ── Effects (all state changes first) ──
+            uint256 fee = (t.amount * feeBps) / 10_000;
+            uint256 payout = t.amount - fee;
+            t.status = TaskStatus.Completed;
+
+            // ── Interactions (external calls last) ──
+            _transferPayout(t.token, t.worker, payout);
+            _transferPayout(t.token, treasury, fee);
+
+            // Record reputation if connected (optional — the worker is already
+            // paid above; a reverting/paused reputation contract must not undo it)
+            // and only for a completion that can't be self-dealt for free.
+            if (address(reputationContract) != address(0) && _earnsRating(taskId, t, fee)) {
+                try reputationContract.rate(t.worker, 5, taskId) {} catch {}
+            }
+
             emit TaskCompleted(taskId, payout, fee);
         } else {
             // Failed verification — worker can retry if attempts remain, or
@@ -681,7 +574,19 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         emit TEESettled(taskId, passed, teeSigner);
 
         if (passed) {
-            (uint256 payout, uint256 fee) = _payWorker(taskId, t, _passScore(taskId, t));
+            // ── Effects (all state changes first) ──
+            uint256 fee = (t.amount * feeBps) / 10_000;
+            uint256 payout = t.amount - fee;
+            t.status = TaskStatus.Completed;
+
+            // ── Interactions (external calls last) ──
+            _transferPayout(t.token, t.worker, payout);
+            _transferPayout(t.token, treasury, fee);
+
+            if (address(reputationContract) != address(0) && _earnsRating(taskId, t, fee)) {
+                try reputationContract.rate(t.worker, 5, taskId) {} catch {}
+            }
+
             emit TaskCompleted(taskId, payout, fee);
         } else {
             t.status = TaskStatus.Verified;
@@ -833,8 +738,17 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         if (t.status != TaskStatus.Disputed) revert InvalidStatus(t.status, TaskStatus.Disputed);
 
         if (workerFavored) {
-            // Neutral score for a disputed completion.
-            (uint256 payout, uint256 fee) = _payWorker(taskId, t, 3);
+            uint256 fee = (t.amount * feeBps) / 10_000;
+            uint256 payout = t.amount - fee;
+            t.status = TaskStatus.Completed;
+
+            _transferPayout(t.token, t.worker, payout);
+            _transferPayout(t.token, treasury, fee);
+
+            if (address(reputationContract) != address(0)) {
+                // neutral score for disputed completion (optional — worker already paid)
+                try reputationContract.rate(t.worker, 3, taskId) {} catch {}
+            }
 
             emit DisputeResolved(taskId, true);
             emit TaskCompleted(taskId, payout, fee);
@@ -869,8 +783,14 @@ contract BlindEscrow is Initializable, ReentrancyGuardTransient, PausableUpgrade
         if (!unjudgedEscalation[taskId]) revert NotEscalated();
         if (block.timestamp < t.disputedAt + DISPUTE_WINDOW + _pauseExtension(taskId)) revert DisputeWindowActive();
 
-        // No rating: nobody judged the work.
-        (uint256 payout, uint256 fee) = _payWorker(taskId, t, 0);
+        // ── Effects ──
+        uint256 fee = (t.amount * feeBps) / 10_000;
+        uint256 payout = t.amount - fee;
+        t.status = TaskStatus.Completed;
+
+        // ── Interactions ──
+        _transferPayout(t.token, t.worker, payout);
+        _transferPayout(t.token, treasury, fee);
 
         emit UnjudgedWorkReleased(taskId, payout, fee);
         emit TaskCompleted(taskId, payout, fee);
