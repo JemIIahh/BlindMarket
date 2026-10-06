@@ -9,6 +9,9 @@ import { ethers } from 'ethers';
  * event arrived, but the task that kept the worker busy spends gas of its own,
  * so by the time the queue drains that answer is stale: every queued task used
  * to be assigned to a wallet that could no longer submit.
+ *
+ * Draining also left no gap between tasks, so the poll loop (resume, verifier
+ * duty, unjudged payouts) never ran while the queue had entries.
  */
 
 const sock = vi.hoisted(() => ({ handlers: {} as Record<string, (data: unknown) => Promise<void>> }));
@@ -183,5 +186,29 @@ describe('a task event deferred while busy is gas-checked again before accept', 
     await w.pollAndWork();
     await waitFor(() => expect(be.released(A)).toBe(true));
     expect(be.accepts()).toEqual([T0, A]);
+  });
+});
+
+describe('a poll that comes due while busy runs before the next queued task', () => {
+  it('fetches verifications between deferred tasks', async () => {
+    const w = await loadWorker({ AGENT_VERIFIER_ENABLED: 'true' });
+    be.holdAccept.add(A);
+    be.holdAccept.add(B);
+    await busyWith([[A], [B]]);
+    // Each task outlasts the poll interval: a tick lands while it runs.
+    for (const [current, next] of [[T0, A], [A, B], [B, null]] as Array<[string, string | null]>) {
+      await w.pollAndWork();
+      be.finishAccept(current);
+      if (next) await waitFor(() => expect(be.accepts().at(-1)).toBe(next));
+      else await waitFor(() => expect(be.calls.filter((c) => c.path === '/api/v1/a2a/verifications')).toHaveLength(3));
+    }
+    const order = be.calls
+      .filter((c) => c.path.endsWith('/accept') || c.path === '/api/v1/a2a/verifications')
+      .map((c) => (c.path.endsWith('/accept') ? `accept ${short(c.path.split('/')[5])}` : 'verifications'));
+    expect(order).toEqual([
+      `accept ${short(T0)}`, 'verifications',
+      `accept ${short(A)}`, 'verifications',
+      `accept ${short(B)}`, 'verifications',
+    ]);
   });
 });

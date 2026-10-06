@@ -1296,6 +1296,11 @@ const MAX_NEEDS_WRAP_POLLS = 20;
 // Guard against concurrent task execution — WS events and poll fallback
 // must not overlap (both use the same wallet for tx signing).
 let _working = false;
+// A poll came due (safety net, disconnect) while _working was set. The
+// deferred-accept queue hands _working from one task to the next with no gap,
+// so without this resume, verifier duty and unjudged payouts never ran while
+// it had entries. drainDeferredAccepts runs the poll before the next task.
+let pollDue = false;
 // Tasks currently being re-driven by resumeAssignedTasks(), so overlapping poll
 // cycles never double-run the same one. resumeFailures caps wasted retries on a
 // task that can't finalize (e.g. past its on-chain deadline) so it can't burn
@@ -2618,10 +2623,12 @@ async function releaseTask(taskHash) {
 // payouts, then scan the feed when due. Exported for tests.
 export async function pollAndWork() {
   if (_working) {
+    pollDue = true; // runs when the current task ends (drainDeferredAccepts)
     log('poll skipped: another task is in progress');
     return;
   }
   _working = true;
+  pollDue = false;
   try {
     // Re-check a model that failed its check (at most every few minutes, so
     // topping up a wallet or fixing a key needs no restart). Free once passed.
@@ -5259,14 +5266,19 @@ export function createDeferredAccepts(limit = 200) {
 
 const wsDeferred = createDeferredAccepts();
 
-// Called whenever _working clears. The queue waits while a task assigned to
-// us is held for gas (resumeGasHeld): the wallet is known to be short, and the
-// gas check lets a failed balance read through. The feed reconcile still
-// covers what waits here. Otherwise start the next deferred task event, if
-// any. Each accept clears _working in its own finally, which drains again, so
-// the queue empties one task at a time.
+// Called whenever _working clears. A poll that came due while busy runs
+// first; pollAndWork drains again in its own finally. The queue then waits
+// while a task assigned to us is held for gas (resumeGasHeld): the wallet is
+// known to be short, and the gas check lets a failed balance read through.
+// The feed reconcile still covers what waits here. Otherwise start the next
+// deferred task event, if any. Each accept clears _working in its own
+// finally, which drains again, so the queue empties one task at a time.
 function drainDeferredAccepts() {
   if (_working) return;
+  if (pollDue) {
+    pollAndWork().catch(() => {});
+    return;
+  }
   if (resumeGasHeld.size > 0) return;
   const next = wsDeferred.next();
   if (next) acceptFromWs(next.taskHash, next.chain, next.sponsored, true).catch(() => {});
