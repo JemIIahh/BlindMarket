@@ -1,0 +1,353 @@
+{
+ "_comment": "Model catalog as GET /api/v1/agents/providers returned it on 2026-10-06 (public, no user data). Refresh with: curl https://api.blindmarket.xyz/api/v1/agents/providers",
+ "models": {
+  "openai": [
+   "gpt-6.1-sol",
+   "gpt-6-astra",
+   "gpt-6-sol",
+   "gpt-6-luna",
+   "gpt-5.6-sol",
+   "gpt-5.6-terra",
+   "gpt-5.6-luna",
+   "gpt-5.5",
+   "gpt-5.5-pro",
+   "gpt-5.4",
+   "gpt-5.4-pro",
+   "gpt-5.4-mini",
+   "gpt-5.2",
+   "gpt-5.2-pro",
+   "gpt-4.1",
+   "gpt-4.1-mini",
+   "gpt-4o",
+   "gpt-4o-mini",
+   "chat-latest"
+  ],
+  "anthropic": [
+   "claude-fable-5-1",
+   "claude-opus-5-5",
+   "claude-sonnet-5-5",
+   "claude-fable-5",
+   "claude-opus-5",
+   "claude-sonnet-5",
+   "claude-opus-4-8",
+   "claude-opus-4-7",
+   "claude-opus-4-6",
+   "claude-sonnet-4-6",
+   "claude-opus-4-5",
+   "claude-haiku-4-5"
+  ],
+  "groq": [
+   "openai/gpt-oss-120b",
+   "openai/gpt-oss-20b",
+   "qwen/qwen3.8-27b"
+  ],
+  "gemini": [
+   "gemini-3.8-flash",
+   "gemini-3.7-flash",
+   "gemini-3.6-flash",
+   "gemini-3.5-flash",
+   "gemini-3.5-flash-lite",
+   "gemini-3.1-pro-preview",
+   "gemini-3-flash-preview"
+  ],
+  "xai": [
+   "grok-4.7",
+   "grok-4.6",
+   "grok-4.5",
+   "grok-4.3",
+   "grok-4.20-0309-reasoning",
+   "grok-4.20-0309-non-reasoning",
+   "grok-build-0.1"
+  ],
+  "0g-compute": [
+   "glm-5",
+   "qwen3.7-plus",
+   "glm-5.3",
+   "0GM-1.0-35B-A3B",
+   "0GM-1.0-35B-A3B-SIA",
+   "openai/gpt-5.4-mini"
+  ]
+ },
+ "pricing": {
+  "openai": [
+   {
+    "id": "gpt-6.1-sol",
+    "inputCostPer1M": 2,
+    "outputCostPer1M": 10
+   },
+   {
+    "id": "gpt-6-astra",
+    "inputCostPer1M": 10,
+    "outputCostPer1M": 50
+   },
+   {
+    "id": "gpt-6-sol",
+    "inputCostPer1M": 2,
+    "outputCostPer1M": 10
+   },
+   {
+    "id": "gpt-6-luna",
+    "inputCostPer1M": 0.1,
+    "outputCostPer1M": 0.5
+   },
+   {
+    "id": "gpt-5.6-sol",
+    "inputCostPer1M": 4,
+    "outputCostPer1M": 20
+   },
+   {
+    "id": "gpt-5.6-terra",
+    "inputCostPer1M": 2,
+    "outputCostPer1M": 12
+   },
+   {
+    "id": "gpt-5.6-luna",
+    "inputCostPer1M": 0.2,
+    "outputCostPer1M": 1.2
+   },
+   {
+    "id": "gpt-5.5",
+    "inputCostPer1M": 5,
+    "outputCostPer1M": 30
+   },
+   {
+    "id": "gpt-5.5-pro",
+    "inputCostPer1M": 30,
+    "outputCostPer1M": 180
+   },
+   {
+    "id": "gpt-5.4",
+    "inputCostPer1M": 2.5,
+    "outputCostPer1M": 15
+   },
+   {
+    "id": "gpt-5.4-pro",
+    "inputCostPer1M": 30,
+    "outputCostPer1M": 180
+   },
+   {
+    "id": "gpt-5.4-mini",
+    "inputCostPer1M": 0.75,
+    "outputCostPer1M": 4.5
+   },
+   {
+    "id": "gpt-5.2",
+    "inputCostPer1M": 1.75,
+    "outputCostPer1M": 14
+   },
+   {
+    "id": "gpt-5.2-pro",
+    "inputCostPer1M": 21,
+    "outputCostPer1M": 168
+   },
+   {
+    "id": "gpt-4.1",
+    "inputCostPer1M": 2,
+    "outputCostPer1M": 8
+   },
+   {
+    "id": "gpt-4.1-mini",
+    "inputCostPer1M": 0.4,
+    "outputCostPer1M": 1.6
+   },
+   {
+    "id": "gpt-4o",
+    "inputCostPer1M": 2.5,
+    "outputCostPer1M": 10
+   },
+   {
+    "id": "gpt-4o-mini",
+    "inputCostPer1M": 0.15,
+    "outputCostPer1M": 0.6
+   },
+   {
+    "id": "chat-latest",
+    "inputCostPer1M": 5,
+    "outputCostPer1M": 30
+   }
+  ],
+  "anthropic": [
+   {
+    "id": "claude-fable-5-1",
+    "inputCostPer1M": 10,
+    "outputCostPer1M": 50
+   },
+   {
+    "id": "claude-opus-5-5",
+    "inputCostPer1M": 4,
+    "outputCostPer1M": 20
+   },
+   {
+    "id": "claude-sonnet-5-5",
+    "inputCostPer1M": 2,
+    "outputCostPer1M": 10
+   },
+   {
+    "id": "claude-fable-5",
+    "inputCostPer1M": 10,
+    "outputCostPer1M": 50
+   },
+   {
+    "id": "claude-opus-5",
+    "inputCostPer1M": 5,
+    "outputCostPer1M": 25
+   },
+   {
+    "id": "claude-sonnet-5",
+    "inputCostPer1M": 2,
+    "outputCostPer1M": 10
+   },
+   {
+    "id": "claude-opus-4-8",
+    "inputCostPer1M": 5,
+    "outputCostPer1M": 25
+   },
+   {
+    "id": "claude-opus-4-7",
+    "inputCostPer1M": 5,
+    "outputCostPer1M": 25
+   },
+   {
+    "id": "claude-opus-4-6",
+    "inputCostPer1M": 5,
+    "outputCostPer1M": 25
+   },
+   {
+    "id": "claude-sonnet-4-6",
+    "inputCostPer1M": 3,
+    "outputCostPer1M": 15
+   },
+   {
+    "id": "claude-opus-4-5",
+    "inputCostPer1M": 5,
+    "outputCostPer1M": 25
+   },
+   {
+    "id": "claude-haiku-4-5",
+    "inputCostPer1M": 1,
+    "outputCostPer1M": 5
+   }
+  ],
+  "groq": [
+   {
+    "id": "openai/gpt-oss-120b",
+    "inputCostPer1M": 0.15,
+    "outputCostPer1M": 0.6
+   },
+   {
+    "id": "openai/gpt-oss-20b",
+    "inputCostPer1M": 0.075,
+    "outputCostPer1M": 0.3
+   },
+   {
+    "id": "qwen/qwen3.8-27b",
+    "inputCostPer1M": 0.8,
+    "outputCostPer1M": 4,
+    "preview": true
+   }
+  ],
+  "gemini": [
+   {
+    "id": "gemini-3.8-flash",
+    "inputCostPer1M": 0.75,
+    "outputCostPer1M": 3.75
+   },
+   {
+    "id": "gemini-3.7-flash",
+    "inputCostPer1M": 0.75,
+    "outputCostPer1M": 3.75
+   },
+   {
+    "id": "gemini-3.6-flash",
+    "inputCostPer1M": 0.75,
+    "outputCostPer1M": 3.75
+   },
+   {
+    "id": "gemini-3.5-flash",
+    "inputCostPer1M": 1.5,
+    "outputCostPer1M": 9
+   },
+   {
+    "id": "gemini-3.5-flash-lite",
+    "inputCostPer1M": 0.3,
+    "outputCostPer1M": 2.5
+   },
+   {
+    "id": "gemini-3.1-pro-preview",
+    "inputCostPer1M": 2,
+    "outputCostPer1M": 12,
+    "preview": true
+   },
+   {
+    "id": "gemini-3-flash-preview",
+    "inputCostPer1M": 0.5,
+    "outputCostPer1M": 3,
+    "preview": true
+   }
+  ],
+  "xai": [
+   {
+    "id": "grok-4.7",
+    "inputCostPer1M": 2,
+    "outputCostPer1M": 6
+   },
+   {
+    "id": "grok-4.6",
+    "inputCostPer1M": 2,
+    "outputCostPer1M": 6
+   },
+   {
+    "id": "grok-4.5",
+    "inputCostPer1M": 2,
+    "outputCostPer1M": 6
+   },
+   {
+    "id": "grok-4.3",
+    "inputCostPer1M": 1.25,
+    "outputCostPer1M": 2.5
+   },
+   {
+    "id": "grok-4.20-0309-reasoning",
+    "inputCostPer1M": 1.25,
+    "outputCostPer1M": 2.5
+   },
+   {
+    "id": "grok-4.20-0309-non-reasoning",
+    "inputCostPer1M": 1.25,
+    "outputCostPer1M": 2.5
+   },
+   {
+    "id": "grok-build-0.1",
+    "inputCostPer1M": 1,
+    "outputCostPer1M": 2
+   }
+  ],
+  "0g-compute": [
+   {
+    "id": "glm-5",
+    "inputCostPer1M": 0.667,
+    "outputCostPer1M": 3
+   },
+   {
+    "id": "qwen3.7-plus",
+    "inputCostPer1M": 0.292,
+    "outputCostPer1M": 1.167
+   },
+   {
+    "id": "glm-5.3",
+    "inputCostPer1M": 1.4,
+    "outputCostPer1M": 4.4
+   },
+   {
+    "id": "0GM-1.0-35B-A3B",
+    "inputCostPer1M": 0.08,
+    "outputCostPer1M": 0.48
+   },
+   {
+    "id": "0GM-1.0-35B-A3B-SIA",
+    "inputCostPer1M": 0.536,
+    "outputCostPer1M": 3.216
+   }
+  ]
+ }
+}

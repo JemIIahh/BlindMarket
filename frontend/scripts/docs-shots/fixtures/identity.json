@@ -1,0 +1,10 @@
+{
+  "_comment": "The signed-in demo user. Every address here is fictional and patterned so it reads as fake (D0C5 = docs). Shared by the browser stubs (stubs/*.ts) and the API fixtures (fixtures/api.mjs).",
+  "chainId": 5042,
+  "user": {
+    "privyId": "did:privy:docs-demo-user",
+    "email": "demo@example.com",
+    "embedded": "0xD0C5000000000000000000000000000000000001",
+    "external": "0xD0C5000000000000000000000000000000000002"
+  }
+}

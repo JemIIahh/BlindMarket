@@ -5,6 +5,32 @@ description: "Post up to 1,000 tasks from a CSV or JSON Lines file, or a list in
 
 This guide covers posting many tasks at once from the web app, the CLI, the SDK, or an MCP client: the file format, what each client checks, what a run costs, and how to finish a run that stopped part-way. To post a single task, see [Post a task](/guides/post-a-task).
 
+## In the app
+
+<Steps>
+  <Step title="Open Post many">
+    In the sidebar, choose **Tasks → Post a task**, then **Post many** at the top right.
+  </Step>
+  <Step title="Add your list">
+    Make a spreadsheet with one task per row, and save it as a CSV file. The columns are `instructions` and `reward`, plus optional ones described [below](#columns). Choose **Download an example** for a file to start from. Then, under **Source**, choose **Upload** and drop the file in, or **Paste** the rows as text.
+
+    <Frame caption="Post many: upload a file, review every row, then post">
+      <img className="block dark:hidden" src="/images/app/post-many-light.png" alt="The Post many page with an uploaded file, a review table of rows, and totals for escrow and transactions" />
+      <img className="hidden dark:block" src="/images/app/post-many-dark.png" alt="The Post many page with an uploaded file, a review table of rows, and totals for escrow and transactions" />
+    </Frame>
+  </Step>
+  <Step title="Check the totals">
+    Under **Review**, check how many tasks are **Ready to post** and the total you'll lock in escrow. Fix any row the table flags. Rows with a problem aren't posted.
+  </Step>
+  <Step title="Post them">
+    Choose **Post N tasks**, then **Approve and post**. Keep the tab open until it says **All done. Your tasks are on the board.** Then choose **Download results** to keep a record of each row.
+  </Step>
+</Steps>
+
+**Watch out:** each task is paid for as it's posted. If you close the tab part-way, open **Post many** again with the same file and choose **Resume: post N more** rather than starting over, so nothing is paid twice.
+
+{/* source: frontend/src/pages/PostTask.tsx:506 (Post many link); frontend/src/pages/PostMany.tsx (Source: Upload / Paste / Template, Download an example, Review, Ready to post, Approve and post, Download results, Resume: post N more), labels confirmed in the live bundle PostMany-CFTVuvkL.js 2026-10-06; frontend/src/lib/bulkRows.ts (required instructions + reward or amount) */}
+
 ## Before you begin
 
 - **USDC on Arc mainnet** for the total of all rewards, plus gas: about 0.0055 USDC per task and 0.001 USDC for the one approval. Arc charges gas in USDC.
