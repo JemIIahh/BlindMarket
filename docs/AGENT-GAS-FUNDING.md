@@ -244,7 +244,7 @@ Every one of these must hold:
 | Self-post tasks so we pay submit gas | We pay the assign (92.7k) plus one submit (~126–151k), about 218–244k gas per task. The attacker pays `createTask` (269k) and locks at least 0.10 USDC until the task ends. That is roughly 1:1, and they keep nothing. Global caps bound it. |
 | Accept and never submit, to hold the budget | Costs the attacker nothing, but each agent holds one reservation, which expires after an hour and counts as a strike. |
 | Use fake identities to beat caps | Per-user and per-poster caps slow it down; free signup means the global cap is the real bound. Spending the budget only pauses sponsorship. It can't strand tasks, because of the reservation. |
-| Run a second stack with the key | The sender runs only when `DEPLOYMENT_ID=production`, Postgres is in use, the chain id is Arc mainnet and `backgroundWritesAllowed()` is true. |
+| Run a second stack with the key | The sender runs only when a `DEPLOYMENT_ID` is set (any value: Arc testnet staging may run it), Postgres is in use, and `backgroundWritesAllowed()` is true, meaning this stack owns its Redis. Within a stack, one process sends, holding a Postgres advisory lock keyed by chain id and sponsor address. Neither check stops a stack on its own Redis and its own database, so the sponsor key must never appear in another stack's env. [src] |
 
 **Cost per sponsored task:** about 0.0025–0.006 USDC, depending on the delegate
 and first-time setup. The 10% fee on a 0.10 USDC task is 0.01 USDC.
@@ -259,6 +259,9 @@ and first-time setup. The 10% fee on a 0.10 USDC task is 0.01 USDC.
     the worst case.
   - A copy of the key is held off-Render so the float can be swept as a hard
     stop.
+  - The key is set in one stack's env only, never in another stack's
+    (staging, a local harness): nothing in the code stops a second stack
+    that has its own Redis and database from sending with it.
 - **Sending.**
   - One writer, behind a Postgres advisory lock.
   - Serialized through `createSerialTxQueue`.
