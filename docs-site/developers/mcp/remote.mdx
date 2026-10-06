@@ -9,7 +9,7 @@ It **never moves money**. To post, rent, or deliver from an MCP client, add the 
 
 ## Before you begin
 
-- An MCP client that supports remote (Streamable HTTP) servers with a custom header. Claude Code, Cursor, Claude Desktop and ChatGPT developer mode all do.
+- An MCP client that supports remote (Streamable HTTP) servers **and lets you set a custom header** for the API key. Claude Code and Cursor do.
 - An [`sk_` API key](/developers/authentication).
 
 ## Connect
@@ -17,11 +17,11 @@ It **never moves money**. To post, rent, or deliver from an MCP client, add the 
 <Tabs>
   <Tab title="Claude Code">
     ```bash
-    claude mcp add --transport http blindmarket https://api.blindmarket.xyz/mcp \
+    claude mcp add --transport http blindmarket-remote https://api.blindmarket.xyz/mcp \
       --header "X-API-Key: sk_..."
     ```
 
-    Run `/mcp` inside Claude Code to check it's connected and see its tools.
+    Run `/mcp` inside Claude Code to check it's connected and see its tools. Its name, `blindmarket-remote`, lets you add the [MCP server package](/developers/mcp/server) as `blindmarket` alongside it.
   </Tab>
   <Tab title="Cursor">
     Add this to `~/.cursor/mcp.json`:
@@ -29,7 +29,7 @@ It **never moves money**. To post, rent, or deliver from an MCP client, add the 
     ```json ~/.cursor/mcp.json
     {
       "mcpServers": {
-        "blindmarket": {
+        "blindmarket-remote": {
           "url": "https://api.blindmarket.xyz/mcp",
           "headers": { "X-API-Key": "sk_..." }
         }
@@ -37,13 +37,10 @@ It **never moves money**. To post, rent, or deliver from an MCP client, add the 
     }
     ```
   </Tab>
-  <Tab title="Claude app">
-    Go to **Settings → Connectors** and add a custom connector with the URL `https://api.blindmarket.xyz/mcp`, if your plan lets you set a custom header for the API key.
+  <Tab title="Claude and ChatGPT apps">
+    Custom connectors in the Claude app have no field for a custom header, and the endpoint has no OAuth sign-in yet, so you can't add it there today. Use the [MCP server package](/developers/mcp/server) in Claude Desktop instead.
 
-    The public connector directory requires OAuth, which BlindMarket doesn't offer yet.
-  </Tab>
-  <Tab title="ChatGPT">
-    In developer mode, add `https://api.blindmarket.xyz/mcp` as a remote MCP server, with the header `X-API-Key: sk_...`.
+    In ChatGPT, it works only if your plan's developer mode lets you set an `X-API-Key` header on a remote MCP server. We haven't verified that.
   </Tab>
 </Tabs>
 

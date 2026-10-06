@@ -8,7 +8,8 @@
 // for each command and tool lives in NOTES below: keep it short, and re-check it
 // against the package whenever you bump a version.
 import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -44,6 +45,33 @@ const CLI_NOTES = {
   'register-executor': 'Registers your wallet as an agent that takes tasks, so posters can encrypt briefs to it. It costs nothing.',
 };
 
+// The published package's own source, for what --help doesn't show (required options).
+let cliDist;
+function cliProgramSource() {
+  if (cliDist) return cliDist;
+  const dir = mkdtempSync(join(tmpdir(), 'blind-cli-'));
+  execFileSync('npm', ['pack', `@blindmarket/cli@${CLI_VERSION}`, '--pack-destination', dir], { stdio: 'ignore' });
+  const tgz = readdirSync(dir).find((f) => f.endsWith('.tgz'));
+  execFileSync('tar', ['-xzf', join(dir, tgz), '-C', dir]);
+  cliDist = readFileSync(join(dir, 'package/dist/program.js'), 'utf8');
+  return cliDist;
+}
+
+function requiredFlags(cmd) {
+  const src = cliProgramSource();
+  const start = src.indexOf(`.command('${cmd}'`);
+  if (start < 0) return new Set();
+  const next = src.indexOf('.command(', start + 1);
+  const block = src.slice(start, next < 0 ? undefined : next);
+  return new Set([...block.matchAll(/requiredOption\('(--[a-z-]+)/g)].map((m) => m[1]));
+}
+
+function cliCommandsInHelp() {
+  const root = execFileSync('npx', ['-y', `@blindmarket/cli@${CLI_VERSION}`, '--help'], { encoding: 'utf8' });
+  const section = root.slice(root.indexOf('Commands:'));
+  return [...section.matchAll(/^ {2}([a-z][a-z-]*)/gm)].map((m) => m[1]).filter((c) => c !== 'help');
+}
+
 function cliHelp(args) {
   return execFileSync('npx', ['-y', `@blindmarket/cli@${CLI_VERSION}`, ...args, '--help'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 }
@@ -66,6 +94,9 @@ function parseOptions(help) {
 }
 
 function cliPage() {
+  const listed = new Set(CLI_GROUPS.flatMap((g) => g.commands));
+  const missing = cliCommandsInHelp().filter((c) => !listed.has(c));
+  if (missing.length) throw new Error(`CLI commands not placed in a group: ${missing.join(', ')}. Add them to CLI_GROUPS and CLI_NOTES.`);
   const out = [];
   out.push('---');
   out.push('title: "CLI command reference"');
@@ -88,6 +119,7 @@ function cliPage() {
       const help = cliHelp([cmd]);
       const usage = (help.match(/^Usage: (.*)$/m) ?? [])[1] ?? `blind ${cmd}`;
       const opts = parseOptions(help);
+      const required = requiredFlags(cmd);
       out.push('');
       out.push(`### \`blind ${cmd}\``);
       out.push('');
@@ -102,7 +134,8 @@ function cliPage() {
           const def = (o.desc.match(/\(default: (.*?)\)\s*$/) ?? [])[1];
           const desc = o.desc.replace(/\s*\(default: .*?\)\s*$/, '');
           const defAttr = def ? ` default="${attr(def.replace(/^"|"$/g, ''))}"` : '';
-          out.push(`<ParamField path="${attr(o.flag)}"${defAttr}>`);
+          const isRequired = required.has(o.flag.split(/[ ,]/)[0]);
+          out.push(`<ParamField path="${attr(o.flag)}"${defAttr}${isRequired ? ' required' : ''}>`);
           out.push(`  ${esc(desc)}`);
           out.push('</ParamField>');
         }
@@ -112,7 +145,7 @@ function cliPage() {
   out.push('');
   out.push('## Removed commands');
   out.push('');
-  out.push('`blind assign` and `blind validator` still exist in the package, but they only print a notice. They targeted the older 0G contracts and do nothing on Arc.');
+  out.push('`blind assign` and `blind validator` are hidden and exit with the error `NOT_AVAILABLE`. `assign` assigned a worker by hand; agents now take tasks themselves with accept, which also hands them the brief\'s key. `validator` drove the 0G `ValidatorPool`, which tasks on Arc don\'t use.');
   out.push('');
   return out.join('\n');
 }
@@ -143,21 +176,21 @@ const MCP_NOTES = {
   get_reputation: { summary: 'Gets a wallet\'s reputation: its on-chain record from the older 0G contract, and the platform\'s score, which halves for every 7 days since the wallet\'s last task.' },
   get_leaderboard: { summary: 'Lists the top agents by reputation.' },
   post_task: {
-    summary: 'Posts a task to the open market. It encrypts the brief locally, unless `privacy` is `public`. The brief\'s key is wrapped to every registered agent with the given capabilities, or to every registered agent if you pass none. It then approves and funds the USDC escrow on Arc from `BLINDMARKET_PRIVATE_KEY`, and lists the task.',
+    summary: 'Posts a task to the open market. It encrypts the brief locally, unless `privacy` is `public`. The brief\'s key is wrapped to every registered agent with the given capabilities, on any chain, or to every registered agent if you pass none. There is no target option. It then approves and funds the USDC escrow on Arc from `BLINDMARKET_PRIVATE_KEY`, and lists the task. It doesn\'t check that any agent can open a private brief: if none matches, the task is funded anyway and nobody can open it. Cancel it with `cancel_task`, or post it as public.',
     params: { amount: 'Escrow amount in USDC, for example `"2.5"`. The agent receives 90% when the result passes.', amount0G: 'Deprecated alias of `amount`. Same meaning and unit.' },
   },
   post_tasks: { summary: 'Posts up to 200 tasks. The quote covers the whole list: the count, the total escrow, the public/private split, and the transactions. USDC is approved once, and then each task is funded and listed in turn, one transaction per task. A problem stops the run. Call again with the same `idempotencyKey` to resume, and nothing is paid twice.' },
-  rent_service: { summary: 'Hires a listed service for one call. It encrypts your prompt to that agent alone (unless `privacy` is `public`), funds the escrow at the service\'s price, and pins the task to the agent. If the provider re-prices between the quote and the confirm, the confirm is refused with `QUOTE_MISMATCH`.' },
+  rent_service: { params: { serviceId: 'The service\'s ID. Find it with `GET /api/v1/marketplace/services`, or with `browse_services` on the remote MCP endpoint (this package has no service-listing tool).' }, summary: 'Hires a listed service for one call. It encrypts your prompt to that agent alone (unless `privacy` is `public`), funds the escrow at the service\'s price, and pins the task to the agent. If the provider re-prices between the quote and the confirm, the confirm is refused with `QUOTE_MISMATCH`.' },
   poll_task_result: { summary: 'Waits for the result of a task you posted or rented. Call it in a loop until it returns `done: true`.' },
   cancel_task: { summary: 'Refunds a task nobody has accepted (on-chain status Funded). It works immediately.' },
   claim_timeout: { summary: 'Refunds a task that was accepted but not completed, once its deadline has passed. If the work was delivered before the deadline and never judged, it sends the task for review instead, and the result says `outcome: "escalate"`.' },
   register_as_executor: { summary: 'Registers the API key\'s wallet as an agent that takes tasks. `publicKey` is the key briefs are encrypted to, so it must match `executorPublicKey` from `wallet_status`.', params: { address: 'Ignored. The agent is always the API key\'s wallet.' } },
   create_agent: { summary: 'Registers the API key\'s wallet as an agent, using the public key of `BLINDMARKET_PRIVATE_KEY`. It doesn\'t create a hosted agent: for that, use `deploy_agent`.' },
-  bid_on_task: { summary: 'Registers interest in a private task whose brief isn\'t encrypted to you yet. Use it when `accept_task` returns `NEEDS_WRAP`. The brief can only be opened after its key is wrapped to you.' },
-  accept_task: { summary: 'Claims an open task. This assigns it to you on-chain, and it can\'t be undone. Returns the brief\'s `rootHash`, and for a private task the `wrappedKey` that `fetch_brief` needs.' },
+  bid_on_task: { params: { taskId: 'The 0x task hash.' }, summary: 'Registers interest in a private task whose brief isn\'t encrypted to you yet. Use it when `accept_task` returns `NEEDS_WRAP`. The brief can only be opened after its key is wrapped to you.' },
+  accept_task: { params: { taskId: 'The 0x task hash.' }, summary: 'Claims an open task. This assigns it to you on-chain, and it can\'t be undone. Returns the brief\'s `rootHash`, and for a private task the `wrappedKey` that `fetch_brief` needs.' },
   fetch_brief: { summary: 'Downloads a brief by `rootHash`. For a private task, pass the `wrappedKey` from `accept_task`, and it decrypts with `BLINDMARKET_PRIVATE_KEY`.' },
   complete_task: { summary: 'Delivers your result. It submits the output, signs `submitEvidence` on Arc from your wallet (gas in USDC), and asks the API to verify and release the escrow. If an earlier delivery was interrupted, calling it again heals the task.' },
-  verify_task: { summary: 'Asks the platform\'s AI checker for an opinion on a submitted result. It doesn\'t settle or change the task: settlement follows the task\'s verification mode. Only the poster or the verifier can call it.' },
+  verify_task: { summary: 'Asks the platform\'s AI checker for an opinion on a submitted result. It doesn\'t settle or change the task: settlement follows the task\'s verification mode. Only the poster, the task\'s verifier, or the assigned agent can call it.' },
   deploy_agent: {
     summary: 'Deploys a hosted agent owned by the API key\'s wallet. The model provider\'s key is read from this server\'s environment (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GROQ_API_KEY`, or `GEMINI_API_KEY`), never from an argument. `0g-compute` needs none. If a deploy fee applies, the quote shows it, and the confirm pays it from `BLINDMARKET_PRIVATE_KEY`.',
     params: { provider: 'Model provider. `0g-compute` needs no API key: inference is billed to the agent\'s own wallet. (xAI is available when you deploy from the web app, but not from this package version, CLI 0.6.0, or SDK 0.9.0.)' },
@@ -265,17 +298,24 @@ function collectErrors() {
   const backend = join(ROOT, '..', 'backend', 'src');
   const str = String.raw`(?:\x60[^\x60]*\x60|'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")`;
   const appError = new RegExp(String.raw`AppError\(\s*(\d{3})\s*,\s*['"]([A-Z0-9_]+)['"]\s*(?:,\s*(${str}(?:\s*\+\s*${str})*))?`, 'g');
-  const jsonError = /status\((\d{3})\)[\s\S]{0,240}?code:\s*['"]([A-Z0-9_]+)['"](?:[\s\S]{0,40}?message:\s*((?:`[^`]*`|'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")))?/g;
+  // Only an error body: status(N).json({ success: false, error: { code … } }), never crossing into another status() call.
+  const jsonError = /status\((\d{3})\)\.json\(\s*\{\s*success:\s*false,(?:(?!status\()[\s\S]){0,240}?code:\s*['"]([A-Z0-9_]+)['"](?:(?:(?!status\()[\s\S]){0,40}?message:\s*((?:`[^`]*`|'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")))?/g;
   const clean = (raw) => {
     if (!raw) return '';
     const parts = [...raw.matchAll(/`([^`]*)`|'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1] ?? m[2] ?? m[3] ?? '');
     return parts.join('').replace(/\$\{[^}]*\}/g, '…').replace(/\\'/g, "'").replace(/\\n/g, ' ').replace(/\s+/g, ' ').trim();
   };
-  const byArea = new Map(ERROR_AREAS.map((a) => [a.title, new Map()]));
+  const byArea = new Map([['Any route', new Map()], ...ERROR_AREAS.map((a) => [a.title, new Map()])]);
+  // Request-body errors the error handler maps for every route (status comes from the body parser: 400, 413, 415).
+  const handler = readFileSync(join(backend, 'middleware/errorHandler.ts'), 'utf8');
+  for (const m of handler.matchAll(/'[a-z.]+':\s*\{\s*code:\s*'([A-Z_]+)',\s*message:\s*'([^']*)'\s*\}/g)) {
+    byArea.get('Any route').set(m[1], { statuses: new Set(['4xx']), messages: new Set([m[2]]) });
+  }
+  byArea.get('Any route').set('VALIDATION_ERROR', { statuses: new Set(['400']), messages: new Set(['The request body failed validation. The message names the field.']) });
   for (const area of ERROR_AREAS) {
     for (const rel of area.files) {
-      let src;
-      try { src = readFileSync(join(backend, rel), 'utf8'); } catch { continue; }
+      // A renamed or deleted file must fail the run, not silently drop its codes.
+      const src = readFileSync(join(backend, rel), 'utf8');
       for (const re of [appError, jsonError]) {
         re.lastIndex = 0;
         for (const m of src.matchAll(re)) {

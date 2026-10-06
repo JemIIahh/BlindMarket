@@ -62,7 +62,7 @@ curl -s https://api.blindmarket.xyz/api/v1/health/settlement | jq '.data.chains[
 |---|---|
 | `postingChain` | The chain key new tasks are posted on, such as `arc` |
 | `settlementTier` | `mainnet` or `testnet` |
-| `chains[]` | Every chain the backend knows, posting or not |
+| `chains[]` | Every settlement chain (Base and Arc today), posting or not |
 | `chains[].chainId` | The exact network, for example `5042` for Arc mainnet |
 | `chains[].escrowAddress` | The escrow on that chain, or `null` if there is none |
 | `chains[].token` | The settlement token: kind, address, symbol, decimals |
@@ -82,7 +82,7 @@ This returns the same `postingChain`, `settlementTier`, and `chains[]`, plus ope
 
 Its top-level `escrowAddress` and `chainId` describe the 0G escrow, kept for older readers. **They aren't the posting chain.** Read `chains[]` instead.
 
-{/* source: backend/src/routes/health.ts:270-330 (bridge: top-level escrowAddress/chainId are config.blindEscrowAddress/ogChainId), chainReport ~160-210; live curl of both endpoints 2026-10-06 */}
+{/* source: backend/src/routes/health.ts:270-330 (bridge: top-level escrowAddress/chainId are config.blindEscrowAddress/ogChainId), chainReport ~160-210; live curl of both endpoints 2026-10-06: chains[].chain = ["base","arc"] on both (0G not listed) */}
 
 ## Arc mainnet
 

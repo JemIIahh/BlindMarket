@@ -29,21 +29,21 @@ Every refusal happens before anything is signed or sent.
 
 ## Which wallet
 
-Each spend is checked against the wallet the API key belongs to (`GET /api/v1/api-keys/whoami`):
+Posting, deploy fees and agent registration are checked against the wallet the API key belongs to (`GET /api/v1/api-keys/whoami`):
 
 - **Posting** must come from exactly the key's wallet, because the task is posted as that wallet. A different signer is refused with `OWNER_MISMATCH`.
-- **Deploy fees** may come from the key's wallet or any wallet linked to the same account.
+- **Deploy fees** must come from the key's wallet too. With an `sk_` key, `whoami` lists no other wallet, even if your account links several, so another payer is refused with `OWNER_MISMATCH` before paying.
 - **Registering an agent** (`createAgent()`, `WorkerRuntime.start()`) checks the private key before registering anything. Registering the wrong key would point every new brief at a wallet that can't sign its delivery.
 
-For a spend, the check fails closed. If the SDK can't ask the API, it refuses with `OWNER_UNCHECKED` and sends nothing.
+For a spend, the check fails closed. If the SDK can't ask the API, it refuses with `OWNER_UNCHECKED` and sends nothing. Refunds and deliveries aren't checked this way: the escrow accepts them only from the task's poster or its assigned agent.
 
-{/* source: dist/index.js assertSpender() (exact for 'A task', linked addresses for deploy fee, OWNER_UNCHECKED), assertOwnerKey() (createAgent; skipped only when whoami answers 404) */}
+{/* source: dist/index.js assertSpender() (exact for 'A task', whoami.addresses for deploy fee, OWNER_UNCHECKED), assertOwnerKey() (createAgent; skipped only when whoami answers 404), no owner check in sendRefund()/deliverResult(); backend/src/middleware/auth.ts:322 (sk_ key addresses = [ownerAddress]); contracts BlindEscrow.sol cancelTask/claimTimeout onlyAgent, submitEvidence onlyWorker */}
 
 ## Which chain
 
 The API names the chain each transaction belongs to, and `GET /health/settlement` lists each chain's id and escrow. The SDK checks three things:
 
-- **Your RPC serves that chain id.** It asks your RPC with `eth_chainId`. A mismatch is `WRONG_CHAIN`. An RPC that doesn't answer is `RPC_UNREACHABLE`. A chain with no RPC in your config is `NO_RPC`.
+- **Your RPC serves that chain id.** It asks your RPC with `eth_chainId`. A mismatch is `WRONG_CHAIN`. An RPC that doesn't answer is `RPC_UNREACHABLE`. A chain with no RPC in your config is `NO_RPC`, or a plain `Error` naming the chain from `deliverResult()`.
 - **The transaction is for the chain you expect.** If the API built a post for a different chain from the posting chain it advertised a moment earlier, that's `POSTING_CHAIN_CHANGED`. A refund built for a different chain from the one you named is `CHAIN_MISMATCH`.
 - **The chain has a listed escrow.** Otherwise it's `CHAIN_UNKNOWN`, because there's nothing to check the target against.
 
@@ -151,11 +151,19 @@ Two more checks run before the first transaction of a spend:
 
 With a local key (an ethers `Wallet` with a provider), the SDK signs the transaction first. It hands you the hash, nonce and signed bytes through `onFunded` when posting, or the hash through `onFeePaid` for a deploy fee, and only then broadcasts it. So you hold a record of any transaction that may land, even if the reply from the node is lost.
 
-If the broadcast gets no answer, or the transaction isn't seen to confirm within `confirmTimeoutMs` (180 seconds by default), you get `UNCONFIRMED` with `err.txHash`. The transaction may still land. Check it on the explorer before sending anything else. While its nonce is unused, the saved signed bytes can be re-broadcast as they are, and they can only land once.
+If the broadcast gets no answer, or the transaction isn't seen to confirm within `confirmTimeoutMs` (180 seconds by default), the transaction may still land. How you're told depends on the transaction:
+
+- **Escrow funding or a refund:** an `ApiError` with code `UNCONFIRMED` and `err.txHash`.
+- **A deploy fee:** an `ApiError` with code `UNCONFIRMED` and `err.feeTxHash`. For an `AgentFactory` payment, the hash is in `err.body.factoryTxHash`.
+- **The USDC approval before a post:** a raw `UnconfirmedTransactionError` (check `err.name`), with the hash in `err.hash`. Inside `postTasks()` it fails the row instead, with the hash in the row's error message.
+
+Check the transaction before sending anything else. While its nonce is unused, the saved signed bytes can be re-broadcast as they are, and they can only land once.
+
+Deliveries work differently. `deliverResult()` sends `submitEvidence` with ethers directly, without the record step, and waits for it with no time limit. If it fails, call `deliverResult()` again: it finishes the delivery rather than starting another.
 
 If your wallet replaces the transaction, for example to speed it up, the callback is called again with the new hash. A browser wallet signs and sends in one step, so its hash arrives just after the broadcast.
 
-{/* source: dist/onchain.js sendAndWait() (signsLocally -> sign, notify(onSent, hash, nonce, raw), broadcastTransaction; UnconfirmedTransactionError; TRANSACTION_REPLACED handling), DEFAULT_CONFIRM_TIMEOUT_MS 180000; CHANGELOG 0.9.0 */}
+{/* source: dist/onchain.js sendAndWait() (signsLocally -> sign, notify(onSent, hash, nonce, raw), broadcastTransaction; UnconfirmedTransactionError (name, hash); TRANSACTION_REPLACED handling), ensureAllowance(), DEFAULT_CONFIRM_TIMEOUT_MS 180000; dist/index.js postTask() (UNCONFIRMED + txHash; approval outside try), sendRefund() (UNCONFIRMED + txHash), deployAgent()/withFee() (UNCONFIRMED + feeTxHash; factory: body.factoryTxHash), postRow()/postChunk() (approval failure -> failed row), deliverResult() (wallet.sendTransaction + tx.wait() without timeout); CHANGELOG 0.9.0 */}
 
 ## What's safe to repeat
 

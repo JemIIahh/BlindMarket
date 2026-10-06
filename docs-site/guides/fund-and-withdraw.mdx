@@ -96,27 +96,19 @@ Each transaction costs under a cent at today's gas prices. Keep a little more th
 
 ### What bridging costs
 
-Circle takes a small fee from the amount, and the dialog shows it before you confirm. For 10 USDC today, the quotes were:
-
-| From | Circle's fee on 10 USDC |
-|---|---|
-| Base | about 0.022 USDC |
-| Ethereum, Arbitrum | about 0.017 USDC |
-| Polygon PoS | about 0.016 USDC |
-
-Fees change. Get a live quote, in USDC's 6-decimal units, before you bridge:
+Circle takes a small fee from the amount, and the dialog shows it, with what you'll receive, before you confirm. At the time of writing, the fee on 10 USDC was a few hundredths of a USDC, and it changes from hour to hour. Get a live quote before you bridge. `sourceChain` is `base`, `ethereum`, `arbitrum`, or `polygon`, and `amountRaw` is in USDC's 6-decimal units (`10000000` is 10 USDC):
 
 ```bash Terminal
 curl -s "https://api.blindmarket.xyz/api/v1/cctp/quote?sourceChain=base&destChain=arc&amountRaw=10000000"
 ```
 
 ```json Response
-{"success":true,"data":{"maxFeeRaw":"21594","estimatedReceiveRaw":"9978406"}}
+{"success":true,"data":{"maxFeeRaw":"<fee in raw units>","estimatedReceiveRaw":"<what arrives on Arc, in raw units>"}}
 ```
 
-You also pay the source chain's gas, for the approval and the transfer.
+`maxFeeRaw` is the most Circle takes, and `estimatedReceiveRaw` is what reaches your wallet. You also pay the source chain's gas, for the approval and the transfer.
 
-{/* source: executed GET /api/v1/cctp/quote for base, ethereum, arbitrum, polygon → arc with amountRaw 10000000 on 2026-10-06 (maxFeeRaw 21594, 16800, 16800, 15800) */}
+{/* source: executed GET /api/v1/cctp/quote for base, ethereum, arbitrum, polygon → arc with amountRaw 10000000 twice on 2026-10-06: first maxFeeRaw 21594/16800/16800/15800, hours later 16638/16638/16638/15638 (drifts, so no fixed numbers on the page); frontend/src/components/CctpFundModal.tsx quote hint */}
 
 ## Withdraw your USDC
 
@@ -188,7 +180,7 @@ The 10% is read from the escrow each time a task settles. See [Escrow and fees](
     Bridging is turned off on the deployment you're using. `GET /api/v1/cctp/config` returns `"enabled": false` when it is.
   </Accordion>
   <Accordion title="You need a little ETH on Base to pay the network fee">
-    Your linked wallet has no gas on the source chain. Add some of that chain's coin, or unlink the wallet and bridge from your BlindMarket wallet.
+    Your linked wallet has no gas on the source chain. Add some of that chain's coin, or disconnect that wallet and bridge from your BlindMarket wallet.
   </Accordion>
   <Accordion title="Still bridging after 10 minutes">
     The dialog stopped waiting, but the transfer didn't stop: Circle's mint can still land. Check your balance later. If it never arrives, contact support with the transfer number the dialog showed.

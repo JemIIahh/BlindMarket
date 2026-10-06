@@ -26,10 +26,10 @@ A key is `sk_` followed by 64 hex characters (32 random bytes). You can revoke i
 {/* source: backend/src/services/apiKeyStore.ts:6,32,58-59 (sk_ + randomBytes(32).hex, sha256 hash, prefix = first 8 chars); frontend/src/pages/Settings.tsx §04 API keys "Revocable · stored as hash", "Create key" */}
 
 <Note>
-Only a signed-in person can create keys, not a hosted agent's token or another key. Keys don't expire. There are no per-key scopes today: a key has the full API authority of its wallet. Treat every key as a password.
+Keys don't expire, and there are no per-key scopes: a key has the full API authority of its wallet. That includes creating and revoking other API keys for the same wallet. Hosted agents' tokens can't create keys. Treat every key as a password.
 </Note>
 
-{/* source: backend/src/routes/apiKeys.ts:24-32 (keys minted only from a signed-in account); capabilities column stored but not consulted by middleware/auth.ts */}
+{/* source: backend/src/routes/apiKeys.ts:24-32 (refuses only tokens with a `typ` — worker/registration tokens — and the legacy shared key; an sk_ key authenticates with no typ, middleware/auth.ts:322, so it can POST/DELETE /api/v1/api-keys); capabilities column stored but not consulted by middleware/auth.ts */}
 
 ## Which wallet a key belongs to
 
@@ -85,23 +85,35 @@ The clients read it from the environment:
 
 ## Rate limits
 
-Limits are counted per minute, as token buckets that refill continuously.
+There are two kinds of limit.
+
+**Fixed windows of 60 seconds:**
 
 | Who | Limit |
 |---|---|
 | Any caller, by IP address | 100 requests a minute |
-| Posting with a valid key (build, upload, list) | 120 items a minute per wallet, and 600 items a minute per IP across all wallets |
 | Posting with a key that fails to authenticate | 100 a minute per IP |
 | Hosted agents | 300 requests a minute per agent |
 
-Bulk calls count each item: a batch of 20 tasks uses 20 from the posting budget. Over the limit, the API answers `429` with code `RATE_LIMIT` and a message saying when to retry.
+Over one of these limits, the API answers `429` with code `RATE_LIMIT` and the message "Too many requests, please try again later". The `Retry-After` header says how many seconds to wait, and the `RateLimit-Policy` header shows the policy, for example `100;w=60`.
 
-{/* source: backend/src/middleware/rateLimit.ts:20 (AGENT_REQUESTS_PER_MIN=300), :37-58 (posting tiers, 600 items/IP), :96-135 (100/min per IP); src/constants.ts:80 (WALLET_POSTING_BUDGET_PER_MIN=120); batchWeight in routes */}
+**Token buckets for posting with a valid key.** These refill continuously, and are separate for each family of posting route: uploads, task builds, and task listings.
+
+| Who | Limit |
+|---|---|
+| One wallet | 120 items a minute per family |
+| One IP address | 600 items a minute across all posting routes and wallets |
+
+Bulk calls count each item: a batch of 20 tasks uses 20. Over a posting limit, the `429` message says which family is exhausted and how many seconds to wait.
+
+{/* source: backend/src/middleware/rateLimit.ts:20 (AGENT_REQUESTS_PER_MIN=300), :37-58 (posting tiers, 600 items/IP), :96-135 (express-rate-limit fixed 60s windows, 100/min per IP, fixed message), :207-235 (createWalletBudget token bucket, message with retry seconds); src/constants.ts:80 (WALLET_POSTING_BUDGET_PER_MIN=120) applied per family in storage.ts/tasks.ts/a2a.ts; live header ratelimit-policy: 100;w=60 */}
 
 ## Keep keys safe
 
 <Warning>
-An `sk_` key plus its wallet key can spend that wallet's USDC through BlindMarket. Use a dedicated wallet that holds only what you plan to spend, keep both keys in environment variables or a secrets manager, never commit them, and revoke a key the moment you suspect it leaked.
+Your wallet key alone can move that wallet's USDC on-chain. Your API key alone can act as your wallet in the API, read your tasks' results, and create more API keys. Use a dedicated wallet that holds only what you plan to spend, keep both keys in environment variables or a secrets manager, and never commit them.
+
+If an API key leaks, revoke **every** key in **Settings → API keys**, not just that one, because the leaked key could have created others. If a wallet key leaks, move the funds out first.
 </Warning>
 
 - The CLI stores the wallet key encrypted in `~/.blind/keystore.json`, readable only by your user account. In CI, set `BLINDMARKET_API_KEY` and `BLINDMARKET_PRIVATE_KEY` as secrets instead.

@@ -36,7 +36,7 @@ Tool definitions are public. `GET /api/v1/agents` returns each tool's name, desc
     Fill in the **Description**. It's required. The model reads it to decide when to call the tool, so say what the tool returns and when to use it.
   </Step>
   <Step title="Point it at the API">
-    Enter the **URL** and **Method**. Put path parameters in braces, like `https://api.example.com/v1/weather/{city}`; a parameter named in braces fills that slot. Under **Parameters**, choose **+ Add** for each input the model should fill in: a name, a type, a description, and **req** if it's required. Under **Param mapping**, choose where each one goes: **body**, **query**, or **header**.
+    Enter the **URL** and **Method**. Put path parameters in braces, like `https://api.example.com/v1/weather/{city}`; a parameter named in braces fills that slot. Under **Parameters**, choose **+ Add** for each input the model should fill in: a name, a type, a description, and **req** if it's required. Under **Param mapping**, choose where each one goes: **body** or **query**. The menu also offers **header**, but a header-mapped input isn't sent today: only the auth key goes in a header.
   </Step>
   <Step title="Check the mapping">
     The mapping menu shows **body** for every parameter, but the form saves a mapping only for the ones you change. A parameter with no saved mapping is never sent. Before you add the tool, switch to **Paste JSON** and check that `param_mapping` names every parameter that isn't in the URL. If one is missing, add it to the JSON there.
@@ -51,7 +51,7 @@ Tool definitions are public. `GET /api/v1/agents` returns each tool's name, desc
   </Step>
 </Steps>
 
-{/* source: frontend/src/components/bb/ToolManager.tsx manual form labels; backend/src/services/toolExecutor.ts buildUrl/injectAuth (query_param never injected) and validateToolDefinition; executed 2026-10-06 against current source: validateToolDefinition('web-search') → "name must be 1-64 chars, alphanumeric + underscore only", empty description → "description is required"; executeTool against an echo endpoint: bearer and header keys sent, query_param key absent; frontend/src/components/agent/OpsConsole.tsx "Tools saved. Restart the agent…" */}
+{/* source: frontend/src/components/bb/ToolManager.tsx manual form labels; backend/src/services/toolExecutor.ts buildUrl/injectAuth (query_param never injected) and validateToolDefinition; executed 2026-10-06 against current source: validateToolDefinition('web-search') → "name must be 1-64 chars, alphanumeric + underscore only", empty description → "description is required"; executeTool against an echo endpoint: bearer and header keys sent, query_param key absent, an input mapped to 'header' absent (buildUrl/buildBody handle only path placeholders, query and body); frontend/src/components/agent/OpsConsole.tsx "Tools saved. Restart the agent…" */}
 
 ## The tool definition
 
@@ -94,7 +94,7 @@ Every HTTP tool, whatever way you add it, is stored as one JSON definition. You 
   A full `http` or `https` URL. `{name}` placeholders are filled from the inputs and URL-encoded. Every placeholder needs a matching property.
 </ParamField>
 <ParamField path="execution.param_mapping" type="object" required>
-  Maps each input to `body`, `query`, `path`, or `header`. Body inputs are sent as one JSON object. A `POST`, `PUT`, or `PATCH` tool with no inputs at all gets a free-form `body` input instead, which the model fills in as JSON.
+  Maps each input to `body`, `query`, or `path`. Body inputs are sent as one JSON object. `header` is accepted but not sent today: an input mapped to it is dropped. A `POST`, `PUT`, or `PATCH` tool with no inputs at all gets a free-form `body` input instead, which the model fills in as JSON.
 </ParamField>
 <ParamField path="auth.type" type="string" required>
   `none`, `bearer` (sends `Authorization: Bearer <secret>`), or `header` (sends `<key_name>: <secret>`). `query_param` is accepted but not sent today.
@@ -123,7 +123,7 @@ Every HTTP tool, whatever way you add it, is stored as one JSON definition. You 
   <Step title="Fix each imported tool">
     Click each tool to edit it:
     - **URL.** Imported tools hold only the path, such as `/v1/weather/{city}`. The spec's server address isn't added, so the tool fails until you enter the full URL.
-    - **Param mapping.** Request-body fields are imported as query parameters. Set them back to **body**.
+    - **Param mapping.** Request-body fields are imported as query parameters. Set them back to **body**. Parameters the spec sends in a header are imported as **header**, which isn't sent today. Only the auth key can go in a header, through **Authentication**.
     - **Name.** If the spec's `operationId` has a hyphen, rename it.
 
     Then choose **Save changes**.
@@ -132,7 +132,7 @@ Every HTTP tool, whatever way you add it, is stored as one JSON definition. You 
 
 The importer reads OpenAPI 3.x in JSON, up to 10 MB. It names each tool after the operation's `operationId`, and describes it from the `summary`. It understands API-key schemes sent in a header, and HTTP bearer schemes. It doesn't handle HTTP basic, OAuth, or OpenID Connect.
 
-{/* source: backend/src/services/openApiParser.ts (JSON only, MAX_OPENAPI_SPEC_BYTES 10 MB, servers[0].url required, applyAuthFromSecurity apiKey/http bearer only, secret_ref "openapi:<scheme>"); backend/src/services/toolDslCompiler.ts compileFromOpenApi (url: op.path, body properties mapped to 'query', needs_review: true); executed 2026-10-06 against current source: parseOpenApiSpec on a sample spec gave execution.url "/weather/{city}" and body fields mapped to query, validateToolDefinition → "execution.url is not a valid URL"; YAML → "Could not parse OpenAPI spec. Only JSON is currently supported…"; frontend/src/components/bb/ToolManager.tsx (credentials block renders only inside the OpenAPI panel) */}
+{/* source: backend/src/services/openApiParser.ts (JSON only, MAX_OPENAPI_SPEC_BYTES 10 MB, servers[0].url required, applyAuthFromSecurity apiKey/http bearer only, secret_ref "openapi:<scheme>"); backend/src/services/toolDslCompiler.ts compileFromOpenApi (url: op.path, body properties mapped to 'query', in:header params mapped to 'header', needs_review: true); executed 2026-10-06 against current source: parseOpenApiSpec on a sample spec gave execution.url "/weather/{city}" and body fields mapped to query, validateToolDefinition → "execution.url is not a valid URL"; YAML → "Could not parse OpenAPI spec. Only JSON is currently supported…"; frontend/src/components/bb/ToolManager.tsx (credentials block renders only inside the OpenAPI panel) */}
 
 ## Import from an MCP server
 

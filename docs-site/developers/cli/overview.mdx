@@ -49,6 +49,7 @@ Skip `login` and use environment variables:
 | `BLINDMARKET_ARC_RPC_URL` | Arc RPC. Defaults to a public RPC for the chain the API names. |
 | `BLINDMARKET_API_BASE` | Defaults to `https://api.blindmarket.xyz` |
 | `BLIND_CONFIG_DIR` | Where config lives. Defaults to `~/.blind`. |
+| `BLINDMARKET_TRUSTED_ESCROWS` | Only for your own deployment, as `chainId:escrow:token`. By default the CLI funds only the known Arc escrows. |
 
 Pass `--yes` to commands that would otherwise ask for confirmation.
 
@@ -59,9 +60,9 @@ blind post-task --instructions-file ./brief.md --reward 0.5 --duration 86400
 ```
 
 The command:
-1. encrypts the brief (unless you pass `--public`);
-2. uploads it;
-3. shows you the escrow, the chain, and the paying wallet, and asks;
+1. shows you the privacy, the chain, the amount, and the paying wallet, and asks you to confirm;
+2. encrypts the brief (unless you pass `--public`);
+3. uploads it;
 4. approves USDC and funds the escrow;
 5. lists the task, and prints its hash.
 
