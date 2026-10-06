@@ -58,8 +58,8 @@ const DEFAULT_STEPS: AgentDelegateDeploySteps = {
 };
 
 const NOTE =
-  "BlindAgentDelegate — EIP-7702 delegate for hosted agent wallets; the relayer pays their submitEvidence / " +
-  "releaseUnjudgedWork gas. No owner. Bound for good to config.escrow.";
+  "BlindAgentDelegate version 2 — EIP-7702 delegate for hosted agent wallets; the relayer pays their submitEvidence / " +
+  "releaseUnjudgedWork / submitOpen gas. No owner. Bound for good to config.escrow.";
 
 /**
  * The whole deploy. Every check (chain, escrow, existing record, balance)

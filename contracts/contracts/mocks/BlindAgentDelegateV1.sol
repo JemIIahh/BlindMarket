@@ -1,15 +1,22 @@
 // SPDX-License-Identifier: MIT
+//
+// FROZEN TEST FIXTURE — do not edit. BlindAgentDelegate.sol version 1, as of
+// commit 152146d (unchanged through d504fcf), renamed: the delegate deployed
+// on Arc testnet (0x4AFf5FE7f19779EEfBA8515fB1BaE84A8F3a20B6) and Arc mainnet
+// (0xF7b7C2e21385e59080862c7031ed568B561753a0) as of 2026-10-06. It has no
+// DELEGATE_VERSION and relays only SubmitEvidence and ReleaseUnjudgedWork.
+// test/BlindAgentDelegate.test.ts runs it next to version 2. Only the
+// contract and interface names differ from the original.
 pragma solidity ^0.8.24;
 
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {IERC1271} from "@openzeppelin/contracts/interfaces/IERC1271.sol";
 
-/// The BlindEscrow worker calls a sponsored agent wallet may make.
-interface IBlindEscrowWorker {
+/// The two BlindEscrow worker calls a sponsored agent wallet may make.
+interface IBlindEscrowWorkerV1 {
     function submitEvidence(uint256 taskId, bytes32 evidenceHash) external;
     function releaseUnjudgedWork(uint256 taskId) external;
-    function submitOpen(uint256 taskId, bytes32 evidenceHash) external;
 }
 
 /**
@@ -28,30 +35,19 @@ interface IBlindEscrowWorker {
  *      OZ EIP712 rebuilds its domain separator whenever address(this) differs
  *      from the deploying contract, which is always the case when delegated.
  *
- *      Only submitEvidence, releaseUnjudgedWork and (from version 2)
- *      submitOpen on ESCROW, never with value. No owner, no upgrade path. A 7702 wallet's storage is the EOA's
+ *      Only submitEvidence and releaseUnjudgedWork on ESCROW, never with
+ *      value. No owner, no upgrade path. A 7702 wallet's storage is the EOA's
  *      and outlives any one delegate, so the only state is the nonce in an
  *      ERC-7201 namespace. The EIP712 name and version stay under 32 bytes so
  *      OZ's ShortStrings never falls back to its (un-namespaced) storage.
  *      Calling the deployed contract directly is inert: no key signs for it.
- *
- *      Versions. DELEGATE_VERSION names the kinds a delegate relays. Version
- *      1, the delegates deployed on Arc testnet and Arc mainnet as of
- *      2026-10, has no DELEGATE_VERSION function: a call to it reverts, which
- *      callers read as version 1 (SubmitEvidence and ReleaseUnjudgedWork).
- *      Version 2 adds SubmitOpen. The EIP-712 name and version stay
- *      "BlindAgentDelegate" / "1", so a signed call of kind 0 or 1 means the
- *      same under either version and its nonce is spent once across both; a
- *      version-1 delegate rejects kind 2 when it decodes the call, before
- *      any code runs.
  */
-contract BlindAgentDelegate is EIP712, IERC1271 {
+contract BlindAgentDelegateV1 is EIP712, IERC1271 {
     // ── Types ──
 
     enum Kind {
         SubmitEvidence,      // 0 — ESCROW.submitEvidence(taskId, evidenceHash)
-        ReleaseUnjudgedWork, // 1 — ESCROW.releaseUnjudgedWork(taskId); evidenceHash must be 0
-        SubmitOpen           // 2 — ESCROW.submitOpen(taskId, evidenceHash); version 2 on
+        ReleaseUnjudgedWork  // 1 — ESCROW.releaseUnjudgedWork(taskId); evidenceHash must be 0
     }
 
     struct Call {
@@ -78,10 +74,6 @@ contract BlindAgentDelegate is EIP712, IERC1271 {
     bytes32 private constant STORAGE_LOCATION = 0x2cb27ebb7a362eb42f6c76e9e3e85fc880d054822147695d5abee89e7aef5f00;
 
     bytes4 private constant ERC1271_INVALID = 0xffffffff;
-
-    /// The kinds this delegate relays: 2 = SubmitEvidence, ReleaseUnjudgedWork
-    /// and SubmitOpen. Version 1 has no such function (see the contract notes).
-    uint256 public constant DELEGATE_VERSION = 2;
 
     // ── State ──
 
@@ -134,14 +126,9 @@ contract BlindAgentDelegate is EIP712, IERC1271 {
         $.nonce = current + 1;
 
         // ── Interactions ──
-        bytes memory data;
-        if (c.kind == Kind.SubmitEvidence) {
-            data = abi.encodeCall(IBlindEscrowWorker.submitEvidence, (c.taskId, c.evidenceHash));
-        } else if (c.kind == Kind.SubmitOpen) {
-            data = abi.encodeCall(IBlindEscrowWorker.submitOpen, (c.taskId, c.evidenceHash));
-        } else {
-            data = abi.encodeCall(IBlindEscrowWorker.releaseUnjudgedWork, (c.taskId));
-        }
+        bytes memory data = c.kind == Kind.SubmitEvidence
+            ? abi.encodeCall(IBlindEscrowWorkerV1.submitEvidence, (c.taskId, c.evidenceHash))
+            : abi.encodeCall(IBlindEscrowWorkerV1.releaseUnjudgedWork, (c.taskId));
         (bool ok, bytes memory ret) = ESCROW.call(data);
         if (!ok) {
             assembly ("memory-safe") {
