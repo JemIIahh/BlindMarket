@@ -20,7 +20,7 @@ process.env.BLINDMARKET_DEPLOY_BACKOFF_MS = '1';
 process.env.OPENAI_API_KEY = 'sk-openai-test';
 
 const { registerRentTools } = await import('../dist/rent.js');
-const { getSpend } = await import('../dist/state.js');
+const { getSpend, updateSpend } = await import('../dist/state.js');
 
 const OWNER_KEY = Wallet.createRandom();
 const OWNER = OWNER_KEY.address;
@@ -41,6 +41,9 @@ before(async () => {
         let result;
         if (method === 'eth_chainId') result = '0x' + (5042002).toString(16);
         else if (method === 'eth_call') result = ERC20.encodeFunctionResult('balanceOf', [12_500_000n]);
+        // Nothing the stub wallet sends is mined or pending; its nonce is `confirmedNonce`.
+        else if (method === 'eth_getTransactionCount') result = '0x' + confirmedNonce.toString(16);
+        else if (method === 'eth_getTransactionReceipt' || method === 'eth_getTransactionByHash') result = null;
         else throw new Error(`stub RPC: unexpected ${method}`);
         return { jsonrpc: '2.0', id, result };
       };
@@ -62,7 +65,9 @@ let deployAnswers;
 let calls;
 let sent;
 let agentsMade;
+let confirmedNonce;
 beforeEach(() => {
+  confirmedNonce = 0;
   terms = TRANSFER_TERMS;
   capacity = () => json(FREE);
   deployAnswers = [];
@@ -269,6 +274,31 @@ test('a failure partway stops the run and says what became of each agent; the re
   assert.equal(done.results[0].resumed, true);
   assert.equal(sent.length, 3, 'agent 2 deployed with the fee it had paid');
   assert.deepEqual(deploys().slice(2).map((d) => [d.body.name, d.body.feeTxHash]), [['scout 2', feeHash(2)], ['scout 3', feeHash(3)]]);
+});
+
+test('a paid fee that never landed is paid again on the resume, not reused forever', async () => {
+  const t = tools();
+  deployAnswers = [undefined, failWith(500, 'INTERNAL_ERROR')];
+  failure(await run(t, { ...args, count: 2, idempotencyKey: 'agents-dropped-1' }));
+  // Agent 2's fee went out with nonce 1, and the wallet has used nonce 1 since.
+  updateSpend('agents-dropped-1#2', { nonce: 1 });
+  confirmedNonce = 2;
+
+  const first = parse(await t.deploy_agents({ ...args, count: 2, idempotencyKey: 'agents-dropped-1' }));
+  assert.equal(first.quote.feeAlreadyPaid, 1);
+  deployAnswers = [1, 2, 3].map(() => failWith(409, 'DEPLOY_FEE_NOT_FOUND'));
+  const stopped = failure(await t.deploy_agents({ ...args, count: 2, idempotencyKey: 'agents-dropped-1', confirm: true, quoteId: first.quote.quoteId }));
+  assert.equal(stopped.error.code, 'FEE_NEVER_LANDED');
+  assert.equal(stopped.results[1].feeTxHash, undefined, 'no fee is reported as paid');
+  assert.equal(getSpend('agents-dropped-1#2').stage, 'created');
+
+  const { quote } = parse(await t.deploy_agents({ ...args, count: 2, idempotencyKey: 'agents-dropped-1' }));
+  assert.equal(quote.feeAlreadyPaid, undefined);
+  assert.equal(quote.totalFee, '1 USDC', 'agent 2 pays again');
+  const done = parse(await t.deploy_agents({ ...args, count: 2, idempotencyKey: 'agents-dropped-1', confirm: true, quoteId: quote.quoteId }));
+  assert.equal(done.deployed, 2);
+  assert.equal(sent.length, 3);
+  assert.equal(deploys().at(-1).body.feeTxHash, feeHash(3));
 });
 
 test('a 429 is asked again for the same agent after a wait, with the same fee', async () => {
