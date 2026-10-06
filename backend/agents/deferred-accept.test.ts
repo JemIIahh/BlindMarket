@@ -64,13 +64,16 @@ const json = (status: number, body: unknown) => new Response(JSON.stringify(body
 
 /**
  * The backend the worker talks to. Records every call; /accept succeeds (a
- * task with no brief, which the worker hands straight back via /release) and
- * can be held open so the worker stays busy while events queue up.
+ * task with no brief, which the worker hands straight back via /release),
+ * can be held open so the worker stays busy while events queue up, or can
+ * first answer OFFER_HELD. The feed lists `feed`.
  */
 function fakeBackend() {
   const calls: Array<{ method: string; path: string; body: any }> = [];
   const held = new Map<string, () => void>();
   const holdAccept = new Set<string>();
+  const offerHeldOnce = new Set<string>();
+  const feed: unknown[] = [];
   const hooks = { onRelease: (_id: string) => {} };
   const fetch = vi.fn(async (url: string, init: RequestInit = {}) => {
     const path = new URL(url).pathname;
@@ -78,6 +81,7 @@ function fakeBackend() {
     calls.push({ method: init.method ?? 'GET', path, body });
     const m = path.match(/^\/api\/v1\/a2a\/tasks\/(0x[0-9a-f]{64})\/(accept|release)$/);
     if (m?.[2] === 'accept') {
+      if (offerHeldOnce.delete(m[1])) return json(409, { error: { code: 'OFFER_HELD', message: 'offered to another agent' } });
       const answer = () => json(200, { data: { chain: 'arc', gasSponsored: body?.sponsorGas === true } });
       if (!holdAccept.has(m[1])) return answer();
       return new Promise<Response>((resolve) => held.set(m[1], () => resolve(answer())));
@@ -88,7 +92,7 @@ function fakeBackend() {
     }
     if (path === '/api/v1/a2a/executions') return json(200, { data: { executions: [] } });
     if (path === '/api/v1/a2a/verifications') return json(200, { data: { verifications: [] } });
-    if (path === '/api/v1/a2a/tasks') return json(200, { data: { tasks: [], total: 0 } });
+    if (path === '/api/v1/a2a/tasks') return json(200, { data: { tasks: feed, total: feed.length } });
     return json(200, { data: {} });
   });
   return {
@@ -96,6 +100,8 @@ function fakeBackend() {
     fetch,
     hooks,
     holdAccept,
+    offerHeldOnce,
+    feed,
     finishAccept: (id: string) => held.get(id)!(),
     accepts: () => calls.filter((c) => c.path.endsWith('/accept')).map((c) => c.path.split('/')[5]),
     released: (id: string) => calls.some((c) => c.path === `/api/v1/a2a/tasks/${id}/release`),
@@ -210,5 +216,27 @@ describe('a poll that comes due while busy runs before the next queued task', ()
       `accept ${short(A)}`, 'verifications',
       `accept ${short(B)}`, 'verifications',
     ]);
+  });
+});
+
+describe("an accept retried after another agent's offer window", () => {
+  it('asks again for the sponsored submit the task was hinted for', async () => {
+    const w = await loadWorker();
+    // The wallet can't pay its own gas; the task's submit is sponsored.
+    balances = [DUST];
+    be.feed.push({ meta: { taskId: S, chain: 'arc', gasSponsored: true }, state: { status: 'open' } });
+    be.offerHeldOnce.add(S);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const poll = w.pollAndWork();
+      await vi.waitFor(() => expect(be.accepts()).toEqual([S]));
+      await vi.advanceTimersByTimeAsync(15_000);
+      await poll;
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(be.calls.filter((c) => c.path.endsWith(`${S}/accept`)).map((c) => c.body)).toEqual([{ sponsorGas: true }, { sponsorGas: true }]);
+    expect(logged(new RegExp(`not working on ${short(S)}… yet`))).toBe(false);
+    expect(be.released(S)).toBe(true);
   });
 });

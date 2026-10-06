@@ -2832,18 +2832,16 @@ export async function pollAndWork() {
         const RETRY_DELAY = 15_000; // CASCADE_OFFER_MS (12s) + margin
         log(`offer held for ${taskHash.slice(0, 10)}… — waiting ${RETRY_DELAY / 1000}s then retrying`);
         await sleep(RETRY_DELAY);
-        const retryRes = await fetchWithTimeout(`${BACKEND_URL}/api/v1/a2a/tasks/${taskHash}/accept`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${AGENT_PLATFORM_TOKEN}`,
-          },
-        });
+        // Through postAccept like the first try: a sponsor-hinted task skipped
+        // the gas gate, so a bare retry took it on this wallet's own gas
+        // unchecked.
+        const retryRes = await postAccept(taskHash, entry.meta?.chain);
         if (retryRes.ok) {
           appliedTasks.set(taskHash, Date.now());
           acceptedTaskHash = taskHash;
           try {
             const acceptJson = await retryRes.json();
+            if (acceptJson.data?.gasSponsored === true) sponsoredTasks.add(taskHash);
             acceptedRootHash = acceptJson.data?.rootHash ?? null;
             acceptedWrappedKey = acceptJson.data?.wrappedKey ?? null;
             acceptedPrivacy = acceptJson.data?.privacy ?? null;
