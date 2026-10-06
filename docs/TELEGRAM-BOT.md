@@ -132,6 +132,14 @@ the webhook answers 503. With a token but no secret, the webhook answers 503.
   alert reads as before. Several become "Deadline approaching (20 tasks)" with
   up to 10 task links and a count of the rest. A repeat for the same task is
   sent once.
+- **Waiting never overrides consent.** Just before each message, the chat's
+  linked wallets and preferences are read again:
+  - after `/stop` or **Disconnect**, nothing that was still waiting goes out;
+  - a type switched off is skipped;
+  - a wallet moved to another chat is no longer reported to the old one.
+- **Order.** A newer alert for the same task and wallet replaces a waiting one
+  of another kind, so "Payout credited" is never followed by a stale
+  "Submission didn't pass".
 - **Pacing.** Messages to one chat are at least 1.1 s apart, and sends from
   one process at least 40 ms apart. That stays under Telegram's limits of
   about 1 a second per chat and 30 a second per bot. The API and the indexer

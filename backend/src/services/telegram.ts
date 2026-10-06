@@ -28,6 +28,7 @@ import {
   peekLinkNonce,
   unlinkChat,
   walletsOfChat,
+  type TelegramType,
 } from './telegramStore.js';
 
 /** Types whose body text is generic (no agent address, no task content). */
@@ -129,6 +130,13 @@ export function formatNotification(n: Pick<Notification, 'type' | 'title' | 'bod
 // from this process globalGapMs apart, and a 429 is waited out for up to
 // maxRetryAfterSec.
 //
+// Waiting must not outlive consent. Just before each message, the chat's
+// linked wallets and preferences are read again: after /stop nothing more
+// goes out, a switched-off type is skipped, and a wallet moved to another chat
+// is no longer reported here. A newer alert for the same task and wallet
+// replaces a waiting one of another kind, so a task's alerts never go out of
+// order ("Payout credited" is not followed by a stale "Submission didn't pass").
+//
 // The outbox lives in memory, so delivery stays best effort and at most once:
 // a restart drops what is waiting (at most maxWaitMs of alerts), and the in-app
 // feed still has every notice. Each process (api, indexer) paces its own
@@ -136,6 +144,8 @@ export function formatNotification(n: Pick<Notification, 'type' | 'title' | 'bod
 
 /** A wait that does not hold the process open: at exit, waiting alerts are dropped anyway. */
 const idleSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms).unref());
+/** Monotonic: a wall-clock step must not stall an outbox. */
+const clock = () => performance.now();
 
 const timing = {
   quietMs: 5_000,
@@ -159,14 +169,15 @@ const TRACKED_MAX = 500;
 
 /** Alerts with the same type and title, waiting to go out as one message. */
 interface Group {
-  type: Notification['type'];
+  type: TelegramType;
   title: string;
   body?: string;
   /** False once two alerts in the group had different bodies. */
   sameBody: boolean;
-  taskIds: Set<string>;
-  /** Alerts with no task id, or past TRACKED_MAX. */
-  untracked: number;
+  /** Task id → the wallets it was sent for (all linked to this chat when queued). */
+  tasks: Map<string, Set<string>>;
+  /** Per wallet, alerts with no task id or past TRACKED_MAX. */
+  untracked: Map<string, number>;
 }
 
 interface Outbox {
@@ -181,33 +192,46 @@ interface Outbox {
 const outboxes = new Map<string, Outbox>();
 let nextGlobalSlot = 0;
 
-function enqueue(chatId: string, n: Notification): void {
+function enqueue(chatId: string, wallet: string, n: Notification & { type: TelegramType }): void {
   let box = outboxes.get(chatId);
   if (!box) {
-    box = { groups: new Map(), firstAt: 0, lastAt: 0, lastSentAt: 0, done: null };
+    box = { groups: new Map(), firstAt: 0, lastAt: 0, lastSentAt: -Infinity, done: null };
     outboxes.set(chatId, box);
   }
-  const now = Date.now();
+  const now = clock();
   if (box.groups.size === 0) box.firstAt = now;
   box.lastAt = now;
 
   const key = `${n.type}\n${n.title}`;
   let g = box.groups.get(key);
   if (!g) {
-    g = { type: n.type, title: n.title, body: n.body, sameBody: true, taskIds: new Set(), untracked: 0 };
+    g = { type: n.type, title: n.title, body: n.body, sameBody: true, tasks: new Map(), untracked: new Map() };
     box.groups.set(key, g);
   } else if (g.body !== n.body) {
     g.sameBody = false;
   }
-  if (n.taskId && (g.taskIds.has(n.taskId) || g.taskIds.size < TRACKED_MAX)) g.taskIds.add(n.taskId);
-  else g.untracked++;
+
+  const taskId = n.taskId;
+  if (taskId) {
+    // This alert supersedes a waiting one of another kind for the same task and wallet.
+    for (const [k, other] of box.groups) {
+      const wallets = other === g ? undefined : other.tasks.get(taskId);
+      if (!wallets?.delete(wallet) || wallets.size > 0) continue;
+      other.tasks.delete(taskId);
+      if (other.tasks.size === 0 && other.untracked.size === 0) box.groups.delete(k);
+    }
+  }
+  const wallets = taskId ? g.tasks.get(taskId) : undefined;
+  if (wallets) wallets.add(wallet);
+  else if (taskId && g.tasks.size < TRACKED_MAX) g.tasks.set(taskId, new Set([wallet]));
+  else g.untracked.set(wallet, (g.untracked.get(wallet) ?? 0) + 1);
 
   if (!box.done) box.done = drain(chatId, box);
 }
 
 /** Wait for this process's next send slot. */
 async function globalSlot(): Promise<void> {
-  const now = Date.now();
+  const now = clock();
   const at = Math.max(now, nextGlobalSlot);
   nextGlobalSlot = at + timing.globalGapMs;
   if (at > now) await idleSleep(at - now);
@@ -218,21 +242,27 @@ async function drain(chatId: string, box: Outbox): Promise<void> {
     while (box.groups.size > 0) {
       // Let the burst finish arriving.
       for (;;) {
-        const wait = Math.min(box.lastAt + timing.quietMs, box.firstAt + timing.maxWaitMs) - Date.now();
+        const wait = Math.min(box.lastAt + timing.quietMs, box.firstAt + timing.maxWaitMs) - clock();
         if (wait <= 0) break;
         await idleSleep(wait);
       }
       const groups = [...box.groups.values()];
       box.groups.clear();
       for (const g of groups) {
-        const gap = box.lastSentAt + timing.chatGapMs - Date.now();
+        const gap = box.lastSentAt + timing.chatGapMs - clock();
         if (gap > 0) await idleSleep(gap);
         await globalSlot();
-        const result = await sendTelegram(chatId, formatGroup(g), {
+        // Consent may have changed while this waited (see above).
+        const linked = new Set(await walletsOfChat(chatId));
+        if (linked.size === 0) return;
+        if (!isTypeEnabled(await getPrefs(chatId), g.type)) continue;
+        const text = formatGroup(g, linked);
+        if (text === null) continue;
+        const result = await sendTelegram(chatId, text, {
           sleep: timing.retrySleep,
           maxRetryAfterSec: timing.maxRetryAfterSec,
         });
-        box.lastSentAt = Date.now();
+        box.lastSentAt = clock();
         if (result === 'blocked') {
           await unlinkChat(chatId);
           console.log('[telegram] chat unreachable — unlinked');
@@ -253,10 +283,17 @@ async function drain(chatId: string, box: Outbox): Promise<void> {
   }
 }
 
-/** One message for a group: the usual text for a lone alert, a task list for several. */
-function formatGroup(g: Group): string {
-  const ids = [...g.taskIds];
-  const count = ids.length + g.untracked;
+/**
+ * One message for a group, counting only alerts for wallets still linked to
+ * the chat: the usual text for a lone alert, a task list for several. null
+ * when none is left.
+ */
+function formatGroup(g: Group, linked: Set<string>): string | null {
+  const ids = [...g.tasks].filter(([, wallets]) => [...wallets].some((w) => linked.has(w))).map(([id]) => id);
+  let untracked = 0;
+  for (const [w, n] of g.untracked) if (linked.has(w)) untracked += n;
+  const count = ids.length + untracked;
+  if (count === 0) return null;
   if (count === 1) return formatNotification({ type: g.type, title: g.title, body: g.body, taskId: ids[0] });
   const lines = [`${g.title} (${count} tasks)`];
   if (g.body && g.sameBody && BODY_TYPES.has(g.type)) lines.push(g.body);
@@ -284,7 +321,7 @@ export async function deliverToTelegram(address: string, n: Notification): Promi
     const link = await getLink(address);
     if (!link) return;
     if (!isTypeEnabled(await getPrefs(link.chatId), n.type)) return;
-    enqueue(link.chatId, n);
+    enqueue(link.chatId, address.toLowerCase(), { ...n, type: n.type });
   } catch (err) {
     console.warn(`[telegram] delivery failed (non-fatal): ${redact(String((err as Error)?.message ?? err))}`);
   }

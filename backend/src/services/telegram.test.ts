@@ -403,6 +403,62 @@ describe('outbox: bursts and pacing', () => {
     expect(await getLink(WALLET)).toBeNull();
   });
 
+  it('sends nothing more after /stop, even what was already waiting', async () => {
+    _setOutboxTiming({ quietMs: 40 });
+    await linkChat('42', [WALLET]);
+    await deliverToTelegram(WALLET, note());
+    await handleTelegramUpdate(update(900, '/stop'));
+    await _outboxesIdle();
+    expect(sent().map((c) => c.body.text)).toEqual(['Disconnected. No more alerts will be sent here.']);
+  });
+
+  it('skips a waiting alert whose type was switched off meanwhile, and sends the rest', async () => {
+    _setOutboxTiming({ quietMs: 40 });
+    await linkChat('42', [WALLET]);
+    await deliverToTelegram(WALLET, reminder(1));
+    await deliverToTelegram(WALLET, note({ type: 'completed', title: 'Payout credited' }));
+    await setPrefs('42', { deadline_soon: false });
+    await _outboxesIdle();
+    expect(sent().map((c) => c.body.text)).toEqual([formatNotification(note({ type: 'completed', title: 'Payout credited' }))]);
+  });
+
+  it('does not report a wallet to a chat it was moved away from meanwhile', async () => {
+    _setOutboxTiming({ quietMs: 40 });
+    const other = '0x' + 'b'.repeat(40);
+    await linkChat('42', [WALLET, other]);
+    await deliverToTelegram(WALLET, note({ taskId: taskId(1) }));
+    await deliverToTelegram(other, note({ taskId: taskId(2) }));
+    await linkChat('77', [WALLET]);
+    await _outboxesIdle();
+    const texts = sent().map((c) => c.body);
+    expect(texts).toEqual([{ chat_id: '42', text: formatNotification(note({ taskId: taskId(2) })), disable_web_page_preview: true }]);
+  });
+
+  it("lets a task's newer alert replace a waiting older one, so they never arrive out of order", async () => {
+    _setOutboxTiming({ quietMs: 40 });
+    await linkChat('42', [WALLET]);
+    const payout = (i: number) => note({ type: 'completed', title: 'Payout credited', taskId: taskId(i) });
+    await deliverToTelegram(WALLET, payout(0));
+    await deliverToTelegram(WALLET, note({ type: 'failed', title: "Submission didn't pass", taskId: taskId(1) }));
+    await deliverToTelegram(WALLET, payout(1));
+    await _outboxesIdle();
+    const texts = sent().map((c) => c.body.text);
+    expect(texts).toHaveLength(1);
+    expect(texts[0]).toMatch(/^Payout credited \(2 tasks\)/);
+  });
+
+  it("keeps both sides of one task when a chat holds the poster's and the worker's wallet", async () => {
+    _setOutboxTiming({ quietMs: 40 });
+    const worker = '0x' + 'b'.repeat(40);
+    await linkChat('42', [WALLET, worker]);
+    const done = note({ type: 'completed', title: 'Task completed — escrow released' });
+    const paid = note({ type: 'completed', title: 'Payout credited' });
+    await deliverToTelegram(WALLET, done);
+    await deliverToTelegram(worker, paid);
+    await _outboxesIdle();
+    expect(sent().map((c) => c.body.text)).toEqual([formatNotification(done), formatNotification(paid)]);
+  });
+
   it('counts a very large burst exactly while listing only ten', async () => {
     _setOutboxTiming({ quietMs: 50 });
     await linkChat('42', [WALLET]);
