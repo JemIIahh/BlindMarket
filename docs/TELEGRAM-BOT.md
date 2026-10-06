@@ -28,6 +28,14 @@ task is freshly inside its window; a sweep outage longer than the window's grace
 (3 h for the 24 h mark, 15 min for the 1 h mark) skips that reminder rather than
 sending a late one.
 
+Tasks posted together get one reminder message. Arc has no batch create yet,
+so **Post many** sends one transaction per task, and their deadlines end up
+minutes apart. When one of a poster's reminders goes out, that poster's other
+tasks whose same mark is at most 15 min away are reminded in the same sweep
+tick (`REMINDER_PULL_AHEAD_SEC`). The Telegram outbox then merges them into one
+message. The copy stays true: 75 min is "about an hour". A task posted later is
+never pulled in on its own; it waits for its own mark.
+
 Not built yet: submission counts and "winner selected" alerts. They belong to
 open-submission tasks (`docs/OPEN-SUBMISSION-TASKS.md`), which do not exist yet.
 

@@ -16,6 +16,13 @@
  * And it fires only while the task is FRESHLY inside the window: remaining time
  * in (sec - graceSec, sec]. A sweep outage longer than graceSec around the mark
  * skips that reminder, which is better than a late, misleading one.
+ *
+ * A poster reminded now is also reminded of their tasks whose mark is less than
+ * REMINDER_PULL_AHEAD_SEC away (the sweep passes it as `aheadSec`). Tasks
+ * posted one by one, as Arc has no batch create yet, have deadlines minutes
+ * apart. Each would otherwise reach the poster on its own sweep tick, and the
+ * Telegram outbox only merges alerts that arrive together. The copy still
+ * reads true: 75 min is "about an hour", 24 h 15 min "about 24 hours".
  */
 
 export interface ReminderWindow {
@@ -30,21 +37,25 @@ export const REMINDER_WINDOWS: readonly ReminderWindow[] = [
   { sec: 3600, graceSec: 15 * 60 },
 ];
 
+/** How early a reminder may go out alongside one of the same poster's that is due. */
+export const REMINDER_PULL_AHEAD_SEC = 15 * 60;
+
 /**
  * The window a task is freshly inside right now, or null. `firstSeenSec` is
  * when the sweep first saw the task: a mark that had already passed by then is
- * never reminded.
+ * never reminded. `aheadSec` also counts a mark that is at most that far away.
  */
 export function dueReminderWindow(
   nowSec: number,
   deadlineSec: number,
   firstSeenSec: number,
   windows: readonly ReminderWindow[] = REMINDER_WINDOWS,
+  aheadSec = 0,
 ): number | null {
   const remaining = deadlineSec - nowSec;
   if (remaining <= 0) return null;
   for (const w of windows) {
-    if (remaining <= w.sec && remaining > w.sec - w.graceSec) {
+    if (remaining <= w.sec + aheadSec && remaining > w.sec - w.graceSec) {
       return firstSeenSec < deadlineSec - w.sec ? w.sec : null;
     }
   }
