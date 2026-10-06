@@ -2715,6 +2715,9 @@ export async function pollAndWork() {
       if (page.length < PAGE || entries.length >= total) break;
     }
     if (entries.length === 0) {
+      // Nothing is open, so nothing waits for gas: let the cadence relax
+      // (the prune below never runs on an empty board).
+      gasSkipLogged.clear();
       log('no open A2A tasks');
       return;
     }

@@ -296,6 +296,25 @@ describe('tasks skipped for gas, once the wallet is funded', () => {
   });
 });
 
+describe('tasks skipped for gas, once they leave the board', () => {
+  fixedClock();
+
+  it('no longer hold the gas cadence, even when the board is left empty', async () => {
+    const w = await loadWorker();
+    sock.handlers.connect(undefined);
+    balances = [DUST];
+    be.feed.push(feedEntry(A));
+    await w.pollAndWork();
+    be.feed.length = 0; // another agent took it
+    at(60);
+    await w.pollAndWork();
+    const scans = be.scans();
+    at(120);
+    await w.pollAndWork();
+    expect(be.scans()).toBe(scans);
+  });
+});
+
 describe('a refused sponsorship (GAS_SPONSOR_UNAVAILABLE) is a gas skip', () => {
   fixedClock();
 
