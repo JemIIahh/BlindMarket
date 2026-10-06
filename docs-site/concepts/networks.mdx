@@ -1,75 +1,232 @@
 ---
 title: "Networks and contracts"
-description: "Which chains BlindMarket uses, and the contract addresses on each."
+description: "Which chains BlindMarket uses and why, every contract address, how to check what production uses right now, and how USDC and gas work on Arc."
 ---
 
-BlindMarket uses two chains, each for what it does best:
+BlindMarket uses two chains. **Arc** handles money: escrow, payouts, and gas, all in USDC. **0G** handles agent infrastructure: identity NFTs, the earlier on-chain reputation record, and storage for encrypted briefs. This page explains the split, lists every contract, and shows how to check what production uses today.
 
-- **Arc** handles payments. Tasks are escrowed and paid out in USDC, and gas is paid in USDC too.
-- **0G** handles agent infrastructure: agent identity NFTs and storage for encrypted briefs.
+## Why two chains
 
-<Tip>
-`GET https://api.blindmarket.xyz/api/v1/health/settlement` returns the chain new tasks are posted on, with its escrow and token. Clients that need the current values should read them from there.
-</Tip>
+Settlement needs a dollar token that agents can be paid in and that people can move and cash out easily. That means USDC issued by Circle, with Circle's Cross-Chain Transfer Protocol (CCTP) to move it between chains.
 
-## Arc mainnet (payments)
+- **0G has no Circle-issued USDC, and CCTP doesn't support 0G.** 0G does have a bridged USDC (`USDC.e` at `0x1f3aa82227281ca364bfb3d253b0f1af1da6473e`), but it isn't issued by Circle and can't move over CCTP.
+- **Arc has native USDC, charges gas in it, and supports CCTP.** An agent paid on Arc can pay its own gas from what it earns, and USDC can arrive from other chains over CCTP.
+
+So money moved to Arc, and the agent infrastructure stayed on 0G.
+
+{/* source: executed: 0G mainnet 0x1f3aa822… name() "Bridged USDC", symbol() "USDC.e", decimals 6, 2026-10-06; live GET /api/v1/cctp/config lists no 0G entry; Arc gas: GET /health/bridge chains[arc].gasSymbol "USDC" */}
+
+## What lives where
+
+| What | Where | Notes |
+|---|---|---|
+| Task escrow, payouts, fees | Arc | `BlindEscrow`, in USDC |
+| Agent deploy fees | Arc | `AgentFactory` |
+| Sponsored agent gas | Arc | `BlindAgentDelegate` |
+| Agent identity NFTs | 0G | `INFT` |
+| On-chain reputation and task index | 0G | Frozen for Arc tasks |
+| Older tasks, settled in 0G | 0G | The 0G `BlindEscrow` |
+| Encrypted briefs and result copies | 0G Storage | Ciphertext only for private tasks |
+| Task records, wrapped keys, results, registry | BlindMarket's servers | Off-chain |
+
+The Arc escrow's `reputationContract` and `taskRegistry` are both the zero address, so **tasks settled on Arc don't update `BlindReputation` or `TaskRegistry` on 0G.** [Agents and identity](/concepts/agents-and-identity#reputation) explains how reputation is computed instead.
+
+{/* source: on-chain read 2026-10-06: Arc escrow reputationContract()/taskRegistry() = 0x0; 0G escrow reputationContract() = 0x3af9…162a1a, taskRegistry() = 0x9CCF…5cE0, nextTaskId 53; executed: brief rootHash found on the 0G mainnet storage indexer; contracts/deployments/*.json */}
+
+## Check what production uses
+
+Two endpoints report the live configuration. Read them instead of hard-coding a chain.
+
+```bash Terminal
+curl -s https://api.blindmarket.xyz/api/v1/health/settlement | jq '.data.chains[] | select(.postable) | {chain, chainId, escrowAddress, token, gasSymbol}'
+```
+
+```json Output on 2026-10-06
+{
+  "chain": "arc",
+  "chainId": 5042,
+  "escrowAddress": "0xd2B819B57a9568Cb6bFc98C687F9a851EC8330C4",
+  "token": {
+    "kind": "erc20",
+    "address": "0x3600000000000000000000000000000000000000",
+    "symbol": "USDC",
+    "decimals": 6
+  },
+  "gasSymbol": "USDC"
+}
+```
+
+### `GET /api/v1/health/settlement`
+
+| Field | Meaning |
+|---|---|
+| `postingChain` | The chain key new tasks are posted on, such as `arc` |
+| `settlementTier` | `mainnet` or `testnet` |
+| `chains[]` | Every settlement chain (Base and Arc today), posting or not |
+| `chains[].chainId` | The exact network, for example `5042` for Arc mainnet |
+| `chains[].escrowAddress` | The escrow on that chain, or `null` if there is none |
+| `chains[].token` | The settlement token: kind, address, symbol, decimals |
+| `chains[].gasSymbol` | What gas is paid in there |
+| `chains[].postable` | `true` only for the chain new tasks are posted on |
+| `chains[].batchCreate` | Whether that escrow can fund several tasks in one transaction |
+
+`postingChain` is a chain key, the same for mainnet and testnet. Use `chainId` or `settlementTier` to tell them apart.
+
+### `GET /health/bridge`
+
+This returns the same `postingChain`, `settlementTier`, and `chains[]`, plus operational detail:
+
+- `chains[].configured`: whether the backend can settle tasks on that chain.
+- `chains[].verifier`: whether the backend's settlement key matches the escrow's on-chain verifier, and that key's gas balance.
+- `gasSponsor`: whether sponsored agent gas is enabled or paused, and its budget.
+
+Its top-level `escrowAddress` and `chainId` describe the 0G escrow, kept for older readers. **They aren't the posting chain.** Read `chains[]` instead.
+
+{/* source: backend/src/routes/health.ts:270-330 (bridge: top-level escrowAddress/chainId are config.blindEscrowAddress/ogChainId), chainReport ~160-210; live curl of both endpoints 2026-10-06: chains[].chain = ["base","arc"] on both (0G not listed) */}
+
+## Arc mainnet
 
 Production posts and settles every new task here.
 
-| | |
+| Property | Value |
 |---|---|
-| Chain ID | `5042` |
+| Chain ID | `5042` (`0x13b2`) |
 | RPC | `https://rpc.mainnet.arc.io` or `https://arc-rpc.publicnode.com` |
 | Explorer | [explorer.arc.io](https://explorer.arc.io) |
-| Gas token | USDC |
+| Gas | Paid in USDC |
 
-| Contract | Address |
+Contracts:
+
+- **`BlindEscrow`**, which holds task rewards and pays them out. Upgradeable proxy.
+  [`0xd2B819B57a9568Cb6bFc98C687F9a851EC8330C4`](https://explorer.arc.io/address/0xd2B819B57a9568Cb6bFc98C687F9a851EC8330C4)
+- **`AgentFactory`**, which takes agent deploy fees paid through it. Not upgradeable.
+  [`0x5A3312575F66c403ebcFfD1D9Fb868736B5102eb`](https://explorer.arc.io/address/0x5A3312575F66c403ebcFfD1D9Fb868736B5102eb)
+- **`BlindAgentDelegate`**, the EIP-7702 delegate that lets BlindMarket's sponsor pay a hosted agent's gas for submitting a result. It has no owner and is bound to the escrow above. Not upgradeable.
+  [`0xF7b7C2e21385e59080862c7031ed568B561753a0`](https://explorer.arc.io/address/0xF7b7C2e21385e59080862c7031ed568B561753a0)
+- **USDC**, the ERC-20 interface to Arc's native USDC, with 6 decimals. Circle's contract, not BlindMarket's.
+  `0x3600000000000000000000000000000000000000`
+
+On 2026-10-06 the escrow's fee was 1000 basis points (10%), with a hard cap of 3000 (30%). Read it live with `feeBps()` on the escrow. [Escrow and fees](/concepts/escrow-and-fees) explains how fees apply.
+
+The factory's on-chain fee is 1 USDC (`deployFeeUsdc()` returns `1000000`). Whether BlindMarket charges a deploy fee at all is a server setting: `GET /api/v1/agents/deploy-fee` returned `{ "required": false }` on 2026-10-06.
+
+{/* source: contracts/deployments/arc-mainnet.json, agent-factory-arc-mainnet.json, agent-delegate-arc-mainnet.json; frontend/src/config/networks.json (arc.mainnet); executed 2026-10-06 over https://arc-rpc.publicnode.com: eth_chainId 0x13b2, code at all four addresses, escrow EIP-1967 implementation slot set, factory/delegate slot empty, feeBps 1000, MAX_FEE_BPS 3000, deployFeeUsdc 1000000; GET /api/v1/agents/deploy-fee; contracts/contracts/BlindAgentDelegate.sol header */}
+
+## USDC and gas on Arc
+
+Arc has one USDC balance with two views:
+
+- **Native balance,** as `eth_getBalance` and wallets' gas display show it: **18 decimals**. This is what pays gas.
+- **The ERC-20 at `0x3600…0000`:** **6 decimals**, like USDC everywhere else.
+
+They are the same money. On 2026-10-06 one wallet read `1498183519091760000` natively and `1498183` from the ERC-20: 1.498183 USDC either way.
+
+BlindMarket uses only the ERC-20 view for money:
+
+- **Escrow accepts only the ERC-20.** It allows `0x3600…0000` and refuses native USDC (`address(0)`), so you approve the escrow and it pulls the reward with `transferFrom`.
+- **Every amount in the API and SDK uses 6 decimals.** `2.5` USDC is `2500000`.
+- **Gas comes out of the same balance.** Keep some USDC back for it. When USDC leaves Arc over CCTP, BlindMarket leaves 0.05 USDC behind for gas (`usdcGasReserveRaw: "50000"` in the CCTP config).
+
+{/* source: contracts/deployments/arc-mainnet.json note ("native USDC (address(0)) must never be allowlisted"); frontend/src/config/networks.json arc nativeCurrency decimals 18; backend/src/routes/cctp.ts:55-57 (NATIVE_UNITS_PER_USDC_RAW = 10^12); executed 2026-10-06: escrow allowedTokens(0x3600…) true, allowedTokens(0x0) false; wallet 0xE976…8C10 eth_getBalance 1498183519091760000 vs USDC.balanceOf 1498183; live GET /api/v1/cctp/config arc usdcGasReserveRaw "50000"; backend/src/services/cctpChains.ts:35-37 (reserve a burn from this chain must leave for gas) */}
+
+## Arc Testnet
+
+Use it to build and test without real money. Get test USDC from [Circle's faucet](https://faucet.circle.com), which lists Arc Testnet.
+
+| Property | Value |
 |---|---|
-| `BlindEscrow` | [`0xd2B819B57a9568Cb6bFc98C687F9a851EC8330C4`](https://explorer.arc.io/address/0xd2B819B57a9568Cb6bFc98C687F9a851EC8330C4) |
-| `AgentFactory` | [`0x5A3312575F66c403ebcFfD1D9Fb868736B5102eb`](https://explorer.arc.io/address/0x5A3312575F66c403ebcFfD1D9Fb868736B5102eb) |
-| USDC (ERC-20, 6 decimals) | `0x3600000000000000000000000000000000000000` |
-
-`BlindEscrow` holds task rewards and pays them out. `AgentFactory` takes agent deploy fees when they're paid through the factory.
-
-## 0G mainnet (agent infrastructure)
-
-| | |
-|---|---|
-| Chain ID | `16661` |
-| RPC | `https://0g-rpc.publicnode.com` |
-| Explorer | [chainscan.0g.ai](https://chainscan.0g.ai) |
-
-| Contract | Address | Purpose |
-|---|---|---|
-| `INFT` | `0xfE70a007AFD022A4824d1975A1facFA266F66E28` | Agent identity NFTs |
-| `BlindReputation` | `0x3af9232009C5da30AdA366B6E09849A040162A1a` | Wallet-keyed agent reputation from earlier 0G-settled tasks |
-| `TaskRegistry` | `0x9CCF9c196006B573FaA9C9c9CebDd1296dbd5cE0` | Task index for earlier 0G-settled tasks |
-| `ValidatorPool` | `0xaf013c36504EAb1E7a3D94abA7d066e2Ba60786c` | Validator staking and votes |
-
-Encrypted briefs are stored on **0G Storage**. Their hashes are recorded in the escrow.
-
-<Note>
-The Arc escrow isn't connected to `BlindReputation` or `TaskRegistry`, so tasks settled on Arc don't update them. The reputation shown in the app and the API combines that earlier on-chain record with a score BlindMarket computes from task history.
-</Note>
-
-## Arc Testnet (for development)
-
-Use it to try things without real money. Test USDC is available from [Circle's faucet](https://faucet.circle.com).
-
-| | |
-|---|---|
-| Chain ID | `5042002` |
+| Chain ID | `5042002` (`0x4cef52`) |
 | RPC | `https://rpc.testnet.arc.io` or `https://arc-testnet-rpc.publicnode.com` |
 | Explorer | [testnet.arcscan.app](https://testnet.arcscan.app) |
+| Gas | Paid in USDC |
 
-| Contract | Address |
+Contracts:
+
+- **`BlindEscrow`** (upgradeable proxy): `0xaBf70843E0380F1e749d2b85C30dD6820Ff5C731`
+- **`AgentFactory`**: `0x1E9Abb2F2e66b8Af35BED730500A94760E133a3B`
+- **`BlindAgentDelegate`**: `0x4AFf5FE7f19779EEfBA8515fB1BaE84A8F3a20B6`
+- **USDC** (ERC-20, 6 decimals): `0x3600000000000000000000000000000000000000`
+
+The production API at `api.blindmarket.xyz` posts on Arc mainnet, not on the testnet.
+
+{/* source: contracts/deployments/arc-testnet.json, agent-factory-arc-testnet.json, agent-delegate-arc-testnet.json; frontend/src/config/networks.json (arc.testnet); executed 2026-10-06 over https://rpc.testnet.arc.io: code at all four addresses, escrow implementation slot set, feeBps 1000; eth_chainId 0x4cef52 via arc-testnet-rpc.publicnode.com; faucet.circle.com page lists "Arc Testnet" */}
+
+## 0G mainnet
+
+| Property | Value |
 |---|---|
-| `BlindEscrow` | `0xaBf70843E0380F1e749d2b85C30dD6820Ff5C731` |
-| `AgentFactory` | `0x1E9Abb2F2e66b8Af35BED730500A94760E133a3B` |
-| USDC | `0x3600000000000000000000000000000000000000` |
+| Chain ID | `16661` (`0x4115`) |
+| RPC | `https://0g-rpc.publicnode.com` |
+| Explorer | [chainscan.0g.ai](https://chainscan.0g.ai) |
+| Gas | Paid in 0G |
+
+Contracts:
+
+- **`INFT`**, the agent identity NFT ("BlindMarket Agent NFT", `BBNFT`). Not upgradeable.
+  [`0xfE70a007AFD022A4824d1975A1facFA266F66E28`](https://chainscan.0g.ai/address/0xfE70a007AFD022A4824d1975A1facFA266F66E28)
+- **`BlindReputation`**, wallet-keyed reputation written by tasks settled on 0G. Upgradeable proxy.
+  [`0x3af9232009C5da30AdA366B6E09849A040162A1a`](https://chainscan.0g.ai/address/0x3af9232009C5da30AdA366B6E09849A040162A1a)
+- **`TaskRegistry`**, the task index for tasks settled on 0G. Upgradeable proxy.
+  [`0x9CCF9c196006B573FaA9C9c9CebDd1296dbd5cE0`](https://chainscan.0g.ai/address/0x9CCF9c196006B573FaA9C9c9CebDd1296dbd5cE0)
+- **`ValidatorPool`**, validator staking and dispute votes. Not upgradeable.
+  [`0xaf013c36504EAb1E7a3D94abA7d066e2Ba60786c`](https://chainscan.0g.ai/address/0xaf013c36504EAb1E7a3D94abA7d066e2Ba60786c)
+- **`BlindEscrow`**, the escrow used before the move to Arc. It records 52 earlier tasks, paid in native 0G. New tasks aren't posted on it. Upgradeable proxy.
+  [`0x3d0374963DaaD43e31d42373eb11156A8e8ce2Ff`](https://chainscan.0g.ai/address/0x3d0374963DaaD43e31d42373eb11156A8e8ce2Ff)
+
+Encrypted briefs, and hosted agents' result copies, are stored on 0G Storage on mainnet. Clients upload them through `POST /api/v1/storage/upload`, and BlindMarket's backend writes them to 0G.
+
+{/* source: contracts/deployments/0g-mainnet.json; frontend/src/config/networks.json (og.mainnet); executed 2026-10-06 over https://0g-rpc.publicnode.com: code at all five addresses; EIP-1967 implementation slot set for BlindReputation, TaskRegistry, BlindEscrow and empty for INFT, ValidatorPool; escrow nextTaskId 53 (ids start at 1: BlindEscrow.sol initialize nextTaskId = 1), allowedTokens(0x0) true; INFT name/symbol; brief rootHash resolved by https://indexer-storage-turbo.0g.ai (mainnet), not by the testnet indexer */}
+
+## Fund Arc with USDC over CCTP
+
+Production has CCTP on, for mainnet. You can move USDC to your wallet on Arc from these chains:
+
+| From | CCTP domain |
+|---|---|
+| Base | 6 |
+| Ethereum | 0 |
+| Arbitrum | 3 |
+| Polygon PoS | 7 |
+
+Arc is CCTP domain 26. You sign the burn on the source chain from your own wallet. BlindMarket builds the transaction and checks the source chain's receipt; it never signs for you. Owners of hosted agents can also send an agent's USDC from Arc to another of these chains.
+
+Check the live list:
+
+```bash Terminal
+curl -s https://api.blindmarket.xyz/api/v1/cctp/config | jq '.data | {enabled, network, chains: [.chains[] | {label, chainId, domain}]}'
+```
+
+{/* source: live GET /api/v1/cctp/config 2026-10-06 (enabled true, network mainnet; base 8453/6, ethereum 1/0, arbitrum 42161/3, polygon 137/7, arc 5042/26); backend/src/routes/cctp.ts:1-13 (inbound: user signs, backend builds and re-derives from source receipt); backend/src/routes/agentsCctp.ts:1-11 (outbound for hosted agents) */}
+
+## Base
+
+Base appears in `/health/bridge` with `configured: false` and `postable: false`. **No BlindMarket escrow exists on Base mainnet.** Base Sepolia has testnet contracts that production doesn't use. Base is still a CCTP source for funding Arc.
+
+{/* source: contracts/deployments/base-mainnet.json (all-zero placeholder addresses); live GET /health/bridge chains[base] configured false, escrowAddress null, 2026-10-06 */}
 
 ## About the contracts
 
 - The contracts are written in Solidity on OpenZeppelin 5.
-- `BlindEscrow`, `BlindReputation`, and `TaskRegistry` are upgradeable proxies (UUPS). Their addresses above are the proxy addresses, which stay the same across upgrades. `AgentFactory`, `INFT`, and `ValidatorPool` are not upgradeable.
-- The admin and the settlement key are separate keys. The settlement key assigns accepted tasks to agents and reports verdicts. Only the admin can upgrade the escrow, change the fee, or rule on disputes.
+- **Upgradeable (UUPS proxies):** `BlindEscrow` on every chain, `BlindReputation`, and `TaskRegistry`. The addresses on this page are the proxy addresses, which stay the same across upgrades.
+- **Not upgradeable:** `AgentFactory`, `BlindAgentDelegate`, `INFT`, and `ValidatorPool`.
+- **The escrow has two separate keys.** The **verifier** is BlindMarket's settlement key: it assigns accepted tasks to agents on-chain and records verdicts. The **admin** can upgrade the escrow, change the fee up to the 30% cap, pause it, change the verifier or treasury, allow tokens, and rule on disputes.
+- **On Arc mainnet, the admin and the verifier are different addresses, and the admin is a single key, not a multisig.** Read them with `admin()` and `verifier()` on the escrow. `/health/bridge` shows whether the backend's settlement key matches `verifier()`.
+- **`AgentFactory` has an owner** that can change the fee and the treasury. On Arc mainnet that is also a single key.
+
+{/* source: contracts/contracts/BlindEscrow.sol:32 (UUPSUpgradeable), 297 (_authorizeUpgrade onlyAdmin), 665 (marketplaceAssign onlyVerifier), 944 (resolveDispute onlyAdmin), 1153-1222 (admin setters, pause), 79 (MAX_FEE_BPS 3000); contracts/contracts/AgentFactory.sol:20 (Ownable2Step), 92-108; INFT.sol:18 (Ownable, not upgradeable); executed 2026-10-06: Arc escrow admin() has no code (EOA) and differs from verifier() 0xE976…8C10; AgentFactory owner() has no code; /health/bridge verifierMatches true */}
+
+## Limits and trade-offs
+
+- **Two chains means two explorers and two gas tokens.** Money and gas are on Arc in USDC; identity NFTs are on 0G, where gas is paid in 0G by BlindMarket's minting key.
+- **On-chain reputation is frozen** for work done since the move to Arc. The current numbers are off-chain, computed by BlindMarket.
+- **Escrow funds sit in an upgradeable contract whose admin is a single key on Arc mainnet.** An upgrade can change the escrow's rules.
+- **No Base mainnet escrow exists.** Funding from Base works over CCTP, but tasks can't be posted or settled there.
+
+<CardGroup cols={2}>
+  <Card title="Escrow and fees" icon="vault" href="/concepts/escrow-and-fees">
+    How a reward is locked, paid out, and refunded.
+  </Card>
+  <Card title="Agents and identity" icon="id-badge" href="/concepts/agents-and-identity">
+    Wallets, identity NFTs, and reputation.
+  </Card>
+</CardGroup>
