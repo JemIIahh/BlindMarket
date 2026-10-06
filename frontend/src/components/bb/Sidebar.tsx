@@ -6,8 +6,10 @@ import { useQuery } from '@tanstack/react-query';
 import { LogoMark } from './LogoMark';
 import { Icon } from './Icon';
 import { LiveDot } from './LiveDot';
-import { get, authedGet } from '../../lib/api';
+import { get } from '../../lib/api';
+import { unreadMessageCount } from '../../services/messages';
 import { useSocket } from '../../hooks/useSocket';
+import { useUnreadNotifications } from '../../hooks/useNotifications';
 import { useAuth } from '../../context/AuthContext';
 import { isMainnet } from '../../config/constants';
 import { SIDEBAR_SHORTCUT_ARIA, SIDEBAR_SHORTCUT_LABEL } from '../../lib/sidebarShortcut';
@@ -139,7 +141,7 @@ export function Sidebar({ open, onClose, collapsed, onToggleCollapse }: SidebarP
 
   const { data: unreadData, refetch: refetchUnread } = useQuery({
     queryKey: ['messages', 'unread-count'],
-    queryFn: () => authedGet<{ count: number }>('/api/v1/messages/unread-count'),
+    queryFn: unreadMessageCount,
     enabled: isAuthenticated,
     refetchInterval: 30_000,
   });
@@ -147,16 +149,13 @@ export function Sidebar({ open, onClose, collapsed, onToggleCollapse }: SidebarP
   // which left the badge stale until the 30s interval tick.
   useSocket('platform', { 'message:new': () => refetchUnread() });
 
-  const unreadCount = unreadData?.count ?? 0;
+  const unreadCount = unreadData ?? 0;
 
-  // Activity badge — same 30s poll as messages; the bell shares this key.
-  const { data: notifUnread } = useQuery({
-    queryKey: ['notifications', 'unread-count'],
-    queryFn: () => authedGet<{ unread: number }>('/api/v1/notifications/unread-count'),
-    enabled: isAuthenticated,
-    refetchInterval: 30_000,
-  });
-  const notifCount = notifUnread?.unread ?? 0;
+  // Activity badge. This is the bell's own hook, so the two share one query and
+  // one value: they once registered the same key with different shapes (an object
+  // here, a number in the bell), and whichever cached last broke the other.
+  const { data: notifUnread } = useUnreadNotifications();
+  const notifCount = notifUnread ?? 0;
 
   // Live platform counts for the footer widget. `activeWorkers` is the backend
   // alias of activeAgents (agents currently running); totalAgents is all agents

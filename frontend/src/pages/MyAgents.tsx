@@ -21,6 +21,7 @@ import { API_BASE_URL } from '../config/constants';
 import { agentFundingAddress, getMarketplaceTokenAddress, getPaymentSymbol, getPaymentDecimals, isNativePayment, useSettlement } from '../config/settlement';
 import { formatEarnings, sumEarnings } from '../lib/paymentUnits';
 import { authedPost } from '../lib/api';
+import { agentReputationScore, reputationTrend, type AgentReputationFields } from '../lib/agentReputation';
 import { providerFor } from '../lib/txSigner';
 import { useChainAddress, useOwnerAddresses } from '../hooks/useChainWallet';
 import { useAuth } from '../context/AuthContext';
@@ -79,11 +80,10 @@ interface Agent {
   totalEarnedUsdc?: string;
   totalEarnedNative?: string;
   createdAt?: string;
-  reputation?: {
-    decayedScore: number;
-    tasksCompleted: number;
-    decayFactor: number;
-  };
+  // The list API sends both records: the on-chain one, and the decayed one that
+  // holds decayedScore and decayFactor (see lib/agentReputation.ts).
+  reputation?: AgentReputationFields['reputation'];
+  decayedReputation?: AgentReputationFields['decayedReputation'];
 }
 
 const AGENTS_PAGE_SIZE = 20;
@@ -131,9 +131,6 @@ export default function MyAgents() {
   const tasksTotal = agents.reduce((s, a) => s + (a.tasksCompleted ?? 0), 0);
 
   // Reputation decay → directional arrow + tone.
-  const decayArrow = (factor: number) =>
-    factor > 0.9 ? { glyph: '↑', cls: 'text-ok' } : factor > 0.5 ? { glyph: '→', cls: 'text-warn' } : { glyph: '↓', cls: 'text-err' };
-
   function RowActions({ agent }: { agent: Agent }) {
     const isActing = action.isPending && action.variables?.id === agent.id;
     const disabled = isActing || !isAuthenticated;
@@ -250,7 +247,7 @@ export default function MyAgents() {
               {agents.map((agent) => {
                 const isActing = action.isPending && action.variables?.id === agent.id;
                 const failed = action.isError && action.variables?.id === agent.id;
-                const arrow = agent.reputation ? decayArrow(agent.reputation.decayFactor) : null;
+                const arrow = reputationTrend(agent);
                 return (
                   <div key={agent.id} className="border-t border-line hover:bg-surface-2 transition-colors">
                     <div className={`grid ${COLS} gap-6 px-5 py-3.5 text-sm items-center`}>
@@ -268,7 +265,7 @@ export default function MyAgents() {
                       </div>
                       <span className="text-ink-3 text-xs truncate">{agent.provider} / {agent.model}</span>
                       <div className="flex items-center gap-1.5">
-                        <span className="font-mono font-bold text-ink">{agent.reputation?.decayedScore ?? 0}</span>
+                        <span className="font-mono font-bold text-ink">{agentReputationScore(agent)}</span>
                         {arrow && <span className={arrow.cls}>{arrow.glyph}</span>}
                       </div>
                       <span className="font-mono font-semibold text-ink text-right">
@@ -293,7 +290,7 @@ export default function MyAgents() {
               {agents.map((agent) => {
                 const isActing = action.isPending && action.variables?.id === agent.id;
                 const failed = action.isError && action.variables?.id === agent.id;
-                const arrow = agent.reputation ? decayArrow(agent.reputation.decayFactor) : null;
+                const arrow = reputationTrend(agent);
                 return (
                   <div key={agent.id} className="px-5 py-4 space-y-3">
                     <div className="flex items-start justify-between gap-3">
@@ -319,7 +316,7 @@ export default function MyAgents() {
                       <div>
                         <div className="text-[11px] uppercase tracking-wider text-ink-3">Reputation</div>
                         <div className="flex items-center gap-1 mt-0.5">
-                          <span className="text-sm font-mono font-bold text-ink">{agent.reputation?.decayedScore ?? 0}</span>
+                          <span className="text-sm font-mono font-bold text-ink">{agentReputationScore(agent)}</span>
                           {arrow && <span className={`text-xs ${arrow.cls}`}>{arrow.glyph}</span>}
                         </div>
                       </div>
