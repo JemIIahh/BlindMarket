@@ -467,7 +467,8 @@ Behind `OPEN_SUBMISSION_ENABLED` (default off). Off, none of it runs: the event
 scan neither queries nor writes, and the sweep is not started. **[source]**
 
 - **Store** (`openSubmissionStore.ts`): what the escrow's events say about each
-  open task, in its own Redis keys (`a2a:open:*`). The single-assignee A2A
+  open task, in its own Redis keys (`a2a:open:*`, keyed by on-chain task
+  since #142). The single-assignee A2A
   state is untouched, so the accept, cascade and expiry flows never see an
   open task.
 - **Events** (`openSubmissionEvents.ts`, from the Arc indexer behind
@@ -529,4 +530,97 @@ Left for part 2b (review of #141):
 - List by the escrow's pause-adjusted deadline, not the `TaskCreated` one.
 - Before the flag goes on, the web app must not tell an open task's poster
   that "an agent will accept it", and needs a `collecting` status tag.
+
+## 12. As built: backend, part 2b (2026-10-07)
+
+The routes, in `routes/openSubmission.ts` (mounted inside `a2aRouter`), all
+404 while the flag is off. Each checks the escrow's rules first, so nobody is
+handed a transaction that reverts. **[source]**
+
+- **`POST /a2a/tasks/:id/submit-open`** `{ resultData, rootHash?, teeAttestation? }`
+  - **Refuses:**
+    - the poster, checked against the task's on-chain poster
+      (`SELF_SUBMIT`);
+    - the task's verifier (`IS_VERIFIER`);
+    - an unregistered agent (`NOT_REGISTERED`);
+    - an agent with the poster's owner (`SAME_OWNER`);
+    - the poster's own hosted agent (`OWN_AGENT`), since the poster reads
+      every result and may pick;
+    - a second submission (`ALREADY_SUBMITTED`), read from the escrow's
+      `submissionOf`, not the lagging indexer;
+    - a paused escrow (`ESCROW_PAUSED`);
+    - a task no longer collecting (`SUBMISSIONS_CLOSED`);
+    - after the deadline (`DEADLINE_REACHED`). Past the stored deadline the
+      escrow's phase decides, so a pause keeps it open.
+  - **Rate limit:** 20 calls a minute per wallet.
+  - **Size cap:** the whole record (`resultData`, `rootHash` and the
+    attestation, which takes `/submit`'s shape) is capped at 64 KB
+    (`RESULT_TOO_LARGE`). The full result belongs in storage (`rootHash`),
+    as single-assignee tasks already send it.
+  - **Returns** `unsignedSubmitOpen` for the caller to sign.
+  - **Hashing:** the evidence hash commits BOTH the result and its storage
+    pointer: `keccak256(JSON.stringify({ resultData, rootHash }))`
+    (`openEvidenceHash`). `/submit` hashes `resultData` alone, but there one
+    executor works alone. Here every result becomes readable at the deadline,
+    so a pointer left out of the commitment could be attached afterwards and
+    point at a copy (third review of #142). The verifier agent must check
+    the same form.
+  - **Held, then kept:** the result is held for one hour. The indexer keeps it
+    (90 days) only once the caller's on-chain submission carries its evidence
+    hash. So nothing is stored for long without an on-chain submission, which
+    costs gas, and a kept result can never be replaced. Until the submission
+    lands, the caller may replace the held result.
+  - **Held results per wallet:** a wallet may hold at most 10 at once, across
+    tasks (`TOO_MANY_HELD`). That bounds one wallet. Across throwaway wallets
+    (registration is free), the global per-IP limit is what bounds it.
+  - **Recovery:** if a hold lapsed before the indexer saw the submission (an
+    outage, a late broadcast), the caller sends the same result again. The
+    escrow's `submissionOf` proves it is the committed one, pointer included,
+    so it is kept with no new transaction (`alreadyOnChain: true`). The
+    attestation is not committed, so it is not kept this way. A different
+    result or pointer gets `ALREADY_SUBMITTED`.
+- **`GET /a2a/tasks/:id/submissions`** (`?cursor=&limit=`)
+  - Returns the submissions the escrow recorded. Each carries its result only
+    when the saved one matches the on-chain evidence hash.
+  - The poster (from any of their wallets) and the task's verifier may read
+    them at any time. Everyone else only once the escrow has closed
+    submissions (`SUBMISSIONS_HIDDEN`).
+- **`POST /a2a/tasks/:id/select`** `{ winner, scorecardHash? }`
+  - Returns `unsignedSelectWinner` for the task's **on-chain** poster wallet.
+  - **Refuses:**
+    - outside a creator-review task (`VERIFIER_PICKS`);
+    - outside the poster's window (`NOT_PICK_WINDOW`);
+    - while the escrow is paused (`ESCROW_PAUSED`);
+    - a winner that did not submit (`NOT_A_SUBMITTER`).
+- **The listing's state:** on `WinnerSelected` or `OpenTaskVoided`, the
+  indexer closes it with one Lua compare-and-set from `collecting`
+  (`a2aStore.closeOpenSubmissionTask`, run against a real Redis):
+  - `collecting` becomes `completed` with the winner as executor, or
+    `failed`/`voided`;
+  - the task leaves the open-submission index and the verifier's queue.
+  - `GET /open-tasks` also prunes the finished ones it finds.
+
+**Keyed by on-chain task, not hash** (security review of #142). The escrow
+does not make task hashes unique, so anyone could post a decoy task with a
+live task's hash. Every `a2a:open:*` record is keyed by `<chain>:<taskId>`. A
+listing is closed only by events from the task its own hash→task mapping
+names (the one its verified poster listed). A decoy's events stay on the
+decoy.
+
+Still the raw deadline: `GET /open-tasks` hides a task at its `TaskCreated`
+deadline even while a pause keeps the escrow taking submissions. Pauses are
+rare, and submit-open itself asks the escrow.
+
+**Known limit: a poster's own second wallet.** In creator-review mode the
+poster reads every result and picks. `OWN_AGENT` refuses the poster's hosted
+agents, but a poster can still submit from an unrelated wallet of their own,
+pick it, and recover 90% of the escrow, having read everyone's work for the
+platform fee. The contract only bars the poster's own address. Agent-managed
+mode, where the task's verifier picks, does not have this problem. Settle it
+before the flag goes on: default to agent-managed, or accept the risk
+knowingly for creator-review tasks.
+
+Left for part 2c:
+- Credit the winner's earnings.
+- The verifier agent's judging (`selectWinnerByVerifier`).
 

@@ -62,3 +62,18 @@ export async function sameOwnerAddresses(poster: string): Promise<Set<string>> {
 export async function sameOwnerSubtask(poster: string, executor: string): Promise<boolean> {
   return (await sameOwnerAddresses(poster)).has(executor.toLowerCase());
 }
+
+/**
+ * True when `executor` is a hosted agent that one of `owners` owns or is
+ * linked to: that person's own agent. For open submission, where the poster
+ * reads every result and may pick the winner, so their own agent could take
+ * the reward back. Defence in depth, like sameOwnerSubtask: an owner with an
+ * unrelated agent gets past it.
+ */
+export async function ownAgentOf(executor: string, owners: Iterable<string>): Promise<boolean> {
+  const agent = await hostedAgent(executor);
+  if (!agent) return false;
+  const theirs = ownersOf(agent);
+  for (const owner of owners) if (theirs.has(owner.toLowerCase())) return true;
+  return false;
+}

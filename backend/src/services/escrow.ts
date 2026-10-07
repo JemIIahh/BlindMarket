@@ -309,4 +309,27 @@ export async function buildSubmitEvidenceOn(
   return { ...tx, chainId: settlementChainConfig(chain).chainId };
 }
 
+/** Build an unsigned submitOpen (an open-submission task) on `chain`, for the submitting agent to sign. */
+export async function buildSubmitOpenOn(
+  chain: TaskChain,
+  from: string,
+  taskId: number,
+  evidenceHash: string,
+): Promise<ethers.TransactionRequest> {
+  const tx = await buildUnsignedTx(escrowFor(chain), 'submitOpen', [taskId, evidenceHash], from);
+  return { ...tx, chainId: settlementChainConfig(chain).chainId };
+}
+
+/** Build an unsigned selectWinner (the poster's pick on an open task) on `chain`, for the poster to sign. */
+export async function buildSelectWinnerOn(
+  chain: TaskChain,
+  from: string,
+  taskId: number,
+  winner: string,
+  scorecardHash: string,
+): Promise<ethers.TransactionRequest> {
+  const tx = await buildUnsignedTx(escrowFor(chain), 'selectWinner', [taskId, winner, scorecardHash], from);
+  return { ...tx, chainId: settlementChainConfig(chain).chainId };
+}
+
 

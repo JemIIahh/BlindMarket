@@ -38,10 +38,15 @@ vi.mock('../services/a2aStore.js', async () => ({
   setMeta: vi.fn(() => Promise.resolve()),
   getTaskHashClaim: vi.fn(() => Promise.resolve(null)),
   listOpenSubmissionTasks: vi.fn(() => Promise.resolve([])),
+  pruneOpenSubmissionIndex: vi.fn(() => Promise.resolve()),
   // The real projection: GET /open-tasks is public.
   projectPublicEntry: (await vi.importActual<typeof import('../services/a2aStore.js')>('../services/a2aStore.js')).projectPublicEntry,
 }));
-vi.mock('../services/openSubmissionStore.js', () => ({ recordedSubmissionCount: vi.fn(async () => 3) }));
+// Counts by on-chain task: three on arc:20, none anywhere else.
+vi.mock('../services/openSubmissionStore.js', () => ({
+  taskRef: (chain: string, taskId: string) => `${chain}:${taskId}`,
+  recordedSubmissionCount: vi.fn(async (ref: string) => (ref === 'arc:20' ? 3 : 0)),
+}));
 vi.mock('../services/avatarStore.js', () => ({ withPosterAvatars: vi.fn(async (metas: unknown[]) => metas) }));
 vi.mock('../services/agentStore.js', () => ({ getAgent: vi.fn(() => Promise.resolve(undefined)) }));
 vi.mock('../services/keyCustodyService.js', () => ({
@@ -107,7 +112,7 @@ import { a2aRouter } from './a2a.js';
 import { globalErrorHandler } from '../middleware/errorHandler.js';
 import * as a2aStore from '../services/a2aStore.js';
 import { chainRuntime } from '../services/chainRuntime.js';
-import { seedTaskId } from '../services/taskChain.js';
+import { resolveCachedTaskByHash, seedTaskId } from '../services/taskChain.js';
 import { emitTaskAvailable, emitTaskOffer } from '../services/socket.js';
 import { getTaskVerifierOn } from '../services/escrow.js';
 import { settlementChainConfig } from '../services/settlementChains.js';
@@ -271,6 +276,9 @@ describe('GET /open-tasks', () => {
   });
 
   it('lists the tasks still taking submissions, soonest deadline first, with their counts', async () => {
+    // Each listing's hash → its on-chain task: the store counts by that.
+    vi.mocked(resolveCachedTaskByHash).mockImplementation(async (hash: string) =>
+      hash === '0xsooner' ? { chain: 'arc', taskId: '20' } : hash === '0xlater' ? { chain: 'arc', taskId: '21' } : null);
     vi.mocked(a2aStore.listOpenSubmissionTasks).mockResolvedValue([
       entry('0xlater', nowSec + 7200),
       entry('0xpast', nowSec - 60),
@@ -281,7 +289,9 @@ describe('GET /open-tasks', () => {
     const res = await request(app()).get('/api/v1/a2a/open-tasks');
     expect(res.status).toBe(200);
     expect(res.body.data.total).toBe(2);
-    expect(res.body.data.tasks.map((t: any) => [t.meta.taskId, t.submissions])).toEqual([['0xsooner', 3], ['0xlater', 3]]);
+    expect(res.body.data.tasks.map((t: any) => [t.meta.taskId, t.submissions])).toEqual([['0xsooner', 3], ['0xlater', 0]]);
+    // The finished one leaves the index, so the list does not grow forever.
+    await vi.waitFor(() => expect(a2aStore.pruneOpenSubmissionIndex).toHaveBeenCalledWith(['0xclosed']));
   });
 
   it('is public, so it strips key material and private state like GET /tasks', async () => {
