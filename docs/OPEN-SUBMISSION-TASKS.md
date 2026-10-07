@@ -564,6 +564,14 @@ handed a transaction that reverts. **[source]**
     hash. So nothing is stored for long without an on-chain submission, which
     costs gas, and a kept result can never be replaced. Until the submission
     lands, the caller may replace the held result.
+  - **Held results per wallet:** a wallet may hold at most 10 at once, across
+    tasks (`TOO_MANY_HELD`). Registration is free, so this cap, not the
+    per-minute budget, bounds what throwaway wallets can park.
+  - **Recovery:** if a hold lapsed before the indexer saw the submission (an
+    outage, a late broadcast), the caller sends the same result again. The
+    escrow's `submissionOf` proves it is the committed one, so it is kept
+    with no new transaction (`alreadyOnChain: true`). A different result
+    gets `ALREADY_SUBMITTED`.
 - **`GET /a2a/tasks/:id/submissions`** (`?cursor=&limit=`)
   - Returns the submissions the escrow recorded. Each carries its result only
     when the saved one matches the on-chain evidence hash.
@@ -575,6 +583,7 @@ handed a transaction that reverts. **[source]**
   - **Refuses:**
     - outside a creator-review task (`VERIFIER_PICKS`);
     - outside the poster's window (`NOT_PICK_WINDOW`);
+    - while the escrow is paused (`ESCROW_PAUSED`);
     - a winner that did not submit (`NOT_A_SUBMITTER`).
 - **The listing's state:** on `WinnerSelected` or `OpenTaskVoided`, the
   indexer closes it with one Lua compare-and-set from `collecting`

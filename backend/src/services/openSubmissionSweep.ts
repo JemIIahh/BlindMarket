@@ -94,7 +94,13 @@ async function pickTimeLeft(rec: OpenTaskRecord, nowSec: number): Promise<number
 /** Look at one due task. True when an alert went out. Throws on a chain read failure: the task stays due. */
 async function sweepOne(ref: TaskRef, nowSec: number): Promise<boolean> {
   const rec = await store.getRecord(ref);
-  if (!rec || (await store.getOutcome(ref))) {
+  if (!rec) {
+    // The indexer schedules a task just before saving its record: look again
+    // later rather than lose the task's summary.
+    await store.scheduleSweep(ref, nowSec + RECHECK_SEC);
+    return false;
+  }
+  if (await store.getOutcome(ref)) {
     await store.unscheduleSweep(ref);
     return false;
   }

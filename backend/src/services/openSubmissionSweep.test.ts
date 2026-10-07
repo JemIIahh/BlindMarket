@@ -162,6 +162,13 @@ describe('the deadline summary', () => {
     expect(due().get(REF)).toBe(DEADLINE);
   });
 
+  it('looks again later at a due task whose record is not saved yet, rather than dropping it', async () => {
+    await store.scheduleSweep(REF, DEADLINE);
+    await sweepOpenSubmissions(NOW);
+    expect(notifyOnce).not.toHaveBeenCalled();
+    expect(due().get(REF)).toBe(NOW + 300);
+  });
+
   it('does not look at tasks that are not due', async () => {
     await store.saveRecord({ chain: 'arc', taskId: '7', taskHash: HASH, poster: POSTER, deadline: NOW + 3600, mode: 'creator', creatorWindow: 86_400 });
     await store.scheduleSweep(REF, NOW + 3600);

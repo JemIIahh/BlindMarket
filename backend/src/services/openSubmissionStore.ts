@@ -20,6 +20,8 @@
  *                                PENDING_RESULT_TTL_SEC: kept only if it lands on-chain
  *   a2a:open:results:<ref>       hash: submitter → JSON OpenResult whose evidence hash
  *                                the escrow recorded; kept RESULTS_TTL_SEC
+ *   a2a:open:held-by:<a>         zset: ref → unix seconds a submitter's held result
+ *                                expires; caps how many one wallet holds (MAX_HELD)
  *   a2a:open:due                 zset: ref → unix seconds the sweep next looks at it
  *
  * Writers:
@@ -97,6 +99,12 @@ export interface OpenResult {
 
 /** How long a sent result waits for its on-chain submission. */
 export const PENDING_RESULT_TTL_SEC = 3600;
+/**
+ * Results one wallet may have held at once, across tasks. Registration is
+ * free, so this, not the per-minute budget, bounds what throwaway wallets
+ * can park in Redis: MAX_HELD x 64 KB each, for an hour.
+ */
+export const MAX_HELD = 10;
 /** How long kept results last: well past every pick window. */
 export const RESULTS_TTL_SEC = 90 * 86_400;
 
@@ -107,6 +115,7 @@ const KEY = {
   closed: (ref: TaskRef) => `a2a:open:closed:${ref}`,
   countGate: (ref: TaskRef) => `a2a:open:count-gate:${ref}`,
   pending: (ref: TaskRef, submitter: string) => `a2a:open:pending:${ref}:${submitter.toLowerCase()}`,
+  heldBy: (submitter: string) => `a2a:open:held-by:${submitter.toLowerCase()}`,
   results: (ref: TaskRef) => `a2a:open:results:${ref}`,
   due: 'a2a:open:due',
 };
@@ -235,7 +244,30 @@ export async function savePendingResult(ref: TaskRef, submitter: string, result:
 }
 
 /**
- * Keep a submitter's pending result now that their on-chain submission is
+ * Take one of the submitter's MAX_HELD slots for a held result on `ref`
+ * (re-sending for the same task reuses its slot). False when they already
+ * hold MAX_HELD results elsewhere: they must wait for one to land or expire.
+ */
+export async function takeHeldSlot(submitter: string, ref: TaskRef, nowSec: number): Promise<boolean> {
+  const key = KEY.heldBy(submitter);
+  await redis.zremrangebyscore(key, '-inf', nowSec);
+  const holding = (await redis.zscore(key, ref)) !== null;
+  if (!holding && (await redis.zcard(key)) >= MAX_HELD) return false;
+  await redis.zadd(key, nowSec + PENDING_RESULT_TTL_SEC, ref);
+  await redis.expire(key, PENDING_RESULT_TTL_SEC);
+  return true;
+}
+
+/** Keep a result for good: the escrow recorded its evidence hash. Never replaces one. True when kept now. */
+async function keep(ref: TaskRef, submitter: string, result: OpenResult): Promise<boolean> {
+  const kept = (await redis.hsetnx(KEY.results(ref), submitter.toLowerCase(), JSON.stringify(result))) === 1;
+  await redis.expire(KEY.results(ref), RESULTS_TTL_SEC);
+  await redis.zrem(KEY.heldBy(submitter), ref);
+  return kept;
+}
+
+/**
+ * Keep a submitter's held result now that their on-chain submission is
  * recorded, if its evidence hash is the one on-chain. Called by the indexer.
  * True when a result was kept.
  */
@@ -243,10 +275,19 @@ export async function keepResult(ref: TaskRef, submitter: string, evidenceHash: 
   const pendingKey = KEY.pending(ref, submitter);
   const pending = parse<OpenResult>(await redis.get(pendingKey));
   if (!pending || pending.evidenceHash.toLowerCase() !== evidenceHash.toLowerCase()) return false;
-  const kept = (await redis.hsetnx(KEY.results(ref), submitter.toLowerCase(), JSON.stringify(pending))) === 1;
-  await redis.expire(KEY.results(ref), RESULTS_TTL_SEC);
+  const kept = await keep(ref, submitter, pending);
   await redis.del(pendingKey);
   return kept;
+}
+
+/**
+ * Keep a result whose evidence hash the caller has just read from the
+ * escrow's submissionOf for this submitter: the on-chain commitment proves it
+ * is the one submitted. The way back for a result whose hold expired before
+ * the indexer saw the submission (an outage, a late broadcast).
+ */
+export async function keepCommittedResult(ref: TaskRef, submitter: string, result: OpenResult): Promise<boolean> {
+  return keep(ref, submitter, result);
 }
 
 /** Kept results for these submitters, in order; null where none was kept. */

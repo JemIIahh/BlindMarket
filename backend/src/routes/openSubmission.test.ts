@@ -36,7 +36,7 @@ vi.mock('../middleware/auth.js', () => ({
   },
 }));
 
-const mem = vi.hoisted(() => ({ kv: new Map<string, string>(), hashes: new Map<string, Map<string, string>>() }));
+const mem = vi.hoisted(() => ({ kv: new Map<string, string>(), hashes: new Map<string, Map<string, string>>(), zsets: new Map<string, Map<string, number>>() }));
 vi.mock('../services/redis.js', () => {
   const h = (k: string) => {
     const m = mem.hashes.get(k) ?? new Map<string, string>();
@@ -54,6 +54,15 @@ vi.mock('../services/redis.js', () => {
       hmget: async (k: string, ...fs: string[]) => fs.map((f) => h(k).get(f) ?? null),
       hlen: async (k: string) => h(k).size,
       expire: async () => 1,
+      zadd: async (k: string, score: number, m: string) => { const z = mem.zsets.get(k) ?? new Map<string, number>(); mem.zsets.set(k, z); z.set(m, score); return 1; },
+      zrem: async (k: string, m: string) => (mem.zsets.get(k)?.delete(m) ? 1 : 0),
+      zscore: async (k: string, m: string) => (mem.zsets.get(k)?.has(m) ? String(mem.zsets.get(k)!.get(m)) : null),
+      zcard: async (k: string) => mem.zsets.get(k)?.size ?? 0,
+      zremrangebyscore: async (k: string, _min: string, max: number) => {
+        let n = 0;
+        for (const [m, sc] of mem.zsets.get(k) ?? []) if (sc <= max) { mem.zsets.get(k)!.delete(m); n++; }
+        return n;
+      },
       // Pages of one entry, so paging is exercised.
       hscan: async (k: string, cursor: string) => {
         const entries = [...h(k).entries()];
@@ -120,6 +129,7 @@ beforeEach(() => {
   flag.on = true;
   mem.kv.clear();
   mem.hashes.clear();
+  mem.zsets.clear();
   a2a.getMeta.mockResolvedValue(openMeta());
   a2a.getState.mockResolvedValue({ taskId: HASH, status: 'collecting' });
   agents.getAgent.mockResolvedValue({ address: AGENT });
@@ -163,6 +173,33 @@ describe('POST /tasks/:id/submit-open', () => {
     expect(res.status).toBe(409);
     expect(res.body.error.code).toBe('ALREADY_SUBMITTED');
     expect(JSON.parse(pending(AGENT)!).resultData).toEqual({ output: 'final' });
+  });
+
+  it('keeps a re-sent result whose hold lapsed, when the escrow already holds its hash', async () => {
+    // The indexer missed the hour (an outage); the agent sends the same result again.
+    escrow.submissionOf.mockResolvedValue(evidence({ output: 'final' }));
+    const res = await submit(AGENT, { output: 'final' });
+    expect(res.status).toBe(200);
+    expect(res.body.data).toMatchObject({ alreadyOnChain: true, kept: true });
+    expect(res.body.data.unsignedSubmitOpen).toBeUndefined();
+    expect((await store.getResults(REF, [AGENT]))[0]?.resultData).toEqual({ output: 'final' });
+    // A different result is not the committed one.
+    expect((await submit(AGENT, { output: 'other' })).body.error.code).toBe('ALREADY_SUBMITTED');
+    // And a kept result is never replaced.
+    await submit(AGENT, { output: 'final' });
+    expect((await store.getResults(REF, [AGENT]))[0]?.resultData).toEqual({ output: 'final' });
+  });
+
+  it('caps how many results one wallet holds at once, across tasks', async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    for (let t = 0; t < 10; t++) expect(await store.takeHeldSlot(AGENT, `arc:${100 + t}`, nowSec)).toBe(true);
+    // Re-sending for a task it already holds reuses that slot.
+    expect(await store.takeHeldSlot(AGENT, 'arc:100', nowSec)).toBe(true);
+    const res = await submit(AGENT);
+    expect(res.status).toBe(429);
+    expect(res.body.error.code).toBe('TOO_MANY_HELD');
+    // An hour later the holds have lapsed.
+    expect(await store.takeHeldSlot(AGENT, REF, nowSec + 3601)).toBe(true);
   });
 
   it("refuses the task's on-chain poster even when another wallet listed it", async () => {
@@ -283,6 +320,11 @@ describe('POST /tasks/:id/select', () => {
     const res = await select(AGENT2, AGENT);
     expect(res.status).toBe(403);
     expect(res.body.error.code).toBe('NOT_POSTER');
+  });
+
+  it('refuses while the escrow is paused: selectWinner would revert', async () => {
+    escrow.paused.mockResolvedValueOnce(true);
+    expect((await select(POSTER, AGENT)).body.error.code).toBe('ESCROW_PAUSED');
   });
 
   it("refuses on a task whose verifier picks, outside the poster's window, and for a non-submitter", async () => {

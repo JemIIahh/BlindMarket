@@ -19,7 +19,9 @@
  * A sent result is held for an hour; the indexer keeps it only once the
  * submitter's on-chain submission carries its evidence hash
  * (openSubmissionStore.keepResult). So nothing is stored for long without an
- * on-chain submission, and a result can't be swapped after one.
+ * on-chain submission, and a result can't be swapped after one. A result
+ * whose hold lapsed first is kept when its submitter sends it again: the
+ * escrow's submissionOf proves it is the committed one.
  */
 
 import { Router } from 'express';
@@ -158,7 +160,39 @@ openSubmissionRouter.post('/tasks/:id/submit-open', enabledOnly, requireAuth, su
     if (posters.includes(address)) {
       throw new AppError(403, 'SELF_SUBMIT', 'You posted this task, so you cannot submit to it');
     }
+
+    const json = JSON.stringify(body.resultData);
+    const sent = { resultData: body.resultData, rootHash: body.rootHash ?? null, teeAttestation: body.teeAttestation ?? undefined };
+    if (Buffer.byteLength(JSON.stringify(sent)) > MAX_RESULT_BYTES) {
+      throw new AppError(
+        413,
+        'RESULT_TOO_LARGE',
+        `The result is over ${MAX_RESULT_BYTES / 1024} KB: put the full result in storage, send its rootHash, and keep resultData short`,
+      );
+    }
+    // Hashed as /submit hashes it, so a verifier checks both kinds alike.
+    const evidenceHash = ethers.keccak256(ethers.toUtf8Bytes(json));
+    const result = {
+      resultData: body.resultData,
+      evidenceHash,
+      rootHash: body.rootHash ?? null,
+      ...(body.teeAttestation ? { teeAttestation: body.teeAttestation } : {}),
+      savedAt: new Date().toISOString(),
+    };
+
     if (alreadySubmitted !== ethers.ZeroHash) {
+      // Already on-chain. The same result again is the way back for one whose
+      // hold expired before the indexer saw the submission (an outage, a late
+      // broadcast): the escrow's commitment proves it is the one submitted.
+      if (String(alreadySubmitted).toLowerCase() === evidenceHash.toLowerCase()) {
+        const kept = await store.keepCommittedResult(ref, address, result);
+        const response: ApiResponse = {
+          success: true,
+          data: { taskHash, onChainTaskId: String(taskId), evidenceHash, alreadyOnChain: true, kept },
+        };
+        res.json(response);
+        return;
+      }
       throw new AppError(409, 'ALREADY_SUBMITTED', 'You already submitted to this task: one submission per agent');
     }
     if (paused) {
@@ -177,24 +211,14 @@ openSubmissionRouter.post('/tasks/:id/submit-open', enabledOnly, requireAuth, su
       throw new AppError(409, 'DEADLINE_REACHED', 'Submissions closed at the deadline');
     }
 
-    const json = JSON.stringify(body.resultData);
-    const kept = { resultData: body.resultData, rootHash: body.rootHash ?? null, teeAttestation: body.teeAttestation ?? undefined };
-    if (Buffer.byteLength(JSON.stringify(kept)) > MAX_RESULT_BYTES) {
+    if (!(await store.takeHeldSlot(address, ref, Math.floor(Date.now() / 1000)))) {
       throw new AppError(
-        413,
-        'RESULT_TOO_LARGE',
-        `The result is over ${MAX_RESULT_BYTES / 1024} KB: put the full result in storage, send its rootHash, and keep resultData short`,
+        429,
+        'TOO_MANY_HELD',
+        `You have ${store.MAX_HELD} results waiting for their on-chain submissions: send those, or wait an hour for them to lapse`,
       );
     }
-    // Hashed as /submit hashes it, so a verifier checks both kinds alike.
-    const evidenceHash = ethers.keccak256(ethers.toUtf8Bytes(json));
-    await store.savePendingResult(ref, address, {
-      resultData: body.resultData,
-      evidenceHash,
-      rootHash: body.rootHash ?? null,
-      ...(body.teeAttestation ? { teeAttestation: body.teeAttestation } : {}),
-      savedAt: new Date().toISOString(),
-    });
+    await store.savePendingResult(ref, address, result);
     const unsignedSubmitOpen = await buildSubmitOpenOn(chain, address, taskId, evidenceHash);
     console.log(`[open-submission] ${address.slice(0, 10)}… submitting to ${taskHash.slice(0, 10)}… (task ${ref})`);
     const response: ApiResponse = {
@@ -284,6 +308,10 @@ openSubmissionRouter.post('/tasks/:id/select', enabledOnly, requireAuth, async (
     const phase = await phaseOf(chain, taskId);
     if (phase !== PHASE.CreatorPick) {
       throw new AppError(409, 'NOT_PICK_WINDOW', `You can pick only in your pick window; this task is ${PHASE_NAMES[phase] ?? 'past it'}`);
+    }
+    // selectWinner is whenNotPaused. A pause also moves the window later.
+    if (await escrowFor(chain).paused()) {
+      throw new AppError(409, 'ESCROW_PAUSED', 'The escrow is paused: picks wait until it resumes');
     }
     const winner = ethers.getAddress(body.winner);
     if ((await escrowFor(chain).submissionOf(taskId, winner)) === ethers.ZeroHash) {

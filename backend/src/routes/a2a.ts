@@ -437,7 +437,11 @@ a2aRouter.get('/open-tasks', async (req, res, next) => {
     const page = live.slice(offset, offset + limit).map(a2aStore.projectPublicEntry);
     const [metas, counts] = await Promise.all([
       withPosterAvatars(page.map((t) => t.meta)),
-      Promise.all(page.map((t) => openSubmissionStore.recordedSubmissionCount(t.meta.taskId))),
+      // The store keys by the on-chain task, not the hash (hashes are not unique).
+      Promise.all(page.map(async (t) => {
+        const listed = await resolveCachedTaskByHash(t.meta.taskId).catch(() => null);
+        return listed ? openSubmissionStore.recordedSubmissionCount(openSubmissionStore.taskRef(listed.chain, listed.taskId)) : 0;
+      })),
     ]);
     const tasks = page.map((t, i) => ({ ...t, meta: metas[i], submissions: counts[i] }));
     const body: ApiResponse = { success: true, data: { tasks, total: live.length, offset, limit } };
