@@ -8,8 +8,9 @@
  * handed a transaction that reverts:
  *   - submitOpen: before the deadline, one per agent, never the poster or the
  *     task's verifier. The result itself stays off-chain, keyed by submitter;
- *     the escrow keeps its evidence hash, the commitment that it was not
- *     changed afterwards.
+ *     the escrow keeps its evidence hash (openEvidenceHash: the resultData
+ *     and its storage pointer), the commitment that neither was changed
+ *     afterwards.
  *   - selectWinner: the poster, in their pick window, of an agent that
  *     submitted.
  *
@@ -65,6 +66,19 @@ const enabledOnly: RequestHandler = (_req, _res, next) => {
   }
   next();
 };
+
+/**
+ * An open submission's evidence hash: keccak256 of the JSON of BOTH the
+ * resultData and the storage pointer. /submit hashes the resultData alone,
+ * but there one executor works alone. Here the full result lives behind
+ * rootHash and every result becomes readable at the deadline: left out of
+ * the commitment, a pointer attached afterwards could point at a copy of a
+ * competitor's work (third review of #142). Storage ids are content hashes,
+ * so the committed pointer can't change what it points at either.
+ */
+export function openEvidenceHash(resultData: Record<string, unknown>, rootHash: string | null): string {
+  return ethers.keccak256(ethers.toUtf8Bytes(JSON.stringify({ resultData, rootHash })));
+}
 
 const PHASE_NAMES: Record<number, string> = {
   [PHASE.Submissions]: 'taking submissions',
@@ -161,7 +175,6 @@ openSubmissionRouter.post('/tasks/:id/submit-open', enabledOnly, requireAuth, su
       throw new AppError(403, 'SELF_SUBMIT', 'You posted this task, so you cannot submit to it');
     }
 
-    const json = JSON.stringify(body.resultData);
     const sent = { resultData: body.resultData, rootHash: body.rootHash ?? null, teeAttestation: body.teeAttestation ?? undefined };
     if (Buffer.byteLength(JSON.stringify(sent)) > MAX_RESULT_BYTES) {
       throw new AppError(
@@ -170,8 +183,7 @@ openSubmissionRouter.post('/tasks/:id/submit-open', enabledOnly, requireAuth, su
         `The result is over ${MAX_RESULT_BYTES / 1024} KB: put the full result in storage, send its rootHash, and keep resultData short`,
       );
     }
-    // Hashed as /submit hashes it, so a verifier checks both kinds alike.
-    const evidenceHash = ethers.keccak256(ethers.toUtf8Bytes(json));
+    const evidenceHash = openEvidenceHash(body.resultData, body.rootHash ?? null);
     const result = {
       resultData: body.resultData,
       evidenceHash,
@@ -185,7 +197,9 @@ openSubmissionRouter.post('/tasks/:id/submit-open', enabledOnly, requireAuth, su
       // hold expired before the indexer saw the submission (an outage, a late
       // broadcast): the escrow's commitment proves it is the one submitted.
       if (String(alreadySubmitted).toLowerCase() === evidenceHash.toLowerCase()) {
-        const kept = await store.keepCommittedResult(ref, address, result);
+        // The attestation is not in the commitment: not kept this way.
+        const { teeAttestation: _uncommitted, ...committed } = result;
+        const kept = await store.keepCommittedResult(ref, address, committed);
         const response: ApiResponse = {
           success: true,
           data: { taskHash, onChainTaskId: String(taskId), evidenceHash, alreadyOnChain: true, kept },

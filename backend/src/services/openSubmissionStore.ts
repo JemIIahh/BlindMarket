@@ -86,7 +86,8 @@ export interface OpenTaskOutcome {
 
 /**
  * A submitter's result as they sent it to submit-open. The escrow holds its
- * evidence hash (keccak256 of the JSON resultData).
+ * evidence hash (routes/openSubmission.ts openEvidenceHash: the resultData
+ * and rootHash together).
  */
 export interface OpenResult {
   resultData: Record<string, unknown>;
@@ -100,9 +101,9 @@ export interface OpenResult {
 /** How long a sent result waits for its on-chain submission. */
 export const PENDING_RESULT_TTL_SEC = 3600;
 /**
- * Results one wallet may have held at once, across tasks. Registration is
- * free, so this, not the per-minute budget, bounds what throwaway wallets
- * can park in Redis: MAX_HELD x 64 KB each, for an hour.
+ * Results one wallet may have held at once, across tasks: MAX_HELD x 64 KB
+ * each, for an hour. That bounds one wallet; across throwaway wallets
+ * (registration is free) the global per-IP limit is what bounds it.
  */
 export const MAX_HELD = 10;
 /** How long kept results last: well past every pick window. */

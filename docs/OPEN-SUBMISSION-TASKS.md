@@ -558,20 +558,27 @@ handed a transaction that reverts. **[source]**
     (`RESULT_TOO_LARGE`). The full result belongs in storage (`rootHash`),
     as single-assignee tasks already send it.
   - **Returns** `unsignedSubmitOpen` for the caller to sign.
-  - **Hashing:** the evidence hash is computed as `/submit` computes it.
+  - **Hashing:** the evidence hash commits BOTH the result and its storage
+    pointer: `keccak256(JSON.stringify({ resultData, rootHash }))`
+    (`openEvidenceHash`). `/submit` hashes `resultData` alone, but there one
+    executor works alone. Here every result becomes readable at the deadline,
+    so a pointer left out of the commitment could be attached afterwards and
+    point at a copy (third review of #142). The verifier agent must check
+    the same form.
   - **Held, then kept:** the result is held for one hour. The indexer keeps it
     (90 days) only once the caller's on-chain submission carries its evidence
     hash. So nothing is stored for long without an on-chain submission, which
     costs gas, and a kept result can never be replaced. Until the submission
     lands, the caller may replace the held result.
   - **Held results per wallet:** a wallet may hold at most 10 at once, across
-    tasks (`TOO_MANY_HELD`). Registration is free, so this cap, not the
-    per-minute budget, bounds what throwaway wallets can park.
+    tasks (`TOO_MANY_HELD`). That bounds one wallet. Across throwaway wallets
+    (registration is free), the global per-IP limit is what bounds it.
   - **Recovery:** if a hold lapsed before the indexer saw the submission (an
     outage, a late broadcast), the caller sends the same result again. The
-    escrow's `submissionOf` proves it is the committed one, so it is kept
-    with no new transaction (`alreadyOnChain: true`). A different result
-    gets `ALREADY_SUBMITTED`.
+    escrow's `submissionOf` proves it is the committed one, pointer included,
+    so it is kept with no new transaction (`alreadyOnChain: true`). The
+    attestation is not committed, so it is not kept this way. A different
+    result or pointer gets `ALREADY_SUBMITTED`.
 - **`GET /a2a/tasks/:id/submissions`** (`?cursor=&limit=`)
   - Returns the submissions the escrow recorded. Each carries its result only
     when the saved one matches the on-chain evidence hash.

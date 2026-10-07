@@ -74,6 +74,11 @@ vi.mock('../services/redis.js', () => {
   };
 });
 
+// The wallet budget is a token bucket (middleware/rateLimit.ts, tested there):
+// a pass-through here, so many calls from one test wallet are not refused.
+const walletBudget = vi.hoisted(() => vi.fn((_opts: { name: string; perMinute: number }) => (_req: unknown, _res: unknown, next: () => void) => next()));
+vi.mock('../middleware/rateLimit.js', () => ({ createWalletBudget: walletBudget }));
+
 const a2a = vi.hoisted(() => ({ getMeta: vi.fn(), getState: vi.fn() }));
 vi.mock('../services/a2aStore.js', () => a2a);
 const agents = vi.hoisted(() => ({ getAgent: vi.fn() }));
@@ -93,7 +98,9 @@ vi.mock('../services/openSubmissionSweep.js', () => ({
   PHASE: { Submissions: 0, CreatorPick: 1, VerifierPick: 2, BackupPick: 3, AdminResolve: 4, Closed: 5 },
 }));
 
-const { openSubmissionRouter, MAX_RESULT_BYTES } = await import('./openSubmission.js');
+const { openSubmissionRouter, MAX_RESULT_BYTES, openEvidenceHash } = await import('./openSubmission.js');
+// Made at import, before any beforeEach clears the mocks.
+const budgetsMade = [...walletBudget.mock.calls];
 const { globalErrorHandler } = await import('../middleware/errorHandler.js');
 const store = await import('../services/openSubmissionStore.js');
 
@@ -116,7 +123,8 @@ const openMeta = (over: Record<string, unknown> = {}) => ({
   taskId: HASH, posterAddress: POSTER, verifierAddress: VERIFIER, deadline: NOW + 3600,
   submissionMode: 'open', openPick: { mode: 'creator', creatorWindow: 86_400 }, privacy: 'public', ...over,
 });
-const evidence = (resultData: Record<string, unknown>) => ethers.keccak256(ethers.toUtf8Bytes(JSON.stringify(resultData)));
+// The submit() helper sends rootHash null.
+const evidence = (resultData: Record<string, unknown>, rootHash: string | null = null) => openEvidenceHash(resultData, rootHash);
 /** The indexer recording an on-chain submission, and keeping its result if the hash matches. */
 async function onChain(who: string, resultData: Record<string, unknown>, ordinal = 1) {
   await store.recordSubmission(REF, who, { evidenceHash: evidence(resultData), ordinal, recordedAt: new Date().toISOString() });
@@ -139,6 +147,12 @@ beforeEach(() => {
   builders.getTaskOn.mockResolvedValue({ agent: POSTER });
   sameOwner.mockResolvedValue(false);
   ownAgent.mockResolvedValue(false);
+});
+
+describe('limits', () => {
+  it('gives submit-open a per-wallet budget', () => {
+    expect(budgetsMade).toEqual([[{ name: 'submissions', perMinute: 20 }]]);
+  });
 });
 
 describe('the flag', () => {
@@ -188,6 +202,31 @@ describe('POST /tasks/:id/submit-open', () => {
     // And a kept result is never replaced.
     await submit(AGENT, { output: 'final' });
     expect((await store.getResults(REF, [AGENT]))[0]?.resultData).toEqual({ output: 'final' });
+  });
+
+  it('commits the storage pointer too: the same resultData with another rootHash is another submission', async () => {
+    const ROOT_A = '0x' + 'aa'.repeat(32);
+    const ROOT_B = '0x' + 'bb'.repeat(32);
+    expect(evidence({ output: 'x' }, ROOT_A)).not.toBe(evidence({ output: 'x' }, ROOT_B));
+    expect(evidence({ output: 'x' }, ROOT_A)).toBe(ethers.keccak256(ethers.toUtf8Bytes(JSON.stringify({ resultData: { output: 'x' }, rootHash: ROOT_A }))));
+    // On-chain with a placeholder and no pointer; after the deadline, the
+    // same resultData with a pointer to a copied result is refused.
+    escrow.submissionOf.mockResolvedValue(evidence({ summary: 'see storage' }, null));
+    escrow.openPhase.mockResolvedValue(1n);
+    const res = await request(app()).post(`/api/v1/a2a/tasks/${HASH}/submit-open`).set(as(AGENT))
+      .send({ resultData: { summary: 'see storage' }, rootHash: ROOT_B });
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('ALREADY_SUBMITTED');
+    expect((await store.getResults(REF, [AGENT]))[0]).toBeNull();
+  });
+
+  it('keeps no attestation through the recovery path: it is not in the commitment', async () => {
+    escrow.submissionOf.mockResolvedValue(evidence({ output: 'final' }));
+    await request(app()).post(`/api/v1/a2a/tasks/${HASH}/submit-open`).set(as(AGENT))
+      .send({ resultData: { output: 'final' }, rootHash: null, teeAttestation: { signature: 'sig', signedText: 'claimed later' } });
+    const kept = (await store.getResults(REF, [AGENT]))[0];
+    expect(kept?.resultData).toEqual({ output: 'final' });
+    expect(kept?.teeAttestation).toBeUndefined();
   });
 
   it('caps how many results one wallet holds at once, across tasks', async () => {
