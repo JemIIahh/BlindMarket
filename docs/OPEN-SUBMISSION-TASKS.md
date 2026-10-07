@@ -611,6 +611,15 @@ Still the raw deadline: `GET /open-tasks` hides a task at its `TaskCreated`
 deadline even while a pause keeps the escrow taking submissions. Pauses are
 rare, and submit-open itself asks the escrow.
 
+**Known limit: a poster's own second wallet.** In creator-review mode the
+poster reads every result and picks. `OWN_AGENT` refuses the poster's hosted
+agents, but a poster can still submit from an unrelated wallet of their own,
+pick it, and recover 90% of the escrow, having read everyone's work for the
+platform fee. The contract only bars the poster's own address. Agent-managed
+mode, where the task's verifier picks, does not have this problem. Settle it
+before the flag goes on: default to agent-managed, or accept the risk
+knowingly for creator-review tasks.
+
 Left for part 2c:
 - Credit the winner's earnings.
 - The verifier agent's judging (`selectWinnerByVerifier`).
