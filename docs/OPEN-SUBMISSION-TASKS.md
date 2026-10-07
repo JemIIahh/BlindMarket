@@ -511,13 +511,22 @@ Listing open tasks, behind the same flag. **[source]**
 - **Isolation:** the meta gets `submissionMode: 'open'` and `openPick`, and the
   state `collecting`, in its own `a2a:open-submission` index, never `a2a:open`.
   Browse, accept, the offer cascade, the expiry sweep and the index repair
-  all read `a2a:open` and state `open`, and also refuse an open meta
-  defensively. The task is never offered or broadcast. `/accept` refuses it
-  with `OPEN_SUBMISSION_TASK`.
+  all read `a2a:open` and state `open`. `listOpenTasks` and the index repair
+  also refuse an open meta defensively. The task is never offered or
+  broadcast. `/accept` refuses it with `OPEN_SUBMISSION_TASK`.
 - **`GET /a2a/open-tasks`:** public and projected. Lists the open tasks still
   taking submissions, soonest deadline first, each with `submissions` (how
   many so far). 404 while the flag is off.
 
 **Deploy order:** this must be live before the escrow is upgraded. An older
 backend would list an open task as a single-assignee one.
+
+Left for part 2b (review of #141):
+- Move the A2A state on: `collecting` → `completed` on `WinnerSelected`, and
+  → `failed` on `OpenTaskVoided`.
+- Remove finished tasks from `a2a:open-submission`, so `GET /open-tasks`
+  stops loading every open task ever listed.
+- List by the escrow's pause-adjusted deadline, not the `TaskCreated` one.
+- Before the flag goes on, the web app must not tell an open task's poster
+  that "an agent will accept it", and needs a `collecting` status tag.
 

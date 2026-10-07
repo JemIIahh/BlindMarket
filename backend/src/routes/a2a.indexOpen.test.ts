@@ -32,13 +32,14 @@ vi.mock('../middleware/auth.js', () => ({
     next();
   },
 }));
-vi.mock('../services/a2aStore.js', () => ({
+vi.mock('../services/a2aStore.js', async () => ({
   getMeta: vi.fn(),
   getState: vi.fn(),
   setMeta: vi.fn(() => Promise.resolve()),
   getTaskHashClaim: vi.fn(() => Promise.resolve(null)),
   listOpenSubmissionTasks: vi.fn(() => Promise.resolve([])),
-  projectPublicEntry: vi.fn((t: unknown) => t),
+  // The real projection: GET /open-tasks is public.
+  projectPublicEntry: (await vi.importActual<typeof import('../services/a2aStore.js')>('../services/a2aStore.js')).projectPublicEntry,
 }));
 vi.mock('../services/openSubmissionStore.js', () => ({ recordedSubmissionCount: vi.fn(async () => 3) }));
 vi.mock('../services/avatarStore.js', () => ({ withPosterAvatars: vi.fn(async (metas: unknown[]) => metas) }));
@@ -132,6 +133,8 @@ const taskCreated = (taskId: number, taskHash = HASH) =>
 const verifierSet = (taskId: number) => log('TaskVerifierSet', [taskId, VERIFIER]);
 // PickMode 1 = CreatorReview, with a 24 h window.
 const openCreated = (taskId: number, address = ESCROW) => log('OpenTaskCreated', [taskId, 1, 86_400], address);
+// PickMode 0 = AgentManaged: no creator window.
+const openCreatedAgentManaged = (taskId: number) => log('OpenTaskCreated', [taskId, 0, 0]);
 
 const getReceipt = vi.fn();
 const receiptWith = (...logs: unknown[]) => getReceipt.mockResolvedValue({ status: 1, logs, blockNumber: 100 });
@@ -180,6 +183,12 @@ describe('POST /tasks/index — an open-submission task', () => {
     expect(seedTaskId).toHaveBeenCalledWith('arc', HASH, '7');
     expect(emitTaskAvailable).not.toHaveBeenCalled();
     expect(emitTaskOffer).not.toHaveBeenCalled();
+  });
+
+  it('reads an agent-managed task, where the verifier picks, from the event too', async () => {
+    receiptWith(taskCreated(7), verifierSet(7), openCreatedAgentManaged(7));
+    await index(openListing());
+    expect(written()[0]).toMatchObject({ submissionMode: 'open', openPick: { mode: 'agent', creatorWindow: 0 } });
   });
 
   it('is refused while open submission is off, before anything is written', async () => {
@@ -273,5 +282,15 @@ describe('GET /open-tasks', () => {
     expect(res.status).toBe(200);
     expect(res.body.data.total).toBe(2);
     expect(res.body.data.tasks.map((t: any) => [t.meta.taskId, t.submissions])).toEqual([['0xsooner', 3], ['0xlater', 3]]);
+  });
+
+  it('is public, so it strips key material and private state like GET /tasks', async () => {
+    const leaky = entry('0xleaky', nowSec + 600);
+    Object.assign(leaky.meta, { wrappedKeys: { [POSTER]: 'SECRET-SLICE' }, keyCustodyBlob: { keyId: 'k', blob: 'SECRET-BLOB' } });
+    Object.assign(leaky.state, { resultData: 'SECRET-RESULT', assignError: 'internal' });
+    vi.mocked(a2aStore.listOpenSubmissionTasks).mockResolvedValue([leaky] as any);
+    const res = await request(app()).get('/api/v1/a2a/open-tasks');
+    expect(JSON.stringify(res.body)).not.toMatch(/SECRET|internal/);
+    expect(res.body.data.tasks[0].meta).toMatchObject({ taskId: '0xleaky', submissionMode: 'open' });
   });
 });
