@@ -485,6 +485,10 @@ Turning it on: set `OPEN_SUBMISSION_ENABLED=true` for both services and
 recreate them (`docker compose up -d --force-recreate api indexer`). The indexer
 scans the events; the API runs the sweep.
 
+For the web screens PR: the "Verification failed" toggle also covers "Another
+submission was picked", so its description in `frontend/src/services/telegram.ts`
+should say so once the feature is visible.
+
 Not yet: indexing open tasks for the board and the web app (they have no
 `a2a:meta` yet), the submit/select routes, crediting the winner's earnings,
 the worker, the verifier agent, and the web app. Turn the flag on only once
