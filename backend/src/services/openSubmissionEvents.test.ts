@@ -58,6 +58,8 @@ const escrow = vi.hoisted(() => ({
   submissionCount: vi.fn(),
 }));
 vi.mock('./escrow.js', () => ({ escrowFor: () => escrow }));
+const closeOpenSubmissionTask = vi.hoisted(() => vi.fn(async (_hash: string, _outcome: unknown) => true));
+vi.mock('./a2aStore.js', () => ({ closeOpenSubmissionTask }));
 
 type Alert = { to: string; type: string; title: string; body?: string; taskId?: string };
 /** What was actually delivered, in order. The once-senders skip a key seen before, like the real ones. */
@@ -215,6 +217,8 @@ describe('WinnerSelected', () => {
     expect(a.filter((x) => x.title === 'Another submission was picked').map((x) => x.to).sort()).toEqual([agent(1), agent(3)]);
     expect(await store.getOutcome(HASH)).toEqual({ kind: 'winner', winner: agent(2), judge: 'creator' });
     expect(due().has(HASH)).toBe(false);
+    // The listing closes too: 'completed', with the winner as its executor.
+    expect(closeOpenSubmissionTask).toHaveBeenCalledWith(HASH, { kind: 'winner', winner: agent(2) });
   });
 
   it('names the judge who picked', async () => {
@@ -248,12 +252,14 @@ describe('OpenTaskVoided', () => {
     expect(alerts().filter((x) => x.title === 'No submission was picked').map((x) => x.to).sort()).toEqual([agent(1), agent(2)]);
     expect(await store.getOutcome(HASH)).toEqual({ kind: 'void', judge: 'backup' });
     expect(due().has(HASH)).toBe(false);
+    expect(closeOpenSubmissionTask).toHaveBeenCalledWith(HASH, { kind: 'void' });
   });
 
-  it('by the poster (nobody submitted): no alert for their own refund', async () => {
+  it('by the poster (nobody submitted): no alert for their own refund, but the listing closes', async () => {
     await handleOpenTaskVoided('arc', 7n, 1);
     expect(alerts()).toHaveLength(0);
     expect(due().has(HASH)).toBe(false);
+    expect(closeOpenSubmissionTask).toHaveBeenCalledWith(HASH, { kind: 'void' });
   });
 });
 

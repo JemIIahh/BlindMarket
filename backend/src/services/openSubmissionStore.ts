@@ -12,9 +12,12 @@
  *   a2a:open:closed:<hash>       set once the poster was told submissions closed
  *   a2a:open:count-gate:<hash>   set for COUNT_NOTICE_GAP_SEC after a count notice
  *   a2a:open:due                 zset: hash → unix seconds the sweep next looks at it
+ *   a2a:open:results:<hash>      hash: submitter → JSON OpenResult, the result as sent to
+ *                                submit-open; kept RESULTS_TTL_SEC
  *
  * Writers: the indexer writes the record, the id index, submissions and the
- * outcome from events; the sweep writes `closed`. Both write `due`: the
+ * outcome from events; the sweep writes `closed`; POST submit-open writes a
+ * submitter's own result. Both write `due`: the
  * indexer schedules a task it meets and unschedules a settled one, the sweep
  * reschedules. Every write is a whole-value SET, HSETNX or ZADD/ZREM, never a
  * read-modify-write, so neither process can lose the other's write. The one
@@ -66,6 +69,7 @@ const KEY = {
   outcome: (hash: string) => `a2a:open:outcome:${hash.toLowerCase()}`,
   closed: (hash: string) => `a2a:open:closed:${hash.toLowerCase()}`,
   countGate: (hash: string) => `a2a:open:count-gate:${hash.toLowerCase()}`,
+  results: (hash: string) => `a2a:open:results:${hash.toLowerCase()}`,
   due: 'a2a:open:due',
 };
 
@@ -167,4 +171,60 @@ export async function unscheduleSweep(taskHash: string): Promise<void> {
 /** Tasks the sweep should look at by `nowSec`, soonest first. */
 export async function dueForSweep(nowSec: number, limit: number): Promise<string[]> {
   return redis.zrangebyscore(KEY.due, '-inf', nowSec, 'LIMIT', 0, limit);
+}
+
+// ── Results ─────────────────────────────────────────────────────────────────
+
+/**
+ * A submitter's result as they sent it to submit-open. The escrow holds its
+ * evidence hash (keccak256 of the JSON resultData): only a result whose hash
+ * matches the submitter's on-chain submission counts.
+ */
+export interface OpenResult {
+  resultData: Record<string, unknown>;
+  evidenceHash: string;
+  /** The full result in storage, as single-assignee tasks send it. */
+  rootHash?: string | null;
+  teeAttestation?: unknown;
+  savedAt: string;
+}
+
+/** How long results are kept: well past every pick window. */
+export const RESULTS_TTL_SEC = 90 * 86_400;
+
+/** Save (or replace, until it is on-chain) a submitter's result. */
+export async function saveResult(taskHash: string, submitter: string, result: OpenResult): Promise<void> {
+  const key = KEY.results(taskHash);
+  await redis.hset(key, submitter.toLowerCase(), JSON.stringify(result));
+  await redis.expire(key, RESULTS_TTL_SEC);
+}
+
+/** Saved results for these submitters, in order; null where none was saved. */
+export async function getResults(taskHash: string, submitters: string[]): Promise<Array<OpenResult | null>> {
+  if (submitters.length === 0) return [];
+  const raws = await redis.hmget(KEY.results(taskHash), ...submitters.map((a) => a.toLowerCase()));
+  return raws.map((raw) => parse<OpenResult>(raw));
+}
+
+/** A submitter's on-chain submission as recorded from events, or null. */
+export async function getSubmission(taskHash: string, submitter: string): Promise<SubmissionRecord | null> {
+  return parse<SubmissionRecord>(await redis.hget(KEY.subs(taskHash), submitter.toLowerCase()));
+}
+
+/**
+ * One page of the task's recorded submissions (HSCAN). Pass the returned
+ * cursor back for the next page; '0' when there are no more.
+ */
+export async function pageSubmissions(
+  taskHash: string,
+  cursor: string,
+  count: number,
+): Promise<{ cursor: string; submissions: Array<{ submitter: string } & SubmissionRecord> }> {
+  const [next, flat] = await redis.hscan(KEY.subs(taskHash), cursor, 'COUNT', count);
+  const submissions: Array<{ submitter: string } & SubmissionRecord> = [];
+  for (let i = 0; i < flat.length; i += 2) {
+    const rec = parse<SubmissionRecord>(flat[i + 1]);
+    if (rec) submissions.push({ submitter: flat[i], ...rec });
+  }
+  return { cursor: next, submissions };
 }

@@ -38,6 +38,7 @@ vi.mock('../services/a2aStore.js', async () => ({
   setMeta: vi.fn(() => Promise.resolve()),
   getTaskHashClaim: vi.fn(() => Promise.resolve(null)),
   listOpenSubmissionTasks: vi.fn(() => Promise.resolve([])),
+  pruneOpenSubmissionIndex: vi.fn(() => Promise.resolve()),
   // The real projection: GET /open-tasks is public.
   projectPublicEntry: (await vi.importActual<typeof import('../services/a2aStore.js')>('../services/a2aStore.js')).projectPublicEntry,
 }));
@@ -282,6 +283,8 @@ describe('GET /open-tasks', () => {
     expect(res.status).toBe(200);
     expect(res.body.data.total).toBe(2);
     expect(res.body.data.tasks.map((t: any) => [t.meta.taskId, t.submissions])).toEqual([['0xsooner', 3], ['0xlater', 3]]);
+    // The finished one leaves the index, so the list does not grow forever.
+    await vi.waitFor(() => expect(a2aStore.pruneOpenSubmissionIndex).toHaveBeenCalledWith(['0xclosed']));
   });
 
   it('is public, so it strips key material and private state like GET /tasks', async () => {

@@ -9,6 +9,7 @@ import { AppError, clientErrorMessage } from '../middleware/errorHandler.js';
 import * as agentStore from '../services/agentStore.js';
 import * as a2aStore from '../services/a2aStore.js';
 import * as openSubmissionStore from '../services/openSubmissionStore.js';
+import { openSubmissionRouter } from './openSubmission.js';
 import { loadAgentBySmartAccount, loadAgentByWallet } from '../services/deployedAgentStore.js';
 import * as bidsStore from '../services/bidsStore.js';
 import * as keyCustody from '../services/keyCustodyService.js';
@@ -58,6 +59,8 @@ import jwt from 'jsonwebtoken';
 import { withPosterAvatars } from '../services/avatarStore.js';
 
 export const a2aRouter = Router();
+// Open-submission routes (submit-open, submissions, select): their own file.
+a2aRouter.use(openSubmissionRouter);
 
 // --- Schemas ---
 
@@ -423,7 +426,12 @@ a2aRouter.get('/open-tasks', async (req, res, next) => {
     const limit = Math.min(Math.max(parseInt(req.query.limit as string) || 100, 1), 200);
     const offset = Math.max(parseInt(req.query.offset as string) || 0, 0);
     const nowSec = Math.floor(Date.now() / 1000);
-    const live = (await a2aStore.listOpenSubmissionTasks())
+    const listed = await a2aStore.listOpenSubmissionTasks();
+    // Finished ones leave the index, so this list does not grow forever.
+    const finished = listed.filter(({ state }) => state.status !== 'collecting').map(({ meta }) => meta.taskId);
+    // Housekeeping: never let it fail the listing.
+    if (finished.length > 0) void Promise.resolve().then(() => a2aStore.pruneOpenSubmissionIndex(finished)).catch(() => {});
+    const live = listed
       .filter(({ meta, state }) => state.status === 'collecting' && onCurrentNetwork(meta) && (!meta.deadline || nowSec < meta.deadline))
       .sort((a, b) => (a.meta.deadline ?? Number.MAX_SAFE_INTEGER) - (b.meta.deadline ?? Number.MAX_SAFE_INTEGER));
     const page = live.slice(offset, offset + limit).map(a2aStore.projectPublicEntry);

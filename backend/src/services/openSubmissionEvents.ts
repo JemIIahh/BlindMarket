@@ -17,6 +17,7 @@
  */
 
 import type { EventLog } from 'ethers';
+import { closeOpenSubmissionTask } from './a2aStore.js';
 import { escrowFor } from './escrow.js';
 import { notify, notifyOnce, notifyOnceMany, type OnceNotice } from './notificationStore.js';
 import * as store from './openSubmissionStore.js';
@@ -152,6 +153,8 @@ export async function handleWinnerSelected(chain: TaskChain, taskId: bigint, win
   const winnerAddr = winner.toLowerCase();
   await store.saveOutcome(hash, { kind: 'winner', winner: winnerAddr, judge });
   await store.unscheduleSweep(hash);
+  // The listing's state: 'completed', with the winner as its executor.
+  await closeOpenSubmissionTask(hash, { kind: 'winner', winner: winnerAddr });
   const total = await submissionTotal(rec);
   await notifyOnce(`open:picked:${hash}`, rec.poster, {
     type: 'completed',
@@ -180,6 +183,7 @@ export async function handleOpenTaskVoided(chain: TaskChain, taskId: bigint, jud
   const judge = JUDGES[judgeIndex] ?? 'admin';
   await store.saveOutcome(hash, { kind: 'void', judge });
   await store.unscheduleSweep(hash);
+  await closeOpenSubmissionTask(hash, { kind: 'void' });
   // The poster voids only a task nobody submitted to, and needs no alert for
   // their own refund.
   if (judge === 'creator') return;

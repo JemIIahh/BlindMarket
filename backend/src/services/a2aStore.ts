@@ -669,6 +669,59 @@ export async function resyncOpenIndex(): Promise<{ added: number; removed: numbe
 }
 
 /**
+ * Close an open-submission task once the escrow paid its winner or refunded
+ * it: 'collecting' becomes 'completed' with the winner as executorAddress, or
+ * 'failed' with failedReason 'voided'. A compare-and-set from 'collecting'
+ * only, in one Lua step, so a redelivered event, or a cancel that closed it
+ * first, changes nothing. Drops the task from the open-submission index and
+ * its verifier's queue, and indexes the winner as its executor. True when
+ * this call closed it.
+ */
+export async function closeOpenSubmissionTask(
+  taskId: string,
+  outcome: { kind: 'winner'; winner: string } | { kind: 'void' },
+): Promise<boolean> {
+  const tid = taskId.toLowerCase();
+  const meta = await getMeta(tid);
+  const winner = outcome.kind === 'winner' ? outcome.winner.toLowerCase() : '';
+  const lua = `
+    local raw = redis.call('GET', KEYS[1])
+    if not raw then return 0 end
+    local s = cjson.decode(raw)
+    if s.status ~= 'collecting' then return 0 end
+    if ARGV[1] ~= '' then
+      s.status = 'completed'
+      s.executorAddress = ARGV[1]
+      redis.call('SADD', ARGV[3], ARGV[2])
+    else
+      s.status = 'failed'
+      s.failedReason = 'voided'
+    end
+    redis.call('SET', KEYS[1], cjson.encode(s))
+    redis.call('SREM', KEYS[2], ARGV[2])
+    if ARGV[4] ~= '' then redis.call('SREM', ARGV[4], ARGV[2]) end
+    return 1
+  `;
+  // The optional index keys ride in ARGV, as in tryCloseOnChainTerminal.
+  const closed = await redis.eval(
+    lua,
+    2,
+    KEY.state(tid),
+    KEY.openSubmission,
+    winner,
+    tid,
+    winner ? KEY.executor(winner) : '',
+    meta?.verifierAddress ? KEY.verifier(meta.verifierAddress) : '',
+  );
+  return Number(closed) === 1;
+}
+
+/** Drop finished tasks from the open-submission index (GET /open-tasks prunes what it finds). */
+export async function pruneOpenSubmissionIndex(taskIds: string[]): Promise<void> {
+  if (taskIds.length > 0) await redis.srem(KEY.openSubmission, ...taskIds.map((t) => t.toLowerCase()));
+}
+
+/**
  * Open-submission tasks (meta.submissionMode 'open'), from their own index:
  * every one ever listed, whatever its state. Callers filter.
  */

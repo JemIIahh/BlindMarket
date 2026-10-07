@@ -530,3 +530,55 @@ Left for part 2b (review of #141):
 - Before the flag goes on, the web app must not tell an open task's poster
   that "an agent will accept it", and needs a `collecting` status tag.
 
+## 12. As built: backend, part 2b (2026-10-07)
+
+The routes, in `routes/openSubmission.ts` (mounted inside `a2aRouter`), all
+404 while the flag is off. Each checks the escrow's rules first, so nobody is
+handed a transaction that reverts. **[source]**
+
+- **`POST /a2a/tasks/:id/submit-open`** `{ resultData, rootHash?, teeAttestation? }`
+  - **Refuses:**
+    - the poster (`SELF_SUBMIT`);
+    - the task's verifier (`IS_VERIFIER`);
+    - an unregistered agent (`NOT_REGISTERED`);
+    - an agent with the poster's owner (`SAME_OWNER`);
+    - a second submission (`ALREADY_SUBMITTED`, once the first is on-chain);
+    - a task no longer collecting (`SUBMISSIONS_CLOSED`);
+    - after the deadline (`DEADLINE_REACHED`). Past the stored deadline the
+      escrow's phase decides, so a pause keeps it open.
+  - **Size cap:** `resultData` is capped at 64 KB (`RESULT_TOO_LARGE`). The
+    full result belongs in storage (`rootHash`), as single-assignee tasks
+    already send it.
+  - **Returns** `unsignedSubmitOpen` for the caller to sign.
+  - **Hashing:** the result is saved off-chain under the caller, and its
+    evidence hash is computed as `/submit` computes it. Until the submission
+    lands on-chain the caller may replace the result.
+  - **Retention:** results are kept 90 days.
+- **`GET /a2a/tasks/:id/submissions`** (`?cursor=&limit=`)
+  - Returns the submissions the escrow recorded. Each carries its result only
+    when the saved one matches the on-chain evidence hash.
+  - The poster (from any of their wallets) and the task's verifier may read
+    them at any time. Everyone else only once the escrow has closed
+    submissions (`SUBMISSIONS_HIDDEN`).
+- **`POST /a2a/tasks/:id/select`** `{ winner, scorecardHash? }`
+  - Returns `unsignedSelectWinner` for the task's **on-chain** poster wallet.
+  - **Refuses:**
+    - outside a creator-review task (`VERIFIER_PICKS`);
+    - outside the poster's window (`NOT_PICK_WINDOW`);
+    - a winner that did not submit (`NOT_A_SUBMITTER`).
+- **The listing's state:** on `WinnerSelected` or `OpenTaskVoided`, the
+  indexer closes it with one Lua compare-and-set from `collecting`
+  (`a2aStore.closeOpenSubmissionTask`, run against a real Redis):
+  - `collecting` becomes `completed` with the winner as executor, or
+    `failed`/`voided`;
+  - the task leaves the open-submission index and the verifier's queue.
+  - `GET /open-tasks` also prunes the finished ones it finds.
+
+Still the raw deadline: `GET /open-tasks` hides a task at its `TaskCreated`
+deadline even while a pause keeps the escrow taking submissions. Pauses are
+rare, and submit-open itself asks the escrow.
+
+Left for part 2c:
+- Credit the winner's earnings.
+- The verifier agent's judging (`selectWinnerByVerifier`).
+
