@@ -43,6 +43,8 @@ const KEY = {
   offer: (taskId: string) => `a2a:offer:${taskId.toLowerCase()}`,
   cascade: (taskId: string) => `a2a:cascade:${taskId.toLowerCase()}`,
   deadline: (taskId: string) => `a2a:deadline:${taskId.toLowerCase()}`,
+  /** Open-submission tasks (meta.submissionMode 'open'), never in KEY.open. */
+  openSubmission: 'a2a:open-submission',
 };
 
 /** How long a poster's claim on a task hash outlives POST /tasks (upload, sign, confirm, index). */
@@ -128,15 +130,22 @@ export async function setMeta(meta: A2ATaskMeta): Promise<void> {
   const pipe = redis.pipeline();
   pipe.set(KEY.meta(tid), JSON.stringify({ ...meta, taskId: tid }));
   
+  // An open-submission task is 'collecting' and goes in its own index, never
+  // in KEY.open: every single-assignee flow (browse, accept, cascade, expiry)
+  // reads KEY.open and status 'open'.
+  const openSubmission = meta.submissionMode === 'open';
+
   // Only initialize state if it doesn't exist in either lowercased or legacy mixed-case form
   if (!stateExists) {
     pipe.set(
       KEY.state(tid),
-      JSON.stringify({ taskId: tid, status: 'open' } satisfies A2ATaskState),
+      JSON.stringify({ taskId: tid, status: openSubmission ? 'collecting' : 'open' } satisfies A2ATaskState),
     );
   }
 
-  if (meta.targetExecutorType === 'agent') {
+  if (openSubmission) {
+    pipe.sadd(KEY.openSubmission, tid);
+  } else if (meta.targetExecutorType === 'agent') {
     pipe.sadd(KEY.open, tid);
   }
   if (meta.posterAddress) {
@@ -585,6 +594,7 @@ export async function listOpenTasks(): Promise<Array<{ meta: A2ATaskMeta; state:
     // in case state was rewritten outside of this module.
     if (meta.targetExecutorType !== 'agent') continue;
     if (state.status !== 'open') continue;
+    if (meta.submissionMode === 'open') continue;
 
     out.push({ meta, state });
   }
@@ -632,7 +642,7 @@ export async function resyncOpenIndex(): Promise<{ added: number; removed: numbe
     try {
       const state = JSON.parse(stateRaw) as A2ATaskState;
       const meta = JSON.parse(metaRaw) as A2ATaskMeta;
-      if (state.status === 'open' && meta.targetExecutorType === 'agent') {
+      if (state.status === 'open' && meta.targetExecutorType === 'agent' && meta.submissionMode !== 'open') {
         shouldBeOpen.add(taskIds[i].toLowerCase());
       }
     } catch {
@@ -656,6 +666,14 @@ export async function resyncOpenIndex(): Promise<{ added: number; removed: numbe
   }
 
   return { added, removed };
+}
+
+/**
+ * Open-submission tasks (meta.submissionMode 'open'), from their own index:
+ * every one ever listed, whatever its state. Callers filter.
+ */
+export async function listOpenSubmissionTasks(): Promise<Array<{ meta: A2ATaskMeta; state: A2ATaskState }>> {
+  return (await loadTasksByIndex(KEY.openSubmission)).filter(({ meta }) => meta.submissionMode === 'open');
 }
 
 /** Browse open agent-targeted tasks, optionally filtered by capabilities. */
