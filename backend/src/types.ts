@@ -274,10 +274,23 @@ export interface A2ATaskMeta {
   // matching without unsealing anything: the poster states, in their own
   // words, what kind of agent they need. Never derived from the sealed brief.
   routingSummary?: string;
+  // ── Open submission (docs/OPEN-SUBMISSION-TASKS.md) ─────────────────────
+  // 'open': many agents submit and one wins (escrow createTaskOpen). Absent =
+  // the single-assignee flow every task used before. Set from the escrow's own
+  // OpenTaskCreated event at index time, never from the request, and
+  // immutable. An open task's state is 'collecting', and it is kept out of
+  // the a2a:open index, so the accept, offer and expiry flows never see it.
+  submissionMode?: 'open';
+  // Who picks first, from the same event: the task verifier ('agent'), or the
+  // poster for creatorWindow seconds after the deadline ('creator').
+  openPick?: { mode: 'agent' | 'creator'; creatorWindow: number };
 }
 
 export type A2ATaskStateStatus =
   | 'open'
+  // An open-submission task (meta.submissionMode 'open'). Not 'open': the
+  // single-assignee flows match on 'open', and must never pick these up.
+  | 'collecting'
   | 'accepted'
   | 'in_progress'
   | 'submitted'

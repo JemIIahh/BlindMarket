@@ -8,6 +8,7 @@ import { zodIssuesText } from '../middleware/batchErrors.js';
 import { AppError, clientErrorMessage } from '../middleware/errorHandler.js';
 import * as agentStore from '../services/agentStore.js';
 import * as a2aStore from '../services/a2aStore.js';
+import * as openSubmissionStore from '../services/openSubmissionStore.js';
 import { loadAgentBySmartAccount, loadAgentByWallet } from '../services/deployedAgentStore.js';
 import * as bidsStore from '../services/bidsStore.js';
 import * as keyCustody from '../services/keyCustodyService.js';
@@ -406,6 +407,38 @@ a2aRouter.get('/tasks', async (req, res, next) => {
   }
 });
 
+/**
+ * GET /api/v1/a2a/open-tasks
+ * Tasks that take submissions from many agents (docs/OPEN-SUBMISSION-TASKS.md)
+ * and are still taking them: on this network and before their deadline,
+ * soonest deadline first. Public like GET /tasks, so projected: no key
+ * material. Each entry adds `submissions`, how many this server has recorded
+ * so far. 404 while open submission is off.
+ */
+a2aRouter.get('/open-tasks', async (req, res, next) => {
+  try {
+    if (!config.openSubmissionEnabled) {
+      throw new AppError(404, 'NOT_FOUND', 'Open submission is not enabled on this server');
+    }
+    const limit = Math.min(Math.max(parseInt(req.query.limit as string) || 100, 1), 200);
+    const offset = Math.max(parseInt(req.query.offset as string) || 0, 0);
+    const nowSec = Math.floor(Date.now() / 1000);
+    const live = (await a2aStore.listOpenSubmissionTasks())
+      .filter(({ meta, state }) => state.status === 'collecting' && onCurrentNetwork(meta) && (!meta.deadline || nowSec < meta.deadline))
+      .sort((a, b) => (a.meta.deadline ?? Number.MAX_SAFE_INTEGER) - (b.meta.deadline ?? Number.MAX_SAFE_INTEGER));
+    const page = live.slice(offset, offset + limit).map(a2aStore.projectPublicEntry);
+    const [metas, counts] = await Promise.all([
+      withPosterAvatars(page.map((t) => t.meta)),
+      Promise.all(page.map((t) => openSubmissionStore.recordedSubmissionCount(t.meta.taskId))),
+    ]);
+    const tasks = page.map((t, i) => ({ ...t, meta: metas[i], submissions: counts[i] }));
+    const body: ApiResponse = { success: true, data: { tasks, total: live.length, offset, limit } };
+    res.json(body);
+  } catch (err) {
+    next(err);
+  }
+});
+
 const ASSIGNMENT_PENDING_MESSAGE =
   'On-chain assignment is still confirming. The task stays assigned to you — retry /accept shortly to confirm it.';
 
@@ -484,6 +517,10 @@ a2aRouter.post('/tasks/:id/accept', requireAuth, async (req: AuthRequest, res, n
       // No attempt logged: the id names no task, and a stream per unknown
       // well-formed hash is still a key per request.
       throw new AppError(404, 'NOT_FOUND', 'Task not found or not A2A-enabled');
+    }
+    // Nobody accepts an open-submission task: agents submit to it instead.
+    if (meta.submissionMode === 'open') {
+      throw new AppError(409, 'OPEN_SUBMISSION_TASK', 'This task takes submissions from many agents: submit to it instead of accepting it');
     }
 
     // Deadline pre-check (cheap — pure arithmetic on meta).
@@ -1453,6 +1490,8 @@ export function hasAutoCheck(criteria: z.infer<typeof indexTaskSchema>['verifica
 
 const TASK_CREATED_TOPIC = ethers.id('TaskCreated(uint256,address,address,uint256,bytes32,string,string,uint256)');
 const TASK_VERIFIER_SET_TOPIC = ethers.id('TaskVerifierSet(uint256,address)');
+// PickMode is a uint8 in the ABI.
+const OPEN_TASK_CREATED_TOPIC = ethers.id('OpenTaskCreated(uint256,uint8,uint256)');
 
 /** A chain the index routes look for a createTask receipt on. */
 interface ReceiptSource {
@@ -1651,6 +1690,29 @@ async function escrowTaskVerifiers(receipt: ethers.TransactionReceipt, source: R
   return verifiers;
 }
 
+/** How an open-submission task picks its winner, from its OpenTaskCreated event. */
+type OpenPick = NonNullable<A2ATaskMeta['openPick']>;
+
+/**
+ * The open-submission tasks the receipt's transaction created on `source`'s
+ * escrow, by task id: its OpenTaskCreated events (createTaskOpen emits one in
+ * the same transaction as TaskCreated). Only the escrow's own events count, so
+ * whether a task is open comes from the chain, never from the request.
+ */
+async function escrowOpenTasks(receipt: ethers.TransactionReceipt, source: ReceiptSource): Promise<Map<string, OpenPick>> {
+  const escrowAddress = (await source.esc.getAddress()).toLowerCase();
+  const open = new Map<string, OpenPick>();
+  for (const l of receipt.logs) {
+    if (l.address.toLowerCase() !== escrowAddress || l.topics[0] !== OPEN_TASK_CREATED_TOPIC || l.topics.length < 2) continue;
+    const [mode, creatorWindow] = ethers.AbiCoder.defaultAbiCoder().decode(['uint8', 'uint256'], l.data);
+    open.set(BigInt(l.topics[1]).toString(), {
+      mode: Number(mode) === 1 ? 'creator' : 'agent',
+      creatorWindow: Number(creatorWindow),
+    });
+  }
+  return open;
+}
+
 /** A TaskCreated event, decoded; the hash and addresses lowercased. */
 interface TaskCreatedEvent {
   taskId: string;
@@ -1661,9 +1723,16 @@ interface TaskCreatedEvent {
   token: string;
   /** The verifier the same transaction committed for this task (escrowTaskVerifiers), or null. */
   verifier: string | null;
+  /** Set when the same transaction made it an open-submission task (escrowOpenTasks). */
+  open: OpenPick | null;
 }
 
-function decodeTaskCreated(esc: ethers.Contract, log: ethers.Log, verifiers: ReadonlyMap<string, string>): TaskCreatedEvent {
+function decodeTaskCreated(
+  esc: ethers.Contract,
+  log: ethers.Log,
+  verifiers: ReadonlyMap<string, string>,
+  openTasks: ReadonlyMap<string, OpenPick>,
+): TaskCreatedEvent {
   const parsed = esc.interface.parseLog({
     topics: log.topics as string[],
     data: log.data,
@@ -1680,6 +1749,7 @@ function decodeTaskCreated(esc: ethers.Contract, log: ethers.Log, verifiers: Rea
     amount: (parsed.args.amount as bigint).toString(),
     token: (parsed.args.token as string).toLowerCase(),
     verifier: verifiers.get(taskId) ?? null,
+    open: openTasks.get(taskId) ?? null,
   };
 }
 
@@ -1877,6 +1947,42 @@ async function indexTaskFromEvent(
       'TOKEN_NOT_SETTLEMENT',
       `Task is escrowed in ${onChainToken}, which is not the settlement token on ${taskChain} — cancel it to get the escrow back`,
     );
+  }
+
+  // An open-submission task (the escrow's own OpenTaskCreated said so): many
+  // agents submit, one wins. Listed only while this server supports it, and
+  // in phase 1 only public (every submitter reads the brief), judged by its
+  // on-chain verifier, and never pinned to one agent. Checked before anything
+  // is written, so a refused task can still be cancelled for a refund.
+  const open = event.open;
+  if (open) {
+    if (!config.openSubmissionEnabled) {
+      throw new AppError(
+        409,
+        'OPEN_SUBMISSION_DISABLED',
+        `This escrow takes submissions from many agents, which this server does not list yet. Cancel task ${onChainTaskId} to get the escrow back.`,
+      );
+    }
+    if (data.privacy !== 'public') {
+      throw new AppError(
+        409,
+        'OPEN_TASK_MUST_BE_PUBLIC',
+        `A task that takes submissions from many agents must be public for now, since every submitter reads the brief. List it with privacy 'public', or cancel task ${onChainTaskId} to get the escrow back.`,
+      );
+    }
+    if (data.verificationMode !== 'agent' || !data.verifierAddress) {
+      throw new AppError(
+        409,
+        'OPEN_TASK_NEEDS_VERIFIER',
+        `A task that takes submissions from many agents is judged by its on-chain verifier. List it with verificationMode 'agent' and verifierAddress ${event.verifier ?? '(the escrow names none)'}.`,
+      );
+    }
+    if (data.targetExecutor || data.serviceId !== undefined) {
+      throw new AppError(400, 'OPEN_TASK_PINNED', 'A task that takes submissions from many agents cannot be pinned to one agent');
+    }
+  }
+  if (existingMeta && (existingMeta.submissionMode === 'open') !== Boolean(open)) {
+    throw new AppError(409, 'TERMS_IMMUTABLE', "This task's submission mode was set when it was first listed and can't be changed");
   }
 
   // Only a task's on-chain verifier can settle it once one is committed
@@ -2077,6 +2183,7 @@ async function indexTaskFromEvent(
     privacy: isPublic ? 'public' : undefined,
     publicBrief: isPublic ? data.publicBrief : undefined,
     routingSummary: data.routingSummary,
+    ...(open ? { submissionMode: 'open' as const, openPick: open } : {}),
   });
 
   // M5 (audit): the funding is receipt-verified at this point, so flip the
@@ -2088,6 +2195,15 @@ async function indexTaskFromEvent(
   // The meta slice both the shadow record and the routing decision read —
   // built ONCE so the shadow log's routing text can never diverge from what
   // the cascade actually ranked on.
+  // An open task is not offered or broadcast: nobody accepts it. Agents find it
+  // in the open-submission list and submit (docs/OPEN-SUBMISSION-TASKS.md).
+  if (open) {
+    console.log(
+      `[a2a] indexed open-submission taskHash=${taskHash.slice(0, 10)}… → onChainId=${onChainTaskId} poster=${address} pick=${open.mode}`,
+    );
+    return { taskHash, onChainTaskId };
+  }
+
   const routingMeta: semanticMatch.RoutingMeta = {
     requiredCapabilities: requiredCaps,
     publicBrief: isPublic ? data.publicBrief : undefined,
@@ -2242,7 +2358,8 @@ a2aRouter.post('/tasks/index', requireAuth, indexBudget, postingIpBudget, async 
       );
     }
     const verifiers = await escrowTaskVerifiers(receipt, active);
-    const { onChainTaskId } = await indexTaskFromEvent(req.user!, data, active.chain, decodeTaskCreated(active.esc, matching[0], verifiers));
+    const openTasks = await escrowOpenTasks(receipt, active);
+    const { onChainTaskId } = await indexTaskFromEvent(req.user!, data, active.chain, decodeTaskCreated(active.esc, matching[0], verifiers, openTasks));
 
     const body: ApiResponse = {
       success: true,
@@ -2339,9 +2456,10 @@ a2aRouter.post('/tasks/index-batch', requireAuth, indexBudget, postingIpBudget, 
         throw new AppError(409, 'NO_TASK_CREATED', 'Receipt contains no TaskCreated event from the configured BlindEscrow address');
       }
       const verifiers = await escrowTaskVerifiers(receipt, active);
+      const openTasks = await escrowOpenTasks(receipt, active);
       const eventsByHash = new Map<string, TaskCreatedEvent[]>();
       for (const log of logs) {
-        const event = decodeTaskCreated(active.esc, log, verifiers);
+        const event = decodeTaskCreated(active.esc, log, verifiers, openTasks);
         eventsByHash.set(event.taskHash, [...(eventsByHash.get(event.taskHash) ?? []), event]);
       }
 

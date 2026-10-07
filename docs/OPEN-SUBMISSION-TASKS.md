@@ -494,3 +494,30 @@ Not yet: indexing open tasks for the board and the web app (they have no
 the worker, the verifier agent, and the web app. Turn the flag on only once
 those land and the escrow is upgraded.
 
+## 11. As built: backend, part 2a (2026-10-07)
+
+Listing open tasks, behind the same flag. **[source]**
+
+- **Detection:** `POST /tasks/index` and `/tasks/index-batch` read the
+  escrow's own `OpenTaskCreated` event in the funding receipt
+  (`escrowOpenTasks`). Whether a task is open never comes from the request.
+- **Off:** an open task is refused with `OPEN_SUBMISSION_DISABLED` before
+  anything is written, so its poster can still cancel it for a refund.
+- **On:** phase 1 rules, also checked before any write:
+  - public only (`OPEN_TASK_MUST_BE_PUBLIC`);
+  - judged by its on-chain verifier (`OPEN_TASK_NEEDS_VERIFIER`);
+  - never pinned (`OPEN_TASK_PINNED`);
+  - the submission mode can't change on a re-index (`TERMS_IMMUTABLE`).
+- **Isolation:** the meta gets `submissionMode: 'open'` and `openPick`, and the
+  state `collecting`, in its own `a2a:open-submission` index, never `a2a:open`.
+  Browse, accept, the offer cascade, the expiry sweep and the index repair
+  all read `a2a:open` and state `open`, and also refuse an open meta
+  defensively. The task is never offered or broadcast. `/accept` refuses it
+  with `OPEN_SUBMISSION_TASK`.
+- **`GET /a2a/open-tasks`:** public and projected. Lists the open tasks still
+  taking submissions, soonest deadline first, each with `submissions` (how
+  many so far). 404 while the flag is off.
+
+**Deploy order:** this must be live before the escrow is upgraded. An older
+backend would list an open task as a single-assignee one.
+
