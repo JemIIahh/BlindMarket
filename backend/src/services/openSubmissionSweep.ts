@@ -18,8 +18,8 @@ import { backgroundWritesAllowed } from './deploymentIdentity.js';
 import { escrowFor } from './escrow.js';
 import { notifyOnce } from './notificationStore.js';
 import * as store from './openSubmissionStore.js';
-import type { OpenTaskRecord } from './openSubmissionStore.js';
-import { agents } from './openSubmissionEvents.js';
+import type { OpenTaskRecord, TaskRef } from './openSubmissionStore.js';
+import { agents } from './openSubmissionCopy.js';
 
 /** The escrow's OpenPhase enum. */
 export const PHASE = { Submissions: 0, CreatorPick: 1, VerifierPick: 2, BackupPick: 3, AdminResolve: 4, Closed: 5 } as const;
@@ -92,55 +92,55 @@ async function pickTimeLeft(rec: OpenTaskRecord, nowSec: number): Promise<number
 }
 
 /** Look at one due task. True when an alert went out. Throws on a chain read failure: the task stays due. */
-async function sweepOne(taskHash: string, nowSec: number): Promise<boolean> {
-  const rec = await store.getRecord(taskHash);
-  if (!rec || (await store.getOutcome(taskHash))) {
-    await store.unscheduleSweep(taskHash);
+async function sweepOne(ref: TaskRef, nowSec: number): Promise<boolean> {
+  const rec = await store.getRecord(ref);
+  if (!rec || (await store.getOutcome(ref))) {
+    await store.unscheduleSweep(ref);
     return false;
   }
   const escrow = escrowFor(rec.chain);
   const phase = Number(await escrow.openPhase(rec.taskId));
   if (phase === PHASE.Submissions) {
-    await store.scheduleSweep(taskHash, nowSec + RECHECK_SEC);
+    await store.scheduleSweep(ref, nowSec + RECHECK_SEC);
     return false;
   }
   if (phase === PHASE.Closed) {
     // Cancelled before anyone submitted, or settled before the indexer saw it.
-    await store.unscheduleSweep(taskHash);
+    await store.unscheduleSweep(ref);
     return false;
   }
 
-  if (!(await store.isClosedNotified(taskHash))) {
+  if (!(await store.isClosedNotified(ref))) {
     const count = Number(await escrow.submissionCount(rec.taskId));
     const pickLeft = phase === PHASE.CreatorPick ? await pickTimeLeft(rec, nowSec) : 0;
-    await notifyOnce(`open:closed:${taskHash}`, rec.poster, closedNotice(rec, count, phase, pickLeft));
-    await store.markClosedNotified(taskHash);
+    await notifyOnce(`open:closed:${ref}`, rec.poster, closedNotice(rec, count, phase, pickLeft));
+    await store.markClosedNotified(ref);
     // Remind before the window ends, unless the summary already said it ends within two hours.
     if (phase === PHASE.CreatorPick && count > 0 && pickLeft > 2 * PICK_REMINDER_SEC) {
-      await store.scheduleSweep(taskHash, nowSec + pickLeft - PICK_REMINDER_SEC);
+      await store.scheduleSweep(ref, nowSec + pickLeft - PICK_REMINDER_SEC);
     } else {
-      await store.unscheduleSweep(taskHash);
+      await store.unscheduleSweep(ref);
     }
     return true;
   }
 
   // The pick reminder. Only while the poster can still pick.
   if (phase !== PHASE.CreatorPick) {
-    await store.unscheduleSweep(taskHash);
+    await store.unscheduleSweep(ref);
     return false;
   }
   const pickLeft = await pickTimeLeft(rec, nowSec);
   // A pause since the summary moved the window later: wait for its new last hour.
   if (pickLeft > PICK_REMINDER_SEC + RECHECK_SEC) {
-    await store.scheduleSweep(taskHash, nowSec + pickLeft - PICK_REMINDER_SEC);
+    await store.scheduleSweep(ref, nowSec + pickLeft - PICK_REMINDER_SEC);
     return false;
   }
-  await store.unscheduleSweep(taskHash);
-  return notifyOnce(`open:pick-soon:${taskHash}`, rec.poster, {
+  await store.unscheduleSweep(ref);
+  return notifyOnce(`open:pick-soon:${ref}`, rec.poster, {
     type: 'deadline_soon',
     title: 'Pick a winner soon',
     body: `Your pick window closes in ${timeLeftText(pickLeft)}. After that, your task's verifier picks the winner.`,
-    taskId: taskHash,
+    taskId: rec.taskHash,
   });
 }
 
@@ -152,11 +152,11 @@ export async function sweepOpenSubmissions(nowSec = Math.floor(Date.now() / 1000
   inFlight = true;
   let sent = 0;
   try {
-    for (const taskHash of await store.dueForSweep(nowSec, SWEEP_LIMIT)) {
+    for (const ref of await store.dueForSweep(nowSec, SWEEP_LIMIT)) {
       try {
-        if (await sweepOne(taskHash, nowSec)) sent++;
+        if (await sweepOne(ref, nowSec)) sent++;
       } catch (err) {
-        console.warn(`[openSubmissionSweep] ${taskHash.slice(0, 10)}… not checked this tick:`, (err as Error).message);
+        console.warn(`[openSubmissionSweep] task ${ref} not checked this tick:`, (err as Error).message);
       }
     }
   } catch (err) {

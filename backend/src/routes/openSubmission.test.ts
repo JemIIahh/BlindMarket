@@ -17,13 +17,19 @@ const VERIFIER = '0x' + 'c'.repeat(40);
 const AGENT = '0x' + '1'.repeat(40);
 const AGENT2 = '0x' + '2'.repeat(40);
 const HASH = '0x' + 'ab'.repeat(32);
+/** The on-chain task the store keys by. */
+const REF = 'arc:7';
 const NOW = Math.floor(Date.now() / 1000);
 
 const flag = vi.hoisted(() => ({ on: true }));
 vi.mock('../config.js', () => ({ config: { get openSubmissionEnabled() { return flag.on; } } }));
 vi.mock('../middleware/auth.js', () => ({
-  requireAuth: (req: any, _res: any, next: any) => {
-    const address = req.headers['x-test-address'] || '0xagent';
+  requireAuth: (req: any, res: any, next: any) => {
+    if (!req.headers['x-test-address']) {
+      res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED' } });
+      return;
+    }
+    const address = req.headers['x-test-address'];
     const extra = req.headers['x-test-addresses'];
     req.user = { address, ...(extra ? { addresses: [address, ...String(extra).split(',')] } : {}) };
     next();
@@ -40,6 +46,8 @@ vi.mock('../services/redis.js', () => {
   return {
     redis: {
       get: async (k: string) => mem.kv.get(k) ?? null,
+      set: async (k: string, v: string) => { mem.kv.set(k, v); return 'OK'; },
+      del: async (k: string) => (mem.kv.delete(k) ? 1 : 0),
       hset: async (k: string, f: string, v: string) => { h(k).set(f, v); return 1; },
       hsetnx: async (k: string, f: string, v: string) => (h(k).has(f) ? 0 : (h(k).set(f, v), 1)),
       hget: async (k: string, f: string) => h(k).get(f) ?? null,
@@ -61,16 +69,17 @@ const a2a = vi.hoisted(() => ({ getMeta: vi.fn(), getState: vi.fn() }));
 vi.mock('../services/a2aStore.js', () => a2a);
 const agents = vi.hoisted(() => ({ getAgent: vi.fn() }));
 vi.mock('../services/agentStore.js', () => agents);
-const escrow = vi.hoisted(() => ({ openPhase: vi.fn(), submissionOf: vi.fn() }));
+const escrow = vi.hoisted(() => ({ openPhase: vi.fn(), submissionOf: vi.fn(), paused: vi.fn() }));
 const builders = vi.hoisted(() => ({
   buildSubmitOpenOn: vi.fn(async (_c: string, from: string, taskId: number, evidenceHash: string) => ({ to: '0xescrow', from, data: `submitOpen(${taskId},${evidenceHash})` })),
   buildSelectWinnerOn: vi.fn(async (_c: string, from: string, taskId: number, winner: string, scorecard: string) => ({ to: '0xescrow', from, data: `selectWinner(${taskId},${winner},${scorecard})` })),
-  getTaskOn: vi.fn(async () => ({ agent: POSTER })),
+  getTaskOn: vi.fn(async () => ({ agent: POSTER }) as { agent: string }),
 }));
 vi.mock('../services/escrow.js', () => ({ escrowFor: () => escrow, ...builders }));
 vi.mock('../services/taskChain.js', () => ({ resolveCachedTaskByHash: vi.fn(async () => ({ chain: 'arc', taskId: '7' })) }));
 const sameOwner = vi.hoisted(() => vi.fn(async () => false));
-vi.mock('../services/delegationGuard.js', () => ({ sameOwnerSubtask: sameOwner }));
+const ownAgent = vi.hoisted(() => vi.fn(async (_agent: string, _owners: Iterable<string>) => false));
+vi.mock('../services/delegationGuard.js', () => ({ sameOwnerSubtask: sameOwner, ownAgentOf: ownAgent }));
 vi.mock('../services/openSubmissionSweep.js', () => ({
   PHASE: { Submissions: 0, CreatorPick: 1, VerifierPick: 2, BackupPick: 3, AdminResolve: 4, Closed: 5 },
 }));
@@ -99,9 +108,12 @@ const openMeta = (over: Record<string, unknown> = {}) => ({
   submissionMode: 'open', openPick: { mode: 'creator', creatorWindow: 86_400 }, privacy: 'public', ...over,
 });
 const evidence = (resultData: Record<string, unknown>) => ethers.keccak256(ethers.toUtf8Bytes(JSON.stringify(resultData)));
-/** The indexer recording an on-chain submission. */
-const onChain = (who: string, resultData: Record<string, unknown>, ordinal = 1) =>
-  store.recordSubmission(HASH, who, { evidenceHash: evidence(resultData), ordinal, recordedAt: new Date().toISOString() });
+/** The indexer recording an on-chain submission, and keeping its result if the hash matches. */
+async function onChain(who: string, resultData: Record<string, unknown>, ordinal = 1) {
+  await store.recordSubmission(REF, who, { evidenceHash: evidence(resultData), ordinal, recordedAt: new Date().toISOString() });
+  await store.keepResult(REF, who, evidence(resultData));
+}
+const pending = (who: string) => mem.kv.get(`a2a:open:pending:${REF}:${who}`);
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -113,35 +125,57 @@ beforeEach(() => {
   agents.getAgent.mockResolvedValue({ address: AGENT });
   escrow.openPhase.mockResolvedValue(0n);
   escrow.submissionOf.mockResolvedValue(ethers.ZeroHash);
+  escrow.paused.mockResolvedValue(false);
+  builders.getTaskOn.mockResolvedValue({ agent: POSTER });
   sameOwner.mockResolvedValue(false);
+  ownAgent.mockResolvedValue(false);
 });
 
 describe('the flag', () => {
-  it('hides every route while open submission is off', async () => {
+  it('hides every route while open submission is off, signed in or not', async () => {
     flag.on = false;
     expect((await submit(AGENT)).status).toBe(404);
     expect((await list(POSTER)).status).toBe(404);
     expect((await select(POSTER, AGENT)).status).toBe(404);
+    expect((await request(app()).get(`/api/v1/a2a/tasks/${HASH}/submissions`)).status).toBe(404);
   });
 });
 
 describe('POST /tasks/:id/submit-open', () => {
-  it('saves the result and hands back submitOpen with its evidence hash, for the caller to sign', async () => {
+  it('holds the result and hands back submitOpen with its evidence hash, for the caller to sign', async () => {
     const res = await submit(AGENT, { output: 'haiku' });
     expect(res.status).toBe(200);
     expect(res.body.data.evidenceHash).toBe(evidence({ output: 'haiku' }));
     expect(res.body.data.unsignedSubmitOpen).toMatchObject({ from: AGENT, data: `submitOpen(7,${evidence({ output: 'haiku' })})` });
-    expect((await store.getResults(HASH, [AGENT]))[0]).toMatchObject({ resultData: { output: 'haiku' }, evidenceHash: evidence({ output: 'haiku' }) });
+    expect(res.body.data.resultHeldForSec).toBe(3600);
+    // Held, not kept: kept only once the on-chain submission carries its hash.
+    expect(JSON.parse(pending(AGENT)!)).toMatchObject({ resultData: { output: 'haiku' } });
+    expect((await store.getResults(REF, [AGENT]))[0]).toBeNull();
   });
 
-  it('lets an agent replace its result until the submission is on-chain, then refuses a second', async () => {
+  it('lets an agent replace its result until its submission is on-chain, then refuses a second', async () => {
     await submit(AGENT, { output: 'draft' });
     await submit(AGENT, { output: 'final' });
-    expect((await store.getResults(HASH, [AGENT]))[0]?.resultData).toEqual({ output: 'final' });
-    await onChain(AGENT, { output: 'final' });
+    expect(JSON.parse(pending(AGENT)!).resultData).toEqual({ output: 'final' });
+    // The escrow decides, not the indexer, which may lag.
+    escrow.submissionOf.mockResolvedValue(evidence({ output: 'final' }));
     const res = await submit(AGENT, { output: 'third' });
     expect(res.status).toBe(409);
     expect(res.body.error.code).toBe('ALREADY_SUBMITTED');
+    expect(JSON.parse(pending(AGENT)!).resultData).toEqual({ output: 'final' });
+  });
+
+  it("refuses the task's on-chain poster even when another wallet listed it", async () => {
+    builders.getTaskOn.mockResolvedValue({ agent: AGENT2 });
+    expect((await submit(AGENT2)).body.error.code).toBe('SELF_SUBMIT');
+  });
+
+  it("refuses the poster's own hosted agent, and while the escrow is paused", async () => {
+    ownAgent.mockResolvedValueOnce(true);
+    expect((await submit(AGENT)).body.error.code).toBe('OWN_AGENT');
+    expect(ownAgent).toHaveBeenCalledWith(AGENT, [POSTER, POSTER]);
+    escrow.paused.mockResolvedValueOnce(true);
+    expect((await submit(AGENT)).body.error.code).toBe('ESCROW_PAUSED');
   });
 
   it.each([
@@ -175,11 +209,20 @@ describe('POST /tasks/:id/submit-open', () => {
     expect((await submit(AGENT)).status).toBe(404);
   });
 
-  it('refuses a resultData over the cap: the full result belongs in storage', async () => {
+  it('refuses a result over the cap, attestation included: the full result belongs in storage', async () => {
     const res = await submit(AGENT, { output: 'x'.repeat(MAX_RESULT_BYTES) });
     expect(res.status).toBe(413);
     expect(res.body.error.code).toBe('RESULT_TOO_LARGE');
-    expect((await store.getResults(HASH, [AGENT]))[0]).toBeNull();
+    const bigAttestation = await request(app()).post(`/api/v1/a2a/tasks/${HASH}/submit-open`).set(as(AGENT))
+      .send({ resultData: { output: 'short' }, teeAttestation: { signature: 's', signedText: 'x'.repeat(MAX_RESULT_BYTES) } });
+    expect(bigAttestation.status).toBe(413);
+    expect(pending(AGENT)).toBeUndefined();
+  });
+
+  it('takes an attestation only in the shape /submit takes it', async () => {
+    const res = await request(app()).post(`/api/v1/a2a/tasks/${HASH}/submit-open`).set(as(AGENT))
+      .send({ resultData: { output: 'short' }, teeAttestation: { anything: 'goes' } });
+    expect(res.status).toBe(400);
   });
 });
 

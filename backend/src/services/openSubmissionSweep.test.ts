@@ -9,6 +9,8 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 const POSTER = '0x' + 'a'.repeat(40);
 const HASH = '0x' + 'ab'.repeat(32);
+/** The on-chain task the store keys by. */
+const REF = 'arc:7';
 const NOW = 1_800_000_000;
 const DEADLINE = NOW - 10;
 
@@ -54,7 +56,7 @@ const store = await import('./openSubmissionStore.js');
 const due = () => mem.zsets.get('a2a:open:due') ?? new Map<string, number>();
 const posted = async (mode: 'agent' | 'creator', creatorWindow = mode === 'creator' ? 86_400 : 0) => {
   await store.saveRecord({ chain: 'arc', taskId: '7', taskHash: HASH, poster: POSTER, deadline: DEADLINE, mode, creatorWindow });
-  await store.scheduleSweep(HASH, DEADLINE);
+  await store.scheduleSweep(REF, DEADLINE);
 };
 
 beforeEach(() => {
@@ -72,14 +74,14 @@ describe('the deadline summary', () => {
   it('tells a picking poster how many submitted, then schedules the pick reminder', async () => {
     await posted('creator');
     expect(await sweepOpenSubmissions(NOW)).toBe(1);
-    expect(notifyOnce).toHaveBeenCalledWith(`open:closed:${HASH}`, POSTER, expect.objectContaining({
+    expect(notifyOnce).toHaveBeenCalledWith(`open:closed:${REF}`, POSTER, expect.objectContaining({
       type: 'submissions',
       title: 'Submissions closed: pick a winner',
       // 23 h 59 min 50 s left, rounded down.
       body: expect.stringContaining('12 agents submitted. Pick a winner within 23 hours'),
       taskId: HASH,
     }));
-    expect(due().get(HASH)).toBe(DEADLINE + 86_400 - PICK_REMINDER_SEC);
+    expect(due().get(REF)).toBe(DEADLINE + 86_400 - PICK_REMINDER_SEC);
   });
 
   it("tells the poster of an agent-managed task that its verifier is picking, and stops", async () => {
@@ -88,7 +90,7 @@ describe('the deadline summary', () => {
     await posted('agent');
     await sweepOpenSubmissions(NOW);
     expect(notifyOnce.mock.calls[0][2]).toMatchObject({ type: 'submissions', title: 'Submissions closed', body: expect.stringContaining('1 agent submitted') });
-    expect(due().has(HASH)).toBe(false);
+    expect(due().has(REF)).toBe(false);
   });
 
   it('with no submissions, tells the poster the escrow is theirs to reclaim', async () => {
@@ -96,21 +98,21 @@ describe('the deadline summary', () => {
     await posted('creator');
     await sweepOpenSubmissions(NOW);
     expect(notifyOnce.mock.calls[0][2]).toMatchObject({ type: 'expired', title: 'No submissions came in' });
-    expect(due().has(HASH)).toBe(false);
+    expect(due().has(REF)).toBe(false);
   });
 
   it('times the reminder from the pause-adjusted deadline', async () => {
     escrow.effectiveDeadline.mockResolvedValue(BigInt(DEADLINE + 600));
     await posted('creator');
     await sweepOpenSubmissions(NOW);
-    expect(due().get(HASH)).toBe(DEADLINE + 600 + 86_400 - PICK_REMINDER_SEC);
+    expect(due().get(REF)).toBe(DEADLINE + 600 + 86_400 - PICK_REMINDER_SEC);
   });
 
   it('sets no reminder for a window of two hours or less: the summary already says it', async () => {
     await posted('creator', 7200);
     await sweepOpenSubmissions(NOW);
     expect(notifyOnce.mock.calls[0][2]).toMatchObject({ body: expect.stringContaining('within an hour') });
-    expect(due().has(HASH)).toBe(false);
+    expect(due().has(REF)).toBe(false);
   });
 
   it("follows the escrow's phase, not the pick mode, when it runs after the poster's window", async () => {
@@ -119,7 +121,7 @@ describe('the deadline summary', () => {
     await sweepOpenSubmissions(NOW);
     expect(notifyOnce.mock.calls[0][2]).toMatchObject({ title: 'Submissions closed', body: expect.stringContaining("verifier is picking") });
     expect(String(notifyOnce.mock.calls[0][2].body)).not.toContain('Pick a winner');
-    expect(due().has(HASH)).toBe(false);
+    expect(due().has(REF)).toBe(false);
   });
 
   it('says who picks once the task verifier has missed its window too', async () => {
@@ -134,21 +136,21 @@ describe('the deadline summary', () => {
     await posted('creator');
     await sweepOpenSubmissions(NOW);
     expect(notifyOnce).not.toHaveBeenCalled();
-    expect(due().get(HASH)).toBe(NOW + 300);
+    expect(due().get(REF)).toBe(NOW + 300);
   });
 
   it('drops a task that closed on-chain, or whose outcome is recorded, without an alert', async () => {
     escrow.openPhase.mockResolvedValue(BigInt(PHASE.Closed));
     await posted('creator');
     await sweepOpenSubmissions(NOW);
-    expect(due().has(HASH)).toBe(false);
+    expect(due().has(REF)).toBe(false);
 
     escrow.openPhase.mockResolvedValue(BigInt(PHASE.CreatorPick));
-    await store.scheduleSweep(HASH, DEADLINE);
-    await store.saveOutcome(HASH, { kind: 'winner', winner: '0x' + '2'.repeat(40), judge: 'creator' });
+    await store.scheduleSweep(REF, DEADLINE);
+    await store.saveOutcome(REF, { kind: 'winner', winner: '0x' + '2'.repeat(40), judge: 'creator' });
     await sweepOpenSubmissions(NOW);
     expect(notifyOnce).not.toHaveBeenCalled();
-    expect(due().has(HASH)).toBe(false);
+    expect(due().has(REF)).toBe(false);
   });
 
   it('keeps a task due when the chain cannot be read', async () => {
@@ -157,12 +159,12 @@ describe('the deadline summary', () => {
     await posted('creator');
     await sweepOpenSubmissions(NOW);
     expect(notifyOnce).not.toHaveBeenCalled();
-    expect(due().get(HASH)).toBe(DEADLINE);
+    expect(due().get(REF)).toBe(DEADLINE);
   });
 
   it('does not look at tasks that are not due', async () => {
     await store.saveRecord({ chain: 'arc', taskId: '7', taskHash: HASH, poster: POSTER, deadline: NOW + 3600, mode: 'creator', creatorWindow: 86_400 });
-    await store.scheduleSweep(HASH, NOW + 3600);
+    await store.scheduleSweep(REF, NOW + 3600);
     await sweepOpenSubmissions(NOW);
     expect(escrow.openPhase).not.toHaveBeenCalled();
   });
@@ -178,24 +180,24 @@ describe('the pick reminder', () => {
 
   it('reminds the poster an hour before their window ends, once', async () => {
     await sweepOpenSubmissions(reminderAt);
-    expect(notifyOnce).toHaveBeenCalledWith(`open:pick-soon:${HASH}`, POSTER, expect.objectContaining({ type: 'deadline_soon', title: 'Pick a winner soon' }));
-    expect(due().has(HASH)).toBe(false);
+    expect(notifyOnce).toHaveBeenCalledWith(`open:pick-soon:${REF}`, POSTER, expect.objectContaining({ type: 'deadline_soon', title: 'Pick a winner soon' }));
+    expect(due().has(REF)).toBe(false);
   });
 
   it('waits for the new last hour when a pause since the summary moved the window', async () => {
     escrow.effectiveDeadline.mockResolvedValue(BigInt(DEADLINE + 6 * 3600));
     await sweepOpenSubmissions(reminderAt);
     expect(notifyOnce).not.toHaveBeenCalled();
-    expect(due().get(HASH)).toBe(reminderAt + 6 * 3600);
+    expect(due().get(REF)).toBe(reminderAt + 6 * 3600);
     await sweepOpenSubmissions(reminderAt + 6 * 3600);
-    expect(notifyOnce).toHaveBeenCalledWith(`open:pick-soon:${HASH}`, POSTER, expect.objectContaining({ body: expect.stringContaining('closes in an hour') }));
+    expect(notifyOnce).toHaveBeenCalledWith(`open:pick-soon:${REF}`, POSTER, expect.objectContaining({ body: expect.stringContaining('closes in an hour') }));
   });
 
   it('stays quiet once the window has passed to the verifier', async () => {
     escrow.openPhase.mockResolvedValue(BigInt(PHASE.VerifierPick));
     await sweepOpenSubmissions(reminderAt);
     expect(notifyOnce).not.toHaveBeenCalled();
-    expect(due().has(HASH)).toBe(false);
+    expect(due().has(REF)).toBe(false);
   });
 });
 

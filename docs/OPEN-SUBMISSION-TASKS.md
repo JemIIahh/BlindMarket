@@ -467,7 +467,8 @@ Behind `OPEN_SUBMISSION_ENABLED` (default off). Off, none of it runs: the event
 scan neither queries nor writes, and the sweep is not started. **[source]**
 
 - **Store** (`openSubmissionStore.ts`): what the escrow's events say about each
-  open task, in its own Redis keys (`a2a:open:*`). The single-assignee A2A
+  open task, in its own Redis keys (`a2a:open:*`, keyed by on-chain task
+  since #142). The single-assignee A2A
   state is untouched, so the accept, cascade and expiry flows never see an
   open task.
 - **Events** (`openSubmissionEvents.ts`, from the Arc indexer behind
@@ -538,22 +539,31 @@ handed a transaction that reverts. **[source]**
 
 - **`POST /a2a/tasks/:id/submit-open`** `{ resultData, rootHash?, teeAttestation? }`
   - **Refuses:**
-    - the poster (`SELF_SUBMIT`);
+    - the poster, checked against the task's on-chain poster
+      (`SELF_SUBMIT`);
     - the task's verifier (`IS_VERIFIER`);
     - an unregistered agent (`NOT_REGISTERED`);
     - an agent with the poster's owner (`SAME_OWNER`);
-    - a second submission (`ALREADY_SUBMITTED`, once the first is on-chain);
+    - the poster's own hosted agent (`OWN_AGENT`), since the poster reads
+      every result and may pick;
+    - a second submission (`ALREADY_SUBMITTED`), read from the escrow's
+      `submissionOf`, not the lagging indexer;
+    - a paused escrow (`ESCROW_PAUSED`);
     - a task no longer collecting (`SUBMISSIONS_CLOSED`);
     - after the deadline (`DEADLINE_REACHED`). Past the stored deadline the
       escrow's phase decides, so a pause keeps it open.
-  - **Size cap:** `resultData` is capped at 64 KB (`RESULT_TOO_LARGE`). The
-    full result belongs in storage (`rootHash`), as single-assignee tasks
-    already send it.
+  - **Rate limit:** 20 calls a minute per wallet.
+  - **Size cap:** the whole record (`resultData`, `rootHash` and the
+    attestation, which takes `/submit`'s shape) is capped at 64 KB
+    (`RESULT_TOO_LARGE`). The full result belongs in storage (`rootHash`),
+    as single-assignee tasks already send it.
   - **Returns** `unsignedSubmitOpen` for the caller to sign.
-  - **Hashing:** the result is saved off-chain under the caller, and its
-    evidence hash is computed as `/submit` computes it. Until the submission
-    lands on-chain the caller may replace the result.
-  - **Retention:** results are kept 90 days.
+  - **Hashing:** the evidence hash is computed as `/submit` computes it.
+  - **Held, then kept:** the result is held for one hour. The indexer keeps it
+    (90 days) only once the caller's on-chain submission carries its evidence
+    hash. So nothing is stored for long without an on-chain submission, which
+    costs gas, and a kept result can never be replaced. Until the submission
+    lands, the caller may replace the held result.
 - **`GET /a2a/tasks/:id/submissions`** (`?cursor=&limit=`)
   - Returns the submissions the escrow recorded. Each carries its result only
     when the saved one matches the on-chain evidence hash.
@@ -573,6 +583,13 @@ handed a transaction that reverts. **[source]**
     `failed`/`voided`;
   - the task leaves the open-submission index and the verifier's queue.
   - `GET /open-tasks` also prunes the finished ones it finds.
+
+**Keyed by on-chain task, not hash** (security review of #142). The escrow
+does not make task hashes unique, so anyone could post a decoy task with a
+live task's hash. Every `a2a:open:*` record is keyed by `<chain>:<taskId>`. A
+listing is closed only by events from the task its own hash→task mapping
+names (the one its verified poster listed). A decoy's events stay on the
+decoy.
 
 Still the raw deadline: `GET /open-tasks` hides a task at its `TaskCreated`
 deadline even while a pause keeps the escrow taking submissions. Pauses are

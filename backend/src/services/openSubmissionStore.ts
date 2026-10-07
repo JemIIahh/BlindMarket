@@ -4,29 +4,48 @@
  * state (a2aStore), so nothing in the accept, cascade or expiry flows ever
  * sees an open task.
  *
- * Keys (task hash lowercased):
- *   a2a:open:<hash>              JSON OpenTaskRecord, written once
- *   a2a:open:id:<chain>:<id>     the task hash of an on-chain task id
- *   a2a:open:subs:<hash>         hash: submitter → JSON SubmissionRecord
- *   a2a:open:outcome:<hash>      JSON OpenTaskOutcome, once a winner is paid or the task voided
- *   a2a:open:closed:<hash>       set once the poster was told submissions closed
- *   a2a:open:count-gate:<hash>   set for COUNT_NOTICE_GAP_SEC after a count notice
- *   a2a:open:due                 zset: hash → unix seconds the sweep next looks at it
- *   a2a:open:results:<hash>      hash: submitter → JSON OpenResult, the result as sent to
- *                                submit-open; kept RESULTS_TTL_SEC
+ * Keyed by the ON-CHAIN task (`<chain>:<taskId>`, a TaskRef), never by the
+ * task hash: the escrow does not make hashes unique, so anyone can post a
+ * decoy task with a live task's hash. Keyed by hash, the decoy's events would
+ * land on the real task's record (security review of #142). The hash rides
+ * along in the record, for links.
  *
- * Writers: the indexer writes the record, the id index, submissions and the
- * outcome from events; the sweep writes `closed`; POST submit-open writes a
- * submitter's own result. Both write `due`: the
- * indexer schedules a task it meets and unschedules a settled one, the sweep
- * reschedules. Every write is a whole-value SET, HSETNX or ZADD/ZREM, never a
- * read-modify-write, so neither process can lose the other's write. The one
- * race is benign: the sweep can reschedule a task the indexer just settled,
- * and the next look drops it on its recorded outcome.
+ * Keys:
+ *   a2a:open:task:<ref>          JSON OpenTaskRecord, written once
+ *   a2a:open:subs:<ref>          hash: submitter → JSON SubmissionRecord
+ *   a2a:open:outcome:<ref>       JSON OpenTaskOutcome, once a winner is paid or the task voided
+ *   a2a:open:closed:<ref>        set once the poster was told submissions closed
+ *   a2a:open:count-gate:<ref>    set for COUNT_NOTICE_GAP_SEC after a count notice
+ *   a2a:open:pending:<ref>:<a>   JSON OpenResult a submitter sent to submit-open, for
+ *                                PENDING_RESULT_TTL_SEC: kept only if it lands on-chain
+ *   a2a:open:results:<ref>       hash: submitter → JSON OpenResult whose evidence hash
+ *                                the escrow recorded; kept RESULTS_TTL_SEC
+ *   a2a:open:due                 zset: ref → unix seconds the sweep next looks at it
+ *
+ * Writers:
+ * - The indexer writes the record, submissions, outcome and kept results, from
+ *   events. A result is kept only when its submitter's on-chain submission
+ *   carries its evidence hash, so nothing is kept for an agent that never
+ *   paid gas to submit, and a kept result can't be replaced.
+ * - The sweep writes `closed`.
+ * - POST submit-open writes a submitter's own pending result.
+ * - Both the indexer and the sweep write `due`.
+ *
+ * Every write is a whole-value SET, HSETNX or ZADD/ZREM, never a
+ * read-modify-write, so no process loses another's write. The one race is
+ * benign: the sweep can reschedule a task the indexer just settled, and the
+ * next look drops it on its recorded outcome.
  */
 
 import { redis } from './redis.js';
 import type { TaskChain } from './taskChain.js';
+
+/** An on-chain task: `<chain>:<taskId>`. */
+export type TaskRef = string;
+
+export function taskRef(chain: TaskChain, taskId: string | number | bigint): TaskRef {
+  return `${chain}:${String(taskId)}`;
+}
 
 /** Who picks first, as the escrow's PickMode: 0 the task verifier, 1 the poster. */
 export type PickMode = 'agent' | 'creator';
@@ -35,6 +54,7 @@ export interface OpenTaskRecord {
   chain: TaskChain;
   /** On-chain task id. */
   taskId: string;
+  /** The hash the task was created with. Not unique: links only, never a key. */
   taskHash: string;
   poster: string;
   /** The deadline createTaskOpen set (unix seconds). A pause moves the real one later. */
@@ -62,14 +82,32 @@ export interface OpenTaskOutcome {
   judge: OpenJudge;
 }
 
+/**
+ * A submitter's result as they sent it to submit-open. The escrow holds its
+ * evidence hash (keccak256 of the JSON resultData).
+ */
+export interface OpenResult {
+  resultData: Record<string, unknown>;
+  evidenceHash: string;
+  /** The full result in storage, as single-assignee tasks send it. */
+  rootHash?: string | null;
+  teeAttestation?: unknown;
+  savedAt: string;
+}
+
+/** How long a sent result waits for its on-chain submission. */
+export const PENDING_RESULT_TTL_SEC = 3600;
+/** How long kept results last: well past every pick window. */
+export const RESULTS_TTL_SEC = 90 * 86_400;
+
 const KEY = {
-  record: (hash: string) => `a2a:open:${hash.toLowerCase()}`,
-  byId: (chain: string, taskId: string) => `a2a:open:id:${chain}:${taskId}`,
-  subs: (hash: string) => `a2a:open:subs:${hash.toLowerCase()}`,
-  outcome: (hash: string) => `a2a:open:outcome:${hash.toLowerCase()}`,
-  closed: (hash: string) => `a2a:open:closed:${hash.toLowerCase()}`,
-  countGate: (hash: string) => `a2a:open:count-gate:${hash.toLowerCase()}`,
-  results: (hash: string) => `a2a:open:results:${hash.toLowerCase()}`,
+  record: (ref: TaskRef) => `a2a:open:task:${ref}`,
+  subs: (ref: TaskRef) => `a2a:open:subs:${ref}`,
+  outcome: (ref: TaskRef) => `a2a:open:outcome:${ref}`,
+  closed: (ref: TaskRef) => `a2a:open:closed:${ref}`,
+  countGate: (ref: TaskRef) => `a2a:open:count-gate:${ref}`,
+  pending: (ref: TaskRef, submitter: string) => `a2a:open:pending:${ref}:${submitter.toLowerCase()}`,
+  results: (ref: TaskRef) => `a2a:open:results:${ref}`,
   due: 'a2a:open:due',
 };
 
@@ -82,51 +120,84 @@ function parse<T>(raw: string | null): T | null {
   }
 }
 
-/**
- * Save a task's record unless one exists. Returns the record now stored. Not
- * findable by id until indexRecordId: the caller indexes it last, once
- * everything else about the task is set up.
- */
+// ── The task ────────────────────────────────────────────────────────────────
+
+/** Save a task's record unless one exists. Returns the record now stored. */
 export async function saveRecord(rec: OpenTaskRecord): Promise<OpenTaskRecord> {
-  const hash = rec.taskHash.toLowerCase();
-  const stored: OpenTaskRecord = { ...rec, taskHash: hash, poster: rec.poster.toLowerCase() };
-  const first = await redis.set(KEY.record(hash), JSON.stringify(stored), 'NX');
-  if (first !== null) return stored;
-  return (await getRecord(hash)) ?? stored;
+  const stored: OpenTaskRecord = { ...rec, taskHash: rec.taskHash.toLowerCase(), poster: rec.poster.toLowerCase() };
+  const ref = taskRef(rec.chain, rec.taskId);
+  if ((await redis.set(KEY.record(ref), JSON.stringify(stored), 'NX')) !== null) return stored;
+  return (await getRecord(ref)) ?? stored;
 }
 
-/** Make a saved record findable by its on-chain id (getRecordById). */
-export async function indexRecordId(chain: TaskChain, taskId: string, taskHash: string): Promise<void> {
-  await redis.set(KEY.byId(chain, taskId), taskHash.toLowerCase());
+export async function getRecord(ref: TaskRef): Promise<OpenTaskRecord | null> {
+  return parse<OpenTaskRecord>(await redis.get(KEY.record(ref)));
 }
 
-export async function getRecord(taskHash: string): Promise<OpenTaskRecord | null> {
-  return parse<OpenTaskRecord>(await redis.get(KEY.record(taskHash)));
+export async function saveOutcome(ref: TaskRef, outcome: OpenTaskOutcome): Promise<boolean> {
+  return (await redis.set(KEY.outcome(ref), JSON.stringify(outcome), 'NX')) !== null;
 }
 
-export async function getRecordById(chain: TaskChain, taskId: string): Promise<OpenTaskRecord | null> {
-  const hash = await redis.get(KEY.byId(chain, taskId));
-  return hash ? getRecord(hash) : null;
+export async function getOutcome(ref: TaskRef): Promise<OpenTaskOutcome | null> {
+  return parse<OpenTaskOutcome>(await redis.get(KEY.outcome(ref)));
 }
 
-/** Record a submission. True the first time this submitter is recorded for the task. */
-export async function recordSubmission(taskHash: string, submitter: string, rec: SubmissionRecord): Promise<boolean> {
-  return (await redis.hsetnx(KEY.subs(taskHash), submitter.toLowerCase(), JSON.stringify(rec))) === 1;
+/** Mark that the poster was told submissions closed. True the first time. */
+export async function markClosedNotified(ref: TaskRef): Promise<boolean> {
+  return (await redis.set(KEY.closed(ref), '1', 'NX')) !== null;
+}
+
+export async function isClosedNotified(ref: TaskRef): Promise<boolean> {
+  return (await redis.exists(KEY.closed(ref))) === 1;
+}
+
+/**
+ * Take the task's count-notice slot for `gapSec`. True when no count notice
+ * went out in that time, so one may go now.
+ */
+export async function takeCountNoticeSlot(ref: TaskRef, gapSec: number): Promise<boolean> {
+  return (await redis.set(KEY.countGate(ref), '1', 'EX', gapSec, 'NX')) !== null;
+}
+
+/** When the sweep should next look at the task (unix seconds). */
+export async function scheduleSweep(ref: TaskRef, atSec: number): Promise<void> {
+  await redis.zadd(KEY.due, atSec, ref);
+}
+
+export async function unscheduleSweep(ref: TaskRef): Promise<void> {
+  await redis.zrem(KEY.due, ref);
+}
+
+/** Tasks the sweep should look at by `nowSec`, soonest first. */
+export async function dueForSweep(nowSec: number, limit: number): Promise<TaskRef[]> {
+  return redis.zrangebyscore(KEY.due, '-inf', nowSec, 'LIMIT', 0, limit);
+}
+
+// ── Submissions ─────────────────────────────────────────────────────────────
+
+/** Record an on-chain submission. True the first time this submitter is recorded for the task. */
+export async function recordSubmission(ref: TaskRef, submitter: string, rec: SubmissionRecord): Promise<boolean> {
+  return (await redis.hsetnx(KEY.subs(ref), submitter.toLowerCase(), JSON.stringify(rec))) === 1;
 }
 
 /** How many submissions this backend has recorded for the task. */
-export async function recordedSubmissionCount(taskHash: string): Promise<number> {
-  return redis.hlen(KEY.subs(taskHash));
+export async function recordedSubmissionCount(ref: TaskRef): Promise<number> {
+  return redis.hlen(KEY.subs(ref));
+}
+
+/** A submitter's on-chain submission as recorded from events, or null. */
+export async function getSubmission(ref: TaskRef, submitter: string): Promise<SubmissionRecord | null> {
+  return parse<SubmissionRecord>(await redis.hget(KEY.subs(ref), submitter.toLowerCase()));
 }
 
 /**
  * Every recorded submitter, a page at a time (HSCAN), so a task with many
  * submissions never loads them in one reply.
  */
-export async function forEachSubmitter(taskHash: string, visit: (addresses: string[]) => Promise<void>): Promise<void> {
+export async function forEachSubmitter(ref: TaskRef, visit: (addresses: string[]) => Promise<void>): Promise<void> {
   let cursor = '0';
   do {
-    const [next, flat] = await redis.hscan(KEY.subs(taskHash), cursor, 'COUNT', 500);
+    const [next, flat] = await redis.hscan(KEY.subs(ref), cursor, 'COUNT', 500);
     cursor = next;
     const addresses: string[] = [];
     for (let i = 0; i < flat.length; i += 2) addresses.push(flat[i]);
@@ -134,97 +205,53 @@ export async function forEachSubmitter(taskHash: string, visit: (addresses: stri
   } while (cursor !== '0');
 }
 
-export async function saveOutcome(taskHash: string, outcome: OpenTaskOutcome): Promise<boolean> {
-  return (await redis.set(KEY.outcome(taskHash), JSON.stringify(outcome), 'NX')) !== null;
-}
-
-export async function getOutcome(taskHash: string): Promise<OpenTaskOutcome | null> {
-  return parse<OpenTaskOutcome>(await redis.get(KEY.outcome(taskHash)));
-}
-
-/** Mark that the poster was told submissions closed. True the first time. */
-export async function markClosedNotified(taskHash: string): Promise<boolean> {
-  return (await redis.set(KEY.closed(taskHash), '1', 'NX')) !== null;
-}
-
-export async function isClosedNotified(taskHash: string): Promise<boolean> {
-  return (await redis.exists(KEY.closed(taskHash))) === 1;
-}
-
-/**
- * Take the task's count-notice slot for `gapSec`. True when no count notice
- * went out in that time, so one may go now.
- */
-export async function takeCountNoticeSlot(taskHash: string, gapSec: number): Promise<boolean> {
-  return (await redis.set(KEY.countGate(taskHash), '1', 'EX', gapSec, 'NX')) !== null;
-}
-
-/** When the sweep should next look at the task (unix seconds). */
-export async function scheduleSweep(taskHash: string, atSec: number): Promise<void> {
-  await redis.zadd(KEY.due, atSec, taskHash.toLowerCase());
-}
-
-export async function unscheduleSweep(taskHash: string): Promise<void> {
-  await redis.zrem(KEY.due, taskHash.toLowerCase());
-}
-
-/** Tasks the sweep should look at by `nowSec`, soonest first. */
-export async function dueForSweep(nowSec: number, limit: number): Promise<string[]> {
-  return redis.zrangebyscore(KEY.due, '-inf', nowSec, 'LIMIT', 0, limit);
-}
-
-// ── Results ─────────────────────────────────────────────────────────────────
-
-/**
- * A submitter's result as they sent it to submit-open. The escrow holds its
- * evidence hash (keccak256 of the JSON resultData): only a result whose hash
- * matches the submitter's on-chain submission counts.
- */
-export interface OpenResult {
-  resultData: Record<string, unknown>;
-  evidenceHash: string;
-  /** The full result in storage, as single-assignee tasks send it. */
-  rootHash?: string | null;
-  teeAttestation?: unknown;
-  savedAt: string;
-}
-
-/** How long results are kept: well past every pick window. */
-export const RESULTS_TTL_SEC = 90 * 86_400;
-
-/** Save (or replace, until it is on-chain) a submitter's result. */
-export async function saveResult(taskHash: string, submitter: string, result: OpenResult): Promise<void> {
-  const key = KEY.results(taskHash);
-  await redis.hset(key, submitter.toLowerCase(), JSON.stringify(result));
-  await redis.expire(key, RESULTS_TTL_SEC);
-}
-
-/** Saved results for these submitters, in order; null where none was saved. */
-export async function getResults(taskHash: string, submitters: string[]): Promise<Array<OpenResult | null>> {
-  if (submitters.length === 0) return [];
-  const raws = await redis.hmget(KEY.results(taskHash), ...submitters.map((a) => a.toLowerCase()));
-  return raws.map((raw) => parse<OpenResult>(raw));
-}
-
-/** A submitter's on-chain submission as recorded from events, or null. */
-export async function getSubmission(taskHash: string, submitter: string): Promise<SubmissionRecord | null> {
-  return parse<SubmissionRecord>(await redis.hget(KEY.subs(taskHash), submitter.toLowerCase()));
-}
-
 /**
  * One page of the task's recorded submissions (HSCAN). Pass the returned
  * cursor back for the next page; '0' when there are no more.
  */
 export async function pageSubmissions(
-  taskHash: string,
+  ref: TaskRef,
   cursor: string,
   count: number,
 ): Promise<{ cursor: string; submissions: Array<{ submitter: string } & SubmissionRecord> }> {
-  const [next, flat] = await redis.hscan(KEY.subs(taskHash), cursor, 'COUNT', count);
+  const [next, flat] = await redis.hscan(KEY.subs(ref), cursor, 'COUNT', count);
   const submissions: Array<{ submitter: string } & SubmissionRecord> = [];
   for (let i = 0; i < flat.length; i += 2) {
     const rec = parse<SubmissionRecord>(flat[i + 1]);
     if (rec) submissions.push({ submitter: flat[i], ...rec });
   }
   return { cursor: next, submissions };
+}
+
+// ── Results ─────────────────────────────────────────────────────────────────
+
+/**
+ * Hold a result a submitter sent to submit-open until their on-chain
+ * submission shows up, for PENDING_RESULT_TTL_SEC. Replaces their earlier
+ * one: until it is on-chain, a submitter may change their mind.
+ */
+export async function savePendingResult(ref: TaskRef, submitter: string, result: OpenResult): Promise<void> {
+  await redis.set(KEY.pending(ref, submitter), JSON.stringify(result), 'EX', PENDING_RESULT_TTL_SEC);
+}
+
+/**
+ * Keep a submitter's pending result now that their on-chain submission is
+ * recorded, if its evidence hash is the one on-chain. Called by the indexer.
+ * True when a result was kept.
+ */
+export async function keepResult(ref: TaskRef, submitter: string, evidenceHash: string): Promise<boolean> {
+  const pendingKey = KEY.pending(ref, submitter);
+  const pending = parse<OpenResult>(await redis.get(pendingKey));
+  if (!pending || pending.evidenceHash.toLowerCase() !== evidenceHash.toLowerCase()) return false;
+  const kept = (await redis.hsetnx(KEY.results(ref), submitter.toLowerCase(), JSON.stringify(pending))) === 1;
+  await redis.expire(KEY.results(ref), RESULTS_TTL_SEC);
+  await redis.del(pendingKey);
+  return kept;
+}
+
+/** Kept results for these submitters, in order; null where none was kept. */
+export async function getResults(ref: TaskRef, submitters: string[]): Promise<Array<OpenResult | null>> {
+  if (submitters.length === 0) return [];
+  const raws = await redis.hmget(KEY.results(ref), ...submitters.map((a) => a.toLowerCase()));
+  return raws.map((raw) => parse<OpenResult>(raw));
 }
