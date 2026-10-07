@@ -57,7 +57,7 @@ vi.mock('./openSubmissionEvents.js', () => ({ OPEN_EVENTS, handleOpenEvent }));
 
 const { pollArcEscrowOnce } = await import('./arcEscrowEvents.js');
 
-const openLog = (eventName: string, taskId: bigint) => ({ eventName, args: { taskId }, transactionHash: '0xtx' });
+const openLog = (eventName: string, taskId: bigint, blockNumber = HEAD - 5) => ({ eventName, args: { taskId }, transactionHash: '0xtx', blockNumber });
 const isOpenQuery = (filter: unknown) => Array.isArray(filter);
 const openQueries = () => chain.arcEscrow.queryFilter.mock.calls.filter(([f]) => isOpenQuery(f));
 
@@ -86,13 +86,51 @@ describe('Arc indexer — open-submission events', () => {
     expect(store.get('arc:events:open-checkpoint')).toBe(String(HEAD));
   });
 
-  it('keeps the checkpoint when an event fails, so the scan retries those blocks', async () => {
+  it('keeps the checkpoint before the block of a failed event, so the scan retries that block', async () => {
     handleOpenEvent.mockImplementation(async (_c: string, ev: unknown) => {
       if ((ev as { eventName: string }).eventName === 'OpenSubmission') throw new Error('rpc down');
     });
     vi.spyOn(console, 'error').mockImplementation(() => {});
     await pollArcEscrowOnce();
+    // Both events are in block HEAD-5: the whole block is redone next tick.
+    expect(store.get('arc:events:open-checkpoint')).toBe(String(HEAD - 6));
+    handleOpenEvent.mockReset().mockResolvedValue(undefined);
+    await pollArcEscrowOnce();
+    expect(handleOpenEvent).toHaveBeenCalledTimes(2);
+    expect(store.get('arc:events:open-checkpoint')).toBe(String(HEAD));
+  });
+
+  it('keeps the checkpoint where it was when the first block fails', async () => {
+    chain.arcEscrow.queryFilter.mockImplementation(async (filter: unknown) =>
+      isOpenQuery(filter) ? [openLog('OpenSubmission', 4n, HEAD - 9)] : []);
+    handleOpenEvent.mockRejectedValue(new Error('rpc down'));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    await pollArcEscrowOnce();
     expect(store.get('arc:events:open-checkpoint')).toBe(String(HEAD - 10));
+  });
+
+  it('after a failure, redoes only the failing block', async () => {
+    chain.arcEscrow.queryFilter.mockImplementation(async (filter: unknown) =>
+      isOpenQuery(filter) ? [openLog('OpenTaskCreated', 4n, HEAD - 8), openLog('OpenSubmission', 4n, HEAD - 3)] : []);
+    handleOpenEvent.mockImplementation(async (_c: string, ev: unknown) => {
+      if ((ev as { eventName: string }).eventName === 'OpenSubmission') throw new Error('rpc down');
+    });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    await pollArcEscrowOnce();
+    expect(store.get('arc:events:open-checkpoint')).toBe(String(HEAD - 4));
+  });
+
+  it('stops between blocks once over its time budget, so a burst cannot hold up the other scans', async () => {
+    chain.arcEscrow.queryFilter.mockImplementation(async (filter: unknown) =>
+      isOpenQuery(filter) ? [openLog('OpenSubmission', 4n, HEAD - 8), openLog('OpenSubmission', 4n, HEAD - 8), openLog('OpenSubmission', 4n, HEAD - 2)] : []);
+    let clock = 1_000_000;
+    const now = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    // Each event takes 10 s: the second (same block) still runs, the third (next block) waits.
+    handleOpenEvent.mockImplementation(async () => { clock += 10_000; });
+    await pollArcEscrowOnce();
+    now.mockRestore();
+    expect(handleOpenEvent).toHaveBeenCalledTimes(2);
+    expect(store.get('arc:events:open-checkpoint')).toBe(String(HEAD - 3));
   });
 
   it('starts at the indexed head on its first scan', async () => {

@@ -38,8 +38,8 @@ never pulled in on its own; it waits for its own mark.
 
 Open-submission tasks (`docs/OPEN-SUBMISSION-TASKS.md`, behind
 `OPEN_SUBMISSION_ENABLED`, off until the escrow upgrade) add these. Only
-"Submissions" is a new type; the rest reuse the types above, so their toggles
-cover them:
+"Submissions" is a new type, offered in Settings only while open submission
+is on; the rest reuse the types above, so their toggles cover them:
 
 | Alert | Type | To | When |
 |---|---|---|---|

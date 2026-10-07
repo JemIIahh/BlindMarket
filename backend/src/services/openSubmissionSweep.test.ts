@@ -48,7 +48,7 @@ vi.mock('./escrow.js', () => ({ escrowFor: () => escrow }));
 const notifyOnce = vi.hoisted(() => vi.fn(async (_key: string, _to: string, _input: Record<string, unknown>) => true));
 vi.mock('./notificationStore.js', () => ({ notifyOnce, notify: vi.fn(), notifyOnceMany: vi.fn() }));
 
-const { sweepOpenSubmissions, PHASE, PICK_REMINDER_SEC } = await import('./openSubmissionSweep.js');
+const { sweepOpenSubmissions, timeLeftText, PHASE, PICK_REMINDER_SEC } = await import('./openSubmissionSweep.js');
 const store = await import('./openSubmissionStore.js');
 
 const due = () => mem.zsets.get('a2a:open:due') ?? new Map<string, number>();
@@ -75,7 +75,8 @@ describe('the deadline summary', () => {
     expect(notifyOnce).toHaveBeenCalledWith(`open:closed:${HASH}`, POSTER, expect.objectContaining({
       type: 'submissions',
       title: 'Submissions closed: pick a winner',
-      body: expect.stringContaining('12 agents submitted. Pick a winner within about 24 hours'),
+      // 23 h 59 min 50 s left, rounded down.
+      body: expect.stringContaining('12 agents submitted. Pick a winner within 23 hours'),
       taskId: HASH,
     }));
     expect(due().get(HASH)).toBe(DEADLINE + 86_400 - PICK_REMINDER_SEC);
@@ -108,8 +109,24 @@ describe('the deadline summary', () => {
   it('sets no reminder for a window of two hours or less: the summary already says it', async () => {
     await posted('creator', 7200);
     await sweepOpenSubmissions(NOW);
-    expect(notifyOnce.mock.calls[0][2]).toMatchObject({ body: expect.stringContaining('about 2 hours') });
+    expect(notifyOnce.mock.calls[0][2]).toMatchObject({ body: expect.stringContaining('within an hour') });
     expect(due().has(HASH)).toBe(false);
+  });
+
+  it("follows the escrow's phase, not the pick mode, when it runs after the poster's window", async () => {
+    escrow.openPhase.mockResolvedValue(BigInt(PHASE.VerifierPick));
+    await posted('creator');
+    await sweepOpenSubmissions(NOW);
+    expect(notifyOnce.mock.calls[0][2]).toMatchObject({ title: 'Submissions closed', body: expect.stringContaining("verifier is picking") });
+    expect(String(notifyOnce.mock.calls[0][2].body)).not.toContain('Pick a winner');
+    expect(due().has(HASH)).toBe(false);
+  });
+
+  it('says who picks once the task verifier has missed its window too', async () => {
+    escrow.openPhase.mockResolvedValue(BigInt(PHASE.BackupPick));
+    await posted('agent');
+    await sweepOpenSubmissions(NOW);
+    expect(notifyOnce.mock.calls[0][2]).toMatchObject({ body: expect.stringContaining('backup judge') });
   });
 
   it('waits while the escrow still takes submissions (paused past the stored deadline)', async () => {
@@ -165,6 +182,15 @@ describe('the pick reminder', () => {
     expect(due().has(HASH)).toBe(false);
   });
 
+  it('waits for the new last hour when a pause since the summary moved the window', async () => {
+    escrow.effectiveDeadline.mockResolvedValue(BigInt(DEADLINE + 6 * 3600));
+    await sweepOpenSubmissions(reminderAt);
+    expect(notifyOnce).not.toHaveBeenCalled();
+    expect(due().get(HASH)).toBe(reminderAt + 6 * 3600);
+    await sweepOpenSubmissions(reminderAt + 6 * 3600);
+    expect(notifyOnce).toHaveBeenCalledWith(`open:pick-soon:${HASH}`, POSTER, expect.objectContaining({ body: expect.stringContaining('closes in an hour') }));
+  });
+
   it('stays quiet once the window has passed to the verifier', async () => {
     escrow.openPhase.mockResolvedValue(BigInt(PHASE.VerifierPick));
     await sweepOpenSubmissions(reminderAt);
@@ -180,5 +206,15 @@ describe('the flag', () => {
     expect(await sweepOpenSubmissions(NOW)).toBe(0);
     expect(escrow.openPhase).not.toHaveBeenCalled();
     expect(notifyOnce).not.toHaveBeenCalled();
+  });
+});
+
+describe('timeLeftText', () => {
+  it('rounds down, so a poster is never told they have longer than they do', () => {
+    expect(timeLeftText(36 * 3600)).toBe('36 hours');
+    expect(timeLeftText(2 * 86_400 + 3600)).toBe('2 days');
+    expect(timeLeftText(90 * 60)).toBe('an hour');
+    expect(timeLeftText(59 * 60 + 59)).toBe('59 minutes');
+    expect(timeLeftText(30)).toBe('a minute');
   });
 });

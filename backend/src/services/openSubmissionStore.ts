@@ -13,9 +13,13 @@
  *   a2a:open:count-gate:<hash>   set for COUNT_NOTICE_GAP_SEC after a count notice
  *   a2a:open:due                 zset: hash → unix seconds the sweep next looks at it
  *
- * Each key has one writer: the indexer writes the record, submissions and
- * outcome from events; the sweep writes `closed` and `due`. No key is
- * read-modified-written by both, so the two processes cannot lose a write.
+ * Writers: the indexer writes the record, the id index, submissions and the
+ * outcome from events; the sweep writes `closed`. Both write `due`: the
+ * indexer schedules a task it meets and unschedules a settled one, the sweep
+ * reschedules. Every write is a whole-value SET, HSETNX or ZADD/ZREM, never a
+ * read-modify-write, so neither process can lose the other's write. The one
+ * race is benign: the sweep can reschedule a task the indexer just settled,
+ * and the next look drops it on its recorded outcome.
  */
 
 import { redis } from './redis.js';
@@ -74,14 +78,22 @@ function parse<T>(raw: string | null): T | null {
   }
 }
 
-/** Save a task's record unless one exists. Returns the record now stored. */
+/**
+ * Save a task's record unless one exists. Returns the record now stored. Not
+ * findable by id until indexRecordId: the caller indexes it last, once
+ * everything else about the task is set up.
+ */
 export async function saveRecord(rec: OpenTaskRecord): Promise<OpenTaskRecord> {
   const hash = rec.taskHash.toLowerCase();
   const stored: OpenTaskRecord = { ...rec, taskHash: hash, poster: rec.poster.toLowerCase() };
   const first = await redis.set(KEY.record(hash), JSON.stringify(stored), 'NX');
-  await redis.set(KEY.byId(rec.chain, rec.taskId), hash);
   if (first !== null) return stored;
   return (await getRecord(hash)) ?? stored;
+}
+
+/** Make a saved record findable by its on-chain id (getRecordById). */
+export async function indexRecordId(chain: TaskChain, taskId: string, taskHash: string): Promise<void> {
+  await redis.set(KEY.byId(chain, taskId), taskHash.toLowerCase());
 }
 
 export async function getRecord(taskHash: string): Promise<OpenTaskRecord | null> {

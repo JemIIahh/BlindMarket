@@ -264,10 +264,11 @@ async function drain(chatId: string, box: Outbox): Promise<void> {
       for (const g of groups) {
         const gap = box.lastSentAt + timing.chatGapMs - clock();
         if (gap > 0) await idleSleep(gap);
+        // The slot first: under a backlog its wait can be long, and the consent
+        // read must come after every wait.
+        await globalSlot();
         const text = await consentedText(chatId, g);
         if (text === null) continue;
-        // After the consent read, so nothing slow sits between the slot and the send.
-        await globalSlot();
         const result = await sendTelegram(chatId, text, {
           sleep: timing.retrySleep,
           maxRetryAfterSec: timing.maxRetryAfterSec,

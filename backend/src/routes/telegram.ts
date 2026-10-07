@@ -14,6 +14,7 @@ import {
   setPrefs,
   unlinkWallets,
   type TelegramPrefs,
+  type TelegramType,
 } from '../services/telegramStore.js';
 import type { AuthRequest, ApiResponse } from '../types.js';
 
@@ -48,6 +49,14 @@ telegramRouter.post('/webhook', async (req, res) => {
   res.json({ success: true, data: {} } as ApiResponse);
   void handleTelegramUpdate(req.body);
 });
+
+/**
+ * The alert types this server offers. "Submissions" only while open
+ * submission is on (OPEN_SUBMISSION_ENABLED): before that, nothing sends it.
+ */
+function offeredTypes(): TelegramType[] {
+  return TELEGRAM_TYPES.filter((t) => t !== 'submissions' || config.openSubmissionEnabled);
+}
 
 function sessionWallets(req: AuthRequest): string[] {
   // The legacy shared agent key has no wallet to alert.
@@ -91,7 +100,7 @@ telegramRouter.get('/status', requireAuth, async (req: AuthRequest, res, next) =
         break;
       }
     }
-    const types = Object.fromEntries(TELEGRAM_TYPES.map((t) => [t, prefs[t] !== false]));
+    const types = Object.fromEntries(offeredTypes().map((t) => [t, prefs[t] !== false]));
     res.json({ success: true, data: { enabled, linked, types } } as ApiResponse);
   } catch (err) { next(err); }
 });
@@ -124,7 +133,7 @@ telegramRouter.put('/prefs', requireAuth, async (req: AuthRequest, res, next) =>
       return;
     }
     const merged = await setPrefs(chatId, patch);
-    res.json({ success: true, data: { types: Object.fromEntries(TELEGRAM_TYPES.map((t) => [t, merged[t] !== false])) } } as ApiResponse);
+    res.json({ success: true, data: { types: Object.fromEntries(offeredTypes().map((t) => [t, merged[t] !== false])) } } as ApiResponse);
   } catch (err) { next(err); }
 });
 

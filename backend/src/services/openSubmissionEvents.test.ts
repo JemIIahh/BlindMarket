@@ -16,6 +16,7 @@ const mem = vi.hoisted(() => ({
   kv: new Map<string, string>(),
   hashes: new Map<string, Map<string, string>>(),
   zsets: new Map<string, Map<string, number>>(),
+  failNextZadd: false,
 }));
 
 vi.mock('./redis.js', () => ({
@@ -38,6 +39,10 @@ vi.mock('./redis.js', () => ({
     // One page holds everything: the cursor goes straight back to 0.
     hscan: async (k: string) => ['0', [...(mem.hashes.get(k) ?? new Map()).entries()].flat()],
     zadd: async (k: string, score: number, m: string) => {
+      if (mem.failNextZadd) {
+        mem.failNextZadd = false;
+        throw new Error('redis blip');
+      }
       const z = mem.zsets.get(k) ?? new Map<string, number>();
       mem.zsets.set(k, z);
       z.set(m, score);
@@ -116,6 +121,16 @@ describe('OpenTaskCreated', () => {
     expect(due().size).toBe(0);
   });
 
+  it('redoes the whole setup when it failed part-way, so the task is still scheduled', async () => {
+    mem.failNextZadd = true;
+    await expect(handleOpenTaskCreated('arc', 7n)).rejects.toThrow('redis blip');
+    // Not findable by id yet: the retried event sets it up again.
+    expect(await store.getRecordById('arc', '7')).toBeNull();
+    await handleOpenTaskCreated('arc', 7n);
+    expect(due().get(HASH)).toBe(DEADLINE);
+    expect(await store.getRecordById('arc', '7')).not.toBeNull();
+  });
+
   it('reads the chain once per task', async () => {
     await handleOpenTaskCreated('arc', 7n);
     await handleOpenSubmission('arc', 7n, agent(1), '0x01', 1n, undefined, NOW);
@@ -151,6 +166,18 @@ describe('OpenSubmission', () => {
     await handleOpenSubmission('arc', 7n, agent(1), '0x01', 1n, undefined, NOW + 5);
     expect(alerts()).toHaveLength(1);
     expect(await store.recordedSubmissionCount(HASH)).toBe(1);
+  });
+
+  it('sends no stale count when an event is redelivered after the count gap', async () => {
+    await handleOpenSubmission('arc', 7n, agent(1), '0x01', 1n, undefined, NOW);
+    await handleOpenSubmission('arc', 7n, agent(2), '0x02', 2n, undefined, NOW + 60);
+    mem.kv.delete(`a2a:open:count-gate:${HASH}`);
+    // The scan replays the block holding submission 2 an hour later.
+    await handleOpenSubmission('arc', 7n, agent(2), '0x02', 2n, undefined, NOW + COUNT_NOTICE_GAP_SEC + 60);
+    expect(alerts()).toHaveLength(1);
+    // And the slot is still free for the next real submission.
+    await handleOpenSubmission('arc', 7n, agent(3), '0x03', 3n, undefined, NOW + COUNT_NOTICE_GAP_SEC + 120);
+    expect(alerts()[1]).toMatchObject({ body: expect.stringContaining('3 agents have submitted so far') });
   });
 
   it('sends no running count once the deadline is due or the summary went out', async () => {

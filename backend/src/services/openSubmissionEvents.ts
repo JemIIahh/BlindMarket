@@ -38,6 +38,8 @@ export const agents = (n: number) => (n === 1 ? '1 agent' : `${n} agents`);
  * The task's record, read from the chain and saved the first time this
  * backend meets the task: its OpenTaskCreated may predate the event scan.
  * A task met for the first time is scheduled for the sweep at its deadline.
+ * The id index is written last: until it exists the task counts as unmet, so
+ * a failure part-way is redone in full when the event is retried.
  * null for a task that does not take open submissions.
  */
 async function ensureRecord(chain: TaskChain, taskId: bigint): Promise<OpenTaskRecord | null> {
@@ -59,6 +61,7 @@ async function ensureRecord(chain: TaskChain, taskId: bigint): Promise<OpenTaskR
   if (!(await store.getOutcome(rec.taskHash)) && !(await store.isClosedNotified(rec.taskHash))) {
     await store.scheduleSweep(rec.taskHash, rec.deadline);
   }
+  await store.indexRecordId(chain, id, rec.taskHash);
   return rec;
 }
 
@@ -78,12 +81,15 @@ export async function handleOpenSubmission(
   const rec = await ensureRecord(chain, taskId);
   if (!rec) return;
   const hash = rec.taskHash;
-  await store.recordSubmission(hash, submitter, {
+  const isNew = await store.recordSubmission(hash, submitter, {
     evidenceHash,
     ordinal: Number(count),
     ...(txHash ? { txHash } : {}),
     recordedAt: new Date(nowSec * 1000).toISOString(),
   });
+  // A redelivered event: its alert, if any, went out the first time. Sending
+  // again would repeat a stale count, or take the count slot from a real one.
+  if (!isNew) return;
 
   // The deadline summary reports the final count: no running count after it,
   // or once it is due (the indexer can run behind the chain).

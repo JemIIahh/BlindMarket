@@ -334,12 +334,19 @@ async function indexCancels(indexedTo: number): Promise<void> {
   }
 }
 
+/** How long one tick may spend on open-submission events before it yields to the next. */
+const OPEN_SCAN_BUDGET_MS = 15_000;
+
 /**
  * Open-submission events (OpenTaskCreated, OpenSubmission, WinnerSelected,
  * OpenTaskVoided), in one log query, only with OPEN_SUBMISSION_ENABLED: off,
  * this scan neither queries nor writes. A first scan starts at the indexed
- * head. A failed event fails the scan, which retries from the same block next
- * tick; every handler is idempotent.
+ * head. Every handler is idempotent.
+ *
+ * There is no cap on submissions, so one range can hold a burst. The scan
+ * stops between blocks once over OPEN_SCAN_BUDGET_MS, so the next tick's
+ * dispute and cancel scans are not held up, and a failed event keeps the
+ * checkpoint just before its block, so only that block is redone.
  */
 async function indexOpenSubmissions(indexedTo: number): Promise<void> {
   if (!arcEscrow || !config.openSubmissionEnabled) return;
@@ -349,11 +356,28 @@ async function indexOpenSubmissions(indexedTo: number): Promise<void> {
     const to = Math.min(indexedTo, from + MAX_BLOCKS_PER_TICK - 1);
     if (from > to) return;
 
-    // Imported at call time, like refundedTasks above: escrow.js reaches this indexer.
+    // Imported at call time, so the module is not even loaded while the flag is off.
     const { OPEN_EVENTS, handleOpenEvent } = await import('./openSubmissionEvents.js');
     const events = await queryArcEscrowLogs([[...OPEN_EVENTS]], from, to);
+    const startedAt = Date.now();
+    // Every event of the blocks before this one has been handled.
+    let block = from - 1;
     for (const ev of events) {
-      if ((ev as EventLog).eventName) await handleOpenEvent('arc', ev as EventLog);
+      const evBlock = Number((ev as EventLog).blockNumber);
+      if (Number.isFinite(evBlock) && evBlock > block) {
+        if (Date.now() - startedAt > OPEN_SCAN_BUDGET_MS) {
+          await redis.set(KEY.openCheckpoint, String(evBlock - 1));
+          return;
+        }
+        block = evBlock;
+      }
+      if (!(ev as EventLog).eventName) continue;
+      try {
+        await handleOpenEvent('arc', ev as EventLog);
+      } catch (err) {
+        if (block - 1 >= from) await redis.set(KEY.openCheckpoint, String(block - 1));
+        throw err;
+      }
     }
     await redis.set(KEY.openCheckpoint, String(to));
     lastOpenFailure = null;

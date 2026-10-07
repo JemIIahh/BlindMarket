@@ -104,7 +104,8 @@ export function TelegramAlerts() {
       ) : (
         <div className="space-y-4">
           <div className={LIST_BOX}>
-            {TELEGRAM_TYPES.map((type) => (
+            {/* Only the types this server offers: it leaves out the ones whose feature is off. */}
+            {TELEGRAM_TYPES.filter((type) => type in data.types).map((type) => (
               <div key={type} className="flex items-center justify-between gap-4 px-4 py-3.5">
                 <div className="min-w-0">
                   <div className="text-sm text-ink">{TELEGRAM_TYPE_COPY[type].label}</div>

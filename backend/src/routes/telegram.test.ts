@@ -11,6 +11,7 @@ import request from 'supertest';
  */
 
 const cfg = vi.hoisted(() => ({
+  openSubmissionEnabled: false,
   telegramBotToken: '123:TOKEN',
   telegramWebhookSecret: 'whsec',
   telegramBotUsername: 'BlindMarketBot',
@@ -167,6 +168,16 @@ describe('GET /status and PUT /prefs', () => {
     expect(res.body.data.enabled).toBe(true);
     expect(res.body.data.linked).toBe(false);
     expect(Object.values(res.body.data.types).every((v) => v === true)).toBe(true);
+  });
+
+  it('offers the Submissions toggle only while open submission is on', async () => {
+    const offered = async () => Object.keys((await request(app()).get('/api/v1/telegram/status')).body.data.types);
+    cfg.openSubmissionEnabled = false;
+    expect(await offered()).not.toContain('submissions');
+    expect(await offered()).toContain('deadline_soon');
+    cfg.openSubmissionEnabled = true;
+    expect(await offered()).toContain('submissions');
+    cfg.openSubmissionEnabled = false;
   });
 
   it('reports linked, and reflects a changed preference', async () => {
