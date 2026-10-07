@@ -46,11 +46,13 @@ describe('generateKeyPair', () => {
     }
   });
 
+  // 2000 key generations: well under a second alone, but past the 5 s default
+  // when the whole suite loads every core.
   it('always returns a 32-byte private key and a 65-byte uncompressed public key', () => {
     for (let i = 0; i < 2000; i++) {
       const { privateKey, publicKey } = generateKeyPair();
       expect(privateKey).toMatch(/^[0-9a-f]{64}$/);
       expect(publicKey).toMatch(/^04[0-9a-f]{128}$/);
     }
-  });
+  }, 20_000);
 });
