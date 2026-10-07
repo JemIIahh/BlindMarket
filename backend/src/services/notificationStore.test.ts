@@ -11,14 +11,24 @@ const mem = vi.hoisted(() => ({ lists: new Map<string, string[]>(), keys: new Ma
 vi.mock('./redis.js', () => {
   const lists = mem.lists;
   const pipe = () => {
-    const ops: Array<() => void> = [];
+    const ops: Array<() => unknown> = [];
     const p = {
+      // SET key value EX s NX, as a pipelined command: its reply comes from exec().
+      set: (k: string, v: string, ...args: unknown[]) => {
+        ops.push(() => {
+          if (args.includes('NX') && mem.keys.has(k)) return null;
+          mem.keys.set(k, v);
+          return 'OK';
+        });
+        return p;
+      },
       lpush: (k: string, v: string) => { ops.push(() => lists.set(k, [v, ...(lists.get(k) ?? [])])); return p; },
       ltrim: (k: string, s: number, e: number) => { ops.push(() => lists.set(k, (lists.get(k) ?? []).slice(s, e + 1))); return p; },
       expire: (_k: string, _s: number) => { ops.push(() => {}); return p; },
       del: (k: string) => { ops.push(() => { lists.delete(k); }); return p; },
       rpush: (k: string, ...vs: string[]) => { ops.push(() => lists.set(k, [...(lists.get(k) ?? []), ...vs])); return p; },
-      exec: async () => { ops.forEach((op) => op()); return []; },
+      // Real Redis replies [error, result] per command.
+      exec: async () => ops.map((op) => [null, op() ?? null]),
     };
     return p;
   };
@@ -57,7 +67,7 @@ vi.mock('./a2aStore.js', () => ({
   getState: vi.fn(async () => ({ executorAddress: EXEC })),
 }));
 
-import { notify, notifyOnce, firstSeenAt, listNotifications, markRead, markAllRead, notifyLifecycle } from './notificationStore.js';
+import { notify, notifyOnce, notifyOnceMany, firstSeenAt, listNotifications, markRead, markAllRead, notifyLifecycle } from './notificationStore.js';
 
 beforeEach(() => {
   mem.lists.clear();
@@ -148,5 +158,40 @@ describe('firstSeenAt', () => {
     expect(await firstSeenAt('remind:0xabc', 1000, 3600)).toBe(1000);
     expect(await firstSeenAt('remind:0xabc', 2000, 3600)).toBe(1000);
     expect(await firstSeenAt('remind:0xdef', 2000, 3600)).toBe(2000);
+  });
+});
+
+describe('notifyOnceMany', () => {
+  const lost = (to: string) => ({
+    dedupeKey: `open:lost:${HASH}:${to}`,
+    to,
+    input: { type: 'failed' as const, title: 'Another submission was picked', taskId: HASH },
+  });
+  const agent = (i: number) => '0x' + i.toString(16).padStart(40, '0');
+
+  beforeEach(() => {
+    mem.lists.clear();
+    mem.keys.clear();
+  });
+
+  it('sends each notice once, to each feed, across batches', async () => {
+    const notices = Array.from({ length: 450 }, (_, i) => lost(agent(i + 1)));
+    expect(await notifyOnceMany(notices)).toBe(450);
+    expect((await listNotifications(agent(1))).notifications[0]).toMatchObject({ type: 'failed', title: 'Another submission was picked' });
+    expect((await listNotifications(agent(450))).total).toBe(1);
+    // Redelivered event: nothing new.
+    expect(await notifyOnceMany(notices)).toBe(0);
+    expect((await listNotifications(agent(1))).total).toBe(1);
+  });
+
+  it('sends only the notices not sent before', async () => {
+    await notifyOnceMany([lost(agent(1))]);
+    expect(await notifyOnceMany([lost(agent(1)), lost(agent(2))])).toBe(1);
+    expect((await listNotifications(agent(2))).total).toBe(1);
+  });
+
+  it('shares its once-keys with notifyOnce', async () => {
+    await notifyOnce(`open:lost:${HASH}:${agent(3)}`, agent(3), { type: 'failed', title: 'x', taskId: HASH });
+    expect(await notifyOnceMany([lost(agent(3))])).toBe(0);
   });
 });

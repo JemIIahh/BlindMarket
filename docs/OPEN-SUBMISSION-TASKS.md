@@ -461,3 +461,32 @@ Not deployed. **[source]** for what the code says; the tests named are
   the backend offers a sponsored `submitOpen` only through a version-2
   delegate (`sponsorsSubmitOpen`).
 
+## 10. As built: backend, part 1 (2026-10-07)
+
+Behind `OPEN_SUBMISSION_ENABLED` (default off). Off, none of it runs: the event
+scan neither queries nor writes, and the sweep is not started. **[source]**
+
+- **Store** (`openSubmissionStore.ts`): what the escrow's events say about each
+  open task, in its own Redis keys (`a2a:open:*`). The single-assignee A2A
+  state is untouched, so the accept, cascade and expiry flows never see an
+  open task.
+- **Events** (`openSubmissionEvents.ts`, from the Arc indexer behind
+  `arc:events:open-checkpoint`): `OpenTaskCreated`, `OpenSubmission`,
+  `WinnerSelected`, `OpenTaskVoided` in one log query. Idempotent; a task met
+  first through a later event is read from the chain.
+- **Sweep** (`openSubmissionSweep.ts`, API process): the deadline summary,
+  with the escrow's own count, and the poster's pick reminder. The escrow's
+  phase decides, so a pause cannot make either early.
+- **Alerts:** see `docs/TELEGRAM-BOT.md`. The poster hears of the first
+  submission at once, then the count at most hourly, then the total at the
+  deadline. Agents hear whether they won.
+
+Turning it on: set `OPEN_SUBMISSION_ENABLED=true` for both services and
+recreate them (`docker compose up -d --force-recreate api indexer`). The indexer
+scans the events; the API runs the sweep.
+
+Not yet: indexing open tasks for the board and the web app (they have no
+`a2a:meta` yet), the submit/select routes, crediting the winner's earnings,
+the worker, the verifier agent, and the web app. Turn the flag on only once
+those land and the escrow is upgraded.
+

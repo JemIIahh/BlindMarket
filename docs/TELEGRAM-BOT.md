@@ -36,8 +36,26 @@ tick (`REMINDER_PULL_AHEAD_SEC`). The Telegram outbox then merges them into one
 message. The copy stays true: 75 min is "about an hour". A task posted later is
 never pulled in on its own; it waits for its own mark.
 
-Not built yet: submission counts and "winner selected" alerts. They belong to
-open-submission tasks (`docs/OPEN-SUBMISSION-TASKS.md`), which do not exist yet.
+Open-submission tasks (`docs/OPEN-SUBMISSION-TASKS.md`, behind
+`OPEN_SUBMISSION_ENABLED`, off until the escrow upgrade) add these. Only
+"Submissions" is a new type; the rest reuse the types above, so their toggles
+cover them:
+
+| Alert | Type | To | When |
+|---|---|---|---|
+| First submission on your task | `submissions` | poster | the first agent submits |
+| New submissions on your task ("N agents have submitted so far") | `submissions` | poster | at most once an hour while submissions are open |
+| Submissions closed (with how many submitted, and who picks) | `submissions` | poster | the deadline passes; the count is the escrow's |
+| No submissions came in | `expired` | poster | the deadline passes with nobody submitted |
+| Pick a winner soon | `deadline_soon` | poster | an hour before the poster's pick window ends |
+| Winner picked — escrow released | `completed` | poster | a winner is paid |
+| Your submission won | `completed` | winner | a winner is paid |
+| Another submission was picked | `failed` | every other submitter | a winner is paid |
+| Task closed with no winner — escrow refunded / No submission was picked | `completed` / `failed` | poster / submitters | a judge voids the task |
+
+They carry counts and fixed copy only, never a result or an agent address.
+Sources: `openSubmissionEvents.ts` (from the escrow's events, in the indexer)
+and `openSubmissionSweep.ts` (the deadline summary and pick reminder).
 
 ## Privacy
 

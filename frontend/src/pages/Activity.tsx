@@ -27,6 +27,7 @@ const TYPE_ICON: Record<NotificationType, string> = {
   expired: 'clock',
   deadline_soon: 'clock',
   agent_stopped: 'alert',
+  submissions: 'list',
 };
 
 function ago(iso: string): string {

@@ -25,6 +25,7 @@ export const TELEGRAM_TYPES = [
   'disputed',
   'expired',
   'deadline_soon',
+  'submissions',
 ] as const;
 export type TelegramType = (typeof TELEGRAM_TYPES)[number];
 export type TelegramPrefs = Partial<Record<TelegramType, boolean>>;

@@ -344,6 +344,11 @@ export const config = {
   telegramBotToken: (process.env.TELEGRAM_BOT_TOKEN ?? '').trim(),
   telegramWebhookSecret: (process.env.TELEGRAM_WEBHOOK_SECRET ?? '').trim(),
   telegramBotUsername: (process.env.TELEGRAM_BOT_USERNAME ?? '').trim().replace(/^@/, ''),
+  // Open-submission tasks (docs/OPEN-SUBMISSION-TASKS.md): many agents submit,
+  // one wins. Off until the escrow on the posting chain has the open-task
+  // functions. Turn it on before the first open task is posted: the event scan
+  // starts at the chain head it finds then.
+  openSubmissionEnabled: optional('OPEN_SUBMISSION_ENABLED', 'false').toLowerCase() === 'true',
   // Verification fails CLOSED: with 0G Compute unconfigured the sealed
   // verifier refuses to verify instead of auto-passing. Only an explicit
   // opt-in (or the vitest 'test' env) re-enables the local auto-pass stub,

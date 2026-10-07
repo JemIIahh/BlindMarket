@@ -12,7 +12,9 @@ export type NotificationType =
   /** A task's deadline is close and it is still waiting on an agent, its work or a verdict. */
   | 'deadline_soon'
   /** A hosted agent was left stopped (not restarted with the server): its owner can start it again. */
-  | 'agent_stopped';
+  | 'agent_stopped'
+  /** An open-submission task's poster: the first submission, how many so far, and how many by the deadline. */
+  | 'submissions';
 
 export interface Notification {
   id: string;

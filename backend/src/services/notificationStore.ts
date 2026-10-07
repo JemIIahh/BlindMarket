@@ -28,7 +28,9 @@ export type NotificationType =
   /** A task's deadline is close and it is still waiting on an agent, its work or a verdict. */
   | 'deadline_soon'
   /** A hosted agent was left stopped (not restarted with the server): its owner can start it again. */
-  | 'agent_stopped';
+  | 'agent_stopped'
+  /** An open-submission task's poster: the first submission, how many so far, and how many by the deadline. */
+  | 'submissions';
 
 export interface Notification {
   id: string;
@@ -162,6 +164,59 @@ export async function notifyOnce(
     console.warn('[notif] notifyOnce failed (non-fatal):', (err as Error).message);
     return false;
   }
+}
+
+/** One notice for notifyOnceMany. */
+export interface OnceNotice {
+  dedupeKey: string;
+  to: string;
+  input: { type: NotificationType; title: string; body?: string; taskId?: string };
+}
+
+/** Notices per round trip in notifyOnceMany. */
+const ONCE_BATCH = 200;
+
+/**
+ * notifyOnce() for many notices, a batch of them per Redis round trip instead
+ * of two round trips each. For one event that tells every submitter of an
+ * open task its outcome: there is no cap on how many submitted. Returns how
+ * many were sent now. Best effort, like notify().
+ */
+export async function notifyOnceMany(notices: OnceNotice[]): Promise<number> {
+  let sent = 0;
+  for (let i = 0; i < notices.length; i += ONCE_BATCH) {
+    const batch = notices.slice(i, i + ONCE_BATCH);
+    try {
+      const claim = redis.pipeline();
+      for (const n of batch) claim.set(KEY.once(n.dedupeKey), '1', 'EX', FEED_TTL_S, 'NX');
+      const claimed = (await claim.exec()) ?? [];
+      const fresh = batch.filter((_, j) => !claimed[j]?.[0] && claimed[j]?.[1] === 'OK');
+      if (fresh.length === 0) continue;
+      const push = redis.pipeline();
+      const notifs = fresh.map((n) => {
+        const notif: Notification = {
+          id: `${Date.now().toString(36)}-${randomBytes(4).toString('hex')}`,
+          type: n.input.type,
+          title: n.input.title,
+          body: n.input.body,
+          taskId: n.input.taskId,
+          createdAt: new Date().toISOString(),
+          read: false,
+        };
+        const key = KEY.feed(n.to);
+        push.lpush(key, JSON.stringify(notif));
+        push.ltrim(key, 0, FEED_CAP - 1);
+        push.expire(key, FEED_TTL_S);
+        return notif;
+      });
+      await push.exec();
+      fresh.forEach((n, j) => void deliverToTelegram(n.to, notifs[j]));
+      sent += fresh.length;
+    } catch (err) {
+      console.warn('[notif] notifyOnceMany batch failed (non-fatal):', (err as Error).message);
+    }
+  }
+  return sent;
 }
 
 /**

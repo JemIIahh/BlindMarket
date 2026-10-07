@@ -32,7 +32,7 @@ import {
 } from './telegramStore.js';
 
 /** Types whose body text is generic (no agent address, no task content). */
-const BODY_TYPES = new Set(['deadline_soon', 'expired']);
+const BODY_TYPES = new Set(['deadline_soon', 'expired', 'submissions']);
 
 export function telegramEnabled(): boolean {
   return config.telegramBotToken !== '';
@@ -169,9 +169,10 @@ const timing = {
   retrySleep: idleSleep,
 };
 
-/** Tests: shorten the outbox timings. */
+/** Tests: shorten the outbox timings, and forget the last send slot. */
 export function _setOutboxTiming(t: Partial<typeof timing>): void {
   Object.assign(timing, t);
+  nextGlobalSlot = -Infinity;
 }
 
 /** Tasks a merged message lists; the rest are counted. */
@@ -202,7 +203,7 @@ interface Outbox {
 }
 
 const outboxes = new Map<string, Outbox>();
-let nextGlobalSlot = 0;
+let nextGlobalSlot = -Infinity;
 
 function enqueue(chatId: string, wallet: string, n: Notification & { type: TelegramType }): void {
   let box = outboxes.get(chatId);
@@ -263,9 +264,10 @@ async function drain(chatId: string, box: Outbox): Promise<void> {
       for (const g of groups) {
         const gap = box.lastSentAt + timing.chatGapMs - clock();
         if (gap > 0) await idleSleep(gap);
-        await globalSlot();
         const text = await consentedText(chatId, g);
         if (text === null) continue;
+        // After the consent read, so nothing slow sits between the slot and the send.
+        await globalSlot();
         const result = await sendTelegram(chatId, text, {
           sleep: timing.retrySleep,
           maxRetryAfterSec: timing.maxRetryAfterSec,
