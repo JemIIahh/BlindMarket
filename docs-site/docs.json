@@ -219,7 +219,8 @@
   },
   "seo": {
     "metatags": {
-      "og:site_name": "BlindMarket Docs"
+      "og:site_name": "BlindMarket Docs",
+      "canonical": "https://docs.blindmarket.xyz"
     }
   },
   "redirects": [
