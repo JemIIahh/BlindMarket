@@ -135,6 +135,8 @@ describe('formatNotification: what may leave the platform', () => {
     expect(soon).toContain('Your task closes in about 1 hour.');
     const expired = formatNotification(note({ type: 'expired', title: 'Your task expired unclaimed', body: 'No agent took it before the deadline.' }));
     expect(expired).toContain('No agent took it before the deadline.');
+    const submissions = formatNotification(note({ type: 'submissions', title: 'Submissions closed', body: '12 agents submitted.' }));
+    expect(submissions).toContain('12 agents submitted.');
   });
 
   it('cannot leak a brief or title: only whitelisted fields are read', () => {
@@ -339,32 +341,45 @@ describe('outbox: bursts and pacing', () => {
     expect(body.text).not.toContain('accepted your task');
   });
 
-  it('spaces messages to one chat by the chat gap', async () => {
+  // On a fake clock: a real one measures the event loop as much as the
+  // schedule, and two timers delayed by a busy loop fire back to back.
+  const onFakeClock = async (run: () => Promise<void>) => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance', 'Date'] });
+    try {
+      await run();
+    } finally {
+      vi.useRealTimers();
+    }
+  };
+
+  it('spaces messages to one chat by the chat gap', () => onFakeClock(async () => {
     _setOutboxTiming({ chatGapMs: 60 });
     await linkChat('42', [WALLET]);
     const times = recordTimes();
     await deliverToTelegram(WALLET, note({ type: 'completed', title: 'Payout credited' }));
     await deliverToTelegram(WALLET, note({ type: 'failed', title: "Submission didn't pass" }));
     await deliverToTelegram(WALLET, reminder(1));
+    await vi.advanceTimersByTimeAsync(1_000);
     await _outboxesIdle();
     expect(times).toHaveLength(3);
-    expect(times[1] - times[0]).toBeGreaterThanOrEqual(55);
-    expect(times[2] - times[1]).toBeGreaterThanOrEqual(55);
-  });
+    expect(times[1] - times[0]).toBeGreaterThanOrEqual(60);
+    expect(times[2] - times[1]).toBeGreaterThanOrEqual(60);
+  }));
 
-  it('spaces sends across chats by the global gap, one message per chat', async () => {
+  it('spaces sends across chats by the global gap, one message per chat', () => onFakeClock(async () => {
     _setOutboxTiming({ quietMs: 20, globalGapMs: 40 });
     const wallets = [1, 2, 3].map((i) => '0x' + String(i).repeat(40));
     for (const [i, w] of wallets.entries()) await linkChat(String(100 + i), [w]);
     const times = recordTimes();
     await Promise.all(wallets.flatMap((w) => [1, 2, 3].map((i) => deliverToTelegram(w, reminder(i)))));
+    await vi.advanceTimersByTimeAsync(1_000);
     await _outboxesIdle();
     expect(new Set(sent().map((c) => c.body.chat_id))).toEqual(new Set(['100', '101', '102']));
     expect(sent()).toHaveLength(3);
     times.sort((a, b) => a - b);
-    expect(times[1] - times[0]).toBeGreaterThanOrEqual(35);
-    expect(times[2] - times[1]).toBeGreaterThanOrEqual(35);
-  });
+    expect(times[1] - times[0]).toBeGreaterThanOrEqual(40);
+    expect(times[2] - times[1]).toBeGreaterThanOrEqual(40);
+  }));
 
   it('does not hold a steady stream back past the maximum wait', async () => {
     _setOutboxTiming({ quietMs: 50, maxWaitMs: 120 });

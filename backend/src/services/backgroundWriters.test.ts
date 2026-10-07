@@ -26,6 +26,7 @@ vi.mock('./cctpAttestationPoller.js', () => ({ startCctpAttestationPoller: () =>
 vi.mock('./a2aExpirySweep.js', () => ({ startExpirySweepLoop: () => started.push('startExpirySweepLoop') }));
 vi.mock('./agentRunner.js', () => ({ reconcileAgents: async () => { started.push('reconcileAgents'); } }));
 vi.mock('./gasSponsorRelayer.js', () => ({ startGasSponsor: () => started.push('startGasSponsor') }));
+vi.mock('./openSubmissionSweep.js', () => ({ startOpenSubmissionSweepLoop: () => started.push('startOpenSubmissionSweepLoop') }));
 
 import { backgroundWriters, startBackgroundWriters } from './backgroundWriters.js';
 
@@ -45,6 +46,13 @@ describe('startBackgroundWriters', () => {
     const { started: names } = await startBackgroundWriters(backgroundWriters({}));
     expect(started).toEqual(EVERY_WRITER);
     expect(names).toEqual(['Base indexer', 'Arc indexer', 'AgentFactory listener', 'CCTP poller', 'expiry sweep', 'gas sponsor', 'agent reconcile']);
+  });
+
+  it('adds the open-submission sweep only with OPEN_SUBMISSION_ENABLED, in the API process', () => {
+    const names = (env: NodeJS.ProcessEnv) => backgroundWriters(env).map((w) => w.name);
+    expect(names({})).not.toContain('open-submission sweep');
+    expect(names({ OPEN_SUBMISSION_ENABLED: 'true' })).toContain('open-submission sweep');
+    expect(names({ OPEN_SUBMISSION_ENABLED: 'true', RUN_MODE: 'indexer' })).not.toContain('open-submission sweep');
   });
 
   it('starts them after the first check whatever it said: each tick is gated, so a later "allowed" takes effect', async () => {

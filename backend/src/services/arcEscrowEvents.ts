@@ -28,6 +28,11 @@
  * (TaskCancelled, see refundedTasks.handleTaskCancelled), behind another:
  *
  *   arc:events:cancel-checkpoint   → last block scanned for TaskCancelled
+ *
+ * And, with OPEN_SUBMISSION_ENABLED, the open-submission events
+ * (openSubmissionEvents), behind one more:
+ *
+ *   arc:events:open-checkpoint     → last block scanned for them
  */
 
 import type { EventLog } from 'ethers';
@@ -49,6 +54,7 @@ const KEY = {
   get checkpoint() { return `${chainScope('arc')}:events:checkpoint`; },
   get disputeCheckpoint() { return `${chainScope('arc')}:events:dispute-checkpoint`; },
   get cancelCheckpoint() { return `${chainScope('arc')}:events:cancel-checkpoint`; },
+  get openCheckpoint() { return `${chainScope('arc')}:events:open-checkpoint`; },
 };
 
 function isPrunedHistoryError(err: unknown): boolean {
@@ -116,6 +122,7 @@ let consecutiveFailures = 0;
 let lastLagLogAt = 0;
 let lastDisputeFailure: string | null = null;
 let lastCancelFailure: string | null = null;
+let lastOpenFailure: string | null = null;
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
@@ -162,6 +169,7 @@ export async function pollArcEscrowOnce(): Promise<void> {
     await indexDisputes(indexedTo);
     await retryParkedDisputes('arc');
     await indexCancels(indexedTo);
+    await indexOpenSubmissions(indexedTo);
   } finally {
     followUpsInFlight = false;
   }
@@ -322,6 +330,62 @@ async function indexCancels(indexedTo: number): Promise<void> {
     if (msg !== lastCancelFailure) {
       console.error('[arcEscrowEvents] TaskCancelled tick failed:', msg);
       lastCancelFailure = msg;
+    }
+  }
+}
+
+/** How long one tick may spend on open-submission events before it yields to the next. */
+const OPEN_SCAN_BUDGET_MS = 15_000;
+
+/**
+ * Open-submission events (OpenTaskCreated, OpenSubmission, WinnerSelected,
+ * OpenTaskVoided), in one log query, only with OPEN_SUBMISSION_ENABLED: off,
+ * this scan neither queries nor writes. A first scan starts at the indexed
+ * head. Every handler is idempotent.
+ *
+ * There is no cap on submissions, so one range can hold a burst. The scan
+ * stops between blocks once over OPEN_SCAN_BUDGET_MS, so the next tick's
+ * dispute and cancel scans are not held up, and a failed event keeps the
+ * checkpoint just before its block, so only that block is redone.
+ */
+async function indexOpenSubmissions(indexedTo: number): Promise<void> {
+  if (!arcEscrow || !config.openSubmissionEnabled) return;
+  try {
+    const checkpointRaw = await redis.get(KEY.openCheckpoint);
+    const from = checkpointRaw ? Number(checkpointRaw) + 1 : indexedTo;
+    const to = Math.min(indexedTo, from + MAX_BLOCKS_PER_TICK - 1);
+    if (from > to) return;
+
+    // Imported at call time, so the module is not even loaded while the flag is off.
+    const { OPEN_EVENTS, handleOpenEvent } = await import('./openSubmissionEvents.js');
+    const events = await queryArcEscrowLogs([[...OPEN_EVENTS]], from, to);
+    const startedAt = Date.now();
+    // Every event of the blocks before this one has been handled.
+    let block = from - 1;
+    for (const ev of events) {
+      const evBlock = Number((ev as EventLog).blockNumber);
+      if (Number.isFinite(evBlock) && evBlock > block) {
+        if (Date.now() - startedAt > OPEN_SCAN_BUDGET_MS) {
+          await redis.set(KEY.openCheckpoint, String(evBlock - 1));
+          return;
+        }
+        block = evBlock;
+      }
+      if (!(ev as EventLog).eventName) continue;
+      try {
+        await handleOpenEvent('arc', ev as EventLog);
+      } catch (err) {
+        if (block - 1 >= from) await redis.set(KEY.openCheckpoint, String(block - 1));
+        throw err;
+      }
+    }
+    await redis.set(KEY.openCheckpoint, String(to));
+    lastOpenFailure = null;
+  } catch (err) {
+    const msg = (err as Error).message;
+    if (msg !== lastOpenFailure) {
+      console.error('[arcEscrowEvents] open-submission tick failed:', msg);
+      lastOpenFailure = msg;
     }
   }
 }
