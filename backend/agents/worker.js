@@ -2540,8 +2540,11 @@ BM_JS_WRAP_EOF`,
 
   // An open-submission run: many agents asking the poster one question each,
   // and waiting up to 30 min on the work slot for the answer, is not a thread.
+  // The inbox goes too: it holds the owner's and other posters' messages, and
+  // an open result is public at the deadline.
   if (!messaging) {
     delete tools.send_message;
+    delete tools.read_inbox;
     delete tools.wait_for_reply;
   }
   return tools;
@@ -3428,10 +3431,13 @@ function generateTextWithTimeout(options) {
  *   onModelFailed  the model errored or produced nothing (never submitted).
  * `open`: an open-submission task, with `meta` from the open board. Its
  * poster reads many results and picks one, so the model gets no messaging
- * tools (and no delegation) and the thread is not read.
+ * tools, no inbox and no delegation (OPEN_TOOL_OPTIONS), the thread is not
+ * read, a brief over OPEN_MAX_BRIEF_CHARS is not worked, and the result is
+ * returned without being uploaded (rootHash null). giveUp gets a reason and
+ * `{ final }` (no point trying again).
  * Returns the result and its storage pointer, or null after a hook ran.
  */
-async function produceResult(taskHash, { briefRootHash, wrappedKey, privacy, meta = undefined, open = false }, { giveUp, onModelFailed }) {
+export async function produceResult(taskHash, { briefRootHash, wrappedKey, privacy, meta = undefined, open = false }, { giveUp, onModelFailed }) {
   // Poster address (to authenticate thread messages) and verification
   // criteria (so the model knows what is checked). Best-effort: without it
   // the run proceeds, minus thread context and the [VERIFICATION] section.
@@ -3483,7 +3489,7 @@ async function produceResult(taskHash, { briefRootHash, wrappedKey, privacy, met
       // worker the backend refuses with 409 ON_CHAIN_LOCKED and only the
       // poster's claimTimeout after the deadline recovers the escrow —
       // releaseTask logs the refusal so the stuck task is at least visible.
-      await giveUp();
+      await giveUp('the brief could not be read');
       return null;
     }
   } else {
@@ -3492,7 +3498,13 @@ async function produceResult(taskHash, { briefRootHash, wrappedKey, privacy, met
     // silently stranding it in 'accepted' (same semantics as the decrypt
     // failure branch above): re-opens if still Funded, else the backend 409s
     // ON_CHAIN_LOCKED and releaseTask logs it so the stuck task is visible.
-    await giveUp();
+    await giveUp('it has no brief to work from', { final: true });
+    return null;
+  }
+
+  // An open run may never pay: a brief past the cap is not worked at all.
+  if (open && briefPlaintext.length > OPEN_MAX_BRIEF_CHARS) {
+    await giveUp(`its brief is over ${OPEN_MAX_BRIEF_CHARS} characters`, { final: true });
     return null;
   }
 
@@ -3516,7 +3528,7 @@ async function produceResult(taskHash, { briefRootHash, wrappedKey, privacy, met
 
   const verificationSection = describeVerificationCriteria(criteria);
   const userPrompt = verificationSection ? `${briefPlaintext}\n\n${verificationSection}` : briefPlaintext;
-  const runTools = buildTools(taskHash, { posterAddress, ...(open ? { messaging: false, delegation: false } : {}) });
+  const runTools = buildTools(taskHash, { posterAddress, ...(open ? OPEN_TOOL_OPTIONS : {}) });
 
   // Tool-call failures get one text-only retry: when the model mangles tool
   // syntax (unknown tool name, unparseable args — both observed live with
@@ -3717,6 +3729,11 @@ async function produceResult(taskHash, { briefRootHash, wrappedKey, privacy, met
     }
   }
 
+  // An open result is sent inline, never uploaded: storage blobs are readable
+  // by anyone, and the result must stay hidden from the other agents until
+  // the deadline (docs/OPEN-SUBMISSION-TASKS.md section 2.3).
+  if (open) return { resultData, teeAttestation, rootHash: null, llmElapsed, taskMeta };
+
   // ── Upload output to 0G Storage (required before submit) ────────────────
   // Sealed with the task key unless the task is public (sealResultForStorage).
   let rootHash = null;
@@ -3748,7 +3765,7 @@ async function produceResult(taskHash, { briefRootHash, wrappedKey, privacy, met
   }
   if (!rootHash) {
     log(`output upload failed — aborting submit for ${taskHash.slice(0, 10)}…`);
-    await giveUp();
+    await giveUp('the result could not be stored');
     return null;
   }
   return { resultData, teeAttestation, rootHash, llmElapsed, taskMeta };
@@ -3958,41 +3975,55 @@ async function runAcceptedTask(acceptedTaskHash, acceptedRootHash, acceptedWrapp
 // With the owner's opt-in (OPEN_SUBMISSION_ENABLED) this agent reads the open
 // board on its own cadence and, when the work slot is free, takes one task per
 // pass: the model runs once, the result goes to POST /submit-open, and this
-// wallet sends the submitOpen the server builds. Open tasks are public, like
-// their results once submissions close. Nothing is sponsored: the submitOpen
-// is paid from this wallet, and the run pays only if this agent wins.
+// wallet sends the submitOpen the server builds. The result is sent inline and
+// never uploaded: storage blobs are readable by anyone, and results must stay
+// hidden from the other agents until the deadline. Nothing is sponsored: the
+// submitOpen is paid from this wallet, and the run pays only if this agent wins.
 
 /** How often the open board is read. */
 export const OPEN_SCAN_MS = 5 * 60 * 1000;
-/** Model runs on open tasks per rolling hour: spend that may never pay is capped. */
+/** Model runs on open tasks per rolling hour (per process: a restart resets it). */
 export const MAX_OPEN_RUNS_PER_HOUR = 4;
 /** Tasks checked against the escrow per pass, so a long board costs a bounded number of reads. */
 const MAX_OPEN_CHECKS_PER_PASS = 5;
-/** Failed runs (brief, model or upload) before a task is left alone. */
+/** Failed runs (brief or model) before a task is left alone. */
 const MAX_OPEN_ATTEMPTS = 2;
-/** Wait before a failed run is tried again. */
+/** Wait before a failed run, or a task whose checks failed to read, is tried again. */
 const OPEN_RETRY_MS = 15 * 60 * 1000;
 /** Wait after the server answers 404 (open submission is off there). */
 const OPEN_OFF_BACKOFF_MS = 60 * 60 * 1000;
-/** A task closing sooner than one model run, the upload and the tx is skipped. */
-export const OPEN_DEADLINE_MARGIN_SEC = Math.ceil(LLM_TIMEOUT_MS / 1000) + 180;
+/**
+ * A task closing sooner than a run can finish is skipped: up to three model
+ * calls (a text-only retry, a self-check repair), then the submit and the tx.
+ */
+export const OPEN_DEADLINE_MARGIN_SEC = 3 * Math.ceil(LLM_TIMEOUT_MS / 1000) + 300;
+/** A longer brief is not worked: open runs may never pay, so their cost is capped. */
+export const OPEN_MAX_BRIEF_CHARS = 20_000;
+/**
+ * The least an open task must pay for this agent to compete, in USDC (the
+ * owner's own minimum applies when higher). Without it, anyone could post
+ * near-free open tasks and spend every opted-in agent's runs on them.
+ */
+export const OPEN_MIN_REWARD_USDC = 0.5;
 /**
  * resultData's share of the server's 64 KB cap on a submission
- * (routes/openSubmission.ts MAX_RESULT_BYTES), leaving room for the storage
- * pointer and the attestation. The full result is in storage either way.
+ * (routes/openSubmission.ts MAX_RESULT_BYTES), leaving room for the
+ * attestation. A longer output is cut (fitOpenResultData).
  */
 export const OPEN_RESULT_DATA_MAX_BYTES = 56 * 1024;
+/** The model's tools for an open run: no messaging (or inbox) and no delegation, whatever the owner allows. */
+export const OPEN_TOOL_OPTIONS = { messaging: false, delegation: false };
 
 /** This process's record of the open tasks it has met. Exported for tests. */
 export function createOpenState() {
   return {
     /** taskHash → why it is finished with: submitted, or refused for good. */
     done: new Map(),
-    /** taskHash → not before this time (ms), after a failed run. */
+    /** taskHash → not before this time (ms). */
     retryAt: new Map(),
     /** taskHash → failed runs so far. */
     attempts: new Map(),
-    /** taskHash → { entry, produced }: a result made but not on-chain yet. */
+    /** taskHash → { entry, produced, txHash? }: a result made but not on-chain yet. */
     unsent: new Map(),
     /** Start times (ms) of model runs in the last hour. */
     runs: [],
@@ -4006,7 +4037,7 @@ const openState = createOpenState();
 
 /**
  * The evidence hash the server commits for an open submission: keccak256 of
- * the JSON of the resultData and the storage pointer. Must match
+ * the JSON of the resultData and the storage pointer (null here). Must match
  * routes/openSubmission.ts openEvidenceHash byte for byte (both test files
  * pin the same vector); the submitOpen is checked against it before it is
  * signed.
@@ -4015,14 +4046,11 @@ export function openEvidenceHash(resultData, rootHash) {
   return ethers.keccak256(ethers.toUtf8Bytes(JSON.stringify({ resultData, rootHash })));
 }
 
-/**
- * resultData cut to fit OPEN_RESULT_DATA_MAX_BYTES: the output is shortened,
- * with a note, and `truncated` set. The stored result (rootHash) stays whole.
- */
+/** resultData cut to fit OPEN_RESULT_DATA_MAX_BYTES: the output is shortened, with a note, and `truncated` set. */
 export function fitOpenResultData(resultData, maxBytes = OPEN_RESULT_DATA_MAX_BYTES) {
   const size = (v) => Buffer.byteLength(JSON.stringify(v));
   if (size(resultData) <= maxBytes) return resultData;
-  const note = '\n\n[Truncated here: the full result is in storage, at rootHash.]';
+  const note = '\n\n[The result was cut here to fit an open submission.]';
   const chars = Array.from(String(resultData.output ?? ''));
   const cut = (n) => ({ ...resultData, output: chars.slice(0, n).join('') + note, truncated: true });
   let lo = 0;
@@ -4036,18 +4064,33 @@ export function fitOpenResultData(resultData, maxBytes = OPEN_RESULT_DATA_MAX_BY
 }
 
 /**
- * The owner's minimum reward, as /accept applies it to single-assignee tasks
- * (agentScorer.meetsRewardFloor): in the posting chain's token, so a reward in
- * another unit passes only a zero floor. No reward recorded, or no floor,
- * passes.
+ * The least reward this agent competes for, in the posting token's base
+ * units: the owner's minimum, or OPEN_MIN_REWARD_USDC on a USDC chain,
+ * whichever is higher. Exported for tests.
+ */
+export function openRewardFloor(minReward, pricing = postingChainInfo()?.token) {
+  let owner = 0n;
+  try { owner = minReward ? BigInt(minReward) : 0n; } catch { /* unparseable: the platform minimum stands */ }
+  const decimals = Number(pricing?.decimals);
+  const platform = pricing?.symbol === 'USDC' && Number.isInteger(decimals)
+    ? BigInt(Math.round(OPEN_MIN_REWARD_USDC * 1e6)) * 10n ** BigInt(Math.max(decimals - 6, 0)) / 10n ** BigInt(Math.max(6 - decimals, 0))
+    : 0n;
+  return owner > platform ? owner : platform;
+}
+
+/**
+ * Whether an open task pays enough: at least openRewardFloor, in the posting
+ * token. A reward in another unit passes only a zero floor, as /accept applies
+ * the owner's minimum (agentScorer.meetsRewardFloor); an unknown reward passes
+ * only a zero floor too, since the reward is what makes a run worth it.
  */
 export function meetsOpenRewardFloor(reward, minReward, pricing = postingChainInfo()?.token) {
-  if (!reward || !minReward) return true;
-  let floor;
-  try { floor = BigInt(minReward); } catch { return true; }
+  const floor = openRewardFloor(minReward, pricing);
+  if (floor === 0n) return true;
+  if (!reward) return false;
   const sameUnit = !!pricing && reward.unit?.symbol === pricing.symbol && Number(reward.unit?.decimals) === Number(pricing.decimals);
-  if (!sameUnit) return floor === 0n;
-  try { return floor <= BigInt(reward.amount); } catch { return true; }
+  if (!sameUnit) return false;
+  try { return BigInt(reward.amount) >= floor; } catch { return false; }
 }
 
 /**
@@ -4060,12 +4103,13 @@ function openChainProblem(chain) {
   if (isUnsupportedChain(chain)) return unsupportedChainReason(chain);
   if (!signerFor(chain)) return `no ${chain} signer`;
   if (canSubmitViaSmartAccount(chain)) return `this agent submits through a smart account on ${chain}, and open tasks take plain txs only`;
+  if (!escrowAddressFor(chain) || !chainInfo(pickChain(chain))?.chainId) return `this worker does not know the ${chain} escrow`;
   return null;
 }
 
 /**
  * Why this agent must not try an open board entry now, or null. Off-chain
- * facts only; the escrow is asked about the chosen tasks (openEligibility).
+ * facts only; the escrow and the server are asked about the chosen tasks.
  * Exported for tests.
  */
 export function openSkipReason(entry, { nowSec, selfAddresses = [], ownerAddress = '', minReward = '', pricing = postingChainInfo()?.token, chainProblem = openChainProblem, marginSec = OPEN_DEADLINE_MARGIN_SEC }) {
@@ -4077,19 +4121,26 @@ export function openSkipReason(entry, { nowSec, selfAddresses = [], ownerAddress
   const chain = chainProblem(meta.chain);
   if (chain) return chain;
   if (typeof meta.deadline !== 'number') return 'no deadline recorded';
-  if (meta.deadline - nowSec < marginSec) return `it closes in under ${Math.ceil(marginSec / 60)} min, too soon for a model run`;
+  if (meta.deadline - nowSec < marginSec) return `it closes in under ${Math.ceil(marginSec / 60)} min, too soon for a run`;
   const self = selfAddresses.filter(Boolean).map(lc);
   if (meta.posterAddress && self.includes(lc(meta.posterAddress))) return 'this agent posted it';
   if (meta.verifierAddress && self.includes(lc(meta.verifierAddress))) return 'this agent is its verifier';
   if (ownerAddress && lc(meta.posterAddress) === lc(ownerAddress)) return "this agent's owner posted it";
-  if (!meetsOpenRewardFloor(meta.reward, minReward, pricing)) return "its reward is below this agent's minimum";
+  if (!meetsOpenRewardFloor(meta.reward, minReward, pricing)) return `its reward is below the open-task minimum (this agent's, or ${OPEN_MIN_REWARD_USDC} USDC)`;
   return null;
 }
 
+/** An entry's reward in base units, 0n when unreadable. */
+function rewardUnits(entry) {
+  try { return BigInt(entry?.meta?.reward?.amount ?? 0); } catch { return 0n; }
+}
+
 /**
- * The board entries this agent may try now, soonest deadline first, and the
- * reason each other one is skipped. Tasks this process finished with, holds an
- * unsent result for, or waits to retry are left out silently. Exported for tests.
+ * The board entries this agent may try now, best first, and the reason each
+ * other one is skipped. Best is the most reward per competitor so far
+ * (reward / (submissions + 1)), then the soonest deadline. Tasks this process
+ * finished with, holds an unsent result for, or waits on are left out
+ * silently. Exported for tests.
  */
 export function pickOpenCandidates(entries, { nowMs, state, ...opts }) {
   const candidates = [];
@@ -4103,7 +4154,13 @@ export function pickOpenCandidates(entries, { nowMs, state, ...opts }) {
     if (reason) skipped.push({ taskHash, reason });
     else candidates.push(entry);
   }
-  candidates.sort((a, b) => a.meta.deadline - b.meta.deadline);
+  const competitors = (e) => BigInt(Math.max(Number(e.submissions) || 0, 0) + 1);
+  candidates.sort((a, b) => {
+    const lhs = rewardUnits(a) * competitors(b);
+    const rhs = rewardUnits(b) * competitors(a);
+    if (lhs !== rhs) return lhs > rhs ? -1 : 1;
+    return a.meta.deadline - b.meta.deadline;
+  });
   return { candidates, skipped };
 }
 
@@ -4138,19 +4195,22 @@ async function readOpenEligibility(chain, onChainTaskId, address) {
  * Why the submitOpen the server handed back must not be signed, or null: it
  * must come from this wallet, on this chain, call the escrow's submitOpen for
  * this task, and commit this result's evidence hash. Anything else would spend
- * gas on a submission whose result the server never keeps. Exported for tests.
+ * gas on a submission whose result the server never keeps. Every expected
+ * value is required: a worker that doesn't know one signs nothing. Exported
+ * for tests.
  */
 export function checkUnsignedSubmitOpen(tx, { from, chainId, escrow, onChainTaskId, evidenceHash }, iface = escrowIface) {
   if (!tx || typeof tx !== 'object') return 'the response has no transaction';
   if (!iface) return 'the escrow ABI is not loaded';
+  if (!from || !escrow || chainId == null || onChainTaskId == null || !evidenceHash) return 'this worker does not know what to expect (wallet, escrow, chain or task id)';
   if (typeof tx.from !== 'string' || tx.from.toLowerCase() !== String(from).toLowerCase()) return `it is from ${tx.from}, not this wallet (${from})`;
-  if (chainId != null && Number(tx.chainId) !== Number(chainId)) return `it is for chain ${tx.chainId}, not ${chainId}`;
-  if (escrow && String(tx.to).toLowerCase() !== escrow.toLowerCase()) return `it calls ${tx.to}, not the escrow`;
+  if (Number(tx.chainId) !== Number(chainId)) return `it is for chain ${tx.chainId}, not ${chainId}`;
+  if (String(tx.to).toLowerCase() !== String(escrow).toLowerCase()) return `it calls ${tx.to}, not the escrow`;
   if (tx.value != null && BigInt(tx.value) !== 0n) return 'it sends value';
   let call = null;
   try { call = iface.parseTransaction({ data: tx.data }); } catch { /* not escrow calldata */ }
   if (call?.name !== 'submitOpen') return 'it is not a submitOpen call';
-  if (onChainTaskId != null && call.args[0] !== BigInt(onChainTaskId)) return `it submits to task ${call.args[0]}, not ${onChainTaskId}`;
+  if (call.args[0] !== BigInt(onChainTaskId)) return `it submits to task ${call.args[0]}, not ${onChainTaskId}`;
   if (String(call.args[1]).toLowerCase() !== String(evidenceHash).toLowerCase()) return "its evidence hash is not this result's";
   return null;
 }
@@ -4173,9 +4233,9 @@ export function openRunsLeft(runs, nowMs, perHour = MAX_OPEN_RUNS_PER_HOUR) {
   return perHour - runs.length;
 }
 
-function logOpenSkip(taskHash, reason) {
-  if (openState.logged.get(taskHash) === reason) return;
-  openState.logged.set(taskHash, reason);
+function logOpenSkip(state, taskHash, reason) {
+  if (state.logged.get(taskHash) === reason) return;
+  state.logged.set(taskHash, reason);
   log(`open task ${taskHash.slice(0, 10)}…: skipping, ${reason}`);
 }
 
@@ -4186,31 +4246,32 @@ function markOpenDone(state, taskHash, reason) {
   log(`open task ${taskHash.slice(0, 10)}…: ${reason}`);
 }
 
-function noteOpenFailure(state, taskHash, reason) {
+/** A failed run: tried again after OPEN_RETRY_MS, up to MAX_OPEN_ATTEMPTS, or at once given up when `final`. Exported for tests. */
+export function noteOpenFailure(state, taskHash, reason, { final = false } = {}) {
   const attempts = (state.attempts.get(taskHash) ?? 0) + 1;
   state.attempts.set(taskHash, attempts);
-  if (attempts >= MAX_OPEN_ATTEMPTS) {
-    markOpenDone(state, taskHash, `${reason}; giving up after ${attempts} runs`);
+  if (final || attempts >= MAX_OPEN_ATTEMPTS) {
+    markOpenDone(state, taskHash, final ? `${reason}; not trying it` : `${reason}; giving up after ${attempts} runs`);
     return;
   }
   state.retryAt.set(taskHash, Date.now() + OPEN_RETRY_MS);
   log(`open task ${taskHash.slice(0, 10)}…: ${reason}; trying again in ${OPEN_RETRY_MS / 60_000} min`);
 }
 
-/** A result that could not be sent yet: the next pass sends it again, with no new model run. */
-function keepUnsent(state, entry, produced, reason) {
-  state.unsent.set(entry.meta.taskId, { entry, produced });
+/** A result that could not be sent yet: a later pass sends it again, with no new model run. */
+function keepUnsent(state, entry, produced, reason, txHash = undefined) {
+  state.unsent.set(entry.meta.taskId, { entry, produced, ...(txHash ? { txHash } : {}) });
   log(`open task ${entry.meta.taskId.slice(0, 10)}…: result not sent yet (${reason}); sending it again on the next pass`);
 }
 
 /** Forget tasks no longer on the board: past their deadline, closed or gone. */
-function pruneOpenState(onBoard) {
-  for (const map of [openState.done, openState.retryAt, openState.attempts, openState.logged]) {
+function pruneOpenState(state, onBoard) {
+  for (const map of [state.done, state.retryAt, state.attempts, state.logged]) {
     for (const k of [...map.keys()]) if (!onBoard.has(k)) map.delete(k);
   }
-  for (const k of [...openState.unsent.keys()]) {
+  for (const k of [...state.unsent.keys()]) {
     if (onBoard.has(k)) continue;
-    openState.unsent.delete(k);
+    state.unsent.delete(k);
     log(`open task ${k.slice(0, 10)}…: it closed before its result could be sent`);
   }
 }
@@ -4241,12 +4302,19 @@ async function fetchOpenTasks() {
 
 /** What sendOpenResult talks to on `chain`: this wallet, the escrow, the server. */
 function openIo(chain) {
+  const signer = signerFor(chain);
   return {
-    signer: signerFor(chain),
+    signer,
     chainId: chainInfo(pickChain(chain))?.chainId,
     escrow: escrowAddressFor(chain),
     nowSec: () => Math.floor(Date.now() / 1000),
-    preflight: (signer) => preflightGas(chain, signer, false),
+    preflight: () => preflightGas(chain, signer, false),
+    /** 'mined' | 'failed' | 'pending' | 'unknown' for a submitOpen sent earlier. */
+    txStatus: async (hash) => {
+      const receipt = await signer.provider.getTransactionReceipt(hash);
+      if (receipt) return receipt.status === 1 ? 'mined' : 'failed';
+      return (await signer.provider.getTransaction(hash)) ? 'pending' : 'unknown';
+    },
     postSubmitOpen: async (taskHash, body) => {
       const res = await fetchWithTimeout(`${BACKEND_URL}/api/v1/a2a/tasks/${taskHash}/submit-open`, {
         method: 'POST',
@@ -4263,23 +4331,44 @@ const FINAL_SUBMIT_OPEN_REVERTS = new Set(['AlreadySubmitted', 'DeadlineReached'
 
 /**
  * Send a finished result: POST /submit-open, check the submitOpen it returns,
- * sign and send it. True once the submission is on-chain. A refusal that will
- * stand marks the task done; anything that may clear keeps the result for the
- * next pass, so a 429 or a dropped tx never costs a second model run.
+ * and send the call it makes, rebuilt here (to the escrow, this chain, its
+ * calldata; gas and nonce from this wallet's provider). True once the
+ * submission is on-chain. A refusal that will stand marks the task done;
+ * anything that may clear keeps the result for the next pass, so a 429 or a
+ * dropped tx never costs a second model run. `txHash`: a submitOpen an earlier
+ * pass sent and lost track of; while it is pending nothing is sent again.
  * Exported for tests, with `io` and `state` standing in for the real ones.
  */
-export async function sendOpenResult(entry, produced, io = openIo(entry.meta.chain), state = openState) {
+export async function sendOpenResult(entry, produced, io = openIo(entry.meta.chain), state = openState, { txHash = "" } = {}) {
   const taskHash = entry.meta.taskId;
   const short = taskHash.slice(0, 10);
   if (io.nowSec() >= entry.meta.deadline) {
     markOpenDone(state, taskHash, 'its deadline passed before the result could be sent');
     return false;
   }
+  if (txHash) {
+    const status = await io.txStatus(txHash).catch(() => 'unknown');
+    if (status === 'mined') {
+      markOpenDone(state, taskHash, 'submitted; the winner is picked after the deadline');
+      return true;
+    }
+    if (status === 'pending') {
+      keepUnsent(state, entry, produced, `its submitOpen ${txHash.slice(0, 10)}… is still pending`, txHash);
+      return false;
+    }
+  }
+  // Gas first: a wallet that can't pay would otherwise re-send the result,
+  // and hold a slot on the server, every pass until it is funded.
+  const gasProblem = await io.preflight();
+  if (gasProblem) {
+    keepUnsent(state, entry, produced, gasProblem);
+    return false;
+  }
   const signer = io.signer;
   const resultData = fitOpenResultData(produced.resultData);
   let res;
   try {
-    res = await io.postSubmitOpen(taskHash, { resultData, rootHash: produced.rootHash, teeAttestation: produced.teeAttestation });
+    res = await io.postSubmitOpen(taskHash, { resultData, rootHash: null, teeAttestation: produced.teeAttestation });
   } catch (e) {
     keepUnsent(state, entry, produced, `no answer from submit-open: ${errorLine(e)}`);
     return false;
@@ -4304,20 +4393,15 @@ export async function sendOpenResult(entry, produced, io = openIo(entry.meta.cha
     chainId: io.chainId,
     escrow: io.escrow,
     onChainTaskId: entry.onChainTaskId,
-    evidenceHash: openEvidenceHash(resultData, produced.rootHash),
+    evidenceHash: openEvidenceHash(resultData, null),
   });
   if (problem) {
     markOpenDone(state, taskHash, `not sending the submitOpen: ${problem}`);
     return false;
   }
-  // The model run took minutes; the wallet may have paid for something since.
-  const gasProblem = await io.preflight(signer);
-  if (gasProblem) {
-    keepUnsent(state, entry, produced, gasProblem);
-    return false;
-  }
+  let sent = null;
   try {
-    const sent = await signer.sendTransaction(data.unsignedSubmitOpen);
+    sent = await signer.sendTransaction({ to: io.escrow, data: data.unsignedSubmitOpen.data, chainId: Number(io.chainId) });
     log(`submitOpen sent for ${short}… from ${signer.address}: ${sent.hash}`);
     const receipt = await sent.wait(1, TX_WAIT_TIMEOUT_MS);
     log(`submitOpen confirmed for ${short}…: block=${receipt?.blockNumber}`);
@@ -4328,10 +4412,10 @@ export async function sendOpenResult(entry, produced, io = openIo(entry.meta.cha
       markOpenDone(state, taskHash, `the escrow refused the submitOpen: ${formatRevert(e)}`);
       return false;
     }
-    // A pause, an RPC blip or a receipt timeout: the tx may still land.
-    // Sending the same result again finds out (alreadyOnChain) or gets a
-    // fresh submitOpen.
-    keepUnsent(state, entry, produced, `submitOpen failed: ${formatRevert(e)}`);
+    // A pause, an RPC blip or a receipt timeout: the tx may still land. The
+    // next pass looks at it first (txHash), then sends the result again,
+    // which finds out (alreadyOnChain) or gets a fresh submitOpen.
+    keepUnsent(state, entry, produced, `submitOpen failed: ${formatRevert(e)}`, sent?.hash);
     return false;
   }
 }
@@ -4340,7 +4424,7 @@ export async function sendOpenResult(entry, produced, io = openIo(entry.meta.cha
 async function runOpenSubmission(entry) {
   const taskHash = entry.meta.taskId;
   // Named to the parent before any work, so a crash is charged to this task
-  // and a poison brief can't crash-loop the worker (skipForCrashes).
+  // and a poison brief can't crash-loop the worker.
   reportInFlight('task-started', taskHash);
   let completed = false;
   try {
@@ -4349,7 +4433,7 @@ async function runOpenSubmission(entry) {
       taskHash,
       { briefRootHash: entry.meta.rootHash, wrappedKey: null, privacy: 'public', meta: entry.meta, open: true },
       {
-        giveUp: () => noteOpenFailure(openState, taskHash, 'the brief could not be read or the result could not be stored'),
+        giveUp: (reason = 'the brief could not be read', { final = false } = {}) => noteOpenFailure(openState, taskHash, reason, { final }),
         onModelFailed: () => noteOpenFailure(openState, taskHash, 'the model produced no result'),
       },
     );
@@ -4365,71 +4449,113 @@ async function runOpenSubmission(entry) {
 }
 
 /**
- * One open-submission pass: send a result an earlier pass could not, or else
- * read the board and work one task. Runs only when the work slot is free and
- * nothing waits for it (a due poll, a deferred offer): single-assignee work
- * comes first. Holds the slot like any task, so offers that arrive meanwhile
- * queue and run after it.
+ * Why crashes keep this process off open tasks, or null. `final`: the worker
+ * crashed while running this task, so it is never run again here; otherwise
+ * the crashes can't be blamed on any task and the pass stops altogether.
+ */
+function openCrashCheck(taskHash) {
+  const reason = resumeSkipReason(taskHash, { crashCount: CRASH_COUNT, crashedTasks: CRASHED_TASKS });
+  if (!reason) return null;
+  return { reason, final: (CRASHED_TASKS[taskHash] ?? 0) >= TASK_CRASH_LIMIT };
+}
+
+/**
+ * The open pass, with what it touches passed in (tests drive it with fakes):
+ * send a result an earlier pass could not, or else pick one task and work it.
+ * Returns what it did: 'off' | 'sent' | 'blocked' | 'capped' | 'ran' | 'none'.
+ * Exported for tests.
+ */
+export async function openPassCore(deps, state = openState) {
+  const entries = await deps.fetchBoard();
+  if (!entries) return 'off';
+  pruneOpenState(state, new Set(entries.map((e) => e?.meta?.taskId)));
+
+  const [unsent] = state.unsent.values();
+  if (unsent) {
+    state.unsent.delete(unsent.entry.meta.taskId);
+    await deps.send(unsent);
+    return 'sent';
+  }
+
+  if (deps.inferenceBlocker()) return 'blocked';
+  if (openRunsLeft(state.runs, deps.nowMs()) <= 0) return 'capped';
+  const { candidates, skipped } = pickOpenCandidates(entries, {
+    nowMs: deps.nowMs(),
+    state,
+    selfAddresses: deps.selfAddresses,
+    ownerAddress: deps.ownerAddress,
+    minReward: deps.minReward,
+    ...(deps.pricing ? { pricing: deps.pricing } : {}),
+    ...(deps.chainProblem ? { chainProblem: deps.chainProblem } : {}),
+  });
+  for (const sk of skipped) logOpenSkip(state, sk.taskHash, sk.reason);
+
+  const gasProblems = {};
+  for (const entry of candidates.slice(0, MAX_OPEN_CHECKS_PER_PASS)) {
+    const taskHash = entry.meta.taskId;
+    const chain = entry.meta.chain;
+    if (!(chain in gasProblems)) gasProblems[chain] = await deps.preflight(chain);
+    if (gasProblems[chain]) {
+      logOpenSkip(state, taskHash, gasProblems[chain]);
+      continue;
+    }
+    const crash = deps.crashCheck(taskHash);
+    if (crash && !crash.final) {
+      logOpenSkip(state, taskHash, `not working open tasks: ${crash.reason}`);
+      return 'none';
+    }
+    if (crash) {
+      markOpenDone(state, taskHash, `not working on it: ${crash.reason}`);
+      continue;
+    }
+    let blocked;
+    try {
+      blocked = await deps.readEligibility(entry);
+    } catch (e) {
+      // Not this pass: the others get their turn, and this one comes back.
+      state.retryAt.set(taskHash, deps.nowMs() + OPEN_RETRY_MS);
+      logOpenSkip(state, taskHash, `the escrow read failed: ${errorLine(e)}`);
+      continue;
+    }
+    if (blocked?.final) {
+      markOpenDone(state, taskHash, blocked.reason);
+      continue;
+    }
+    if (blocked) {
+      logOpenSkip(state, taskHash, blocked.reason);
+      continue;
+    }
+    log(`open task ${taskHash.slice(0, 10)}…: competing (closes in ${Math.floor((entry.meta.deadline - deps.nowMs() / 1000) / 60)} min, ${Number(entry.submissions) || 0} submitted so far)`);
+    await deps.run(entry);
+    return 'ran';
+  }
+  return 'none';
+}
+
+/**
+ * One open-submission pass. Runs only when the work slot is free and nothing
+ * waits for it (a due poll, a deferred offer): single-assignee work comes
+ * first. Holds the slot like any task, so offers that arrive meanwhile queue
+ * and run after it.
  */
 async function openSubmissionPass() {
   if (!OPEN_SUBMISSION_ENABLED || _working || pollDue || wsDeferred.size > 0) return;
   if (Date.now() < openState.offUntil) return;
   _working = true;
   try {
-    const entries = await fetchOpenTasks();
-    if (!entries) return;
-    pruneOpenState(new Set(entries.map((e) => e?.meta?.taskId)));
-
-    const [unsent] = openState.unsent.values();
-    if (unsent) {
-      openState.unsent.delete(unsent.entry.meta.taskId);
-      await sendOpenResult(unsent.entry, unsent.produced);
-      return;
-    }
-
-    if (inferenceGate.blocker()) return;
-    if (openRunsLeft(openState.runs, Date.now()) <= 0) return;
-    const { candidates, skipped } = pickOpenCandidates(entries, {
-      nowMs: Date.now(),
-      state: openState,
+    await openPassCore({
+      fetchBoard: fetchOpenTasks,
+      send: (u) => sendOpenResult(u.entry, u.produced, openIo(u.entry.meta.chain), openState, { txHash: u.txHash }),
+      inferenceBlocker: () => inferenceGate.blocker(),
+      nowMs: () => Date.now(),
       selfAddresses: selfAddressList(),
       ownerAddress: AGENT_OWNER_ADDRESS,
       minReward: process.env.AGENT_MIN_REWARD ?? '',
+      preflight: (chain) => preflightGas(chain, signerFor(chain), false),
+      crashCheck: openCrashCheck,
+      readEligibility: (entry) => readOpenEligibility(entry.meta.chain, entry.onChainTaskId, signerFor(entry.meta.chain).address),
+      run: runOpenSubmission,
     });
-    for (const sk of skipped) logOpenSkip(sk.taskHash, sk.reason);
-
-    const gasProblems = {};
-    for (const entry of candidates.slice(0, MAX_OPEN_CHECKS_PER_PASS)) {
-      const taskHash = entry.meta.taskId;
-      const chain = entry.meta.chain;
-      if (!(chain in gasProblems)) gasProblems[chain] = await preflightGas(chain, signerFor(chain), false);
-      if (gasProblems[chain]) {
-        logOpenSkip(taskHash, gasProblems[chain]);
-        continue;
-      }
-      let blocked;
-      try {
-        blocked = await readOpenEligibility(chain, entry.onChainTaskId, signerFor(chain).address);
-      } catch (e) {
-        logOpenSkip(taskHash, `the escrow read failed: ${errorLine(e)}`);
-        continue;
-      }
-      if (blocked?.final) {
-        markOpenDone(openState, taskHash, blocked.reason);
-        continue;
-      }
-      if (blocked) {
-        logOpenSkip(taskHash, blocked.reason);
-        continue;
-      }
-      if (skipForCrashes(taskHash, 'open submission')) {
-        markOpenDone(openState, taskHash, 'the worker crashed while working on it');
-        continue;
-      }
-      log(`open task ${taskHash.slice(0, 10)}…: competing (closes in ${Math.floor((entry.meta.deadline - Date.now() / 1000) / 60)} min)`);
-      await runOpenSubmission(entry);
-      return;
-    }
   } catch (err) {
     log(`open submission pass error: ${err.message}`);
   } finally {
