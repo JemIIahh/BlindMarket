@@ -109,7 +109,9 @@ describe('wallet budget on the posting routes', () => {
   });
 });
 
-describe('per-IP limits around the posting routes', () => {
+// Each test here sends 100-150 requests one after another: well under the 5 s
+// default alone, past it when the whole suite loads every core.
+describe('per-IP limits around the posting routes', { timeout: 20_000 }, () => {
   it('skips the global per-IP limit for posting calls that present credentials', async () => {
     const app = makeApp();
     // 150 wallets behind one IP, past the global 100 a minute.
