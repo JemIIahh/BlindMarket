@@ -3432,12 +3432,13 @@ function generateTextWithTimeout(options) {
  * `open`: an open-submission task, with `meta` from the open board. Its
  * poster reads many results and picks one, so the model gets no messaging
  * tools, no inbox and no delegation (OPEN_TOOL_OPTIONS), the thread is not
- * read, a brief over OPEN_MAX_BRIEF_CHARS is not worked, and the result is
- * returned without being uploaded (rootHash null). giveUp gets a reason and
- * `{ final }` (no point trying again).
+ * read, a prompt (brief and [VERIFICATION]) over OPEN_MAX_PROMPT_CHARS is not
+ * worked, and the result is returned without being uploaded (rootHash null).
+ * giveUp gets a reason and `{ final }` (no point trying again); onModelStart
+ * runs just before the first model call.
  * Returns the result and its storage pointer, or null after a hook ran.
  */
-export async function produceResult(taskHash, { briefRootHash, wrappedKey, privacy, meta = undefined, open = false }, { giveUp, onModelFailed }) {
+export async function produceResult(taskHash, { briefRootHash, wrappedKey, privacy, meta = undefined, open = false }, { giveUp, onModelFailed, onModelStart = () => {} }) {
   // Poster address (to authenticate thread messages) and verification
   // criteria (so the model knows what is checked). Best-effort: without it
   // the run proceeds, minus thread context and the [VERIFICATION] section.
@@ -3502,12 +3503,6 @@ export async function produceResult(taskHash, { briefRootHash, wrappedKey, priva
     return null;
   }
 
-  // An open run may never pay: a brief past the cap is not worked at all.
-  if (open && briefPlaintext.length > OPEN_MAX_BRIEF_CHARS) {
-    await giveUp(`its brief is over ${OPEN_MAX_BRIEF_CHARS} characters`, { final: true });
-    return null;
-  }
-
   log(`working on task ${taskHash.slice(0, 10)}…`);
   // Length + hash prefix only — never the decrypted brief text itself. See
   // the note on log() above: worker stdout is captured and streamed live.
@@ -3528,6 +3523,12 @@ export async function produceResult(taskHash, { briefRootHash, wrappedKey, priva
 
   const verificationSection = describeVerificationCriteria(criteria);
   const userPrompt = verificationSection ? `${briefPlaintext}\n\n${verificationSection}` : briefPlaintext;
+  // An open run may never pay: a prompt past the cap (the poster writes both
+  // the brief and the criteria) is not worked at all.
+  if (open && userPrompt.length > OPEN_MAX_PROMPT_CHARS) {
+    await giveUp(`its brief and criteria are over ${OPEN_MAX_PROMPT_CHARS} characters`, { final: true });
+    return null;
+  }
   const runTools = buildTools(taskHash, { posterAddress, ...(open ? OPEN_TOOL_OPTIONS : {}) });
 
   // Tool-call failures get one text-only retry: when the model mangles tool
@@ -3537,6 +3538,7 @@ export async function produceResult(taskHash, { briefRootHash, wrappedKey, priva
   // below via the fail-closed path. RUN_SAMPLING (temperature 0 off
   // Anthropic) also makes malformed tool syntax far less likely.
   let result = null;
+  onModelStart();
   try {
     for (let attempt = 1; attempt <= 2; attempt++) {
       const textOnly = attempt > 1;
@@ -3997,8 +3999,15 @@ const OPEN_OFF_BACKOFF_MS = 60 * 60 * 1000;
  * calls (a text-only retry, a self-check repair), then the submit and the tx.
  */
 export const OPEN_DEADLINE_MARGIN_SEC = 3 * Math.ceil(LLM_TIMEOUT_MS / 1000) + 300;
-/** A longer brief is not worked: open runs may never pay, so their cost is capped. */
-export const OPEN_MAX_BRIEF_CHARS = 20_000;
+/**
+ * A longer prompt (the brief and its [VERIFICATION] section, both written by
+ * the poster) is not worked: open runs may never pay, so their cost is capped.
+ */
+export const OPEN_MAX_PROMPT_CHARS = 24_000;
+/** Board pages read per pass (200 each), after the server applies this agent's floor. */
+const MAX_OPEN_BOARD_PAGES = 5;
+/** Passes an unsent result is tried before it is given up. */
+const MAX_UNSENT_TRIES = 12;
 /**
  * The least an open task must pay for this agent to compete, in USDC (the
  * owner's own minimum applies when higher). Without it, anyone could post
@@ -4011,6 +4020,8 @@ export const OPEN_MIN_REWARD_USDC = 0.5;
  * attestation. A longer output is cut (fitOpenResultData).
  */
 export const OPEN_RESULT_DATA_MAX_BYTES = 56 * 1024;
+/** The server's cap on a whole submission (routes/openSubmission.ts MAX_RESULT_BYTES), with a little room. */
+const OPEN_SUBMISSION_MAX_BYTES = 63 * 1024;
 /** The model's tools for an open run: no messaging (or inbox) and no delegation, whatever the owner allows. */
 export const OPEN_TOOL_OPTIONS = { messaging: false, delegation: false };
 
@@ -4127,6 +4138,9 @@ export function openSkipReason(entry, { nowSec, selfAddresses = [], ownerAddress
   if (meta.verifierAddress && self.includes(lc(meta.verifierAddress))) return 'this agent is its verifier';
   if (ownerAddress && lc(meta.posterAddress) === lc(ownerAddress)) return "this agent's owner posted it";
   if (!meetsOpenRewardFloor(meta.reward, minReward, pricing)) return `its reward is below the open-task minimum (this agent's, or ${OPEN_MIN_REWARD_USDC} USDC)`;
+  // A result an open submission can't hold would fail its check and cost a
+  // second model call (the self-check repair) for nothing.
+  if (Number(meta.verificationCriteria?.min_length) > OPEN_RESULT_DATA_MAX_BYTES) return 'its criteria ask for a longer result than an open submission holds';
   return null;
 }
 
@@ -4154,7 +4168,7 @@ export function pickOpenCandidates(entries, { nowMs, state, ...opts }) {
     if (reason) skipped.push({ taskHash, reason });
     else candidates.push(entry);
   }
-  const competitors = (e) => BigInt(Math.max(Number(e.submissions) || 0, 0) + 1);
+  const competitors = (e) => BigInt(Math.max(Math.floor(Number(e.submissions)) || 0, 0) + 1);
   candidates.sort((a, b) => {
     const lhs = rewardUnits(a) * competitors(b);
     const rhs = rewardUnits(b) * competitors(a);
@@ -4206,7 +4220,9 @@ export function checkUnsignedSubmitOpen(tx, { from, chainId, escrow, onChainTask
   if (typeof tx.from !== 'string' || tx.from.toLowerCase() !== String(from).toLowerCase()) return `it is from ${tx.from}, not this wallet (${from})`;
   if (Number(tx.chainId) !== Number(chainId)) return `it is for chain ${tx.chainId}, not ${chainId}`;
   if (String(tx.to).toLowerCase() !== String(escrow).toLowerCase()) return `it calls ${tx.to}, not the escrow`;
-  if (tx.value != null && BigInt(tx.value) !== 0n) return 'it sends value';
+  let value = 0n;
+  try { value = tx.value == null ? 0n : BigInt(tx.value); } catch { return 'its value is unreadable'; }
+  if (value !== 0n) return 'it sends value';
   let call = null;
   try { call = iface.parseTransaction({ data: tx.data }); } catch { /* not escrow calldata */ }
   if (call?.name !== 'submitOpen') return 'it is not a submitOpen call';
@@ -4216,13 +4232,14 @@ export function checkUnsignedSubmitOpen(tx, { from, chainId, escrow, onChainTask
 }
 
 /**
- * Whether a refusal from POST /submit-open will stand on a retry. A 429, a
- * 5xx, a paused escrow or a task not indexed yet can clear before the
- * deadline; the 4xx answers (already submitted, closed, not allowed, too
- * large) will not. Exported for tests.
+ * Whether a refusal from the server will stand on a retry. A 429, a 5xx, a
+ * 404 (the feature switched off, or a listing not there yet), a paused
+ * escrow or a task not indexed yet can clear before the deadline; the other
+ * 4xx answers (already submitted, closed, not allowed, too large) will not.
+ * Exported for tests.
  */
 export function openRefusalIsFinal(status, code) {
-  if (status === 429 || status >= 500) return false;
+  if (status === 429 || status === 404 || status >= 500) return false;
   if (code === 'ESCROW_PAUSED' || code === 'NOT_INDEXED') return false;
   return true;
 }
@@ -4258,46 +4275,71 @@ export function noteOpenFailure(state, taskHash, reason, { final = false } = {})
   log(`open task ${taskHash.slice(0, 10)}…: ${reason}; trying again in ${OPEN_RETRY_MS / 60_000} min`);
 }
 
-/** A result that could not be sent yet: a later pass sends it again, with no new model run. */
-function keepUnsent(state, entry, produced, reason, txHash = undefined) {
-  state.unsent.set(entry.meta.taskId, { entry, produced, ...(txHash ? { txHash } : {}) });
+/** A result that could not be sent yet: a later pass sends it again, with no new model run, up to MAX_UNSENT_TRIES passes. */
+function keepUnsent(state, entry, produced, reason, txHash = undefined, tries = 0) {
+  if (tries + 1 >= MAX_UNSENT_TRIES) {
+    markOpenDone(state, entry.meta.taskId, `result not sent after ${tries + 1} tries (${reason}); giving up`);
+    return;
+  }
+  state.unsent.set(entry.meta.taskId, { entry, produced, tries: tries + 1, ...(txHash ? { txHash } : {}) });
   log(`open task ${entry.meta.taskId.slice(0, 10)}…: result not sent yet (${reason}); sending it again on the next pass`);
 }
 
-/** Forget tasks no longer on the board: past their deadline, closed or gone. */
-function pruneOpenState(state, onBoard) {
-  for (const map of [state.done, state.retryAt, state.attempts, state.logged]) {
-    for (const k of [...map.keys()]) if (!onBoard.has(k)) map.delete(k);
+/**
+ * Forget tasks no longer on the board: past their deadline, closed or gone.
+ * Only a board read to its end says a task is gone; a partial read prunes
+ * nothing but results whose deadline has passed.
+ */
+function pruneOpenState(state, onBoard, { complete, nowSec }) {
+  if (complete) {
+    for (const map of [state.done, state.retryAt, state.attempts, state.logged]) {
+      for (const k of [...map.keys()]) if (!onBoard.has(k)) map.delete(k);
+    }
   }
-  for (const k of [...state.unsent.keys()]) {
-    if (onBoard.has(k)) continue;
+  for (const [k, u] of [...state.unsent.entries()]) {
+    if (nowSec < u.entry.meta.deadline && (onBoard.has(k) || !complete)) continue;
     state.unsent.delete(k);
     log(`open task ${k.slice(0, 10)}…: it closed before its result could be sent`);
   }
 }
 
-/** The open board, or null (read failed, or the feature is off on the server). */
+/**
+ * The open board, paying at least this agent's floor (the server filters
+ * before paging, so near-free tasks can't crowd the real ones off a page):
+ * { entries, complete }, or null (read failed, or the feature is off on the
+ * server). Up to MAX_OPEN_BOARD_PAGES pages; `complete` says the end was
+ * reached.
+ */
 async function fetchOpenTasks() {
-  let res;
-  try {
-    res = await fetchWithTimeout(`${BACKEND_URL}/api/v1/a2a/open-tasks?limit=200`, {
-      headers: { 'Authorization': `Bearer ${AGENT_PLATFORM_TOKEN}` },
-    }, 15_000);
-  } catch (e) {
-    log(`open board read failed: ${errorLine(e)}`);
-    return null;
+  const PAGE = 200;
+  const floor = openRewardFloor(process.env.AGENT_MIN_REWARD ?? '');
+  const entries = [];
+  for (let page = 0; page < MAX_OPEN_BOARD_PAGES; page++) {
+    let res;
+    try {
+      res = await fetchWithTimeout(`${BACKEND_URL}/api/v1/a2a/open-tasks?limit=${PAGE}&offset=${page * PAGE}${floor > 0n ? `&minReward=${floor}` : ''}`, {
+        headers: { 'Authorization': `Bearer ${AGENT_PLATFORM_TOKEN}` },
+      }, 15_000);
+    } catch (e) {
+      log(`open board read failed: ${errorLine(e)}`);
+      return null;
+    }
+    if (res.status === 404) {
+      openState.offUntil = Date.now() + OPEN_OFF_BACKOFF_MS;
+      log(`open submission is off on the server; looking again in ${OPEN_OFF_BACKOFF_MS / 60_000} min`);
+      return null;
+    }
+    if (!res.ok) {
+      log(`open board read failed: ${res.status}`);
+      return null;
+    }
+    const data = (await res.json().catch(() => null))?.data;
+    if (!Array.isArray(data?.tasks)) return null;
+    entries.push(...data.tasks);
+    const total = Number(data.total ?? entries.length);
+    if (data.tasks.length < PAGE || entries.length >= total) return { entries, complete: true };
   }
-  if (res.status === 404) {
-    openState.offUntil = Date.now() + OPEN_OFF_BACKOFF_MS;
-    log(`open submission is off on the server; looking again in ${OPEN_OFF_BACKOFF_MS / 60_000} min`);
-    return null;
-  }
-  if (!res.ok) {
-    log(`open board read failed: ${res.status}`);
-    return null;
-  }
-  const tasks = (await res.json().catch(() => null))?.data?.tasks;
-  return Array.isArray(tasks) ? tasks : null;
+  return { entries, complete: false };
 }
 
 /**
@@ -4314,8 +4356,7 @@ async function checkOpenSubmitter(entry) {
   const code = json.error?.code ?? '';
   return {
     reason: `the server refuses it: ${res.status} ${code}${json.error?.message ? ` (${json.error.message})` : ''}`,
-    // A 404 is the feature switched off mid-pass, not this task's answer.
-    final: res.status !== 404 && openRefusalIsFinal(res.status, code),
+    final: openRefusalIsFinal(res.status, code),
   };
 }
 
@@ -4333,6 +4374,19 @@ function openIo(chain) {
       const receipt = await signer.provider.getTransactionReceipt(hash);
       if (receipt) return receipt.status === 1 ? 'mined' : 'failed';
       return (await signer.provider.getTransaction(hash)) ? 'pending' : 'unknown';
+    },
+    /**
+     * Sign locally, then broadcast: the hash is known before the node sees
+     * the tx, so a broadcast that errors after the node took it is still
+     * looked up on the next pass instead of sent twice.
+     */
+    send: async (request) => {
+      const signed = await signer.signTransaction(await signer.populateTransaction(request));
+      try {
+        return await signer.provider.broadcastTransaction(signed);
+      } catch (e) {
+        throw Object.assign(e instanceof Error ? e : new Error(String(e)), { txHash: ethers.keccak256(signed) });
+      }
     },
     postSubmitOpen: async (taskHash, body) => {
       const res = await fetchWithTimeout(`${BACKEND_URL}/api/v1/a2a/tasks/${taskHash}/submit-open`, {
@@ -4358,7 +4412,7 @@ const FINAL_SUBMIT_OPEN_REVERTS = new Set(['AlreadySubmitted', 'DeadlineReached'
  * pass sent and lost track of; while it is pending nothing is sent again.
  * Exported for tests, with `io` and `state` standing in for the real ones.
  */
-export async function sendOpenResult(entry, produced, io = openIo(entry.meta.chain), state = openState, { txHash = "" } = {}) {
+export async function sendOpenResult(entry, produced, io = openIo(entry.meta.chain), state = openState, { txHash = '', tries = 0 } = {}) {
   const taskHash = entry.meta.taskId;
   const short = taskHash.slice(0, 10);
   if (io.nowSec() >= entry.meta.deadline) {
@@ -4372,7 +4426,7 @@ export async function sendOpenResult(entry, produced, io = openIo(entry.meta.cha
       return true;
     }
     if (status === 'pending') {
-      keepUnsent(state, entry, produced, `its submitOpen ${txHash.slice(0, 10)}… is still pending`, txHash);
+      keepUnsent(state, entry, produced, `its submitOpen ${txHash.slice(0, 10)}… is still pending`, txHash, tries);
       return false;
     }
   }
@@ -4380,16 +4434,22 @@ export async function sendOpenResult(entry, produced, io = openIo(entry.meta.cha
   // and hold a slot on the server, every pass until it is funded.
   const gasProblem = await io.preflight();
   if (gasProblem) {
-    keepUnsent(state, entry, produced, gasProblem);
+    keepUnsent(state, entry, produced, gasProblem, undefined, tries);
     return false;
   }
   const signer = io.signer;
   const resultData = fitOpenResultData(produced.resultData);
+  // The attestation is not in the commitment: dropped rather than let it
+  // push the submission past the server's 64 KB cap.
+  const withAttestation = { resultData, rootHash: null, teeAttestation: produced.teeAttestation ?? null };
+  const body = Buffer.byteLength(JSON.stringify(withAttestation)) > OPEN_SUBMISSION_MAX_BYTES
+    ? { resultData, rootHash: null, teeAttestation: null }
+    : withAttestation;
   let res;
   try {
-    res = await io.postSubmitOpen(taskHash, { resultData, rootHash: null, teeAttestation: produced.teeAttestation });
+    res = await io.postSubmitOpen(taskHash, body);
   } catch (e) {
-    keepUnsent(state, entry, produced, `no answer from submit-open: ${errorLine(e)}`);
+    keepUnsent(state, entry, produced, `no answer from submit-open: ${errorLine(e)}`, undefined, tries);
     return false;
   }
   const json = res.json ?? {};
@@ -4397,7 +4457,7 @@ export async function sendOpenResult(entry, produced, io = openIo(entry.meta.cha
     const code = json.error?.code ?? '';
     const why = `submit-open answered ${res.status} ${code}${json.error?.message ? `: ${json.error.message}` : ''}`;
     if (openRefusalIsFinal(res.status, code)) markOpenDone(state, taskHash, why);
-    else keepUnsent(state, entry, produced, why);
+    else keepUnsent(state, entry, produced, why, undefined, tries);
     return false;
   }
   const data = json.data ?? {};
@@ -4420,7 +4480,7 @@ export async function sendOpenResult(entry, produced, io = openIo(entry.meta.cha
   }
   let sent = null;
   try {
-    sent = await signer.sendTransaction({ to: io.escrow, data: data.unsignedSubmitOpen.data, chainId: Number(io.chainId) });
+    sent = await io.send({ to: io.escrow, data: data.unsignedSubmitOpen.data, chainId: Number(io.chainId) });
     log(`submitOpen sent for ${short}… from ${signer.address}: ${sent.hash}`);
     const receipt = await sent.wait(1, TX_WAIT_TIMEOUT_MS);
     log(`submitOpen confirmed for ${short}…: block=${receipt?.blockNumber}`);
@@ -4434,7 +4494,7 @@ export async function sendOpenResult(entry, produced, io = openIo(entry.meta.cha
     // A pause, an RPC blip or a receipt timeout: the tx may still land. The
     // next pass looks at it first (txHash), then sends the result again,
     // which finds out (alreadyOnChain) or gets a fresh submitOpen.
-    keepUnsent(state, entry, produced, `submitOpen failed: ${formatRevert(e)}`, sent?.hash);
+    keepUnsent(state, entry, produced, `submitOpen failed: ${formatRevert(e)}`, sent?.hash ?? e?.txHash, tries);
     return false;
   }
 }
@@ -4447,13 +4507,15 @@ async function runOpenSubmission(entry) {
   reportInFlight('task-started', taskHash);
   let completed = false;
   try {
-    openState.runs.push(Date.now());
     const produced = await produceResult(
       taskHash,
       { briefRootHash: entry.meta.rootHash, wrappedKey: null, privacy: 'public', meta: entry.meta, open: true },
       {
         giveUp: (reason = 'the brief could not be read', { final = false } = {}) => noteOpenFailure(openState, taskHash, reason, { final }),
         onModelFailed: () => noteOpenFailure(openState, taskHash, 'the model produced no result'),
+        // A run counts against the hourly cap once the model is called, not
+        // when the brief fails to download.
+        onModelStart: () => { openState.runs.push(Date.now()); },
       },
     );
     if (!produced) return;
@@ -4481,13 +4543,15 @@ function openCrashCheck(taskHash) {
 /**
  * The open pass, with what it touches passed in (tests drive it with fakes):
  * send a result an earlier pass could not, or else pick one task and work it.
+ * `fetchBoard` gives { entries, complete } (or a plain array, read whole).
  * Returns what it did: 'off' | 'sent' | 'blocked' | 'capped' | 'ran' | 'none'.
  * Exported for tests.
  */
 export async function openPassCore(deps, state = openState) {
-  const entries = await deps.fetchBoard();
-  if (!entries) return 'off';
-  pruneOpenState(state, new Set(entries.map((e) => e?.meta?.taskId)));
+  const board = await deps.fetchBoard();
+  if (!board) return 'off';
+  const { entries, complete } = Array.isArray(board) ? { entries: board, complete: true } : board;
+  pruneOpenState(state, new Set(entries.map((e) => e?.meta?.taskId)), { complete, nowSec: Math.floor(deps.nowMs() / 1000) });
 
   const [unsent] = state.unsent.values();
   if (unsent) {
@@ -4541,6 +4605,8 @@ export async function openPassCore(deps, state = openState) {
       continue;
     }
     if (blocked) {
+      // Not this pass: the others get their turn, and this one comes back.
+      state.retryAt.set(taskHash, deps.nowMs() + OPEN_RETRY_MS);
       logOpenSkip(state, taskHash, blocked.reason);
       continue;
     }
@@ -4559,6 +4625,7 @@ export async function openPassCore(deps, state = openState) {
       continue;
     }
     if (refused) {
+      state.retryAt.set(taskHash, deps.nowMs() + OPEN_RETRY_MS);
       logOpenSkip(state, taskHash, refused.reason);
       continue;
     }
@@ -4582,7 +4649,7 @@ async function openSubmissionPass() {
   try {
     await openPassCore({
       fetchBoard: fetchOpenTasks,
-      send: (u) => sendOpenResult(u.entry, u.produced, openIo(u.entry.meta.chain), openState, { txHash: u.txHash }),
+      send: (u) => sendOpenResult(u.entry, u.produced, openIo(u.entry.meta.chain), openState, { txHash: u.txHash, tries: u.tries ?? 0 }),
       inferenceBlocker: () => inferenceGate.blocker(),
       nowMs: () => Date.now(),
       selfAddresses: selfAddressList(),

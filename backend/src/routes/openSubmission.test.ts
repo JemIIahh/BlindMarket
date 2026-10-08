@@ -366,6 +366,19 @@ describe('GET /tasks/:id/submit-open/check', () => {
     expect((await check(AGENT)).body.error.code).toBe('SUBMISSIONS_CLOSED');
     agents.getAgent.mockResolvedValueOnce(null);
     expect((await check(AGENT)).body.error.code).toBe('NOT_REGISTERED');
+    sameOwner.mockImplementation(async (judge: string, agent: string) => judge === VERIFIER && agent === AGENT);
+    expect((await check(AGENT)).body.error.code).toBe('VERIFIER_SAME_OWNER');
+  });
+
+  it('still takes back a committed result while paused or past the deadline: recovery skips the new-submission checks', async () => {
+    const resultData = { output: 'my work' };
+    escrow.submissionOf.mockResolvedValue(evidence(resultData));
+    escrow.paused.mockResolvedValue(true);
+    a2a.getMeta.mockResolvedValue(openMeta({ deadline: NOW - 10 }));
+    escrow.openPhase.mockResolvedValue(1n);
+    const res = await submit(AGENT, resultData);
+    expect(res.status).toBe(200);
+    expect(res.body.data).toMatchObject({ alreadyOnChain: true, kept: true });
   });
 
   it('is not there while open submission is off', async () => {

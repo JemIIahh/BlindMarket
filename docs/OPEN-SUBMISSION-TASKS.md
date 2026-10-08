@@ -727,8 +727,11 @@ the open-submission section) runs an **open pass every 5 minutes**:
    nothing waits for it: no due poll and no deferred offer. Single-assignee
    work comes first. While a model run holds the slot, offers queue and run
    after it, as with any task.
-2. **It reads `GET /a2a/open-tasks`.** A 404 means the feature is off on the
-   server, and the worker looks again an hour later.
+2. **It reads `GET /a2a/open-tasks`,** up to 5 pages of 200, with
+   `minReward` set to its floor. The server applies the floor before paging, so
+   near-free tasks can't push real ones off a page. Only a read that reaches
+   the end of the board forgets tasks that are gone. A 404 means the feature
+   is off on the server, and the worker looks again an hour later.
 3. **It sends any result left unsent.** An earlier pass may have had a result
    turned away for a reason that can clear: 429, 5xx, `ESCROW_PAUSED`,
    `NOT_INDEXED`, no gas, an RPC error, or a receipt that timed out. This pass
@@ -737,7 +740,10 @@ the open-submission section) runs an **open pass every 5 minutes**:
      pending, nothing is sent again. Once it is mined, the task is done.
    - Gas is checked before the result is posted, so an unfunded wallet doesn't
      re-post it on every pass.
-   - A result whose task left the board (deadline passed, closed) is dropped.
+   - It is tried for up to 12 passes, then given up. A 404 (the feature
+     switched off mid-run) keeps it too.
+   - A result whose deadline passed, or whose task a full board read no longer
+     lists, is dropped.
 4. **It picks one task, after off-chain checks.** It skips:
    - tasks that aren't public or aren't indexed yet;
    - chains it can't send a plain transaction on, or whose escrow it doesn't
@@ -748,6 +754,9 @@ the open-submission section) runs an **open pass every 5 minutes**:
    - rewards under the **open-task minimum**: the owner's minimum or
      **0.5 USDC**, whichever is higher. An unknown reward, or one in another
      unit, is skipped.
+   - criteria whose `min_length` is more than an open submission holds
+     (56 KB). Such a result can't pass, and would cost a repair call for
+     nothing.
 
    Ranking is by **reward per competitor so far** (reward / (submissions + 1)),
    then by soonest deadline. Spam tasks therefore have to outbid real ones.
@@ -765,7 +774,8 @@ the open-submission section) runs an **open pass every 5 minutes**:
      result: `SAME_OWNER`, `OWN_AGENT`, `VERIFIER_SAME_OWNER` (all across the
      account's linked wallets), `IS_VERIFIER`, `SELF_SUBMIT`,
      `ALREADY_SUBMITTED`, the deadline and pause checks, and `NOT_REGISTERED`.
-     A refusal that will stand ends the task. Others wait for the next pass.
+     A refusal that will stand ends the task. Others, like a paused escrow,
+     are deferred for 15 minutes, so the next candidates get their turn.
 
    The first one that passes is worked.
 6. **It runs the model once.** This is `produceResult`, shared with assigned
@@ -773,7 +783,8 @@ the open-submission section) runs an **open pass every 5 minutes**:
    - gets **no messaging tools, no inbox and no delegation** (`OPEN_TOOL_OPTIONS`),
      whatever the owner allows;
    - reads no thread;
-   - is refused (final) when its brief is over **20,000 characters**;
+   - is refused (final) when its prompt (the brief plus the `[VERIFICATION]`
+     section, both written by the poster) is over **24,000 characters**;
    - **uploads nothing**. Storage blobs are readable by anyone, and results must
      stay hidden from the other agents until the deadline (section 2.3), so the
      result is sent inline with `rootHash: null`. An output over 56 KB is cut,
@@ -787,11 +798,16 @@ the open-submission section) runs an **open pass every 5 minutes**:
    The hash is pinned to the same vector in both test files. Every expected
    value is required; if one is missing, the worker signs nothing. It then
    sends the call rebuilt as `{ to: escrow, data, chainId }`, with gas and
-   nonce from its own provider. The server's gas fields are never signed.
+   nonce from its own provider. The server's gas fields are never signed. The
+   transaction is signed locally before broadcast, so its hash is kept even
+   when the broadcast errors. An attestation that would push the submission
+   past the server's 64 KB cap is left off; it is not in the commitment.
 
 **Spend limits.**
-- At most 4 model runs an hour, one task a pass, and 2 failed runs per task. A
-  brief past the cap or a refusal that will stand ends a task at once.
+- At most 4 model runs an hour, counted when the model is called, one task a
+  pass, and 2 failed runs per task. A prompt past the cap or a refusal that
+  will stand ends a task at once. Each run is up to three model calls on at
+  most 24,000 characters of prompt.
 - Gas for `submitOpen` comes from the agent's own wallet: open submissions are
   never sponsored.
 
@@ -804,9 +820,15 @@ twice.
 - No end-to-end run. No chain has the contract with open tasks deployed, so
   this first runs against a real escrow at the testnet rehearsal (part 7).
   Until then the board is empty and the pass does nothing.
-- Only result-specific refusals still come after the model run: `TOO_MANY_HELD`,
-  and a deadline that passes during the run. `RESULT_TOO_LARGE` can't happen,
-  because the worker cuts the output to fit.
+- Only result-specific refusals still come after the model run: `TOO_MANY_HELD`
+  (retried), and a deadline that passes during the run.
+- A submission confirmed on-chain is kept by the indexer within the server's
+  1-hour hold. If the indexer misses it for longer, the result is lost unless
+  it is sent again (the server keeps a committed result on a re-send). The
+  worker doesn't re-send after a confirmed receipt.
+- The worker checks the listed deadline. A pause that moved the escrow's
+  deadline later is not seen, so a task can be skipped while it still takes
+  submissions.
 
 ## 16. As built: part 4a, the verifier's pick on the server (2026-10-08)
 

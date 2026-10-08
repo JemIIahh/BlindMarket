@@ -11,7 +11,7 @@ vi.mock('socket.io-client', () => ({ io: () => ({ on: vi.fn(), emit: vi.fn() }) 
 import {
   openEvidenceHash, fitOpenResultData, meetsOpenRewardFloor, openSkipReason, pickOpenCandidates,
   openEligibility, checkUnsignedSubmitOpen, openRefusalIsFinal, openRunsLeft, createOpenState,
-  sendOpenResult, buildTools, openRewardFloor, noteOpenFailure, openPassCore, produceResult, OPEN_MAX_BRIEF_CHARS,
+  sendOpenResult, buildTools, openRewardFloor, noteOpenFailure, openPassCore, produceResult, OPEN_MAX_PROMPT_CHARS,
   OPEN_RESULT_DATA_MAX_BYTES, OPEN_TOOL_OPTIONS, OPEN_DEADLINE_MARGIN_SEC,
   // @ts-expect-error — plain-JS worker, no d.ts
 } from './worker.js';
@@ -120,6 +120,11 @@ describe('openSkipReason', () => {
     expect(openSkipReason(e, opts)).toMatch(why);
   });
 
+  it('skips a task whose criteria ask for more than an open submission holds', () => {
+    expect(openSkipReason(entry({ verificationCriteria: { min_length: 1_000_000 } }), opts)).toMatch(/longer result/);
+    expect(openSkipReason(entry({ verificationCriteria: { min_length: 2000 } }), opts)).toBeNull();
+  });
+
   it('skips a near-free task even with no owner minimum', () => {
     expect(openSkipReason(entry({ reward: { amount: '1', unit: USDC } }), { ...opts, minReward: '' })).toMatch(/0.5 USDC/);
   });
@@ -201,9 +206,11 @@ describe('checkUnsignedSubmitOpen', () => {
   });
 
   it('signs nothing when it does not know what to expect', () => {
-    for (const missing of ['escrow', 'chainId', 'onChainTaskId'] as const) {
-      expect(checkUnsignedSubmitOpen(unsigned(), { ...expected, [missing]: missing === 'escrow' ? '' : null }, iface)).toMatch(/does not know/);
+    for (const missing of ['escrow', 'chainId', 'onChainTaskId', 'from', 'evidenceHash'] as const) {
+      const blank = missing === 'chainId' || missing === 'onChainTaskId' ? null : '';
+      expect(checkUnsignedSubmitOpen(unsigned(), { ...expected, [missing]: blank }, iface)).toMatch(/does not know/);
     }
+    expect(checkUnsignedSubmitOpen(unsigned({ value: 'lots' }), expected, iface)).toMatch(/unreadable/);
   });
 });
 
@@ -214,9 +221,11 @@ describe('openRefusalIsFinal', () => {
     expect(openRefusalIsFinal(503, 'NOT_INDEXED')).toBe(false);
     expect(openRefusalIsFinal(500, 'INTERNAL')).toBe(false);
     expect(openRefusalIsFinal(409, 'ESCROW_PAUSED')).toBe(false);
+    // Off mid-pass, or a listing not there yet: not this task's answer.
+    expect(openRefusalIsFinal(404, 'NOT_FOUND')).toBe(false);
   });
   it('stops on what the server would say again', () => {
-    for (const [status, code] of [[409, 'ALREADY_SUBMITTED'], [409, 'DEADLINE_REACHED'], [409, 'SUBMISSIONS_CLOSED'], [403, 'OWN_AGENT'], [403, 'SAME_OWNER'], [413, 'RESULT_TOO_LARGE'], [404, 'NOT_FOUND']] as const) {
+    for (const [status, code] of [[409, 'ALREADY_SUBMITTED'], [409, 'DEADLINE_REACHED'], [409, 'SUBMISSIONS_CLOSED'], [403, 'OWN_AGENT'], [403, 'SAME_OWNER'], [413, 'RESULT_TOO_LARGE'], [401, 'UNAUTHORIZED']] as const) {
       expect(openRefusalIsFinal(status, code)).toBe(true);
     }
   });
@@ -267,9 +276,10 @@ describe('noteOpenFailure', () => {
 describe('sendOpenResult', () => {
   const produced = { resultData: { output: 'x', agent: 'a' }, rootHash: ROOT, teeAttestation: null };
   let state: any;
-  let sendTransaction: ReturnType<typeof vi.fn>;
+  let send: ReturnType<typeof vi.fn>;
   const io = (over: Record<string, unknown> = {}) => ({
-    signer: { address: WALLET, sendTransaction },
+    signer: { address: WALLET },
+    send,
     chainId: 5042,
     escrow: ESCROW,
     nowSec: () => NOW_SEC,
@@ -282,7 +292,7 @@ describe('sendOpenResult', () => {
 
   beforeEach(() => {
     state = createOpenState();
-    sendTransaction = vi.fn(async () => ({ hash: '0x' + '77'.repeat(32), wait: async () => ({ blockNumber: 9 }) }));
+    send = vi.fn(async () => ({ hash: '0x' + '77'.repeat(32), wait: async () => ({ blockNumber: 9 }) }));
   });
 
   it('posts the result inline, sends the submitOpen it checked, rebuilt, and is done once it lands', async () => {
@@ -291,7 +301,7 @@ describe('sendOpenResult', () => {
     // No storage pointer, even when one was made: blobs are readable by anyone.
     expect(deps.postSubmitOpen).toHaveBeenCalledWith(HASH, { resultData: produced.resultData, rootHash: null, teeAttestation: null });
     // Only the call is taken from the server; gas and nonce come from this wallet's provider.
-    expect(sendTransaction).toHaveBeenCalledWith({ to: ESCROW, data: unsigned().data, chainId: 5042 });
+    expect(send).toHaveBeenCalledWith({ to: ESCROW, data: unsigned().data, chainId: 5042 });
     expect(state.done.get(HASH)).toMatch(/submitted/);
     expect(state.unsent.size).toBe(0);
   });
@@ -305,8 +315,8 @@ describe('sendOpenResult', () => {
 
   it('keeps the result for the next pass when the server says to wait, with no tx', async () => {
     expect(await sendOpenResult(entry(), produced, io({ postSubmitOpen: refused(429, 'TOO_MANY_HELD') }), state)).toBe(false);
-    expect(state.unsent.get(HASH)).toEqual({ entry: entry(), produced });
-    expect(sendTransaction).not.toHaveBeenCalled();
+    expect(state.unsent.get(HASH)).toEqual({ entry: entry(), produced, tries: 1 });
+    expect(send).not.toHaveBeenCalled();
   });
 
   it('keeps it too when the server does not answer', async () => {
@@ -315,17 +325,48 @@ describe('sendOpenResult', () => {
     expect(state.unsent.has(HASH)).toBe(true);
   });
 
+  it('keeps the hash of a tx whose broadcast errored after signing, so it is looked up, not sent twice', async () => {
+    send.mockRejectedValueOnce(Object.assign(new Error('connection reset'), { txHash: '0x' + '99'.repeat(32) }));
+    expect(await sendOpenResult(entry(), produced, io(), state)).toBe(false);
+    expect(state.unsent.get(HASH).txHash).toBe('0x' + '99'.repeat(32));
+  });
+
+  it('gives an unsent result up after its last try', async () => {
+    expect(await sendOpenResult(entry(), produced, io({ postSubmitOpen: refused(503, 'INTERNAL') }), state, { tries: 10 })).toBe(false);
+    expect(state.unsent.get(HASH).tries).toBe(11);
+    state = createOpenState();
+    expect(await sendOpenResult(entry(), produced, io({ postSubmitOpen: refused(503, 'INTERNAL') }), state, { tries: 11 })).toBe(false);
+    expect(state.unsent.size).toBe(0);
+    expect(state.done.get(HASH)).toMatch(/not sent after 12 tries/);
+  });
+
+  it('keeps a finished result when the feature switches off mid-run (404)', async () => {
+    expect(await sendOpenResult(entry(), produced, io({ postSubmitOpen: refused(404, 'NOT_FOUND') }), state)).toBe(false);
+    expect(state.unsent.has(HASH)).toBe(true);
+  });
+
+  it('drops an attestation that would push the submission past the server cap', async () => {
+    const attested = { ...produced, teeAttestation: { signature: '0x', signedText: 'a'.repeat(70 * 1024) } };
+    const deps = io();
+    await sendOpenResult(entry(), attested, deps, state);
+    expect(deps.postSubmitOpen.mock.calls[0][1].teeAttestation).toBeNull();
+    const small = { ...produced, teeAttestation: { signature: '0x', signedText: 'ok' } };
+    const again = io();
+    await sendOpenResult(entry(), small, again, createOpenState());
+    expect(again.postSubmitOpen.mock.calls[0][1].teeAttestation).toEqual(small.teeAttestation);
+  });
+
   it('stops on a refusal that will stand', async () => {
     expect(await sendOpenResult(entry(), produced, io({ postSubmitOpen: refused(403, 'OWN_AGENT') }), state)).toBe(false);
     expect(state.done.get(HASH)).toMatch(/403 OWN_AGENT/);
     expect(state.unsent.size).toBe(0);
-    expect(sendTransaction).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
   });
 
   it('is done with no tx when the submission is already on-chain', async () => {
     const deps = io({ postSubmitOpen: vi.fn(async () => ({ status: 200, ok: true, json: { data: { alreadyOnChain: true, kept: true } } })) });
     expect(await sendOpenResult(entry(), produced, deps, state)).toBe(true);
-    expect(sendTransaction).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
     expect(state.done.get(HASH)).toMatch(/already on-chain/);
   });
 
@@ -333,7 +374,7 @@ describe('sendOpenResult', () => {
     const other = unsigned({}, [41n, '0x' + '33'.repeat(32)]);
     const deps = io({ postSubmitOpen: vi.fn(async () => ({ status: 200, ok: true, json: { data: { unsignedSubmitOpen: other } } })) });
     expect(await sendOpenResult(entry(), produced, deps, state)).toBe(false);
-    expect(sendTransaction).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
     expect(state.done.get(HASH)).toMatch(/not sending the submitOpen/);
   });
 
@@ -351,12 +392,12 @@ describe('sendOpenResult', () => {
     const deps = io({ preflight: vi.fn(async () => 'wallet holds 0 USDC on arc') });
     expect(await sendOpenResult(entry(), produced, deps, state)).toBe(false);
     expect(deps.postSubmitOpen).not.toHaveBeenCalled();
-    expect(sendTransaction).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
     expect(state.unsent.has(HASH)).toBe(true);
   });
 
   it('remembers a tx whose receipt it lost, and sends nothing while it is pending', async () => {
-    sendTransaction.mockResolvedValueOnce({ hash: '0x' + '88'.repeat(32), wait: async () => { throw new Error('timeout'); } });
+    send.mockResolvedValueOnce({ hash: '0x' + '88'.repeat(32), wait: async () => { throw new Error('timeout'); } });
     expect(await sendOpenResult(entry(), produced, io(), state)).toBe(false);
     const kept = state.unsent.get(HASH);
     expect(kept.txHash).toBe('0x' + '88'.repeat(32));
@@ -380,17 +421,17 @@ describe('sendOpenResult', () => {
   });
 
   it('stops when the escrow refuses for good', async () => {
-    sendTransaction.mockRejectedValueOnce(Object.assign(new Error('execution reverted'), { data: iface.encodeErrorResult('AlreadySubmitted', []) }));
+    send.mockRejectedValueOnce(Object.assign(new Error('execution reverted'), { data: iface.encodeErrorResult('AlreadySubmitted', []) }));
     expect(await sendOpenResult(entry(), produced, io(), state)).toBe(false);
     expect(state.done.get(HASH)).toMatch(/AlreadySubmitted/);
   });
 
   it('keeps the result when the tx may still land (RPC error, pause)', async () => {
-    sendTransaction.mockRejectedValueOnce(new Error('timeout'));
+    send.mockRejectedValueOnce(new Error('timeout'));
     expect(await sendOpenResult(entry(), produced, io(), state)).toBe(false);
     expect(state.unsent.has(HASH)).toBe(true);
     state = createOpenState();
-    sendTransaction.mockRejectedValueOnce(Object.assign(new Error('execution reverted'), { data: iface.encodeErrorResult('EnforcedPause', []) }));
+    send.mockRejectedValueOnce(Object.assign(new Error('execution reverted'), { data: iface.encodeErrorResult('EnforcedPause', []) }));
     expect(await sendOpenResult(entry(), produced, io(), state)).toBe(false);
     expect(state.unsent.has(HASH)).toBe(true);
   });
@@ -429,7 +470,7 @@ describe('openPassCore', () => {
     expect(d.run).not.toHaveBeenCalled();
   });
 
-  it('sends an unsent result first, with no model run', async () => {
+  it('sends an unsent result first, with no model run and no pre-check', async () => {
     const state = createOpenState();
     const unsent = { entry: entry(), produced: {}, txHash: '0x99' };
     state.unsent.set(HASH, unsent);
@@ -437,6 +478,26 @@ describe('openPassCore', () => {
     expect(await openPassCore(d, state)).toBe('sent');
     expect(d.send).toHaveBeenCalledWith(unsent);
     expect(d.run).not.toHaveBeenCalled();
+    expect(d.check).not.toHaveBeenCalled();
+  });
+
+  it('prunes nothing on a partial board read, but drops a result whose deadline has passed', async () => {
+    const state = createOpenState();
+    const gone = '0x' + 'ee'.repeat(32);
+    state.done.set(gone, 'submitted');
+    state.unsent.set(gone, { entry: entry({ taskId: gone }), produced: {} });
+    const partial = deps({ fetchBoard: vi.fn(async () => ({ entries: [entry()], complete: false })) });
+    expect(await openPassCore(partial, state)).toBe('sent');
+    expect(state.done.has(gone)).toBe(true);
+    // Not on this page, but the page was partial: sent, not dropped.
+    expect(partial.send).toHaveBeenCalledWith(expect.objectContaining({ entry: expect.objectContaining({ meta: expect.objectContaining({ taskId: gone }) }) }));
+    const later = createOpenState();
+    const past = '0x' + 'dd'.repeat(32);
+    later.unsent.set(past, { entry: entry({ taskId: past, deadline: NOW_SEC - 1 }), produced: {} });
+    const d = deps({ fetchBoard: vi.fn(async () => ({ entries: [entry()], complete: false })) });
+    expect(await openPassCore(d, later)).toBe('ran');
+    expect(later.unsent.size).toBe(0);
+    expect(d.send).not.toHaveBeenCalled();
   });
 
   it('drops an unsent result whose task left the board, then works another', async () => {
@@ -470,6 +531,7 @@ describe('openPassCore', () => {
     const paused = createOpenState();
     expect(await openPassCore(deps({ readEligibility: vi.fn(async () => ({ reason: 'the escrow is paused', final: false })) }), paused)).toBe('none');
     expect(paused.done.has(HASH)).toBe(false);
+    expect(paused.retryAt.get(HASH)).toBeGreaterThan(NOW_SEC * 1000);
   });
 
   it('lets the next task through when one escrow read fails, and comes back to it later', async () => {
@@ -494,6 +556,8 @@ describe('openPassCore', () => {
     const b = deps({ check: vi.fn(async () => ({ reason: 'the server refuses it: 429 RATE_LIMIT', final: false })) });
     expect(await openPassCore(b, busy)).toBe('none');
     expect(busy.done.size).toBe(0);
+    // Deferred, so the next candidates get their turn.
+    expect(busy.retryAt.get(HASH)).toBeGreaterThan(NOW_SEC * 1000);
     const down = createOpenState();
     const x = deps({ check: vi.fn(async () => { throw new Error('socket hang up'); }) });
     expect(await openPassCore(x, down)).toBe('none');
@@ -528,7 +592,7 @@ describe('produceResult', () => {
     vi.mocked(generateText).mockReset().mockResolvedValue({ text: 'Tides follow the moon.', steps: [], toolCalls: [], toolResults: [], content: [], finishReason: 'stop', usage: {} } as never);
   });
   afterEach(() => vi.unstubAllGlobals());
-  const hooks = () => ({ giveUp: vi.fn(), onModelFailed: vi.fn() });
+  const hooks = () => ({ giveUp: vi.fn(), onModelFailed: vi.fn(), onModelStart: vi.fn() });
 
   it('on an open task: no messaging, inbox or delegation, no thread read, and nothing uploaded', async () => {
     const h = hooks();
@@ -540,14 +604,32 @@ describe('produceResult', () => {
     for (const name of ['send_message', 'read_inbox', 'wait_for_reply', 'delegate_to_agent']) expect(opts.tools[name]).toBeUndefined();
     expect(opts.system).toMatch(/cannot contact the poster/);
     expect(h.giveUp).not.toHaveBeenCalled();
+    expect(h.onModelStart).toHaveBeenCalledTimes(1);
   });
 
   it('does not work an open brief over the cap', async () => {
-    brief = 'x'.repeat(OPEN_MAX_BRIEF_CHARS + 1);
+    brief = 'x'.repeat(OPEN_MAX_PROMPT_CHARS + 1);
     const h = hooks();
     expect(await produceResult(HASH, { briefRootHash: ROOT, wrappedKey: null, privacy: 'public', meta: entry().meta, open: true }, h)).toBeNull();
-    expect(h.giveUp).toHaveBeenCalledWith(expect.stringMatching(/brief is over/), { final: true });
+    expect(h.giveUp).toHaveBeenCalledWith(expect.stringMatching(/brief and criteria are over/), { final: true });
     expect(generateText).not.toHaveBeenCalled();
+    expect(h.onModelStart).not.toHaveBeenCalled();
+  });
+
+  it('counts the poster-written criteria in the cap: a short brief with huge criteria is not worked either', async () => {
+    const h = hooks();
+    const meta = { ...entry().meta, verificationCriteria: { rubric: 'r'.repeat(OPEN_MAX_PROMPT_CHARS) } };
+    expect(await produceResult(HASH, { briefRootHash: ROOT, wrappedKey: null, privacy: 'public', meta, open: true }, h)).toBeNull();
+    expect(h.giveUp).toHaveBeenCalledWith(expect.stringMatching(/brief and criteria are over/), { final: true });
+    expect(generateText).not.toHaveBeenCalled();
+  });
+
+  it('starts no run when the brief cannot be read', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 500 })));
+    const h = hooks();
+    expect(await produceResult(HASH, { briefRootHash: ROOT, wrappedKey: null, privacy: 'public', meta: entry().meta, open: true }, h)).toBeNull();
+    expect(h.giveUp).toHaveBeenCalled();
+    expect(h.onModelStart).not.toHaveBeenCalled();
   });
 
   it('on an assigned task, as before: reads its meta and thread, offers messaging, and uploads the result', async () => {
