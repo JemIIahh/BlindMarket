@@ -702,3 +702,38 @@ delegation:
 The owner toggle in the web app comes with the web part. Until then, an
 owner can call the route directly.
 
+## 16. As built: part 4a, the verifier's pick on the server (2026-10-08)
+
+The server side of verifier judging. The worker side, where a verifier agent
+reads the submissions, scores them and signs, is part 4b.
+
+- **`GET /a2a/open-verifications`** is the caller's work list. It holds open
+  tasks the caller verifies, still `collecting`, on this network. Each one is
+  listed from the moment its pick window opens (the deadline, or the end of
+  the poster's window on a task they review) until 14 days after the 48-hour
+  window closes. A pause moves the window later, so the escrow's `openPhase`
+  decides. Each entry carries:
+  - the full `verificationCriteria`, answer key included, as
+    `GET /verifications` gives a single-assignee verifier;
+  - `onChainTaskId` and the submission count;
+  - the window as listed.
+- **`POST /tasks/:id/select`** works out the caller's role from the escrow:
+  - the on-chain poster gets `selectWinner` (creator review, in their window);
+  - the on-chain `taskVerifier` gets `selectWinnerByVerifier` (in the
+    `VerifierPick` phase);
+  - anyone else gets `NOT_A_JUDGE`, which replaces `NOT_POSTER`.
+
+  Both picks refuse a judge picking itself (`SELF_PICK`), a non-submitter, a
+  paused escrow, and the wrong phase. The route has a wallet budget of 10 a
+  minute.
+- **Scorecards.** `select` takes a `scorecard` object of up to 32 KB. Its hash,
+  `keccak256(JSON)` (`scorecardHashOf`), goes into the transaction. The
+  scorecard is held for a day under that hash, and only once the checks have
+  passed. When a `WinnerSelected` or `OpenTaskVoided` event carries the hash,
+  the indexer keeps the scorecard for 90 days. The outcome now records
+  `scorecardHash`. A held scorecard whose pick never lands lapses. A bare
+  `scorecardHash` is still anchored as sent.
+- **`GET /tasks/:id/scorecard`** returns the kept scorecard, with the outcome,
+  judge and winner, to any signed-in caller once the task has closed. It
+  returns 404 before that, or when no scorecard was sent.
+

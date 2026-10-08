@@ -16,7 +16,7 @@
  * address, because Telegram is outside the platform's access control.
  */
 
-import type { EventLog } from 'ethers';
+import { ethers, type EventLog } from 'ethers';
 import { closeOpenSubmissionTask, getMeta } from './a2aStore.js';
 import { loadAgentBySmartAccount } from './deployedAgentStore.js';
 import { escrowFor } from './escrow.js';
@@ -169,6 +169,12 @@ async function tellSubmitters(
   });
 }
 
+/** The judge's scorecard, kept when the escrow anchored its hash (POST /select held it). */
+async function keepAnchoredScorecard(ref: TaskRef, scorecardHash: string): Promise<void> {
+  if (!scorecardHash || /^0x0*$/.test(scorecardHash)) return;
+  await store.keepScorecard(ref, scorecardHash);
+}
+
 const WINNER_PICKED_BY: Record<OpenJudge, string> = {
   creator: 'You picked a winner',
   task_verifier: "Your task's verifier picked a winner",
@@ -176,14 +182,15 @@ const WINNER_PICKED_BY: Record<OpenJudge, string> = {
   admin: 'An admin picked a winner',
 };
 
-export async function handleWinnerSelected(chain: TaskChain, taskId: bigint, winner: string, judgeIndex: number): Promise<void> {
+export async function handleWinnerSelected(chain: TaskChain, taskId: bigint, winner: string, judgeIndex: number, scorecardHash: string = ethers.ZeroHash): Promise<void> {
   const found = await ensureRecord(chain, taskId);
   if (!found) return;
   const { ref, rec } = found;
   const hash = rec.taskHash;
   const judge = JUDGES[judgeIndex] ?? 'admin';
   const winnerAddr = winner.toLowerCase();
-  await store.saveOutcome(ref, { kind: 'winner', winner: winnerAddr, judge });
+  await store.saveOutcome(ref, { kind: 'winner', winner: winnerAddr, judge, scorecardHash: scorecardHash.toLowerCase() });
+  await keepAnchoredScorecard(ref, scorecardHash);
   await store.unscheduleSweep(ref);
   const listing = await listingOf(rec);
   if (listing) {
@@ -227,13 +234,14 @@ export async function handleWinnerSelected(chain: TaskChain, taskId: bigint, win
   });
 }
 
-export async function handleOpenTaskVoided(chain: TaskChain, taskId: bigint, judgeIndex: number): Promise<void> {
+export async function handleOpenTaskVoided(chain: TaskChain, taskId: bigint, judgeIndex: number, scorecardHash: string = ethers.ZeroHash): Promise<void> {
   const found = await ensureRecord(chain, taskId);
   if (!found) return;
   const { ref, rec } = found;
   const hash = rec.taskHash;
   const judge = JUDGES[judgeIndex] ?? 'admin';
-  await store.saveOutcome(ref, { kind: 'void', judge });
+  await store.saveOutcome(ref, { kind: 'void', judge, scorecardHash: scorecardHash.toLowerCase() });
+  await keepAnchoredScorecard(ref, scorecardHash);
   await store.unscheduleSweep(ref);
   if (await listingOf(rec)) await closeOpenSubmissionTask(hash, { kind: 'void' });
   // The poster voids only a task nobody submitted to, and needs no alert for
@@ -263,8 +271,8 @@ export async function handleOpenEvent(chain: TaskChain, ev: EventLog): Promise<v
     case 'OpenSubmission':
       return handleOpenSubmission(chain, a.taskId as bigint, String(a.submitter), String(a.evidenceHash), a.count as bigint, ev.transactionHash);
     case 'WinnerSelected':
-      return handleWinnerSelected(chain, a.taskId as bigint, String(a.winner), Number(a.judge));
+      return handleWinnerSelected(chain, a.taskId as bigint, String(a.winner), Number(a.judge), String(a.scorecardHash));
     case 'OpenTaskVoided':
-      return handleOpenTaskVoided(chain, a.taskId as bigint, Number(a.judge));
+      return handleOpenTaskVoided(chain, a.taskId as bigint, Number(a.judge), String(a.scorecardHash));
   }
 }

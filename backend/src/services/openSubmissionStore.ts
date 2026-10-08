@@ -22,6 +22,11 @@
  *                                the escrow recorded; kept RESULTS_TTL_SEC
  *   a2a:open:held-by:<a>         zset: ref → unix seconds a submitter's held result
  *                                expires; caps how many one wallet holds (MAX_HELD)
+ *   a2a:open:scorecard-pending:<ref>:<h>
+ *                                JSON scorecard a judge sent with a pick, for
+ *                                PENDING_SCORECARD_TTL_SEC: kept only if a pick
+ *                                or void with hash <h> lands on-chain
+ *   a2a:open:scorecard:<ref>     JSON KeptScorecard, the one the escrow anchored
  *   a2a:open:due                 zset: ref → unix seconds the sweep next looks at it
  *
  * Writers:
@@ -31,6 +36,7 @@
  *   paid gas to submit, and a kept result can't be replaced.
  * - The sweep writes `closed`.
  * - POST submit-open writes a submitter's own pending result.
+ * - POST select writes the judge's pending scorecard; the indexer keeps it.
  * - Both the indexer and the sweep write `due`.
  *
  * Every write is a whole-value SET, HSETNX or ZADD/ZREM, never a
@@ -89,6 +95,14 @@ export interface OpenTaskOutcome {
   kind: 'winner' | 'void';
   winner?: string;
   judge: OpenJudge;
+  /** The scorecard hash the escrow recorded with the pick; zero when none. */
+  scorecardHash?: string;
+}
+
+/** A judge's scorecard whose hash the escrow recorded with its pick or void. */
+export interface KeptScorecard {
+  scorecardHash: string;
+  scorecard: Record<string, unknown>;
 }
 
 /**
@@ -115,6 +129,8 @@ export const PENDING_RESULT_TTL_SEC = 3600;
 export const MAX_HELD = 10;
 /** How long kept results last: well past every pick window. */
 export const RESULTS_TTL_SEC = 90 * 86_400;
+/** How long a judge's scorecard waits for its pick to land on-chain. */
+export const PENDING_SCORECARD_TTL_SEC = 86_400;
 
 const KEY = {
   record: (ref: TaskRef) => `a2a:open:task:${ref}`,
@@ -125,6 +141,8 @@ const KEY = {
   pending: (ref: TaskRef, submitter: string) => `a2a:open:pending:${ref}:${submitter.toLowerCase()}`,
   heldBy: (submitter: string) => `a2a:open:held-by:${submitter.toLowerCase()}`,
   results: (ref: TaskRef) => `a2a:open:results:${ref}`,
+  scorecardPending: (ref: TaskRef, hash: string) => `a2a:open:scorecard-pending:${ref}:${hash.toLowerCase()}`,
+  scorecard: (ref: TaskRef) => `a2a:open:scorecard:${ref}`,
   due: 'a2a:open:due',
 };
 
@@ -314,3 +332,34 @@ export async function getResults(ref: TaskRef, submitters: string[]): Promise<Ar
   const raws = await redis.hmget(KEY.results(ref), ...submitters.map((a) => a.toLowerCase()));
   return raws.map((raw) => parse<OpenResult>(raw));
 }
+
+// ── Scorecards ──────────────────────────────────────────────────────────────
+
+/**
+ * Hold the scorecard a judge sent with a pick, under its hash, until the pick
+ * lands (keepScorecard). Each pick the judge asks for holds one; they lapse
+ * in a day unless the escrow anchors one.
+ */
+export async function savePendingScorecard(ref: TaskRef, scorecardHash: string, scorecard: Record<string, unknown>): Promise<void> {
+  await redis.set(KEY.scorecardPending(ref, scorecardHash), JSON.stringify(scorecard), 'EX', PENDING_SCORECARD_TTL_SEC);
+}
+
+/**
+ * Keep the held scorecard with the hash the escrow recorded with a pick or
+ * void. Called by the indexer. True when one was kept; false when none was
+ * held (no scorecard sent, or the judge picked without this server).
+ */
+export async function keepScorecard(ref: TaskRef, scorecardHash: string): Promise<boolean> {
+  const pendingKey = KEY.scorecardPending(ref, scorecardHash);
+  const scorecard = parse<Record<string, unknown>>(await redis.get(pendingKey));
+  if (!scorecard) return false;
+  const kept: KeptScorecard = { scorecardHash: scorecardHash.toLowerCase(), scorecard };
+  const stored = (await redis.set(KEY.scorecard(ref), JSON.stringify(kept), 'EX', RESULTS_TTL_SEC, 'NX')) !== null;
+  await redis.del(pendingKey);
+  return stored;
+}
+
+export async function getScorecard(ref: TaskRef): Promise<KeptScorecard | null> {
+  return parse<KeptScorecard>(await redis.get(KEY.scorecard(ref)));
+}
+

@@ -79,7 +79,18 @@ vi.mock('../services/redis.js', () => {
 const walletBudget = vi.hoisted(() => vi.fn((_opts: { name: string; perMinute: number }) => (_req: unknown, _res: unknown, next: () => void) => next()));
 vi.mock('../middleware/rateLimit.js', () => ({ createWalletBudget: walletBudget }));
 
-const a2a = vi.hoisted(() => ({ getMeta: vi.fn(), getState: vi.fn() }));
+const a2a = vi.hoisted(() => ({
+  getMeta: vi.fn(),
+  getState: vi.fn(),
+  listOpenSubmissionTasks: vi.fn(async () => [] as unknown[]),
+  // The public view hides the answer key (a2aStore.projectCriteria).
+  projectPublicMeta: (meta: any) => {
+    const { verificationCriteria, ...rest } = meta;
+    if (!verificationCriteria) return rest;
+    const { expected_answer: _key, ...criteria } = verificationCriteria;
+    return { ...rest, verificationCriteria: criteria };
+  },
+}));
 vi.mock('../services/a2aStore.js', () => a2a);
 const agents = vi.hoisted(() => ({ getAgent: vi.fn() }));
 vi.mock('../services/agentStore.js', () => agents);
@@ -87,12 +98,14 @@ const escrow = vi.hoisted(() => ({ openPhase: vi.fn(), submissionOf: vi.fn(), pa
 const builders = vi.hoisted(() => ({
   buildSubmitOpenOn: vi.fn(async (_c: string, from: string, taskId: number, evidenceHash: string) => ({ to: '0xescrow', from, data: `submitOpen(${taskId},${evidenceHash})` })),
   buildSelectWinnerOn: vi.fn(async (_c: string, from: string, taskId: number, winner: string, scorecard: string) => ({ to: '0xescrow', from, data: `selectWinner(${taskId},${winner},${scorecard})` })),
+  buildSelectWinnerByVerifierOn: vi.fn(async (_c: string, from: string, taskId: number, winner: string, scorecard: string) => ({ to: '0xescrow', from, data: `selectWinnerByVerifier(${taskId},${winner},${scorecard})` })),
   getTaskOn: vi.fn(async () => ({ agent: POSTER }) as { agent: string }),
+  getTaskVerifierOn: vi.fn(async () => VERIFIER),
 }));
 vi.mock('../services/escrow.js', () => ({ escrowFor: () => escrow, ...builders }));
 vi.mock('../services/taskChain.js', () => ({ resolveCachedTaskByHash: vi.fn(async () => ({ chain: 'arc', taskId: '7' })) }));
 // Bare chain keys, so refs read 'arc:7' (openSubmissionStore.test.ts checks the network-scoped form).
-vi.mock('../services/chainScope.js', () => ({ chainScope: (chain: string) => chain }));
+vi.mock('../services/chainScope.js', () => ({ chainScope: (chain: string) => chain, onCurrentNetwork: (meta: any) => meta.chainId !== 1 }));
 const sameOwner = vi.hoisted(() => vi.fn(async () => false));
 const ownAgent = vi.hoisted(() => vi.fn(async (_agent: string, _owners: Iterable<string>) => false));
 vi.mock('../services/delegationGuard.js', () => ({ sameOwnerSubtask: sameOwner, ownAgentOf: ownAgent }));
@@ -100,7 +113,7 @@ vi.mock('../services/openSubmissionSweep.js', () => ({
   PHASE: { Submissions: 0, CreatorPick: 1, VerifierPick: 2, BackupPick: 3, AdminResolve: 4, Closed: 5 },
 }));
 
-const { openSubmissionRouter, MAX_RESULT_BYTES, openEvidenceHash } = await import('./openSubmission.js');
+const { openSubmissionRouter, MAX_RESULT_BYTES, MAX_SCORECARD_BYTES, openEvidenceHash, scorecardHashOf } = await import('./openSubmission.js');
 // Made at import, before any beforeEach clears the mocks.
 const budgetsMade = [...walletBudget.mock.calls];
 const { globalErrorHandler } = await import('../middleware/errorHandler.js');
@@ -147,13 +160,15 @@ beforeEach(() => {
   escrow.submissionOf.mockResolvedValue(ethers.ZeroHash);
   escrow.paused.mockResolvedValue(false);
   builders.getTaskOn.mockResolvedValue({ agent: POSTER });
+  builders.getTaskVerifierOn.mockResolvedValue(VERIFIER);
+  a2a.listOpenSubmissionTasks.mockResolvedValue([]);
   sameOwner.mockResolvedValue(false);
   ownAgent.mockResolvedValue(false);
 });
 
 describe('limits', () => {
-  it('gives submit-open a per-wallet budget', () => {
-    expect(budgetsMade).toEqual([[{ name: 'submissions', perMinute: 20 }]]);
+  it('gives submit-open and select per-wallet budgets', () => {
+    expect(budgetsMade).toEqual([[{ name: 'submissions', perMinute: 20 }], [{ name: 'picks', perMinute: 10 }]]);
   });
 });
 
@@ -357,10 +372,10 @@ describe('POST /tasks/:id/select', () => {
     expect(res.body.data.unsignedSelectWinner).toMatchObject({ from: POSTER, data: `selectWinner(7,${ethers.getAddress(AGENT)},${ethers.ZeroHash})` });
   });
 
-  it('refuses anyone but the poster', async () => {
+  it('refuses anyone but the poster and the task verifier', async () => {
     const res = await select(AGENT2, AGENT);
     expect(res.status).toBe(403);
-    expect(res.body.error.code).toBe('NOT_POSTER');
+    expect(res.body.error.code).toBe('NOT_A_JUDGE');
   });
 
   it('refuses while the escrow is paused: selectWinner would revert', async () => {
@@ -376,3 +391,134 @@ describe('POST /tasks/:id/select', () => {
     expect((await select(POSTER, AGENT2)).body.error.code).toBe('NOT_A_SUBMITTER');
   });
 });
+
+describe("POST /tasks/:id/select by the task's verifier", () => {
+  beforeEach(() => {
+    a2a.getMeta.mockResolvedValue(openMeta({ openPick: { mode: 'agent', creatorWindow: 0 } }));
+    escrow.openPhase.mockResolvedValue(2n);
+    escrow.submissionOf.mockImplementation(async (_id: number, who: string) => (who.toLowerCase() === AGENT ? '0x' + '11'.repeat(32) : ethers.ZeroHash));
+  });
+
+  it('hands the on-chain verifier selectWinnerByVerifier in its window', async () => {
+    const res = await select(VERIFIER, AGENT);
+    expect(res.status).toBe(200);
+    expect(res.body.data.unsignedSelectWinnerByVerifier).toMatchObject({ from: VERIFIER, data: `selectWinnerByVerifier(7,${ethers.getAddress(AGENT)},${ethers.ZeroHash})` });
+    expect(res.body.data.unsignedSelectWinner).toBeUndefined();
+  });
+
+  it('picks after the poster on a task they review, once their window has passed', async () => {
+    a2a.getMeta.mockResolvedValue(openMeta());
+    expect((await select(VERIFIER, AGENT)).status).toBe(200);
+    escrow.openPhase.mockResolvedValueOnce(1n);
+    const early = await select(VERIFIER, AGENT);
+    expect(early.body.error.code).toBe('NOT_PICK_WINDOW');
+    expect(early.body.error.message).toMatch(/poster's pick window/);
+  });
+
+  it('goes by the escrow, not the listing: an address the escrow does not name is refused', async () => {
+    builders.getTaskVerifierOn.mockResolvedValueOnce(ethers.ZeroAddress);
+    expect((await select(VERIFIER, AGENT)).body.error.code).toBe('NOT_A_JUDGE');
+  });
+
+  it('refuses after its window, while paused, a non-submitter, and itself', async () => {
+    escrow.openPhase.mockResolvedValueOnce(3n);
+    expect((await select(VERIFIER, AGENT)).body.error.code).toBe('NOT_PICK_WINDOW');
+    escrow.paused.mockResolvedValueOnce(true);
+    expect((await select(VERIFIER, AGENT)).body.error.code).toBe('ESCROW_PAUSED');
+    expect((await select(VERIFIER, AGENT2)).body.error.code).toBe('NOT_A_SUBMITTER');
+    expect((await select(VERIFIER, VERIFIER)).body.error.code).toBe('SELF_PICK');
+  });
+});
+
+describe('scorecards', () => {
+  const pick = (who: string, body: Record<string, unknown>) =>
+    request(app()).post(`/api/v1/a2a/tasks/${HASH}/select`).set(as(who)).send({ winner: AGENT, ...body });
+  const scorecard = { winner: AGENT, scores: [{ submitter: AGENT, score: 9, reasons: 'complete' }] };
+
+  beforeEach(() => {
+    a2a.getMeta.mockResolvedValue(openMeta({ openPick: { mode: 'agent', creatorWindow: 0 } }));
+    escrow.openPhase.mockResolvedValue(2n);
+    escrow.submissionOf.mockImplementation(async (_id: number, who: string) => (who.toLowerCase() === AGENT ? '0x' + '11'.repeat(32) : ethers.ZeroHash));
+  });
+
+  it("anchors the scorecard's hash in the pick and holds the scorecard under it", async () => {
+    const res = await pick(VERIFIER, { scorecard });
+    const hash = scorecardHashOf(scorecard);
+    expect(res.status).toBe(200);
+    expect(res.body.data.scorecardHash).toBe(hash);
+    expect(res.body.data.unsignedSelectWinnerByVerifier.data).toBe(`selectWinnerByVerifier(7,${ethers.getAddress(AGENT)},${hash})`);
+    expect(JSON.parse(mem.kv.get(`a2a:open:scorecard-pending:${REF}:${hash.toLowerCase()}`)!)).toEqual(scorecard);
+  });
+
+  it('refuses a scorecardHash that is not the scorecard sent, and an oversized scorecard', async () => {
+    const mismatch = await pick(VERIFIER, { scorecard, scorecardHash: '0x' + '44'.repeat(32) });
+    expect(mismatch.status).toBe(400);
+    expect(mismatch.body.error.code).toBe('SCORECARD_MISMATCH');
+    const big = await pick(VERIFIER, { scorecard: { reasons: 'x'.repeat(MAX_SCORECARD_BYTES) } });
+    expect(big.status).toBe(413);
+    expect([...mem.kv.keys()].some((k) => k.includes('scorecard'))).toBe(false);
+  });
+
+  it('holds nothing for a pick that is refused', async () => {
+    escrow.openPhase.mockResolvedValueOnce(3n);
+    expect((await pick(VERIFIER, { scorecard })).status).toBe(409);
+    expect([...mem.kv.keys()].some((k) => k.includes('scorecard'))).toBe(false);
+  });
+
+  it('serves the scorecard the escrow anchored, once the indexer kept it', async () => {
+    expect((await request(app()).get(`/api/v1/a2a/tasks/${HASH}/scorecard`).set(as(AGENT2))).status).toBe(404);
+    await pick(VERIFIER, { scorecard });
+    const hash = scorecardHashOf(scorecard);
+    await store.saveOutcome(REF, { kind: 'winner', winner: AGENT, judge: 'task_verifier', scorecardHash: hash });
+    // Held, not anchored yet: nothing served.
+    expect((await request(app()).get(`/api/v1/a2a/tasks/${HASH}/scorecard`).set(as(AGENT2))).status).toBe(404);
+    expect(await store.keepScorecard(REF, hash)).toBe(true);
+    const res = await request(app()).get(`/api/v1/a2a/tasks/${HASH}/scorecard`).set(as(AGENT2));
+    expect(res.status).toBe(200);
+    expect(res.body.data).toMatchObject({ outcome: 'winner', judge: 'task_verifier', winner: AGENT, scorecardHash: hash.toLowerCase(), scorecard });
+  });
+
+  it('keeps nothing for a hash no judge held a scorecard under', async () => {
+    expect(await store.keepScorecard(REF, '0x' + '55'.repeat(32))).toBe(false);
+    expect(await store.getScorecard(REF)).toBeNull();
+  });
+});
+
+describe('GET /open-verifications', () => {
+  const listed = (taskId: string, over: Record<string, unknown> = {}, status = 'collecting') => ({
+    meta: openMeta({ taskId, openPick: { mode: 'agent', creatorWindow: 0 }, deadline: NOW - 60, verificationCriteria: { min_length: 50, expected_answer: '42' }, ...over }),
+    state: { taskId, status },
+  });
+  const get = (who: string) => request(app()).get('/api/v1/a2a/open-verifications').set(as(who));
+
+  it("lists the caller's tasks in their window, with the full criteria the judge needs", async () => {
+    a2a.listOpenSubmissionTasks.mockResolvedValue([
+      listed('0xmine'),
+      listed('0xother', { verifierAddress: AGENT2 }),
+      listed('0xnotyet', { deadline: NOW + 600 }),
+      listed('0xposterfirst', { openPick: { mode: 'creator', creatorWindow: 3600 } }),
+      listed('0xlongago', { deadline: NOW - 30 * 86_400 }),
+      listed('0xdone', {}, 'completed'),
+      listed('0xothernet', { chainId: 1 }),
+    ]);
+    const res = await get(VERIFIER);
+    expect(res.status).toBe(200);
+    expect(res.body.data.tasks.map((t: any) => t.meta.taskId)).toEqual(['0xmine']);
+    const [t] = res.body.data.tasks;
+    expect(t.meta.verificationCriteria).toEqual({ min_length: 50, expected_answer: '42' });
+    expect(t.onChainTaskId).toBe('7');
+    expect(t.window).toEqual({ opensAt: NOW - 60, closesAt: NOW - 60 + 48 * 3600 });
+  });
+
+  it('lists nothing for an agent that verifies nothing', async () => {
+    a2a.listOpenSubmissionTasks.mockResolvedValue([listed('0xmine')]);
+    expect((await get(AGENT)).body.data.tasks).toEqual([]);
+  });
+
+  it('is not there while open submission is off, and needs a signed-in caller', async () => {
+    expect((await request(app()).get('/api/v1/a2a/open-verifications')).status).toBe(401);
+    flag.on = false;
+    expect((await get(VERIFIER)).status).toBe(404);
+  });
+});
+
