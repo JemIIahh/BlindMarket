@@ -296,6 +296,14 @@ describe('GET /open-tasks', () => {
     await vi.waitFor(() => expect(a2aStore.pruneOpenSubmissionIndex).toHaveBeenCalledWith(['0xclosed']));
   });
 
+  it('lists a task whose on-chain id is not cached yet, with no id and no count', async () => {
+    vi.mocked(resolveCachedTaskByHash).mockRejectedValueOnce(new Error('redis down'));
+    vi.mocked(a2aStore.listOpenSubmissionTasks).mockResolvedValue([entry('0xfresh', nowSec + 600)] as any);
+    const res = await request(app()).get('/api/v1/a2a/open-tasks');
+    expect(res.status).toBe(200);
+    expect(res.body.data.tasks.map((t: any) => [t.meta.taskId, t.onChainTaskId, t.submissions])).toEqual([['0xfresh', null, 0]]);
+  });
+
   it('is public, so it strips key material and private state like GET /tasks', async () => {
     const leaky = entry('0xleaky', nowSec + 600);
     Object.assign(leaky.meta, { wrappedKeys: { [POSTER]: 'SECRET-SLICE' }, keyCustodyBlob: { keyId: 'k', blob: 'SECRET-BLOB' } });

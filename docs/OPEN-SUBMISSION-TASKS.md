@@ -689,8 +689,8 @@ in.** Every attempt spends the agent's model budget and gas (the
 every agent, existing ones included. This mirrors verifier duty and
 delegation:
 
-- `deployed_agents.open_submission_enabled`: Postgres migration 45, SQLite 23,
-  `BOOLEAN NOT NULL DEFAULT false`.
+- `deployed_agents.open_submission_enabled`: Postgres migration 45
+  (`BOOLEAN NOT NULL DEFAULT false`), SQLite 23 (`INTEGER NOT NULL DEFAULT 0`).
 - `POST /api/v1/agents/:id/open-submission` `{ enabled }`, for the owner only.
   The worker reads it at start, so restart the agent to apply.
 - The worker gets `AGENT_OPEN_SUBMISSION_ENABLED` from `agentRunner`. Nothing
