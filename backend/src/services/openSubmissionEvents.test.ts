@@ -263,29 +263,35 @@ describe('WinnerSelected', () => {
 
 describe("the judge's scorecard", () => {
   const scorecard = { scores: [{ submitter: 'one', score: 9 }] };
-  const SC = '0x' + '5c'.repeat(32);
+  let SC: string;
 
   beforeEach(async () => {
     await handleOpenTaskCreated('arc', 7n);
     await handleOpenSubmission('arc', 7n, agent(1), '0x01', 1n, undefined, NOW);
-    await store.savePendingScorecard(REF, SC, scorecard);
+    SC = (await store.savePendingScorecard(REF, 'task_verifier', scorecard)).toLowerCase();
   });
 
-  it('is kept when the pick anchors its hash, and the outcome records the hash', async () => {
+  it("is kept when the judge's pick anchors its hash, and the outcome records the hash", async () => {
     await handleWinnerSelected('arc', 7n, agent(1), 2, SC.toUpperCase().replace('0X', '0x'));
     expect(await store.getScorecard(REF)).toEqual({ scorecardHash: SC, scorecard });
     expect((await store.getOutcome(REF))?.scorecardHash).toBe(SC);
-    expect(mem.kv.has(`a2a:open:scorecard-pending:${REF}:${SC}`)).toBe(false);
+    expect(mem.kv.has(`a2a:open:scorecard-pending:${REF}:task_verifier`)).toBe(false);
   });
 
-  it('is kept on a void that anchors it too', async () => {
-    await handleOpenTaskVoided('arc', 7n, 3, SC);
-    expect(await store.getScorecard(REF)).toEqual({ scorecardHash: SC, scorecard });
+  it('is kept for the judge that picked: the poster’s pick does not take the verifier’s scorecard', async () => {
+    await handleWinnerSelected('arc', 7n, agent(1), 1, SC);
+    expect(await store.getScorecard(REF)).toBeNull();
   });
 
   it('is not kept for another hash, or none', async () => {
     await handleWinnerSelected('arc', 7n, agent(1), 2, '0x' + '66'.repeat(32));
     expect(await store.getScorecard(REF)).toBeNull();
+  });
+
+  it('is kept once: a redelivered event changes nothing', async () => {
+    await handleWinnerSelected('arc', 7n, agent(1), 2, SC);
+    await handleWinnerSelected('arc', 7n, agent(1), 2, SC);
+    expect(await store.getScorecard(REF)).toEqual({ scorecardHash: SC, scorecard });
   });
 
   it('reaches the handler from the decoded event', async () => {

@@ -59,7 +59,8 @@ import jwt from 'jsonwebtoken';
 import { withPosterAvatars } from '../services/avatarStore.js';
 
 export const a2aRouter = Router();
-// Open-submission routes (submit-open, submissions, select): their own file.
+// Open-submission routes (submit-open, submissions, select, scorecard,
+// open-verifications): their own file.
 a2aRouter.use(openSubmissionRouter);
 
 // --- Schemas ---

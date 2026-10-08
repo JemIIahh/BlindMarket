@@ -36,7 +36,7 @@ vi.mock('../middleware/auth.js', () => ({
   },
 }));
 
-const mem = vi.hoisted(() => ({ kv: new Map<string, string>(), hashes: new Map<string, Map<string, string>>(), zsets: new Map<string, Map<string, number>>() }));
+const mem = vi.hoisted(() => ({ kv: new Map<string, string>(), ttl: new Map<string, number>(), hashes: new Map<string, Map<string, string>>(), zsets: new Map<string, Map<string, number>>() }));
 vi.mock('../services/redis.js', () => {
   const h = (k: string) => {
     const m = mem.hashes.get(k) ?? new Map<string, string>();
@@ -46,7 +46,14 @@ vi.mock('../services/redis.js', () => {
   return {
     redis: {
       get: async (k: string) => mem.kv.get(k) ?? null,
-      set: async (k: string, v: string) => { mem.kv.set(k, v); return 'OK'; },
+      // Honours NX, and records EX so the tests can check what lapses.
+      set: async (k: string, v: string, ...args: unknown[]) => {
+        if (args.includes('NX') && mem.kv.has(k)) return null;
+        mem.kv.set(k, v);
+        const ex = args.indexOf('EX');
+        if (ex >= 0) mem.ttl.set(k, Number(args[ex + 1]));
+        return 'OK';
+      },
       del: async (k: string) => (mem.kv.delete(k) ? 1 : 0),
       hset: async (k: string, f: string, v: string) => { h(k).set(f, v); return 1; },
       hsetnx: async (k: string, f: string, v: string) => (h(k).has(f) ? 0 : (h(k).set(f, v), 1)),
@@ -82,7 +89,7 @@ vi.mock('../middleware/rateLimit.js', () => ({ createWalletBudget: walletBudget 
 const a2a = vi.hoisted(() => ({
   getMeta: vi.fn(),
   getState: vi.fn(),
-  listOpenSubmissionTasks: vi.fn(async () => [] as unknown[]),
+  getVerifierTasks: vi.fn(async (_address: string) => [] as unknown[]),
   // The public view hides the answer key (a2aStore.projectCriteria).
   projectPublicMeta: (meta: any) => {
     const { verificationCriteria, ...rest } = meta;
@@ -161,7 +168,8 @@ beforeEach(() => {
   escrow.paused.mockResolvedValue(false);
   builders.getTaskOn.mockResolvedValue({ agent: POSTER });
   builders.getTaskVerifierOn.mockResolvedValue(VERIFIER);
-  a2a.listOpenSubmissionTasks.mockResolvedValue([]);
+  a2a.getVerifierTasks.mockResolvedValue([]);
+  mem.ttl.clear();
   sameOwner.mockResolvedValue(false);
   ownAgent.mockResolvedValue(false);
 });
@@ -406,6 +414,12 @@ describe("POST /tasks/:id/select by the task's verifier", () => {
     expect(res.body.data.unsignedSelectWinner).toBeUndefined();
   });
 
+  it('finds the verifier among the caller’s linked wallets', async () => {
+    const res = await select(AGENT2, AGENT, VERIFIER);
+    expect(res.status).toBe(200);
+    expect(res.body.data.unsignedSelectWinnerByVerifier.from).toBe(VERIFIER);
+  });
+
   it('picks after the poster on a task they review, once their window has passed', async () => {
     a2a.getMeta.mockResolvedValue(openMeta());
     expect((await select(VERIFIER, AGENT)).status).toBe(200);
@@ -413,6 +427,15 @@ describe("POST /tasks/:id/select by the task's verifier", () => {
     const early = await select(VERIFIER, AGENT);
     expect(early.body.error.code).toBe('NOT_PICK_WINDOW');
     expect(early.body.error.message).toMatch(/poster's pick window/);
+  });
+
+  it("gives a caller holding both the poster's and the verifier's wallets the pick whose window is open", async () => {
+    a2a.getMeta.mockResolvedValue(openMeta());
+    const late = await select(POSTER, AGENT, VERIFIER);
+    expect(late.body.data.unsignedSelectWinnerByVerifier.from).toBe(VERIFIER);
+    escrow.openPhase.mockResolvedValue(1n);
+    const early = await select(POSTER, AGENT, VERIFIER);
+    expect(early.body.data.unsignedSelectWinner.from).toBe(POSTER);
   });
 
   it('goes by the escrow, not the listing: an address the escrow does not name is refused', async () => {
@@ -428,12 +451,37 @@ describe("POST /tasks/:id/select by the task's verifier", () => {
     expect((await select(VERIFIER, AGENT2)).body.error.code).toBe('NOT_A_SUBMITTER');
     expect((await select(VERIFIER, VERIFIER)).body.error.code).toBe('SELF_PICK');
   });
+
+  it("refuses to pick an agent of the judge's own owner", async () => {
+    sameOwner.mockImplementation(async (judge: string, agent: string) => judge === VERIFIER && agent.toLowerCase() === AGENT);
+    const res = await select(VERIFIER, AGENT);
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('OWN_AGENT_PICK');
+    expect(builders.buildSelectWinnerByVerifierOn).not.toHaveBeenCalled();
+  });
+});
+
+describe("submit-open and the verifier's own agents", () => {
+  it("refuses an agent with the same owner as the task's verifier: it reads every result", async () => {
+    sameOwner.mockImplementation(async (judge: string, agent: string) => judge === VERIFIER && agent === AGENT);
+    const res = await submit(AGENT);
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe('VERIFIER_SAME_OWNER');
+  });
+
+  it("refuses a person verifier's own agent too", async () => {
+    ownAgent.mockImplementation(async (agent: string, owners: Iterable<string>) => agent === AGENT && [...owners].includes(VERIFIER));
+    expect((await submit(AGENT)).body.error.code).toBe('VERIFIER_SAME_OWNER');
+  });
 });
 
 describe('scorecards', () => {
   const pick = (who: string, body: Record<string, unknown>) =>
     request(app()).post(`/api/v1/a2a/tasks/${HASH}/select`).set(as(who)).send({ winner: AGENT, ...body });
   const scorecard = { winner: AGENT, scores: [{ submitter: AGENT, score: 9, reasons: 'complete' }] };
+  const pendingKey = `a2a:open:scorecard-pending:${REF}:task_verifier`;
+  const getCard = (who = AGENT2) => request(app()).get(`/api/v1/a2a/tasks/${HASH}/scorecard`).set(as(who));
+  const postCard = (card: Record<string, unknown>) => request(app()).post(`/api/v1/a2a/tasks/${HASH}/scorecard`).set(as(AGENT2)).send({ scorecard: card });
 
   beforeEach(() => {
     a2a.getMeta.mockResolvedValue(openMeta({ openPick: { mode: 'agent', creatorWindow: 0 } }));
@@ -441,13 +489,21 @@ describe('scorecards', () => {
     escrow.submissionOf.mockImplementation(async (_id: number, who: string) => (who.toLowerCase() === AGENT ? '0x' + '11'.repeat(32) : ethers.ZeroHash));
   });
 
-  it("anchors the scorecard's hash in the pick and holds the scorecard under it", async () => {
+  it("anchors the scorecard's hash in the pick and holds the scorecard, through the longest pick window", async () => {
     const res = await pick(VERIFIER, { scorecard });
     const hash = scorecardHashOf(scorecard);
     expect(res.status).toBe(200);
     expect(res.body.data.scorecardHash).toBe(hash);
     expect(res.body.data.unsignedSelectWinnerByVerifier.data).toBe(`selectWinnerByVerifier(7,${ethers.getAddress(AGENT)},${hash})`);
-    expect(JSON.parse(mem.kv.get(`a2a:open:scorecard-pending:${REF}:${hash.toLowerCase()}`)!)).toEqual(scorecard);
+    expect(JSON.parse(mem.kv.get(pendingKey)!)).toEqual({ scorecardHash: hash, scorecard });
+    expect(mem.ttl.get(pendingKey)).toBe(store.PENDING_SCORECARD_TTL_SEC);
+    expect(store.PENDING_SCORECARD_TTL_SEC).toBeGreaterThanOrEqual(7 * 86_400 + 48 * 3600);
+  });
+
+  it('holds one per judge: a later pick request replaces it', async () => {
+    for (let i = 0; i < 25; i++) await pick(VERIFIER, { scorecard: { ...scorecard, n: i } });
+    expect([...mem.kv.keys()].filter((k) => k.includes('scorecard'))).toEqual([pendingKey]);
+    expect(JSON.parse(mem.kv.get(pendingKey)!).scorecard.n).toBe(24);
   });
 
   it('refuses a scorecardHash that is not the scorecard sent, and an oversized scorecard', async () => {
@@ -465,22 +521,44 @@ describe('scorecards', () => {
     expect([...mem.kv.keys()].some((k) => k.includes('scorecard'))).toBe(false);
   });
 
-  it('serves the scorecard the escrow anchored, once the indexer kept it', async () => {
-    expect((await request(app()).get(`/api/v1/a2a/tasks/${HASH}/scorecard`).set(as(AGENT2))).status).toBe(404);
+  it('serves the scorecard the escrow anchored once the indexer kept it, and says why when it cannot', async () => {
+    expect((await getCard()).body.error.code).toBe('NOT_CLOSED');
     await pick(VERIFIER, { scorecard });
     const hash = scorecardHashOf(scorecard);
     await store.saveOutcome(REF, { kind: 'winner', winner: AGENT, judge: 'task_verifier', scorecardHash: hash });
-    // Held, not anchored yet: nothing served.
-    expect((await request(app()).get(`/api/v1/a2a/tasks/${HASH}/scorecard`).set(as(AGENT2))).status).toBe(404);
-    expect(await store.keepScorecard(REF, hash)).toBe(true);
-    const res = await request(app()).get(`/api/v1/a2a/tasks/${HASH}/scorecard`).set(as(AGENT2));
+    expect((await getCard()).body.error.code).toBe('SCORECARD_NOT_SENT');
+    expect(await store.keepScorecard(REF, 'task_verifier', hash)).toBe(true);
+    const res = await getCard();
     expect(res.status).toBe(200);
     expect(res.body.data).toMatchObject({ outcome: 'winner', judge: 'task_verifier', winner: AGENT, scorecardHash: hash.toLowerCase(), scorecard });
+    expect(mem.ttl.get(`a2a:open:scorecard:${REF}`)).toBe(store.RESULTS_TTL_SEC);
+    expect(mem.kv.has(pendingKey)).toBe(false);
   });
 
-  it('keeps nothing for a hash no judge held a scorecard under', async () => {
-    expect(await store.keepScorecard(REF, '0x' + '55'.repeat(32))).toBe(false);
+  it('says no scorecard was anchored when the pick carried none', async () => {
+    await store.saveOutcome(REF, { kind: 'void', judge: 'backup', scorecardHash: ethers.ZeroHash });
+    expect((await getCard()).body.error.code).toBe('NO_SCORECARD');
+  });
+
+  it('keeps nothing for a hash the held scorecard does not have', async () => {
+    await pick(VERIFIER, { scorecard });
+    expect(await store.keepScorecard(REF, 'task_verifier', '0x' + '55'.repeat(32))).toBe(false);
     expect(await store.getScorecard(REF)).toBeNull();
+  });
+
+  it("takes back a lapsed or a backup judge's scorecard from anyone, checked against the anchored hash", async () => {
+    const hash = scorecardHashOf(scorecard);
+    expect((await postCard(scorecard)).body.error.code).toBe('NOT_ANCHORED');
+    await store.saveOutcome(REF, { kind: 'void', judge: 'backup', scorecardHash: hash });
+    const wrong = await postCard({ ...scorecard, forged: true });
+    expect(wrong.status).toBe(400);
+    expect(wrong.body.error.code).toBe('SCORECARD_MISMATCH');
+    const ok = await postCard(scorecard);
+    expect(ok.status).toBe(200);
+    expect(ok.body.data).toMatchObject({ scorecardHash: hash, kept: true });
+    expect((await getCard()).body.data).toMatchObject({ outcome: 'void', judge: 'backup', scorecard });
+    // Kept once: a second send changes nothing.
+    expect((await postCard(scorecard)).body.data.kept).toBe(false);
   });
 });
 
@@ -489,20 +567,22 @@ describe('GET /open-verifications', () => {
     meta: openMeta({ taskId, openPick: { mode: 'agent', creatorWindow: 0 }, deadline: NOW - 60, verificationCriteria: { min_length: 50, expected_answer: '42' }, ...over }),
     state: { taskId, status },
   });
-  const get = (who: string) => request(app()).get('/api/v1/a2a/open-verifications').set(as(who));
+  const get = (who: string, extra?: string) => request(app()).get('/api/v1/a2a/open-verifications').set(as(who, extra));
 
   it("lists the caller's tasks in their window, with the full criteria the judge needs", async () => {
-    a2a.listOpenSubmissionTasks.mockResolvedValue([
+    a2a.getVerifierTasks.mockResolvedValue([
       listed('0xmine'),
+      listed('0xsingle', { submissionMode: undefined }),
       listed('0xother', { verifierAddress: AGENT2 }),
       listed('0xnotyet', { deadline: NOW + 600 }),
       listed('0xposterfirst', { openPick: { mode: 'creator', creatorWindow: 3600 } }),
-      listed('0xlongago', { deadline: NOW - 30 * 86_400 }),
+      listed('0xlongago', { deadline: NOW - 60 * 86_400 }),
       listed('0xdone', {}, 'completed'),
       listed('0xothernet', { chainId: 1 }),
     ]);
     const res = await get(VERIFIER);
     expect(res.status).toBe(200);
+    expect(a2a.getVerifierTasks).toHaveBeenCalledWith(VERIFIER);
     expect(res.body.data.tasks.map((t: any) => t.meta.taskId)).toEqual(['0xmine']);
     const [t] = res.body.data.tasks;
     expect(t.meta.verificationCriteria).toEqual({ min_length: 50, expected_answer: '42' });
@@ -510,8 +590,22 @@ describe('GET /open-verifications', () => {
     expect(t.window).toEqual({ opensAt: NOW - 60, closesAt: NOW - 60 + 48 * 3600 });
   });
 
+  it('puts live windows first, soonest close first, so the cap never hides one behind a lapsed task', async () => {
+    const lapsed = Array.from({ length: 60 }, (_, i) => listed(`0xold${i}`, { deadline: NOW - 3 * 86_400 - i }));
+    a2a.getVerifierTasks.mockResolvedValue([...lapsed, listed('0xlater', { deadline: NOW - 60 }), listed('0xsooner', { deadline: NOW - 3600 })]);
+    const ids = (await get(VERIFIER)).body.data.tasks.map((t: any) => t.meta.taskId);
+    expect(ids).toHaveLength(50);
+    expect(ids.slice(0, 3)).toEqual(['0xsooner', '0xlater', '0xold0']);
+  });
+
+  it('reads every linked wallet, once per task', async () => {
+    a2a.getVerifierTasks.mockImplementation(async (w: string) => (w === VERIFIER ? [listed('0xmine')] : [listed('0xmine')]));
+    const res = await get(AGENT2, VERIFIER);
+    expect(res.body.data.tasks.map((t: any) => t.meta.taskId)).toEqual(['0xmine']);
+  });
+
   it('lists nothing for an agent that verifies nothing', async () => {
-    a2a.listOpenSubmissionTasks.mockResolvedValue([listed('0xmine')]);
+    a2a.getVerifierTasks.mockResolvedValue([listed('0xmine')]);
     expect((await get(AGENT)).body.data.tasks).toEqual([]);
   });
 
@@ -521,4 +615,3 @@ describe('GET /open-verifications', () => {
     expect((await get(VERIFIER)).status).toBe(404);
   });
 });
-

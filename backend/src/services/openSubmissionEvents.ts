@@ -169,10 +169,16 @@ async function tellSubmitters(
   });
 }
 
-/** The judge's scorecard, kept when the escrow anchored its hash (POST /select held it). */
-async function keepAnchoredScorecard(ref: TaskRef, scorecardHash: string): Promise<void> {
+/**
+ * The judge's scorecard, kept when the escrow anchored its hash. Only the
+ * poster and the task verifier pick through POST /select, which holds one; a
+ * backup judge's or admin's scorecard can still be sent afterwards (POST
+ * /tasks/:id/scorecard), checked against the hash recorded here.
+ */
+async function keepJudgeScorecard(ref: TaskRef, judge: OpenJudge, scorecardHash: string): Promise<void> {
   if (!scorecardHash || /^0x0*$/.test(scorecardHash)) return;
-  await store.keepScorecard(ref, scorecardHash);
+  if (judge !== 'creator' && judge !== 'task_verifier') return;
+  await store.keepScorecard(ref, judge, scorecardHash);
 }
 
 const WINNER_PICKED_BY: Record<OpenJudge, string> = {
@@ -190,7 +196,7 @@ export async function handleWinnerSelected(chain: TaskChain, taskId: bigint, win
   const judge = JUDGES[judgeIndex] ?? 'admin';
   const winnerAddr = winner.toLowerCase();
   await store.saveOutcome(ref, { kind: 'winner', winner: winnerAddr, judge, scorecardHash: scorecardHash.toLowerCase() });
-  await keepAnchoredScorecard(ref, scorecardHash);
+  await keepJudgeScorecard(ref, judge, scorecardHash);
   await store.unscheduleSweep(ref);
   const listing = await listingOf(rec);
   if (listing) {
@@ -241,7 +247,7 @@ export async function handleOpenTaskVoided(chain: TaskChain, taskId: bigint, jud
   const hash = rec.taskHash;
   const judge = JUDGES[judgeIndex] ?? 'admin';
   await store.saveOutcome(ref, { kind: 'void', judge, scorecardHash: scorecardHash.toLowerCase() });
-  await keepAnchoredScorecard(ref, scorecardHash);
+  await keepJudgeScorecard(ref, judge, scorecardHash);
   await store.unscheduleSweep(ref);
   if (await listingOf(rec)) await closeOpenSubmissionTask(hash, { kind: 'void' });
   // The poster voids only a task nobody submitted to, and needs no alert for
