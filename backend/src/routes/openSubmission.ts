@@ -621,7 +621,7 @@ openSubmissionRouter.get('/open-verifications', enabledOnly, requireAuth, async 
     const indexed = (await Promise.all([...wallets].map((w) => a2aStore.getVerifierTasks(w)))).flat();
     const offset = Math.max(parseInt(req.query.offset as string) || 0, 0);
     const limit = Math.min(Math.max(parseInt(req.query.limit as string) || VERIFIER_LIST_MAX, 1), VERIFIER_LIST_MAX);
-    const listed = indexed
+    const inWindow = indexed
       .filter(({ meta, state }) => {
         if (seen.has(meta.taskId)) return false;
         seen.add(meta.taskId);
@@ -629,8 +629,17 @@ openSubmissionRouter.get('/open-verifications', enabledOnly, requireAuth, async 
         if (!meta.verifierAddress || !wallets.has(meta.verifierAddress.toLowerCase())) return false;
         const opensAt = verifierWindowOpensAt(meta);
         return opensAt !== null && nowSec >= opensAt && nowSec < opensAt + VERIFIER_PICK_WINDOW_SEC + VERIFIER_LIST_SLACK_SEC;
-      })
-      .map((t) => ({ ...t, closesAt: verifierWindowOpensAt(t.meta)! + VERIFIER_PICK_WINDOW_SEC }))
+      });
+    // Each task's on-chain id, and whether this verifier already declined it,
+    // before paging: a declined task is not its work any more, so it takes
+    // no place on a page and is not counted in total.
+    const resolvedAll = await Promise.all(inWindow.map(async (t) => {
+      const resolved = await resolveCachedTaskByHash(t.meta.taskId).catch(() => null);
+      const declined = resolved ? !!(await store.getDecline(store.taskRef(resolved.chain, resolved.taskId))) : false;
+      return { ...t, resolved, declined, closesAt: verifierWindowOpensAt(t.meta)! + VERIFIER_PICK_WINDOW_SEC };
+    }));
+    const listed = resolvedAll
+      .filter((t) => !t.declined)
       .sort((a, b) => {
         const aLive = nowSec < a.closesAt;
         const bLive = nowSec < b.closesAt;
@@ -638,17 +647,12 @@ openSubmissionRouter.get('/open-verifications', enabledOnly, requireAuth, async 
         return aLive ? a.closesAt - b.closesAt : b.closesAt - a.closesAt;
       });
     const mine = listed.slice(offset, offset + limit);
-    const tasks = (await Promise.all(mine.map(async ({ meta, closesAt }) => {
-      const resolved = await resolveCachedTaskByHash(meta.taskId).catch(() => null);
-      // A task this verifier already declined is not its work any more.
-      if (resolved && (await store.getDecline(store.taskRef(resolved.chain, resolved.taskId)))) return null;
-      return {
-        meta: { ...a2aStore.projectPublicMeta(meta), ...(meta.verificationCriteria ? { verificationCriteria: meta.verificationCriteria } : {}) },
-        onChainTaskId: resolved ? String(resolved.taskId) : null,
-        submissions: resolved ? await store.recordedSubmissionCount(store.taskRef(resolved.chain, resolved.taskId)) : 0,
-        window: { opensAt: closesAt - VERIFIER_PICK_WINDOW_SEC, closesAt },
-      };
-    }))).filter((t) => t !== null);
+    const tasks = await Promise.all(mine.map(async ({ meta, resolved, closesAt }) => ({
+      meta: { ...a2aStore.projectPublicMeta(meta), ...(meta.verificationCriteria ? { verificationCriteria: meta.verificationCriteria } : {}) },
+      onChainTaskId: resolved ? String(resolved.taskId) : null,
+      submissions: resolved ? await store.recordedSubmissionCount(store.taskRef(resolved.chain, resolved.taskId)) : 0,
+      window: { opensAt: closesAt - VERIFIER_PICK_WINDOW_SEC, closesAt },
+    })));
     const response: ApiResponse = { success: true, data: { tasks, total: listed.length, offset, limit } };
     res.json(response);
   } catch (err) {

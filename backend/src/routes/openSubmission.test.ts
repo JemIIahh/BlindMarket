@@ -683,6 +683,20 @@ describe('POST /tasks/:id/judge-decline', () => {
     expect(await store.getDecline(REF)).toBeNull();
   });
 
+  it('refuses an oversized scorecard', async () => {
+    const big = await decline(VERIFIER, { scorecard: { reasons: 'x'.repeat(MAX_SCORECARD_BYTES) } });
+    expect(big.status).toBe(413);
+    expect(await store.getDecline(REF)).toBeNull();
+  });
+
+  it('takes a declined task off the list before paging: no slot, not in total', async () => {
+    const live = (taskId: string, deadline: number) => ({ meta: openMeta({ taskId, openPick: { mode: 'agent', creatorWindow: 0 }, deadline }), state: { taskId, status: 'collecting' } });
+    a2a.getVerifierTasks.mockResolvedValue([live('0xfirst', NOW - 7200), live('0xsecond', NOW - 60)]);
+    await decline(VERIFIER); // resolveCachedTaskByHash maps every hash to task 7: both read as declined
+    const res = await request(app()).get('/api/v1/a2a/open-verifications?limit=1').set(as(VERIFIER));
+    expect(res.body.data).toMatchObject({ total: 0, tasks: [] });
+  });
+
   it('takes the task off the verifier’s list', async () => {
     const listed = { meta: openMeta({ taskId: '0xmine', openPick: { mode: 'agent', creatorWindow: 0 }, deadline: NOW - 60 }), state: { taskId: '0xmine', status: 'collecting' } };
     a2a.getVerifierTasks.mockResolvedValue([listed]);

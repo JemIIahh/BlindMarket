@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { ethers } from 'ethers';
 import { z } from 'zod';
+import { createHash } from 'node:crypto';
 
 vi.mock('ai', () => ({ tool: (d: unknown) => d, generateText: vi.fn(), generateObject: vi.fn(), stepCountIs: (n: number) => n }));
 vi.mock('@ai-sdk/openai', () => ({ createOpenAI: () => () => 'm' }));
@@ -12,7 +13,7 @@ vi.mock('socket.io-client', () => ({ io: () => ({ on: vi.fn(), emit: vi.fn() }) 
 import {
   judgeableSubmissions, checkRanking, judgeInRounds, buildScorecard, checkUnsignedSelect, scorecardHashOf,
   sendPick, confirmScorecard, openJudgePassCore, createJudgeState, JUDGE_BATCH, JUDGE_MAX_SUBMISSIONS,
-  verifyOpenResults, openEvidenceHash,
+  verifyOpenResults, openEvidenceHash, readCommitments, storedBytesMatch, rankWithModel, isProviderFailure,
   // @ts-expect-error — plain-JS worker, no d.ts
 } from './worker.js';
 
@@ -124,13 +125,17 @@ describe('judgeInRounds', () => {
     expect(res.laterRounds.map((r: any[]) => r.length)).toEqual([10, 2]);
   });
 
-  it('fails closed when any ranking fails, or a later round names no winner', async () => {
+  it('fails closed when any ranking fails', async () => {
     const failing = vi.fn(async (batch: any[]) => (batch[0].id === 'S1' ? null : { winner: batch[0].id, scores: [] }));
     expect(await judgeInRounds(cands(JUDGE_BATCH + 1), failing)).toBeNull();
-    // Round 1: [S1..S6] → S1, [S7] → S7. Round 2: [S1, S7] → none, which contradicts round 1.
-    const contradicts = vi.fn(async (batch: any[]) => ({ winner: batch.length === 2 ? null : batch[0].id, scores: [] }));
-    expect(await judgeInRounds(cands(JUDGE_BATCH + 1), contradicts)).toBeNull();
-    expect(contradicts).toHaveBeenCalledTimes(3);
+  });
+
+  it('names no winner when a later round finds none acceptable: a decline, not a failure', async () => {
+    // Round 1: [S1..S6] → S1, [S7] → S7. Round 2: [S1, S7] → none.
+    const noneInFinal = vi.fn(async (batch: any[]) => ({ winner: batch.length === 2 ? null : batch[0].id, scores: [] }));
+    const res = await judgeInRounds(cands(JUDGE_BATCH + 1), noneInFinal);
+    expect(res).toMatchObject({ winner: null });
+    expect(noneInFinal).toHaveBeenCalledTimes(3);
   });
 
   it('names no winner when no first-round batch has one', async () => {
@@ -170,9 +175,9 @@ describe('buildScorecard', () => {
     expect(card.notJudged.reduce((n: number, g: any) => n + g.count, 0)).toBe(2000);
   });
 
-  it('never publishes the expected answer in a reason', () => {
-    const card = buildScorecard({ ...base, scores: [{ id: 'S1', score: 9, reason: 'matches 42.7 exactly' }, { id: 'S2', score: 1, reason: 'said 13' }], expectedAnswer: '42.7' });
-    expect(JSON.stringify(card)).not.toContain('42.7');
+  it('never publishes the expected answer in a reason, whatever its case', () => {
+    const card = buildScorecard({ ...base, scores: [{ id: 'S1', score: 9, reason: 'says Paris (1.5)' }, { id: 'S2', score: 1, reason: 'said PARIS (1.5) too late' }], expectedAnswer: 'paris (1.5)' });
+    expect(JSON.stringify(card).toLowerCase()).not.toContain('paris (1.5)');
   });
 });
 
@@ -265,11 +270,24 @@ describe('sendPick', () => {
     expect(send).not.toHaveBeenCalled();
   });
 
-  it('judges again without a winner the server refuses for this judge (own agent)', async () => {
+  it('judges again without a winner the server refuses for this judge (own agent), spending an attempt', async () => {
     expect(await sendPick(task(), pick, io({ postSelect: refused(409, 'OWN_AGENT_PICK') }), state)).toBe(false);
     expect(state.done.has(HASH)).toBe(false);
     expect(state.picked.has(HASH)).toBe(false);
     expect([...state.excluded.get(HASH)]).toEqual([A]);
+    expect(state.attempts.get(HASH)).toBe(1);
+  });
+
+  it('holds the pick on NOT_A_SUBMITTER: it read the commitment itself, so the server read is stale', async () => {
+    expect(await sendPick(task(), pick, io({ postSelect: refused(409, 'NOT_A_SUBMITTER') }), state)).toBe(false);
+    expect(state.picked.get(HASH)).toMatchObject({ winner: A });
+    expect(state.excluded.has(HASH)).toBe(false);
+  });
+
+  it('still confirms the scorecard when a pick it sent closed the window', async () => {
+    expect(await sendPick(task(), { ...pick, txHash: '0x88' }, io({ postSelect: refused(409, 'NOT_PICK_WINDOW') }), state)).toBe(false);
+    expect(state.done.get(HASH)).toMatch(/NOT_PICK_WINDOW/);
+    expect(state.confirm.get(HASH)).toEqual({ scorecard: SCORECARD, tries: 0 });
   });
 
   it('holds the pick while the wallet cannot pay gas, without posting', async () => {
@@ -331,6 +349,7 @@ describe('openJudgePassCore', () => {
     preflight: vi.fn(async () => null),
     crashCheck: () => null,
     fetchSubmissions: vi.fn(async () => subs),
+    readCommitments: vi.fn(async (_t: unknown, list: any[]) => list.map((x) => ({ ...x, committed: '0x' + 'c0'.repeat(32) }))),
     verifyResults: vi.fn(async (_t: unknown, list: any[]) => list),
     readBrief: vi.fn(async () => 'the brief'),
     rank: vi.fn(async (_ctx: unknown, batch: any[]) => ({ winner: batch[batch.length - 1].id, scores: batch.map((c, i) => ({ id: c.id, score: i, reason: 'ok' })) })),
@@ -387,6 +406,75 @@ describe('openJudgePassCore', () => {
     expect(await openJudgePassCore(d, state)).toBe('sent');
     expect(d.sendPick).toHaveBeenCalledWith(task(), held);
     expect(d.rank).not.toHaveBeenCalled();
+  });
+
+  it('never lets a held pick block the other tasks: it sends it and judges the next', async () => {
+    const other = '0x' + '44'.repeat(32);
+    const state = createJudgeState();
+    state.picked.set(HASH, { task: task(), winner: A, scorecard: SCORECARD });
+    const d = deps({
+      fetchList: vi.fn(async () => [task(), task({ taskId: other })]),
+      readOnChain: vi.fn(async (t: any) => ({ taskHash: t.meta.taskId, verifier: JUDGE, phase: 2n, submissionCount: 2n })),
+    });
+    expect(await openJudgePassCore(d, state)).toBe('judged');
+    expect(d.sendPick.mock.calls.map(([t]: any[]) => t.meta.taskId)).toEqual([HASH, other]);
+    expect(d.rank).toHaveBeenCalled();
+  });
+
+  it('drops a made-up submission (no on-chain commitment) and waits when the real ones fall short', async () => {
+    const padded = [...subs, sub(C, 3, null)];
+    const d = deps({
+      fetchSubmissions: vi.fn(async () => padded),
+      readOnChain: chain({ submissionCount: 3n }),
+      readCommitments: vi.fn(async (_t: unknown, list: any[]) => list.map((x) => ({ ...x, committed: x.submitter === C ? ethers.ZeroHash : '0x' + 'c0'.repeat(32) }))),
+    });
+    const state = createJudgeState();
+    await openJudgePassCore(d, state);
+    expect(d.rank).not.toHaveBeenCalled();
+    expect(state.retryAt.get(HASH)).toBeGreaterThan(NOW_MS);
+  });
+
+  it('waits rather than judge on a summary when a stored result cannot be read', async () => {
+    const d = deps({ verifyResults: vi.fn(async () => { throw new Error('storage 503'); }) });
+    const state = createJudgeState();
+    await openJudgePassCore(d, state);
+    expect(d.rank).not.toHaveBeenCalled();
+    expect(state.retryAt.get(HASH)).toBeGreaterThan(NOW_MS);
+    expect(state.attempts.has(HASH)).toBe(false);
+  });
+
+  it('charges a crash to the task from the moment it reads its submissions', async () => {
+    const d = deps({ fetchSubmissions: vi.fn(async () => null) });
+    await openJudgePassCore(d, createJudgeState());
+    expect(d.inFlight.mock.calls).toEqual([['task-started', HASH], ['task-finished', HASH, false]]);
+  });
+
+  it('stops judging for paid work that arrives mid-way, without spending an attempt', async () => {
+    let calls = 0;
+    const many = Array.from({ length: JUDGE_BATCH + 2 }, (_, i) => sub(`0x${String(i + 1).padStart(40, '0')}`, i + 1, out(`w${i}`)));
+    const d = deps({
+      fetchSubmissions: vi.fn(async () => many),
+      readOnChain: chain({ submissionCount: BigInt(many.length) }),
+      busy: () => calls++ > 0, // free at the start, busy once judging began
+    });
+    const state = createJudgeState();
+    expect(await openJudgePassCore(d, state)).toBe('busy');
+    expect(state.attempts.has(HASH)).toBe(false);
+    expect(d.sendPick).not.toHaveBeenCalled();
+  });
+
+  it('lets a sent pick of a settled task go after its lookups, and forgets gone tasks on a full list', async () => {
+    const state = createJudgeState();
+    const gone = '0x' + '55'.repeat(32);
+    state.picked.set(gone, { task: task({ taskId: gone }), winner: A, scorecard: {}, txHash: '0x88', lookups: 24 });
+    state.done.set('0xold', 'picked');
+    await openJudgePassCore(deps({ fetchList: vi.fn(async () => ({ tasks: [], complete: true })) }), state);
+    expect(state.picked.has(gone)).toBe(false);
+    expect(state.done.has('0xold')).toBe(false);
+    const partial = createJudgeState();
+    partial.done.set('0xold', 'picked');
+    await openJudgePassCore(deps({ fetchList: vi.fn(async () => ({ tasks: [], complete: false })) }), partial);
+    expect(partial.done.has('0xold')).toBe(true);
   });
 
   it('looks up a sent pick whose task left the list, and forgets one never sent', async () => {
@@ -484,35 +572,102 @@ describe('openJudgePassCore', () => {
   });
 });
 
-describe('verifyOpenResults: each result against its on-chain commitment', () => {
-  const t = { meta: { taskId: HASH, chain: 'arc' }, onChainTaskId: '41' };
-  const rdA = { output: 'A wrote this' };
-  const rdB = { output: 'B wrote this' };
-  const committed = new Map([[A, openEvidenceHash(rdA, null)], [B, openEvidenceHash(rdB, null)], [C, openEvidenceHash({ output: 'stub' }, ROOT)]]);
-  const read = vi.fn(async (_t: unknown, fn: string, [id, who]: [bigint, string]) => {
-    expect([fn, id]).toEqual(['submissionOf', 41n]);
-    return [committed.get(who) ?? ethers.ZeroHash];
-  });
-
-  it('keeps a result that matches, and marks one a server swapped', async () => {
-    const swapped = [sub(A, 1, rdB), sub(B, 2, rdB)];
-    const out = await verifyOpenResults(t, swapped, read, async () => Buffer.from(''));
-    expect(out.map((s: any) => !!s.mismatch)).toEqual([true, false]);
-  });
-
-  it('reads a full result from storage when the commitment names it', async () => {
-    const stored = sub(C, 3, { output: 'stub' });
-    stored.result!.rootHash = ROOT as any;
-    const download = vi.fn(async () => Buffer.from('the whole stored result'));
-    const [out] = await verifyOpenResults(t, [stored], read, download);
-    expect(download).toHaveBeenCalledWith(ROOT);
-    expect(out.storedText).toBe('the whole stored result');
-    expect(out.mismatch).toBeUndefined();
-  });
-
-  it('leaves a result-less submission as it is', async () => {
-    const [out] = await verifyOpenResults(t, [sub(A, 1, null)], read, async () => Buffer.from(''));
-    expect(out.result).toBeNull();
+describe('readCommitments', () => {
+  it('reads every listed submitter’s commitment from the escrow', async () => {
+    const read = vi.fn(async (_t: unknown, fn: string, [id, who]: [bigint, string]) => {
+      expect([fn, id]).toEqual(['submissionOf', 41n]);
+      return [who === A ? '0x' + 'aa'.repeat(32) : ethers.ZeroHash];
+    });
+    const res = await readCommitments({ meta: { taskId: HASH, chain: 'arc' }, onChainTaskId: '41' }, [sub(A, 1, null), sub(B, 2, null)], read);
+    expect(res.map((x: any) => x.committed)).toEqual(['0x' + 'aa'.repeat(32), ethers.ZeroHash]);
   });
 });
 
+describe('verifyOpenResults: each result against its commitment and its storage id', () => {
+  const t = { meta: { taskId: HASH, chain: 'arc' }, onChainTaskId: '41' };
+  const rdA = { output: 'A wrote this' };
+  const rdB = { output: 'B wrote this' };
+  const withCommit = (x: any, rd: any, root: string | null = null) => ({ ...x, committed: openEvidenceHash(rd, root) });
+  const noDownload = async () => { throw new Error('not expected'); };
+
+  it('keeps a result that matches, and marks one a server swapped', async () => {
+    const res = await verifyOpenResults(t, [withCommit(sub(A, 1, rdB), rdA), withCommit(sub(B, 2, rdB), rdB)], noDownload, async () => true);
+    expect(res.map((x: any) => !!x.mismatch)).toEqual([true, false]);
+  });
+
+  it('reads a stored full result only when its bytes are the stored content', async () => {
+    const stored = { ...sub(C, 3, { output: 'stub' }), result: { resultData: { output: 'stub' }, rootHash: ROOT } };
+    const good = await verifyOpenResults(t, [withCommit(stored, { output: 'stub' }, ROOT)], async () => Buffer.from('the whole result'), async () => true);
+    expect(good[0].storedText).toBe('the whole result');
+    const forged = await verifyOpenResults(t, [withCommit(stored, { output: 'stub' }, ROOT)], async () => Buffer.from('server-chosen text'), async () => false);
+    expect(forged[0]).toMatchObject({ mismatch: true });
+    expect(forged[0].storedText).toBeUndefined();
+  });
+
+  it('marks a stored result too large to judge, and throws when one cannot be downloaded', async () => {
+    const stored = { ...sub(C, 3, { output: 'stub' }), result: { resultData: { output: 'stub' }, rootHash: ROOT } };
+    const big = await verifyOpenResults(t, [withCommit(stored, { output: 'stub' }, ROOT)], async () => Buffer.alloc(300 * 1024), async () => true);
+    expect(big[0]).toMatchObject({ mismatch: true, why: 'its stored result is too large to judge' });
+    await expect(verifyOpenResults(t, [withCommit(stored, { output: 'stub' }, ROOT)], async () => { throw new Error('storage 503'); }, async () => true)).rejects.toThrow('storage 503');
+  });
+
+  it('leaves a result-less submission as it is', async () => {
+    const [res] = await verifyOpenResults(t, [sub(A, 1, null)], noDownload, async () => true);
+    expect(res.result).toBeNull();
+  });
+});
+
+describe('storedBytesMatch', () => {
+  const bytes = Buffer.from('a stored result');
+  it('matches the sha256 id of the local store and the 0G merkle root of 0G storage', async () => {
+    expect(await storedBytesMatch(bytes, '0x' + createHash('sha256').update(bytes).digest('hex'))).toBe(true);
+    const { MemData } = await import('@0gfoundation/0g-storage-ts-sdk');
+    const [tree] = await new MemData(new Uint8Array(bytes)).merkleTree();
+    expect(await storedBytesMatch(bytes, tree!.rootHash() as string)).toBe(true);
+  });
+  it('refuses other bytes, and ids it cannot check', async () => {
+    expect(await storedBytesMatch(Buffer.from('other bytes'), '0x' + createHash('sha256').update(bytes).digest('hex'))).toBe(false);
+    expect(await storedBytesMatch(bytes, 'walrus-style-id-abcdefghijklmnopqrstuvwxyz012345')).toBe(false);
+  });
+});
+
+describe('rankWithModel', () => {
+  const batch = [{ id: 'S1', submitter: A, output: 'one' }, { id: 'S2', submitter: B, output: 'two' }];
+  const answer = { object: { scores: [{ id: 'S1', score: 8, reason: 'r' }, { id: 'S2', score: 2, reason: 'r' }], winner: 'S1' } };
+
+  it('tags every header with a fresh random tag, so a submission cannot forge one', async () => {
+    const generate = vi.fn(async () => answer);
+    await rankWithModel({ brief: 'b', criteria: null }, batch, { generate });
+    await rankWithModel({ brief: 'b', criteria: null }, batch, { generate });
+    const tags = generate.mock.calls.map(([o]: any[]) => /SUBMISSION S1 #([0-9a-f]+) ===/.exec(o.prompt)?.[1]);
+    expect(tags[0]).toMatch(/^[0-9a-f]{12}$/);
+    expect(tags[0]).not.toBe(tags[1]);
+    const [{ system, prompt }] = generate.mock.calls[0] as any[];
+    expect(system).toContain(`#${tags[0]}`);
+    expect(prompt).toContain(`SUBMISSION S2 #${tags[0]} ===`);
+  });
+
+  it('returns the checked ranking, and null for an inconsistent one', async () => {
+    expect(await rankWithModel({ brief: 'b', criteria: null }, batch, { generate: vi.fn(async () => answer) })).toMatchObject({ winner: 'S1' });
+    const lowWinner = { object: { ...answer.object, winner: 'S2' } };
+    expect(await rankWithModel({ brief: 'b', criteria: null }, batch, { generate: vi.fn(async () => lowWinner) })).toBeNull();
+  });
+
+  it('tells the inference gate about a provider failure, not about a malformed answer', async () => {
+    const onProviderFailure = vi.fn();
+    const outage = Object.assign(new Error('Unauthorized'), { name: 'AI_APICallError' });
+    expect(await rankWithModel({ brief: 'b', criteria: null }, batch, { generate: vi.fn(async () => { throw outage; }), onProviderFailure })).toBeNull();
+    expect(onProviderFailure).toHaveBeenCalledTimes(1);
+    const malformed = Object.assign(new Error('No object generated: response did not match schema'), { name: 'AI_NoObjectGeneratedError' });
+    expect(await rankWithModel({ brief: 'b', criteria: null }, batch, { generate: vi.fn(async () => { throw malformed; }), onProviderFailure })).toBeNull();
+    expect(onProviderFailure).toHaveBeenCalledTimes(1);
+  });
+
+  it('classifies provider failures', () => {
+    expect(isProviderFailure(Object.assign(new Error('x'), { name: 'AI_RetryError' }))).toBe(true);
+    expect(isProviderFailure(new Error('open-task judge run timed out after 600000ms'))).toBe(true);
+    expect(isProviderFailure(new Error('fetch failed'))).toBe(true);
+    expect(isProviderFailure(Object.assign(new Error('Type validation failed'), { name: 'AI_TypeValidationError' }))).toBe(false);
+    expect(isProviderFailure(new Error('Unexpected token in JSON'))).toBe(false);
+  });
+});
