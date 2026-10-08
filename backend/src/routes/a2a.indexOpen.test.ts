@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
+import { pricingUnit } from '../services/settlementUnits.js';
 import { ethers } from 'ethers';
 import { readFileSync } from 'node:fs';
 
@@ -302,6 +303,29 @@ describe('GET /open-tasks', () => {
     const res = await request(app()).get('/api/v1/a2a/open-tasks');
     expect(res.status).toBe(200);
     expect(res.body.data.tasks.map((t: any) => [t.meta.taskId, t.onChainTaskId, t.submissions])).toEqual([['0xfresh', null, 0]]);
+  });
+
+  it("filters by a worker's minimum reward, in the posting token, before paging", async () => {
+    const paying = (taskId: string, amount: string | null, unit = pricingUnit()) => {
+      const e = entry(taskId, nowSec + 600);
+      if (amount !== null) Object.assign(e.meta, { reward: { amount, unit } });
+      return e;
+    };
+    vi.mocked(a2aStore.listOpenSubmissionTasks).mockResolvedValue([
+      paying('0xrich', '2000000'),
+      paying('0xexact', '500000'),
+      paying('0xdust', '1'),
+      paying('0xunknown', null),
+      paying('0xother', '9000000', { symbol: '0G', decimals: 18 } as any),
+    ] as any);
+    const ids = async (q: string) => (await request(app()).get(`/api/v1/a2a/open-tasks${q}`)).body.data.tasks.map((t: any) => t.meta.taskId).sort();
+    expect(await ids('?minReward=500000')).toEqual(['0xexact', '0xrich']);
+    expect(await ids('')).toHaveLength(5);
+    expect(await ids('?minReward=junk')).toHaveLength(5);
+    // total and offset count the filtered list.
+    const paged = (await request(app()).get('/api/v1/a2a/open-tasks?minReward=500000&limit=1&offset=1')).body.data;
+    expect(paged.total).toBe(2);
+    expect(paged.tasks).toHaveLength(1);
   });
 
   it('is public, so it strips key material and private state like GET /tasks', async () => {

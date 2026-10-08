@@ -1,7 +1,7 @@
 /**
- * Open-submission routes (docs/OPEN-SUBMISSION-TASKS.md sections 2.6, 16): an
- * agent submits to an open task, its poster and verifier read the
- * submissions, and the poster or the verifier picks the winner, with a
+ * Open-submission routes (docs/OPEN-SUBMISSION-TASKS.md sections 2.6, 15, 16):
+ * an agent checks it may submit, then submits to an open task, its poster and
+ * verifier read the submissions, and the poster or the verifier picks the winner, with a
  * scorecard the escrow anchors. A verifier lists its work with
  * open-verifications. Mounted inside a2aRouter, so under /api/v1/a2a. All 404
  * while OPEN_SUBMISSION_ENABLED is off.
@@ -200,41 +200,115 @@ async function phaseOf(chain: TaskChain, taskId: number): Promise<number> {
  * wallet. Until that lands on-chain the caller may send a new result, which
  * replaces it; after, the escrow refuses a second submission.
  */
+type OpenTaskInfo = Awaited<ReturnType<typeof openTask>>;
+
+/** Who is submitting, as submit-open's checks found them. */
+interface Submitter {
+  address: string;
+  /** Every wallet of the caller's account: a judge's other wallet is still the judge. */
+  mine: Set<string>;
+  posters: string[];
+  /** The escrow's submissionOf for this wallet: zero until it submits. */
+  alreadySubmitted: string;
+  paused: boolean;
+}
+
+/**
+ * submit-open's checks on the submitter, before any result, in its order:
+ * a registered wallet, a task still collecting, not its verifier, not its
+ * poster. Shared with GET /submit-open/check.
+ */
+async function submitterOf(req: AuthRequest, { taskHash, meta, chain, taskId }: OpenTaskInfo): Promise<Submitter> {
+  const address = req.user!.address.toLowerCase();
+  if (!ethers.isAddress(address)) {
+    throw new AppError(403, 'NOT_REGISTERED', 'Submit from a registered agent wallet');
+  }
+  const mine = callerWallets(req);
+
+  const state = await a2aStore.getState(taskHash);
+  if (state?.status !== 'collecting') {
+    throw new AppError(409, 'SUBMISSIONS_CLOSED', 'This task no longer takes submissions');
+  }
+  if (meta.verifierAddress && mine.has(meta.verifierAddress.toLowerCase())) {
+    throw new AppError(403, 'IS_VERIFIER', "You hold this task's verifier wallet, so you cannot submit to it");
+  }
+  if (!(await agentStore.getAgent(address))) {
+    throw new AppError(403, 'NOT_REGISTERED', 'Register as an agent executor first');
+  }
+
+  // The escrow's own view: its poster, this agent's submission, its pause.
+  // The indexer's record can lag, and a second submitOpen would revert.
+  const escrow = escrowFor(chain);
+  const [onChain, alreadySubmitted, paused] = await Promise.all([
+    getTaskOn(chain, taskId),
+    escrow.submissionOf(taskId, address),
+    escrow.paused(),
+  ]);
+  const posters = [String(onChain.agent), meta.posterAddress].filter((a): a is string => !!a).map((a) => a.toLowerCase());
+  if (posters.some((p) => mine.has(p))) {
+    throw new AppError(403, 'SELF_SUBMIT', 'You posted this task, so you cannot submit to it');
+  }
+  return { address, mine, posters, alreadySubmitted: String(alreadySubmitted), paused: Boolean(paused) };
+}
+
+/**
+ * submit-open's checks on a NEW submission (re-sending one already on-chain
+ * skips them): the escrow not paused, no agent of the poster's or the
+ * verifier's owner, before the escrow's deadline. Shared with GET
+ * /submit-open/check.
+ */
+async function refuseNewSubmission({ meta, chain, taskId }: OpenTaskInfo, { address, mine, posters, paused }: Submitter): Promise<void> {
+  if (paused) {
+    throw new AppError(409, 'ESCROW_PAUSED', 'The escrow is paused: submissions wait until it resumes');
+  }
+  // Every wallet of the caller's account, as for the poster and verifier checks.
+  if (meta.posterAddress && (await anySameOwner(meta.posterAddress, mine))) {
+    throw new AppError(403, 'SAME_OWNER', 'This task was posted by an agent with the same owner, so this agent cannot submit to it');
+  }
+  // The poster reads every result and may pick the winner: their own agent
+  // could take the reward back.
+  if (await ownAgentOf(address, posters)) {
+    throw new AppError(403, 'OWN_AGENT', "This is the poster's own agent, so it cannot submit to their task");
+  }
+  // So does the task's verifier: an agent of its owner could copy the best
+  // result and be picked.
+  if (meta.verifierAddress && (await judgesOwnAgent(mine, [meta.verifierAddress]))) {
+    throw new AppError(403, 'VERIFIER_SAME_OWNER', "This agent has the same owner as the task's verifier, so it cannot submit to the task");
+  }
+  // The escrow's deadline decides: a pause moves it past the stored one.
+  if (meta.deadline && Math.floor(Date.now() / 1000) >= meta.deadline && (await phaseOf(chain, taskId)) !== PHASE.Submissions) {
+    throw new AppError(409, 'DEADLINE_REACHED', 'Submissions closed at the deadline');
+  }
+}
+
+/**
+ * GET /api/v1/a2a/tasks/:id/submit-open/check
+ * Whether the caller may submit to this task now: every refusal submit-open
+ * gives about the submitter rather than the result, so an agent hears it
+ * before it spends a model run. 200 { ok: true }, or that refusal.
+ */
+openSubmissionRouter.get('/tasks/:id/submit-open/check', enabledOnly, requireAuth, submitBudget, async (req: AuthRequest, res, next) => {
+  try {
+    const task = await openTask(String(req.params.id));
+    const who = await submitterOf(req, task);
+    if (who.alreadySubmitted !== ethers.ZeroHash) {
+      throw new AppError(409, 'ALREADY_SUBMITTED', 'You already submitted to this task: one submission per agent');
+    }
+    await refuseNewSubmission(task, who);
+    const response: ApiResponse = { success: true, data: { taskHash: task.taskHash, ok: true } };
+    res.json(response);
+  } catch (err) {
+    next(err);
+  }
+});
+
 openSubmissionRouter.post('/tasks/:id/submit-open', enabledOnly, requireAuth, submitBudget, async (req: AuthRequest, res, next) => {
   try {
     const body = submitOpenSchema.parse(req.body);
-    const { taskHash, meta, chain, taskId, ref } = await openTask(String(req.params.id));
-    const address = req.user!.address.toLowerCase();
-    if (!ethers.isAddress(address)) {
-      throw new AppError(403, 'NOT_REGISTERED', 'Submit from a registered agent wallet');
-    }
-
-    // Every wallet of the caller's account: a judge's other wallet is still the judge.
-    const mine = callerWallets(req);
-
-    const state = await a2aStore.getState(taskHash);
-    if (state?.status !== 'collecting') {
-      throw new AppError(409, 'SUBMISSIONS_CLOSED', 'This task no longer takes submissions');
-    }
-    if (meta.verifierAddress && mine.has(meta.verifierAddress.toLowerCase())) {
-      throw new AppError(403, 'IS_VERIFIER', "You hold this task's verifier wallet, so you cannot submit to it");
-    }
-    if (!(await agentStore.getAgent(address))) {
-      throw new AppError(403, 'NOT_REGISTERED', 'Register as an agent executor first');
-    }
-
-    // The escrow's own view: its poster, this agent's submission, its pause.
-    // The indexer's record can lag, and a second submitOpen would revert.
-    const escrow = escrowFor(chain);
-    const [onChain, alreadySubmitted, paused] = await Promise.all([
-      getTaskOn(chain, taskId),
-      escrow.submissionOf(taskId, address),
-      escrow.paused(),
-    ]);
-    const posters = [String(onChain.agent), meta.posterAddress].filter((a): a is string => !!a).map((a) => a.toLowerCase());
-    if (posters.some((p) => mine.has(p))) {
-      throw new AppError(403, 'SELF_SUBMIT', 'You posted this task, so you cannot submit to it');
-    }
+    const task = await openTask(String(req.params.id));
+    const { taskHash, chain, taskId, ref } = task;
+    const who = await submitterOf(req, task);
+    const { address, alreadySubmitted } = who;
 
     const sent = { resultData: body.resultData, rootHash: body.rootHash ?? null, teeAttestation: body.teeAttestation ?? undefined };
     if (Buffer.byteLength(JSON.stringify(sent)) > MAX_RESULT_BYTES) {
@@ -270,27 +344,7 @@ openSubmissionRouter.post('/tasks/:id/submit-open', enabledOnly, requireAuth, su
       }
       throw new AppError(409, 'ALREADY_SUBMITTED', 'You already submitted to this task: one submission per agent');
     }
-    if (paused) {
-      throw new AppError(409, 'ESCROW_PAUSED', 'The escrow is paused: submissions wait until it resumes');
-    }
-    // Every wallet of the caller's account, as for the poster and verifier checks above.
-    if (meta.posterAddress && (await anySameOwner(meta.posterAddress, mine))) {
-      throw new AppError(403, 'SAME_OWNER', 'This task was posted by an agent with the same owner, so this agent cannot submit to it');
-    }
-    // The poster reads every result and may pick the winner: their own agent
-    // could take the reward back.
-    if (await ownAgentOf(address, posters)) {
-      throw new AppError(403, 'OWN_AGENT', "This is the poster's own agent, so it cannot submit to their task");
-    }
-    // So does the task's verifier: an agent of its owner could copy the best
-    // result and be picked.
-    if (meta.verifierAddress && (await judgesOwnAgent(mine, [meta.verifierAddress]))) {
-      throw new AppError(403, 'VERIFIER_SAME_OWNER', "This agent has the same owner as the task's verifier, so it cannot submit to the task");
-    }
-    // The escrow's deadline decides: a pause moves it past the stored one.
-    if (meta.deadline && Math.floor(Date.now() / 1000) >= meta.deadline && (await phaseOf(chain, taskId)) !== PHASE.Submissions) {
-      throw new AppError(409, 'DEADLINE_REACHED', 'Submissions closed at the deadline');
-    }
+    await refuseNewSubmission(task, who);
 
     if (!(await store.takeHeldSlot(address, ref, Math.floor(Date.now() / 1000)))) {
       throw new AppError(

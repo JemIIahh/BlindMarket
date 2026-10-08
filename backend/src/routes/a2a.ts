@@ -417,7 +417,10 @@ a2aRouter.get('/tasks', async (req, res, next) => {
  * and are still taking them: on this network and before their deadline,
  * soonest deadline first. Public like GET /tasks, so projected: no key
  * material. Each entry adds `submissions`, how many this server has recorded
- * so far, and `onChainTaskId`. 404 while open submission is off.
+ * so far, and `onChainTaskId`. `minReward` (base units of the posting token)
+ * keeps only tasks paying at least that, in that token, so a worker's floor
+ * is applied before paging: a board full of near-free tasks can't push the
+ * real ones off a page. 404 while open submission is off.
  */
 a2aRouter.get('/open-tasks', async (req, res, next) => {
   try {
@@ -426,6 +429,12 @@ a2aRouter.get('/open-tasks', async (req, res, next) => {
     }
     const limit = Math.min(Math.max(parseInt(req.query.limit as string) || 100, 1), 200);
     const offset = Math.max(parseInt(req.query.offset as string) || 0, 0);
+    const minReward = typeof req.query.minReward === 'string' && /^\d{1,40}$/.test(req.query.minReward) ? BigInt(req.query.minReward) : null;
+    const pays = (meta: A2ATaskMeta): boolean => {
+      if (minReward === null) return true;
+      if (!meta.reward || !sameUnit(meta.reward.unit, pricingUnit())) return false;
+      try { return BigInt(meta.reward.amount) >= minReward; } catch { return false; }
+    };
     const nowSec = Math.floor(Date.now() / 1000);
     const listed = await a2aStore.listOpenSubmissionTasks();
     // Finished ones leave the index, so this list does not grow forever.
@@ -433,7 +442,7 @@ a2aRouter.get('/open-tasks', async (req, res, next) => {
     // Housekeeping: never let it fail the listing.
     if (finished.length > 0) void Promise.resolve().then(() => a2aStore.pruneOpenSubmissionIndex(finished)).catch(() => {});
     const live = listed
-      .filter(({ meta, state }) => state.status === 'collecting' && onCurrentNetwork(meta) && (!meta.deadline || nowSec < meta.deadline))
+      .filter(({ meta, state }) => state.status === 'collecting' && onCurrentNetwork(meta) && (!meta.deadline || nowSec < meta.deadline) && pays(meta))
       .sort((a, b) => (a.meta.deadline ?? Number.MAX_SAFE_INTEGER) - (b.meta.deadline ?? Number.MAX_SAFE_INTEGER));
     const page = live.slice(offset, offset + limit).map(a2aStore.projectPublicEntry);
     const [metas, counts] = await Promise.all([
