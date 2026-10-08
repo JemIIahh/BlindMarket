@@ -107,6 +107,7 @@ vi.mock('./notificationStore.js', () => sent);
 const { handleOpenTaskCreated, handleOpenSubmission, handleWinnerSelected, handleOpenTaskVoided, handleOpenEvent, COUNT_NOTICE_GAP_SEC } =
   await import('./openSubmissionEvents.js');
 const store = await import('./openSubmissionStore.js');
+const ZERO_HASH = '0x' + '0'.repeat(64);
 
 const alerts = () => delivered.list;
 const due = () => mem.zsets.get('a2a:open:due') ?? new Map<string, number>();
@@ -236,7 +237,7 @@ describe('WinnerSelected', () => {
     expect(a.find((x) => x.to === POSTER)).toMatchObject({ type: 'completed', title: 'Winner picked — escrow released', body: expect.stringContaining('You picked a winner from 3 submissions') });
     expect(a.find((x) => x.to === agent(2))).toMatchObject({ type: 'completed', title: 'Your submission won' });
     expect(a.filter((x) => x.title === 'Another submission was picked').map((x) => x.to).sort()).toEqual([agent(1), agent(3)]);
-    expect(await store.getOutcome(REF)).toEqual({ kind: 'winner', winner: agent(2), judge: 'creator' });
+    expect(await store.getOutcome(REF)).toEqual({ kind: 'winner', winner: agent(2), judge: 'creator', scorecardHash: ZERO_HASH });
     expect(due().has(REF)).toBe(false);
     // The listing closes too: 'completed', with the winner as its executor.
     expect(closeOpenSubmissionTask).toHaveBeenCalledWith(HASH, { kind: 'winner', winner: agent(2) });
@@ -260,6 +261,53 @@ describe('WinnerSelected', () => {
   });
 });
 
+describe("the judge's scorecard", () => {
+  const scorecard = { scores: [{ submitter: 'one', score: 9 }] };
+  let SC: string;
+
+  beforeEach(async () => {
+    await handleOpenTaskCreated('arc', 7n);
+    await handleOpenSubmission('arc', 7n, agent(1), '0x01', 1n, undefined, NOW);
+    SC = (await store.savePendingScorecard(REF, 'task_verifier', scorecard)).toLowerCase();
+  });
+
+  it("is kept when the judge's pick anchors its hash, and the outcome records the hash", async () => {
+    await handleWinnerSelected('arc', 7n, agent(1), 2, SC.toUpperCase().replace('0X', '0x'));
+    expect(await store.getScorecard(REF)).toEqual({ scorecardHash: SC, scorecard });
+    expect((await store.getOutcome(REF))?.scorecardHash).toBe(SC);
+    expect(mem.kv.has(`a2a:open:scorecard-pending:${REF}:task_verifier`)).toBe(false);
+  });
+
+  it("is kept for the poster's pick from the poster's held scorecard", async () => {
+    const posterCard = { scores: [{ submitter: 'one', score: 7 }], by: 'poster' };
+    const hash = (await store.savePendingScorecard(REF, 'creator', posterCard)).toLowerCase();
+    await handleWinnerSelected('arc', 7n, agent(1), 1, hash);
+    expect(await store.getScorecard(REF)).toEqual({ scorecardHash: hash, scorecard: posterCard });
+  });
+
+  it('is kept for the judge that picked: the poster’s pick does not take the verifier’s scorecard', async () => {
+    await handleWinnerSelected('arc', 7n, agent(1), 1, SC);
+    expect(await store.getScorecard(REF)).toBeNull();
+  });
+
+  it('is not kept for another hash, or none', async () => {
+    await handleWinnerSelected('arc', 7n, agent(1), 2, '0x' + '66'.repeat(32));
+    expect(await store.getScorecard(REF)).toBeNull();
+  });
+
+  it('is kept once: a redelivered event changes nothing', async () => {
+    await handleWinnerSelected('arc', 7n, agent(1), 2, SC);
+    await handleWinnerSelected('arc', 7n, agent(1), 2, SC);
+    expect(await store.getScorecard(REF)).toEqual({ scorecardHash: SC, scorecard });
+  });
+
+  it('reaches the handler from the decoded event', async () => {
+    const log = { eventName: 'WinnerSelected', args: { taskId: 7n, winner: agent(1), judge: 2n, scorecardHash: SC }, transactionHash: '0xtx' } as never;
+    await handleOpenEvent('arc', log);
+    expect(await store.getScorecard(REF)).toEqual({ scorecardHash: SC, scorecard });
+  });
+});
+
 describe('OpenTaskVoided', () => {
   beforeEach(async () => {
     await handleOpenTaskCreated('arc', 7n);
@@ -271,7 +319,7 @@ describe('OpenTaskVoided', () => {
     await handleOpenTaskVoided('arc', 7n, 3);
     expect(alerts().find((x) => x.to === POSTER)).toMatchObject({ type: 'completed', title: 'Task closed with no winner — escrow refunded' });
     expect(alerts().filter((x) => x.title === 'No submission was picked').map((x) => x.to).sort()).toEqual([agent(1), agent(2)]);
-    expect(await store.getOutcome(REF)).toEqual({ kind: 'void', judge: 'backup' });
+    expect(await store.getOutcome(REF)).toEqual({ kind: 'void', judge: 'backup', scorecardHash: ZERO_HASH });
     expect(due().has(REF)).toBe(false);
     expect(closeOpenSubmissionTask).toHaveBeenCalledWith(HASH, { kind: 'void' });
   });

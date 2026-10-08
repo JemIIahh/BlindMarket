@@ -1,8 +1,10 @@
 /**
- * Open-submission routes (docs/OPEN-SUBMISSION-TASKS.md section 2.6): an
+ * Open-submission routes (docs/OPEN-SUBMISSION-TASKS.md sections 2.6, 16): an
  * agent submits to an open task, its poster and verifier read the
- * submissions, and the poster picks the winner. Mounted inside a2aRouter, so
- * under /api/v1/a2a. All 404 while OPEN_SUBMISSION_ENABLED is off.
+ * submissions, and the poster or the verifier picks the winner, with a
+ * scorecard the escrow anchors. A verifier lists its work with
+ * open-verifications. Mounted inside a2aRouter, so under /api/v1/a2a. All 404
+ * while OPEN_SUBMISSION_ENABLED is off.
  *
  * The escrow decides every rule here; these routes check first so nobody is
  * handed a transaction that reverts:
@@ -12,7 +14,9 @@
  *     and its storage pointer), the commitment that neither was changed
  *     afterwards.
  *   - selectWinner: the poster, in their pick window, of an agent that
- *     submitted.
+ *     submitted. selectWinnerByVerifier: the task's verifier, in its window.
+ *     A judge may send its scorecard with the pick; the escrow anchors its
+ *     hash, and the indexer keeps the scorecard once the pick lands.
  *
  * Results are hidden from everyone but the poster and the task's verifier
  * until submissions close, so no agent can copy another's (section 2.3).
@@ -35,7 +39,8 @@ import { createWalletBudget } from '../middleware/rateLimit.js';
 import * as a2aStore from '../services/a2aStore.js';
 import * as agentStore from '../services/agentStore.js';
 import * as store from '../services/openSubmissionStore.js';
-import { buildSelectWinnerOn, buildSubmitOpenOn, escrowFor, getTaskOn } from '../services/escrow.js';
+import { buildSelectWinnerByVerifierOn, buildSelectWinnerOn, buildSubmitOpenOn, escrowFor, getTaskOn, getTaskVerifierOn } from '../services/escrow.js';
+import { onCurrentNetwork } from '../services/chainScope.js';
 import { resolveCachedTaskByHash, type TaskChain } from '../services/taskChain.js';
 import { ownAgentOf, sameOwnerSubtask } from '../services/delegationGuard.js';
 import { storageIdSchema } from '../services/storageId.js';
@@ -57,6 +62,20 @@ export const MAX_RESULT_BYTES = 64 * 1024;
 
 /** Each wallet's submit-open calls (middleware/rateLimit.ts). */
 const submitBudget = createWalletBudget({ name: 'submissions', perMinute: 20 });
+/** Each wallet's select calls (each may replace its held scorecard). */
+const pickBudget = createWalletBudget({ name: 'picks', perMinute: 10 });
+/** Each wallet's scorecard sends (POST /tasks/:id/scorecard). */
+const scorecardBudget = createWalletBudget({ name: 'scorecards', perMinute: 10 });
+
+/** Largest scorecard a judge may send with a pick. */
+export const MAX_SCORECARD_BYTES = 32 * 1024;
+
+/** How long past its verifier's window, as listed, a task stays on GET /open-verifications: a pause moves the window later. */
+const VERIFIER_LIST_SLACK_SEC = 30 * 86_400;
+/** Most tasks one page of GET /open-verifications returns: live windows first. */
+const VERIFIER_LIST_MAX = 50;
+/** The escrow's VERIFIER_PICK_WINDOW. */
+const VERIFIER_PICK_WINDOW_SEC = 48 * 3600;
 
 /** 404 before anything else while open submission is off, signed in or not. */
 const enabledOnly: RequestHandler = (_req, _res, next) => {
@@ -105,7 +124,24 @@ const submitOpenSchema = z.object({
 const selectSchema = z.object({
   winner: z.string().refine((a) => ethers.isAddress(a), 'winner must be an address'),
   scorecardHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/, 'scorecardHash must be 32 bytes of hex').optional(),
+  /** The judge's scores and reasons. Its hash goes on-chain with the pick. */
+  scorecard: z.record(z.unknown()).optional(),
 });
+
+/**
+ * A scorecard's hash, as the escrow anchors it: keccak256 of its JSON as this
+ * server parsed it. Send the scorecard and sign with the scorecardHash
+ * returned; a hash computed from your own text can differ (key order).
+ */
+export function scorecardHashOf(scorecard: Record<string, unknown>): string {
+  return store.scorecardHashOf(scorecard);
+}
+
+/** When the task verifier's pick window opens, from the listing: after the poster's window, if they review. */
+function verifierWindowOpensAt(meta: A2ATaskMeta): number | null {
+  if (!meta.deadline) return null;
+  return meta.deadline + (meta.openPick?.mode === 'creator' ? meta.openPick.creatorWindow ?? 0 : 0);
+}
 
 /** The caller's wallets, lowercased. */
 function callerWallets(req: AuthRequest): Set<string> {
@@ -130,6 +166,28 @@ async function openTask(rawHash: string): Promise<{ taskHash: string; meta: A2AT
   return { taskHash, meta, chain: resolved.chain, taskId: Number(resolved.taskId), ref: store.taskRef(resolved.chain, resolved.taskId) };
 }
 
+/**
+ * True when any of `agents` (one account's wallets) belongs to one of
+ * `judges`' owners: a judge is a hosted agent and the wallet is one of its
+ * owner's agents (or the owner's own wallet), or a judge is a person and the
+ * wallet is their own agent. Such an account must not be judged by them.
+ * A few lookups per wallet pair; accounts hold a handful of wallets.
+ */
+async function judgesOwnAgent(agents: Iterable<string>, judges: Iterable<string>): Promise<boolean> {
+  const judgeList = [...new Set([...judges].map((j) => j.toLowerCase()))];
+  for (const agent of new Set([...agents].map((a) => a.toLowerCase()))) {
+    if (await ownAgentOf(agent, judgeList)) return true;
+    for (const judge of judgeList) if (await sameOwnerSubtask(judge, agent)) return true;
+  }
+  return false;
+}
+
+/** True when `poster` is a hosted agent and one of `wallets` shares its owner (delegationGuard.sameOwnerSubtask). */
+async function anySameOwner(poster: string, wallets: Iterable<string>): Promise<boolean> {
+  for (const wallet of wallets) if (await sameOwnerSubtask(poster, wallet)) return true;
+  return false;
+}
+
 /** The escrow's phase for an open task, as its enum number. */
 async function phaseOf(chain: TaskChain, taskId: number): Promise<number> {
   return Number(await escrowFor(chain).openPhase(taskId));
@@ -151,12 +209,15 @@ openSubmissionRouter.post('/tasks/:id/submit-open', enabledOnly, requireAuth, su
       throw new AppError(403, 'NOT_REGISTERED', 'Submit from a registered agent wallet');
     }
 
+    // Every wallet of the caller's account: a judge's other wallet is still the judge.
+    const mine = callerWallets(req);
+
     const state = await a2aStore.getState(taskHash);
     if (state?.status !== 'collecting') {
       throw new AppError(409, 'SUBMISSIONS_CLOSED', 'This task no longer takes submissions');
     }
-    if (meta.verifierAddress?.toLowerCase() === address) {
-      throw new AppError(403, 'IS_VERIFIER', "You are this task's verifier, so you cannot submit to it");
+    if (meta.verifierAddress && mine.has(meta.verifierAddress.toLowerCase())) {
+      throw new AppError(403, 'IS_VERIFIER', "You hold this task's verifier wallet, so you cannot submit to it");
     }
     if (!(await agentStore.getAgent(address))) {
       throw new AppError(403, 'NOT_REGISTERED', 'Register as an agent executor first');
@@ -171,7 +232,7 @@ openSubmissionRouter.post('/tasks/:id/submit-open', enabledOnly, requireAuth, su
       escrow.paused(),
     ]);
     const posters = [String(onChain.agent), meta.posterAddress].filter((a): a is string => !!a).map((a) => a.toLowerCase());
-    if (posters.includes(address)) {
+    if (posters.some((p) => mine.has(p))) {
       throw new AppError(403, 'SELF_SUBMIT', 'You posted this task, so you cannot submit to it');
     }
 
@@ -212,13 +273,19 @@ openSubmissionRouter.post('/tasks/:id/submit-open', enabledOnly, requireAuth, su
     if (paused) {
       throw new AppError(409, 'ESCROW_PAUSED', 'The escrow is paused: submissions wait until it resumes');
     }
-    if (meta.posterAddress && (await sameOwnerSubtask(meta.posterAddress, address))) {
+    // Every wallet of the caller's account, as for the poster and verifier checks above.
+    if (meta.posterAddress && (await anySameOwner(meta.posterAddress, mine))) {
       throw new AppError(403, 'SAME_OWNER', 'This task was posted by an agent with the same owner, so this agent cannot submit to it');
     }
     // The poster reads every result and may pick the winner: their own agent
     // could take the reward back.
     if (await ownAgentOf(address, posters)) {
       throw new AppError(403, 'OWN_AGENT', "This is the poster's own agent, so it cannot submit to their task");
+    }
+    // So does the task's verifier: an agent of its owner could copy the best
+    // result and be picked.
+    if (meta.verifierAddress && (await judgesOwnAgent(mine, [meta.verifierAddress]))) {
+      throw new AppError(403, 'VERIFIER_SAME_OWNER', "This agent has the same owner as the task's verifier, so it cannot submit to the task");
     }
     // The escrow's deadline decides: a pause moves it past the stored one.
     if (meta.deadline && Math.floor(Date.now() / 1000) >= meta.deadline && (await phaseOf(chain, taskId)) !== PHASE.Submissions) {
@@ -302,40 +369,200 @@ openSubmissionRouter.get('/tasks/:id/submissions', enabledOnly, requireAuth, asy
 
 /**
  * POST /api/v1/a2a/tasks/:id/select
- * Body { winner, scorecardHash? }. The poster's pick on a task they review:
- * returns the unsigned selectWinner for the poster's on-chain wallet to sign.
- * Only in the poster's pick window, and only of an agent that submitted.
+ * Body { winner, scorecard?, scorecardHash? }. A judge's pick, as an unsigned
+ * transaction for the judge's on-chain wallet to sign:
+ *   - the poster, on a task they review, in their pick window: selectWinner;
+ *   - the task's verifier, in its window: selectWinnerByVerifier.
+ * A caller holding both wallets gets the one whose window is open. Only of an
+ * agent that submitted, and not of the judge's own agents. A scorecard sent
+ * with the pick is held (one per judge per task, the last one sent) and its
+ * hash goes into the transaction; the indexer keeps it once the pick lands.
+ * Sign with the scorecardHash returned. A scorecardHash alone is anchored as
+ * sent.
  */
-openSubmissionRouter.post('/tasks/:id/select', enabledOnly, requireAuth, async (req: AuthRequest, res, next) => {
+openSubmissionRouter.post('/tasks/:id/select', enabledOnly, requireAuth, pickBudget, async (req: AuthRequest, res, next) => {
   try {
     const body = selectSchema.parse(req.body);
-    const { taskHash, meta, chain, taskId } = await openTask(String(req.params.id));
-    // The escrow checks msg.sender against the task's on-chain poster.
-    const onChain = await getTaskOn(chain, taskId);
-    const poster = String(onChain.agent).toLowerCase();
-    if (!callerWallets(req).has(poster)) {
-      throw new AppError(403, 'NOT_POSTER', 'Only the poster picks the winner of this task');
+    const { taskHash, meta, chain, taskId, ref } = await openTask(String(req.params.id));
+
+    let scorecardHash = body.scorecardHash ?? ethers.ZeroHash;
+    if (body.scorecard) {
+      if (Buffer.byteLength(JSON.stringify(body.scorecard)) > MAX_SCORECARD_BYTES) {
+        throw new AppError(413, 'SCORECARD_TOO_LARGE', `The scorecard is over ${MAX_SCORECARD_BYTES / 1024} KB: keep the reasons short`);
+      }
+      const computed = scorecardHashOf(body.scorecard);
+      if (body.scorecardHash && body.scorecardHash.toLowerCase() !== computed.toLowerCase()) {
+        throw new AppError(400, 'SCORECARD_MISMATCH', 'scorecardHash is not the hash of the scorecard as parsed here: send the scorecard alone and sign with the scorecardHash returned');
+      }
+      scorecardHash = computed;
     }
-    if (meta.openPick?.mode !== 'creator') {
+
+    // The escrow checks msg.sender against the task's on-chain poster or verifier.
+    const wallets = callerWallets(req);
+    const [onChain, onChainVerifier, phase] = await Promise.all([
+      getTaskOn(chain, taskId),
+      getTaskVerifierOn(chain, taskId),
+      phaseOf(chain, taskId),
+    ]);
+    const poster = String(onChain.agent).toLowerCase();
+    const verifier = String(onChainVerifier).toLowerCase();
+    const isPoster = wallets.has(poster);
+    const isVerifier = verifier !== ethers.ZeroAddress && wallets.has(verifier);
+    if (!isPoster && !isVerifier) {
+      throw new AppError(403, 'NOT_A_JUDGE', "Only the poster, or the task's verifier in its window, picks the winner of this task");
+    }
+    // Holding both wallets, the poster's role applies only in the poster's
+    // window of a task they review.
+    const byVerifier = isVerifier && (!isPoster || phase === PHASE.VerifierPick || meta.openPick?.mode !== 'creator');
+    const judge = byVerifier ? verifier : poster;
+    if (!byVerifier && meta.openPick?.mode !== 'creator') {
       throw new AppError(409, 'VERIFIER_PICKS', "This task's verifier picks its winner");
     }
-    const phase = await phaseOf(chain, taskId);
-    if (phase !== PHASE.CreatorPick) {
+    if (phase !== (byVerifier ? PHASE.VerifierPick : PHASE.CreatorPick)) {
       throw new AppError(409, 'NOT_PICK_WINDOW', `You can pick only in your pick window; this task is ${PHASE_NAMES[phase] ?? 'past it'}`);
     }
-    // selectWinner is whenNotPaused. A pause also moves the window later.
+    // selectWinner and selectWinnerByVerifier are whenNotPaused. A pause also moves the window later.
     if (await escrowFor(chain).paused()) {
       throw new AppError(409, 'ESCROW_PAUSED', 'The escrow is paused: picks wait until it resumes');
     }
     const winner = ethers.getAddress(body.winner);
+    // No judge pays itself (the escrow refuses SelfAssignment), another of
+    // its account's wallets, or its own agents.
+    if (wallets.has(winner.toLowerCase())) {
+      throw new AppError(409, 'SELF_PICK', 'A judge cannot pick itself or another of its own wallets');
+    }
     if ((await escrowFor(chain).submissionOf(taskId, winner)) === ethers.ZeroHash) {
       throw new AppError(409, 'NOT_A_SUBMITTER', 'That address did not submit to this task');
     }
-    const unsignedSelectWinner = await buildSelectWinnerOn(chain, poster, taskId, winner, body.scorecardHash ?? ethers.ZeroHash);
+    if (await judgesOwnAgent([winner], wallets)) {
+      throw new AppError(409, 'OWN_AGENT_PICK', "That agent has the same owner as you, so you cannot pick it");
+    }
+    const build = byVerifier ? buildSelectWinnerByVerifierOn : buildSelectWinnerOn;
+    const unsigned = await build(chain, judge, taskId, winner, scorecardHash);
+    if (body.scorecard) await store.savePendingScorecard(ref, byVerifier ? 'task_verifier' : 'creator', body.scorecard);
     const response: ApiResponse = {
       success: true,
-      data: { taskHash, onChainTaskId: String(taskId), winner: winner.toLowerCase(), unsignedSelectWinner },
+      data: {
+        taskHash,
+        onChainTaskId: String(taskId),
+        winner: winner.toLowerCase(),
+        scorecardHash,
+        ...(byVerifier ? { unsignedSelectWinnerByVerifier: unsigned } : { unsignedSelectWinner: unsigned }),
+      },
     };
+    res.json(response);
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * GET /api/v1/a2a/tasks/:id/scorecard
+ * The judge's scorecard for a task whose winner was picked (or that was
+ * voided): the one whose hash the escrow anchored with the pick. Readable by
+ * any signed-in caller, like the results once submissions close.
+ */
+openSubmissionRouter.get('/tasks/:id/scorecard', enabledOnly, requireAuth, async (req: AuthRequest, res, next) => {
+  try {
+    const { taskHash, ref } = await openTask(String(req.params.id));
+    const [kept, outcome] = await Promise.all([store.getScorecard(ref), store.getOutcome(ref)]);
+    if (!outcome) {
+      throw new AppError(404, 'NOT_CLOSED', 'No winner has been picked for this task yet');
+    }
+    if (!kept) {
+      const anchored = !!outcome.scorecardHash && !/^0x0*$/.test(outcome.scorecardHash);
+      throw anchored
+        ? new AppError(404, 'SCORECARD_NOT_SENT', "The judge anchored a scorecard, but this server doesn't hold it: whoever has it can POST it here")
+        : new AppError(404, 'NO_SCORECARD', 'The judge anchored no scorecard for this task');
+    }
+    const response: ApiResponse = {
+      success: true,
+      data: { taskHash, outcome: outcome.kind, judge: outcome.judge, winner: outcome.winner ?? null, ...kept },
+    };
+    res.json(response);
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * POST /api/v1/a2a/tasks/:id/scorecard
+ * Body { scorecard }. Keeps a scorecard whose hash is the one the escrow
+ * anchored with the task's pick or void. The way back for one whose hold
+ * lapsed before the indexer saw the pick, or a backup judge's or admin's,
+ * which never went through /select. Content-addressed: anyone holding it may
+ * send it.
+ */
+openSubmissionRouter.post('/tasks/:id/scorecard', enabledOnly, requireAuth, scorecardBudget, async (req: AuthRequest, res, next) => {
+  try {
+    const { scorecard } = z.object({ scorecard: z.record(z.unknown()) }).parse(req.body);
+    if (Buffer.byteLength(JSON.stringify(scorecard)) > MAX_SCORECARD_BYTES) {
+      throw new AppError(413, 'SCORECARD_TOO_LARGE', `The scorecard is over ${MAX_SCORECARD_BYTES / 1024} KB`);
+    }
+    const { taskHash, ref } = await openTask(String(req.params.id));
+    const outcome = await store.getOutcome(ref);
+    if (!outcome?.scorecardHash || /^0x0*$/.test(outcome.scorecardHash)) {
+      throw new AppError(409, 'NOT_ANCHORED', 'No scorecard hash was anchored for this task');
+    }
+    const scorecardHash = scorecardHashOf(scorecard);
+    if (scorecardHash.toLowerCase() !== outcome.scorecardHash.toLowerCase()) {
+      throw new AppError(400, 'SCORECARD_MISMATCH', 'That is not the scorecard the escrow anchored');
+    }
+    const kept = await store.keepAnchoredScorecard(ref, scorecardHash, scorecard);
+    const response: ApiResponse = { success: true, data: { taskHash, scorecardHash, kept } };
+    res.json(response);
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * GET /api/v1/a2a/open-verifications?offset=&limit=
+ * Open tasks the caller is the verifier of (its wallets' verifier index),
+ * from when its pick window opens, as listed (the deadline, or the end of the
+ * poster's window on a task they review), until 30 days after that window
+ * closes: a pause moves it later, so the worker asks the escrow's openPhase
+ * before judging. Live windows first, soonest close first, then the rest, up
+ * to 50 a page (offset, limit; total says how many). The order follows the
+ * clock, so a window closing between pages can shift an entry by one. The
+ * judge gets the full verification criteria, answer key included, as GET
+ * /verifications gives a single-assignee task's verifier.
+ */
+openSubmissionRouter.get('/open-verifications', enabledOnly, requireAuth, async (req: AuthRequest, res, next) => {
+  try {
+    const wallets = callerWallets(req);
+    const nowSec = Math.floor(Date.now() / 1000);
+    const seen = new Set<string>();
+    const indexed = (await Promise.all([...wallets].map((w) => a2aStore.getVerifierTasks(w)))).flat();
+    const offset = Math.max(parseInt(req.query.offset as string) || 0, 0);
+    const limit = Math.min(Math.max(parseInt(req.query.limit as string) || VERIFIER_LIST_MAX, 1), VERIFIER_LIST_MAX);
+    const listed = indexed
+      .filter(({ meta, state }) => {
+        if (seen.has(meta.taskId)) return false;
+        seen.add(meta.taskId);
+        if (meta.submissionMode !== 'open' || state.status !== 'collecting' || !onCurrentNetwork(meta)) return false;
+        if (!meta.verifierAddress || !wallets.has(meta.verifierAddress.toLowerCase())) return false;
+        const opensAt = verifierWindowOpensAt(meta);
+        return opensAt !== null && nowSec >= opensAt && nowSec < opensAt + VERIFIER_PICK_WINDOW_SEC + VERIFIER_LIST_SLACK_SEC;
+      })
+      .map((t) => ({ ...t, closesAt: verifierWindowOpensAt(t.meta)! + VERIFIER_PICK_WINDOW_SEC }))
+      .sort((a, b) => {
+        const aLive = nowSec < a.closesAt;
+        const bLive = nowSec < b.closesAt;
+        if (aLive !== bLive) return aLive ? -1 : 1;
+        return aLive ? a.closesAt - b.closesAt : b.closesAt - a.closesAt;
+      });
+    const mine = listed.slice(offset, offset + limit);
+    const tasks = await Promise.all(mine.map(async ({ meta, closesAt }) => {
+      const resolved = await resolveCachedTaskByHash(meta.taskId).catch(() => null);
+      return {
+        meta: { ...a2aStore.projectPublicMeta(meta), ...(meta.verificationCriteria ? { verificationCriteria: meta.verificationCriteria } : {}) },
+        onChainTaskId: resolved ? String(resolved.taskId) : null,
+        submissions: resolved ? await store.recordedSubmissionCount(store.taskRef(resolved.chain, resolved.taskId)) : 0,
+        window: { opensAt: closesAt - VERIFIER_PICK_WINDOW_SEC, closesAt },
+      };
+    }));
+    const response: ApiResponse = { success: true, data: { tasks, total: listed.length, offset, limit } };
     res.json(response);
   } catch (err) {
     next(err);
