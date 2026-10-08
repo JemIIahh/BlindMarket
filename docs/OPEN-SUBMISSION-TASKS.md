@@ -653,7 +653,8 @@ the real task's credit.
   unrelated task.
 - **Network scope:** open-submission refs are network-scoped like every other
   per-chain key (`<chainScope>:<taskId>`, chainScope.ts). Escrow ids restart
-  at 1 on a new network.
+  at 1 on a new network. Each record also stores its network (`scope`), and
+  the sweep drops one from another network without reading the new escrow.
 - **Rounding, every payout path:** `recordWorkerPayout` now splits as the
   escrow does. The fee is rounded down and the worker gets the rest. It used
   to round the share down, crediting one base unit less than was paid on any

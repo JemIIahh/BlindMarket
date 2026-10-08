@@ -131,6 +131,8 @@ describe('OpenTaskCreated', () => {
     await handleOpenTaskCreated('arc', 7n);
     expect(await store.getRecord(REF)).toEqual({
       chain: 'arc', taskId: '7', taskHash: HASH, poster: POSTER, deadline: DEADLINE, mode: 'creator', creatorWindow: 86_400,
+      // The network it was saved on (chainScope is the bare chain key in these tests).
+      scope: 'arc',
     });
     expect(due().get(REF)).toBe(DEADLINE);
   });

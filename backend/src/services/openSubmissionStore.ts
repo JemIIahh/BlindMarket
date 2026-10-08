@@ -69,6 +69,8 @@ export interface OpenTaskRecord {
   mode: PickMode;
   /** Seconds the poster has to pick after the deadline; 0 for agent mode. */
   creatorWindow: number;
+  /** The network the task is on (chainScope at save). A record from another network is stale. */
+  scope?: string;
 }
 
 export interface SubmissionRecord {
@@ -139,7 +141,12 @@ function parse<T>(raw: string | null): T | null {
 
 /** Save a task's record unless one exists. Returns the record now stored. */
 export async function saveRecord(rec: OpenTaskRecord): Promise<OpenTaskRecord> {
-  const stored: OpenTaskRecord = { ...rec, taskHash: rec.taskHash.toLowerCase(), poster: rec.poster.toLowerCase() };
+  const stored: OpenTaskRecord = {
+    ...rec,
+    taskHash: rec.taskHash.toLowerCase(),
+    poster: rec.poster.toLowerCase(),
+    scope: chainScope(rec.chain),
+  };
   const ref = taskRef(rec.chain, rec.taskId);
   if ((await redis.set(KEY.record(ref), JSON.stringify(stored), 'NX')) !== null) return stored;
   return (await getRecord(ref)) ?? stored;
@@ -147,6 +154,11 @@ export async function saveRecord(rec: OpenTaskRecord): Promise<OpenTaskRecord> {
 
 export async function getRecord(ref: TaskRef): Promise<OpenTaskRecord | null> {
   return parse<OpenTaskRecord>(await redis.get(KEY.record(ref)));
+}
+
+/** False for a record saved on another network than the one its chain runs on now. */
+export function onThisNetwork(rec: OpenTaskRecord): boolean {
+  return rec.scope === undefined || rec.scope === chainScope(rec.chain);
 }
 
 export async function saveOutcome(ref: TaskRef, outcome: OpenTaskOutcome): Promise<boolean> {

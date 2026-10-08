@@ -171,6 +171,16 @@ describe('the deadline summary', () => {
     expect(due().get(REF)).toBe(NOW + 300);
   });
 
+  it('drops a task saved on another network, without reading this network\'s escrow', async () => {
+    await posted('creator');
+    const raw = mem.kv.get(`a2a:open:task:${REF}`)!;
+    mem.kv.set(`a2a:open:task:${REF}`, JSON.stringify({ ...JSON.parse(raw), scope: 'arc@5042002' }));
+    await sweepOpenSubmissions(NOW);
+    expect(escrow.openPhase).not.toHaveBeenCalled();
+    expect(notifyOnce).not.toHaveBeenCalled();
+    expect(due().has(REF)).toBe(false);
+  });
+
   it('does not look at tasks that are not due', async () => {
     await store.saveRecord({ chain: 'arc', taskId: '7', taskHash: HASH, poster: POSTER, deadline: NOW + 3600, mode: 'creator', creatorWindow: 86_400 });
     await store.scheduleSweep(REF, NOW + 3600);
