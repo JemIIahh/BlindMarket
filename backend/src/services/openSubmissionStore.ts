@@ -4,7 +4,7 @@
  * state (a2aStore), so nothing in the accept, cascade or expiry flows ever
  * sees an open task.
  *
- * Keyed by the ON-CHAIN task (`<chain>:<taskId>`, a TaskRef), never by the
+ * Keyed by the ON-CHAIN task (`<chainScope>:<taskId>`, a TaskRef), never by the
  * task hash: the escrow does not make hashes unique, so anyone can post a
  * decoy task with a live task's hash. Keyed by hash, the decoy's events would
  * land on the real task's record (security review of #142). The hash rides
@@ -40,13 +40,18 @@
  */
 
 import { redis } from './redis.js';
+import { chainScope } from './chainScope.js';
 import type { TaskChain } from './taskChain.js';
 
-/** An on-chain task: `<chain>:<taskId>`. */
+/**
+ * An on-chain task: `<chainScope>:<taskId>`. Network-scoped like every other
+ * per-chain key (chainScope.ts): escrow ids restart at 1 on a new network,
+ * so a key by chain alone would name an unrelated task after a move.
+ */
 export type TaskRef = string;
 
 export function taskRef(chain: TaskChain, taskId: string | number | bigint): TaskRef {
-  return `${chain}:${String(taskId)}`;
+  return `${chainScope(chain)}:${String(taskId)}`;
 }
 
 /** Who picks first, as the escrow's PickMode: 0 the task verifier, 1 the poster. */
@@ -64,6 +69,8 @@ export interface OpenTaskRecord {
   mode: PickMode;
   /** Seconds the poster has to pick after the deadline; 0 for agent mode. */
   creatorWindow: number;
+  /** The network the task is on (chainScope at save). A record from another network is stale. */
+  scope?: string;
 }
 
 export interface SubmissionRecord {
@@ -134,7 +141,12 @@ function parse<T>(raw: string | null): T | null {
 
 /** Save a task's record unless one exists. Returns the record now stored. */
 export async function saveRecord(rec: OpenTaskRecord): Promise<OpenTaskRecord> {
-  const stored: OpenTaskRecord = { ...rec, taskHash: rec.taskHash.toLowerCase(), poster: rec.poster.toLowerCase() };
+  const stored: OpenTaskRecord = {
+    ...rec,
+    taskHash: rec.taskHash.toLowerCase(),
+    poster: rec.poster.toLowerCase(),
+    scope: chainScope(rec.chain),
+  };
   const ref = taskRef(rec.chain, rec.taskId);
   if ((await redis.set(KEY.record(ref), JSON.stringify(stored), 'NX')) !== null) return stored;
   return (await getRecord(ref)) ?? stored;
@@ -142,6 +154,11 @@ export async function saveRecord(rec: OpenTaskRecord): Promise<OpenTaskRecord> {
 
 export async function getRecord(ref: TaskRef): Promise<OpenTaskRecord | null> {
   return parse<OpenTaskRecord>(await redis.get(KEY.record(ref)));
+}
+
+/** False for a record saved on another network than the one its chain runs on now. */
+export function onThisNetwork(rec: OpenTaskRecord): boolean {
+  return rec.scope === undefined || rec.scope === chainScope(rec.chain);
 }
 
 export async function saveOutcome(ref: TaskRef, outcome: OpenTaskOutcome): Promise<boolean> {

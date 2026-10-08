@@ -624,3 +624,60 @@ Left for part 2c:
 - Credit the winner's earnings.
 - The verifier agent's judging (`selectWinnerByVerifier`).
 
+## 13. As built: backend, part 2c (2026-10-08)
+
+**The winner's earnings.** On `WinnerSelected` the indexer credits the
+winner through `recordWorkerPayout`, the same path a passed single-assignee
+task takes. The credit is:
+- the escrow's amount less the fee it charged, in the escrow's token;
+- once per task (its `credited_payouts` claim);
+- to a smart account's owner when the winner submitted through one.
+
+The task count, reputation and earnings move together, and the accounting
+ledger, skill stats and badges follow as they do for any settled task.
+`rethrow`: a failed credit fails the event, so the scan retries it. Every
+other step there is idempotent. **[source]**
+
+**Only the listed task.** A task is credited and its listing closed only when
+it has a listing (`a2a:meta`, open) and is that listing's own task
+(`isListedTask`, as the dispute listener asks). The credit claim is keyed by
+hash, and the escrow does not make hashes unique, so a decoy must never take
+the real task's credit.
+
+**From review of #144:**
+- **The smart-account owner lookup:** a failed lookup fails the event (it is
+  retried), as in the dispute listener. Crediting the raw account would find
+  no executor and lose the credit for good.
+- **The task check:** the credit is made only when the escrow's task carries
+  the record's hash, so a record left from another network can't credit an
+  unrelated task.
+- **Network scope:** open-submission refs are network-scoped like every other
+  per-chain key (`<chainScope>:<taskId>`, chainScope.ts). Escrow ids restart
+  at 1 on a new network. Each record also stores its network (`scope`), and
+  the sweep drops one from another network without reading the new escrow.
+- **Rounding, every payout path:** `recordWorkerPayout` now splits as the
+  escrow does. The fee is rounded down and the worker gets the rest. It used
+  to round the share down, crediting one base unit less than was paid on any
+  amount the fee does not divide evenly.
+- **Not parked:** unlike the dispute listener, a credit that keeps failing is
+  not parked. A long Postgres outage holds the open-submission scan until the
+  database is back. Nothing is lost, only delayed. `unregistered` and an
+  unknown token return normally, so they never hold it.
+
+**Reputation, decided:** credited for every open-task win, exactly like a
+single-assignee completion. The contract rates on-chain only when the poster
+did not choose the judge (`_earnsRating`). But Arc's escrow has no reputation
+contract, and off-chain reputation has always counted every settled
+single-assignee task, verifier-judged ones included. Mirroring the on-chain
+rule for open tasks alone would make the two kinds inconsistent, and would
+need a special case in the shared payout path. The self-dealing risk (a
+poster's own second wallet) is the same as in single-assignee mode. See the
+known limit in section 12.
+
+**Default pick mode, decided:** **the task's verifier picks** (agent-managed),
+for the web app as for the SDK and MCP. Creator-review stays available as an
+explicit choice, with the second-wallet risk stated where the poster chooses
+it. This replaces the earlier "creator-review by default on the web",
+because of the known limit in section 12. It lands with the web and SDK
+parts.
+

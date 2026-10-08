@@ -91,6 +91,8 @@ const builders = vi.hoisted(() => ({
 }));
 vi.mock('../services/escrow.js', () => ({ escrowFor: () => escrow, ...builders }));
 vi.mock('../services/taskChain.js', () => ({ resolveCachedTaskByHash: vi.fn(async () => ({ chain: 'arc', taskId: '7' })) }));
+// Bare chain keys, so refs read 'arc:7' (openSubmissionStore.test.ts checks the network-scoped form).
+vi.mock('../services/chainScope.js', () => ({ chainScope: (chain: string) => chain }));
 const sameOwner = vi.hoisted(() => vi.fn(async () => false));
 const ownAgent = vi.hoisted(() => vi.fn(async (_agent: string, _owners: Iterable<string>) => false));
 vi.mock('../services/delegationGuard.js', () => ({ sameOwnerSubtask: sameOwner, ownAgentOf: ownAgent }));
