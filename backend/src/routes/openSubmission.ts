@@ -131,7 +131,9 @@ const selectSchema = z.object({
  * server parsed it. Send the scorecard and sign with the scorecardHash
  * returned; a hash computed from your own text can differ (key order).
  */
-export const scorecardHashOf = store.scorecardHashOf;
+export function scorecardHashOf(scorecard: Record<string, unknown>): string {
+  return store.scorecardHashOf(scorecard);
+}
 
 /** When the task verifier's pick window opens, from the listing: after the poster's window, if they review. */
 function verifierWindowOpensAt(meta: A2ATaskMeta): number | null {
