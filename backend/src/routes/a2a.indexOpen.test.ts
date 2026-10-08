@@ -290,8 +290,18 @@ describe('GET /open-tasks', () => {
     expect(res.status).toBe(200);
     expect(res.body.data.total).toBe(2);
     expect(res.body.data.tasks.map((t: any) => [t.meta.taskId, t.submissions])).toEqual([['0xsooner', 3], ['0xlater', 0]]);
+    // The escrow's id, so a worker can check its own submission before working.
+    expect(res.body.data.tasks.map((t: any) => t.onChainTaskId)).toEqual(['20', '21']);
     // The finished one leaves the index, so the list does not grow forever.
     await vi.waitFor(() => expect(a2aStore.pruneOpenSubmissionIndex).toHaveBeenCalledWith(['0xclosed']));
+  });
+
+  it('lists a task whose on-chain id is not cached yet, with no id and no count', async () => {
+    vi.mocked(resolveCachedTaskByHash).mockRejectedValueOnce(new Error('redis down'));
+    vi.mocked(a2aStore.listOpenSubmissionTasks).mockResolvedValue([entry('0xfresh', nowSec + 600)] as any);
+    const res = await request(app()).get('/api/v1/a2a/open-tasks');
+    expect(res.status).toBe(200);
+    expect(res.body.data.tasks.map((t: any) => [t.meta.taskId, t.onChainTaskId, t.submissions])).toEqual([['0xfresh', null, 0]]);
   });
 
   it('is public, so it strips key material and private state like GET /tasks', async () => {

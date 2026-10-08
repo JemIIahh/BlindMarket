@@ -416,7 +416,7 @@ a2aRouter.get('/tasks', async (req, res, next) => {
  * and are still taking them: on this network and before their deadline,
  * soonest deadline first. Public like GET /tasks, so projected: no key
  * material. Each entry adds `submissions`, how many this server has recorded
- * so far. 404 while open submission is off.
+ * so far, and `onChainTaskId`. 404 while open submission is off.
  */
 a2aRouter.get('/open-tasks', async (req, res, next) => {
   try {
@@ -440,10 +440,15 @@ a2aRouter.get('/open-tasks', async (req, res, next) => {
       // The store keys by the on-chain task, not the hash (hashes are not unique).
       Promise.all(page.map(async (t) => {
         const listed = await resolveCachedTaskByHash(t.meta.taskId).catch(() => null);
-        return listed ? openSubmissionStore.recordedSubmissionCount(openSubmissionStore.taskRef(listed.chain, listed.taskId)) : 0;
+        return {
+          onChainTaskId: listed?.taskId ?? null,
+          submissions: listed ? await openSubmissionStore.recordedSubmissionCount(openSubmissionStore.taskRef(listed.chain, listed.taskId)) : 0,
+        };
       })),
     ]);
-    const tasks = page.map((t, i) => ({ ...t, meta: metas[i], submissions: counts[i] }));
+    // onChainTaskId: so a worker can ask the escrow (submissionOf) whether it
+    // already submitted before spending a model run on the task.
+    const tasks = page.map((t, i) => ({ ...t, meta: metas[i], onChainTaskId: counts[i].onChainTaskId, submissions: counts[i].submissions }));
     const body: ApiResponse = { success: true, data: { tasks, total: live.length, offset, limit } };
     res.json(body);
   } catch (err) {

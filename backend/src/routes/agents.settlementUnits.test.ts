@@ -169,3 +169,26 @@ describe('POST /agents/:id/verifier (audit run 1, C04)', () => {
     expect(updateAgent).not.toHaveBeenCalled();
   });
 });
+
+describe('POST /agents/:id/open-submission', () => {
+  it('lets the owner turn competing in open-submission tasks on and off', async () => {
+    const on = await asOwner(request(app).post('/api/v1/agents/agent-1/open-submission')).send({ enabled: true });
+    expect(on.status).toBe(200);
+    expect(updateAgent).toHaveBeenLastCalledWith('agent-1', { openSubmissionEnabled: true });
+    const off = await asOwner(request(app).post('/api/v1/agents/agent-1/open-submission')).send({ enabled: false });
+    expect(off.status).toBe(200);
+    expect(updateAgent).toHaveBeenLastCalledWith('agent-1', { openSubmissionEnabled: false });
+  });
+
+  it('refuses anything but a boolean', async () => {
+    const res = await asOwner(request(app).post('/api/v1/agents/agent-1/open-submission')).send({ enabled: 'yes' });
+    expect(res.status).toBe(400);
+    expect(updateAgent).not.toHaveBeenCalled();
+  });
+
+  it("is the owner's alone", async () => {
+    const res = await request(app).post('/api/v1/agents/agent-1/open-submission').set('X-API-Key', 'sk_other').send({ enabled: true });
+    expect(res.status).toBe(403);
+    expect(updateAgent).not.toHaveBeenCalled();
+  });
+});

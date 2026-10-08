@@ -34,6 +34,7 @@ function rowToAgent(row: Record<string, unknown>): DeployedAgent {
     minReward: (row.min_reward as string) ?? undefined,
     verifierEnabled: row.verifier_enabled === true || row.verifier_enabled === 1,
     delegationEnabled: row.delegation_enabled === true || row.delegation_enabled === 1,
+    openSubmissionEnabled: row.open_submission_enabled === true || row.open_submission_enabled === 1,
     privyUserId: typeof row.privy_user_id === 'string' && row.privy_user_id ? row.privy_user_id : undefined,
     skills: safeJsonJson(row.skills) as InstalledSkill[] | undefined,
     // M2 (audit): these columns are new (migrations neonDb:29 / database:13) —
@@ -104,6 +105,7 @@ function agentToRow(agent: DeployedAgent): Record<string, unknown> {
     min_reward: agent.minReward ?? null,
     verifier_enabled: agent.verifierEnabled ? 1 : 0,
     delegation_enabled: agent.delegationEnabled ? 1 : 0,
+    open_submission_enabled: agent.openSubmissionEnabled ? 1 : 0,
     privy_user_id: agent.privyUserId ?? null,
     skills: JSON.stringify(agent.skills ?? []),
     tool_secrets: JSON.stringify(agent.toolSecrets ?? {}),
@@ -112,7 +114,7 @@ function agentToRow(agent: DeployedAgent): Record<string, unknown> {
   };
 }
 
-const PG_COLS = 'id, owner_address, authorized_owners, name, instructions, provider, model, api_key, encrypted_api_key, capabilities, tools, status, deployed_at, last_active_at, storage_ref, platform_token, wallet_address, smart_account_address, public_key, encrypted_private_key, raw_private_key, inft_token_id, min_reward, skills, tool_secrets, encrypted_tool_secrets, verifier_enabled, delegation_enabled, privy_user_id';
+const PG_COLS = 'id, owner_address, authorized_owners, name, instructions, provider, model, api_key, encrypted_api_key, capabilities, tools, status, deployed_at, last_active_at, storage_ref, platform_token, wallet_address, smart_account_address, public_key, encrypted_private_key, raw_private_key, inft_token_id, min_reward, skills, tool_secrets, encrypted_tool_secrets, verifier_enabled, delegation_enabled, privy_user_id, open_submission_enabled';
 
 export async function saveAgent(agent: DeployedAgent): Promise<void> {
   if (usePg()) {
@@ -125,9 +127,9 @@ export async function saveAgent(agent: DeployedAgent): Promise<void> {
           platform_token, wallet_address, smart_account_address, public_key,
           encrypted_private_key, raw_private_key, inft_token_id, min_reward,
           skills, tool_secrets, encrypted_tool_secrets, verifier_enabled,
-          delegation_enabled, privy_user_id, updated_at)
+          delegation_enabled, privy_user_id, open_submission_enabled, updated_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-         $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, NOW())
+         $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, NOW())
        ON CONFLICT (id) DO UPDATE SET
          owner_address = EXCLUDED.owner_address,
          authorized_owners = EXCLUDED.authorized_owners,
@@ -155,6 +157,7 @@ export async function saveAgent(agent: DeployedAgent): Promise<void> {
          encrypted_tool_secrets = EXCLUDED.encrypted_tool_secrets,
          verifier_enabled = EXCLUDED.verifier_enabled,
          delegation_enabled = EXCLUDED.delegation_enabled,
+         open_submission_enabled = EXCLUDED.open_submission_enabled,
          -- Set once: a save from a copy loaded before the backfill never clears it.
          privy_user_id = COALESCE(deployed_agents.privy_user_id, EXCLUDED.privy_user_id),
          updated_at = NOW()`,
@@ -174,6 +177,7 @@ export async function saveAgent(agent: DeployedAgent): Promise<void> {
         agent.verifierEnabled === true,
         agent.delegationEnabled === true,
         agent.privyUserId ?? null,
+        agent.openSubmissionEnabled === true,
       ],
     );
     return;
@@ -197,7 +201,7 @@ export async function saveAgent(agent: DeployedAgent): Promise<void> {
 /** The fields of an existing agent that change after deploy. */
 export type AgentFieldPatch = Partial<Pick<DeployedAgent,
   'instructions' | 'provider' | 'model' | 'apiKey' | 'encryptedApiKey' | 'tools' | 'capabilities' | 'minReward'
-  | 'skills' | 'verifierEnabled' | 'delegationEnabled' | 'status' | 'lastActiveAt' | 'platformToken' | 'authorizedOwners'>>;
+  | 'skills' | 'verifierEnabled' | 'delegationEnabled' | 'openSubmissionEnabled' | 'status' | 'lastActiveAt' | 'platformToken' | 'authorizedOwners'>>;
 
 // Column and bound value per field, for Postgres and SQLite: the same
 // encodings saveAgent uses for each column.
@@ -213,6 +217,7 @@ const FIELD_COLUMNS: { [K in keyof Required<AgentFieldPatch>]: { col: string; pg
   skills: { col: 'skills', pg: (v) => JSON.stringify(v), sqlite: (v) => JSON.stringify(v) },
   verifierEnabled: { col: 'verifier_enabled', pg: (v) => v === true, sqlite: (v) => (v ? 1 : 0) },
   delegationEnabled: { col: 'delegation_enabled', pg: (v) => v === true, sqlite: (v) => (v ? 1 : 0) },
+  openSubmissionEnabled: { col: 'open_submission_enabled', pg: (v) => v === true, sqlite: (v) => (v ? 1 : 0) },
   status: { col: 'status', pg: (v) => v, sqlite: (v) => v },
   lastActiveAt: { col: 'last_active_at', pg: (v) => v, sqlite: (v) => v },
   platformToken: { col: 'platform_token', pg: (v) => v, sqlite: (v) => v },

@@ -46,6 +46,14 @@ describe('deployed agent opt-ins and owner identity (SQLite)', () => {
     expect((await loadAgent('a2'))?.delegationEnabled).toBe(false);
   });
 
+  it('reads open submission back as off for an agent saved without it, and keeps the owner\'s choice', async () => {
+    expect((await loadAgent('a1'))?.openSubmissionEnabled).toBe(false);
+    await saveAgent(agent('a4', { openSubmissionEnabled: true }));
+    expect((await loadAgent('a4'))?.openSubmissionEnabled).toBe(true);
+    await saveAgent({ ...(await loadAgent('a4'))!, openSubmissionEnabled: false });
+    expect((await loadAgent('a4'))?.openSubmissionEnabled).toBe(false);
+  });
+
   it('keeps the deploying Privy user across later saves', async () => {
     await saveAgent(agent('a3', { privyUserId: 'did:privy:cm0abc123' }));
     const loaded = (await loadAgent('a3'))!;
@@ -65,15 +73,16 @@ describe('deployed agent upsert (Postgres)', () => {
   it('binds every placeholder, delegation and the Privy user included', async () => {
     pg.on = true;
     try {
-      await saveAgent(agent('p1', { delegationEnabled: true, privyUserId: 'did:privy:cm0abc123' }));
+      await saveAgent(agent('p1', { delegationEnabled: true, privyUserId: 'did:privy:cm0abc123', openSubmissionEnabled: true }));
     } finally {
       pg.on = false;
     }
     const { sql, params } = pg.calls.at(-1)!;
     const highest = Math.max(...[...sql.matchAll(/\$(\d+)/g)].map((m) => Number(m[1])));
     expect(params).toHaveLength(highest);
-    expect(params.slice(-2)).toEqual([true, 'did:privy:cm0abc123']);
+    expect(params.slice(-3)).toEqual([true, 'did:privy:cm0abc123', true]);
     expect(sql).toMatch(/delegation_enabled = EXCLUDED\.delegation_enabled/);
+    expect(sql).toMatch(/open_submission_enabled = EXCLUDED\.open_submission_enabled/);
     // Set once: a later save never clears or replaces it.
     expect(sql).toMatch(/privy_user_id = COALESCE\(deployed_agents\.privy_user_id, EXCLUDED\.privy_user_id\)/);
   });

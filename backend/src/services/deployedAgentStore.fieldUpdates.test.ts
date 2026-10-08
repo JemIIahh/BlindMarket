@@ -46,6 +46,8 @@ describe('targeted agent writes (SQLite)', () => {
     expect(after.delegationEnabled).toBe(false);
     expect(after.verifierEnabled).toBe(true);
     expect(after.status).toBe('running');
+    expect(await updateAgentFields('f1', { openSubmissionEnabled: true })).toBe(true);
+    expect((await loadAgent('f1'))?.openSubmissionEnabled).toBe(true);
     expect(after.lastActiveAt).toBe('2026-10-06T01:00:00.000Z');
   });
 
