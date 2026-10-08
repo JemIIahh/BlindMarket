@@ -953,9 +953,9 @@ land.
 
 **Step 3: judge one task.** This step runs only when the model check passes.
 Paid work waiting (a deferred offer that can run; while a task is held for
-gas the queue doesn't drain, so that doesn't count) defers it. Each deferral
-counts as one of the task's yields, and after 3 in a row the task is judged
-anyway.
+gas the queue doesn't drain, so that doesn't count) defers the task about to
+be judged, before any read. Each deferral counts as one of that task's
+yields, and after 3 in a row it is judged anyway.
 
 1. **Check itself.** A gas preflight (the pick is paid from this wallet) and
    the crash guard. From the first read of the submissions to the ranking,
@@ -984,10 +984,14 @@ anyway.
    - A stored result that can't be downloaded makes the task wait, rather than
      judge a summary. The server answers 404 for a 0G hiccup as well as for a
      blob never uploaded, so every failure waits.
-   - After 3 such passes (about 45 minutes of the 48-hour window) the task is
-     judged without that result, so a bogus storage id can't hold the task.
-   - If storage serves none of the results, that is an outage: it waits
-     without spending an attempt.
+   - **Waits are counted per stored result.** A result that failed 3 passes
+     (about 45 minutes of the 48-hour window) is judged without, so a bogus
+     storage id can't hold the task. One submitter's bogus id never costs an
+     honest result its own waits.
+   - The task waits on storage for 6 passes at most in all. After that it is
+     judged without the results still failing.
+   - Nothing readable while storage is failing is an outage: it waits without
+     spending an attempt, while the task may still wait.
    - The text is the stored result, else `resultData.output`, else
      `resultData` as JSON, so a result in any shape is judged.
    - Results that fail the task's hard checks are left out unless none pass.

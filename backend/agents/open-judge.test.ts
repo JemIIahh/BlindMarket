@@ -454,23 +454,57 @@ describe('openJudgePassCore', () => {
     expect(state.retryAt.get(HASH)).toBeGreaterThan(NOW_MS);
   });
 
-  it('waits a few passes on storage that keeps failing, then judges without that result', async () => {
+  it("gives up on a result's storage per result: one bogus root never costs an honest result its waits", async () => {
+    // A commits a root that was never stored; B (the best) is stored and storage hiccups once on pass 4; C is inline.
+    const BOGUS = '0x' + 'b0'.repeat(32);
+    const B_ROOT = '0x' + 'b1'.repeat(32);
+    const stored = (who: string, ordinal: number, root: string) => ({ ...sub(who, ordinal, { output: 'see storage' }), result: { resultData: { output: 'see storage' }, rootHash: root } });
+    const list = [stored(A, 1, BOGUS), stored(B, 2, B_ROOT), sub(C, 3, out('inline answer C'))];
+    let pass = 0;
+    const download = vi.fn(async (root: string) => {
+      if (root === BOGUS || (root === B_ROOT && pass === 4)) throw new Error('storage download 404');
+      return Buffer.from('the best answer, B');
+    });
+    const d = deps({
+      fetchSubmissions: vi.fn(async () => list),
+      readOnChain: chain({ submissionCount: 3n }),
+      readCommitments: vi.fn(async (_t: unknown, l: any[]) => l.map((x) => ({ ...x, committed: openEvidenceHash(x.result.resultData, x.result.rootHash ?? null) }))),
+      verifyResults: (t: any, l: any[], opts: any) => verifyOpenResults(t, l, download, async () => true, opts),
+      rank: vi.fn(async (_c: unknown, batch: any[]) => {
+        const best = batch.find((c) => c.output.includes('best')) ?? batch[0];
+        return { winner: best.id, scores: batch.map((c) => ({ id: c.id, score: c === best ? 9 : 2, reason: '' })) };
+      }),
+    });
     const state = createJudgeState();
+    let picked: any = null;
+    for (pass = 1; pass <= 8 && !picked; pass++) {
+      state.retryAt.clear();
+      await openJudgePassCore(d, state);
+      picked = d.sendPick.mock.calls[0]?.[1] ?? null;
+    }
+    expect(picked.winner).toBe(B);
+    expect(picked.scorecard.notJudged).toEqual([expect.objectContaining({ why: 'its stored result could not be read', count: 1, submitters: [A] })]);
+  });
+
+  it('waits on storage for the task at most its cap, then judges without what still fails', async () => {
+    const ROOTS = Array.from({ length: 7 }, (_, i) => `0x${String(i + 1).repeat(64)}`);
+    const state = createJudgeState();
+    let n = 0;
+    // A different root fails each pass, so no single root reaches its own budget.
     const verifyResults = vi.fn(async (_t: unknown, list: any[], opts: any) => {
-      if (!opts.giveUpOnStorage) throw new Error('storage download 503');
-      return list;
+      if (opts.giveUpOn.size > 0) return list;
+      throw Object.assign(new Error('x'), { failedRoots: [ROOTS[n++]] });
     });
     const d = deps({ verifyResults });
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 6; i++) {
       state.retryAt.clear();
       await openJudgePassCore(d, state);
     }
     expect(d.rank).not.toHaveBeenCalled();
-    expect(state.storageWaits.get(HASH)).toBe(3);
+    expect(state.storageWaits.get(HASH).passes).toBe(6);
     state.retryAt.clear();
     expect(await openJudgePassCore(d, state)).toBe('judged');
-    expect(verifyResults.mock.calls[3][2]).toEqual({ giveUpOnStorage: true });
-    expect(d.rank).toHaveBeenCalled();
+    expect([...verifyResults.mock.calls[6][2].giveUpOn].sort()).toEqual(ROOTS.slice(0, 6).sort());
   });
 
   it('counts paid work waiting before judging as a yield, and judges through after three', async () => {
@@ -480,18 +514,29 @@ describe('openJudgePassCore', () => {
       expect(await openJudgePassCore(d, state)).toBe('busy');
       expect(state.yields.get(HASH)).toBe(i);
     }
+    // Deferred before any read: nothing fetched or downloaded while paid work waits.
+    expect(d.fetchSubmissions).not.toHaveBeenCalled();
     expect(await openJudgePassCore(d, state)).toBe('judged');
     expect(d.rank).toHaveBeenCalled();
   });
 
-  it('waits out a storage outage that leaves nothing readable, without spending attempts', async () => {
+  it('waits out a storage outage that leaves nothing readable without spending attempts, while the task may wait on storage', async () => {
+    const unreadable = vi.fn(async (_t: unknown, list: any[]) => list.map((x, i) => (i === 0 ? { ...x, result: null } : { ...x, mismatch: true, why: 'its stored result could not be read' })));
     const state = createJudgeState();
-    state.storageWaits.set(HASH, 3);
-    const d = deps({ verifyResults: vi.fn(async (_t: unknown, list: any[]) => list.map((x) => ({ ...x, mismatch: true, why: 'its stored result could not be read' }))) });
-    await openJudgePassCore(d, state);
+    state.storageWaits.set(HASH, { passes: 3, roots: new Map() });
+    await openJudgePassCore(deps({ verifyResults: unreadable }), state);
     expect(state.attempts.has(HASH)).toBe(false);
     expect(state.retryAt.get(HASH)).toBeGreaterThan(NOW_MS);
-    expect(d.rank).not.toHaveBeenCalled();
+    const spent = createJudgeState();
+    spent.storageWaits.set(HASH, { passes: 6, roots: new Map() });
+    await openJudgePassCore(deps({ verifyResults: unreadable }), spent);
+    expect(spent.attempts.get(HASH)).toBe(1);
+  });
+
+  it('spends an attempt when nothing is readable for a reason other than storage', async () => {
+    const state = createJudgeState();
+    await openJudgePassCore(deps({ verifyResults: vi.fn(async (_t: unknown, list: any[]) => list.map((x) => ({ ...x, result: null }))) }), state);
+    expect(state.attempts.get(HASH)).toBe(1);
   });
 
   it('asks for no more submissions than the escrow count allows', async () => {
@@ -714,12 +759,13 @@ describe('verifyOpenResults: each result against its commitment and its storage 
     expect(big[0]).toMatchObject({ mismatch: true, why: 'its stored result is too large to judge' });
   });
 
-  it('waits on any stored result it cannot download (the server answers 404 for a 0G hiccup too), unless told to give up', async () => {
+  it('waits on any stored result it cannot download (the server answers 404 for a 0G hiccup too), naming the roots, unless that root is given up on', async () => {
     const stored = withCommit({ ...sub(C, 3, { output: 'stub' }), result: { resultData: { output: 'stub' }, rootHash: ROOT } }, { output: 'stub' }, ROOT);
     for (const status of [404, 503]) {
-      await expect(verifyOpenResults(t, [stored], async () => { throw new Error(`storage download ${status}`); }, async () => true)).rejects.toThrow(String(status));
+      const err = await verifyOpenResults(t, [stored], async () => { throw new Error(`storage download ${status}`); }, async () => true).catch((e: any) => e);
+      expect(err.failedRoots).toEqual([ROOT.toLowerCase()]);
     }
-    const gaveUp = await verifyOpenResults(t, [stored], async () => { throw new Error('storage download 404'); }, async () => true, { giveUpOnStorage: true });
+    const gaveUp = await verifyOpenResults(t, [stored], async () => { throw new Error('storage download 404'); }, async () => true, { giveUpOn: new Set([ROOT.toLowerCase()]) });
     expect(gaveUp[0]).toMatchObject({ mismatch: true, why: 'its stored result could not be read' });
   });
 
@@ -795,6 +841,7 @@ describe('rankWithModel', () => {
     expect(isProviderFailure(Object.assign(new Error('Your credit balance is too low'), { name: 'AI_APICallError', statusCode: 400 }))).toBe(true);
     expect(isProviderFailure(Object.assign(new Error('Bad request'), { name: 'AI_APICallError', statusCode: 400, responseBody: '{"error":"API key not valid"}' }))).toBe(true);
     expect(isProviderFailure(apiError(402))).toBe(true);
+    expect(isProviderFailure(Object.assign(new Error('User location is not supported for the API use.'), { name: 'AI_APICallError', statusCode: 400 }))).toBe(true);
     expect(isProviderFailure(apiError(404))).toBe(true);
     expect(isProviderFailure(Object.assign(new Error('x'), { name: 'AI_RetryError' }))).toBe(true);
     expect(isProviderFailure(Object.assign(new Error('no such model'), { name: 'AI_NoSuchModelError' }))).toBe(true);

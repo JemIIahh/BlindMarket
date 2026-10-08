@@ -4738,8 +4738,10 @@ const MAX_STORED_RESULT_BYTES = 256 * 1024;
 const MAX_UNLISTED_LOOKUPS = 24;
 /** Held picks sent per pass: the server's /select takes 10 a minute per wallet. */
 const MAX_PICKS_PER_PASS = 8;
-/** Passes a task waits on storage failing to serve a stored result before judging without it. */
+/** Passes one stored result may fail to download before it is judged without. */
 const MAX_STORAGE_WAITS = 3;
+/** Passes a task waits on storage in all, whatever the results: then it is judged without them. */
+const MAX_TASK_STORAGE_WAITS = 6;
 /** Times in a row a task's judging yields to paid work before it is judged through. */
 const MAX_JUDGE_YIELDS = 3;
 /** Entries a submissions list may hold beyond the escrow's count before it is taken for padding. */
@@ -4762,7 +4764,7 @@ export function createJudgeState() {
     confirm: new Map(),
     /** taskHash → submitters the server refused as winners (own agent, self): judged without them. */
     excluded: new Map(),
-    /** taskHash → passes it waited on storage failing to serve a stored result. */
+    /** taskHash → { passes, roots: Map rootHash → failed downloads }: waits on storage, per stored result. */
     storageWaits: new Map(),
     /** taskHash → times in a row its judging yielded to paid work. */
     yields: new Map(),
@@ -4984,7 +4986,7 @@ export function isProviderFailure(e) {
     // other status (401, 402, 403, 404, …) is the provider or the account.
     const status = Number(e?.statusCode ?? e?.status);
     if (status === 400 || status === 413 || status === 422) {
-      return /credit|billing|balance|payment|api[ _-]?key|unauthori[sz]ed|permission|quota|does not exist|not found|no such model|deprecated/i
+      return /credit|billing|balance|payment|api[ _-]?key|unauthori[sz]ed|permission|quota|does not exist|not found|no such model|deprecated|not supported|unsupported|location/i
         .test(`${e?.message ?? ''} ${e?.responseBody ?? ''}`);
     }
     return true;
@@ -5173,7 +5175,8 @@ export async function confirmScorecard(taskHash, scorecard, io) {
  *   2. send held picks, the longest waiting first, at most
  *      MAX_PICKS_PER_PASS (the server takes 10 a minute): nothing about
  *      judging (the model, paid work waiting) holds them up;
- *   3. judge one task, when no paid work waits and the model answers.
+ *   3. judge one task, when the model answers; paid work waiting defers it
+ *      (each deferral a yield, judged through after MAX_JUDGE_YIELDS).
  * Returns 'off' | 'busy' | 'sent' | 'judged' | 'none'. Exported for tests.
  */
 export async function openJudgePassCore(deps, state = judgeState) {
@@ -5268,19 +5271,11 @@ export async function openJudgePassCore(deps, state = judgeState) {
   }
   const idle = sent ? 'sent' : 'none';
 
-  // 3. Judge one task, when nothing paid waits and the model answers. Paid
-  // work waiting defers the first task to judge, counted as a yield: after
+  // 3. Judge one task, when the model answers. Paid work waiting defers the
+  // task about to be judged, counted as one of its yields: after
   // MAX_JUDGE_YIELDS in a row it is judged through anyway.
   if (toJudge.length === 0) return idle;
   if (deps.inferenceBlocker()) return idle;
-  if (deps.busy()) {
-    const first = toJudge[0].task.meta.taskId;
-    const yields = state.yields.get(first) ?? 0;
-    if (yields < MAX_JUDGE_YIELDS) {
-      state.yields.set(first, yields + 1);
-      return 'busy';
-    }
-  }
   for (const { task, onChain } of toJudge) {
     const taskHash = task.meta.taskId;
     const later = (why) => {
@@ -5288,6 +5283,13 @@ export async function openJudgePassCore(deps, state = judgeState) {
       log(`judge: ${taskHash.slice(0, 10)}… ${why}; looking again in ${JUDGE_RETRY_MS / 60_000} min`);
     };
     if ((state.attempts.get(taskHash) ?? 0) >= MAX_JUDGE_ATTEMPTS) continue;
+    if (deps.busy()) {
+      const yields = state.yields.get(taskHash) ?? 0;
+      if (yields < MAX_JUDGE_YIELDS) {
+        state.yields.set(taskHash, yields + 1);
+        return 'busy';
+      }
+    }
     const gasProblem = await deps.preflight(task.meta.chain);
     if (gasProblem) {
       later(`can't pay for a pick: ${gasProblem}`);
@@ -5341,23 +5343,34 @@ export async function openJudgePassCore(deps, state = judgeState) {
       const considered = ordered.slice(0, JUDGE_MAX_SUBMISSIONS);
       const overflow = ordered.slice(JUDGE_MAX_SUBMISSIONS).map((s) => ({ submitter: s.submitter, why: `only the first ${JUDGE_MAX_SUBMISSIONS} submissions are judged` }));
       const refusedRows = real.filter((s) => refused.has(String(s.submitter).toLowerCase())).map((s) => ({ submitter: s.submitter, why: 'the server refused it as a winner for this judge' }));
-      // A stored result storage keeps failing to serve is waited for a few
-      // passes, then judged without (one submitter can't hold the task).
-      const waits = state.storageWaits.get(taskHash) ?? 0;
+      // A stored result storage keeps failing to serve is waited for, a few
+      // passes per result (so one bogus rootHash costs the others nothing),
+      // and at most MAX_TASK_STORAGE_WAITS passes for the task: then it is
+      // judged without the ones still failing.
+      const waits = state.storageWaits.get(taskHash) ?? { passes: 0, roots: new Map() };
+      const giveUpOn = new Set([...waits.roots].filter(([, n]) => n >= MAX_STORAGE_WAITS || waits.passes >= MAX_TASK_STORAGE_WAITS).map(([root]) => root));
       let checked;
       try {
-        checked = await deps.verifyResults(task, considered, { giveUpOnStorage: waits >= MAX_STORAGE_WAITS });
+        checked = await deps.verifyResults(task, considered, { giveUpOn });
       } catch (e) {
-        state.storageWaits.set(taskHash, waits + 1);
+        if (!Array.isArray(e?.failedRoots)) {
+          later(`its results could not be read: ${errorLine(e)}`);
+          continue;
+        }
+        const roots = new Map(waits.roots);
+        for (const root of e.failedRoots) roots.set(root, (roots.get(root) ?? 0) + 1);
+        state.storageWaits.set(taskHash, { passes: waits.passes + 1, roots });
         later(`its results could not be read: ${errorLine(e)}`);
         continue;
       }
       const criteria = task.meta.verificationCriteria ?? null;
       const { candidates, excluded } = judgeableSubmissions(checked, criteria);
       if (candidates.length === 0) {
-        // Storage down for every stored result is an outage, not this task:
-        // it waits without spending an attempt.
-        if (!excluded.every((e) => e.why === STORAGE_UNREADABLE)) state.attempts.set(taskHash, (state.attempts.get(taskHash) ?? 0) + 1);
+        // Nothing readable with storage failing is an outage, not this task:
+        // it waits without spending an attempt, while the task's storage
+        // waits last.
+        const outage = excluded.some((e) => e.why === STORAGE_UNREADABLE) && waits.passes < MAX_TASK_STORAGE_WAITS;
+        if (!outage) state.attempts.set(taskHash, (state.attempts.get(taskHash) ?? 0) + 1);
         later('no submission can be read');
         continue;
       }
@@ -5573,12 +5586,16 @@ export async function storedBytesMatch(bytes, rootHash) {
  * an id that can't be checked is not judged. A stored result that can't be
  * downloaded throws, so the task waits rather than judge a summary: the
  * server answers 404 for a 0G hiccup as well as for a blob never uploaded,
- * so the two can't be told apart. With `giveUpOnStorage` (it waited enough)
- * it is left out instead, so a bogus rootHash can't hold the task. Exported
- * for tests, with the download and the content check passed in.
+ * so the two can't be told apart. A rootHash in `giveUpOn` (it failed often
+ * enough) is left out instead, so a bogus rootHash can't hold the task, and
+ * each result has its own budget: one submitter's bogus rootHash costs an
+ * honest result nothing. Every download is tried; the error thrown names
+ * the roots that failed (`failedRoots`). Exported for tests, with the
+ * download and the content check passed in.
  */
-export async function verifyOpenResults(task, submissions, download = downloadBriefBlob, matches = storedBytesMatch, { giveUpOnStorage = false } = {}) {
+export async function verifyOpenResults(task, submissions, download = downloadBriefBlob, matches = storedBytesMatch, { giveUpOn = new Set() } = {}) {
   const out = [];
+  const failedRoots = [];
   for (let i = 0; i < submissions.length; i += 8) {
     out.push(...await Promise.all(submissions.slice(i, i + 8).map(async (s) => {
       if (!s?.result) return s;
@@ -5589,14 +5606,18 @@ export async function verifyOpenResults(task, submissions, download = downloadBr
       let bytes;
       try {
         bytes = await download(s.result.rootHash);
-      } catch (e) {
-        if (giveUpOnStorage) return { ...s, mismatch: true, why: STORAGE_UNREADABLE };
-        throw e;
+      } catch {
+        if (giveUpOn.has(String(s.result.rootHash).toLowerCase())) return { ...s, mismatch: true, why: STORAGE_UNREADABLE };
+        failedRoots.push(String(s.result.rootHash).toLowerCase());
+        return s;
       }
       if (bytes.length > MAX_STORED_RESULT_BYTES) return { ...s, mismatch: true, why: 'its stored result is too large to judge' };
       if (!(await matches(bytes, s.result.rootHash))) return { ...s, mismatch: true, why: 'its stored result is not the content its storage id names' };
       return { ...s, storedText: bytes.toString('utf8') };
     })));
+  }
+  if (failedRoots.length > 0) {
+    throw Object.assign(new Error(`${failedRoots.length} stored result(s) could not be downloaded`), { failedRoots });
   }
   return out;
 }
