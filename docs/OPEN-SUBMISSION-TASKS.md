@@ -929,8 +929,8 @@ the poll loop at most every 5 minutes.
 A 404 means the feature is off, and it waits an hour. A full list also
 forgets tasks that have gone. It then:
 - confirms the scorecards of picks that landed;
-- looks up sent picks whose task left the list (up to 24 passes), so a pick
-  that landed late still gets its scorecard confirmed.
+- queues for step 2 the sent picks whose task left the list (up to 24
+  passes), so a pick that landed late still gets its scorecard confirmed.
 
 **Step 1: look at every listed task (no model call).** For each task it
 reads the escrow: `getTask`, `taskVerifier`, `openPhase` and
@@ -951,9 +951,11 @@ land.
 - A pick is sent again until the window closes, with no new model run. A
   pending transaction, or one whose lookup fails, is waited on, not re-sent.
 
-**Step 3: judge one task.** This step runs only when no paid work waits (a
-deferred offer that can run: while a task is held for gas the queue doesn't
-drain, so that doesn't count) and the model check passes.
+**Step 3: judge one task.** This step runs only when the model check passes.
+Paid work waiting (a deferred offer that can run; while a task is held for
+gas the queue doesn't drain, so that doesn't count) defers it. Each deferral
+counts as one of the task's yields, and after 3 in a row the task is judged
+anyway.
 
 1. **Check itself.** A gas preflight (the pick is paid from this wallet) and
    the crash guard. From the first read of the submissions to the ranking,
@@ -966,7 +968,8 @@ drain, so that doesn't count) and the model check passes.
      (`submissionOf`). An entry with none is made up and dropped. If fewer real
      ones are listed than the escrow counts, it waits: a partial list would
      leave someone out.
-   - It judges at most 60, earliest by the server's order. The server could
+   - It reads no more entries than the escrow's count plus 50, and judges at
+     most 60, earliest by the server's order. The server could
      choose which 60 when there are more, and it could withhold a result; the
      escrow's count catches a withheld submission, not a withheld result.
    - Submitters the server refused as winners for this judge (`OWN_AGENT_PICK`,
@@ -978,11 +981,13 @@ drain, so that doesn't count) and the model check passes.
      bytes checked against that id:** a 0G merkle root, or a sha256 for the
      server's local store. These are not judged: bytes that don't match, a
      blob over 256 KB, or an id the judge can't check (another store).
-   - A stored result storage doesn't have (a 4xx: never uploaded) is not
-     judged, so one submitter can't hold the task.
-   - A stored result storage fails to serve (a 5xx, a time limit) makes the
-     task wait, rather than judge a summary. After 3 such passes it is judged
-     without that result.
+   - A stored result that can't be downloaded makes the task wait, rather than
+     judge a summary. The server answers 404 for a 0G hiccup as well as for a
+     blob never uploaded, so every failure waits.
+   - After 3 such passes (about 45 minutes of the 48-hour window) the task is
+     judged without that result, so a bogus storage id can't hold the task.
+   - If storage serves none of the results, that is an outage: it waits
+     without spending an attempt.
    - The text is the stored result, else `resultData.output`, else
      `resultData` as JSON, so a result in any shape is judged.
    - Results that fail the task's hard checks are left out unless none pass.
@@ -996,9 +1001,14 @@ drain, so that doesn't count) and the model check passes.
      no pick. After 3 failed rankings the backup judge decides.
    - A batch may name none in any round. If no batch does, nothing is picked:
      a decline.
-   - A provider failure (auth, quota, a 5xx, a missing model, network, a time
-     limit) reaches the inference gate. A malformed answer or a 400 doesn't: a
-     submission may have caused it.
+   - A provider failure reaches the inference gate. That covers:
+     - auth, credit and billing, and a missing or retired model, whatever the
+       status;
+     - retries that ran out;
+     - network errors and a time limit.
+
+     A malformed answer doesn't, and neither does a request-shaped 400 (a
+     context too long, a content policy): a submission may have caused it.
    - Before each batch it yields to paid work that has arrived, with no
      attempt spent. A task that yielded 3 times in a row is judged through.
 4. **No acceptable submission means no pick.** The judge records a decline

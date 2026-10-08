@@ -4568,7 +4568,7 @@ async function runOpenSubmission(entry) {
 /**
  * Why crashes keep this process off open tasks, or null. `final`: the worker
  * crashed while running this task, so it is never run again here; otherwise
- * the crashes can't be blamed on any task and the pass stops altogether.
+ * the crashes can't be blamed on any task, and it is skipped this pass.
  */
 function openCrashCheck(taskHash) {
   const reason = resumeSkipReason(taskHash, { crashCount: CRASH_COUNT, crashedTasks: CRASHED_TASKS });
@@ -4728,6 +4728,8 @@ const MAX_JUDGE_ATTEMPTS = 3;
 const JUDGE_RETRY_MS = 15 * 60 * 1000;
 /** Passes a kept-scorecard check is tried after the pick lands. */
 const MAX_SCORECARD_CONFIRMS = 12;
+/** Why a stored result storage never served is left out (after MAX_STORAGE_WAITS passes). */
+const STORAGE_UNREADABLE = 'its stored result could not be read';
 /** Most /submissions pages read (about 50 each). */
 const MAX_SUBMISSION_PAGES = 1000;
 /** Largest stored result the judge reads (and hashes to check). */
@@ -4975,10 +4977,17 @@ export function isProviderFailure(e) {
   const name = String(e?.name ?? '');
   if (/NoObjectGenerated|TypeValidation|JSONParse|InvalidResponseData/i.test(name)) return false;
   if (/APICallError/i.test(name)) {
-    // A 400 is the request (a context too long, a content policy): a
-    // submission can cause it. Auth, quota and the provider's own errors can't.
+    // The AI SDK retries 408/409/429/5xx (those arrive as RetryError), so
+    // what reaches here is the first answer. A request-shaped 400/413/422 (a
+    // context too long, a content policy) a submission can cause; one about
+    // the account (credit, billing, a key, a missing model) it can't. Every
+    // other status (401, 402, 403, 404, …) is the provider or the account.
     const status = Number(e?.statusCode ?? e?.status);
-    return !Number.isFinite(status) || status === 401 || status === 403 || status === 408 || status === 429 || status >= 500;
+    if (status === 400 || status === 413 || status === 422) {
+      return /credit|billing|balance|payment|api[ _-]?key|unauthori[sz]ed|permission|quota|does not exist|not found|no such model|deprecated/i
+        .test(`${e?.message ?? ''} ${e?.responseBody ?? ''}`);
+    }
+    return true;
   }
   if (/RetryError|LoadAPIKey|NoSuchModel|EmptyResponseBody|NoContentGenerated|AbortError|TimeoutError/i.test(name)) return true;
   return /timed out|time limit|ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|fetch failed|socket hang up|status code (401|403|429|5\d\d)|quota|rate limit/i.test(String(e?.message ?? ''));
@@ -5259,10 +5268,19 @@ export async function openJudgePassCore(deps, state = judgeState) {
   }
   const idle = sent ? 'sent' : 'none';
 
-  // 3. Judge one task, when nothing paid waits and the model answers.
+  // 3. Judge one task, when nothing paid waits and the model answers. Paid
+  // work waiting defers the first task to judge, counted as a yield: after
+  // MAX_JUDGE_YIELDS in a row it is judged through anyway.
   if (toJudge.length === 0) return idle;
-  if (deps.busy()) return 'busy';
   if (deps.inferenceBlocker()) return idle;
+  if (deps.busy()) {
+    const first = toJudge[0].task.meta.taskId;
+    const yields = state.yields.get(first) ?? 0;
+    if (yields < MAX_JUDGE_YIELDS) {
+      state.yields.set(first, yields + 1);
+      return 'busy';
+    }
+  }
   for (const { task, onChain } of toJudge) {
     const taskHash = task.meta.taskId;
     const later = (why) => {
@@ -5292,7 +5310,7 @@ export async function openJudgePassCore(deps, state = judgeState) {
     deps.inFlight('task-started', taskHash);
     let finished = false;
     try {
-      const all = await deps.fetchSubmissions(task).catch(() => null);
+      const all = await deps.fetchSubmissions(task, count + MAX_LIST_EXCESS + 1).catch(() => null);
       if (!all) {
         later('its submissions could not be read');
         continue;
@@ -5337,7 +5355,9 @@ export async function openJudgePassCore(deps, state = judgeState) {
       const criteria = task.meta.verificationCriteria ?? null;
       const { candidates, excluded } = judgeableSubmissions(checked, criteria);
       if (candidates.length === 0) {
-        state.attempts.set(taskHash, (state.attempts.get(taskHash) ?? 0) + 1);
+        // Storage down for every stored result is an outage, not this task:
+        // it waits without spending an attempt.
+        if (!excluded.every((e) => e.why === STORAGE_UNREADABLE)) state.attempts.set(taskHash, (state.attempts.get(taskHash) ?? 0) + 1);
         later('no submission can be read');
         continue;
       }
@@ -5467,8 +5487,12 @@ async function fetchOpenVerifications() {
   return { tasks, complete: false };
 }
 
-/** Every submission of a task with its kept result (GET /submissions, paged by cursor), once per submitter. */
-async function fetchOpenSubmissions(task) {
+/**
+ * Every submission of a task with its kept result (GET /submissions, paged
+ * by cursor), once per submitter; it stops once it has more than
+ * `maxEntries` (more than the escrow's count allows is padding anyway).
+ */
+async function fetchOpenSubmissions(task, maxEntries = Infinity) {
   const bySubmitter = new Map();
   let cursor = '0';
   for (let page = 0; page < MAX_SUBMISSION_PAGES; page++) {
@@ -5479,7 +5503,7 @@ async function fetchOpenSubmissions(task) {
     const data = (await res.json()).data ?? {};
     for (const s of data.submissions ?? []) bySubmitter.set(String(s.submitter).toLowerCase(), s);
     cursor = String(data.cursor ?? '0');
-    if (cursor === '0') return [...bySubmitter.values()];
+    if (cursor === '0' || bySubmitter.size >= maxEntries) return [...bySubmitter.values()];
   }
   throw new Error(`more than ${MAX_SUBMISSION_PAGES} pages of submissions`);
 }
@@ -5546,11 +5570,12 @@ export async function storedBytesMatch(bytes, rootHash) {
  * stored in full (rootHash) is read from storage and its bytes checked
  * against that id (`storedText`), so the server can't swap those either; a
  * blob over MAX_STORED_RESULT_BYTES, one that is not the stored content, or
- * an id that can't be checked is not judged. A stored result storage does
- * not have (a 4xx: never uploaded) is not judged either; one storage fails
- * to serve (a 5xx, a time limit) throws, so the task waits rather than judge
- * a summary, unless `giveUpOnStorage` (it waited enough). Exported for
- * tests, with the download and the content check passed in.
+ * an id that can't be checked is not judged. A stored result that can't be
+ * downloaded throws, so the task waits rather than judge a summary: the
+ * server answers 404 for a 0G hiccup as well as for a blob never uploaded,
+ * so the two can't be told apart. With `giveUpOnStorage` (it waited enough)
+ * it is left out instead, so a bogus rootHash can't hold the task. Exported
+ * for tests, with the download and the content check passed in.
  */
 export async function verifyOpenResults(task, submissions, download = downloadBriefBlob, matches = storedBytesMatch, { giveUpOnStorage = false } = {}) {
   const out = [];
@@ -5565,8 +5590,7 @@ export async function verifyOpenResults(task, submissions, download = downloadBr
       try {
         bytes = await download(s.result.rootHash);
       } catch (e) {
-        const status = Number(/storage download (\d{3})/.exec(String(e?.message))?.[1]);
-        if ((status >= 400 && status < 500) || giveUpOnStorage) return { ...s, mismatch: true, why: 'its stored result could not be read' };
+        if (giveUpOnStorage) return { ...s, mismatch: true, why: STORAGE_UNREADABLE };
         throw e;
       }
       if (bytes.length > MAX_STORED_RESULT_BYTES) return { ...s, mismatch: true, why: 'its stored result is too large to judge' };

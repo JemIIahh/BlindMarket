@@ -473,6 +473,33 @@ describe('openJudgePassCore', () => {
     expect(d.rank).toHaveBeenCalled();
   });
 
+  it('counts paid work waiting before judging as a yield, and judges through after three', async () => {
+    const state = createJudgeState();
+    const d = deps({ busy: () => true });
+    for (let i = 1; i <= 3; i++) {
+      expect(await openJudgePassCore(d, state)).toBe('busy');
+      expect(state.yields.get(HASH)).toBe(i);
+    }
+    expect(await openJudgePassCore(d, state)).toBe('judged');
+    expect(d.rank).toHaveBeenCalled();
+  });
+
+  it('waits out a storage outage that leaves nothing readable, without spending attempts', async () => {
+    const state = createJudgeState();
+    state.storageWaits.set(HASH, 3);
+    const d = deps({ verifyResults: vi.fn(async (_t: unknown, list: any[]) => list.map((x) => ({ ...x, mismatch: true, why: 'its stored result could not be read' }))) });
+    await openJudgePassCore(d, state);
+    expect(state.attempts.has(HASH)).toBe(false);
+    expect(state.retryAt.get(HASH)).toBeGreaterThan(NOW_MS);
+    expect(d.rank).not.toHaveBeenCalled();
+  });
+
+  it('asks for no more submissions than the escrow count allows', async () => {
+    const d = deps();
+    await openJudgePassCore(d, createJudgeState());
+    expect(d.fetchSubmissions).toHaveBeenCalledWith(task(), 2 + 50 + 1);
+  });
+
   it('judges a task through once it has yielded to paid work three times in a row', async () => {
     const many = Array.from({ length: JUDGE_BATCH + 2 }, (_, i) => sub(`0x${String(i + 1).padStart(40, '0')}`, i + 1, out(`w${i}`)));
     const state = createJudgeState();
@@ -687,12 +714,12 @@ describe('verifyOpenResults: each result against its commitment and its storage 
     expect(big[0]).toMatchObject({ mismatch: true, why: 'its stored result is too large to judge' });
   });
 
-  it('leaves out a stored result storage does not have (4xx), and waits on one it fails to serve (5xx) unless told to give up', async () => {
+  it('waits on any stored result it cannot download (the server answers 404 for a 0G hiccup too), unless told to give up', async () => {
     const stored = withCommit({ ...sub(C, 3, { output: 'stub' }), result: { resultData: { output: 'stub' }, rootHash: ROOT } }, { output: 'stub' }, ROOT);
-    const missing = await verifyOpenResults(t, [stored], async () => { throw new Error('storage download 404'); }, async () => true);
-    expect(missing[0]).toMatchObject({ mismatch: true, why: 'its stored result could not be read' });
-    await expect(verifyOpenResults(t, [stored], async () => { throw new Error('storage download 503'); }, async () => true)).rejects.toThrow('503');
-    const gaveUp = await verifyOpenResults(t, [stored], async () => { throw new Error('storage download 503'); }, async () => true, { giveUpOnStorage: true });
+    for (const status of [404, 503]) {
+      await expect(verifyOpenResults(t, [stored], async () => { throw new Error(`storage download ${status}`); }, async () => true)).rejects.toThrow(String(status));
+    }
+    const gaveUp = await verifyOpenResults(t, [stored], async () => { throw new Error('storage download 404'); }, async () => true, { giveUpOnStorage: true });
     expect(gaveUp[0]).toMatchObject({ mismatch: true, why: 'its stored result could not be read' });
   });
 
@@ -763,6 +790,12 @@ describe('rankWithModel', () => {
     expect(isProviderFailure(apiError(503))).toBe(true);
     // A context too long or a content policy: a submission can cause it.
     expect(isProviderFailure(apiError(400))).toBe(false);
+    expect(isProviderFailure(Object.assign(new Error("This model's maximum context length is 8192 tokens"), { name: 'AI_APICallError', statusCode: 400 }))).toBe(false);
+    // The account or the model: the provider's side, whatever the status.
+    expect(isProviderFailure(Object.assign(new Error('Your credit balance is too low'), { name: 'AI_APICallError', statusCode: 400 }))).toBe(true);
+    expect(isProviderFailure(Object.assign(new Error('Bad request'), { name: 'AI_APICallError', statusCode: 400, responseBody: '{"error":"API key not valid"}' }))).toBe(true);
+    expect(isProviderFailure(apiError(402))).toBe(true);
+    expect(isProviderFailure(apiError(404))).toBe(true);
     expect(isProviderFailure(Object.assign(new Error('x'), { name: 'AI_RetryError' }))).toBe(true);
     expect(isProviderFailure(Object.assign(new Error('no such model'), { name: 'AI_NoSuchModelError' }))).toBe(true);
     expect(isProviderFailure(Object.assign(new Error('empty'), { name: 'AI_EmptyResponseBodyError' }))).toBe(true);
