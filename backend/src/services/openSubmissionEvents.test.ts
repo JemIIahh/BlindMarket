@@ -11,6 +11,7 @@ const HASH = '0x' + 'ab'.repeat(32);
 /** The on-chain task the store keys by. */
 const REF = 'arc:7';
 const NOW = 1_800_000_000;
+const ARC_USDC = '0x3600000000000000000000000000000000000000';
 const DEADLINE = NOW + 7200;
 const agent = (i: number) => '0x' + i.toString(16).padStart(40, '0');
 
@@ -64,10 +65,15 @@ const escrow = vi.hoisted(() => ({
 }));
 vi.mock('./escrow.js', () => ({ escrowFor: () => escrow }));
 const closeOpenSubmissionTask = vi.hoisted(() => vi.fn(async (_hash: string, _outcome: unknown) => true));
-vi.mock('./a2aStore.js', () => ({ closeOpenSubmissionTask }));
-// The listing's hash → task mapping: by default the listing is task 7.
-const listing = vi.hoisted(() => ({ resolveCachedTaskByHash: vi.fn(async (_hash: string) => ({ chain: 'arc', taskId: '7' }) as { chain: string; taskId: string } | null) }));
+// The listing: by default an open task listed by its poster, and it is task 7.
+const listingMeta = vi.hoisted(() => ({ value: { submissionMode: 'open', posterAddress: '0x' + 'a'.repeat(40) } as Record<string, unknown> | undefined }));
+vi.mock('./a2aStore.js', () => ({ closeOpenSubmissionTask, getMeta: async () => listingMeta.value }));
+const listing = vi.hoisted(() => ({ isListedTask: vi.fn(async (_chain: string, taskId: string | number) => String(taskId) === '7') }));
 vi.mock('./taskChain.js', () => listing);
+const recordWorkerPayout = vi.hoisted(() => vi.fn(async (..._args: unknown[]) => {}));
+vi.mock('./workerPayout.js', () => ({ recordWorkerPayout }));
+const smartAccounts = vi.hoisted(() => ({ loadAgentBySmartAccount: vi.fn(async (_a: string) => null as { walletAddress: string } | null) }));
+vi.mock('./deployedAgentStore.js', () => smartAccounts);
 
 type Alert = { to: string; type: string; title: string; body?: string; taskId?: string };
 /** What was actually delivered, in order. The once-senders skip a key seen before, like the real ones. */
@@ -110,7 +116,10 @@ beforeEach(() => {
   mem.zsets.clear();
   delivered.list.length = 0;
   delivered.once.clear();
-  escrow.getTask.mockResolvedValue({ agent: '0x' + 'A'.repeat(40), taskHash: HASH.toUpperCase().replace('0X', '0x'), deadline: BigInt(DEADLINE) });
+  escrow.getTask.mockResolvedValue({ agent: '0x' + 'A'.repeat(40), taskHash: HASH.toUpperCase().replace('0X', '0x'), deadline: BigInt(DEADLINE), amount: 5_000_000n, token: ARC_USDC });
+  listingMeta.value = { submissionMode: 'open', posterAddress: POSTER };
+  recordWorkerPayout.mockReset().mockResolvedValue(undefined);
+  smartAccounts.loadAgentBySmartAccount.mockResolvedValue(null);
   escrow.getOpenTask.mockResolvedValue({ open: true, mode: 1n, creatorWindow: 86_400n, closedBy: 0n });
   escrow.submissionCount.mockResolvedValue(3n);
 });
@@ -303,8 +312,8 @@ describe('a decoy task with the same hash (security review of #142)', () => {
     // Task 8 copies task 7's hash. The listing is task 7: its verified poster listed it.
     escrow.getTask.mockImplementation(async (id: bigint) =>
       id === 8n
-        ? { agent: ATTACKER, taskHash: HASH, deadline: BigInt(NOW + 3600) }
-        : { agent: POSTER, taskHash: HASH, deadline: BigInt(DEADLINE) });
+        ? { agent: ATTACKER, taskHash: HASH, deadline: BigInt(NOW + 3600), amount: 1n, token: ARC_USDC }
+        : { agent: POSTER, taskHash: HASH, deadline: BigInt(DEADLINE), amount: 5_000_000n, token: ARC_USDC });
     await handleOpenTaskCreated('arc', 7n);
     for (let i = 1; i <= 2; i++) await handleOpenSubmission('arc', 7n, agent(i), `0x0${i}`, BigInt(i), undefined, NOW);
     await handleOpenTaskCreated('arc', 8n);
@@ -326,10 +335,11 @@ describe('a decoy task with the same hash (security review of #142)', () => {
     expect(due().has(REF)).toBe(true);
   });
 
-  it("cannot mark the real listing won, or tell the real task's submitters they lost", async () => {
+  it("cannot mark the real listing won, take its credit, or tell the real task's submitters they lost", async () => {
     await handleOpenSubmission('arc', 8n, ATTACKER, '0x0e', 1n, undefined, NOW);
     await handleWinnerSelected('arc', 8n, ATTACKER, 1);
     expect(closeOpenSubmissionTask).not.toHaveBeenCalled();
+    expect(recordWorkerPayout).not.toHaveBeenCalled();
     expect(await store.getOutcome(REF)).toBeNull();
     // Only the decoy's own poster and submitter hear of it.
     expect(new Set(alerts().map((a) => a.to))).toEqual(new Set([ATTACKER]));
@@ -364,5 +374,44 @@ describe('keeping results', () => {
     await store.savePendingResult(REF, agent(1), { resultData: { output: 'swapped' }, evidenceHash: H1, rootHash: null, savedAt: '' });
     await handleOpenSubmission('arc', 7n, agent(1), H1, 1n, undefined, NOW);
     expect((await store.getResults(REF, [agent(1)]))[0]?.resultData).toEqual({ output: 'mine' });
+  });
+});
+
+describe("crediting the winner's earnings", () => {
+  beforeEach(async () => {
+    await handleOpenTaskCreated('arc', 7n);
+    for (let i = 1; i <= 2; i++) await handleOpenSubmission('arc', 7n, agent(i), `0x0${i}`, BigInt(i), undefined, NOW);
+  });
+
+  it('credits the winner once, as a passed task credits its worker: the escrow amount and token', async () => {
+    await handleWinnerSelected('arc', 7n, agent(2), 2);
+    expect(recordWorkerPayout).toHaveBeenCalledTimes(1);
+    expect(recordWorkerPayout).toHaveBeenCalledWith(HASH, agent(2), '7', 5_000_000n, { chain: 'arc', token: ARC_USDC }, {
+      rethrow: true,
+      meta: expect.objectContaining({ submissionMode: 'open' }),
+    });
+  });
+
+  it("credits a smart account's owner, as the executor is known", async () => {
+    smartAccounts.loadAgentBySmartAccount.mockResolvedValue({ walletAddress: agent(9) });
+    await handleWinnerSelected('arc', 7n, agent(2), 2);
+    expect(recordWorkerPayout.mock.calls[0][1]).toBe(agent(9));
+  });
+
+  it('credits nothing for a task that was never listed', async () => {
+    listingMeta.value = undefined;
+    await handleWinnerSelected('arc', 7n, agent(2), 2);
+    expect(recordWorkerPayout).not.toHaveBeenCalled();
+    expect(closeOpenSubmissionTask).not.toHaveBeenCalled();
+    // Its poster and submitters still hear the outcome.
+    expect(alerts().map((a) => a.title)).toContain('Winner picked — escrow released');
+  });
+
+  it('fails the event when the credit fails, so the scan retries it; the retry sends no alert twice', async () => {
+    recordWorkerPayout.mockRejectedValueOnce(new Error('database down'));
+    await expect(handleWinnerSelected('arc', 7n, agent(2), 2)).rejects.toThrow('database down');
+    await handleWinnerSelected('arc', 7n, agent(2), 2);
+    expect(recordWorkerPayout).toHaveBeenCalledTimes(2);
+    expect(alerts().filter((a) => a.title === 'Your submission won')).toHaveLength(1);
   });
 });

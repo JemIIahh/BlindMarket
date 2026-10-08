@@ -17,13 +17,16 @@
  */
 
 import type { EventLog } from 'ethers';
-import { closeOpenSubmissionTask } from './a2aStore.js';
+import { closeOpenSubmissionTask, getMeta } from './a2aStore.js';
+import { loadAgentBySmartAccount } from './deployedAgentStore.js';
 import { escrowFor } from './escrow.js';
 import { notify, notifyOnce, notifyOnceMany, type OnceNotice } from './notificationStore.js';
 import { agents } from './openSubmissionCopy.js';
 import * as store from './openSubmissionStore.js';
 import { taskRef, type OpenJudge, type OpenTaskRecord, type TaskRef } from './openSubmissionStore.js';
-import { resolveCachedTaskByHash, type TaskChain } from './taskChain.js';
+import { isListedTask, type TaskChain } from './taskChain.js';
+import { recordWorkerPayout } from './workerPayout.js';
+import type { A2ATaskMeta } from '../types.js';
 
 /** The least time between two "how many so far" alerts for one task. */
 export const COUNT_NOTICE_GAP_SEC = 3600;
@@ -66,15 +69,22 @@ async function ensureRecord(chain: TaskChain, taskId: bigint): Promise<{ ref: Ta
 }
 
 /**
- * Close the task's listing, but only when the listing is this task. The
- * escrow does not make hashes unique: a decoy task with the same hash must
- * never close the real one (security review of #142), so the listing's own
- * hash→task mapping, written when its verified poster listed it, decides.
+ * The task's listing, when the task has one and it is this task; else null.
+ * The escrow does not make hashes unique: a decoy task with the same hash
+ * must never close the real listing or take its credit (security review of
+ * #142), so the listing's own hash→task mapping, written when its verified
+ * poster listed it, decides (isListedTask, as the dispute listener asks).
  */
-async function closeListing(rec: OpenTaskRecord, outcome: Parameters<typeof closeOpenSubmissionTask>[1]): Promise<void> {
-  const listed = await resolveCachedTaskByHash(rec.taskHash).catch(() => null);
-  if (!listed || listed.chain !== rec.chain || listed.taskId !== rec.taskId) return;
-  await closeOpenSubmissionTask(rec.taskHash, outcome);
+async function listingOf(rec: OpenTaskRecord): Promise<A2ATaskMeta | null> {
+  const meta = await getMeta(rec.taskHash);
+  if (!meta || meta.submissionMode !== 'open') return null;
+  return (await isListedTask(rec.chain, rec.taskId, rec.taskHash, rec.poster, meta.posterAddress)) ? meta : null;
+}
+
+/** An on-chain address's executor: agents that submit through a smart account (Base) are credited as its owner. */
+async function executorFor(onChain: string): Promise<string> {
+  const owner = await loadAgentBySmartAccount(onChain).catch(() => null);
+  return owner?.walletAddress || onChain;
 }
 
 export async function handleOpenTaskCreated(chain: TaskChain, taskId: bigint): Promise<void> {
@@ -170,8 +180,21 @@ export async function handleWinnerSelected(chain: TaskChain, taskId: bigint, win
   const winnerAddr = winner.toLowerCase();
   await store.saveOutcome(ref, { kind: 'winner', winner: winnerAddr, judge });
   await store.unscheduleSweep(ref);
-  // The listing's state: 'completed', with the winner as its executor.
-  await closeListing(rec, { kind: 'winner', winner: winnerAddr });
+  const listing = await listingOf(rec);
+  if (listing) {
+    // The listing's state: 'completed', with the winner as its executor.
+    await closeOpenSubmissionTask(hash, { kind: 'winner', winner: winnerAddr });
+    // The winner's earnings, credited exactly as a passed single-assignee
+    // task credits its worker: once per task (recordWorkerPayout's own claim),
+    // the escrow's amount less the fee it charged. rethrow: a failed credit
+    // fails the event, so the scan retries it; everything else here is
+    // idempotent.
+    const t = await escrowFor(chain).getTask(taskId);
+    await recordWorkerPayout(hash, await executorFor(winnerAddr), rec.taskId, BigInt(t.amount), { chain, token: String(t.token) }, {
+      rethrow: true,
+      meta: listing,
+    });
+  }
   const total = await submissionTotal(ref, rec);
   await notifyOnce(`open:picked:${ref}`, rec.poster, {
     type: 'completed',
@@ -201,7 +224,7 @@ export async function handleOpenTaskVoided(chain: TaskChain, taskId: bigint, jud
   const judge = JUDGES[judgeIndex] ?? 'admin';
   await store.saveOutcome(ref, { kind: 'void', judge });
   await store.unscheduleSweep(ref);
-  await closeListing(rec, { kind: 'void' });
+  if (await listingOf(rec)) await closeOpenSubmissionTask(hash, { kind: 'void' });
   // The poster voids only a task nobody submitted to, and needs no alert for
   // their own refund.
   if (judge === 'creator') return;
