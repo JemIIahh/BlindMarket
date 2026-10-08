@@ -290,6 +290,8 @@ describe('GET /open-tasks', () => {
     expect(res.status).toBe(200);
     expect(res.body.data.total).toBe(2);
     expect(res.body.data.tasks.map((t: any) => [t.meta.taskId, t.submissions])).toEqual([['0xsooner', 3], ['0xlater', 0]]);
+    // The escrow's id, so a worker can check its own submission before working.
+    expect(res.body.data.tasks.map((t: any) => t.onChainTaskId)).toEqual(['20', '21']);
     // The finished one leaves the index, so the list does not grow forever.
     await vi.waitFor(() => expect(a2aStore.pruneOpenSubmissionIndex).toHaveBeenCalledWith(['0xclosed']));
   });

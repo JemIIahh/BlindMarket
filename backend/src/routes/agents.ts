@@ -1289,6 +1289,26 @@ agentsRouter.post('/:id/delegation', requireAuth, async (req: AuthRequest, res) 
   });
 });
 
+// POST /api/v1/agents/:id/open-submission — the owner lets this agent compete
+// in open-submission tasks (many agents submit, one wins), or stops it. Off by
+// default: every attempt spends the agent's model budget and gas, and pays
+// nothing unless it wins (docs/OPEN-SUBMISSION-TASKS.md). The worker reads it
+// at start, so restart the agent to apply.
+agentsRouter.post('/:id/open-submission', requireAuth, async (req: AuthRequest, res) => {
+  const agent = await authorizeOwner(req, res, req.params.id);
+  if (!agent) return;
+  const parsed = z.object({ enabled: z.boolean() }).safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'enabled must be true or false' } });
+    return;
+  }
+  const updated = await updateAgent(req.params.id, { openSubmissionEnabled: parsed.data.enabled });
+  res.json({
+    success: true,
+    data: { openSubmissionEnabled: updated?.openSubmissionEnabled === true, note: 'Restart the agent for the change to take effect.' },
+  });
+});
+
 // ── Agent Services (rent-your-agent Phase 1) ────────────────────────────────
 // Owner-managed CRUD for an agent's priced service listings. Public browse/detail
 // live on the marketplace router. Every route is owner-gated via authorizeOwner;

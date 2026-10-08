@@ -334,6 +334,12 @@ const migrations: Migration[] = [
     name: 'deployed_agents_privy_user_id',
     sql: `ALTER TABLE deployed_agents ADD COLUMN privy_user_id TEXT;`,
   },
+  {
+    // Mirror of Postgres migration 45.
+    id: 23,
+    name: 'deployed_agents_open_submission_enabled',
+    sql: `ALTER TABLE deployed_agents ADD COLUMN open_submission_enabled INTEGER NOT NULL DEFAULT 0;`,
+  },
 ];
 
 /** One migration's SQL, for tests of what a migration does to existing rows. */

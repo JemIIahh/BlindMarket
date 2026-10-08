@@ -615,6 +615,8 @@ export async function startAgent(id: string, opts?: { skipResume?: boolean }): P
       AGENT_VERIFIER_ENABLED: agent.verifierEnabled ? 'true' : 'false',
       // delegate_to_agent is the owner's opt-in (services/delegationGuard.ts).
       AGENT_DELEGATION_ENABLED: agent.delegationEnabled ? 'true' : 'false',
+      // Competing in open-submission tasks is the owner's opt-in too.
+      AGENT_OPEN_SUBMISSION_ENABLED: agent.openSubmissionEnabled ? 'true' : 'false',
       AGENT_MEMORY_NS: `agent:${agent.id}`,
       AGENT_FILES_DIR: `/data/agents/${agent.id}`,
       // Set only on a post-crash auto-restart: the worker skips re-driving its
@@ -923,7 +925,7 @@ export async function listAgents(ownerAddress?: string): Promise<DeployedAgent[]
     : all;
 }
 
-export async function updateAgent(id: string, patch: Partial<Pick<DeployedAgent, 'instructions' | 'provider' | 'model' | 'apiKey' | 'tools' | 'capabilities' | 'minReward' | 'skills' | 'verifierEnabled' | 'delegationEnabled'>>): Promise<DeployedAgent | undefined> {
+export async function updateAgent(id: string, patch: Partial<Pick<DeployedAgent, 'instructions' | 'provider' | 'model' | 'apiKey' | 'tools' | 'capabilities' | 'minReward' | 'skills' | 'verifierEnabled' | 'delegationEnabled' | 'openSubmissionEnabled'>>): Promise<DeployedAgent | undefined> {
   const agent = await loadAgent(id);
   if (!agent) return undefined;
   // Strip undefined values before merging.

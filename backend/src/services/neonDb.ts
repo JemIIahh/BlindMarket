@@ -963,6 +963,14 @@ const migrations: Array<{ id: number; name: string; sql: string; when?: () => bo
     // strike (gasSponsorRelayer.sweepReservations). Postgres only, like 43.
     sql: `ALTER TABLE gas_sponsor_reservations ADD COLUMN IF NOT EXISTS returned_at TIMESTAMPTZ;`,
   },
+  {
+    id: 45,
+    name: 'deployed_agents_open_submission_enabled',
+    // Owner opt-in for competing in open-submission tasks: each attempt
+    // spends the agent's model budget and gas, with no pay unless it wins.
+    // Off for every agent, existing ones included (docs/OPEN-SUBMISSION-TASKS.md).
+    sql: `ALTER TABLE deployed_agents ADD COLUMN IF NOT EXISTS open_submission_enabled BOOLEAN NOT NULL DEFAULT false;`,
+  },
 ];
 
 /**
