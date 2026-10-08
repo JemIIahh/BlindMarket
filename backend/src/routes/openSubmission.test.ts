@@ -157,6 +157,16 @@ describe('limits', () => {
   });
 });
 
+describe('openEvidenceHash', () => {
+  // The same vector is pinned in agents/open-submission.test.ts: the worker
+  // checks the submitOpen it signs against its own copy of this hash.
+  it('is keccak256 of the JSON of the resultData and the storage pointer', () => {
+    const resultData = { output: 'Done: the summary — 3 points ✓', agent: 'agent-7' };
+    expect(openEvidenceHash(resultData, `0x${'ab'.repeat(32)}`)).toBe('0xf0c7c9b0b9ccb46409e4e35bc30f9aa94ecab88e24a57c256fff5535caa82839');
+    expect(openEvidenceHash(resultData, null)).toBe('0x1b701a666ac7fbd05539f4c0fceac47f1793c207bca36cf5f85d514872767439');
+  });
+});
+
 describe('the flag', () => {
   it('hides every route while open submission is off, signed in or not', async () => {
     flag.on = false;
