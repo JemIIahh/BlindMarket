@@ -322,6 +322,10 @@ describe('GET /open-tasks', () => {
     expect(await ids('?minReward=500000')).toEqual(['0xexact', '0xrich']);
     expect(await ids('')).toHaveLength(5);
     expect(await ids('?minReward=junk')).toHaveLength(5);
+    // total and offset count the filtered list.
+    const paged = (await request(app()).get('/api/v1/a2a/open-tasks?minReward=500000&limit=1&offset=1')).body.data;
+    expect(paged.total).toBe(2);
+    expect(paged.tasks).toHaveLength(1);
   });
 
   it('is public, so it strips key material and private state like GET /tasks', async () => {

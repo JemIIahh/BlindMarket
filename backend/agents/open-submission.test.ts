@@ -12,6 +12,7 @@ import {
   openEvidenceHash, fitOpenResultData, meetsOpenRewardFloor, openSkipReason, pickOpenCandidates,
   openEligibility, checkUnsignedSubmitOpen, openRefusalIsFinal, openRunsLeft, createOpenState,
   sendOpenResult, buildTools, openRewardFloor, noteOpenFailure, openPassCore, produceResult, OPEN_MAX_PROMPT_CHARS,
+  readOpenBoard, openBoardUrl,
   OPEN_RESULT_DATA_MAX_BYTES, OPEN_TOOL_OPTIONS, OPEN_DEADLINE_MARGIN_SEC,
   // @ts-expect-error — plain-JS worker, no d.ts
 } from './worker.js';
@@ -500,13 +501,33 @@ describe('openPassCore', () => {
     expect(d.send).not.toHaveBeenCalled();
   });
 
-  it('drops an unsent result whose task left the board, then works another', async () => {
+  it('keeps an unsent result a complete read missed, until its deadline: pages shift between reads', async () => {
     const state = createOpenState();
-    state.unsent.set('0x' + 'ee'.repeat(32), { entry: entry({ taskId: '0x' + 'ee'.repeat(32) }), produced: {} });
-    const d = deps();
-    expect(await openPassCore(d, state)).toBe('ran');
-    expect(state.unsent.size).toBe(0);
-    expect(d.send).not.toHaveBeenCalled();
+    const missed = '0x' + 'cc'.repeat(32);
+    state.unsent.set(missed, { entry: entry({ taskId: missed }), produced: {} });
+    const d = deps({ fetchBoard: vi.fn(async () => ({ entries: [entry()], complete: true })) });
+    expect(await openPassCore(d, state)).toBe('sent');
+    expect(d.send).toHaveBeenCalledWith(expect.objectContaining({ entry: expect.objectContaining({ meta: expect.objectContaining({ taskId: missed }) }) }));
+  });
+
+  it('forgets a finished task only after two complete reads without it', async () => {
+    const state = createOpenState();
+    const gone = '0x' + 'bb'.repeat(32);
+    state.done.set(gone, 'submitted');
+    state.attempts.set(gone, 2);
+    const d = deps({ fetchBoard: vi.fn(async () => ({ entries: [entry()], complete: true })), run: vi.fn(async () => {}) });
+    await openPassCore(d, state);
+    expect(state.done.has(gone)).toBe(true);
+    await openPassCore(d, state);
+    expect(state.done.has(gone)).toBe(false);
+    expect(state.attempts.has(gone)).toBe(false);
+    // Back on the board after one miss: the count starts again.
+    const back = createOpenState();
+    back.done.set(gone, 'submitted');
+    await openPassCore(deps({ fetchBoard: vi.fn(async () => ({ entries: [entry()], complete: true })) }), back);
+    await openPassCore(deps({ fetchBoard: vi.fn(async () => ({ entries: [entry(), entry({ taskId: gone })], complete: true })) }), back);
+    await openPassCore(deps({ fetchBoard: vi.fn(async () => ({ entries: [entry()], complete: true })) }), back);
+    expect(back.done.has(gone)).toBe(true);
   });
 
   it('runs no model while the model check fails, or past the hourly cap', async () => {
@@ -616,12 +637,20 @@ describe('produceResult', () => {
     expect(h.onModelStart).not.toHaveBeenCalled();
   });
 
-  it('counts the poster-written criteria in the cap: a short brief with huge criteria is not worked either', async () => {
+  it('counts the poster-written criteria in the cap: a brief and criteria each under it, over it together, are not worked', async () => {
+    brief = 'b'.repeat(OPEN_MAX_PROMPT_CHARS - 4000);
     const h = hooks();
-    const meta = { ...entry().meta, verificationCriteria: { rubric: 'r'.repeat(OPEN_MAX_PROMPT_CHARS) } };
+    const criteria = {
+      rubric: Array.from({ length: 20 }, (_, i) => ({ criterion: `${'c'.repeat(240)} ${i}`, weight: 1 })),
+      contains_keywords: Array.from({ length: 50 }, (_, i) => `keyword-${'k'.repeat(40)}-${i}`),
+    };
+    const meta = { ...entry().meta, verificationCriteria: criteria };
     expect(await produceResult(HASH, { briefRootHash: ROOT, wrappedKey: null, privacy: 'public', meta, open: true }, h)).toBeNull();
     expect(h.giveUp).toHaveBeenCalledWith(expect.stringMatching(/brief and criteria are over/), { final: true });
     expect(generateText).not.toHaveBeenCalled();
+    // The same brief alone is under the cap and is worked.
+    const alone = hooks();
+    expect(await produceResult(HASH, { briefRootHash: ROOT, wrappedKey: null, privacy: 'public', meta: entry().meta, open: true }, alone)).not.toBeNull();
   });
 
   it('starts no run when the brief cannot be read', async () => {
@@ -642,6 +671,35 @@ describe('produceResult', () => {
     const opts = vi.mocked(generateText).mock.calls[0][0] as any;
     expect(opts.tools.send_message).toBeDefined();
     expect(opts.system).toMatch(/messaging tools describe how/);
+  });
+});
+
+describe('reading the open board', () => {
+  const page = (from: number, n: number, total: number) => ({ tasks: Array.from({ length: n }, (_, i) => ({ meta: { taskId: `t${from + i}` } })), total });
+
+  it('pages by what it has read until total, whatever page size the server chose', async () => {
+    const offsets: number[] = [];
+    const board = await readOpenBoard(async (offset: number) => { offsets.push(offset); return page(offset, Math.min(150, 450 - offset), 450); });
+    expect(offsets).toEqual([0, 150, 300]);
+    expect(board).toMatchObject({ complete: true });
+    expect(board.entries).toHaveLength(450);
+  });
+
+  it('is partial when the page cap stops it, and nothing when a read fails', async () => {
+    const board = await readOpenBoard(async (offset: number) => page(offset, 200, 5000), 2);
+    expect(board).toMatchObject({ complete: false });
+    expect(board.entries).toHaveLength(400);
+    expect(await readOpenBoard(async (offset: number) => (offset === 0 ? page(0, 200, 400) : null))).toBeNull();
+  });
+
+  it('keeps a task met on two pages once (the list shifted)', async () => {
+    const board = await readOpenBoard(async (offset: number) => (offset === 0 ? page(0, 2, 4) : page(1, 2, 4)));
+    expect(board.entries.map((e: any) => e.meta.taskId)).toEqual(['t0', 't1', 't2']);
+  });
+
+  it('asks the server to apply the floor, and not when there is none', () => {
+    expect(openBoardUrl(200, 500_000n)).toMatch(/open-tasks\?limit=200&offset=200&minReward=500000$/);
+    expect(openBoardUrl(0, 0n)).not.toMatch(/minReward/);
   });
 });
 

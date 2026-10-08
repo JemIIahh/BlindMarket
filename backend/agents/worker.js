@@ -4042,6 +4042,8 @@ export function createOpenState() {
     offUntil: 0,
     /** taskHash → the skip reason last logged for it. */
     logged: new Map(),
+    /** taskHash → complete board reads in a row it was missing from (forgotten at 2). */
+    absent: new Map(),
   };
 }
 const openState = createOpenState();
@@ -4286,38 +4288,80 @@ function keepUnsent(state, entry, produced, reason, txHash = undefined, tries = 
 }
 
 /**
- * Forget tasks no longer on the board: past their deadline, closed or gone.
- * Only a board read to its end says a task is gone; a partial read prunes
- * nothing but results whose deadline has passed.
+ * Forget tasks no longer on the board. The board is paged by offset over a
+ * list that changes between page reads, so even a read to its end can miss a
+ * live task: a task is forgotten only after two complete reads in a row
+ * without it, and an unsent result only at its deadline (sendOpenResult and
+ * the server's refusals end it sooner if its task closed).
  */
 function pruneOpenState(state, onBoard, { complete, nowSec }) {
   if (complete) {
-    for (const map of [state.done, state.retryAt, state.attempts, state.logged]) {
-      for (const k of [...map.keys()]) if (!onBoard.has(k)) map.delete(k);
+    const known = new Set([...state.done.keys(), ...state.retryAt.keys(), ...state.attempts.keys(), ...state.logged.keys(), ...state.absent.keys()]);
+    for (const k of known) {
+      if (onBoard.has(k)) {
+        state.absent.delete(k);
+        continue;
+      }
+      const misses = (state.absent.get(k) ?? 0) + 1;
+      if (misses < 2) {
+        state.absent.set(k, misses);
+        continue;
+      }
+      for (const map of [state.done, state.retryAt, state.attempts, state.logged, state.absent]) map.delete(k);
     }
   }
+  // Skip reasons of a board never read whole: bounded, re-logged at worst.
+  if (state.logged.size > 2000) state.logged.clear();
   for (const [k, u] of [...state.unsent.entries()]) {
-    if (nowSec < u.entry.meta.deadline && (onBoard.has(k) || !complete)) continue;
+    if (nowSec < u.entry.meta.deadline) continue;
     state.unsent.delete(k);
-    log(`open task ${k.slice(0, 10)}…: it closed before its result could be sent`);
+    log(`open task ${k.slice(0, 10)}…: its deadline passed before its result could be sent`);
   }
+}
+
+/** The board URL for one page, with this agent's floor when it has one. Exported for tests. */
+export function openBoardUrl(offset, floor) {
+  return `${BACKEND_URL}/api/v1/a2a/open-tasks?limit=200&offset=${offset}${floor > 0n ? `&minReward=${floor}` : ''}`;
+}
+
+/**
+ * Read the board page by page: `getPage(offset)` gives a page's `data`
+ * ({ tasks, total }), or null to stop (a failed read). { entries, complete }
+ * or null. The next offset is what was read so far, whatever page size the
+ * server chose; `complete` is reaching `total` (or an empty page). A task
+ * met twice (the list shifted between pages) is kept once. Exported for tests.
+ */
+export async function readOpenBoard(getPage, maxPages = MAX_OPEN_BOARD_PAGES) {
+  const seen = new Set();
+  const entries = [];
+  let read = 0;
+  for (let page = 0; page < maxPages; page++) {
+    const data = await getPage(read);
+    if (!data || !Array.isArray(data.tasks)) return null;
+    read += data.tasks.length;
+    for (const e of data.tasks) {
+      const id = e?.meta?.taskId;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      entries.push(e);
+    }
+    if (data.tasks.length === 0 || read >= Number(data.total ?? read)) return { entries, complete: true };
+  }
+  return { entries, complete: false };
 }
 
 /**
  * The open board, paying at least this agent's floor (the server filters
  * before paging, so near-free tasks can't crowd the real ones off a page):
  * { entries, complete }, or null (read failed, or the feature is off on the
- * server). Up to MAX_OPEN_BOARD_PAGES pages; `complete` says the end was
- * reached.
+ * server).
  */
 async function fetchOpenTasks() {
-  const PAGE = 200;
   const floor = openRewardFloor(process.env.AGENT_MIN_REWARD ?? '');
-  const entries = [];
-  for (let page = 0; page < MAX_OPEN_BOARD_PAGES; page++) {
+  return readOpenBoard(async (offset) => {
     let res;
     try {
-      res = await fetchWithTimeout(`${BACKEND_URL}/api/v1/a2a/open-tasks?limit=${PAGE}&offset=${page * PAGE}${floor > 0n ? `&minReward=${floor}` : ''}`, {
+      res = await fetchWithTimeout(openBoardUrl(offset, floor), {
         headers: { 'Authorization': `Bearer ${AGENT_PLATFORM_TOKEN}` },
       }, 15_000);
     } catch (e) {
@@ -4333,13 +4377,8 @@ async function fetchOpenTasks() {
       log(`open board read failed: ${res.status}`);
       return null;
     }
-    const data = (await res.json().catch(() => null))?.data;
-    if (!Array.isArray(data?.tasks)) return null;
-    entries.push(...data.tasks);
-    const total = Number(data.total ?? entries.length);
-    if (data.tasks.length < PAGE || entries.length >= total) return { entries, complete: true };
-  }
-  return { entries, complete: false };
+    return (await res.json().catch(() => null))?.data ?? null;
+  });
 }
 
 /**
