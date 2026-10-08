@@ -23,7 +23,7 @@
  *   a2a:open:held-by:<a>         zset: ref → unix seconds a submitter's held result
  *                                expires; caps how many one wallet holds (MAX_HELD)
  *   a2a:open:scorecard-pending:<ref>:<role>
- *                                JSON PendingScorecard: the scorecard a judge
+ *                                JSON { scorecardHash, scorecard }: the scorecard a judge
  *                                (creator or task_verifier) last sent with a pick,
  *                                for PENDING_SCORECARD_TTL_SEC; kept only if a pick
  *                                with its hash lands on-chain. One per role, so a

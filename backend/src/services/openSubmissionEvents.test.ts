@@ -278,6 +278,13 @@ describe("the judge's scorecard", () => {
     expect(mem.kv.has(`a2a:open:scorecard-pending:${REF}:task_verifier`)).toBe(false);
   });
 
+  it("is kept for the poster's pick from the poster's held scorecard", async () => {
+    const posterCard = { scores: [{ submitter: 'one', score: 7 }], by: 'poster' };
+    const hash = (await store.savePendingScorecard(REF, 'creator', posterCard)).toLowerCase();
+    await handleWinnerSelected('arc', 7n, agent(1), 1, hash);
+    expect(await store.getScorecard(REF)).toEqual({ scorecardHash: hash, scorecard: posterCard });
+  });
+
   it('is kept for the judge that picked: the poster’s pick does not take the verifier’s scorecard', async () => {
     await handleWinnerSelected('arc', 7n, agent(1), 1, SC);
     expect(await store.getScorecard(REF)).toBeNull();

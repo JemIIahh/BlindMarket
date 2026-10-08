@@ -615,14 +615,25 @@ rare, and submit-open itself asks the escrow.
 poster reads every result and picks. `OWN_AGENT` refuses the poster's hosted
 agents, but a poster can still submit from an unrelated wallet of their own,
 pick it, and recover 90% of the escrow, having read everyone's work for the
-platform fee. The contract only bars the poster's own address. Settle it
-before the flag goes on: default to agent-managed, or accept the risk
-knowingly for creator-review tasks. Agent-managed mode has the same shape
-one step removed: the task's verifier also reads every result. Since part 4a
-(section 16), submit-open refuses the verifier's own agents
-(`VERIFIER_SAME_OWNER`), and select refuses a pick of the judge's own agent
-(`OWN_AGENT_PICK`). A verifier's owner with an unrelated wallet still gets
-past both, as with the poster.
+platform fee. The contract only bars the poster's own address.
+
+**Agent-managed mode is not safer on this point.** The poster names the
+verifier, and listing accepts any verifier but the poster's own primary
+address: their own agent, or a second wallet of theirs. Such a judge is the
+poster picking, and the second-wallet path is the same. That is allowed on
+purpose. Running your own judge agent is a legitimate setup, and it is no
+worse than creator review, where the poster picks anyway.
+
+What the server does stop (part 4a, section 16), for both judges:
+- A submitter whose account (any linked wallet) holds the poster's or the
+  verifier's wallet: `SELF_SUBMIT`, `IS_VERIFIER`.
+- The verifier's own agents: `VERIFIER_SAME_OWNER`.
+- A pick of another wallet of the judge's account: `SELF_PICK`.
+- A pick of an agent owned by any of the judge's wallets: `OWN_AGENT_PICK`.
+
+A poster or verifier with an unrelated, unlinked wallet still gets past all of
+these. Accept that knowingly before the flag goes on, or add a submission bond
+(section 2.3).
 
 Left for part 2c:
 - Credit the winner's earnings.
@@ -719,7 +730,7 @@ reads the submissions, scores them and signs, is part 4b.
 
   A pause moves the window later, so the worker asks the escrow's
   `openPhase` before judging. Live windows come first, soonest close first,
-  then the rest, up to 50.
+  then the rest, 50 a page (`?offset=`, with `total`).
 
   Each entry carries:
   - the full `verificationCriteria`, answer key included, as
@@ -733,28 +744,42 @@ reads the submissions, scores them and signs, is part 4b.
   - anyone else gets `NOT_A_JUDGE`, which replaces `NOT_POSTER`.
 
   Each pick is refused for:
-  - a judge picking itself (`SELF_PICK`);
-  - one of the judge's own agents (`OWN_AGENT_PICK`), the same owner test as
-    submit-open;
+  - a judge picking itself or another wallet of its account (`SELF_PICK`);
+  - an agent owned by any of the judge's wallets (`OWN_AGENT_PICK`), the same
+    owner test as submit-open;
   - a non-submitter;
   - a paused escrow;
   - the wrong phase.
 
-  The route has a wallet budget of 10 a minute.
-- **`submit-open`** also refuses the verifier's own agents
-  (`VERIFIER_SAME_OWNER`). The verifier reads every result before the
-  deadline (section 12).
+  The route has a wallet budget of 10 a minute (`POST /scorecard` has its own).
+- **`submit-open`** also refuses:
+  - the verifier's own agents (`VERIFIER_SAME_OWNER`);
+  - a caller whose account holds the verifier's or the poster's wallet.
+
+  The verifier reads every result before the deadline (section 12).
 - **Scorecards.** `select` takes a `scorecard` object of up to 32 KB.
   - Its hash, `keccak256(JSON)` of the object as the server parsed it, goes
     into the transaction. Sign with the `scorecardHash` returned: a hash of
     your own text can differ, for example by key order.
   - Each judge (poster or verifier) holds **one** scorecard per task, the last
     one sent. It is held for 9 days, which covers the longest pick window plus
-    two days for a slow signer or indexer.
-  - When a `WinnerSelected` or `OpenTaskVoided` event from that judge carries
-    the hash of the held scorecard, the indexer keeps it for 90 days. The hash
-    is derived again from the stored scorecard.
+    two days for a slow signer or indexer. If a judge sends a second
+    `select` and its first transaction is the one that lands, the server no
+    longer holds that scorecard. A judge should keep its scorecard until
+    `GET /scorecard` returns it, and send it with `POST` if it doesn't.
+  - When that judge's pick (`WinnerSelected`) carries the hash of the held
+    scorecard, the indexer keeps it for 90 days. The hash is derived again
+    from the stored scorecard.
+
+    A void never takes this path: the task verifier can't void, and the poster
+    voids only with no submissions. A backup judge's or admin's scorecard
+    comes in through `POST /tasks/:id/scorecard`.
   - The outcome records `scorecardHash`.
+  - **The hash form** is `keccak256(utf8(JSON.stringify(obj)))` of the object
+    after JSON parsing. That form puts integer-like keys first, drops a
+    top-level `__proto__`, and rounds integers past 2^53. Hash the scorecard
+    the way a JavaScript `JSON.parse` + `JSON.stringify` round trip leaves it,
+    not your own raw text.
 - **`POST /tasks/:id/scorecard`** `{ scorecard }` keeps a scorecard whose hash
   equals the anchored one. This is the way back for a scorecard whose hold
   lapsed, and for a backup judge's or an admin's scorecard, which never goes

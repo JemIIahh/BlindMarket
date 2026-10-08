@@ -62,15 +62,17 @@ export const MAX_RESULT_BYTES = 64 * 1024;
 
 /** Each wallet's submit-open calls (middleware/rateLimit.ts). */
 const submitBudget = createWalletBudget({ name: 'submissions', perMinute: 20 });
-/** Each wallet's select calls: each may hold a scorecard for a day. */
+/** Each wallet's select calls (each may replace its held scorecard). */
 const pickBudget = createWalletBudget({ name: 'picks', perMinute: 10 });
+/** Each wallet's scorecard sends (POST /tasks/:id/scorecard). */
+const scorecardBudget = createWalletBudget({ name: 'scorecards', perMinute: 10 });
 
 /** Largest scorecard a judge may send with a pick. */
 export const MAX_SCORECARD_BYTES = 32 * 1024;
 
 /** How long past its verifier's window, as listed, a task stays on GET /open-verifications: a pause moves the window later. */
 const VERIFIER_LIST_SLACK_SEC = 30 * 86_400;
-/** Most tasks GET /open-verifications returns: live windows first. */
+/** Most tasks one page of GET /open-verifications returns: live windows first. */
 const VERIFIER_LIST_MAX = 50;
 /** The escrow's VERIFIER_PICK_WINDOW. */
 const VERIFIER_PICK_WINDOW_SEC = 48 * 3600;
@@ -165,13 +167,16 @@ async function openTask(rawHash: string): Promise<{ taskHash: string; meta: A2AT
 }
 
 /**
- * True when `agent` belongs to `judge`'s owner: `judge` is a hosted agent and
- * `agent` is one of its owner's agents (or the owner's wallet), or `judge` is
- * a person and `agent` is their own agent. Such an agent must not be judged
- * by them.
+ * True when `agent` belongs to one of `judges`' owners: a judge is a hosted
+ * agent and `agent` is one of its owner's agents (or the owner's wallet), or
+ * a judge is a person and `agent` is their own agent. Such an agent must not
+ * be judged by them.
  */
-async function judgesOwnAgent(agent: string, judge: string): Promise<boolean> {
-  return (await sameOwnerSubtask(judge, agent)) || (await ownAgentOf(agent, [judge]));
+async function judgesOwnAgent(agent: string, judges: Iterable<string>): Promise<boolean> {
+  const list = [...new Set([...judges].map((j) => j.toLowerCase()))];
+  if (await ownAgentOf(agent, list)) return true;
+  for (const judge of list) if (await sameOwnerSubtask(judge, agent)) return true;
+  return false;
 }
 
 /** The escrow's phase for an open task, as its enum number. */
@@ -195,12 +200,15 @@ openSubmissionRouter.post('/tasks/:id/submit-open', enabledOnly, requireAuth, su
       throw new AppError(403, 'NOT_REGISTERED', 'Submit from a registered agent wallet');
     }
 
+    // Every wallet of the caller's account: a judge's other wallet is still the judge.
+    const mine = callerWallets(req);
+
     const state = await a2aStore.getState(taskHash);
     if (state?.status !== 'collecting') {
       throw new AppError(409, 'SUBMISSIONS_CLOSED', 'This task no longer takes submissions');
     }
-    if (meta.verifierAddress?.toLowerCase() === address) {
-      throw new AppError(403, 'IS_VERIFIER', "You are this task's verifier, so you cannot submit to it");
+    if (meta.verifierAddress && mine.has(meta.verifierAddress.toLowerCase())) {
+      throw new AppError(403, 'IS_VERIFIER', "You hold this task's verifier wallet, so you cannot submit to it");
     }
     if (!(await agentStore.getAgent(address))) {
       throw new AppError(403, 'NOT_REGISTERED', 'Register as an agent executor first');
@@ -215,7 +223,7 @@ openSubmissionRouter.post('/tasks/:id/submit-open', enabledOnly, requireAuth, su
       escrow.paused(),
     ]);
     const posters = [String(onChain.agent), meta.posterAddress].filter((a): a is string => !!a).map((a) => a.toLowerCase());
-    if (posters.includes(address)) {
+    if (posters.some((p) => mine.has(p))) {
       throw new AppError(403, 'SELF_SUBMIT', 'You posted this task, so you cannot submit to it');
     }
 
@@ -266,7 +274,7 @@ openSubmissionRouter.post('/tasks/:id/submit-open', enabledOnly, requireAuth, su
     }
     // So does the task's verifier: an agent of its owner could copy the best
     // result and be picked.
-    if (meta.verifierAddress && (await judgesOwnAgent(address, meta.verifierAddress))) {
+    if (meta.verifierAddress && (await judgesOwnAgent(address, [meta.verifierAddress]))) {
       throw new AppError(403, 'VERIFIER_SAME_OWNER', "This agent has the same owner as the task's verifier, so it cannot submit to the task");
     }
     // The escrow's deadline decides: a pause moves it past the stored one.
@@ -393,7 +401,9 @@ openSubmissionRouter.post('/tasks/:id/select', enabledOnly, requireAuth, pickBud
     if (!isPoster && !isVerifier) {
       throw new AppError(403, 'NOT_A_JUDGE', "Only the poster, or the task's verifier in its window, picks the winner of this task");
     }
-    const byVerifier = isVerifier && (!isPoster || phase === PHASE.VerifierPick);
+    // Holding both wallets, the poster's role applies only in the poster's
+    // window of a task they review.
+    const byVerifier = isVerifier && (!isPoster || phase === PHASE.VerifierPick || meta.openPick?.mode !== 'creator');
     const judge = byVerifier ? verifier : poster;
     if (!byVerifier && meta.openPick?.mode !== 'creator') {
       throw new AppError(409, 'VERIFIER_PICKS', "This task's verifier picks its winner");
@@ -406,14 +416,15 @@ openSubmissionRouter.post('/tasks/:id/select', enabledOnly, requireAuth, pickBud
       throw new AppError(409, 'ESCROW_PAUSED', 'The escrow is paused: picks wait until it resumes');
     }
     const winner = ethers.getAddress(body.winner);
-    // No judge pays itself (the escrow refuses SelfAssignment), or its own agents.
-    if (winner.toLowerCase() === judge) {
-      throw new AppError(409, 'SELF_PICK', 'A judge cannot pick itself');
+    // No judge pays itself (the escrow refuses SelfAssignment), another of
+    // its account's wallets, or its own agents.
+    if (winner.toLowerCase() === judge || wallets.has(winner.toLowerCase())) {
+      throw new AppError(409, 'SELF_PICK', 'A judge cannot pick itself or another of its own wallets');
     }
     if ((await escrowFor(chain).submissionOf(taskId, winner)) === ethers.ZeroHash) {
       throw new AppError(409, 'NOT_A_SUBMITTER', 'That address did not submit to this task');
     }
-    if (await judgesOwnAgent(winner, judge)) {
+    if (await judgesOwnAgent(winner, [judge, ...wallets])) {
       throw new AppError(409, 'OWN_AGENT_PICK', "That agent has the same owner as you, so you cannot pick it");
     }
     const build = byVerifier ? buildSelectWinnerByVerifierOn : buildSelectWinnerOn;
@@ -472,7 +483,7 @@ openSubmissionRouter.get('/tasks/:id/scorecard', enabledOnly, requireAuth, async
  * which never went through /select. Content-addressed: anyone holding it may
  * send it.
  */
-openSubmissionRouter.post('/tasks/:id/scorecard', enabledOnly, requireAuth, pickBudget, async (req: AuthRequest, res, next) => {
+openSubmissionRouter.post('/tasks/:id/scorecard', enabledOnly, requireAuth, scorecardBudget, async (req: AuthRequest, res, next) => {
   try {
     const { scorecard } = z.object({ scorecard: z.record(z.unknown()) }).parse(req.body);
     if (Buffer.byteLength(JSON.stringify(scorecard)) > MAX_SCORECARD_BYTES) {
@@ -496,12 +507,13 @@ openSubmissionRouter.post('/tasks/:id/scorecard', enabledOnly, requireAuth, pick
 });
 
 /**
- * GET /api/v1/a2a/open-verifications
+ * GET /api/v1/a2a/open-verifications?offset=
  * Open tasks the caller is the verifier of (its wallets' verifier index),
  * from when its pick window opens, as listed (the deadline, or the end of the
  * poster's window on a task they review), until 30 days after that window
  * closes: a pause moves it later, so the worker asks the escrow's openPhase
- * before judging. Live windows first, soonest close first, then the rest. The
+ * before judging. Live windows first, soonest close first, then the rest, 50
+ * a page (pass offset; total says how many). The
  * judge gets the full verification criteria, answer key included, as GET
  * /verifications gives a single-assignee task's verifier.
  */
@@ -511,7 +523,8 @@ openSubmissionRouter.get('/open-verifications', enabledOnly, requireAuth, async 
     const nowSec = Math.floor(Date.now() / 1000);
     const seen = new Set<string>();
     const indexed = (await Promise.all([...wallets].map((w) => a2aStore.getVerifierTasks(w)))).flat();
-    const mine = indexed
+    const offset = Math.max(parseInt(req.query.offset as string) || 0, 0);
+    const listed = indexed
       .filter(({ meta, state }) => {
         if (seen.has(meta.taskId)) return false;
         seen.add(meta.taskId);
@@ -526,8 +539,8 @@ openSubmissionRouter.get('/open-verifications', enabledOnly, requireAuth, async 
         const bLive = nowSec < b.closesAt;
         if (aLive !== bLive) return aLive ? -1 : 1;
         return aLive ? a.closesAt - b.closesAt : b.closesAt - a.closesAt;
-      })
-      .slice(0, VERIFIER_LIST_MAX);
+      });
+    const mine = listed.slice(offset, offset + VERIFIER_LIST_MAX);
     const tasks = await Promise.all(mine.map(async ({ meta, closesAt }) => {
       const resolved = await resolveCachedTaskByHash(meta.taskId).catch(() => null);
       return {
@@ -537,7 +550,7 @@ openSubmissionRouter.get('/open-verifications', enabledOnly, requireAuth, async 
         window: { opensAt: closesAt - VERIFIER_PICK_WINDOW_SEC, closesAt },
       };
     }));
-    const response: ApiResponse = { success: true, data: { tasks } };
+    const response: ApiResponse = { success: true, data: { tasks, total: listed.length, offset, limit: VERIFIER_LIST_MAX } };
     res.json(response);
   } catch (err) {
     next(err);

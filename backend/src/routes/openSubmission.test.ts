@@ -176,7 +176,7 @@ beforeEach(() => {
 
 describe('limits', () => {
   it('gives submit-open and select per-wallet budgets', () => {
-    expect(budgetsMade).toEqual([[{ name: 'submissions', perMinute: 20 }], [{ name: 'picks', perMinute: 10 }]]);
+    expect(budgetsMade).toEqual([[{ name: 'submissions', perMinute: 20 }], [{ name: 'picks', perMinute: 10 }], [{ name: 'scorecards', perMinute: 10 }]]);
   });
 });
 
@@ -452,6 +452,26 @@ describe("POST /tasks/:id/select by the task's verifier", () => {
     expect((await select(VERIFIER, VERIFIER)).body.error.code).toBe('SELF_PICK');
   });
 
+  it('gives a caller holding both wallets the verifier’s answer outside its window on a task the verifier picks', async () => {
+    escrow.openPhase.mockResolvedValue(3n);
+    expect((await select(POSTER, AGENT, VERIFIER)).body.error.code).toBe('NOT_PICK_WINDOW');
+  });
+
+  it("refuses to pick another wallet of the judge's own account", async () => {
+    escrow.submissionOf.mockResolvedValue('0x' + '11'.repeat(32));
+    const res = await select(VERIFIER, AGENT2, AGENT2);
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('SELF_PICK');
+  });
+
+  it("refuses an agent owned by any of the judge's wallets (the poster's too)", async () => {
+    ownAgent.mockImplementation(async (agent: string, owners: Iterable<string>) => agent.toLowerCase() === AGENT && [...owners].includes(POSTER_OTHER_WALLET));
+    expect((await select(VERIFIER, AGENT, POSTER_OTHER_WALLET)).body.error.code).toBe('OWN_AGENT_PICK');
+    a2a.getMeta.mockResolvedValue(openMeta());
+    escrow.openPhase.mockResolvedValue(1n);
+    expect((await select(POSTER, AGENT, POSTER_OTHER_WALLET)).body.error.code).toBe('OWN_AGENT_PICK');
+  });
+
   it("refuses to pick an agent of the judge's own owner", async () => {
     sameOwner.mockImplementation(async (judge: string, agent: string) => judge === VERIFIER && agent.toLowerCase() === AGENT);
     const res = await select(VERIFIER, AGENT);
@@ -467,6 +487,12 @@ describe("submit-open and the verifier's own agents", () => {
     const res = await submit(AGENT);
     expect(res.status).toBe(403);
     expect(res.body.error.code).toBe('VERIFIER_SAME_OWNER');
+  });
+
+  it("refuses a caller whose account holds the verifier's or the poster's wallet", async () => {
+    const fromLinked = (linked: string) => request(app()).post(`/api/v1/a2a/tasks/${HASH}/submit-open`).set(as(AGENT, linked)).send({ resultData: { output: 'x' }, rootHash: null });
+    expect((await fromLinked(VERIFIER)).body.error.code).toBe('IS_VERIFIER');
+    expect((await fromLinked(POSTER)).body.error.code).toBe('SELF_SUBMIT');
   });
 
   it("refuses a person verifier's own agent too", async () => {
@@ -599,9 +625,20 @@ describe('GET /open-verifications', () => {
   });
 
   it('reads every linked wallet, once per task', async () => {
-    a2a.getVerifierTasks.mockImplementation(async (w: string) => (w === VERIFIER ? [listed('0xmine')] : [listed('0xmine')]));
+    a2a.getVerifierTasks.mockImplementation(async (w: string) => (w === VERIFIER ? [listed('0xmine'), listed('0xboth')] : [listed('0xboth')]));
     const res = await get(AGENT2, VERIFIER);
-    expect(res.body.data.tasks.map((t: any) => t.meta.taskId)).toEqual(['0xmine']);
+    expect(a2a.getVerifierTasks.mock.calls.map(([w]) => w).sort()).toEqual([AGENT2, VERIFIER].sort());
+    expect(res.body.data.tasks.map((t: any) => t.meta.taskId).sort()).toEqual(['0xboth', '0xmine']);
+  });
+
+  it('pages: offset, with the total', async () => {
+    a2a.getVerifierTasks.mockResolvedValue(Array.from({ length: 60 }, (_, i) => listed(`0x${i}`, { deadline: NOW - 60 - i })));
+    const first = (await get(VERIFIER)).body.data;
+    const second = (await request(app()).get('/api/v1/a2a/open-verifications?offset=50').set(as(VERIFIER))).body.data;
+    expect(first).toMatchObject({ total: 60, offset: 0, limit: 50 });
+    expect(first.tasks).toHaveLength(50);
+    expect(second.tasks).toHaveLength(10);
+    expect(new Set([...first.tasks, ...second.tasks].map((t: any) => t.meta.taskId)).size).toBe(60);
   });
 
   it('lists nothing for an agent that verifies nothing', async () => {
