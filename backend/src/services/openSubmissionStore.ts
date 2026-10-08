@@ -22,6 +22,13 @@
  *                                the escrow recorded; kept RESULTS_TTL_SEC
  *   a2a:open:held-by:<a>         zset: ref → unix seconds a submitter's held result
  *                                expires; caps how many one wallet holds (MAX_HELD)
+ *   a2a:open:scorecard-pending:<ref>:<role>
+ *                                JSON { scorecardHash, scorecard }: the scorecard a judge
+ *                                (creator or task_verifier) last sent with a pick,
+ *                                for PENDING_SCORECARD_TTL_SEC; kept only if a pick
+ *                                with its hash lands on-chain. One per role, so a
+ *                                judge can hold at most one.
+ *   a2a:open:scorecard:<ref>     JSON KeptScorecard, the one the escrow anchored
  *   a2a:open:due                 zset: ref → unix seconds the sweep next looks at it
  *
  * Writers:
@@ -31,6 +38,9 @@
  *   paid gas to submit, and a kept result can't be replaced.
  * - The sweep writes `closed`.
  * - POST submit-open writes a submitter's own pending result.
+ * - POST select writes the judge's pending scorecard; the indexer keeps it.
+ *   POST scorecard keeps one whose hash the escrow anchored (content-addressed,
+ *   so anyone holding it may send it).
  * - Both the indexer and the sweep write `due`.
  *
  * Every write is a whole-value SET, HSETNX or ZADD/ZREM, never a
@@ -39,6 +49,7 @@
  * next look drops it on its recorded outcome.
  */
 
+import { ethers } from 'ethers';
 import { redis } from './redis.js';
 import { chainScope } from './chainScope.js';
 import type { TaskChain } from './taskChain.js';
@@ -89,7 +100,18 @@ export interface OpenTaskOutcome {
   kind: 'winner' | 'void';
   winner?: string;
   judge: OpenJudge;
+  /** The scorecard hash the escrow recorded with the pick; zero when none. */
+  scorecardHash?: string;
 }
+
+/** A judge's scorecard whose hash the escrow recorded with its pick or void. */
+export interface KeptScorecard {
+  scorecardHash: string;
+  scorecard: Record<string, unknown>;
+}
+
+/** The judges that pick through POST /select: the escrow's Creator and TaskVerifier. */
+export type ScorecardRole = 'creator' | 'task_verifier';
 
 /**
  * A submitter's result as they sent it to submit-open. The escrow holds its
@@ -115,6 +137,12 @@ export const PENDING_RESULT_TTL_SEC = 3600;
 export const MAX_HELD = 10;
 /** How long kept results last: well past every pick window. */
 export const RESULTS_TTL_SEC = 90 * 86_400;
+/**
+ * How long a judge's scorecard waits for its pick to land on-chain: the
+ * longest pick window (a poster's, up to 7 days) and two more for a slow
+ * signer or indexer. One per judge per task, so the length costs little.
+ */
+export const PENDING_SCORECARD_TTL_SEC = 9 * 86_400;
 
 const KEY = {
   record: (ref: TaskRef) => `a2a:open:task:${ref}`,
@@ -125,6 +153,8 @@ const KEY = {
   pending: (ref: TaskRef, submitter: string) => `a2a:open:pending:${ref}:${submitter.toLowerCase()}`,
   heldBy: (submitter: string) => `a2a:open:held-by:${submitter.toLowerCase()}`,
   results: (ref: TaskRef) => `a2a:open:results:${ref}`,
+  scorecardPending: (ref: TaskRef, role: ScorecardRole) => `a2a:open:scorecard-pending:${ref}:${role}`,
+  scorecard: (ref: TaskRef) => `a2a:open:scorecard:${ref}`,
   due: 'a2a:open:due',
 };
 
@@ -313,4 +343,50 @@ export async function getResults(ref: TaskRef, submitters: string[]): Promise<Ar
   if (submitters.length === 0) return [];
   const raws = await redis.hmget(KEY.results(ref), ...submitters.map((a) => a.toLowerCase()));
   return raws.map((raw) => parse<OpenResult>(raw));
+}
+
+// ── Scorecards ──────────────────────────────────────────────────────────────
+
+/** A scorecard's hash, as the escrow anchors it: keccak256 of its JSON. */
+export function scorecardHashOf(scorecard: Record<string, unknown>): string {
+  return ethers.keccak256(ethers.toUtf8Bytes(JSON.stringify(scorecard)));
+}
+
+/**
+ * Hold the scorecard a judge sent with a pick until the pick lands
+ * (keepScorecard). A judge holds one per task: a later pick request replaces
+ * it, and the pick that lands must carry the hash of the last one sent.
+ */
+export async function savePendingScorecard(ref: TaskRef, role: ScorecardRole, scorecard: Record<string, unknown>): Promise<string> {
+  const scorecardHash = scorecardHashOf(scorecard);
+  await redis.set(KEY.scorecardPending(ref, role), JSON.stringify({ scorecardHash, scorecard }), 'EX', PENDING_SCORECARD_TTL_SEC);
+  return scorecardHash;
+}
+
+/**
+ * Keep the judge's held scorecard if it is the one the escrow anchored with
+ * its pick or void (its hash, re-derived here). Called by the indexer. True
+ * when one was kept.
+ */
+export async function keepScorecard(ref: TaskRef, role: ScorecardRole, scorecardHash: string): Promise<boolean> {
+  const pendingKey = KEY.scorecardPending(ref, role);
+  const pending = parse<{ scorecardHash: string; scorecard: Record<string, unknown> }>(await redis.get(pendingKey));
+  if (!pending?.scorecard || scorecardHashOf(pending.scorecard).toLowerCase() !== scorecardHash.toLowerCase()) return false;
+  const kept = await keepAnchoredScorecard(ref, scorecardHash, pending.scorecard);
+  await redis.del(pendingKey);
+  return kept;
+}
+
+/**
+ * Keep a scorecard whose hash the caller checked against the one the escrow
+ * anchored (POST /tasks/:id/scorecard): content-addressed, so it needs no
+ * trust in who sent it. True when stored; false when one was kept already.
+ */
+export async function keepAnchoredScorecard(ref: TaskRef, scorecardHash: string, scorecard: Record<string, unknown>): Promise<boolean> {
+  const kept: KeptScorecard = { scorecardHash: scorecardHash.toLowerCase(), scorecard };
+  return (await redis.set(KEY.scorecard(ref), JSON.stringify(kept), 'EX', RESULTS_TTL_SEC, 'NX')) !== null;
+}
+
+export async function getScorecard(ref: TaskRef): Promise<KeptScorecard | null> {
+  return parse<KeptScorecard>(await redis.get(KEY.scorecard(ref)));
 }

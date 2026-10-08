@@ -332,4 +332,16 @@ export async function buildSelectWinnerOn(
   return { ...tx, chainId: settlementChainConfig(chain).chainId };
 }
 
+/** Build an unsigned selectWinnerByVerifier (the task verifier's pick, in its window) on `chain`, for the verifier to sign. */
+export async function buildSelectWinnerByVerifierOn(
+  chain: TaskChain,
+  from: string,
+  taskId: number,
+  winner: string,
+  scorecardHash: string,
+): Promise<ethers.TransactionRequest> {
+  const tx = await buildUnsignedTx(escrowFor(chain), 'selectWinnerByVerifier', [taskId, winner, scorecardHash], from);
+  return { ...tx, chainId: settlementChainConfig(chain).chainId };
+}
+
 
