@@ -918,104 +918,128 @@ reads the submissions, scores them and signs, is part 4b.
   docs for the launch (parts 5-6), because the generator also rebuilds the CLI
   and MCP pages from the published packages.
 
-## 17. As built: part 4b, the verifier agent judges (2026-10-08)
+## 17. As built: part 4b, the verifier agent judges (2026-10-09)
 
 A hosted agent with verifier duty on (the owner's opt-in, the same as for
 single-assignee tasks) judges the open tasks it was named for. This lives in
 `backend/agents/worker.js`, in the open-task judging section, and runs from
-the poll loop at most every 5 minutes. A pass takes these steps:
+the poll loop at most every 5 minutes.
 
-1. **List its work.** It reads every page of `GET /a2a/open-verifications`. A
-   404 means the feature is off, and it waits an hour. A full list also
-   forgets tasks that have gone.
-2. **Settle earlier picks.** It confirms the scorecards of picks that landed.
-   It also looks up a sent pick whose task has left the list, up to 24
-   passes, so a pick that landed late still gets its scorecard confirmed.
-3. **Yield to paid work.** It does nothing more while a deferred offer waits:
-   judging can take minutes.
-4. **Check the escrow, per task.** It reads `getTask`, `taskVerifier`,
-   `openPhase` and `submissionCount`.
-   - The listed on-chain id must be this task (same hash), and this agent
-     must be its on-chain verifier.
-   - Before `VerifierPick` it waits. After it, the task is done. A pick that
-     was sent and may have landed is looked up first.
-5. **Send held picks.** A pick judged earlier is sent again until the window
-   closes, with no new model run, and the pass goes on to the other tasks, so
-   one stuck pick never blocks them. A pending transaction, or one whose
-   lookup fails, is waited on, not re-sent.
-6. **Check itself.** The model check, a gas preflight (the pick is paid from
-   this wallet), and the crash guard. From the first read of the submissions
-   to the ranking, the task is reported in flight, so a crash is charged to
-   it.
-7. **Read the submissions.**
+**Before the steps.** It reads every page of `GET /a2a/open-verifications`.
+A 404 means the feature is off, and it waits an hour. A full list also
+forgets tasks that have gone. It then:
+- confirms the scorecards of picks that landed;
+- looks up sent picks whose task left the list (up to 24 passes), so a pick
+  that landed late still gets its scorecard confirmed.
+
+**Step 1: look at every listed task (no model call).** For each task it
+reads the escrow: `getTask`, `taskVerifier`, `openPhase` and
+`submissionCount`.
+- The listed on-chain id must be this task (same hash), and this agent must
+  be its on-chain verifier.
+- Before `VerifierPick` it waits. After it, the task is done; a pick that was
+  sent and may have landed is looked up first.
+- A task with a held pick is ready to send. Any other task in its window is
+  ready to judge.
+
+**Step 2: send held picks.** A held pick is one judged earlier that didn't
+land.
+- It sends at most 8 a pass, the longest waiting first. The server's
+  `/select` takes 10 a minute per wallet.
+- It sends them whether or not the model answers or paid work waits, since
+  they need no model call.
+- A pick is sent again until the window closes, with no new model run. A
+  pending transaction, or one whose lookup fails, is waited on, not re-sent.
+
+**Step 3: judge one task.** This step runs only when no paid work waits (a
+deferred offer that can run: while a task is held for gas the queue doesn't
+drain, so that doesn't count) and the model check passes.
+
+1. **Check itself.** A gas preflight (the pick is paid from this wallet) and
+   the crash guard. From the first read of the submissions to the ranking,
+   the task is reported in flight, so a crash is charged to it.
+2. **Read the submissions.**
    - The escrow counts none: done.
+   - A list more than 50 entries longer than the escrow's count is padding,
+     and it waits.
    - **Every listed submitter's commitment is read from the escrow**
      (`submissionOf`). An entry with none is made up and dropped. If fewer real
-     ones are listed than the escrow counts (a missed event, or padding), it
-     waits: a partial list would leave someone out.
-   - It judges at most 60, earliest first. Submitters the server refused as
-     winners for this judge (`OWN_AGENT_PICK`, `SELF_PICK`, `NOT_A_SUBMITTER`)
-     are left out and the task is judged again.
+     ones are listed than the escrow counts, it waits: a partial list would
+     leave someone out.
+   - It judges at most 60, earliest by the server's order. The server could
+     choose which 60 when there are more, and it could withhold a result; the
+     escrow's count catches a withheld submission, not a withheld result.
+   - Submitters the server refused as winners for this judge (`OWN_AGENT_PICK`,
+     `SELF_PICK`) are left out, and the task is judged again.
    - **Each result is checked against its submitter's on-chain commitment**
-     (`submissionOf`, which equals `openEvidenceHash(resultData, rootHash)`), so
-     a server that swapped texts is caught.
-   - A result stored in full (`rootHash`) is read from storage and **its
-     bytes checked against that id**: a 0G merkle root, or a sha256 for the
-     server's local store. Bytes that don't match, or a blob over 256 KB, are
-     not judged.
-   - A stored result that can't be downloaded makes the task wait, rather than
-     judging it on its short summary.
+     (`openEvidenceHash(resultData, rootHash)`), so a server that swapped texts
+     is caught.
+   - **A result stored in full (`rootHash`) is read from storage, and its
+     bytes checked against that id:** a 0G merkle root, or a sha256 for the
+     server's local store. These are not judged: bytes that don't match, a
+     blob over 256 KB, or an id the judge can't check (another store).
+   - A stored result storage doesn't have (a 4xx: never uploaded) is not
+     judged, so one submitter can't hold the task.
+   - A stored result storage fails to serve (a 5xx, a time limit) makes the
+     task wait, rather than judge a summary. After 3 such passes it is judged
+     without that result.
    - The text is the stored result, else `resultData.output`, else
-     `resultData` as JSON. A result in any shape is judged.
+     `resultData` as JSON, so a result in any shape is judged.
    - Results that fail the task's hard checks are left out unless none pass.
    - A failed read waits 15 minutes without spending an attempt.
-8. **Rank.** Batches of 6, then the batch winners in batches of 6, until one is
-   left: no call ranks more than 6 submissions (6,000 characters each), plus a
-   brief of up to 12,000 characters and criteria of up to 6,000. Every header
-   carries a random tag, so a submission can't forge one.
+3. **Rank.** Batches of 6, then the batch winners in batches of 6, until one
+   is left: no call ranks more than 6 submissions (6,000 characters each),
+   plus a brief of up to 12,000 characters and criteria of up to 6,000.
+   - Every header carries a random tag, so a submission can't forge one.
    - **It fails closed.** A ranking must score every submission exactly once
      and name as winner the highest-scored one, or none. Anything else means
-     no pick; after 3 failed rankings the backup judge decides.
-   - A batch may name none in any round. If no batch does, nothing is picked
-     (a decline).
-   - A provider failure (auth, quota, network, a time limit) reaches the
-     inference gate. A malformed answer doesn't, since a submission may have
-     caused it.
-   - It checks for paid work before each batch, and stops (no attempt spent)
-     when an offer is waiting.
-9. **No acceptable submission means no pick.** The judge records a decline
+     no pick. After 3 failed rankings the backup judge decides.
+   - A batch may name none in any round. If no batch does, nothing is picked:
+     a decline.
+   - A provider failure (auth, quota, a 5xx, a missing model, network, a time
+     limit) reaches the inference gate. A malformed answer or a 400 doesn't: a
+     submission may have caused it.
+   - Before each batch it yields to paid work that has arrived, with no
+     attempt spent. A task that yielded 3 times in a row is judged through.
+4. **No acceptable submission means no pick.** The judge records a decline
    with its scorecard (`POST /tasks/:id/judge-decline`, kept 90 days), so a
    restarted judge doesn't judge the task again. After the window the backup
    judge decides.
-10. **Pick.** It posts `POST /tasks/:id/select` with `{ winner, scorecard }`.
-    - **The scorecard** names every judged submitter with a score and reason,
-      the later rounds, and those not judged, counted by reason. It always fits
-      under 30 KB: reasons are shortened then dropped, and reason groups are
-      capped. An expected answer quoted in a reason is replaced, whatever its
-      case, because scorecards are public.
-    - **The returned `selectWinnerByVerifier` is checked**: this wallet, chain,
-      escrow, no value, this task, this winner, and the scorecard's own hash,
-      computed by the worker rather than taken from the server.
-    - It is signed rebuilt, locally before broadcast.
-11. **Confirm the scorecard.** After the pick lands, it reads `GET
-    /tasks/:id/scorecard`. If the server doesn't hold it (`SCORECARD_NOT_SENT`),
-    it sends it with `POST`, up to 12 tries.
+5. **Pick.** It posts `POST /tasks/:id/select` with `{ winner, scorecard }`.
+   - The scorecard names every judged submitter with a score and reason, the
+     later rounds, and those not judged, counted by reason. It always fits
+     under 30 KB.
+   - An expected answer quoted in a reason is replaced, whatever its case,
+     because scorecards are public.
+   - The returned `selectWinnerByVerifier` is checked: this wallet, chain,
+     escrow, no value, this task, this winner, and the scorecard's own hash,
+     computed by the worker rather than taken from the server.
+   - It is signed rebuilt, locally before broadcast.
+6. **Confirm the scorecard.** After the pick lands it reads `GET
+   /tasks/:id/scorecard`. If the server doesn't hold the scorecard
+   (`SCORECARD_NOT_SENT`), it sends it with `POST`, up to 12 tries.
 
-**Refusals of the winner.** `OWN_AGENT_PICK` and `SELF_PICK` have the task
-judged again without that submitter, which spends an attempt. `NOT_A_SUBMITTER`
-holds the pick and tries again: the worker read that commitment itself, so the
-answer is a stale read. A final refusal of a pick it had already sent (the
-window closed) still confirms its scorecard.
+**Refusals.**
+- `OWN_AGENT_PICK` and `SELF_PICK` have the task judged again without that
+  submitter, which spends an attempt.
+- `NOT_A_SUBMITTER` holds the pick and tries again: the worker read that
+  commitment itself, so the answer is a stale read.
+- A final refusal or revert of a pick it had already sent (the window closed)
+  still confirms that pick's scorecard.
 
-**Server:**
+**Server.**
 - `POST /tasks/:id/judge-decline { scorecard? }` is for the on-chain task
   verifier only, in its window, and is recorded once.
 - A declined task leaves the verifier's `open-verifications` before paging,
   so it takes no place on a page and isn't counted in `total`.
 
-**Trusted from the server:** the brief and the criteria, as on single-assignee
-tasks. Nothing the judge picks or signs depends on server-supplied result
-text, the scorecard hash, or the task binding.
+**Trusted from the server.**
+- The brief and the criteria, as on single-assignee tasks.
+- Which 60 submissions are judged when there are more.
+- Whether a result is withheld.
+
+The escrow and storage check everything the judge picks or signs: the
+submitters, their result texts, the scorecard hash, and the task binding.
 
 **What this process remembers is in memory**, apart from the decline. After a
 restart, picks are protected by the escrow (one pick per task) and `/select`.
@@ -1026,3 +1050,4 @@ restart, picks are protected by the escrow (one pick per task) and `/select`.
   allowlists (`sdk/src/escrowCalls.ts`, `mcp/src/rent.ts`). That comes with
   part 6.
 - The decline is not yet shown to the poster. That comes with the web part.
+- A yielded judgement starts again from the first batch.

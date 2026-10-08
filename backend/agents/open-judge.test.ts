@@ -310,6 +310,13 @@ describe('sendPick', () => {
     expect(s2.confirm.has(HASH)).toBe(true);
   });
 
+  it('still confirms the scorecard when a re-send reverts because an earlier pick closed the window', async () => {
+    send.mockRejectedValueOnce(Object.assign(new Error('reverted'), { data: iface.encodeErrorResult('WrongPhase', [5]) }));
+    expect(await sendPick(task(), { ...pick, txHash: '0x88' }, io(), state)).toBe(false);
+    expect(state.done.get(HASH)).toMatch(/WrongPhase/);
+    expect(state.confirm.has(HASH)).toBe(true);
+  });
+
   it('stops on a final revert and keeps the hash of one that may still land', async () => {
     send.mockRejectedValueOnce(Object.assign(new Error('reverted'), { data: iface.encodeErrorResult('WrongPhase', [3]) }));
     expect(await sendPick(task(), pick, io(), state)).toBe(false);
@@ -404,8 +411,76 @@ describe('openJudgePassCore', () => {
     state.picked.set(HASH, held);
     const d = deps();
     expect(await openJudgePassCore(d, state)).toBe('sent');
-    expect(d.sendPick).toHaveBeenCalledWith(task(), held);
+    expect(d.sendPick).toHaveBeenCalledWith(task(), expect.objectContaining({ winner: A, scorecard: SCORECARD, lastTriedAt: NOW_MS }));
     expect(d.rank).not.toHaveBeenCalled();
+  });
+
+  it('sends held picks while the model is down or paid work waits: they need no model call', async () => {
+    const other = '0x' + '44'.repeat(32);
+    const both = () => vi.fn(async () => [task({ taskId: other }), task()]);
+    const onChainOf = vi.fn(async (t: any) => ({ taskHash: t.meta.taskId, verifier: JUDGE, phase: 2n, submissionCount: 2n }));
+    for (const blocked of [{ inferenceBlocker: () => 'quota spent' }, { busy: () => true }]) {
+      const state = createJudgeState();
+      state.picked.set(HASH, { task: task(), winner: A, scorecard: SCORECARD });
+      const d = deps({ fetchList: both(), readOnChain: onChainOf, ...blocked });
+      await openJudgePassCore(d, state);
+      expect(d.sendPick).toHaveBeenCalledWith(task(), expect.objectContaining({ winner: A }));
+      expect(d.rank).not.toHaveBeenCalled();
+    }
+  });
+
+  it('sends at most 8 held picks a pass, the longest waiting first', async () => {
+    const hashes = Array.from({ length: 10 }, (_, i) => `0x${String(i).padStart(2, '0').repeat(32)}`);
+    const state = createJudgeState();
+    hashes.forEach((h, i) => state.picked.set(h, { task: task({ taskId: h }), winner: A, scorecard: {}, lastTriedAt: 1000 - i }));
+    const d = deps({
+      fetchList: vi.fn(async () => hashes.map((h) => task({ taskId: h }))),
+      readOnChain: vi.fn(async (t: any) => ({ taskHash: t.meta.taskId, verifier: JUDGE, phase: 2n, submissionCount: 1n })),
+    });
+    await openJudgePassCore(d, state);
+    const sentIds = d.sendPick.mock.calls.map(([t]: any[]) => t.meta.taskId);
+    expect(sentIds).toHaveLength(8);
+    expect(sentIds[0]).toBe(hashes[9]); // tried longest ago
+    expect(sentIds).not.toContain(hashes[0]);
+    expect(sentIds).not.toContain(hashes[1]);
+  });
+
+  it('takes a list far longer than the escrow count for padding, and waits', async () => {
+    const padded = Array.from({ length: 60 }, (_, i) => sub(`0x${String(i + 1).padStart(40, '0')}`, i + 1, out('x')));
+    const d = deps({ fetchSubmissions: vi.fn(async () => padded), readOnChain: chain({ submissionCount: 2n }) });
+    const state = createJudgeState();
+    await openJudgePassCore(d, state);
+    expect(d.readCommitments).not.toHaveBeenCalled();
+    expect(state.retryAt.get(HASH)).toBeGreaterThan(NOW_MS);
+  });
+
+  it('waits a few passes on storage that keeps failing, then judges without that result', async () => {
+    const state = createJudgeState();
+    const verifyResults = vi.fn(async (_t: unknown, list: any[], opts: any) => {
+      if (!opts.giveUpOnStorage) throw new Error('storage download 503');
+      return list;
+    });
+    const d = deps({ verifyResults });
+    for (let i = 0; i < 3; i++) {
+      state.retryAt.clear();
+      await openJudgePassCore(d, state);
+    }
+    expect(d.rank).not.toHaveBeenCalled();
+    expect(state.storageWaits.get(HASH)).toBe(3);
+    state.retryAt.clear();
+    expect(await openJudgePassCore(d, state)).toBe('judged');
+    expect(verifyResults.mock.calls[3][2]).toEqual({ giveUpOnStorage: true });
+    expect(d.rank).toHaveBeenCalled();
+  });
+
+  it('judges a task through once it has yielded to paid work three times in a row', async () => {
+    const many = Array.from({ length: JUDGE_BATCH + 2 }, (_, i) => sub(`0x${String(i + 1).padStart(40, '0')}`, i + 1, out(`w${i}`)));
+    const state = createJudgeState();
+    state.yields.set(HASH, 3);
+    let calls = 0;
+    const d = deps({ fetchSubmissions: vi.fn(async () => many), readOnChain: chain({ submissionCount: BigInt(many.length) }), busy: () => calls++ > 0 });
+    expect(await openJudgePassCore(d, state)).toBe('judged');
+    expect(state.yields.has(HASH)).toBe(false);
   });
 
   it('never lets a held pick block the other tasks: it sends it and judges the next', async () => {
@@ -449,7 +524,7 @@ describe('openJudgePassCore', () => {
     expect(d.inFlight.mock.calls).toEqual([['task-started', HASH], ['task-finished', HASH, false]]);
   });
 
-  it('stops judging for paid work that arrives mid-way, without spending an attempt', async () => {
+  it('stops judging for paid work that arrives mid-way, without spending an attempt (counted as a yield)', async () => {
     let calls = 0;
     const many = Array.from({ length: JUDGE_BATCH + 2 }, (_, i) => sub(`0x${String(i + 1).padStart(40, '0')}`, i + 1, out(`w${i}`)));
     const d = deps({
@@ -460,7 +535,9 @@ describe('openJudgePassCore', () => {
     const state = createJudgeState();
     expect(await openJudgePassCore(d, state)).toBe('busy');
     expect(state.attempts.has(HASH)).toBe(false);
+    expect(state.yields.get(HASH)).toBe(1);
     expect(d.sendPick).not.toHaveBeenCalled();
+    expect(d.inFlight).toHaveBeenLastCalledWith('task-finished', HASH, false);
   });
 
   it('lets a sent pick of a settled task go after its lookups, and forgets gone tasks on a full list', async () => {
@@ -604,11 +681,26 @@ describe('verifyOpenResults: each result against its commitment and its storage 
     expect(forged[0].storedText).toBeUndefined();
   });
 
-  it('marks a stored result too large to judge, and throws when one cannot be downloaded', async () => {
+  it('marks a stored result too large to judge', async () => {
     const stored = { ...sub(C, 3, { output: 'stub' }), result: { resultData: { output: 'stub' }, rootHash: ROOT } };
     const big = await verifyOpenResults(t, [withCommit(stored, { output: 'stub' }, ROOT)], async () => Buffer.alloc(300 * 1024), async () => true);
     expect(big[0]).toMatchObject({ mismatch: true, why: 'its stored result is too large to judge' });
-    await expect(verifyOpenResults(t, [withCommit(stored, { output: 'stub' }, ROOT)], async () => { throw new Error('storage 503'); }, async () => true)).rejects.toThrow('storage 503');
+  });
+
+  it('leaves out a stored result storage does not have (4xx), and waits on one it fails to serve (5xx) unless told to give up', async () => {
+    const stored = withCommit({ ...sub(C, 3, { output: 'stub' }), result: { resultData: { output: 'stub' }, rootHash: ROOT } }, { output: 'stub' }, ROOT);
+    const missing = await verifyOpenResults(t, [stored], async () => { throw new Error('storage download 404'); }, async () => true);
+    expect(missing[0]).toMatchObject({ mismatch: true, why: 'its stored result could not be read' });
+    await expect(verifyOpenResults(t, [stored], async () => { throw new Error('storage download 503'); }, async () => true)).rejects.toThrow('503');
+    const gaveUp = await verifyOpenResults(t, [stored], async () => { throw new Error('storage download 503'); }, async () => true, { giveUpOnStorage: true });
+    expect(gaveUp[0]).toMatchObject({ mismatch: true, why: 'its stored result could not be read' });
+  });
+
+  it('does not judge a stored result in a store it cannot check', async () => {
+    const walrus = 'walrus-style-id-abcdefghijklmnopqrstuvwxyz012345';
+    const stored = withCommit({ ...sub(C, 3, { output: 'stub' }), result: { resultData: { output: 'stub' }, rootHash: walrus } }, { output: 'stub' }, walrus);
+    const [res] = await verifyOpenResults(t, [stored], noDownload, async () => true);
+    expect(res).toMatchObject({ mismatch: true, why: 'its stored result is in a store the judge cannot check' });
   });
 
   it('leaves a result-less submission as it is', async () => {
@@ -621,6 +713,7 @@ describe('storedBytesMatch', () => {
   const bytes = Buffer.from('a stored result');
   it('matches the sha256 id of the local store and the 0G merkle root of 0G storage', async () => {
     expect(await storedBytesMatch(bytes, '0x' + createHash('sha256').update(bytes).digest('hex'))).toBe(true);
+    expect(await storedBytesMatch(bytes, createHash('sha256').update(bytes).digest('hex'))).toBe(true);
     const { MemData } = await import('@0gfoundation/0g-storage-ts-sdk');
     const [tree] = await new MemData(new Uint8Array(bytes)).merkleTree();
     expect(await storedBytesMatch(bytes, tree!.rootHash() as string)).toBe(true);
@@ -664,10 +757,18 @@ describe('rankWithModel', () => {
   });
 
   it('classifies provider failures', () => {
+    const apiError = (statusCode: number) => Object.assign(new Error(`status ${statusCode}`), { name: 'AI_APICallError', statusCode });
+    expect(isProviderFailure(apiError(401))).toBe(true);
+    expect(isProviderFailure(apiError(429))).toBe(true);
+    expect(isProviderFailure(apiError(503))).toBe(true);
+    // A context too long or a content policy: a submission can cause it.
+    expect(isProviderFailure(apiError(400))).toBe(false);
     expect(isProviderFailure(Object.assign(new Error('x'), { name: 'AI_RetryError' }))).toBe(true);
+    expect(isProviderFailure(Object.assign(new Error('no such model'), { name: 'AI_NoSuchModelError' }))).toBe(true);
+    expect(isProviderFailure(Object.assign(new Error('empty'), { name: 'AI_EmptyResponseBodyError' }))).toBe(true);
     expect(isProviderFailure(new Error('open-task judge run timed out after 600000ms'))).toBe(true);
     expect(isProviderFailure(new Error('fetch failed'))).toBe(true);
     expect(isProviderFailure(Object.assign(new Error('Type validation failed'), { name: 'AI_TypeValidationError' }))).toBe(false);
-    expect(isProviderFailure(new Error('Unexpected token in JSON'))).toBe(false);
+    expect(isProviderFailure(new Error('Unexpected token in JSON at position 4291'))).toBe(false);
   });
 });

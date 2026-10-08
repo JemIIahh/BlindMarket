@@ -4734,6 +4734,14 @@ const MAX_SUBMISSION_PAGES = 1000;
 const MAX_STORED_RESULT_BYTES = 256 * 1024;
 /** Passes a sent pick whose task left the list is looked up before it is let go. */
 const MAX_UNLISTED_LOOKUPS = 24;
+/** Held picks sent per pass: the server's /select takes 10 a minute per wallet. */
+const MAX_PICKS_PER_PASS = 8;
+/** Passes a task waits on storage failing to serve a stored result before judging without it. */
+const MAX_STORAGE_WAITS = 3;
+/** Times in a row a task's judging yields to paid work before it is judged through. */
+const MAX_JUDGE_YIELDS = 3;
+/** Entries a submissions list may hold beyond the escrow's count before it is taken for padding. */
+const MAX_LIST_EXCESS = 50;
 /** The escrow's OpenPhase.VerifierPick. */
 const PHASE_VERIFIER_PICK = 2;
 
@@ -4750,8 +4758,12 @@ export function createJudgeState() {
     picked: new Map(),
     /** taskHash → { scorecard, tries }: pick landed; make sure the server keeps its scorecard. */
     confirm: new Map(),
-    /** taskHash → submitters the server refused as winners (own agent, not a submitter): judged without them. */
+    /** taskHash → submitters the server refused as winners (own agent, self): judged without them. */
     excluded: new Map(),
+    /** taskHash → passes it waited on storage failing to serve a stored result. */
+    storageWaits: new Map(),
+    /** taskHash → times in a row its judging yielded to paid work. */
+    yields: new Map(),
     lastScanAt: 0,
     offUntil: 0,
   };
@@ -4962,8 +4974,14 @@ const WINNER_REFUSALS = new Set(['OWN_AGENT_PICK', 'SELF_PICK']);
 export function isProviderFailure(e) {
   const name = String(e?.name ?? '');
   if (/NoObjectGenerated|TypeValidation|JSONParse|InvalidResponseData/i.test(name)) return false;
-  if (/APICallError|RetryError|LoadAPIKey|AbortError|TimeoutError/i.test(name)) return true;
-  return /timed out|time limit|timeout|ECONN|ENOTFOUND|EAI_AGAIN|fetch failed|socket hang up|network|401|403|429|quota|rate limit/i.test(String(e?.message ?? ''));
+  if (/APICallError/i.test(name)) {
+    // A 400 is the request (a context too long, a content policy): a
+    // submission can cause it. Auth, quota and the provider's own errors can't.
+    const status = Number(e?.statusCode ?? e?.status);
+    return !Number.isFinite(status) || status === 401 || status === 403 || status === 408 || status === 429 || status >= 500;
+  }
+  if (/RetryError|LoadAPIKey|NoSuchModel|EmptyResponseBody|NoContentGenerated|AbortError|TimeoutError/i.test(name)) return true;
+  return /timed out|time limit|ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|fetch failed|socket hang up|status code (401|403|429|5\d\d)|quota|rate limit/i.test(String(e?.message ?? ''));
 }
 
 /**
@@ -5116,6 +5134,8 @@ export async function sendPick(task, pick, io, state = judgeState) {
   } catch (e) {
     if (FINAL_SELECT_REVERTS.has(decodeEscrowRevert(e)?.name)) {
       finish(`the escrow refused the pick: ${formatRevert(e)}`);
+      // A pick sent earlier may be what closed the window: its scorecard still needs keeping.
+      if (pick.txHash) state.confirm.set(taskHash, { scorecard: pick.scorecard, tries: 0 });
       return false;
     }
     keep(`selectWinnerByVerifier failed: ${formatRevert(e)}`, sent?.hash ?? e?.txHash);
@@ -5138,22 +5158,28 @@ export async function confirmScorecard(taskHash, scorecard, io) {
 
 /**
  * One judging pass, with what it touches passed in (tests drive it with
- * fakes): confirm scorecards of landed picks and look up picks whose task
- * left the list, send every held pick, then judge one task in its window.
- * A held pick never blocks the others. Returns 'off' | 'busy' | 'sent' |
- * 'judged' | 'none'. Exported for tests.
+ * fakes), in three steps:
+ *   1. look at every listed task (the escrow's view, its window), with no
+ *      model call: held picks to send, tasks to judge;
+ *   2. send held picks, the longest waiting first, at most
+ *      MAX_PICKS_PER_PASS (the server takes 10 a minute): nothing about
+ *      judging (the model, paid work waiting) holds them up;
+ *   3. judge one task, when no paid work waits and the model answers.
+ * Returns 'off' | 'busy' | 'sent' | 'judged' | 'none'. Exported for tests.
  */
 export async function openJudgePassCore(deps, state = judgeState) {
   const board = await deps.fetchList();
   if (!board) return 'off';
   const { tasks: list, complete } = Array.isArray(board) ? { tasks: board, complete: true } : board;
   const listed = new Set(list.map((t) => t?.meta?.taskId));
+  const now = deps.nowMs();
 
   for (const [taskHash, c] of [...state.confirm.entries()]) {
     const outcome = await deps.confirmScorecard(taskHash, c.scorecard).catch(() => 'retry');
     if (outcome === 'kept' || c.tries + 1 >= MAX_SCORECARD_CONFIRMS) state.confirm.delete(taskHash);
     else state.confirm.set(taskHash, { ...c, tries: c.tries + 1 });
   }
+  const ready = [];
   // A pick sent but not seen to land, whose task left the list (settled):
   // look its tx up, so a landed pick still gets its scorecard confirmed.
   for (const [taskHash, p] of [...state.picked.entries()]) {
@@ -5164,25 +5190,22 @@ export async function openJudgePassCore(deps, state = judgeState) {
       continue;
     }
     state.picked.set(taskHash, { ...p, lookups });
-    await deps.sendPick(p.task, { ...p, lookups });
+    ready.push({ task: p.task, held: { ...p, lookups } });
   }
   // A full list says which tasks are gone: forget them.
   if (complete) {
-    for (const map of [state.done, state.attempts, state.retryAt, state.excluded]) {
+    for (const map of [state.done, state.attempts, state.retryAt, state.excluded, state.storageWaits, state.yields]) {
       for (const k of [...map.keys()]) if (!listed.has(k)) map.delete(k);
     }
   }
 
-  // Paid work waiting (a deferred offer) goes first: judging can take minutes.
-  if (deps.busy()) return 'busy';
-
-  const now = deps.nowMs();
-  let sent = false;
+  // 1. Every listed task, the escrow's view, no model call.
+  const toJudge = [];
   for (const task of list) {
     const taskHash = task?.meta?.taskId;
     if (typeof taskHash !== 'string' || state.done.has(taskHash)) continue;
     if ((state.retryAt.get(taskHash) ?? 0) > now) continue;
-    if ((state.attempts.get(taskHash) ?? 0) >= MAX_JUDGE_ATTEMPTS) continue;
+    if ((state.attempts.get(taskHash) ?? 0) >= MAX_JUDGE_ATTEMPTS && !state.picked.has(taskHash)) continue;
     if (task.onChainTaskId == null) continue;
     const chainProblem = deps.chainProblem(task.meta.chain);
     if (chainProblem) {
@@ -5190,16 +5213,12 @@ export async function openJudgePassCore(deps, state = judgeState) {
       log(`judge: ${taskHash.slice(0, 10)}… not judging: ${chainProblem}`);
       continue;
     }
-    const later = (why) => {
-      state.retryAt.set(taskHash, now + JUDGE_RETRY_MS);
-      log(`judge: ${taskHash.slice(0, 10)}… ${why}; looking again in ${JUDGE_RETRY_MS / 60_000} min`);
-    };
-
     let onChain;
     try {
       onChain = await deps.readOnChain(task);
     } catch (e) {
-      later(`the escrow read failed: ${errorLine(e)}`);
+      state.retryAt.set(taskHash, now + JUDGE_RETRY_MS);
+      log(`judge: ${taskHash.slice(0, 10)}… the escrow read failed: ${errorLine(e)}; looking again in ${JUDGE_RETRY_MS / 60_000} min`);
       continue;
     }
     // The list's id must be this task, and this agent its judge, on-chain.
@@ -5217,7 +5236,7 @@ export async function openJudgePassCore(deps, state = judgeState) {
     if (phase < PHASE_VERIFIER_PICK) continue; // not this judge's turn yet
     if (phase > PHASE_VERIFIER_PICK) {
       if (held?.txHash) {
-        await deps.sendPick(task, held); // landed late, or refused: either way settled
+        ready.push({ task, held }); // landed late, or refused: either way settled
         continue;
       }
       state.picked.delete(taskHash);
@@ -5225,14 +5244,32 @@ export async function openJudgePassCore(deps, state = judgeState) {
       log(`judge: ${taskHash.slice(0, 10)}… its pick window has passed`);
       continue;
     }
-    if (held) {
-      // Sent (or held again), then on to the others: one task never blocks the rest.
-      await deps.sendPick(task, held);
-      sent = true;
-      continue;
-    }
+    if (held) ready.push({ task, held });
+    else toJudge.push({ task, onChain });
+  }
 
-    if (deps.inferenceBlocker()) break;
+  // 2. Held picks: a tx each, no model call. The longest waiting go first.
+  ready.sort((a, b) => (a.held.lastTriedAt ?? 0) - (b.held.lastTriedAt ?? 0));
+  let sent = false;
+  for (const { task, held } of ready.slice(0, MAX_PICKS_PER_PASS)) {
+    const pick = { ...held, task, lastTriedAt: now };
+    state.picked.set(task.meta.taskId, pick);
+    await deps.sendPick(task, pick);
+    sent = true;
+  }
+  const idle = sent ? 'sent' : 'none';
+
+  // 3. Judge one task, when nothing paid waits and the model answers.
+  if (toJudge.length === 0) return idle;
+  if (deps.busy()) return 'busy';
+  if (deps.inferenceBlocker()) return idle;
+  for (const { task, onChain } of toJudge) {
+    const taskHash = task.meta.taskId;
+    const later = (why) => {
+      state.retryAt.set(taskHash, now + JUDGE_RETRY_MS);
+      log(`judge: ${taskHash.slice(0, 10)}… ${why}; looking again in ${JUDGE_RETRY_MS / 60_000} min`);
+    };
+    if ((state.attempts.get(taskHash) ?? 0) >= MAX_JUDGE_ATTEMPTS) continue;
     const gasProblem = await deps.preflight(task.meta.chain);
     if (gasProblem) {
       later(`can't pay for a pick: ${gasProblem}`);
@@ -5241,10 +5278,8 @@ export async function openJudgePassCore(deps, state = judgeState) {
     const crash = deps.crashCheck(taskHash);
     if (crash) {
       if (crash.final) state.done.set(taskHash, `not judging it: ${crash.reason}`);
-      else break;
       continue;
     }
-
     const count = Number(onChain.submissionCount);
     if (count === 0) {
       state.done.set(taskHash, 'nobody submitted');
@@ -5255,13 +5290,17 @@ export async function openJudgePassCore(deps, state = judgeState) {
     // From here the task is in flight: a crash reading its submissions
     // (submitter-chosen blobs) or ranking them is charged to it.
     deps.inFlight('task-started', taskHash);
-    let outcome = 'judged';
     let finished = false;
     try {
       const all = await deps.fetchSubmissions(task).catch(() => null);
       if (!all) {
         later('its submissions could not be read');
-        outcome = null;
+        continue;
+      }
+      // An honest list holds the escrow's count (fewer while the indexer
+      // catches up). Far more is padding: each entry costs an escrow read.
+      if (all.length > count + MAX_LIST_EXCESS) {
+        later(`the server lists ${all.length} entries for ${count} submissions`);
         continue;
       }
       // Every listed submitter's commitment, read from the escrow: a made-up
@@ -5272,13 +5311,11 @@ export async function openJudgePassCore(deps, state = judgeState) {
         committed = await deps.readCommitments(task, all);
       } catch (e) {
         later(`its commitments could not be read: ${errorLine(e)}`);
-        outcome = null;
         continue;
       }
       const real = committed.filter((s) => s.committed && s.committed !== ethers.ZeroHash);
       if (real.length < count) {
         later(`the server lists ${real.length} of its ${count} submissions`);
-        outcome = null;
         continue;
       }
       const refused = state.excluded.get(taskHash) ?? new Set();
@@ -5286,14 +5323,15 @@ export async function openJudgePassCore(deps, state = judgeState) {
       const considered = ordered.slice(0, JUDGE_MAX_SUBMISSIONS);
       const overflow = ordered.slice(JUDGE_MAX_SUBMISSIONS).map((s) => ({ submitter: s.submitter, why: `only the first ${JUDGE_MAX_SUBMISSIONS} submissions are judged` }));
       const refusedRows = real.filter((s) => refused.has(String(s.submitter).toLowerCase())).map((s) => ({ submitter: s.submitter, why: 'the server refused it as a winner for this judge' }));
+      // A stored result storage keeps failing to serve is waited for a few
+      // passes, then judged without (one submitter can't hold the task).
+      const waits = state.storageWaits.get(taskHash) ?? 0;
       let checked;
       try {
-        checked = await deps.verifyResults(task, considered);
+        checked = await deps.verifyResults(task, considered, { giveUpOnStorage: waits >= MAX_STORAGE_WAITS });
       } catch (e) {
-        // A stored result that could not be read: judging it on its summary
-        // would be unfair, so the whole task waits.
+        state.storageWaits.set(taskHash, waits + 1);
         later(`its results could not be read: ${errorLine(e)}`);
-        outcome = null;
         continue;
       }
       const criteria = task.meta.verificationCriteria ?? null;
@@ -5301,7 +5339,6 @@ export async function openJudgePassCore(deps, state = judgeState) {
       if (candidates.length === 0) {
         state.attempts.set(taskHash, (state.attempts.get(taskHash) ?? 0) + 1);
         later('no submission can be read');
-        outcome = null;
         continue;
       }
       let brief;
@@ -5309,21 +5346,26 @@ export async function openJudgePassCore(deps, state = judgeState) {
         brief = await deps.readBrief(task);
       } catch (e) {
         later(`its brief could not be read: ${errorLine(e)}`);
-        outcome = null;
         continue;
       }
 
       log(`judge: ranking ${candidates.length} submission(s) for ${taskHash.slice(0, 10)}…`);
-      // Paid work that arrives mid-judging is not kept waiting more than a batch.
+      // Paid work that arrives mid-judging waits no more than a batch, but a
+      // task that yielded MAX_JUDGE_YIELDS times in a row is judged through.
+      const yields = state.yields.get(taskHash) ?? 0;
       let yielded = false;
       const judged = await judgeInRounds(candidates, async (batch) => {
-        if (deps.busy()) {
+        if (yields < MAX_JUDGE_YIELDS && deps.busy()) {
           yielded = true;
           return null;
         }
         return deps.rank({ brief, criteria }, batch);
       });
-      if (!judged && yielded) return 'busy';
+      if (!judged && yielded) {
+        state.yields.set(taskHash, yields + 1);
+        return 'busy';
+      }
+      state.yields.delete(taskHash);
       // Only a judgement counts as a finished run for the crash guard.
       finished = judged !== null;
       if (!judged) {
@@ -5351,15 +5393,15 @@ export async function openJudgePassCore(deps, state = judgeState) {
         log(`judge: ${taskHash.slice(0, 10)}… no submission is acceptable; not picking (the backup judge decides)`);
         return 'judged';
       }
-      const pick = { task, winner: judged.winner.submitter, scorecard };
+      const pick = { task, winner: judged.winner.submitter, scorecard, lastTriedAt: now };
       state.picked.set(taskHash, pick);
       await deps.sendPick(task, pick);
-      return outcome;
+      return 'judged';
     } finally {
       deps.inFlight('task-finished', taskHash, finished);
     }
   }
-  return sent ? 'sent' : 'none';
+  return idle;
 }
 
 /** The judge's server calls: the pick, the decline and the scorecard. */
@@ -5503,12 +5545,14 @@ export async function storedBytesMatch(bytes, rootHash) {
  * rootHash): a server that swapped texts is caught (`mismatch`). A result
  * stored in full (rootHash) is read from storage and its bytes checked
  * against that id (`storedText`), so the server can't swap those either; a
- * blob over MAX_STORED_RESULT_BYTES, or one that is not the stored content,
- * is marked too. A stored result that can't be downloaded throws: judging it
- * on its summary would be unfair, so the task waits. Exported for tests,
- * with the download and the content check passed in.
+ * blob over MAX_STORED_RESULT_BYTES, one that is not the stored content, or
+ * an id that can't be checked is not judged. A stored result storage does
+ * not have (a 4xx: never uploaded) is not judged either; one storage fails
+ * to serve (a 5xx, a time limit) throws, so the task waits rather than judge
+ * a summary, unless `giveUpOnStorage` (it waited enough). Exported for
+ * tests, with the download and the content check passed in.
  */
-export async function verifyOpenResults(task, submissions, download = downloadBriefBlob, matches = storedBytesMatch) {
+export async function verifyOpenResults(task, submissions, download = downloadBriefBlob, matches = storedBytesMatch, { giveUpOnStorage = false } = {}) {
   const out = [];
   for (let i = 0; i < submissions.length; i += 8) {
     out.push(...await Promise.all(submissions.slice(i, i + 8).map(async (s) => {
@@ -5516,9 +5560,17 @@ export async function verifyOpenResults(task, submissions, download = downloadBr
       const expected = openEvidenceHash(s.result.resultData, s.result.rootHash ?? null);
       if (String(s.committed ?? '').toLowerCase() !== expected.toLowerCase()) return { ...s, mismatch: true };
       if (!s.result.rootHash) return s;
-      const bytes = await download(s.result.rootHash);
+      if (!/^(0x)?[0-9a-fA-F]{64}$/.test(String(s.result.rootHash))) return { ...s, mismatch: true, why: 'its stored result is in a store the judge cannot check' };
+      let bytes;
+      try {
+        bytes = await download(s.result.rootHash);
+      } catch (e) {
+        const status = Number(/storage download (\d{3})/.exec(String(e?.message))?.[1]);
+        if ((status >= 400 && status < 500) || giveUpOnStorage) return { ...s, mismatch: true, why: 'its stored result could not be read' };
+        throw e;
+      }
       if (bytes.length > MAX_STORED_RESULT_BYTES) return { ...s, mismatch: true, why: 'its stored result is too large to judge' };
-      if (!(await matches(bytes, s.result.rootHash))) return { ...s, mismatch: true };
+      if (!(await matches(bytes, s.result.rootHash))) return { ...s, mismatch: true, why: 'its stored result is not the content its storage id names' };
       return { ...s, storedText: bytes.toString('utf8') };
     })));
   }
@@ -5552,7 +5604,9 @@ async function openJudgePass() {
     await openJudgePassCore({
       fetchList: fetchOpenVerifications,
       confirmScorecard: (taskHash, scorecard) => confirmScorecard(taskHash, scorecard, http),
-      busy: () => wsDeferred.size > 0,
+      // A deferred offer waits for the slot; while a task is held for gas the
+      // queue does not drain (drainDeferredAccepts), so that is not waiting.
+      busy: () => wsDeferred.size > 0 && resumeGasHeld.size === 0,
       chainProblem: judgeChainProblem,
       readOnChain: readJudgedTask,
       sendPick: (task, pick) => sendPick(task, pick, judgeIo(task.meta.chain)),
@@ -5565,7 +5619,7 @@ async function openJudgePass() {
       crashCheck: openCrashCheck,
       fetchSubmissions: fetchOpenSubmissions,
       readCommitments: (task, submissions) => readCommitments(task, submissions),
-      verifyResults: (task, submissions) => verifyOpenResults(task, submissions),
+      verifyResults: (task, submissions, opts) => verifyOpenResults(task, submissions, undefined, undefined, opts),
       readBrief: (task) => downloadPublicBrief(task.meta.rootHash),
       rank: rankWithModel,
       inFlight: reportInFlight,
