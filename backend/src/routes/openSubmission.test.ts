@@ -495,6 +495,16 @@ describe("submit-open and the verifier's own agents", () => {
     expect((await fromLinked(POSTER)).body.error.code).toBe('SELF_SUBMIT');
   });
 
+  it("refuses when another wallet of the caller's account is the verifier's or a hosted poster's owner", async () => {
+    const fromLinked = (linked: string) => request(app()).post(`/api/v1/a2a/tasks/${HASH}/submit-open`).set(as(AGENT, linked)).send({ resultData: { output: 'x' }, rootHash: null });
+    const OWNER = '0x' + 'd'.repeat(40);
+    ownAgent.mockImplementation(async (agent: string, owners: Iterable<string>) => agent === OWNER && [...owners].includes(VERIFIER));
+    expect((await fromLinked(OWNER)).body.error.code).toBe('VERIFIER_SAME_OWNER');
+    ownAgent.mockResolvedValue(false);
+    sameOwner.mockImplementation(async (poster: string, wallet: string) => poster === POSTER && wallet === OWNER);
+    expect((await fromLinked(OWNER)).body.error.code).toBe('SAME_OWNER');
+  });
+
   it("refuses a person verifier's own agent too", async () => {
     ownAgent.mockImplementation(async (agent: string, owners: Iterable<string>) => agent === AGENT && [...owners].includes(VERIFIER));
     expect((await submit(AGENT)).body.error.code).toBe('VERIFIER_SAME_OWNER');
@@ -636,6 +646,9 @@ describe('GET /open-verifications', () => {
     const first = (await get(VERIFIER)).body.data;
     const second = (await request(app()).get('/api/v1/a2a/open-verifications?offset=50').set(as(VERIFIER))).body.data;
     expect(first).toMatchObject({ total: 60, offset: 0, limit: 50 });
+    const small = (await request(app()).get('/api/v1/a2a/open-verifications?limit=5&offset=55').set(as(VERIFIER))).body.data;
+    expect(small).toMatchObject({ offset: 55, limit: 5 });
+    expect(small.tasks).toHaveLength(5);
     expect(first.tasks).toHaveLength(50);
     expect(second.tasks).toHaveLength(10);
     expect(new Set([...first.tasks, ...second.tasks].map((t: any) => t.meta.taskId)).size).toBe(60);

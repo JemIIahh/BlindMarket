@@ -167,15 +167,24 @@ async function openTask(rawHash: string): Promise<{ taskHash: string; meta: A2AT
 }
 
 /**
- * True when `agent` belongs to one of `judges`' owners: a judge is a hosted
- * agent and `agent` is one of its owner's agents (or the owner's wallet), or
- * a judge is a person and `agent` is their own agent. Such an agent must not
- * be judged by them.
+ * True when any of `agents` (one account's wallets) belongs to one of
+ * `judges`' owners: a judge is a hosted agent and the wallet is one of its
+ * owner's agents (or the owner's own wallet), or a judge is a person and the
+ * wallet is their own agent. Such an account must not be judged by them.
+ * A few lookups per wallet pair; accounts hold a handful of wallets.
  */
-async function judgesOwnAgent(agent: string, judges: Iterable<string>): Promise<boolean> {
-  const list = [...new Set([...judges].map((j) => j.toLowerCase()))];
-  if (await ownAgentOf(agent, list)) return true;
-  for (const judge of list) if (await sameOwnerSubtask(judge, agent)) return true;
+async function judgesOwnAgent(agents: Iterable<string>, judges: Iterable<string>): Promise<boolean> {
+  const judgeList = [...new Set([...judges].map((j) => j.toLowerCase()))];
+  for (const agent of new Set([...agents].map((a) => a.toLowerCase()))) {
+    if (await ownAgentOf(agent, judgeList)) return true;
+    for (const judge of judgeList) if (await sameOwnerSubtask(judge, agent)) return true;
+  }
+  return false;
+}
+
+/** True when `poster` is a hosted agent and one of `wallets` shares its owner (delegationGuard.sameOwnerSubtask). */
+async function anySameOwner(poster: string, wallets: Iterable<string>): Promise<boolean> {
+  for (const wallet of wallets) if (await sameOwnerSubtask(poster, wallet)) return true;
   return false;
 }
 
@@ -264,7 +273,8 @@ openSubmissionRouter.post('/tasks/:id/submit-open', enabledOnly, requireAuth, su
     if (paused) {
       throw new AppError(409, 'ESCROW_PAUSED', 'The escrow is paused: submissions wait until it resumes');
     }
-    if (meta.posterAddress && (await sameOwnerSubtask(meta.posterAddress, address))) {
+    // Every wallet of the caller's account, as for the poster and verifier checks above.
+    if (meta.posterAddress && (await anySameOwner(meta.posterAddress, mine))) {
       throw new AppError(403, 'SAME_OWNER', 'This task was posted by an agent with the same owner, so this agent cannot submit to it');
     }
     // The poster reads every result and may pick the winner: their own agent
@@ -274,7 +284,7 @@ openSubmissionRouter.post('/tasks/:id/submit-open', enabledOnly, requireAuth, su
     }
     // So does the task's verifier: an agent of its owner could copy the best
     // result and be picked.
-    if (meta.verifierAddress && (await judgesOwnAgent(address, [meta.verifierAddress]))) {
+    if (meta.verifierAddress && (await judgesOwnAgent(mine, [meta.verifierAddress]))) {
       throw new AppError(403, 'VERIFIER_SAME_OWNER', "This agent has the same owner as the task's verifier, so it cannot submit to the task");
     }
     // The escrow's deadline decides: a pause moves it past the stored one.
@@ -418,13 +428,13 @@ openSubmissionRouter.post('/tasks/:id/select', enabledOnly, requireAuth, pickBud
     const winner = ethers.getAddress(body.winner);
     // No judge pays itself (the escrow refuses SelfAssignment), another of
     // its account's wallets, or its own agents.
-    if (winner.toLowerCase() === judge || wallets.has(winner.toLowerCase())) {
+    if (wallets.has(winner.toLowerCase())) {
       throw new AppError(409, 'SELF_PICK', 'A judge cannot pick itself or another of its own wallets');
     }
     if ((await escrowFor(chain).submissionOf(taskId, winner)) === ethers.ZeroHash) {
       throw new AppError(409, 'NOT_A_SUBMITTER', 'That address did not submit to this task');
     }
-    if (await judgesOwnAgent(winner, [judge, ...wallets])) {
+    if (await judgesOwnAgent([winner], wallets)) {
       throw new AppError(409, 'OWN_AGENT_PICK', "That agent has the same owner as you, so you cannot pick it");
     }
     const build = byVerifier ? buildSelectWinnerByVerifierOn : buildSelectWinnerOn;
@@ -507,13 +517,14 @@ openSubmissionRouter.post('/tasks/:id/scorecard', enabledOnly, requireAuth, scor
 });
 
 /**
- * GET /api/v1/a2a/open-verifications?offset=
+ * GET /api/v1/a2a/open-verifications?offset=&limit=
  * Open tasks the caller is the verifier of (its wallets' verifier index),
  * from when its pick window opens, as listed (the deadline, or the end of the
  * poster's window on a task they review), until 30 days after that window
  * closes: a pause moves it later, so the worker asks the escrow's openPhase
- * before judging. Live windows first, soonest close first, then the rest, 50
- * a page (pass offset; total says how many). The
+ * before judging. Live windows first, soonest close first, then the rest, up
+ * to 50 a page (offset, limit; total says how many). The order follows the
+ * clock, so a window closing between pages can shift an entry by one. The
  * judge gets the full verification criteria, answer key included, as GET
  * /verifications gives a single-assignee task's verifier.
  */
@@ -524,6 +535,7 @@ openSubmissionRouter.get('/open-verifications', enabledOnly, requireAuth, async 
     const seen = new Set<string>();
     const indexed = (await Promise.all([...wallets].map((w) => a2aStore.getVerifierTasks(w)))).flat();
     const offset = Math.max(parseInt(req.query.offset as string) || 0, 0);
+    const limit = Math.min(Math.max(parseInt(req.query.limit as string) || VERIFIER_LIST_MAX, 1), VERIFIER_LIST_MAX);
     const listed = indexed
       .filter(({ meta, state }) => {
         if (seen.has(meta.taskId)) return false;
@@ -540,7 +552,7 @@ openSubmissionRouter.get('/open-verifications', enabledOnly, requireAuth, async 
         if (aLive !== bLive) return aLive ? -1 : 1;
         return aLive ? a.closesAt - b.closesAt : b.closesAt - a.closesAt;
       });
-    const mine = listed.slice(offset, offset + VERIFIER_LIST_MAX);
+    const mine = listed.slice(offset, offset + limit);
     const tasks = await Promise.all(mine.map(async ({ meta, closesAt }) => {
       const resolved = await resolveCachedTaskByHash(meta.taskId).catch(() => null);
       return {
@@ -550,7 +562,7 @@ openSubmissionRouter.get('/open-verifications', enabledOnly, requireAuth, async 
         window: { opensAt: closesAt - VERIFIER_PICK_WINDOW_SEC, closesAt },
       };
     }));
-    const response: ApiResponse = { success: true, data: { tasks, total: listed.length, offset, limit: VERIFIER_LIST_MAX } };
+    const response: ApiResponse = { success: true, data: { tasks, total: listed.length, offset, limit } };
     res.json(response);
   } catch (err) {
     next(err);

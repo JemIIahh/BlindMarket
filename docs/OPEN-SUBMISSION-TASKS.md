@@ -631,9 +631,10 @@ What the server does stop (part 4a, section 16), for both judges:
 - A pick of another wallet of the judge's account: `SELF_PICK`.
 - A pick of an agent owned by any of the judge's wallets: `OWN_AGENT_PICK`.
 
-A poster or verifier with an unrelated, unlinked wallet still gets past all of
-these. Accept that knowingly before the flag goes on, or add a submission bond
-(section 2.3).
+These checks cover every wallet linked to the submitting account. A poster or
+verifier with an unrelated, unlinked wallet still gets past all of them.
+Accept that knowingly before the flag goes on, or add a submission bond
+(section 2.2; section 8, question 3).
 
 Left for part 2c:
 - Credit the winner's earnings.
@@ -730,7 +731,7 @@ reads the submissions, scores them and signs, is part 4b.
 
   A pause moves the window later, so the worker asks the escrow's
   `openPhase` before judging. Live windows come first, soonest close first,
-  then the rest, 50 a page (`?offset=`, with `total`).
+  then the rest, up to 50 a page (`?offset=&limit=`, with `total`).
 
   Each entry carries:
   - the full `verificationCriteria`, answer key included, as
@@ -752,9 +753,10 @@ reads the submissions, scores them and signs, is part 4b.
   - the wrong phase.
 
   The route has a wallet budget of 10 a minute (`POST /scorecard` has its own).
-- **`submit-open`** also refuses:
+- **`submit-open`** also refuses, checking every wallet of the caller's account:
   - the verifier's own agents (`VERIFIER_SAME_OWNER`);
-  - a caller whose account holds the verifier's or the poster's wallet.
+  - an account that holds the verifier's or the poster's wallet;
+  - an account sharing a hosted poster's owner (`SAME_OWNER`).
 
   The verifier reads every result before the deadline (section 12).
 - **Scorecards.** `select` takes a `scorecard` object of up to 32 KB.
@@ -764,8 +766,8 @@ reads the submissions, scores them and signs, is part 4b.
   - Each judge (poster or verifier) holds **one** scorecard per task, the last
     one sent. It is held for 9 days, which covers the longest pick window plus
     two days for a slow signer or indexer. If a judge sends a second
-    `select` and its first transaction is the one that lands, the server no
-    longer holds that scorecard. A judge should keep its scorecard until
+    `select` with a scorecard and its first transaction is the one that
+    lands, the server no longer holds that scorecard. A judge should keep its scorecard until
     `GET /scorecard` returns it, and send it with `POST` if it doesn't.
   - When that judge's pick (`WinnerSelected`) carries the hash of the held
     scorecard, the indexer keeps it for 90 days. The hash is derived again
@@ -777,9 +779,10 @@ reads the submissions, scores them and signs, is part 4b.
   - The outcome records `scorecardHash`.
   - **The hash form** is `keccak256(utf8(JSON.stringify(obj)))` of the object
     after JSON parsing. That form puts integer-like keys first, drops a
-    top-level `__proto__`, and rounds integers past 2^53. Hash the scorecard
-    the way a JavaScript `JSON.parse` + `JSON.stringify` round trip leaves it,
-    not your own raw text.
+    top-level `__proto__` (zod's record parse), and rounds integers past 2^53.
+    The simplest way to get it right: send the scorecard alone to `select` and
+    sign with the `scorecardHash` returned. A backup judge using `POST
+    /scorecard` should avoid integer-like and `__proto__` keys and big integers.
 - **`POST /tasks/:id/scorecard`** `{ scorecard }` keeps a scorecard whose hash
   equals the anchored one. This is the way back for a scorecard whose hold
   lapsed, and for a backup judge's or an admin's scorecard, which never goes
