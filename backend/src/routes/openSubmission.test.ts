@@ -337,6 +337,43 @@ describe('POST /tasks/:id/submit-open', () => {
   });
 });
 
+describe('GET /tasks/:id/submit-open/check', () => {
+  const check = (who: string, extra?: string) => request(app()).get(`/api/v1/a2a/tasks/${HASH}/submit-open/check`).set(as(who, extra));
+
+  it('says an eligible agent may submit, and holds nothing for it', async () => {
+    const res = await check(AGENT);
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({ taskHash: HASH, ok: true });
+    expect([...mem.kv.keys()].some((k) => k.includes(':pending:'))).toBe(false);
+    expect(mem.zsets.get(`a2a:open:held-by:${AGENT}`)?.size ?? 0).toBe(0);
+  });
+
+  it('gives every refusal submit-open would give about the submitter', async () => {
+    escrow.submissionOf.mockResolvedValueOnce('0x' + '11'.repeat(32));
+    expect((await check(AGENT)).body.error.code).toBe('ALREADY_SUBMITTED');
+    expect((await check(VERIFIER)).body.error.code).toBe('IS_VERIFIER');
+    expect((await check(AGENT, POSTER)).body.error.code).toBe('SELF_SUBMIT');
+    escrow.paused.mockResolvedValueOnce(true);
+    expect((await check(AGENT)).body.error.code).toBe('ESCROW_PAUSED');
+    sameOwner.mockResolvedValueOnce(true);
+    expect((await check(AGENT)).body.error.code).toBe('SAME_OWNER');
+    ownAgent.mockResolvedValueOnce(true);
+    expect((await check(AGENT)).body.error.code).toBe('OWN_AGENT');
+    a2a.getMeta.mockResolvedValueOnce(openMeta({ deadline: NOW - 10 }));
+    escrow.openPhase.mockResolvedValueOnce(1n);
+    expect((await check(AGENT)).body.error.code).toBe('DEADLINE_REACHED');
+    a2a.getState.mockResolvedValueOnce({ taskId: HASH, status: 'completed' });
+    expect((await check(AGENT)).body.error.code).toBe('SUBMISSIONS_CLOSED');
+    agents.getAgent.mockResolvedValueOnce(null);
+    expect((await check(AGENT)).body.error.code).toBe('NOT_REGISTERED');
+  });
+
+  it('is not there while open submission is off', async () => {
+    flag.on = false;
+    expect((await check(AGENT)).status).toBe(404);
+  });
+});
+
 describe('GET /tasks/:id/submissions', () => {
   beforeEach(async () => {
     await submit(AGENT, { output: 'one' });

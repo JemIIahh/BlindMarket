@@ -411,6 +411,7 @@ describe('openPassCore', () => {
     preflight: vi.fn(async () => null),
     crashCheck: () => null,
     readEligibility: vi.fn(async () => null),
+    check: vi.fn(async () => null),
     run: vi.fn(async () => {}),
     ...over,
   });
@@ -481,6 +482,22 @@ describe('openPassCore', () => {
     expect(await openPassCore(d, state)).toBe('ran');
     expect(d.run).toHaveBeenCalledWith(other);
     expect(state.retryAt.get(HASH)).toBeGreaterThan(NOW_SEC * 1000);
+  });
+
+  it("asks the server before the model run: a refusal that will stand ends the task, others wait", async () => {
+    const owned = createOpenState();
+    const d = deps({ check: vi.fn(async () => ({ reason: 'the server refuses it: 403 SAME_OWNER', final: true })) });
+    expect(await openPassCore(d, owned)).toBe('none');
+    expect(d.run).not.toHaveBeenCalled();
+    expect(owned.done.get(HASH)).toMatch(/SAME_OWNER/);
+    const busy = createOpenState();
+    const b = deps({ check: vi.fn(async () => ({ reason: 'the server refuses it: 429 RATE_LIMIT', final: false })) });
+    expect(await openPassCore(b, busy)).toBe('none');
+    expect(busy.done.size).toBe(0);
+    const down = createOpenState();
+    const x = deps({ check: vi.fn(async () => { throw new Error('socket hang up'); }) });
+    expect(await openPassCore(x, down)).toBe('none');
+    expect(down.retryAt.get(HASH)).toBeGreaterThan(NOW_SEC * 1000);
   });
 
   it('never runs a task the worker crashed on, and stops when the crashes cannot be blamed', async () => {

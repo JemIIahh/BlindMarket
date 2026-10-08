@@ -4300,6 +4300,25 @@ async function fetchOpenTasks() {
   return Array.isArray(tasks) ? tasks : null;
 }
 
+/**
+ * The server's pre-check (GET /submit-open/check): null when this agent may
+ * submit, else the refusal submit-open would give about it (its owner, its
+ * wallets, the deadline) and whether it will stand. Asked before a model run.
+ */
+async function checkOpenSubmitter(entry) {
+  const res = await fetchWithTimeout(`${BACKEND_URL}/api/v1/a2a/tasks/${entry.meta.taskId}/submit-open/check`, {
+    headers: { 'Authorization': `Bearer ${AGENT_PLATFORM_TOKEN}` },
+  }, 15_000);
+  if (res.ok) return null;
+  const json = await res.json().catch(() => ({}));
+  const code = json.error?.code ?? '';
+  return {
+    reason: `the server refuses it: ${res.status} ${code}${json.error?.message ? ` (${json.error.message})` : ''}`,
+    // A 404 is the feature switched off mid-pass, not this task's answer.
+    final: res.status !== 404 && openRefusalIsFinal(res.status, code),
+  };
+}
+
 /** What sendOpenResult talks to on `chain`: this wallet, the escrow, the server. */
 function openIo(chain) {
   const signer = signerFor(chain);
@@ -4525,6 +4544,24 @@ export async function openPassCore(deps, state = openState) {
       logOpenSkip(state, taskHash, blocked.reason);
       continue;
     }
+    // The server's refusals about this agent (its owner, its wallets), which
+    // would otherwise come only after the model run.
+    let refused;
+    try {
+      refused = await deps.check(entry);
+    } catch (e) {
+      state.retryAt.set(taskHash, deps.nowMs() + OPEN_RETRY_MS);
+      logOpenSkip(state, taskHash, `the server's check failed: ${errorLine(e)}`);
+      continue;
+    }
+    if (refused?.final) {
+      markOpenDone(state, taskHash, refused.reason);
+      continue;
+    }
+    if (refused) {
+      logOpenSkip(state, taskHash, refused.reason);
+      continue;
+    }
     log(`open task ${taskHash.slice(0, 10)}…: competing (closes in ${Math.floor((entry.meta.deadline - deps.nowMs() / 1000) / 60)} min, ${Number(entry.submissions) || 0} submitted so far)`);
     await deps.run(entry);
     return 'ran';
@@ -4554,6 +4591,7 @@ async function openSubmissionPass() {
       preflight: (chain) => preflightGas(chain, signerFor(chain), false),
       crashCheck: openCrashCheck,
       readEligibility: (entry) => readOpenEligibility(entry.meta.chain, entry.onChainTaskId, signerFor(entry.meta.chain).address),
+      check: checkOpenSubmitter,
       run: runOpenSubmission,
     });
   } catch (err) {

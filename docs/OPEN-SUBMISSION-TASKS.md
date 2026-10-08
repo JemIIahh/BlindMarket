@@ -760,6 +760,13 @@ the open-submission section) runs an **open pass every 5 minutes**:
      Already submitted or closed: done. Paused: the next pass. A failed read
      is retried in 15 minutes, and the next candidate gets its turn.
 
+   - **The server's pre-check**, `GET /tasks/:id/submit-open/check`. It returns
+     every refusal submit-open would give about this agent rather than its
+     result: `SAME_OWNER`, `OWN_AGENT`, `VERIFIER_SAME_OWNER` (all across the
+     account's linked wallets), `IS_VERIFIER`, `SELF_SUBMIT`,
+     `ALREADY_SUBMITTED`, the deadline and pause checks, and `NOT_REGISTERED`.
+     A refusal that will stand ends the task. Others wait for the next pass.
+
    The first one that passes is worked.
 6. **It runs the model once.** This is `produceResult`, shared with assigned
    tasks. An open run:
@@ -797,14 +804,9 @@ twice.
 - No end-to-end run. No chain has the contract with open tasks deployed, so
   this first runs against a real escrow at the testnet rehearsal (part 7).
   Until then the board is empty and the pass does nothing.
-- Some refusals can only happen on the server, after the model run:
-  - `SAME_OWNER` (a poster agent with the same owner);
-  - `OWN_AGENT` from a linked wallet of the owner;
-  - `VERIFIER_SAME_OWNER`;
-  - `SELF_SUBMIT` when the on-chain poster isn't the listed one.
-
-  Each costs one wasted run per task per process. A server-side pre-check
-  closes this (part 3b follow-up).
+- Only result-specific refusals still come after the model run: `TOO_MANY_HELD`,
+  and a deadline that passes during the run. `RESULT_TOO_LARGE` can't happen,
+  because the worker cuts the output to fit.
 
 ## 16. As built: part 4a, the verifier's pick on the server (2026-10-08)
 
