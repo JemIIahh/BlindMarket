@@ -70,6 +70,8 @@ const listingMeta = vi.hoisted(() => ({ value: { submissionMode: 'open', posterA
 vi.mock('./a2aStore.js', () => ({ closeOpenSubmissionTask, getMeta: async () => listingMeta.value }));
 const listing = vi.hoisted(() => ({ isListedTask: vi.fn(async (_chain: string, taskId: string | number) => String(taskId) === '7') }));
 vi.mock('./taskChain.js', () => listing);
+// Bare chain keys, so refs read 'arc:7' (openSubmissionStore.test.ts checks the network-scoped form).
+vi.mock('./chainScope.js', () => ({ chainScope: (chain: string) => chain }));
 const recordWorkerPayout = vi.hoisted(() => vi.fn(async (..._args: unknown[]) => {}));
 vi.mock('./workerPayout.js', () => ({ recordWorkerPayout }));
 const smartAccounts = vi.hoisted(() => ({ loadAgentBySmartAccount: vi.fn(async (_a: string) => null as { walletAddress: string } | null) }));
@@ -396,6 +398,19 @@ describe("crediting the winner's earnings", () => {
     smartAccounts.loadAgentBySmartAccount.mockResolvedValue({ walletAddress: agent(9) });
     await handleWinnerSelected('arc', 7n, agent(2), 2);
     expect(recordWorkerPayout.mock.calls[0][1]).toBe(agent(9));
+  });
+
+  it('fails the event when the smart-account lookup fails, rather than credit an unknown address', async () => {
+    smartAccounts.loadAgentBySmartAccount.mockRejectedValueOnce(new Error('database blip'));
+    await expect(handleWinnerSelected('arc', 7n, agent(2), 2)).rejects.toThrow('database blip');
+    expect(recordWorkerPayout).not.toHaveBeenCalled();
+  });
+
+  it("credits nothing when the escrow's task is not the one the record names (a record from another network)", async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    escrow.getTask.mockResolvedValue({ agent: POSTER, taskHash: '0x' + 'cd'.repeat(32), deadline: BigInt(DEADLINE), amount: 5_000_000n, token: ARC_USDC });
+    await handleWinnerSelected('arc', 7n, agent(2), 2);
+    expect(recordWorkerPayout).not.toHaveBeenCalled();
   });
 
   it('credits nothing for a task that was never listed', async () => {

@@ -644,6 +644,25 @@ it has a listing (`a2a:meta`, open) and is that listing's own task
 hash, and the escrow does not make hashes unique, so a decoy must never take
 the real task's credit.
 
+**From review of #144:**
+- **The smart-account owner lookup:** a failed lookup fails the event (it is
+  retried), as in the dispute listener. Crediting the raw account would find
+  no executor and lose the credit for good.
+- **The task check:** the credit is made only when the escrow's task carries
+  the record's hash, so a record left from another network can't credit an
+  unrelated task.
+- **Network scope:** open-submission refs are network-scoped like every other
+  per-chain key (`<chainScope>:<taskId>`, chainScope.ts). Escrow ids restart
+  at 1 on a new network.
+- **Rounding, every payout path:** `recordWorkerPayout` now splits as the
+  escrow does. The fee is rounded down and the worker gets the rest. It used
+  to round the share down, crediting one base unit less than was paid on any
+  amount the fee does not divide evenly.
+- **Not parked:** unlike the dispute listener, a credit that keeps failing is
+  not parked. A long Postgres outage holds the open-submission scan until the
+  database is back. Nothing is lost, only delayed. `unregistered` and an
+  unknown token return normally, so they never hold it.
+
 **Reputation, decided:** credited for every open-task win, exactly like a
 single-assignee completion. The contract rates on-chain only when the poster
 did not choose the judge (`_earnsRating`). But Arc's escrow has no reputation

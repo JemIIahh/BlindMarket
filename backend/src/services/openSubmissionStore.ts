@@ -4,7 +4,7 @@
  * state (a2aStore), so nothing in the accept, cascade or expiry flows ever
  * sees an open task.
  *
- * Keyed by the ON-CHAIN task (`<chain>:<taskId>`, a TaskRef), never by the
+ * Keyed by the ON-CHAIN task (`<chainScope>:<taskId>`, a TaskRef), never by the
  * task hash: the escrow does not make hashes unique, so anyone can post a
  * decoy task with a live task's hash. Keyed by hash, the decoy's events would
  * land on the real task's record (security review of #142). The hash rides
@@ -40,13 +40,18 @@
  */
 
 import { redis } from './redis.js';
+import { chainScope } from './chainScope.js';
 import type { TaskChain } from './taskChain.js';
 
-/** An on-chain task: `<chain>:<taskId>`. */
+/**
+ * An on-chain task: `<chainScope>:<taskId>`. Network-scoped like every other
+ * per-chain key (chainScope.ts): escrow ids restart at 1 on a new network,
+ * so a key by chain alone would name an unrelated task after a move.
+ */
 export type TaskRef = string;
 
 export function taskRef(chain: TaskChain, taskId: string | number | bigint): TaskRef {
-  return `${chain}:${String(taskId)}`;
+  return `${chainScope(chain)}:${String(taskId)}`;
 }
 
 /** Who picks first, as the escrow's PickMode: 0 the task verifier, 1 the poster. */

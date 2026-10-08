@@ -81,9 +81,14 @@ async function listingOf(rec: OpenTaskRecord): Promise<A2ATaskMeta | null> {
   return (await isListedTask(rec.chain, rec.taskId, rec.taskHash, rec.poster, meta.posterAddress)) ? meta : null;
 }
 
-/** An on-chain address's executor: agents that submit through a smart account (Base) are credited as its owner. */
+/**
+ * An on-chain address's executor: agents that submit through a smart account
+ * (Base) are credited as its owner. A failed lookup fails the event (it is
+ * retried), as in the dispute listener: crediting the raw account would find
+ * no executor and lose the credit for good.
+ */
 async function executorFor(onChain: string): Promise<string> {
-  const owner = await loadAgentBySmartAccount(onChain).catch(() => null);
+  const owner = await loadAgentBySmartAccount(onChain);
   return owner?.walletAddress || onChain;
 }
 
@@ -190,10 +195,16 @@ export async function handleWinnerSelected(chain: TaskChain, taskId: bigint, win
     // fails the event, so the scan retries it; everything else here is
     // idempotent.
     const t = await escrowFor(chain).getTask(taskId);
-    await recordWorkerPayout(hash, await executorFor(winnerAddr), rec.taskId, BigInt(t.amount), { chain, token: String(t.token) }, {
-      rethrow: true,
-      meta: listing,
-    });
+    // The record and the escrow must name the same task: a record left from
+    // another network would credit an unrelated task under its hash.
+    if (String(t.taskHash).toLowerCase() === hash) {
+      await recordWorkerPayout(hash, await executorFor(winnerAddr), rec.taskId, BigInt(t.amount), { chain, token: String(t.token) }, {
+        rethrow: true,
+        meta: listing,
+      });
+    } else {
+      console.error(`[open-submission] not crediting task ${ref}: its record's hash is not the escrow's`);
+    }
   }
   const total = await submissionTotal(ref, rec);
   await notifyOnce(`open:picked:${ref}`, rec.poster, {

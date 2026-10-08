@@ -39,6 +39,8 @@ vi.mock('./redis.js', () => ({
 const cfg = vi.hoisted(() => ({ openSubmissionEnabled: true }));
 vi.mock('../config.js', () => ({ config: cfg }));
 vi.mock('./deploymentIdentity.js', () => ({ backgroundWritesAllowed: () => true }));
+// Bare chain keys, so refs read 'arc:7' (openSubmissionStore.test.ts checks the network-scoped form).
+vi.mock('./chainScope.js', () => ({ chainScope: (chain: string) => chain }));
 
 const escrow = vi.hoisted(() => ({
   openPhase: vi.fn(),
