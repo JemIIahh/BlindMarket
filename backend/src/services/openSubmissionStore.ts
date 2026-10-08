@@ -29,6 +29,8 @@
  *                                with its hash lands on-chain. One per role, so a
  *                                judge can hold at most one.
  *   a2a:open:scorecard:<ref>     JSON KeptScorecard, the one the escrow anchored
+ *   a2a:open:decline:<ref>       JSON OpenDecline: the task verifier judged and found
+ *                                no submission acceptable (it does not pick)
  *   a2a:open:due                 zset: ref → unix seconds the sweep next looks at it
  *
  * Writers:
@@ -39,6 +41,7 @@
  * - The sweep writes `closed`.
  * - POST submit-open writes a submitter's own pending result.
  * - POST select writes the judge's pending scorecard; the indexer keeps it.
+ * - POST judge-decline writes the task verifier's decline, once.
  *   POST scorecard keeps one whose hash the escrow anchored (content-addressed,
  *   so anyone holding it may send it).
  * - Both the indexer and the sweep write `due`.
@@ -155,6 +158,7 @@ const KEY = {
   results: (ref: TaskRef) => `a2a:open:results:${ref}`,
   scorecardPending: (ref: TaskRef, role: ScorecardRole) => `a2a:open:scorecard-pending:${ref}:${role}`,
   scorecard: (ref: TaskRef) => `a2a:open:scorecard:${ref}`,
+  decline: (ref: TaskRef) => `a2a:open:decline:${ref}`,
   due: 'a2a:open:due',
 };
 
@@ -390,3 +394,27 @@ export async function keepAnchoredScorecard(ref: TaskRef, scorecardHash: string,
 export async function getScorecard(ref: TaskRef): Promise<KeptScorecard | null> {
   return parse<KeptScorecard>(await redis.get(KEY.scorecard(ref)));
 }
+
+// ── A verifier's decline ────────────────────────────────────────────────────
+
+/** The task verifier judged the submissions and found none acceptable. */
+export interface OpenDecline {
+  verifier: string;
+  at: string;
+  /** Its scores and reasons, as a scorecard would hold them. */
+  scorecard?: Record<string, unknown>;
+}
+
+/**
+ * Record the task verifier's decline, once: it does not pick, and after its
+ * window the backup judge decides. Kept so a restarted verifier does not
+ * judge the task again. True when this call recorded it.
+ */
+export async function saveDecline(ref: TaskRef, decline: OpenDecline): Promise<boolean> {
+  return (await redis.set(KEY.decline(ref), JSON.stringify({ ...decline, verifier: decline.verifier.toLowerCase() }), 'EX', RESULTS_TTL_SEC, 'NX')) !== null;
+}
+
+export async function getDecline(ref: TaskRef): Promise<OpenDecline | null> {
+  return parse<OpenDecline>(await redis.get(KEY.decline(ref)));
+}
+

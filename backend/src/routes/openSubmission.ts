@@ -571,6 +571,37 @@ openSubmissionRouter.post('/tasks/:id/scorecard', enabledOnly, requireAuth, scor
 });
 
 /**
+ * POST /api/v1/a2a/tasks/:id/judge-decline
+ * Body { scorecard? }. The task verifier, in its window, records that it
+ * judged the submissions and found none acceptable: it does not pick, and
+ * after its window the backup judge decides. Recorded once; the task leaves
+ * the verifier's open-verifications, so a restarted verifier does not judge
+ * it again.
+ */
+openSubmissionRouter.post('/tasks/:id/judge-decline', enabledOnly, requireAuth, pickBudget, async (req: AuthRequest, res, next) => {
+  try {
+    const { scorecard } = z.object({ scorecard: z.record(z.unknown()).optional() }).parse(req.body ?? {});
+    if (scorecard && Buffer.byteLength(JSON.stringify(scorecard)) > MAX_SCORECARD_BYTES) {
+      throw new AppError(413, 'SCORECARD_TOO_LARGE', `The scorecard is over ${MAX_SCORECARD_BYTES / 1024} KB`);
+    }
+    const { taskHash, chain, taskId, ref } = await openTask(String(req.params.id));
+    const verifier = String(await getTaskVerifierOn(chain, taskId)).toLowerCase();
+    if (verifier === ethers.ZeroAddress || !callerWallets(req).has(verifier)) {
+      throw new AppError(403, 'NOT_A_JUDGE', "Only the task's verifier records a decline");
+    }
+    const phase = await phaseOf(chain, taskId);
+    if (phase !== PHASE.VerifierPick) {
+      throw new AppError(409, 'NOT_PICK_WINDOW', `The verifier declines only in its pick window; this task is ${PHASE_NAMES[phase] ?? 'past it'}`);
+    }
+    const recorded = await store.saveDecline(ref, { verifier, at: new Date().toISOString(), ...(scorecard ? { scorecard } : {}) });
+    const response: ApiResponse = { success: true, data: { taskHash, declined: true, recorded } };
+    res.json(response);
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
  * GET /api/v1/a2a/open-verifications?offset=&limit=
  * Open tasks the caller is the verifier of (its wallets' verifier index),
  * from when its pick window opens, as listed (the deadline, or the end of the
@@ -607,15 +638,17 @@ openSubmissionRouter.get('/open-verifications', enabledOnly, requireAuth, async 
         return aLive ? a.closesAt - b.closesAt : b.closesAt - a.closesAt;
       });
     const mine = listed.slice(offset, offset + limit);
-    const tasks = await Promise.all(mine.map(async ({ meta, closesAt }) => {
+    const tasks = (await Promise.all(mine.map(async ({ meta, closesAt }) => {
       const resolved = await resolveCachedTaskByHash(meta.taskId).catch(() => null);
+      // A task this verifier already declined is not its work any more.
+      if (resolved && (await store.getDecline(store.taskRef(resolved.chain, resolved.taskId)))) return null;
       return {
         meta: { ...a2aStore.projectPublicMeta(meta), ...(meta.verificationCriteria ? { verificationCriteria: meta.verificationCriteria } : {}) },
         onChainTaskId: resolved ? String(resolved.taskId) : null,
         submissions: resolved ? await store.recordedSubmissionCount(store.taskRef(resolved.chain, resolved.taskId)) : 0,
         window: { opensAt: closesAt - VERIFIER_PICK_WINDOW_SEC, closesAt },
       };
-    }));
+    }))).filter((t) => t !== null);
     const response: ApiResponse = { success: true, data: { tasks, total: listed.length, offset, limit } };
     res.json(response);
   } catch (err) {
