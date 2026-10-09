@@ -46,6 +46,10 @@ const ESCROW_READ = new Interface([
   'function getTask(uint256) view returns (tuple(address agent,address worker,address token,uint256 amount,bytes32 taskHash,bytes32 evidenceHash,uint8 status,string category,string locationZone,uint256 createdAt,uint256 deadline,uint8 submissionAttempts))',
 ]);
 const FUTURE = BigInt(Math.floor(Date.now() / 1000) + 3600);
+const OPEN_READS = new Interface([
+  'function getOpenTask(uint256) view returns (tuple(bool open,uint8 mode,uint32 creatorWindow,uint8 closedBy))',
+  'function submissionOf(uint256,address) view returns (bytes32)',
+]);
 
 /** What the real backend builds (backend/src/services/escrow.ts, routes/a2a.ts): the MCP signs nothing else. */
 const ESCROW_CALLS = new Interface([
@@ -101,9 +105,19 @@ before(async () => {
           case 'eth_call': {
             const { to, data } = params[0];
             if ([ESCROW, MAINNET_ESCROW].some((a) => a.toLowerCase() === to.toLowerCase())) {
+              // getOpenTask / submissionOf: open unless a test says otherwise, no submission unless one is set.
+              const extra = (() => { try { return OPEN_READS.parseTransaction({ data }); } catch { return null; } })();
+              if (extra?.name === 'getOpenTask') {
+                result = OPEN_READS.encodeFunctionResult('getOpenTask', [[chain.openTaskOpen ?? true, 1, 3600, 0]]);
+                break;
+              }
+              if (extra?.name === 'submissionOf') {
+                result = OPEN_READS.encodeFunctionResult('submissionOf', [chain.submission ?? '0x' + '00'.repeat(32)]);
+                break;
+              }
               const taskId = Number(ESCROW_READ.decodeFunctionData('getTask', data)[0]);
               result = ESCROW_READ.encodeFunctionResult('getTask', [[
-                OWNER.address, OWNER.address, USDC, 2_500_000n, HASH, '0x' + '00'.repeat(32),
+                OWNER.address, OWNER.address, USDC, 2_500_000n, chain.taskHash ?? HASH, '0x' + '00'.repeat(32),
                 chain.tasks[taskId] ?? 0, 'delegated', 'global', 1n, chain.deadlines?.[taskId] ?? FUTURE, 0,
               ]]);
             } else {
@@ -164,10 +178,13 @@ let bridgeDown;
 let indexAnswers;
 /** path → (body) => the backend's answer, in place of the default. */
 let overrides;
+/** path → a failed answer the backend gives, in place of the default. */
+let failures;
 let openConfig;
 let openStatus;
 beforeEach(() => {
   overrides = {};
+  failures = {};
   openConfig = { enabled: true, posting: true, pickModes: ['agent', 'creator'], windows: { creatorMinSec: 3600, creatorMaxSec: 604800, verifierSec: 172800, backupSec: 172800 }, maxResultBytes: 65536, maxScorecardBytes: 32768 };
   openStatus = { taskHash: HASH, onChainTaskId: '41', chain: 'arc', mode: 'creator', phase: 'submissions', paused: false, submissions: 2, windows: { submissionsEnd: Number(FUTURE), creatorPickEnd: null, verifierPickEnd: 0, backupPickEnd: 0 }, outcome: null, declined: null };
   resetChain();
@@ -186,6 +203,7 @@ globalThis.fetch = async (url, init = {}) => {
   const body = init.body ? JSON.parse(init.body) : undefined;
   backendCalls.push({ method: init.method ?? 'GET', path, body });
   const json = (data) => ({ ok: true, status: 200, json: async () => ({ success: true, data }) });
+  if (failures[path]) return failures[path];
   if (overrides[path]) return json(overrides[path](body));
   if (path === '/health/bridge') {
     if (bridgeDown) throw new TypeError('fetch failed');
@@ -336,10 +354,34 @@ test('submit_open_result signs submitOpen for this task, committing this result'
   assert.equal(chain.sent[0].chainId, BigInt(ARC_ID));
 });
 
-test('submit_open_result sends nothing for a result already on-chain', async () => {
-  overrides[`/api/v1/a2a/tasks/${HASH}/submit-open`] = (b) => ({ taskHash: HASH, onChainTaskId: '41', evidenceHash: openEvidence(b.resultData, b.rootHash), alreadyOnChain: true, kept: true });
+const alreadyOnChain = (b) => ({ taskHash: HASH, onChainTaskId: '41', evidenceHash: openEvidence(b.resultData, b.rootHash), alreadyOnChain: true, kept: true });
+
+test('submit_open_result sends nothing for a result already on-chain, as the escrow confirms', async () => {
+  overrides[`/api/v1/a2a/tasks/${HASH}/submit-open`] = alreadyOnChain;
+  chain.submission = openEvidence({ output: 'Three sources: …' }, null);
   assert.equal(parse(await tools().submit_open_result({ task: HASH, output: 'Three sources: …' })).alreadyOnChain, true);
   assert.equal(chain.sent.length, 0);
+});
+
+test('submit_open_result refuses a backend that says the result is on-chain when the escrow holds none', async () => {
+  overrides[`/api/v1/a2a/tasks/${HASH}/submit-open`] = alreadyOnChain;
+  assert.equal(errorOf(await tools().submit_open_result({ task: HASH, output: 'Three sources: …' })).code, 'TX_MISMATCH');
+});
+
+test("submit_open_result and pick_open_winner refuse a task id the escrow says is another task, with nothing sent", async () => {
+  overrides[`/api/v1/a2a/tasks/${HASH}/submit-open`] = (b) => submitted(b.resultData, b.rootHash);
+  overrides[`/api/v1/a2a/tasks/${HASH}/select`] = (b) => picked('selectWinner', b.winner);
+  for (const set of [() => { chain.taskHash = '0x' + 'cd'.repeat(32); }, () => { chain.taskHash = undefined; chain.openTaskOpen = false; }]) {
+    set();
+    assert.equal(errorOf(await tools().submit_open_result({ task: HASH, output: 'x' })).code, 'TASK_MISMATCH');
+    assert.equal(errorOf(await tools().pick_open_winner({ task: HASH, winner: WINNER })).code, 'TASK_MISMATCH');
+  }
+  assert.equal(chain.sent.length, 0);
+});
+
+test('submit_open_result refuses a result over 64 KB as sent, before asking the backend', async () => {
+  assert.equal(errorOf(await tools().submit_open_result({ task: HASH, output: 'é'.repeat(40_000) })).code, 'RESULT_TOO_LARGE');
+  assert.equal(backendCalls.some((c) => c.path.endsWith('/submit-open')), false);
 });
 
 test('submit_open_result refuses a submission built wrong, with nothing sent', async () => {
@@ -406,8 +448,23 @@ test('pick_open_winner refuses a pick built for another winner or with both pick
 });
 
 test('cancel_task refuses an open task once anyone has submitted, and quotes it with none', async () => {
+  openStatus.onChainTaskId = '8';
   openStatus.submissions = 3;
   assert.equal(errorOf(await tools().cancel_task({ task: '8', idempotencyKey: 'open-cancel-1' })).code, 'HAS_SUBMISSIONS');
   openStatus.submissions = 0;
   assert.ok(parse(await tools().cancel_task({ task: '8', idempotencyKey: 'open-cancel-2' })).quote.quoteId);
+});
+
+test("cancel_task's guard is for this task only: another escrow under the same hash is not refused", async () => {
+  openStatus.onChainTaskId = '41';
+  openStatus.submissions = 3;
+  assert.ok(parse(await tools().cancel_task({ task: '8', idempotencyKey: 'open-cancel-3' })).quote.quoteId);
+});
+
+test('post_task open builds before approving, so a build the backend refuses costs no gas', async () => {
+  failures['/api/v1/tasks'] = failWith(409, 'VERIFIER_CHAIN_UNSUPPORTED');
+  const t = tools();
+  const { quote } = parse(await t.post_task({ ...openPost, idempotencyKey: 'open-post-refused' }));
+  assert.equal(errorOf(await t.post_task({ ...openPost, idempotencyKey: 'open-post-refused', confirm: true, quoteId: quote.quoteId })).code, 'VERIFIER_CHAIN_UNSUPPORTED');
+  assert.equal(chain.sent.length, 0, 'no approve, no createTaskOpen');
 });

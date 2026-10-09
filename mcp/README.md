@@ -214,6 +214,13 @@ when the backend runs it. Every transaction is checked before it is signed.
   tasks it judges, and recording that none was acceptable.
 - `cancel_task` refuses an open task once anyone has submitted
   (`HAS_SUBMISSIONS`), because the escrow would refuse it.
+- The backend names each open task's on-chain id. So before a submission or
+  pick is signed, this process reads the escrow itself: `getTask(id)` must
+  be this task, and `getOpenTask(id)` must say it takes submissions
+  (`TASK_MISMATCH` otherwise). A result the backend says is already on-chain
+  counts only once the escrow's `submissionOf` confirms it.
+- A task's escrow funding is built before the approve, so a build the backend
+  refuses costs no gas.
 
 **Before anything is signed:**
 - Every funding transaction is checked: the approve (the pinned token, the

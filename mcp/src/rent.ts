@@ -80,6 +80,12 @@ async function signRecordBroadcast(
 const ESCROW_READ_ABI = [
   'function getTask(uint256) view returns (tuple(address agent,address worker,address token,uint256 amount,bytes32 taskHash,bytes32 evidenceHash,uint8 status,string category,string locationZone,uint256 createdAt,uint256 deadline,uint8 submissionAttempts))',
 ];
+/** What binds an open task's on-chain id to its hash, and a wallet's submission to it. */
+const OPEN_READ_ABI = [
+  ...ESCROW_READ_ABI,
+  'function getOpenTask(uint256) view returns (tuple(bool open,uint8 mode,uint32 creatorWindow,uint8 closedBy))',
+  'function submissionOf(uint256,address) view returns (bytes32)',
+];
 
 /**
  * Tier-2 spending tools: the CURRENT encrypted post/rent flow, executed
@@ -125,6 +131,8 @@ const ESCROW_CALLS = new Interface([
 type EscrowCall = 'createTask' | 'submitEvidence' | 'cancelTask' | 'claimTimeout' | 'createTaskOpen' | 'submitOpen' | 'selectWinner' | 'selectWinnerByVerifier' | 'voidOpenTask';
 /** The poster's pick window on an open task (BlindEscrow MIN_CREATOR_WINDOW / MAX_CREATOR_WINDOW). */
 const MIN_PICK_WINDOW_SECONDS = 3600;
+/** The backend's MAX_RESULT_BYTES for submit-open: the result and its pointer, as JSON. */
+const MAX_OPEN_RESULT_BYTES = 64 * 1024;
 const MAX_PICK_WINDOW_SECONDS = 7 * 86400;
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 const TASK_HASH_RE = /^0x[0-9a-fA-F]{64}$/;
@@ -597,10 +605,8 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       // Only a pinned (or trusted) escrow is approved or funded.
       const unpinned = pinRefusal(s);
       if (unpinned) throw unpinned;
-      // `nonces` carries the next nonce between the rows of one post_tasks
-      // call, when this spend sends no approve of its own.
-      const nonce = isErc20Settlement(s) ? (await ensureAllowance(s, record)) ?? nonces?.next : undefined;
-
+      // Built before the approve, as the SDK does: a build the backend refuses
+      // (a verifier that can't serve, a hash in use) then costs no gas.
       const { unsignedTx, chain: builtChain, chainId: builtChainId } = await api('POST', '/api/v1/tasks', {
         taskHash: record.taskHash,
         token: isErc20Settlement(s) ? s.token.address : ZERO_TOKEN,
@@ -650,6 +656,10 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
           && a[7] === (open.mode === 'creator' ? 1n : 0n)
           && a[8] === BigInt(open.creatorWindow))),
       createFn, isErc20Settlement(s) ? 0n : amount);
+
+      // `nonces` carries the next nonce between the rows of one post_tasks
+      // call, when this spend sends no approve of its own.
+      const nonce = isErc20Settlement(s) ? (await ensureAllowance(s, record)) ?? nonces?.next : undefined;
 
       if (isErc20Settlement(s)) {
         const { hash, isUserOp, nonce: used } = await sendErc20(s, { to: unsignedTx.to, data: unsignedTx.data }, nonce, (sent) => {
@@ -1033,8 +1043,9 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       const unpinned = pinRefusal(s);
       if (unpinned) return fail(unpinned.code!, unpinned.message);
 
-      // A task many agents submit to: refused here, before a quote, when the
-      // escrow or the task board would refuse it after funding.
+      // A task many agents submit to: refused here, before a quote, for what
+      // this request decides. Whether the verifier can serve (opted in, on this
+      // chain) the backend checks when it builds, before anything is approved.
       let openTerms: { mode: 'agent' | 'creator'; creatorWindow: number } | undefined;
       if (open) {
         if (privacy === 'private') {
@@ -1701,8 +1712,9 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       // A task many agents submit to stays Funded until a pick, and the escrow
       // refuses a cancel once anyone has submitted. Not open (404), or unknown:
       // as before.
-      const openStatus = await api<{ submissions: number }>('GET', `/api/v1/a2a/tasks/${detail.taskHash}/open-status`).catch(() => null);
-      if (openStatus && openStatus.submissions > 0) {
+      const openStatus = await api<{ submissions: number; onChainTaskId: string; chain: string }>('GET', `/api/v1/a2a/tasks/${detail.taskHash}/open-status`).catch(() => null);
+      // Only for this task: hashes repeat, and another escrow under the same hash is not this one.
+      if (openStatus && openStatus.onChainTaskId === String(detail.taskId) && openStatus.chain === s.mode && openStatus.submissions > 0) {
         return fail('HAS_SUBMISSIONS', `Task ${detail.taskId} takes submissions from many agents and has ${openStatus.submissions}: the escrow refuses a cancel once anyone has submitted. The winner is picked after the deadline (get_open_task_status).`);
       }
 
@@ -2087,6 +2099,33 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     outcome: { kind: 'winner' | 'void'; winner: string | null; judge: string } | null; declined: { at: string } | null;
   }
 
+  /**
+   * The escrow's own word on an open task, read here rather than taken from
+   * the backend, which names the id: task `id` must be `task` and take open
+   * submissions (TASK_MISMATCH otherwise, with nothing sent). With
+   * `submitter`, that wallet's evidence hash (zero for none).
+   */
+  async function openTaskBinding(s: Settlement, id: bigint, task: string, submitter?: string): Promise<{ submission?: string }> {
+    const provider = isErc20Settlement(s) ? s.provider : walletCtx?.provider;
+    if (!provider || !s.escrowAddress) {
+      const e: ApiError = new Error('No RPC to read the escrow with, so the task cannot be checked before signing. Nothing was sent.');
+      e.code = 'NO_RPC';
+      throw e;
+    }
+    const escrow = new Contract(s.escrowAddress, OPEN_READ_ABI, provider);
+    const [t, o, sub] = await Promise.all([
+      escrow.getTask(id),
+      escrow.getOpenTask(id),
+      submitter ? escrow.submissionOf(id, submitter) : Promise.resolve(undefined),
+    ]);
+    if (String(t.taskHash).toLowerCase() !== task.toLowerCase() || !o.open) {
+      const e: ApiError = new Error(`The escrow says task ${id} is ${o.open ? `another task (${t.taskHash})` : 'not one that takes submissions from many agents'}, not ${task}. Nothing was sent.`);
+      e.code = 'TASK_MISMATCH';
+      throw e;
+    }
+    return sub !== undefined ? { submission: String(sub) } : {};
+  }
+
   /** The open task's status, refused when it lives on another chain than this process settles. */
   async function openTaskOn(s: Settlement, task: string): Promise<OpenStatus> {
     const status = await api<OpenStatus>('GET', `/api/v1/a2a/tasks/${task}/open-status`);
@@ -2124,7 +2163,18 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       return { hash: sent.hash, gas: sent.gas };
     }
     if (s.payment === 'local-erc20') {
-      const sent = await sendErc20(s, { to: tx.to, data: tx.data }, undefined, () => { /* no spend ledger: the escrow takes one per agent or task */ });
+      let sent;
+      try {
+        sent = await sendErc20(s, { to: tx.to, data: tx.data }, undefined, () => { /* no spend ledger: the escrow takes one per agent or task */ });
+      } catch (err) {
+        // These tools take no idempotencyKey: say what a retry does instead.
+        if ((err as ApiError).code === 'TX_MAYBE_SENT') {
+          const e: ApiError = new Error(`${what} was signed and handed to the node, but no answer came back: it may still land (${(err as Error).message.match(/0x[0-9a-fA-F]{64}/)?.[0] ?? 'hash unknown'}). Calling again is safe: once it lands the escrow refuses a second ${what}, and a submission already on-chain sends nothing.`);
+          e.code = 'TX_MAYBE_SENT';
+          throw e;
+        }
+        throw err;
+      }
       await waitRelayed(s, sent.hash, false);
       return { hash: sent.hash };
     }
@@ -2213,7 +2263,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       description: 'Submit your result to a task many agents submit to, from YOUR wallet: one submission per agent, before the deadline. Sends submitOpen (gas only, no escrow): checked to commit exactly this result before signing. Results stay hidden from the other agents until submissions close; the winner is paid after the deadline. Re-calling with the same result after it landed changes nothing.',
       inputSchema: {
         task: z.string().regex(TASK_HASH_RE).describe('The 0x task hash'),
-        output: z.string().min(1).max(60_000).describe('Your result. Keep it under the size get_open_task_status allows (64 KB); put a longer one in storage and pass its rootHash.'),
+        output: z.string().min(1).max(MAX_OPEN_RESULT_BYTES).describe('Your result: at most 64 KB as UTF-8 JSON with rootHash. Put a longer one in storage and pass its rootHash.'),
         rootHash: z.string().regex(TASK_HASH_RE).optional().describe('A storage root holding the full result, committed on-chain with output'),
       },
       annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: true },
@@ -2223,21 +2273,29 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       if ('error' in f) return f.error;
       const { s } = f;
       try {
-        const status = await openTaskOn(s, task);
         const resultData = { output };
+        if (Buffer.byteLength(JSON.stringify({ resultData, rootHash: rootHash ?? null })) > MAX_OPEN_RESULT_BYTES) {
+          return fail('RESULT_TOO_LARGE', 'The result is over 64 KB as sent: put the full result in storage, pass its rootHash, and keep output short. Nothing was sent.');
+        }
+        const status = await openTaskOn(s, task);
         const evidence = openEvidenceHashOf(resultData, rootHash ?? null);
         type Built = { onChainTaskId: string; evidenceHash: string; alreadyOnChain?: boolean; unsignedSubmitOpen?: { to: string; data: string; from?: string; chainId?: number } };
         const built = await api<Built>('POST', `/api/v1/a2a/tasks/${task}/submit-open`, { resultData, rootHash: rootHash ?? null });
         if (String(built.onChainTaskId) !== status.onChainTaskId || String(built.evidenceHash).toLowerCase() !== evidence.toLowerCase()) {
           return fail('TX_MISMATCH', 'The backend answered for another task or another result than this one. Nothing was sent.');
         }
+        const id = BigInt(status.onChainTaskId);
+        const signerAddress = isErc20Settlement(s) ? s.payFrom : walletCtx!.wallet.address;
+        const bound = await openTaskBinding(s, id, task, signerAddress);
         if (built.alreadyOnChain) {
+          if (String(bound.submission).toLowerCase() !== evidence.toLowerCase()) {
+            return fail('TX_MISMATCH', `The backend says this result is already on-chain, but the escrow holds ${bound.submission === ZERO_HASH ? 'no submission' : 'another submission'} from ${signerAddress}. Nothing was sent.`);
+          }
           return ok({ taskHash: task, onChainTaskId: status.onChainTaskId, evidenceHash: evidence, alreadyOnChain: true, hint: 'This result was already submitted on-chain; nothing was sent.' });
         }
         const tx = built.unsignedSubmitOpen;
         if (!tx) return fail('TX_MISMATCH', 'The backend built no submitOpen. Nothing was sent.');
         await verifyTarget(s, tx.to, 'submitOpen');
-        const id = BigInt(status.onChainTaskId);
         assertEscrowCall(tx, 'submitOpen', (a) => a[0] === id && String(a[1]).toLowerCase() === evidence.toLowerCase(), 'submitOpen');
         const sent = await sendOpenTx(s, tx, 'submitOpen');
         return ok({
@@ -2274,6 +2332,8 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       const { s, payFrom } = f;
       try {
         const status = await openTaskOn(s, task);
+        // Checked at the quote and again before signing: the backend names the id.
+        await openTaskBinding(s, BigInt(status.onChainTaskId), task);
         const scorecardHash = scorecard ? scorecardHashOf(scorecard) : ZERO_HASH;
         const spend: SpendFields = { ...settlementFields(s, payFrom), task: task.toLowerCase(), onChainTaskId: status.onChainTaskId, winner: winner.toLowerCase(), scorecardHash };
         if (!confirm) {
@@ -2299,6 +2359,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
         const fn = byVerifier ? 'selectWinnerByVerifier' : 'selectWinner';
         await verifyTarget(s, tx.to, fn);
         const id = BigInt(status.onChainTaskId);
+        await openTaskBinding(s, id, task);
         assertEscrowCall(tx, fn, (a) => a[0] === id && String(a[1]).toLowerCase() === winner.toLowerCase() && String(a[2]).toLowerCase() === scorecardHash.toLowerCase(), fn);
         const sent = await sendOpenTx(s, tx, fn);
         return ok({ taskHash: task, onChainTaskId: status.onChainTaskId, winner, role: byVerifier ? 'verifier' : 'poster', scorecardHash, pickTxHash: sent.hash, gas: sent.gas, hint: 'The escrow paid the winner.' });
