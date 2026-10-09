@@ -95,6 +95,14 @@ describe('recordWorkerPayout', () => {
     expect(redisMock.del).not.toHaveBeenCalled();
   });
 
+  it('credits exactly what the escrow paid: the fee is rounded down, the worker gets the rest', async () => {
+    // BlindEscrow: fee = 1_234_567 * 1000 / 10000 = 123_456 (rounded down), payout = 1_111_111.
+    // Rounding the share down instead credited 1_111_110.
+    await recordWorkerPayout(TASK, EXEC, '7', 1_234_567n, onArc);
+    expect(store.creditPayoutOnce).toHaveBeenCalledWith(claimOn('arc'), EXEC, USDC_UNIT, 1_111_111n);
+    expect(sideEffects.recordTransaction).toHaveBeenCalledWith(expect.objectContaining({ fee: 0.123456, net: 1.111111 }));
+  });
+
   it('credits an Arc USDC payout to the USDC total', async () => {
     await recordWorkerPayout(TASK, EXEC, '7', 5_000_000n, onArc);
     expect(store.creditPayoutOnce).toHaveBeenCalledWith(claimOn('arc'), EXEC, USDC_UNIT, 4_500_000n);

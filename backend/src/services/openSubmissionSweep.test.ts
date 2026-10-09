@@ -39,6 +39,8 @@ vi.mock('./redis.js', () => ({
 const cfg = vi.hoisted(() => ({ openSubmissionEnabled: true }));
 vi.mock('../config.js', () => ({ config: cfg }));
 vi.mock('./deploymentIdentity.js', () => ({ backgroundWritesAllowed: () => true }));
+// Bare chain keys, so refs read 'arc:7' (openSubmissionStore.test.ts checks the network-scoped form).
+vi.mock('./chainScope.js', () => ({ chainScope: (chain: string) => chain }));
 
 const escrow = vi.hoisted(() => ({
   openPhase: vi.fn(),
@@ -167,6 +169,16 @@ describe('the deadline summary', () => {
     await sweepOpenSubmissions(NOW);
     expect(notifyOnce).not.toHaveBeenCalled();
     expect(due().get(REF)).toBe(NOW + 300);
+  });
+
+  it('drops a task saved on another network, without reading this network\'s escrow', async () => {
+    await posted('creator');
+    const raw = mem.kv.get(`a2a:open:task:${REF}`)!;
+    mem.kv.set(`a2a:open:task:${REF}`, JSON.stringify({ ...JSON.parse(raw), scope: 'arc@5042002' }));
+    await sweepOpenSubmissions(NOW);
+    expect(escrow.openPhase).not.toHaveBeenCalled();
+    expect(notifyOnce).not.toHaveBeenCalled();
+    expect(due().has(REF)).toBe(false);
   });
 
   it('does not look at tasks that are not due', async () => {

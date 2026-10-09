@@ -148,8 +148,12 @@ export async function recordWorkerPayout(
       : BigInt(Math.floor((opts.computeCostMicroUnits ?? 0) * 1e12));
     const afterComputeCost = grossAmount > computeCostChain ? grossAmount - computeCostChain : 0n;
 
-    const workerShare = (afterComputeCost * (10_000n - BigInt(feeBps))) / 10_000n;
-    const platformFee = afterComputeCost - workerShare;
+    // As the escrow splits it (BlindEscrow._platformFee, _payWorker): the fee
+    // is rounded down and the worker gets the rest. Rounding the share down
+    // instead credited one base unit less than was paid on any amount the
+    // fee does not divide evenly.
+    const platformFee = (afterComputeCost * BigInt(feeBps)) / 10_000n;
+    const workerShare = afterComputeCost - platformFee;
 
     // tasksCompleted, reputation, and the earnings total move as one unit —
     // the task counter is never advanced without crediting the matching

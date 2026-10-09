@@ -159,6 +159,32 @@ async function erc20Read(signer: ethers.Signer, token: string, fn: 'allowance' |
   return ERC20.decodeFunctionResult(fn, raw)[0] as bigint;
 }
 
+// The escrow reads that bind an open task's on-chain id to its hash. getTask's
+// tuple is read up to submissionAttempts: a later field (disputedAt) is ignored.
+const ESCROW_READS = new ethers.Interface([
+  'function getTask(uint256 taskId) view returns (tuple(address agent, address worker, address token, uint256 amount, bytes32 taskHash, bytes32 evidenceHash, uint8 status, string category, string locationZone, uint256 createdAt, uint256 deadline, uint8 submissionAttempts))',
+  'function getOpenTask(uint256 taskId) view returns (tuple(bool open, uint8 mode, uint32 creatorWindow, uint8 closedBy))',
+  'function submissionOf(uint256 taskId, address submitter) view returns (bytes32)',
+]);
+
+/**
+ * What the escrow itself says about an open task, read over the signer's own
+ * RPC rather than taken from the backend: its brief's hash, whether it takes
+ * open submissions, and (with `submitter`) that wallet's evidence hash
+ * (zero for none).
+ */
+export async function openTaskOnChain(signer: ethers.Signer, escrow: string, taskId: bigint, submitter?: string): Promise<{ taskHash: string; open: boolean; submission?: string }> {
+  const provider = signer.provider;
+  if (!provider) throw new ApiError(400, 'The signer has no provider to read the escrow with.', undefined, 'NO_RPC');
+  const read = async (fn: string, args: unknown[]) => ESCROW_READS.decodeFunctionResult(fn, await provider.call({ to: escrow, data: ESCROW_READS.encodeFunctionData(fn, args) }))[0];
+  const [task, open, submission] = await Promise.all([
+    read('getTask', [taskId]),
+    read('getOpenTask', [taskId]),
+    submitter ? read('submissionOf', [taskId, submitter]) : Promise.resolve(undefined),
+  ]);
+  return { taskHash: String(task.taskHash), open: Boolean(open.open), ...(submission !== undefined ? { submission: String(submission) } : {}) };
+}
+
 export function tokenBalance(signer: ethers.Signer, token: string, owner: string): Promise<bigint> {
   return erc20Read(signer, token, 'balanceOf', [owner]);
 }

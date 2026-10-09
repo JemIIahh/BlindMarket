@@ -80,6 +80,7 @@ export function useRefundEscrow() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['tasks'] });
       qc.invalidateQueries({ queryKey: ['my-tasks-posted'] });
+      qc.invalidateQueries({ queryKey: ['open-submission'] });
     },
   });
 

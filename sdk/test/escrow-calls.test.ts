@@ -33,7 +33,7 @@ const refused = (fn: () => unknown, code: string) => {
 
 describe('the open-submission escrow calls', () => {
   it('are the escrow ABI functions, selector for selector', () => {
-    for (const name of ['createTaskOpen', 'submitOpen', 'selectWinner', 'voidOpenTask']) {
+    for (const name of ['createTaskOpen', 'submitOpen', 'selectWinner', 'selectWinnerByVerifier', 'voidOpenTask']) {
       expect(ESCROW_CALLS.getFunction(name)!.selector, name).toBe(escrowAbi.getFunction(name)!.selector);
     }
   });

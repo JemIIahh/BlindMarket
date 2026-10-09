@@ -22,6 +22,9 @@ import { TaskStatus, TaskStatusLabels } from '../types/api';
 import type { A2ATaskMeta } from '../types/api';
 import { normalizeBrief, splitBrief } from '../lib/briefText';
 import { PosterAvatar, type AvatarConfig } from '../components/avatar/PosterAvatar';
+import { OpenScorecardPanel, OpenSubmissionsPanel, OpenTaskStatusPanel } from '../components/task/OpenTaskPanels';
+import { useOpenTaskStatus } from '../hooks/useOpenSubmission';
+import { canCancelOpen, isOpenTask, openStatusLabel, openStatusStale, submissionsText, type Viewer } from '../lib/openTask';
 
 const fadeUp = {
   hidden: { opacity: 0, y: 20 },
@@ -88,8 +91,13 @@ export default function TaskDetail() {
   // The backend names the escrow's chain on the detail response — Arc tasks
   // explore on ArcScan.
   const explorerUrl = useChainExplorerUrl('arc');
-  // Auth context kept for any future reads; not used in the A2A view path.
-  void useAuth();
+  const { isAuthenticated } = useAuth();
+  // A task many agents submit to (docs/OPEN-SUBMISSION-TASKS.md): its status
+  // comes from the escrow through the server, refreshed while the page is open.
+  const isOpen = isOpenTask(data?.onChain?.a2aMeta);
+  const openStatusQuery = useOpenTaskStatus(data?.onChain?.taskHash, isOpen, data?.onChain?.status);
+  // A read older than the escrow status (the server caches it 15 s) is not shown; a fresh one follows.
+  const openStatus = openStatusQuery.data && !openStatusStale(openStatusQuery.data, data?.onChain?.status) ? openStatusQuery.data : undefined;
   const [activeTab, setActiveTab] = useTabParam<DetailTab>('details', DETAIL_TABS.map((t) => t.id));
   const [confirmAction, setConfirmAction] = useState<'cancel' | 'timeout' | null>(null);
 
@@ -138,6 +146,18 @@ export default function TaskDetail() {
   // funded it, and without this such a task (which the backend won't list)
   // had no way back from the site.
   const canRefund = isPoster || (refund.canSignAs(onChain.agent) && isDirectSigned(onChain.chain));
+  // Who reads an open task's page: its poster, its verifier agent's owner
+  // signed in as that wallet, or anyone.
+  const isVerifier = !!onChain.a2aMeta?.verifierAddress && myWallets.has(onChain.a2aMeta.verifierAddress.toLowerCase());
+  const viewer: Viewer = isPoster ? 'poster' : isVerifier ? 'verifier' : 'other';
+  const statusLabel = isOpen ? openStatusLabel(openStatus, TaskStatusLabels[onChain.status]) : TaskStatusLabels[onChain.status];
+  // Closed, or past the deadline with nobody to pick: no winner is coming.
+  const openNoWinner = isOpen && (onChain.status !== TaskStatus.Funded || openStatus?.phase === 'closed'
+    || (openStatus?.submissions === 0 && openStatus.phase !== 'submissions'));
+  // The escrow makes the winner the task's worker, so a completed task names it before its status loads.
+  const openWinner = openStatus?.outcome?.kind === 'winner'
+    ? openStatus.outcome.winner
+    : onChain.status === TaskStatus.Completed && onChain.worker !== '0x0000000000000000000000000000000000000000' ? onChain.worker : null;
   const startRefund = (kind: 'cancel' | 'timeout') =>
     refund.mutate({ taskId: String(numericTaskId), chain: onChain.chain, poster: onChain.agent, kind, linked: isPoster });
   // The unit this task's reward is in: what the backend read from the
@@ -213,7 +233,7 @@ export default function TaskDetail() {
                 <span className="font-mono text-[11px] uppercase tracking-widest text-ink-3">
                   Task {onChain.taskId ? `#${onChain.taskId}` : `${id?.slice(0, 10)}…`}
                 </span>
-                <StatusTag status={TaskStatusLabels[onChain.status]} />
+                <StatusTag status={statusLabel} />
               </div>
               <h1
                 className={`${headline.length > 70 ? 'text-[26px] sm:text-[32px]' : 'text-[32px] sm:text-[42px]'} font-medium text-ink leading-[1.08] tracking-[-0.03em] break-words mb-4`}
@@ -230,7 +250,7 @@ export default function TaskDetail() {
                   <>Task <span className="font-mono text-ink-2">(hash {id?.slice(0, 10)}…)</span></>
                 )}
               </h1>
-              <StatusTag status={TaskStatusLabels[onChain.status]} />
+              <StatusTag status={statusLabel} />
             </div>
           )}
           <div className="flex items-center gap-x-4 gap-y-2 text-sm text-ink-3 flex-wrap">
@@ -316,6 +336,23 @@ export default function TaskDetail() {
                   </a>
                 </p>
               </Field>
+              {isOpen ? (
+                <Field label="Winner">
+                  <p className="text-sm font-mono">
+                    {openWinner ? (
+                      <Link
+                        to={`/agents/${openWinner}`}
+                        title={openWinner}
+                        className="text-ink hover:text-accent hover:underline decoration-line-2 underline-offset-[3px] transition-colors"
+                      >
+                        {truncateAddress(openWinner)} <span className="font-sans text-xs">→</span>
+                      </Link>
+                    ) : (
+                      <span className="text-ink-3 font-sans">{openNoWinner ? 'No winner' : 'Picked after the deadline'}</span>
+                    )}
+                  </p>
+                </Field>
+              ) : (
               <Field label="Accepted by">
                 <p className="text-sm font-mono">
                   {onChain.worker === '0x0000000000000000000000000000000000000000' ? (
@@ -331,18 +368,34 @@ export default function TaskDetail() {
                   )}
                 </p>
               </Field>
+              )}
               <Field label="Created">
                 <p className="text-sm text-ink font-mono">{formatDate(new Date(Number(onChain.createdAt) * 1000))}</p>
               </Field>
               <Field label="Deadline">
                 <p className="text-sm text-ink font-mono">{formatDate(new Date(Number(onChain.deadline) * 1000))}</p>
               </Field>
-              <Field label="Verification mode">
-                <p className="text-sm text-ink capitalize">{onChain.a2aMeta?.verificationMode || 'manual'}</p>
-              </Field>
-              <Field label="Executor type">
-                <p className="text-sm text-ink capitalize">{onChain.a2aMeta?.targetExecutorType || 'human'}</p>
-              </Field>
+              {isOpen ? (
+                <>
+                  <Field label="Who picks">
+                    <p className="text-sm text-ink">
+                      {onChain.a2aMeta?.openPick?.mode === 'creator' ? 'The poster, then the verifier agent' : 'The verifier agent'}
+                    </p>
+                  </Field>
+                  <Field label="Submissions">
+                    <p className="text-sm text-ink">{openStatus ? submissionsText(openStatus.submissions) : '…'}</p>
+                  </Field>
+                </>
+              ) : (
+                <>
+                  <Field label="Verification mode">
+                    <p className="text-sm text-ink capitalize">{onChain.a2aMeta?.verificationMode || 'manual'}</p>
+                  </Field>
+                  <Field label="Executor type">
+                    <p className="text-sm text-ink capitalize">{onChain.a2aMeta?.targetExecutorType || 'human'}</p>
+                  </Field>
+                </>
+              )}
               <Field label="Evidence hash" span2>
                 <p className="text-sm font-mono break-all" title={hasEvidence ? `${onChain.evidenceHash} — open in chain explorer` : undefined}>
                   {hasEvidence ? (
@@ -355,7 +408,7 @@ export default function TaskDetail() {
                       {onChain.evidenceHash}
                     </a>
                   ) : (
-                    <span className="font-sans text-ink-3">Not submitted yet</span>
+                    <span className="font-sans text-ink-3">{isOpen ? (openNoWinner ? 'None' : 'Set when a winner is picked') : 'Not submitted yet'}</span>
                   )}
                 </p>
               </Field>
@@ -429,10 +482,27 @@ export default function TaskDetail() {
             )}
           </Panel>
 
+          {/* An open task: where it stands, its submissions, the judge's scorecard. */}
+          {isOpen && openStatus && (
+            <>
+              <OpenTaskStatusPanel status={openStatus} viewer={viewer} />
+              <OpenSubmissionsPanel taskHash={onChain.taskHash} status={openStatus} viewer={viewer} signedIn={isAuthenticated} poster={onChain.agent} />
+              <OpenScorecardPanel taskHash={onChain.taskHash} status={openStatus} signedIn={isAuthenticated} />
+            </>
+          )}
+          {isOpen && !openStatus && (
+            <Panel padding="md" className="mb-6">
+              {openStatusQuery.isError
+                ? <ErrorNotice error={openStatusQuery.error} title="Couldn't load where this task stands" compact />
+                : <Skeleton className="h-16 w-full rounded-2xl" />}
+            </Panel>
+          )}
+
           {/* A2A status — describes the current lifecycle stage in A2A
               terms (no apply / no manual assign). Always visible so a
               poster sees what stage their task is in without scanning
               the status tag enum. */}
+          {!isOpen && (
           <Panel padding="md" className="mb-6">
             <h3 className="text-sm font-semibold text-ink mb-2">A2A status</h3>
             {onChain.status === TaskStatus.Funded && onChain.a2aIndexed === false && (
@@ -522,9 +592,11 @@ export default function TaskDetail() {
               </p>
             )}
           </Panel>
+          )}
 
-          {/* Agent output — shown when A2A state has resultData OR a verification result */}
-          {(a2aState?.resultData || a2aState?.verificationResult) && (
+          {/* Agent output — shown when A2A state has resultData OR a verification
+              result. An open task shows its submissions instead. */}
+          {!isOpen && (a2aState?.resultData || a2aState?.verificationResult) && (
             <Panel padding="md" className="mb-6">
               <div className="flex items-center justify-between mb-5">
                 <h2 className="text-sm font-semibold text-ink">Agent output</h2>
@@ -650,13 +722,15 @@ export default function TaskDetail() {
             )}
 
           {/* Poster: Cancel / Timeout actions */}
-          {canRefund && (onChain.status === TaskStatus.Funded || canTimeout) && (
+          {canRefund && (isOpen ? canCancelOpen(openStatus, onChain.status) : (onChain.status === TaskStatus.Funded || canTimeout)) && (
             <Panel padding="md" className="mb-6">
               <div className="flex items-center justify-between gap-4 flex-wrap">
                 <div className="min-w-0">
                   <h3 className="text-sm font-semibold text-ink">Poster actions</h3>
                   <p className="text-xs text-ink-3 mt-1 leading-relaxed">
-                    {onChain.status === TaskStatus.Funded
+                    {isOpen
+                      ? 'Cancel this task to reclaim your escrowed funds. You can until an agent submits.'
+                      : onChain.status === TaskStatus.Funded
                       ? 'Cancel this task to reclaim your escrowed funds. (Useful if no agent picks it up.)'
                       : sendsForReview
                         ? 'The agent delivered before the deadline and nobody has judged the work. Send it for review: an admin rules on it, and with no ruling within 14 days the agent is paid.'

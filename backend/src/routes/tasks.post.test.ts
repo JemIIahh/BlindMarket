@@ -25,9 +25,10 @@ const TASK = '0x' + 'cd'.repeat(32);
 const abi = JSON.parse(readFileSync(new URL('../abi/BlindEscrow.json', import.meta.url), 'utf-8'));
 const iface = new ethers.Interface(Array.isArray(abi) ? abi : abi.abi);
 
-const { verifierOptedOut } = vi.hoisted(() => ({ verifierOptedOut: { value: false } }));
+const { verifierOptedOut, verifierOffChain } = vi.hoisted(() => ({ verifierOptedOut: { value: false }, verifierOffChain: { value: false } }));
 vi.mock('../services/verifierDuty.js', () => ({
   hostedVerifierNotOptedIn: vi.fn(async () => verifierOptedOut.value),
+  verifierChainUnsupported: vi.fn(async () => verifierOffChain.value),
   VERIFIER_NOT_OPTED_IN_MESSAGE: 'not opted in',
 }));
 // Whether a hosted agent may post is services/delegationGuard.ts's own test;
@@ -66,6 +67,11 @@ const hashClaim = vi.hoisted(() => ({
   getMeta: vi.fn(async (_hash: string): Promise<unknown> => undefined),
 }));
 vi.mock('../services/a2aStore.js', () => hashClaim);
+const openSupport = vi.hoisted(() => vi.fn(async () => true));
+vi.mock('../services/batchSupport.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../services/batchSupport.js')>()),
+  openCreateSupport: openSupport,
+}));
 // The escrow hash index: which escrow task, if any, a hash already names.
 const hashIndex = vi.hoisted(() => ({ resolveCachedTaskByHash: vi.fn(async (_hash: string): Promise<unknown> => null) }));
 vi.mock('../services/taskChain.js', async (importOriginal) => ({
@@ -171,6 +177,18 @@ describe('POST /tasks on a deployment with a Base escrow', () => {
       expect(res.body.error.code).toBe('VERIFIER_NOT_OPTED_IN');
     } finally {
       verifierOptedOut.value = false;
+    }
+  });
+
+  it("refuses a verifier agent that doesn't settle on the posting chain, before building: the index would refuse it after funding", async () => {
+    verifierOffChain.value = true;
+    try {
+      const res = await post({ token: USDC, verificationMode: 'agent', verifierAddress: VERIFIER });
+      expect(res.status).toBe(409);
+      expect(res.body.error.code).toBe('VERIFIER_CHAIN_UNSUPPORTED');
+      expect(chain.buildUnsignedTx).not.toHaveBeenCalled();
+    } finally {
+      verifierOffChain.value = false;
     }
   });
 
@@ -281,5 +299,77 @@ describe('POST /tasks refuses an amount or duration that is not a whole number',
     expect(res.status).toBe(200);
     const args = iface.parseTransaction({ data: res.body.data.unsignedTx.data })!.args;
     expect(args.amount).toBe(5_000_000n);
+  });
+});
+
+describe('POST /tasks for a task many agents submit to', () => {
+  const open = (o: Record<string, unknown>) => post({ token: USDC, verificationMode: 'agent', verifierAddress: VERIFIER, privacy: 'public', ...o });
+  const args = (res: request.Response) => iface.parseTransaction({ data: res.body.data.unsignedTx.data })!.args;
+  beforeEach(() => {
+    cfg.openSubmissionEnabled = true;
+    openSupport.mockResolvedValue(true);
+  });
+
+  it('builds createTaskOpen with the verifier picking, from the deadline', async () => {
+    const res = await open({ open: { mode: 'agent', creatorWindow: 0 } });
+    expect(res.status).toBe(200);
+    expect(methodOf(res.body.data.unsignedTx)).toBe('createTaskOpen');
+    const a = args(res);
+    expect([a.verifierAgent, Number(a.mode), Number(a.creatorWindow)]).toEqual([VERIFIER, 0, 0]);
+  });
+
+  it('builds the poster picking first, for their window', async () => {
+    const res = await open({ open: { mode: 'creator', creatorWindow: 86_400 } });
+    expect(res.status).toBe(200);
+    const a = args(res);
+    expect([Number(a.mode), Number(a.creatorWindow)]).toEqual([1, 86_400]);
+  });
+
+  it('refuses while open submission is off, so nothing is funded that cannot be listed', async () => {
+    cfg.openSubmissionEnabled = false;
+    const res = await open({ open: { mode: 'agent', creatorWindow: 0 } });
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('OPEN_SUBMISSION_DISABLED');
+  });
+
+  it('needs a verifier that is not the poster', async () => {
+    const none = await post({ token: USDC, privacy: 'public', open: { mode: 'agent', creatorWindow: 0 } });
+    expect(none.body.error.code).toBe('OPEN_TASK_NEEDS_VERIFIER');
+    const self = await open({ verifierAddress: POSTER, open: { mode: 'agent', creatorWindow: 0 } });
+    expect(self.body.error.code).toBe('INVALID_VERIFIER');
+  });
+
+  it("holds the poster's window to the escrow's limits, and none when the verifier picks", async () => {
+    for (const o of [{ mode: 'creator', creatorWindow: 600 }, { mode: 'creator', creatorWindow: 8 * 86_400 }, { mode: 'agent', creatorWindow: 3600 }]) {
+      const res = await open({ open: o });
+      expect(res.status).toBe(400);
+      expect(res.body.error.code).toBe('INVALID_PICK_WINDOW');
+    }
+  });
+
+  it('is public: refuses a private brief, or one with wrapped keys, which the index would refuse after funding', async () => {
+    for (const o of [{ privacy: undefined }, { privacy: 'private' }, { wrappedKeys: { [VERIFIER.toLowerCase()]: 'ab'.repeat(97) } }]) {
+      const res = await open({ ...o, open: { mode: 'agent', creatorWindow: 0 } });
+      expect(res.status).toBe(400);
+      expect(res.body.error.code).toBe('OPEN_TASK_MUST_BE_PUBLIC');
+    }
+  });
+
+  it("refuses when the posting chain's escrow has no createTaskOpen yet", async () => {
+    openSupport.mockResolvedValue(false);
+    const res = await open({ open: { mode: 'agent', creatorWindow: 0 } });
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('OPEN_SUBMISSION_UNSUPPORTED');
+  });
+
+  it('refuses before claiming the task hash', async () => {
+    cfg.openSubmissionEnabled = false;
+    await open({ open: { mode: 'agent', creatorWindow: 0 } });
+    cfg.openSubmissionEnabled = true;
+    await open({ open: { mode: 'creator', creatorWindow: 60 } });
+    await open({ privacy: 'private', open: { mode: 'agent', creatorWindow: 0 } });
+    openSupport.mockResolvedValue(false);
+    await open({ open: { mode: 'agent', creatorWindow: 0 } });
+    expect(hashClaim.claimTaskHash).not.toHaveBeenCalled();
   });
 });

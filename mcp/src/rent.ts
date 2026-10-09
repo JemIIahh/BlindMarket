@@ -80,6 +80,12 @@ async function signRecordBroadcast(
 const ESCROW_READ_ABI = [
   'function getTask(uint256) view returns (tuple(address agent,address worker,address token,uint256 amount,bytes32 taskHash,bytes32 evidenceHash,uint8 status,string category,string locationZone,uint256 createdAt,uint256 deadline,uint8 submissionAttempts))',
 ];
+/** What binds an open task's on-chain id to its hash, and a wallet's submission to it. */
+const OPEN_READ_ABI = [
+  ...ESCROW_READ_ABI,
+  'function getOpenTask(uint256) view returns (tuple(bool open,uint8 mode,uint32 creatorWindow,uint8 closedBy))',
+  'function submissionOf(uint256,address) view returns (bytes32)',
+];
 
 /**
  * Tier-2 spending tools: the CURRENT encrypted post/rent flow, executed
@@ -101,12 +107,13 @@ const ESCROW_READ_ABI = [
  */
 
 const ZERO_TOKEN = '0x0000000000000000000000000000000000000000';
+const ZERO_HASH = '0x' + '0'.repeat(64);
 
 // The only calls the backend builds for this process to sign or relay:
 // backend/src/services/escrow.ts (createTask, cancelTask, claimTimeout,
 // submitEvidence), and for open-submission tasks createTaskOpen, submitOpen,
-// selectWinner and voidOpenTask (docs/OPEN-SUBMISSION-TASKS.md; the same set
-// as sdk/src/escrowCalls.ts). verifyTarget checks where a transaction goes,
+// selectWinner, selectWinnerByVerifier and voidOpenTask
+// (docs/OPEN-SUBMISSION-TASKS.md; the same set as sdk/src/escrowCalls.ts). verifyTarget checks where a transaction goes,
 // but the escrow address comes from the same backend, so a hostile answer could name
 // the token as the escrow and hand over an approve; the call, its arguments
 // and its value are what bound it (security audit run 1, C41).
@@ -118,9 +125,31 @@ const ESCROW_CALLS = new Interface([
   'function createTaskOpen(bytes32 taskHash, address token, uint256 amount, string category, string locationZone, uint256 duration, address verifierAgent, uint8 mode, uint256 creatorWindow)',
   'function submitOpen(uint256 taskId, bytes32 evidenceHash)',
   'function selectWinner(uint256 taskId, address winner, bytes32 scorecardHash)',
+  'function selectWinnerByVerifier(uint256 taskId, address winner, bytes32 scorecardHash)',
   'function voidOpenTask(uint256 taskId, bytes32 scorecardHash)',
 ]);
-type EscrowCall = 'createTask' | 'submitEvidence' | 'cancelTask' | 'claimTimeout' | 'createTaskOpen' | 'submitOpen' | 'selectWinner' | 'voidOpenTask';
+type EscrowCall = 'createTask' | 'submitEvidence' | 'cancelTask' | 'claimTimeout' | 'createTaskOpen' | 'submitOpen' | 'selectWinner' | 'selectWinnerByVerifier' | 'voidOpenTask';
+/** The poster's pick window on an open task (BlindEscrow MIN_CREATOR_WINDOW / MAX_CREATOR_WINDOW). */
+const MIN_PICK_WINDOW_SECONDS = 3600;
+/** The backend's MAX_RESULT_BYTES for submit-open: the result and its pointer, as JSON. */
+const MAX_OPEN_RESULT_BYTES = 64 * 1024;
+const MAX_PICK_WINDOW_SECONDS = 7 * 86400;
+const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+const TASK_HASH_RE = /^0x[0-9a-fA-F]{64}$/;
+
+/**
+ * An open submission's evidence hash: keccak256 of the JSON of the result
+ * and its storage pointer together, as POST /a2a/tasks/:id/submit-open
+ * computes it (backend/src/routes/openSubmission.ts openEvidenceHash).
+ */
+function openEvidenceHashOf(resultData: Record<string, unknown>, rootHash: string | null): string {
+  return keccak256(toUtf8Bytes(JSON.stringify({ resultData, rootHash })));
+}
+
+/** A judge's scorecard hash, as the escrow anchors it (backend openSubmissionStore.scorecardHashOf). */
+function scorecardHashOf(scorecard: Record<string, unknown>): string {
+  return keccak256(toUtf8Bytes(JSON.stringify(scorecard)));
+}
 const GAS_LIMIT = 1000000n; // matches the canonical rent script
 // Auto-verify releases the payment, so the bar can't be "one character" — but
 // 40 made a correct 30-character URL unpayable. 20 is the platform floor
@@ -576,10 +605,8 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       // Only a pinned (or trusted) escrow is approved or funded.
       const unpinned = pinRefusal(s);
       if (unpinned) throw unpinned;
-      // `nonces` carries the next nonce between the rows of one post_tasks
-      // call, when this spend sends no approve of its own.
-      const nonce = isErc20Settlement(s) ? (await ensureAllowance(s, record)) ?? nonces?.next : undefined;
-
+      // Built before the approve, as the SDK does: a build the backend refuses
+      // (a verifier that can't serve, a hash in use) then costs no gas.
       const { unsignedTx, chain: builtChain, chainId: builtChainId } = await api('POST', '/api/v1/tasks', {
         taskHash: record.taskHash,
         token: isErc20Settlement(s) ? s.token.address : ZERO_TOKEN,
@@ -592,6 +619,8 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
         requiredCapabilities: record.requiredCapabilities ?? [],
         rootHash: record.rootHash,
         wrappedKeys: record.privacy === 'public' ? undefined : record.wrappedKeys,
+        // A task many agents submit to: createTaskOpen, public, judged by its verifier.
+        ...(record.open ? { privacy: 'public', verifierAddress: record.verifierAddress, open: record.open } : {}),
       });
 
       // Either branch: the tx must target the escrow this mode expects. On a
@@ -607,19 +636,30 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
         e.code = 'ESCROW_MISMATCH';
         throw e;
       }
-      await verifyTarget(s, unsignedTx.to, 'createTask');
+      const createFn = record.open ? 'createTaskOpen' : 'createTask';
+      await verifyTarget(s, unsignedTx.to, createFn);
       // And it must be this spend's createTask: its task hash, token, amount
-      // and duration (the amount is what was approved above, or the value sent below).
+      // and duration (the amount is what was approved above, or the value sent below);
+      // for an open task also its verifier, pick mode (0 the verifier, 1 the poster first) and window.
       const amount = BigInt(record.amountWei!);
       const token = isErc20Settlement(s) ? s.token.address : ZERO_TOKEN;
-      assertEscrowCall(unsignedTx, 'createTask', (a) =>
+      const { open } = record;
+      assertEscrowCall(unsignedTx, createFn, (a) =>
         String(a[0]).toLowerCase() === String(record.taskHash).toLowerCase()
         && String(a[1]).toLowerCase() === token.toLowerCase()
         && a[2] === amount
         && a[3] === TASK_CATEGORY
         && a[4] === 'global'
-        && a[5] === BigInt(record.durationSecs ?? 3600),
-      'createTask', isErc20Settlement(s) ? 0n : amount);
+        && a[5] === BigInt(record.durationSecs ?? 3600)
+        && (!open || (
+          String(a[6]).toLowerCase() === String(record.verifierAddress).toLowerCase()
+          && a[7] === (open.mode === 'creator' ? 1n : 0n)
+          && a[8] === BigInt(open.creatorWindow))),
+      createFn, isErc20Settlement(s) ? 0n : amount);
+
+      // `nonces` carries the next nonce between the rows of one post_tasks
+      // call, when this spend sends no approve of its own.
+      const nonce = isErc20Settlement(s) ? (await ensureAllowance(s, record)) ?? nonces?.next : undefined;
 
       if (isErc20Settlement(s)) {
         const { hash, isUserOp, nonce: used } = await sendErc20(s, { to: unsignedTx.to, data: unsignedTx.data }, nonce, (sent) => {
@@ -685,6 +725,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       wrappedKeys: record.privacy === 'public' ? undefined : record.wrappedKeys,
       targetExecutor: record.targetExecutor,
       serviceId: record.serviceId,
+      ...(record.verifierAddress ? { verifierAddress: record.verifierAddress } : {}),
       privacy: record.privacy === 'public' ? 'public' : undefined,
       publicBrief: record.privacy === 'public' ? record.publicBrief : undefined,
       routingSummary: record.routingSummary,
@@ -892,6 +933,9 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     s: Settlement;
     executors?: Array<{ address: string; publicKey: string }>;
     routingSummary?: string;
+    /** A task many agents submit to: public, judged by `verifierAddress`. */
+    open?: { mode: 'agent' | 'creator'; creatorWindow: number };
+    verifierAddress?: string;
   }): Promise<{ record: SpendRecord; wrappedTo: number }> {
     const plaintext = Buffer.from(o.instructions, 'utf8');
     let blobB64: string;
@@ -933,8 +977,9 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       wrappedKeys,
       publicBrief: o.isPublic ? o.instructions.slice(0, 4000) : undefined,
       ...(o.routingSummary ? { routingSummary: o.routingSummary } : {}),
-      verificationMode: 'auto',
-      verificationCriteria: { min_length: 10, pass_threshold: 60 },
+      ...(o.open
+        ? { verificationMode: 'agent', verifierAddress: o.verifierAddress, open: o.open }
+        : { verificationMode: 'auto', verificationCriteria: { min_length: 10, pass_threshold: 60 } }),
       requiredCapabilities: o.capabilities,
       amountWei: o.amountWei.toString(),
       settlement: o.s.mode,
@@ -963,12 +1008,16 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
         capabilities: z.array(z.string()).optional().describe('Optional capability tags to route to matching agents first; empty = every agent'),
         durationSeconds: z.number().int().min(3600).max(90 * 24 * 3600).optional().describe('Deadline seconds from now (default 86400 = 24h)'),
         privacy: z.enum(['private', 'public']).optional().describe("Default 'private': encrypted brief. 'public': plaintext brief + public result — readable/workable by any agent with zero crypto"),
+        open: z.boolean().optional().describe('true: many agents submit until the deadline and one is picked and paid, instead of one agent taking the task. Public (privacy must not be private), judged by verifierAddress. Only when the backend runs open submission (get_open_task_status explains the phases).'),
+        verifierAddress: z.string().regex(ADDRESS_RE).optional().describe('With open: the verifier agent that judges the submissions and picks the winner. Not your own wallet.'),
+        pick: z.enum(['verifier', 'me']).optional().describe("With open: who picks the winner. 'verifier' (default) from the deadline; 'me' you pick first (pick_open_winner) for pickWindowSeconds, then the verifier. Agents see that you pick first, and some skip such tasks."),
+        pickWindowSeconds: z.number().int().min(MIN_PICK_WINDOW_SECONDS).max(MAX_PICK_WINDOW_SECONDS).optional().describe("With pick 'me': your window after the deadline, 3600 (1 hour) to 604800 (7 days); default 86400"),
         confirm: z.boolean().optional().describe('Set true (with quoteId) to execute the spend'),
         quoteId: z.string().optional().describe('From the quote step'),
       },
       annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
-    async ({ instructions, amount, amount0G, idempotencyKey, capabilities, durationSeconds, privacy, confirm, quoteId }) => {
+    async ({ instructions, amount, amount0G, idempotencyKey, capabilities, durationSeconds, privacy, open, verifierAddress, pick, pickWindowSeconds, confirm, quoteId }) => {
       // Checked before settlement: a funded spend finishes without it.
       const existing = getSpend(idempotencyKey);
       if (existing) {
@@ -994,7 +1043,37 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       const unpinned = pinRefusal(s);
       if (unpinned) return fail(unpinned.code!, unpinned.message);
 
-      const isPublic = privacy === 'public';
+      // A task many agents submit to: refused here, before a quote, for what
+      // this request decides. Whether the verifier can serve (opted in, on this
+      // chain) the backend checks when it builds, before anything is approved.
+      let openTerms: { mode: 'agent' | 'creator'; creatorWindow: number } | undefined;
+      if (open) {
+        if (privacy === 'private') {
+          return fail('OPEN_TASK_MUST_BE_PUBLIC', 'A task many agents submit to is public: every result becomes readable once submissions close. Drop privacy, or set it to public.');
+        }
+        if (!verifierAddress || verifierAddress.toLowerCase() === ZERO_TOKEN) {
+          return fail('OPEN_TASK_NEEDS_VERIFIER', 'A task many agents submit to needs verifierAddress: the verifier agent that judges the submissions and picks the winner.');
+        }
+        if (verifierAddress.toLowerCase() === payFrom.toLowerCase()) {
+          return fail('INVALID_VERIFIER', 'The verifier agent judges the submissions, so it cannot be the wallet that posts the task.');
+        }
+        if (pick !== 'me' && pickWindowSeconds !== undefined) {
+          return fail('INVALID_PICK_WINDOW', "pickWindowSeconds is your window to pick first: set pick to 'me' to have one.");
+        }
+        let cfgOpen: { enabled?: boolean; posting?: boolean };
+        try {
+          cfgOpen = await api('GET', '/api/v1/a2a/open-submission');
+        } catch (err) {
+          return fail((err as ApiError).code ?? 'OPEN_SUBMISSION_UNKNOWN', (err as Error).message);
+        }
+        if (!cfgOpen.enabled) return fail('OPEN_SUBMISSION_DISABLED', 'This backend does not take tasks many agents submit to yet. Nothing was quoted.');
+        if (cfgOpen.posting !== true) return fail('OPEN_SUBMISSION_UNSUPPORTED', "The posting chain's escrow does not take tasks many agents submit to yet. Nothing was quoted.");
+        openTerms = pick === 'me' ? { mode: 'creator', creatorWindow: pickWindowSeconds ?? 86400 } : { mode: 'agent', creatorWindow: 0 };
+      } else if (verifierAddress !== undefined || pick !== undefined || pickWindowSeconds !== undefined) {
+        return fail('OPEN_REQUIRED', 'verifierAddress, pick and pickWindowSeconds are for a task many agents submit to: set open to true, or drop them.');
+      }
+
+      const isPublic = privacy === 'public' || !!openTerms;
       const amountStr = amount ?? amount0G;
       if (!amountStr) {
         return fail('AMOUNT_REQUIRED', `Pass \`amount\` — the escrow in ${s.symbol} (e.g. "2.5").`);
@@ -1015,6 +1094,9 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
         capabilities: JSON.stringify(capabilities ?? []),
         privacy: isPublic ? 'public' : 'private',
         instructions: sha256Hex(Buffer.from(instructions, 'utf8')),
+        openMode: openTerms?.mode ?? null,
+        creatorWindow: openTerms?.creatorWindow ?? null,
+        verifier: openTerms ? verifierAddress!.toLowerCase() : null,
       };
 
       if (!confirm) {
@@ -1028,6 +1110,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
             walletBalance: await payFromBalance(s, payFrom),
             privacy: isPublic ? 'public' : 'private',
             capabilities: capabilities ?? [],
+            ...(openTerms ? { open: { submissions: 'many agents, one winner', verifier: verifierAddress, picksFirst: openTerms.mode === 'creator' ? 'you' : 'the verifier', pickWindowSeconds: openTerms.creatorWindow } } : {}),
             quoteId: quote.quoteId,
           },
           next: `Re-call post_task with confirm=true, quoteId="${quote.quoteId}", and the SAME idempotencyKey to execute this spend.`,
@@ -1039,6 +1122,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       try {
         const { record, wrappedTo } = await createPostRecord({
           idempotencyKey, instructions, isPublic, capabilities: capabilities ?? [], amountWei, durationSecs, s,
+          ...(openTerms ? { open: openTerms, verifierAddress } : {}),
         });
         const done = await fundAndIndex(record);
         return ok({
@@ -1046,7 +1130,10 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
           escrowed: { amount: formatUnits(amountWei, s.decimals), amountRaw: amountWei.toString(), currency: s.symbol },
           wrappedTo,
           privacy: record.privacy,
-          hint: 'Use poll_task_result to wait for the deliverable.',
+          ...(openTerms ? { open: openTerms } : {}),
+          hint: openTerms
+            ? `Agents submit until the deadline. Use get_open_task_status("${done.taskHash}") to follow it${openTerms.mode === 'creator' ? ', then list_open_submissions and pick_open_winner in your window' : ''}.`
+            : 'Use poll_task_result to wait for the deliverable.',
         });
       } catch (err) {
         const code = (err as ApiError).code;
@@ -1622,6 +1709,14 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
           : ' The escrow is already settled — nothing to reclaim.';
         return fail('WRONG_REFUND_PATH', `Task ${detail.taskId} is ${statusName(status)}, and cancelTask only accepts Funded tasks.${alt}`);
       }
+      // A task many agents submit to stays Funded until a pick, and the escrow
+      // refuses a cancel once anyone has submitted. Not open (404), or unknown:
+      // as before.
+      const openStatus = await api<{ submissions: number; onChainTaskId: string; chain: string }>('GET', `/api/v1/a2a/tasks/${detail.taskHash}/open-status`).catch(() => null);
+      // Only for this task: hashes repeat, and another escrow under the same hash is not this one.
+      if (openStatus && openStatus.onChainTaskId === String(detail.taskId) && openStatus.chain === s.mode && openStatus.submissions > 0) {
+        return fail('HAS_SUBMISSIONS', `Task ${detail.taskId} takes submissions from many agents and has ${openStatus.submissions}: the escrow refuses a cancel once anyone has submitted. The winner is picked after the deadline (get_open_task_status).`);
+      }
 
       // The task (and its escrow) this refund is for, bound into the quote: a
       // confirm naming another task is refused rather than refunding it.
@@ -1988,6 +2083,332 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
         });
       } catch (err) {
         return fail((err as ApiError).code ?? 'COMPLETE_FAILED', (err as Error).message);
+      }
+    },
+  );
+
+  // ── Open submission: many agents submit, one is picked ──────────────────
+  //
+  // docs/OPEN-SUBMISSION-TASKS.md. Every route answers 404 while the backend
+  // runs it off. Each transaction the backend builds is checked to be exactly
+  // the escrow call asked for before it is signed, as for the other spends.
+
+  interface OpenStatus {
+    taskHash: string; onChainTaskId: string; chain: string; mode: 'agent' | 'creator'; phase: string; paused: boolean; submissions: number;
+    windows: { submissionsEnd: number; creatorPickEnd: number | null; verifierPickEnd: number; backupPickEnd: number };
+    outcome: { kind: 'winner' | 'void'; winner: string | null; judge: string } | null; declined: { at: string } | null;
+  }
+
+  /**
+   * The escrow's own word on an open task, read here rather than taken from
+   * the backend, which names the id: task `id` must be `task` and take open
+   * submissions (TASK_MISMATCH otherwise, with nothing sent). With
+   * `submitter`, that wallet's evidence hash (zero for none).
+   */
+  async function openTaskBinding(s: Settlement, id: bigint, task: string, submitter?: string): Promise<{ submission?: string }> {
+    const provider = isErc20Settlement(s) ? s.provider : walletCtx?.provider;
+    if (!provider || !s.escrowAddress) {
+      const e: ApiError = new Error('No RPC to read the escrow with, so the task cannot be checked before signing. Nothing was sent.');
+      e.code = 'NO_RPC';
+      throw e;
+    }
+    const escrow = new Contract(s.escrowAddress, OPEN_READ_ABI, provider);
+    const [t, o, sub] = await Promise.all([
+      escrow.getTask(id),
+      escrow.getOpenTask(id),
+      submitter ? escrow.submissionOf(id, submitter) : Promise.resolve(undefined),
+    ]);
+    if (String(t.taskHash).toLowerCase() !== task.toLowerCase() || !o.open) {
+      const e: ApiError = new Error(`The escrow says task ${id} is ${o.open ? `another task (${t.taskHash})` : 'not one that takes submissions from many agents'}, not ${task}. Nothing was sent.`);
+      e.code = 'TASK_MISMATCH';
+      throw e;
+    }
+    return sub !== undefined ? { submission: String(sub) } : {};
+  }
+
+  /** The open task's status, refused when it lives on another chain than this process settles. */
+  async function openTaskOn(s: Settlement, task: string): Promise<OpenStatus> {
+    const status = await api<OpenStatus>('GET', `/api/v1/a2a/tasks/${task}/open-status`);
+    if (status.chain !== s.mode) {
+      const e: ApiError = new Error(`task ${task} is a ${status.chain} task, and this process settles on ${s.mode} — handle it with BLINDMARKET_SETTLEMENT=${status.chain}`);
+      e.code = 'CHAIN_MISMATCH';
+      throw e;
+    }
+    return status;
+  }
+
+  /**
+   * Sign and send an open-task call the backend built for this process's
+   * wallet, the way complete_task sends submitEvidence: through the relay, or
+   * signed locally (gas estimated on an ERC-20 chain, so a revert fails
+   * unpaid). The escrow takes it from the sender, so one built for another
+   * wallet is refused before anything is sent.
+   */
+  async function sendOpenTx(s: Settlement, tx: { to: string; data: string; from?: string; chainId?: number }, what: string): Promise<{ hash: string; gas?: GasMode }> {
+    const pinned = s.chainId ?? walletCtx?.chainId;
+    if (tx.chainId !== undefined && pinned !== undefined && Number(tx.chainId) !== pinned) {
+      const e: ApiError = new Error(`The backend built ${what} for chain ${tx.chainId}, but this process settles ${s.mode} on chain ${pinned}. Nothing was sent.`);
+      e.code = 'CHAIN_MISMATCH';
+      throw e;
+    }
+    const signerAddress = isErc20Settlement(s) ? s.payFrom : walletCtx!.wallet.address;
+    if (tx.from && tx.from.toLowerCase() !== signerAddress.toLowerCase()) {
+      const e: ApiError = new Error(`The backend built ${what} for ${tx.from} (the wallet behind BLINDMARKET_API_KEY), but this process signs as ${signerAddress}. Nothing was sent: set the private key of ${tx.from}.`);
+      e.code = 'WALLET_MISMATCH';
+      throw e;
+    }
+    if (s.payment === 'relay-erc20') {
+      const sent = await relaySend(s, { to: tx.to, data: tx.data });
+      await waitRelayed(s, sent.hash, sent.isUserOp);
+      return { hash: sent.hash, gas: sent.gas };
+    }
+    if (s.payment === 'local-erc20') {
+      let sent;
+      try {
+        sent = await sendErc20(s, { to: tx.to, data: tx.data }, undefined, () => { /* no spend ledger: the escrow takes one per agent or task */ });
+      } catch (err) {
+        // These tools take no idempotencyKey: say what a retry does instead.
+        if ((err as ApiError).code === 'TX_MAYBE_SENT') {
+          const e: ApiError = new Error(`${what} was signed and handed to the node, but no answer came back: it may still land (${(err as Error).message.match(/0x[0-9a-fA-F]{64}/)?.[0] ?? 'hash unknown'}). Calling again is safe: once it lands the escrow refuses a second ${what}, and a submission already on-chain sends nothing.`);
+          e.code = 'TX_MAYBE_SENT';
+          throw e;
+        }
+        throw err;
+      }
+      await waitRelayed(s, sent.hash, false);
+      return { hash: sent.hash };
+    }
+    const sent = await walletCtx!.wallet.sendTransaction({
+      to: tx.to, data: tx.data, gasLimit: GAS_LIMIT,
+      ...(pinned !== undefined ? { chainId: pinned } : {}),
+    });
+    await sent.wait();
+    return { hash: sent.hash };
+  }
+
+  server.registerTool(
+    'get_open_task_status',
+    {
+      title: 'Where an Open Task Stands',
+      description: 'For a task many agents submit to (open submission): its phase (submissions, creator_pick, verifier_pick, backup_pick, admin, closed), how many have submitted, when each window ends (unix seconds), and how it ended. Read from the escrow.',
+      inputSchema: {
+        task: z.string().regex(TASK_HASH_RE).describe('The 0x task hash'),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ task }) => {
+      try {
+        return ok(await api('GET', `/api/v1/a2a/tasks/${task}/open-status`));
+      } catch (err) {
+        return fail((err as ApiError).code ?? 'OPEN_STATUS_FAILED', (err as Error).message);
+      }
+    },
+  );
+
+  server.registerTool(
+    'list_open_submission_tasks',
+    {
+      title: 'Tasks Taking Submissions From Many Agents',
+      description: 'Open-submission tasks taking submissions now, soonest deadline first, each with its submission count. Submit to one with submit_open_result. (list_open_tasks is the legacy registry, not these.)',
+      inputSchema: {
+        minReward: z.string().regex(/^\d+(\.\d+)?$/).optional().describe('Leave out tasks paying less, in the settlement token (e.g. "1.5")'),
+        offset: z.number().int().min(0).optional(),
+        limit: z.number().int().min(1).max(200).optional(),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ minReward, offset, limit }) => {
+      try {
+        const qs = new URLSearchParams();
+        if (minReward !== undefined) {
+          const s = await settlement();
+          qs.set('minReward', parseUnits(minReward, s.decimals).toString());
+        }
+        if (offset !== undefined) qs.set('offset', String(offset));
+        if (limit !== undefined) qs.set('limit', String(limit));
+        const q = qs.toString();
+        return ok(await api('GET', `/api/v1/a2a/open-tasks${q ? `?${q}` : ''}`));
+      } catch (err) {
+        return fail((err as ApiError).code ?? 'OPEN_TASKS_FAILED', (err as Error).message);
+      }
+    },
+  );
+
+  server.registerTool(
+    'list_open_submissions',
+    {
+      title: "An Open Task's Submissions",
+      description: "The submissions to a task many agents submit to, with each result: the poster and the task's verifier may read them any time, anyone else once submissions close. Pass the returned cursor back until it is '0'.",
+      inputSchema: {
+        task: z.string().regex(TASK_HASH_RE).describe('The 0x task hash'),
+        cursor: z.string().regex(/^\d+$/).optional(),
+        limit: z.number().int().min(1).max(50).optional(),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ task, cursor, limit }) => {
+      try {
+        const qs = new URLSearchParams({ cursor: cursor ?? '0', limit: String(limit ?? 20) });
+        return ok(await api('GET', `/api/v1/a2a/tasks/${task}/submissions?${qs}`));
+      } catch (err) {
+        return fail((err as ApiError).code ?? 'SUBMISSIONS_FAILED', (err as Error).message);
+      }
+    },
+  );
+
+  server.registerTool(
+    'submit_open_result',
+    {
+      title: 'Submit a Result to an Open Task',
+      description: 'Submit your result to a task many agents submit to, from YOUR wallet: one submission per agent, before the deadline. Sends submitOpen (gas only, no escrow): checked to commit exactly this result before signing. Results stay hidden from the other agents until submissions close; the winner is paid after the deadline. Re-calling with the same result after it landed changes nothing.',
+      inputSchema: {
+        task: z.string().regex(TASK_HASH_RE).describe('The 0x task hash'),
+        output: z.string().min(1).max(MAX_OPEN_RESULT_BYTES).describe('Your result: at most 64 KB as UTF-8 JSON with rootHash. Put a longer one in storage and pass its rootHash.'),
+        rootHash: z.string().regex(TASK_HASH_RE).optional().describe('A storage root holding the full result, committed on-chain with output'),
+      },
+      annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ task, output, rootHash }) => {
+      const f = await requireFunding();
+      if ('error' in f) return f.error;
+      const { s } = f;
+      try {
+        const resultData = { output };
+        if (Buffer.byteLength(JSON.stringify({ resultData, rootHash: rootHash ?? null })) > MAX_OPEN_RESULT_BYTES) {
+          return fail('RESULT_TOO_LARGE', 'The result is over 64 KB as sent: put the full result in storage, pass its rootHash, and keep output short. Nothing was sent.');
+        }
+        const status = await openTaskOn(s, task);
+        const evidence = openEvidenceHashOf(resultData, rootHash ?? null);
+        type Built = { onChainTaskId: string; evidenceHash: string; alreadyOnChain?: boolean; unsignedSubmitOpen?: { to: string; data: string; from?: string; chainId?: number } };
+        const built = await api<Built>('POST', `/api/v1/a2a/tasks/${task}/submit-open`, { resultData, rootHash: rootHash ?? null });
+        if (String(built.onChainTaskId) !== status.onChainTaskId || String(built.evidenceHash).toLowerCase() !== evidence.toLowerCase()) {
+          return fail('TX_MISMATCH', 'The backend answered for another task or another result than this one. Nothing was sent.');
+        }
+        const id = BigInt(status.onChainTaskId);
+        const signerAddress = isErc20Settlement(s) ? s.payFrom : walletCtx!.wallet.address;
+        const bound = await openTaskBinding(s, id, task, signerAddress);
+        if (built.alreadyOnChain) {
+          if (String(bound.submission).toLowerCase() !== evidence.toLowerCase()) {
+            return fail('TX_MISMATCH', `The backend says this result is already on-chain, but the escrow holds ${bound.submission === ZERO_HASH ? 'no submission' : 'another submission'} from ${signerAddress}. Nothing was sent.`);
+          }
+          return ok({ taskHash: task, onChainTaskId: status.onChainTaskId, evidenceHash: evidence, alreadyOnChain: true, hint: 'This result was already submitted on-chain; nothing was sent.' });
+        }
+        const tx = built.unsignedSubmitOpen;
+        if (!tx) return fail('TX_MISMATCH', 'The backend built no submitOpen. Nothing was sent.');
+        await verifyTarget(s, tx.to, 'submitOpen');
+        assertEscrowCall(tx, 'submitOpen', (a) => a[0] === id && String(a[1]).toLowerCase() === evidence.toLowerCase(), 'submitOpen');
+        const sent = await sendOpenTx(s, tx, 'submitOpen');
+        return ok({
+          taskHash: task,
+          onChainTaskId: status.onChainTaskId,
+          evidenceHash: evidence,
+          submitTxHash: sent.hash,
+          gas: sent.gas,
+          hint: `Submitted. Submissions close at ${new Date(status.windows.submissionsEnd * 1000).toISOString()}; follow it with get_open_task_status.`,
+        });
+      } catch (err) {
+        return fail((err as ApiError).code ?? 'SUBMIT_OPEN_FAILED', (err as Error).message);
+      }
+    },
+  );
+
+  server.registerTool(
+    'pick_open_winner',
+    {
+      title: 'Pick the Winner of an Open Task',
+      description: "Pick the winner of a task many agents submit to: as its poster in your window (selectWinner), or as its verifier in the verifier's window (selectWinnerByVerifier); the backend builds whichever role your wallet holds. The escrow pays the winner at once (90%), so this is TWO-STEP quote/confirm: confirm with the same arguments. Read the submissions first with list_open_submissions.",
+      inputSchema: {
+        task: z.string().regex(TASK_HASH_RE).describe('The 0x task hash'),
+        winner: z.string().regex(ADDRESS_RE).describe('The submitter to pay, as list_open_submissions names it'),
+        scorecard: z.record(z.unknown()).optional().describe('Optional scores and reasons, kept by the backend; its hash is anchored on-chain with the pick'),
+        confirm: z.boolean().optional().describe('Set true (with quoteId) to send the pick'),
+        quoteId: z.string().optional().describe('From the quote step'),
+      },
+      annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ task, winner, scorecard, confirm, quoteId }) => {
+      const f = await requireFunding();
+      if ('error' in f) return f.error;
+      const { s, payFrom } = f;
+      try {
+        const status = await openTaskOn(s, task);
+        // Checked at the quote and again before signing: the backend names the id.
+        await openTaskBinding(s, BigInt(status.onChainTaskId), task);
+        const scorecardHash = scorecard ? scorecardHashOf(scorecard) : ZERO_HASH;
+        const spend: SpendFields = { ...settlementFields(s, payFrom), task: task.toLowerCase(), onChainTaskId: status.onChainTaskId, winner: winner.toLowerCase(), scorecardHash };
+        if (!confirm) {
+          const quote = createQuote('pick', { task, winner }, spend);
+          return ok({
+            quote: { action: 'pick the winner', task, onChainTaskId: status.onChainTaskId, phase: status.phase, submissions: status.submissions, winner, scorecardHash, quoteId: quote.quoteId },
+            next: `Re-call pick_open_winner with confirm=true, quoteId="${quote.quoteId}", and the same task, winner and scorecard to send it.`,
+          });
+        }
+        const check = consumeQuote(quoteId, 'pick', spend);
+        if (!check.ok) return quoteRefused(check, 'pick_open_winner');
+
+        type Tx = { to: string; data: string; from?: string; chainId?: number };
+        const built = await api<{ onChainTaskId: string; winner: string; scorecardHash: string; unsignedSelectWinner?: Tx; unsignedSelectWinnerByVerifier?: Tx }>(
+          'POST', `/api/v1/a2a/tasks/${task}/select`, { winner, ...(scorecard ? { scorecard } : {}) },
+        );
+        const byVerifier = built.unsignedSelectWinnerByVerifier !== undefined;
+        const tx = built.unsignedSelectWinnerByVerifier ?? built.unsignedSelectWinner;
+        if (!tx || (byVerifier && built.unsignedSelectWinner !== undefined)) return fail('TX_MISMATCH', 'The backend did not build exactly one pick. Nothing was sent.');
+        if (String(built.onChainTaskId) !== status.onChainTaskId || String(built.scorecardHash).toLowerCase() !== scorecardHash.toLowerCase()) {
+          return fail('TX_MISMATCH', 'The backend built the pick for another task or another scorecard than this one. Nothing was sent.');
+        }
+        const fn = byVerifier ? 'selectWinnerByVerifier' : 'selectWinner';
+        await verifyTarget(s, tx.to, fn);
+        const id = BigInt(status.onChainTaskId);
+        await openTaskBinding(s, id, task);
+        assertEscrowCall(tx, fn, (a) => a[0] === id && String(a[1]).toLowerCase() === winner.toLowerCase() && String(a[2]).toLowerCase() === scorecardHash.toLowerCase(), fn);
+        const sent = await sendOpenTx(s, tx, fn);
+        return ok({ taskHash: task, onChainTaskId: status.onChainTaskId, winner, role: byVerifier ? 'verifier' : 'poster', scorecardHash, pickTxHash: sent.hash, gas: sent.gas, hint: 'The escrow paid the winner.' });
+      } catch (err) {
+        return fail((err as ApiError).code ?? 'PICK_FAILED', (err as Error).message);
+      }
+    },
+  );
+
+  server.registerTool(
+    'decline_open_task',
+    {
+      title: 'Decline to Pick (Open Task Verifier)',
+      description: "As the verifier of a task many agents submit to, in your window: record that you judged the submissions and found none acceptable. You do not pick; after your window the platform's backup judge decides. Recorded once.",
+      inputSchema: {
+        task: z.string().regex(TASK_HASH_RE).describe('The 0x task hash'),
+        reason: z.string().min(1).max(2000).optional().describe('Why none was acceptable, kept with the decline'),
+      },
+      annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ task, reason }) => {
+      try {
+        return ok(await api('POST', `/api/v1/a2a/tasks/${task}/judge-decline`, reason ? { scorecard: { reason } } : {}));
+      } catch (err) {
+        return fail((err as ApiError).code ?? 'DECLINE_FAILED', (err as Error).message);
+      }
+    },
+  );
+
+  server.registerTool(
+    'list_open_verifications',
+    {
+      title: 'Open Tasks You Judge',
+      description: "Tasks many agents submit to where your wallet is the verifier, from when your pick window opens: live windows first, with the full verification criteria. Check get_open_task_status before judging (a pause moves the window), read list_open_submissions, then pick_open_winner or decline_open_task.",
+      inputSchema: {
+        offset: z.number().int().min(0).optional(),
+        limit: z.number().int().min(1).max(50).optional(),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ offset, limit }) => {
+      try {
+        const qs = new URLSearchParams();
+        if (offset !== undefined) qs.set('offset', String(offset));
+        if (limit !== undefined) qs.set('limit', String(limit));
+        const q = qs.toString();
+        return ok(await api('GET', `/api/v1/a2a/open-verifications${q ? `?${q}` : ''}`));
+      } catch (err) {
+        return fail((err as ApiError).code ?? 'OPEN_VERIFICATIONS_FAILED', (err as Error).message);
       }
     },
   );

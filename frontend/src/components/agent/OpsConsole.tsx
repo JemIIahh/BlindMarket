@@ -18,6 +18,7 @@ import { authedDelete, authedGet, authedPatch, authedPost, getAuthHeaders } from
 import { API_BASE_URL } from '../../config/constants';
 import { getPaymentSymbol } from '../../config/settlement';
 import { restartAgent, saveOwnerToggle } from '../../lib/ownerToggle';
+import { useOpenSubmissionConfig } from '../../hooks/useOpenSubmission';
 import { formatPaymentAmount, parsePaymentAmount } from '../../lib/paymentUnits';
 import { ToolManager, type AnyTool } from '../bb/ToolManager';
 import AgentMetricsPanel from '../AgentMetricsPanel';
@@ -367,6 +368,24 @@ export function OpsConsole({
     },
   });
 
+  // Open submission is the owner's opt-in as well: when on, the agent works
+  // tasks many agents submit to, and each try spends its model and gas
+  // whether or not it wins. Shown only when this server runs open
+  // submission. Applied on restart, like the two above.
+  const openSubmissionConfig = useOpenSubmissionConfig();
+  const [openSubmissionEnabled, setOpenSubmissionEnabled] = useState(agent.openSubmissionEnabled === true);
+  const [openSubmissionRestartError, setOpenSubmissionRestartError] = useState<unknown>(null);
+  const saveOpenSubmission = useMutation({
+    mutationFn: (enabled: boolean) => saveOwnerToggle<AgentDetails>(authedPost, agentId, 'open-submission', enabled, agentRunning),
+    onMutate: (enabled) => { setOpenSubmissionEnabled(enabled); setOpenSubmissionRestartError(null); },
+    onError: () => setOpenSubmissionEnabled(agent.openSubmissionEnabled === true),
+    onSuccess: ({ enabled, agent: latest, restartError }) => {
+      setOpenSubmissionEnabled(enabled);
+      setOpenSubmissionRestartError(restartError);
+      onAgentUpdated({ ...agent, ...latest, openSubmissionEnabled: enabled });
+    },
+  });
+
   const saveTools = useMutation({
     mutationFn: () =>
       authedPatch<AgentDetails>(`/api/v1/agents/${agentId}`, {
@@ -707,6 +726,22 @@ export function OpsConsole({
               </div>
               {delegationRestartError != null && <ErrorNotice error={delegationRestartError} compact className="mt-2" />}
             </FormField>
+
+            {openSubmissionConfig.data?.enabled && (
+              <FormField label="Compete on open tasks" hint="When on, this agent submits to tasks that take results from many agents, where one is picked and paid. Each try uses this agent's model and gas, and pays only if it wins. Saving restarts the agent.">
+                <div className="flex items-center gap-3">
+                  <Toggle
+                    checked={openSubmissionEnabled}
+                    onChange={(v) => saveOpenSubmission.mutate(v)}
+                    disabled={saveOpenSubmission.isPending}
+                    label="Compete on open tasks"
+                  />
+                  {saveOpenSubmission.isPending && <span className="text-xs text-ink-3">Saving & restarting…</span>}
+                  {saveOpenSubmission.isError && <span className="text-xs text-err">Couldn't save</span>}
+                </div>
+                {openSubmissionRestartError != null && <ErrorNotice error={openSubmissionRestartError} compact className="mt-2" />}
+              </FormField>
+            )}
 
             <div className="flex items-center gap-3 flex-wrap">
               <Button

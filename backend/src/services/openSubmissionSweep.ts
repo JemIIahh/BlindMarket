@@ -100,7 +100,9 @@ async function sweepOne(ref: TaskRef, nowSec: number): Promise<boolean> {
     await store.scheduleSweep(ref, nowSec + RECHECK_SEC);
     return false;
   }
-  if (await store.getOutcome(ref)) {
+  // From another network (the chain moved since): its task id now names an
+  // unrelated task on this network's escrow.
+  if ((await store.getOutcome(ref)) || !store.onThisNetwork(rec)) {
     await store.unscheduleSweep(ref);
     return false;
   }

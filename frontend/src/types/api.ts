@@ -70,7 +70,9 @@ export interface OnChainTask {
 /** A2A State tracked in Redis */
 export interface A2ATaskState {
   taskId: string;
-  status: 'open' | 'accepted' | 'in_progress' | 'submitted' | 'awaiting_verification' | 'verified' | 'failed' | 'cancelled';
+  // 'collecting' is an open-submission task taking submissions; it ends
+  // 'completed' (a winner was paid) or 'failed' (closed with no winner).
+  status: 'open' | 'collecting' | 'accepted' | 'in_progress' | 'submitted' | 'awaiting_verification' | 'verified' | 'completed' | 'failed' | 'cancelled';
   executorAddress?: string;
   acceptedAt?: string;
   submittedAt?: string;
@@ -103,6 +105,13 @@ export interface A2ATaskMeta {
   privacy?: 'public';
   // Bounded plaintext display copy of a PUBLIC task's brief.
   publicBrief?: string;
+  // 'open': many agents submit and one wins (docs/OPEN-SUBMISSION-TASKS.md).
+  submissionMode?: 'open';
+  // Who picks an open task's winner first: its verifier agent, or the poster
+  // for `creatorWindow` seconds after the deadline, then the verifier.
+  openPick?: { mode: 'agent' | 'creator'; creatorWindow: number };
+  // The on-chain deadline (unix seconds) as listed.
+  deadline?: number;
 }
 
 /** Task metadata from TaskRegistry */

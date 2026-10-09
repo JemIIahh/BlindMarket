@@ -14,6 +14,11 @@ import type { IndexTaskParams, PostTaskParams } from './index.js';
 /** The escrow's deadline bounds (BlindEscrow MIN_DEADLINE / MAX_DEADLINE). */
 export const MIN_DURATION_SECONDS = 3_600;
 export const MAX_DURATION_SECONDS = 90 * 86_400;
+/** The poster's pick window on an open task (BlindEscrow MIN_CREATOR_WINDOW / MAX_CREATOR_WINDOW). */
+export const MIN_PICK_WINDOW_SECONDS = 3_600;
+export const MAX_PICK_WINDOW_SECONDS = 7 * 86_400;
+/** The poster's pick window when they pick first and name none. */
+export const DEFAULT_PICK_WINDOW_SECONDS = 86_400;
 /** A brief's key is wrapped to at most this many executors (POST /tasks caps wrappedKeys at 200). */
 export const MAX_WRAPPED_KEYS = 200;
 
@@ -42,6 +47,8 @@ export interface NormalizedPost {
   verifierAddress?: Address;
   targetExecutor?: Address;
   routingSummary?: string;
+  /** Many agents submit and one is picked (createTaskOpen): who picks first, and the poster's window in seconds (0 when the verifier picks). */
+  open?: { pick: 'agent' | 'creator'; creatorWindow: number };
 }
 
 /** POST /a2a/tasks/index takes a routing summary of at most this many characters. */
@@ -61,7 +68,9 @@ export function normalizePost(params: PostTaskParams, maxAmountRaw?: bigint | st
   if (!Number.isInteger(duration) || duration < MIN_DURATION_SECONDS || duration > MAX_DURATION_SECONDS) {
     throw new ApiError(400, 'durationSeconds must be a whole number from 3600 (1 hour) to 7776000 (90 days): the escrow refuses anything else. Nothing was sent.', undefined, 'INVALID_DURATION');
   }
-  const verificationMode = params.verificationMode ?? 'auto';
+  // An open task's terms first: it is judged by its verifier agent.
+  const open = params.open !== undefined ? openTerms(params) : undefined;
+  const verificationMode = open ? 'agent' : params.verificationMode ?? 'auto';
   const verificationCriteria = params.verificationCriteria
     ?? (verificationMode === 'auto' ? { min_length: 10, pass_threshold: 60 } : undefined);
   // Checked here, before funding: the listing would refuse it after the escrow is paid.
@@ -73,7 +82,7 @@ export function normalizePost(params: PostTaskParams, maxAmountRaw?: bigint | st
     instructions: params.instructions,
     amount,
     duration,
-    privacy: params.privacy ?? 'private',
+    privacy: open ? 'public' : params.privacy ?? 'private',
     locationZone: params.locationZone ?? 'global',
     verificationMode,
     ...(verificationCriteria ? { verificationCriteria } : {}),
@@ -81,10 +90,51 @@ export function normalizePost(params: PostTaskParams, maxAmountRaw?: bigint | st
     ...(params.verifierAddress ? { verifierAddress: params.verifierAddress } : {}),
     ...(params.targetExecutor ? { targetExecutor: params.targetExecutor } : {}),
     ...(routingSummary ? { routingSummary } : {}),
+    ...(open ? { open } : {}),
   };
 }
 
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+
+/**
+ * An open task's terms, or the refusal the escrow or the task board would
+ * give after the escrow is funded (POST /a2a/tasks/index): an open task is
+ * public, judged by a verifier agent that is named, and offered to every
+ * agent. Its results are read by everyone once submissions close, so a
+ * private brief cannot be one.
+ */
+function openTerms(params: PostTaskParams): { pick: 'agent' | 'creator'; creatorWindow: number } {
+  const refuse = (code: string, message: string) => new ApiError(400, `${message} Nothing was sent.`, undefined, code);
+  const open = params.open!;
+  if (!open || typeof open !== 'object') throw refuse('INVALID_OPEN', 'open must be an object: { pick?, pickWindowSeconds? }.');
+  if (params.privacy === 'private') {
+    throw refuse('OPEN_TASK_MUST_BE_PUBLIC', 'A task many agents submit to is public: every result becomes readable once submissions close. Drop privacy, or set it to \'public\'.');
+  }
+  if (params.verificationMode !== undefined && params.verificationMode !== 'agent') {
+    throw refuse('OPEN_TASK_NEEDS_VERIFIER', `A task many agents submit to is judged by a verifier agent, not '${params.verificationMode}': drop verificationMode, or set it to 'agent'.`);
+  }
+  if (!params.verifierAddress || !ADDRESS.test(params.verifierAddress) || params.verifierAddress.toLowerCase() === ethers.ZeroAddress) {
+    throw refuse('OPEN_TASK_NEEDS_VERIFIER', 'A task many agents submit to needs verifierAddress: the verifier agent that judges the submissions and picks the winner.');
+  }
+  if (params.targetExecutor !== undefined) {
+    throw refuse('OPEN_TASK_PINNED', 'A task many agents submit to is offered to every agent: drop targetExecutor.');
+  }
+  const pick = open.pick ?? 'agent';
+  if (pick !== 'agent' && pick !== 'creator') {
+    throw refuse('INVALID_OPEN', `open.pick must be 'agent' (the verifier picks) or 'creator' (you pick first), not ${JSON.stringify(open.pick)}.`);
+  }
+  if (pick === 'agent') {
+    if (open.pickWindowSeconds !== undefined && open.pickWindowSeconds !== 0) {
+      throw refuse('INVALID_PICK_WINDOW', "open.pickWindowSeconds is your window to pick first: set open.pick to 'creator' to have one.");
+    }
+    return { pick, creatorWindow: 0 };
+  }
+  const creatorWindow = open.pickWindowSeconds ?? DEFAULT_PICK_WINDOW_SECONDS;
+  if (!Number.isInteger(creatorWindow) || creatorWindow < MIN_PICK_WINDOW_SECONDS || creatorWindow > MAX_PICK_WINDOW_SECONDS) {
+    throw refuse('INVALID_PICK_WINDOW', `open.pickWindowSeconds must be a whole number from ${MIN_PICK_WINDOW_SECONDS} (1 hour) to ${MAX_PICK_WINDOW_SECONDS} (7 days): the escrow refuses anything else.`);
+  }
+  return { pick, creatorWindow };
+}
 
 /**
  * The checks a bulk post adds for fields a caller builds from a file or a
@@ -93,6 +143,7 @@ const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
  */
 export function checkRowFields(params: PostTaskParams): void {
   const bad = (message: string) => new ApiError(400, `${message} Nothing was sent.`, undefined, 'INVALID_ROW');
+  if (params.open !== undefined) throw bad('a task many agents submit to (open) is posted on its own, with postTask().');
   if (typeof params.instructions !== 'string' || !params.instructions.trim()) throw bad('instructions are empty.');
   if (params.privacy !== undefined && params.privacy !== 'private' && params.privacy !== 'public') {
     throw bad(`privacy must be 'private' or 'public', not ${JSON.stringify(params.privacy)}.`);
@@ -194,6 +245,8 @@ export function createTaskBody(post: NormalizedPost, sealed: SealedBrief, token:
     requiredCapabilities: post.requiredCapabilities,
     rootHash: rootHash as CreateTaskRequest['rootHash'],
     ...(sealed.wrappedKeys ? { wrappedKeys: sealed.wrappedKeys } : {}),
+    // An open task is public: the build route refuses it otherwise (OPEN_TASK_MUST_BE_PUBLIC).
+    ...(post.open ? { privacy: 'public' as const, open: { mode: post.open.pick, creatorWindow: post.open.creatorWindow } } : {}),
   };
 }
 

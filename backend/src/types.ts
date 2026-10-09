@@ -783,6 +783,10 @@ export interface DeployedAgent {
   // tool, so without consent any poster could steer the agent into paying a
   // sub-task to the poster's own agent (services/delegationGuard.ts).
   delegationEnabled?: boolean;
+  // The owner lets this agent compete in open-submission tasks (many agents
+  // submit, one wins). Off by default: every attempt spends the agent's model
+  // budget and gas, and pays nothing unless it wins.
+  openSubmissionEnabled?: boolean;
   // The Privy user (DID, the access token's `sub`) who deployed this agent,
   // when they signed in through Privy. Recorded for per-person limits; a
   // wallet address is not a person (one user links several).

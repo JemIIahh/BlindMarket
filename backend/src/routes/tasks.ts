@@ -22,13 +22,14 @@ import * as accountingService from '../services/accountingService.js';
 import { getDb } from '../services/database.js';
 import { getPool } from '../services/neonDb.js';
 import { config } from '../config.js';
+import { OPEN_PICK_WINDOWS } from '../services/openPickWindows.js';
 import { rooms } from '../services/socket.js';
 import { isSafeRegexSource } from '../services/rubricEngine.js';
-import { hostedVerifierNotOptedIn, VERIFIER_NOT_OPTED_IN_MESSAGE } from '../services/verifierDuty.js';
+import { hostedVerifierNotOptedIn, verifierChainUnsupported, VERIFIER_NOT_OPTED_IN_MESSAGE } from '../services/verifierDuty.js';
 import { refuseUnapprovedDelegation } from '../services/delegationGuard.js';
 import { withPosterAvatars } from '../services/avatarStore.js';
 import { closeRefundedA2ATask } from '../services/refundedTasks.js';
-import { BATCH_UNSUPPORTED, batchCreateSupport } from '../services/batchSupport.js';
+import { BATCH_UNSUPPORTED, batchCreateSupport, openCreateSupport } from '../services/batchSupport.js';
 import { MAX_BATCH_REQUEST, WALLET_POSTING_BUDGET_PER_MIN } from '../constants.js';
 import { batchWeight, createWalletBudget, postingIpBudget } from '../middleware/rateLimit.js';
 import { invalidRows, zodIssuesText, type RowError } from '../middleware/batchErrors.js';
@@ -67,6 +68,17 @@ const createTaskSchema = z.object({
   // Bounded, and shared with POST /a2a/tasks/index (services/verificationCriteriaSchema.ts).
   verificationCriteria: verificationCriteriaSchema.optional(),
   requiredCapabilities: z.array(z.enum(AGENT_CAPABILITIES as unknown as [string, ...string[]])).optional(),
+  // A task many agents submit to (docs/OPEN-SUBMISSION-TASKS.md): built as
+  // createTaskOpen. `mode` is who picks first: 'agent' its verifier, from
+  // the deadline; 'creator' the poster, for `creatorWindow` seconds.
+  open: z.object({
+    mode: z.enum(['agent', 'creator']),
+    creatorWindow: z.number().int().min(0),
+  }).optional(),
+  // What POST /a2a/tasks/index will be told. Required as 'public' with
+  // `open`: every result becomes readable once submissions close, and the
+  // index refuses an open task that is not public, after the escrow is funded.
+  privacy: z.enum(['private', 'public']).optional(),
   // 0G Storage root hash of the AES-encrypted brief. Required for the
   // encrypted-flow demo; absent for legacy/H2H tasks that don't use the
   // decryption pipeline.
@@ -507,12 +519,53 @@ function settlementToken(
 
 /**
  * Checked before the funding tx is built, so nothing is escrowed for a
- * verifier that would never act (security audit run 1, C04).
+ * verifier that would never act (security audit run 1, C04), or that the
+ * index would refuse once the escrow is funded: a registered agent that
+ * doesn't settle on the posting chain.
  */
-async function refuseOptedOutVerifier(data: TaskTerms): Promise<void> {
-  if (data.verificationMode === 'agent' && data.verifierAddress && await hostedVerifierNotOptedIn(data.verifierAddress)) {
+async function refuseUnusableVerifier(data: TaskTerms, chain: TaskChain, label: string): Promise<void> {
+  if (data.verificationMode !== 'agent' || !data.verifierAddress) return;
+  if (await verifierChainUnsupported(data.verifierAddress, chain)) {
+    throw new AppError(409, 'VERIFIER_CHAIN_UNSUPPORTED', `That verifier agent doesn't settle on ${label}. Choose another verifier.`);
+  }
+  if (await hostedVerifierNotOptedIn(data.verifierAddress)) {
     throw new AppError(409, 'VERIFIER_NOT_OPTED_IN', VERIFIER_NOT_OPTED_IN_MESSAGE);
   }
+}
+
+/**
+ * The open terms for createTaskOpen, checked as the escrow and the index
+ * route check what this request carries: open submission on, a public brief
+ * (no wrapped keys), a verifier that is not the poster, and a poster's window
+ * within MIN/MAX_CREATOR_WINDOW (none for the verifier's pick). The index
+ * body must also be public and name no targetExecutor or serviceId
+ * (OPEN_TASK_PINNED); this request does not carry those.
+ */
+function openTerms(data: z.infer<typeof createTaskSchema>, from: string): { verifier: string; mode: 0 | 1; creatorWindow: number } {
+  const open = data.open!;
+  if (!config.openSubmissionEnabled) {
+    throw new AppError(409, 'OPEN_SUBMISSION_DISABLED', 'This server does not take tasks that many agents submit to yet');
+  }
+  if (data.privacy !== 'public' || (data.wrappedKeys && Object.keys(data.wrappedKeys).length > 0)) {
+    throw new AppError(400, 'OPEN_TASK_MUST_BE_PUBLIC', "A task that takes submissions from many agents is public: send privacy 'public' and no wrappedKeys");
+  }
+  if (data.verificationMode !== 'agent' || !data.verifierAddress) {
+    throw new AppError(400, 'OPEN_TASK_NEEDS_VERIFIER', "A task that takes submissions from many agents needs a verifier agent: send verificationMode 'agent' with verifierAddress");
+  }
+  if (data.verifierAddress.toLowerCase() === from.toLowerCase()) {
+    throw new AppError(400, 'INVALID_VERIFIER', 'The poster cannot be their own verifier');
+  }
+  const creator = open.mode === 'creator';
+  if (creator ? open.creatorWindow < OPEN_PICK_WINDOWS.creatorMinSec || open.creatorWindow > OPEN_PICK_WINDOWS.creatorMaxSec : open.creatorWindow !== 0) {
+    throw new AppError(
+      400,
+      'INVALID_PICK_WINDOW',
+      creator
+        ? `Your pick window must be between ${OPEN_PICK_WINDOWS.creatorMinSec / 3600} hour and ${OPEN_PICK_WINDOWS.creatorMaxSec / 86_400} days`
+        : 'There is no poster window when the verifier picks: send creatorWindow 0',
+    );
+  }
+  return { verifier: data.verifierAddress, mode: creator ? 1 : 0, creatorWindow: open.creatorWindow };
 }
 
 /** The verifier the escrow call commits on-chain for this task, if any. */
@@ -563,22 +616,40 @@ tasksRouter.post('/', requireAuth, buildBudget, postingIpBudget, async (req: Aut
 
     const { amount: amountBigInt, duration: durationBigInt } = checkTaskTerms(data);
     const { chain, label, chainId, token } = postingTarget();
+    // Refused before the hash is claimed, like every other term.
+    const open = data.open ? openTerms(data, from) : undefined;
+    if (open && !(await openCreateSupport(chain))) {
+      throw new AppError(409, 'OPEN_SUBMISSION_UNSUPPORTED', `The ${label} escrow does not take tasks that many agents submit to yet`);
+    }
     await claimNewTaskHash(data.taskHash, from, randomUUID());
     const { tokenAddress, isNative } = settlementToken(chain, label, token, data.token);
-    await refuseOptedOutVerifier(data);
+    await refuseUnusableVerifier(data, chain, label);
 
-    const tx = await escrowService.buildCreateTaskOn(
-      chain,
-      from,
-      data.taskHash,
-      tokenAddress,
-      amountBigInt,
-      'general',
-      data.locationZone,
-      durationBigInt,
-      isNative ? amountBigInt : undefined,
-      committedVerifier(data),
-    );
+    const tx = open
+      ? await escrowService.buildCreateTaskOpenOn(
+        chain,
+        from,
+        data.taskHash,
+        tokenAddress,
+        amountBigInt,
+        'general',
+        data.locationZone,
+        durationBigInt,
+        isNative ? amountBigInt : undefined,
+        open,
+      )
+      : await escrowService.buildCreateTaskOn(
+        chain,
+        from,
+        data.taskHash,
+        tokenAddress,
+        amountBigInt,
+        'general',
+        data.locationZone,
+        durationBigInt,
+        isNative ? amountBigInt : undefined,
+        committedVerifier(data),
+      );
 
     // Note: A2A meta is NOT written here. Doing so unconditionally produced
     // phantom Redis entries (createTask reverts with TokenNotAllowed, gas
@@ -732,6 +803,11 @@ tasksRouter.post('/batch', requireAuth, buildBudget, postingIpBudget, async (req
         errors.push({ index, code: 'VALIDATION_ERROR', message: zodIssuesText(parsed.error) });
         return;
       }
+      // createTasks builds single-assignee tasks: an open one is refused, never built as one.
+      if (parsed.data.open) {
+        errors.push({ index, code: 'OPEN_TASK_NOT_BATCHED', message: 'A task that takes submissions from many agents is posted on its own, with POST /tasks.' });
+        return;
+      }
       const hash = parsed.data.taskHash.toLowerCase();
       const first = firstByHash.get(hash);
       if (first !== undefined) {
@@ -763,7 +839,7 @@ tasksRouter.post('/batch', requireAuth, buildBudget, postingIpBudget, async (req
         if (claimedBy && claimedBy !== holder) {
           throw new AppError(409, 'TASK_HASH_TAKEN', 'Another poster is already posting a task with this hash — post with a new brief');
         }
-        await refuseOptedOutVerifier(data);
+        await refuseUnusableVerifier(data, chain, label);
       } catch (err) {
         errors.push(batchTaskError(index, err));
       }

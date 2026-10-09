@@ -29,7 +29,7 @@ export type SpendStage = 'created' | 'approved' | 'funded' | 'indexed' | 'sent' 
  *  'deploy-batch' is a deploy_agents call: it holds which agents the key
  *  deploys (batchDigest), and each agent is its own 'deploy' spend under
  *  `<idempotencyKey>#<n>`, n counted from 1 as in the agent's name. */
-export type SpendKind = 'rent' | 'post' | 'post-batch' | 'cancel' | 'timeout' | 'deploy' | 'deploy-batch';
+export type SpendKind = 'rent' | 'post' | 'post-batch' | 'cancel' | 'timeout' | 'deploy' | 'deploy-batch' | 'pick';
 
 export interface SpendRecord {
   idempotencyKey: string;
@@ -75,6 +75,10 @@ export interface SpendRecord {
   routingSummary?: string;
   verificationMode?: string;
   verificationCriteria?: unknown;
+  /** post, open task only: the verifier agent committed on-chain (createTaskOpen). */
+  verifierAddress?: string;
+  /** post only: a task many agents submit to. `mode` is who picks first; `creatorWindow` the poster's seconds (0 when the verifier picks). */
+  open?: { mode: 'agent' | 'creator'; creatorWindow: number };
   requiredCapabilities?: string[];
   amountWei?: string;
   durationSecs?: number;

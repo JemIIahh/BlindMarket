@@ -26,9 +26,10 @@ const OTHER = '0x000000000000000000000000000000000000dead';
 const abi = JSON.parse(readFileSync(new URL('../abi/BlindEscrow.json', import.meta.url), 'utf-8'));
 const iface = new ethers.Interface(Array.isArray(abi) ? abi : abi.abi);
 
-const { verifierOptedOut } = vi.hoisted(() => ({ verifierOptedOut: { value: false } }));
+const { verifierOptedOut, verifierOffChain } = vi.hoisted(() => ({ verifierOptedOut: { value: false }, verifierOffChain: { value: false } }));
 vi.mock('../services/verifierDuty.js', () => ({
   hostedVerifierNotOptedIn: vi.fn(async () => verifierOptedOut.value),
+  verifierChainUnsupported: vi.fn(async () => verifierOffChain.value),
   VERIFIER_NOT_OPTED_IN_MESSAGE: 'not opted in',
 }));
 // Whether a hosted agent may post is services/delegationGuard.ts's own test;
@@ -112,6 +113,7 @@ beforeEach(() => {
   store.getTaskHashClaim.mockImplementation(async () => null);
   hashIndex.resolveCachedTaskByHash.mockImplementation(async () => null);
   verifierOptedOut.value = false;
+  verifierOffChain.value = false;
   estimateGas.mockResolvedValue(3_000_000n);
   Object.assign(cfg, { baseChainId: 84532, baseEscrowAddress: BASE_ESCROW, baseUsdcAddress: USDC, arcEscrowAddress: '' });
   Object.assign(chain, {
@@ -173,6 +175,14 @@ describe('POST /tasks/batch — a valid batch', () => {
 });
 
 describe('POST /tasks/batch — all or nothing', () => {
+  it('refuses a task many agents submit to: createTasks would build it for one agent', async () => {
+    const res = await batch([task(0), task(1, { open: { mode: 'creator', creatorWindow: 86_400 } })]);
+    expect(res.status).toBe(400);
+    expect(res.body.error.details.errors).toEqual([{ index: 1, code: 'OPEN_TASK_NOT_BATCHED', message: expect.stringContaining('POST /tasks') }]);
+    expect(store.claimTaskHash).not.toHaveBeenCalled();
+    expect(chain.buildUnsignedTx).not.toHaveBeenCalled();
+  });
+
   it('refuses the batch with 400 naming each invalid task by index, claiming nothing', async () => {
     const res = await batch([
       task(0),
@@ -231,6 +241,14 @@ describe('POST /tasks/batch — all or nothing', () => {
     const res = await request(app()).post('/api/v1/tasks/batch').send({ token: USDC, tasks: 'all of them' });
     expect(res.status).toBe(400);
     expect(res.body.error).toEqual({ code: 'VALIDATION_ERROR', message: 'tasks: Expected array, received string' });
+  });
+
+  it("refuses a task whose verifier agent doesn't settle on the posting chain, claiming nothing", async () => {
+    verifierOffChain.value = true;
+    const res = await batch([task(0), task(1, { verificationMode: 'agent', verifierAddress: VERIFIER })]);
+    expect(res.status).toBe(400);
+    expect(res.body.error.details.errors.map((e: any) => [e.index, e.code])).toEqual([[1, 'VERIFIER_CHAIN_UNSUPPORTED']]);
+    expect(store.claimTaskHash).not.toHaveBeenCalled();
   });
 
   it('names every refused task at once, from its own terms and from shared state', async () => {

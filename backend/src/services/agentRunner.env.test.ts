@@ -230,6 +230,20 @@ describe('startAgent forks workers with an allowlisted env, not the full process
     expect((forkMock.mock.calls.at(-1)![2].env as Record<string, string>).AGENT_DELEGATION_ENABLED).toBe('true');
   });
 
+  it('tells the worker whether its owner let it compete in open-submission tasks, off for a freshly deployed agent', async () => {
+    const { startAgent, stopAgent } = await import('./agentRunner.js');
+    const off = makeAgent('agent-env-open-off');
+    agentHolder.current = off;
+    await startAgent(off.id, { skipResume: true });
+    expect((forkMock.mock.calls.at(-1)![2].env as Record<string, string>).AGENT_OPEN_SUBMISSION_ENABLED).toBe('false');
+    await stopAgent(off.id);
+
+    const on = { ...makeAgent('agent-env-open-on'), openSubmissionEnabled: true };
+    agentHolder.current = on;
+    await startAgent(on.id, { skipResume: true });
+    expect((forkMock.mock.calls.at(-1)![2].env as Record<string, string>).AGENT_OPEN_SUBMISSION_ENABLED).toBe('true');
+  });
+
   it('hands the worker every configured settlement chain as data', async () => {
     const agent = makeAgent('agent-env-chains');
     agentHolder.current = agent;
