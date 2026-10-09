@@ -101,7 +101,7 @@ const a2a = vi.hoisted(() => ({
 vi.mock('../services/a2aStore.js', () => a2a);
 const agents = vi.hoisted(() => ({ getAgent: vi.fn() }));
 vi.mock('../services/agentStore.js', () => agents);
-const escrow = vi.hoisted(() => ({ openPhase: vi.fn(), submissionOf: vi.fn(), paused: vi.fn() }));
+const escrow = vi.hoisted(() => ({ openPhase: vi.fn(), submissionOf: vi.fn(), paused: vi.fn(), submissionCount: vi.fn(), effectiveDeadline: vi.fn(), getOpenTask: vi.fn() }));
 const builders = vi.hoisted(() => ({
   buildSubmitOpenOn: vi.fn(async (_c: string, from: string, taskId: number, evidenceHash: string) => ({ to: '0xescrow', from, data: `submitOpen(${taskId},${evidenceHash})` })),
   buildSelectWinnerOn: vi.fn(async (_c: string, from: string, taskId: number, winner: string, scorecard: string) => ({ to: '0xescrow', from, data: `selectWinner(${taskId},${winner},${scorecard})` })),
@@ -120,11 +120,12 @@ vi.mock('../services/openSubmissionSweep.js', () => ({
   PHASE: { Submissions: 0, CreatorPick: 1, VerifierPick: 2, BackupPick: 3, AdminResolve: 4, Closed: 5 },
 }));
 
-const { openSubmissionRouter, MAX_RESULT_BYTES, MAX_SCORECARD_BYTES, openEvidenceHash, scorecardHashOf } = await import('./openSubmission.js');
+const { openSubmissionRouter, MAX_RESULT_BYTES, MAX_SCORECARD_BYTES, openEvidenceHash, scorecardHashOf, _clearOpenStatusCache } = await import('./openSubmission.js');
 // Made at import, before any beforeEach clears the mocks.
 const budgetsMade = [...walletBudget.mock.calls];
 const { globalErrorHandler } = await import('../middleware/errorHandler.js');
 const store = await import('../services/openSubmissionStore.js');
+const taskChain = await import('../services/taskChain.js');
 
 function app() {
   const a = express();
@@ -187,6 +188,139 @@ describe('openEvidenceHash', () => {
     const resultData = { output: 'Done: the summary — 3 points ✓', agent: 'agent-7' };
     expect(openEvidenceHash(resultData, `0x${'ab'.repeat(32)}`)).toBe('0xf0c7c9b0b9ccb46409e4e35bc30f9aa94ecab88e24a57c256fff5535caa82839');
     expect(openEvidenceHash(resultData, null)).toBe('0x1b701a666ac7fbd05539f4c0fceac47f1793c207bca36cf5f85d514872767439');
+  });
+});
+
+describe('GET /tasks/:id/open-status', () => {
+  const status = () => request(app()).get(`/api/v1/a2a/tasks/${HASH}/open-status`);
+  beforeEach(() => {
+    _clearOpenStatusCache();
+    escrow.submissionCount.mockResolvedValue(4n);
+    escrow.effectiveDeadline.mockResolvedValue(BigInt(NOW + 3600));
+  });
+
+  it("tells anyone where the task stands, from the escrow, and when each window ends", async () => {
+    a2a.getMeta.mockResolvedValue(openMeta({ openPick: { mode: 'creator', creatorWindow: 86_400 } }));
+    escrow.openPhase.mockResolvedValue(0n);
+    const res = await status();
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({
+      taskHash: HASH,
+      onChainTaskId: '7',
+      chain: 'arc',
+      mode: 'creator',
+      phase: 'submissions',
+      paused: false,
+      submissions: 4,
+      windows: { submissionsEnd: NOW + 3600, creatorPickEnd: NOW + 3600 + 86_400, verifierPickEnd: NOW + 3600 + 86_400 + 172_800, backupPickEnd: NOW + 3600 + 86_400 + 2 * 172_800 },
+      outcome: null,
+      declined: null,
+    });
+  });
+
+  it('has no poster window when the verifier picks, and reports the outcome and a decline', async () => {
+    a2a.getMeta.mockResolvedValue(openMeta({ openPick: { mode: 'agent', creatorWindow: 0 } }));
+    escrow.openPhase.mockResolvedValue(5n);
+    await store.saveOutcome(REF, { kind: 'winner', winner: AGENT, judge: 'task_verifier', scorecardHash: '0x01' });
+    await store.saveDecline(REF, { verifier: VERIFIER, at: '2026-10-09T00:00:00.000Z' });
+    const { body } = await status();
+    expect(body.data).toMatchObject({ mode: 'agent', phase: 'closed', outcome: { kind: 'winner', winner: AGENT, judge: 'task_verifier' }, declined: { at: '2026-10-09T00:00:00.000Z' } });
+    expect(body.data.windows).toMatchObject({ creatorPickEnd: null, verifierPickEnd: NOW + 3600 + 172_800 });
+  });
+
+  it('reads how a closed task ended from the escrow until the indexer records it', async () => {
+    escrow.openPhase.mockResolvedValue(5n);
+    // A winner paid (TaskStatus.Completed), picked by the task verifier.
+    escrow.getOpenTask.mockResolvedValue({ closedBy: 2n });
+    builders.getTaskOn.mockResolvedValue({ agent: POSTER, worker: AGENT, status: 4 } as never);
+    expect((await status()).body.data.outcome).toEqual({ kind: 'winner', winner: AGENT, judge: 'task_verifier' });
+
+    // Refunded by the backup judge (TaskStatus.Cancelled).
+    _clearOpenStatusCache();
+    escrow.getOpenTask.mockResolvedValue({ closedBy: 3n });
+    builders.getTaskOn.mockResolvedValue({ agent: POSTER, worker: ethers.ZeroAddress, status: 5 } as never);
+    expect((await status()).body.data.outcome).toEqual({ kind: 'void', winner: null, judge: 'backup' });
+
+    // Cancelled by the poster: closed by no judge.
+    _clearOpenStatusCache();
+    escrow.getOpenTask.mockResolvedValue({ closedBy: 0n });
+    expect((await status()).body.data.outcome).toBeNull();
+
+    // A task read from a node behind the other read: no outcome rather than a wrong one.
+    _clearOpenStatusCache();
+    escrow.getOpenTask.mockResolvedValue({ closedBy: 2n });
+    builders.getTaskOn.mockResolvedValue({ agent: POSTER, worker: ethers.ZeroAddress, status: 0 } as never);
+    expect((await status()).body.data.outcome).toBeNull();
+  });
+
+  it('does not read the escrow for an outcome while the task is open, or once the indexer has it', async () => {
+    escrow.openPhase.mockResolvedValue(2n);
+    await status();
+    _clearOpenStatusCache();
+    escrow.openPhase.mockResolvedValue(5n);
+    await store.saveOutcome(REF, { kind: 'void', winner: null, judge: 'creator', scorecardHash: '0x01' });
+    expect((await status()).body.data.outcome).toEqual({ kind: 'void', winner: null, judge: 'creator' });
+    expect(escrow.getOpenTask).not.toHaveBeenCalled();
+  });
+
+  it('reads the escrow once per 15 seconds per task', async () => {
+    a2a.getMeta.mockResolvedValue(openMeta());
+    escrow.openPhase.mockResolvedValue(0n);
+    await status();
+    await status();
+    expect(escrow.submissionCount).toHaveBeenCalledTimes(1);
+  });
+
+  it('shares one set of escrow reads between simultaneous views', async () => {
+    // Hold the escrow read so all three views arrive while it is under way.
+    const waiting: Array<() => void> = [];
+    escrow.submissionCount.mockImplementation(() => new Promise((resolve) => waiting.push(() => resolve(4n))));
+    const views = Promise.all([status(), status(), status()]);
+    await new Promise((r) => setTimeout(r, 100));
+    waiting.forEach((go) => go());
+    const done = await views;
+    expect(done.map((r) => r.body.data.submissions)).toEqual([4, 4, 4]);
+    expect(escrow.submissionCount).toHaveBeenCalledTimes(1);
+  });
+
+  it("never serves one task's cached status for another", async () => {
+    const OTHER = '0x' + 'cd'.repeat(32);
+    vi.mocked(taskChain.resolveCachedTaskByHash).mockImplementation(async (hash: string) =>
+      ({ chain: 'arc', taskId: hash === OTHER ? '8' : '7' }) as never);
+    escrow.submissionCount.mockImplementation(async (id: number) => (id === 8 ? 1n : 4n));
+    await status();
+    const other = await request(app()).get(`/api/v1/a2a/tasks/${OTHER}/open-status`);
+    expect(other.body.data).toMatchObject({ taskHash: OTHER, onChainTaskId: '8', submissions: 1 });
+    vi.mocked(taskChain.resolveCachedTaskByHash).mockImplementation(async () => ({ chain: 'arc', taskId: '7' }) as never);
+  });
+
+  it('asks to retry while the task is not indexed yet', async () => {
+    vi.mocked(taskChain.resolveCachedTaskByHash).mockResolvedValueOnce(null as never);
+    const res = await status();
+    expect(res.status).toBe(503);
+    expect(res.body.error?.code ?? res.body.code).toBe('NOT_INDEXED');
+  });
+
+  it('is not there while open submission is off', async () => {
+    flag.on = false;
+    expect((await status()).status).toBe(404);
+  });
+});
+
+describe('GET /open-submission', () => {
+  it('says whether open submission is on, with the escrow windows, on or off, to anyone', async () => {
+    const on = await request(app()).get('/api/v1/a2a/open-submission');
+    expect(on.status).toBe(200);
+    expect(on.body.data).toMatchObject({
+      enabled: true,
+      pickModes: ['agent', 'creator'],
+      windows: { creatorMinSec: 3600, creatorMaxSec: 604_800, verifierSec: 172_800, backupSec: 172_800 },
+      maxResultBytes: MAX_RESULT_BYTES,
+    });
+    flag.on = false;
+    const off = await request(app()).get('/api/v1/a2a/open-submission');
+    expect(off.status).toBe(200);
+    expect(off.body.data.enabled).toBe(false);
   });
 });
 

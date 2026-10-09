@@ -11,7 +11,7 @@ import { UserFacingError } from './friendlyError';
  * One mutation for both used to reset a switch on any failure, so an opt-in
  * that was saved looked as if it was not.
  */
-export type OwnerToggle = 'verifier' | 'delegation';
+export type OwnerToggle = 'verifier' | 'delegation' | 'open-submission';
 
 export interface OwnerToggleResult<A> {
   /** The setting as the server stored it. */
@@ -24,7 +24,11 @@ export interface OwnerToggleResult<A> {
 
 type Post = <T>(path: string, body: unknown) => Promise<T>;
 
-const FIELD: Record<OwnerToggle, string> = { verifier: 'verifierEnabled', delegation: 'delegationEnabled' };
+const FIELD: Record<OwnerToggle, string> = {
+  verifier: 'verifierEnabled',
+  delegation: 'delegationEnabled',
+  'open-submission': 'openSubmissionEnabled',
+};
 
 /**
  * Stop and start the agent so it runs on what was just saved. Never throws:

@@ -18,7 +18,7 @@ function backend(toggle: OwnerToggle, opts: { stored?: boolean; fail?: Record<st
     const err = opts.fail?.[route];
     if (err) throw err;
     if (route === toggle) {
-      const field = toggle === 'verifier' ? 'verifierEnabled' : 'delegationEnabled';
+      const field = { verifier: 'verifierEnabled', delegation: 'delegationEnabled', 'open-submission': 'openSubmissionEnabled' }[toggle];
       return { [field]: opts.stored ?? (body as { enabled: boolean }).enabled, note: 'Restart the agent for the change to take effect.' } as T;
     }
     return { id: 'agent-1', status: route === 'stop' ? 'stopped' : 'running' } as T;
@@ -27,7 +27,7 @@ function backend(toggle: OwnerToggle, opts: { stored?: boolean; fail?: Record<st
 }
 
 describe('saveOwnerToggle', () => {
-  for (const toggle of ['delegation', 'verifier'] as const) {
+  for (const toggle of ['delegation', 'verifier', 'open-submission'] as const) {
     it(`keeps ${toggle} on when the save worked and only the restart failed, and names the restart`, async () => {
       const { post, calls } = backend(toggle, { fail: { start: apiError('AGENT_ACTION_FAILED', 400, 'No free worker slot') } });
       const out = await saveOwnerToggle(post, 'agent-1', toggle, true, true);

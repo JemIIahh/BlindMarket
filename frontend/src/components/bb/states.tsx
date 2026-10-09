@@ -91,11 +91,11 @@ type Tone = 'ok' | 'warn' | 'err' | 'info' | 'neutral' | 'accent';
 
 const STATUS_TONE: Record<string, Tone> = {
   // open for work — the accent, so available tasks stand out
-  open: 'accent', posted: 'accent', funded: 'accent',
+  open: 'accent', posted: 'accent', funded: 'accent', collecting: 'accent', taking_submissions: 'accent',
   // in flight or awaiting a verdict — someone is on it
   assigned: 'info', accepted: 'info', in_progress: 'info', executing: 'info',
   active: 'info', submitted: 'info', verifying: 'info', pending: 'info',
-  awaiting_verification: 'info',
+  awaiting_verification: 'info', picking_winner: 'info',
   // needs the owner's attention
   paused: 'warn',
   // done — green
