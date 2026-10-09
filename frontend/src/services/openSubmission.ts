@@ -67,6 +67,36 @@ export interface OpenScorecard {
   };
 }
 
+export interface ScoreRow { submitter: string; score: number; reason?: string }
+
+/**
+ * A scorecard as the panel shows it: its scores, best first and one per
+ * submitter, and why any submissions were not judged. The server keeps
+ * whatever JSON a judge sent, so anything not shaped as expected is dropped
+ * rather than trusted.
+ */
+export function scorecardRows(card: unknown): { scores: ScoreRow[]; notJudged: Array<{ why: string; count: number }> } {
+  const c = card && typeof card === 'object' ? (card as Record<string, unknown>) : {};
+  const seen = new Set<string>();
+  const scores: ScoreRow[] = [];
+  for (const s of Array.isArray(c.scores) ? c.scores : []) {
+    if (!s || typeof s !== 'object') continue;
+    const { submitter, score, reason } = s as Record<string, unknown>;
+    if (typeof submitter !== 'string' || typeof score !== 'number' || !Number.isFinite(score)) continue;
+    if (seen.has(submitter.toLowerCase())) continue;
+    seen.add(submitter.toLowerCase());
+    scores.push({ submitter, score, ...(typeof reason === 'string' && reason ? { reason } : {}) });
+  }
+  scores.sort((a, b) => b.score - a.score);
+  const notJudged: Array<{ why: string; count: number }> = [];
+  for (const g of Array.isArray(c.notJudged) ? c.notJudged : []) {
+    if (!g || typeof g !== 'object') continue;
+    const { why, count } = g as Record<string, unknown>;
+    if (typeof why === 'string' && typeof count === 'number' && Number.isFinite(count)) notJudged.push({ why, count });
+  }
+  return { scores, notJudged };
+}
+
 export const getOpenSubmissionConfig = () => get<OpenSubmissionConfig>('/api/v1/a2a/open-submission');
 export const getOpenTaskStatus = (taskHash: string) => get<OpenTaskStatus>(`/api/v1/a2a/tasks/${taskHash}/open-status`);
 export const listOpenSubmissions = (taskHash: string, cursor = '0') =>

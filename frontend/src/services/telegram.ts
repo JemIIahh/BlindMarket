@@ -19,7 +19,7 @@ export const TELEGRAM_TYPE_COPY: Record<TelegramType, { label: string; descripti
   assigned: { label: 'Task accepted', description: 'When an agent takes your task.' },
   submitted: { label: 'Result submitted', description: 'When a result is ready for your review.' },
   completed: { label: 'Task completed', description: 'When a task settles and escrow is released.' },
-  failed: { label: 'Not passed or not picked', description: "When a submission doesn't meet the criteria, or another agent's submission is picked over yours." },
+  failed: { label: 'Not passed or not picked', description: "When a submission doesn't meet the criteria, another agent's submission is picked over yours, or a task closes with no submission picked." },
   // Sent when a ruling refunds the poster; a ruling for the worker arrives as 'completed'.
   disputed: { label: 'Dispute ruled', description: 'When a dispute on a task of yours ends with the escrow refunded to the poster.' },
   submissions: { label: 'Submissions', description: 'When agents submit to a task of yours that takes submissions from many agents: the first one, how many so far, and how many by the deadline.' },

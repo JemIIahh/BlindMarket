@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { canCancelOpen, canReadSubmissions, isOpenTask, openPhaseCopy, openRowLabel, openStatusLabel, submissionsText, timeLeft, windowText } from './openTask';
 import type { OpenTaskStatus } from '../services/openSubmission';
+import { TaskStatus } from '../types/api';
 
 const NOW = 1_800_000_000_000;
 const T = NOW / 1000;
@@ -34,11 +35,21 @@ describe('open task labels', () => {
   });
 
   it('names where the task is', () => {
-    expect(openStatusLabel(status())).toBe('Taking submissions');
-    expect(openStatusLabel(status({ phase: 'verifier_pick' }))).toBe('Picking winner');
-    expect(openStatusLabel(status({ phase: 'closed', outcome: { kind: 'winner', winner: '0x1', judge: 'creator' } }))).toBe('Completed');
-    expect(openStatusLabel(status({ phase: 'closed', outcome: { kind: 'void', winner: null, judge: 'backup' } }))).toBe('Refunded');
-    expect(openStatusLabel(status({ phase: 'closed' }))).toBe('Cancelled');
+    expect(openStatusLabel(status(), 'Funded')).toBe('Taking submissions');
+    expect(openStatusLabel(status({ phase: 'verifier_pick' }), 'Funded')).toBe('Picking winner');
+    expect(openStatusLabel(status({ phase: 'closed', outcome: { kind: 'winner', winner: '0x1', judge: 'creator' } }), 'Completed')).toBe('Completed');
+    expect(openStatusLabel(status({ phase: 'closed', outcome: { kind: 'void', winner: null, judge: 'backup' } }), 'Cancelled')).toBe('Refunded');
+    expect(openStatusLabel(status({ phase: 'closed' }), 'Cancelled')).toBe('Cancelled');
+  });
+
+  it('says nobody submitted once submissions closed with none', () => {
+    expect(openStatusLabel(status({ phase: 'verifier_pick', submissions: 0 }), 'Funded')).toBe('No submissions');
+    expect(openStatusLabel(status({ phase: 'submissions', submissions: 0 }), 'Funded')).toBe('Taking submissions');
+    expect(openStatusLabel(status({ phase: 'closed', submissions: 0 }), 'Cancelled')).toBe('Cancelled');
+  });
+
+  it("shows the escrow status's label while the status loads or fails", () => {
+    expect(openStatusLabel(undefined, 'Completed')).toBe('Completed');
   });
 
   it('counts and times in plain words', () => {
@@ -86,6 +97,19 @@ describe('openPhaseCopy', () => {
     expect(openPhaseCopy(status({ phase: 'closed', submissions: 0 }), ctx()).lead).toBe('Cancelled.');
   });
 
+  it('with no submissions past the deadline: the poster cancels, nobody picks', () => {
+    for (const phase of ['creator_pick', 'verifier_pick', 'backup_pick', 'admin'] as const) {
+      const s = status({ phase, submissions: 0 });
+      expect(openPhaseCopy(s, ctx('poster'))).toEqual({ tone: 'warn', lead: 'No submissions.', body: 'Nobody submitted before the deadline. Cancel the task to get the escrow back.' });
+      expect(openPhaseCopy(s, ctx('verifier')).body).toBe('Nobody submitted before the deadline. The poster can cancel the task and get the escrow back.');
+    }
+  });
+
+  it('in the backup window: whether the verifier declined or ran out of time', () => {
+    expect(openPhaseCopy(status({ phase: 'backup_pick' }), ctx()).body).toMatch(/^The verifier agent did not pick in time\. /);
+    expect(openPhaseCopy(status({ phase: 'backup_pick', declined: { at: 'x' } }), ctx()).body).toMatch(/^The verifier agent found no submission acceptable\. /);
+  });
+
   it('says when a pause moves the times, never once closed', () => {
     expect(openPhaseCopy(status({ paused: true }), ctx()).body).toMatch(/paused, which moves these times later\.$/);
     expect(openPhaseCopy(status({ paused: true, phase: 'closed' }), ctx()).body).not.toMatch(/paused/);
@@ -93,19 +117,26 @@ describe('openPhaseCopy', () => {
 });
 
 describe('what the viewer may do', () => {
-  it('cancels while nobody has submitted, until it closes (the escrow refuses once anyone has)', () => {
-    expect(canCancelOpen(status({ submissions: 0 }))).toBe(true);
-    expect(canCancelOpen(status({ submissions: 0, phase: 'creator_pick' }))).toBe(true);
-    expect(canCancelOpen(status())).toBe(false);
-    expect(canCancelOpen(status({ submissions: 0, phase: 'closed' }))).toBe(false);
-    expect(canCancelOpen(undefined)).toBe(false);
+  it('cancels as the escrow allows: funded, nobody has submitted, not paused', () => {
+    expect(canCancelOpen(status({ submissions: 0 }), TaskStatus.Funded)).toBe(true);
+    expect(canCancelOpen(status({ submissions: 0, phase: 'creator_pick' }), TaskStatus.Funded)).toBe(true);
+    expect(canCancelOpen(status(), TaskStatus.Funded)).toBe(false);
+    expect(canCancelOpen(status({ submissions: 0, phase: 'closed' }), TaskStatus.Funded)).toBe(false);
+    expect(canCancelOpen(status({ submissions: 0, paused: true }), TaskStatus.Funded)).toBe(false);
+    // Cancelled on-chain, before the status refreshes.
+    expect(canCancelOpen(status({ submissions: 0 }), TaskStatus.Cancelled)).toBe(false);
+    expect(canCancelOpen(undefined, TaskStatus.Funded)).toBe(false);
   });
 
-  it('labels a list row from its listing alone', () => {
+  it('labels a list row from its listing and escrow status', () => {
     expect(openRowLabel('collecting', T + 60, T)).toBe('taking submissions');
-    expect(openRowLabel('collecting', T - 60, T)).toBe('picking winner');
+    expect(openRowLabel('collecting', T - 60, T)).toBe('deadline passed');
     expect(openRowLabel('completed', T - 60, T)).toBe('completed');
     expect(openRowLabel('failed', T - 60, T)).toBe('refunded');
+    // The escrow closed it before the listing caught up.
+    expect(openRowLabel('collecting', T - 60, T, TaskStatus.Completed)).toBe('completed');
+    expect(openRowLabel('collecting', T + 60, T, TaskStatus.Cancelled)).toBe('refunded');
+    expect(openRowLabel('collecting', T + 60, T, TaskStatus.Funded)).toBe('taking submissions');
   });
 
   it('reads submissions: the poster and verifier any time, anyone once they close', () => {

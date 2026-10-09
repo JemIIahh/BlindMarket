@@ -101,7 +101,7 @@ const a2a = vi.hoisted(() => ({
 vi.mock('../services/a2aStore.js', () => a2a);
 const agents = vi.hoisted(() => ({ getAgent: vi.fn() }));
 vi.mock('../services/agentStore.js', () => agents);
-const escrow = vi.hoisted(() => ({ openPhase: vi.fn(), submissionOf: vi.fn(), paused: vi.fn(), submissionCount: vi.fn(), effectiveDeadline: vi.fn() }));
+const escrow = vi.hoisted(() => ({ openPhase: vi.fn(), submissionOf: vi.fn(), paused: vi.fn(), submissionCount: vi.fn(), effectiveDeadline: vi.fn(), getOpenTask: vi.fn() }));
 const builders = vi.hoisted(() => ({
   buildSubmitOpenOn: vi.fn(async (_c: string, from: string, taskId: number, evidenceHash: string) => ({ to: '0xescrow', from, data: `submitOpen(${taskId},${evidenceHash})` })),
   buildSelectWinnerOn: vi.fn(async (_c: string, from: string, taskId: number, winner: string, scorecard: string) => ({ to: '0xescrow', from, data: `selectWinner(${taskId},${winner},${scorecard})` })),
@@ -125,6 +125,7 @@ const { openSubmissionRouter, MAX_RESULT_BYTES, MAX_SCORECARD_BYTES, openEvidenc
 const budgetsMade = [...walletBudget.mock.calls];
 const { globalErrorHandler } = await import('../middleware/errorHandler.js');
 const store = await import('../services/openSubmissionStore.js');
+const taskChain = await import('../services/taskChain.js');
 
 function app() {
   const a = express();
@@ -227,12 +228,71 @@ describe('GET /tasks/:id/open-status', () => {
     expect(body.data.windows).toMatchObject({ creatorPickEnd: null, verifierPickEnd: NOW + 3600 + 172_800 });
   });
 
+  it('reads how a closed task ended from the escrow until the indexer records it', async () => {
+    escrow.openPhase.mockResolvedValue(5n);
+    // A winner paid (TaskStatus.Completed), picked by the task verifier.
+    escrow.getOpenTask.mockResolvedValue({ closedBy: 2n });
+    builders.getTaskOn.mockResolvedValue({ agent: POSTER, worker: AGENT, status: 4 } as never);
+    expect((await status()).body.data.outcome).toEqual({ kind: 'winner', winner: AGENT, judge: 'task_verifier' });
+
+    // Refunded by the backup judge (TaskStatus.Cancelled).
+    _clearOpenStatusCache();
+    escrow.getOpenTask.mockResolvedValue({ closedBy: 3n });
+    builders.getTaskOn.mockResolvedValue({ agent: POSTER, worker: ethers.ZeroAddress, status: 5 } as never);
+    expect((await status()).body.data.outcome).toEqual({ kind: 'void', winner: null, judge: 'backup' });
+
+    // Cancelled by the poster: closed by no judge.
+    _clearOpenStatusCache();
+    escrow.getOpenTask.mockResolvedValue({ closedBy: 0n });
+    expect((await status()).body.data.outcome).toBeNull();
+  });
+
+  it('does not read the escrow for an outcome while the task is open, or once the indexer has it', async () => {
+    escrow.openPhase.mockResolvedValue(2n);
+    await status();
+    _clearOpenStatusCache();
+    escrow.openPhase.mockResolvedValue(5n);
+    await store.saveOutcome(REF, { kind: 'void', winner: null, judge: 'creator', scorecardHash: '0x01' });
+    expect((await status()).body.data.outcome).toEqual({ kind: 'void', winner: null, judge: 'creator' });
+    expect(escrow.getOpenTask).not.toHaveBeenCalled();
+  });
+
   it('reads the escrow once per 15 seconds per task', async () => {
     a2a.getMeta.mockResolvedValue(openMeta());
     escrow.openPhase.mockResolvedValue(0n);
     await status();
     await status();
     expect(escrow.submissionCount).toHaveBeenCalledTimes(1);
+  });
+
+  it('shares one set of escrow reads between simultaneous views', async () => {
+    // Hold the escrow read so all three views arrive while it is under way.
+    const waiting: Array<() => void> = [];
+    escrow.submissionCount.mockImplementation(() => new Promise((resolve) => waiting.push(() => resolve(4n))));
+    const views = Promise.all([status(), status(), status()]);
+    await new Promise((r) => setTimeout(r, 100));
+    waiting.forEach((go) => go());
+    const done = await views;
+    expect(done.map((r) => r.body.data.submissions)).toEqual([4, 4, 4]);
+    expect(escrow.submissionCount).toHaveBeenCalledTimes(1);
+  });
+
+  it("never serves one task's cached status for another", async () => {
+    const OTHER = '0x' + 'cd'.repeat(32);
+    vi.mocked(taskChain.resolveCachedTaskByHash).mockImplementation(async (hash: string) =>
+      ({ chain: 'arc', taskId: hash === OTHER ? '8' : '7' }) as never);
+    escrow.submissionCount.mockImplementation(async (id: number) => (id === 8 ? 1n : 4n));
+    await status();
+    const other = await request(app()).get(`/api/v1/a2a/tasks/${OTHER}/open-status`);
+    expect(other.body.data).toMatchObject({ taskHash: OTHER, onChainTaskId: '8', submissions: 1 });
+    vi.mocked(taskChain.resolveCachedTaskByHash).mockImplementation(async () => ({ chain: 'arc', taskId: '7' }) as never);
+  });
+
+  it('asks to retry while the task is not indexed yet', async () => {
+    vi.mocked(taskChain.resolveCachedTaskByHash).mockResolvedValueOnce(null as never);
+    const res = await status();
+    expect(res.status).toBe(503);
+    expect(res.body.error?.code ?? res.body.code).toBe('NOT_INDEXED');
   });
 
   it('is not there while open submission is off', async () => {

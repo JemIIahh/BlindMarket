@@ -74,8 +74,13 @@ export const MAX_SCORECARD_BYTES = 32 * 1024;
 const VERIFIER_LIST_SLACK_SEC = 30 * 86_400;
 /** Most tasks one page of GET /open-verifications returns: live windows first. */
 const VERIFIER_LIST_MAX = 50;
-/** The escrow's VERIFIER_PICK_WINDOW. */
-const VERIFIER_PICK_WINDOW_SEC = 48 * 3600;
+/** The escrow's pick windows (BlindEscrow: MIN/MAX_CREATOR_WINDOW, VERIFIER/BACKUP_PICK_WINDOW). */
+export const OPEN_PICK_WINDOWS = {
+  creatorMinSec: 3600,
+  creatorMaxSec: 7 * 86_400,
+  verifierSec: 48 * 3600,
+  backupSec: 48 * 3600,
+};
 
 /** 404 before anything else while open submission is off, signed in or not. */
 const enabledOnly: RequestHandler = (_req, _res, next) => {
@@ -193,14 +198,6 @@ async function phaseOf(chain: TaskChain, taskId: number): Promise<number> {
   return Number(await escrowFor(chain).openPhase(taskId));
 }
 
-/** The escrow's pick windows (BlindEscrow: MIN/MAX_CREATOR_WINDOW, VERIFIER/BACKUP_PICK_WINDOW). */
-export const OPEN_PICK_WINDOWS = {
-  creatorMinSec: 3600,
-  creatorMaxSec: 7 * 86_400,
-  verifierSec: 48 * 3600,
-  backupSec: 48 * 3600,
-};
-
 /**
  * GET /api/v1/a2a/open-submission
  * Public, and answers whether or not open submission is on, so clients show
@@ -230,17 +227,73 @@ const PHASE_KEYS: Record<number, string> = {
   [PHASE.Closed]: 'closed',
 };
 
-/** How long an open task's status is served from memory: four escrow reads per view otherwise. */
+/** How long an open task's status is served from memory: six escrow reads per view otherwise. */
 const STATUS_TTL_MS = 15_000;
 const statusCache = new Map<string, { at: number; data: Record<string, unknown> }>();
+/** Status reads under way, so simultaneous views of one task share one set of escrow reads. */
+const statusReads = new Map<string, Promise<Record<string, unknown>>>();
+
+/** The escrow's Judge enum; 0 (None) closes nothing, as a cancel with no submission. */
+const JUDGE_KEYS: Record<number, store.OpenJudge> = { 1: 'creator', 2: 'task_verifier', 3: 'backup', 4: 'admin' };
+/** The escrow's TaskStatus.Completed: a winner was paid. */
+const TASK_COMPLETED = 4;
+
+/**
+ * How a closed open task ended, read from the escrow: for the moments after
+ * it closes, before the event indexer has recorded the outcome. Null for a
+ * cancel (closed by no judge).
+ */
+async function closedOutcomeOnChain(chain: TaskChain, taskId: number): Promise<{ kind: 'winner' | 'void'; winner: string | null; judge: store.OpenJudge } | null> {
+  const [open, task] = await Promise.all([escrowFor(chain).getOpenTask(taskId), getTaskOn(chain, taskId)]);
+  const judge = JUDGE_KEYS[Number(open.closedBy)];
+  if (!judge) return null;
+  return task.status === TASK_COMPLETED ? { kind: 'winner', winner: task.worker, judge } : { kind: 'void', winner: null, judge };
+}
+
+async function readOpenStatus(taskHash: string, meta: A2ATaskMeta, chain: TaskChain, taskId: number, ref: store.TaskRef): Promise<Record<string, unknown>> {
+  const escrow = escrowFor(chain);
+  const [phase, count, paused, deadline, stored, decline] = await Promise.all([
+    phaseOf(chain, taskId),
+    escrow.submissionCount(taskId),
+    escrow.paused(),
+    escrow.effectiveDeadline(taskId),
+    store.getOutcome(ref),
+    store.getDecline(ref),
+  ]);
+  const phaseKey = PHASE_KEYS[phase] ?? 'closed';
+  const outcome = stored
+    ? { kind: stored.kind, winner: stored.winner ?? null, judge: stored.judge }
+    : phaseKey === 'closed' ? await closedOutcomeOnChain(chain, taskId) : null;
+  const mode = meta.openPick?.mode ?? 'agent';
+  const deadlineSec = Number(deadline);
+  const creatorPickEnd = mode === 'creator' ? deadlineSec + (meta.openPick?.creatorWindow ?? 0) : null;
+  const verifierPickEnd = (creatorPickEnd ?? deadlineSec) + OPEN_PICK_WINDOWS.verifierSec;
+  return {
+    taskHash,
+    onChainTaskId: String(taskId),
+    chain,
+    mode,
+    phase: phaseKey,
+    paused: Boolean(paused),
+    submissions: Number(count),
+    windows: {
+      submissionsEnd: deadlineSec,
+      creatorPickEnd,
+      verifierPickEnd,
+      backupPickEnd: verifierPickEnd + OPEN_PICK_WINDOWS.backupSec,
+    },
+    outcome,
+    declined: decline ? { at: decline.at } : null,
+  };
+}
 
 /**
  * GET /api/v1/a2a/tasks/:id/open-status
  * Public: where an open task stands, read from the escrow (its phase, its
  * submission count, its deadline as a pause moved it, whether it is
  * paused), when each pick window ends, and how it ended (winner or void,
- * and by which judge) or that its verifier declined. What a task page shows
- * to anyone; the results stay behind GET /submissions.
+ * and by which judge; null for a cancel) or that its verifier declined.
+ * What a task page shows to anyone; the results stay behind GET /submissions.
  */
 openSubmissionRouter.get('/tasks/:id/open-status', enabledOnly, async (req, res, next) => {
   try {
@@ -250,36 +303,12 @@ openSubmissionRouter.get('/tasks/:id/open-status', enabledOnly, async (req, res,
       res.json({ success: true, data: cached.data } as ApiResponse);
       return;
     }
-    const escrow = escrowFor(chain);
-    const [phase, count, paused, deadline, outcome, decline] = await Promise.all([
-      phaseOf(chain, taskId),
-      escrow.submissionCount(taskId),
-      escrow.paused(),
-      escrow.effectiveDeadline(taskId),
-      store.getOutcome(ref),
-      store.getDecline(ref),
-    ]);
-    const mode = meta.openPick?.mode ?? 'agent';
-    const deadlineSec = Number(deadline);
-    const creatorPickEnd = mode === 'creator' ? deadlineSec + (meta.openPick?.creatorWindow ?? 0) : null;
-    const verifierPickEnd = (creatorPickEnd ?? deadlineSec) + OPEN_PICK_WINDOWS.verifierSec;
-    const data = {
-      taskHash,
-      onChainTaskId: String(taskId),
-      chain,
-      mode,
-      phase: PHASE_KEYS[phase] ?? 'closed',
-      paused: Boolean(paused),
-      submissions: Number(count),
-      windows: {
-        submissionsEnd: deadlineSec,
-        creatorPickEnd,
-        verifierPickEnd,
-        backupPickEnd: verifierPickEnd + OPEN_PICK_WINDOWS.backupSec,
-      },
-      outcome: outcome ? { kind: outcome.kind, winner: outcome.winner ?? null, judge: outcome.judge } : null,
-      declined: decline ? { at: decline.at } : null,
-    };
+    let read = statusReads.get(ref);
+    if (!read) {
+      read = readOpenStatus(taskHash, meta, chain, taskId, ref).finally(() => statusReads.delete(ref));
+      statusReads.set(ref, read);
+    }
+    const data = await read;
     statusCache.set(ref, { at: Date.now(), data });
     if (statusCache.size > 5000) statusCache.clear();
     res.json({ success: true, data } as ApiResponse);
@@ -728,7 +757,7 @@ openSubmissionRouter.get('/open-verifications', enabledOnly, requireAuth, async 
         if (meta.submissionMode !== 'open' || state.status !== 'collecting' || !onCurrentNetwork(meta)) return false;
         if (!meta.verifierAddress || !wallets.has(meta.verifierAddress.toLowerCase())) return false;
         const opensAt = verifierWindowOpensAt(meta);
-        return opensAt !== null && nowSec >= opensAt && nowSec < opensAt + VERIFIER_PICK_WINDOW_SEC + VERIFIER_LIST_SLACK_SEC;
+        return opensAt !== null && nowSec >= opensAt && nowSec < opensAt + OPEN_PICK_WINDOWS.verifierSec + VERIFIER_LIST_SLACK_SEC;
       });
     // Each task's on-chain id, and whether this verifier already declined it,
     // before paging: a declined task is not its work any more, so it takes
@@ -736,7 +765,7 @@ openSubmissionRouter.get('/open-verifications', enabledOnly, requireAuth, async 
     const resolvedAll = await Promise.all(inWindow.map(async (t) => {
       const resolved = await resolveCachedTaskByHash(t.meta.taskId).catch(() => null);
       const declined = resolved ? !!(await store.getDecline(store.taskRef(resolved.chain, resolved.taskId))) : false;
-      return { ...t, resolved, declined, closesAt: verifierWindowOpensAt(t.meta)! + VERIFIER_PICK_WINDOW_SEC };
+      return { ...t, resolved, declined, closesAt: verifierWindowOpensAt(t.meta)! + OPEN_PICK_WINDOWS.verifierSec };
     }));
     const listed = resolvedAll
       .filter((t) => !t.declined)
@@ -751,7 +780,7 @@ openSubmissionRouter.get('/open-verifications', enabledOnly, requireAuth, async 
       meta: { ...a2aStore.projectPublicMeta(meta), ...(meta.verificationCriteria ? { verificationCriteria: meta.verificationCriteria } : {}) },
       onChainTaskId: resolved ? String(resolved.taskId) : null,
       submissions: resolved ? await store.recordedSubmissionCount(store.taskRef(resolved.chain, resolved.taskId)) : 0,
-      window: { opensAt: closesAt - VERIFIER_PICK_WINDOW_SEC, closesAt },
+      window: { opensAt: closesAt - OPEN_PICK_WINDOWS.verifierSec, closesAt },
     })));
     const response: ApiResponse = { success: true, data: { tasks, total: listed.length, offset, limit } };
     res.json(response);

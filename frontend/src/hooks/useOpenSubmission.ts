@@ -17,18 +17,18 @@ export function useOpenSubmissionConfig() {
   });
 }
 
-/** Where an open task stands, refreshed every 30 s while the page is open. */
+/** Where an open task stands, refreshed every 30 s while the page is open, until it closes. */
 export function useOpenTaskStatus(taskHash: string | undefined, enabled: boolean) {
   return useQuery({
     queryKey: ['open-submission', 'status', taskHash],
     queryFn: () => getOpenTaskStatus(taskHash!),
     enabled: enabled && !!taskHash,
-    refetchInterval: 30_000,
+    refetchInterval: (q) => (q.state.data?.phase === 'closed' ? false : 30_000),
   });
 }
 
-/** An open task's submissions, page by page (signed in). */
-export function useOpenSubmissions(taskHash: string | undefined, enabled: boolean) {
+/** An open task's submissions, page by page (signed in); refreshed every 30 s while `live`. */
+export function useOpenSubmissions(taskHash: string | undefined, enabled: boolean, live: boolean) {
   const { isAuthenticated } = useAuth();
   return useInfiniteQuery({
     queryKey: ['open-submission', 'submissions', taskHash],
@@ -36,6 +36,7 @@ export function useOpenSubmissions(taskHash: string | undefined, enabled: boolea
     initialPageParam: '0',
     getNextPageParam: (last) => (last.cursor && last.cursor !== '0' ? last.cursor : undefined),
     enabled: enabled && !!taskHash && isAuthenticated,
+    refetchInterval: live ? 30_000 : false,
     retry: false,
   });
 }

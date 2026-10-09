@@ -1,4 +1,5 @@
 import type { OpenJudge, OpenTaskStatus } from '../services/openSubmission';
+import { TaskStatus } from '../types/api';
 
 /**
  * What an open-submission task (docs/OPEN-SUBMISSION-TASKS.md) shows on its
@@ -12,10 +13,19 @@ export function isOpenTask(meta?: { submissionMode?: string } | null): boolean {
   return meta?.submissionMode === 'open';
 }
 
-/** The status chip: where the task is, not the escrow's single-worker status. */
-export function openStatusLabel(status: OpenTaskStatus | undefined): string {
-  if (!status) return 'Taking submissions';
+/** True once submissions closed with none: nobody can pick, and only the poster can get the escrow back. */
+function noneSubmitted(status: OpenTaskStatus): boolean {
+  return status.submissions === 0 && status.phase !== 'submissions' && status.phase !== 'closed';
+}
+
+/**
+ * The status chip: where the task is, not the escrow's single-worker status.
+ * `fallback` (the escrow status's label) while the status loads or fails.
+ */
+export function openStatusLabel(status: OpenTaskStatus | undefined, fallback: string): string {
+  if (!status) return fallback;
   if (status.phase === 'submissions') return 'Taking submissions';
+  if (noneSubmitted(status)) return 'No submissions';
   if (status.phase !== 'closed') return 'Picking winner';
   if (status.outcome?.kind === 'winner') return 'Completed';
   if (status.outcome?.kind === 'void') return 'Refunded';
@@ -81,6 +91,11 @@ export function openPhaseCopy(status: OpenTaskStatus, ctx: CopyContext): PhaseCo
   const n = status.submissions;
   const paused = status.paused && status.phase !== 'closed' ? ' The escrow is paused, which moves these times later.' : '';
   const copy = ((): PhaseCopy => {
+    if (noneSubmitted(status)) {
+      return viewer === 'poster'
+        ? { tone: 'warn', lead: 'No submissions.', body: 'Nobody submitted before the deadline. Cancel the task to get the escrow back.' }
+        : { tone: 'neutral', lead: 'No submissions.', body: 'Nobody submitted before the deadline. The poster can cancel the task and get the escrow back.' };
+    }
     switch (status.phase) {
       case 'submissions': {
         const next = status.mode === 'creator' && w.creatorPickEnd
@@ -109,7 +124,11 @@ export function openPhaseCopy(status: OpenTaskStatus, ctx: CopyContext): PhaseCo
         }
         return { tone: 'info', lead: 'The verifier is judging.', body: `The task's verifier agent is judging ${submissionsText(n)} and picks the winner by ${when(w.verifierPickEnd)}.` };
       case 'backup_pick':
-        return { tone: 'info', lead: 'The backup judge is deciding.', body: `The verifier agent did not pick in time. The platform's backup judge picks a winner or refunds the poster by ${when(w.backupPickEnd)}.` };
+        return {
+          tone: 'info',
+          lead: 'The backup judge is deciding.',
+          body: `${status.declined ? 'The verifier agent found no submission acceptable.' : 'The verifier agent did not pick in time.'} The platform's backup judge picks a winner or refunds the poster by ${when(w.backupPickEnd)}.`,
+        };
       case 'admin':
         return { tone: 'warn', lead: 'Waiting for an admin.', body: 'No judge picked in time. An admin picks a winner or refunds the poster.' };
       case 'closed':
@@ -131,23 +150,24 @@ export function openPhaseCopy(status: OpenTaskStatus, ctx: CopyContext): PhaseCo
 }
 
 /**
- * Whether the poster may cancel and get the escrow back now: while nobody has
- * submitted (the escrow's cancelTask refuses once anyone has), until it closes.
+ * Whether the poster may cancel and get the escrow back now, as the escrow's
+ * cancelTask allows: still funded, nobody has submitted, and not paused.
  */
-export function canCancelOpen(status: OpenTaskStatus | undefined): boolean {
-  return !!status && status.phase !== 'closed' && status.submissions === 0;
+export function canCancelOpen(status: OpenTaskStatus | undefined, onChainStatus: number): boolean {
+  return !!status && onChainStatus === TaskStatus.Funded && !status.paused && status.phase !== 'closed' && status.submissions === 0;
 }
 
 /**
- * An open task's label in a list, from its listing alone (no escrow read):
- * taking submissions until its deadline, then picking a winner until it
- * closes as completed or refunded.
+ * An open task's label in a list, from its listing and the escrow status the
+ * list already has: taking submissions until its deadline, then past it
+ * (the list does not know whether anyone submitted) until it closes as
+ * completed or refunded (cancelled or closed with no winner: both return
+ * the escrow to the poster).
  */
-export function openRowLabel(state: string | undefined, deadline: number | undefined, nowSec: number): string {
-  if (state === 'completed') return 'completed';
-  if (state === 'failed') return 'refunded';
-  if (state === 'cancelled') return 'cancelled';
-  return deadline && nowSec >= deadline ? 'picking winner' : 'taking submissions';
+export function openRowLabel(state: string | undefined, deadline: number | undefined, nowSec: number, onChainStatus?: number): string {
+  if (onChainStatus === TaskStatus.Completed || state === 'completed') return 'completed';
+  if (onChainStatus === TaskStatus.Cancelled || state === 'failed') return 'refunded';
+  return deadline && nowSec >= deadline ? 'deadline passed' : 'taking submissions';
 }
 
 /** Whether the viewer may read the submissions now: the poster and the verifier any time, anyone once they close. */

@@ -6,7 +6,7 @@ import { useOpenScorecard, useOpenSubmissions } from '../../hooks/useOpenSubmiss
 import { JUDGE_LABEL, canReadSubmissions, openPhaseCopy, type Viewer } from '../../lib/openTask';
 import { formatDate, truncateAddress } from '../../lib/utils';
 import { PLATFORM_FEE_PCT, WORKER_SHARE_PCT } from '../../config/constants';
-import type { OpenSubmissionRow, OpenTaskStatus } from '../../services/openSubmission';
+import { scorecardRows, type OpenSubmissionRow, type OpenTaskStatus } from '../../services/openSubmission';
 
 /**
  * The open-submission sections of a task page (docs/OPEN-SUBMISSION-TASKS.md):
@@ -75,7 +75,18 @@ function SubmissionRow({ row, winner }: { row: OpenSubmissionRow; winner: string
           )}
         </div>
       </div>
-      {!text && <p className="mt-2 text-xs text-ink-3">This result could not be read here.</p>}
+      {!text && !row.result?.rootHash && <p className="mt-2 text-xs text-ink-3">This result could not be read here.</p>}
+      {row.result?.rootHash && (
+        <p className="mt-2 text-xs font-mono break-all">
+          <span className="text-ink-3 font-sans">0G storage (full result): </span>
+          <Link
+            to={`/storage/${row.result.rootHash}`}
+            className="text-accent underline decoration-line-2 underline-offset-[3px] hover:decoration-accent"
+          >
+            {row.result.rootHash}
+          </Link>
+        </p>
+      )}
       {open && text && (
         <div className="mt-3 rounded-xl border border-line bg-surface-2 p-4 overflow-x-auto">
           {typeof row.result?.resultData.output === 'string' ? (
@@ -96,13 +107,14 @@ function SubmissionRow({ row, winner }: { row: OpenSubmissionRow; winner: string
  */
 export function OpenSubmissionsPanel({ taskHash, status, viewer, signedIn }: { taskHash: string; status: OpenTaskStatus; viewer: Viewer; signedIn: boolean }) {
   const readable = canReadSubmissions(status, viewer);
-  const query = useOpenSubmissions(taskHash, readable && status.submissions > 0);
-  const rows = query.data?.pages.flatMap((p) => p.submissions) ?? [];
+  const query = useOpenSubmissions(taskHash, readable && status.submissions > 0, status.phase !== 'closed');
+  // A page boundary can repeat a submitter (HSCAN); show each once.
+  const rows = [...new Map((query.data?.pages.flatMap((p) => p.submissions) ?? []).map((r) => [r.submitter.toLowerCase(), r])).values()];
   const winner = status.outcome?.kind === 'winner' ? status.outcome.winner : null;
 
   let body: React.ReactNode;
   if (status.submissions === 0) {
-    body = <p className="text-sm text-ink-3">No submissions yet.</p>;
+    body = <p className="text-sm text-ink-3">{status.phase === 'submissions' ? 'No submissions yet.' : 'No submissions.'}</p>;
   } else if (!readable) {
     body = <p className="text-sm text-ink-3">Results stay hidden until submissions close, so no agent can copy another.</p>;
   } else if (!signedIn) {
@@ -148,8 +160,8 @@ export function OpenScorecardPanel({ taskHash, status, signedIn }: { taskHash: s
   const closed = status.phase === 'closed' && !!status.outcome;
   const query = useOpenScorecard(taskHash, closed && signedIn);
   if (!closed || !signedIn || query.isLoading || query.isError || !query.data) return null;
-  const card = query.data.scorecard;
-  const scores = [...(card.scores ?? [])].sort((a, b) => b.score - a.score);
+  const { scores, notJudged } = scorecardRows(query.data.scorecard);
+  const winner = typeof query.data.winner === 'string' ? query.data.winner.toLowerCase() : null;
   return (
     <Panel padding="md" className="mb-6">
       <div className="flex items-center justify-between gap-3 mb-3">
@@ -164,7 +176,7 @@ export function OpenScorecardPanel({ taskHash, status, signedIn }: { taskHash: s
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
                   <span className="font-mono text-xs text-ink-2">{truncateAddress(s.submitter)}</span>
-                  {query.data.winner && s.submitter.toLowerCase() === query.data.winner.toLowerCase() && <Tag tone="ok">winner</Tag>}
+                  {winner && s.submitter.toLowerCase() === winner && <Tag tone="ok">winner</Tag>}
                 </div>
                 {s.reason && <p className="mt-1 text-xs text-ink-3 leading-relaxed">{s.reason}</p>}
               </div>
@@ -172,9 +184,9 @@ export function OpenScorecardPanel({ taskHash, status, signedIn }: { taskHash: s
           ))}
         </ul>
       )}
-      {(card.notJudged ?? []).length > 0 && (
+      {notJudged.length > 0 && (
         <p className="mt-3 text-xs text-ink-3 leading-relaxed">
-          Not judged: {(card.notJudged ?? []).map((g) => `${g.count} (${g.why})`).join('; ')}.
+          Not judged: {notJudged.map((g) => `${g.count} (${g.why})`).join('; ')}.
         </p>
       )}
     </Panel>

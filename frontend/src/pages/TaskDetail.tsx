@@ -149,8 +149,14 @@ export default function TaskDetail() {
   // signed in as that wallet, or anyone.
   const isVerifier = !!onChain.a2aMeta?.verifierAddress && myWallets.has(onChain.a2aMeta.verifierAddress.toLowerCase());
   const viewer: Viewer = isPoster ? 'poster' : isVerifier ? 'verifier' : 'other';
-  const statusLabel = isOpen ? openStatusLabel(openStatus) : TaskStatusLabels[onChain.status];
-  const openWinner = openStatus?.outcome?.kind === 'winner' ? openStatus.outcome.winner : null;
+  const statusLabel = isOpen ? openStatusLabel(openStatus, TaskStatusLabels[onChain.status]) : TaskStatusLabels[onChain.status];
+  // Closed, or past the deadline with nobody to pick: no winner is coming.
+  const openNoWinner = isOpen && (onChain.status !== TaskStatus.Funded || openStatus?.phase === 'closed'
+    || (openStatus?.submissions === 0 && openStatus.phase !== 'submissions'));
+  // The escrow makes the winner the task's worker, so a completed task names it before its status loads.
+  const openWinner = openStatus?.outcome?.kind === 'winner'
+    ? openStatus.outcome.winner
+    : onChain.status === TaskStatus.Completed && onChain.worker !== '0x0000000000000000000000000000000000000000' ? onChain.worker : null;
   const startRefund = (kind: 'cancel' | 'timeout') =>
     refund.mutate({ taskId: String(numericTaskId), chain: onChain.chain, poster: onChain.agent, kind, linked: isPoster });
   // The unit this task's reward is in: what the backend read from the
@@ -341,7 +347,7 @@ export default function TaskDetail() {
                         {truncateAddress(openWinner)} <span className="font-sans text-xs">→</span>
                       </Link>
                     ) : (
-                      <span className="text-ink-3 font-sans">Picked after the deadline</span>
+                      <span className="text-ink-3 font-sans">{openNoWinner ? 'No winner' : 'Picked after the deadline'}</span>
                     )}
                   </p>
                 </Field>
@@ -401,7 +407,7 @@ export default function TaskDetail() {
                       {onChain.evidenceHash}
                     </a>
                   ) : (
-                    <span className="font-sans text-ink-3">{isOpen ? 'Set when a winner is picked' : 'Not submitted yet'}</span>
+                    <span className="font-sans text-ink-3">{isOpen ? (openNoWinner ? 'None' : 'Set when a winner is picked') : 'Not submitted yet'}</span>
                   )}
                 </p>
               </Field>
@@ -715,7 +721,7 @@ export default function TaskDetail() {
             )}
 
           {/* Poster: Cancel / Timeout actions */}
-          {canRefund && (isOpen ? canCancelOpen(openStatus) : (onChain.status === TaskStatus.Funded || canTimeout)) && (
+          {canRefund && (isOpen ? canCancelOpen(openStatus, onChain.status) : (onChain.status === TaskStatus.Funded || canTimeout)) && (
             <Panel padding="md" className="mb-6">
               <div className="flex items-center justify-between gap-4 flex-wrap">
                 <div className="min-w-0">

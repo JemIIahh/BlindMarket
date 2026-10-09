@@ -31,8 +31,8 @@ import { getAesKey } from '../lib/keyStash';
 import { useChainAddress } from '../hooks/useChainWallet';
 import { useAuth } from '../context/AuthContext';
 
-import { unitFor, useSettlement } from '../config/settlement';import { isOpenTask, openRowLabel } from '../lib/openTask';
-
+import { unitFor, useSettlement } from '../config/settlement';
+import { isOpenTask, openRowLabel } from '../lib/openTask';
 
 // ── Shapes returned by GET /api/v1/a2a/tasks/posted ──────────────────────
 
@@ -371,7 +371,7 @@ export default function MyTasks() {
             {sortedTasks.map(t => {
               const status = effectiveStatus(t);
               const statusLabel = isOpenTask(t.meta)
-                ? openRowLabel(t.state.status, t.meta.deadline, nowSec)
+                ? openRowLabel(t.state.status, t.meta.deadline, nowSec, t.onChain?.status)
                 : t.onChain
                   ? (STATUS_LABELS[status] ?? 'open')
                   : t.state.status.replace(/_/g, ' ');
