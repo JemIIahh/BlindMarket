@@ -8,11 +8,13 @@ import { ethers, time } from "../lib/hh.js";
 
 /**
  * test/fixtures/BlindEscrow-882acaf.json is the implementation both Arc
- * proxies run: BlindEscrow.sol as of 882acaf, compiled (see its _note for why
- * it is bytecode and not a source under contracts/). These tests pin that,
- * then hold the current BlindEscrow to it: every settlement the deployed code
- * can make must pay, rate and log exactly as it did, and a proxy of it must
- * upgrade to the current code with its state intact.
+ * proxies ran until the 2026-10-09 upgrade (docs/OPEN-SUBMISSION-TASKS.md
+ * section 21): BlindEscrow.sol as of 882acaf, compiled (see its _note for why
+ * it is bytecode and not a source under contracts/). These tests pin that to
+ * the manifests' previous implementation, then hold the current BlindEscrow to
+ * it: every settlement that code could make must pay, rate and log exactly as
+ * it did, and a proxy of it must upgrade to the current code with its state
+ * intact. Every task created before the upgrade was created by that code.
  */
 
 const DEPLOYED = JSON.parse(readFileSync(new URL("./fixtures/BlindEscrow-882acaf.json", import.meta.url), "utf8")) as {
@@ -29,11 +31,15 @@ const MANIFESTS = [
   { chain: "Arc mainnet", path: ".openzeppelin/unknown-5042.json" },
 ];
 
-/** The version (bytecode hash without metadata) of the implementation a manifest records last. */
+/**
+ * The version (bytecode hash without metadata) of the implementation a
+ * manifest records before its last one: what the proxy ran until the
+ * 2026-10-09 upgrade pointed it at the last.
+ */
 function deployedVersion(path: string): string {
   const manifest = JSON.parse(readFileSync(new URL(`../${path}`, import.meta.url), "utf8")) as { impls: Record<string, unknown> };
   const keys = Object.keys(manifest.impls);
-  return keys[keys.length - 1];
+  return keys[keys.length - 2];
 }
 
 // The ERC1967Proxy the OpenZeppelin plugin deploys. Deployed by hand here so
@@ -47,9 +53,9 @@ const PROXY = JSON.parse(
   ),
 ) as { abi: unknown[]; bytecode: string };
 
-describe("The deployed-implementation fixture is what the Arc proxies run", function () {
+describe("The 882acaf fixture is what the Arc proxies ran before the 2026-10-09 upgrade", function () {
   for (const m of MANIFESTS) {
-    it(`has the version of the ${m.chain} implementation recorded in ${m.path}`, function () {
+    it(`has the version of the previous ${m.chain} implementation recorded in ${m.path}`, function () {
       expect(getVersion(DEPLOYED.bytecode).linkedWithoutMetadata).to.equal(deployedVersion(m.path));
     });
   }
