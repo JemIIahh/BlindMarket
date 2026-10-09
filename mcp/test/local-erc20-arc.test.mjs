@@ -445,9 +445,8 @@ test('post_task refuses a createTask for another amount than the one quoted and 
   const { quote } = parse(await t.post_task(args));
   const error = errorOf(await t.post_task({ ...args, confirm: true, quoteId: quote.quoteId }));
   assert.equal(error.code, 'TX_MISMATCH');
-  // Only the approve of the quoted 2.5 USDC went out (it precedes the build); no createTask.
-  assert.deepEqual(chain.sent.map((tx) => tx.to), [USDC]);
-  assert.deepEqual(ERC20.decodeFunctionData('approve', chain.sent[0].data).map(String), [ESCROW, '2500000']);
+  // Nothing went out: the build is checked before the approve, so not even that.
+  assert.deepEqual(chain.sent, []);
   assert.equal(backendCalls.some((c) => c.path === '/api/v1/a2a/tasks/index'), false);
 });
 
@@ -518,17 +517,17 @@ test('a post confirmed on Arc Testnet is not funded on Arc mainnet by a retry af
   const args = { instructions: 'Summarise this paragraph in one sentence.', amount: '2.5', idempotencyKey: 'arc-moved-post-1', privacy: 'public' };
   const t = tools();
   const { quote } = parse(await t.post_task(args));
-  // The approve goes out on Arc Testnet, then the build fails.
+  // The build fails on Arc Testnet (before the approve, so nothing is sent).
   overrides['/api/v1/tasks'] = () => { throw new TypeError('fetch failed'); };
   errorOf(await t.post_task({ ...args, confirm: true, quoteId: quote.quoteId }));
-  assert.deepEqual(chain.sent.map((tx) => [tx.to, tx.chainId]), [[USDC, BigInt(ARC_ID)]]);
+  assert.deepEqual(chain.sent, []);
 
   onMainnet();
   const error = errorOf(await tools().post_task(args));
   assert.equal(error.code, 'SETTLEMENT_CHANGED');
   assert.match(error.message, /chain 5042002/);
   assert.match(error.message, /chain 5042\b/);
-  assert.equal(chain.sent.length, 1, 'nothing signed on Arc mainnet');
+  assert.equal(chain.sent.length, 0, 'nothing signed on Arc mainnet');
 });
 
 test('a refund confirmed on Arc Testnet is not sent on Arc mainnet by a retry after the backend moved', async () => {
