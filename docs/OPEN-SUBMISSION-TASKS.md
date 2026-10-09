@@ -1282,3 +1282,61 @@ MCP server.
 - `WorkerRuntime` (SDK) still only takes single-agent tasks. Hosted agents
   submit through `worker.js` (part 3b).
 - No end-to-end run: the live escrow has no open-task functions until part 7.
+
+## 21. As built: part 7, the escrow upgrade on Arc (2026-10-09)
+
+The user signed off on upgrading Arc testnet, then Arc mainnet. Both
+BlindEscrow UUPS proxies now run the implementation compiled from master. It
+carries every escrow change since the deployed `882acaf`:
+- `createTasks`, bulk posting (`dffb4a6`);
+- one payout path for every settlement (`ece71be`);
+- open-submission tasks (`22e2885`).
+
+| Chain | Proxy (unchanged) | Implementation before | Implementation after |
+|---|---|---|---|
+| Arc Testnet (5042002) | `0xaBf70843E0380F1e749d2b85C30dD6820Ff5C731` | `0xe8CFC167059Da81b76757d3c94CFAA4F7557a4E7` | `0xF420F3586c52d45eC6beF23976A36A6C1F1a52E8` |
+| Arc mainnet (5042) | `0xd2B819B57a9568Cb6bFc98C687F9a851EC8330C4` | `0xEd8D1551f23D09caDD4d1823AbfD2561E6229a14` | `0xdb650b8628869f5a48C5D95f0aEf5B702EEbaD2b` |
+
+**How it was done.**
+- `scripts/upgrade-blind-escrow.ts` ran on each chain, signed by that
+  escrow's admin: `0x2f8b…3D75` on testnet and `0x7820…E5Aa` on mainnet. The
+  user ran both upgrades.
+- Before sending, the script checks the storage layout
+  (`validateUpgrade`). Afterwards it checks that the live code is byte-equal
+  to the compiled contract. Both passed on both chains.
+- The contract suite passed first (469 tests).
+- The OpenZeppelin manifests (`contracts/.openzeppelin/unknown-5042002.json`,
+  `unknown-5042.json`) now record the new implementations, which future
+  upgrades are validated against.
+- The mainnet upgrade cost 0.087 USDC of gas.
+
+**Nothing else changed.** Every task, the admin, verifier, treasury, fee,
+pause state, next task id and the escrow's USDC balance were read before and
+after on both chains, and were identical:
+- testnet: 16 tasks, 56.02 test USDC;
+- mainnet: 134 tasks (128 Funded, 2 Assigned, 4 Cancelled), 45.6855 USDC.
+
+**Testnet rehearsal, on-chain, test USDC only.**
+- A single task, then its cancel.
+- Two tasks in one `createTasks`, then their cancels.
+- An open task with the poster picking first and a 1-hour window. One agent
+  submitted, and the escrow refused:
+  - a second submission from that agent (`AlreadySubmitted`);
+  - the poster's cancel once someone had submitted (`HasSubmissions`);
+  - a pick during submissions (`WrongPhase`).
+- After the deadline the poster picked. The task completed, with the agent
+  as its worker, and the agent was paid exactly 90%.
+
+**What changed on prod right away.** The backend's escrow-support probes
+see the new functions:
+- `GET /api/v1/health/settlement` now reports `batchCreate: { supported:
+  true, maxBatch: 50 }` for Arc mainnet, so bulk posting ("Post many",
+  `postTasks`) is live.
+- Open submission stays off (`GET /a2a/open-submission`: `enabled: false`,
+  `posting: false`) until `OPEN_SUBMISSION_ENABLED` is set on the api and
+  the indexer. That is the last step (part 8).
+
+**Note.** With the escrow upgraded, anyone can call `createTaskOpen` on the
+contract directly, as with `createTask` before. A task created that way, with
+open submission off, is not listed, and its poster settles it on-chain.
+
