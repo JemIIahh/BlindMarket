@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Button, ErrorNotice, Panel, Skeleton, Tag } from '../bb';
+import { Button, ConfirmDialog, ErrorNotice, Panel, Skeleton, Tag } from '../bb';
+import { TxPendingModal } from '../TxPendingModal';
+import { usePickWinner } from '../../hooks/usePickWinner';
 import { Markdown } from '../Markdown';
 import { useOpenScorecard, useOpenSubmissions } from '../../hooks/useOpenSubmission';
 import { JUDGE_LABEL, canReadSubmissions, openPhaseCopy, type Viewer } from '../../lib/openTask';
@@ -50,7 +52,7 @@ function resultText(row: OpenSubmissionRow): string {
   return typeof data.output === 'string' ? data.output : JSON.stringify(data, null, 2);
 }
 
-function SubmissionRow({ row, winner }: { row: OpenSubmissionRow; winner: string | null }) {
+function SubmissionRow({ row, winner, onPick, picking }: { row: OpenSubmissionRow; winner: string | null; onPick?: () => void; picking?: boolean }) {
   const [open, setOpen] = useState(false);
   const text = resultText(row);
   const won = !!winner && winner.toLowerCase() === row.submitter.toLowerCase();
@@ -72,6 +74,9 @@ function SubmissionRow({ row, winner }: { row: OpenSubmissionRow; winner: string
           <span className="text-xs text-ink-3">{formatDate(row.recordedAt, { hour: 'numeric', minute: '2-digit' })}</span>
           {text && (
             <Button variant="ghost" size="sm" label={open ? 'Hide' : 'Read'} onClick={() => setOpen((v) => !v)} />
+          )}
+          {onPick && (
+            <Button variant="outline" size="sm" label="Pick" onClick={onPick} disabled={picking} />
           )}
         </div>
       </div>
@@ -105,12 +110,21 @@ function SubmissionRow({ row, winner }: { row: OpenSubmissionRow; winner: string
  * anyone else once submissions close (they stay hidden so no agent copies
  * another). Signed in, since the list carries results.
  */
-export function OpenSubmissionsPanel({ taskHash, status, viewer, signedIn }: { taskHash: string; status: OpenTaskStatus; viewer: Viewer; signedIn: boolean }) {
+export function OpenSubmissionsPanel({ taskHash, status, viewer, signedIn, poster }: { taskHash: string; status: OpenTaskStatus; viewer: Viewer; signedIn: boolean; poster: string }) {
   const readable = canReadSubmissions(status, viewer);
   const query = useOpenSubmissions(taskHash, readable && status.submissions > 0, status.phase !== 'closed');
   // A page boundary can repeat a submitter (HSCAN); show each once.
   const rows = [...new Map((query.data?.pages.flatMap((p) => p.submissions) ?? []).map((r) => [r.submitter.toLowerCase(), r])).values()];
   const winner = status.outcome?.kind === 'winner' ? status.outcome.winner : null;
+  // The poster picks in their window, from the posting wallet. A submission
+  // whose result can't be read is not offered: the poster picks what they read.
+  const pick = usePickWinner();
+  const [choice, setChoice] = useState<string | null>(null);
+  const canPick = viewer === 'poster' && status.phase === 'creator_pick' && !status.paused && pick.canSignAs(poster);
+  const startPick = (submitter: string) => {
+    setChoice(null);
+    pick.mutate({ taskHash, onChainTaskId: status.onChainTaskId, chain: status.chain, poster, winner: submitter });
+  };
 
   let body: React.ReactNode;
   if (status.submissions === 0) {
@@ -127,8 +141,25 @@ export function OpenSubmissionsPanel({ taskHash, status, viewer, signedIn }: { t
     body = (
       <>
         <ul className="overflow-hidden rounded-2xl border border-line divide-y divide-line">
-          {rows.map((row) => <SubmissionRow key={row.submitter} row={row} winner={winner} />)}
+          {rows.map((row) => (
+            <SubmissionRow
+              key={row.submitter}
+              row={row}
+              winner={winner}
+              picking={pick.isPending}
+              onPick={canPick && row.result ? () => setChoice(row.submitter) : undefined}
+            />
+          ))}
         </ul>
+        {viewer === 'poster' && status.phase === 'creator_pick' && !pick.canSignAs(poster) && (
+          <p className="mt-3 text-xs text-warn leading-relaxed">
+            Posted from {truncateAddress(poster)}. Connect that wallet to pick the winner.
+          </p>
+        )}
+        {viewer === 'poster' && status.phase === 'creator_pick' && status.paused && (
+          <p className="mt-3 text-xs text-ink-3 leading-relaxed">The escrow is paused. You can pick once it resumes; your window moves later.</p>
+        )}
+        <ErrorNotice error={pick.error} title="Couldn't pick the winner" className="mt-3" />
         {query.hasNextPage && (
           <div className="mt-3">
             <Button
@@ -146,11 +177,20 @@ export function OpenSubmissionsPanel({ taskHash, status, viewer, signedIn }: { t
 
   return (
     <Panel padding="md" className="mb-6">
+      <TxPendingModal open={pick.isPending} />
       <div className="flex items-center justify-between gap-3 mb-3">
         <h3 className="text-sm font-semibold text-ink">Submissions</h3>
         <span className="text-xs text-ink-3 tabular-nums">{status.submissions}</span>
       </div>
       {body}
+      <ConfirmDialog
+        open={choice !== null}
+        title="Pick this submission"
+        description={choice ? `${truncateAddress(choice)} wins and the escrow pays them. The other submissions are not paid. This can't be undone.` : ''}
+        confirmLabel="Pick as winner"
+        onConfirm={() => choice && startPick(choice)}
+        onCancel={() => setChoice(null)}
+      />
     </Panel>
   );
 }

@@ -283,3 +283,46 @@ describe('POST /tasks refuses an amount or duration that is not a whole number',
     expect(args.amount).toBe(5_000_000n);
   });
 });
+
+describe('POST /tasks for a task many agents submit to', () => {
+  const open = (o: Record<string, unknown>) => post({ token: USDC, verificationMode: 'agent', verifierAddress: VERIFIER, ...o });
+  const args = (res: request.Response) => iface.parseTransaction({ data: res.body.data.unsignedTx.data })!.args;
+  beforeEach(() => { cfg.openSubmissionEnabled = true; });
+
+  it('builds createTaskOpen with the verifier picking, from the deadline', async () => {
+    const res = await open({ open: { mode: 'agent', creatorWindow: 0 } });
+    expect(res.status).toBe(200);
+    expect(methodOf(res.body.data.unsignedTx)).toBe('createTaskOpen');
+    const a = args(res);
+    expect([a.verifierAgent, Number(a.mode), Number(a.creatorWindow)]).toEqual([VERIFIER, 0, 0]);
+  });
+
+  it('builds the poster picking first, for their window', async () => {
+    const res = await open({ open: { mode: 'creator', creatorWindow: 86_400 } });
+    expect(res.status).toBe(200);
+    const a = args(res);
+    expect([Number(a.mode), Number(a.creatorWindow)]).toEqual([1, 86_400]);
+  });
+
+  it('refuses while open submission is off, so nothing is funded that cannot be listed', async () => {
+    cfg.openSubmissionEnabled = false;
+    const res = await open({ open: { mode: 'agent', creatorWindow: 0 } });
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('OPEN_SUBMISSION_DISABLED');
+  });
+
+  it('needs a verifier that is not the poster', async () => {
+    const none = await post({ token: USDC, open: { mode: 'agent', creatorWindow: 0 } });
+    expect(none.body.error.code).toBe('OPEN_TASK_NEEDS_VERIFIER');
+    const self = await open({ verifierAddress: POSTER, open: { mode: 'agent', creatorWindow: 0 } });
+    expect(self.body.error.code).toBe('INVALID_VERIFIER');
+  });
+
+  it("holds the poster's window to the escrow's limits, and none when the verifier picks", async () => {
+    for (const o of [{ mode: 'creator', creatorWindow: 600 }, { mode: 'creator', creatorWindow: 8 * 86_400 }, { mode: 'agent', creatorWindow: 3600 }]) {
+      const res = await open({ open: o });
+      expect(res.status).toBe(400);
+      expect(res.body.error.code).toBe('INVALID_PICK_WINDOW');
+    }
+  });
+});

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { scorecardRows } from './openSubmission';
+import { ethers } from 'ethers';
+import { checkSelectWinnerTx, scorecardRows } from './openSubmission';
 
 describe('scorecardRows', () => {
   it('keeps the scores best first, with reasons, and why some were not judged', () => {
@@ -26,5 +27,36 @@ describe('scorecardRows', () => {
 
   it('keeps one score per submitter, so each row has its own key', () => {
     expect(scorecardRows({ scores: [{ submitter: '0xA', score: 3 }, { submitter: '0xa', score: 8 }] }).scores).toEqual([{ submitter: '0xA', score: 3 }]);
+  });
+});
+
+const ESCROW = '0x' + 'e5'.repeat(20);
+const POSTER = ethers.getAddress('0x' + 'a1'.repeat(20));
+const WINNER = ethers.getAddress('0x' + '7e'.repeat(20));
+const iface = new ethers.Interface(['function selectWinner(uint256 taskId, address winner, bytes32 scorecardHash)', 'function cancelTask(uint256 taskId)']);
+const tx = (over: Record<string, unknown> = {}, args: [bigint, string] = [41n, WINNER]) => ({
+  to: ESCROW, from: POSTER, data: iface.encodeFunctionData('selectWinner', [...args, ethers.ZeroHash]), ...over,
+});
+const expected = { escrow: ESCROW, poster: POSTER.toLowerCase(), onChainTaskId: '41', winner: WINNER.toLowerCase() };
+
+describe("checkSelectWinnerTx: the poster signs only their own pick", () => {
+  it('accepts selectWinner for this task and winner, to the escrow, from the poster', () => {
+    expect(checkSelectWinnerTx(tx(), expected)).toBeNull();
+  });
+
+  it.each([
+    ['no transaction', undefined, /no transaction/],
+    ['another contract', tx({ to: '0x' + '99'.repeat(20) }), /escrow/],
+    ['another wallet', tx({ from: WINNER }), /posted this task/],
+    ['value', tx({ value: '1' }), /sends funds/],
+    ['another call', tx({ data: iface.encodeFunctionData('cancelTask', [41n]) }), /not a pick/],
+    ['another task', tx({}, [42n, WINNER]), /another task/],
+    ['another winner', tx({}, [41n, POSTER]), /another winner/],
+  ])('refuses %s', (_name, t, why) => {
+    expect(checkSelectWinnerTx(t as never, expected)).toMatch(why);
+  });
+
+  it('refuses when the chain has no known escrow', () => {
+    expect(checkSelectWinnerTx(tx(), { ...expected, escrow: undefined })).toMatch(/escrow/);
   });
 });

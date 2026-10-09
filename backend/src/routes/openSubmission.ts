@@ -45,6 +45,7 @@ import { resolveCachedTaskByHash, type TaskChain } from '../services/taskChain.j
 import { ownAgentOf, sameOwnerSubtask } from '../services/delegationGuard.js';
 import { storageIdSchema } from '../services/storageId.js';
 import { PHASE } from '../services/openSubmissionSweep.js';
+import { OPEN_PICK_WINDOWS } from '../services/openPickWindows.js';
 import type { A2ATaskMeta, ApiResponse, AuthRequest } from '../types.js';
 import type { RequestHandler } from 'express';
 
@@ -74,14 +75,6 @@ export const MAX_SCORECARD_BYTES = 32 * 1024;
 const VERIFIER_LIST_SLACK_SEC = 30 * 86_400;
 /** Most tasks one page of GET /open-verifications returns: live windows first. */
 const VERIFIER_LIST_MAX = 50;
-/** The escrow's pick windows (BlindEscrow: MIN/MAX_CREATOR_WINDOW, VERIFIER/BACKUP_PICK_WINDOW). */
-export const OPEN_PICK_WINDOWS = {
-  creatorMinSec: 3600,
-  creatorMaxSec: 7 * 86_400,
-  verifierSec: 48 * 3600,
-  backupSec: 48 * 3600,
-};
-
 /** 404 before anything else while open submission is off, signed in or not. */
 const enabledOnly: RequestHandler = (_req, _res, next) => {
   if (!config.openSubmissionEnabled) {
@@ -197,6 +190,8 @@ async function anySameOwner(poster: string, wallets: Iterable<string>): Promise<
 async function phaseOf(chain: TaskChain, taskId: number): Promise<number> {
   return Number(await escrowFor(chain).openPhase(taskId));
 }
+
+export { OPEN_PICK_WINDOWS };
 
 /**
  * GET /api/v1/a2a/open-submission

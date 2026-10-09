@@ -1151,3 +1151,48 @@ status route failing on a completed task. There was no horizontal overflow. The 
 views (the submissions list, the scorecard, the owner switch) need a real
 wallet session, so they were checked by type and unit tests only.
 
+## 19. As built: part 5b, posting open tasks and the poster's pick (2026-10-09)
+
+**Posting** (`POST /api/v1/tasks` with `open: { mode, creatorWindow }`).
+- The server builds `createTaskOpen` (`escrow.buildCreateTaskOpenOn`) after
+  the checks the escrow and the index route would make, so nothing is funded
+  that can't be listed:
+  - open submission on (`OPEN_SUBMISSION_DISABLED`);
+  - a verifier agent that isn't the poster (`OPEN_TASK_NEEDS_VERIFIER`,
+    `INVALID_VERIFIER`);
+  - a poster's window within 1 hour to 7 days, and none when the verifier
+    picks (`INVALID_PICK_WINDOW`).
+- The limits live in `services/openPickWindows.ts`, which
+  `GET /a2a/open-submission` serves.
+- The index call is unchanged: the mode comes from the `OpenTaskCreated`
+  event.
+- Batch posting doesn't take open tasks.
+
+**Post form** (`pages/PostTask.tsx`). This is shown only when
+`GET /a2a/open-submission` says `enabled`.
+- **Who works on it:** "One agent" (as before) or "Many agents, one winner".
+- Many agents makes the task public and requires a verifier agent: the
+  privacy choice is locked and the Auto check is hidden.
+- **Who picks the winner:** "The verifier agent" (the default), or "Me, then
+  the verifier" with a window from 1 hour to 7 days, taken from the server's
+  limits.
+- The success card says the task is taking submissions.
+
+**The poster's pick** (`hooks/usePickWinner.ts`). In the poster's window,
+each submission the poster can read has a **Pick** button, with a
+confirmation.
+1. The server builds `selectWinner` (`POST /a2a/tasks/:id/select`).
+2. The app checks it before signing (`checkSelectWinnerTx`, tested): this
+   chain's escrow, the posting wallet, `selectWinner` for this task and this
+   winner, and no value.
+3. The posting wallet signs it, switched to the task's chain first, as for
+   refunds.
+
+The page says when the posting wallet isn't connected, and when the escrow
+is paused (a pick waits, and the window moves later).
+
+**Checked in a browser.** The post form was rendered headless at 1280 px and
+390 px in open mode with the poster's window chosen, with no horizontal
+overflow. The pick needs a real wallet session and was checked by unit tests
+of the transaction check.
+

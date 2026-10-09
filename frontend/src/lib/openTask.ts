@@ -196,6 +196,13 @@ export function canReadSubmissions(status: OpenTaskStatus | undefined, viewer: V
   return !!status && status.phase !== 'submissions';
 }
 
+/** The poster's pick-window choices within the escrow's limits: [seconds, label]. */
+export function creatorWindowOptions(windows: { creatorMinSec: number; creatorMaxSec: number }): Array<[number, string]> {
+  return [3600, 6 * 3600, 12 * 3600, 86_400, 2 * 86_400, 3 * 86_400, 7 * 86_400]
+    .filter((sec) => sec >= windows.creatorMinSec && sec <= windows.creatorMaxSec)
+    .map((sec) => [sec, windowText(sec)]);
+}
+
 function capitalize(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }

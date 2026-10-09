@@ -22,6 +22,7 @@ import * as accountingService from '../services/accountingService.js';
 import { getDb } from '../services/database.js';
 import { getPool } from '../services/neonDb.js';
 import { config } from '../config.js';
+import { OPEN_PICK_WINDOWS } from '../services/openPickWindows.js';
 import { rooms } from '../services/socket.js';
 import { isSafeRegexSource } from '../services/rubricEngine.js';
 import { hostedVerifierNotOptedIn, VERIFIER_NOT_OPTED_IN_MESSAGE } from '../services/verifierDuty.js';
@@ -67,6 +68,13 @@ const createTaskSchema = z.object({
   // Bounded, and shared with POST /a2a/tasks/index (services/verificationCriteriaSchema.ts).
   verificationCriteria: verificationCriteriaSchema.optional(),
   requiredCapabilities: z.array(z.enum(AGENT_CAPABILITIES as unknown as [string, ...string[]])).optional(),
+  // A task many agents submit to (docs/OPEN-SUBMISSION-TASKS.md): built as
+  // createTaskOpen. `mode` is who picks first: 'agent' its verifier, from
+  // the deadline; 'creator' the poster, for `creatorWindow` seconds.
+  open: z.object({
+    mode: z.enum(['agent', 'creator']),
+    creatorWindow: z.number().int().min(0),
+  }).optional(),
   // 0G Storage root hash of the AES-encrypted brief. Required for the
   // encrypted-flow demo; absent for legacy/H2H tasks that don't use the
   // decryption pipeline.
@@ -515,6 +523,36 @@ async function refuseOptedOutVerifier(data: TaskTerms): Promise<void> {
   }
 }
 
+/**
+ * The open terms for createTaskOpen, checked as the escrow and the index
+ * route check them, so nothing is funded that can't be listed: open
+ * submission on, a verifier that is not the poster, and a poster's window
+ * within MIN/MAX_CREATOR_WINDOW (none for the verifier's pick).
+ */
+function openTerms(data: z.infer<typeof createTaskSchema>, from: string): { verifier: string; mode: 0 | 1; creatorWindow: number } {
+  const open = data.open!;
+  if (!config.openSubmissionEnabled) {
+    throw new AppError(409, 'OPEN_SUBMISSION_DISABLED', 'This server does not take tasks that many agents submit to yet');
+  }
+  if (data.verificationMode !== 'agent' || !data.verifierAddress) {
+    throw new AppError(400, 'OPEN_TASK_NEEDS_VERIFIER', "A task that takes submissions from many agents needs a verifier agent: send verificationMode 'agent' with verifierAddress");
+  }
+  if (data.verifierAddress.toLowerCase() === from.toLowerCase()) {
+    throw new AppError(400, 'INVALID_VERIFIER', 'The poster cannot be their own verifier');
+  }
+  const creator = open.mode === 'creator';
+  if (creator ? open.creatorWindow < OPEN_PICK_WINDOWS.creatorMinSec || open.creatorWindow > OPEN_PICK_WINDOWS.creatorMaxSec : open.creatorWindow !== 0) {
+    throw new AppError(
+      400,
+      'INVALID_PICK_WINDOW',
+      creator
+        ? `Your pick window must be between ${OPEN_PICK_WINDOWS.creatorMinSec / 3600} hour and ${OPEN_PICK_WINDOWS.creatorMaxSec / 86_400} days`
+        : 'There is no poster window when the verifier picks: send creatorWindow 0',
+    );
+  }
+  return { verifier: data.verifierAddress, mode: creator ? 1 : 0, creatorWindow: open.creatorWindow };
+}
+
 /** The verifier the escrow call commits on-chain for this task, if any. */
 function committedVerifier(data: TaskTerms): string | undefined {
   return data.verificationMode === 'agent' ? data.verifierAddress : undefined;
@@ -567,18 +605,31 @@ tasksRouter.post('/', requireAuth, buildBudget, postingIpBudget, async (req: Aut
     const { tokenAddress, isNative } = settlementToken(chain, label, token, data.token);
     await refuseOptedOutVerifier(data);
 
-    const tx = await escrowService.buildCreateTaskOn(
-      chain,
-      from,
-      data.taskHash,
-      tokenAddress,
-      amountBigInt,
-      'general',
-      data.locationZone,
-      durationBigInt,
-      isNative ? amountBigInt : undefined,
-      committedVerifier(data),
-    );
+    const tx = data.open
+      ? await escrowService.buildCreateTaskOpenOn(
+        chain,
+        from,
+        data.taskHash,
+        tokenAddress,
+        amountBigInt,
+        'general',
+        data.locationZone,
+        durationBigInt,
+        isNative ? amountBigInt : undefined,
+        openTerms(data, from),
+      )
+      : await escrowService.buildCreateTaskOn(
+        chain,
+        from,
+        data.taskHash,
+        tokenAddress,
+        amountBigInt,
+        'general',
+        data.locationZone,
+        durationBigInt,
+        isNative ? amountBigInt : undefined,
+        committedVerifier(data),
+      );
 
     // Note: A2A meta is NOT written here. Doing so unconditionally produced
     // phantom Redis entries (createTask reverts with TokenNotAllowed, gas
