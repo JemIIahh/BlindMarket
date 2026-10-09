@@ -1212,3 +1212,73 @@ is paused (a pick waits, and the window moves later).
 overflow. The pick needs a real wallet session and was checked by unit tests
 of the transaction check.
 
+
+## 20. As built: part 6, the SDK, CLI and MCP (2026-10-09)
+
+Clients for open tasks, in two PRs: the SDK with the CLI, and the MCP server.
+Each client checks every transaction the backend builds before a key signs
+it, the same way it checks posting and refunds. Published versions move at
+release (Andrew): the SDK first, then the CLI range and `MIN_MINOR`, then the
+MCP server.
+
+**SDK** (`sdk/src/index.ts`, `posting.ts`, `escrowCalls.ts`).
+- `postTask({ open: { pick, pickWindowSeconds } })` posts an open task.
+  - It is public, `verifierAddress` is required, and `verificationMode` is
+    `'agent'`.
+  - These are refused before anything is uploaded or sent:
+    - a private brief (`OPEN_TASK_MUST_BE_PUBLIC`);
+    - another check, or no verifier (`OPEN_TASK_NEEDS_VERIFIER`);
+    - `targetExecutor` (`OPEN_TASK_PINNED`);
+    - a window the escrow would refuse (`INVALID_PICK_WINDOW`);
+    - the posting wallet as the verifier (`INVALID_VERIFIER`);
+    - `GET /a2a/open-submission` without `enabled` (`OPEN_SUBMISSION_DISABLED`)
+      or without `posting: true` (`OPEN_SUBMISSION_UNSUPPORTED`). This fails
+      closed: an older backend that omits `posting` would drop `open` from
+      the build.
+  - The build carries `privacy: 'public'` and is checked to be exactly
+    `createTaskOpen` with this verifier, pick mode and window.
+  - `postTasks()` refuses open rows.
+- `submitOpen()` and `pickWinner()` take the task's id from the backend, so
+  they first read `getTask(id).taskHash` and `getOpenTask(id).open` over the
+  signer's own RPC. A call for another task is refused (`TASK_MISMATCH`),
+  and so is an escrow that isn't a known deployment (`ESCROW_NOT_PINNED`).
+- `submitOpen()` signs `submitOpen` for this task.
+  - The evidence hash is computed locally (`openEvidenceHashOf`, tested
+    against the backend's vectors).
+  - A transaction built for another wallet is refused (`OWNER_MISMATCH`).
+  - A result the backend says is already on-chain sends nothing, but only
+    once `submissionOf` on the escrow confirms it.
+- `pickWinner()` signs `selectWinner` (the poster) or `selectWinnerByVerifier`
+  (the verifier, now in the allowlist). It checks this task, this winner and
+  this scorecard's hash (`scorecardHashOf`), and that exactly one pick was
+  built.
+- Also `declineOpenTask`, `checkOpenSubmission`, and the reads: the open
+  status, open tasks, submissions, the scorecard and open verifications.
+
+**CLI** (`cli/src/program.ts`).
+- `post-task --open --verifier <address> [--pick me --pick-window <s>]`.
+- `open-tasks`, `open-status`, `submit-open`, `submissions`, `pick`,
+  `decline` and `verifications`.
+- They throw `SDK_TOO_OLD` against an SDK without these methods.
+
+**MCP** (`mcp/src/rent.ts`).
+- `post_task` takes `open: true`, `verifierAddress`, `pick` (`verifier` or
+  `me`) and `pickWindowSeconds`, with the same refusals before the quote. The
+  funding is checked to be exactly `createTaskOpen`.
+- New tools:
+  - `submit_open_result`;
+  - `pick_open_winner`, a quote and confirm bound to the task, winner and
+    scorecard hash;
+  - `decline_open_task`;
+  - `get_open_task_status`;
+  - `list_open_submission_tasks`, named so it isn't confused with the legacy
+    `list_open_tasks`;
+  - `list_open_submissions`;
+  - `list_open_verifications`.
+- `cancel_task` refuses an open task once anyone has submitted
+  (`HAS_SUBMISSIONS`), rather than quoting a cancel the escrow refuses.
+
+**Not covered yet.**
+- `WorkerRuntime` (SDK) still only takes single-agent tasks. Hosted agents
+  submit through `worker.js` (part 3b).
+- No end-to-end run: the live escrow has no open-task functions until part 7.

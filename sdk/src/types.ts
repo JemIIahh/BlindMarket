@@ -145,6 +145,10 @@ export interface CreateTaskRequest {
   rootHash?: string;
   /** Lowercased executor address → hex ECIES blob (no 0x) of the brief AES key. */
   wrappedKeys?: Record<string, string>;
+  /** Many agents submit and one is picked: the backend builds createTaskOpen. Needs privacy 'public'. */
+  open?: { mode: 'agent' | 'creator'; creatorWindow: number };
+  /** What the listing will say; sent as 'public' with `open`. */
+  privacy?: 'private' | 'public';
 }
 
 export interface CreateTaskTx {
@@ -167,6 +171,8 @@ export interface TaskDetail extends OpenTask {
 /** Mirrors `A2ATaskStateStatus` in `backend/src/types.ts`. */
 export type A2ATaskStatus =
   | 'open'
+  /** A task many agents submit to, taking submissions until it closes. */
+  | 'collecting'
   | 'accepted'
   | 'in_progress'
   | 'submitted'
@@ -433,3 +439,109 @@ export const AgentCap = {
 } as const;
 
 export type AgentCapability = typeof AgentCap[keyof typeof AgentCap];
+
+// ── Open submission (docs/OPEN-SUBMISSION-TASKS.md) ─────────────────────────
+
+/** GET /a2a/open-submission: whether the backend runs open submission, and the escrow's pick windows. */
+export interface OpenSubmissionConfig {
+  enabled: boolean;
+  /** Open tasks can be posted now: on, and the posting chain's escrow has createTaskOpen. Absent from older backends. */
+  posting?: boolean;
+  pickModes: Array<'agent' | 'creator'>;
+  windows: { creatorMinSec: number; creatorMaxSec: number; verifierSec: number; backupSec: number };
+  /** The largest result submitOpen() takes inline; put the rest in storage and send its rootHash. */
+  maxResultBytes: number;
+  maxScorecardBytes: number;
+}
+
+export type OpenPhase = 'submissions' | 'creator_pick' | 'verifier_pick' | 'backup_pick' | 'admin' | 'closed';
+export type OpenJudge = 'creator' | 'task_verifier' | 'backup' | 'admin';
+
+/** GET /a2a/tasks/:hash/open-status: where an open task stands, read from the escrow. Unix seconds. */
+export interface OpenTaskStatus {
+  taskHash: string;
+  onChainTaskId: string;
+  chain: string;
+  mode: 'agent' | 'creator';
+  phase: OpenPhase;
+  paused: boolean;
+  submissions: number;
+  windows: { submissionsEnd: number; creatorPickEnd: number | null; verifierPickEnd: number; backupPickEnd: number };
+  /** How it ended; null while open, and for a cancel. */
+  outcome: { kind: 'winner' | 'void'; winner: string | null; judge: OpenJudge } | null;
+  /** The verifier judged and found no submission acceptable. */
+  declined: { at: string } | null;
+}
+
+/** One entry of GET /a2a/open-tasks: an open task taking submissions. */
+export interface OpenTaskListing {
+  /** The public listing: meta.taskId is the task hash; meta.reward and meta.deadline (unix seconds) are what it pays and when it closes. */
+  meta: Record<string, unknown> & { taskId: string; reward?: { amount: string; unit?: unknown }; deadline?: number };
+  state: Record<string, unknown>;
+  onChainTaskId: string | null;
+  submissions: number;
+}
+
+export interface OpenSubmissionRow {
+  submitter: string;
+  ordinal: number;
+  evidenceHash: string;
+  recordedAt: string;
+  /** The result, when the one saved matches the on-chain evidence hash. */
+  result: { resultData: Record<string, unknown>; rootHash: string | null } | null;
+}
+
+/** GET /a2a/tasks/:hash/submissions: pass `cursor` back until it is '0'. */
+export interface OpenSubmissionsPage {
+  submissions: OpenSubmissionRow[];
+  cursor: string;
+  total: number;
+}
+
+/** One entry of GET /a2a/open-verifications: an open task this caller judges, from when its window opens. */
+export interface OpenVerificationTask {
+  meta: Record<string, unknown>;
+  onChainTaskId: string | null;
+  submissions: number;
+  window: { opensAt: number; closesAt: number };
+}
+
+export interface OpenScorecard {
+  taskHash: string;
+  outcome: 'winner' | 'void';
+  judge: OpenJudge;
+  winner: string | null;
+  scorecardHash: string;
+  scorecard: Record<string, unknown>;
+}
+
+export interface SubmitOpenParams {
+  /** The result. Kept short: at most maxResultBytes with rootHash; put a long one in storage. */
+  resultData: Record<string, unknown>;
+  /** A storage id holding the full result, committed on-chain with resultData. */
+  rootHash?: string | null;
+  teeAttestation?: { signature: string; signer?: string; signedText: string; chatID?: string; verified?: boolean } | null;
+}
+
+export interface SubmitOpenResult {
+  taskHash: string;
+  chain: string;
+  onChainTaskId: string;
+  evidenceHash: string;
+  /** The submitOpen transaction; null when this result was already on-chain (alreadyOnChain). */
+  txHash: string | null;
+  /** The same result was already submitted on-chain: the backend kept it again, and nothing was sent. */
+  alreadyOnChain: boolean;
+}
+
+export interface PickWinnerResult {
+  taskHash: string;
+  chain: string;
+  onChainTaskId: string;
+  winner: string;
+  scorecardHash: string;
+  /** Who picked: the poster (selectWinner) or the task's verifier (selectWinnerByVerifier). */
+  role: 'poster' | 'verifier';
+  txHash: string;
+}
+

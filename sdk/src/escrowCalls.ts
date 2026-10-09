@@ -3,8 +3,8 @@
  *
  * The backend builds createTask (or createTasks), submitEvidence, cancelTask and claimTimeout
  * for the client's own key to sign, and for open-submission tasks createTaskOpen, submitOpen,
- * selectWinner (the poster's pick) and voidOpenTask (the poster's refund when nothing was
- * submitted). Whoever answers at `apiBase` (a
+ * selectWinner (the poster's pick), selectWinnerByVerifier (the task verifier's pick) and
+ * voidOpenTask (the poster's refund when nothing was submitted). Whoever answers at `apiBase` (a
  * compromised or malicious backend, an untrusted apiBase, a network attacker
  * on plain http) controls that JSON, so a client that signs it as given signs
  * anything: a native transfer, an ERC-20 approve or transfer, on any chain it
@@ -33,6 +33,7 @@ export const ESCROW_CALLS = new ethers.Interface([
   'function createTaskOpen(bytes32 taskHash, address token, uint256 amount, string category, string locationZone, uint256 duration, address verifierAgent, uint8 mode, uint256 creatorWindow)',
   'function submitOpen(uint256 taskId, bytes32 evidenceHash)',
   'function selectWinner(uint256 taskId, address winner, bytes32 scorecardHash)',
+  'function selectWinnerByVerifier(uint256 taskId, address winner, bytes32 scorecardHash)',
   'function voidOpenTask(uint256 taskId, bytes32 scorecardHash)',
 ]);
 
@@ -46,6 +47,7 @@ export type EscrowFunction =
   | 'createTaskOpen'
   | 'submitOpen'
   | 'selectWinner'
+  | 'selectWinnerByVerifier'
   | 'voidOpenTask';
 
 /**
@@ -56,6 +58,26 @@ export type EscrowFunction =
  */
 export function evidenceHashOf(resultData: Record<string, unknown>): string {
   return ethers.keccak256(ethers.toUtf8Bytes(JSON.stringify(resultData)));
+}
+
+/**
+ * An open submission's evidence hash: keccak256 of the JSON of the result and
+ * its storage pointer together, exactly as POST /a2a/tasks/:id/submit-open
+ * computes it (backend/src/routes/openSubmission.ts openEvidenceHash), so the
+ * pointer is committed on-chain too. `rootHash` null when there is none.
+ */
+export function openEvidenceHashOf(resultData: Record<string, unknown>, rootHash: string | null): string {
+  return ethers.keccak256(ethers.toUtf8Bytes(JSON.stringify({ resultData, rootHash })));
+}
+
+/**
+ * A judge's scorecard hash, as the escrow anchors it with a pick: keccak256 of
+ * its JSON (backend openSubmissionStore.scorecardHashOf). The backend parses
+ * the scorecard this client sends and hashes it again; JSON.stringify of the
+ * parsed body gives the same string.
+ */
+export function scorecardHashOf(scorecard: Record<string, unknown>): string {
+  return ethers.keccak256(ethers.toUtf8Bytes(JSON.stringify(scorecard)));
 }
 
 export interface ExpectedEscrowCall {
