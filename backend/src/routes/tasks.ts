@@ -25,7 +25,7 @@ import { config } from '../config.js';
 import { OPEN_PICK_WINDOWS } from '../services/openPickWindows.js';
 import { rooms } from '../services/socket.js';
 import { isSafeRegexSource } from '../services/rubricEngine.js';
-import { hostedVerifierNotOptedIn, VERIFIER_NOT_OPTED_IN_MESSAGE } from '../services/verifierDuty.js';
+import { hostedVerifierNotOptedIn, verifierChainUnsupported, VERIFIER_NOT_OPTED_IN_MESSAGE } from '../services/verifierDuty.js';
 import { refuseUnapprovedDelegation } from '../services/delegationGuard.js';
 import { withPosterAvatars } from '../services/avatarStore.js';
 import { closeRefundedA2ATask } from '../services/refundedTasks.js';
@@ -519,10 +519,16 @@ function settlementToken(
 
 /**
  * Checked before the funding tx is built, so nothing is escrowed for a
- * verifier that would never act (security audit run 1, C04).
+ * verifier that would never act (security audit run 1, C04), or that the
+ * index would refuse once the escrow is funded: a registered agent that
+ * doesn't settle on the posting chain.
  */
-async function refuseOptedOutVerifier(data: TaskTerms): Promise<void> {
-  if (data.verificationMode === 'agent' && data.verifierAddress && await hostedVerifierNotOptedIn(data.verifierAddress)) {
+async function refuseUnusableVerifier(data: TaskTerms, chain: TaskChain, label: string): Promise<void> {
+  if (data.verificationMode !== 'agent' || !data.verifierAddress) return;
+  if (await verifierChainUnsupported(data.verifierAddress, chain)) {
+    throw new AppError(409, 'VERIFIER_CHAIN_UNSUPPORTED', `That verifier agent doesn't settle on ${label}. Choose another verifier.`);
+  }
+  if (await hostedVerifierNotOptedIn(data.verifierAddress)) {
     throw new AppError(409, 'VERIFIER_NOT_OPTED_IN', VERIFIER_NOT_OPTED_IN_MESSAGE);
   }
 }
@@ -617,7 +623,7 @@ tasksRouter.post('/', requireAuth, buildBudget, postingIpBudget, async (req: Aut
     }
     await claimNewTaskHash(data.taskHash, from, randomUUID());
     const { tokenAddress, isNative } = settlementToken(chain, label, token, data.token);
-    await refuseOptedOutVerifier(data);
+    await refuseUnusableVerifier(data, chain, label);
 
     const tx = open
       ? await escrowService.buildCreateTaskOpenOn(
@@ -833,7 +839,7 @@ tasksRouter.post('/batch', requireAuth, buildBudget, postingIpBudget, async (req
         if (claimedBy && claimedBy !== holder) {
           throw new AppError(409, 'TASK_HASH_TAKEN', 'Another poster is already posting a task with this hash — post with a new brief');
         }
-        await refuseOptedOutVerifier(data);
+        await refuseUnusableVerifier(data, chain, label);
       } catch (err) {
         errors.push(batchTaskError(index, err));
       }

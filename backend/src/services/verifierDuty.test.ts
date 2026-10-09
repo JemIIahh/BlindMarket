@@ -6,7 +6,9 @@ vi.mock('./deployedAgentStore.js', () => ({
   loadAllAgents: vi.fn(async () => []),
 }));
 
-import { activeHostedVerifiers, hostedVerifierNotOptedIn } from './verifierDuty.js';
+vi.mock('./agentStore.js', () => ({ getAgent: vi.fn(async () => undefined) }));
+import { activeHostedVerifiers, hostedVerifierNotOptedIn, verifierChainUnsupported } from './verifierDuty.js';
+import { getAgent } from './agentStore.js';
 import { loadAgentBySmartAccount, loadAgentByWallet, loadAllAgents } from './deployedAgentStore.js';
 
 const ADDR = '0x1234000000000000000000000000000000000001';
@@ -28,6 +30,19 @@ describe('hostedVerifierNotOptedIn (audit run 1, C04)', () => {
 
   it('leaves addresses that are not hosted agents alone', async () => {
     expect(await hostedVerifierNotOptedIn(ADDR)).toBe(false);
+  });
+});
+
+describe('verifierChainUnsupported', () => {
+  it("flags a registered agent that doesn't settle on the chain, as the index does", async () => {
+    vi.mocked(getAgent).mockResolvedValueOnce({ address: '0xa', supportedChains: ['0g'] } as any);
+    expect(await verifierChainUnsupported('0xa', 'arc')).toBe(true);
+    vi.mocked(getAgent).mockResolvedValueOnce({ address: '0xa', supportedChains: ['0g', 'arc'] } as any);
+    expect(await verifierChainUnsupported('0xa', 'arc')).toBe(false);
+  });
+
+  it('leaves an address that is not a registered agent alone', async () => {
+    expect(await verifierChainUnsupported('0xb', 'arc')).toBe(false);
   });
 });
 

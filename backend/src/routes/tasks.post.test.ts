@@ -25,9 +25,10 @@ const TASK = '0x' + 'cd'.repeat(32);
 const abi = JSON.parse(readFileSync(new URL('../abi/BlindEscrow.json', import.meta.url), 'utf-8'));
 const iface = new ethers.Interface(Array.isArray(abi) ? abi : abi.abi);
 
-const { verifierOptedOut } = vi.hoisted(() => ({ verifierOptedOut: { value: false } }));
+const { verifierOptedOut, verifierOffChain } = vi.hoisted(() => ({ verifierOptedOut: { value: false }, verifierOffChain: { value: false } }));
 vi.mock('../services/verifierDuty.js', () => ({
   hostedVerifierNotOptedIn: vi.fn(async () => verifierOptedOut.value),
+  verifierChainUnsupported: vi.fn(async () => verifierOffChain.value),
   VERIFIER_NOT_OPTED_IN_MESSAGE: 'not opted in',
 }));
 // Whether a hosted agent may post is services/delegationGuard.ts's own test;
@@ -176,6 +177,18 @@ describe('POST /tasks on a deployment with a Base escrow', () => {
       expect(res.body.error.code).toBe('VERIFIER_NOT_OPTED_IN');
     } finally {
       verifierOptedOut.value = false;
+    }
+  });
+
+  it("refuses a verifier agent that doesn't settle on the posting chain, before building: the index would refuse it after funding", async () => {
+    verifierOffChain.value = true;
+    try {
+      const res = await post({ token: USDC, verificationMode: 'agent', verifierAddress: VERIFIER });
+      expect(res.status).toBe(409);
+      expect(res.body.error.code).toBe('VERIFIER_CHAIN_UNSUPPORTED');
+      expect(chain.buildUnsignedTx).not.toHaveBeenCalled();
+    } finally {
+      verifierOffChain.value = false;
     }
   });
 
