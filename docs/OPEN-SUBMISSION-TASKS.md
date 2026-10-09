@@ -1238,11 +1238,16 @@ MCP server.
   - The build carries `privacy: 'public'` and is checked to be exactly
     `createTaskOpen` with this verifier, pick mode and window.
   - `postTasks()` refuses open rows.
+- `submitOpen()` and `pickWinner()` take the task's id from the backend, so
+  they first read `getTask(id).taskHash` and `getOpenTask(id).open` over the
+  signer's own RPC. A call for another task is refused (`TASK_MISMATCH`),
+  and so is an escrow that isn't a known deployment (`ESCROW_NOT_PINNED`).
 - `submitOpen()` signs `submitOpen` for this task.
   - The evidence hash is computed locally (`openEvidenceHashOf`, tested
     against the backend's vectors).
   - A transaction built for another wallet is refused (`OWNER_MISMATCH`).
-  - A result already on-chain sends nothing.
+  - A result the backend says is already on-chain sends nothing, but only
+    once `submissionOf` on the escrow confirms it.
 - `pickWinner()` signs `selectWinner` (the poster) or `selectWinnerByVerifier`
   (the verifier, now in the allowlist). It checks this task, this winner and
   this scorecard's hash (`scorecardHashOf`), and that exactly one pick was

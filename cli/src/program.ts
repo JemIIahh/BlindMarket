@@ -74,8 +74,11 @@ function openTerms(opts: { open?: boolean; verifier?: string; pick?: string; pic
   const pick = opts.pick ?? 'verifier';
   if (pick !== 'verifier' && pick !== 'me') throw new CliError('BAD_PICK', '--pick must be verifier or me.');
   if (opts.pickWindow !== undefined && pick !== 'me') throw new CliError('BAD_PICK_WINDOW', '--pick-window is your window to pick first: add --pick me.');
-  if (opts.pickWindow !== undefined && !/^\d+$/.test(opts.pickWindow)) throw new CliError('BAD_PICK_WINDOW', '--pick-window must be a whole number of seconds.');
-  return { verifier: opts.verifier, pick: pick === 'me' ? 'creator' : 'agent', ...(opts.pickWindow !== undefined ? { window: Number(opts.pickWindow) } : {}) };
+  if (pick === 'verifier') return { verifier: opts.verifier, pick: 'agent' };
+  // The window the confirm states is the one funded: the default applied here, not later.
+  const window = opts.pickWindow === undefined ? 86_400 : /^\d+$/.test(opts.pickWindow) ? Number(opts.pickWindow) : NaN;
+  if (!(window >= 3_600 && window <= 604_800)) throw new CliError('BAD_PICK_WINDOW', '--pick-window must be a whole number of seconds from 3600 (1 hour) to 604800 (7 days).');
+  return { verifier: opts.verifier, pick: 'creator', window };
 }
 
 /** Tasks many agents submit to need SDK methods newer than the CLI's oldest supported SDK. */
@@ -1400,14 +1403,18 @@ export function buildProgram(): Command {
   program
     .command('verifications')
     .description('List tasks many agents submit to that your wallet judges, from when your window opens')
-    .action(async () => {
+    .option('--offset <n>', 'Skip this many (live windows come first)', '0')
+    .action(async (opts: { offset: string }) => {
+      if (!/^\d+$/.test(opts.offset)) throw new CliError('BAD_OFFSET', '--offset must be a whole number.');
       const { bb } = client();
       assertOpenSdk(bb);
-      const { tasks } = await bb.listOpenVerifications();
-      if (tasks.length === 0) { out('No tasks to judge right now.'); return; }
+      const offset = Number(opts.offset);
+      const { tasks, total } = await bb.listOpenVerifications({ offset });
+      if (tasks.length === 0) { out(offset ? 'No more tasks to judge.' : 'No tasks to judge right now.'); return; }
       for (const t of tasks) {
         out(`${String(t.meta.taskId)}  ${String(t.submissions).padStart(3)} submitted  your window ${when(t.window.opensAt)} to ${when(t.window.closesAt)}`);
       }
+      if (offset + tasks.length < total) out(`(${offset + 1}-${offset + tasks.length} of ${total}) More: blind verifications --offset ${offset + tasks.length}`);
     });
 
   // ── settling ──────────────────────────────────────────────────────────────

@@ -28,6 +28,11 @@ deadline, and one is picked and paid. Only when the backend runs it
       chain whose escrow does not take it yet (`OPEN_SUBMISSION_UNSUPPORTED`).
   - The funding is checked to be exactly `createTaskOpen` with this
     verifier, pick mode and window. `postTasks()` refuses open rows.
+- **The task id is checked against the escrow.** `submitOpen()` and
+  `pickWinner()` read `getTask(id)` and `getOpenTask(id)` over the signer's
+  own RPC. The backend names the id, so a call for another task is refused
+  (`TASK_MISMATCH`), as is an escrow that isn't a known deployment
+  (`ESCROW_NOT_PINNED`). Nothing is sent in either case.
 - **`submitOpen(taskHash, { resultData, rootHash })`** submits a result from
   the API key's own wallet (one per agent). It signs `submitOpen` only for
   this task, with the evidence hash computed locally (`openEvidenceHashOf`,

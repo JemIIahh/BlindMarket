@@ -51,6 +51,11 @@ const ESCROW_CALLS = new Interface([
   'function claimTimeout(uint256 taskId)',
 ]);
 const createTaskData = (b) => ESCROW_CALLS.encodeFunctionData('createTask', [b.taskHash, b.token, b.amount, 'general', b.locationZone, b.duration]);
+const ESCROW_READS = new Interface([
+  'function getTask(uint256 taskId) view returns (tuple(address agent, address worker, address token, uint256 amount, bytes32 taskHash, bytes32 evidenceHash, uint8 status, string category, string locationZone, uint256 createdAt, uint256 deadline, uint8 submissionAttempts, uint256 disputedAt))',
+  'function getOpenTask(uint256 taskId) view returns (tuple(bool open, uint8 mode, uint32 creatorWindow, uint8 closedBy))',
+  'function submissionOf(uint256 taskId, address submitter) view returns (bytes32)',
+]);
 // An escrow with createTasks (docs/BULK-POSTING.md), as the backend builds it for POST /tasks/batch.
 const BATCH_CALLS = new Interface([
   'function createTasks(address token, tuple(bytes32 taskHash, uint256 amount, string category, string locationZone, uint256 duration, address verifierAgent)[] tasks)',
@@ -79,6 +84,16 @@ before(async () => {
           case 'eth_getTransactionCount': result = '0x' + chain.sent.length.toString(16); break;
           case 'eth_estimateGas': result = '0x30000'; break;
           case 'eth_call': {
+            // The escrow reads that bind an open task's id to its hash (task 41 is OPEN_HASH, open, no submission).
+            const read = ESCROW_READS.parseTransaction({ data: params[0].data });
+            if (read) {
+              result = read.name === 'getTask'
+                ? ESCROW_READS.encodeFunctionResult('getTask', [[OWNER.address, '0x' + '00'.repeat(20), USDC, 2_000_000n, chain.openTaskHash ?? '0x' + 'ab'.repeat(32), '0x' + '00'.repeat(32), 0, 'general', 'global', 1n, 2n, 0, 0n]])
+                : read.name === 'getOpenTask'
+                  ? ESCROW_READS.encodeFunctionResult('getOpenTask', [[true, 1, 3600, 0]])
+                  : ESCROW_READS.encodeFunctionResult('submissionOf', ['0x' + '00'.repeat(32)]);
+              break;
+            }
             const fn = ERC20.parseTransaction({ data: params[0].data }).name;
             result = ERC20.encodeFunctionResult(fn, [fn === 'allowance' ? chain.allowance : 10_000_000n]);
             break;
@@ -1263,4 +1278,14 @@ test('open-status says where the task stands in words', async () => {
   assert.match(text, /task 41 on arc: closed/);
   assert.match(text, new RegExp(`winner: +${WINNER}`));
   await assert.rejects(blind('open-status', '--task', '41'), (e) => e.code === 'BAD_TASK');
+});
+
+test("post-task --open --pick me states the window it funds (one day by default) and refuses one the escrow would", async () => {
+  answers['/api/v1/a2a/open-submission'] = [openConfig()];
+  await assert.rejects(
+    blind('post-task', '--instructions', 'Name three sources.', '--reward', '2', '--open', '--verifier', VERIFIER, '--pick', 'me'),
+    (e) => e.code === 'CONFIRM_REQUIRED' && /you picking first for 86400 s/.test(e.message),
+  );
+  const base = ['post-task', '--instructions', 'Name three sources.', '--reward', '2', '--open', '--verifier', VERIFIER, '--pick', 'me', '--yes'];
+  for (const w of ['3599', '604801', '1.5']) await assert.rejects(blind(...base, '--pick-window', w), (e) => e.code === 'BAD_PICK_WINDOW');
 });

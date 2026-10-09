@@ -95,8 +95,15 @@ function stub(b: Backend = {}) {
 
 const erc20 = new ethers.Interface(['function allowance(address,address) view returns (uint256)', 'function balanceOf(address) view returns (uint256)']);
 const word = (v: bigint) => ethers.AbiCoder.defaultAbiCoder().encode(['uint256'], [v]);
+// What the escrow answers about task 41: by default the open task HASH, and no submission from the signer.
+const READS = new ethers.Interface([
+  'function getTask(uint256 taskId) view returns (tuple(address agent, address worker, address token, uint256 amount, bytes32 taskHash, bytes32 evidenceHash, uint8 status, string category, string locationZone, uint256 createdAt, uint256 deadline, uint8 submissionAttempts, uint256 disputedAt))',
+  'function getOpenTask(uint256 taskId) view returns (tuple(bool open, uint8 mode, uint32 creatorWindow, uint8 closedBy))',
+  'function submissionOf(uint256 taskId, address submitter) view returns (bytes32)',
+]);
+interface Escrow { taskHash?: string; open?: boolean; submission?: string }
 
-function wallet(address = OWNER) {
+function wallet(address = OWNER, escrow: Escrow = {}) {
   const sent: { to: string; data: string; value?: bigint }[] = [];
   const signer = {
     getAddress: async () => address,
@@ -109,6 +116,11 @@ function wallet(address = OWNER) {
         const sel = tx.data.slice(0, 10);
         if (sel === erc20.getFunction('balanceOf')!.selector) return word(10_000_000n);
         if (sel === erc20.getFunction('allowance')!.selector) return word(10_000_000n);
+        if (sel === READS.getFunction('getTask')!.selector) {
+          return READS.encodeFunctionResult('getTask', [[OWNER, ethers.ZeroAddress, USDC, 2_000_000n, escrow.taskHash ?? HASH, ethers.ZeroHash, 0, 'general', 'global', 1n, 2n, 0, 0n]]);
+        }
+        if (sel === READS.getFunction('getOpenTask')!.selector) return READS.encodeFunctionResult('getOpenTask', [[escrow.open ?? true, 1, 3600, 0]]);
+        if (sel === READS.getFunction('submissionOf')!.selector) return READS.encodeFunctionResult('submissionOf', [escrow.submission ?? ethers.ZeroHash]);
         throw new Error(`unexpected read ${sel}`);
       }),
       getNetwork: async () => ({ chainId: BigInt(CHAIN_ID) }),
@@ -253,10 +265,38 @@ describe('submitOpen()', () => {
     expect(sent).toEqual([SENT]);
   });
 
-  it('sends nothing when the same result is already on-chain', async () => {
-    stub({ submit: (b) => ok({ taskHash: HASH, onChainTaskId: '41', evidenceHash: openEvidenceHashOf(b.resultData, b.rootHash), alreadyOnChain: true, kept: true }) });
-    const w = wallet();
+  const onChainAlready = (b: { resultData: Record<string, unknown>; rootHash: string | null }) =>
+    ok({ taskHash: HASH, onChainTaskId: '41', evidenceHash: openEvidenceHashOf(b.resultData, b.rootHash), alreadyOnChain: true, kept: true });
+
+  it('sends nothing when the same result is already on-chain, as the escrow confirms', async () => {
+    stub({ submit: onChainAlready });
+    const w = wallet(OWNER, { submission: openEvidenceHashOf(result.resultData, ROOT) });
     expect(await bb().submitOpen(HASH, result, { signer: w.signer })).toMatchObject({ txHash: null, alreadyOnChain: true });
+    expect(w.sent).toHaveLength(0);
+  });
+
+  it('refuses a backend that says the result is on-chain when the escrow holds none', async () => {
+    stub({ submit: onChainAlready });
+    expect((await refusal(bb().submitOpen(HASH, result, { signer: wallet().signer }))).code).toBe('TX_MISMATCH');
+  });
+
+  it.each([
+    ['another task', { taskHash: '0x' + 'cd'.repeat(32) }],
+    ['a task one agent takes', { open: false }],
+  ])("refuses when the escrow says the backend's task id is %s, with nothing sent", async (_name, escrow) => {
+    stub();
+    const w = wallet(OWNER, escrow);
+    expect((await refusal(bb().submitOpen(HASH, result, { signer: w.signer }))).code).toBe('TASK_MISMATCH');
+    expect(w.sent).toHaveLength(0);
+  });
+
+  it('refuses an escrow that is not a known deployment', async () => {
+    const unpinned = { ...SETTLEMENT, chains: SETTLEMENT.chains.map((c: { chain: string }) => (c.chain === 'arc' ? { ...c, escrowAddress: '0x' + '9a'.repeat(20) } : c)) };
+    const { fn } = stub();
+    const base = fn.getMockImplementation()!;
+    fn.mockImplementation(async (url: string | URL, init?: RequestInit) => (String(url).endsWith('/health/settlement') ? ok(unpinned) : base(url, init)));
+    const w = wallet();
+    expect((await refusal(bb().submitOpen(HASH, result, { signer: w.signer }))).code).toBe('ESCROW_NOT_PINNED');
     expect(w.sent).toHaveLength(0);
   });
 
@@ -318,6 +358,13 @@ describe('pickWinner()', () => {
     stub({ select: answer });
     const w = wallet();
     expect((await refusal(bb().pickWinner(HASH, WINNER, { signer: w.signer }))).code).toBe('TX_MISMATCH');
+    expect(w.sent).toHaveLength(0);
+  });
+
+  it('refuses a pick for a task id the escrow says is another task, with nothing sent', async () => {
+    stub();
+    const w = wallet(OWNER, { taskHash: '0x' + 'cd'.repeat(32) });
+    expect((await refusal(bb().pickWinner(HASH, WINNER, { signer: w.signer }))).code).toBe('TASK_MISMATCH');
     expect(w.sent).toHaveLength(0);
   });
 

@@ -1,7 +1,7 @@
 import { ethers } from 'ethers';
 import { ApiError } from './apiError.js';
 import {
-  sendAndWait, assertSignerChain, ensureAllowance, tokenBalance, UnconfirmedTransactionError, DEFAULT_CONFIRM_TIMEOUT_MS,
+  sendAndWait, assertSignerChain, ensureAllowance, tokenBalance, openTaskOnChain, UnconfirmedTransactionError, DEFAULT_CONFIRM_TIMEOUT_MS,
 } from './onchain.js';
 import { checkEscrowCall, evidenceHashOf, openEvidenceHashOf, scorecardHashOf, taskIdOf, type EscrowFunction } from './escrowCalls.js';
 import { isPinnedSettlement, SETTLEMENT_PINS, type SettlementPin } from './settlementPins.js';
@@ -1836,9 +1836,16 @@ export class BlindMarket {
     if (String(built.onChainTaskId) !== status.onChainTaskId || String(built.evidenceHash).toLowerCase() !== evidenceHash.toLowerCase()) {
       throw new ApiError(409, `${what}: the backend answered for another task or another result than this one. Nothing was sent.`, built, 'TX_MISMATCH');
     }
-    const out = { taskHash: status.taskHash, chain: status.chain, onChainTaskId: status.onChainTaskId, evidenceHash };
-    if (built.alreadyOnChain) return { ...out, txHash: null, alreadyOnChain: true };
     const id = BigInt(status.onChainTaskId);
+    // The task id comes from the backend: the escrow must say it is this task, and an open one.
+    const onChain = await this.assertOpenTaskOnChain(signer, entry.escrowAddress, id, taskHash, what, address);
+    const out = { taskHash: status.taskHash, chain: status.chain, onChainTaskId: status.onChainTaskId, evidenceHash };
+    if (built.alreadyOnChain) {
+      if (String(onChain.submission).toLowerCase() !== evidenceHash.toLowerCase()) {
+        throw new ApiError(409, `${what}: the backend says this result is already on-chain, but the escrow holds ${onChain.submission === ethers.ZeroHash ? 'no submission' : 'another submission'} from ${address}. Nothing was sent.`, built, 'TX_MISMATCH');
+      }
+      return { ...out, txHash: null, alreadyOnChain: true };
+    }
     const call = this.checkedOpenCall(built.unsignedSubmitOpen, 'submitOpen', entry, address, what,
       (a) => a[0] === id && String(a[1]).toLowerCase() === evidenceHash.toLowerCase());
     const txHash = await this.sendOpenCall(signer, call, what, opts,
@@ -1876,6 +1883,7 @@ export class BlindMarket {
       throw new ApiError(409, `${what}: the backend built the pick for another task or another scorecard than this one. Nothing was sent.`, built, 'TX_MISMATCH');
     }
     const id = BigInt(status.onChainTaskId);
+    await this.assertOpenTaskOnChain(signer, entry.escrowAddress, id, taskHash, what);
     const fn = byVerifier ? 'selectWinnerByVerifier' : 'selectWinner';
     const call = this.checkedOpenCall(byVerifier ? built.unsignedSelectWinnerByVerifier : built.unsignedSelectWinner, fn, entry, address, what,
       (a) => a[0] === id && String(a[1]).toLowerCase() === winner.toLowerCase() && String(a[2]).toLowerCase() === scorecardHash.toLowerCase());
@@ -1926,12 +1934,29 @@ export class BlindMarket {
     }
   }
 
-  /** The escrow of an open task's chain and a signer on it. */
+  /** The escrow of an open task's chain, a known deployment (or one the caller trusts), and a signer on it. */
   private async openSigner(chain: string, what: string, signerOption?: ethers.Signer): Promise<{ entry: SettlementChainInfo & { escrowAddress: string }; signer: ethers.Signer; address: string }> {
     const entry = await this.settlementEntry(chain, what);
+    if (!entry.token.address || !isPinnedSettlement(entry.chainId, entry.escrowAddress, entry.token.address, this.trustedEscrows)) {
+      throw new ApiError(409, `${what}: the backend names escrow ${entry.escrowAddress} on ${chain} (chain ${entry.chainId}), which is not a known deployment. Nothing was sent. For a custom or local deployment, list it in BlindMarketConfig.trustedEscrows.`, undefined, 'ESCROW_NOT_PINNED');
+    }
     const signer = signerOption ?? this.signerOn(chain, what);
     await assertSignerChain(signer, entry.chainId, what);
     return { entry, signer, address: await signer.getAddress() };
+  }
+
+  /**
+   * Throws 409 TASK_MISMATCH, with nothing sent, unless the escrow says task
+   * `id` is `taskHash` and takes open submissions: the id comes from the
+   * backend, and a call for another task would spend a submission, or pay a
+   * winner, there.
+   */
+  private async assertOpenTaskOnChain(signer: ethers.Signer, escrow: string, id: bigint, taskHash: string, what: string, submitter?: string): Promise<{ submission?: string }> {
+    const onChain = await openTaskOnChain(signer, escrow, id, submitter);
+    if (onChain.taskHash.toLowerCase() !== taskHash.toLowerCase() || !onChain.open) {
+      throw new ApiError(409, `${what}: the escrow says task ${id} is ${onChain.open ? `another task (${onChain.taskHash})` : 'not one that takes submissions from many agents'}, not ${taskHash}. Nothing was sent.`, undefined, 'TASK_MISMATCH');
+    }
+    return onChain;
   }
 
   /**
