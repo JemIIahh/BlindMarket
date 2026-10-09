@@ -133,8 +133,11 @@ export default function PostTask() {
     creatorWindowSec: 86_400,
   });
   const openConfig = useOpenSubmissionConfig();
-  const openEnabled = openConfig.data?.enabled === true;
+  const openEnabled = openConfig.data?.enabled === true && openConfig.data.posting !== false;
   const isOpenPost = openEnabled && form.submissionMode === 'open';
+  // What "Many agents" overrode (it forces public and a verifier agent), put
+  // back on "One agent", so a private brief never goes out public unchosen.
+  const beforeOpen = useRef<{ privacy: typeof form.privacy; verificationMode: typeof form.verificationMode } | null>(null);
   // Agents the poster can designate as a verifier: those whose owner opted in,
   // that are running, and that settle on the posting chain (role=verifier).
   // We need each one's publicKey to ECIES-wrap the brief key to it.
@@ -350,7 +353,7 @@ export default function PostTask() {
         rootHash,
         wrappedKeys: isPublicTask ? undefined : wrappedKeys,
         ...(isOpenPost
-          ? { open: { mode: form.pickMode, creatorWindow: form.pickMode === 'creator' ? form.creatorWindowSec : 0 } }
+          ? { privacy: 'public', open: { mode: form.pickMode, creatorWindow: form.pickMode === 'creator' ? form.creatorWindowSec : 0 } }
           : {}),
       }, token);
 
@@ -718,9 +721,18 @@ export default function PostTask() {
                     label="Who works on it"
                     value={form.submissionMode}
                     disabled={busy}
-                    onChange={(submissionMode) => setForm(f => (submissionMode === 'open'
-                      ? { ...f, submissionMode, privacy: 'public', verificationMode: 'agent' }
-                      : { ...f, submissionMode }))}
+                    onChange={(submissionMode) => {
+                      // The ref is kept out of the state updater, which React may run twice.
+                      if (submissionMode === form.submissionMode) return;
+                      if (submissionMode === 'open') {
+                        beforeOpen.current = { privacy: form.privacy, verificationMode: form.verificationMode };
+                        setForm(f => ({ ...f, submissionMode, privacy: 'public', verificationMode: 'agent' }));
+                        return;
+                      }
+                      const before = beforeOpen.current;
+                      beforeOpen.current = null;
+                      setForm(f => ({ ...f, submissionMode, ...(before ?? {}) }));
+                    }}
                     options={[
                       ['one', 'One agent'],
                       ['open', 'Many agents, one winner'],
@@ -890,7 +902,7 @@ export default function PostTask() {
                       <FormField
                         label="Who picks the winner"
                         hint={form.pickMode === 'creator'
-                          ? 'You pick from the submissions after the deadline. If you have not picked when your window ends, the verifier agent picks.'
+                          ? 'You pick from the submissions after the deadline. If you have not picked when your window ends, the verifier agent picks. Agents see that you pick first: a poster could pick a second wallet of their own, so some agents skip these tasks.'
                           : 'The verifier agent judges every submission after the deadline and picks the winner.'}
                       >
                         <div className="space-y-3">

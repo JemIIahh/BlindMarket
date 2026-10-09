@@ -66,6 +66,11 @@ const hashClaim = vi.hoisted(() => ({
   getMeta: vi.fn(async (_hash: string): Promise<unknown> => undefined),
 }));
 vi.mock('../services/a2aStore.js', () => hashClaim);
+const openSupport = vi.hoisted(() => vi.fn(async () => true));
+vi.mock('../services/batchSupport.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../services/batchSupport.js')>()),
+  openCreateSupport: openSupport,
+}));
 // The escrow hash index: which escrow task, if any, a hash already names.
 const hashIndex = vi.hoisted(() => ({ resolveCachedTaskByHash: vi.fn(async (_hash: string): Promise<unknown> => null) }));
 vi.mock('../services/taskChain.js', async (importOriginal) => ({
@@ -285,9 +290,12 @@ describe('POST /tasks refuses an amount or duration that is not a whole number',
 });
 
 describe('POST /tasks for a task many agents submit to', () => {
-  const open = (o: Record<string, unknown>) => post({ token: USDC, verificationMode: 'agent', verifierAddress: VERIFIER, ...o });
+  const open = (o: Record<string, unknown>) => post({ token: USDC, verificationMode: 'agent', verifierAddress: VERIFIER, privacy: 'public', ...o });
   const args = (res: request.Response) => iface.parseTransaction({ data: res.body.data.unsignedTx.data })!.args;
-  beforeEach(() => { cfg.openSubmissionEnabled = true; });
+  beforeEach(() => {
+    cfg.openSubmissionEnabled = true;
+    openSupport.mockResolvedValue(true);
+  });
 
   it('builds createTaskOpen with the verifier picking, from the deadline', async () => {
     const res = await open({ open: { mode: 'agent', creatorWindow: 0 } });
@@ -312,7 +320,7 @@ describe('POST /tasks for a task many agents submit to', () => {
   });
 
   it('needs a verifier that is not the poster', async () => {
-    const none = await post({ token: USDC, open: { mode: 'agent', creatorWindow: 0 } });
+    const none = await post({ token: USDC, privacy: 'public', open: { mode: 'agent', creatorWindow: 0 } });
     expect(none.body.error.code).toBe('OPEN_TASK_NEEDS_VERIFIER');
     const self = await open({ verifierAddress: POSTER, open: { mode: 'agent', creatorWindow: 0 } });
     expect(self.body.error.code).toBe('INVALID_VERIFIER');
@@ -324,5 +332,31 @@ describe('POST /tasks for a task many agents submit to', () => {
       expect(res.status).toBe(400);
       expect(res.body.error.code).toBe('INVALID_PICK_WINDOW');
     }
+  });
+
+  it('is public: refuses a private brief, or one with wrapped keys, which the index would refuse after funding', async () => {
+    for (const o of [{ privacy: undefined }, { privacy: 'private' }, { wrappedKeys: { [VERIFIER.toLowerCase()]: 'ab'.repeat(97) } }]) {
+      const res = await open({ ...o, open: { mode: 'agent', creatorWindow: 0 } });
+      expect(res.status).toBe(400);
+      expect(res.body.error.code).toBe('OPEN_TASK_MUST_BE_PUBLIC');
+    }
+  });
+
+  it("refuses when the posting chain's escrow has no createTaskOpen yet", async () => {
+    openSupport.mockResolvedValue(false);
+    const res = await open({ open: { mode: 'agent', creatorWindow: 0 } });
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('OPEN_SUBMISSION_UNSUPPORTED');
+  });
+
+  it('refuses before claiming the task hash', async () => {
+    cfg.openSubmissionEnabled = false;
+    await open({ open: { mode: 'agent', creatorWindow: 0 } });
+    cfg.openSubmissionEnabled = true;
+    await open({ open: { mode: 'creator', creatorWindow: 60 } });
+    await open({ privacy: 'private', open: { mode: 'agent', creatorWindow: 0 } });
+    openSupport.mockResolvedValue(false);
+    await open({ open: { mode: 'agent', creatorWindow: 0 } });
+    expect(hashClaim.claimTaskHash).not.toHaveBeenCalled();
   });
 });

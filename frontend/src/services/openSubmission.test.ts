@@ -56,6 +56,11 @@ describe("checkSelectWinnerTx: the poster signs only their own pick", () => {
     expect(checkSelectWinnerTx(t as never, expected)).toMatch(why);
   });
 
+  it('refuses a pick that anchors a scorecard the poster never sent', () => {
+    const data = iface.encodeFunctionData('selectWinner', [41n, WINNER, '0x' + '55'.repeat(32)]);
+    expect(checkSelectWinnerTx(tx({ data }), expected)).toMatch(/scorecard/);
+  });
+
   it('refuses when the chain has no known escrow', () => {
     expect(checkSelectWinnerTx(tx(), { ...expected, escrow: undefined })).toMatch(/escrow/);
   });

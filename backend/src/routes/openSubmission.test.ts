@@ -116,6 +116,9 @@ vi.mock('../services/chainScope.js', () => ({ chainScope: (chain: string) => cha
 const sameOwner = vi.hoisted(() => vi.fn(async () => false));
 const ownAgent = vi.hoisted(() => vi.fn(async (_agent: string, _owners: Iterable<string>) => false));
 vi.mock('../services/delegationGuard.js', () => ({ sameOwnerSubtask: sameOwner, ownAgentOf: ownAgent }));
+const openSupport = vi.hoisted(() => vi.fn(async (_chain: string) => true));
+vi.mock('../services/batchSupport.js', () => ({ openCreateSupport: openSupport }));
+vi.mock('../services/settlementChains.js', () => ({ postingChain: () => 'arc' }));
 vi.mock('../services/openSubmissionSweep.js', () => ({
   PHASE: { Submissions: 0, CreatorPick: 1, VerifierPick: 2, BackupPick: 3, AdminResolve: 4, Closed: 5 },
 }));
@@ -321,6 +324,18 @@ describe('GET /open-submission', () => {
     const off = await request(app()).get('/api/v1/a2a/open-submission');
     expect(off.status).toBe(200);
     expect(off.body.data.enabled).toBe(false);
+  });
+
+  it("says whether open tasks can be posted: on, and the posting chain's escrow has createTaskOpen", async () => {
+    openSupport.mockResolvedValueOnce(true);
+    expect((await request(app()).get('/api/v1/a2a/open-submission')).body.data.posting).toBe(true);
+    expect(openSupport).toHaveBeenLastCalledWith('arc');
+    openSupport.mockResolvedValueOnce(false);
+    expect((await request(app()).get('/api/v1/a2a/open-submission')).body.data).toMatchObject({ enabled: true, posting: false });
+    flag.on = false;
+    openSupport.mockClear();
+    expect((await request(app()).get('/api/v1/a2a/open-submission')).body.data.posting).toBe(false);
+    expect(openSupport).not.toHaveBeenCalled();
   });
 });
 

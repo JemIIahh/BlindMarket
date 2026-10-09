@@ -45,6 +45,8 @@ import { resolveCachedTaskByHash, type TaskChain } from '../services/taskChain.j
 import { ownAgentOf, sameOwnerSubtask } from '../services/delegationGuard.js';
 import { storageIdSchema } from '../services/storageId.js';
 import { PHASE } from '../services/openSubmissionSweep.js';
+import { openCreateSupport } from '../services/batchSupport.js';
+import { postingChain } from '../services/settlementChains.js';
 import { OPEN_PICK_WINDOWS } from '../services/openPickWindows.js';
 import type { A2ATaskMeta, ApiResponse, AuthRequest } from '../types.js';
 import type { RequestHandler } from 'express';
@@ -199,11 +201,14 @@ export { OPEN_PICK_WINDOWS };
  * open-task screens only when it is. Also the escrow's pick windows and the
  * size limits, so a client never hardcodes them.
  */
-openSubmissionRouter.get('/open-submission', (_req, res) => {
+openSubmissionRouter.get('/open-submission', async (_req, res) => {
+  // Whether open tasks can be posted now: on, and the posting chain's escrow has createTaskOpen.
+  const posting = config.openSubmissionEnabled && (await openCreateSupport(postingChain()));
   const response: ApiResponse = {
     success: true,
     data: {
       enabled: config.openSubmissionEnabled,
+      posting,
       pickModes: ['agent', 'creator'],
       windows: OPEN_PICK_WINDOWS,
       maxResultBytes: MAX_RESULT_BYTES,

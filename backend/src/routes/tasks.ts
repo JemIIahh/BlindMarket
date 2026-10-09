@@ -29,7 +29,7 @@ import { hostedVerifierNotOptedIn, VERIFIER_NOT_OPTED_IN_MESSAGE } from '../serv
 import { refuseUnapprovedDelegation } from '../services/delegationGuard.js';
 import { withPosterAvatars } from '../services/avatarStore.js';
 import { closeRefundedA2ATask } from '../services/refundedTasks.js';
-import { BATCH_UNSUPPORTED, batchCreateSupport } from '../services/batchSupport.js';
+import { BATCH_UNSUPPORTED, batchCreateSupport, openCreateSupport } from '../services/batchSupport.js';
 import { MAX_BATCH_REQUEST, WALLET_POSTING_BUDGET_PER_MIN } from '../constants.js';
 import { batchWeight, createWalletBudget, postingIpBudget } from '../middleware/rateLimit.js';
 import { invalidRows, zodIssuesText, type RowError } from '../middleware/batchErrors.js';
@@ -75,6 +75,10 @@ const createTaskSchema = z.object({
     mode: z.enum(['agent', 'creator']),
     creatorWindow: z.number().int().min(0),
   }).optional(),
+  // What POST /a2a/tasks/index will be told. Required as 'public' with
+  // `open`: every result becomes readable once submissions close, and the
+  // index refuses an open task that is not public, after the escrow is funded.
+  privacy: z.enum(['private', 'public']).optional(),
   // 0G Storage root hash of the AES-encrypted brief. Required for the
   // encrypted-flow demo; absent for legacy/H2H tasks that don't use the
   // decryption pipeline.
@@ -525,14 +529,19 @@ async function refuseOptedOutVerifier(data: TaskTerms): Promise<void> {
 
 /**
  * The open terms for createTaskOpen, checked as the escrow and the index
- * route check them, so nothing is funded that can't be listed: open
- * submission on, a verifier that is not the poster, and a poster's window
- * within MIN/MAX_CREATOR_WINDOW (none for the verifier's pick).
+ * route check what this request carries: open submission on, a public brief
+ * (no wrapped keys), a verifier that is not the poster, and a poster's window
+ * within MIN/MAX_CREATOR_WINDOW (none for the verifier's pick). The index
+ * body must also be public and name no targetExecutor or serviceId
+ * (OPEN_TASK_PINNED); this request does not carry those.
  */
 function openTerms(data: z.infer<typeof createTaskSchema>, from: string): { verifier: string; mode: 0 | 1; creatorWindow: number } {
   const open = data.open!;
   if (!config.openSubmissionEnabled) {
     throw new AppError(409, 'OPEN_SUBMISSION_DISABLED', 'This server does not take tasks that many agents submit to yet');
+  }
+  if (data.privacy !== 'public' || (data.wrappedKeys && Object.keys(data.wrappedKeys).length > 0)) {
+    throw new AppError(400, 'OPEN_TASK_MUST_BE_PUBLIC', "A task that takes submissions from many agents is public: send privacy 'public' and no wrappedKeys");
   }
   if (data.verificationMode !== 'agent' || !data.verifierAddress) {
     throw new AppError(400, 'OPEN_TASK_NEEDS_VERIFIER', "A task that takes submissions from many agents needs a verifier agent: send verificationMode 'agent' with verifierAddress");
@@ -601,11 +610,16 @@ tasksRouter.post('/', requireAuth, buildBudget, postingIpBudget, async (req: Aut
 
     const { amount: amountBigInt, duration: durationBigInt } = checkTaskTerms(data);
     const { chain, label, chainId, token } = postingTarget();
+    // Refused before the hash is claimed, like every other term.
+    const open = data.open ? openTerms(data, from) : undefined;
+    if (open && !(await openCreateSupport(chain))) {
+      throw new AppError(409, 'OPEN_SUBMISSION_UNSUPPORTED', `The ${label} escrow does not take tasks that many agents submit to yet`);
+    }
     await claimNewTaskHash(data.taskHash, from, randomUUID());
     const { tokenAddress, isNative } = settlementToken(chain, label, token, data.token);
     await refuseOptedOutVerifier(data);
 
-    const tx = data.open
+    const tx = open
       ? await escrowService.buildCreateTaskOpenOn(
         chain,
         from,
@@ -616,7 +630,7 @@ tasksRouter.post('/', requireAuth, buildBudget, postingIpBudget, async (req: Aut
         data.locationZone,
         durationBigInt,
         isNative ? amountBigInt : undefined,
-        openTerms(data, from),
+        open,
       )
       : await escrowService.buildCreateTaskOn(
         chain,
@@ -781,6 +795,11 @@ tasksRouter.post('/batch', requireAuth, buildBudget, postingIpBudget, async (req
       const parsed = taskTermsSchema.safeParse(raw);
       if (!parsed.success) {
         errors.push({ index, code: 'VALIDATION_ERROR', message: zodIssuesText(parsed.error) });
+        return;
+      }
+      // createTasks builds single-assignee tasks: an open one is refused, never built as one.
+      if (parsed.data.open) {
+        errors.push({ index, code: 'OPEN_TASK_NOT_BATCHED', message: 'A task that takes submissions from many agents is posted on its own, with POST /tasks.' });
         return;
       }
       const hash = parsed.data.taskHash.toLowerCase();

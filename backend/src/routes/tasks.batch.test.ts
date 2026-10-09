@@ -173,6 +173,14 @@ describe('POST /tasks/batch — a valid batch', () => {
 });
 
 describe('POST /tasks/batch — all or nothing', () => {
+  it('refuses a task many agents submit to: createTasks would build it for one agent', async () => {
+    const res = await batch([task(0), task(1, { open: { mode: 'creator', creatorWindow: 86_400 } })]);
+    expect(res.status).toBe(400);
+    expect(res.body.error.details.errors).toEqual([{ index: 1, code: 'OPEN_TASK_NOT_BATCHED', message: expect.stringContaining('POST /tasks') }]);
+    expect(store.claimTaskHash).not.toHaveBeenCalled();
+    expect(chain.buildUnsignedTx).not.toHaveBeenCalled();
+  });
+
   it('refuses the batch with 400 naming each invalid task by index, claiming nothing', async () => {
     const res = await batch([
       task(0),

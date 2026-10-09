@@ -10,6 +10,8 @@ import { authedGet, authedPost, get } from '../lib/api';
 /** GET /a2a/open-submission: public, answered whether the feature is on or off. */
 export interface OpenSubmissionConfig {
   enabled: boolean;
+  /** Open tasks can be posted now: on, and the posting chain's escrow has createTaskOpen. Absent from older servers. */
+  posting?: boolean;
   pickModes: Array<'agent' | 'creator'>;
   windows: { creatorMinSec: number; creatorMaxSec: number; verifierSec: number; backupSec: number };
   maxResultBytes: number;
@@ -137,6 +139,8 @@ export function checkSelectWinnerTx(
   if (!call) return 'The transaction is not a pick of the winner. Nothing was signed.';
   if (call.args[0] !== BigInt(expected.onChainTaskId)) return 'The pick is for another task. Nothing was signed.';
   if (String(call.args[1]).toLowerCase() !== expected.winner.toLowerCase()) return 'The pick names another winner. Nothing was signed.';
+  // The poster sends no scorecard, so the pick anchors none.
+  if (call.args[2] !== ethers.ZeroHash) return 'The pick anchors a scorecard you did not send. Nothing was signed.';
   return null;
 }
 
