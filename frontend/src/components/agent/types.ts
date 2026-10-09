@@ -22,6 +22,7 @@ export interface AgentDetails {
   verifierEnabled?: boolean;
   /** The owner lets this agent pay other agents for sub-tasks (delegate_to_agent). Off by default. */
   delegationEnabled?: boolean;
+  openSubmissionEnabled?: boolean;
   apiKeyHint?: string | null;
   reputation?: { score: number; avgScore: number; tasksCompleted: number; disputes: number };
   decayedReputation?: { rawScore: number; decayedScore: number; tasksCompleted: number; disputes: number };

@@ -193,6 +193,106 @@ async function phaseOf(chain: TaskChain, taskId: number): Promise<number> {
   return Number(await escrowFor(chain).openPhase(taskId));
 }
 
+/** The escrow's pick windows (BlindEscrow: MIN/MAX_CREATOR_WINDOW, VERIFIER/BACKUP_PICK_WINDOW). */
+export const OPEN_PICK_WINDOWS = {
+  creatorMinSec: 3600,
+  creatorMaxSec: 7 * 86_400,
+  verifierSec: 48 * 3600,
+  backupSec: 48 * 3600,
+};
+
+/**
+ * GET /api/v1/a2a/open-submission
+ * Public, and answers whether or not open submission is on, so clients show
+ * open-task screens only when it is. Also the escrow's pick windows and the
+ * size limits, so a client never hardcodes them.
+ */
+openSubmissionRouter.get('/open-submission', (_req, res) => {
+  const response: ApiResponse = {
+    success: true,
+    data: {
+      enabled: config.openSubmissionEnabled,
+      pickModes: ['agent', 'creator'],
+      windows: OPEN_PICK_WINDOWS,
+      maxResultBytes: MAX_RESULT_BYTES,
+      maxScorecardBytes: MAX_SCORECARD_BYTES,
+    },
+  };
+  res.json(response);
+});
+
+const PHASE_KEYS: Record<number, string> = {
+  [PHASE.Submissions]: 'submissions',
+  [PHASE.CreatorPick]: 'creator_pick',
+  [PHASE.VerifierPick]: 'verifier_pick',
+  [PHASE.BackupPick]: 'backup_pick',
+  [PHASE.AdminResolve]: 'admin',
+  [PHASE.Closed]: 'closed',
+};
+
+/** How long an open task's status is served from memory: four escrow reads per view otherwise. */
+const STATUS_TTL_MS = 15_000;
+const statusCache = new Map<string, { at: number; data: Record<string, unknown> }>();
+
+/**
+ * GET /api/v1/a2a/tasks/:id/open-status
+ * Public: where an open task stands, read from the escrow (its phase, its
+ * submission count, its deadline as a pause moved it, whether it is
+ * paused), when each pick window ends, and how it ended (winner or void,
+ * and by which judge) or that its verifier declined. What a task page shows
+ * to anyone; the results stay behind GET /submissions.
+ */
+openSubmissionRouter.get('/tasks/:id/open-status', enabledOnly, async (req, res, next) => {
+  try {
+    const { taskHash, meta, chain, taskId, ref } = await openTask(String(req.params.id));
+    const cached = statusCache.get(ref);
+    if (cached && Date.now() - cached.at < STATUS_TTL_MS) {
+      res.json({ success: true, data: cached.data } as ApiResponse);
+      return;
+    }
+    const escrow = escrowFor(chain);
+    const [phase, count, paused, deadline, outcome, decline] = await Promise.all([
+      phaseOf(chain, taskId),
+      escrow.submissionCount(taskId),
+      escrow.paused(),
+      escrow.effectiveDeadline(taskId),
+      store.getOutcome(ref),
+      store.getDecline(ref),
+    ]);
+    const mode = meta.openPick?.mode ?? 'agent';
+    const deadlineSec = Number(deadline);
+    const creatorPickEnd = mode === 'creator' ? deadlineSec + (meta.openPick?.creatorWindow ?? 0) : null;
+    const verifierPickEnd = (creatorPickEnd ?? deadlineSec) + OPEN_PICK_WINDOWS.verifierSec;
+    const data = {
+      taskHash,
+      onChainTaskId: String(taskId),
+      chain,
+      mode,
+      phase: PHASE_KEYS[phase] ?? 'closed',
+      paused: Boolean(paused),
+      submissions: Number(count),
+      windows: {
+        submissionsEnd: deadlineSec,
+        creatorPickEnd,
+        verifierPickEnd,
+        backupPickEnd: verifierPickEnd + OPEN_PICK_WINDOWS.backupSec,
+      },
+      outcome: outcome ? { kind: outcome.kind, winner: outcome.winner ?? null, judge: outcome.judge } : null,
+      declined: decline ? { at: decline.at } : null,
+    };
+    statusCache.set(ref, { at: Date.now(), data });
+    if (statusCache.size > 5000) statusCache.clear();
+    res.json({ success: true, data } as ApiResponse);
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** Clear the status cache (tests). */
+export function _clearOpenStatusCache(): void {
+  statusCache.clear();
+}
+
 /**
  * POST /api/v1/a2a/tasks/:id/submit-open
  * Body { resultData, rootHash?, teeAttestation? }. Saves the caller's result

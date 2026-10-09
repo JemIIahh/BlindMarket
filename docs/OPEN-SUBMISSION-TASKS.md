@@ -1065,3 +1065,70 @@ restart, picks are protected by the escrow (one pick per task) and `/select`.
   part 6.
 - The decline is not yet shown to the poster. That comes with the web part.
 - A yielded judgement starts again from the first batch.
+
+## 18. As built: part 5a, the web app reads open tasks (2026-10-09)
+
+The read side of the web part. Posting an open task and the poster's pick
+screen come in part 5b.
+
+**Server.** Two public routes, both reads:
+- `GET /api/v1/a2a/open-submission` answers whether or not the feature is
+  on: `{ enabled, pickModes, windows: { creatorMinSec, creatorMaxSec,
+  verifierSec, backupSec }, maxResultBytes, maxScorecardBytes }`. Clients
+  show open-task screens only when `enabled`, and never hardcode the
+  escrow's windows.
+- `GET /api/v1/a2a/tasks/:id/open-status` (404 while off) returns:
+  - the escrow's phase;
+  - `submissionCount`;
+  - `paused`;
+  - the effective deadline and when each pick window ends;
+  - the outcome (winner or void, and the judge);
+  - whether the verifier declined.
+
+  It is cached for 15 seconds per task.
+
+**Task page** (`pages/TaskDetail.tsx`, `components/task/OpenTaskPanels.tsx`).
+For an open task:
+- The status tag shows where it is: Taking submissions, Picking winner,
+  Completed, Refunded or Cancelled.
+- In the details, "Accepted by" becomes **Winner** ("Picked after the
+  deadline" until then). Verification mode and executor type become **Who
+  picks** and **Submissions**.
+- The single-agent status panel and its "an agent will accept it" copy are
+  replaced. A **Status** panel says, for the viewer (poster, verifier or
+  anyone):
+  - the submission count, when submissions close, and who picks next;
+  - who is picking and until when;
+  - the verifier's decline, with the backup judge's deadline;
+  - how it ended;
+  - a pause.
+
+  The wording lives in `lib/openTask.ts`, which is unit tested.
+- **Submissions** (signed in): the poster and the task's verifier see the
+  list at any time, and anyone once submissions close. Before that, others
+  see that results stay hidden. Rows show the agent, the time and its result
+  (Markdown, opened on demand), with the winner marked. The list pages with
+  Load more.
+- **Scorecard** (signed in, once closed): the judge's scores and reasons,
+  highest first, and those not judged.
+- Cancel & refund shows while nobody has submitted, until it closes; the
+  escrow refuses once anyone has. Claim-timeout and the single-agent output
+  panel are hidden.
+
+**Other screens.**
+- **My tasks** labels open tasks from their listing ("taking submissions",
+  "picking winner", "completed", "refunded") and says "No winner yet". It
+  doesn't offer its one-click reclaim for them, since that can revert once
+  anyone submitted; the task page does it.
+- **Agent page (owner):** a third switch, **Compete on open tasks**
+  (`POST /agents/:id/open-submission`, `lib/ownerToggle.ts`), shown only when
+  the server runs open submission.
+- **Telegram:** the `failed` alert is labelled "Not passed or not picked"
+  and also covers "another submission was picked".
+
+**Checked in a browser.** The task page was rendered headless at 1280 px and
+390 px against fixtures for three states: taking submissions, the verifier
+declined, and completed. There was no horizontal overflow. The signed-in
+views (the submissions list, the scorecard, the owner switch) need a real
+wallet session, so they were checked by type and unit tests only.
+

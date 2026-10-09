@@ -31,7 +31,8 @@ import { getAesKey } from '../lib/keyStash';
 import { useChainAddress } from '../hooks/useChainWallet';
 import { useAuth } from '../context/AuthContext';
 
-import { unitFor, useSettlement } from '../config/settlement';
+import { unitFor, useSettlement } from '../config/settlement';import { isOpenTask, openRowLabel } from '../lib/openTask';
+
 
 // ── Shapes returned by GET /api/v1/a2a/tasks/posted ──────────────────────
 
@@ -47,10 +48,14 @@ interface PostedTask {
     publicBrief?: string;
     /** The poster's public one-liner, which titles a private task. */
     routingSummary?: string;
+    /** 'open': many agents submit, one is picked. */
+    submissionMode?: 'open';
+    /** The on-chain deadline (unix seconds) as listed. */
+    deadline?: number;
   };
   state: {
     taskId: string;
-    status: 'open' | 'accepted' | 'submitted' | 'awaiting_verification' | 'verified' | 'completed' | 'failed' | 'in_progress';
+    status: 'open' | 'collecting' | 'accepted' | 'submitted' | 'awaiting_verification' | 'verified' | 'completed' | 'failed' | 'in_progress';
     executorAddress?: string;
     acceptedAt?: string;
     submittedAt?: string;
@@ -244,7 +249,9 @@ export default function MyTasks() {
   const [reclaimTarget, setReclaimTarget] = useState<PostedTask | null>(null);
   const [refundFailedFor, setRefundFailedFor] = useState<string | null>(null);
   const nowSec = Math.floor(Date.now() / 1000);
-  const reclaimableOf = (t: PostedTask) => !!t.onChain && isReclaimable(t.onChain.status, Number(t.onChain.deadline), nowSec);
+  // An open task (many agents submit) is cancelled from its own page, which
+  // knows whether anyone has submitted: the escrow refuses it once someone has.
+  const reclaimableOf = (t: PostedTask) => !!t.onChain && !isOpenTask(t.meta) && isReclaimable(t.onChain.status, Number(t.onChain.deadline), nowSec);
   const posterOf = (t: PostedTask) => t.onChain?.agent ?? t.meta.posterAddress ?? '';
   const reclaimable = tasks.filter(reclaimableOf);
   const reclaimableTotals = reclaimable.reduce<Record<string, number>>((acc, t) => {
@@ -363,9 +370,11 @@ export default function MyTasks() {
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             {sortedTasks.map(t => {
               const status = effectiveStatus(t);
-              const statusLabel = t.onChain
-                ? (STATUS_LABELS[status] ?? 'open')
-                : t.state.status.replace(/_/g, ' ');
+              const statusLabel = isOpenTask(t.meta)
+                ? openRowLabel(t.state.status, t.meta.deadline, nowSec)
+                : t.onChain
+                  ? (STATUS_LABELS[status] ?? 'open')
+                  : t.state.status.replace(/_/g, ' ');
               const isDone = status === 3 || status === 4 || status === 6;
               const hasResult = !!t.state.resultData;
               const reasons = t.state.verificationResult;
@@ -441,7 +450,7 @@ export default function MyTasks() {
                         {worker ? (
                           <>Worker <span className="font-mono">{worker}</span></>
                         ) : (
-                          'No worker yet'
+                          isOpenTask(t.meta) ? 'No winner yet' : 'No worker yet'
                         )}
                       </div>
                     </div>
