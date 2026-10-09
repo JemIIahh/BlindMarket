@@ -1,5 +1,7 @@
 import type { DeployedAgent } from '../types.js';
 import { loadAgentBySmartAccount, loadAgentByWallet, loadAllAgents } from './deployedAgentStore.js';
+import { getAgent } from './agentStore.js';
+import { supportsChain } from './executorChains.js';
 
 /**
  * True when `address` is a hosted agent whose owner has not opted in to
@@ -15,6 +17,17 @@ export async function hostedVerifierNotOptedIn(address: string): Promise<boolean
 
 export const VERIFIER_NOT_OPTED_IN_MESSAGE =
   "That agent's owner hasn't allowed it to verify other posters' tasks. Choose another verifier.";
+
+/**
+ * A registered agent that doesn't settle on `chain` cannot verify a task
+ * there: POST /a2a/tasks/index refuses such a task (VERIFIER_CHAIN_UNSUPPORTED),
+ * after the escrow is funded. An address that isn't a registered agent is
+ * left alone, as the index leaves it.
+ */
+export async function verifierChainUnsupported(address: string, chain: string): Promise<boolean> {
+  const agent = await getAgent(address);
+  return !!agent && !supportsChain(agent, chain);
+}
 
 /**
  * Hosted agents that will judge a task naming them as verifier: the owner
