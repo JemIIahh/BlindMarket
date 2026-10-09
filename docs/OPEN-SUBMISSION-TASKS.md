@@ -1082,23 +1082,30 @@ screen come in part 5b.
   - `submissionCount`;
   - `paused`;
   - the effective deadline and when each pick window ends;
-  - the outcome (winner or void, and the judge);
+  - the outcome (winner or void, and the judge; null for a cancel), from
+    the event indexer, or from the escrow (`getOpenTask().closedBy`, the
+    task's status and worker) until the indexer has it;
   - whether the verifier declined.
 
-  It is cached for 15 seconds per task.
+  It is cached for 15 seconds per task, and simultaneous views share one
+  set of escrow reads.
 
 **Task page** (`pages/TaskDetail.tsx`, `components/task/OpenTaskPanels.tsx`).
 For an open task:
 - The status tag shows where it is: Taking submissions, Picking winner,
-  Completed, Refunded or Cancelled.
-- In the details, "Accepted by" becomes **Winner** ("Picked after the
-  deadline" until then). Verification mode and executor type become **Who
+  No submissions, Completed, Refunded or Cancelled. While the status loads
+  or fails, it shows the escrow status.
+- In the details, "Accepted by" becomes **Winner**: "Picked after the
+  deadline" until then, "No winner" once none is coming. A completed task
+  names its winner from the escrow. Verification mode and executor type become **Who
   picks** and **Submissions**.
 - The single-agent status panel and its "an agent will accept it" copy are
   replaced. A **Status** panel says, for the viewer (poster, verifier or
   anyone):
   - the submission count, when submissions close, and who picks next;
   - who is picking and until when;
+  - with no submissions past the deadline: that nobody can pick, and the
+    poster cancels to get the escrow back;
   - the verifier's decline, with the backup judge's deadline;
   - how it ended;
   - a pause.
@@ -1107,28 +1114,34 @@ For an open task:
 - **Submissions** (signed in): the poster and the task's verifier see the
   list at any time, and anyone once submissions close. Before that, others
   see that results stay hidden. Rows show the agent, the time and its result
-  (Markdown, opened on demand), with the winner marked. The list pages with
-  Load more.
+  (Markdown, opened on demand, and a link to a result kept in 0G
+  storage), with the winner marked. The list pages with Load more and
+  refreshes every 30 seconds until the task closes.
 - **Scorecard** (signed in, once closed): the judge's scores and reasons,
-  highest first, and those not judged.
-- Cancel & refund shows while nobody has submitted, until it closes; the
-  escrow refuses once anyone has. Claim-timeout and the single-agent output
-  panel are hidden.
+  highest first, and those not judged. The server keeps any JSON a judge
+  sent, so the page drops anything not shaped as a score
+  (`scorecardRows`, tested).
+- Cancel & refund shows only when the escrow's `cancelTask` would succeed:
+  still funded, nobody has submitted, and not paused. Claim-timeout and the
+  single-agent output panel are hidden.
 
 **Other screens.**
-- **My tasks** labels open tasks from their listing ("taking submissions",
-  "picking winner", "completed", "refunded") and says "No winner yet". It
+- **My tasks** labels open tasks from their listing and escrow status
+  ("taking submissions", "deadline passed", "completed", "refunded": a
+  cancel and a close with no winner both refund) and says "No winner yet". It
   doesn't offer its one-click reclaim for them, since that can revert once
   anyone submitted; the task page does it.
 - **Agent page (owner):** a third switch, **Compete on open tasks**
   (`POST /agents/:id/open-submission`, `lib/ownerToggle.ts`), shown only when
   the server runs open submission.
 - **Telegram:** the `failed` alert is labelled "Not passed or not picked"
-  and also covers "another submission was picked".
+  and also covers "another submission was picked" and a close with no
+  winner.
 
 **Checked in a browser.** The task page was rendered headless at 1280 px and
-390 px against fixtures for three states: taking submissions, the verifier
-declined, and completed. There was no horizontal overflow. The signed-in
+390 px against fixtures for six states: taking submissions, the verifier
+declined, completed, no submissions past the deadline, cancelled, and the
+status route failing on a completed task. There was no horizontal overflow. The signed-in
 views (the submissions list, the scorecard, the owner switch) need a real
 wallet session, so they were checked by type and unit tests only.
 
