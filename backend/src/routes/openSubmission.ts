@@ -235,19 +235,23 @@ const statusReads = new Map<string, Promise<Record<string, unknown>>>();
 
 /** The escrow's Judge enum; 0 (None) closes nothing, as a cancel with no submission. */
 const JUDGE_KEYS: Record<number, store.OpenJudge> = { 1: 'creator', 2: 'task_verifier', 3: 'backup', 4: 'admin' };
-/** The escrow's TaskStatus.Completed: a winner was paid. */
+/** The escrow's TaskStatus.Completed (a winner was paid) and Cancelled (refunded). */
 const TASK_COMPLETED = 4;
+const TASK_CANCELLED = 5;
 
 /**
  * How a closed open task ended, read from the escrow: for the moments after
  * it closes, before the event indexer has recorded the outcome. Null for a
- * cancel (closed by no judge).
+ * cancel (closed by no judge), and when the two reads disagree (an RPC node
+ * behind the other), so a lagging read is never shown as an outcome.
  */
 async function closedOutcomeOnChain(chain: TaskChain, taskId: number): Promise<{ kind: 'winner' | 'void'; winner: string | null; judge: store.OpenJudge } | null> {
   const [open, task] = await Promise.all([escrowFor(chain).getOpenTask(taskId), getTaskOn(chain, taskId)]);
   const judge = JUDGE_KEYS[Number(open.closedBy)];
   if (!judge) return null;
-  return task.status === TASK_COMPLETED ? { kind: 'winner', winner: task.worker, judge } : { kind: 'void', winner: null, judge };
+  if (task.status === TASK_COMPLETED) return { kind: 'winner', winner: task.worker, judge };
+  if (task.status === TASK_CANCELLED) return { kind: 'void', winner: null, judge };
+  return null;
 }
 
 async function readOpenStatus(taskHash: string, meta: A2ATaskMeta, chain: TaskChain, taskId: number, ref: store.TaskRef): Promise<Record<string, unknown>> {

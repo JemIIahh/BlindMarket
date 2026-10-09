@@ -24,7 +24,7 @@ import { normalizeBrief, splitBrief } from '../lib/briefText';
 import { PosterAvatar, type AvatarConfig } from '../components/avatar/PosterAvatar';
 import { OpenScorecardPanel, OpenSubmissionsPanel, OpenTaskStatusPanel } from '../components/task/OpenTaskPanels';
 import { useOpenTaskStatus } from '../hooks/useOpenSubmission';
-import { canCancelOpen, isOpenTask, openStatusLabel, submissionsText, type Viewer } from '../lib/openTask';
+import { canCancelOpen, isOpenTask, openStatusLabel, openStatusStale, submissionsText, type Viewer } from '../lib/openTask';
 
 const fadeUp = {
   hidden: { opacity: 0, y: 20 },
@@ -95,8 +95,9 @@ export default function TaskDetail() {
   // A task many agents submit to (docs/OPEN-SUBMISSION-TASKS.md): its status
   // comes from the escrow through the server, refreshed while the page is open.
   const isOpen = isOpenTask(data?.onChain?.a2aMeta);
-  const openStatusQuery = useOpenTaskStatus(data?.onChain?.taskHash, isOpen);
-  const openStatus = openStatusQuery.data;
+  const openStatusQuery = useOpenTaskStatus(data?.onChain?.taskHash, isOpen, data?.onChain?.status);
+  // A read older than the escrow status (the server caches it 15 s) is not shown; a fresh one follows.
+  const openStatus = openStatusQuery.data && !openStatusStale(openStatusQuery.data, data?.onChain?.status) ? openStatusQuery.data : undefined;
   const [activeTab, setActiveTab] = useTabParam<DetailTab>('details', DETAIL_TABS.map((t) => t.id));
   const [confirmAction, setConfirmAction] = useState<'cancel' | 'timeout' | null>(null);
 

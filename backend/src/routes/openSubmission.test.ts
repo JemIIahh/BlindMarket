@@ -245,6 +245,12 @@ describe('GET /tasks/:id/open-status', () => {
     _clearOpenStatusCache();
     escrow.getOpenTask.mockResolvedValue({ closedBy: 0n });
     expect((await status()).body.data.outcome).toBeNull();
+
+    // A task read from a node behind the other read: no outcome rather than a wrong one.
+    _clearOpenStatusCache();
+    escrow.getOpenTask.mockResolvedValue({ closedBy: 2n });
+    builders.getTaskOn.mockResolvedValue({ agent: POSTER, worker: ethers.ZeroAddress, status: 0 } as never);
+    expect((await status()).body.data.outcome).toBeNull();
   });
 
   it('does not read the escrow for an outcome while the task is open, or once the indexer has it', async () => {

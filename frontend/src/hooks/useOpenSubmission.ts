@@ -6,6 +6,7 @@ import {
   getOpenTaskStatus,
   listOpenSubmissions,
 } from '../services/openSubmission';
+import { openStatusSettled, openStatusStale } from '../lib/openTask';
 
 /** Whether this server runs open submission, and its pick windows. Off when the read fails. */
 export function useOpenSubmissionConfig() {
@@ -17,13 +18,21 @@ export function useOpenSubmissionConfig() {
   });
 }
 
-/** Where an open task stands, refreshed every 30 s while the page is open, until it closes. */
-export function useOpenTaskStatus(taskHash: string | undefined, enabled: boolean) {
+/**
+ * Where an open task stands, refreshed every 30 s while the page is open
+ * until it has settled; sooner (past the server's 15 s cache) while the read
+ * is older than the escrow status the page has.
+ */
+export function useOpenTaskStatus(taskHash: string | undefined, enabled: boolean, onChainStatus: number | undefined) {
   return useQuery({
     queryKey: ['open-submission', 'status', taskHash],
     queryFn: () => getOpenTaskStatus(taskHash!),
     enabled: enabled && !!taskHash,
-    refetchInterval: (q) => (q.state.data?.phase === 'closed' ? false : 30_000),
+    refetchInterval: (q) => {
+      const s = q.state.data;
+      if (s && openStatusSettled(s, onChainStatus)) return false;
+      return s && openStatusStale(s, onChainStatus) ? 16_000 : 30_000;
+    },
   });
 }
 
@@ -48,6 +57,9 @@ export function useOpenScorecard(taskHash: string | undefined, enabled: boolean)
     queryKey: ['open-submission', 'scorecard', taskHash],
     queryFn: () => getOpenScorecard(taskHash!),
     enabled: enabled && !!taskHash && isAuthenticated,
-    retry: false,
+    // The status can show a pick (read from the escrow) a few seconds before
+    // the indexer records it, and the scorecard answers NOT_CLOSED until then.
+    retry: (n, e) => (e as { code?: string }).code === 'NOT_CLOSED' && n < 6,
+    retryDelay: 10_000,
   });
 }

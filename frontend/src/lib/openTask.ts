@@ -90,12 +90,13 @@ export function openPhaseCopy(status: OpenTaskStatus, ctx: CopyContext): PhaseCo
   const when = (sec: number) => `${fmt(sec)} (${timeLeft(sec, nowMs)})`;
   const n = status.submissions;
   const paused = status.paused && status.phase !== 'closed' ? ' The escrow is paused, which moves these times later.' : '';
+  if (noneSubmitted(status)) {
+    const once = status.paused ? 'Once the escrow is unpaused, ' : '';
+    return viewer === 'poster'
+      ? { tone: 'warn', lead: 'No submissions.', body: `Nobody submitted before the deadline. ${once ? `${once}cancel` : 'Cancel'} the task to get the escrow back.` }
+      : { tone: 'neutral', lead: 'No submissions.', body: `Nobody submitted before the deadline. ${once ? `${once}the poster` : 'The poster'} can cancel the task and get the escrow back.` };
+  }
   const copy = ((): PhaseCopy => {
-    if (noneSubmitted(status)) {
-      return viewer === 'poster'
-        ? { tone: 'warn', lead: 'No submissions.', body: 'Nobody submitted before the deadline. Cancel the task to get the escrow back.' }
-        : { tone: 'neutral', lead: 'No submissions.', body: 'Nobody submitted before the deadline. The poster can cancel the task and get the escrow back.' };
-    }
     switch (status.phase) {
       case 'submissions': {
         const next = status.mode === 'creator' && w.creatorPickEnd
@@ -147,6 +148,25 @@ export function openPhaseCopy(status: OpenTaskStatus, ctx: CopyContext): PhaseCo
     }
   })();
   return { ...copy, body: copy.body + paused };
+}
+
+/**
+ * Whether a status read is older than what the escrow already shows: the
+ * task left Funded (cancelled, paid, refunded) but the read, perhaps from the
+ * server's 15-second cache, still has it open. The page then waits for a
+ * fresh one rather than show it.
+ */
+export function openStatusStale(status: OpenTaskStatus, onChainStatus: number | undefined): boolean {
+  return onChainStatus !== undefined && onChainStatus !== TaskStatus.Funded && status.phase !== 'closed';
+}
+
+/**
+ * Whether polling the status can stop: closed, and how it ended is known
+ * (an outcome, or a cancel the escrow shows). A closed read with no outcome
+ * on a task the escrow shows paid is a read that lagged; keep polling.
+ */
+export function openStatusSettled(status: OpenTaskStatus, onChainStatus: number | undefined): boolean {
+  return status.phase === 'closed' && (!!status.outcome || onChainStatus === TaskStatus.Cancelled);
 }
 
 /**

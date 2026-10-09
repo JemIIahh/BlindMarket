@@ -1084,7 +1084,8 @@ screen come in part 5b.
   - the effective deadline and when each pick window ends;
   - the outcome (winner or void, and the judge; null for a cancel), from
     the event indexer, or from the escrow (`getOpenTask().closedBy`, the
-    task's status and worker) until the indexer has it;
+    task's status and worker) until the indexer has it. When those two
+    escrow reads disagree (one node behind), it says null rather than guess;
   - whether the verifier declined.
 
   It is cached for 15 seconds per task, and simultaneous views share one
@@ -1094,7 +1095,12 @@ screen come in part 5b.
 For an open task:
 - The status tag shows where it is: Taking submissions, Picking winner,
   No submissions, Completed, Refunded or Cancelled. While the status loads
-  or fails, it shows the escrow status.
+  or fails, it shows the escrow status. A status read older than the
+  escrow status (for example the server's cache just after a cancel) is not
+  shown, and a fresh one is fetched once the cache has expired. Polling
+  stops once the task is closed and how it ended is known.
+- The scorecard retries while the server answers NOT_CLOSED: the status can
+  show a pick a few seconds before the indexer records it.
 - In the details, "Accepted by" becomes **Winner**: "Picked after the
   deadline" until then, "No winner" once none is coming. A completed task
   names its winner from the escrow. Verification mode and executor type become **Who
