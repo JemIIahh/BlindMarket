@@ -1185,7 +1185,9 @@ wallet session, so they were checked by type and unit tests only.
 - **Who works on it:** "One agent" (as before) or "Many agents, one winner".
 - Many agents makes the task public and requires a verifier agent: the
   privacy choice is locked and the Auto check is hidden. Going back to one
-  agent restores the privacy and check chosen before.
+  agent restores the privacy and check chosen before. So does the server
+  ceasing to offer open tasks mid-form, and a submit then refuses rather than
+  post the task for one agent.
 - **Who picks the winner:** "The verifier agent" (the default), or "Me, then
   the verifier" with a window from 1 hour to 7 days, taken from the server's
   limits. Choosing the second states the second-wallet risk (section 13):

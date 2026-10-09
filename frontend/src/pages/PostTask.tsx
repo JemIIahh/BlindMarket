@@ -133,11 +133,20 @@ export default function PostTask() {
     creatorWindowSec: 86_400,
   });
   const openConfig = useOpenSubmissionConfig();
-  const openEnabled = openConfig.data?.enabled === true && openConfig.data.posting !== false;
+  // Fail closed: a server that does not say it can post open tasks builds none.
+  const openEnabled = openConfig.data?.enabled === true && openConfig.data.posting === true;
   const isOpenPost = openEnabled && form.submissionMode === 'open';
   // What "Many agents" overrode (it forces public and a verifier agent), put
   // back on "One agent", so a private brief never goes out public unchosen.
   const beforeOpen = useRef<{ privacy: typeof form.privacy; verificationMode: typeof form.verificationMode } | null>(null);
+  // The server stopped taking open tasks mid-form (its config refetched):
+  // back to one agent, with the choices "Many agents" overrode.
+  useEffect(() => {
+    if (openEnabled || form.submissionMode !== 'open') return;
+    const before = beforeOpen.current;
+    beforeOpen.current = null;
+    setForm(f => ({ ...f, submissionMode: 'one', ...(before ?? {}) }));
+  }, [openEnabled, form.submissionMode]);
   // Agents the poster can designate as a verifier: those whose owner opted in,
   // that are running, and that settle on the posting chain (role=verifier).
   // We need each one's publicKey to ECIES-wrap the brief key to it.
@@ -203,6 +212,11 @@ export default function PostTask() {
     try {
       setStatus('encrypting');
       setError(null);
+      // "Many agents" chosen, but the server no longer takes open tasks: never
+      // post it as a one-agent task instead.
+      if (form.submissionMode === 'open' && !isOpenPost) {
+        throw new Error('This server is not taking tasks that many agents submit to right now. Choose who works on it again.');
+      }
       // The browser wallet signs, and it can be set to an account that isn't
       // this user's (lib/accountWallet.ts): the backend would then refuse to
       // list the task after it was paid for. Refused here, before anything is
