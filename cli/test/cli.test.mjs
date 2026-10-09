@@ -1178,3 +1178,89 @@ test('rows funded together are checked once, not once per row', async () => {
   assert.equal(chain.rpcCalls.filter((m) => m === 'eth_getTransactionByHash').length, 1, 'one check for the three rows');
   assert.equal(chain.rpcCalls.filter((m) => m === 'eth_getTransactionReceipt').length >= 2, true);
 });
+
+// ── tasks many agents submit to (open submission) ─────────────────────────────
+
+const OPEN_CALLS = new Interface([
+  'function createTaskOpen(bytes32 taskHash, address token, uint256 amount, string category, string locationZone, uint256 duration, address verifierAgent, uint8 mode, uint256 creatorWindow)',
+  'function submitOpen(uint256 taskId, bytes32 evidenceHash)',
+  'function selectWinner(uint256 taskId, address winner, bytes32 scorecardHash)',
+]);
+const OPEN_HASH = '0x' + 'ab'.repeat(32);
+const VERIFIER = getAddress('0x' + 'c3'.repeat(20));
+const WINNER = getAddress('0x' + '7e'.repeat(20));
+const openConfig = () => answer({ enabled: true, posting: true, pickModes: ['agent', 'creator'], windows: { creatorMinSec: 3600, creatorMaxSec: 604800, verifierSec: 172800, backupSec: 172800 }, maxResultBytes: 65536, maxScorecardBytes: 32768 });
+const openStatus = (over = {}) => answer({ taskHash: OPEN_HASH, onChainTaskId: '41', chain: 'arc', mode: 'creator', phase: 'submissions', paused: false, submissions: 2, windows: { submissionsEnd: 1_900_000_000, creatorPickEnd: 1_900_086_400, verifierPickEnd: 1_900_259_200, backupPickEnd: 1_900_432_000 }, outcome: null, declined: null, ...over });
+const escrowSent = () => chain.sent.filter((tx) => tx.to === ESCROW).map((tx) => OPEN_CALLS.parseTransaction({ data: tx.data }));
+const keccakJson = async (v) => (await import('ethers')).keccak256(new TextEncoder().encode(JSON.stringify(v)));
+
+test('post-task --open funds createTaskOpen: public, judged by --verifier, the poster picking first for --pick-window', async () => {
+  answers['/api/v1/a2a/open-submission'] = [openConfig()];
+  // What the real backend builds for an open task (escrow.buildCreateTaskOpenOn).
+  answers['/api/v1/tasks'] = [{
+    ok: true, status: 200,
+    json: async () => {
+      const b = calls.findLast((c) => c.path === '/api/v1/tasks').body;
+      const data = OPEN_CALLS.encodeFunctionData('createTaskOpen', [b.taskHash, b.token, b.amount, 'general', b.locationZone, b.duration, b.verifierAddress, b.open.mode === 'creator' ? 1 : 0, b.open.creatorWindow]);
+      return { success: true, data: { unsignedTx: { to: ESCROW, data, from: OWNER.address }, chain: 'arc', chainId: ARC.chainId } };
+    },
+  }];
+  const text = await blind('post-task', '--instructions', 'Name three primary sources for the 1907 panic.', '--reward', '2', '--open', '--verifier', VERIFIER, '--pick', 'me', '--pick-window', '7200', '--yes');
+  const build = posted('/api/v1/tasks')[0].body;
+  assert.equal(build.privacy, 'public');
+  assert.equal(build.verificationMode, 'agent');
+  assert.equal(build.verifierAddress, VERIFIER);
+  assert.deepEqual(build.open, { mode: 'creator', creatorWindow: 7200 });
+  const [create] = escrowSent();
+  assert.equal(create.name, 'createTaskOpen');
+  assert.deepEqual([create.args[6], create.args[7], create.args[8]], [VERIFIER, 1n, 7200n]);
+  assert.match(text, /Posted a task many agents submit to on arc/);
+  assert.match(text, /blind open-status --task 0x/);
+});
+
+test('post-task --open refuses what the task board would refuse, before asking the backend anything', async () => {
+  const base = ['post-task', '--instructions', 'Name three sources.', '--reward', '2', '--yes'];
+  await assert.rejects(blind(...base, '--open'), (e) => e.code === 'VERIFIER_REQUIRED');
+  await assert.rejects(blind(...base, '--open', '--verifier', VERIFIER, '--target', WINNER), (e) => e.code === 'OPEN_TASK_PINNED');
+  await assert.rejects(blind(...base, '--open', '--verifier', VERIFIER, '--verification', 'manual'), (e) => e.code === 'BAD_VERIFICATION');
+  await assert.rejects(blind(...base, '--open', '--verifier', VERIFIER, '--pick-window', '7200'), (e) => e.code === 'BAD_PICK_WINDOW');
+  await assert.rejects(blind(...base, '--verifier', VERIFIER), (e) => e.code === 'OPEN_REQUIRED');
+  assert.equal(calls.length, 0);
+});
+
+test('submit-open signs submitOpen for the task, committing exactly this result', async () => {
+  answers[`/api/v1/a2a/tasks/${OPEN_HASH}/open-status`] = [openStatus()];
+  const evidence = await keccakJson({ resultData: { output: 'Three sources: …' }, rootHash: null });
+  answers[`/api/v1/a2a/tasks/${OPEN_HASH}/submit-open`] = [answer({
+    taskHash: OPEN_HASH, onChainTaskId: '41', evidenceHash: evidence, resultHeldForSec: 3600,
+    unsignedSubmitOpen: { to: ESCROW, from: OWNER.address, chainId: ARC.chainId, data: OPEN_CALLS.encodeFunctionData('submitOpen', [41n, evidence]) },
+  })];
+  const text = await blind('submit-open', '--task', OPEN_HASH, '--result', 'Three sources: …', '--yes');
+  const [call] = escrowSent();
+  assert.equal(call.name, 'submitOpen');
+  assert.deepEqual([call.args[0], call.args[1]], [41n, evidence]);
+  assert.match(text, /Submitted to task 41 on arc/);
+});
+
+test('pick signs selectWinner for this winner, after asking', async () => {
+  await assert.rejects(blind('pick', '--task', OPEN_HASH, '--winner', WINNER), (e) => e.code === 'CONFIRM_REQUIRED');
+  answers[`/api/v1/a2a/tasks/${OPEN_HASH}/open-status`] = [openStatus({ phase: 'creator_pick' })];
+  const zero = '0x' + '00'.repeat(32);
+  answers[`/api/v1/a2a/tasks/${OPEN_HASH}/select`] = [answer({
+    onChainTaskId: '41', winner: WINNER.toLowerCase(), scorecardHash: zero,
+    unsignedSelectWinner: { to: ESCROW, from: OWNER.address, chainId: ARC.chainId, data: OPEN_CALLS.encodeFunctionData('selectWinner', [41n, WINNER, zero]) },
+  })];
+  const text = await blind('pick', '--task', OPEN_HASH, '--winner', WINNER, '--yes');
+  const [call] = escrowSent();
+  assert.equal(call.name, 'selectWinner');
+  assert.equal(call.args[1], WINNER);
+  assert.match(text, /as its poster/);
+});
+
+test('open-status says where the task stands in words', async () => {
+  answers[`/api/v1/a2a/tasks/${OPEN_HASH}/open-status`] = [openStatus({ phase: 'closed', outcome: { kind: 'winner', winner: WINNER, judge: 'task_verifier' } })];
+  const text = await blind('open-status', '--task', OPEN_HASH);
+  assert.match(text, /task 41 on arc: closed/);
+  assert.match(text, new RegExp(`winner: +${WINNER}`));
+  await assert.rejects(blind('open-status', '--task', '41'), (e) => e.code === 'BAD_TASK');
+});

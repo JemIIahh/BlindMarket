@@ -58,6 +58,43 @@ function instructionsFrom(opts: { instructions?: string; instructionsFile?: stri
 }
 
 const list = (v?: string) => (v ? v.split(',').map((s) => s.trim()).filter(Boolean) : []);
+const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+const TASK_HASH = /^0x[0-9a-fA-F]{64}$/;
+
+/** post-task's --open terms, or the refusal the escrow or the task board would give after funding. */
+function openTerms(opts: { open?: boolean; verifier?: string; pick?: string; pickWindow?: string; target?: string; verification?: string; public?: boolean }):
+  { verifier: string; pick: 'agent' | 'creator'; window?: number } | undefined {
+  if (!opts.open) {
+    if (opts.verifier || opts.pick || opts.pickWindow) throw new CliError('OPEN_REQUIRED', '--verifier, --pick and --pick-window are for a task many agents submit to: add --open, or drop them.');
+    return undefined;
+  }
+  if (opts.target) throw new CliError('OPEN_TASK_PINNED', 'A task many agents submit to is offered to every agent: drop --target.');
+  if (opts.verification) throw new CliError('BAD_VERIFICATION', 'A task many agents submit to is judged by its --verifier agent: drop --verification.');
+  if (!opts.verifier || !ADDRESS.test(opts.verifier)) throw new CliError('VERIFIER_REQUIRED', '--open needs --verifier <0x address>: the verifier agent that judges the submissions and picks the winner.');
+  const pick = opts.pick ?? 'verifier';
+  if (pick !== 'verifier' && pick !== 'me') throw new CliError('BAD_PICK', '--pick must be verifier or me.');
+  if (opts.pickWindow !== undefined && pick !== 'me') throw new CliError('BAD_PICK_WINDOW', '--pick-window is your window to pick first: add --pick me.');
+  if (opts.pickWindow !== undefined && !/^\d+$/.test(opts.pickWindow)) throw new CliError('BAD_PICK_WINDOW', '--pick-window must be a whole number of seconds.');
+  return { verifier: opts.verifier, pick: pick === 'me' ? 'creator' : 'agent', ...(opts.pickWindow !== undefined ? { window: Number(opts.pickWindow) } : {}) };
+}
+
+/** Tasks many agents submit to need SDK methods newer than the CLI's oldest supported SDK. */
+function assertOpenSdk(bb: BlindMarket): void {
+  if (typeof (bb as { getOpenTaskStatus?: unknown }).getOpenTaskStatus !== 'function') {
+    throw new CliError('SDK_TOO_OLD', 'Tasks many agents submit to need a newer @blindmarket/sdk (with getOpenTaskStatus). Reinstall @blindmarket/cli, or update @blindmarket/sdk beside it.');
+  }
+}
+
+/** An open task's phase in words. */
+const OPEN_PHASE: Record<string, string> = {
+  submissions: 'taking submissions',
+  creator_pick: "in the poster's pick window",
+  verifier_pick: "in the verifier's pick window",
+  backup_pick: "in the backup judge's window",
+  admin: 'waiting for an admin',
+  closed: 'closed',
+};
+const when = (sec: number | null | undefined) => (sec ? new Date(sec * 1000).toISOString() : '-');
 const out = (line = '') => console.log(line);
 
 /** Run an async step behind a spinner; the spinner fails with the error, which is rethrown. */
@@ -830,19 +867,27 @@ export function buildProgram(): Command {
     .option('--public', 'Post the brief in plaintext: no encryption, readable by any agent')
     .option('--capabilities <list>', 'Route to agents with these capabilities first')
     .option('--target <address>', 'Only this executor can take it')
-    .option('--verification <mode>', 'auto (checked against criteria) or manual (you approve with `blind review`)', 'auto')
+    .option('--verification <mode>', 'auto (checked against criteria, the default) or manual (you approve with `blind review`)')
+    .option('--open', 'Many agents submit until the deadline and one is picked and paid. Public, judged by --verifier')
+    .option('--verifier <address>', 'With --open: the verifier agent that judges the submissions and picks the winner')
+    .option('--pick <who>', 'With --open: who picks the winner, verifier (default) or me (you first, then the verifier)')
+    .option('--pick-window <seconds>', 'With --pick me: your window after the deadline, 3600 (1 hour) to 604800 (7 days); default 86400')
     .option('--yes', 'Fund without asking')
     .action(async (opts: {
       instructions?: string; instructionsFile?: string; reward?: string; amount?: string; token?: string;
-      zone: string; duration: string; public?: boolean; capabilities?: string; target?: string; verification: string; yes?: boolean;
+      zone: string; duration: string; public?: boolean; capabilities?: string; target?: string; verification?: string; yes?: boolean;
+      open?: boolean; verifier?: string; pick?: string; pickWindow?: string;
     }) => {
       const instructions = instructionsFrom(opts);
       if (opts.target && !/^0x[0-9a-fA-F]{40}$/.test(opts.target)) throw new CliError('BAD_TARGET', '--target must be a 0x wallet address.');
       if (!!opts.reward === !!opts.amount) throw new CliError('AMOUNT_REQUIRED', 'Pass exactly one of --reward <amount> or --amount <raw>.');
-      if (opts.verification !== 'auto' && opts.verification !== 'manual') throw new CliError('BAD_VERIFICATION', '--verification must be auto or manual.');
+      const verification = opts.verification ?? 'auto';
+      if (verification !== 'auto' && verification !== 'manual') throw new CliError('BAD_VERIFICATION', '--verification must be auto or manual.');
       if (!/^\d+$/.test(opts.duration)) throw new CliError('INVALID_DURATION', '--duration must be a whole number of seconds.');
+      const open = openTerms(opts);
 
       const { bb, signer, postingChain, chains } = await signingClient();
+      if (open) assertOpenSdk(bb);
       const entry = chains.find((c) => c.chain === postingChain);
       if (!postingChain || !entry?.token.address) throw new CliError('SETTLEMENT_NOT_POSTABLE', 'The backend has no chain to post new tasks on right now.');
       if (opts.token && opts.token.toLowerCase() !== entry.token.address.toLowerCase()) {
@@ -856,10 +901,12 @@ export function buildProgram(): Command {
           ? `--reward must be a number with at most ${entry.token.decimals} decimals, e.g. 2.5.`
           : '--amount must be a whole number of the smallest unit.');
       }
-      const privacy = opts.public ? 'public' : 'private';
+      const privacy = opts.public || open ? 'public' : 'private';
       const human = formatUnits(amountRaw, entry.token.decimals);
       await confirm(
-        `Post a ${privacy} task on ${postingChain}, locking ${human} ${entry.token.symbol} in escrow from ${signer.address} (plus gas)?`,
+        open
+          ? `Post a public task many agents submit to on ${postingChain}, judged by ${open.verifier}${open.pick === 'creator' ? `, you picking first for ${open.window} s` : ''}, locking ${human} ${entry.token.symbol} in escrow from ${signer.address} (plus gas)?`
+          : `Post a ${privacy} task on ${postingChain}, locking ${human} ${entry.token.symbol} in escrow from ${signer.address} (plus gas)?`,
         opts.yes,
       );
       let task;
@@ -871,7 +918,9 @@ export function buildProgram(): Command {
             amountRaw,
             durationSeconds: Number(opts.duration),
             privacy,
-            verificationMode: opts.verification as 'auto' | 'manual',
+            ...(open
+              ? { verifierAddress: open.verifier as `0x${string}`, open: { pick: open.pick, pickWindowSeconds: open.window } }
+              : { verificationMode: verification as 'auto' | 'manual' }),
             requiredCapabilities: list(opts.capabilities) as AgentCapability[],
             ...(opts.target ? { targetExecutor: opts.target as `0x${string}` } : {}),
             locationZone: opts.zone,
@@ -892,12 +941,12 @@ export function buildProgram(): Command {
         throw e;
       }
       setPendingPost(task.taskHash, null);
-      out(`Posted ${privacy} task on ${task.chain}`);
+      out(open ? `Posted a task many agents submit to on ${task.chain}` : `Posted ${privacy} task on ${task.chain}`);
       out(`  task hash: ${task.taskHash}`);
       if (task.taskId) out(`  task id:   ${task.taskId}`);
       out(`  escrow:    ${human} ${entry.token.symbol} (tx ${task.txHash})`);
       if (privacy === 'private') out(`  readable by ${task.wrappedTo} executor(s)`);
-      out(`Check on it with: blind status --task ${task.taskHash}`);
+      out(open ? `Follow it with: blind open-status --task ${task.taskHash}` : `Check on it with: blind status --task ${task.taskHash}`);
     });
 
   program
@@ -1215,6 +1264,150 @@ export function buildProgram(): Command {
       out(`  worker:  ${task.worker && !/^0x0{40}$/.test(task.worker) ? task.worker : '(unassigned)'}`);
       out(`  escrow:  ${task.decimals !== undefined ? `${formatUnits(BigInt(task.amount), task.decimals)} ${task.symbol ?? ''}`.trim() : `${task.amount} (raw)`}`);
       if (task.a2aState?.resultData != null) out(`  result:  ${JSON.stringify(task.a2aState.resultData, null, 2)}`);
+    });
+
+  // ── tasks many agents submit to (open submission) ─────────────────────────
+
+  /** A 0x task hash, as the open-submission commands address tasks. */
+  const taskHash = (task: string): string => {
+    if (!TASK_HASH.test(task)) throw new CliError('BAD_TASK', '--task must be the 0x task hash.');
+    return task;
+  };
+
+  program
+    .command('open-tasks')
+    .description('List tasks many agents submit to that take submissions now, soonest deadline first')
+    .option('--min-reward <amount>', "Leave out tasks paying less, in the posting chain's token, e.g. 1.5")
+    .option('--limit <n>', 'At most this many', '50')
+    .action(async (opts: { minReward?: string; limit: string }) => {
+      const { bb } = client();
+      assertOpenSdk(bb);
+      let minRewardRaw: bigint | undefined;
+      if (opts.minReward !== undefined) {
+        const { postingChain, chains } = await bb.getSettlement();
+        const entry = chains.find((c) => c.chain === postingChain);
+        if (!entry) throw new CliError('SETTLEMENT_NOT_POSTABLE', 'The backend names no posting chain, so --min-reward has no unit.');
+        try { minRewardRaw = parseUnits(opts.minReward, entry.token.decimals); } catch { throw new CliError('INVALID_AMOUNT', `--min-reward must be a number with at most ${entry.token.decimals} decimals.`); }
+      }
+      const { tasks, total } = await bb.listOpenSubmissionTasks({ ...(minRewardRaw !== undefined ? { minRewardRaw } : {}), limit: Number(opts.limit) });
+      if (tasks.length === 0) { out('No tasks are taking submissions from many agents right now.'); return; }
+      for (const t of tasks) {
+        const brief = typeof t.meta.publicBrief === 'string' ? `  ${t.meta.publicBrief.slice(0, 60).replace(/\s+/g, ' ')}` : '';
+        out(`${t.meta.taskId}  ${String(t.submissions).padStart(3)} submitted  closes ${when(t.meta.deadline)}${brief}`);
+      }
+      if (total > tasks.length) out(`(${tasks.length} of ${total})`);
+    });
+
+  program
+    .command('open-status')
+    .description('Show where a task many agents submit to stands: its phase, submissions, windows and outcome')
+    .requiredOption('--task <hash>', '0x task hash')
+    .action(async (opts: { task: string }) => {
+      const { bb } = client();
+      assertOpenSdk(bb);
+      const s = await bb.getOpenTaskStatus(taskHash(opts.task));
+      out(`task ${s.onChainTaskId} on ${s.chain}: ${OPEN_PHASE[s.phase] ?? s.phase}${s.paused ? ' (escrow paused)' : ''}`);
+      out(`  submissions:     ${s.submissions}`);
+      out(`  picks first:     ${s.mode === 'creator' ? 'the poster, then the verifier' : 'the verifier'}`);
+      out(`  submissions end: ${when(s.windows.submissionsEnd)}`);
+      if (s.windows.creatorPickEnd) out(`  poster picks by: ${when(s.windows.creatorPickEnd)}`);
+      out(`  verifier by:     ${when(s.windows.verifierPickEnd)}`);
+      if (s.declined) out(`  the verifier found no submission acceptable (${s.declined.at})`);
+      if (s.outcome) out(s.outcome.kind === 'winner' ? `  winner:          ${s.outcome.winner} (picked by ${s.outcome.judge})` : `  closed with no winner (${s.outcome.judge}): the escrow went back to the poster`);
+    });
+
+  program
+    .command('submit-open')
+    .description('Submit your result to a task many agents submit to, from your wallet (one per agent, gas only)')
+    .requiredOption('--task <hash>', '0x task hash')
+    .option('--result <text>', 'Your result')
+    .option('--result-file <path>', 'Read your result from a file')
+    .option('--root-hash <id>', 'A storage root holding the full result, committed with it')
+    .option('--yes', 'Send without asking')
+    .action(async (opts: { task: string; result?: string; resultFile?: string; rootHash?: string; yes?: boolean }) => {
+      if (!!opts.result === !!opts.resultFile) throw new CliError('RESULT_REQUIRED', 'Pass exactly one of --result <text> or --result-file <path>.');
+      const output = opts.result ?? readFileSync(resolve(opts.resultFile!), 'utf-8');
+      if (!output.trim()) throw new CliError('RESULT_REQUIRED', 'The result is empty.');
+      const hash = taskHash(opts.task);
+      const { bb, signer } = await signingClient();
+      assertOpenSdk(bb);
+      await confirm(`Submit your result to task ${hash} from ${signer.address} (gas only; one submission per agent)?`, opts.yes);
+      const res = await step('Submitting…', () => bb.submitOpen(hash, { resultData: { output }, ...(opts.rootHash ? { rootHash: opts.rootHash } : {}) }));
+      out(res.alreadyOnChain
+        ? `This result was already submitted to task ${res.onChainTaskId} on ${res.chain}; nothing was sent.`
+        : `Submitted to task ${res.onChainTaskId} on ${res.chain} (tx ${res.txHash}). Results stay hidden from the other agents until submissions close.`);
+    });
+
+  program
+    .command('submissions')
+    .description('List the submissions to a task many agents submit to (the poster and verifier any time, anyone once submissions close)')
+    .requiredOption('--task <hash>', '0x task hash')
+    .option('--cursor <cursor>', 'From a previous page', '0')
+    .option('--full', 'Print each result in full')
+    .action(async (opts: { task: string; cursor: string; full?: boolean }) => {
+      const { bb } = client();
+      assertOpenSdk(bb);
+      const page = await bb.listOpenSubmissions(taskHash(opts.task), { cursor: opts.cursor, limit: 50 });
+      if (page.submissions.length === 0) { out('No submissions on this page.'); return; }
+      for (const row of page.submissions) {
+        const data = row.result?.resultData;
+        const text = !data ? '(result not readable here)' : typeof data.output === 'string' ? data.output : JSON.stringify(data);
+        out(`#${row.ordinal}  ${row.submitter}  ${row.recordedAt}`);
+        out(`  ${opts.full ? text : text.slice(0, 200).replace(/\s+/g, ' ')}${!opts.full && text.length > 200 ? '…' : ''}`);
+        if (row.result?.rootHash) out(`  full result in storage: ${row.result.rootHash}`);
+      }
+      if (page.cursor !== '0') out(`More: blind submissions --task ${opts.task} --cursor ${page.cursor}`);
+    });
+
+  program
+    .command('pick')
+    .description('Pick the winner of a task many agents submit to: as its poster in your window, or as its verifier in its window. The escrow pays them at once')
+    .requiredOption('--task <hash>', '0x task hash')
+    .requiredOption('--winner <address>', 'The submitter to pay')
+    .option('--scorecard-file <path>', 'A JSON file of scores and reasons, anchored on-chain with the pick')
+    .option('--yes', 'Send without asking')
+    .action(async (opts: { task: string; winner: string; scorecardFile?: string; yes?: boolean }) => {
+      if (!ADDRESS.test(opts.winner)) throw new CliError('BAD_WINNER', '--winner must be a 0x wallet address.');
+      let scorecard: Record<string, unknown> | undefined;
+      if (opts.scorecardFile) {
+        try { scorecard = JSON.parse(readFileSync(resolve(opts.scorecardFile), 'utf-8')); } catch { throw new CliError('BAD_SCORECARD', '--scorecard-file must hold a JSON object.'); }
+        if (!scorecard || typeof scorecard !== 'object' || Array.isArray(scorecard)) throw new CliError('BAD_SCORECARD', '--scorecard-file must hold a JSON object.');
+      }
+      const hash = taskHash(opts.task);
+      const { bb } = await signingClient();
+      assertOpenSdk(bb);
+      await confirm(`Pick ${opts.winner} as the winner of task ${hash}? The escrow pays them at once.`, opts.yes);
+      const res = await step('Picking…', () => bb.pickWinner(hash, opts.winner, scorecard ? { scorecard } : {}));
+      out(`Picked ${res.winner} as the winner of task ${res.onChainTaskId} on ${res.chain}, as its ${res.role} (tx ${res.txHash}). The escrow paid them.`);
+    });
+
+  program
+    .command('decline')
+    .description("As the verifier of a task many agents submit to, in your window: record that no submission was acceptable. The backup judge then decides")
+    .requiredOption('--task <hash>', '0x task hash')
+    .option('--reason <text...>', 'Why none was acceptable')
+    .option('--yes', 'Record without asking')
+    .action(async (opts: { task: string; reason?: string[]; yes?: boolean }) => {
+      const hash = taskHash(opts.task);
+      const { bb } = client();
+      assertOpenSdk(bb);
+      await confirm(`Record that no submission to task ${hash} was acceptable? You will not pick it; the backup judge decides.`, opts.yes);
+      const reason = opts.reason?.join(' ');
+      await bb.declineOpenTask(hash, reason ? { scorecard: { reason } } : {});
+      out(`Recorded: no submission to task ${hash} was acceptable. The backup judge decides after your window.`);
+    });
+
+  program
+    .command('verifications')
+    .description('List tasks many agents submit to that your wallet judges, from when your window opens')
+    .action(async () => {
+      const { bb } = client();
+      assertOpenSdk(bb);
+      const { tasks } = await bb.listOpenVerifications();
+      if (tasks.length === 0) { out('No tasks to judge right now.'); return; }
+      for (const t of tasks) {
+        out(`${String(t.meta.taskId)}  ${String(t.submissions).padStart(3)} submitted  your window ${when(t.window.opensAt)} to ${when(t.window.closesAt)}`);
+      }
     });
 
   // ── settling ──────────────────────────────────────────────────────────────

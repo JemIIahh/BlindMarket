@@ -3,7 +3,7 @@ import { ApiError } from './apiError.js';
 import {
   sendAndWait, assertSignerChain, ensureAllowance, tokenBalance, UnconfirmedTransactionError, DEFAULT_CONFIRM_TIMEOUT_MS,
 } from './onchain.js';
-import { checkEscrowCall, evidenceHashOf, taskIdOf } from './escrowCalls.js';
+import { checkEscrowCall, evidenceHashOf, openEvidenceHashOf, scorecardHashOf, taskIdOf, type EscrowFunction } from './escrowCalls.js';
 import { isPinnedSettlement, SETTLEMENT_PINS, type SettlementPin } from './settlementPins.js';
 import {
   normalizePost, checkRowFields, sealBrief, createTaskBody, indexParamsFor, commitsVerifier,
@@ -16,6 +16,8 @@ import type {
   StorageUploadResult, Message, AgentSearchResult, TaskTemplate,
   VerifyTaskInput, A2ATaskEntry, AgentCapability,
   CreateAgentParams, CreateAgentResult, CreateTaskRequest,
+  OpenSubmissionConfig, OpenTaskStatus, OpenTaskListing, OpenSubmissionsPage, OpenVerificationTask, OpenScorecard,
+  SubmitOpenParams, SubmitOpenResult, PickWinnerResult,
 } from './types.js';
 
 // ── Public config ───────────────────────────────────────────────────────────
@@ -328,6 +330,18 @@ export interface PostTaskParams {
    * about: keep secrets out of it.
    */
   routingSummary?: string;
+  /**
+   * Many agents submit and one is picked, instead of one agent taking the
+   * task (docs/OPEN-SUBMISSION-TASKS.md). Such a task is public, needs
+   * `verifierAddress` (the verifier agent that judges and picks), and takes no
+   * `targetExecutor`; `privacy` and `verificationMode` default to 'public' and
+   * 'agent'. `pick`: 'agent' (default), the verifier picks from the
+   * deadline; 'creator', you pick first, for `pickWindowSeconds` (default
+   * 86400; 1 hour to 7 days), then the verifier. Only when the backend runs
+   * open submission (getOpenSubmissionConfig().enabled), and one at a time:
+   * postTasks() refuses it.
+   */
+  open?: { pick?: 'agent' | 'creator'; pickWindowSeconds?: number };
 }
 
 export interface PostTaskOptions {
@@ -371,6 +385,8 @@ export interface PostedTask {
    * to an executor that registers later; never send it anywhere.
    */
   aesKey?: string;
+  /** A task many agents submit to: who picks first, and the poster's window in seconds (0 when the verifier picks). */
+  open?: { pick: 'agent' | 'creator'; creatorWindow: number };
 }
 
 /** The body of POST /api/v1/a2a/tasks/index, which lists a funded task on the market. */
@@ -1000,7 +1016,11 @@ export class BlindMarket {
    */
   async postTask(params: PostTaskParams, opts: PostTaskOptions = {}): Promise<PostedTask> {
     const post = normalizePost(params, opts.maxAmountRaw);
+    if (post.open) await this.assertOpenSubmission('Posting a task many agents submit to');
     const ctx = await this.postingContext(opts.signer);
+    if (post.open && post.verifierAddress!.toLowerCase() === ctx.poster.toLowerCase()) {
+      throw new ApiError(400, 'The verifier agent judges the submissions, so it cannot be the wallet that posts the task. Nothing was sent.', undefined, 'INVALID_VERIFIER');
+    }
     await this.assertCovers(ctx, post.amount);
 
     // The brief: plaintext, or encrypted to the executors that can take it.
@@ -1300,16 +1320,19 @@ export class BlindMarket {
       throw new ApiError(409, `The backend built this task for ${built.chain} (chain ${built.chainId}), not ${ctx.postingChain}: its posting chain changed. Nothing was sent; try again.`, undefined, 'POSTING_CHAIN_CHANGED');
     }
     const withVerifier = commitsVerifier(post);
+    const { open } = post;
     return checkEscrowCall(built.unsignedTx, {
       escrow: ctx.escrow,
-      fn: withVerifier ? 'createTaskWithVerifier' : 'createTask',
+      fn: open ? 'createTaskOpen' : withVerifier ? 'createTaskWithVerifier' : 'createTask',
       args: (a) => String(a[0]).toLowerCase() === taskHash.toLowerCase()
         && String(a[1]).toLowerCase() === ctx.token.toLowerCase()
         && a[2] === post.amount
         && a[3] === TASK_CATEGORY
         && a[4] === post.locationZone
         && a[5] === BigInt(post.duration)
-        && (!withVerifier || String(a[6]).toLowerCase() === post.verifierAddress!.toLowerCase()),
+        && (!(open || withVerifier) || String(a[6]).toLowerCase() === post.verifierAddress!.toLowerCase())
+        // createTaskOpen's PickMode (0 the verifier picks, 1 the poster first) and the poster's window.
+        && (!open || (a[7] === (open.pick === 'creator' ? 1n : 0n) && a[8] === BigInt(open.creatorWindow))),
       value: ctx.isNative ? post.amount : 0n,
       chainId: ctx.entry.chainId,
     }, `Funding the escrow on ${ctx.postingChain}`);
@@ -1354,6 +1377,7 @@ export class BlindMarket {
       privacy: post.privacy,
       wrappedTo: sealed.wrappedKeys ? Object.keys(sealed.wrappedKeys).length : 0,
       ...(sealed.aesKey ? { aesKey: sealed.aesKey } : {}),
+      ...(post.open ? { open: post.open } : {}),
     };
   }
 
@@ -1725,6 +1749,220 @@ export class BlindMarket {
       }
     }
     return { closed: false, escalated: false };
+  }
+
+  // ── Open submission: many agents submit, one is picked ──────────────────
+  //
+  // docs/OPEN-SUBMISSION-TASKS.md. Every route but getOpenSubmissionConfig()
+  // answers 404 while the backend runs it off. Every transaction is checked
+  // before a key signs it, like the posting and refund ones.
+
+  /** Whether the backend runs open submission, and the escrow's pick windows (`GET /a2a/open-submission`, answered on or off). */
+  async getOpenSubmissionConfig(): Promise<OpenSubmissionConfig> {
+    return this.req('GET', '/api/v1/a2a/open-submission');
+  }
+
+  /** Where an open task stands, read from the escrow: its phase, submission count, windows and outcome. */
+  async getOpenTaskStatus(taskHash: string): Promise<OpenTaskStatus> {
+    return this.req('GET', `/api/v1/a2a/tasks/${encodeURIComponent(taskHash)}/open-status`);
+  }
+
+  /**
+   * Open tasks taking submissions now, soonest deadline first. `minRewardRaw`
+   * leaves out those paying less, in the posting token's smallest unit.
+   */
+  async listOpenSubmissionTasks(opts: { minRewardRaw?: string | bigint; offset?: number; limit?: number } = {}): Promise<{ tasks: OpenTaskListing[]; total: number; offset: number; limit: number }> {
+    const qs = new URLSearchParams();
+    if (opts.minRewardRaw !== undefined) qs.set('minReward', String(opts.minRewardRaw));
+    if (opts.offset !== undefined) qs.set('offset', String(opts.offset));
+    if (opts.limit !== undefined) qs.set('limit', String(opts.limit));
+    const q = qs.toString();
+    return this.req('GET', `/api/v1/a2a/open-tasks${q ? `?${q}` : ''}`);
+  }
+
+  /**
+   * An open task's submissions, one page (at most 50): the poster and the
+   * task's verifier may read them any time, anyone else once submissions
+   * close. Pass the returned `cursor` back until it is '0'.
+   */
+  async listOpenSubmissions(taskHash: string, opts: { cursor?: string; limit?: number } = {}): Promise<OpenSubmissionsPage> {
+    const qs = new URLSearchParams({ cursor: opts.cursor ?? '0', limit: String(opts.limit ?? 20) });
+    return this.req('GET', `/api/v1/a2a/tasks/${encodeURIComponent(taskHash)}/submissions?${qs}`);
+  }
+
+  /** The judge's scorecard, once a winner was picked (or the task closed with none). */
+  async getOpenScorecard(taskHash: string): Promise<OpenScorecard> {
+    return this.req('GET', `/api/v1/a2a/tasks/${encodeURIComponent(taskHash)}/scorecard`);
+  }
+
+  /**
+   * Whether this API key's wallet may submit to an open task now: resolves,
+   * or throws the refusal submitOpen() would give about the submitter
+   * (ALREADY_SUBMITTED, DEADLINE_REACHED, SELF_SUBMIT, …). Ask before
+   * spending a model run on the task.
+   */
+  async checkOpenSubmission(taskHash: string): Promise<void> {
+    await this.req('GET', `/api/v1/a2a/tasks/${encodeURIComponent(taskHash)}/submit-open/check`);
+  }
+
+  /**
+   * Submit a result to an open task, signed and sent from this API key's own
+   * wallet (one submission per agent). The backend holds the result for an
+   * hour and keeps it once the submitOpen lands; results stay hidden from
+   * the other agents until submissions close.
+   *
+   * Only `submitOpen(taskId, evidenceHash)` on the escrow /health/settlement
+   * lists for the task's chain is signed, with no value, where the evidence
+   * hash is the one computed here from `resultData` and `rootHash`
+   * (openEvidenceHashOf): 409 ESCROW_MISMATCH, CHAIN_MISMATCH, TX_MISMATCH or
+   * OWNER_MISMATCH otherwise, with nothing sent. If the result is already
+   * on-chain (a hold that lapsed), sending the same result again keeps it,
+   * and nothing is sent.
+   */
+  async submitOpen(taskHash: string, result: SubmitOpenParams, opts: { signer?: ethers.Signer; confirmTimeoutMs?: number; onSent?: (sent: { txHash: string; nonce: number }) => void | Promise<void> } = {}): Promise<SubmitOpenResult> {
+    const what = 'Submitting to the open task';
+    const status = await this.getOpenTaskStatus(taskHash);
+    const { entry, signer, address } = await this.openSigner(status.chain, what, opts.signer);
+    const rootHash = result.rootHash ?? null;
+    const evidenceHash = openEvidenceHashOf(result.resultData, rootHash);
+    const built = await this.req<{
+      taskHash: string; onChainTaskId: string; evidenceHash: string; unsignedSubmitOpen?: { from?: string };
+      alreadyOnChain?: boolean;
+    }>('POST', `/api/v1/a2a/tasks/${encodeURIComponent(taskHash)}/submit-open`, {
+      resultData: result.resultData,
+      rootHash,
+      ...(result.teeAttestation ? { teeAttestation: result.teeAttestation } : {}),
+    });
+    if (String(built.onChainTaskId) !== status.onChainTaskId || String(built.evidenceHash).toLowerCase() !== evidenceHash.toLowerCase()) {
+      throw new ApiError(409, `${what}: the backend answered for another task or another result than this one. Nothing was sent.`, built, 'TX_MISMATCH');
+    }
+    const out = { taskHash: status.taskHash, chain: status.chain, onChainTaskId: status.onChainTaskId, evidenceHash };
+    if (built.alreadyOnChain) return { ...out, txHash: null, alreadyOnChain: true };
+    const id = BigInt(status.onChainTaskId);
+    const call = this.checkedOpenCall(built.unsignedSubmitOpen, 'submitOpen', entry, address, what,
+      (a) => a[0] === id && String(a[1]).toLowerCase() === evidenceHash.toLowerCase());
+    const txHash = await this.sendOpenCall(signer, call, what, opts,
+      (hash) => `If it confirms within the hour the result is kept; after that, submitOpen() the same result again to keep it. Do not submit another result: the escrow takes one per agent (${hash}).`);
+    return { ...out, txHash, alreadyOnChain: false };
+  }
+
+  /**
+   * Pick an open task's winner, signed and sent: the poster in their window
+   * (selectWinner) or the task's verifier in its window
+   * (selectWinnerByVerifier); the backend builds whichever this API key's
+   * wallets hold the role for. `scorecard` (the scores and reasons) is kept
+   * by the backend and its hash anchored on-chain with the pick.
+   *
+   * Only that call, for this task and this winner with this scorecard's
+   * hash (scorecardHashOf; zero without one), on the escrow
+   * /health/settlement lists for the task's chain, with no value, is signed:
+   * 409 otherwise, with nothing sent. The escrow pays the winner at once.
+   */
+  async pickWinner(taskHash: string, winner: string, opts: { scorecard?: Record<string, unknown>; signer?: ethers.Signer; confirmTimeoutMs?: number } = {}): Promise<PickWinnerResult> {
+    const what = 'Picking the winner';
+    if (!ethers.isAddress(winner)) throw new ApiError(400, `${what}: winner must be a 0x wallet address, not ${JSON.stringify(winner)}. Nothing was sent.`, undefined, 'INVALID_WINNER');
+    const status = await this.getOpenTaskStatus(taskHash);
+    const { entry, signer, address } = await this.openSigner(status.chain, what, opts.signer);
+    const scorecardHash = opts.scorecard ? scorecardHashOf(opts.scorecard) : ethers.ZeroHash;
+    const built = await this.req<{
+      onChainTaskId: string; winner: string; scorecardHash: string;
+      unsignedSelectWinner?: { from?: string }; unsignedSelectWinnerByVerifier?: { from?: string };
+    }>('POST', `/api/v1/a2a/tasks/${encodeURIComponent(taskHash)}/select`, { winner, ...(opts.scorecard ? { scorecard: opts.scorecard } : {}) });
+    const byVerifier = built.unsignedSelectWinnerByVerifier !== undefined;
+    if (byVerifier === (built.unsignedSelectWinner !== undefined)) {
+      throw new ApiError(409, `${what}: the backend did not build exactly one pick. Nothing was sent.`, built, 'TX_MISMATCH');
+    }
+    if (String(built.onChainTaskId) !== status.onChainTaskId || String(built.scorecardHash).toLowerCase() !== scorecardHash.toLowerCase()) {
+      throw new ApiError(409, `${what}: the backend built the pick for another task or another scorecard than this one. Nothing was sent.`, built, 'TX_MISMATCH');
+    }
+    const id = BigInt(status.onChainTaskId);
+    const fn = byVerifier ? 'selectWinnerByVerifier' : 'selectWinner';
+    const call = this.checkedOpenCall(byVerifier ? built.unsignedSelectWinnerByVerifier : built.unsignedSelectWinner, fn, entry, address, what,
+      (a) => a[0] === id && String(a[1]).toLowerCase() === winner.toLowerCase() && String(a[2]).toLowerCase() === scorecardHash.toLowerCase());
+    const txHash = await this.sendOpenCall(signer, call, what, opts,
+      (hash) => `Check it before picking again: the escrow takes one pick per task (${hash}).`);
+    return {
+      taskHash: status.taskHash, chain: status.chain, onChainTaskId: status.onChainTaskId,
+      winner: ethers.getAddress(winner), scorecardHash, role: byVerifier ? 'verifier' : 'poster', txHash,
+    };
+  }
+
+  /**
+   * As the task's verifier, in its window: record that you judged the
+   * submissions and found none acceptable. You do not pick; after your window
+   * the platform's backup judge decides. Recorded once.
+   */
+  async declineOpenTask(taskHash: string, opts: { scorecard?: Record<string, unknown> } = {}): Promise<{ taskHash: string; declined: true; recorded: boolean }> {
+    return this.req('POST', `/api/v1/a2a/tasks/${encodeURIComponent(taskHash)}/judge-decline`, opts.scorecard ? { scorecard: opts.scorecard } : {});
+  }
+
+  /**
+   * Open tasks this API key's wallets judge, from when each verifier window
+   * opens: live windows first, with the full verification criteria. Ask
+   * getOpenTaskStatus() for the phase before judging: a pause moves the window.
+   */
+  async listOpenVerifications(opts: { offset?: number; limit?: number } = {}): Promise<{ tasks: OpenVerificationTask[]; total: number; offset: number; limit: number }> {
+    const qs = new URLSearchParams();
+    if (opts.offset !== undefined) qs.set('offset', String(opts.offset));
+    if (opts.limit !== undefined) qs.set('limit', String(opts.limit));
+    const q = qs.toString();
+    return this.req('GET', `/api/v1/a2a/open-verifications${q ? `?${q}` : ''}`);
+  }
+
+  /**
+   * Throws 409, with nothing sent, when open tasks cannot be posted now:
+   * OPEN_SUBMISSION_DISABLED while the backend runs it off,
+   * OPEN_SUBMISSION_UNSUPPORTED while the posting chain's escrow has no
+   * createTaskOpen.
+   */
+  private async assertOpenSubmission(what: string): Promise<void> {
+    const cfg = await this.getOpenSubmissionConfig();
+    if (!cfg?.enabled) {
+      throw new ApiError(409, `${what}: this backend does not run open submission yet (GET /a2a/open-submission). Nothing was sent.`, undefined, 'OPEN_SUBMISSION_DISABLED');
+    }
+    // Fail closed: a backend that does not say it can post them (an older one omits posting) builds none.
+    if (cfg.posting !== true) {
+      throw new ApiError(409, `${what}: the posting chain's escrow does not take these tasks yet. Nothing was sent.`, undefined, 'OPEN_SUBMISSION_UNSUPPORTED');
+    }
+  }
+
+  /** The escrow of an open task's chain and a signer on it. */
+  private async openSigner(chain: string, what: string, signerOption?: ethers.Signer): Promise<{ entry: SettlementChainInfo & { escrowAddress: string }; signer: ethers.Signer; address: string }> {
+    const entry = await this.settlementEntry(chain, what);
+    const signer = signerOption ?? this.signerOn(chain, what);
+    await assertSignerChain(signer, entry.chainId, what);
+    return { entry, signer, address: await signer.getAddress() };
+  }
+
+  /**
+   * A backend-built open-task call, checked to be exactly `fn` with these
+   * arguments on this chain's escrow, built for this signer: the escrow takes
+   * a submission or a pick from the sender, so one built for another wallet
+   * would be sent for nothing.
+   */
+  private checkedOpenCall(tx: { from?: string } | undefined, fn: EscrowFunction, entry: SettlementChainInfo & { escrowAddress: string }, address: string, what: string, args: (a: ethers.Result) => boolean): { to: string; data: string } {
+    if (tx?.from && tx.from.toLowerCase() !== address.toLowerCase()) {
+      throw new ApiError(409, `${what}: the backend built this for ${tx.from}, but the signer is ${address}. Nothing was sent. Sign with the API key's own wallet.`, undefined, 'OWNER_MISMATCH');
+    }
+    return checkEscrowCall(tx, { escrow: entry.escrowAddress, fn, args, chainId: entry.chainId }, what);
+  }
+
+  private async sendOpenCall(signer: ethers.Signer, call: { to: string; data: string }, what: string, opts: { confirmTimeoutMs?: number; onSent?: (sent: { txHash: string; nonce: number }) => void | Promise<void> }, hint: (hash: string) => string): Promise<string> {
+    try {
+      const { hash } = await sendAndWait(signer, call, {
+        timeoutMs: opts.confirmTimeoutMs,
+        onSent: (txHash, nonce) => opts.onSent?.({ txHash, nonce }),
+        unconfirmedHint: hint,
+      });
+      return hash;
+    } catch (err) {
+      if (err instanceof UnconfirmedTransactionError) {
+        const out = new ApiError(0, `${what}: ${err.message}`, { txHash: err.hash }, 'UNCONFIRMED');
+        out.txHash = err.hash;
+        throw out;
+      }
+      throw err;
+    }
   }
 
   // ── Agent deployment & management ─────────────────────────────────────────
@@ -2970,6 +3208,7 @@ export class BlindMarket {
 
 export { ethers };
 export { ApiError };
+export { openEvidenceHashOf, scorecardHashOf } from './escrowCalls.js';
 export { SETTLEMENT_PINS, isPinnedSettlement } from './settlementPins.js';
 export type { SettlementPin } from './settlementPins.js';
 export {
