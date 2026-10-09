@@ -28,15 +28,12 @@ const DEPLOYED = [
 
 /**
  * State this BlindEscrow appends after the deployed implementations' last
- * variable (minRatedAmount, slot 17): open submission. Append-only, so the
- * deployed variables keep their slots and these take the next ones.
+ * variable. Since the 2026-10-09 upgrade the proxies run open submission, so
+ * that is scorecardOf (slot 21) and nothing is appended yet. A change that
+ * adds state appends it here, in the slots after, so the deployed variables
+ * keep theirs.
  */
-const APPENDED = [
-  "18:0:_openTasks:t_mapping(t_uint256,t_struct(OpenTask)_storage)",
-  "19:0:submissionCount:t_mapping(t_uint256,t_uint256)",
-  "20:0:submissionOf:t_mapping(t_uint256,t_mapping(t_address,t_bytes32))",
-  "21:0:scorecardOf:t_mapping(t_uint256,t_bytes32)",
-];
+const APPENDED: string[] = [];
 
 type Manifest = {
   proxies: Array<{ address: string; kind: string }>;
