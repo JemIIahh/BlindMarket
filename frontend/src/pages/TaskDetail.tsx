@@ -486,7 +486,7 @@ export default function TaskDetail() {
           {isOpen && openStatus && (
             <>
               <OpenTaskStatusPanel status={openStatus} viewer={viewer} />
-              <OpenSubmissionsPanel taskHash={onChain.taskHash} status={openStatus} viewer={viewer} signedIn={isAuthenticated} />
+              <OpenSubmissionsPanel taskHash={onChain.taskHash} status={openStatus} viewer={viewer} signedIn={isAuthenticated} poster={onChain.agent} />
               <OpenScorecardPanel taskHash={onChain.taskHash} status={openStatus} signedIn={isAuthenticated} />
             </>
           )}

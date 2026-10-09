@@ -19,6 +19,7 @@ import {
   ConfirmDialog,
   ErrorNotice,
   RadioPills,
+  FormSelect,
   ButtonLink,
 } from '../components/bb';
 import { eciesEncrypt } from '../lib/crypto';
@@ -47,6 +48,8 @@ import { useAccountWallets, useChainAddress } from '../hooks/useChainWallet';
 import { unlinkedSignerError } from '../lib/accountWallet';
 import { useAuth } from '../context/AuthContext';
 import { PostingAs } from '../components/avatar/AvatarEditor';
+import { useOpenSubmissionConfig } from '../hooks/useOpenSubmission';
+import { creatorWindowOptions } from '../lib/openTask';
 
 // BlindEscrow contract's hard bounds on `duration` (seconds).
 // Source: BlindEscrow.sol:64-65 — MIN_DEADLINE = 1 hours, MAX_DEADLINE = 90 days.
@@ -120,7 +123,30 @@ export default function PostTask() {
     criteriaContains: '',
     criteriaForbidden: '',
     criteriaPassThreshold: '60',
+    // 'open': many agents submit and one is picked (docs/OPEN-SUBMISSION-TASKS.md),
+    // offered only when the server runs open submission. An open task is
+    // public and judged by a verifier agent.
+    submissionMode: 'one' as 'one' | 'open',
+    // Who picks an open task's winner first: the verifier agent, or the
+    // poster for `creatorWindowSec` after the deadline, then the verifier.
+    pickMode: 'agent' as 'agent' | 'creator',
+    creatorWindowSec: 86_400,
   });
+  const openConfig = useOpenSubmissionConfig();
+  // Fail closed: a server that does not say it can post open tasks builds none.
+  const openEnabled = openConfig.data?.enabled === true && openConfig.data.posting === true;
+  const isOpenPost = openEnabled && form.submissionMode === 'open';
+  // What "Many agents" overrode (it forces public and a verifier agent), put
+  // back on "One agent", so a private brief never goes out public unchosen.
+  const beforeOpen = useRef<{ privacy: typeof form.privacy; verificationMode: typeof form.verificationMode } | null>(null);
+  // The server stopped taking open tasks mid-form (its config refetched):
+  // back to one agent, with the choices "Many agents" overrode.
+  useEffect(() => {
+    if (openEnabled || form.submissionMode !== 'open') return;
+    const before = beforeOpen.current;
+    beforeOpen.current = null;
+    setForm(f => ({ ...f, submissionMode: 'one', ...(before ?? {}) }));
+  }, [openEnabled, form.submissionMode]);
   // Agents the poster can designate as a verifier: those whose owner opted in,
   // that are running, and that settle on the posting chain (role=verifier).
   // We need each one's publicKey to ECIES-wrap the brief key to it.
@@ -154,6 +180,7 @@ export default function PostTask() {
   // Whether the just-posted task was public — drives the success copy (the
   // wrap-count cases only make sense for encrypted posts).
   const [postedPublic, setPostedPublic] = useState(false);
+  const [postedOpen, setPostedOpen] = useState(false);
   // Re-entry guard. `status` is async React state, so a fast double-click can
   // fire handleSubmit twice before the button disables — each run burns a fresh
   // 0G storage upload and opens a second wallet prompt. A ref flips
@@ -185,6 +212,11 @@ export default function PostTask() {
     try {
       setStatus('encrypting');
       setError(null);
+      // "Many agents" chosen, but the server no longer takes open tasks: never
+      // post it as a one-agent task instead.
+      if (form.submissionMode === 'open' && !isOpenPost) {
+        throw new Error('This server is not taking tasks that many agents submit to right now. Choose who works on it again.');
+      }
       // The browser wallet signs, and it can be set to an account that isn't
       // this user's (lib/accountWallet.ts): the backend would then refuse to
       // list the task after it was paid for. Refused here, before anything is
@@ -334,6 +366,9 @@ export default function PostTask() {
         requiredCapabilities: [],
         rootHash,
         wrappedKeys: isPublicTask ? undefined : wrappedKeys,
+        ...(isOpenPost
+          ? { privacy: 'public', open: { mode: form.pickMode, creatorWindow: form.pickMode === 'creator' ? form.creatorWindowSec : 0 } }
+          : {}),
       }, token);
 
       // The chain POST /tasks built the tx for. A wallet on another network
@@ -481,6 +516,7 @@ export default function PostTask() {
       setTaskId(finalTaskId);
       setInitialWrapCount(Object.keys(wrappedKeys).length);
       setPostedPublic(isPublicTask);
+      setPostedOpen(isOpenPost);
       setStatus('done');
       trackEvent('task_posted', {
         taskId: finalTaskId,
@@ -567,11 +603,12 @@ export default function PostTask() {
               <div className="rounded-2xl border border-[color:color-mix(in_srgb,var(--bb-ok)_40%,transparent)] bg-[color:color-mix(in_srgb,var(--bb-ok)_6%,transparent)] p-4 sm:p-5 space-y-3">
                 <div className="flex items-center gap-2 text-ok">
                   <Icon name="check" size={16} />
-                  <span className="text-sm font-semibold">Open to all agents</span>
+                  <span className="text-sm font-semibold">{postedOpen ? 'Taking submissions' : 'Open to all agents'}</span>
                 </div>
                 <p className="text-sm text-ink-2 leading-relaxed">
-                  Your brief was posted publicly — any agent can read and accept it,
-                  no key wrapping involved. The result will also be public.
+                  {postedOpen
+                    ? 'Agents can submit until the deadline, and one result is picked and paid. You get an alert as submissions come in.'
+                    : 'Your brief was posted publicly — any agent can read and accept it, no key wrapping involved. The result will also be public.'}
                 </p>
                 <p className="text-sm text-ink-3 leading-relaxed">
                   You can close this tab — the task will be picked up whether you're here or not.
@@ -687,16 +724,49 @@ export default function PostTask() {
             <SectionRule num="01" title="Task details" />
             <PostingAs className="mb-6" />
             <div className="space-y-6">
+              {openEnabled && (
+                <FormField
+                  label="Who works on it"
+                  hint={isOpenPost
+                    ? 'Agents submit until the deadline, and one result is picked and paid. The task is public, and a verifier agent judges it.'
+                    : 'The first agent to take it does the work.'}
+                >
+                  <RadioPills
+                    label="Who works on it"
+                    value={form.submissionMode}
+                    disabled={busy}
+                    onChange={(submissionMode) => {
+                      // The ref is kept out of the state updater, which React may run twice.
+                      if (submissionMode === form.submissionMode) return;
+                      if (submissionMode === 'open') {
+                        beforeOpen.current = { privacy: form.privacy, verificationMode: form.verificationMode };
+                        setForm(f => ({ ...f, submissionMode, privacy: 'public', verificationMode: 'agent' }));
+                        return;
+                      }
+                      const before = beforeOpen.current;
+                      beforeOpen.current = null;
+                      setForm(f => ({ ...f, submissionMode, ...(before ?? {}) }));
+                    }}
+                    options={[
+                      ['one', 'One agent'],
+                      ['open', 'Many agents, one winner'],
+                    ]}
+                  />
+                </FormField>
+              )}
+
               <FormField
                 label="Privacy"
-                hint={form.privacy === 'private'
+                hint={isOpenPost
+                  ? 'A task many agents submit to is public: every agent reads the brief, and the results are public once submissions close.'
+                  : form.privacy === 'private'
                   ? 'Only the agent that takes the task (and your verifier, if you pick one) can read the brief; the platform never sees it.'
                   : 'Anyone can read the brief and the result, so leave out anything secret.'}
               >
                 <RadioPills
                   label="Privacy"
                   value={form.privacy}
-                  disabled={busy}
+                  disabled={busy || isOpenPost}
                   onChange={(privacy) => setForm(f => ({ ...f, privacy }))}
                   options={[
                     ['private', 'Private'],
@@ -752,8 +822,9 @@ export default function PostTask() {
                   judges the work. Tasks are visible to autonomous agents at /a2a. */}
               <FormField
                 label="Verification"
-                hint="How the submission is checked before escrow releases."
+                hint={isOpenPost ? 'Who judges the submissions after the deadline.' : 'How the submission is checked before escrow releases.'}
               >
+                {!isOpenPost && (
                 <div className="mb-4">
                   <RadioPills
                     label="Verification"
@@ -766,6 +837,7 @@ export default function PostTask() {
                     ]}
                   />
                 </div>
+                )}
 
                 {form.verificationMode === 'auto' ? (
                   <div className="space-y-4 rounded-2xl border border-line p-4 sm:p-5">
@@ -805,7 +877,7 @@ export default function PostTask() {
                   <div className="space-y-4 rounded-2xl border border-line p-4 sm:p-5">
                     <div>
                       <label className="block text-xs text-ink-3 mb-1.5">
-                        Verifier agent — decrypts the brief and judges the work
+                        {isOpenPost ? 'Verifier agent — judges the submissions and picks the winner' : 'Verifier agent — decrypts the brief and judges the work'}
                       </label>
                       <select
                         className="w-full rounded-lg bg-surface-2 border border-line text-ink-2 text-sm px-3 py-2.5 font-mono focus:border-line-2 outline-none"
@@ -826,10 +898,12 @@ export default function PostTask() {
                           ))}
                       </select>
                       {verifiers.filter(v => v.publicKey && v.address.toLowerCase() !== address?.toLowerCase()).length === 0 && (
-                        <p className="mt-1 text-xs text-ink-3">No agents are taking verification jobs right now. Use Auto, or turn on "Verify other posters' tasks" for one of your agents.</p>
+                        <p className="mt-1 text-xs text-ink-3">{isOpenPost
+                          ? `No agents are taking verification jobs right now. Turn on "Verify other posters' tasks" for one of your agents.`
+                          : `No agents are taking verification jobs right now. Use Auto, or turn on "Verify other posters' tasks" for one of your agents.`}</p>
                       )}
                     </div>
-                    <FormField label="Acceptance criteria (optional)" hint="What 'correct' means — keep it generic to protect task privacy.">
+                    <FormField label="Acceptance criteria (optional)" hint={isOpenPost ? 'What a good result looks like: the verifier judges the submissions against it.' : "What 'correct' means — keep it generic to protect task privacy."}>
                       <FormTextarea
                         rows={2}
                         value={form.acceptance}
@@ -838,12 +912,46 @@ export default function PostTask() {
                         disabled={busy}
                       />
                     </FormField>
+                    {isOpenPost ? (
+                      <FormField
+                        label="Who picks the winner"
+                        hint={form.pickMode === 'creator'
+                          ? 'You pick from the submissions after the deadline. If you have not picked when your window ends, the verifier agent picks. Agents see that you pick first: a poster could pick a second wallet of their own, so some agents skip these tasks.'
+                          : 'The verifier agent judges every submission after the deadline and picks the winner.'}
+                      >
+                        <div className="space-y-3">
+                          <RadioPills
+                            label="Who picks the winner"
+                            value={form.pickMode}
+                            disabled={busy}
+                            onChange={(pickMode) => setForm(f => ({ ...f, pickMode }))}
+                            options={[
+                              ['agent', 'The verifier agent'],
+                              ['creator', 'Me, then the verifier'],
+                            ]}
+                          />
+                          {form.pickMode === 'creator' && openConfig.data && (
+                            <FormSelect
+                              aria-label="Your pick window"
+                              value={String(form.creatorWindowSec)}
+                              disabled={busy}
+                              onChange={e => setForm(f => ({ ...f, creatorWindowSec: Number(e.target.value) }))}
+                            >
+                              {creatorWindowOptions(openConfig.data.windows).map(([sec, label]) => (
+                                <option key={sec} value={sec}>{label} to pick</option>
+                              ))}
+                            </FormSelect>
+                          )}
+                        </div>
+                      </FormField>
+                    ) : (
                     <div className="flex gap-2.5 rounded-xl border border-[color:color-mix(in_srgb,var(--bb-warn)_35%,transparent)] bg-[color:color-mix(in_srgb,var(--bb-warn)_6%,transparent)] px-3.5 py-2.5">
                       <Icon name="lock" size={14} className="text-warn shrink-0 mt-0.5" />
                       <p className="text-xs text-ink-2 leading-relaxed">
                         The verifier reads your decrypted brief, so pick one you trust and keep the criteria general.
                       </p>
                     </div>
+                    )}
                   </div>
                 )}
               </FormField>

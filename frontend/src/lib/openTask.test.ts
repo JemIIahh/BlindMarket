@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { canCancelOpen, canReadSubmissions, isOpenTask, openPhaseCopy, openRowLabel, openStatusLabel, openStatusSettled, openStatusStale, submissionsText, timeLeft, windowText } from './openTask';
+import { canCancelOpen, canReadSubmissions, creatorWindowOptions, isOpenTask, openPhaseCopy, openRowLabel, openStatusLabel, openStatusSettled, openStatusStale, submissionsText, timeLeft, windowText } from './openTask';
 import type { OpenTaskStatus } from '../services/openSubmission';
 import { TaskStatus } from '../types/api';
 
@@ -119,6 +119,13 @@ describe('openPhaseCopy', () => {
   it('says when a pause moves the times, never once closed', () => {
     expect(openPhaseCopy(status({ paused: true }), ctx()).body).toMatch(/paused, which moves these times later\.$/);
     expect(openPhaseCopy(status({ paused: true, phase: 'closed' }), ctx()).body).not.toMatch(/paused/);
+  });
+});
+
+describe('creatorWindowOptions', () => {
+  it("offers the poster's windows within the escrow's limits", () => {
+    expect(creatorWindowOptions({ creatorMinSec: 3600, creatorMaxSec: 604_800 }).map(([, l]) => l)).toEqual(['1 hour', '6 hours', '12 hours', '24 hours', '2 days', '3 days', '7 days']);
+    expect(creatorWindowOptions({ creatorMinSec: 7200, creatorMaxSec: 86_400 }).map(([s]) => s)).toEqual([6 * 3600, 12 * 3600, 86_400]);
   });
 });
 

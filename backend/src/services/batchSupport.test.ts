@@ -18,7 +18,7 @@ vi.mock('../config.js', async (importOriginal) => {
   return { ...mod, config: cfg };
 });
 
-const { batchCreateSupport, _resetBatchCreateSupportCache } = await import('./batchSupport.js');
+const { batchCreateSupport, openCreateSupport, _resetBatchCreateSupportCache } = await import('./batchSupport.js');
 
 const BASE_ESCROW = '0xCca5ab873158b888158AD9Dc36fb4Ee683eFbEBf';
 const OTHER_ESCROW = '0x00000000000000000000000000000000000e5c00';
@@ -116,3 +116,21 @@ describe('batchCreateSupport', () => {
     expect(await batchCreateSupport('arc')).toEqual({ supported: false, maxBatch: 0 });
   });
 });
+
+describe('openCreateSupport', () => {
+  it("says yes when the escrow answers getOpenTask, and keeps it apart from createTasks' answer", async () => {
+    const getOpenTask = vi.fn(async () => ({ open: false, mode: 0n, creatorWindow: 0n, closedBy: 0n }));
+    chain.baseEscrow = { MAX_BATCH: maxBatch, getOpenTask };
+    maxBatch.mockRejectedValueOnce(revert());
+    expect(await batchCreateSupport('base')).toEqual({ supported: false, maxBatch: 0 });
+    expect(await openCreateSupport('base')).toBe(true);
+    expect(getOpenTask).toHaveBeenCalledWith(0);
+  });
+
+  it('says no for an escrow from before the upgrade (the call reverts) or no escrow', async () => {
+    chain.baseEscrow = { MAX_BATCH: maxBatch, getOpenTask: vi.fn(async () => { throw revert(); }) };
+    expect(await openCreateSupport('base')).toBe(false);
+    expect(await openCreateSupport('arc')).toBe(false);
+  });
+});
+

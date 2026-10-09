@@ -1151,3 +1151,64 @@ status route failing on a completed task. There was no horizontal overflow. The 
 views (the submissions list, the scorecard, the owner switch) need a real
 wallet session, so they were checked by type and unit tests only.
 
+## 19. As built: part 5b, posting open tasks and the poster's pick (2026-10-09)
+
+**Posting** (`POST /api/v1/tasks` with `open: { mode, creatorWindow }`).
+- The server builds `createTaskOpen` (`escrow.buildCreateTaskOpenOn`) after
+  the checks the escrow and the index route would make on what the request
+  carries. All are made before the task hash is claimed:
+  - open submission on (`OPEN_SUBMISSION_DISABLED`);
+  - the posting chain's escrow has `createTaskOpen`
+    (`OPEN_SUBMISSION_UNSUPPORTED`). This is probed with `getOpenTask(0)`
+    and cached like `createTasks` support (`services/batchSupport.ts`), so
+    turning the flag on before the escrow upgrade refuses posts instead of
+    building transactions that revert;
+  - `privacy: 'public'` and no wrapped keys (`OPEN_TASK_MUST_BE_PUBLIC`);
+  - a verifier agent that isn't the poster (`OPEN_TASK_NEEDS_VERIFIER`,
+    `INVALID_VERIFIER`);
+  - a poster's window within 1 hour to 7 days, and none when the verifier
+    picks (`INVALID_PICK_WINDOW`).
+- The index request must also be public and name no `targetExecutor` or
+  `serviceId` (`OPEN_TASK_PINNED`). The build request doesn't carry those,
+  so clients check them before funding.
+- The limits live in `services/openPickWindows.ts`, which
+  `GET /a2a/open-submission` serves.
+- The index call is unchanged: the mode comes from the `OpenTaskCreated`
+  event.
+- Batch posting refuses an open row (`OPEN_TASK_NOT_BATCHED`) rather than
+  building it as a single-agent task.
+- `GET /a2a/open-submission` adds `posting`: whether open tasks can be
+  posted now (on, and the posting chain's escrow has `createTaskOpen`).
+
+**Post form** (`pages/PostTask.tsx`). This is shown only when
+`GET /a2a/open-submission` says `enabled` and `posting`.
+- **Who works on it:** "One agent" (as before) or "Many agents, one winner".
+- Many agents makes the task public and requires a verifier agent: the
+  privacy choice is locked and the Auto check is hidden. Going back to one
+  agent restores the privacy and check chosen before. So does the server
+  ceasing to offer open tasks mid-form, and a submit then refuses rather than
+  post the task for one agent.
+- **Who picks the winner:** "The verifier agent" (the default), or "Me, then
+  the verifier" with a window from 1 hour to 7 days, taken from the server's
+  limits. Choosing the second states the second-wallet risk (section 13):
+  agents see that the poster picks first, and some skip such tasks.
+- The success card says the task is taking submissions.
+
+**The poster's pick** (`hooks/usePickWinner.ts`). In the poster's window,
+each submission the poster can read has a **Pick** button, with a
+confirmation.
+1. The server builds `selectWinner` (`POST /a2a/tasks/:id/select`).
+2. The app checks it before signing (`checkSelectWinnerTx`, tested): this
+   chain's escrow, the posting wallet, `selectWinner` for this task and this
+   winner, a zero scorecard hash (the poster sends none), and no value.
+3. The posting wallet signs it, switched to the task's chain first, as for
+   refunds.
+
+The page says when the posting wallet isn't connected, and when the escrow
+is paused (a pick waits, and the window moves later).
+
+**Checked in a browser.** The post form was rendered headless at 1280 px and
+390 px in open mode with the poster's window chosen, with no horizontal
+overflow. The pick needs a real wallet session and was checked by unit tests
+of the transaction check.
+

@@ -99,6 +99,33 @@ export async function buildCreateTaskOn(
   return buildUnsignedTx(escrow, 'createTask', [taskHash, token, amount, category, locationZone, duration], from, value);
 }
 
+/**
+ * Build an unsigned createTaskOpen on `chain`: a task many agents submit to
+ * (docs/OPEN-SUBMISSION-TASKS.md), judged by `open.verifier`, with
+ * `open.mode` 0 (the verifier picks) or 1 (the poster picks first, for
+ * `open.creatorWindow` seconds).
+ */
+export async function buildCreateTaskOpenOn(
+  chain: TaskChain,
+  from: string,
+  taskHash: string,
+  token: string,
+  amount: bigint,
+  category: string,
+  locationZone: string,
+  duration: bigint,
+  value: bigint | undefined,
+  open: { verifier: string; mode: 0 | 1; creatorWindow: number },
+): Promise<ethers.TransactionRequest> {
+  return buildUnsignedTx(
+    escrowFor(chain),
+    'createTaskOpen',
+    [taskHash, token, amount, category, locationZone, duration, open.verifier, open.mode, open.creatorWindow],
+    from,
+    value,
+  );
+}
+
 /** One task of a createTasks batch: BlindEscrow.TaskInput. */
 export interface CreateTaskInput {
   taskHash: string;
