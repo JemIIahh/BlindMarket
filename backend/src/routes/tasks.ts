@@ -30,6 +30,7 @@ import { refuseUnapprovedDelegation } from '../services/delegationGuard.js';
 import { withPosterAvatars } from '../services/avatarStore.js';
 import { closeRefundedA2ATask } from '../services/refundedTasks.js';
 import { BATCH_UNSUPPORTED, batchCreateSupport, openCreateSupport } from '../services/batchSupport.js';
+import { verifierSignerFor } from '../services/verifierSigner.js';
 import { MAX_BATCH_REQUEST, WALLET_POSTING_BUDGET_PER_MIN } from '../constants.js';
 import { batchWeight, createWalletBudget, postingIpBudget } from '../middleware/rateLimit.js';
 import { invalidRows, zodIssuesText, type RowError } from '../middleware/batchErrors.js';
@@ -620,6 +621,15 @@ tasksRouter.post('/', requireAuth, buildBudget, postingIpBudget, async (req: Aut
     const open = data.open ? openTerms(data, from) : undefined;
     if (open && !(await openCreateSupport(chain))) {
       throw new AppError(409, 'OPEN_SUBMISSION_UNSUPPORTED', `The ${label} escrow does not take tasks that many agents submit to yet`);
+    }
+    // The platform judges by a fallback rule, not by quality
+    // (openSubmissionJudge.ts): with it as the judge, the poster picks first.
+    if (open && open.mode === 0 && open.verifier.toLowerCase() === (await verifierSignerFor(chain))?.address) {
+      throw new AppError(
+        400,
+        'PLATFORM_JUDGE_POSTER_PICKS',
+        "With BlindMarket as the judge, you pick the winner first: send open.mode 'creator' with a creatorWindow.",
+      );
     }
     await claimNewTaskHash(data.taskHash, from, randomUUID());
     const { tokenAddress, isNative } = settlementToken(chain, label, token, data.token);

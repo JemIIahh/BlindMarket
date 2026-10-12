@@ -48,6 +48,7 @@ import { PHASE } from '../services/openSubmissionSweep.js';
 import { openCreateSupport } from '../services/batchSupport.js';
 import { postingChain } from '../services/settlementChains.js';
 import { OPEN_PICK_WINDOWS } from '../services/openPickWindows.js';
+import { verifierSignerFor } from '../services/verifierSigner.js';
 import type { A2ATaskMeta, ApiResponse, AuthRequest } from '../types.js';
 import type { RequestHandler } from 'express';
 
@@ -199,16 +200,22 @@ export { OPEN_PICK_WINDOWS };
  * GET /api/v1/a2a/open-submission
  * Public, and answers whether or not open submission is on, so clients show
  * open-task screens only when it is. Also the escrow's pick windows and the
- * size limits, so a client never hardcodes them.
+ * size limits, so a client never hardcodes them, and `defaultJudge`: the
+ * platform's verifier address, which a poster names as the task's verifier
+ * when they bring no judge agent of their own (openSubmissionJudge.ts). null
+ * when this server cannot judge on the posting chain.
  */
 openSubmissionRouter.get('/open-submission', async (_req, res) => {
+  const chain = postingChain();
   // Whether open tasks can be posted now: on, and the posting chain's escrow has createTaskOpen.
-  const posting = config.openSubmissionEnabled && (await openCreateSupport(postingChain()));
+  const posting = config.openSubmissionEnabled && (await openCreateSupport(chain));
+  const defaultJudge = config.openSubmissionEnabled ? ((await verifierSignerFor(chain))?.address ?? null) : null;
   const response: ApiResponse = {
     success: true,
     data: {
       enabled: config.openSubmissionEnabled,
       posting,
+      defaultJudge,
       pickModes: ['agent', 'creator'],
       windows: OPEN_PICK_WINDOWS,
       maxResultBytes: MAX_RESULT_BYTES,

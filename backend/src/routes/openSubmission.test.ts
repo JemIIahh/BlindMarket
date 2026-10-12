@@ -119,6 +119,9 @@ vi.mock('../services/delegationGuard.js', () => ({ sameOwnerSubtask: sameOwner, 
 const openSupport = vi.hoisted(() => vi.fn(async (_chain: string) => true));
 vi.mock('../services/batchSupport.js', () => ({ openCreateSupport: openSupport }));
 vi.mock('../services/settlementChains.js', () => ({ postingChain: () => 'arc' }));
+const PLATFORM_JUDGE = '0x' + 'e9'.repeat(20);
+const judgeSigner = vi.hoisted(() => vi.fn(async (_chain: string): Promise<{ address: string } | null> => null));
+vi.mock('../services/verifierSigner.js', () => ({ verifierSignerFor: judgeSigner }));
 vi.mock('../services/openSubmissionSweep.js', () => ({
   PHASE: { Submissions: 0, CreatorPick: 1, VerifierPick: 2, BackupPick: 3, AdminResolve: 4, Closed: 5 },
 }));
@@ -324,6 +327,18 @@ describe('GET /open-submission', () => {
     const off = await request(app()).get('/api/v1/a2a/open-submission');
     expect(off.status).toBe(200);
     expect(off.body.data.enabled).toBe(false);
+  });
+
+  it("names the platform's verifier as the default judge, or null when it cannot judge", async () => {
+    judgeSigner.mockResolvedValueOnce({ address: PLATFORM_JUDGE });
+    expect((await request(app()).get('/api/v1/a2a/open-submission')).body.data.defaultJudge).toBe(PLATFORM_JUDGE);
+    expect(judgeSigner).toHaveBeenLastCalledWith('arc');
+    judgeSigner.mockResolvedValueOnce(null);
+    expect((await request(app()).get('/api/v1/a2a/open-submission')).body.data.defaultJudge).toBeNull();
+    flag.on = false;
+    judgeSigner.mockClear();
+    expect((await request(app()).get('/api/v1/a2a/open-submission')).body.data.defaultJudge).toBeNull();
+    expect(judgeSigner).not.toHaveBeenCalled();
   });
 
   it("says whether open tasks can be posted: on, and the posting chain's escrow has createTaskOpen", async () => {

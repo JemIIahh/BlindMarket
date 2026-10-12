@@ -53,8 +53,9 @@ async function ensureRecord(chain: TaskChain, taskId: bigint): Promise<{ ref: Ta
   const escrow = escrowFor(chain);
   const [task, open] = await Promise.all([escrow.getTask(taskId), escrow.getOpenTask(taskId)]);
   if (!open.open) return null;
-  if (!(await store.getOutcome(ref)) && !(await store.isClosedNotified(ref))) {
-    await store.scheduleSweep(ref, Number(task.deadline));
+  if (!(await store.getOutcome(ref))) {
+    if (!(await store.isClosedNotified(ref))) await store.scheduleSweep(ref, Number(task.deadline));
+    await store.scheduleJudgeIfAbsent(ref, Number(task.deadline));
   }
   const rec = await store.saveRecord({
     chain,
@@ -75,7 +76,7 @@ async function ensureRecord(chain: TaskChain, taskId: bigint): Promise<{ ref: Ta
  * #142), so the listing's own hash→task mapping, written when its verified
  * poster listed it, decides (isListedTask, as the dispute listener asks).
  */
-async function listingOf(rec: OpenTaskRecord): Promise<A2ATaskMeta | null> {
+export async function listingOf(rec: OpenTaskRecord): Promise<A2ATaskMeta | null> {
   const meta = await getMeta(rec.taskHash);
   if (!meta || meta.submissionMode !== 'open') return null;
   return (await isListedTask(rec.chain, rec.taskId, rec.taskHash, rec.poster, meta.posterAddress)) ? meta : null;
@@ -170,14 +171,15 @@ async function tellSubmitters(
 }
 
 /**
- * The judge's scorecard, kept when the escrow anchored its hash. Only the
- * poster and the task verifier pick through POST /select, which holds one; a
- * backup judge's or admin's scorecard can still be sent afterwards (POST
- * /tasks/:id/scorecard), checked against the hash recorded here.
+ * The judge's scorecard, kept when the escrow anchored its hash. The poster
+ * and the task verifier hold one through POST /select, and the platform judge
+ * holds its own before it picks; an admin's scorecard can still be sent
+ * afterwards (POST /tasks/:id/scorecard), checked against the hash recorded
+ * here.
  */
 async function keepJudgeScorecard(ref: TaskRef, judge: OpenJudge, scorecardHash: string): Promise<void> {
   if (!scorecardHash || /^0x0*$/.test(scorecardHash)) return;
-  if (judge !== 'creator' && judge !== 'task_verifier') return;
+  if (judge === 'admin') return;
   await store.keepScorecard(ref, judge, scorecardHash);
 }
 
@@ -198,6 +200,7 @@ export async function handleWinnerSelected(chain: TaskChain, taskId: bigint, win
   await store.saveOutcome(ref, { kind: 'winner', winner: winnerAddr, judge, scorecardHash: scorecardHash.toLowerCase() });
   await keepJudgeScorecard(ref, judge, scorecardHash);
   await store.unscheduleSweep(ref);
+  await store.unscheduleJudge(ref);
   const listing = await listingOf(rec);
   if (listing) {
     // The listing's state: 'completed', with the winner as its executor.
@@ -249,6 +252,7 @@ export async function handleOpenTaskVoided(chain: TaskChain, taskId: bigint, jud
   await store.saveOutcome(ref, { kind: 'void', judge, scorecardHash: scorecardHash.toLowerCase() });
   await keepJudgeScorecard(ref, judge, scorecardHash);
   await store.unscheduleSweep(ref);
+  await store.unscheduleJudge(ref);
   if (await listingOf(rec)) await closeOpenSubmissionTask(hash, { kind: 'void' });
   // The poster voids only a task nobody submitted to, and needs no alert for
   // their own refund.
