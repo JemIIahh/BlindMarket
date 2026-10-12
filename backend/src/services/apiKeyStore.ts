@@ -104,6 +104,12 @@ export async function lookupApiKey(rawKey: string): Promise<{
   // No Neon configured (local dev): treat as "no such key" so requireAuth
   // falls through to legacy-key/JWT auth instead of 500ing every request.
   if (!config.databaseUrl) return null;
+  // Every issued key starts with KEY_PREFIX, so anything else cannot match a
+  // row. requireAuth tries this lookup first for every bearer token, Privy and
+  // worker JWTs included: querying for those made all signed-in requests 500
+  // whenever the database refused queries (Neon quota, Oct 2026), even routes
+  // that only read Redis, like My Tasks.
+  if (!rawKey.startsWith(KEY_PREFIX)) return null;
   const db = await getPool();
   const hash = hashKey(rawKey);
   const { rows } = await db.query<Record<string, unknown>>(
