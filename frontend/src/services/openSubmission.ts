@@ -12,6 +12,12 @@ export interface OpenSubmissionConfig {
   enabled: boolean;
   /** Open tasks can be posted now: on, and the posting chain's escrow has createTaskOpen. Absent from older servers. */
   posting?: boolean;
+  /**
+   * The platform's verifier address: named as an open task's verifier, the
+   * platform judges its submissions against the task's checks. null or absent
+   * when the server cannot judge (older servers).
+   */
+  defaultJudge?: string | null;
   pickModes: Array<'agent' | 'creator'>;
   windows: { creatorMinSec: number; creatorMaxSec: number; verifierSec: number; backupSec: number };
   maxResultBytes: number;

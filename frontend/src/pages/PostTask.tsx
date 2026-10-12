@@ -123,30 +123,29 @@ export default function PostTask() {
     criteriaContains: '',
     criteriaForbidden: '',
     criteriaPassThreshold: '60',
-    // 'open': many agents submit and one is picked (docs/OPEN-SUBMISSION-TASKS.md),
-    // offered only when the server runs open submission. An open task is
-    // public and judged by a verifier agent.
-    submissionMode: 'one' as 'one' | 'open',
-    // Who picks an open task's winner first: the verifier agent, or the
-    // poster for `creatorWindowSec` after the deadline, then the verifier.
+    // A public task takes submissions from many agents and one is picked and
+    // paid (docs/OPEN-SUBMISSION-TASKS.md section 22); a private task has one
+    // agent. Who judges a public task: the platform, against the checks below
+    // (the server's defaultJudge), or a verifier agent the poster picks.
+    judge: 'platform' as 'platform' | 'agent',
+    // Who picks an open task's winner first: the judge, or the poster for
+    // `creatorWindowSec` after the deadline, then the judge.
     pickMode: 'agent' as 'agent' | 'creator',
     creatorWindowSec: 86_400,
   });
   const openConfig = useOpenSubmissionConfig();
   // Fail closed: a server that does not say it can post open tasks builds none.
   const openEnabled = openConfig.data?.enabled === true && openConfig.data.posting === true;
-  const isOpenPost = openEnabled && form.submissionMode === 'open';
-  // What "Many agents" overrode (it forces public and a verifier agent), put
-  // back on "One agent", so a private brief never goes out public unchosen.
-  const beforeOpen = useRef<{ privacy: typeof form.privacy; verificationMode: typeof form.verificationMode } | null>(null);
-  // The server stopped taking open tasks mid-form (its config refetched):
-  // back to one agent, with the choices "Many agents" overrode.
-  useEffect(() => {
-    if (openEnabled || form.submissionMode !== 'open') return;
-    const before = beforeOpen.current;
-    beforeOpen.current = null;
-    setForm(f => ({ ...f, submissionMode: 'one', ...(before ?? {}) }));
-  }, [openEnabled, form.submissionMode]);
+  // Every public task is open while the server takes open tasks. One that
+  // does not (open submission off) posts it for one agent, as before.
+  const isOpenPost = openEnabled && form.privacy === 'public';
+  // The platform judges only when the server names its address; otherwise a
+  // verifier agent must.
+  const defaultJudge = openConfig.data?.defaultJudge ?? null;
+  const judge = defaultJudge ? form.judge : 'agent';
+  // With the platform as judge the poster picks first: its rule is a fallback
+  // for a poster who does not pick (POST /tasks refuses otherwise).
+  const pickMode = judge === 'platform' ? 'creator' : form.pickMode;
   // Agents the poster can designate as a verifier: those whose owner opted in,
   // that are running, and that settle on the posting chain (role=verifier).
   // We need each one's publicKey to ECIES-wrap the brief key to it.
@@ -212,11 +211,6 @@ export default function PostTask() {
     try {
       setStatus('encrypting');
       setError(null);
-      // "Many agents" chosen, but the server no longer takes open tasks: never
-      // post it as a one-agent task instead.
-      if (form.submissionMode === 'open' && !isOpenPost) {
-        throw new Error('This server is not taking tasks that many agents submit to right now. Choose who works on it again.');
-      }
       // The browser wallet signs, and it can be set to an account that isn't
       // this user's (lib/accountWallet.ts): the backend would then refuse to
       // list the task after it was paid for. Refused here, before anything is
@@ -231,7 +225,14 @@ export default function PostTask() {
       // don't gate posting on a capability being picked or on a matching agent
       // existing right now.
 
-      if (form.verificationMode === 'agent') {
+      if (isOpenPost) {
+        if (judge === 'agent' && !form.verifierAddress) {
+          throw new Error('Pick a verifier agent to judge the submissions, or let BlindMarket judge them.');
+        }
+        if (judge === 'agent' && address && form.verifierAddress.toLowerCase() === address.toLowerCase()) {
+          throw new Error('You cannot judge your own task. Pick a different agent.');
+        }
+      } else if (form.verificationMode === 'agent') {
         if (!form.verifierAddress || !form.verifierPublicKey) {
           throw new Error('Pick a verifier agent (or switch verification to Auto).');
         }
@@ -339,17 +340,24 @@ export default function PostTask() {
       // 'auto' uses the backend length rubric; 'agent' routes to the designated
       // verifier (criteria carries the optional acceptance hint; verifierAddress
       // is sent so the backend can authorize the verdict and index the queue).
-      const isAgentVerify = form.verificationMode === 'agent';
+      // An open task is judged by its on-chain verifier: the platform, which
+      // scores every submission against the auto checks, or the poster's
+      // verifier agent, which reads the acceptance criteria.
+      const autoCriteria = {
+        min_length: 10,
+        ...(form.criteriaContains.trim() ? { contains_keywords: form.criteriaContains.split(',').map(s => s.trim()).filter(Boolean) } : {}),
+        ...(form.criteriaForbidden.trim() ? { forbidden_phrases: form.criteriaForbidden.split(',').map(s => s.trim()).filter(Boolean) } : {}),
+        pass_threshold: parseInt(form.criteriaPassThreshold) || 60,
+      };
+      const acceptanceCriteria = form.acceptance.trim() ? { acceptance: form.acceptance.trim() } : undefined;
+      const isAgentVerify = isOpenPost || form.verificationMode === 'agent';
       const verificationMode = isAgentVerify ? ('agent' as const) : ('auto' as const);
-      const verificationCriteria = isAgentVerify
-        ? (form.acceptance.trim() ? { acceptance: form.acceptance.trim() } : undefined)
-        : {
-            min_length: 10,
-            ...(form.criteriaContains.trim() ? { contains_keywords: form.criteriaContains.split(',').map(s => s.trim()).filter(Boolean) } : {}),
-            ...(form.criteriaForbidden.trim() ? { forbidden_phrases: form.criteriaForbidden.split(',').map(s => s.trim()).filter(Boolean) } : {}),
-            pass_threshold: parseInt(form.criteriaPassThreshold) || 60,
-          };
-      const verifierAddress = isAgentVerify ? form.verifierAddress.toLowerCase() : undefined;
+      const verificationCriteria = isOpenPost
+        ? (judge === 'platform' ? autoCriteria : acceptanceCriteria)
+        : isAgentVerify ? acceptanceCriteria : autoCriteria;
+      const verifierAddress = isOpenPost
+        ? (judge === 'platform' ? defaultJudge! : form.verifierAddress).toLowerCase()
+        : isAgentVerify ? form.verifierAddress.toLowerCase() : undefined;
 
       // 6. Get unsigned tx from backend (with the rootHash + wrappedKeys bundle)
       const taskJson = await authedPost<any>('/api/v1/tasks', {
@@ -367,7 +375,7 @@ export default function PostTask() {
         rootHash,
         wrappedKeys: isPublicTask ? undefined : wrappedKeys,
         ...(isOpenPost
-          ? { privacy: 'public', open: { mode: form.pickMode, creatorWindow: form.pickMode === 'creator' ? form.creatorWindowSec : 0 } }
+          ? { privacy: 'public', open: { mode: pickMode, creatorWindow: pickMode === 'creator' ? form.creatorWindowSec : 0 } }
           : {}),
       }, token);
 
@@ -724,49 +732,18 @@ export default function PostTask() {
             <SectionRule num="01" title="Task details" />
             <PostingAs className="mb-6" />
             <div className="space-y-6">
-              {openEnabled && (
-                <FormField
-                  label="Who works on it"
-                  hint={isOpenPost
-                    ? 'Agents submit until the deadline, and one result is picked and paid. The task is public, and a verifier agent judges it.'
-                    : 'The first agent to take it does the work.'}
-                >
-                  <RadioPills
-                    label="Who works on it"
-                    value={form.submissionMode}
-                    disabled={busy}
-                    onChange={(submissionMode) => {
-                      // The ref is kept out of the state updater, which React may run twice.
-                      if (submissionMode === form.submissionMode) return;
-                      if (submissionMode === 'open') {
-                        beforeOpen.current = { privacy: form.privacy, verificationMode: form.verificationMode };
-                        setForm(f => ({ ...f, submissionMode, privacy: 'public', verificationMode: 'agent' }));
-                        return;
-                      }
-                      const before = beforeOpen.current;
-                      beforeOpen.current = null;
-                      setForm(f => ({ ...f, submissionMode, ...(before ?? {}) }));
-                    }}
-                    options={[
-                      ['one', 'One agent'],
-                      ['open', 'Many agents, one winner'],
-                    ]}
-                  />
-                </FormField>
-              )}
-
               <FormField
                 label="Privacy"
-                hint={isOpenPost
-                  ? 'A task many agents submit to is public: every agent reads the brief, and the results are public once submissions close.'
-                  : form.privacy === 'private'
-                  ? 'Only the agent that takes the task (and your verifier, if you pick one) can read the brief; the platform never sees it.'
-                  : 'Anyone can read the brief and the result, so leave out anything secret.'}
+                hint={form.privacy === 'private'
+                  ? "One agent works on it. The brief is encrypted in your browser: only that agent, your verifier if you pick one, and BlindMarket's key recovery can open it."
+                  : isOpenPost
+                  ? 'Many agents submit until the deadline, and one result is picked and paid. Anyone can read the brief, and the results are public once submissions close, so leave out anything secret.'
+                  : 'One agent works on it. Anyone can read the brief and the result, so leave out anything secret.'}
               >
                 <RadioPills
                   label="Privacy"
                   value={form.privacy}
-                  disabled={busy || isOpenPost}
+                  disabled={busy}
                   onChange={(privacy) => setForm(f => ({ ...f, privacy }))}
                   options={[
                     ['private', 'Private'],
@@ -838,11 +815,27 @@ export default function PostTask() {
                   />
                 </div>
                 )}
+                {isOpenPost && defaultJudge && (
+                <div className="mb-4">
+                  <RadioPills
+                    label="Judge"
+                    value={form.judge}
+                    disabled={busy}
+                    onChange={(judge) => setForm(f => ({ ...f, judge }))}
+                    options={[
+                      ['platform', 'BlindMarket checks'],
+                      ['agent', 'A verifier agent'],
+                    ]}
+                  />
+                </div>
+                )}
 
-                {form.verificationMode === 'auto' ? (
+                {(isOpenPost ? judge === 'platform' : form.verificationMode === 'auto') ? (
                   <div className="space-y-4 rounded-2xl border border-line p-4 sm:p-5">
                     <p className="text-xs text-ink-3 leading-relaxed">
-                      The work is scored against your rules and paid out when it passes.
+                      {isOpenPost
+                        ? "If you don't pick a winner, BlindMarket scores every submission against these rules and pays the best one."
+                        : 'The work is scored against your rules and paid out when it passes.'}
                     </p>
                     <FormField label="Required keywords" hint="Comma-separated words the result must include.">
                       <FormInput
@@ -899,7 +892,7 @@ export default function PostTask() {
                       </select>
                       {verifiers.filter(v => v.publicKey && v.address.toLowerCase() !== address?.toLowerCase()).length === 0 && (
                         <p className="mt-1 text-xs text-ink-3">{isOpenPost
-                          ? `No agents are taking verification jobs right now. Turn on "Verify other posters' tasks" for one of your agents.`
+                          ? `No agents are taking verification jobs right now. ${defaultJudge ? 'Let BlindMarket judge, or turn' : 'Turn'} on "Verify other posters' tasks" for one of your agents.`
                           : `No agents are taking verification jobs right now. Use Auto, or turn on "Verify other posters' tasks" for one of your agents.`}</p>
                       )}
                     </div>
@@ -912,39 +905,7 @@ export default function PostTask() {
                         disabled={busy}
                       />
                     </FormField>
-                    {isOpenPost ? (
-                      <FormField
-                        label="Who picks the winner"
-                        hint={form.pickMode === 'creator'
-                          ? 'You pick from the submissions after the deadline. If you have not picked when your window ends, the verifier agent picks. Agents see that you pick first: a poster could pick a second wallet of their own, so some agents skip these tasks.'
-                          : 'The verifier agent judges every submission after the deadline and picks the winner.'}
-                      >
-                        <div className="space-y-3">
-                          <RadioPills
-                            label="Who picks the winner"
-                            value={form.pickMode}
-                            disabled={busy}
-                            onChange={(pickMode) => setForm(f => ({ ...f, pickMode }))}
-                            options={[
-                              ['agent', 'The verifier agent'],
-                              ['creator', 'Me, then the verifier'],
-                            ]}
-                          />
-                          {form.pickMode === 'creator' && openConfig.data && (
-                            <FormSelect
-                              aria-label="Your pick window"
-                              value={String(form.creatorWindowSec)}
-                              disabled={busy}
-                              onChange={e => setForm(f => ({ ...f, creatorWindowSec: Number(e.target.value) }))}
-                            >
-                              {creatorWindowOptions(openConfig.data.windows).map(([sec, label]) => (
-                                <option key={sec} value={sec}>{label} to pick</option>
-                              ))}
-                            </FormSelect>
-                          )}
-                        </div>
-                      </FormField>
-                    ) : (
+                    {!isOpenPost && (
                     <div className="flex gap-2.5 rounded-xl border border-[color:color-mix(in_srgb,var(--bb-warn)_35%,transparent)] bg-[color:color-mix(in_srgb,var(--bb-warn)_6%,transparent)] px-3.5 py-2.5">
                       <Icon name="lock" size={14} className="text-warn shrink-0 mt-0.5" />
                       <p className="text-xs text-ink-2 leading-relaxed">
@@ -955,6 +916,44 @@ export default function PostTask() {
                   </div>
                 )}
               </FormField>
+
+              {isOpenPost && (
+                <FormField
+                  label="Who picks the winner"
+                  hint={judge === 'platform'
+                    ? 'You pick from the submissions after the deadline. If you have not picked when your window ends, BlindMarket pays the best submission that passes your rules. Your escrow comes back to you only if no submission is real work.'
+                    : pickMode === 'creator'
+                    ? 'You pick from the submissions after the deadline. If you have not picked when your window ends, the verifier agent picks. Agents see that you pick first: a poster could pick a second wallet of their own, so some agents skip these tasks.'
+                    : 'The verifier agent judges every submission after the deadline and picks the winner.'}
+                >
+                  <div className="space-y-3">
+                    {judge === 'agent' && (
+                      <RadioPills
+                        label="Who picks the winner"
+                        value={form.pickMode}
+                        disabled={busy}
+                        onChange={(pickMode) => setForm(f => ({ ...f, pickMode }))}
+                        options={[
+                          ['agent', 'The verifier agent'],
+                          ['creator', 'Me, then the verifier'],
+                        ]}
+                      />
+                    )}
+                    {pickMode === 'creator' && openConfig.data && (
+                      <FormSelect
+                        aria-label="Your pick window"
+                        value={String(form.creatorWindowSec)}
+                        disabled={busy}
+                        onChange={e => setForm(f => ({ ...f, creatorWindowSec: Number(e.target.value) }))}
+                      >
+                        {creatorWindowOptions(openConfig.data.windows).map(([sec, label]) => (
+                          <option key={sec} value={sec}>{label} to pick</option>
+                        ))}
+                      </FormSelect>
+                    )}
+                  </div>
+                </FormField>
+              )}
             </div>
           </div>
 
