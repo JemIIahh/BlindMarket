@@ -68,6 +68,11 @@ export function taskRef(chain: TaskChain, taskId: string | number | bigint): Tas
   return `${chainScope(chain)}:${String(taskId)}`;
 }
 
+/** The network a ref belongs to: its chainScope. */
+export function scopeOfRef(ref: TaskRef): string {
+  return ref.slice(0, ref.lastIndexOf(':'));
+}
+
 /** Who picks first, as the escrow's PickMode: 0 the task verifier, 1 the poster. */
 export type PickMode = 'agent' | 'creator';
 
@@ -142,8 +147,13 @@ export const PENDING_RESULT_TTL_SEC = 3600;
  * (registration is free) the global per-IP limit is what bounds it.
  */
 export const MAX_HELD = 10;
-/** How long kept results last: well past every pick window. */
-export const RESULTS_TTL_SEC = 90 * 86_400;
+/**
+ * How long kept results last, from the latest one kept: past the last pick
+ * window of the longest task. A result kept on day one of a 90-day task is
+ * still there for the backup judge, after the deadline, a 7-day poster window
+ * and the verifier's 48 h (openSubmissionJudge.ts).
+ */
+export const RESULTS_TTL_SEC = 120 * 86_400;
 /**
  * How long a judge's scorecard waits for its pick to land on-chain: the
  * longest pick window (a poster's, up to 7 days) and two more for a slow
@@ -164,7 +174,10 @@ const KEY = {
   scorecard: (ref: TaskRef) => `a2a:open:scorecard:${ref}`,
   decline: (ref: TaskRef) => `a2a:open:decline:${ref}`,
   due: 'a2a:open:due',
-  judgeDue: 'a2a:open:judge-due',
+  // Per network (the ref's scope): a backend on another network sharing this
+  // Redis neither sees nor drops this network's tasks.
+  judgeDue: (scope: string) => `a2a:open:judge-due:${scope}`,
+  judgeBackfilled: (scope: string) => `a2a:open:judge-backfilled:${scope}`,
 };
 
 function parse<T>(raw: string | null): T | null {
@@ -245,21 +258,26 @@ export async function dueForSweep(nowSec: number, limit: number): Promise<TaskRe
  * alerts are sent, days before the judge's turn.
  */
 export async function scheduleJudge(ref: TaskRef, atSec: number): Promise<void> {
-  await redis.zadd(KEY.judgeDue, atSec, ref);
+  await redis.zadd(KEY.judgeDue(scopeOfRef(ref)), atSec, ref);
 }
 
 /** Schedule the judge only if the task is not scheduled yet. */
 export async function scheduleJudgeIfAbsent(ref: TaskRef, atSec: number): Promise<void> {
-  await redis.zadd(KEY.judgeDue, 'NX', atSec, ref);
+  await redis.zadd(KEY.judgeDue(scopeOfRef(ref)), 'NX', atSec, ref);
 }
 
 export async function unscheduleJudge(ref: TaskRef): Promise<void> {
-  await redis.zrem(KEY.judgeDue, ref);
+  await redis.zrem(KEY.judgeDue(scopeOfRef(ref)), ref);
 }
 
-/** Tasks the judge should look at by `nowSec`, soonest first. */
-export async function dueForJudge(nowSec: number, limit: number): Promise<TaskRef[]> {
-  return redis.zrangebyscore(KEY.judgeDue, '-inf', nowSec, 'LIMIT', 0, limit);
+/** The network's tasks the judge should look at by `nowSec`, soonest first. */
+export async function dueForJudge(scope: string, nowSec: number, limit: number): Promise<TaskRef[]> {
+  return redis.zrangebyscore(KEY.judgeDue(scope), '-inf', nowSec, 'LIMIT', 0, limit);
+}
+
+/** Mark the network's existing tasks scheduled for the judge. True the first time. */
+export async function markJudgeBackfilled(scope: string): Promise<boolean> {
+  return (await redis.set(KEY.judgeBackfilled(scope), '1', 'NX')) !== null;
 }
 
 /**

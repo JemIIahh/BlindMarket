@@ -1358,9 +1358,11 @@ whose judges stayed silent waited for the admin.
 The parts:
 1. The platform judge (below). Backend.
 2. Hosted agents submit to open tasks by default; owners can turn it off.
-3. The web app posts every public task as open, with the platform as judge
-   unless the poster names a judge agent. Live on Andrew's Vercel deploy.
-4. The SDK, CLI and MCP post public tasks as open. npm release by Andrew.
+3. The web app posts every public task as open. The poster picks the winner
+   first, with the platform as the judge after them, unless the poster names
+   a judge agent. Live on Andrew's Vercel deploy.
+4. The SDK, CLI and MCP post public tasks as open, on the same terms. npm
+   release by Andrew.
 5. Bulk posting of public tasks: `createTasks` builds single-assignee tasks
    only, so this needs an escrow change and an upgrade the user signs off.
 6. The backend refuses a public task that is not open (hires excepted), once
@@ -1380,44 +1382,75 @@ so the two never race for a nonce.
   as `verifierAddress` with `verificationMode: 'agent'`. The escrow only
   refuses the poster as verifier, and the agent checks at post leave an
   address that is not a registered agent alone.
-- The backup judge's, on every open task.
+- The backup judge's, on every open task this server listed.
 
-**The rule.** The task's own checks, the listing's `verificationCriteria`
-through `autoVerify`, decide which submissions are valid. `autoVerify` also
-fails empty output, worker error text, refusals and filler with no criteria
-set. A submission whose result was never kept cannot pass. Of the valid ones,
-the highest score wins, the earliest submission on a tie. At most the first
-500 submissions are judged.
-- As task verifier with none valid: no transaction. The turn passes, and the
-  platform comes back as backup judge.
-- As backup judge with none valid: `voidOpenTask`, a full refund to the
-  poster.
+**The poster picks first.** The platform cannot judge quality: it has no
+model, only the deterministic checks. So `POST /tasks` refuses an open task
+that names the platform as judge without the poster picking first
+(`PLATFORM_JUDGE_POSTER_PICKS`: send `open.mode: 'creator'` with a window).
+The platform's rule is a fallback for a poster who did not pick.
+
+**The rule, in both turns.**
+1. Only real work counts: a kept result past `deliverableFloor`
+   (`autoVerify.ts`): not empty, not a worker's error text, not a refusal,
+   and past the content floor, which a task that pins down a short answer
+   (`expected_answer`, a usable `regex_pattern`, required keys or fields)
+   lifts as `autoVerify` does. The poster's answer checks are not part of
+   it. If they were, a poster could set an answer nobody matches, read every
+   result and be refunded.
+2. Among real work: passing the task's own checks (`autoVerify`) beats
+   failing them; then the higher score; then the more substantive (distinct
+   words, capped at 500), so a one-line answer does not beat real work by
+   being first; then the earliest.
+3. With no real work, the platform as task verifier lets its turn pass. As
+   backup judge it refunds the poster (`voidOpenTask`), but only when every
+   submission on-chain was recorded, has its kept result, and was judged.
+   Otherwise it looks again every hour, a submitter may re-send a result, and
+   at the end of the window it leaves the task for the admin.
+- Only submissions with a kept result are judged, up to 2000, earliest
+  first: submissions with no result cannot crowd real work out.
 - A task nobody submitted to is left for its poster to reclaim.
 - A task this server never listed (created on the escrow directly) is left
-  alone: it has no result here to judge, and refunding it would ignore work
-  sent elsewhere. Its poster's and the admin's turns remain.
+  alone: it has no result here to judge. Its poster's and the admin's turns
+  remain.
+- Before any transaction the judge checks that the escrow's task under the
+  record's id has the record's hash (as the indexer does before crediting),
+  and, as backup judge, that its signer is the escrow's verifier.
 
-Judging runs in the API process, 25 submissions between yields to the event
-loop.
+Kept results now last 120 days from the latest one kept (they were 90): past
+the backup window of the longest task (a 90-day deadline, a 7-day poster
+window, the verifier's 48 h).
 
 **A judge agent's decline is not followed.** A poster may name their own
 agent as judge (section 16). If the backup step followed that agent's
 decline, a poster could read every result and pay nothing, which the escrow's
 void rule exists to prevent. The backup judge applies its own rule.
 
+**Known limit.** Among submissions that pass the checks with the same score,
+the fallback pays the more substantive one, which padding can game. The
+poster's own pick comes first, and a stronger judge (a model, run by the
+platform) is future work.
+
 **Scorecards.** Every pick or void anchors one: the rule, the decision, the
-counts, and up to 100 entries (submitter, ordinal, passed, score, the first
-failure reason). It is held under the role `task_verifier` or `backup` before
-the transaction, and the indexer keeps it once the escrow records its hash
+counts (on-chain, recorded, with a result, judged, real, passed), and up to
+100 entries (submitter, ordinal, real, passed, score, substance, the first
+reason). It is held under the role `task_verifier` or `backup` before the
+transaction, and the indexer keeps it once the escrow records its hash
 (`keepJudgeScorecard` now keeps every judge's but the admin's).
 
-**Scheduling.** Its own Redis set, `a2a:open:judge-due`: the alert sweep drops
-a task once its alerts are out, days before the backup window. The indexer
-schedules a task at its deadline when it first meets it; on start, the judge
-schedules every saved task with no outcome (`scheduleExistingOpenTasks`). Each
-look reads the phase and the pause-adjusted deadline from the escrow and
-comes back when the platform's next turn opens, plus 30 s. It waits, 5 min at
-a time, while the indexer has recorded fewer submissions than the escrow
-counts, unless the window has under an hour left. A failed or reverted send
-is retried 5 min later; the escrow refuses a second settlement, so a retry
-can never pay twice.
+**Scheduling.** Its own Redis set per network, `a2a:open:judge-due:<scope>`,
+so a backend on another network sharing this Redis neither sees nor drops
+these tasks. The alert sweep drops a task once its alerts are out, days
+before the backup window. The indexer schedules a task at its deadline when
+it first meets it; once per network, the judge schedules every saved task
+with no outcome (`scheduleExistingOpenTasks`, flagged by
+`a2a:open:judge-backfilled:<scope>`). Each look reads the phase and the
+pause-adjusted deadline from the escrow and comes back when the platform's
+next turn opens, plus 30 s. It waits, 5 min at a time, while the indexer has
+recorded fewer submissions than the escrow counts, unless the window has under
+an hour left; with records incomplete it may still pay real work, never
+refund. A failed or reverted send is retried 5 min later; the escrow refuses
+a second settlement, so a retry can never pay twice.
+
+Judging runs in the API process, 25 submissions between yields to the event
+loop.

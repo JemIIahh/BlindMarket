@@ -3,10 +3,12 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 /**
  * The platform's judging turns on open-submission tasks
  * (openSubmissionJudge.ts): as the task verifier when the poster named it,
- * and as backup judge on every open task. The task's own checks decide which
- * submissions are valid; the best score wins, the earliest on a tie; with
- * none valid the backup judge refunds the poster. The real store and
- * autoVerify run on an in-memory Redis; the escrow and its signer are stubs.
+ * and as backup judge on every open task. Real work decides between paying
+ * and refunding, so a poster's checks cannot refund every submission; among
+ * real work the task's checks, the score, the substance and then the order
+ * rank it. A refund needs every submission seen, with its result. The real
+ * store, autoVerify and deliverableFloor run on an in-memory Redis; the
+ * escrow and its signer are stubs.
  *
  * Run: npx vitest run src/services/openSubmissionJudge.test.ts
  */
@@ -85,6 +87,7 @@ const cfg = vi.hoisted(() => ({ openSubmissionEnabled: true }));
 vi.mock('../config.js', () => ({ config: cfg }));
 vi.mock('./deploymentIdentity.js', () => ({ backgroundWritesAllowed: () => true }));
 vi.mock('./chainScope.js', () => ({ chainScope: (chain: string) => chain }));
+vi.mock('./settlementChains.js', () => ({ SETTLEMENT_CHAIN_KEYS: ['arc'] }));
 vi.mock('./openSubmissionSweep.js', () => ({
   PHASE: { Submissions: 0, CreatorPick: 1, VerifierPick: 2, BackupPick: 3, AdminResolve: 4, Closed: 5 },
 }));
@@ -95,6 +98,8 @@ const chain = vi.hoisted(() => ({
     effectiveDeadline: vi.fn(),
     taskVerifier: vi.fn(),
     submissionCount: vi.fn(),
+    getTask: vi.fn(),
+    verifier: vi.fn(),
   },
   write: {
     selectWinnerByVerifier: vi.fn(),
@@ -113,7 +118,7 @@ vi.mock('./openSubmissionEvents.js', () => ({
   listingOf: async () => (listing.listed ? { verificationCriteria: listing.criteria } : null),
 }));
 
-const { judgeOpenSubmissions, judgeSubmissions, pickWinner, scheduleExistingOpenTasks, RECHECK_SEC, SLACK_SEC } = await import('./openSubmissionJudge.js');
+const { judgeOpenSubmissions, pickWinner, scheduleExistingOpenTasks, RECHECK_SEC, SLACK_SEC, MISSING_RECHECK_SEC } = await import('./openSubmissionJudge.js');
 const store = await import('./openSubmissionStore.js');
 
 const GOOD = 'El Clásico ended 2-1. Vinícius Júnior opened the scoring in the 23rd minute after a quick counter-attack down the left. '
@@ -121,8 +126,9 @@ const GOOD = 'El Clásico ended 2-1. Vinícius Júnior opened the scoring in the
   + 'Standout player: Bellingham, who also made three key tackles in midfield and covered more ground than anyone on the pitch.';
 const SHORT = 'Real won.';
 const REFUSAL = 'I am unable to complete this task because I cannot access live match data.';
+const JUNK = 'hello world this is fine';
 
-const judgeDue = () => mem.zsets.get('a2a:open:judge-due') ?? new Map<string, number>();
+const judgeDue = (scope = 'arc') => mem.zsets.get(`a2a:open:judge-due:${scope}`) ?? new Map<string, number>();
 const sent = () => [
   ...chain.write.selectWinnerByVerifier.mock.calls.map((c) => ['verifier', ...c]),
   ...chain.write.selectWinnerByBackup.mock.calls.map((c) => ['backup', ...c]),
@@ -154,44 +160,42 @@ beforeEach(() => {
   chain.read.openPhase.mockResolvedValue(2n);
   chain.read.effectiveDeadline.mockResolvedValue(BigInt(DEADLINE));
   chain.read.taskVerifier.mockResolvedValue(PLATFORM);
+  chain.read.getTask.mockResolvedValue({ taskHash: HASH });
+  chain.read.verifier.mockResolvedValue(PLATFORM);
   for (const fn of Object.values(chain.write)) fn.mockImplementation(async () => tx());
 });
 
 describe('pickWinner', () => {
-  const e = (submitter: string, ordinal: number, passed: boolean, score: number) => ({ submitter, ordinal, passed, score });
+  const e = (submitter: string, ordinal: number, o: { real?: boolean; passed?: boolean; score?: number; substance?: number } = {}) =>
+    ({ submitter, ordinal, real: o.real ?? true, passed: o.passed ?? true, score: o.score ?? 100, substance: o.substance ?? 50 });
 
-  it('takes the highest score among the valid submissions', () => {
-    expect(pickWinner([e(A, 1, true, 70), e(B, 2, false, 99), e(C, 3, true, 85)])?.submitter).toBe(C);
+  it("prefers passing the task's checks, then the score", () => {
+    expect(pickWinner([e(A, 1, { passed: false, score: 99 }), e(B, 2, { score: 70 }), e(C, 3, { score: 85 })])?.submitter).toBe(C);
   });
 
-  it('gives a tie to the earliest submission', () => {
-    expect(pickWinner([e(B, 2, true, 80), e(A, 1, true, 80)])?.submitter).toBe(A);
+  it('breaks a tie on substance, then on order', () => {
+    expect(pickWinner([e(A, 1, { substance: 5 }), e(B, 2, { substance: 120 })])?.submitter).toBe(B);
+    expect(pickWinner([e(B, 2), e(A, 1)])?.submitter).toBe(A);
   });
 
-  it('is null when nothing passed', () => {
-    expect(pickWinner([e(A, 1, false, 90)])).toBeNull();
-  });
-});
-
-describe('judgeSubmissions', () => {
-  it('fails a submission whose result was never kept', () => {
-    const [entry] = judgeSubmissions([{ submitter: A, ordinal: 1, result: null }], {});
-    expect(entry).toMatchObject({ passed: false, score: 0, reason: 'No result was kept for this submission' });
+  it('pays real work that failed the checks over nothing, and nothing that is not real work', () => {
+    expect(pickWinner([e(A, 1, { passed: false, score: 20 })])?.submitter).toBe(A);
+    expect(pickWinner([e(A, 1, { real: false, passed: false })])).toBeNull();
   });
 });
 
 describe('as the task verifier the poster named', () => {
-  it('pays the valid submission in its window, with a held scorecard of the same hash', async () => {
+  it('pays the real submission in its window, with a held scorecard of the same hash', async () => {
     await posted([[A, REFUSAL], [B, GOOD], [C, SHORT]]);
     expect(await judgeOpenSubmissions(NOW)).toBe(1);
     expect(sent()).toEqual([['verifier', 7n, B, expect.stringMatching(/^0x[0-9a-f]{64}$/)]]);
     const held = JSON.parse(mem.kv.get(`a2a:open:scorecard-pending:${REF}:task_verifier`)!);
     expect(held.scorecardHash).toBe(chain.write.selectWinnerByVerifier.mock.calls[0][2]);
-    expect(held.scorecard).toMatchObject({ judge: 'platform', role: 'task_verifier', decision: { winner: B }, submissions: 3, judged: 3, valid: 1 });
+    expect(held.scorecard).toMatchObject({ judge: 'platform', role: 'task_verifier', decision: { winner: B }, submissions: 3, judged: 3, real: 1 });
     expect(judgeDue().has(REF)).toBe(false);
   });
 
-  it("lets its turn pass when nothing is valid, and comes back for the backup judge's", async () => {
+  it("lets its turn pass with no real work, and comes back for the backup judge's", async () => {
     await posted([[A, REFUSAL], [B, null]]);
     expect(await judgeOpenSubmissions(NOW)).toBe(0);
     expect(sent()).toEqual([]);
@@ -208,39 +212,98 @@ describe('as the task verifier the poster named', () => {
 });
 
 describe('as backup judge', () => {
+  beforeEach(() => {
+    chain.read.taskVerifier.mockResolvedValue(OTHER_JUDGE);
+    chain.read.openPhase.mockResolvedValue(3n);
+  });
+
   it("does nothing in another judge's window, and comes back for its own", async () => {
     await posted([[A, GOOD]]);
-    chain.read.taskVerifier.mockResolvedValue(OTHER_JUDGE);
+    chain.read.openPhase.mockResolvedValue(2n);
     expect(await judgeOpenSubmissions(NOW)).toBe(0);
     expect(sent()).toEqual([]);
     expect(judgeDue().get(REF)).toBe(BACKUP_START + SLACK_SEC);
   });
 
-  it('pays the valid submission when the task verifier did not pick', async () => {
+  it('pays the real submission when the task verifier did not pick', async () => {
     await posted([[A, SHORT], [B, GOOD]]);
-    chain.read.taskVerifier.mockResolvedValue(OTHER_JUDGE);
-    chain.read.openPhase.mockResolvedValue(3n);
     expect(await judgeOpenSubmissions(NOW)).toBe(1);
     expect(sent()).toEqual([['backup', 7n, B, expect.any(String)]]);
     expect(mem.kv.has(`a2a:open:scorecard-pending:${REF}:backup`)).toBe(true);
   });
 
-  it('refunds the poster when no submission passes', async () => {
+  it('refunds the poster when every submission was seen and none is real work', async () => {
     await posted([[A, REFUSAL], [B, SHORT]]);
-    chain.read.openPhase.mockResolvedValue(3n);
     expect(await judgeOpenSubmissions(NOW)).toBe(1);
     expect(sent()).toEqual([['void', 7n, expect.any(String)]]);
     const held = JSON.parse(mem.kv.get(`a2a:open:scorecard-pending:${REF}:backup`)!);
-    expect(held.scorecard.decision).toEqual({ void: true, reason: 'No submission passed the checks' });
+    expect(held.scorecard.decision).toEqual({ void: true, reason: 'No submission was real work' });
   });
 
-  it("applies the task's own checks", async () => {
+  it("applies the task's own checks to rank real work", async () => {
     listing.criteria = { contains_keywords: ['Lewandowski'] };
-    const noKeyword = GOOD.replace('Lewandowski', 'Raphinha');
-    await posted([[A, noKeyword], [B, GOOD]]);
-    chain.read.openPhase.mockResolvedValue(3n);
+    await posted([[A, GOOD.replace('Lewandowski', 'Raphinha')], [B, GOOD]]);
     await judgeOpenSubmissions(NOW);
     expect(sent()).toEqual([['backup', 7n, B, expect.any(String)]]);
+  });
+
+  it("cannot be made to refund real work by a check nobody passes (the poster's hidden answer)", async () => {
+    listing.criteria = { expected_answer: 'zx-unguessable-9137' };
+    await posted([[A, GOOD], [B, REFUSAL]]);
+    await judgeOpenSubmissions(NOW);
+    expect(sent()).toEqual([['backup', 7n, A, expect.any(String)]]);
+  });
+
+  it('pays the right short answer on a task that asks for one', async () => {
+    listing.criteria = { expected_answer: '4' };
+    await posted([[A, GOOD], [B, '4']]);
+    await judgeOpenSubmissions(NOW);
+    expect(sent()).toEqual([['backup', 7n, B, expect.any(String)]]);
+  });
+
+  it('does not let a fast one-liner beat real work on a tie', async () => {
+    await posted([[A, JUNK], [B, GOOD]]);
+    await judgeOpenSubmissions(NOW);
+    expect(sent()).toEqual([['backup', 7n, B, expect.any(String)]]);
+  });
+
+  it('judges real work behind a flood of submissions with no result', async () => {
+    const flood: Array<[string, string | null]> = Array.from({ length: 600 }, (_, i) => ['0x' + (i + 16).toString(16).padStart(40, '0'), null]);
+    await posted([...flood, [A, GOOD]]);
+    await judgeOpenSubmissions(NOW);
+    expect(sent()).toEqual([['backup', 7n, A, expect.any(String)]]);
+  });
+
+  it('does not refund while a submission has no result, and looks again', async () => {
+    await posted([[A, REFUSAL], [B, null]]);
+    expect(await judgeOpenSubmissions(NOW)).toBe(0);
+    expect(sent()).toEqual([]);
+    expect(judgeDue().get(REF)).toBe(NOW + MISSING_RECHECK_SEC);
+  });
+
+  it('leaves a task with missing results to the admin at the end of its window', async () => {
+    await posted([[A, REFUSAL], [B, null]]);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    await judgeOpenSubmissions(BACKUP_START + 48 * 3600 - 600);
+    expect(sent()).toEqual([]);
+    expect(judgeDue().has(REF)).toBe(false);
+  });
+
+  it('does not refund when the indexer has not recorded every submission, even late in the window', async () => {
+    await posted([[A, REFUSAL]]);
+    chain.read.submissionCount.mockResolvedValue(2n);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    await judgeOpenSubmissions(BACKUP_START + 48 * 3600 - 600);
+    expect(sent()).toEqual([]);
+  });
+
+  it("does not act when this server's signer is not the escrow's verifier", async () => {
+    await posted([[A, GOOD]]);
+    chain.read.verifier.mockResolvedValue(OTHER_JUDGE);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    await judgeOpenSubmissions(NOW);
+    expect(sent()).toEqual([]);
+    expect(judgeDue().get(REF)).toBe(NOW + MISSING_RECHECK_SEC);
   });
 });
 
@@ -253,7 +316,7 @@ describe('when not to act', () => {
     expect(judgeDue().get(REF)).toBe(NOW + RECHECK_SEC);
   });
 
-  it('judges what it has once the window is nearly over', async () => {
+  it('pays what it has recorded once the window is nearly over', async () => {
     await posted([[A, GOOD]]);
     chain.read.submissionCount.mockResolvedValue(2n);
     await judgeOpenSubmissions(BACKUP_START - 600);
@@ -268,14 +331,6 @@ describe('when not to act', () => {
     expect(judgeDue().has(REF)).toBe(false);
   });
 
-  it('stops once the task is closed or past the backup window', async () => {
-    await posted([[A, GOOD]]);
-    chain.read.openPhase.mockResolvedValue(4n);
-    await judgeOpenSubmissions(NOW);
-    expect(sent()).toEqual([]);
-    expect(judgeDue().has(REF)).toBe(false);
-  });
-
   it('leaves a task this server never listed to its poster and the admin', async () => {
     await posted([[A, GOOD]]);
     listing.listed = false;
@@ -285,13 +340,21 @@ describe('when not to act', () => {
     expect(judgeDue().has(REF)).toBe(false);
   });
 
-  it('judges every submission when there are more than one batch', async () => {
-    const many: Array<[string, string | null]> = Array.from({ length: 60 }, (_, i) => ['0x' + (i + 16).toString(16).padStart(40, '0'), i === 47 ? GOOD : SHORT]);
-    await posted(many);
+  it("does not judge a record whose id now names another task on the escrow", async () => {
+    await posted([[A, GOOD]]);
+    chain.read.getTask.mockResolvedValue({ taskHash: '0x' + 'cd'.repeat(32) });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
     await judgeOpenSubmissions(NOW);
-    expect(sent()).toEqual([['verifier', 7n, many[47][0], expect.any(String)]]);
-    const held = JSON.parse(mem.kv.get(`a2a:open:scorecard-pending:${REF}:task_verifier`)!);
-    expect(held.scorecard).toMatchObject({ judged: 60, valid: 1 });
+    expect(sent()).toEqual([]);
+    expect(judgeDue().has(REF)).toBe(false);
+  });
+
+  it('stops once the task is past the backup window', async () => {
+    await posted([[A, GOOD]]);
+    chain.read.openPhase.mockResolvedValue(4n);
+    await judgeOpenSubmissions(NOW);
+    expect(sent()).toEqual([]);
+    expect(judgeDue().has(REF)).toBe(false);
   });
 
   it('looks again later when its transaction reverts', async () => {
@@ -300,6 +363,13 @@ describe('when not to act', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     expect(await judgeOpenSubmissions(NOW)).toBe(0);
     expect(judgeDue().get(REF)).toBe(NOW + RECHECK_SEC);
+  });
+
+  it("never reads another network's schedule", async () => {
+    await posted([[A, GOOD]]);
+    await store.scheduleJudge('arc@5042002:9', NOW - 100);
+    await judgeOpenSubmissions(NOW, ['arc']);
+    expect(judgeDue('arc@5042002').get('arc@5042002:9')).toBe(NOW - 100);
   });
 
   it('does nothing with open submission off', async () => {
@@ -311,15 +381,18 @@ describe('when not to act', () => {
 });
 
 describe('scheduleExistingOpenTasks', () => {
-  it('schedules saved tasks with no outcome, and leaves settled ones and existing schedules alone', async () => {
+  it("schedules a network's saved tasks with no outcome once, leaving settled ones and other networks alone", async () => {
     await store.saveRecord({ chain: 'arc', taskId: '7', taskHash: HASH, poster: POSTER, deadline: DEADLINE, mode: 'agent', creatorWindow: 0 });
     await store.saveRecord({ chain: 'arc', taskId: '8', taskHash: HASH, poster: POSTER, deadline: DEADLINE + 5, mode: 'agent', creatorWindow: 0 });
     await store.saveRecord({ chain: 'arc', taskId: '9', taskHash: HASH, poster: POSTER, deadline: DEADLINE + 9, mode: 'agent', creatorWindow: 0 });
     await store.saveOutcome('arc:8', { kind: 'void', judge: 'creator' });
     await store.scheduleJudge('arc:9', NOW);
-    expect(await scheduleExistingOpenTasks()).toBe(2);
+    expect(await scheduleExistingOpenTasks(['arc'])).toBe(2);
     expect(judgeDue().get('arc:7')).toBe(DEADLINE);
     expect(judgeDue().has('arc:8')).toBe(false);
     expect(judgeDue().get('arc:9')).toBe(NOW);
+    await store.unscheduleJudge('arc:7');
+    expect(await scheduleExistingOpenTasks(['arc'])).toBe(0);
+    expect(judgeDue().has('arc:7')).toBe(false);
   });
 });

@@ -361,6 +361,65 @@ const hardFail = (reason: string): AutoVerifyResult =>
  * contains_keywords, forbidden_phrases, regex_pattern, expected_schema, and a
  * short expected_answer.
  */
+/**
+ * The content floor, the distinct-word check and the refusal gate, in that
+ * order: why the deliverable is not real work, or null.
+ */
+function contentFailure(visible: string, language: FailureLanguage, disclosed: boolean, minContent: number, expectsShortAnswer: boolean): string | null {
+  if (visible.length < minContent) {
+    return disclosed
+      ? `Output too short: ${visible.length} characters outside the "Not done / assumptions" section, minimum ${minContent}`
+      : `Output too short: ${visible.length} characters, minimum ${minContent}`;
+  }
+  if (!expectsShortAnswer) {
+    const distinct = new Set(words(visible.slice(0, SCAN_WINDOW))).size;
+    if (distinct < MIN_DISTINCT_TOKENS) {
+      return `Output has no real content: ${distinct} distinct words, minimum ${MIN_DISTINCT_TOKENS}`;
+    }
+  }
+  // A refusal, or nothing but failure vocabulary — see REFUSAL_PATTERNS.
+  const { refusal, neutral, substantiveWords, refusalWords, totalWords, distinctWords } = language;
+  if (refusal && (substantiveWords < MIN_WORDS_BESIDE_REFUSAL || refusalWords > MAX_REFUSAL_SHARE * totalWords)) {
+    return 'Output is a failure excuse, not a deliverable';
+  }
+  if (neutral && substantiveWords < MIN_SUBSTANTIVE_WORDS && distinctWords < MIN_DISTINCT_WORDS) {
+    return 'Output is a failure excuse, not a deliverable';
+  }
+  return null;
+}
+
+/**
+ * Whether a result is real work at all, whatever the poster's checks say:
+ * not empty, not a worker's error text, not a refusal, and past the content
+ * floor, which a task that pins down a short answer (expected_answer, a usable
+ * regex_pattern, required keys or fields) lifts as autoVerify does. The
+ * poster's answer checks themselves are not applied. Used by the open-task
+ * judge (openSubmissionJudge.ts) so a poster's checks cannot fail every
+ * submission. Returns why it is not real work, or null.
+ */
+export function deliverableFloor(resultData: Record<string, unknown>, criteria: VerificationCriteria): string | null {
+  const output = typeof resultData.output === 'string' ? resultData.output : JSON.stringify(resultData);
+  if (output.trim().length === 0) return 'Empty output';
+  const { deliverable, disclosed } = splitDisclosure(canonical(output));
+  const visible = flatten(deliverable);
+  const scanText = foldForScan(visible);
+  if (ERROR_MARKER.test(scanText.slice(0, ERROR_MARKER_WINDOW))) return 'Worker reported an LLM execution error instead of output';
+  let usableRegex = false;
+  if (criteria.regex_pattern && isSafeRegexSource(criteria.regex_pattern)) {
+    try {
+      new RegExp(criteria.regex_pattern);
+      usableRegex = true;
+    } catch { /* not compilable: does not lift the floor */ }
+  }
+  const expectsShortAnswer = Boolean(
+    criteria.expected_answer?.trim()
+    || usableRegex
+    || criteria.expected_schema?.required?.some(k => k.trim())
+    || criteria.required_fields?.some(f => f.trim()),
+  );
+  return contentFailure(visible, scanFailureLanguage(scanText), disclosed, expectsShortAnswer ? 1 : DEFAULT_MIN_CONTENT_CHARS, expectsShortAnswer);
+}
+
 export function autoVerify(
   resultData: Record<string, unknown>,
   criteria: VerificationCriteria,
@@ -431,27 +490,10 @@ export function autoVerify(
     || criteria.expected_schema?.required?.some(k => k.trim())
     || criteria.required_fields?.some(f => f.trim()),
   );
-  const minContent = Math.max(criteria.min_length ?? 0, expectsShortAnswer ? 0 : DEFAULT_MIN_CONTENT_CHARS);
-  if (visible.length < minContent) {
-    return hardFail(disclosed
-      ? `Output too short: ${visible.length} characters outside the "Not done / assumptions" section, minimum ${minContent}`
-      : `Output too short: ${visible.length} characters, minimum ${minContent}`);
-  }
-  if (!expectsShortAnswer) {
-    const distinct = new Set(words(visible.slice(0, SCAN_WINDOW))).size;
-    if (distinct < MIN_DISTINCT_TOKENS) {
-      return hardFail(`Output has no real content: ${distinct} distinct words, minimum ${MIN_DISTINCT_TOKENS}`);
-    }
-  }
-
-  // A refusal, or nothing but failure vocabulary — see REFUSAL_PATTERNS.
-  const { refusal, neutral, substantiveWords, refusalWords, totalWords, distinctWords } = scanFailureLanguage(scanText);
-  if (refusal && (substantiveWords < MIN_WORDS_BESIDE_REFUSAL || refusalWords > MAX_REFUSAL_SHARE * totalWords)) {
-    return hardFail('Output is a failure excuse, not a deliverable');
-  }
-  if (neutral && substantiveWords < MIN_SUBSTANTIVE_WORDS && distinctWords < MIN_DISTINCT_WORDS) {
-    return hardFail('Output is a failure excuse, not a deliverable');
-  }
+  const language = scanFailureLanguage(scanText);
+  const { refusal, neutral } = language;
+  const contentFail = contentFailure(visible, language, disclosed, Math.max(criteria.min_length ?? 0, expectsShortAnswer ? 0 : DEFAULT_MIN_CONTENT_CHARS), expectsShortAnswer);
+  if (contentFail) return hardFail(contentFail);
 
   const rubrics: Array<{ fn: (output: string) => number; weight: number; name: string }> = [];
   // Human-readable reasons for rubrics whose bare percentage explains nothing.
