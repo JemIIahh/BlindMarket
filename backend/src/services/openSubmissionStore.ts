@@ -113,8 +113,12 @@ export interface KeptScorecard {
   scorecard: Record<string, unknown>;
 }
 
-/** The judges that pick through POST /select: the escrow's Creator and TaskVerifier. */
-export type ScorecardRole = 'creator' | 'task_verifier';
+/**
+ * The judges whose scorecard is held until their pick lands: the escrow's
+ * Creator and TaskVerifier (POST /select), and the platform's backup judge
+ * (openSubmissionJudge.ts).
+ */
+export type ScorecardRole = 'creator' | 'task_verifier' | 'backup';
 
 /**
  * A submitter's result as they sent it to submit-open. The escrow holds its
@@ -160,6 +164,7 @@ const KEY = {
   scorecard: (ref: TaskRef) => `a2a:open:scorecard:${ref}`,
   decline: (ref: TaskRef) => `a2a:open:decline:${ref}`,
   due: 'a2a:open:due',
+  judgeDue: 'a2a:open:judge-due',
 };
 
 function parse<T>(raw: string | null): T | null {
@@ -232,6 +237,43 @@ export async function unscheduleSweep(ref: TaskRef): Promise<void> {
 /** Tasks the sweep should look at by `nowSec`, soonest first. */
 export async function dueForSweep(nowSec: number, limit: number): Promise<TaskRef[]> {
   return redis.zrangebyscore(KEY.due, '-inf', nowSec, 'LIMIT', 0, limit);
+}
+
+/**
+ * When the platform judge (openSubmissionJudge.ts) should next look at the
+ * task (unix seconds). Its own set: the alert sweep drops a task once its
+ * alerts are sent, days before the judge's turn.
+ */
+export async function scheduleJudge(ref: TaskRef, atSec: number): Promise<void> {
+  await redis.zadd(KEY.judgeDue, atSec, ref);
+}
+
+/** Schedule the judge only if the task is not scheduled yet. */
+export async function scheduleJudgeIfAbsent(ref: TaskRef, atSec: number): Promise<void> {
+  await redis.zadd(KEY.judgeDue, 'NX', atSec, ref);
+}
+
+export async function unscheduleJudge(ref: TaskRef): Promise<void> {
+  await redis.zrem(KEY.judgeDue, ref);
+}
+
+/** Tasks the judge should look at by `nowSec`, soonest first. */
+export async function dueForJudge(nowSec: number, limit: number): Promise<TaskRef[]> {
+  return redis.zrangebyscore(KEY.judgeDue, '-inf', nowSec, 'LIMIT', 0, limit);
+}
+
+/**
+ * Every saved task record's ref, a page at a time (SCAN). For the judge's
+ * one-time pass over tasks created before it ran.
+ */
+export async function forEachRecordRef(visit: (refs: TaskRef[]) => Promise<void>): Promise<void> {
+  const prefix = KEY.record('');
+  let cursor = '0';
+  do {
+    const [next, keys] = await redis.scan(cursor, 'MATCH', `${prefix}*`, 'COUNT', 500);
+    cursor = next;
+    if (keys.length > 0) await visit(keys.map((k) => k.slice(prefix.length)));
+  } while (cursor !== '0');
 }
 
 // ── Submissions ─────────────────────────────────────────────────────────────
