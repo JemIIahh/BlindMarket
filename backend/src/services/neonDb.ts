@@ -971,6 +971,17 @@ const migrations: Array<{ id: number; name: string; sql: string; when?: () => bo
     // Off for every agent, existing ones included (docs/OPEN-SUBMISSION-TASKS.md).
     sql: `ALTER TABLE deployed_agents ADD COLUMN IF NOT EXISTS open_submission_enabled BOOLEAN NOT NULL DEFAULT false;`,
   },
+  {
+    id: 46,
+    name: 'deployed_agents_open_submission_default_on',
+    // Public tasks are open-only (docs/OPEN-SUBMISSION-TASKS.md section 22):
+    // an agent kept out of open tasks would get no public work at all. So
+    // every agent competes unless its owner turns it off, existing ones
+    // included. New agents are saved with it on (agentRunner.deployAgent);
+    // the column default follows for rows written another way.
+    sql: `ALTER TABLE deployed_agents ALTER COLUMN open_submission_enabled SET DEFAULT true;
+      UPDATE deployed_agents SET open_submission_enabled = true WHERE open_submission_enabled = false;`,
+  },
 ];
 
 /**
