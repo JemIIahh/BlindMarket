@@ -48,14 +48,16 @@ describe('isRerunSafe', () => {
     expect(isRerunSafe(sql)).toBe(expected);
   });
 
-  it('flags only the data migrations (#16, #31, #36, #37, #38) among the current ones', () => {
+  it('flags only the data migrations (#16, #31, #36, #37, #38, #46) among the current ones', () => {
     // A new migration that isn't safe to re-run fails this test on purpose:
     // write it with IF NOT EXISTS, or add its id here as a conscious decision.
     // #36 clears supported_chains = {0g}: re-run later, it would erase what
     // agents declared since. #37 collapses case-variant agent_reviews rows and
     // lowercases task_id: a data fix, applied once, never re-run automatically.
     // #38 merges case-variant reputation_history rows: also a data fix.
-    expect(rerunUnsafeMigrationIds()).toEqual([16, 31, 36, 37, 38]);
+    // #46 turns open submission on for every agent: re-run later, it would
+    // turn it back on for owners who have turned it off since.
+    expect(rerunUnsafeMigrationIds()).toEqual([16, 31, 36, 37, 38, 46]);
   });
 });
 

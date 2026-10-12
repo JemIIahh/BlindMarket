@@ -501,6 +501,9 @@ export async function deployAgent(params: {
     encryptedToolSecrets: Object.keys(encryptedToolSecrets).length > 0 ? encryptedToolSecrets : undefined,
     skills: params.skills?.length ? params.skills : undefined,
     privyUserId: params.privyUserId,
+    // Public tasks are open-only, so a new agent competes in them unless its
+    // owner turns it off (POST /agents/:id/open-submission).
+    openSubmissionEnabled: true,
   };
 
   // Deploy ERC-4337 smart account on Base (non-fatal if AA infra is unconfigured).

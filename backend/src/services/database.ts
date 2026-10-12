@@ -340,6 +340,13 @@ const migrations: Migration[] = [
     name: 'deployed_agents_open_submission_enabled',
     sql: `ALTER TABLE deployed_agents ADD COLUMN open_submission_enabled INTEGER NOT NULL DEFAULT 0;`,
   },
+  {
+    // Mirror of Postgres migration 46. SQLite cannot change a column's
+    // default; saveAgent always writes the column.
+    id: 24,
+    name: 'deployed_agents_open_submission_default_on',
+    sql: `UPDATE deployed_agents SET open_submission_enabled = 1 WHERE open_submission_enabled = 0;`,
+  },
 ];
 
 /** One migration's SQL, for tests of what a migration does to existing rows. */
