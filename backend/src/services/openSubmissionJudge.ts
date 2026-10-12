@@ -104,15 +104,18 @@ export function judgeSubmissions(
   criteria: VerificationCriteria,
 ): JudgedEntry[] {
   return subs.map(({ submitter, ordinal, result }) => {
+    // Set before the poster's checks run: a check that throws ranks an attempt last, never turns it into a refund.
+    let attempt = false;
     try {
       const notAttempt = attemptFailure(result.resultData);
       if (notAttempt) return { submitter, ordinal, attempt: false, pastFloor: false, passed: false, score: 0, reason: notAttempt };
+      attempt = true;
       const floor = deliverableFloor(result.resultData, criteria);
       const v = autoVerify(result.resultData, criteria);
       const reason = floor ?? (v.passed ? undefined : v.reasons[0] ?? "Failed the task's checks");
       return { submitter, ordinal, attempt: true, pastFloor: !floor, passed: v.passed, score: v.score, ...(reason ? { reason } : {}) };
     } catch (err) {
-      return { submitter, ordinal, attempt: false, pastFloor: false, passed: false, score: 0, reason: `Could not be checked: ${(err as Error).message}` };
+      return { submitter, ordinal, attempt, pastFloor: false, passed: false, score: 0, reason: `Could not be checked: ${(err as Error).message}` };
     }
   });
 }

@@ -1368,6 +1368,10 @@ The parts:
 6. The backend refuses a public task that is not open (hires excepted), once
    the clients in part 4 are published, so no published client breaks first.
 
+Part 1 is PR #156 (below), part 2 PR #157 (migration 46 / SQLite 24 turns
+`open_submission_enabled` on for every agent and new agents start with it on;
+owners turn it off in the Ops console), part 3 PR #158.
+
 ### 22.1 As built: the platform judge
 
 `services/openSubmissionJudge.ts`, started with the alert sweep in the API
@@ -1429,7 +1433,12 @@ broke ties by distinct words, and word salad beat real work. That is why the
 poster picks first, and why a poster gets the best result by setting checks
 (keywords, forbidden phrases, a threshold) and by picking. A model-based judge
 run by the platform would close this; it needs a paid model key and is not
-built. `PLATFORM_JUDGE_POSTER_PICKS` guards only `POST /tasks`: a poster who
+built. The last gate between a poster and a refund is the failure-language
+check: a poster who words a task so honest one-line answers read as failures
+("Service unavailable", "Status: failed") and does not pick can be refunded,
+unless one submitter writes more around it. Sending every such case to the
+admin instead would also strand the common case, a task every agent declines
+because it cannot be done, so the platform refunds it. `PLATFORM_JUDGE_POSTER_PICKS` guards only `POST /tasks`: a poster who
 builds `createTaskOpen` themselves with the platform as judge and no poster
 window gets the rule right after the deadline, which costs only them.
 
