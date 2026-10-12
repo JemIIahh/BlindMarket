@@ -14,19 +14,24 @@
  *     whose judges stayed silent is settled rather than left for the admin.
  *
  * The rule, the same in both turns:
- *   1. Only real work counts: a kept result past deliverableFloor (not empty,
- *      not a worker's error, not a refusal, past the content floor the task's
- *      format allows). The poster's checks cannot fail real work here: if
- *      they could, a poster could set an answer nobody matches, read every
- *      result and be refunded, which the escrow's void rule exists to stop.
- *   2. Of the real submissions, one that passes the task's own checks
- *      (autoVerify) beats one that does not; then the higher score; then the
- *      more substantive (distinct words, capped), so a one-line answer does
- *      not beat real work by being first; then the earliest.
- *   3. No real submission: as task verifier the platform lets its turn pass;
- *      as backup judge it refunds the poster (voidOpenTask), but only when
- *      every submission on-chain was recorded, has its result, and was judged.
+ *   1. Every attempt can be paid: a kept result that is not empty, not a
+ *      worker's error and not a refusal (attemptFailure), with no length
+ *      floor, since "Paris" is an answer. The poster's checks never decide
+ *      between paying and refunding: if they did, a poster could set a check
+ *      nobody passes, or ask for a short answer, read every result and be
+ *      refunded, which the escrow's void rule exists to stop.
+ *   2. Of the attempts, one that passes the task's own checks (autoVerify)
+ *      beats one that does not; then one past the content floor
+ *      (deliverableFloor) beats one that is not; then the higher score; then
+ *      the earliest. The task's checks include an expected_answer hidden from
+ *      submitters; its existence is public (has_expected_answer).
+ *   3. No attempt: as task verifier the platform lets its turn pass; as
+ *      backup judge it refunds the poster (voidOpenTask), but only when every
+ *      submission on-chain was recorded, has its result, and was judged.
  *      Otherwise the task is left for the admin.
+ *
+ * The rule cannot judge quality: among equally good submissions the earliest
+ * wins, however thin. The poster picks first for that reason.
  *
  * A judge agent's decline (POST /judge-decline) is not followed: a poster may
  * name their own agent as judge, and following its decline would let them
@@ -39,7 +44,7 @@
 import { ethers } from 'ethers';
 import { config } from '../config.js';
 import type { VerificationCriteria } from '../types.js';
-import { autoVerify, deliverableFloor } from './autoVerify.js';
+import { attemptFailure, autoVerify, deliverableFloor } from './autoVerify.js';
 import { chainScope } from './chainScope.js';
 import { backgroundWritesAllowed } from './deploymentIdentity.js';
 import { escrowFor } from './escrow.js';
@@ -69,14 +74,12 @@ export const LAG_GRACE_SEC = 3600;
 export const MAX_JUDGED = 2000;
 /** Submissions judged between two yields to the event loop. */
 const JUDGE_BATCH = 25;
-/** Distinct words counted toward substance; more add nothing. */
-export const SUBSTANCE_CAP = 500;
 /** Scorecard entries kept, best first: the scorecard is stored and served. */
 const MAX_SCORECARD_ENTRIES = 100;
 
 export const JUDGE_RULE =
-  "Of the submissions that are real work, the platform pays one that passes the task's checks before one that does not, " +
-  'then the higher score, then the more substantive, then the earliest. With no real work it refunds the poster.';
+  "Of the submissions that are an attempt, the platform pays one that passes the task's checks first, then one past the content floor, " +
+  'then the higher score, then the earliest. With no attempt it refunds the poster.';
 
 let timer: NodeJS.Timeout | null = null;
 let inFlight = false;
@@ -84,56 +87,45 @@ let inFlight = false;
 export interface JudgedEntry {
   submitter: string;
   ordinal: number;
-  /** Real work at all (deliverableFloor): what decides between paying and refunding. */
-  real: boolean;
+  /** An attempt at all (attemptFailure): what decides between paying and refunding. */
+  attempt: boolean;
+  /** Past the content floor (deliverableFloor). */
+  pastFloor: boolean;
   /** Passed the task's own checks (autoVerify). */
   passed: boolean;
   score: number;
-  /** Distinct words in the result, capped at SUBSTANCE_CAP. */
-  substance: number;
-  /** Why it is not real work, or why it failed the task's checks. */
+  /** Why it is not an attempt, or the first thing it fell short on. */
   reason?: string;
 }
 
-function substanceOf(resultData: Record<string, unknown>): number {
-  const output = typeof resultData.output === 'string' ? resultData.output : JSON.stringify(resultData);
-  return Math.min(SUBSTANCE_CAP, new Set(output.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []).size);
-}
-
-/** Judge each submission: is it real work, and does it pass the task's checks. */
+/** Judge each submission: is it an attempt, is it past the floor, does it pass the task's checks. */
 export function judgeSubmissions(
   subs: ReadonlyArray<{ submitter: string; ordinal: number; result: OpenResult }>,
   criteria: VerificationCriteria,
 ): JudgedEntry[] {
   return subs.map(({ submitter, ordinal, result }) => {
     try {
+      const notAttempt = attemptFailure(result.resultData);
+      if (notAttempt) return { submitter, ordinal, attempt: false, pastFloor: false, passed: false, score: 0, reason: notAttempt };
       const floor = deliverableFloor(result.resultData, criteria);
-      if (floor) return { submitter, ordinal, real: false, passed: false, score: 0, substance: 0, reason: floor };
       const v = autoVerify(result.resultData, criteria);
-      return {
-        submitter,
-        ordinal,
-        real: true,
-        passed: v.passed,
-        score: v.score,
-        substance: substanceOf(result.resultData),
-        ...(v.passed ? {} : { reason: v.reasons[0] ?? "Failed the task's checks" }),
-      };
+      const reason = floor ?? (v.passed ? undefined : v.reasons[0] ?? "Failed the task's checks");
+      return { submitter, ordinal, attempt: true, pastFloor: !floor, passed: v.passed, score: v.score, ...(reason ? { reason } : {}) };
     } catch (err) {
-      return { submitter, ordinal, real: false, passed: false, score: 0, substance: 0, reason: `Could not be checked: ${(err as Error).message}` };
+      return { submitter, ordinal, attempt: false, pastFloor: false, passed: false, score: 0, reason: `Could not be checked: ${(err as Error).message}` };
     }
   });
 }
 
-/** Best first: passed the checks, then score, then substance, then the earliest. */
+/** Best first: passed the checks, then past the floor, then score, then the earliest. */
 function better(a: JudgedEntry, b: JudgedEntry): number {
-  return Number(b.passed) - Number(a.passed) || b.score - a.score || b.substance - a.substance || a.ordinal - b.ordinal;
+  return Number(b.passed) - Number(a.passed) || Number(b.pastFloor) - Number(a.pastFloor) || b.score - a.score || a.ordinal - b.ordinal;
 }
 
-/** The submission to pay, or null when none is real work. */
+/** The submission to pay, or null when none is an attempt. */
 export function pickWinner(judged: readonly JudgedEntry[]): JudgedEntry | null {
   let best: JudgedEntry | null = null;
-  for (const e of judged) if (e.real && (!best || better(e, best) < 0)) best = e;
+  for (const e of judged) if (e.attempt && (!best || better(e, best) < 0)) best = e;
   return best;
 }
 
@@ -147,12 +139,13 @@ function scorecardOf(
     judge: 'platform',
     role,
     rule: JUDGE_RULE,
-    decision: winner ? { winner: winner.submitter, score: winner.score } : { void: true, reason: 'No submission was real work' },
+    decision: winner ? { winner: winner.submitter, score: winner.score } : { void: true, reason: 'No submission was an attempt' },
     ...counts,
     judged: judged.length,
-    real: judged.filter((e) => e.real).length,
+    attempts: judged.filter((e) => e.attempt).length,
+    pastFloor: judged.filter((e) => e.pastFloor).length,
     passed: judged.filter((e) => e.passed).length,
-    entries: [...judged].sort((a, b) => Number(b.real) - Number(a.real) || better(a, b)).slice(0, MAX_SCORECARD_ENTRIES),
+    entries: [...judged].sort((a, b) => Number(b.attempt) - Number(a.attempt) || better(a, b)).slice(0, MAX_SCORECARD_ENTRIES),
   };
 }
 
@@ -270,7 +263,7 @@ async function judgeOne(ref: TaskRef, nowSec: number): Promise<JudgeAction> {
       if (windowEnd - nowSec > MISSING_RECHECK_SEC) {
         await store.scheduleJudge(ref, nowSec + MISSING_RECHECK_SEC);
       } else {
-        console.error(`[openSubmissionJudge] task ${ref}: no real work in ${toJudge.length} judged, ${unseen} submission(s) not seen or not judged; left for the admin`);
+        console.error(`[openSubmissionJudge] task ${ref}: no attempt in ${toJudge.length} judged, ${unseen} submission(s) not seen or not judged; left for the admin`);
         await store.unscheduleJudge(ref);
       }
       return null;
@@ -296,7 +289,7 @@ async function judgeOne(ref: TaskRef, nowSec: number): Promise<JudgeAction> {
   await store.unscheduleJudge(ref);
   console.log(
     `[openSubmissionJudge] ${winner ? `picked ${winner.submitter} (score ${winner.score})` : 'voided'} on task ${ref} as ${role}, ` +
-      `${judged.filter((e) => e.real).length}/${judged.length} real, tx ${tx.hash}`,
+      `${judged.filter((e) => e.attempt).length}/${judged.length} attempts, tx ${tx.hash}`,
   );
   return winner ? 'picked' : 'voided';
 }
@@ -339,7 +332,7 @@ export async function judgeOpenSubmissions(nowSec = Math.floor(Date.now() / 1000
  */
 export async function scheduleExistingOpenTasks(scopes: readonly string[] = ownScopes()): Promise<number> {
   const pending = new Set<string>();
-  for (const scope of scopes) if (await store.markJudgeBackfilled(scope)) pending.add(scope);
+  for (const scope of scopes) if (!(await store.isJudgeBackfilled(scope))) pending.add(scope);
   if (pending.size === 0) return 0;
   let scheduled = 0;
   await store.forEachRecordRef(async (refs) => {
@@ -351,6 +344,8 @@ export async function scheduleExistingOpenTasks(scopes: readonly string[] = ownS
       scheduled++;
     }
   });
+  // Marked once the scan is through: a scan cut short runs again on the next start.
+  for (const scope of pending) await store.markJudgeBackfilled(scope);
   return scheduled;
 }
 

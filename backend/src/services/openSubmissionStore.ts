@@ -275,9 +275,14 @@ export async function dueForJudge(scope: string, nowSec: number, limit: number):
   return redis.zrangebyscore(KEY.judgeDue(scope), '-inf', nowSec, 'LIMIT', 0, limit);
 }
 
-/** Mark the network's existing tasks scheduled for the judge. True the first time. */
-export async function markJudgeBackfilled(scope: string): Promise<boolean> {
-  return (await redis.set(KEY.judgeBackfilled(scope), '1', 'NX')) !== null;
+/** Whether the network's existing tasks were scheduled for the judge. */
+export async function isJudgeBackfilled(scope: string): Promise<boolean> {
+  return (await redis.exists(KEY.judgeBackfilled(scope))) === 1;
+}
+
+/** Mark the network's existing tasks scheduled for the judge, once the pass is through. */
+export async function markJudgeBackfilled(scope: string): Promise<void> {
+  await redis.set(KEY.judgeBackfilled(scope), '1');
 }
 
 /**

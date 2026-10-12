@@ -3,12 +3,13 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 /**
  * The platform's judging turns on open-submission tasks
  * (openSubmissionJudge.ts): as the task verifier when the poster named it,
- * and as backup judge on every open task. Real work decides between paying
- * and refunding, so a poster's checks cannot refund every submission; among
- * real work the task's checks, the score, the substance and then the order
- * rank it. A refund needs every submission seen, with its result. The real
- * store, autoVerify and deliverableFloor run on an in-memory Redis; the
- * escrow and its signer are stubs.
+ * and as backup judge on every open task. Whether any submission is an
+ * attempt decides between paying and refunding, so neither a poster's checks
+ * nor a short-answer question can refund every submission; among attempts
+ * the task's checks, the content floor, the score and then the order rank
+ * them. A refund needs every submission seen, with its result. The real
+ * store, autoVerify, attemptFailure and deliverableFloor run on an in-memory
+ * Redis; the escrow and its signer are stubs.
  *
  * Run: npx vitest run src/services/openSubmissionJudge.test.ts
  */
@@ -126,7 +127,9 @@ const GOOD = 'El Clásico ended 2-1. Vinícius Júnior opened the scoring in the
   + 'Standout player: Bellingham, who also made three key tackles in midfield and covered more ground than anyone on the pitch.';
 const SHORT = 'Real won.';
 const REFUSAL = 'I am unable to complete this task because I cannot access live match data.';
-const JUNK = 'hello world this is fine';
+const THIN = 'ok done';
+const WORKER_ERROR = 'Error during LLM execution: the provider rate-limited this request.';
+const GOOD_TOO = GOOD.replace('Standout player: Bellingham', 'Standout player: Vinícius Júnior');
 
 const judgeDue = (scope = 'arc') => mem.zsets.get(`a2a:open:judge-due:${scope}`) ?? new Map<string, number>();
 const sent = () => [
@@ -166,21 +169,21 @@ beforeEach(() => {
 });
 
 describe('pickWinner', () => {
-  const e = (submitter: string, ordinal: number, o: { real?: boolean; passed?: boolean; score?: number; substance?: number } = {}) =>
-    ({ submitter, ordinal, real: o.real ?? true, passed: o.passed ?? true, score: o.score ?? 100, substance: o.substance ?? 50 });
+  const e = (submitter: string, ordinal: number, o: { attempt?: boolean; pastFloor?: boolean; passed?: boolean; score?: number } = {}) =>
+    ({ submitter, ordinal, attempt: o.attempt ?? true, pastFloor: o.pastFloor ?? true, passed: o.passed ?? true, score: o.score ?? 100 });
 
-  it("prefers passing the task's checks, then the score", () => {
+  it("prefers passing the task's checks, then the content floor, then the score", () => {
     expect(pickWinner([e(A, 1, { passed: false, score: 99 }), e(B, 2, { score: 70 }), e(C, 3, { score: 85 })])?.submitter).toBe(C);
+    expect(pickWinner([e(A, 1, { passed: false, pastFloor: false, score: 90 }), e(B, 2, { passed: false, score: 40 })])?.submitter).toBe(B);
   });
 
-  it('breaks a tie on substance, then on order', () => {
-    expect(pickWinner([e(A, 1, { substance: 5 }), e(B, 2, { substance: 120 })])?.submitter).toBe(B);
+  it('gives a tie to the earliest', () => {
     expect(pickWinner([e(B, 2), e(A, 1)])?.submitter).toBe(A);
   });
 
-  it('pays real work that failed the checks over nothing, and nothing that is not real work', () => {
-    expect(pickWinner([e(A, 1, { passed: false, score: 20 })])?.submitter).toBe(A);
-    expect(pickWinner([e(A, 1, { real: false, passed: false })])).toBeNull();
+  it('pays any attempt over nothing, and nothing that is not an attempt', () => {
+    expect(pickWinner([e(A, 1, { passed: false, pastFloor: false, score: 10 })])?.submitter).toBe(A);
+    expect(pickWinner([e(A, 1, { attempt: false, pastFloor: false, passed: false })])).toBeNull();
   });
 });
 
@@ -191,11 +194,11 @@ describe('as the task verifier the poster named', () => {
     expect(sent()).toEqual([['verifier', 7n, B, expect.stringMatching(/^0x[0-9a-f]{64}$/)]]);
     const held = JSON.parse(mem.kv.get(`a2a:open:scorecard-pending:${REF}:task_verifier`)!);
     expect(held.scorecardHash).toBe(chain.write.selectWinnerByVerifier.mock.calls[0][2]);
-    expect(held.scorecard).toMatchObject({ judge: 'platform', role: 'task_verifier', decision: { winner: B }, submissions: 3, judged: 3, real: 1 });
+    expect(held.scorecard).toMatchObject({ judge: 'platform', role: 'task_verifier', decision: { winner: B }, submissions: 3, judged: 3, attempts: 2, pastFloor: 1, passed: 1 });
     expect(judgeDue().has(REF)).toBe(false);
   });
 
-  it("lets its turn pass with no real work, and comes back for the backup judge's", async () => {
+  it("lets its turn pass with no attempt, and comes back for the backup judge's", async () => {
     await posted([[A, REFUSAL], [B, null]]);
     expect(await judgeOpenSubmissions(NOW)).toBe(0);
     expect(sent()).toEqual([]);
@@ -232,22 +235,22 @@ describe('as backup judge', () => {
     expect(mem.kv.has(`a2a:open:scorecard-pending:${REF}:backup`)).toBe(true);
   });
 
-  it('refunds the poster when every submission was seen and none is real work', async () => {
-    await posted([[A, REFUSAL], [B, SHORT]]);
+  it('refunds the poster when every submission was seen and none is an attempt', async () => {
+    await posted([[A, REFUSAL], [B, WORKER_ERROR], [C, '   ']]);
     expect(await judgeOpenSubmissions(NOW)).toBe(1);
     expect(sent()).toEqual([['void', 7n, expect.any(String)]]);
     const held = JSON.parse(mem.kv.get(`a2a:open:scorecard-pending:${REF}:backup`)!);
-    expect(held.scorecard.decision).toEqual({ void: true, reason: 'No submission was real work' });
+    expect(held.scorecard.decision).toEqual({ void: true, reason: 'No submission was an attempt' });
   });
 
-  it("applies the task's own checks to rank real work", async () => {
+  it("applies the task's own checks to rank attempts", async () => {
     listing.criteria = { contains_keywords: ['Lewandowski'] };
     await posted([[A, GOOD.replace('Lewandowski', 'Raphinha')], [B, GOOD]]);
     await judgeOpenSubmissions(NOW);
     expect(sent()).toEqual([['backup', 7n, B, expect.any(String)]]);
   });
 
-  it("cannot be made to refund real work by a check nobody passes (the poster's hidden answer)", async () => {
+  it("cannot be made to refund by a check nobody passes (the poster's hidden answer)", async () => {
     listing.criteria = { expected_answer: 'zx-unguessable-9137' };
     await posted([[A, GOOD], [B, REFUSAL]]);
     await judgeOpenSubmissions(NOW);
@@ -261,10 +264,22 @@ describe('as backup judge', () => {
     expect(sent()).toEqual([['backup', 7n, B, expect.any(String)]]);
   });
 
-  it('does not let a fast one-liner beat real work on a tie', async () => {
-    await posted([[A, JUNK], [B, GOOD]]);
+  it('pays a short answer rather than refund a question that asked for one without saying so', async () => {
+    await posted([[A, REFUSAL], [B, 'Paris']]);
     await judgeOpenSubmissions(NOW);
     expect(sent()).toEqual([['backup', 7n, B, expect.any(String)]]);
+  });
+
+  it('ranks work past the content floor above an earlier thin answer', async () => {
+    await posted([[A, THIN], [B, GOOD]]);
+    await judgeOpenSubmissions(NOW);
+    expect(sent()).toEqual([['backup', 7n, B, expect.any(String)]]);
+  });
+
+  it('pays the earliest of equally good submissions (the known limit: no judge of quality)', async () => {
+    await posted([[A, GOOD], [B, GOOD_TOO]]);
+    await judgeOpenSubmissions(NOW);
+    expect(sent()).toEqual([['backup', 7n, A, expect.any(String)]]);
   });
 
   it('judges real work behind a flood of submissions with no result', async () => {

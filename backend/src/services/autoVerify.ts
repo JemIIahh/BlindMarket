@@ -388,22 +388,43 @@ function contentFailure(visible: string, language: FailureLanguage, disclosed: b
   return null;
 }
 
-/**
- * Whether a result is real work at all, whatever the poster's checks say:
- * not empty, not a worker's error text, not a refusal, and past the content
- * floor, which a task that pins down a short answer (expected_answer, a usable
- * regex_pattern, required keys or fields) lifts as autoVerify does. The
- * poster's answer checks themselves are not applied. Used by the open-task
- * judge (openSubmissionJudge.ts) so a poster's checks cannot fail every
- * submission. Returns why it is not real work, or null.
- */
-export function deliverableFloor(resultData: Record<string, unknown>, criteria: VerificationCriteria): string | null {
+/** The output as autoVerify reads it, split for the gates; or why there is nothing to read. */
+function readDeliverable(resultData: Record<string, unknown>): { visible: string; scanText: string; disclosed: boolean } | string {
   const output = typeof resultData.output === 'string' ? resultData.output : JSON.stringify(resultData);
   if (output.trim().length === 0) return 'Empty output';
   const { deliverable, disclosed } = splitDisclosure(canonical(output));
   const visible = flatten(deliverable);
   const scanText = foldForScan(visible);
   if (ERROR_MARKER.test(scanText.slice(0, ERROR_MARKER_WINDOW))) return 'Worker reported an LLM execution error instead of output';
+  return { visible, scanText, disclosed };
+}
+
+/**
+ * Whether a result is an attempt at all: not empty, not a worker's error
+ * text, not a refusal. No length floor: "Paris" is an answer. The open-task
+ * judge (openSubmissionJudge.ts) refunds a poster only when no submission is
+ * one, so the poster's checks, or a question with a short answer, cannot
+ * fail every submission. Returns why it is not an attempt, or null.
+ */
+export function attemptFailure(resultData: Record<string, unknown>): string | null {
+  const read = readDeliverable(resultData);
+  if (typeof read === 'string') return read;
+  return contentFailure(read.visible, scanFailureLanguage(read.scanText), read.disclosed, 0, true);
+}
+
+/**
+ * Whether a result clears the content floor autoVerify applies before any
+ * of the poster's checks: past DEFAULT_MIN_CONTENT_CHARS and the distinct-word
+ * count, both lifted for a task that pins down a short answer
+ * (expected_answer, a usable regex_pattern, required keys or fields), and not
+ * a refusal. The poster's answer checks themselves are not applied. The
+ * open-task judge ranks work past it above work that is not. Returns why it
+ * falls short, or null.
+ */
+export function deliverableFloor(resultData: Record<string, unknown>, criteria: VerificationCriteria): string | null {
+  const read = readDeliverable(resultData);
+  if (typeof read === 'string') return read;
+  const { visible, scanText, disclosed } = read;
   let usableRegex = false;
   if (criteria.regex_pattern && isSafeRegexSource(criteria.regex_pattern)) {
     try {
@@ -417,7 +438,7 @@ export function deliverableFloor(resultData: Record<string, unknown>, criteria: 
     || criteria.expected_schema?.required?.some(k => k.trim())
     || criteria.required_fields?.some(f => f.trim()),
   );
-  return contentFailure(visible, scanFailureLanguage(scanText), disclosed, expectsShortAnswer ? 1 : DEFAULT_MIN_CONTENT_CHARS, expectsShortAnswer);
+  return contentFailure(visible, scanFailureLanguage(scanText), disclosed, expectsShortAnswer ? 0 : DEFAULT_MIN_CONTENT_CHARS, expectsShortAnswer);
 }
 
 export function autoVerify(
