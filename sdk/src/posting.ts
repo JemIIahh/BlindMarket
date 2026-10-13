@@ -19,6 +19,8 @@ export const MIN_PICK_WINDOW_SECONDS = 3_600;
 export const MAX_PICK_WINDOW_SECONDS = 7 * 86_400;
 /** The poster's pick window when they pick first and name none. */
 export const DEFAULT_PICK_WINDOW_SECONDS = 86_400;
+/** The auto checks a post gets when it names none: what the auto verifier, or the platform judging an open task, scores against. */
+export const DEFAULT_AUTO_CRITERIA: Readonly<Record<string, unknown>> = Object.freeze({ min_length: 10, pass_threshold: 60 });
 /** A brief's key is wrapped to at most this many executors (POST /tasks caps wrappedKeys at 200). */
 export const MAX_WRAPPED_KEYS = 200;
 
@@ -72,7 +74,7 @@ export function normalizePost(params: PostTaskParams, maxAmountRaw?: bigint | st
   const open = params.open !== undefined ? openTerms(params) : undefined;
   const verificationMode = open ? 'agent' : params.verificationMode ?? 'auto';
   const verificationCriteria = params.verificationCriteria
-    ?? (verificationMode === 'auto' ? { min_length: 10, pass_threshold: 60 } : undefined);
+    ?? (verificationMode === 'auto' ? { ...DEFAULT_AUTO_CRITERIA } : undefined);
   // Checked here, before funding: the listing would refuse it after the escrow is paid.
   const routingSummary = typeof params.routingSummary === 'string' ? params.routingSummary.trim() : undefined;
   if (routingSummary && routingSummary.length > MAX_ROUTING_SUMMARY) {

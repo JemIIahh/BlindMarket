@@ -33,9 +33,17 @@ const ABI = new ethers.Interface([
   'function selectWinner(uint256 taskId, address winner, bytes32 scorecardHash)',
   'function selectWinnerByVerifier(uint256 taskId, address winner, bytes32 scorecardHash)',
 ]);
-type CreateBody = { taskHash: string; token: string; amount: string; locationZone: string; duration: string; verifierAddress: string; open: { mode: 'agent' | 'creator'; creatorWindow: number } };
+type CreateBody = { taskHash: string; token: string; amount: string; locationZone: string; duration: string; verifierAddress: string; open?: { mode: 'agent' | 'creator'; creatorWindow: number } };
 const createOpenData = (b: CreateBody, over: { mode?: number; window?: number } = {}) =>
-  ABI.encodeFunctionData('createTaskOpen', [b.taskHash, b.token, b.amount, 'general', b.locationZone, b.duration, b.verifierAddress, over.mode ?? (b.open.mode === 'creator' ? 1 : 0), over.window ?? b.open.creatorWindow]);
+  ABI.encodeFunctionData('createTaskOpen', [b.taskHash, b.token, b.amount, 'general', b.locationZone, b.duration, b.verifierAddress, over.mode ?? (b.open!.mode === 'creator' ? 1 : 0), over.window ?? b.open!.creatorWindow]);
+/** What the backend builds for a body without `open`: a task one agent takes. */
+const createOneData = (b: CreateBody) => (b.verifierAddress
+  ? ABI.encodeFunctionData('createTaskWithVerifier', [b.taskHash, b.token, b.amount, 'general', b.locationZone, b.duration, b.verifierAddress])
+  : ABI.encodeFunctionData('createTask', [b.taskHash, b.token, b.amount, 'general', b.locationZone, b.duration]));
+/** An executor a private brief's key is wrapped to. */
+const EXECUTOR = ethers.Wallet.createRandom();
+/** The platform's verifier, as GET /a2a/open-submission names it. */
+const JUDGE = '0x00000000000000000000000000000000000000d9';
 
 const ok = (data: unknown) => ({ status: 200, json: async () => ({ success: true, data }) }) as unknown as Response;
 const fail = (status: number, code: string) => ({ status, json: async () => ({ success: false, error: { code, message: code } }) }) as unknown as Response;
@@ -48,6 +56,8 @@ const STATUS = {
 interface Backend {
   enabled?: boolean;
   posting?: boolean;
+  /** GET /a2a/open-submission's defaultJudge; JUDGE when unset, omitted when null. */
+  defaultJudge?: string | null;
   /** The createTask* the backend builds for POST /tasks. */
   create?: (body: CreateBody) => Record<string, unknown>;
   submit?: (body: { resultData: Record<string, unknown>; rootHash: string | null }) => Response;
@@ -66,12 +76,14 @@ function stub(b: Backend = {}) {
     if (u.endsWith('/health/settlement')) return ok(SETTLEMENT);
     if (u.endsWith('/api/v1/api-keys/whoami')) return ok({ address: OWNER, addresses: [OWNER] });
     if (u.endsWith('/api/v1/a2a/open-submission')) {
-      return ok({ enabled: b.enabled ?? true, posting: b.posting === undefined ? true : b.posting ?? undefined, pickModes: ['agent', 'creator'], windows: { creatorMinSec: 3600, creatorMaxSec: 604800, verifierSec: 172800, backupSec: 172800 }, maxResultBytes: 65536, maxScorecardBytes: 32768 });
+      const judge = b.defaultJudge === undefined ? JUDGE : b.defaultJudge;
+      return ok({ enabled: b.enabled ?? true, posting: b.posting === undefined ? true : b.posting ?? undefined, ...(judge ? { defaultJudge: judge } : {}), pickModes: ['agent', 'creator'], windows: { creatorMinSec: 3600, creatorMaxSec: 604800, verifierSec: 172800, backupSec: 172800 }, maxResultBytes: 65536, maxScorecardBytes: 32768 });
     }
     if (u.endsWith('/api/v1/storage/upload')) return ok({ rootHash: ROOT });
+    if (u.includes('/api/v1/a2a/executors?')) return ok({ executors: [{ address: EXECUTOR.address, publicKey: EXECUTOR.signingKey.publicKey }] });
     if (u.endsWith('/api/v1/tasks')) {
       posts.push(body);
-      return ok(b.create?.(body) ?? { unsignedTx: { to: ESCROW, data: createOpenData(body), from: OWNER }, chain: 'arc', chainId: CHAIN_ID });
+      return ok(b.create?.(body) ?? { unsignedTx: { to: ESCROW, data: body.open ? createOpenData(body) : createOneData(body), from: OWNER }, chain: 'arc', chainId: CHAIN_ID });
     }
     if (u.endsWith('/api/v1/a2a/tasks/index')) { indexes.push(body); return ok({ taskHash: body.taskHash, onChainTaskId: '41', indexed: true }); }
     if (u.endsWith(`/api/v1/a2a/tasks/${HASH}/open-status`)) return ok(STATUS);
@@ -157,6 +169,88 @@ describe('the open-submission hashes match the backend', () => {
   });
 });
 
+describe('postTask() — a public task takes submissions from many agents', () => {
+  const brief = { instructions: 'Name three primary sources for the 1907 panic, with links.', amountRaw: '2000000' };
+  const funded = (w: ReturnType<typeof wallet>) => w.sent.find((t) => t.to.toLowerCase() === ESCROW.toLowerCase())!;
+
+  it('posts a public task open, judged by the platform, with the poster picking first', async () => {
+    const { posts, indexes } = stub();
+    const w = wallet();
+    const posted = await bb().postTask({ ...brief, privacy: 'public' }, { signer: w.signer });
+    expect(posts[0]).toMatchObject({ privacy: 'public', verificationMode: 'agent', verifierAddress: JUDGE, open: { mode: 'creator', creatorWindow: 86_400 } });
+    expect(posts[0]).toMatchObject({ verificationCriteria: { min_length: 10, pass_threshold: 60 } });
+    expect(indexes[0]).toMatchObject({ privacy: 'public', verificationMode: 'agent', verifierAddress: JUDGE });
+    const a = ABI.decodeFunctionData('createTaskOpen', funded(w).data);
+    expect([a[6].toLowerCase(), a[7], a[8]]).toEqual([JUDGE, 1n, 86_400n]);
+    expect(posted).toMatchObject({ privacy: 'public', open: { pick: 'creator', creatorWindow: 86_400 } });
+  });
+
+  it("keeps the poster's own checks for the platform to judge against", async () => {
+    const { posts } = stub();
+    await bb().postTask({ ...brief, privacy: 'public', verificationCriteria: { contains_keywords: ['1907'] } }, { signer: wallet().signer });
+    expect(posts[0].open).toEqual({ mode: 'creator', creatorWindow: 86_400 });
+    expect(posts[0]).toMatchObject({ verificationCriteria: { contains_keywords: ['1907'] } });
+  });
+
+  it('lets a verifier agent the poster names judge it, picking from the deadline', async () => {
+    const { posts } = stub();
+    const w = wallet();
+    await bb().postTask({ ...brief, privacy: 'public', verificationMode: 'agent', verifierAddress: VERIFIER as `0x${string}` }, { signer: w.signer });
+    expect(posts[0]).toMatchObject({ verifierAddress: VERIFIER, open: { mode: 'agent', creatorWindow: 0 } });
+    expect(ABI.decodeFunctionData('createTaskOpen', funded(w).data)[7]).toBe(0n);
+  });
+
+  it.each([
+    ['open submission is off', { enabled: false }],
+    ["the posting chain's escrow has no createTaskOpen", { posting: false }],
+    ['the backend names no judge', { defaultJudge: null }],
+  ])('gives a public task one agent when %s', async (_name, backend) => {
+    const { posts } = stub(backend);
+    const w = wallet();
+    const posted = await bb().postTask({ ...brief, privacy: 'public' }, { signer: w.signer });
+    expect(posts[0]).not.toHaveProperty('open');
+    expect(ABI.parseTransaction({ data: funded(w).data })!.name).toBe('createTask');
+    expect(posted).not.toHaveProperty('open');
+  });
+
+  it('gives one agent a public task pinned to it, and a private task, without reading the config', async () => {
+    const { calls, posts } = stub();
+    await bb().postTask({ ...brief, privacy: 'public', targetExecutor: WINNER as `0x${string}` }, { signer: wallet().signer });
+    await bb().postTask({ ...brief, privacy: 'private' }, { signer: wallet().signer });
+    expect(calls).not.toContain('/api/v1/a2a/open-submission');
+    expect(posts).toHaveLength(2);
+    for (const p of posts) expect(p).not.toHaveProperty('open');
+  });
+
+  it('names the platform as judge of an open task that names no verifier', async () => {
+    const { posts } = stub();
+    await bb().postTask({ ...brief, open: { pickWindowSeconds: 3600 } }, { signer: wallet().signer });
+    expect(posts[0]).toMatchObject({ verifierAddress: JUDGE, open: { mode: 'creator', creatorWindow: 3600 } });
+  });
+
+  it('refuses the platform as judge picking first, before anything is uploaded or sent', async () => {
+    const { calls } = stub();
+    const w = wallet();
+    const err = await refusal(bb().postTask({ ...brief, open: { pick: 'agent' } }, { signer: w.signer }));
+    expect(err.code).toBe('PLATFORM_JUDGE_POSTER_PICKS');
+    expect(calls).toEqual(['/api/v1/a2a/open-submission']);
+    expect(w.sent).toHaveLength(0);
+  });
+
+  it("refuses the platform's address named as verifier, picking first, before anything is uploaded", async () => {
+    const { calls } = stub();
+    const err = await refusal(bb().postTask({ ...brief, verifierAddress: JUDGE as `0x${string}`, open: { pick: 'agent' } }, { signer: wallet().signer }));
+    expect(err.code).toBe('PLATFORM_JUDGE_POSTER_PICKS');
+    expect(calls).toEqual(['/api/v1/a2a/open-submission']);
+  });
+
+  it('refuses an open task with no verifier when the backend names no judge', async () => {
+    stub({ defaultJudge: null });
+    const err = await refusal(bb().postTask({ ...brief, open: {} }, { signer: wallet().signer }));
+    expect(err.code).toBe('OPEN_TASK_NEEDS_VERIFIER');
+  });
+});
+
 describe('postTask({ open }) — a task many agents submit to', () => {
   it('posts it public, judged by its verifier, and funds exactly createTaskOpen', async () => {
     const { posts, indexes } = stub();
@@ -196,7 +290,6 @@ describe('postTask({ open }) — a task many agents submit to', () => {
   it.each([
     ['a private brief', { privacy: 'private' as const }, 'OPEN_TASK_MUST_BE_PUBLIC'],
     ['another check', { verificationMode: 'auto' as const }, 'OPEN_TASK_NEEDS_VERIFIER'],
-    ['no verifier', { verifierAddress: undefined }, 'OPEN_TASK_NEEDS_VERIFIER'],
     ['a pinned executor', { targetExecutor: WINNER as `0x${string}` }, 'OPEN_TASK_PINNED'],
   ])('refuses %s before anything is uploaded or sent', async (_name, over, code) => {
     const { calls } = stub();

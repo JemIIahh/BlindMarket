@@ -936,6 +936,8 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     /** A task many agents submit to: public, judged by `verifierAddress`. */
     open?: { mode: 'agent' | 'creator'; creatorWindow: number };
     verifierAddress?: string;
+    /** The checks the platform scores an open task's submissions against, when it judges. */
+    verificationCriteria?: Record<string, unknown>;
   }): Promise<{ record: SpendRecord; wrappedTo: number }> {
     const plaintext = Buffer.from(o.instructions, 'utf8');
     let blobB64: string;
@@ -978,7 +980,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       publicBrief: o.isPublic ? o.instructions.slice(0, 4000) : undefined,
       ...(o.routingSummary ? { routingSummary: o.routingSummary } : {}),
       ...(o.open
-        ? { verificationMode: 'agent', verifierAddress: o.verifierAddress, open: o.open }
+        ? { verificationMode: 'agent', verifierAddress: o.verifierAddress, open: o.open, ...(o.verificationCriteria ? { verificationCriteria: o.verificationCriteria } : {}) }
         : { verificationMode: 'auto', verificationCriteria: { min_length: 10, pass_threshold: 60 } }),
       requiredCapabilities: o.capabilities,
       amountWei: o.amountWei.toString(),
@@ -999,7 +1001,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
     'post_task',
     {
       title: 'Post a Task to the Open Market',
-      description: 'Post a task any matching agent can pick up: encrypts the brief locally and wraps its key to every registered matching executor (or posts it in plaintext with privacy=public), then funds escrow. Escrow is paid on the backend\'s posting chain: USDC on Arc signed by the local wallet (BLINDMARKET_PRIVATE_KEY, which must own BLINDMARKET_API_KEY; gas is also USDC), USDC on Base through the backend relay (no private key needed), or native 0G from the local wallet. wallet_status shows which. TWO-STEP quote/confirm like rent_service: confirm with the same arguments, or it is refused with QUOTE_MISMATCH; requires a unique idempotencyKey.',
+      description: 'Post a task: private (default) means one agent works on it, the brief encrypted locally and its key wrapped to every registered matching executor; privacy=public means a plaintext brief that many agents submit to until the deadline, one picked and paid (you pick first, then BlindMarket judges, unless you name your own verifierAddress), whenever the backend takes such tasks. Then funds escrow. Escrow is paid on the backend\'s posting chain: USDC on Arc signed by the local wallet (BLINDMARKET_PRIVATE_KEY, which must own BLINDMARKET_API_KEY; gas is also USDC), USDC on Base through the backend relay (no private key needed), or native 0G from the local wallet. wallet_status shows which. TWO-STEP quote/confirm like rent_service: confirm with the same arguments, or it is refused with QUOTE_MISMATCH; requires a unique idempotencyKey.',
       inputSchema: {
         instructions: z.string().min(1).max(100_000).describe('The task brief'),
         amount: z.string().regex(/^\d+(\.\d+)?$/).optional().describe('Escrow amount in the settlement token (e.g. "2.5" — USDC on Base, 0G on 0G) — paid to the worker (90%) on verified completion'),
@@ -1007,10 +1009,10 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
         idempotencyKey: z.string().min(8).max(128).describe('Unique key for this spend — reuse it on retries'),
         capabilities: z.array(z.string()).optional().describe('Optional capability tags to route to matching agents first; empty = every agent'),
         durationSeconds: z.number().int().min(3600).max(90 * 24 * 3600).optional().describe('Deadline seconds from now (default 86400 = 24h)'),
-        privacy: z.enum(['private', 'public']).optional().describe("Default 'private': encrypted brief. 'public': plaintext brief + public result — readable/workable by any agent with zero crypto"),
-        open: z.boolean().optional().describe('true: many agents submit until the deadline and one is picked and paid, instead of one agent taking the task. Public (privacy must not be private), judged by verifierAddress. Only when the backend runs open submission (get_open_task_status explains the phases).'),
-        verifierAddress: z.string().regex(ADDRESS_RE).optional().describe('With open: the verifier agent that judges the submissions and picks the winner. Not your own wallet.'),
-        pick: z.enum(['verifier', 'me']).optional().describe("With open: who picks the winner. 'verifier' (default) from the deadline; 'me' you pick first (pick_open_winner) for pickWindowSeconds, then the verifier. Agents see that you pick first, and some skip such tasks."),
+        privacy: z.enum(['private', 'public']).optional().describe("Default 'private': encrypted brief, one agent works on it. 'public': plaintext brief; many agents submit until the deadline and one is picked and paid (one agent when the backend takes no such tasks). Results come after the deadline."),
+        open: z.boolean().optional().describe("true: insist on many agents submitting, refused rather than posted for one agent when the backend takes no such tasks. privacy='public' already asks for it."),
+        verifierAddress: z.string().regex(ADDRESS_RE).optional().describe('With a public task: your verifier agent judges the submissions instead of BlindMarket. Not your own wallet.'),
+        pick: z.enum(['verifier', 'me']).optional().describe("With a public task: who picks the winner first. 'me' (the default, and the only choice when BlindMarket judges) for pickWindowSeconds, with pick_open_winner, then the judge; 'verifier' (the default with your own verifierAddress) lets it pick from the deadline. Agents see that you pick first, and some skip such tasks."),
         pickWindowSeconds: z.number().int().min(MIN_PICK_WINDOW_SECONDS).max(MAX_PICK_WINDOW_SECONDS).optional().describe("With pick 'me': your window after the deadline, 3600 (1 hour) to 604800 (7 days); default 86400"),
         confirm: z.boolean().optional().describe('Set true (with quoteId) to execute the spend'),
         quoteId: z.string().optional().describe('From the quote step'),
@@ -1043,34 +1045,54 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       const unpinned = pinRefusal(s);
       if (unpinned) return fail(unpinned.code!, unpinned.message);
 
-      // A task many agents submit to: refused here, before a quote, for what
-      // this request decides. Whether the verifier can serve (opted in, on this
-      // chain) the backend checks when it builds, before anything is approved.
+      // A public task takes submissions from many agents
+      // (docs/OPEN-SUBMISSION-TASKS.md section 22) when the backend takes them:
+      // judged by verifierAddress, or else by BlindMarket (defaultJudge) with
+      // the poster picking first. A backend that takes none, or cannot say,
+      // gets a public task for one agent, unless the request insists (open,
+      // verifierAddress, pick, pickWindowSeconds). Refused here, before a quote,
+      // for what this request decides; whether a verifier agent can serve (opted
+      // in, on this chain) the backend checks when it builds, before anything
+      // is approved.
       let openTerms: { mode: 'agent' | 'creator'; creatorWindow: number } | undefined;
-      if (open) {
-        if (privacy === 'private') {
-          return fail('OPEN_TASK_MUST_BE_PUBLIC', 'A task many agents submit to is public: every result becomes readable once submissions close. Drop privacy, or set it to public.');
-        }
-        if (!verifierAddress || verifierAddress.toLowerCase() === ZERO_TOKEN) {
-          return fail('OPEN_TASK_NEEDS_VERIFIER', 'A task many agents submit to needs verifierAddress: the verifier agent that judges the submissions and picks the winner.');
-        }
-        if (verifierAddress.toLowerCase() === payFrom.toLowerCase()) {
+      let judge: { address: string; platform: boolean } | undefined;
+      const insist = !!open || verifierAddress !== undefined || pick !== undefined || pickWindowSeconds !== undefined;
+      if (insist && privacy !== 'public' && !open) {
+        return fail('OPEN_REQUIRED', 'verifierAddress, pick and pickWindowSeconds are for a public task, which many agents submit to: set privacy to public, or drop them.');
+      }
+      if (open && privacy === 'private') {
+        return fail('OPEN_TASK_MUST_BE_PUBLIC', 'A task many agents submit to is public: every result becomes readable once submissions close. Drop privacy, or set it to public.');
+      }
+      if (open || privacy === 'public') {
+        if (verifierAddress !== undefined && (verifierAddress.toLowerCase() === ZERO_TOKEN || verifierAddress.toLowerCase() === payFrom.toLowerCase())) {
           return fail('INVALID_VERIFIER', 'The verifier agent judges the submissions, so it cannot be the wallet that posts the task.');
         }
-        if (pick !== 'me' && pickWindowSeconds !== undefined) {
+        if (verifierAddress !== undefined && pick !== 'me' && pickWindowSeconds !== undefined) {
           return fail('INVALID_PICK_WINDOW', "pickWindowSeconds is your window to pick first: set pick to 'me' to have one.");
         }
-        let cfgOpen: { enabled?: boolean; posting?: boolean };
+        let cfgOpen: { enabled?: boolean; posting?: boolean; defaultJudge?: string | null } | null;
         try {
           cfgOpen = await api('GET', '/api/v1/a2a/open-submission');
         } catch (err) {
-          return fail((err as ApiError).code ?? 'OPEN_SUBMISSION_UNKNOWN', (err as Error).message);
+          if (insist) return fail((err as ApiError).code ?? 'OPEN_SUBMISSION_UNKNOWN', (err as Error).message);
+          cfgOpen = null;
         }
-        if (!cfgOpen.enabled) return fail('OPEN_SUBMISSION_DISABLED', 'This backend does not take tasks many agents submit to yet. Nothing was quoted.');
-        if (cfgOpen.posting !== true) return fail('OPEN_SUBMISSION_UNSUPPORTED', "The posting chain's escrow does not take tasks many agents submit to yet. Nothing was quoted.");
-        openTerms = pick === 'me' ? { mode: 'creator', creatorWindow: pickWindowSeconds ?? 86400 } : { mode: 'agent', creatorWindow: 0 };
-      } else if (verifierAddress !== undefined || pick !== undefined || pickWindowSeconds !== undefined) {
-        return fail('OPEN_REQUIRED', 'verifierAddress, pick and pickWindowSeconds are for a task many agents submit to: set open to true, or drop them.');
+        const available = !!cfgOpen?.enabled && cfgOpen.posting === true;
+        if (insist && !cfgOpen?.enabled) return fail('OPEN_SUBMISSION_DISABLED', 'This backend does not take tasks many agents submit to yet. Nothing was quoted.');
+        if (insist && cfgOpen?.posting !== true) return fail('OPEN_SUBMISSION_UNSUPPORTED', "The posting chain's escrow does not take tasks many agents submit to yet. Nothing was quoted.");
+        const defaultJudge = cfgOpen?.defaultJudge ?? undefined;
+        if (available && (verifierAddress || defaultJudge)) {
+          const address = verifierAddress ?? defaultJudge!;
+          const platform = !!defaultJudge && address.toLowerCase() === defaultJudge.toLowerCase();
+          const who = pick ?? (platform ? 'me' : 'verifier');
+          if (platform && who !== 'me') {
+            return fail('PLATFORM_JUDGE_POSTER_PICKS', "With BlindMarket as the judge you pick the winner first: drop pick, set it to 'me', or name your own verifierAddress.");
+          }
+          judge = { address, platform };
+          openTerms = who === 'me' ? { mode: 'creator', creatorWindow: pickWindowSeconds ?? 86400 } : { mode: 'agent', creatorWindow: 0 };
+        } else if (insist) {
+          return fail('OPEN_TASK_NEEDS_VERIFIER', 'The backend names no judge for tasks many agents submit to: pass verifierAddress, the verifier agent that judges the submissions.');
+        }
       }
 
       const isPublic = privacy === 'public' || !!openTerms;
@@ -1096,7 +1118,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
         instructions: sha256Hex(Buffer.from(instructions, 'utf8')),
         openMode: openTerms?.mode ?? null,
         creatorWindow: openTerms?.creatorWindow ?? null,
-        verifier: openTerms ? verifierAddress!.toLowerCase() : null,
+        verifier: judge ? judge.address.toLowerCase() : null,
       };
 
       if (!confirm) {
@@ -1110,7 +1132,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
             walletBalance: await payFromBalance(s, payFrom),
             privacy: isPublic ? 'public' : 'private',
             capabilities: capabilities ?? [],
-            ...(openTerms ? { open: { submissions: 'many agents, one winner', verifier: verifierAddress, picksFirst: openTerms.mode === 'creator' ? 'you' : 'the verifier', pickWindowSeconds: openTerms.creatorWindow } } : {}),
+            ...(openTerms && judge ? { open: { submissions: 'many agents, one winner', verifier: judge.address, judge: judge.platform ? 'BlindMarket' : 'your verifier agent', picksFirst: openTerms.mode === 'creator' ? 'you' : 'the verifier', pickWindowSeconds: openTerms.creatorWindow } } : {}),
             quoteId: quote.quoteId,
           },
           next: `Re-call post_task with confirm=true, quoteId="${quote.quoteId}", and the SAME idempotencyKey to execute this spend.`,
@@ -1122,7 +1144,9 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       try {
         const { record, wrappedTo } = await createPostRecord({
           idempotencyKey, instructions, isPublic, capabilities: capabilities ?? [], amountWei, durationSecs, s,
-          ...(openTerms ? { open: openTerms, verifierAddress } : {}),
+          ...(openTerms && judge
+            ? { open: openTerms, verifierAddress: judge.address, ...(judge.platform ? { verificationCriteria: { min_length: 10, pass_threshold: 60 } } : {}) }
+            : {}),
         });
         const done = await fundAndIndex(record);
         return ok({

@@ -61,24 +61,64 @@ const list = (v?: string) => (v ? v.split(',').map((s) => s.trim()).filter(Boole
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const TASK_HASH = /^0x[0-9a-fA-F]{64}$/;
 
-/** post-task's --open terms, or the refusal the escrow or the task board would give after funding. */
-function openTerms(opts: { open?: boolean; verifier?: string; pick?: string; pickWindow?: string; target?: string; verification?: string; public?: boolean }):
-  { verifier: string; pick: 'agent' | 'creator'; window?: number } | undefined {
-  if (!opts.open) {
-    if (opts.verifier || opts.pick || opts.pickWindow) throw new CliError('OPEN_REQUIRED', '--verifier, --pick and --pick-window are for a task many agents submit to: add --open, or drop them.');
+/** post-task's options for who works on a task. */
+interface WhoWorks { open?: boolean; public?: boolean; verifier?: string; pick?: string; pickWindow?: string; target?: string; verification?: string }
+
+/**
+ * post-task's checks on --open, --verifier, --pick and --pick-window that need
+ * no backend, or the refusal the escrow or the task board would give after
+ * funding. Run before anything is sent.
+ */
+function checkWhoWorks(opts: WhoWorks): void {
+  const openTerms = opts.verifier || opts.pick || opts.pickWindow;
+  if (!opts.open && !opts.public) {
+    if (openTerms) throw new CliError('OPEN_REQUIRED', '--verifier, --pick and --pick-window are for a public task, which many agents submit to: add --public, or drop them.');
+    return;
+  }
+  if (opts.target && (opts.open || openTerms)) throw new CliError('OPEN_TASK_PINNED', 'A task many agents submit to is offered to every agent: drop --target, or --open, --verifier, --pick and --pick-window.');
+  if (opts.verifier && !ADDRESS.test(opts.verifier)) throw new CliError('BAD_VERIFIER', '--verifier must be a 0x address: the verifier agent that judges the submissions.');
+  if (opts.verifier && opts.verification) throw new CliError('BAD_VERIFICATION', 'A task many agents submit to is judged by its --verifier agent: drop --verification.');
+  if (opts.pick !== undefined && opts.pick !== 'verifier' && opts.pick !== 'me') throw new CliError('BAD_PICK', '--pick must be verifier or me.');
+  if (opts.pickWindow !== undefined && !(/^\d+$/.test(opts.pickWindow) && Number(opts.pickWindow) >= 3_600 && Number(opts.pickWindow) <= 604_800)) {
+    throw new CliError('BAD_PICK_WINDOW', '--pick-window must be a whole number of seconds from 3600 (1 hour) to 604800 (7 days).');
+  }
+  // Your own verifier picks from the deadline unless you pick first.
+  if (opts.verifier && opts.pickWindow !== undefined && (opts.pick ?? 'verifier') !== 'me') {
+    throw new CliError('BAD_PICK_WINDOW', '--pick-window is your window to pick first: add --pick me.');
+  }
+}
+
+/**
+ * Who works on a public task (docs/OPEN-SUBMISSION-TASKS.md section 22): many
+ * agents when the backend takes open tasks, judged by --verifier or else by
+ * the platform (its defaultJudge), with the poster picking first when the
+ * platform judges. undefined when the task gets one agent: a private task, a
+ * public one for --target, or a backend that takes no open tasks or cannot
+ * say. --open insists, and throws where the task would get one agent.
+ */
+async function whoWorks(bb: BlindMarket, opts: WhoWorks): Promise<{ verifier: string; byPlatform: boolean; pick: 'agent' | 'creator'; window?: number } | undefined> {
+  if (!opts.open && (!opts.public || opts.target)) return undefined;
+  const insist = opts.open || !!(opts.verifier || opts.pick || opts.pickWindow);
+  if (insist) assertOpenSdk(bb);
+  const read = (bb as { getOpenSubmissionConfig?: () => Promise<{ enabled?: boolean; posting?: boolean; defaultJudge?: string | null }> }).getOpenSubmissionConfig;
+  const cfg = typeof read === 'function' ? await read.call(bb).catch(() => null) : null;
+  if (!cfg?.enabled || cfg.posting !== true) {
+    if (insist) throw new CliError('OPEN_UNAVAILABLE', "The backend isn't taking tasks many agents submit to right now. Drop --open, --verifier, --pick and --pick-window to post for one agent.");
     return undefined;
   }
-  if (opts.target) throw new CliError('OPEN_TASK_PINNED', 'A task many agents submit to is offered to every agent: drop --target.');
-  if (opts.verification) throw new CliError('BAD_VERIFICATION', 'A task many agents submit to is judged by its --verifier agent: drop --verification.');
-  if (!opts.verifier || !ADDRESS.test(opts.verifier)) throw new CliError('VERIFIER_REQUIRED', '--open needs --verifier <0x address>: the verifier agent that judges the submissions and picks the winner.');
-  const pick = opts.pick ?? 'verifier';
-  if (pick !== 'verifier' && pick !== 'me') throw new CliError('BAD_PICK', '--pick must be verifier or me.');
+  const verifier = opts.verifier ?? cfg.defaultJudge ?? undefined;
+  if (!verifier) {
+    if (insist) throw new CliError('VERIFIER_REQUIRED', 'The backend names no judge for tasks many agents submit to: add --verifier <0x address>, the verifier agent that judges the submissions.');
+    return undefined;
+  }
+  const byPlatform = !!cfg.defaultJudge && verifier.toLowerCase() === cfg.defaultJudge.toLowerCase();
+  const pick = opts.pick ?? (byPlatform ? 'me' : 'verifier');
+  if (byPlatform && pick !== 'me') throw new CliError('PLATFORM_JUDGE_POSTER_PICKS', 'With BlindMarket as the judge you pick the winner first: drop --pick verifier, or add --verifier with your own verifier agent.');
   if (opts.pickWindow !== undefined && pick !== 'me') throw new CliError('BAD_PICK_WINDOW', '--pick-window is your window to pick first: add --pick me.');
-  if (pick === 'verifier') return { verifier: opts.verifier, pick: 'agent' };
   // The window the confirm states is the one funded: the default applied here, not later.
-  const window = opts.pickWindow === undefined ? 86_400 : /^\d+$/.test(opts.pickWindow) ? Number(opts.pickWindow) : NaN;
-  if (!(window >= 3_600 && window <= 604_800)) throw new CliError('BAD_PICK_WINDOW', '--pick-window must be a whole number of seconds from 3600 (1 hour) to 604800 (7 days).');
-  return { verifier: opts.verifier, pick: 'creator', window };
+  return pick === 'me'
+    ? { verifier, byPlatform, pick: 'creator', window: opts.pickWindow === undefined ? 86_400 : Number(opts.pickWindow) }
+    : { verifier, byPlatform, pick: 'agent' };
 }
 
 /** Tasks many agents submit to need SDK methods newer than the CLI's oldest supported SDK. */
@@ -858,7 +898,7 @@ export function buildProgram(): Command {
 
   program
     .command('post-task')
-    .description('Post a task and fund its escrow from your wallet. Encrypted by default; --public posts it in plaintext')
+    .description('Post a task and fund its escrow from your wallet. Private by default: encrypted, one agent works on it. --public: plaintext, many agents submit and one is picked and paid')
     .option('--instructions <text>', 'The brief')
     .option('--instructions-file <path>', 'Read the brief from a file')
     .option('--reward <amount>', "Escrow in the posting chain's token, e.g. 2.5 (USDC)")
@@ -867,13 +907,13 @@ export function buildProgram(): Command {
     .option('--category <cat>', 'Accepted for older scripts; not used')
     .option('--zone <zone>', 'Location zone', 'global')
     .option('--duration <seconds>', 'Seconds until the deadline (1 hour to 90 days)', '86400')
-    .option('--public', 'Post the brief in plaintext: no encryption, readable by any agent')
+    .option('--public', 'Plaintext brief; many agents submit until the deadline and one is picked and paid. You pick first, then BlindMarket (or your --verifier) judges. One agent when the backend takes no such tasks, or with --target')
     .option('--capabilities <list>', 'Route to agents with these capabilities first')
     .option('--target <address>', 'Only this executor can take it')
     .option('--verification <mode>', 'auto (checked against criteria, the default) or manual (you approve with `blind review`)')
-    .option('--open', 'Many agents submit until the deadline and one is picked and paid. Public, judged by --verifier')
-    .option('--verifier <address>', 'With --open: the verifier agent that judges the submissions and picks the winner')
-    .option('--pick <who>', 'With --open: who picks the winner, verifier (default) or me (you first, then the verifier)')
+    .option('--open', 'Like --public, but refused rather than posted for one agent when the backend takes no tasks many agents submit to')
+    .option('--verifier <address>', 'With --public: your verifier agent judges the submissions instead of BlindMarket')
+    .option('--pick <who>', 'With --public: who picks the winner first, me (the default when BlindMarket judges) or verifier (the default with --verifier)')
     .option('--pick-window <seconds>', 'With --pick me: your window after the deadline, 3600 (1 hour) to 604800 (7 days); default 86400')
     .option('--yes', 'Fund without asking')
     .action(async (opts: {
@@ -887,10 +927,10 @@ export function buildProgram(): Command {
       const verification = opts.verification ?? 'auto';
       if (verification !== 'auto' && verification !== 'manual') throw new CliError('BAD_VERIFICATION', '--verification must be auto or manual.');
       if (!/^\d+$/.test(opts.duration)) throw new CliError('INVALID_DURATION', '--duration must be a whole number of seconds.');
-      const open = openTerms(opts);
+      checkWhoWorks(opts);
 
       const { bb, signer, postingChain, chains } = await signingClient();
-      if (open) assertOpenSdk(bb);
+      const open = await whoWorks(bb, opts);
       const entry = chains.find((c) => c.chain === postingChain);
       if (!postingChain || !entry?.token.address) throw new CliError('SETTLEMENT_NOT_POSTABLE', 'The backend has no chain to post new tasks on right now.');
       if (opts.token && opts.token.toLowerCase() !== entry.token.address.toLowerCase()) {
@@ -908,7 +948,7 @@ export function buildProgram(): Command {
       const human = formatUnits(amountRaw, entry.token.decimals);
       await confirm(
         open
-          ? `Post a public task many agents submit to on ${postingChain}, judged by ${open.verifier}${open.pick === 'creator' ? `, you picking first for ${open.window} s` : ''}, locking ${human} ${entry.token.symbol} in escrow from ${signer.address} (plus gas)?`
+          ? `Post a public task many agents submit to on ${postingChain}, judged by ${open.byPlatform ? `BlindMarket (${open.verifier})` : open.verifier}${open.pick === 'creator' ? `, you picking first for ${open.window} s` : ''}, locking ${human} ${entry.token.symbol} in escrow from ${signer.address} (plus gas)?`
           : `Post a ${privacy} task on ${postingChain}, locking ${human} ${entry.token.symbol} in escrow from ${signer.address} (plus gas)?`,
         opts.yes,
       );
@@ -922,7 +962,13 @@ export function buildProgram(): Command {
             durationSeconds: Number(opts.duration),
             privacy,
             ...(open
-              ? { verifierAddress: open.verifier as `0x${string}`, open: { pick: open.pick, pickWindowSeconds: open.window } }
+              ? {
+                verificationMode: 'agent' as const,
+                verifierAddress: open.verifier as `0x${string}`,
+                // The checks the platform scores submissions against when the poster does not pick.
+                ...(open.byPlatform ? { verificationCriteria: { min_length: 10, pass_threshold: 60 } } : {}),
+                open: { pick: open.pick, pickWindowSeconds: open.window },
+              }
               : { verificationMode: verification as 'auto' | 'manual' }),
             requiredCapabilities: list(opts.capabilities) as AgentCapability[],
             ...(opts.target ? { targetExecutor: opts.target as `0x${string}` } : {}),

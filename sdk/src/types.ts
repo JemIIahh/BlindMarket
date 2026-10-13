@@ -447,6 +447,13 @@ export interface OpenSubmissionConfig {
   enabled: boolean;
   /** Open tasks can be posted now: on, and the posting chain's escrow has createTaskOpen. Absent from older backends. */
   posting?: boolean;
+  /**
+   * The platform's verifier address. Named as an open task's verifier, the
+   * platform judges the submissions the poster does not pick from, against the
+   * task's checks; the poster then picks first. null or absent when the
+   * backend cannot judge (older backends).
+   */
+  defaultJudge?: string | null;
   pickModes: Array<'agent' | 'creator'>;
   windows: { creatorMinSec: number; creatorMaxSec: number; verifierSec: number; backupSec: number };
   /** The largest result submitOpen() takes inline; put the rest in storage and send its rootHash. */
