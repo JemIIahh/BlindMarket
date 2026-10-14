@@ -1204,13 +1204,25 @@ const OPEN_CALLS = new Interface([
 const OPEN_HASH = '0x' + 'ab'.repeat(32);
 const VERIFIER = getAddress('0x' + 'c3'.repeat(20));
 const WINNER = getAddress('0x' + '7e'.repeat(20));
-const openConfig = () => answer({ enabled: true, posting: true, pickModes: ['agent', 'creator'], windows: { creatorMinSec: 3600, creatorMaxSec: 604800, verifierSec: 172800, backupSec: 172800 }, maxResultBytes: 65536, maxScorecardBytes: 32768 });
+const openConfig = (over = {}) => answer({ enabled: true, posting: true, pickModes: ['agent', 'creator'], windows: { creatorMinSec: 3600, creatorMaxSec: 604800, verifierSec: 172800, backupSec: 172800 }, maxResultBytes: 65536, maxScorecardBytes: 32768, ...over });
+/** The platform's verifier, as GET /a2a/open-submission names it. */
+const JUDGE = getAddress('0x' + 'd9'.repeat(20));
+/** POST /tasks answered as the real backend builds an open task (escrow.buildCreateTaskOpenOn). */
+const openBuild = () => ({
+  ok: true, status: 200,
+  json: async () => {
+    const b = calls.findLast((c) => c.path === '/api/v1/tasks').body;
+    const data = OPEN_CALLS.encodeFunctionData('createTaskOpen', [b.taskHash, b.token, b.amount, 'general', b.locationZone, b.duration, b.verifierAddress, b.open.mode === 'creator' ? 1 : 0, b.open.creatorWindow]);
+    return { success: true, data: { unsignedTx: { to: ESCROW, data, from: OWNER.address }, chain: 'arc', chainId: ARC.chainId } };
+  },
+});
 const openStatus = (over = {}) => answer({ taskHash: OPEN_HASH, onChainTaskId: '41', chain: 'arc', mode: 'creator', phase: 'submissions', paused: false, submissions: 2, windows: { submissionsEnd: 1_900_000_000, creatorPickEnd: 1_900_086_400, verifierPickEnd: 1_900_259_200, backupPickEnd: 1_900_432_000 }, outcome: null, declined: null, ...over });
 const escrowSent = () => chain.sent.filter((tx) => tx.to === ESCROW).map((tx) => OPEN_CALLS.parseTransaction({ data: tx.data }));
 const keccakJson = async (v) => (await import('ethers')).keccak256(new TextEncoder().encode(JSON.stringify(v)));
 
 test('post-task --open funds createTaskOpen: public, judged by --verifier, the poster picking first for --pick-window', async () => {
-  answers['/api/v1/a2a/open-submission'] = [openConfig()];
+  // Read by the CLI to say who judges, then by the SDK before it builds.
+  answers['/api/v1/a2a/open-submission'] = [openConfig(), openConfig()];
   // What the real backend builds for an open task (escrow.buildCreateTaskOpenOn).
   answers['/api/v1/tasks'] = [{
     ok: true, status: 200,
@@ -1235,8 +1247,9 @@ test('post-task --open funds createTaskOpen: public, judged by --verifier, the p
 
 test('post-task --open refuses what the task board would refuse, before asking the backend anything', async () => {
   const base = ['post-task', '--instructions', 'Name three sources.', '--reward', '2', '--yes'];
-  await assert.rejects(blind(...base, '--open'), (e) => e.code === 'VERIFIER_REQUIRED');
   await assert.rejects(blind(...base, '--open', '--verifier', VERIFIER, '--target', WINNER), (e) => e.code === 'OPEN_TASK_PINNED');
+  await assert.rejects(blind(...base, '--public', '--verifier', VERIFIER, '--target', WINNER), (e) => e.code === 'OPEN_TASK_PINNED');
+  await assert.rejects(blind(...base, '--public', '--verifier', 'not-an-address'), (e) => e.code === 'BAD_VERIFIER');
   await assert.rejects(blind(...base, '--open', '--verifier', VERIFIER, '--verification', 'manual'), (e) => e.code === 'BAD_VERIFICATION');
   await assert.rejects(blind(...base, '--open', '--verifier', VERIFIER, '--pick-window', '7200'), (e) => e.code === 'BAD_PICK_WINDOW');
   await assert.rejects(blind(...base, '--verifier', VERIFIER), (e) => e.code === 'OPEN_REQUIRED');
@@ -1278,6 +1291,79 @@ test('open-status says where the task stands in words', async () => {
   assert.match(text, /task 41 on arc: closed/);
   assert.match(text, new RegExp(`winner: +${WINNER}`));
   await assert.rejects(blind('open-status', '--task', '41'), (e) => e.code === 'BAD_TASK');
+});
+
+test('post-task --public posts a task many agents submit to, judged by BlindMarket, the poster picking first', async () => {
+  answers['/api/v1/a2a/open-submission'] = [openConfig({ defaultJudge: JUDGE }), openConfig({ defaultJudge: JUDGE })];
+  answers['/api/v1/tasks'] = [openBuild()];
+  await assert.rejects(
+    blind('post-task', '--instructions', 'Name three primary sources for the 1907 panic.', '--reward', '2', '--public'),
+    (e) => e.code === 'CONFIRM_REQUIRED' && new RegExp(`judged by BlindMarket \\(${JUDGE}\\), you picking first for 86400 s`).test(e.message),
+  );
+  answers['/api/v1/a2a/open-submission'] = [openConfig({ defaultJudge: JUDGE }), openConfig({ defaultJudge: JUDGE })];
+  const text = await blind('post-task', '--instructions', 'Name three primary sources for the 1907 panic.', '--reward', '2', '--public', '--yes');
+  const build = posted('/api/v1/tasks')[0].body;
+  assert.equal(build.privacy, 'public');
+  assert.equal(build.verificationMode, 'agent');
+  assert.equal(build.verifierAddress.toLowerCase(), JUDGE.toLowerCase());
+  assert.deepEqual(build.open, { mode: 'creator', creatorWindow: 86400 });
+  assert.deepEqual(build.verificationCriteria, { min_length: 10, pass_threshold: 60 });
+  const [create] = escrowSent();
+  assert.equal(create.name, 'createTaskOpen');
+  assert.deepEqual([create.args[6], create.args[7], create.args[8]], [JUDGE, 1n, 86400n]);
+  assert.match(text, /Posted a task many agents submit to on arc/);
+});
+
+test('post-task --public --verifier lets that verifier agent judge, picking from the deadline', async () => {
+  answers['/api/v1/a2a/open-submission'] = [openConfig({ defaultJudge: JUDGE }), openConfig({ defaultJudge: JUDGE })];
+  answers['/api/v1/tasks'] = [openBuild()];
+  await blind('post-task', '--instructions', 'Name three primary sources for the 1907 panic.', '--reward', '2', '--public', '--verifier', VERIFIER, '--yes');
+  const build = posted('/api/v1/tasks')[0].body;
+  assert.equal(build.verifierAddress, VERIFIER);
+  assert.deepEqual(build.open, { mode: 'agent', creatorWindow: 0 });
+  assert.equal(build.verificationCriteria, undefined);
+});
+
+test('post-task --public refuses BlindMarket as judge picking first, before anything is built', async () => {
+  answers['/api/v1/a2a/open-submission'] = [openConfig({ defaultJudge: JUDGE })];
+  await assert.rejects(
+    blind('post-task', '--instructions', 'Name three sources.', '--reward', '2', '--public', '--pick', 'verifier', '--yes'),
+    (e) => e.code === 'PLATFORM_JUDGE_POSTER_PICKS',
+  );
+  assert.equal(posted('/api/v1/tasks').length, 0);
+});
+
+test('post-task --open refuses where the task would get one agent; --public posts it for one', async () => {
+  const base = ['post-task', '--instructions', 'Name three sources.', '--reward', '2', '--yes'];
+  answers['/api/v1/a2a/open-submission'] = [openConfig({ enabled: false })];
+  await assert.rejects(blind(...base, '--open'), (e) => e.code === 'OPEN_UNAVAILABLE');
+  answers['/api/v1/a2a/open-submission'] = [openConfig()];
+  await assert.rejects(blind(...base, '--open'), (e) => e.code === 'VERIFIER_REQUIRED');
+  answers['/api/v1/a2a/open-submission'] = [openConfig({ defaultJudge: null })];
+  const text = await blind(...base, '--public');
+  const build = posted('/api/v1/tasks')[0].body;
+  assert.equal(build.open, undefined);
+  assert.equal(ESCROW_CALLS.parseTransaction({ data: chain.sent.find((tx) => tx.to === ESCROW).data }).name, 'createTask');
+  assert.match(text, /Posted public task on arc/);
+});
+
+test('post-task --public funds what it confirmed: a config read that fails gets one agent, and the SDK does not read again', async () => {
+  // The CLI's read fails; a second read would say open tasks are on.
+  answers['/api/v1/a2a/open-submission'] = [failWith(503, 'UNAVAILABLE'), openConfig({ defaultJudge: JUDGE })];
+  const text = await blind('post-task', '--instructions', 'Name three primary sources for the 1907 panic.', '--reward', '2', '--public', '--yes');
+  assert.equal(posted('/api/v1/a2a/open-submission').length, 1);
+  assert.equal(posted('/api/v1/tasks')[0].body.open, undefined);
+  assert.equal(ESCROW_CALLS.parseTransaction({ data: chain.sent.find((tx) => tx.to === ESCROW).data }).name, 'createTask');
+  assert.match(text, /Posted public task on arc/);
+});
+
+test('post-task refuses manual approval on a task many agents submit to', async () => {
+  const base = ['post-task', '--instructions', 'Name three sources.', '--reward', '2', '--verification', 'manual', '--yes'];
+  await assert.rejects(blind(...base, '--open'), (e) => e.code === 'BAD_VERIFICATION');
+  assert.equal(calls.length, 0);
+  answers['/api/v1/a2a/open-submission'] = [openConfig({ defaultJudge: JUDGE })];
+  await assert.rejects(blind(...base, '--public'), (e) => e.code === 'BAD_VERIFICATION');
+  assert.equal(posted('/api/v1/tasks').length, 0);
 });
 
 test("post-task --open --pick me states the window it funds (one day by default) and refuses one the escrow would", async () => {
