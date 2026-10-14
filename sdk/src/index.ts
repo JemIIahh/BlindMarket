@@ -1962,19 +1962,23 @@ export class BlindMarket {
     const refuse = (code: string, message: string) => new ApiError(400, `${message} Nothing was sent.`, undefined, code);
     const explicit = params.open !== undefined;
     if (!explicit && (params.privacy !== 'public' || params.targetExecutor !== undefined)) return { params, config: null };
+    const unknown = (detail?: string) => new ApiError(503, `Could not read whether the backend takes tasks many agents submit to (GET /a2a/open-submission${detail ? `: ${detail}` : ''}). Nothing was sent.`, undefined, 'OPEN_SUBMISSION_UNKNOWN');
     // A named verifier needs nothing from the backend yet: normalizePost refuses bad terms before any request.
-    if (explicit && params.verifierAddress) return { params, config: opts.openSubmissionConfig ?? null };
+    if (explicit && params.verifierAddress) {
+      if ('openSubmissionConfig' in opts && !opts.openSubmissionConfig) throw unknown();
+      return { params, config: opts.openSubmissionConfig ?? null };
+    }
     let readError: Error | undefined;
     const config = 'openSubmissionConfig' in opts
       ? opts.openSubmissionConfig ?? null
       : await this.getOpenSubmissionConfig().catch((err: Error) => { readError = err; return null; });
     const judge = config?.defaultJudge ?? undefined;
     if (explicit) {
-      if (!config) {
-        throw new ApiError(503, `Could not read whether the backend takes tasks many agents submit to (GET /a2a/open-submission${readError ? `: ${readError.message}` : ''}). Nothing was sent.`, undefined, 'OPEN_SUBMISSION_UNKNOWN');
-      }
+      if (!config) throw unknown(readError?.message);
+      // Off, or no createTaskOpen: said as such, not as a missing judge (a backend running it off names none).
+      await this.assertOpenSubmission('Posting a task many agents submit to', config);
       // normalizePost checks the rest, and refuses a missing verifier when the backend names no judge.
-      if (!judge || (params.verificationMode !== undefined && params.verificationMode !== 'auto')) return { params, config };
+      if (!judge || params.verificationMode === 'manual') return { params, config };
       return {
         params: {
           ...params,

@@ -286,6 +286,25 @@ describe('postTask() — a public task takes submissions from many agents', () =
     expect(err.code).toBe('OPEN_SUBMISSION_UNKNOWN');
   });
 
+  it('refuses an open task when the config passed is null, a named verifier or not', async () => {
+    stub();
+    for (const over of [{}, { verifierAddress: VERIFIER as `0x${string}` }]) {
+      const err = await refusal(bb().postTask({ ...brief, ...over, open: {} }, { signer: wallet().signer, openSubmissionConfig: null }));
+      expect(err.code).toBe('OPEN_SUBMISSION_UNKNOWN');
+    }
+  });
+
+  it('says open submission is off, not that a verifier is missing', async () => {
+    stub({ enabled: false, defaultJudge: null });
+    expect((await refusal(bb().postTask({ ...brief, open: {} }, { signer: wallet().signer }))).code).toBe('OPEN_SUBMISSION_DISABLED');
+  });
+
+  it("takes verificationMode 'agent' on an open task with no verifier: the platform judges", async () => {
+    const { posts } = stub();
+    await bb().postTask({ ...brief, verificationMode: 'agent', open: {} }, { signer: wallet().signer });
+    expect(posts[0]).toMatchObject({ verifierAddress: JUDGE, open: { mode: 'creator', creatorWindow: 86_400 } });
+  });
+
   it('decides from the config the caller passes, without reading it again', async () => {
     const { calls, posts } = stub();
     const cfg = { enabled: true, posting: true, defaultJudge: JUDGE, pickModes: ['agent', 'creator'] as Array<'agent' | 'creator'>, windows: { creatorMinSec: 3600, creatorMaxSec: 604800, verifierSec: 172800, backupSec: 172800 }, maxResultBytes: 65536, maxScorecardBytes: 32768 };
