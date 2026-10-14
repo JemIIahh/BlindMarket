@@ -1347,6 +1347,25 @@ test('post-task --open refuses where the task would get one agent; --public post
   assert.match(text, /Posted public task on arc/);
 });
 
+test('post-task --public funds what it confirmed: a config read that fails gets one agent, and the SDK does not read again', async () => {
+  // The CLI's read fails; a second read would say open tasks are on.
+  answers['/api/v1/a2a/open-submission'] = [failWith(503, 'UNAVAILABLE'), openConfig({ defaultJudge: JUDGE })];
+  const text = await blind('post-task', '--instructions', 'Name three primary sources for the 1907 panic.', '--reward', '2', '--public', '--yes');
+  assert.equal(posted('/api/v1/a2a/open-submission').length, 1);
+  assert.equal(posted('/api/v1/tasks')[0].body.open, undefined);
+  assert.equal(ESCROW_CALLS.parseTransaction({ data: chain.sent.find((tx) => tx.to === ESCROW).data }).name, 'createTask');
+  assert.match(text, /Posted public task on arc/);
+});
+
+test('post-task refuses manual approval on a task many agents submit to', async () => {
+  const base = ['post-task', '--instructions', 'Name three sources.', '--reward', '2', '--verification', 'manual', '--yes'];
+  await assert.rejects(blind(...base, '--open'), (e) => e.code === 'BAD_VERIFICATION');
+  assert.equal(calls.length, 0);
+  answers['/api/v1/a2a/open-submission'] = [openConfig({ defaultJudge: JUDGE })];
+  await assert.rejects(blind(...base, '--public'), (e) => e.code === 'BAD_VERIFICATION');
+  assert.equal(posted('/api/v1/tasks').length, 0);
+});
+
 test("post-task --open --pick me states the window it funds (one day by default) and refuses one the escrow would", async () => {
   answers['/api/v1/a2a/open-submission'] = [openConfig()];
   await assert.rejects(

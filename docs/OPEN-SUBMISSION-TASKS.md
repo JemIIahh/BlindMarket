@@ -1491,14 +1491,22 @@ terms as the web form:
 
 Per client:
 - **SDK** (`postTask`, `withOpenDefaults`): `privacy: 'public'` is enough.
-  `open` without `verifierAddress` gets the platform as judge.
-  `PostedTask.open` says which the task became. A refusal the request alone
-  decides still comes before any request. Unreleased (CHANGELOG): a caller
-  that waited for the first result now waits for the deadline.
+  `open` without `verifierAddress` gets the platform as judge; a named
+  `verifierAddress` judges whatever `verificationMode` says, except that
+  `'manual'` (`OPEN_TASK_NO_MANUAL`) and `'auto'` beside a verifier are
+  refused rather than dropped. `PostedTask.open` says which the task became.
+  A refusal the request alone decides still comes before any request
+  (`withJudgePlaceholder`). `opts.openSubmissionConfig` makes `postTask()`
+  decide from the config the caller already read. Unreleased (CHANGELOG): a
+  caller that waited for the first result now waits for the deadline.
 - **CLI** (`post-task`): `--public` is enough; `--verifier` and `--pick`
-  work with it, and `--open` insists. The CLI decides and passes explicit
-  terms, so it states the judge in its confirm and works with the published
-  SDK 0.11.0.
+  work with it, and `--open` insists. The CLI decides, passes explicit terms
+  and the config it read (`openSubmissionConfig`), so what its confirm states
+  is what is funded even if the backend changes in between; it works with the
+  published SDK 0.11.0. `--verification manual` is refused on an open task.
 - **MCP** (`post_task`): `privacy: "public"` is enough; the quote adds
-  `judge` (`"BlindMarket"` or `"your verifier agent"`) next to `verifier`.
+  `judge` (`"BlindMarket"` or `"your verifier agent"`) next to `verifier`,
+  and is bound to the open terms (a backend that changes between quote and
+  confirm gets `QUOTE_MISMATCH`). `open: false` with a public task is
+  refused (`PUBLIC_TASK_IS_OPEN`).
 

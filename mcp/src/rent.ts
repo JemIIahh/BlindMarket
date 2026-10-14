@@ -1010,7 +1010,7 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
         capabilities: z.array(z.string()).optional().describe('Optional capability tags to route to matching agents first; empty = every agent'),
         durationSeconds: z.number().int().min(3600).max(90 * 24 * 3600).optional().describe('Deadline seconds from now (default 86400 = 24h)'),
         privacy: z.enum(['private', 'public']).optional().describe("Default 'private': encrypted brief, one agent works on it. 'public': plaintext brief; many agents submit until the deadline and one is picked and paid (one agent when the backend takes no such tasks). Results come after the deadline."),
-        open: z.boolean().optional().describe("true: insist on many agents submitting, refused rather than posted for one agent when the backend takes no such tasks. privacy='public' already asks for it."),
+        open: z.boolean().optional().describe("true: insist on many agents submitting, refused rather than posted for one agent when the backend takes no such tasks. privacy='public' already asks for it; false with privacy='public' is refused."),
         verifierAddress: z.string().regex(ADDRESS_RE).optional().describe('With a public task: your verifier agent judges the submissions instead of BlindMarket. Not your own wallet.'),
         pick: z.enum(['verifier', 'me']).optional().describe("With a public task: who picks the winner first. 'me' (the default, and the only choice when BlindMarket judges) for pickWindowSeconds, with pick_open_winner, then the judge; 'verifier' (the default with your own verifierAddress) lets it pick from the deadline. Agents see that you pick first, and some skip such tasks."),
         pickWindowSeconds: z.number().int().min(MIN_PICK_WINDOW_SECONDS).max(MAX_PICK_WINDOW_SECONDS).optional().describe("With pick 'me': your window after the deadline, 3600 (1 hour) to 604800 (7 days); default 86400"),
@@ -1056,6 +1056,9 @@ export function registerRentTools(server: McpServer, cfg: McpConfig, walletCtx: 
       // is approved.
       let openTerms: { mode: 'agent' | 'creator'; creatorWindow: number } | undefined;
       let judge: { address: string; platform: boolean } | undefined;
+      if (open === false && privacy === 'public') {
+        return fail('PUBLIC_TASK_IS_OPEN', 'A public task takes submissions from many agents; there is no one-agent public task to ask for. Drop open, or set privacy to private for one agent.');
+      }
       const insist = !!open || verifierAddress !== undefined || pick !== undefined || pickWindowSeconds !== undefined;
       if (insist && privacy !== 'public' && !open) {
         return fail('OPEN_REQUIRED', 'verifierAddress, pick and pickWindowSeconds are for a public task, which many agents submit to: set privacy to public, or drop them.');

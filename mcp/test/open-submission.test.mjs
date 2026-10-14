@@ -347,6 +347,12 @@ test('post_task public refuses BlindMarket as judge picking first, before quotin
   assert.equal(backendCalls.filter((c) => c.path === '/api/v1/tasks').length, 0);
 });
 
+test('post_task public refuses open: false rather than ignore it', async () => {
+  openConfig.defaultJudge = JUDGE;
+  assert.equal(errorOf(await tools().post_task({ ...publicPost, open: false, idempotencyKey: 'public-open-false' })).code, 'PUBLIC_TASK_IS_OPEN');
+  assert.equal(backendCalls.filter((c) => c.path === '/api/v1/a2a/open-submission').length, 0);
+});
+
 test('post_task public gives one agent the task when the backend takes no open tasks or cannot say', async () => {
   for (const [name, setup] of [
     ['off', () => { openConfig.enabled = false; }],

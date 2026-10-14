@@ -244,6 +244,58 @@ describe('postTask() — a public task takes submissions from many agents', () =
     expect(calls).toEqual(['/api/v1/a2a/open-submission']);
   });
 
+  it('refuses what the request alone decides before any request, as before', async () => {
+    const { calls } = stub();
+    expect((await refusal(bb().postTask({ ...brief, privacy: 'public', amountRaw: '1.5' }, { signer: wallet().signer }))).code).toBe('INVALID_AMOUNT');
+    expect((await refusal(bb().postTask({ ...brief, privacy: 'public', durationSeconds: 5 }, { signer: wallet().signer }))).code).toBe('INVALID_DURATION');
+    expect((await refusal(bb().postTask({ ...brief, privacy: 'private', open: {} }, { signer: wallet().signer }))).code).toBe('OPEN_TASK_MUST_BE_PUBLIC');
+    expect((await refusal(bb().postTask({ ...brief, targetExecutor: WINNER as `0x${string}`, open: {} }, { signer: wallet().signer }))).code).toBe('OPEN_TASK_PINNED');
+    expect((await refusal(bb().postTask({ ...brief, verificationMode: 'manual', open: {} }, { signer: wallet().signer }))).code).toBe('OPEN_TASK_NEEDS_VERIFIER');
+    expect(calls).toEqual([]);
+  });
+
+  it('lets a named verifier judge a public task without verificationMode', async () => {
+    const { posts } = stub();
+    await bb().postTask({ ...brief, privacy: 'public', verifierAddress: VERIFIER as `0x${string}` }, { signer: wallet().signer });
+    expect(posts[0]).toMatchObject({ verifierAddress: VERIFIER, verificationMode: 'agent', open: { mode: 'agent', creatorWindow: 0 } });
+  });
+
+  it("treats the platform's address named as verifier as the platform: you pick first", async () => {
+    const { posts } = stub();
+    await bb().postTask({ ...brief, privacy: 'public', verificationMode: 'agent', verifierAddress: JUDGE as `0x${string}` }, { signer: wallet().signer });
+    expect(posts[0]).toMatchObject({ verifierAddress: JUDGE, open: { mode: 'creator', creatorWindow: 86_400 } });
+  });
+
+  it('refuses a public task with a check that would be dropped, rather than change it silently', async () => {
+    stub();
+    expect((await refusal(bb().postTask({ ...brief, privacy: 'public', verificationMode: 'manual' }, { signer: wallet().signer }))).code).toBe('OPEN_TASK_NO_MANUAL');
+    expect((await refusal(bb().postTask({ ...brief, privacy: 'public', verificationMode: 'auto', verifierAddress: VERIFIER as `0x${string}` }, { signer: wallet().signer }))).code).toBe('OPEN_TASK_NEEDS_VERIFIER');
+  });
+
+  it('keeps manual approval on a public task the backend gives one agent', async () => {
+    const { posts } = stub({ enabled: false });
+    await bb().postTask({ ...brief, privacy: 'public', verificationMode: 'manual' }, { signer: wallet().signer });
+    expect(posts[0]).toMatchObject({ verificationMode: 'manual' });
+    expect(posts[0]).not.toHaveProperty('open');
+  });
+
+  it("says when it could not read whether the backend takes open tasks, for an explicit open task", async () => {
+    stub();
+    vi.mocked(fetch).mockImplementationOnce(async () => { throw new TypeError('fetch failed'); });
+    const err = await refusal(bb().postTask({ ...brief, open: {} }, { signer: wallet().signer }));
+    expect(err.code).toBe('OPEN_SUBMISSION_UNKNOWN');
+  });
+
+  it('decides from the config the caller passes, without reading it again', async () => {
+    const { calls, posts } = stub();
+    const cfg = { enabled: true, posting: true, defaultJudge: JUDGE, pickModes: ['agent', 'creator'] as Array<'agent' | 'creator'>, windows: { creatorMinSec: 3600, creatorMaxSec: 604800, verifierSec: 172800, backupSec: 172800 }, maxResultBytes: 65536, maxScorecardBytes: 32768 };
+    await bb().postTask({ ...brief, privacy: 'public' }, { signer: wallet().signer, openSubmissionConfig: cfg });
+    expect(posts[0]).toMatchObject({ verifierAddress: JUDGE, open: { mode: 'creator', creatorWindow: 86_400 } });
+    await bb().postTask({ ...brief, privacy: 'public' }, { signer: wallet().signer, openSubmissionConfig: null });
+    expect(posts[1]).not.toHaveProperty('open');
+    expect(calls).not.toContain('/api/v1/a2a/open-submission');
+  });
+
   it('refuses an open task with no verifier when the backend names no judge', async () => {
     stub({ defaultJudge: null });
     const err = await refusal(bb().postTask({ ...brief, open: {} }, { signer: wallet().signer }));

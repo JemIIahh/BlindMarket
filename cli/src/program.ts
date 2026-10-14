@@ -78,6 +78,7 @@ function checkWhoWorks(opts: WhoWorks): void {
   if (opts.target && (opts.open || openTerms)) throw new CliError('OPEN_TASK_PINNED', 'A task many agents submit to is offered to every agent: drop --target, or --open, --verifier, --pick and --pick-window.');
   if (opts.verifier && !ADDRESS.test(opts.verifier)) throw new CliError('BAD_VERIFIER', '--verifier must be a 0x address: the verifier agent that judges the submissions.');
   if (opts.verifier && opts.verification) throw new CliError('BAD_VERIFICATION', 'A task many agents submit to is judged by its --verifier agent: drop --verification.');
+  if (opts.open && opts.verification === 'manual') throw new CliError('BAD_VERIFICATION', 'On a task many agents submit to you pick the winner rather than approve one result: drop --verification manual (you pick first).');
   if (opts.pick !== undefined && opts.pick !== 'verifier' && opts.pick !== 'me') throw new CliError('BAD_PICK', '--pick must be verifier or me.');
   if (opts.pickWindow !== undefined && !(/^\d+$/.test(opts.pickWindow) && Number(opts.pickWindow) >= 3_600 && Number(opts.pickWindow) <= 604_800)) {
     throw new CliError('BAD_PICK_WINDOW', '--pick-window must be a whole number of seconds from 3600 (1 hour) to 604800 (7 days).');
@@ -96,29 +97,48 @@ function checkWhoWorks(opts: WhoWorks): void {
  * public one for --target, or a backend that takes no open tasks or cannot
  * say. --open insists, and throws where the task would get one agent.
  */
-async function whoWorks(bb: BlindMarket, opts: WhoWorks): Promise<{ verifier: string; byPlatform: boolean; pick: 'agent' | 'creator'; window?: number } | undefined> {
-  if (!opts.open && (!opts.public || opts.target)) return undefined;
+type OpenConfig = Awaited<ReturnType<BlindMarket['getOpenSubmissionConfig']>>;
+
+/**
+ * `open`: the terms when many agents submit, undefined when one agent works on
+ * it. `config`: the open-submission config this decision was made from (null
+ * when it could not be read), handed to postTask() so the SDK decides from the
+ * same answer and what the confirm stated is what is funded. Absent when no
+ * config was read (a private task, or one for --target).
+ */
+async function whoWorks(bb: BlindMarket, opts: WhoWorks): Promise<{
+  open?: { verifier: string; byPlatform: boolean; pick: 'agent' | 'creator'; window?: number };
+  config?: OpenConfig | null;
+}> {
+  if (!opts.open && (!opts.public || opts.target)) return {};
   const insist = opts.open || !!(opts.verifier || opts.pick || opts.pickWindow);
   if (insist) assertOpenSdk(bb);
-  const read = (bb as { getOpenSubmissionConfig?: () => Promise<{ enabled?: boolean; posting?: boolean; defaultJudge?: string | null }> }).getOpenSubmissionConfig;
-  const cfg = typeof read === 'function' ? await read.call(bb).catch(() => null) : null;
-  if (!cfg?.enabled || cfg.posting !== true) {
+  const read = (bb as { getOpenSubmissionConfig?: () => Promise<OpenConfig> }).getOpenSubmissionConfig;
+  if (typeof read !== 'function') return {};
+  const config = await read.call(bb).catch(() => null);
+  if (!config?.enabled || config.posting !== true) {
     if (insist) throw new CliError('OPEN_UNAVAILABLE', "The backend isn't taking tasks many agents submit to right now. Drop --open, --verifier, --pick and --pick-window to post for one agent.");
-    return undefined;
+    return { config };
   }
-  const verifier = opts.verifier ?? cfg.defaultJudge ?? undefined;
+  const verifier = opts.verifier ?? config.defaultJudge ?? undefined;
   if (!verifier) {
     if (insist) throw new CliError('VERIFIER_REQUIRED', 'The backend names no judge for tasks many agents submit to: add --verifier <0x address>, the verifier agent that judges the submissions.');
-    return undefined;
+    return { config };
   }
-  const byPlatform = !!cfg.defaultJudge && verifier.toLowerCase() === cfg.defaultJudge.toLowerCase();
+  if (opts.verification === 'manual') {
+    throw new CliError('BAD_VERIFICATION', 'A public task takes submissions from many agents, and you pick the winner rather than approve one result: drop --verification manual (you pick first), or post it private for one agent.');
+  }
+  const byPlatform = !!config.defaultJudge && verifier.toLowerCase() === config.defaultJudge.toLowerCase();
   const pick = opts.pick ?? (byPlatform ? 'me' : 'verifier');
   if (byPlatform && pick !== 'me') throw new CliError('PLATFORM_JUDGE_POSTER_PICKS', 'With BlindMarket as the judge you pick the winner first: drop --pick verifier, or add --verifier with your own verifier agent.');
   if (opts.pickWindow !== undefined && pick !== 'me') throw new CliError('BAD_PICK_WINDOW', '--pick-window is your window to pick first: add --pick me.');
   // The window the confirm states is the one funded: the default applied here, not later.
-  return pick === 'me'
-    ? { verifier, byPlatform, pick: 'creator', window: opts.pickWindow === undefined ? 86_400 : Number(opts.pickWindow) }
-    : { verifier, byPlatform, pick: 'agent' };
+  return {
+    config,
+    open: pick === 'me'
+      ? { verifier, byPlatform, pick: 'creator', window: opts.pickWindow === undefined ? 86_400 : Number(opts.pickWindow) }
+      : { verifier, byPlatform, pick: 'agent' },
+  };
 }
 
 /** Tasks many agents submit to need SDK methods newer than the CLI's oldest supported SDK. */
@@ -930,7 +950,7 @@ export function buildProgram(): Command {
       checkWhoWorks(opts);
 
       const { bb, signer, postingChain, chains } = await signingClient();
-      const open = await whoWorks(bb, opts);
+      const { open, config: openConfig } = await whoWorks(bb, opts);
       const entry = chains.find((c) => c.chain === postingChain);
       if (!postingChain || !entry?.token.address) throw new CliError('SETTLEMENT_NOT_POSTABLE', 'The backend has no chain to post new tasks on right now.');
       if (opts.token && opts.token.toLowerCase() !== entry.token.address.toLowerCase()) {
@@ -974,7 +994,10 @@ export function buildProgram(): Command {
             ...(opts.target ? { targetExecutor: opts.target as `0x${string}` } : {}),
             locationZone: opts.zone,
           },
-          { onFunded: ({ taskHash, indexParams }) => { fundedHash = taskHash; setPendingPost(taskHash, { ...indexParams }); } },
+          {
+            ...(openConfig !== undefined ? { openSubmissionConfig: openConfig } : {}),
+            onFunded: ({ taskHash, indexParams }) => { fundedHash = taskHash; setPendingPost(taskHash, { ...indexParams }); },
+          },
         ));
       } catch (e) {
         const err = e as ApiError;

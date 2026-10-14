@@ -21,6 +21,29 @@ export const MAX_PICK_WINDOW_SECONDS = 7 * 86_400;
 export const DEFAULT_PICK_WINDOW_SECONDS = 86_400;
 /** The auto checks a post gets when it names none: what the auto verifier, or the platform judging an open task, scores against. */
 export const DEFAULT_AUTO_CRITERIA: Readonly<Record<string, unknown>> = Object.freeze({ min_length: 10, pass_threshold: 60 });
+/**
+ * Stands in for an open task's judge while postTask() checks what the request
+ * alone decides, before it reads which judge the backend names.
+ */
+const JUDGE_PLACEHOLDER = '0x000000000000000000000000000000000000dEaD' as Address;
+
+/**
+ * `params` checkable before any request: an open task with no verifier named
+ * gets a placeholder judge, so normalizePost() refuses everything else it
+ * would (amount, duration, a private or pinned open task, the pick terms)
+ * without waiting for the platform's address.
+ */
+export function withJudgePlaceholder(params: PostTaskParams): PostTaskParams {
+  if (params.open === undefined || params.verifierAddress) return params;
+  // The platform judges such a task, and the poster then picks first (withOpenDefaults).
+  return {
+    ...params,
+    verifierAddress: JUDGE_PLACEHOLDER,
+    verificationMode: params.verificationMode === 'auto' ? undefined : params.verificationMode,
+    open: params.open && typeof params.open === 'object' ? { ...params.open, pick: params.open.pick ?? 'creator' } : params.open,
+  };
+}
+
 /** A brief's key is wrapped to at most this many executors (POST /tasks caps wrappedKeys at 200). */
 export const MAX_WRAPPED_KEYS = 200;
 

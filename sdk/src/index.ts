@@ -6,7 +6,7 @@ import {
 import { checkEscrowCall, evidenceHashOf, openEvidenceHashOf, scorecardHashOf, taskIdOf, type EscrowFunction } from './escrowCalls.js';
 import { isPinnedSettlement, SETTLEMENT_PINS, type SettlementPin } from './settlementPins.js';
 import {
-  normalizePost, checkRowFields, sealBrief, createTaskBody, indexParamsFor, commitsVerifier, DEFAULT_AUTO_CRITERIA,
+  normalizePost, checkRowFields, sealBrief, createTaskBody, indexParamsFor, commitsVerifier, DEFAULT_AUTO_CRITERIA, withJudgePlaceholder,
   type NormalizedPost, type SealedBrief, type ExecutorKey,
 } from './posting.js';
 import type {
@@ -369,6 +369,14 @@ export interface PostTaskOptions {
    * Refused with AMOUNT_ABOVE_MAX before anything is sent.
    */
   maxAmountRaw?: bigint | string;
+  /**
+   * The open-submission config the caller already read
+   * (getOpenSubmissionConfig()). postTask() decides from it whether a public
+   * task takes many agents and who judges it, instead of reading it again, so
+   * what the caller showed before asking is what is funded. null: as if the
+   * read failed, so a public task gets one agent and `open` is refused.
+   */
+  openSubmissionConfig?: OpenSubmissionConfig | null;
   /**
    * Called the moment the funding transaction is broadcast, with its hash and
    * the complete listing body. Persist `indexParams`: if this process dies
@@ -1028,7 +1036,9 @@ export class BlindMarket {
    * );
    */
   async postTask(params: PostTaskParams, opts: PostTaskOptions = {}): Promise<PostedTask> {
-    const { params: terms, config } = await this.withOpenDefaults(params);
+    // What the request alone decides, refused before any request.
+    normalizePost(withJudgePlaceholder(params), opts.maxAmountRaw);
+    const { params: terms, config } = await this.withOpenDefaults(params, opts);
     const post = normalizePost(terms, opts.maxAmountRaw);
     if (post.open) {
       const cfg = await this.assertOpenSubmission('Posting a task many agents submit to', config);
@@ -1940,21 +1950,29 @@ export class BlindMarket {
   /**
    * `params` as postTask() posts them. A public task takes submissions from
    * many agents (docs/OPEN-SUBMISSION-TASKS.md section 22) when the backend
-   * takes open tasks: judged by the caller's verifier agent if they name one
-   * with verificationMode 'agent', else by the platform (defaultJudge) with
-   * the poster picking first. A public task for one named agent, or a backend
-   * that takes no open tasks or cannot say, gets one agent, as before. An
-   * explicit `open` with no verifier gets the platform as its judge. Reads
-   * the backend's open-submission config only for a public or open post.
+   * takes open tasks: judged by the verifier agent the caller names, else by
+   * the platform (defaultJudge), with the poster picking first when the
+   * platform judges. A public task for one named agent, or a backend that
+   * takes no open tasks, names no judge, or cannot say, gets one agent, as
+   * before. An explicit `open` with no verifier gets the platform. Reads the
+   * config only for a public or open post, and not when the caller passed it
+   * (`opts.openSubmissionConfig`).
    */
-  private async withOpenDefaults(params: PostTaskParams): Promise<{ params: PostTaskParams; config: OpenSubmissionConfig | null }> {
+  private async withOpenDefaults(params: PostTaskParams, opts: PostTaskOptions): Promise<{ params: PostTaskParams; config: OpenSubmissionConfig | null }> {
+    const refuse = (code: string, message: string) => new ApiError(400, `${message} Nothing was sent.`, undefined, code);
     const explicit = params.open !== undefined;
     if (!explicit && (params.privacy !== 'public' || params.targetExecutor !== undefined)) return { params, config: null };
     // A named verifier needs nothing from the backend yet: normalizePost refuses bad terms before any request.
-    if (explicit && params.verifierAddress) return { params, config: null };
-    const config = await this.getOpenSubmissionConfig().catch(() => null);
+    if (explicit && params.verifierAddress) return { params, config: opts.openSubmissionConfig ?? null };
+    let readError: Error | undefined;
+    const config = 'openSubmissionConfig' in opts
+      ? opts.openSubmissionConfig ?? null
+      : await this.getOpenSubmissionConfig().catch((err: Error) => { readError = err; return null; });
     const judge = config?.defaultJudge ?? undefined;
     if (explicit) {
+      if (!config) {
+        throw new ApiError(503, `Could not read whether the backend takes tasks many agents submit to (GET /a2a/open-submission${readError ? `: ${readError.message}` : ''}). Nothing was sent.`, undefined, 'OPEN_SUBMISSION_UNKNOWN');
+      }
       // normalizePost checks the rest, and refuses a missing verifier when the backend names no judge.
       if (!judge || (params.verificationMode !== undefined && params.verificationMode !== 'auto')) return { params, config };
       return {
@@ -1969,8 +1987,16 @@ export class BlindMarket {
       };
     }
     if (!config?.enabled || config.posting !== true) return { params, config };
-    const ownJudge = params.verificationMode === 'agent' && params.verifierAddress ? params.verifierAddress : undefined;
+    const named = params.verifierAddress;
+    const platformNamed = !!named && !!judge && named.toLowerCase() === judge.toLowerCase();
+    const ownJudge = named && !platformNamed ? named : undefined;
     if (!ownJudge && !judge) return { params, config };
+    if (ownJudge && params.verificationMode !== undefined && params.verificationMode !== 'agent') {
+      throw refuse('OPEN_TASK_NEEDS_VERIFIER', `A public task takes submissions from many agents, judged by verifierAddress: drop verificationMode '${params.verificationMode}', or set it to 'agent'.`);
+    }
+    if (params.verificationMode === 'manual') {
+      throw refuse('OPEN_TASK_NO_MANUAL', "A public task takes submissions from many agents, and you pick the winner rather than approving one result: drop verificationMode 'manual' (you pick first), or post it private for one agent.");
+    }
     return {
       params: {
         ...params,
