@@ -6,8 +6,8 @@ import { pickVerifierService } from './verification.js';
  * not whatever service the contract happens to list first (an image or
  * fine-tuning service, or one whose TEE signer was never acknowledged).
  */
-const svc = (provider: string, serviceType: string, ack: boolean, model = 'm') =>
-  ({ provider, serviceType, teeSignerAcknowledged: ack, model, inputPrice: 0n, outputPrice: 0n, url: `https://${provider}.example` });
+const svc = (provider: string, serviceType: string, ack: boolean, model = 'm', formats?: string[]) =>
+  ({ provider, serviceType, teeSignerAcknowledged: ack, model, inputPrice: 0n, outputPrice: 0n, url: `https://${provider}.example`, ...(formats ? { formats } : {}) });
 
 describe('pickVerifierService', () => {
   const listed = [
@@ -34,5 +34,22 @@ describe('pickVerifierService', () => {
 
   it('finds nothing when no chat service qualifies', () => {
     expect(pickVerifierService([svc('0xaaa', 'text-to-image', true), svc('0xbbb', 'chatbot', false)], '')).toBeNull();
+  });
+
+  it('skips a service that serves only the Anthropic format (claude-* on 0G mainnet)', () => {
+    const svcs = [svc('0xa11', 'chatbot', true, 'claude-opus-5', ['anthropic']), svc('0xb22', 'chatbot', true, 'glm-5', ['openai'])];
+    expect(pickVerifierService(svcs, '')?.provider).toBe('0xb22');
+  });
+
+  it('does not take a configured provider that serves only the Anthropic format', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const svcs = [svc('0xa11', 'chatbot', true, 'claude-opus-5', ['anthropic']), svc('0xb22', 'chatbot', true, 'glm-5', ['openai', 'anthropic'])];
+    expect(pickVerifierService(svcs, '0xA11')?.provider).toBe('0xb22');
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('finds nothing when every chat service serves only the Anthropic format', () => {
+    expect(pickVerifierService([svc('0xa11', 'chatbot', true, 'm', ['anthropic'])], '')).toBeNull();
   });
 });

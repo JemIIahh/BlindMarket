@@ -1,7 +1,7 @@
 import { ethers } from 'ethers';
 import https from 'https';
 import { config } from '../config.js';
-import { ogChatServices, type OgServiceLike } from './ogComputeModels.js';
+import { ogChatServices, servesOpenAi, type OgServiceLike } from './ogComputeModels.js';
 
 // @0gfoundation/0g-compute-ts-sdk ESM exports — use createRequire for CJS compat
 import { createRequire } from 'module';
@@ -104,26 +104,51 @@ interface ServiceInfo {
 /**
  * The service the verifier calls: the configured provider when it is
  * registered, else the first chatbot service whose TEE signer 0G has
- * acknowledged (ogChatServices, as agents choose theirs). Not simply the
- * first service listed: that can be a non-chat service, or one whose answers
- * can't be verified. Null when no service qualifies.
+ * acknowledged (ogChatServices, as agents choose theirs) and that serves the
+ * OpenAI format the verifier calls in (servesOpenAi). Not simply the first
+ * service listed: that can be a non-chat service, one whose answers can't be
+ * verified, or one that serves only the Anthropic format. Null when no
+ * service qualifies.
  */
 export function pickVerifierService<T extends OgServiceLike & { url?: string; endpoint?: string }>(services: readonly T[], configured: string): T | null {
   if (configured) {
     const match = services.find((s) => s.provider?.toLowerCase() === configured.toLowerCase());
-    if (match) return match;
-    console.warn(`Configured provider ${configured} not found, using the first chat service`);
+    if (match && servesOpenAi(match)) return match;
+    console.warn(`Configured provider ${configured} ${match ? 'does not serve the OpenAI format' : 'not found'}, using the first chat service`);
   }
-  return ogChatServices(services)[0] ?? null;
+  return ogChatServices(services).filter(servesOpenAi)[0] ?? null;
+}
+
+type VerifierService = OgServiceLike & { url?: string; endpoint?: string; model?: string };
+
+/**
+ * The acknowledged services, with the API formats each serves when 0G's
+ * status API lists them (modelInfo.supported_formats, not in the SDK's
+ * types). The detailed listing falls back to the plain one if it fails.
+ */
+async function listVerifierServices(b: Awaited<ReturnType<typeof getBroker>>): Promise<VerifierService[]> {
+  const inference = b.inference as { listService(): Promise<unknown[]>; listServiceWithDetail?: () => Promise<unknown[]> };
+  if (typeof inference.listServiceWithDetail === 'function') {
+    try {
+      const rows = (await inference.listServiceWithDetail()) as Array<VerifierService & { modelInfo?: { supported_formats?: unknown } }>;
+      return rows.map((r) => {
+        const f = r.modelInfo?.supported_formats;
+        return Array.isArray(f) ? { ...r, formats: f.filter((x): x is string => typeof x === 'string') } : r;
+      });
+    } catch (err) {
+      console.warn(`[verification] detailed 0G service listing failed (${(err as Error).message}); using the plain list`);
+    }
+  }
+  return ((await inference.listService()) ?? []) as VerifierService[];
 }
 
 /** Find the inference provider the verifier uses (pickVerifierService). */
 async function findProvider(): Promise<ServiceInfo> {
   const b = await getBroker();
-  const services = (await b.inference.listService()) as Array<OgServiceLike & { url?: string; endpoint?: string; model?: string }>;
-  const picked = pickVerifierService(services ?? [], config.ogComputeProviderAddress);
+  const services = await listVerifierServices(b);
+  const picked = pickVerifierService(services, config.ogComputeProviderAddress);
   if (!picked) {
-    throw new Error('No 0G Compute chat service with an acknowledged TEE signer is available');
+    throw new Error('No 0G Compute chat service with an acknowledged TEE signer that serves the OpenAI format is available');
   }
   return {
     providerAddress: picked.provider,
