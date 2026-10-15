@@ -597,7 +597,7 @@ export function createOgCompute({
           return Array.isArray(f) ? { ...r, formats: f.filter((x) => typeof x === 'string') } : r;
         });
       } catch (e) {
-        log(`0G Compute: couldn't read the providers' API formats (${e.message}); choosing from the plain list`);
+        log(`0G Compute: couldn't list the services with their details (${e.message}); retrying with the plain list`);
       }
     }
     return page((offset, limit) => broker.inference.listService(offset, limit, true));

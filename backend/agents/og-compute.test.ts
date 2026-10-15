@@ -312,12 +312,12 @@ describe('setup: only a provider the worker can call (OpenAI format)', () => {
     expect(compute.service()?.provider).toBe(QWEN.provider);
   });
 
-  it("falls back to the plain list when the formats can't be read, and says so", async () => {
-    const chain = withDetail(new Error('status API down'));
+  it('falls back to the plain list when the detailed listing fails, and says so', async () => {
+    const chain = withDetail(new Error('chain read failed'));
     const { compute, logs } = og('qwen3.7-plus', chain);
     await compute.ensure({ force: true });
     expect(compute.ready()).toBe(true);
     expect(chain.broker.inference.listService).toHaveBeenCalled();
-    expect(logs.some((l) => l.includes("couldn't read the providers' API formats"))).toBe(true);
+    expect(logs.some((l) => l.includes("couldn't list the services with their details"))).toBe(true);
   });
 });
