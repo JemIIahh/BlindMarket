@@ -373,7 +373,13 @@ export async function nextStoredNonce(chainId: number, sponsor: string): Promise
   return rows[0]?.n == null ? null : Number(rows[0].n) + 1;
 }
 
-/** Store a signed transaction before it is broadcast. */
+/**
+ * Store a signed transaction before it is broadcast, in one statement and
+ * only while the sponsor has no stored transaction a node hasn't
+ * acknowledged ('signed'): a nonce is never stored above one that may never
+ * land. Null when one exists; the caller must not broadcast. Recovery's
+ * sent → signed flip is its own statement, so the two can't interleave.
+ */
 export async function recordSignedTx(tx: {
   chainId: number;
   reservationId: number;
@@ -382,13 +388,15 @@ export async function recordSignedTx(tx: {
   rawTx: string;
   txHash: string;
   withAuthorization: boolean;
-}): Promise<SponsoredTx> {
+}): Promise<SponsoredTx | null> {
   const { rows } = await (await pool()).query(
     `INSERT INTO gas_sponsor_txs (chain_id, reservation_id, sponsor, nonce, raw_tx, tx_hash, with_authorization, status)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, 'signed') RETURNING *`,
+     SELECT $1, $2, $3, $4, $5, $6, $7, 'signed'
+     WHERE NOT EXISTS (SELECT 1 FROM gas_sponsor_txs WHERE chain_id = $1 AND sponsor = $3 AND status = 'signed')
+     RETURNING *`,
     [tx.chainId, tx.reservationId, tx.sponsor.toLowerCase(), tx.nonce, tx.rawTx, tx.txHash, tx.withAuthorization],
   );
-  return toTx(rows[0]);
+  return rows[0] ? toTx(rows[0]) : null;
 }
 
 /**

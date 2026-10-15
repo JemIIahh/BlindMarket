@@ -306,16 +306,23 @@ and first-time setup. The 10% fee on a 0.10 USDC task is 0.01 USDC.
     authorization still applies whenever it lands, and would bump the
     wallet's nonce under the worker's own-gas transaction. It ends when it
     lands or its nonce is filled. See "A stuck transaction" below.
-  - Recovery's flip of a transaction back to unacknowledged runs through the
-    send queue, and each send checks again right before it signs, so no send
-    can sign above it in between. A flip never overwrites a status a settle
-    wrote meanwhile.
+  - A send is stored only while the sponsor has no unacknowledged
+    transaction, checked in the same statement as the insert; not stored, it
+    is not broadcast (`SPONSOR_BACKLOG`). So recovery's flip of a transaction
+    back to unacknowledged can't let a send sign above it, however many sends
+    are queued. Every status write after a broadcast is conditional on the
+    status it expects, so none overwrites a settle that got there first.
+  - A writer pass that runs past ten minutes (an RPC or database read that
+    never answers) is reported to Sentry and a new pass starts; the hung one
+    can't block the ones after it.
   - Receipts are polled, because Arc RPC replicas can lag.
 - **Monitoring.**
   - `/health/bridge` shows the sponsor balance, calls today and budget left,
     and what is still in flight: `heldReservations` and `unsettledTxs`, read
     from Postgres at most every 30 s per process (the route is
-    unauthenticated). With sponsorship off it shows them only where this
+    unauthenticated), and again after any pause, kill or resume. The founder
+    route `GET /api/v1/admin/gas-sponsor` always reads them fresh: watch that
+    one while waiting for them to reach 0. With sponsorship off it shows them only where this
     backend could drain (the key and the rest of the configuration still
     set; without them it reads nothing from the database), with `draining`,
     and if a run-time check stops the drain, `drainProblem`.
@@ -344,8 +351,8 @@ order:
 1. Pause: `POST /api/v1/admin/gas-sponsor/controls` with
    `{ "paused": true, "reason": "..." }`. No new reservations; held ones are
    still served.
-2. Wait until `/health/bridge` shows `gasSponsor.heldReservations` and
-   `gasSponsor.unsettledTxs` both at 0. Reservations end within an hour of
+2. Wait until `GET /api/v1/admin/gas-sponsor` (or `/health/bridge`, up to
+   30 s behind) shows `heldReservations` and `unsettledTxs` both at 0. Reservations end within an hour of
    their assignment; a transaction lands or is killed as stuck.
 3. Unset `GAS_SPONSOR_ENABLED`. Remove or rotate `GAS_SPONSOR_PRIVATE_KEY`
    only after that, and sweep the float.

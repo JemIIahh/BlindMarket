@@ -11,7 +11,8 @@
  *   it is broadcast. recover() re-broadcasts those bytes and never signs
  *   again; a transaction whose nonce went to another is marked dropped.
  * - No nonce above a hole: while a stored transaction no node has
- *   acknowledged is unsettled, nothing new is signed (SPONSOR_BACKLOG), and
+ *   acknowledged is unsettled, nothing new is stored or sent (SPONSOR_BACKLOG;
+ *   recordSignedTx checks it in the same statement as its insert), and
  *   a nonce is freed only when a node refused the bytes on their first and
  *   only broadcast. One that has not landed in GAS_SPONSOR_STUCK_MINUTES
  *   kills sponsorship; its call reports failed once the signed call's own
@@ -272,6 +273,7 @@ async function trip(settings: Enabled, action: 'paused' | 'killed', reason: stri
   lastTrip = { at: new Date().toISOString(), action, reason, nonce: tx.nonce, txHash: tx.txHash };
   if (action === 'killed' || !draining()) {
     await setControls(settings.chainId, action === 'killed' ? { killed: true } : { paused: true }, `auto: ${reason}`, 'auto');
+    invalidateSponsorReportCache();
   }
   console.error(`[gasSponsor] ⛔ ${action} automatically: ${reason}`);
   Sentry.captureMessage(`gas sponsor ${action} automatically on ${settings.chainId}: ${reason}`, action === 'killed' ? 'fatal' : 'error');
@@ -679,19 +681,22 @@ async function send(settings: Enabled, reservation: Reservation, tx: Prepared): 
         });
         hash = ethers.keccak256(raw);
       }
-      // Again at the last moment: nothing unacknowledged may have appeared
-      // since sendBlocker looked (recovery's sent → signed flip runs through
-      // this queue too, so this is belt and braces).
-      const lateBlock = await sendBlocker(settings, []);
-      if (lateBlock) {
-        if (tx.kind === DelegateKind.ReleaseUnjudgedWork) await closeReservation(reservation.id, 'released');
-        outcome = Promise.resolve(lateBlock);
-        return null;
-      }
-      await recordSignedTx({
+      // Stored only while no stored transaction lacks a node's
+      // acknowledgement, checked in the same statement: recovery may have
+      // flipped one back since sendBlocker looked. Not stored: not sent.
+      const recorded = await recordSignedTx({
         chainId: settings.chainId, reservationId: reservation.id, sponsor: sponsor.address, nonce, rawTx: raw, txHash: hash,
         withAuthorization: !!tx.authorization,
       });
+      if (!recorded) {
+        if (tx.kind === DelegateKind.ReleaseUnjudgedWork) await closeReservation(reservation.id, 'released');
+        outcome = Promise.resolve(refuse(
+          503,
+          'SPONSOR_BACKLOG',
+          'An earlier sponsored transaction has not reached the network; nothing new is signed until it does',
+        ));
+        return null;
+      }
     } catch (err) {
       outcome = Promise.resolve(refuse(503, 'NOT_SENT', `Not sent: ${safeErrorMessage(err)}`));
       return null;
@@ -707,12 +712,16 @@ async function send(settings: Enabled, reservation: Reservation, tx: Prepared): 
           outcome = Promise.resolve(pendingResult(hash, `Broadcast of ${hash} did not go through yet; it is re-sent until it lands`));
           return null;
         }
-        // Final: these bytes can never land.
+        // Final: these bytes can never land. Only while still 'signed': a
+        // settle outside the queue (the tick, a status read) may already have
+        // found them mined, and its status and cost must stand.
+        if (!(await setTxStatus(hash, why === 'nonce_low' ? 'dropped' : 'rejected', 'signed'))) {
+          outcome = settle(settings, reservation, tx, hash);
+          return null;
+        }
         if (why === 'nonce_low') {
-          await setTxStatus(hash, 'dropped');
           await trip(settings, 'killed', `the node says the sponsor's nonce ${nonce} is used, but not by ${hash}: the sponsor key is signing elsewhere`, { nonce, txHash: hash });
         } else {
-          await setTxStatus(hash, 'rejected');
           await trip(settings, 'paused', `the node rejected sponsored tx ${hash} (nonce ${nonce}): ${safeErrorMessage(err)}`, { nonce, txHash: hash });
         }
         if (tx.kind === DelegateKind.ReleaseUnjudgedWork) await closeReservation(reservation.id, 'released');
@@ -720,7 +729,9 @@ async function send(settings: Enabled, reservation: Reservation, tx: Prepared): 
         return null;
       }
     }
-    await setTxStatus(hash, 'sent');
+    // Only from 'signed': a settle that got here first keeps 'confirmed' (and
+    // its cost), which a write back to 'sent' would undo for good.
+    await setTxStatus(hash, 'sent', 'signed');
     const settled = settle(settings, reservation, tx, hash);
     outcome = settled;
     // The queue holds the next send until this one is mined.
@@ -823,15 +834,12 @@ export async function recoverSponsorTxs(settings: Enabled, now = Date.now()): Pr
         // here; freeing it let the next send sign above a hole. The bytes
         // count as unacknowledged again, which holds every new send, and are
         // re-sent each tick until a node takes them or they are stuck.
-        // Through the send queue: a send that already passed its check must
-        // not sign above this tx while it flips (it signs first, or sees it).
-        if (tx.status === 'sent') {
-          await enqueue(async () => {
-            await setTxStatus(tx.txHash, 'signed', 'sent');
-            return null;
-          });
-        }
-        if (!refusedAlerted.has(tx.txHash)) {
+        // Directly, not through the send queue: queued sends would run first
+        // and sign above it. recordSignedTx refuses to store a send while it
+        // is 'signed', in the same statement. Only from 'sent': if it settled
+        // meanwhile, nothing changes and there is nothing to alert.
+        const flipped = tx.status === 'sent' ? await setTxStatus(tx.txHash, 'signed', 'sent') : true;
+        if (flipped && !refusedAlerted.has(tx.txHash)) {
           refusedAlerted.add(tx.txHash);
           await trip(settings, 'paused', `a node refused to take sponsored tx ${tx.txHash} (nonce ${tx.nonce}) again: ${safeErrorMessage(err)}; nothing new is signed until a node takes it`, tx);
         }
@@ -1025,6 +1033,7 @@ export async function maybeAutoPause(settings: Enabled): Promise<string | null> 
   }
   if (!reason) return null;
   await setControls(settings.chainId, { paused: true }, `auto: ${reason}`, 'auto');
+  invalidateSponsorReportCache();
   console.error(`[gasSponsor] ⛔ paused automatically: ${reason}`);
   Sentry.captureMessage(`gas sponsor paused automatically on ${settings.chainId}: ${reason}`, 'error');
   return reason;
@@ -1042,19 +1051,29 @@ let started = false;
  * automatic pause, while held reservations or unsettled transactions are
  * left, then it lets the lock go. Exported for tests.
  */
-export async function gasSponsorTick(): Promise<void> {
-  // One pass at a time: recovery can wait on the send queue (a sent → signed
-  // flip), and the 30 s interval must not start a second pass meanwhile.
-  if (ticking) return;
-  ticking = true;
+export async function gasSponsorTick(now: () => number = Date.now): Promise<void> {
+  // One pass at a time: a slow RPC or database read must not pile passes up.
+  // But a pass that hangs (no RPC answer, no statement timeout) must not stop
+  // every later one: past TICK_STALL_MS a new pass starts, and the hung one,
+  // if it ever ends, leaves the new one's mark alone (the generation).
+  if (tickStartedAt !== null) {
+    if (now() - tickStartedAt < TICK_STALL_MS) return;
+    const minutes = Math.round((now() - tickStartedAt) / 60_000);
+    console.error(`[gasSponsor] ⚠ the writer pass started ${minutes} minutes ago has not finished; starting another`);
+    Sentry.captureMessage(`gas sponsor: a writer pass has run ${minutes} minutes; starting another`, 'error');
+  }
+  const generation = ++tickGeneration;
+  tickStartedAt = now();
   try {
     await tick();
   } finally {
-    ticking = false;
+    if (tickGeneration === generation) tickStartedAt = null;
   }
 }
 
-let ticking = false;
+const TICK_STALL_MS = 10 * 60_000;
+let tickGeneration = 0;
+let tickStartedAt: number | null = null;
 
 async function tick(): Promise<void> {
   const run = await drainableSettings('gas sponsor').catch((e) => ({ ok: false as const, reason: (e as Error).message }));
@@ -1105,7 +1124,7 @@ export async function _resetGasSponsorRelayer(): Promise<void> {
   stuckAlerted.clear();
   refusedAlerted.clear();
   countsMemo = null;
-  ticking = false;
+  tickStartedAt = null;
   lostSince.clear();
 }
 
@@ -1149,10 +1168,11 @@ export interface GasSponsorReport {
  * throws. /health/bridge is unauthenticated: an error appears here only as
  * safeErrorMessage gives it (no request detail, RPC URLs masked).
  */
-export async function gasSponsorReport(): Promise<GasSponsorReport> {
+export async function gasSponsorReport(opts: { fresh?: boolean } = {}): Promise<GasSponsorReport> {
+  const fresh = opts.fresh === true;
   try {
     const on = gasSponsorSettings();
-    if (!on.enabled) return await offReport(on.reason);
+    if (!on.enabled) return await offReport(on.reason, fresh);
     const run = await runnableSettings('gas sponsor report');
     if (!run.ok) return { enabled: false, reason: run.reason };
     const s = run.settings;
@@ -1161,7 +1181,7 @@ export async function gasSponsorReport(): Promise<GasSponsorReport> {
       usage(s.chainId),
       provider().getBalance(s.sponsor.address).catch(() => null),
       unsettledTxs(s.chainId, s.sponsor.address),
-      reportedInFlightCounts(s.chainId),
+      reportedInFlightCounts(s.chainId, fresh),
     ]);
     const oldest = open[0] ?? null;
     const left = s.caps.dailyBudgetWei > used.spentLastDayWei ? s.caps.dailyBudgetWei - used.spentLastDayWei : 0n;
@@ -1196,8 +1216,13 @@ export async function gasSponsorReport(): Promise<GasSponsorReport> {
 const REPORT_COUNTS_TTL_MS = 30_000;
 let countsMemo: { at: number; chainId: number; value: Promise<{ heldReservations: number; unsettledTxs: number }> } | null = null;
 
-function reportedInFlightCounts(chainId: number): Promise<{ heldReservations: number; unsettledTxs: number }> {
-  if (countsMemo && countsMemo.chainId === chainId && Date.now() - countsMemo.at < REPORT_COUNTS_TTL_MS) return countsMemo.value;
+/** Forget the cached in-flight counts: the controls changed (a pause, kill or resume), so the next report reads them again. */
+export function invalidateSponsorReportCache(): void {
+  countsMemo = null;
+}
+
+function reportedInFlightCounts(chainId: number, fresh = false): Promise<{ heldReservations: number; unsettledTxs: number }> {
+  if (!fresh && countsMemo && countsMemo.chainId === chainId && Date.now() - countsMemo.at < REPORT_COUNTS_TTL_MS) return countsMemo.value;
   const value = inFlightCounts(chainId);
   countsMemo = { at: Date.now(), chainId, value };
   // A failed read is not kept: the next report asks again.
@@ -1213,12 +1238,12 @@ function reportedInFlightCounts(chainId: number): Promise<{ heldReservations: nu
  * what is still in flight, read at most every 30 s, and whether it drains.
  * Otherwise nothing touches the database: the check is configuration only.
  */
-async function offReport(reason: string): Promise<GasSponsorReport> {
+async function offReport(reason: string, fresh: boolean): Promise<GasSponsorReport> {
   const configured = gasSponsorDrainSettings();
   if (!configured.enabled) return { enabled: false, reason };
   let left: { heldReservations: number; unsettledTxs: number };
   try {
-    left = await reportedInFlightCounts(configured.chainId);
+    left = await reportedInFlightCounts(configured.chainId, fresh);
   } catch {
     return { enabled: false, reason };
   }

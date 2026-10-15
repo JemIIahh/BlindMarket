@@ -103,7 +103,9 @@ vi.mock('./gasSponsorStore.js', () => ({
     return { ok: true, reservation: r, existing: false };
   }),
   nextStoredNonce: vi.fn(async () => (db.txs.length ? Math.max(...db.txs.map((t: Tx) => t.nonce)) + 1 : null)),
+  // Like the SQL: stored only while the sponsor has no 'signed' transaction.
   recordSignedTx: vi.fn(async (tx: any) => {
+    if (db.txs.some((t: Tx) => t.status === 'signed' && t.sponsor.toLowerCase() === tx.sponsor.toLowerCase())) return null;
     db.events.push(`signed:${tx.nonce}`);
     const row = { id: db.txs.length + 1, ...tx, status: 'signed', createdAt: new Date() };
     db.txs.push(row);
@@ -113,7 +115,7 @@ vi.mock('./gasSponsorStore.js', () => ({
     const t = db.txs.find((x: Tx) => x.txHash === hash);
     if (from !== undefined && t.status !== from) return false;
     t.status = status;
-    if (from !== undefined) db.events.push(`status:${t.nonce}:${status}`); // recovery's conditional flips
+    if (status === 'signed') db.events.push(`status:${t.nonce}:${status}`); // recovery's flips back
     return true;
   }),
   settleTx: vi.fn(async (hash: string, status: string, gasUsed: bigint, costWei: bigint) => {
@@ -125,7 +127,8 @@ vi.mock('./gasSponsorStore.js', () => ({
     r.costWei = (r.costWei ?? 0n) + costWei;
   }),
   setupAttempts: vi.fn(async () => db.txs.filter((t: Tx) => t.withAuthorization && t.status !== 'dropped' && t.status !== 'rejected').length),
-  unsettledTxs: vi.fn(async () => db.txs.filter((t: Tx) => t.status === 'signed' || t.status === 'sent')),
+  // Rows as read: copies, like a query's (a later write doesn't change what the caller holds).
+  unsettledTxs: vi.fn(async () => db.txs.filter((t: Tx) => t.status === 'signed' || t.status === 'sent').map((t: Tx) => ({ ...t }))),
   txsForReservation: vi.fn(async (id: number) => db.txs.filter((t: Tx) => t.reservationId === id)),
   usage: vi.fn(async () => db.usage),
   walletKeyExported: vi.fn(async (w: string) => db.exported.has(w.toLowerCase())),
@@ -1056,7 +1059,7 @@ describe('no nonce above a hole (pre-enable review, finding-9)', () => {
     expect(db.txs[1]).toMatchObject({ nonce: 4, reservationId: b.id });
   });
 
-  it('re-checks right before signing: an unacknowledged tx that appears while a send waits in the queue blocks it (PR #164 review, item 3)', async () => {
+  it('stores nothing when an unacknowledged tx appears after sendBlocker looked: the store checks it in the insert (PR #164 review, item 3)', async () => {
     await writer();
     // nonce 3 went out and a node took it.
     db.txs.push({ id: 50, chainId: CHAIN_ID, reservationId: 99, sponsor: SPONSOR, nonce: 3, rawTx: '0x', txHash: '0xprev', withAuthorization: false, status: 'sent' });
@@ -1076,41 +1079,91 @@ describe('no nonce above a hole (pre-enable review, finding-9)', () => {
     provider.send.mockImplementation(realSend);
   });
 
-  it("recovery's sent → signed flip waits for a send already in the queue, so it never lands between that send's check and its signature (PR #164 review, item 3)", async () => {
+  it('a refusal flipped back while sends wait in the queue: none of them signs above it (PR #164 re-review, item 1)', async () => {
     await writer();
     db.txs.push({ id: 50, chainId: CHAIN_ID, reservationId: 99, sponsor: SPONSOR, nonce: 3, rawTx: '0xprevraw', txHash: '0xprev', withAuthorization: false, status: 'sent', createdAt: new Date() });
     chain.sponsorNonce = 4;
     chain.latestNonce = 3;
-    holdReservation();
-    // Hold the send at its front-of-queue simulation.
+    holdReservation({ taskId: 41n });
+    holdReservation({ taskId: 42n });
+    holdReservation({ taskId: 43n });
+    // Hold the first send at its nonce read, right before it signs; two more queue behind it.
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
+    let pendingReads = 0;
+    provider.getTransactionCount.mockImplementation(async (_a: string, tag: string) => {
+      if (tag === 'latest') return chain.latestNonce;
+      if (++pendingReads === 1) await gate;
+      return chain.sponsorNonce;
+    });
     let estimates = 0;
-    const realSend = provider.send.getMockImplementation()!;
     provider.send.mockImplementation(async (method: string, params: any[]) => {
-      if (method === 'eth_estimateGas' && ++estimates === 2) await gate;
+      if (method === 'eth_estimateGas') estimates++;
       if (method === 'eth_sendRawTransaction' && params[0] === '0xprevraw') {
         throw Object.assign(new Error('invalid sender'), { code: 'UNKNOWN_ERROR' }); // the re-send of nonce 3 is refused
       }
-      return realSend(method, params);
+      return providerSend(method, params);
     });
-    const sending = relayer.relaySponsoredCall(await input({ authorization: auth() }));
-    while (estimates < 2) await new Promise((r) => setTimeout(r, 1));
+    const sends = [41n, 42n, 43n].map(async (taskId) => relayer.relaySponsoredCall(await input({ authorization: auth(), taskId })));
+    while (pendingReads < 1 || estimates < 4) await new Promise((r) => setTimeout(r, 1));
+    await new Promise((r) => setTimeout(r, 10)); // the other two are in the queue now
     const recovering = relayer.recoverSponsorTxs(settings.current);
     await new Promise((r) => setTimeout(r, 20));
-    const statusWhileHeld = db.txs[0].status;
-    // Let the send go before asserting: a send left held would block the module's queue for every later test.
+    const statusWhileQueued = db.txs[0].status;
+    // Let the sends go before asserting: one left held would block the module's queue for every later test.
     release();
-    const result = await sending;
+    const results = await Promise.all(sends);
     await recovering;
-    expect(statusWhileHeld).toBe('sent'); // the flip waits behind the send
-    expect(result).toMatchObject({ ok: true });
-    // The send signed nonce 4 while 3 was still acknowledged; only then did 3 flip.
-    const signedAt = db.events.indexOf('signed:4');
-    const flippedAt = db.events.indexOf('status:3:signed');
-    expect(signedAt).toBeGreaterThanOrEqual(0);
-    expect(flippedAt).toBeGreaterThan(signedAt);
-    provider.send.mockImplementation(realSend);
+    expect(statusWhileQueued).toBe('signed'); // flipped at once, not behind the queued sends
+    expect(results.map((r) => (r.ok ? 'ok' : r.code))).toEqual(['SPONSOR_BACKLOG', 'SPONSOR_BACKLOG', 'SPONSOR_BACKLOG']);
+    expect(db.txs).toHaveLength(1); // nothing stored at nonce 4, 5 or 6
+    expect(chain.sent).toEqual([]);
+    provider.getTransactionCount.mockImplementation(async (_a: string, tag: string) => (tag === 'latest' ? chain.latestNonce : chain.sponsorNonce));
+  });
+
+  it('a refused re-send of a tx that settled meanwhile changes nothing and alerts nothing (PR #164 re-review, item 3)', async () => {
+    await writer();
+    holdReservation();
+    db.txs.push({ id: 52, chainId: CHAIN_ID, reservationId: 1, sponsor: SPONSOR, nonce: 3, rawTx: '0xraw3', txHash: '0xthree', withAuthorization: false, status: 'sent', createdAt: new Date() });
+    chain.latestNonce = 3;
+    provider.send.mockImplementation(async (method: string, params: any[]) => {
+      if (method === 'eth_sendRawTransaction') {
+        // A status read settled it between recovery's receipt check and this re-send.
+        Object.assign(db.txs[0], { status: 'confirmed', costWei: 1n });
+        throw Object.assign(new Error('invalid sender'), { code: 'UNKNOWN_ERROR' });
+      }
+      return providerSend(method, params);
+    });
+    await relayer.recoverSponsorTxs(settings.current);
+    expect(db.txs[0].status).toBe('confirmed');
+    expect(db.setControlsCalls).toEqual([]);
+    expect((await relayer.gasSponsorReport()).lastTrip).toBeNull();
+  });
+
+  it.each([
+    ['went through', null, 'sent'],
+    ['"nonce too low"', Object.assign(new Error('nonce too low'), { code: 'NONCE_EXPIRED' }), 'dropped'],
+    ['an outright refusal', Object.assign(new Error('insufficient funds'), { code: 'INSUFFICIENT_FUNDS' }), 'rejected'],
+  ])('a first broadcast that %s never overwrites a settle that got there first (PR #164 re-review, item 2)', async (_name, error, _would) => {
+    await writer();
+    const r = holdReservation();
+    provider.send.mockImplementation(async (method: string, params: any[]) => {
+      if (method === 'eth_sendRawTransaction') {
+        const hash = ethers.keccak256(params[0]);
+        // Mined at once, and settled by the tick (or a status read) outside the queue.
+        chain.mined.set(hash, { status: 1, logs: [evidenceLog()], gasUsed: 150_000n, gasPrice: 20n * GWEI });
+        chain.code = DESIGNATOR;
+        const t = db.txs.find((x) => x.txHash === hash)!;
+        Object.assign(t, { status: 'confirmed', gasUsed: 150_000n, costWei: 150_000n * 20n * GWEI });
+        if (error) throw error;
+        return hash;
+      }
+      return providerSend(method, params);
+    });
+    expect(await relayer.relaySponsoredCall(await input({ authorization: auth() }))).toMatchObject({ ok: true });
+    expect(db.txs[0].status).toBe('confirmed');
+    expect(r.status).toBe('used');
+    expect(db.controls).toMatchObject({ paused: false, killed: false }); // ours landed: no "signing elsewhere"
   });
 
   it('a recovery flip never overwrites a status a settle wrote meanwhile', async () => {
@@ -1315,6 +1368,57 @@ describe('turned off with work in flight: draining (pre-enable review, item 2)',
     await relayer.recoverSponsorTxs(settings.current, Date.now() + 11 * 60_000);
     expect(db.controls).toMatchObject({ paused: false, killed: true });
     relayer._setReceiptTimeout(60_000);
+  });
+});
+
+describe('the writer pass watchdog (PR #164 re-review, item 4)', () => {
+  it('starts a new pass past ten minutes, alerts, and a late end of the old pass leaves the new one marked', async () => {
+    const sentry = await import('@sentry/node');
+    await writer();
+    const gates: Array<() => void> = [];
+    let latestReads = 0;
+    provider.send.mockImplementation(async (method: string, params: any[]) => {
+      if (method === 'eth_getTransactionCount') {
+        latestReads++;
+        if (gates.length < 2) await new Promise<void>((r) => gates.push(r)); // the first two passes hang here
+      }
+      return providerSend(method, params);
+    });
+    const t0 = 1_000_000;
+    const first = relayer.gasSponsorTick(() => t0);
+    while (latestReads < 1) await new Promise((r) => setTimeout(r, 1));
+    await relayer.gasSponsorTick(() => t0 + 60_000); // still running: skipped
+    expect(latestReads).toBe(1);
+    const second = relayer.gasSponsorTick(() => t0 + 10 * 60_000 + 1); // hung: another starts
+    while (latestReads < 2) await new Promise((r) => setTimeout(r, 1));
+    expect(sentry.captureMessage).toHaveBeenCalledWith(expect.stringMatching(/a writer pass has run 10 minutes/), 'error');
+    gates[0]();
+    await first; // the hung pass ends late
+    await relayer.gasSponsorTick(() => t0 + 10 * 60_000 + 2); // the second is still running: skipped
+    expect(latestReads).toBe(2);
+    gates[1]();
+    await second;
+    await relayer.gasSponsorTick(() => t0 + 10 * 60_000 + 3); // both done: runs
+    expect(latestReads).toBe(3);
+  });
+});
+
+describe('the report count cache (PR #164 re-review, item 5)', () => {
+  it('is read again after a pause, kill or resume, and never for a fresh report', async () => {
+    const { inFlightCounts } = await import('./gasSponsorStore.js');
+    vi.mocked(inFlightCounts).mockClear();
+    await relayer.gasSponsorReport();
+    await relayer.gasSponsorReport();
+    expect(inFlightCounts).toHaveBeenCalledTimes(1);
+    await relayer.gasSponsorReport({ fresh: true }); // the founder route
+    expect(inFlightCounts).toHaveBeenCalledTimes(2);
+    db.usage.failuresLastHour = 50;
+    await relayer.maybeAutoPause(settings.current); // an automatic pause
+    await relayer.gasSponsorReport();
+    expect(inFlightCounts).toHaveBeenCalledTimes(3);
+    relayer.invalidateSponsorReportCache(); // what the controls route calls
+    await relayer.gasSponsorReport();
+    expect(inFlightCounts).toHaveBeenCalledTimes(4);
   });
 });
 

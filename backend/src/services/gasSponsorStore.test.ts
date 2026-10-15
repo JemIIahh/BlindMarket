@@ -184,12 +184,31 @@ describe.skipIf(!url)('gasSponsorStore on Postgres', () => {
     expect(await store.setTxStatus(hash, 'dropped')).toBe(true); // unconditional, as before
   });
 
+  it('stores a signed transaction only while the sponsor has none a node has not acknowledged (PR #164 re-review, item 1)', async () => {
+    const r = await reserveOk();
+    const sponsor = '0x' + 'e'.repeat(40);
+    const tx = (nonce: number, o: Record<string, unknown> = {}) => ({
+      chainId: CHAIN, reservationId: r.id, sponsor, nonce, rawTx: `0x${nonce}`, txHash: '0x' + nonce.toString(16).padStart(64, '0'), withAuthorization: false, ...o,
+    });
+    expect(await store.recordSignedTx(tx(20))).toMatchObject({ nonce: 20, status: 'signed' });
+    expect(await store.recordSignedTx(tx(21))).toBeNull(); // 20 is still 'signed'
+    // Another sponsor, or another chain, is not held.
+    expect(await store.recordSignedTx(tx(21, { sponsor: '0x' + 'd'.repeat(40), txHash: '0x' + 'a1'.repeat(32) }))).not.toBeNull();
+    expect(await store.recordSignedTx(tx(21, { chainId: CHAIN + 1, txHash: '0x' + 'a2'.repeat(32) }))).not.toBeNull();
+    await store.setTxStatus(tx(20).txHash, 'sent', 'signed');
+    expect(await store.recordSignedTx(tx(21))).toMatchObject({ nonce: 21 });
+    // A refused re-send flips 20 back: 22 waits.
+    await store.setTxStatus(tx(21).txHash, 'sent', 'signed');
+    await store.setTxStatus(tx(20).txHash, 'signed', 'sent');
+    expect(await store.recordSignedTx(tx(22))).toBeNull();
+  });
+
   it('counts held reservations and unsettled transactions on a chain', async () => {
     expect(await store.inFlightCounts(CHAIN)).toEqual({ heldReservations: 0, unsettledTxs: 0 });
     const r = await reserveOk();
     await store.recordSignedTx({ chainId: CHAIN, reservationId: r.id, sponsor: '0x' + 'f'.repeat(40), nonce: 1, rawTx: '0x01', txHash: '0x' + '01'.repeat(32), withAuthorization: false });
+    await store.setTxStatus('0x' + '01'.repeat(32), 'sent', 'signed'); // a node took it: the next may be stored
     await store.recordSignedTx({ chainId: CHAIN, reservationId: r.id, sponsor: '0x' + 'f'.repeat(40), nonce: 2, rawTx: '0x02', txHash: '0x' + '02'.repeat(32), withAuthorization: false });
-    await store.setTxStatus('0x' + '02'.repeat(32), 'sent');
     await reserveOk({ chainId: CHAIN + 1 });
     expect(await store.inFlightCounts(CHAIN)).toEqual({ heldReservations: 1, unsettledTxs: 2 });
     await store.settleTx('0x' + '01'.repeat(32), 'confirmed', 1n, 1n);
@@ -244,7 +263,9 @@ describe.skipIf(!url)('gasSponsorStore on Postgres', () => {
     const sponsor = '0x' + 'e'.repeat(40);
     expect(await store.nextStoredNonce(CHAIN, sponsor)).toBeNull();
     await store.recordSignedTx({ chainId: CHAIN, reservationId: r.id, sponsor, nonce: 4, rawTx: '0x04aa', txHash: '0x' + '01'.repeat(32), withAuthorization: true });
+    await store.setTxStatus('0x' + '01'.repeat(32), 'sent', 'signed');
     await store.recordSignedTx({ chainId: CHAIN, reservationId: r.id, sponsor, nonce: 5, rawTx: '0x02bb', txHash: '0x' + '02'.repeat(32), withAuthorization: false });
+    await store.setTxStatus('0x' + '02'.repeat(32), 'sent', 'signed');
     expect(await store.nextStoredNonce(CHAIN, sponsor)).toBe(6);
     await expect(store.recordSignedTx({ chainId: CHAIN, reservationId: r.id, sponsor, nonce: 5, rawTx: '0x', txHash: '0x' + '03'.repeat(32), withAuthorization: false }))
       .rejects.toThrow();
