@@ -19,7 +19,7 @@
  */
 import { LLM_PROVIDER_MODELS, type LLMProvider } from '../types.js';
 import { readOgServices, type OgService } from './ogComputeCatalog.js';
-import { matchOgService, ogChatServices } from './ogComputeModels.js';
+import { matchOgService, ogChatServices, servesOpenAi } from './ogComputeModels.js';
 
 export interface DiscoveredModel {
   id: string;
@@ -151,7 +151,7 @@ export function withCreated(body: unknown, ids: readonly string[]): LiveModel[] 
  * detail on is kept, since 0G's serving broker is OpenAI-compatible.
  */
 export function ogCallableServices(services: readonly OgService[]): OgService[] {
-  return ogChatServices(services).filter((s) => !s.formats || s.formats.includes('openai'));
+  return ogChatServices(services).filter(servesOpenAi);
 }
 
 /**
