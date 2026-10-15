@@ -56,6 +56,7 @@ import {
 } from './services/settlementChains.js';
 import { chainRuntime } from './services/chainRuntime.js';
 import { clientPricingWarnings } from './services/settlementUnits.js';
+import { warmEscrowSupport } from './services/batchSupport.js';
 import { logChainConfig } from './services/chainService.js';
 import { startZombieReaper } from './services/agentRunner.js';
 import { logGasSponsorConfig } from './services/gasSponsorConfig.js';
@@ -182,6 +183,8 @@ const identityCheck = checkDeploymentIdentity();
 
 httpServer.listen(config.port, () => {
   console.log(`BlindMarket backend listening on port ${config.port} (${config.nodeEnv})`);
+  // Read the posting escrow's createTasks/createTaskOpen support now, not on the first client's request.
+  warmEscrowSupport(postingChain());
 
   // Semantic routing (Phase 2 flip) posture. Loud misconfig warning: flipping
   // routing on while embeddings are mock/keyless would order cascade offers by
