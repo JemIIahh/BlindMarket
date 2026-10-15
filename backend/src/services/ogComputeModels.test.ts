@@ -67,3 +67,14 @@ describe('matchOgService', () => {
     expect(matchOgService([b, a], 'm')).toBe(a);
   });
 });
+
+describe('servesOpenAi', () => {
+  it('is false only when the formats are known and lack openai', async () => {
+    const { servesOpenAi } = await import('./ogComputeModels.js');
+    expect(servesOpenAi({})).toBe(true);
+    expect(servesOpenAi({ formats: ['openai'] })).toBe(true);
+    expect(servesOpenAi({ formats: ['openai', 'anthropic'] })).toBe(true);
+    expect(servesOpenAi({ formats: ['anthropic'] })).toBe(false);
+    expect(servesOpenAi({ formats: [] })).toBe(false);
+  });
+});
