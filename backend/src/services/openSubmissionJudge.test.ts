@@ -169,8 +169,8 @@ beforeEach(() => {
 });
 
 describe('pickWinner', () => {
-  const e = (submitter: string, ordinal: number, o: { attempt?: boolean; pastFloor?: boolean; passed?: boolean; score?: number } = {}) =>
-    ({ submitter, ordinal, attempt: o.attempt ?? true, pastFloor: o.pastFloor ?? true, passed: o.passed ?? true, score: o.score ?? 100 });
+  const e = (submitter: string, ordinal: number, o: { attempt?: boolean; payable?: boolean; pastFloor?: boolean; passed?: boolean; score?: number } = {}) =>
+    ({ submitter, ordinal, attempt: o.attempt ?? true, payable: o.payable ?? o.attempt ?? true, pastFloor: o.pastFloor ?? true, passed: o.passed ?? true, score: o.score ?? 100 });
 
   it("prefers passing the task's checks, then the content floor, then the score", () => {
     expect(pickWinner([e(A, 1, { passed: false, score: 99 }), e(B, 2, { score: 70 }), e(C, 3, { score: 85 })])?.submitter).toBe(C);
@@ -181,9 +181,10 @@ describe('pickWinner', () => {
     expect(pickWinner([e(B, 2), e(A, 1)])?.submitter).toBe(A);
   });
 
-  it('pays any attempt over nothing, and nothing that is not an attempt', () => {
+  it('pays a payable entry over nothing, and nothing that is not payable', () => {
     expect(pickWinner([e(A, 1, { passed: false, pastFloor: false, score: 10 })])?.submitter).toBe(A);
     expect(pickWinner([e(A, 1, { attempt: false, pastFloor: false, passed: false })])).toBeNull();
+    expect(pickWinner([e(A, 1, { payable: false, pastFloor: false, passed: false, score: 90 })])).toBeNull();
   });
 });
 
@@ -194,11 +195,11 @@ describe('as the task verifier the poster named', () => {
     expect(sent()).toEqual([['verifier', 7n, B, expect.stringMatching(/^0x[0-9a-f]{64}$/)]]);
     const held = JSON.parse(mem.kv.get(`a2a:open:scorecard-pending:${REF}:task_verifier`)!);
     expect(held.scorecardHash).toBe(chain.write.selectWinnerByVerifier.mock.calls[0][2]);
-    expect(held.scorecard).toMatchObject({ judge: 'platform', role: 'task_verifier', decision: { winner: B }, submissions: 3, judged: 3, attempts: 2, pastFloor: 1, passed: 1 });
+    expect(held.scorecard).toMatchObject({ judge: 'platform', role: 'task_verifier', decision: { winner: B }, submissions: 3, judged: 3, attempts: 2, payable: 1, pastFloor: 1, passed: 1 });
     expect(judgeDue().has(REF)).toBe(false);
   });
 
-  it("lets its turn pass with no attempt, and comes back for the backup judge's", async () => {
+  it("lets its turn pass with nothing payable, and comes back for the backup judge's", async () => {
     await posted([[A, REFUSAL], [B, null]]);
     expect(await judgeOpenSubmissions(NOW)).toBe(0);
     expect(sent()).toEqual([]);
@@ -235,12 +236,12 @@ describe('as backup judge', () => {
     expect(mem.kv.has(`a2a:open:scorecard-pending:${REF}:backup`)).toBe(true);
   });
 
-  it('refunds the poster when every submission was seen and none is an attempt', async () => {
+  it('refunds the poster when every submission was seen and none is payable', async () => {
     await posted([[A, REFUSAL], [B, WORKER_ERROR], [C, '   ']]);
     expect(await judgeOpenSubmissions(NOW)).toBe(1);
     expect(sent()).toEqual([['void', 7n, expect.any(String)]]);
     const held = JSON.parse(mem.kv.get(`a2a:open:scorecard-pending:${REF}:backup`)!);
-    expect(held.scorecard.decision).toEqual({ void: true, reason: 'No submission was an attempt' });
+    expect(held.scorecard.decision).toEqual({ void: true, reason: 'No submission was payable' });
   });
 
   it("applies the task's own checks to rank attempts", async () => {
@@ -264,10 +265,31 @@ describe('as backup judge', () => {
     expect(sent()).toEqual([['backup', 7n, B, expect.any(String)]]);
   });
 
-  it('pays a short answer rather than refund a question that asked for one without saying so', async () => {
-    await posted([[A, REFUSAL], [B, 'Paris']]);
+  it('refunds junk rather than pay it the whole escrow: "." is not work', async () => {
+    await posted([[A, '.'], [B, 'x'], [C, 'N/A']]);
+    expect(await judgeOpenSubmissions(NOW)).toBe(1);
+    expect(sent()).toEqual([['void', 7n, expect.any(String)]]);
+    const held = JSON.parse(mem.kv.get(`a2a:open:scorecard-pending:${REF}:backup`)!);
+    expect(held.scorecard).toMatchObject({ attempts: 3, payable: 0 });
+  });
+
+  it('refunds junk on a task that pins a short answer, when the junk is not that answer', async () => {
+    listing.criteria = { expected_answer: '4' };
+    await posted([[A, '.'], [B, 'done']]);
+    await judgeOpenSubmissions(NOW);
+    expect(sent()).toEqual([['void', 7n, expect.any(String)]]);
+  });
+
+  it('pays real work over earlier junk', async () => {
+    await posted([[A, '.'], [B, GOOD]]);
     await judgeOpenSubmissions(NOW);
     expect(sent()).toEqual([['backup', 7n, B, expect.any(String)]]);
+  });
+
+  it('pays a one-word answer only on a task whose checks pin it down (the cost of the floor)', async () => {
+    await posted([[A, REFUSAL], [B, 'Paris']]);
+    await judgeOpenSubmissions(NOW);
+    expect(sent()).toEqual([['void', 7n, expect.any(String)]]);
   });
 
   it('ranks work past the content floor above an earlier thin answer', async () => {

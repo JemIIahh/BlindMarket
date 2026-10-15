@@ -14,18 +14,23 @@
  *     whose judges stayed silent is settled rather than left for the admin.
  *
  * The rule, the same in both turns:
- *   1. Every attempt can be paid: a kept result that is not empty, not a
- *      worker's error and not a refusal (attemptFailure), with no length
- *      floor, since "Paris" is an answer. The poster's checks never decide
- *      between paying and refunding: if they did, a poster could set a check
- *      nobody passes, or ask for a short answer, read every result and be
- *      refunded, which the escrow's void rule exists to stop.
- *   2. Of the attempts, one that passes the task's own checks (autoVerify)
+ *   1. A submission can be paid when it is real work: an attempt (not
+ *      empty, not a worker's error, not a refusal: attemptFailure) that
+ *      either passes the task's own checks (autoVerify) or clears the content
+ *      floor with no task checks at all (deliverableFloor with empty
+ *      criteria: 20 visible characters, 3 distinct words). The poster's
+ *      checks can only add a way to be paid: a check nobody passes cannot
+ *      refund real work. With no floor at all, one junk submission (".")
+ *      would take the whole escrow of a task nobody else answered, since the
+ *      poster can no longer cancel once anyone has submitted. The cost: a
+ *      one-word answer ("Paris") is paid only on a task whose checks pin the
+ *      answer down (expected_answer, regex_pattern, required fields).
+ *   2. Of the payable ones, one that passes the task's own checks (autoVerify)
  *      beats one that does not; then one past the content floor
  *      (deliverableFloor) beats one that is not; then the higher score; then
  *      the earliest. The task's checks include an expected_answer hidden from
  *      submitters; its existence is public (has_expected_answer).
- *   3. No attempt: as task verifier the platform lets its turn pass; as
+ *   3. Nothing payable: as task verifier the platform lets its turn pass; as
  *      backup judge it refunds the poster (voidOpenTask), but only when every
  *      submission on-chain was recorded, has its result, and was judged.
  *      Otherwise the task is left for the admin.
@@ -78,8 +83,9 @@ const JUDGE_BATCH = 25;
 const MAX_SCORECARD_ENTRIES = 100;
 
 export const JUDGE_RULE =
-  "Of the submissions that are an attempt, the platform pays one that passes the task's checks first, then one past the content floor, " +
-  'then the higher score, then the earliest. With no attempt it refunds the poster.';
+  "A submission is payable when it passes the task's checks, or is real work past the content floor (20 characters, 3 distinct words) " +
+  "and not a refusal. Of those, the platform pays one that passes the task's checks first, then one past the floor for the task, " +
+  'then the higher score, then the earliest. With nothing payable it refunds the poster.';
 
 let timer: NodeJS.Timeout | null = null;
 let inFlight = false;
@@ -87,8 +93,10 @@ let inFlight = false;
 export interface JudgedEntry {
   submitter: string;
   ordinal: number;
-  /** An attempt at all (attemptFailure): what decides between paying and refunding. */
+  /** An attempt at all (attemptFailure). */
   attempt: boolean;
+  /** Can be paid: an attempt that passes the task's checks or clears the content floor with no checks. */
+  payable: boolean;
   /** Past the content floor (deliverableFloor). */
   pastFloor: boolean;
   /** Passed the task's own checks (autoVerify). */
@@ -104,18 +112,23 @@ export function judgeSubmissions(
   criteria: VerificationCriteria,
 ): JudgedEntry[] {
   return subs.map(({ submitter, ordinal, result }) => {
-    // Set before the poster's checks run: a check that throws ranks an attempt last, never turns it into a refund.
+    // Set before the poster's checks run: a check that throws ranks the entry last, never turns real work into a refund.
     let attempt = false;
+    let realWork = false;
     try {
       const notAttempt = attemptFailure(result.resultData);
-      if (notAttempt) return { submitter, ordinal, attempt: false, pastFloor: false, passed: false, score: 0, reason: notAttempt };
+      if (notAttempt) return { submitter, ordinal, attempt: false, payable: false, pastFloor: false, passed: false, score: 0, reason: notAttempt };
       attempt = true;
+      // The floor with no task checks: what the poster's criteria cannot lower or raise.
+      const workFloor = deliverableFloor(result.resultData, {});
+      realWork = !workFloor;
       const floor = deliverableFloor(result.resultData, criteria);
       const v = autoVerify(result.resultData, criteria);
-      const reason = floor ?? (v.passed ? undefined : v.reasons[0] ?? "Failed the task's checks");
-      return { submitter, ordinal, attempt: true, pastFloor: !floor, passed: v.passed, score: v.score, ...(reason ? { reason } : {}) };
+      const payable = realWork || v.passed;
+      const reason = payable ? floor ?? (v.passed ? undefined : v.reasons[0] ?? "Failed the task's checks") : workFloor!;
+      return { submitter, ordinal, attempt: true, payable, pastFloor: !floor, passed: v.passed, score: v.score, ...(reason ? { reason } : {}) };
     } catch (err) {
-      return { submitter, ordinal, attempt, pastFloor: false, passed: false, score: 0, reason: `Could not be checked: ${(err as Error).message}` };
+      return { submitter, ordinal, attempt, payable: realWork, pastFloor: false, passed: false, score: 0, reason: `Could not be checked: ${(err as Error).message}` };
     }
   });
 }
@@ -125,10 +138,10 @@ function better(a: JudgedEntry, b: JudgedEntry): number {
   return Number(b.passed) - Number(a.passed) || Number(b.pastFloor) - Number(a.pastFloor) || b.score - a.score || a.ordinal - b.ordinal;
 }
 
-/** The submission to pay, or null when none is an attempt. */
+/** The submission to pay, or null when none is payable. */
 export function pickWinner(judged: readonly JudgedEntry[]): JudgedEntry | null {
   let best: JudgedEntry | null = null;
-  for (const e of judged) if (e.attempt && (!best || better(e, best) < 0)) best = e;
+  for (const e of judged) if (e.payable && (!best || better(e, best) < 0)) best = e;
   return best;
 }
 
@@ -142,13 +155,14 @@ function scorecardOf(
     judge: 'platform',
     role,
     rule: JUDGE_RULE,
-    decision: winner ? { winner: winner.submitter, score: winner.score } : { void: true, reason: 'No submission was an attempt' },
+    decision: winner ? { winner: winner.submitter, score: winner.score } : { void: true, reason: 'No submission was payable' },
     ...counts,
     judged: judged.length,
     attempts: judged.filter((e) => e.attempt).length,
+    payable: judged.filter((e) => e.payable).length,
     pastFloor: judged.filter((e) => e.pastFloor).length,
     passed: judged.filter((e) => e.passed).length,
-    entries: [...judged].sort((a, b) => Number(b.attempt) - Number(a.attempt) || better(a, b)).slice(0, MAX_SCORECARD_ENTRIES),
+    entries: [...judged].sort((a, b) => Number(b.payable) - Number(a.payable) || Number(b.attempt) - Number(a.attempt) || better(a, b)).slice(0, MAX_SCORECARD_ENTRIES),
   };
 }
 
@@ -266,7 +280,7 @@ async function judgeOne(ref: TaskRef, nowSec: number): Promise<JudgeAction> {
       if (windowEnd - nowSec > MISSING_RECHECK_SEC) {
         await store.scheduleJudge(ref, nowSec + MISSING_RECHECK_SEC);
       } else {
-        console.error(`[openSubmissionJudge] task ${ref}: no attempt in ${toJudge.length} judged, ${unseen} submission(s) not seen or not judged; left for the admin`);
+        console.error(`[openSubmissionJudge] task ${ref}: nothing payable in ${toJudge.length} judged, ${unseen} submission(s) not seen or not judged; left for the admin`);
         await store.unscheduleJudge(ref);
       }
       return null;
@@ -292,7 +306,7 @@ async function judgeOne(ref: TaskRef, nowSec: number): Promise<JudgeAction> {
   await store.unscheduleJudge(ref);
   console.log(
     `[openSubmissionJudge] ${winner ? `picked ${winner.submitter} (score ${winner.score})` : 'voided'} on task ${ref} as ${role}, ` +
-      `${judged.filter((e) => e.attempt).length}/${judged.length} attempts, tx ${tx.hash}`,
+      `${judged.filter((e) => e.payable).length}/${judged.length} payable, tx ${tx.hash}`,
   );
   return winner ? 'picked' : 'voided';
 }
