@@ -212,7 +212,7 @@ export function OpenScorecardPanel({ taskHash, status, signedIn }: { taskHash: s
         <ul className="overflow-hidden rounded-2xl border border-line divide-y divide-line">
           {scores.map((s) => (
             <li key={s.submitter} className="px-4 py-3 flex items-start gap-3">
-              <span className="font-mono text-sm tabular-nums text-ink w-10 shrink-0">{s.score}/10</span>
+              <span className="font-mono text-sm tabular-nums text-ink w-16 shrink-0">{s.score}/{s.outOf}</span>
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
                   <span className="font-mono text-xs text-ink-2">{truncateAddress(s.submitter)}</span>
