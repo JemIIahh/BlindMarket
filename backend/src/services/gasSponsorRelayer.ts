@@ -324,7 +324,8 @@ async function nonceTaken(settings: Enabled, tx: SponsoredTxRecord, now: number,
   if (first === undefined) lostSince.set(tx.txHash, now);
   if (first === undefined ? confirmAfterMs > 0 : now - first < confirmAfterMs) return false;
   lostSince.delete(tx.txHash);
-  await setTxStatus(tx.txHash, 'dropped');
+  // Only from the status read: a settle that found it mined meanwhile keeps 'confirmed'.
+  if (!(await setTxStatus(tx.txHash, 'dropped', tx.status))) return false;
   await trip(settings, 'killed', `the sponsor's nonce ${tx.nonce} was used by a transaction that is not ${tx.txHash}: the sponsor key is signing elsewhere`, tx);
   return true;
 }
@@ -710,6 +711,13 @@ async function send(settings: Enabled, reservation: Reservation, tx: Prepared): 
         if (why === 'transient') {
           // Maybe in a pool, maybe not: the bytes are stored and recover() re-sends them.
           outcome = Promise.resolve(pendingResult(hash, `Broadcast of ${hash} did not go through yet; it is re-sent until it lands`));
+          return null;
+        }
+        // "Nonce too low" can mean these very bytes were mined already (recovery
+        // re-sent the stored tx first, on sub-second blocks): settle them rather
+        // than kill sponsorship. A raw read, not ethers' 250 ms request cache.
+        if (why === 'nonce_low' && (await provider().send('eth_getTransactionReceipt', [hash]).catch(() => null))) {
+          outcome = settle(settings, reservation, tx, hash);
           return null;
         }
         // Final: these bytes can never land. Only while still 'signed': a

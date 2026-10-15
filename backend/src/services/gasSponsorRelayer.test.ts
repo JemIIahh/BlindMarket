@@ -142,6 +142,7 @@ const chain = vi.hoisted(() => ({
   sponsorNonce: 0, latestNonce: 0, mined: new Map<string, { status: number; logs: any[]; gasUsed: bigint; gasPrice: bigint }>(),
   sent: [] as string[], broadcastError: null as any, balance: 10n ** 19n, knownTx: new Set<string>(),
   onBroadcast: null as null | ((raw: string, hash: string) => void),
+  minedDespiteError: false,
   // Reads of a transaction (receipt, by hash) fail with this: an RPC outage.
   txReadError: null as any,
   // The latest block's timestamp (unix seconds); null: now.
@@ -173,8 +174,16 @@ const provider = {
       if (chain.estimateError) throw chain.estimateError;
       return ethers.toQuantity(chain.estimate);
     }
+    if (method === 'eth_getTransactionReceipt') {
+      if (chain.txReadError) throw chain.txReadError;
+      return chain.mined.has(params[0]) ? { transactionHash: params[0], blockNumber: '0x9' } : null;
+    }
     if (method === 'eth_sendRawTransaction') {
-      if (chain.broadcastError) throw chain.broadcastError;
+      if (chain.broadcastError) {
+        // Bytes that landed even though the node answers with an error (re-sent by recovery first).
+        if (chain.minedDespiteError) chain.onBroadcast?.(params[0], ethers.keccak256(params[0]));
+        throw chain.broadcastError;
+      }
       const raw = params[0] as string;
       const hash = ethers.keccak256(raw);
       db.events.push('broadcast');
@@ -314,7 +323,7 @@ beforeEach(async () => {
       evidenceHash: ethers.ZeroHash, status: 1, createdAt: 0n, deadline: BigInt(Math.floor(Date.now() / 1000) + 86_400), submissionAttempts: 0 },
     deadline: null, state: { executorAddress: AGENT.toLowerCase(), assignTxHash: '0xassign', resultData: RESULT }, taskAfter: null, escalated: true,
     code: '0x', estimate: 120_000n, estimateError: null, baseFee: 20n * GWEI, sponsorNonce: 3, latestNonce: 3, sent: [], broadcastError: null,
-    balance: 10n ** 19n, onBroadcast: null, txReadError: null, blockTime: null,
+    balance: 10n ** 19n, onBroadcast: null, minedDespiteError: false, txReadError: null, blockTime: null,
   });
   chain.mined.clear();
   chain.knownTx.clear();
@@ -827,6 +836,19 @@ describe('a first broadcast the node refuses', () => {
     expect(await relayer.relaySponsoredCall(await input({ authorization: auth() }))).toMatchObject({ ok: false, code: 'NOT_SENT' });
     expect(db.txs[0].status).toBe('dropped');
     expect(db.controls.killed).toBe(true);
+  });
+
+  it('"nonce too low" for bytes that were mined already settles them, without a kill', async () => {
+    await writer();
+    const r = holdReservation();
+    chain.broadcastError = Object.assign(new Error('nonce too low'), { code: 'NONCE_EXPIRED' });
+    // The default onBroadcast mines the bytes and delegates the wallet.
+    chain.minedDespiteError = true;
+    const out = await relayer.relaySponsoredCall(await input({ authorization: auth() }));
+    expect(out).toMatchObject({ ok: true });
+    expect(db.txs[0].status).not.toBe('dropped');
+    expect(db.controls.killed).toBe(false);
+    expect(r.status).toBe('used');
   });
 
   it('an error it does not recognise keeps the bytes and answers pending, without a pause (delta audit 2026-10-06, ops-2)', async () => {
