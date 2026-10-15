@@ -8,7 +8,10 @@
  *   - it is a hosted agent whose stored key derives its wallet_address;
  *   - a Privy-authenticated owner deployed it (the Privy user id is stored);
  *   - its key was never exported (agent_key_exports);
- *   - it and its Privy user have fewer strikes than the cap.
+ *   - it and its Privy user have fewer strikes than the cap;
+ *   - its wallet is delegated, or still has a sponsored setup attempt left
+ *     (MAX_SETUP_ATTEMPTS): the relayer refuses a setup past the limit, so
+ *     reserving for that wallet would only hold a task it can't submit.
  * A task qualifies when:
  *   - its reward is at least GAS_SPONSOR_MIN_TASK_USDC in the settlement token;
  *   - if a verifier agent rules it, that verifier is a hosted agent whose owner
@@ -19,12 +22,13 @@ import type { A2ATaskMeta, DeployedAgent, OnChainTask } from '../types.js';
 import { chainRuntime } from './chainRuntime.js';
 import { loadAgentBySmartAccount, loadAgentByWallet } from './deployedAgentStore.js';
 import { getTaskVerifierOn } from './escrow.js';
-import { gasSponsorSettings, type GasSponsorSettings } from './gasSponsorConfig.js';
-import { getControls, strikeCounts, usage, walletKeyExported } from './gasSponsorStore.js';
+import { MAX_SETUP_ATTEMPTS, gasSponsorSettings, type GasSponsorSettings } from './gasSponsorConfig.js';
+import { getControls, setupAttempts, strikeCounts, usage, walletKeyExported } from './gasSponsorStore.js';
+import { isDelegatedTo } from './eip7702.js';
 
 type Enabled = Extract<GasSponsorSettings, { enabled: true }>;
 
-export type AgentIneligible = 'not_hosted' | 'key_mismatch' | 'no_privy_user' | 'key_exported' | 'strikes';
+export type AgentIneligible = 'not_hosted' | 'key_mismatch' | 'no_privy_user' | 'key_exported' | 'strikes' | 'setup_limit';
 export type TaskIneligible = 'wrong_token' | 'below_minimum' | 'verifier_not_ready';
 
 /** Whether a hosted agent's stored key derives the wallet it is recorded under. */
@@ -48,7 +52,23 @@ export async function agentEligibility(
   if (await walletKeyExported(agent.walletAddress)) return { ok: false, reason: 'key_exported' };
   const strikes = await strikeCounts(settings.chainId, agent.walletAddress, agent.privyUserId);
   if (strikes.agent >= settings.caps.maxStrikes || strikes.owner >= settings.caps.maxStrikes) return { ok: false, reason: 'strikes' };
+  if ((await setupAttempts(settings.chainId, agent.walletAddress)) >= MAX_SETUP_ATTEMPTS && !(await delegated(settings, agent.walletAddress))) {
+    return { ok: false, reason: 'setup_limit' };
+  }
   return { ok: true, ownerDid: agent.privyUserId };
+}
+
+/**
+ * Whether the wallet is delegated to the BlindMarket delegate, read straight
+ * from the node (ethers caches a repeat getCode for 250 ms). An unreadable
+ * code counts as not delegated: the caller then refuses, as the relayer would.
+ */
+async function delegated(settings: Enabled, wallet: string): Promise<boolean> {
+  try {
+    return isDelegatedTo(String(await chainRuntime('arc').provider.send('eth_getCode', [wallet, 'latest'])), settings.delegate);
+  } catch {
+    return false;
+  }
 }
 
 /** The gas gate a hosted worker applies, at current fees (worker.js preflightGas). */

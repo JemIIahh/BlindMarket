@@ -5752,7 +5752,12 @@ const SPONSORED_CALL_ATTEMPTS = 5;
 // worker neither pays its own gas for that call nor hands the task back: it
 // asks GET /sponsored-call until the status is final. Each wait runs inline
 // for at most SPONSORED_WAIT_MS; a resume poll asks again after that, until
-// SPONSORED_DEADLINE_MARGIN_S before the task's deadline.
+// SPONSORED_DEADLINE_MARGIN_S before the task's deadline. For a plain call
+// the backend answers 'failed' (call_expired) much sooner: once the
+// ten-minute deadline signed into the call passes, the delegate reverts it
+// wherever it lands, so paying our own gas no longer races it. A setup
+// transaction (carrying this wallet's 7702 authorization) stays pending: its
+// authorization would still bump this wallet's nonce when it lands.
 const sponsoredPending = new Set();
 const SPONSORED_POLL_MS = envNumber(process.env.SPONSORED_POLL_MS, 10_000, { min: 500 });
 const SPONSORED_WAIT_MS = 5 * 60_000;

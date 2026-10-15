@@ -4,7 +4,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
  * The sponsored-gas store (gasSponsorStore.ts) on a real Postgres: the caps
  * are SQL under an advisory lock, which a fake pool can't check. Runs when
  * TEST_DATABASE_URL names a disposable database (it creates the tables of
- * migration 43 and empties them); skipped otherwise — CI has no Postgres.
+ * migrations 43, 44 and 47 and empties them); skipped otherwise — CI has no
+ * Postgres. It shares tables with gasSponsorRelayer.handBack.test.ts: run the
+ * two with --no-file-parallelism.
  *
  *   docker run -d --name gas-store-pg -e POSTGRES_PASSWORD=pw -p 127.0.0.1:55452:5432 postgres:16
  *   TEST_DATABASE_URL='postgres://postgres:pw@127.0.0.1:55452/postgres?sslmode=disable' npx vitest run src/services/gasSponsorStore.test.ts
@@ -58,6 +60,7 @@ describe.skipIf(!url)('gasSponsorStore on Postgres', () => {
     pool.current = new pg.Pool({ connectionString: url, ssl: /[?&]sslmode=disable\b/.test(url) ? false : { rejectUnauthorized: false } });
     await pool.current.query(migrationSql(43)!);
     await pool.current.query(migrationSql(44)!);
+    await pool.current.query(migrationSql(47)!);
   });
   afterAll(async () => {
     await pool.current?.end();
@@ -137,6 +140,82 @@ describe.skipIf(!url)('gasSponsorStore on Postgres', () => {
     expect(await store.reserve(input({ poster: '0x' + 'c'.repeat(40) }), caps)).toEqual({ ok: false, refusal: 'poster_daily' });
   });
 
+  it('counts a reservation handed back against the daily caps, though it is released without a strike (pre-enable review, item 4)', async () => {
+    const wallet = '0x' + '7'.repeat(40);
+    for (let i = 0; i < caps.perAgentDaily; i++) {
+      const r = await reserveOk({ agentWallet: wallet });
+      await store.markReservationReturned(r.id);
+      await store.closeReservation(r.id, 'released');
+    }
+    expect(await store.reserve(input({ agentWallet: wallet }), caps)).toEqual({ ok: false, refusal: 'agent_daily' });
+    // One released with no hand-back (the task moved on, an accept that failed) still doesn't count.
+    const other = '0x' + '8'.repeat(40);
+    for (let i = 0; i < caps.perAgentDaily; i++) await store.closeReservation((await reserveOk({ agentWallet: other })).id, 'released');
+    expect((await store.reserve(input({ agentWallet: other }), caps)).ok).toBe(true);
+  });
+
+  it('records the first relay attempt and the last refusal on a held reservation, and a re-take starts clean (pre-enable review, item 3)', async () => {
+    const r = await reserveOk({ taskId: 11n });
+    expect(r).toMatchObject({ attemptedAt: null, lastRefusal: null });
+    await store.markReservationAttempted(r.id, 'FEES_TOO_HIGH');
+    const first = (await store.getReservationById(r.id))!;
+    expect(first.attemptedAt).toBeInstanceOf(Date);
+    expect(first.lastRefusal).toBe('FEES_TOO_HIGH');
+    await pool.current!.query(`UPDATE gas_sponsor_reservations SET attempted_at = attempted_at - interval '1 minute' WHERE id = $1`, [r.id]);
+    const earlier = (await store.getReservationById(r.id))!.attemptedAt!;
+    await store.markReservationAttempted(r.id, null);
+    expect(await store.getReservationById(r.id)).toMatchObject({ attemptedAt: earlier, lastRefusal: null });
+    await store.closeReservation(r.id, 'released');
+    await store.markReservationAttempted(r.id, 'GAS_TOO_HIGH'); // no longer held: left alone
+    expect((await store.getReservationById(r.id))!.lastRefusal).toBeNull();
+    const again = await reserveOk({ taskId: 11n, agentWallet: '0x' + '9'.repeat(40) });
+    expect(again).toMatchObject({ id: r.id, attemptedAt: null, lastRefusal: null });
+  });
+
+  it('changes a status only from the one expected, when one is named (PR #164 review, item 3)', async () => {
+    const r = await reserveOk();
+    const hash = '0x' + '0c'.repeat(32);
+    await store.recordSignedTx({ chainId: CHAIN, reservationId: r.id, sponsor: '0x' + 'f'.repeat(40), nonce: 9, rawTx: '0x09', txHash: hash, withAuthorization: false });
+    expect(await store.setTxStatus(hash, 'sent', 'signed')).toBe(true);
+    await store.settleTx(hash, 'confirmed', 1n, 1n);
+    // Recovery saw it 'sent' before the settle: its flip must not undo the settle.
+    expect(await store.setTxStatus(hash, 'signed', 'sent')).toBe(false);
+    expect((await store.txsForReservation(r.id))[0].status).toBe('confirmed');
+    expect(await store.setTxStatus(hash, 'dropped')).toBe(true); // unconditional, as before
+  });
+
+  it('stores a signed transaction only while the sponsor has none a node has not acknowledged (PR #164 re-review, item 1)', async () => {
+    const r = await reserveOk();
+    const sponsor = '0x' + 'e'.repeat(40);
+    const tx = (nonce: number, o: Record<string, unknown> = {}) => ({
+      chainId: CHAIN, reservationId: r.id, sponsor, nonce, rawTx: `0x${nonce}`, txHash: '0x' + nonce.toString(16).padStart(64, '0'), withAuthorization: false, ...o,
+    });
+    expect(await store.recordSignedTx(tx(20))).toMatchObject({ nonce: 20, status: 'signed' });
+    expect(await store.recordSignedTx(tx(21))).toBeNull(); // 20 is still 'signed'
+    // Another sponsor, or another chain, is not held.
+    expect(await store.recordSignedTx(tx(21, { sponsor: '0x' + 'd'.repeat(40), txHash: '0x' + 'a1'.repeat(32) }))).not.toBeNull();
+    expect(await store.recordSignedTx(tx(21, { chainId: CHAIN + 1, txHash: '0x' + 'a2'.repeat(32) }))).not.toBeNull();
+    await store.setTxStatus(tx(20).txHash, 'sent', 'signed');
+    expect(await store.recordSignedTx(tx(21))).toMatchObject({ nonce: 21 });
+    // A refused re-send flips 20 back: 22 waits.
+    await store.setTxStatus(tx(21).txHash, 'sent', 'signed');
+    await store.setTxStatus(tx(20).txHash, 'signed', 'sent');
+    expect(await store.recordSignedTx(tx(22))).toBeNull();
+  });
+
+  it('counts held reservations and unsettled transactions on a chain', async () => {
+    expect(await store.inFlightCounts(CHAIN)).toEqual({ heldReservations: 0, unsettledTxs: 0 });
+    const r = await reserveOk();
+    await store.recordSignedTx({ chainId: CHAIN, reservationId: r.id, sponsor: '0x' + 'f'.repeat(40), nonce: 1, rawTx: '0x01', txHash: '0x' + '01'.repeat(32), withAuthorization: false });
+    await store.setTxStatus('0x' + '01'.repeat(32), 'sent', 'signed'); // a node took it: the next may be stored
+    await store.recordSignedTx({ chainId: CHAIN, reservationId: r.id, sponsor: '0x' + 'f'.repeat(40), nonce: 2, rawTx: '0x02', txHash: '0x' + '02'.repeat(32), withAuthorization: false });
+    await reserveOk({ chainId: CHAIN + 1 });
+    expect(await store.inFlightCounts(CHAIN)).toEqual({ heldReservations: 1, unsettledTxs: 2 });
+    await store.settleTx('0x' + '01'.repeat(32), 'confirmed', 1n, 1n);
+    await store.markReservationUsed(r.id, '0x' + '01'.repeat(32));
+    expect(await store.inFlightCounts(CHAIN)).toEqual({ heldReservations: 0, unsettledTxs: 1 });
+  });
+
   it('caps global spend per hour and per day, counting held budgets and real costs', async () => {
     const hourly = { ...caps, perAgentDaily: 99, perUserDaily: 99, perPosterDaily: 99 };
     for (let i = 0; i < 10; i++) expect((await store.reserve(input(), hourly)).ok).toBe(true); // 10 × 0.01 = the 0.1 hourly budget
@@ -184,7 +263,9 @@ describe.skipIf(!url)('gasSponsorStore on Postgres', () => {
     const sponsor = '0x' + 'e'.repeat(40);
     expect(await store.nextStoredNonce(CHAIN, sponsor)).toBeNull();
     await store.recordSignedTx({ chainId: CHAIN, reservationId: r.id, sponsor, nonce: 4, rawTx: '0x04aa', txHash: '0x' + '01'.repeat(32), withAuthorization: true });
+    await store.setTxStatus('0x' + '01'.repeat(32), 'sent', 'signed');
     await store.recordSignedTx({ chainId: CHAIN, reservationId: r.id, sponsor, nonce: 5, rawTx: '0x02bb', txHash: '0x' + '02'.repeat(32), withAuthorization: false });
+    await store.setTxStatus('0x' + '02'.repeat(32), 'sent', 'signed');
     expect(await store.nextStoredNonce(CHAIN, sponsor)).toBe(6);
     await expect(store.recordSignedTx({ chainId: CHAIN, reservationId: r.id, sponsor, nonce: 5, rawTx: '0x', txHash: '0x' + '03'.repeat(32), withAuthorization: false }))
       .rejects.toThrow();

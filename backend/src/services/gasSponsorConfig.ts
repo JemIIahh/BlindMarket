@@ -31,6 +31,8 @@ export const GAS_LIMIT_MARGIN_PERCENT = 115n;
 export const MIN_SECONDS_BEFORE_DEADLINE = 60;
 /** Setup (7702 authorization) transactions per wallet: the first and one retry. */
 export const MAX_SETUP_ATTEMPTS = 2;
+/** Transactions sent for one reservation: the call, and one retry after a setup that did nothing. */
+export const MAX_SENDS_PER_RESERVATION = 2;
 
 export type GasSponsorSettings =
   | { enabled: false; reason: string; misconfigured: boolean }
@@ -79,8 +81,23 @@ function positiveUnits(raw: string, decimals: number): bigint | null {
 
 /** The settings from the current config. Raw values are never echoed: a key pasted into the wrong variable would end up in logs. */
 export function gasSponsorSettings(): GasSponsorSettings {
+  if (!config.gasSponsor.enabled) return off('GAS_SPONSOR_ENABLED is not true', false);
+  return buildSettings();
+}
+
+/**
+ * The settings with GAS_SPONSOR_ENABLED left out: what a process needs to
+ * finish the work already out once sponsorship is turned off (draining:
+ * re-send stored bytes, settle, sweep reservations, answer call status). It
+ * never signs anything new. Needs everything else still configured, the
+ * sponsor key included (it names the sponsor whose transactions to finish).
+ */
+export function gasSponsorDrainSettings(): GasSponsorSettings {
+  return buildSettings();
+}
+
+function buildSettings(): GasSponsorSettings {
   const s = config.gasSponsor;
-  if (!s.enabled) return off('GAS_SPONSOR_ENABLED is not true', false);
   if (!config.databaseUrl) return off('sponsored gas needs DATABASE_URL (Postgres); it never runs on SQLite');
   if (!config.deploymentId) return off('sponsored gas needs a DEPLOYMENT_ID, so a second stack on this Redis is stopped');
 
@@ -113,7 +130,9 @@ export function gasSponsorSettings(): GasSponsorSettings {
     return off('the GAS_SPONSOR_PER_*_DAILY, GAS_SPONSOR_MAX_STRIKES, GAS_SPONSOR_MAX_FAILURES_PER_HOUR and GAS_SPONSOR_STUCK_MINUTES settings must be whole numbers above 0');
   }
 
-  if (!s.privateKey) return off('GAS_SPONSOR_ENABLED is set but GAS_SPONSOR_PRIVATE_KEY is empty');
+  if (!s.privateKey) {
+    return off(s.enabled ? 'GAS_SPONSOR_ENABLED is set but GAS_SPONSOR_PRIVATE_KEY is empty' : 'GAS_SPONSOR_PRIVATE_KEY is empty');
+  }
   let sponsor: ethers.Wallet;
   try {
     const k = s.privateKey.trim();
@@ -203,6 +222,30 @@ export async function runnableSettings(writer: string): Promise<
   if (problem) return { ok: false, reason: problem };
   if (!backgroundWritesAllowed(writer)) return { ok: false, reason: "this backend is on another deployment's Redis" };
   return { ok: true, settings };
+}
+
+/**
+ * runnableSettings, or, with GAS_SPONSOR_ENABLED off, the settings to drain
+ * with: mode 'draining' finishes what is already out (re-sends stored bytes,
+ * settles, sweeps reservations, answers call status) and signs nothing new.
+ * Only the writer tick and the status reads use this; every path that could
+ * sign or reserve uses runnableSettings. A process that is on but
+ * misconfigured does not drain either: the same checks gate both.
+ */
+export async function drainableSettings(writer: string): Promise<
+  | { ok: true; mode: 'on' | 'draining'; settings: Extract<GasSponsorSettings, { enabled: true }> }
+  | { ok: false; reason: string }
+> {
+  if (config.gasSponsor.enabled) {
+    const run = await runnableSettings(writer);
+    return run.ok ? { ...run, mode: 'on' } : run;
+  }
+  const settings = gasSponsorDrainSettings();
+  if (!settings.enabled) return { ok: false, reason: `GAS_SPONSOR_ENABLED is not true, and nothing can drain: ${settings.reason}` };
+  const problem = await checkSponsorRoles(settings);
+  if (problem) return { ok: false, reason: problem };
+  if (!backgroundWritesAllowed(writer)) return { ok: false, reason: "this backend is on another deployment's Redis" };
+  return { ok: true, mode: 'draining', settings };
 }
 
 let submitOpenSupport: { delegate: string; supported: boolean } | null = null;

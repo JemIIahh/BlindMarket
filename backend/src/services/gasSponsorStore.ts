@@ -1,7 +1,7 @@
 /**
  * Durable state of sponsored agent gas (docs/AGENT-GAS-FUNDING.md): budget
  * reservations, every sponsored transaction (write-ahead), strikes, the
- * key-export log and the pause/kill controls. Postgres migration 43.
+ * key-export log and the pause/kill controls. Postgres migrations 43, 44 and 47.
  *
  * Postgres only, never Redis or SQLite: these are money counters and signed
  * transactions, and a redeploy must not reset or lose them. Every function
@@ -11,7 +11,8 @@
  * caps hold however many /accept calls race, on however many processes:
  *   - one held reservation per agent;
  *   - sponsored tasks per agent, per Privy user and per poster wallet in the
- *     last 24 hours;
+ *     last 24 hours (a reservation handed back counts, though it is released
+ *     without a strike: otherwise take-and-hand-back cycles never hit a cap);
  *   - global spend in the last hour and the last 24 hours, where a held
  *     reservation counts its budget and a settled one what it really cost.
  * Spend is gasUsed × effectiveGasPrice from receipts, reverts included.
@@ -23,9 +24,13 @@ import { getPool } from './neonDb.js';
 export type ReservationKind = 'submit' | 'release';
 export type ReservationStatus = 'reserved' | 'used' | 'released' | 'expired';
 /**
- * signed → sent → confirmed | reverted | noop. dropped: its nonce went to a
- * transaction that is not this one. rejected: the node refused the bytes
- * outright, so they never entered a pool and the nonce is free again.
+ * signed → sent → confirmed | reverted | noop. signed: stored, and no node
+ * has acknowledged the bytes (not broadcast yet, the broadcast failed, or a
+ * re-send was refused); while one is unsettled the relayer signs nothing new,
+ * so no later nonce waits behind a hole. sent: a node took them. dropped: its
+ * nonce went to a transaction that is not this one. rejected: the node
+ * refused the bytes on their first and only broadcast, so they never entered
+ * a pool and the nonce is free again.
  */
 export type SponsoredTxStatus = 'signed' | 'sent' | 'confirmed' | 'reverted' | 'noop' | 'dropped' | 'rejected';
 
@@ -47,6 +52,10 @@ export interface Reservation {
   costWei: bigint | null;
   /** When the agent handed the task back while the escrow still named it (markReservationReturned). */
   returnedAt: Date | null;
+  /** When the agent first asked the relayer to use it (markReservationAttempted). */
+  attemptedAt: Date | null;
+  /** The code of the relayer's last refusal of a call on it; null once one went out. */
+  lastRefusal: string | null;
 }
 
 export interface SponsoredTx {
@@ -115,6 +124,8 @@ function toReservation(r: Record<string, unknown>): Reservation {
     gasUsed: big(r.gas_used),
     costWei: big(r.cost_wei),
     returnedAt: r.returned_at == null ? null : new Date(r.returned_at as string),
+    attemptedAt: r.attempted_at == null ? null : new Date(r.attempted_at as string),
+    lastRefusal: r.last_refusal == null ? null : String(r.last_refusal),
   };
 }
 
@@ -207,7 +218,7 @@ export async function reserve(
               COUNT(*) FILTER (WHERE owner_did = $3)::text AS owner,
               COUNT(*) FILTER (WHERE poster = $4)::text AS poster
        FROM gas_sponsor_reservations
-       WHERE chain_id = $1 AND kind = 'submit' AND status IN ('reserved', 'used', 'expired')
+       WHERE chain_id = $1 AND kind = 'submit' AND (status IN ('reserved', 'used', 'expired') OR returned_at IS NOT NULL)
          AND created_at > NOW() - interval '24 hours'`,
       [input.chainId, wallet, input.ownerDid, poster],
     );
@@ -235,7 +246,7 @@ export async function reserve(
       ? await client.query(
           `UPDATE gas_sponsor_reservations SET task_hash = $4, agent_wallet = $5, owner_did = $6, poster = $7,
              status = 'reserved', budget_wei = $8, created_at = NOW(), expires_at = NOW() + make_interval(secs => $9),
-             settled_at = NULL, returned_at = NULL
+             settled_at = NULL, returned_at = NULL, attempted_at = NULL, last_refusal = NULL
            WHERE chain_id = $1 AND task_id = $2 AND kind = $3 RETURNING *`,
           values,
         )
@@ -310,6 +321,18 @@ export async function markReservationReturned(id: number): Promise<boolean> {
 }
 
 /**
+ * Record that the agent asked the relayer to use its held reservation, with
+ * the code of the refusal (null: a call went out). Keeps the first time. At
+ * its hour a reservation the agent tried to use is released without a strike.
+ */
+export async function markReservationAttempted(id: number, refusal: string | null): Promise<void> {
+  await (await pool()).query(
+    `UPDATE gas_sponsor_reservations SET attempted_at = COALESCE(attempted_at, NOW()), last_refusal = $2 WHERE id = $1 AND status = 'reserved'`,
+    [id, refusal],
+  );
+}
+
+/**
  * Close a held reservation. 'expired' also records a strike against its agent
  * and Privy user. False when it was no longer held.
  */
@@ -350,7 +373,13 @@ export async function nextStoredNonce(chainId: number, sponsor: string): Promise
   return rows[0]?.n == null ? null : Number(rows[0].n) + 1;
 }
 
-/** Store a signed transaction before it is broadcast. */
+/**
+ * Store a signed transaction before it is broadcast, in one statement and
+ * only while the sponsor has no stored transaction a node hasn't
+ * acknowledged ('signed'): a nonce is never stored above one that may never
+ * land. Null when one exists; the caller must not broadcast. Recovery's
+ * sent → signed flip is its own statement, so the two can't interleave.
+ */
 export async function recordSignedTx(tx: {
   chainId: number;
   reservationId: number;
@@ -359,17 +388,29 @@ export async function recordSignedTx(tx: {
   rawTx: string;
   txHash: string;
   withAuthorization: boolean;
-}): Promise<SponsoredTx> {
+}): Promise<SponsoredTx | null> {
   const { rows } = await (await pool()).query(
     `INSERT INTO gas_sponsor_txs (chain_id, reservation_id, sponsor, nonce, raw_tx, tx_hash, with_authorization, status)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, 'signed') RETURNING *`,
+     SELECT $1, $2, $3, $4, $5, $6, $7, 'signed'
+     WHERE NOT EXISTS (SELECT 1 FROM gas_sponsor_txs WHERE chain_id = $1 AND sponsor = $3 AND status = 'signed')
+     RETURNING *`,
     [tx.chainId, tx.reservationId, tx.sponsor.toLowerCase(), tx.nonce, tx.rawTx, tx.txHash, tx.withAuthorization],
   );
-  return toTx(rows[0]);
+  return rows[0] ? toTx(rows[0]) : null;
 }
 
-export async function setTxStatus(txHash: string, status: SponsoredTxStatus): Promise<void> {
-  await (await pool()).query('UPDATE gas_sponsor_txs SET status = $2, updated_at = NOW() WHERE tx_hash = $1', [txHash, status]);
+/**
+ * Set a stored transaction's status. With `from`, only while it still has
+ * that status: recovery's signed ⇄ sent flips must never overwrite a status a
+ * concurrent settle wrote (a 'confirmed' turned back into 'signed' would hold
+ * every send for good). False when nothing changed.
+ */
+export async function setTxStatus(txHash: string, status: SponsoredTxStatus, from?: SponsoredTxStatus): Promise<boolean> {
+  const { rowCount } = await (await pool()).query(
+    'UPDATE gas_sponsor_txs SET status = $2, updated_at = NOW() WHERE tx_hash = $1 AND ($3::text IS NULL OR status = $3)',
+    [txHash, status, from ?? null],
+  );
+  return (rowCount ?? 0) > 0;
 }
 
 /**
@@ -516,6 +557,22 @@ export async function usage(chainId: number): Promise<SponsorUsage> {
     failuresLastHour: Number(r?.failures ?? 0),
     sendsLastHour: Number(r?.sends ?? 0),
   };
+}
+
+/**
+ * What is still in flight on a chain: held reservations, and sponsored
+ * transactions not known to be mined (any sponsor). Sponsorship may be
+ * switched off, or its key rotated, only once both are 0
+ * (docs/AGENT-GAS-FUNDING.md, "Turning it off").
+ */
+export async function inFlightCounts(chainId: number): Promise<{ heldReservations: number; unsettledTxs: number }> {
+  const { rows } = await (await pool()).query<{ held: string; txs: string }>(
+    `SELECT
+       (SELECT COUNT(*)::text FROM gas_sponsor_reservations WHERE chain_id = $1 AND status = 'reserved') AS held,
+       (SELECT COUNT(*)::text FROM gas_sponsor_txs WHERE chain_id = $1 AND status IN ('signed', 'sent')) AS txs`,
+    [chainId],
+  );
+  return { heldReservations: Number(rows[0]?.held ?? 0), unsettledTxs: Number(rows[0]?.txs ?? 0) };
 }
 
 /** Strikes in the last 7 days against an agent, and against its Privy user. */

@@ -982,6 +982,18 @@ const migrations: Array<{ id: number; name: string; sql: string; when?: () => bo
     sql: `ALTER TABLE deployed_agents ALTER COLUMN open_submission_enabled SET DEFAULT true;
       UPDATE deployed_agents SET open_submission_enabled = true WHERE open_submission_enabled = false;`,
   },
+  {
+    id: 47,
+    name: 'gas_sponsor_reservations_attempt',
+    // When the agent first asked the relayer to use its reservation, and the
+    // code of the last refusal (NULL once a call went out). A reservation the
+    // agent tried to use is released at its hour without a strike: the
+    // refusal was ours (not the writer, fees, the gas ceiling, the setup
+    // limit...), not an agent sitting on it (gasSponsorRelayer.sweepReservations).
+    // Postgres only, like 43 and 44: sponsored gas never runs on SQLite.
+    sql: `ALTER TABLE gas_sponsor_reservations ADD COLUMN IF NOT EXISTS attempted_at TIMESTAMPTZ;
+      ALTER TABLE gas_sponsor_reservations ADD COLUMN IF NOT EXISTS last_refusal TEXT;`,
+  },
 ];
 
 /**

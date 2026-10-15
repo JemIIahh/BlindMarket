@@ -70,7 +70,7 @@ vi.mock('./chainRuntime.js', () => ({
 const identity = vi.hoisted(() => ({ allowed: true }));
 vi.mock('./deploymentIdentity.js', () => ({ backgroundWritesAllowed: () => identity.allowed }));
 
-const { gasSponsorSettings, runnableSettings, sponsorsSubmitOpen, _resetSponsorRoles } = await import('./gasSponsorConfig.js');
+const { gasSponsorSettings, gasSponsorDrainSettings, drainableSettings, runnableSettings, sponsorsSubmitOpen, _resetSponsorRoles } = await import('./gasSponsorConfig.js');
 
 function enable(o: Record<string, unknown> = {}) {
   cfg.gasSponsor = {
@@ -160,6 +160,32 @@ describe('runnableSettings', () => {
     roles.fail = false;
     identity.allowed = false;
     expect(await runnableSettings('test')).toEqual({ ok: false, reason: expect.stringMatching(/another deployment's Redis/) });
+  });
+});
+
+describe('drainableSettings (pre-enable review, item 2)', () => {
+  it('is mode on while enabled, and draining once GAS_SPONSOR_ENABLED is off with everything else in place', async () => {
+    enable();
+    expect(await drainableSettings('test')).toMatchObject({ ok: true, mode: 'on' });
+    cfg.gasSponsor = { ...cfg.gasSponsor, enabled: false };
+    expect(gasSponsorSettings()).toMatchObject({ enabled: false });
+    expect(await runnableSettings('test')).toMatchObject({ ok: false });
+    expect(await drainableSettings('test')).toMatchObject({ ok: true, mode: 'draining', settings: { chainId: 5042002, sponsor: { address: SPONSOR } } });
+    expect(gasSponsorDrainSettings()).toMatchObject({ enabled: true, chainId: 5042002 });
+  });
+
+  it('cannot drain without the key, on a misconfigured stack, or on another deployment\'s Redis', async () => {
+    enable({ enabled: false, privateKey: '' });
+    expect(await drainableSettings('test')).toEqual({ ok: false, reason: expect.stringMatching(/GAS_SPONSOR_PRIVATE_KEY is empty/) });
+    enable({ enabled: false });
+    identity.allowed = false;
+    expect(await drainableSettings('test')).toEqual({ ok: false, reason: expect.stringMatching(/another deployment's Redis/) });
+    // On but misconfigured: no drain either, the same checks gate both.
+    identity.allowed = true;
+    enable();
+    _resetSponsorRoles(); // the role check holds per process; read the roles again
+    roles.verifier = SPONSOR;
+    expect(await drainableSettings('test')).toEqual({ ok: false, reason: expect.stringMatching(/escrow's verifier/) });
   });
 });
 

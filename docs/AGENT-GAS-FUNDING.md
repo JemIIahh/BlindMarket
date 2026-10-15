@@ -161,7 +161,10 @@ Every one of these must hold:
    - No first-party client calls `export-key` today, so ordinary owners keep
      sponsorship. [src]
 3. **Its wallet is delegated to our delegate,** checked with `getCode` just
-   before sending.
+   before sending. A wallet that is not delegated yet must still have a
+   sponsored setup attempt left (two per wallet): past that, the relayer
+   refuses the setup, so `/accept` doesn't reserve for it either and the
+   agent page says "Not eligible (wallet setup failed)".
 
 ### The flow
 
@@ -182,6 +185,12 @@ Every one of these must hold:
      time), and each Privy user a few. An expired reservation is a strike
      against that agent and user; repeated strikes refuse them new
      reservations. A reservation already held is still served.
+   - The strike is only for an agent that sat on its reservation. One whose
+     agent asked the relayer to use it (`attempted_at`, with the refusal's
+     code in `last_refusal`) is released at its hour without a strike: the
+     refusal came from our side (not the writer, fees or gas over the cap, a
+     reverting simulation, the setup limit, the backlog below). So is one
+     lost to a kill, or to a transaction of ours that failed.
    - The worker hands back a task it can't finish (`/release`). When the
      escrow already names it, the route answers `ON_CHAIN_LOCKED` and the task
      stays its own. The reservation is kept, so a resume after a passing
@@ -216,7 +225,8 @@ Every one of these must hold:
    - Success means the receipt holds the escrow's `EvidenceSubmitted` event for
      that task, and the wallet's code is still our designator afterwards.
    - A stale or foreign authorization silently does nothing: status 1, no event.
-     [meas] So the relayer allows at most one setup retry per wallet.
+     [meas] So the relayer allows at most one setup retry per wallet, and at
+     most two sends per reservation (the call and that retry).
    - If simulation reverts `InvalidNonce` and the task is already Submitted with
      this evidence, someone else landed the signed call. That counts as success.
 6. **Fallback.** If anything is refused, the worker uses today's direct path and
@@ -231,7 +241,8 @@ Every one of these must hold:
 - **Caps:**
   - per agent per day;
   - per Privy user per day;
-  - per poster wallet per day;
+  - per poster wallet per day (a reservation handed back counts against these
+    three, though it is released without a strike);
   - a global budget per hour and per day, in USDC.
 - **Two runtime controls,** stored in the database, flipped from a
   founder-gated route, applied without a restart:
@@ -250,7 +261,7 @@ Every one of these must hold:
 | Re-point the wallet, then get relayed | Only possible with the key, and exported wallets are ineligible. Code is checked before sending, and success needs the escrow event. |
 | Replay a signature or authorization | Nonce, deadline and chain id are pinned to Arc. |
 | Self-post tasks so we pay submit gas | We pay the assign (92.7k) plus one submit (~126–151k), about 218–244k gas per task. The attacker pays `createTask` (269k) and locks at least 0.10 USDC until the task ends. That is roughly 1:1, and they keep nothing. Global caps bound it. |
-| Accept and never submit, to hold the budget | Costs the attacker nothing, but each agent holds one reservation, which expires after an hour and counts as a strike. |
+| Accept and never submit, to hold the budget | Costs the attacker nothing, but each agent holds one reservation, which expires after an hour and counts as a strike. Accepting and handing back avoids the strike but still counts against the daily caps. |
 | Pin tasks an agent can't work (a brief it can't decrypt) so its owner is struck | The worker hands each one back, which marks its reservation: at its hour it is released without a strike. Strikes only refuse new reservations, never end a held one. |
 | Use fake identities to beat caps | Per-user and per-poster caps slow it down; free signup means the global cap is the real bound. Spending the budget only pauses sponsorship. It can't strand tasks, because of the reservation. |
 | Run a second stack with the key | The sender runs only when a `DEPLOYMENT_ID` is set (any value: Arc testnet staging may run it), Postgres is in use, and `backgroundWritesAllowed()` is true, meaning this stack owns its Redis. Within a stack, one process sends, holding a Postgres advisory lock keyed by chain id and sponsor address. Neither check stops a stack on its own Redis and its own database, so the sponsor key must never appear in another stack's env. [src] |
@@ -277,15 +288,106 @@ and first-time setup. The 10% fee on a 0.10 USDC task is 0.01 USDC.
   - Write-ahead: the nonce and signed raw transaction are saved before
     broadcast. Recovery re-broadcasts the same raw transaction and never
     re-signs.
+  - No nonce above a hole. While a stored transaction has no node's
+    acknowledgement (its broadcast failed without an answer, or a node
+    refused a re-send), nothing new is signed: calls are refused with
+    `SPONSOR_BACKLOG` and the worker pays its own gas. Recovery re-sends the
+    stored bytes every 30 s, and sends resume once a node takes them. A
+    nonce is freed only when a node refused the bytes on their first and
+    only broadcast; a refused re-send keeps it (the bytes may sit in another
+    pool) and pauses sponsorship.
+  - A stored transaction that has not landed in `GAS_SPONSOR_STUCK_MINUTES`
+    (default 10) **kills** sponsorship: every later nonce would wait behind
+    it. Recovery keeps re-sending it. A plain call (type 2) reports `failed`
+    (`call_expired`) as soon as the deadline the agent signed into the call
+    (ten minutes of chain time) passes: the delegate reverts it from then on,
+    so the worker pays its own gas without racing it. A setup (type 4, the
+    first call, carrying the 7702 authorization) stays `pending`: its
+    authorization still applies whenever it lands, and would bump the
+    wallet's nonce under the worker's own-gas transaction. It ends when it
+    lands or its nonce is filled. See "A stuck transaction" below.
+  - A send is stored only while the sponsor has no unacknowledged
+    transaction, checked in the same statement as the insert; not stored, it
+    is not broadcast (`SPONSOR_BACKLOG`). So recovery's flip of a transaction
+    back to unacknowledged can't let a send sign above it, however many sends
+    are queued. Every status write after a broadcast is conditional on the
+    status it expects, so none overwrites a settle that got there first.
+  - A writer pass that runs past ten minutes (an RPC or database read that
+    never answers) is reported to Sentry and a new pass starts; the hung one
+    can't block the ones after it.
   - Receipts are polled, because Arc RPC replicas can lag.
 - **Monitoring.**
-  - `/health/bridge` shows the sponsor balance, calls today and budget left.
+  - `/health/bridge` shows the sponsor balance, calls today and budget left,
+    and what is still in flight: `heldReservations` and `unsettledTxs`, read
+    from Postgres at most every 30 s per process (the route is
+    unauthenticated), and again after any pause, kill or resume. The founder
+    route `GET /api/v1/admin/gas-sponsor` always reads them fresh: watch that
+    one while waiting for them to reach 0. With sponsorship off it shows them only where this
+    backend could drain (the key and the rest of the configuration still
+    set; without them it reads nothing from the database), with `draining`,
+    and if a run-time check stops the drain, `drainProblem`.
   - Failures go to Sentry, and each call is recorded with
     `recordEvent('gas_sponsored')`.
   - Sponsorship pauses itself and alerts when the hourly spend or failure rate
     exceeds its limit, or the balance falls below one day of budget.
 - **Users see the state.** The agent page shows "Gas paid by BlindMarket",
   "Gas sponsorship paused", or "Not eligible (key exported)".
+
+### Turning it off
+
+Unsetting `GAS_SPONSOR_ENABLED` stops every new reservation and send at once.
+Work already out is not stranded: while Postgres holds a held reservation or
+an unsettled transaction, the writer keeps draining. It re-sends the stored
+bytes, settles receipts, answers the worker's `GET /sponsored-call`, and
+releases each reservation with nothing out (no strike). It signs nothing new,
+and it never stores a pause (automatic or from the breaker; a kill is still
+stored), so turning sponsorship back on doesn't find it silently paused. Once
+both counts are 0 it lets the writer lock go.
+
+Draining needs the rest of the configuration, the sponsor key included (it
+names the sponsor whose transactions to finish). So turn it off in this
+order:
+
+1. Pause: `POST /api/v1/admin/gas-sponsor/controls` with
+   `{ "paused": true, "reason": "..." }`. No new reservations; held ones are
+   still served.
+2. Wait until `GET /api/v1/admin/gas-sponsor` (or `/health/bridge`, up to
+   30 s behind) shows `heldReservations` and `unsettledTxs` both at 0. Reservations end within an hour of
+   their assignment; a transaction lands or is killed as stuck.
+3. Unset `GAS_SPONSOR_ENABLED`. Remove or rotate `GAS_SPONSOR_PRIVATE_KEY`
+   only after that, and sweep the float.
+
+Unsetting the flag early is safe while the key stays set: the process drains.
+Removing the key with work still out stops the drain, and `/health/bridge` can
+no longer show the counts (it only reports `enabled: false`). Read them before
+removing the key.
+
+### A stuck transaction
+
+A stored transaction that never lands holds its nonce, and every later
+sponsor transaction waits behind it. After `GAS_SPONSOR_STUCK_MINUTES`
+sponsorship kills itself, and `/health/bridge` shows the transaction under
+`lastTrip` and `oldestPendingTx` (nonce and hash). For a plain call the
+worker has already paid its own gas once the call's signed deadline passed.
+For a setup (type 4) it is still holding the task: filling the nonce below
+ends that.
+
+If it can't land on its own (fees above the cap for good, or a node refuses
+the bytes), fill the nonce by hand. There is no route for this; the holder of
+the offline copy of the sponsor key does it:
+
+1. Read the sponsor's `eth_getTransactionCount` at `latest`. It must equal
+   the stuck transaction's nonce N; if it is past N, the transaction (or
+   another) already landed there and nothing needs filling.
+2. From the sponsor wallet, send a 0-value transfer to itself at nonce N,
+   with a fee high enough to land now. Never print the key.
+3. Within a minute or so, recovery sees nonce N used by a transaction that is not
+   the stored one. It marks the stored one `dropped` and records a kill
+   ("the sponsor key is signing elsewhere"): that is expected here. The
+   reservation is then released without a strike.
+4. Check that `unsettledTxs` falls and `oldestPendingTx` is clear. Then lift
+   the kill: `POST /api/v1/admin/gas-sponsor/controls` with
+   `{ "killed": false, "paused": false, "reason": "filled nonce N" }`.
 
 ## Fixes that ship regardless
 

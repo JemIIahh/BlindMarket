@@ -11,6 +11,7 @@ vi.mock('./gasSponsorConfig.js', () => ({
   RESERVATION_TTL_SECONDS: 3600,
   runnableSettings: async () => run.value,
   gasSponsorSettings: () => ({ enabled: true, chainId: 5042002 }),
+  gasSponsorDrainSettings: () => ({ enabled: true, chainId: 5042002 }),
 }));
 const writer = vi.hoisted(() => ({ is: true }));
 vi.mock('./gasSponsorRelayer.js', () => ({ isSponsorWriter: () => writer.is, reservationBudgetWei: async () => 10n ** 16n }));
