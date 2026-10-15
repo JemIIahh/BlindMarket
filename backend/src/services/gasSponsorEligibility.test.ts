@@ -21,10 +21,13 @@ const state = vi.hoisted(() => ({
   taskVerifier: '0x0000000000000000000000000000000000000000',
   balances: new Map<string, bigint>(),
   maxFee: 40n * 10n ** 9n,
+  setupAttempts: 0,
+  code: '0x' as string | Error,
 }));
 vi.mock('./gasSponsorStore.js', () => ({
   walletKeyExported: vi.fn(async (w: string) => state.exported.has(w.toLowerCase())),
   strikeCounts: vi.fn(async () => state.strikes),
+  setupAttempts: vi.fn(async () => state.setupAttempts),
   getControls: vi.fn(async () => state.controls),
   usage: vi.fn(async () => ({ spentLastHourWei: state.spent.hour, spentLastDayWei: state.spent.day, callsLastDay: 0, failuresLastHour: 0, sendsLastHour: 0 })),
 }));
@@ -38,17 +41,24 @@ vi.mock('./chainRuntime.js', () => ({
     provider: {
       getFeeData: async () => ({ maxFeePerGas: state.maxFee, gasPrice: state.maxFee / 2n }),
       getBalance: async (a: string) => state.balances.get(a.toLowerCase()) ?? 0n,
+      send: async (method: string) => {
+        if (method !== 'eth_getCode') throw new Error(`unexpected ${method}`);
+        if (state.code instanceof Error) throw state.code;
+        return state.code;
+      },
     },
   }),
 }));
 const settingsHolder = vi.hoisted(() => ({ current: null as unknown }));
-vi.mock('./gasSponsorConfig.js', () => ({ gasSponsorSettings: () => settingsHolder.current }));
+vi.mock('./gasSponsorConfig.js', () => ({ gasSponsorSettings: () => settingsHolder.current, MAX_SETUP_ATTEMPTS: 2 }));
 
 const { agentEligibility, taskEligibility, verifierCanRule, sponsorHint, sponsorshipStatus, _resetSponsorHintCache } = await import('./gasSponsorEligibility.js');
 
+const DELEGATE = ethers.getAddress('0x' + 'de'.repeat(20));
 const settings = {
   enabled: true,
   chainId: 5042,
+  delegate: DELEGATE,
   chain: { key: 'arc', chainId: 5042, token: { address: USDC, unit: { symbol: 'USDC', decimals: 6 } }, gas: { workerTxGasLimit: 200_000n } },
   minTaskRaw: 100_000n,
   caps: { maxStrikes: 3, hourlyBudgetWei: 10n ** 17n, dailyBudgetWei: 10n ** 18n },
@@ -66,6 +76,8 @@ beforeEach(() => {
   state.agents.clear();
   state.taskVerifier = '0x0000000000000000000000000000000000000000';
   state.balances.clear();
+  state.setupAttempts = 0;
+  state.code = '0x';
   settingsHolder.current = settings;
   _resetSponsorHintCache();
 });
@@ -87,6 +99,19 @@ describe('agentEligibility', () => {
   it('refuses a wallet whose key was ever exported', async () => {
     state.exported.add(AGENT.toLowerCase());
     expect(await agentEligibility(settings, hosted() as never)).toEqual({ ok: false, reason: 'key_exported' });
+  });
+
+  it('refuses an undelegated wallet that used its sponsored setup attempts, which the relayer would refuse (pre-enable review, item 3)', async () => {
+    state.setupAttempts = 1;
+    expect(await agentEligibility(settings, hosted() as never)).toMatchObject({ ok: true });
+    state.setupAttempts = 2;
+    expect(await agentEligibility(settings, hosted() as never)).toEqual({ ok: false, reason: 'setup_limit' });
+    // A code that can't be read counts as not delegated: refuse, as the relayer would.
+    state.code = new Error('server response 503');
+    expect(await agentEligibility(settings, hosted() as never)).toEqual({ ok: false, reason: 'setup_limit' });
+    // Delegated after all (its own transaction, or a setup that did land): nothing more to set up.
+    state.code = `0xef0100${DELEGATE.slice(2).toLowerCase()}`;
+    expect(await agentEligibility(settings, hosted() as never)).toMatchObject({ ok: true });
   });
 
   it('refuses an agent, or a Privy user, at the strike cap', async () => {

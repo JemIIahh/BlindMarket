@@ -4,7 +4,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
  * The sponsored-gas store (gasSponsorStore.ts) on a real Postgres: the caps
  * are SQL under an advisory lock, which a fake pool can't check. Runs when
  * TEST_DATABASE_URL names a disposable database (it creates the tables of
- * migration 43 and empties them); skipped otherwise — CI has no Postgres.
+ * migrations 43, 44 and 47 and empties them); skipped otherwise — CI has no
+ * Postgres. It shares tables with gasSponsorRelayer.handBack.test.ts: run the
+ * two with --no-file-parallelism.
  *
  *   docker run -d --name gas-store-pg -e POSTGRES_PASSWORD=pw -p 127.0.0.1:55452:5432 postgres:16
  *   TEST_DATABASE_URL='postgres://postgres:pw@127.0.0.1:55452/postgres?sslmode=disable' npx vitest run src/services/gasSponsorStore.test.ts
@@ -58,6 +60,7 @@ describe.skipIf(!url)('gasSponsorStore on Postgres', () => {
     pool.current = new pg.Pool({ connectionString: url, ssl: /[?&]sslmode=disable\b/.test(url) ? false : { rejectUnauthorized: false } });
     await pool.current.query(migrationSql(43)!);
     await pool.current.query(migrationSql(44)!);
+    await pool.current.query(migrationSql(47)!);
   });
   afterAll(async () => {
     await pool.current?.end();
@@ -135,6 +138,51 @@ describe.skipIf(!url)('gasSponsorStore on Postgres', () => {
 
     for (let i = 0; i < caps.perPosterDaily; i++) await reserveOk({ poster: '0x' + 'c'.repeat(40), agentWallet: `0x${'6'.repeat(39)}${i}` });
     expect(await store.reserve(input({ poster: '0x' + 'c'.repeat(40) }), caps)).toEqual({ ok: false, refusal: 'poster_daily' });
+  });
+
+  it('counts a reservation handed back against the daily caps, though it is released without a strike (pre-enable review, item 4)', async () => {
+    const wallet = '0x' + '7'.repeat(40);
+    for (let i = 0; i < caps.perAgentDaily; i++) {
+      const r = await reserveOk({ agentWallet: wallet });
+      await store.markReservationReturned(r.id);
+      await store.closeReservation(r.id, 'released');
+    }
+    expect(await store.reserve(input({ agentWallet: wallet }), caps)).toEqual({ ok: false, refusal: 'agent_daily' });
+    // One released with no hand-back (the task moved on, an accept that failed) still doesn't count.
+    const other = '0x' + '8'.repeat(40);
+    for (let i = 0; i < caps.perAgentDaily; i++) await store.closeReservation((await reserveOk({ agentWallet: other })).id, 'released');
+    expect((await store.reserve(input({ agentWallet: other }), caps)).ok).toBe(true);
+  });
+
+  it('records the first relay attempt and the last refusal on a held reservation, and a re-take starts clean (pre-enable review, item 3)', async () => {
+    const r = await reserveOk({ taskId: 11n });
+    expect(r).toMatchObject({ attemptedAt: null, lastRefusal: null });
+    await store.markReservationAttempted(r.id, 'FEES_TOO_HIGH');
+    const first = (await store.getReservationById(r.id))!;
+    expect(first.attemptedAt).toBeInstanceOf(Date);
+    expect(first.lastRefusal).toBe('FEES_TOO_HIGH');
+    await pool.current!.query(`UPDATE gas_sponsor_reservations SET attempted_at = attempted_at - interval '1 minute' WHERE id = $1`, [r.id]);
+    const earlier = (await store.getReservationById(r.id))!.attemptedAt!;
+    await store.markReservationAttempted(r.id, null);
+    expect(await store.getReservationById(r.id)).toMatchObject({ attemptedAt: earlier, lastRefusal: null });
+    await store.closeReservation(r.id, 'released');
+    await store.markReservationAttempted(r.id, 'GAS_TOO_HIGH'); // no longer held: left alone
+    expect((await store.getReservationById(r.id))!.lastRefusal).toBeNull();
+    const again = await reserveOk({ taskId: 11n, agentWallet: '0x' + '9'.repeat(40) });
+    expect(again).toMatchObject({ id: r.id, attemptedAt: null, lastRefusal: null });
+  });
+
+  it('counts held reservations and unsettled transactions on a chain', async () => {
+    expect(await store.inFlightCounts(CHAIN)).toEqual({ heldReservations: 0, unsettledTxs: 0 });
+    const r = await reserveOk();
+    await store.recordSignedTx({ chainId: CHAIN, reservationId: r.id, sponsor: '0x' + 'f'.repeat(40), nonce: 1, rawTx: '0x01', txHash: '0x' + '01'.repeat(32), withAuthorization: false });
+    await store.recordSignedTx({ chainId: CHAIN, reservationId: r.id, sponsor: '0x' + 'f'.repeat(40), nonce: 2, rawTx: '0x02', txHash: '0x' + '02'.repeat(32), withAuthorization: false });
+    await store.setTxStatus('0x' + '02'.repeat(32), 'sent');
+    await reserveOk({ chainId: CHAIN + 1 });
+    expect(await store.inFlightCounts(CHAIN)).toEqual({ heldReservations: 1, unsettledTxs: 2 });
+    await store.settleTx('0x' + '01'.repeat(32), 'confirmed', 1n, 1n);
+    await store.markReservationUsed(r.id, '0x' + '01'.repeat(32));
+    expect(await store.inFlightCounts(CHAIN)).toEqual({ heldReservations: 0, unsettledTxs: 1 });
   });
 
   it('caps global spend per hour and per day, counting held budgets and real costs', async () => {

@@ -2837,8 +2837,10 @@ a2aRouter.post('/tasks/:id/sponsored-call', requireAuth, async (req: AuthRequest
  * GET /api/v1/a2a/tasks/:id/sponsored-call?kind=submit|release
  *
  * What became of the agent's sponsored call for this task: 'none' (nothing
- * sent), 'pending' (out, may still land), 'confirmed', or 'failed' for good.
- * Same caller rule as the POST.
+ * sent), 'pending' (out, may still land), 'confirmed', or 'failed' for good
+ * (reason 'call_expired' once the deadline signed into the call passed while
+ * ours was still out: the worker pays its own gas then). Answered while
+ * sponsorship drains after being turned off, too. Same caller rule as the POST.
  */
 a2aRouter.get('/tasks/:id/sponsored-call', requireAuth, async (req: AuthRequest, res, next) => {
   try {

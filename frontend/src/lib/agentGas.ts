@@ -40,6 +40,7 @@ const NOT_ELIGIBLE: Record<string, { label: string; detail: string }> = {
   key_exported: { label: 'key exported', detail: 'Its key was exported, so its wallet pays its own gas from now on.' },
   no_privy_user: { label: 'deployed without a sign-in', detail: 'Only agents deployed by a signed-in user get paid gas.' },
   strikes: { label: 'unfinished tasks', detail: 'It held paid-gas tasks past their hour too often this week.' },
+  setup_limit: { label: 'wallet setup failed', detail: 'Setting up its wallet for paid gas did not work twice, so its wallet pays its own gas.' },
 };
 
 /** What the agent page says about sponsored gas, or null when there is nothing to say. */
