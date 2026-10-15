@@ -276,3 +276,48 @@ describe('refunds from a provider the agent no longer uses', () => {
     expect(ogRefundAction({ balance: 2n * OG, pendingRefund: 0n, refunds: [] }, NOW, NOW - 61 * 60_000)).toBe('request');
   });
 });
+
+describe('setup: only a provider the worker can call (OpenAI format)', () => {
+  // A cheaper qwen3.7-plus provider that serves only the Anthropic format: the
+  // worker calls 0G Compute in the OpenAI format, so it must never fund this one.
+  const QWEN_ANTHROPIC = svc('0x00000000000000000000000000000000000a17c0', 'qwen3.7-plus', 'https://anthropic-only.example', { inputPrice: 1n, outputPrice: 1n });
+  const detail = (s: Svc, formats?: string[]) => ({ ...s, ...(formats ? { modelInfo: { supported_formats: formats } } : {}) });
+
+  function withDetail(rows: unknown[] | Error) {
+    const chain = mockChain();
+    const all = [...SERVICES, QWEN_ANTHROPIC];
+    (chain.broker.inference as Record<string, unknown>).listServiceWithDetail = vi.fn(async (offset: number, limit: number) => {
+      if (rows instanceof Error) throw rows;
+      return rows.slice(offset, offset + limit);
+    });
+    chain.broker.inference.getServiceMetadata = vi.fn(async (p: string) => {
+      const s = all.find((x) => x.provider.toLowerCase() === p.toLowerCase())!;
+      return { endpoint: `${s.url}/v1/proxy`, model: s.model };
+    });
+    return chain;
+  }
+
+  it('funds the OpenAI-format provider, though an Anthropic-only one is cheaper', async () => {
+    const chain = withDetail([detail(GLM5, ['openai']), detail(WHISPER), detail(QWEN, ['openai', 'anthropic']), detail(QWEN_ANTHROPIC, ['anthropic'])]);
+    const { compute } = og('qwen3.7-plus', chain);
+    await compute.ensure({ force: true });
+    expect(compute.service()?.provider).toBe(QWEN.provider);
+    expect(chain.broker.ledger.transferFund.mock.calls.every((c: unknown[]) => c[0] !== QWEN_ANTHROPIC.provider)).toBe(true);
+  });
+
+  it('treats a provider with no listed formats as callable, as the deploy form does', async () => {
+    const chain = withDetail([detail(GLM5), detail(QWEN)]);
+    const { compute } = og('qwen3.7-plus', chain);
+    await compute.ensure({ force: true });
+    expect(compute.service()?.provider).toBe(QWEN.provider);
+  });
+
+  it("falls back to the plain list when the formats can't be read, and says so", async () => {
+    const chain = withDetail(new Error('status API down'));
+    const { compute, logs } = og('qwen3.7-plus', chain);
+    await compute.ensure({ force: true });
+    expect(compute.ready()).toBe(true);
+    expect(chain.broker.inference.listService).toHaveBeenCalled();
+    expect(logs.some((l) => l.includes("couldn't read the providers' API formats"))).toBe(true);
+  });
+});

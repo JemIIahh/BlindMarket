@@ -575,14 +575,32 @@ export function createOgCompute({
     return inFlight;
   }
 
+  // Every service, with the API formats each provider serves when 0G's
+  // status API knows them (listServiceWithDetail): matchOgService skips an
+  // Anthropic-only provider, which this worker can't call. If the detailed
+  // read fails, the plain list, as before: formats unknown, nothing excluded.
   async function listServices() {
-    const all = [];
-    for (let page = 0; page < 20; page++) {
-      const rows = await broker.inference.listService(page * OG_SERVICE_PAGE, OG_SERVICE_PAGE, true);
-      all.push(...rows);
-      if (rows.length < OG_SERVICE_PAGE) break;
+    const page = async (read) => {
+      const all = [];
+      for (let p = 0; p < 20; p++) {
+        const rows = await read(p * OG_SERVICE_PAGE, OG_SERVICE_PAGE);
+        all.push(...rows);
+        if (rows.length < OG_SERVICE_PAGE) break;
+      }
+      return all;
+    };
+    if (typeof broker.inference.listServiceWithDetail === 'function') {
+      try {
+        const rows = await page((offset, limit) => broker.inference.listServiceWithDetail(offset, limit, true));
+        return rows.map((r) => {
+          const f = r.modelInfo?.supported_formats;
+          return Array.isArray(f) ? { ...r, formats: f.filter((x) => typeof x === 'string') } : r;
+        });
+      } catch (e) {
+        log(`0G Compute: couldn't read the providers' API formats (${e.message}); choosing from the plain list`);
+      }
     }
-    return all;
+    return page((offset, limit) => broker.inference.listService(offset, limit, true));
   }
 
   // The providers the account holds 0G with. None before the account exists.
