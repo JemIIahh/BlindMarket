@@ -1,6 +1,7 @@
 import { ethers } from 'ethers';
 import https from 'https';
 import { config } from '../config.js';
+import { ogChatServices, type OgServiceLike } from './ogComputeModels.js';
 
 // @0gfoundation/0g-compute-ts-sdk ESM exports — use createRequire for CJS compat
 import { createRequire } from 'module';
@@ -101,38 +102,33 @@ interface ServiceInfo {
 }
 
 /**
- * Find a suitable inference provider.
- * Prefers the configured provider address, otherwise picks the first available.
+ * The service the verifier calls: the configured provider when it is
+ * registered, else the first chatbot service whose TEE signer 0G has
+ * acknowledged (ogChatServices, as agents choose theirs). Not simply the
+ * first service listed: that can be a non-chat service, or one whose answers
+ * can't be verified. Null when no service qualifies.
  */
+export function pickVerifierService<T extends OgServiceLike & { url?: string; endpoint?: string }>(services: readonly T[], configured: string): T | null {
+  if (configured) {
+    const match = services.find((s) => s.provider?.toLowerCase() === configured.toLowerCase());
+    if (match) return match;
+    console.warn(`Configured provider ${configured} not found, using the first chat service`);
+  }
+  return ogChatServices(services)[0] ?? null;
+}
+
+/** Find the inference provider the verifier uses (pickVerifierService). */
 async function findProvider(): Promise<ServiceInfo> {
   const b = await getBroker();
-  const services = await b.inference.listService();
-
-  if (!services || services.length === 0) {
-    throw new Error('No 0G Compute inference services available');
+  const services = (await b.inference.listService()) as Array<OgServiceLike & { url?: string; endpoint?: string; model?: string }>;
+  const picked = pickVerifierService(services ?? [], config.ogComputeProviderAddress);
+  if (!picked) {
+    throw new Error('No 0G Compute chat service with an acknowledged TEE signer is available');
   }
-
-  // If a specific provider is configured, use it
-  if (config.ogComputeProviderAddress) {
-    const match = services.find(
-      (s: any) => s.provider?.toLowerCase() === config.ogComputeProviderAddress.toLowerCase()
-    );
-    if (match) {
-      return {
-        providerAddress: (match as any).provider,
-        endpoint: (match as any).url || (match as any).endpoint,
-        model: (match as any).model || 'default',
-      };
-    }
-    console.warn(`Configured provider ${config.ogComputeProviderAddress} not found, using first available`);
-  }
-
-  // Auto-select first available service
-  const first = services[0] as any;
   return {
-    providerAddress: first.provider,
-    endpoint: first.url || first.endpoint,
-    model: first.model || 'default',
+    providerAddress: picked.provider,
+    endpoint: (picked.url || picked.endpoint)!,
+    model: picked.model || 'default',
   };
 }
 
