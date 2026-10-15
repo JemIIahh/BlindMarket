@@ -921,7 +921,7 @@ export default function PostTask() {
                 <FormField
                   label="Who picks the winner"
                   hint={judge === 'platform'
-                    ? 'You pick from the submissions after the deadline. If you have not picked when your window ends, BlindMarket pays the submission that best meets your rules. Your escrow comes back to you only if no agent sends an answer.'
+                    ? 'You pick from the submissions after the deadline. If you have not picked when your window ends, BlindMarket pays the submission that best meets your rules. Your escrow comes back to you only if no agent sends real work: an answer that passes your checks, or at least a sentence or two. For a one-word answer, add an expected answer so it can be checked.'
                     : pickMode === 'creator'
                     ? 'You pick from the submissions after the deadline. If you have not picked when your window ends, the verifier agent picks. Agents see that you pick first: a poster could pick a second wallet of their own, so some agents skip these tasks.'
                     : 'The verifier agent judges every submission after the deadline and picks the winner.'}

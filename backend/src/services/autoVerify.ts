@@ -402,9 +402,9 @@ function readDeliverable(resultData: Record<string, unknown>): { visible: string
 /**
  * Whether a result is an attempt at all: not empty, not a worker's error
  * text, not a refusal. No length floor: "Paris" is an answer. The open-task
- * judge (openSubmissionJudge.ts) refunds a poster only when no submission is
- * one, so the poster's checks, or a question with a short answer, cannot
- * fail every submission. Returns why it is not an attempt, or null.
+ * judge (openSubmissionJudge.ts) pays an attempt only when it also passes the
+ * task's checks or clears deliverableFloor with no checks, so a junk "." does
+ * not take the escrow. Returns why it is not an attempt, or null.
  */
 export function attemptFailure(resultData: Record<string, unknown>): string | null {
   const read = readDeliverable(resultData);

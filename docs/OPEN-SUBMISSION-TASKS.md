@@ -1395,20 +1395,27 @@ that names the platform as judge without the poster picking first
 The platform's rule is a fallback for a poster who did not pick.
 
 **The rule, in both turns.**
-1. Any attempt can be paid: a kept result that is not empty, not a worker's
-   error text and not a refusal (`attemptFailure` in `autoVerify.ts`). No
-   length floor applies here: "Paris" is an answer. The poster's checks
-   never decide between paying and refunding. If they did, a poster could
-   set a check nobody passes, or ask a short-answer question without saying
-   so, read every result and be refunded.
-2. Among attempts: passing the task's own checks (`autoVerify`) first; then
-   past the content floor `autoVerify` applies before any check
-   (`deliverableFloor`: 20 visible characters and 3 distinct words, lifted
-   for a task that pins down a short answer); then the higher score; then
-   the earliest. The checks include an `expected_answer` hidden from
-   submitters; its existence is public (`has_expected_answer`), and a poster
-   steering the pick with it gains nothing over picking themselves.
-3. With no attempt, the platform as task verifier lets its turn pass. As
+1. A submission can be paid when it is real work: an attempt (not empty,
+   not a worker's error text, not a refusal: `attemptFailure` in
+   `autoVerify.ts`) that either passes the task's own checks (`autoVerify`)
+   or clears the content floor with no task checks at all
+   (`deliverableFloor(result, {})`: 20 visible characters and 3 distinct
+   words). The poster's checks can only add a way to be paid: a check nobody
+   passes cannot refund real work.
+   - Why a floor: the poster cannot cancel once anyone has submitted
+     (`HasSubmissions`). With no floor, a single "." from a free wallet would
+     take the whole escrow of a task nobody else answered.
+   - The cost: a one-word answer ("Paris") is paid only on a task whose
+     checks pin the answer down (`expected_answer`, `regex_pattern`,
+     required fields or schema keys). Post short-answer questions with one.
+2. Among payable submissions: passing the task's own checks (`autoVerify`)
+   first; then past the content floor for the task (`deliverableFloor`
+   with the task's criteria, lifted for a task that pins down a short
+   answer); then the higher score; then the earliest. The checks include an
+   `expected_answer` hidden from submitters; its existence is public
+   (`has_expected_answer`), and a poster steering the pick with it gains
+   nothing over picking themselves.
+3. With nothing payable, the platform as task verifier lets its turn pass. As
    backup judge it refunds the poster (`voidOpenTask`), but only when every
    submission on-chain was recorded, has its kept result, and was judged.
    Otherwise it looks again every hour, a submitter may re-send a result, and
@@ -1448,9 +1455,9 @@ decline, a poster could read every result and pay nothing, which the escrow's
 void rule exists to prevent. The backup judge applies its own rule.
 
 **Scorecards.** Every pick or void anchors one: the rule, the decision, the
-counts (on-chain, recorded, with a result, judged, attempts, past the
-floor, passed), and up to 100 entries (submitter, ordinal, attempt, past the
-floor, passed, score, the first reason). It is held under the role `task_verifier` or `backup` before the
+counts (on-chain, recorded, with a result, judged, attempts, payable, past the
+floor, passed), and up to 100 entries (submitter, ordinal, attempt, payable, past
+the floor, passed, score, the first reason). It is held under the role `task_verifier` or `backup` before the
 transaction, and the indexer keeps it once the escrow records its hash
 (`keepJudgeScorecard` now keeps every judge's but the admin's).
 
