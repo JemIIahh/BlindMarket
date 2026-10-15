@@ -172,6 +172,18 @@ describe.skipIf(!url)('gasSponsorStore on Postgres', () => {
     expect(again).toMatchObject({ id: r.id, attemptedAt: null, lastRefusal: null });
   });
 
+  it('changes a status only from the one expected, when one is named (PR #164 review, item 3)', async () => {
+    const r = await reserveOk();
+    const hash = '0x' + '0c'.repeat(32);
+    await store.recordSignedTx({ chainId: CHAIN, reservationId: r.id, sponsor: '0x' + 'f'.repeat(40), nonce: 9, rawTx: '0x09', txHash: hash, withAuthorization: false });
+    expect(await store.setTxStatus(hash, 'sent', 'signed')).toBe(true);
+    await store.settleTx(hash, 'confirmed', 1n, 1n);
+    // Recovery saw it 'sent' before the settle: its flip must not undo the settle.
+    expect(await store.setTxStatus(hash, 'signed', 'sent')).toBe(false);
+    expect((await store.txsForReservation(r.id))[0].status).toBe('confirmed');
+    expect(await store.setTxStatus(hash, 'dropped')).toBe(true); // unconditional, as before
+  });
+
   it('counts held reservations and unsettled transactions on a chain', async () => {
     expect(await store.inFlightCounts(CHAIN)).toEqual({ heldReservations: 0, unsettledTxs: 0 });
     const r = await reserveOk();

@@ -391,8 +391,18 @@ export async function recordSignedTx(tx: {
   return toTx(rows[0]);
 }
 
-export async function setTxStatus(txHash: string, status: SponsoredTxStatus): Promise<void> {
-  await (await pool()).query('UPDATE gas_sponsor_txs SET status = $2, updated_at = NOW() WHERE tx_hash = $1', [txHash, status]);
+/**
+ * Set a stored transaction's status. With `from`, only while it still has
+ * that status: recovery's signed ⇄ sent flips must never overwrite a status a
+ * concurrent settle wrote (a 'confirmed' turned back into 'signed' would hold
+ * every send for good). False when nothing changed.
+ */
+export async function setTxStatus(txHash: string, status: SponsoredTxStatus, from?: SponsoredTxStatus): Promise<boolean> {
+  const { rowCount } = await (await pool()).query(
+    'UPDATE gas_sponsor_txs SET status = $2, updated_at = NOW() WHERE tx_hash = $1 AND ($3::text IS NULL OR status = $3)',
+    [txHash, status, from ?? null],
+  );
+  return (rowCount ?? 0) > 0;
 }
 
 /**

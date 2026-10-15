@@ -27,6 +27,8 @@ const DESIGNATOR = `0xef0100${DELEGATE.slice(2).toLowerCase()}`;
 
 // mode 'draining': GAS_SPONSOR_ENABLED is off, with everything else still configured.
 const settings = vi.hoisted(() => ({ current: null as any, mode: 'on' as 'on' | 'draining' }));
+// A drain refused at run time (roles, Redis ownership) with the settings in place.
+const drainProblem = vi.hoisted(() => ({ value: null as string | null }));
 vi.mock('./gasSponsorConfig.js', async (orig) => {
   const off = { enabled: false, reason: 'GAS_SPONSOR_ENABLED is not true', misconfigured: false };
   return {
@@ -34,7 +36,9 @@ vi.mock('./gasSponsorConfig.js', async (orig) => {
     runnableSettings: async () => (settings.current && settings.mode === 'on' ? { ok: true, settings: settings.current } : { ok: false, reason: off.reason }),
     gasSponsorSettings: () => (settings.current && settings.mode === 'on' ? settings.current : off),
     gasSponsorDrainSettings: () => settings.current ?? off,
-    drainableSettings: async () => (settings.current ? { ok: true, mode: settings.mode, settings: settings.current } : { ok: false, reason: 'nothing can drain' }),
+    drainableSettings: async () => (drainProblem.value
+      ? { ok: false, reason: drainProblem.value }
+      : settings.current ? { ok: true, mode: settings.mode, settings: settings.current } : { ok: false, reason: 'nothing can drain' }),
   };
 });
 const elig = vi.hoisted(() => ({ agent: { ok: true, ownerDid: 'did:privy:abc' } as any, task: { ok: true } as any }));
@@ -105,7 +109,13 @@ vi.mock('./gasSponsorStore.js', () => ({
     db.txs.push(row);
     return row;
   }),
-  setTxStatus: vi.fn(async (hash: string, status: string) => { db.txs.find((t: Tx) => t.txHash === hash).status = status; }),
+  setTxStatus: vi.fn(async (hash: string, status: string, from?: string) => {
+    const t = db.txs.find((x: Tx) => x.txHash === hash);
+    if (from !== undefined && t.status !== from) return false;
+    t.status = status;
+    if (from !== undefined) db.events.push(`status:${t.nonce}:${status}`); // recovery's conditional flips
+    return true;
+  }),
   settleTx: vi.fn(async (hash: string, status: string, gasUsed: bigint, costWei: bigint) => {
     const t = db.txs.find((x: Tx) => x.txHash === hash);
     if (t.costWei !== undefined) return;
@@ -182,6 +192,8 @@ const provider = {
   getTransaction: vi.fn(async (hash: string) => (chain.knownTx.has(hash) ? { hash, blockNumber: 9 } : null)),
   getBalance: vi.fn(async () => chain.balance),
 };
+// A test may wrap provider.send; each test starts from this one again.
+const providerSend = provider.send.getMockImplementation()!;
 vi.mock('./chainRuntime.js', () => ({ chainRuntime: () => ({ provider, escrow: { interface: ESCROW_IFACE } }) }));
 vi.mock('./escrow.js', () => ({
   getTaskOn: vi.fn(async () => chain.task),
@@ -283,6 +295,7 @@ beforeEach(async () => {
   lock.clients.length = 0;
   settings.current = baseSettings();
   settings.mode = 'on';
+  drainProblem.value = null;
   elig.agent = { ok: true, ownerDid: 'did:privy:abc' };
   elig.task = { ok: true };
   db.reservations.length = 0;
@@ -308,6 +321,7 @@ beforeEach(async () => {
     chain.code = DESIGNATOR;
   };
   vi.clearAllMocks();
+  provider.send.mockImplementation(providerSend);
 });
 
 const writer = async () => expect(await relayer.acquireSponsorWriter(settings.current)).toBe(true);
@@ -1042,6 +1056,70 @@ describe('no nonce above a hole (pre-enable review, finding-9)', () => {
     expect(db.txs[1]).toMatchObject({ nonce: 4, reservationId: b.id });
   });
 
+  it('re-checks right before signing: an unacknowledged tx that appears while a send waits in the queue blocks it (PR #164 review, item 3)', async () => {
+    await writer();
+    // nonce 3 went out and a node took it.
+    db.txs.push({ id: 50, chainId: CHAIN_ID, reservationId: 99, sponsor: SPONSOR, nonce: 3, rawTx: '0x', txHash: '0xprev', withAuthorization: false, status: 'sent' });
+    chain.sponsorNonce = 4;
+    holdReservation();
+    // While this send is past sendBlocker (re-simulating at the front of the
+    // queue), nonce 3 becomes unacknowledged.
+    let estimates = 0;
+    const realSend = provider.send.getMockImplementation()!;
+    provider.send.mockImplementation(async (method: string, params: any[]) => {
+      if (method === 'eth_estimateGas' && ++estimates === 2) db.txs[0].status = 'signed';
+      return realSend(method, params);
+    });
+    expect(await relayer.relaySponsoredCall(await input({ authorization: auth() }))).toMatchObject({ ok: false, code: 'SPONSOR_BACKLOG' });
+    expect(db.txs).toHaveLength(1); // nothing signed at nonce 4
+    expect(chain.sent).toEqual([]);
+    provider.send.mockImplementation(realSend);
+  });
+
+  it("recovery's sent → signed flip waits for a send already in the queue, so it never lands between that send's check and its signature (PR #164 review, item 3)", async () => {
+    await writer();
+    db.txs.push({ id: 50, chainId: CHAIN_ID, reservationId: 99, sponsor: SPONSOR, nonce: 3, rawTx: '0xprevraw', txHash: '0xprev', withAuthorization: false, status: 'sent', createdAt: new Date() });
+    chain.sponsorNonce = 4;
+    chain.latestNonce = 3;
+    holdReservation();
+    // Hold the send at its front-of-queue simulation.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let estimates = 0;
+    const realSend = provider.send.getMockImplementation()!;
+    provider.send.mockImplementation(async (method: string, params: any[]) => {
+      if (method === 'eth_estimateGas' && ++estimates === 2) await gate;
+      if (method === 'eth_sendRawTransaction' && params[0] === '0xprevraw') {
+        throw Object.assign(new Error('invalid sender'), { code: 'UNKNOWN_ERROR' }); // the re-send of nonce 3 is refused
+      }
+      return realSend(method, params);
+    });
+    const sending = relayer.relaySponsoredCall(await input({ authorization: auth() }));
+    while (estimates < 2) await new Promise((r) => setTimeout(r, 1));
+    const recovering = relayer.recoverSponsorTxs(settings.current);
+    await new Promise((r) => setTimeout(r, 20));
+    const statusWhileHeld = db.txs[0].status;
+    // Let the send go before asserting: a send left held would block the module's queue for every later test.
+    release();
+    const result = await sending;
+    await recovering;
+    expect(statusWhileHeld).toBe('sent'); // the flip waits behind the send
+    expect(result).toMatchObject({ ok: true });
+    // The send signed nonce 4 while 3 was still acknowledged; only then did 3 flip.
+    const signedAt = db.events.indexOf('signed:4');
+    const flippedAt = db.events.indexOf('status:3:signed');
+    expect(signedAt).toBeGreaterThanOrEqual(0);
+    expect(flippedAt).toBeGreaterThan(signedAt);
+    provider.send.mockImplementation(realSend);
+  });
+
+  it('a recovery flip never overwrites a status a settle wrote meanwhile', async () => {
+    db.txs.push({ id: 51, chainId: CHAIN_ID, reservationId: 1, sponsor: SPONSOR, nonce: 3, rawTx: '0xraw', txHash: '0xdone', withAuthorization: false, status: 'confirmed' });
+    const { setTxStatus } = await import('./gasSponsorStore.js');
+    expect(await setTxStatus('0xdone', 'signed', 'sent')).toBe(false);
+    expect(db.txs[0].status).toBe('confirmed');
+  });
+
   it('a release held back by the backlog gives its new reservation back', async () => {
     await writer();
     holdReservation();
@@ -1054,7 +1132,25 @@ describe('no nonce above a hole (pre-enable review, finding-9)', () => {
     expect(db.reservations.find((r) => r.kind === 'release')?.status).toBe('released');
   });
 
-  it('reports a call stuck past the deadline the agent signed as failed, so the worker pays its own gas', async () => {
+  it('reports a plain call (type 2) stuck past the deadline the agent signed as failed, so the worker pays its own gas', async () => {
+    relayer._setReceiptTimeout(50);
+    await writer();
+    holdReservation();
+    chain.code = DESIGNATOR; // delegated: no authorization rides along
+    chain.broadcastError = new Error('timeout');
+    const sent = await input();
+    await relayer.relaySponsoredCall(sent);
+    expect(db.txs[0].withAuthorization).toBe(false);
+    chain.broadcastError = null;
+    chain.blockTime = Number(sent.deadline); // valid while block.timestamp <= deadline
+    expect(await relayer.sponsoredCallStatus(AGENT, TASK_ID, 'submit')).toEqual({ status: 'pending', txHash: db.txs[0].txHash });
+    chain.blockTime = Number(sent.deadline) + 1; // the delegate reverts it with Expired() from now on
+    expect(await relayer.sponsoredCallStatus(AGENT, TASK_ID, 'submit'))
+      .toEqual({ status: 'failed', txHash: db.txs[0].txHash, reason: 'call_expired' });
+    relayer._setReceiptTimeout(60_000);
+  });
+
+  it('keeps a stuck setup (type 4) pending past the call deadline: its authorization would still apply when it lands (PR #164 review, item 4)', async () => {
     relayer._setReceiptTimeout(50);
     await writer();
     holdReservation();
@@ -1062,11 +1158,12 @@ describe('no nonce above a hole (pre-enable review, finding-9)', () => {
     const sent = await input({ authorization: auth() });
     await relayer.relaySponsoredCall(sent);
     chain.broadcastError = null;
-    chain.blockTime = Number(sent.deadline); // valid while block.timestamp <= deadline
+    expect(db.txs[0].withAuthorization).toBe(true);
+    chain.blockTime = Number(sent.deadline) + 3_600;
     expect(await relayer.sponsoredCallStatus(AGENT, TASK_ID, 'submit')).toEqual({ status: 'pending', txHash: db.txs[0].txHash });
-    chain.blockTime = Number(sent.deadline) + 1; // the delegate reverts it with Expired() from now on
-    expect(await relayer.sponsoredCallStatus(AGENT, TASK_ID, 'submit'))
-      .toEqual({ status: 'failed', txHash: db.txs[0].txHash, reason: 'call_expired' });
+    // Final once its nonce went to another transaction (the manual fill after the stuck kill).
+    db.txs[0].status = 'dropped';
+    expect(await relayer.sponsoredCallStatus(AGENT, TASK_ID, 'submit')).toMatchObject({ status: 'failed', reason: 'dropped' });
     relayer._setReceiptTimeout(60_000);
   });
 
@@ -1141,7 +1238,10 @@ describe('turned off with work in flight: draining (pre-enable review, item 2)',
     chain.code = DESIGNATOR;
     await relayer.gasSponsorTick();
     expect(a.status).toBe('used');
+    // The report reads its counts at most every 30 s.
+    const later = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 30_001);
     expect(await relayer.gasSponsorReport()).toMatchObject({ enabled: false, heldReservations: 0, unsettledTxs: 0 });
+    later.mockRestore();
     await relayer.gasSponsorTick();
     expect(relayer.isSponsorWriter()).toBe(false);
     expect(lock.held).toBe(false);
@@ -1156,13 +1256,65 @@ describe('turned off with work in flight: draining (pre-enable review, item 2)',
     expect(db.setControlsCalls).toEqual([]);
   });
 
-  it('says what is left, and why it cannot drain, once the rest of the config is gone too', async () => {
+  it('reads nothing from Postgres for /health/bridge when it could not drain anyway: no key, a config-only check (PR #164 review, item 1)', async () => {
     holdReservation();
     settings.mode = 'draining';
     settings.current = null; // the sponsor key removed as well
-    expect(await relayer.gasSponsorReport()).toMatchObject({
-      enabled: false, heldReservations: 1, unsettledTxs: 0, draining: false, drainProblem: 'nothing can drain',
-    });
+    const { inFlightCounts } = await import('./gasSponsorStore.js');
+    vi.mocked(inFlightCounts).mockClear();
+    expect(await relayer.gasSponsorReport()).toEqual({ enabled: false, reason: 'GAS_SPONSOR_ENABLED is not true' });
+    expect(inFlightCounts).not.toHaveBeenCalled();
+  });
+
+  it('reads the in-flight counts at most every 30 s, and says why it cannot drain (PR #164 review, item 1)', async () => {
+    holdReservation();
+    settings.mode = 'draining';
+    drainProblem.value = "this backend is on another deployment's Redis";
+    const { inFlightCounts } = await import('./gasSponsorStore.js');
+    vi.mocked(inFlightCounts).mockClear();
+    for (let i = 0; i < 5; i++) {
+      expect(await relayer.gasSponsorReport()).toMatchObject({
+        enabled: false, heldReservations: 1, unsettledTxs: 0, draining: false, drainProblem: "this backend is on another deployment's Redis",
+      });
+    }
+    expect(inFlightCounts).toHaveBeenCalledTimes(1);
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now + 30_001);
+    await relayer.gasSponsorReport();
+    expect(inFlightCounts).toHaveBeenCalledTimes(2);
+    clock.mockRestore();
+  });
+
+  it('never persists a pause while draining: not the automatic one after a settle, nor a breaker pause; a kill still is (PR #164 review, item 2)', async () => {
+    relayer._setReceiptTimeout(50);
+    await writer();
+    holdReservation();
+    chain.broadcastError = new Error('timeout');
+    await relayer.relaySponsoredCall(await input({ authorization: auth() }));
+    chain.broadcastError = null;
+    settings.mode = 'draining';
+    db.usage.failuresLastHour = 50; // would auto-pause
+    // It lands and reverts: settled through recovery, then read through a status call.
+    chain.mined.set(db.txs[0].txHash, { status: 0, logs: [], gasUsed: 50_000n, gasPrice: 20n * GWEI });
+    await relayer.gasSponsorTick();
+    expect(db.txs[0].status).toBe('reverted');
+    expect(await relayer.sponsoredCallStatus(AGENT, TASK_ID, 'submit')).toMatchObject({ status: 'failed' });
+    expect(db.setControlsCalls).toEqual([]);
+    expect(db.controls).toMatchObject({ paused: false, killed: false });
+
+    // A refused re-send while draining: alerted and shown, not stored.
+    holdReservation({ taskId: 42n });
+    db.txs.push({ id: 60, chainId: CHAIN_ID, reservationId: 2, sponsor: SPONSOR, nonce: 4, rawTx: '0xraw4', txHash: '0xfour', withAuthorization: false, status: 'sent', createdAt: new Date() });
+    chain.latestNonce = 4;
+    chain.broadcastError = Object.assign(new Error('invalid sender'), { code: 'UNKNOWN_ERROR' });
+    await relayer.recoverSponsorTxs(settings.current);
+    expect(db.setControlsCalls).toEqual([]);
+    expect(db.txs[1].status).toBe('signed');
+    expect((await relayer.gasSponsorReport()).lastTrip).toMatchObject({ action: 'paused', nonce: 4 });
+    // Stuck past its time: the kill is recorded.
+    await relayer.recoverSponsorTxs(settings.current, Date.now() + 11 * 60_000);
+    expect(db.controls).toMatchObject({ paused: false, killed: true });
+    relayer._setReceiptTimeout(60_000);
   });
 });
 

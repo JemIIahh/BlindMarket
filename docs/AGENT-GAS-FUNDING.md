@@ -298,17 +298,27 @@ and first-time setup. The 10% fee on a 0.10 USDC task is 0.01 USDC.
     pool) and pauses sponsorship.
   - A stored transaction that has not landed in `GAS_SPONSOR_STUCK_MINUTES`
     (default 10) **kills** sponsorship: every later nonce would wait behind
-    it. Recovery keeps re-sending it. Its call reports `failed`
+    it. Recovery keeps re-sending it. A plain call (type 2) reports `failed`
     (`call_expired`) as soon as the deadline the agent signed into the call
     (ten minutes of chain time) passes: the delegate reverts it from then on,
-    so the worker pays its own gas without racing it. See "A stuck
-    transaction" below.
+    so the worker pays its own gas without racing it. A setup (type 4, the
+    first call, carrying the 7702 authorization) stays `pending`: its
+    authorization still applies whenever it lands, and would bump the
+    wallet's nonce under the worker's own-gas transaction. It ends when it
+    lands or its nonce is filled. See "A stuck transaction" below.
+  - Recovery's flip of a transaction back to unacknowledged runs through the
+    send queue, and each send checks again right before it signs, so no send
+    can sign above it in between. A flip never overwrites a status a settle
+    wrote meanwhile.
   - Receipts are polled, because Arc RPC replicas can lag.
 - **Monitoring.**
   - `/health/bridge` shows the sponsor balance, calls today and budget left,
-    and what is still in flight: `heldReservations` and `unsettledTxs`. With
-    sponsorship off it shows those two counts, `draining`, and if it can't
-    drain, `drainProblem`.
+    and what is still in flight: `heldReservations` and `unsettledTxs`, read
+    from Postgres at most every 30 s per process (the route is
+    unauthenticated). With sponsorship off it shows them only where this
+    backend could drain (the key and the rest of the configuration still
+    set; without them it reads nothing from the database), with `draining`,
+    and if a run-time check stops the drain, `drainProblem`.
   - Failures go to Sentry, and each call is recorded with
     `recordEvent('gas_sponsored')`.
   - Sponsorship pauses itself and alerts when the hourly spend or failure rate
@@ -322,8 +332,10 @@ Unsetting `GAS_SPONSOR_ENABLED` stops every new reservation and send at once.
 Work already out is not stranded: while Postgres holds a held reservation or
 an unsettled transaction, the writer keeps draining. It re-sends the stored
 bytes, settles receipts, answers the worker's `GET /sponsored-call`, and
-releases each reservation with nothing out (no strike). It signs nothing new.
-Once both counts are 0 it lets the writer lock go.
+releases each reservation with nothing out (no strike). It signs nothing new,
+and it never stores a pause (automatic or from the breaker; a kill is still
+stored), so turning sponsorship back on doesn't find it silently paused. Once
+both counts are 0 it lets the writer lock go.
 
 Draining needs the rest of the configuration, the sponsor key included (it
 names the sponsor whose transactions to finish). So turn it off in this
@@ -339,16 +351,19 @@ order:
    only after that, and sweep the float.
 
 Unsetting the flag early is safe while the key stays set: the process drains.
-Removing the key with work still out stops the drain, and `/health/bridge`
-says so (`draining: false`, `drainProblem`).
+Removing the key with work still out stops the drain, and `/health/bridge` can
+no longer show the counts (it only reports `enabled: false`). Read them before
+removing the key.
 
 ### A stuck transaction
 
 A stored transaction that never lands holds its nonce, and every later
 sponsor transaction waits behind it. After `GAS_SPONSOR_STUCK_MINUTES`
 sponsorship kills itself, and `/health/bridge` shows the transaction under
-`lastTrip` and `oldestPendingTx` (nonce and hash). The worker has already
-paid its own gas once the call's signed deadline passed.
+`lastTrip` and `oldestPendingTx` (nonce and hash). For a plain call the
+worker has already paid its own gas once the call's signed deadline passed.
+For a setup (type 4) it is still holding the task: filling the nonce below
+ends that.
 
 If it can't land on its own (fees above the cap for good, or a node refuses
 the bytes), fill the nonce by hand. There is no route for this; the holder of
