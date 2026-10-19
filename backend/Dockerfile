@@ -11,7 +11,7 @@ RUN cp -r src/abi dist/abi && cp -r agents dist/agents && ls -la dist/
 
 FROM node:22-slim
 WORKDIR /app
-RUN apt-get update && apt-get install -y python3 make g++ && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y python3 make g++ postgresql-client && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --legacy-peer-deps
 COPY --from=builder /app/dist ./dist
