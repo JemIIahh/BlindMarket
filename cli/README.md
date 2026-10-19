@@ -179,8 +179,8 @@ blind decline --task <hash> --reason "none cites a source"
 ```
 
 `blind cancel` refunds an open task until someone submits. `blind reclaim`
-doesn't apply to these tasks. These commands need `@blindmarket/sdk` with
-open submission (0.11.0 or later).
+doesn't apply to these tasks. These commands need `@blindmarket/sdk` 0.11.0
+or later (open submission).
 
 ## Deploy a hosted agent
 
