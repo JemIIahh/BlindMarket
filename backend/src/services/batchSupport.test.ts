@@ -117,6 +117,72 @@ describe('batchCreateSupport', () => {
   });
 });
 
+describe('no answer from the RPC', () => {
+  const rpcDown = () => Object.assign(new Error('request timeout'), { code: 'TIMEOUT' });
+
+  it('keeps a known "yes" through a failed read, and asks again in 30 s', async () => {
+    expect(await batchCreateSupport('base')).toEqual({ supported: true, maxBatch: 50 });
+    vi.advanceTimersByTime(11 * 60_000);
+    maxBatch.mockRejectedValueOnce(rpcDown());
+    await batchCreateSupport('base');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await batchCreateSupport('base')).toEqual({ supported: true, maxBatch: 50 });
+    expect(maxBatch).toHaveBeenCalledTimes(2);
+    vi.advanceTimersByTime(31_000);
+    await batchCreateSupport('base');
+    expect(maxBatch).toHaveBeenCalledTimes(3);
+  });
+
+  it('keeps a known "yes" through a probe that never answers', async () => {
+    expect(await batchCreateSupport('base')).toEqual({ supported: true, maxBatch: 50 });
+    vi.advanceTimersByTime(11 * 60_000);
+    maxBatch.mockImplementationOnce(() => new Promise<bigint>(() => {}));
+    await batchCreateSupport('base');
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await batchCreateSupport('base')).toEqual({ supported: true, maxBatch: 50 });
+  });
+
+  it('keeps a known "no" through a failed read', async () => {
+    maxBatch.mockRejectedValueOnce(revert());
+    expect(await batchCreateSupport('base')).toEqual({ supported: false, maxBatch: 0 });
+    vi.advanceTimersByTime(61_000);
+    maxBatch.mockRejectedValueOnce(rpcDown());
+    await batchCreateSupport('base');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await batchCreateSupport('base')).toEqual({ supported: false, maxBatch: 0 });
+  });
+
+  it('with nothing known, says "no" for now and asks again in 30 s', async () => {
+    maxBatch.mockRejectedValueOnce(rpcDown());
+    expect(await batchCreateSupport('base')).toEqual({ supported: false, maxBatch: 0 });
+    vi.advanceTimersByTime(31_000);
+    await batchCreateSupport('base');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await batchCreateSupport('base')).toEqual({ supported: true, maxBatch: 50 });
+    expect(maxBatch).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps open-task support through a failed read', async () => {
+    const getOpenTask = vi.fn(async () => ({ open: false }));
+    chain.baseEscrow = { MAX_BATCH: maxBatch, getOpenTask };
+    expect(await openCreateSupport('base')).toBe(true);
+    vi.advanceTimersByTime(11 * 60_000);
+    getOpenTask.mockRejectedValueOnce(rpcDown());
+    await openCreateSupport('base');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await openCreateSupport('base')).toBe(true);
+  });
+
+  it('reads an escrow ABI without the function as "no", not as no answer', async () => {
+    chain.baseEscrow = { MAX_BATCH: maxBatch };
+    expect(await openCreateSupport('base')).toBe(false);
+    vi.advanceTimersByTime(31_000);
+    await openCreateSupport('base');
+    // A known "no" is kept a minute, so no second read yet.
+    expect(await openCreateSupport('base')).toBe(false);
+  });
+});
+
 describe('openCreateSupport', () => {
   it("says yes when the escrow answers getOpenTask, and keeps it apart from createTasks' answer", async () => {
     const getOpenTask = vi.fn(async () => ({ open: false, mode: 0n, creatorWindow: 0n, closedBy: 0n }));

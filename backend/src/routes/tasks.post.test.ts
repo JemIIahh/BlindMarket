@@ -44,6 +44,9 @@ vi.mock('../config.js', async (importOriginal) => {
 // escrow.ts is real: it picks the contract through chainRuntime, which reads
 // these bindings.
 vi.mock('../services/chain.js', () => chain);
+// The platform's verifier: as an open task's judge, the poster must pick first.
+const PLATFORM_JUDGE = '0x' + 'e9'.repeat(20);
+vi.mock('../services/verifierSigner.js', () => ({ verifierSignerFor: async () => ({ address: PLATFORM_JUDGE }) }));
 
 vi.mock('../middleware/auth.js', () => {
   const gate = (req: any, _res: any, next: any) => {
@@ -316,6 +319,16 @@ describe('POST /tasks for a task many agents submit to', () => {
     expect(methodOf(res.body.data.unsignedTx)).toBe('createTaskOpen');
     const a = args(res);
     expect([a.verifierAgent, Number(a.mode), Number(a.creatorWindow)]).toEqual([VERIFIER, 0, 0]);
+  });
+
+  it('with the platform as judge, makes the poster pick first', async () => {
+    const judgeFirst = await open({ verifierAddress: PLATFORM_JUDGE, open: { mode: 'agent', creatorWindow: 0 } });
+    expect(judgeFirst.status).toBe(400);
+    expect(judgeFirst.body.error.code).toBe('PLATFORM_JUDGE_POSTER_PICKS');
+    expect(hashClaim.claimTaskHash).not.toHaveBeenCalled();
+    const posterFirst = await open({ verifierAddress: PLATFORM_JUDGE, open: { mode: 'creator', creatorWindow: 3600 } });
+    expect(posterFirst.status).toBe(200);
+    expect([args(posterFirst).verifierAgent.toLowerCase(), Number(args(posterFirst).mode)]).toEqual([PLATFORM_JUDGE, 1]);
   });
 
   it('builds the poster picking first, for their window', async () => {

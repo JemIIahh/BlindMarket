@@ -28,7 +28,7 @@
 import type { Contract, ContractTransactionResponse } from 'ethers';
 import { isAddress, verifyMessage, toUtf8Bytes, isHexString, hexlify, getBytes } from 'ethers';
 import { chainRuntime } from './chainRuntime.js';
-import { SETTLEMENT_CHAIN_KEYS, settlementChainConfig } from './settlementChains.js';
+import { settlementChainConfig } from './settlementChains.js';
 import { config } from '../config.js';
 import { resolveTaskByHash, type TaskChain, type ResolvedTask } from './taskChain.js';
 import { getTaskOn } from './escrow.js';
@@ -43,17 +43,13 @@ import type { OnChainTask } from '../types.js';
 const HASH_LOOKUP_TIMEOUT_MS = 30_000;
 const HASH_LOOKUP_POLL_INTERVAL_MS = 2_000;
 
-// One serial queue per signer (0G and Base use different wallets); see
+// One serial queue per signer (0G and Base use different wallets), shared
+// with everything else that sends as it (verifierSigner.ts); see
 // serialTxQueue.ts for why each waits for mining, not just broadcast.
 export { createSerialTxQueue, isNonceCollision } from './serialTxQueue.js';
-import { createSerialTxQueue, HOLD_TIMEOUT_MS } from './serialTxQueue.js';
+import { HOLD_TIMEOUT_MS } from './serialTxQueue.js';
+import { verifierQueue, type TxQueue } from './verifierSigner.js';
 
-type TxQueue = <T>(fn: () => Promise<T>) => Promise<T>;
-
-/** One queue per chain's signer, created once. */
-const signerQueues = new Map<TaskChain, TxQueue>(
-  SETTLEMENT_CHAIN_KEYS.map((chain) => [chain, createSerialTxQueue()]),
-);
 
 /**
  * The escrow a task actually lives on, plus the signer that can act on it.
@@ -75,7 +71,7 @@ function bridgeFor(chain: TaskChain): {
   return {
     escrow: escrowAsMarketplace,
     ready: !!(escrowAsMarketplace && marketplaceSigner),
-    enqueue: signerQueues.get(chain)!,
+    enqueue: verifierQueue(chain),
     label: `${label} (${signerEnv})`,
   };
 }

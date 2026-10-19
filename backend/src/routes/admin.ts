@@ -11,7 +11,7 @@ import { z } from 'zod';
 import { AppError } from '../middleware/errorHandler.js';
 import { gasSponsorSettings } from '../services/gasSponsorConfig.js';
 import { setControls } from '../services/gasSponsorStore.js';
-import { gasSponsorReport } from '../services/gasSponsorRelayer.js';
+import { gasSponsorReport, invalidateSponsorReportCache } from '../services/gasSponsorRelayer.js';
 
 export const adminRouter = Router();
 
@@ -163,7 +163,9 @@ adminRouter.post('/tasks/:id/rewind', requireAuth, requireFounder, async (req: A
 // and what the last hour and day spent.
 adminRouter.get('/gas-sponsor', requireAuth, requireFounder, async (_req: AuthRequest, res, next) => {
   try {
-    res.json({ success: true, data: await gasSponsorReport() });
+    // Fresh counts, never the 30 s cache /health/bridge reads from: this is
+    // what a founder watches while waiting for them to reach 0.
+    res.json({ success: true, data: await gasSponsorReport({ fresh: true }) });
   } catch (err) {
     next(err);
   }
@@ -187,6 +189,7 @@ adminRouter.post('/gas-sponsor/controls', requireAuth, requireFounder, async (re
     if (!settings.enabled) throw new AppError(409, 'GAS_SPONSOR_OFF', `Sponsored gas is off here: ${settings.reason}`);
     const { paused, killed, reason } = parsed.data;
     const controls = await setControls(settings.chainId, { paused, killed }, reason, req.user!.address);
+    invalidateSponsorReportCache();
     console.warn(`[gasSponsor] controls set by ${req.user!.address}: paused=${controls.paused} killed=${controls.killed} (${reason})`);
     res.json({ success: true, data: controls });
   } catch (err) {

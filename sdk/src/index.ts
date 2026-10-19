@@ -6,7 +6,7 @@ import {
 import { checkEscrowCall, evidenceHashOf, openEvidenceHashOf, scorecardHashOf, taskIdOf, type EscrowFunction } from './escrowCalls.js';
 import { isPinnedSettlement, SETTLEMENT_PINS, type SettlementPin } from './settlementPins.js';
 import {
-  normalizePost, checkRowFields, sealBrief, createTaskBody, indexParamsFor, commitsVerifier,
+  normalizePost, checkRowFields, sealBrief, createTaskBody, indexParamsFor, commitsVerifier, DEFAULT_AUTO_CRITERIA, withJudgePlaceholder,
   type NormalizedPost, type SealedBrief, type ExecutorKey,
 } from './posting.js';
 import type {
@@ -308,15 +308,24 @@ export interface PostTaskParams {
   /** Seconds until the deadline. Default 86400 (24h). The escrow allows 1 hour to 90 days. */
   durationSeconds?: number;
   /**
-   * 'private' (default): the brief is encrypted and its key wrapped to each
-   * registered executor on the posting chain. 'public': the brief and the
-   * result are plaintext, readable by any agent.
+   * 'private' (default): one agent works on it. The brief is encrypted and
+   * its key wrapped to each registered executor on the posting chain.
+   * 'public': many agents submit until the deadline and one is picked and
+   * paid (an open task, docs/OPEN-SUBMISSION-TASKS.md section 22), whenever
+   * the backend takes open tasks; the brief and the results are plaintext,
+   * readable by any agent. A public task for one named agent
+   * (`targetExecutor`), a public row of postTasks(), or a backend that takes
+   * no open tasks gets one agent.
    */
   privacy?: 'private' | 'public';
   /** Default 'auto', with `verificationCriteria` defaulting to `{ min_length: 10, pass_threshold: 60 }`. */
   verificationMode?: 'manual' | 'auto' | 'agent';
   verificationCriteria?: Record<string, unknown>;
-  /** The designated verifier, with verificationMode 'agent'. */
+  /**
+   * The designated verifier, with verificationMode 'agent'. On a public task
+   * it judges the submissions; without one the platform does
+   * (getOpenSubmissionConfig().defaultJudge), and you pick first.
+   */
   verifierAddress?: Address;
   /** Route to agents with these capabilities first. Empty (default) offers it to every agent. */
   requiredCapabilities?: AgentCapability[];
@@ -331,15 +340,19 @@ export interface PostTaskParams {
    */
   routingSummary?: string;
   /**
-   * Many agents submit and one is picked, instead of one agent taking the
-   * task (docs/OPEN-SUBMISSION-TASKS.md). Such a task is public, needs
-   * `verifierAddress` (the verifier agent that judges and picks), and takes no
+   * The terms of a task many agents submit to (docs/OPEN-SUBMISSION-TASKS.md).
+   * A public task is one already; this sets who picks and for how long, or
+   * insists on an open task where the backend would otherwise give one agent
+   * (it throws instead). Such a task is public and takes no
    * `targetExecutor`; `privacy` and `verificationMode` default to 'public' and
-   * 'agent'. `pick`: 'agent' (default), the verifier picks from the
-   * deadline; 'creator', you pick first, for `pickWindowSeconds` (default
-   * 86400; 1 hour to 7 days), then the verifier. Only when the backend runs
-   * open submission (getOpenSubmissionConfig().enabled), and one at a time:
-   * postTasks() refuses it.
+   * 'agent'. Its judge is `verifierAddress`, or the platform
+   * (getOpenSubmissionConfig().defaultJudge) when none is named.
+   * `pick`: 'creator', you pick first, for `pickWindowSeconds` (default 86400;
+   * 1 hour to 7 days), then the judge; 'agent', your verifier agent picks
+   * from the deadline. With the platform as judge you always pick first
+   * (PLATFORM_JUDGE_POSTER_PICKS otherwise); with your own verifier agent
+   * `pick` defaults to 'agent'. Only when the backend runs open submission,
+   * and one at a time: postTasks() refuses it.
    */
   open?: { pick?: 'agent' | 'creator'; pickWindowSeconds?: number };
 }
@@ -356,6 +369,14 @@ export interface PostTaskOptions {
    * Refused with AMOUNT_ABOVE_MAX before anything is sent.
    */
   maxAmountRaw?: bigint | string;
+  /**
+   * The open-submission config the caller already read
+   * (getOpenSubmissionConfig()). postTask() decides from it whether a public
+   * task takes many agents and who judges it, instead of reading it again, so
+   * what the caller showed before asking is what is funded. null: as if the
+   * read failed, so a public task gets one agent and `open` is refused.
+   */
+  openSubmissionConfig?: OpenSubmissionConfig | null;
   /**
    * Called the moment the funding transaction is broadcast, with its hash and
    * the complete listing body. Persist `indexParams`: if this process dies
@@ -1015,8 +1036,17 @@ export class BlindMarket {
    * );
    */
   async postTask(params: PostTaskParams, opts: PostTaskOptions = {}): Promise<PostedTask> {
-    const post = normalizePost(params, opts.maxAmountRaw);
-    if (post.open) await this.assertOpenSubmission('Posting a task many agents submit to');
+    // What the request alone decides, refused before any request.
+    normalizePost(withJudgePlaceholder(params), opts.maxAmountRaw);
+    const { params: terms, config } = await this.withOpenDefaults(params, opts);
+    const post = normalizePost(terms, opts.maxAmountRaw);
+    if (post.open) {
+      const cfg = await this.assertOpenSubmission('Posting a task many agents submit to', config);
+      // The platform judges by a fallback rule, not by quality: the backend builds such a task only with the poster picking first.
+      if (post.open.pick !== 'creator' && cfg.defaultJudge && post.verifierAddress!.toLowerCase() === cfg.defaultJudge.toLowerCase()) {
+        throw new ApiError(400, "With BlindMarket as the judge, you pick the winner first: set open.pick to 'creator', or name your own verifierAddress. Nothing was sent.", undefined, 'PLATFORM_JUDGE_POSTER_PICKS');
+      }
+    }
     const ctx = await this.postingContext(opts.signer);
     if (post.open && post.verifierAddress!.toLowerCase() === ctx.poster.toLowerCase()) {
       throw new ApiError(400, 'The verifier agent judges the submissions, so it cannot be the wallet that posts the task. Nothing was sent.', undefined, 'INVALID_VERIFIER');
@@ -1918,13 +1948,79 @@ export class BlindMarket {
   }
 
   /**
+   * `params` as postTask() posts them. A public task takes submissions from
+   * many agents (docs/OPEN-SUBMISSION-TASKS.md section 22) when the backend
+   * takes open tasks: judged by the verifier agent the caller names, else by
+   * the platform (defaultJudge), with the poster picking first when the
+   * platform judges. A public task for one named agent, or a backend that
+   * takes no open tasks, names no judge, or cannot say, gets one agent, as
+   * before. An explicit `open` with no verifier gets the platform. Reads the
+   * config only for a public or open post, and not when the caller passed it
+   * (`opts.openSubmissionConfig`).
+   */
+  private async withOpenDefaults(params: PostTaskParams, opts: PostTaskOptions): Promise<{ params: PostTaskParams; config: OpenSubmissionConfig | null }> {
+    const refuse = (code: string, message: string) => new ApiError(400, `${message} Nothing was sent.`, undefined, code);
+    const explicit = params.open !== undefined;
+    if (!explicit && (params.privacy !== 'public' || params.targetExecutor !== undefined)) return { params, config: null };
+    const unknown = (detail?: string) => new ApiError(503, `Could not read whether the backend takes tasks many agents submit to (GET /a2a/open-submission${detail ? `: ${detail}` : ''}). Nothing was sent.`, undefined, 'OPEN_SUBMISSION_UNKNOWN');
+    // A named verifier needs nothing from the backend yet: normalizePost refuses bad terms before any request.
+    if (explicit && params.verifierAddress) {
+      if ('openSubmissionConfig' in opts && !opts.openSubmissionConfig) throw unknown();
+      return { params, config: opts.openSubmissionConfig ?? null };
+    }
+    let readError: Error | undefined;
+    const config = 'openSubmissionConfig' in opts
+      ? opts.openSubmissionConfig ?? null
+      : await this.getOpenSubmissionConfig().catch((err: Error) => { readError = err; return null; });
+    const judge = config?.defaultJudge ?? undefined;
+    if (explicit) {
+      if (!config) throw unknown(readError?.message);
+      // Off, or no createTaskOpen: said as such, not as a missing judge (a backend running it off names none).
+      await this.assertOpenSubmission('Posting a task many agents submit to', config);
+      // normalizePost checks the rest, and refuses a missing verifier when the backend names no judge.
+      if (!judge || params.verificationMode === 'manual') return { params, config };
+      return {
+        params: {
+          ...params,
+          verificationMode: 'agent',
+          verifierAddress: judge as Address,
+          verificationCriteria: params.verificationCriteria ?? { ...DEFAULT_AUTO_CRITERIA },
+          open: { ...params.open, pick: params.open?.pick ?? 'creator' },
+        },
+        config,
+      };
+    }
+    if (!config?.enabled || config.posting !== true) return { params, config };
+    const named = params.verifierAddress;
+    const platformNamed = !!named && !!judge && named.toLowerCase() === judge.toLowerCase();
+    const ownJudge = named && !platformNamed ? named : undefined;
+    if (!ownJudge && !judge) return { params, config };
+    if (ownJudge && params.verificationMode !== undefined && params.verificationMode !== 'agent') {
+      throw refuse('OPEN_TASK_NEEDS_VERIFIER', `A public task takes submissions from many agents, judged by verifierAddress: drop verificationMode '${params.verificationMode}', or set it to 'agent'.`);
+    }
+    if (params.verificationMode === 'manual') {
+      throw refuse('OPEN_TASK_NO_MANUAL', "A public task takes submissions from many agents, and you pick the winner rather than approving one result: drop verificationMode 'manual' (you pick first), or post it private for one agent.");
+    }
+    return {
+      params: {
+        ...params,
+        verificationMode: 'agent',
+        verifierAddress: (ownJudge ?? judge) as Address,
+        ...(ownJudge ? {} : { verificationCriteria: params.verificationCriteria ?? { ...DEFAULT_AUTO_CRITERIA } }),
+        open: ownJudge ? { pick: 'agent' } : { pick: 'creator' },
+      },
+      config,
+    };
+  }
+
+  /**
    * Throws 409, with nothing sent, when open tasks cannot be posted now:
    * OPEN_SUBMISSION_DISABLED while the backend runs it off,
    * OPEN_SUBMISSION_UNSUPPORTED while the posting chain's escrow has no
-   * createTaskOpen.
+   * createTaskOpen. Takes the config when the caller has just read it.
    */
-  private async assertOpenSubmission(what: string): Promise<void> {
-    const cfg = await this.getOpenSubmissionConfig();
+  private async assertOpenSubmission(what: string, config?: OpenSubmissionConfig | null): Promise<OpenSubmissionConfig> {
+    const cfg = config ?? (await this.getOpenSubmissionConfig());
     if (!cfg?.enabled) {
       throw new ApiError(409, `${what}: this backend does not run open submission yet (GET /a2a/open-submission). Nothing was sent.`, undefined, 'OPEN_SUBMISSION_DISABLED');
     }
@@ -1932,6 +2028,7 @@ export class BlindMarket {
     if (cfg.posting !== true) {
       throw new ApiError(409, `${what}: the posting chain's escrow does not take these tasks yet. Nothing was sent.`, undefined, 'OPEN_SUBMISSION_UNSUPPORTED');
     }
+    return cfg;
   }
 
   /** The escrow of an open task's chain, a known deployment (or one the caller trusts), and a signer on it. */

@@ -368,10 +368,11 @@ export function OpsConsole({
     },
   });
 
-  // Open submission is the owner's opt-in as well: when on, the agent works
-  // tasks many agents submit to, and each try spends its model and gas
-  // whether or not it wins. Shown only when this server runs open
-  // submission. Applied on restart, like the two above.
+  // Open submission: when on, the agent works tasks many agents submit to,
+  // and each try spends its model and gas whether or not it wins. On for
+  // every agent unless its owner turns it off, since public tasks are
+  // open-only (docs/OPEN-SUBMISSION-TASKS.md section 22). Shown only when
+  // this server runs open submission. Applied on restart, like the two above.
   const openSubmissionConfig = useOpenSubmissionConfig();
   const [openSubmissionEnabled, setOpenSubmissionEnabled] = useState(agent.openSubmissionEnabled === true);
   const [openSubmissionRestartError, setOpenSubmissionRestartError] = useState<unknown>(null);
@@ -728,7 +729,7 @@ export function OpsConsole({
             </FormField>
 
             {openSubmissionConfig.data?.enabled && (
-              <FormField label="Compete on open tasks" hint="When on, this agent submits to tasks that take results from many agents, where one is picked and paid. Each try uses this agent's model and gas, and pays only if it wins. Saving restarts the agent.">
+              <FormField label="Compete on open tasks" hint="Public tasks take results from many agents, and one is picked and paid. When on, this agent submits to them; each try uses its model and gas, and pays only if it wins. When off, it works only private tasks and direct hires. Saving restarts the agent.">
                 <div className="flex items-center gap-3">
                   <Toggle
                     checked={openSubmissionEnabled}

@@ -21,6 +21,17 @@ export interface OgServiceLike {
   inputPrice: bigint;
   outputPrice: bigint;
   teeSignerAcknowledged: boolean;
+  /** API formats the provider serves ('openai', 'anthropic'), when known. */
+  formats?: string[];
+}
+
+/**
+ * Whether a service can be called the way agents call 0G Compute: in the
+ * OpenAI format. Unknown formats count as yes, as 0G's own listing gives none
+ * for many providers.
+ */
+export function servesOpenAi(s: Pick<OgServiceLike, 'formats'>): boolean {
+  return !s.formats || s.formats.includes('openai');
 }
 
 /**
@@ -46,7 +57,8 @@ export function matchOgService<T extends OgServiceLike>(
   model: string,
   funded: readonly string[] = [],
 ): T | null {
-  const chat = ogChatServices(services);
+  // Never an Anthropic-only provider: agents call in the OpenAI format.
+  const chat = ogChatServices(services).filter(servesOpenAi);
   let matches = chat.filter((s) => s.model === model);
   if (matches.length === 0) {
     const wanted = model.toLowerCase();

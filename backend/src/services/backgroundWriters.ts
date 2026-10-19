@@ -16,6 +16,7 @@ import { startAgentFactoryListener } from './agentFactoryListener.js';
 import { startCctpAttestationPoller } from './cctpAttestationPoller.js';
 import { startExpirySweepLoop } from './a2aExpirySweep.js';
 import { startOpenSubmissionSweepLoop } from './openSubmissionSweep.js';
+import { startOpenSubmissionJudgeLoop } from './openSubmissionJudge.js';
 import { reconcileAgents } from './agentRunner.js';
 import { startGasSponsor } from './gasSponsorRelayer.js';
 
@@ -76,10 +77,15 @@ export function backgroundWriters(env: NodeJS.ProcessEnv = process.env): Backgro
       // reservation sweep. A no-op unless GAS_SPONSOR_ENABLED (gasSponsorConfig.ts).
       // In the API process: /accept reserves and /sponsored-call relays there.
       { name: 'gas sponsor', start: startGasSponsor },
-      // Deadline summaries and pick reminders for open-submission tasks. Only
-      // with OPEN_SUBMISSION_ENABLED: off, it is not started at all.
+      // Deadline summaries and pick reminders for open-submission tasks, and
+      // the platform's judging turns (in this process: it signs as the
+      // verifier, through settlement's queue). Only with
+      // OPEN_SUBMISSION_ENABLED: off, neither is started.
       ...((env.OPEN_SUBMISSION_ENABLED ?? '').toLowerCase() === 'true'
-        ? [{ name: 'open-submission sweep', start: startOpenSubmissionSweepLoop }]
+        ? [
+          { name: 'open-submission sweep', start: startOpenSubmissionSweepLoop },
+          { name: 'open-submission judge', start: startOpenSubmissionJudgeLoop },
+        ]
         : []),
     );
   }

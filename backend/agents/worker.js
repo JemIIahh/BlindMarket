@@ -575,14 +575,32 @@ export function createOgCompute({
     return inFlight;
   }
 
+  // Every service, with the API formats each provider serves when 0G's
+  // status API knows them (listServiceWithDetail): matchOgService skips an
+  // Anthropic-only provider, which this worker can't call. If the detailed
+  // read fails, the plain list, as before: formats unknown, nothing excluded.
   async function listServices() {
-    const all = [];
-    for (let page = 0; page < 20; page++) {
-      const rows = await broker.inference.listService(page * OG_SERVICE_PAGE, OG_SERVICE_PAGE, true);
-      all.push(...rows);
-      if (rows.length < OG_SERVICE_PAGE) break;
+    const page = async (read) => {
+      const all = [];
+      for (let p = 0; p < 20; p++) {
+        const rows = await read(p * OG_SERVICE_PAGE, OG_SERVICE_PAGE);
+        all.push(...rows);
+        if (rows.length < OG_SERVICE_PAGE) break;
+      }
+      return all;
+    };
+    if (typeof broker.inference.listServiceWithDetail === 'function') {
+      try {
+        const rows = await page((offset, limit) => broker.inference.listServiceWithDetail(offset, limit, true));
+        return rows.map((r) => {
+          const f = r.modelInfo?.supported_formats;
+          return Array.isArray(f) ? { ...r, formats: f.filter((x) => typeof x === 'string') } : r;
+        });
+      } catch (e) {
+        log(`0G Compute: couldn't list the services with their details (${e.message}); retrying with the plain list`);
+      }
     }
-    return all;
+    return page((offset, limit) => broker.inference.listService(offset, limit, true));
   }
 
   // The providers the account holds 0G with. None before the account exists.
@@ -5734,7 +5752,12 @@ const SPONSORED_CALL_ATTEMPTS = 5;
 // worker neither pays its own gas for that call nor hands the task back: it
 // asks GET /sponsored-call until the status is final. Each wait runs inline
 // for at most SPONSORED_WAIT_MS; a resume poll asks again after that, until
-// SPONSORED_DEADLINE_MARGIN_S before the task's deadline.
+// SPONSORED_DEADLINE_MARGIN_S before the task's deadline. For a plain call
+// the backend answers 'failed' (call_expired) much sooner: once the
+// ten-minute deadline signed into the call passes, the delegate reverts it
+// wherever it lands, so paying our own gas no longer races it. A setup
+// transaction (carrying this wallet's 7702 authorization) stays pending: its
+// authorization would still bump this wallet's nonce when it lands.
 const sponsoredPending = new Set();
 const SPONSORED_POLL_MS = envNumber(process.env.SPONSORED_POLL_MS, 10_000, { min: 500 });
 const SPONSORED_WAIT_MS = 5 * 60_000;

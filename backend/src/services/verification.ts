@@ -1,6 +1,7 @@
 import { ethers } from 'ethers';
 import https from 'https';
 import { config } from '../config.js';
+import { ogChatServices, servesOpenAi, type OgServiceLike } from './ogComputeModels.js';
 
 // @0gfoundation/0g-compute-ts-sdk ESM exports — use createRequire for CJS compat
 import { createRequire } from 'module';
@@ -101,38 +102,58 @@ interface ServiceInfo {
 }
 
 /**
- * Find a suitable inference provider.
- * Prefers the configured provider address, otherwise picks the first available.
+ * The service the verifier calls: the configured provider when it is
+ * registered, else the first chatbot service whose TEE signer 0G has
+ * acknowledged (ogChatServices, as agents choose theirs) and that serves the
+ * OpenAI format the verifier calls in (servesOpenAi). Not simply the first
+ * service listed: that can be a non-chat service, one whose answers can't be
+ * verified, or one that serves only the Anthropic format. Null when no
+ * service qualifies.
  */
+export function pickVerifierService<T extends OgServiceLike & { url?: string; endpoint?: string }>(services: readonly T[], configured: string): T | null {
+  if (configured) {
+    const match = services.find((s) => s.provider?.toLowerCase() === configured.toLowerCase());
+    if (match && servesOpenAi(match)) return match;
+    console.warn(`Configured provider ${configured} ${match ? 'does not serve the OpenAI format' : 'not found'}, using the first chat service`);
+  }
+  return ogChatServices(services).filter(servesOpenAi)[0] ?? null;
+}
+
+type VerifierService = OgServiceLike & { url?: string; endpoint?: string; model?: string };
+
+/**
+ * The acknowledged services, with the API formats each serves when 0G's
+ * status API lists them (modelInfo.supported_formats, not in the SDK's
+ * types). The detailed listing falls back to the plain one if it fails.
+ */
+async function listVerifierServices(b: Awaited<ReturnType<typeof getBroker>>): Promise<VerifierService[]> {
+  const inference = b.inference as { listService(): Promise<unknown[]>; listServiceWithDetail?: () => Promise<unknown[]> };
+  if (typeof inference.listServiceWithDetail === 'function') {
+    try {
+      const rows = (await inference.listServiceWithDetail()) as Array<VerifierService & { modelInfo?: { supported_formats?: unknown } }>;
+      return rows.map((r) => {
+        const f = r.modelInfo?.supported_formats;
+        return Array.isArray(f) ? { ...r, formats: f.filter((x): x is string => typeof x === 'string') } : r;
+      });
+    } catch (err) {
+      console.warn(`[verification] detailed 0G service listing failed (${(err as Error).message}); using the plain list`);
+    }
+  }
+  return ((await inference.listService()) ?? []) as VerifierService[];
+}
+
+/** Find the inference provider the verifier uses (pickVerifierService). */
 async function findProvider(): Promise<ServiceInfo> {
   const b = await getBroker();
-  const services = await b.inference.listService();
-
-  if (!services || services.length === 0) {
-    throw new Error('No 0G Compute inference services available');
+  const services = await listVerifierServices(b);
+  const picked = pickVerifierService(services, config.ogComputeProviderAddress);
+  if (!picked) {
+    throw new Error('No 0G Compute chat service with an acknowledged TEE signer that serves the OpenAI format is available');
   }
-
-  // If a specific provider is configured, use it
-  if (config.ogComputeProviderAddress) {
-    const match = services.find(
-      (s: any) => s.provider?.toLowerCase() === config.ogComputeProviderAddress.toLowerCase()
-    );
-    if (match) {
-      return {
-        providerAddress: (match as any).provider,
-        endpoint: (match as any).url || (match as any).endpoint,
-        model: (match as any).model || 'default',
-      };
-    }
-    console.warn(`Configured provider ${config.ogComputeProviderAddress} not found, using first available`);
-  }
-
-  // Auto-select first available service
-  const first = services[0] as any;
   return {
-    providerAddress: first.provider,
-    endpoint: first.url || first.endpoint,
-    model: first.model || 'default',
+    providerAddress: picked.provider,
+    endpoint: (picked.url || picked.endpoint)!,
+    model: picked.model || 'default',
   };
 }
 

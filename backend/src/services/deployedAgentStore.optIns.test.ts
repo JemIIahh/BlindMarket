@@ -24,6 +24,7 @@ vi.mock('better-sqlite3', async (importOriginal) => {
 });
 
 import { saveAgent, loadAgent } from './deployedAgentStore.js';
+import { getDb, sqliteMigrationSql } from './database.js';
 import { stripAgentSecrets } from './agentOwnership.js';
 import type { DeployedAgent } from '../types.js';
 
@@ -52,6 +53,15 @@ describe('deployed agent opt-ins and owner identity (SQLite)', () => {
     expect((await loadAgent('a4'))?.openSubmissionEnabled).toBe(true);
     await saveAgent({ ...(await loadAgent('a4'))!, openSubmissionEnabled: false });
     expect((await loadAgent('a4'))?.openSubmissionEnabled).toBe(false);
+  });
+
+  it('turns open submission on for agents saved before migration 24 (Postgres 46), which owners can turn off again', async () => {
+    await saveAgent(agent('a5'));
+    expect((await loadAgent('a5'))?.openSubmissionEnabled).toBe(false);
+    getDb().exec(sqliteMigrationSql(24)!);
+    expect((await loadAgent('a5'))?.openSubmissionEnabled).toBe(true);
+    await saveAgent({ ...(await loadAgent('a5'))!, openSubmissionEnabled: false });
+    expect((await loadAgent('a5'))?.openSubmissionEnabled).toBe(false);
   });
 
   it('keeps the deploying Privy user across later saves', async () => {

@@ -12,7 +12,7 @@ import { TaskStatus } from '../types.js';
 import { loadAgentByWallet } from './deployedAgentStore.js';
 import { getTaskOn } from './escrow.js';
 import { resolveTaskByHash } from './taskChain.js';
-import { RESERVATION_TTL_SECONDS, gasSponsorSettings, runnableSettings } from './gasSponsorConfig.js';
+import { RESERVATION_TTL_SECONDS, gasSponsorDrainSettings, runnableSettings } from './gasSponsorConfig.js';
 import { agentEligibility, taskEligibility } from './gasSponsorEligibility.js';
 import {
   closeReservation, getReservation, markReservationReturned, reserve, startReservationClock, txsForReservation, type Reservation,
@@ -67,10 +67,16 @@ export async function startReservationAfterAssign(reservation: Reservation): Pro
   await startReservationClock(reservation.id, RESERVATION_TTL_SECONDS).catch(() => {});
 }
 
-/** Whether `executor` holds a sponsored-submit reservation for `taskHash` (a re-accept on resume). */
+/**
+ * Whether `executor` holds a sponsored-submit reservation for `taskHash` (a
+ * re-accept on resume). Also while sponsorship drains after being turned off:
+ * a reservation still held then has our transaction out (the drain sweep
+ * releases the others), and a resumed worker that didn't know would pay its
+ * own gas for a submit ours may still land.
+ */
 export async function holdsReservation(taskHash: string, executor: string): Promise<boolean> {
   try {
-    const settings = gasSponsorSettings();
+    const settings = gasSponsorDrainSettings();
     if (!settings.enabled) return false;
     const resolved = await resolveTaskByHash(taskHash);
     if (!resolved || resolved.chain !== 'arc') return false;
@@ -83,7 +89,8 @@ export async function holdsReservation(taskHash: string, executor: string): Prom
 
 /** The submit reservation `executor` holds for `taskHash`, if it holds one. */
 async function heldSubmit(taskHash: string, executor: string): Promise<Reservation | null> {
-  const settings = gasSponsorSettings();
+  // Draining included: a hand-back or re-open still marks or frees it.
+  const settings = gasSponsorDrainSettings();
   if (!settings.enabled) return null;
   const resolved = await resolveTaskByHash(taskHash);
   if (!resolved || resolved.chain !== 'arc') return null;

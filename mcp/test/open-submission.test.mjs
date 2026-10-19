@@ -269,7 +269,7 @@ test('post_task open: quotes it, then funds exactly createTaskOpen, public and j
   overrides['/api/v1/tasks'] = builtOpen();
   const t = tools();
   const { quote } = parse(await t.post_task({ ...openPost, pick: 'me', pickWindowSeconds: 7200, idempotencyKey: 'open-post-1' }));
-  assert.deepEqual(quote.open, { submissions: 'many agents, one winner', verifier: VERIFIER, picksFirst: 'you', pickWindowSeconds: 7200 });
+  assert.deepEqual(quote.open, { submissions: 'many agents, one winner', verifier: VERIFIER, judge: 'your verifier agent', picksFirst: 'you', pickWindowSeconds: 7200 });
   assert.equal(quote.privacy, 'public');
   const done = parse(await t.post_task({ ...openPost, pick: 'me', pickWindowSeconds: 7200, idempotencyKey: 'open-post-1', confirm: true, quoteId: quote.quoteId }));
   const build = backendCalls.find((c) => c.path === '/api/v1/tasks').body;
@@ -317,6 +317,62 @@ test('post_task open refuses what the escrow or the task board would refuse, bef
   assert.equal(errorOf(await tools().post_task({ ...openPost, idempotencyKey: 'open-refuse-unsupported' })).code, 'OPEN_SUBMISSION_UNSUPPORTED');
   assert.equal(backendCalls.filter((c) => c.path === '/api/v1/tasks').length, 0);
   assert.equal(chain.sent.length, 0);
+});
+
+const JUDGE = '0x' + 'd9'.repeat(20);
+const publicPost = { instructions: 'Name three primary sources for the 1907 panic, with links.', amount: '2', privacy: 'public' };
+
+test('post_task public: many agents submit, judged by BlindMarket, the poster picking first', async () => {
+  openConfig.defaultJudge = JUDGE;
+  overrides['/api/v1/tasks'] = builtOpen();
+  const t = tools();
+  const { quote } = parse(await t.post_task({ ...publicPost, idempotencyKey: 'public-open-1' }));
+  assert.deepEqual(quote.open, { submissions: 'many agents, one winner', verifier: JUDGE, judge: 'BlindMarket', picksFirst: 'you', pickWindowSeconds: 86400 });
+  const done = parse(await t.post_task({ ...publicPost, idempotencyKey: 'public-open-1', confirm: true, quoteId: quote.quoteId }));
+  const build = backendCalls.find((c) => c.path === '/api/v1/tasks').body;
+  assert.equal(build.privacy, 'public');
+  assert.equal(build.verificationMode, 'agent');
+  assert.equal(build.verifierAddress, JUDGE);
+  assert.deepEqual(build.open, { mode: 'creator', creatorWindow: 86400 });
+  assert.deepEqual(build.verificationCriteria, { min_length: 10, pass_threshold: 60 });
+  const [create] = sentCalls();
+  assert.equal(create.name, 'createTaskOpen');
+  assert.deepEqual([create.args[6].toLowerCase(), create.args[7], create.args[8]], [JUDGE, 1n, 86400n]);
+  assert.deepEqual(done.open, { mode: 'creator', creatorWindow: 86400 });
+});
+
+test('post_task public refuses BlindMarket as judge picking first, before quoting', async () => {
+  openConfig.defaultJudge = JUDGE;
+  assert.equal(errorOf(await tools().post_task({ ...publicPost, pick: 'verifier', idempotencyKey: 'public-open-2' })).code, 'PLATFORM_JUDGE_POSTER_PICKS');
+  assert.equal(backendCalls.filter((c) => c.path === '/api/v1/tasks').length, 0);
+});
+
+test('post_task public refuses open: false rather than ignore it', async () => {
+  openConfig.defaultJudge = JUDGE;
+  assert.equal(errorOf(await tools().post_task({ ...publicPost, open: false, idempotencyKey: 'public-open-false' })).code, 'PUBLIC_TASK_IS_OPEN');
+  assert.equal(backendCalls.filter((c) => c.path === '/api/v1/a2a/open-submission').length, 0);
+});
+
+test('post_task public gives one agent the task when the backend takes no open tasks or cannot say', async () => {
+  for (const [name, setup] of [
+    ['off', () => { openConfig.enabled = false; }],
+    ['no judge', () => { delete openConfig.defaultJudge; }],
+    ['unreadable', () => { failures['/api/v1/a2a/open-submission'] = failWith(503, 'UNAVAILABLE'); }],
+  ]) {
+    openConfig.enabled = true;
+    openConfig.defaultJudge = JUDGE;
+    delete failures['/api/v1/a2a/open-submission'];
+    setup();
+    const t = tools();
+    const key = `public-one-${name.replace(' ', '-')}`;
+    const { quote } = parse(await t.post_task({ ...publicPost, idempotencyKey: key }));
+    assert.equal(quote.open, undefined, name);
+    parse(await t.post_task({ ...publicPost, idempotencyKey: key, confirm: true, quoteId: quote.quoteId }));
+    const build = backendCalls.findLast((c) => c.path === '/api/v1/tasks').body;
+    assert.equal(build.open, undefined, name);
+    assert.equal(sentCalls().at(-1).name, 'createTask', name);
+  }
+  delete failures['/api/v1/a2a/open-submission'];
 });
 
 test('post_task open refuses a backend that builds another pick mode or a task one agent takes, with nothing funded', async () => {

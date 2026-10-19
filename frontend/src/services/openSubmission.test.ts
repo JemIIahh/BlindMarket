@@ -9,7 +9,7 @@ describe('scorecardRows', () => {
       notJudged: [{ why: 'unreadable', count: 2, submitters: ['0xc', '0xd'] }],
     });
     expect(rows).toEqual({
-      scores: [{ submitter: '0xb', score: 9 }, { submitter: '0xa', score: 4, reason: 'thin' }],
+      scores: [{ submitter: '0xb', score: 9, outOf: 10 }, { submitter: '0xa', score: 4, outOf: 10, reason: 'thin' }],
       notJudged: [{ why: 'unreadable', count: 2 }],
     });
   });
@@ -22,11 +22,26 @@ describe('scorecardRows', () => {
       scores: [null, 3, { submitter: 7, score: 1 }, { submitter: '0xa', score: 'high' }, { submitter: '0xb', score: Number.NaN }, { submitter: '0xc', score: 2, reason: 5 }],
       notJudged: [null, { why: 'late' }, { why: 3, count: 1 }, { why: 'late', count: 1 }],
     });
-    expect(rows).toEqual({ scores: [{ submitter: '0xc', score: 2 }], notJudged: [{ why: 'late', count: 1 }] });
+    expect(rows).toEqual({ scores: [{ submitter: '0xc', score: 2, outOf: 10 }], notJudged: [{ why: 'late', count: 1 }] });
+  });
+
+  it("reads the platform judge's entries out of 100, in the order it ranked them", () => {
+    const rows = scorecardRows({
+      judge: 'platform',
+      entries: [
+        { submitter: '0xb', ordinal: 2, attempt: true, payable: true, passed: true, score: 70 },
+        { submitter: '0xa', ordinal: 1, attempt: true, payable: false, passed: false, score: 90, reason: 'Output too short' },
+        { submitter: 9, score: 50 },
+      ],
+    });
+    expect(rows.scores).toEqual([
+      { submitter: '0xb', score: 70, outOf: 100 },
+      { submitter: '0xa', score: 90, outOf: 100, reason: 'Output too short' },
+    ]);
   });
 
   it('keeps one score per submitter, so each row has its own key', () => {
-    expect(scorecardRows({ scores: [{ submitter: '0xA', score: 3 }, { submitter: '0xa', score: 8 }] }).scores).toEqual([{ submitter: '0xA', score: 3 }]);
+    expect(scorecardRows({ scores: [{ submitter: '0xA', score: 3 }, { submitter: '0xa', score: 8 }] }).scores).toEqual([{ submitter: '0xA', score: 3, outOf: 10 }]);
   });
 });
 

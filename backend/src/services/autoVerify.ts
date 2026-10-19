@@ -361,6 +361,86 @@ const hardFail = (reason: string): AutoVerifyResult =>
  * contains_keywords, forbidden_phrases, regex_pattern, expected_schema, and a
  * short expected_answer.
  */
+/**
+ * The content floor, the distinct-word check and the refusal gate, in that
+ * order: why the deliverable is not real work, or null.
+ */
+function contentFailure(visible: string, language: FailureLanguage, disclosed: boolean, minContent: number, expectsShortAnswer: boolean): string | null {
+  if (visible.length < minContent) {
+    return disclosed
+      ? `Output too short: ${visible.length} characters outside the "Not done / assumptions" section, minimum ${minContent}`
+      : `Output too short: ${visible.length} characters, minimum ${minContent}`;
+  }
+  if (!expectsShortAnswer) {
+    const distinct = new Set(words(visible.slice(0, SCAN_WINDOW))).size;
+    if (distinct < MIN_DISTINCT_TOKENS) {
+      return `Output has no real content: ${distinct} distinct words, minimum ${MIN_DISTINCT_TOKENS}`;
+    }
+  }
+  // A refusal, or nothing but failure vocabulary — see REFUSAL_PATTERNS.
+  const { refusal, neutral, substantiveWords, refusalWords, totalWords, distinctWords } = language;
+  if (refusal && (substantiveWords < MIN_WORDS_BESIDE_REFUSAL || refusalWords > MAX_REFUSAL_SHARE * totalWords)) {
+    return 'Output is a failure excuse, not a deliverable';
+  }
+  if (neutral && substantiveWords < MIN_SUBSTANTIVE_WORDS && distinctWords < MIN_DISTINCT_WORDS) {
+    return 'Output is a failure excuse, not a deliverable';
+  }
+  return null;
+}
+
+/** The output as autoVerify reads it, split for the gates; or why there is nothing to read. */
+function readDeliverable(resultData: Record<string, unknown>): { visible: string; scanText: string; disclosed: boolean } | string {
+  const output = typeof resultData.output === 'string' ? resultData.output : JSON.stringify(resultData);
+  if (output.trim().length === 0) return 'Empty output';
+  const { deliverable, disclosed } = splitDisclosure(canonical(output));
+  const visible = flatten(deliverable);
+  const scanText = foldForScan(visible);
+  if (ERROR_MARKER.test(scanText.slice(0, ERROR_MARKER_WINDOW))) return 'Worker reported an LLM execution error instead of output';
+  return { visible, scanText, disclosed };
+}
+
+/**
+ * Whether a result is an attempt at all: not empty, not a worker's error
+ * text, not a refusal. No length floor: "Paris" is an answer. The open-task
+ * judge (openSubmissionJudge.ts) pays an attempt only when it also passes the
+ * task's checks or clears deliverableFloor with no checks, so a junk "." does
+ * not take the escrow. Returns why it is not an attempt, or null.
+ */
+export function attemptFailure(resultData: Record<string, unknown>): string | null {
+  const read = readDeliverable(resultData);
+  if (typeof read === 'string') return read;
+  return contentFailure(read.visible, scanFailureLanguage(read.scanText), read.disclosed, 0, true);
+}
+
+/**
+ * Whether a result clears the content floor autoVerify applies before any
+ * of the poster's checks: past DEFAULT_MIN_CONTENT_CHARS and the distinct-word
+ * count, both lifted for a task that pins down a short answer
+ * (expected_answer, a usable regex_pattern, required keys or fields), and not
+ * a refusal. The poster's answer checks themselves are not applied. The
+ * open-task judge ranks work past it above work that is not. Returns why it
+ * falls short, or null.
+ */
+export function deliverableFloor(resultData: Record<string, unknown>, criteria: VerificationCriteria): string | null {
+  const read = readDeliverable(resultData);
+  if (typeof read === 'string') return read;
+  const { visible, scanText, disclosed } = read;
+  let usableRegex = false;
+  if (criteria.regex_pattern && isSafeRegexSource(criteria.regex_pattern)) {
+    try {
+      new RegExp(criteria.regex_pattern);
+      usableRegex = true;
+    } catch { /* not compilable: does not lift the floor */ }
+  }
+  const expectsShortAnswer = Boolean(
+    criteria.expected_answer?.trim()
+    || usableRegex
+    || criteria.expected_schema?.required?.some(k => k.trim())
+    || criteria.required_fields?.some(f => f.trim()),
+  );
+  return contentFailure(visible, scanFailureLanguage(scanText), disclosed, expectsShortAnswer ? 0 : DEFAULT_MIN_CONTENT_CHARS, expectsShortAnswer);
+}
+
 export function autoVerify(
   resultData: Record<string, unknown>,
   criteria: VerificationCriteria,
@@ -431,27 +511,10 @@ export function autoVerify(
     || criteria.expected_schema?.required?.some(k => k.trim())
     || criteria.required_fields?.some(f => f.trim()),
   );
-  const minContent = Math.max(criteria.min_length ?? 0, expectsShortAnswer ? 0 : DEFAULT_MIN_CONTENT_CHARS);
-  if (visible.length < minContent) {
-    return hardFail(disclosed
-      ? `Output too short: ${visible.length} characters outside the "Not done / assumptions" section, minimum ${minContent}`
-      : `Output too short: ${visible.length} characters, minimum ${minContent}`);
-  }
-  if (!expectsShortAnswer) {
-    const distinct = new Set(words(visible.slice(0, SCAN_WINDOW))).size;
-    if (distinct < MIN_DISTINCT_TOKENS) {
-      return hardFail(`Output has no real content: ${distinct} distinct words, minimum ${MIN_DISTINCT_TOKENS}`);
-    }
-  }
-
-  // A refusal, or nothing but failure vocabulary — see REFUSAL_PATTERNS.
-  const { refusal, neutral, substantiveWords, refusalWords, totalWords, distinctWords } = scanFailureLanguage(scanText);
-  if (refusal && (substantiveWords < MIN_WORDS_BESIDE_REFUSAL || refusalWords > MAX_REFUSAL_SHARE * totalWords)) {
-    return hardFail('Output is a failure excuse, not a deliverable');
-  }
-  if (neutral && substantiveWords < MIN_SUBSTANTIVE_WORDS && distinctWords < MIN_DISTINCT_WORDS) {
-    return hardFail('Output is a failure excuse, not a deliverable');
-  }
+  const language = scanFailureLanguage(scanText);
+  const { refusal, neutral } = language;
+  const contentFail = contentFailure(visible, language, disclosed, Math.max(criteria.min_length ?? 0, expectsShortAnswer ? 0 : DEFAULT_MIN_CONTENT_CHARS), expectsShortAnswer);
+  if (contentFail) return hardFail(contentFail);
 
   const rubrics: Array<{ fn: (output: string) => number; weight: number; name: string }> = [];
   // Human-readable reasons for rubrics whose bare percentage explains nothing.

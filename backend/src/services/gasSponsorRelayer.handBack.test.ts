@@ -35,6 +35,8 @@ vi.mock('./gasSponsorConfig.js', async (orig) => ({
   ...(await orig<typeof import('./gasSponsorConfig.js')>()),
   runnableSettings: async () => ({ ok: true, settings: settings.current }),
   gasSponsorSettings: () => settings.current,
+  gasSponsorDrainSettings: () => settings.current,
+  drainableSettings: async () => ({ ok: true, mode: 'on', settings: settings.current }),
 }));
 vi.mock('./gasSponsorEligibility.js', () => ({
   agentEligibility: vi.fn(async () => ({ ok: true, ownerDid: 'did:privy:owner' })),
@@ -97,6 +99,7 @@ describe.skipIf(!url)('a task handed back while the escrow names the agent, on P
     pool.current = new pg.Pool({ connectionString: url, ssl: /[?&]sslmode=disable\b/.test(url) ? false : { rejectUnauthorized: false } });
     await pool.current.query(migrationSql(43)!);
     await pool.current.query(migrationSql(44)!);
+    await pool.current.query(migrationSql(47)!);
   });
   afterAll(async () => {
     await relayer._resetGasSponsorRelayer();

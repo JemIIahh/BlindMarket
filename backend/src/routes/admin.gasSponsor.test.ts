@@ -18,10 +18,10 @@ vi.mock('../services/agentEmbedding.js', () => ({ backfillAgentEmbeddings: vi.fn
 vi.mock('../services/neonDb.js', () => ({ getPool: vi.fn() }));
 vi.mock('../services/embeddingService.js', () => ({ embeddingModelId: vi.fn(), embeddingsConfigured: vi.fn() }));
 vi.mock('../services/stuckTasks.js', () => ({ diagnoseStuckTasks: vi.fn(), forceReleaseTask: vi.fn(), rewindSubmittedTask: vi.fn() }));
-const s = vi.hoisted(() => ({ enabled: true, setControls: vi.fn(), report: vi.fn() }));
+const s = vi.hoisted(() => ({ enabled: true, setControls: vi.fn(), report: vi.fn(), invalidate: vi.fn() }));
 vi.mock('../services/gasSponsorConfig.js', () => ({ gasSponsorSettings: () => (s.enabled ? { enabled: true, chainId: 5042 } : { enabled: false, reason: 'off' }) }));
 vi.mock('../services/gasSponsorStore.js', () => ({ setControls: s.setControls }));
-vi.mock('../services/gasSponsorRelayer.js', () => ({ gasSponsorReport: s.report }));
+vi.mock('../services/gasSponsorRelayer.js', () => ({ gasSponsorReport: s.report, invalidateSponsorReportCache: s.invalidate }));
 
 const { adminRouter } = await import('./admin.js');
 const { globalErrorHandler } = await import('../middleware/errorHandler.js');
@@ -45,6 +45,8 @@ describe('POST /admin/gas-sponsor/controls', () => {
     const paused = await controls({ paused: true, reason: 'budget review' });
     expect(paused.status).toBe(200);
     expect(s.setControls).toHaveBeenCalledWith(5042, { paused: true, killed: undefined }, 'budget review', '0xF0');
+    // The in-flight counts /health/bridge caches are read again (PR #164 re-review, item 5).
+    expect(s.invalidate).toHaveBeenCalledTimes(1);
     expect((await controls({ killed: true, reason: 'leaked key' })).body.data).toMatchObject({ killed: true, reason: 'leaked key' });
   });
 
@@ -68,5 +70,10 @@ describe('GET /admin/gas-sponsor', () => {
   it('reports to founders only', async () => {
     expect((await request(app).get('/api/v1/admin/gas-sponsor').set('x-founder', 'yes')).body.data).toEqual({ enabled: true, sponsorBalance: '1.5' });
     expect((await request(app).get('/api/v1/admin/gas-sponsor').set('x-founder', 'no')).status).toBe(403);
+  });
+
+  it('reads fresh counts, never the cached ones (PR #164 re-review, item 5)', async () => {
+    await request(app).get('/api/v1/admin/gas-sponsor').set('x-founder', 'yes');
+    expect(s.report).toHaveBeenCalledWith({ fresh: true });
   });
 });

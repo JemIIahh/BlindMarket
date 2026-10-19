@@ -971,6 +971,29 @@ const migrations: Array<{ id: number; name: string; sql: string; when?: () => bo
     // Off for every agent, existing ones included (docs/OPEN-SUBMISSION-TASKS.md).
     sql: `ALTER TABLE deployed_agents ADD COLUMN IF NOT EXISTS open_submission_enabled BOOLEAN NOT NULL DEFAULT false;`,
   },
+  {
+    id: 46,
+    name: 'deployed_agents_open_submission_default_on',
+    // Public tasks are open-only (docs/OPEN-SUBMISSION-TASKS.md section 22):
+    // an agent kept out of open tasks would get no public work at all. So
+    // every agent competes unless its owner turns it off, existing ones
+    // included. New agents are saved with it on (agentRunner.deployAgent);
+    // the column default follows for rows written another way.
+    sql: `ALTER TABLE deployed_agents ALTER COLUMN open_submission_enabled SET DEFAULT true;
+      UPDATE deployed_agents SET open_submission_enabled = true WHERE open_submission_enabled = false;`,
+  },
+  {
+    id: 47,
+    name: 'gas_sponsor_reservations_attempt',
+    // When the agent first asked the relayer to use its reservation, and the
+    // code of the last refusal (NULL once a call went out). A reservation the
+    // agent tried to use is released at its hour without a strike: the
+    // refusal was ours (not the writer, fees, the gas ceiling, the setup
+    // limit...), not an agent sitting on it (gasSponsorRelayer.sweepReservations).
+    // Postgres only, like 43 and 44: sponsored gas never runs on SQLite.
+    sql: `ALTER TABLE gas_sponsor_reservations ADD COLUMN IF NOT EXISTS attempted_at TIMESTAMPTZ;
+      ALTER TABLE gas_sponsor_reservations ADD COLUMN IF NOT EXISTS last_refusal TEXT;`,
+  },
 ];
 
 /**

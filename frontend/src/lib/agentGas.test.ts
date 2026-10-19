@@ -35,6 +35,7 @@ describe('sponsorshipView', () => {
     expect(sponsorshipView({ state: 'sponsored' })).toMatchObject({ title: 'Gas paid by BlindMarket', sponsored: true });
     expect(sponsorshipView({ state: 'paused' })).toMatchObject({ title: 'Gas sponsorship paused', sponsored: false });
     expect(sponsorshipView({ state: 'not_eligible', reason: 'key_exported' })).toMatchObject({ title: 'Not eligible (key exported)', sponsored: false });
+    expect(sponsorshipView({ state: 'not_eligible', reason: 'setup_limit' })).toMatchObject({ title: 'Not eligible (wallet setup failed)', sponsored: false });
   });
 
   it('says nothing where sponsorship does not run, or before it loads', () => {
